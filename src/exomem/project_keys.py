@@ -15,12 +15,19 @@ lands in the service log when it fires.
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
 import yaml
 
-from .vault import kb_root
+from .vault import (
+    PathGuard,
+    PlannedWrite,
+    batch_atomic_write,
+    kb_root,
+    read_guarded_text,
+)
 
 log = logging.getLogger(__name__)
 
@@ -59,6 +66,24 @@ class ProjectRegistry:
         return self.project_to_category.get(key, "uncategorized")
 
 
+@dataclass(frozen=True)
+class ProjectKeyIntroduction:
+    key: str
+    folder: str
+    category: str
+
+
+@dataclass(frozen=True)
+class ProjectKeyPlan:
+    registry: ProjectRegistry
+    introductions: tuple[ProjectKeyIntroduction, ...]
+    writes: tuple[PlannedWrite, ...]
+
+    @property
+    def introduced_keys(self) -> tuple[str, ...]:
+        return tuple(item.key for item in self.introductions)
+
+
 def load_project_registry(vault_root: Path) -> ProjectRegistry:
     """Read `_Schema/project-keys.yaml` and return a typed registry.
 
@@ -80,12 +105,21 @@ def load_project_registry(vault_root: Path) -> ProjectRegistry:
         )
         return _fallback_registry()
 
-    projects = data.get("projects")
-    if not isinstance(projects, dict) or not projects:
+    registry = _registry_from_data(data)
+    if registry is None:
         log.warning(
             "project-keys.yaml has no `projects:` mapping; using fallback"
         )
         return _fallback_registry()
+    return registry
+
+
+def _registry_from_data(data: object) -> ProjectRegistry | None:
+    if not isinstance(data, dict):
+        return None
+    projects = data.get("projects")
+    if not isinstance(projects, dict) or not projects:
+        return None
 
     project_to_folder: dict[str, str] = {}
     project_to_category: dict[str, str] = {}
@@ -104,7 +138,7 @@ def load_project_registry(vault_root: Path) -> ProjectRegistry:
         project_to_folder[key] = str(folder)
         project_to_category[key] = str(category)
     if not project_to_folder:
-        return _fallback_registry()
+        return None
     return ProjectRegistry(
         project_to_folder=project_to_folder,
         project_to_category=project_to_category,
@@ -143,7 +177,7 @@ def _title_case_slug(key: str) -> str:
     return " ".join(part.capitalize() for part in key.split("-"))
 
 
-_SLUG_RE = __import__("re").compile(r"^[a-z][a-z0-9-]{0,40}$")
+_SLUG_RE = re.compile(r"^[a-z][a-z0-9-]{0,40}$")
 
 
 class ProjectKeyTypoError(ValueError):
@@ -215,6 +249,113 @@ def _closest_existing_key(
     return best
 
 
+def _bootstrap_registry_text() -> str:
+    lines = [
+        "# Project keys for research-notes and cross-cutting projects: list.",
+        "# exomem loads this at startup and auto-appends new keys on use.",
+        "",
+        "projects:",
+    ]
+    for key, folder in _FALLBACK_PROJECTS.items():
+        lines.extend(
+            (f"  {key}:", f"    folder: {folder}", "    category: uncategorized")
+        )
+    return "\n".join(lines) + "\n"
+
+
+def plan_project_keys(
+    vault_root: Path,
+    keys: list[str] | tuple[str, ...],
+    *,
+    category: str = "uncategorized",
+    folders: dict[str, str] | None = None,
+    replay_introductions: tuple[ProjectKeyIntroduction, ...] = (),
+) -> ProjectKeyPlan:
+    """Purely plan a folded registry update for zero or more project keys."""
+    if type(keys) not in {list, tuple} or len(keys) > 64:
+        raise ValueError("project key plan must contain at most 64 keys")
+    root = Path(vault_root)
+    path = kb_root(root) / "_Schema" / "project-keys.yaml"
+    try:
+        text, guard = read_guarded_text(root, path)
+        path_exists = True
+        try:
+            parsed = yaml.safe_load(text) or {}
+        except yaml.YAMLError:
+            parsed = {}
+        current = _registry_from_data(parsed) or _fallback_registry()
+    except FileNotFoundError:
+        text = _bootstrap_registry_text()
+        guard = PathGuard.capture(
+            root, path.relative_to(root).as_posix(), leaf_policy="absent"
+        )
+        path_exists = False
+        current = _fallback_registry()
+    proposed_folders = dict(current.project_to_folder)
+    proposed_categories = dict(current.project_to_category)
+    introductions: list[ProjectKeyIntroduction] = []
+    replay_by_key = {item.key: item for item in replay_introductions}
+    seen: set[str] = set()
+    for raw in keys:
+        if type(raw) is not str or not _SLUG_RE.fullmatch(raw):
+            raise ValueError(
+                f"project key {raw!r} is not a valid slug "
+                f"(must match {_SLUG_RE.pattern}; lowercase + dashes)"
+            )
+        if raw in seen:
+            continue
+        seen.add(raw)
+        replay = replay_by_key.get(raw)
+        if raw in proposed_folders:
+            if replay is not None:
+                if (
+                    proposed_folders[raw] != replay.folder
+                    or proposed_categories.get(raw, "uncategorized") != replay.category
+                ):
+                    raise ValueError("prepared project registration no longer matches")
+                introductions.append(replay)
+            continue
+        close = _closest_existing_key(raw, list(proposed_folders))
+        if close is not None:
+            raise ProjectKeyTypoError(raw, close[0], close[1])
+        folder_name = replay.folder if replay is not None else (
+            (folders or {}).get(raw) or _title_case_slug(raw)
+        )
+        item_category = replay.category if replay is not None else category
+        introduction = ProjectKeyIntroduction(raw, folder_name, item_category)
+        introductions.append(introduction)
+        proposed_folders[raw] = folder_name
+        proposed_categories[raw] = item_category
+
+    registry = ProjectRegistry(proposed_folders, proposed_categories)
+    if not introductions:
+        return ProjectKeyPlan(registry, (), ())
+
+    if not text.endswith("\n"):
+        text += "\n"
+    for item in introductions:
+        if item.key in current.project_to_folder:
+            continue
+        text += (
+            "\n  # auto-registered by exomem\n"
+            f"  {item.key}:\n"
+            f"    folder: {item.folder}\n"
+            f"    category: {item.category}\n"
+        )
+    project_directories = tuple(
+        kb_root(root) / "Notes" / "Research" / item.folder
+        for item in introductions
+    )
+    write = PlannedWrite(
+        path,
+        text,
+        create_only=not path_exists,
+        guard=guard,
+        ensure_directories=project_directories,
+    )
+    return ProjectKeyPlan(registry, tuple(introductions), (write,))
+
+
 def register_project_key(
     vault_root: Path,
     key: str,
@@ -237,67 +378,16 @@ def register_project_key(
     `Vehicles` or `vehicles!` doesn't pollute the registry. The folder
     name is free-form (Title Case allowed).
     """
-    if not _SLUG_RE.match(key):
-        raise ValueError(
-            f"project key {key!r} is not a valid slug "
-            f"(must match {_SLUG_RE.pattern}; lowercase + dashes)"
-        )
-
-    # Typo guard: catch single- or two-edit-distance mistakes BEFORE
-    # mutating the registry. An LLM agent's natural recovery is to re-call
-    # with the suggested key, so we want a hard error rather than a silent
-    # registration + warning that might get missed.
-    existing_registry = load_project_registry(vault_root)
-    close = _closest_existing_key(
-        key, list(existing_registry.project_to_folder.keys())
+    plan = plan_project_keys(
+        vault_root,
+        [key],
+        category=category,
+        folders={key: folder} if folder is not None else None,
     )
-    if close is not None and close[0] != key:
-        raise ProjectKeyTypoError(key, close[0], close[1])
-
-    path = kb_root(vault_root) / "_Schema" / "project-keys.yaml"
-    if not path.exists():
-        # Fresh install: bootstrap a file with the fallback set + the new key.
-        path.parent.mkdir(parents=True, exist_ok=True)
-        bootstrap_lines = [
-            "# Project keys for research-notes and cross-cutting projects: list.",
-            "# exomem loads this at startup and auto-appends new keys on use.",
-            "",
-            "projects:",
-        ]
-        for k, f in _FALLBACK_PROJECTS.items():
-            bootstrap_lines.append(f"  {k}:")
-            bootstrap_lines.append(f"    folder: {f}")
-            bootstrap_lines.append("    category: uncategorized")
-        path.write_text("\n".join(bootstrap_lines) + "\n", encoding="utf-8")
-
-    text = path.read_text(encoding="utf-8")
-
-    folder_name = folder or _title_case_slug(key)
-
-    # Idempotency check: if the key already appears as a top-level entry
-    # under `projects:`, no-op.
-    import re
-    existing = re.search(
-        rf"^\s{{2}}{re.escape(key)}:\s*$", text, re.MULTILINE
-    )
-    if existing:
-        return key, folder_name, False
-
-    # Append the entry at end of the file. Keep formatting simple — a YAML
-    # round-trip would lose comments + ordering.
-    new_block = (
-        f"\n  # auto-registered by exomem\n"
-        f"  {key}:\n"
-        f"    folder: {folder_name}\n"
-        f"    category: {category}\n"
-    )
-    # If file ends without newline, prepend one.
-    if not text.endswith("\n"):
-        text += "\n"
-    path.write_text(text + new_block, encoding="utf-8")
-
-    # Create the matching folder so the next note write lands cleanly.
-    folder_path = kb_root(vault_root) / "Notes" / "Research" / folder_name
+    if not plan.introductions:
+        return key, plan.registry.folder_for(key) or folder or _title_case_slug(key), False
+    batch_atomic_write(plan.writes, vault_root=vault_root)
+    introduction = plan.introductions[0]
+    folder_path = kb_root(vault_root) / "Notes" / "Research" / introduction.folder
     folder_path.mkdir(parents=True, exist_ok=True)
-
-    return key, folder_name, True
+    return key, introduction.folder, True

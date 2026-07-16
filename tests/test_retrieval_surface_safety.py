@@ -83,7 +83,8 @@ def test_product_mcp_retrieval_schemas_are_safe(
     read_schema = tools["read_memory"]["outputSchema"]
     assert read_schema["type"] == "object"
     assert read_schema["additionalProperties"] is True
-    assert "path" in tools["read_memory"]["inputSchema"]["properties"]
+    read_inputs = tools["read_memory"]["inputSchema"]["properties"]
+    assert {"path", "unit_ref"} <= set(read_inputs)
 
 
 def test_legacy_mcp_leaf_names_are_opt_in(

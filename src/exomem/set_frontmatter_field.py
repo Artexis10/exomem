@@ -16,16 +16,19 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from . import project_keys, semantic_writes
 from .vault import (
     PlannedWrite,
     VaultPathError,
     _format_yaml_line,
-    batch_atomic_write,
+    content_hash,
     excluded_frontmatter_reason,
     in_append_only_tree,
     in_curated_tree,
+    kb_root,
+    plan_log_writes,
+    read_guarded_text,
     resolve_under_vault,
-    write_log_entry,
 )
 
 log = logging.getLogger(__name__)
@@ -40,15 +43,41 @@ class SetFrontmatterResult:
     old_value: Any
     new_value: Any
     warnings: list[str]
+    semantic: dict | None = None
 
     def as_dict(self) -> dict:
-        return {
+        result = {
             "path": self.path,
             "field": self.field,
             "old_value": self.old_value,
             "new_value": self.new_value,
             "warnings": self.warnings,
         }
+        if self.semantic is not None:
+            result["semantic"] = self.semantic
+        return result
+
+
+@dataclass
+class SetFrontmatterValidation:
+    path: str
+    field: str
+    old_value: Any
+    new_value: Any
+    validate_only: bool
+    semantic: dict | None = None
+
+    def as_dict(self) -> dict:
+        result = {
+            "path": self.path,
+            "field": self.field,
+            "old_value": self.old_value,
+            "new_value": self.new_value,
+            "validate_only": self.validate_only,
+        }
+        if self.semantic is not None:
+            result["semantic"] = self.semantic
+        return result
 
 
 @dataclass
@@ -69,7 +98,12 @@ def set_frontmatter_field(
     why: str,
     allow_curated: bool = False,
     today: dt.date | None = None,
-) -> SetFrontmatterResult:
+    validate_only: bool = False,
+    semantic_transition_token: str | None = None,
+    relation_disposition: str | None = None,
+    relation_review_hash: str | None = None,
+    relation_review_reason: str | None = None,
+) -> SetFrontmatterResult | SetFrontmatterValidation:
     if not field or not field.strip():
         raise SetFrontmatterError(
             code="INVALID_SET", reason="field is required"
@@ -87,12 +121,6 @@ def set_frontmatter_field(
     excluded_reason = excluded_frontmatter_reason(field)
     if excluded_reason is not None:
         raise SetFrontmatterError(code="EXCLUDED_FIELD", reason=excluded_reason)
-
-    # Project-key guard: route project/projects values through the same
-    # auto-register + typo-distance check that note() uses. Without this,
-    # a typo via this surgical op silently lands in frontmatter and the
-    # registry stays clean while the page is broken.
-    _autoregister_project_keys_or_typo_block(vault_root, field, value)
 
     try:
         abs_path, rel_path = resolve_under_vault(
@@ -121,7 +149,12 @@ def set_frontmatter_field(
             ),
         )
 
-    text = abs_path.read_text(encoding="utf-8")
+    try:
+        text, _ = read_guarded_text(vault_root, abs_path)
+    except (OSError, UnicodeError) as error:
+        raise SetFrontmatterError(
+            code="UNREADABLE", reason=f"could not safely read {rel_path}"
+        ) from error
     m = _FM_PATTERN.match(text)
     if not m:
         raise SetFrontmatterError(
@@ -148,17 +181,33 @@ def set_frontmatter_field(
 
     new_text = f"---\n{fm_text}\n---\n{body}"
 
-    warnings: list[str] = []
+    project_plan = _plan_project_keys(vault_root, field, value)
     try:
-        batch_atomic_write(
-            [PlannedWrite(path=abs_path, content=new_text)],
-            vault_root=vault_root,
+        preflight = semantic_writes.preflight_existing(
+            vault_root,
+            path=rel_path,
+            after_source=new_text,
+            operation="edit",
+            expected_before_hash=content_hash(text),
+            transition_token=semantic_transition_token,
+            relation_disposition=relation_disposition,
+            relation_review_hash=relation_review_hash,
+            relation_review_reason=relation_review_reason,
         )
-    except Exception as e:
-        log.exception("set_frontmatter_field write failed for %s", rel_path)
-        warnings.append(f"partial write — reconcile on desktop: {e}")
-        raise
+    except semantic_writes.SemanticWriteError as error:
+        raise SetFrontmatterError(error.code, error.reason) from error
 
+    if validate_only:
+        return SetFrontmatterValidation(
+            path=rel_path,
+            field=field,
+            old_value=old_value,
+            new_value=value,
+            validate_only=True,
+            semantic=preflight.as_dict(),
+        )
+
+    warnings: list[str] = []
     rel_no_ext = rel_path.removesuffix(".md") if rel_path.endswith(".md") else rel_path
     log_body = (
         f"set_frontmatter_field via exomem. {why.strip()} "
@@ -166,15 +215,37 @@ def set_frontmatter_field(
     )
     if curated and allow_curated:
         log_body += f" allow_curated=true (target tree: {curated})."
-    log_warning = write_log_entry(
-        vault_root,
-        date_iso=date_iso,
-        op="set_frontmatter_field",
-        rel_path_no_ext=rel_no_ext,
-        body=log_body,
-    )
-    if log_warning:
-        warnings.append(log_warning)
+    try:
+        log_plan = plan_log_writes(
+            vault_root,
+            date_iso=date_iso,
+            op="set_frontmatter_field",
+            rel_path_no_ext=rel_no_ext,
+            body=log_body,
+            operation_token=preflight.transition_token,
+        )
+    except (OSError, UnicodeError, ValueError) as error:
+        raise SetFrontmatterError(
+            "LOG_PLAN_CONFLICT", "frontmatter log update could not be planned safely"
+        ) from error
+    if log_plan.warning is not None:
+        warnings.append(log_plan.warning)
+    if log_plan.rotation_note is not None:
+        warnings.append(log_plan.rotation_note)
+
+    auxiliaries = [*project_plan, *log_plan.writes]
+    try:
+        committed = semantic_writes.commit_existing(
+            vault_root,
+            preflight=preflight,
+            auxiliary_writes=tuple(auxiliaries),
+        )
+    except semantic_writes.SemanticWriteError as error:
+        raise SetFrontmatterError(error.code, error.reason) from error
+    except Exception as error:
+        log.exception("set_frontmatter_field write failed for %s", rel_path)
+        warnings.append(f"partial write — reconcile on desktop: {error}")
+        raise
 
     return SetFrontmatterResult(
         path=rel_path,
@@ -182,12 +253,13 @@ def set_frontmatter_field(
         old_value=old_value,
         new_value=value,
         warnings=warnings,
+        semantic=committed.as_dict(),
     )
 
 
-def _autoregister_project_keys_or_typo_block(
+def _plan_project_keys(
     vault_root: Path, field: str, value: Any
-) -> None:
+) -> tuple[PlannedWrite, ...]:
     """If the patched field is project/projects, validate via the registry.
 
     Mirrors note.py's behaviour: slug-shaped new keys auto-register,
@@ -195,31 +267,41 @@ def _autoregister_project_keys_or_typo_block(
     corrects. Non-project fields are unaffected.
     """
     if field not in ("project", "projects"):
-        return
-    from . import project_keys as project_keys_module
+        return ()
 
     if field == "project":
         candidates: list[str] = [value] if isinstance(value, str) and value else []
     else:
-        candidates = [v for v in (value or []) if isinstance(v, str) and v]
+        candidates = (
+            [v for v in value if isinstance(v, str) and v]
+            if isinstance(value, list)
+            else []
+        )
 
     if not candidates:
-        return
+        return ()
 
-    registry = project_keys_module.load_project_registry(vault_root)
-    for cand in candidates:
-        if cand in registry.project_to_folder:
-            continue
-        try:
-            project_keys_module.register_project_key(vault_root, cand)
-        except project_keys_module.ProjectKeyTypoError as e:
-            raise SetFrontmatterError(
-                code="PROJECT_KEY_TYPO", reason=str(e)
-            ) from e
-        except ValueError:
-            # Invalid slug — leave as-is; the frontmatter value will land
-            # but downstream audit will flag it via unregistered_project_key.
-            pass
+    try:
+        plan = project_keys.plan_project_keys(vault_root, candidates)
+    except project_keys.ProjectKeyTypoError as error:
+        raise SetFrontmatterError(
+            code="PROJECT_KEY_TYPO", reason=str(error)
+        ) from error
+    except ValueError:
+        # Preserve the legacy escape hatch: invalid values land and are later
+        # surfaced by audit rather than mutating the registry.
+        return ()
+    if plan.writes:
+        return plan.writes
+
+    # Keep the auxiliary target/content digest stable across an exact retry
+    # after a newly introduced key was written but before the primary page.
+    registry_path = kb_root(vault_root) / "_Schema" / "project-keys.yaml"
+    try:
+        current, guard = read_guarded_text(vault_root, registry_path)
+    except FileNotFoundError:
+        return ()
+    return (PlannedWrite(registry_path, current, guard=guard),)
 
 
 def _read_yaml_field(fm_text: str, field: str) -> Any:

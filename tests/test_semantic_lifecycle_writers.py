@@ -1,0 +1,3956 @@
+from __future__ import annotations
+
+import datetime as dt
+import hashlib
+import json
+import os
+from contextlib import contextmanager
+from dataclasses import replace
+from pathlib import Path
+
+import pytest
+
+from exomem import (
+    activation_manifest,
+    index_sync,
+    memory_schema,
+    relation_review,
+    semantic_contract,
+    semantic_writes,
+    vault,
+)
+from exomem import (
+    append_to_file as append_module,
+)
+from exomem import (
+    create_file as create_file_module,
+)
+from exomem import (
+    delete_directory as delete_directory_module,
+)
+from exomem import (
+    delete_file as delete_file_module,
+)
+from exomem import (
+    edit as edit_module,
+)
+from exomem import (
+    move_file as move_module,
+)
+from exomem import (
+    multi_edit as multi_edit_module,
+)
+from exomem import (
+    recover_from_trash as recover_module,
+)
+from exomem import (
+    set_frontmatter_field as set_frontmatter_module,
+)
+from exomem import (
+    set_take as set_take_module,
+)
+
+_ID = "00000000-0000-4000-8000-000000000061"
+_OTHER_ID = "00000000-0000-4000-8000-000000000062"
+_TRANSITION_AB = "00000000-0000-4000-8000-0000000000ab"
+_TRANSITION_BC = "00000000-0000-4000-8000-0000000000bc"
+_TRANSITION_CB = "00000000-0000-4000-8000-0000000000cb"
+_PAGE = "Knowledge Base/Notes/Insights/lifecycle.md"
+_OTHER_PAGE = "Knowledge Base/Notes/Insights/lifecycle-moved.md"
+
+
+def _source(body: str, *, page_id: str | None = _ID) -> str:
+    identity = f"exomem_id: {page_id}\n" if page_id is not None else ""
+    return (
+        "---\n"
+        "title: Lifecycle\n"
+        "type: insight\n"
+        "status: active\n"
+        f"{identity}"
+        "---\n\n"
+        f"{body}\n\n"
+        "## Relations\n"
+    )
+
+
+def _write(root: Path, rel: str, source: str) -> Path:
+    path = root / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(source, encoding="utf-8")
+    return path
+
+
+def _save_required_block_contract(
+    root: Path, *, name: str, project: str, block: str, validation: str
+) -> None:
+    memory_schema.save_contract(
+        root,
+        memory_schema.MemoryContract(
+            name=name,
+            scope=memory_schema.ContractScope(
+                project=project, page_type="insight"
+            ),
+            sample_size=1,
+            fields={},
+            blocks={block: {"required": True}},
+            relations={},
+            validation=validation,
+        ).as_dict(),
+    )
+
+
+def _binding(path: str, source: str) -> relation_review.LifecyclePrimaryBinding:
+    return relation_review.LifecyclePrimaryBinding(
+        path=path,
+        source_hash=vault.content_hash(source),
+        review_fingerprint=semantic_contract.review_content_fingerprint(_ID, source),
+    )
+
+
+def _decision(source: str, *, reason: str = "No honest relation exists"):
+    return relation_review.build_lifecycle_decision(
+        page_identity=_ID,
+        after_fingerprint=semantic_contract.review_content_fingerprint(_ID, source),
+        reason=reason,
+    )
+
+
+def _prepared(
+    before_source: str,
+    after_source: str,
+    *,
+    transition_id: str,
+    decision,
+    before_path: str = _PAGE,
+    after_path: str = _PAGE,
+    token: str = "bounded-transition-token",
+    carried_from=None,
+):
+    return relation_review.build_lifecycle_prepared_transition(
+        transition_id=transition_id,
+        operation="edit",
+        page_identity=_ID,
+        before_path=before_path,
+        before_source_hash=vault.content_hash(before_source),
+        after_path=after_path,
+        after_source_hash=vault.content_hash(after_source),
+        after_fingerprint=semantic_contract.review_content_fingerprint(_ID, after_source),
+        decision=decision,
+        transition_token=token,
+        auxiliary_hash=hashlib.sha256(b"auxiliaries").hexdigest(),
+        carried_from=carried_from,
+    )
+
+
+def _apply_plan(root: Path, plan: relation_review.LifecycleTransitionPlan) -> None:
+    vault.batch_atomic_write(
+        plan.writes,
+        vault_root=root,
+        required_guards=plan.required_guards,
+    )
+
+
+def test_stable_id_move_prepares_exact_lifecycle_and_indexes_each_path_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = _source("Stable identity survives a path move.")
+    old_path = _PAGE
+    new_path = _OTHER_PAGE
+    old = _write(tmp_path, old_path, source)
+    before_corpus = semantic_contract.build_corpus_context(tmp_path)
+    activation_manifest.ensure_manifest(
+        tmp_path, census=before_corpus.activation_census
+    )
+    upserts: list[list[str]] = []
+    deletes: list[list[str]] = []
+
+    monkeypatch.setattr(
+        index_sync,
+        "upsert_after_write",
+        lambda root, paths, **_kwargs: upserts.append(
+            [path.relative_to(root).as_posix() for path in paths]
+        ),
+    )
+    monkeypatch.setattr(
+        index_sync,
+        "delete_after_remove",
+        lambda _root, paths: deletes.append(list(paths)),
+    )
+
+    result = move_module.move_file(
+        tmp_path,
+        old_path=old_path,
+        new_path=new_path,
+    )
+
+    moved = tmp_path / new_path
+    assert not old.exists()
+    assert moved.read_text(encoding="utf-8") == source
+    state = semantic_contract.build_page_state(tmp_path, new_path, source)
+    assert state.identity == _ID
+    prepared = relation_review.load_lifecycle_prepared(tmp_path, _ID)
+    assert prepared is not None
+    assert prepared.operation == "move"
+    assert prepared.before_path == old_path
+    assert prepared.after_path == new_path
+    assert getattr(result, "semantic", None) is not None
+    assert sum(path == new_path for batch in upserts for path in batch) == 1
+    assert deletes == [[old_path]]
+
+
+def test_move_without_wikilink_updates_blocks_unchanged_referrer_in_final_corpus(
+    tmp_path: Path,
+) -> None:
+    new_path = "Knowledge Base/Notes/Insights/lifecycle-renamed.md"
+    anchor_path = "Knowledge Base/Notes/Insights/lifecycle-anchor.md"
+    target = _source("Target", page_id=_ID).replace(
+        "## Relations\n",
+        "## Relations\n"
+        "- supports [[Knowledge Base/Notes/Insights/lifecycle-anchor]]\n",
+    )
+    referrer = _source("Referrer", page_id=_OTHER_ID).replace(
+        "## Relations\n",
+        "## Relations\n"
+        "- supports [[Knowledge Base/Notes/Insights/lifecycle]]\n",
+    )
+    anchor = _source(
+        "Anchor", page_id="00000000-0000-4000-8000-000000000063"
+    )
+    old = _write(tmp_path, _PAGE, target)
+    _write(tmp_path, _OTHER_PAGE, referrer)
+    _write(tmp_path, anchor_path, anchor)
+    before_corpus = semantic_contract.build_corpus_context(tmp_path)
+    activation_manifest.ensure_manifest(
+        tmp_path, census=before_corpus.activation_census
+    )
+
+    with pytest.raises(move_module.MoveFileError) as blocked:
+        move_module.move_file(
+            tmp_path,
+            old_path=_PAGE,
+            new_path=new_path,
+            update_wikilinks=False,
+        )
+
+    assert blocked.value.code == "SEMANTIC_CONTRACT_BLOCKED"
+    assert old.read_text(encoding="utf-8") == target
+    assert not (tmp_path / new_path).exists()
+
+
+@pytest.mark.parametrize("append_tree", ["Sources", "Evidence"])
+def test_move_blocks_append_only_inbound_rewrite_before_any_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    append_tree: str,
+) -> None:
+    new_path = "Knowledge Base/Notes/Insights/lifecycle-renamed.md"
+    anchor_path = "Knowledge Base/Notes/Insights/lifecycle-anchor.md"
+    referrer_path = (
+        f"Knowledge Base/{append_tree}/Articles/lifecycle-referrer.md"
+    )
+    target = _source("Target", page_id=_ID).replace(
+        "## Relations\n",
+        "## Relations\n"
+        "- supports [[Knowledge Base/Notes/Insights/lifecycle-anchor]]\n",
+    )
+    referrer = _source("Append-only referrer", page_id=_OTHER_ID).replace(
+        "## Relations\n",
+        "## Relations\n"
+        "- supports [[Knowledge Base/Notes/Insights/lifecycle]]\n",
+    )
+    old = _write(tmp_path, _PAGE, target)
+    referrer_file = _write(tmp_path, referrer_path, referrer)
+    _write(
+        tmp_path,
+        anchor_path,
+        _source("Anchor", page_id="00000000-0000-4000-8000-000000000063"),
+    )
+    corpus = semantic_contract.build_corpus_context(tmp_path)
+    activation_manifest.ensure_manifest(
+        tmp_path, census=corpus.activation_census
+    )
+    lifecycle_before = {
+        path.relative_to(tmp_path).as_posix(): path.read_bytes()
+        for path in (tmp_path / "Knowledge Base/_Schema").rglob("*")
+        if path.is_file()
+    }
+    index_calls: list[tuple[str, tuple[str, ...]]] = []
+    monkeypatch.setattr(
+        index_sync,
+        "upsert_after_write",
+        lambda _root, paths, **_kwargs: index_calls.append(
+            ("upsert", tuple(str(path) for path in paths))
+        ),
+    )
+    monkeypatch.setattr(
+        index_sync,
+        "delete_after_remove",
+        lambda _root, paths: index_calls.append(("delete", tuple(paths))),
+    )
+
+    with pytest.raises(move_module.MoveFileError) as blocked:
+        move_module.move_file(
+            tmp_path,
+            old_path=_PAGE,
+            new_path=new_path,
+        )
+
+    assert blocked.value.code == "APPEND_ONLY"
+    assert "update_wikilinks=false" in blocked.value.reason
+    assert old.read_bytes() == target.encode()
+    assert referrer_file.read_bytes() == referrer.encode()
+    assert not (tmp_path / new_path).exists()
+    assert index_calls == []
+    assert {
+        path.relative_to(tmp_path).as_posix(): path.read_bytes()
+        for path in (tmp_path / "Knowledge Base/_Schema").rglob("*")
+        if path.is_file()
+    } == lifecycle_before
+
+
+def test_move_without_rewrites_still_runs_final_corpus_for_append_only_referrer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    new_path = "Knowledge Base/Notes/Insights/lifecycle-renamed.md"
+    anchor_path = "Knowledge Base/Notes/Insights/lifecycle-anchor.md"
+    referrer_path = "Knowledge Base/Sources/Articles/lifecycle-referrer.md"
+    target = _source("Target", page_id=_ID).replace(
+        "## Relations\n",
+        "## Relations\n"
+        "- supports [[Knowledge Base/Notes/Insights/lifecycle-anchor]]\n",
+    )
+    referrer = _source("Append-only referrer", page_id=_OTHER_ID).replace(
+        "## Relations\n",
+        "## Relations\n"
+        "- supports [[Knowledge Base/Notes/Insights/lifecycle]]\n",
+    )
+    _write(tmp_path, _PAGE, target)
+    referrer_file = _write(tmp_path, referrer_path, referrer)
+    _write(
+        tmp_path,
+        anchor_path,
+        _source("Anchor", page_id="00000000-0000-4000-8000-000000000063"),
+    )
+    corpus = semantic_contract.build_corpus_context(tmp_path)
+    activation_manifest.ensure_manifest(
+        tmp_path, census=corpus.activation_census
+    )
+    calls: list[tuple[str, str]] = []
+    real_preflight = semantic_writes.preflight_move
+
+    def capture_preflight(*args, **kwargs):
+        calls.append((kwargs["old_path"], kwargs["new_path"]))
+        return real_preflight(*args, **kwargs)
+
+    monkeypatch.setattr(semantic_writes, "preflight_move", capture_preflight)
+
+    result = move_module.move_file(
+        tmp_path,
+        old_path=_PAGE,
+        new_path=new_path,
+        update_wikilinks=False,
+    )
+
+    assert calls == [(_PAGE, new_path)]
+    assert referrer_file.read_bytes() == referrer.encode()
+    assert result.semantic is not None
+    assert not (tmp_path / _PAGE).exists()
+    assert (tmp_path / new_path).read_text(encoding="utf-8") == target
+
+
+def test_intra_append_only_move_never_rewrites_moved_source_bytes(
+    tmp_path: Path,
+) -> None:
+    old_path = "Knowledge Base/Sources/Articles/self-linked.md"
+    new_path = "Knowledge Base/Sources/Archive/self-linked.md"
+    source = (
+        "# Raw source\n\n"
+        "See [[Knowledge Base/Sources/Articles/self-linked]].\n"
+    )
+    old = _write(tmp_path, old_path, source)
+
+    with pytest.raises(move_module.MoveFileError) as blocked:
+        move_module.move_file(
+            tmp_path,
+            old_path=old_path,
+            new_path=new_path,
+        )
+
+    assert blocked.value.code == "APPEND_ONLY"
+    assert "update_wikilinks=false" in blocked.value.reason
+    assert old.read_bytes() == source.encode()
+    assert not (tmp_path / new_path).exists()
+
+
+def test_path_only_inbound_rewrite_carries_current_reviewed_none(
+    tmp_path: Path,
+) -> None:
+    new_path = "Knowledge Base/Notes/Insights/lifecycle-renamed.md"
+    anchor_path = "Knowledge Base/Notes/Insights/lifecycle-anchor.md"
+    target = _source("Target", page_id=_ID).replace(
+        "## Relations\n",
+        "## Relations\n"
+        "- supports [[Knowledge Base/Notes/Insights/lifecycle-anchor]]\n",
+    )
+    referrer = _source(
+        "See [[Knowledge Base/Notes/Insights/lifecycle]].", page_id=_OTHER_ID
+    )
+    anchor = _source(
+        "Anchor", page_id="00000000-0000-4000-8000-000000000063"
+    )
+    _write(tmp_path, _PAGE, target)
+    referrer_path = _write(tmp_path, _OTHER_PAGE, referrer)
+    _write(tmp_path, anchor_path, anchor)
+    before_corpus = semantic_contract.build_corpus_context(tmp_path)
+    activation_manifest.ensure_manifest(
+        tmp_path, census=before_corpus.activation_census
+    )
+    old_decision = relation_review.build_lifecycle_decision(
+        page_identity=_OTHER_ID,
+        after_fingerprint=semantic_contract.review_content_fingerprint(
+            _OTHER_ID, referrer
+        ),
+        reason="No honest relation exists",
+    )
+    old_prepared = relation_review.build_lifecycle_prepared_transition(
+        transition_id=_TRANSITION_AB,
+        operation="edit",
+        page_identity=_OTHER_ID,
+        before_path=_OTHER_PAGE,
+        before_source_hash=vault.content_hash(referrer),
+        after_path=_OTHER_PAGE,
+        after_source_hash=vault.content_hash(referrer),
+        after_fingerprint=semantic_contract.review_content_fingerprint(
+            _OTHER_ID, referrer
+        ),
+        decision=old_decision,
+        transition_token="seed-current-reviewed-none",
+        auxiliary_hash=relation_review.lifecycle_auxiliary_hash((), tmp_path),
+    )
+    vault.batch_atomic_write(
+        [
+            vault.PlannedWrite(
+                relation_review.lifecycle_decision_path(
+                    tmp_path, _OTHER_ID, old_decision.after_fingerprint
+                ),
+                relation_review.serialize_lifecycle_decision(old_decision),
+                create_only=True,
+            ),
+            vault.PlannedWrite(
+                relation_review.lifecycle_prepared_path(tmp_path, _OTHER_ID),
+                relation_review.serialize_lifecycle_prepared(old_prepared),
+                create_only=True,
+            ),
+        ],
+        vault_root=tmp_path,
+    )
+
+    result = move_module.move_file(
+        tmp_path,
+        old_path=_PAGE,
+        new_path=new_path,
+    )
+
+    rewritten = referrer_path.read_text(encoding="utf-8")
+    assert "[[Knowledge Base/Notes/Insights/lifecycle-renamed]]" in rewritten
+    new_fingerprint = semantic_contract.review_content_fingerprint(
+        _OTHER_ID, rewritten
+    )
+    carried = relation_review.load_lifecycle_decision(
+        tmp_path, _OTHER_ID, new_fingerprint
+    )
+    assert carried is not None
+    prepared = relation_review.load_lifecycle_prepared(tmp_path, _OTHER_ID)
+    assert prepared is not None
+    assert prepared.operation == "move"
+    assert prepared.carried_from == old_decision.reference
+    assert result.semantic is not None
+
+
+def test_move_rewrites_self_link_at_destination_without_recreating_old_path(
+    tmp_path: Path,
+) -> None:
+    new_path = "Knowledge Base/Notes/Insights/lifecycle-renamed.md"
+    anchor_path = "Knowledge Base/Notes/Insights/lifecycle-anchor.md"
+    target = _source(
+        "Self [[Knowledge Base/Notes/Insights/lifecycle]].", page_id=_ID
+    ).replace(
+        "## Relations\n",
+        "## Relations\n"
+        "- supports [[Knowledge Base/Notes/Insights/lifecycle-anchor]]\n",
+    )
+    anchor = _source(
+        "Anchor", page_id="00000000-0000-4000-8000-000000000063"
+    )
+    old = _write(tmp_path, _PAGE, target)
+    _write(tmp_path, anchor_path, anchor)
+    before_corpus = semantic_contract.build_corpus_context(tmp_path)
+    activation_manifest.ensure_manifest(
+        tmp_path, census=before_corpus.activation_census
+    )
+
+    move_module.move_file(tmp_path, old_path=_PAGE, new_path=new_path)
+
+    assert not old.exists()
+    moved = (tmp_path / new_path).read_text(encoding="utf-8")
+    assert "[[Knowledge Base/Notes/Insights/lifecycle-renamed]]" in moved
+
+
+def test_move_out_of_trash_routes_through_recovery_lifecycle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    anchor = "Knowledge Base/Notes/Insights/move-recovery-anchor.md"
+    source = _source("Recover through move").replace(
+        "## Relations\n",
+        "## Relations\n"
+        "- supports [[Knowledge Base/Notes/Insights/move-recovery-anchor]]\n",
+    )
+    _write(tmp_path, _PAGE, source)
+    _write(tmp_path, anchor, _source("Anchor", page_id=_OTHER_ID))
+    corpus = semantic_contract.build_corpus_context(tmp_path)
+    activation_manifest.ensure_manifest(
+        tmp_path, census=corpus.activation_census
+    )
+    trashed = delete_file_module.delete_file(
+        tmp_path,
+        path=_PAGE,
+        confirm=True,
+        now=dt.datetime(2026, 7, 14, 11, 59, 0),
+    )
+    destination = "Knowledge Base/Notes/Insights/recovered-via-move.md"
+    upserts: list[list[str]] = []
+    report = index_sync.IndexSyncReport(
+        "upsert", (destination,), (destination,), ()
+    )
+
+    def capture_upsert(root: Path, paths: list[Path], **_kwargs):
+        upserts.append([path.relative_to(root).as_posix() for path in paths])
+        return report
+
+    monkeypatch.setattr(index_sync, "upsert_after_write", capture_upsert)
+
+    result = move_module.move_file(
+        tmp_path,
+        old_path=trashed.trash_path,
+        new_path=destination,
+    )
+
+    prepared = relation_review.load_lifecycle_prepared(tmp_path, _ID)
+    assert prepared is not None
+    assert prepared.operation == "recover"
+    assert prepared.before_path == trashed.trash_path
+    assert prepared.after_path == destination
+    assert result.semantic is not None
+    assert result.index is not None
+    assert sum(destination in batch for batch in upserts) == 1
+    assert not (tmp_path / trashed.trash_path).exists()
+    assert (tmp_path / destination).read_text(encoding="utf-8") == source
+
+
+def test_move_returns_structured_index_degradation_and_attempts_both_leaves(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = _source("Move feedback")
+    _write(tmp_path, _PAGE, source)
+    corpus = semantic_contract.build_corpus_context(tmp_path)
+    activation_manifest.ensure_manifest(
+        tmp_path, census=corpus.activation_census
+    )
+    upserts: list[list[str]] = []
+    deletes: list[list[str]] = []
+
+    def degraded_upsert(root: Path, paths: list[Path], **_kwargs):
+        rels = [path.relative_to(root).as_posix() for path in paths]
+        upserts.append(rels)
+        return index_sync.IndexSyncReport(
+            "upsert",
+            tuple(rels),
+            tuple(rels),
+            (
+                index_sync.IndexComponentOutcome(
+                    "lexstore", "degraded", "dispatch_failed"
+                ),
+            ),
+        )
+
+    def completed_delete(_root: Path, paths: list[str]):
+        deletes.append(list(paths))
+        return index_sync.IndexSyncReport(
+            "delete", tuple(paths), tuple(paths), ()
+        )
+
+    monkeypatch.setattr(index_sync, "upsert_after_write", degraded_upsert)
+    monkeypatch.setattr(index_sync, "delete_after_remove", completed_delete)
+
+    result = move_module.move_file(
+        tmp_path,
+        old_path=_PAGE,
+        new_path=_OTHER_PAGE,
+    )
+
+    assert sum(_OTHER_PAGE in batch for batch in upserts) == 1
+    assert deletes == [[_PAGE]]
+    assert result.index is not None
+    assert result.index["reconcile_required"] is True
+    assert result.index["reconcile_guidance"]
+    assert any(
+        item["reconcile_required"] for item in result.index["upsert_reports"]
+    )
+    assert result.index["delete_report"]["reconcile_required"] is False
+
+
+def test_trash_indebted_page_preserves_review_history_and_returns_exact_cleanup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = _source("Indebted active page with no qualifying relation.")
+    _write(tmp_path, _PAGE, source)
+    history = relation_review.lifecycle_prepared_path(tmp_path, _ID)
+    history.parent.mkdir(parents=True)
+    history.write_text("governed history stays", encoding="utf-8")
+    report = index_sync.IndexSyncReport(
+        "delete",
+        (_PAGE,),
+        (_PAGE,),
+        (
+            index_sync.IndexComponentOutcome(
+                "lexstore", "accepted", "accepted_unverified"
+            ),
+            index_sync.IndexComponentOutcome(
+                "embeddings", "accepted", "embeddings_disabled"
+            ),
+            index_sync.IndexComponentOutcome(
+                "resolver", "degraded", "dispatch_failed"
+            ),
+        ),
+    )
+    calls: list[list[str]] = []
+
+    def cleanup(_root: Path, paths: list[str]):
+        calls.append(list(paths))
+        return report
+
+    monkeypatch.setattr(index_sync, "delete_after_remove", cleanup)
+
+    result = delete_file_module.delete_file(
+        tmp_path,
+        path=_PAGE,
+        confirm=True,
+        now=dt.datetime(2026, 7, 14, 12, 0, 0),
+    )
+
+    assert calls == [[_PAGE]]
+    assert not (tmp_path / _PAGE).exists()
+    assert history.read_text(encoding="utf-8") == "governed history stays"
+    assert getattr(result, "index", None) == report.as_dict()
+    assert result.index["reconcile_required"] is True
+    assert result.index["reconcile_guidance"]
+
+
+def test_recursive_trash_registers_sorted_markdown_once_and_returns_cleanup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    directory = "Knowledge Base/Notes/Insights/doomed"
+    first = f"{directory}/a.md"
+    second = f"{directory}/b.md"
+    _write(tmp_path, second, _source("B", page_id=_OTHER_ID))
+    _write(tmp_path, first, _source("A", page_id=_ID))
+    _write(tmp_path, f"{directory}/raw.txt", "non-Markdown")
+    expected = [first, second]
+    report = index_sync.IndexSyncReport(
+        "delete",
+        tuple(expected),
+        tuple(expected),
+        (
+            index_sync.IndexComponentOutcome(
+                "memory_refs", "completed", "dispatch_completed"
+            ),
+            index_sync.IndexComponentOutcome(
+                "epistemic_graph", "completed", "dispatch_completed"
+            ),
+            index_sync.IndexComponentOutcome(
+                "embeddings", "deferred", "queued"
+            ),
+        ),
+    )
+    watcher_calls: list[list[str]] = []
+    cleanup_calls: list[list[str]] = []
+
+    from exomem import file_watcher
+
+    monkeypatch.setattr(
+        file_watcher,
+        "register_self_delete",
+        lambda _root, paths: watcher_calls.append(list(paths)),
+    )
+
+    def cleanup(_root: Path, paths: list[str]):
+        cleanup_calls.append(list(paths))
+        return report
+
+    monkeypatch.setattr(index_sync, "delete_after_remove", cleanup)
+
+    result = delete_directory_module.delete_directory(
+        tmp_path,
+        path=directory,
+        confirm=True,
+        recursive=True,
+        now=dt.datetime(2026, 7, 14, 12, 1, 0),
+    )
+
+    assert watcher_calls == [expected]
+    assert cleanup_calls == [expected]
+    assert getattr(result, "index", None) == report.as_dict()
+    assert not (tmp_path / directory).exists()
+
+
+def test_non_markdown_trash_does_not_register_markdown_self_delete(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import file_watcher
+
+    path = "Knowledge Base/Notes/Insights/raw.txt"
+    _write(tmp_path, path, "raw")
+    watcher_calls: list[list[str]] = []
+    cleanup_calls: list[list[str]] = []
+    monkeypatch.setattr(
+        file_watcher,
+        "register_self_delete",
+        lambda _root, paths: watcher_calls.append(list(paths)),
+    )
+    monkeypatch.setattr(
+        index_sync,
+        "delete_after_remove",
+        lambda _root, paths: cleanup_calls.append(list(paths)),
+    )
+
+    result = delete_file_module.delete_file(
+        tmp_path,
+        path=path,
+        confirm=True,
+        now=dt.datetime(2026, 7, 14, 12, 2, 0),
+    )
+
+    assert watcher_calls == []
+    assert cleanup_calls == []
+    assert result.index is None
+
+
+def test_trash_legacy_none_is_accepted_unverified(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write(tmp_path, _PAGE, _source("Legacy index fanout"))
+    monkeypatch.setattr(index_sync, "delete_after_remove", lambda *_args: None)
+
+    result = delete_file_module.delete_file(
+        tmp_path,
+        path=_PAGE,
+        confirm=True,
+        now=dt.datetime(2026, 7, 14, 12, 2, 1),
+    )
+
+    assert result.index is not None
+    assert result.index["reconcile_required"] is False
+    assert {
+        item["code"] for item in result.index["components"]
+    } == {"accepted_unverified"}
+
+
+def test_recovery_reenters_stable_qualifying_page_and_indexes_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    anchor_path = "Knowledge Base/Notes/Insights/lifecycle-anchor.md"
+    source = _source("Recover me", page_id=_ID).replace(
+        "## Relations\n",
+        "## Relations\n"
+        "- supports [[Knowledge Base/Notes/Insights/lifecycle-anchor]]\n",
+    )
+    anchor = _source("Anchor", page_id=_OTHER_ID)
+    _write(tmp_path, _PAGE, source)
+    _write(tmp_path, anchor_path, anchor)
+    before_corpus = semantic_contract.build_corpus_context(tmp_path)
+    activation_manifest.ensure_manifest(
+        tmp_path, census=before_corpus.activation_census
+    )
+    trashed = delete_file_module.delete_file(
+        tmp_path,
+        path=_PAGE,
+        confirm=True,
+        now=dt.datetime(2026, 7, 14, 12, 3, 0),
+    )
+    upserts: list[list[str]] = []
+    upsert_report = index_sync.IndexSyncReport(
+        "upsert", (_PAGE,), (_PAGE,), ()
+    )
+
+    def capture_upsert(root: Path, paths: list[Path], **_kwargs):
+        upserts.append([path.relative_to(root).as_posix() for path in paths])
+        return upsert_report
+
+    monkeypatch.setattr(
+        index_sync,
+        "upsert_after_write",
+        capture_upsert,
+    )
+
+    result = recover_module.recover_from_trash(
+        tmp_path,
+        trash_path=trashed.trash_path,
+    )
+
+    assert (tmp_path / _PAGE).read_text(encoding="utf-8") == source
+    assert not (tmp_path / trashed.trash_path).exists()
+    assert not (tmp_path / trashed.trash_meta_path).exists()
+    prepared = relation_review.load_lifecycle_prepared(tmp_path, _ID)
+    assert prepared is not None
+    assert prepared.operation == "recover"
+    assert prepared.before_path == trashed.trash_path
+    assert prepared.after_path == _PAGE
+    assert getattr(result, "semantic", None) is not None
+    assert result.semantic["relation_review_requests"] == []
+    assert sum(path == _PAGE for batch in upserts for path in batch) == 1
+
+
+def test_recovery_to_missing_parent_tree_rebinds_destination_guards(
+    tmp_path: Path,
+) -> None:
+    anchor = "Knowledge Base/Notes/Insights/recovery-parent-anchor.md"
+    source = _source("Recover into new parents").replace(
+        "## Relations\n",
+        "## Relations\n"
+        "- supports [[Knowledge Base/Notes/Insights/recovery-parent-anchor]]\n",
+    )
+    _write(tmp_path, _PAGE, source)
+    _write(tmp_path, anchor, _source("Anchor", page_id=_OTHER_ID))
+    corpus = semantic_contract.build_corpus_context(tmp_path)
+    activation_manifest.ensure_manifest(
+        tmp_path, census=corpus.activation_census
+    )
+    trashed = delete_file_module.delete_file(
+        tmp_path,
+        path=_PAGE,
+        confirm=True,
+        now=dt.datetime(2026, 7, 14, 12, 3, 1),
+    )
+    restored = "Knowledge Base/Notes/Insights/new-parent/deeper/page.md"
+
+    result = recover_module.recover_from_trash(
+        tmp_path,
+        trash_path=trashed.trash_path,
+        restore_path=restored,
+    )
+
+    assert result.restored_path == restored
+    assert (tmp_path / restored).read_text(encoding="utf-8") == source
+    assert not (tmp_path / trashed.trash_path).exists()
+
+
+def test_semantically_blocked_recovery_creates_no_destination_parents(
+    tmp_path: Path,
+) -> None:
+    empty = semantic_contract.build_corpus_context(tmp_path)
+    activation_manifest.ensure_manifest(
+        tmp_path, census=empty.activation_census
+    )
+    source = _source("New semantic debt")
+    _write(tmp_path, _PAGE, source)
+    trashed = delete_file_module.delete_file(
+        tmp_path,
+        path=_PAGE,
+        confirm=True,
+        now=dt.datetime(2026, 7, 14, 12, 3, 2),
+    )
+    restored = "Knowledge Base/Notes/Insights/blocked-parent/deeper/page.md"
+    new_parent = tmp_path / "Knowledge Base/Notes/Insights/blocked-parent"
+
+    with pytest.raises(recover_module.RecoverError) as blocked:
+        recover_module.recover_from_trash(
+            tmp_path,
+            trash_path=trashed.trash_path,
+            restore_path=restored,
+        )
+
+    assert blocked.value.code == "SEMANTIC_CONTRACT_BLOCKED"
+    assert not new_parent.exists()
+    assert (tmp_path / trashed.trash_path).exists()
+
+
+def test_recovery_missing_parent_external_race_still_blocks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    anchor = "Knowledge Base/Notes/Insights/recovery-race-anchor.md"
+    source = _source("Recover with parent race").replace(
+        "## Relations\n",
+        "## Relations\n"
+        "- supports [[Knowledge Base/Notes/Insights/recovery-race-anchor]]\n",
+    )
+    _write(tmp_path, _PAGE, source)
+    _write(tmp_path, anchor, _source("Anchor", page_id=_OTHER_ID))
+    corpus = semantic_contract.build_corpus_context(tmp_path)
+    activation_manifest.ensure_manifest(
+        tmp_path, census=corpus.activation_census
+    )
+    trashed = delete_file_module.delete_file(
+        tmp_path,
+        path=_PAGE,
+        confirm=True,
+        now=dt.datetime(2026, 7, 14, 12, 3, 3),
+    )
+    restored = "Knowledge Base/Notes/Insights/raced-parent/deeper/page.md"
+    raced_parent = tmp_path / "Knowledge Base/Notes/Insights/raced-parent"
+    real_commit = semantic_writes.commit_recovery
+
+    def race_then_commit(vault_root: Path, *, preflight, mutate):
+        raced_parent.mkdir()
+        return real_commit(vault_root, preflight=preflight, mutate=mutate)
+
+    monkeypatch.setattr(semantic_writes, "commit_recovery", race_then_commit)
+
+    with pytest.raises(recover_module.RecoverError) as blocked:
+        recover_module.recover_from_trash(
+            tmp_path,
+            trash_path=trashed.trash_path,
+            restore_path=restored,
+        )
+
+    assert blocked.value.code == "PATH_GUARD_CHANGED"
+    assert raced_parent.is_dir()
+    assert not (tmp_path / restored).exists()
+    assert (tmp_path / trashed.trash_path).exists()
+
+
+@pytest.mark.parametrize(
+    "invalid_sidecar",
+    [
+        b"\xff",
+        b"{",
+        b"[]",
+        b'{"original_path":"first.md","original_path":"second.md"}',
+    ],
+    ids=["invalid-utf8", "invalid-json", "non-object", "duplicate-key"],
+)
+def test_recovery_rejects_invalid_sidecar_without_mutation(
+    tmp_path: Path,
+    invalid_sidecar: bytes,
+) -> None:
+    path = "Knowledge Base/Notes/Insights/raw.txt"
+    restored = "Knowledge Base/Notes/Insights/restored-raw.txt"
+    _write(tmp_path, path, "raw")
+    trashed = delete_file_module.delete_file(
+        tmp_path,
+        path=path,
+        confirm=True,
+        now=dt.datetime(2026, 7, 14, 12, 3, 4),
+    )
+    trash = tmp_path / trashed.trash_path
+    sidecar = tmp_path / trashed.trash_meta_path
+    trash_before = trash.read_bytes()
+    sidecar.write_bytes(invalid_sidecar)
+
+    with pytest.raises(recover_module.RecoverError) as blocked:
+        recover_module.recover_from_trash(
+            tmp_path,
+            trash_path=trashed.trash_path,
+            restore_path=restored,
+        )
+
+    assert blocked.value.code == "TRASH_SIDECAR_INVALID"
+    assert trash.read_bytes() == trash_before
+    assert sidecar.read_bytes() == invalid_sidecar
+    assert not (tmp_path / restored).exists()
+
+
+def test_recovery_never_unlinks_sidecar_replaced_after_preflight(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    anchor = "Knowledge Base/Notes/Insights/recovery-sidecar-anchor.md"
+    source = _source("Recover with replaced sidecar").replace(
+        "## Relations\n",
+        "## Relations\n"
+        "- supports [[Knowledge Base/Notes/Insights/recovery-sidecar-anchor]]\n",
+    )
+    _write(tmp_path, _PAGE, source)
+    _write(tmp_path, anchor, _source("Anchor", page_id=_OTHER_ID))
+    corpus = semantic_contract.build_corpus_context(tmp_path)
+    activation_manifest.ensure_manifest(
+        tmp_path, census=corpus.activation_census
+    )
+    trashed = delete_file_module.delete_file(
+        tmp_path,
+        path=_PAGE,
+        confirm=True,
+        now=dt.datetime(2026, 7, 14, 12, 3, 5),
+    )
+    sidecar = tmp_path / trashed.trash_meta_path
+    replacement = b'{"replacement":"belongs to another writer"}'
+    real_commit = semantic_writes.commit_recovery
+
+    def replace_after_commit(vault_root: Path, *, preflight, mutate):
+        committed = real_commit(vault_root, preflight=preflight, mutate=mutate)
+        sidecar.write_bytes(replacement)
+        return committed
+
+    monkeypatch.setattr(
+        semantic_writes, "commit_recovery", replace_after_commit
+    )
+
+    result = recover_module.recover_from_trash(
+        tmp_path, trash_path=trashed.trash_path
+    )
+
+    assert (tmp_path / _PAGE).read_text(encoding="utf-8") == source
+    assert sidecar.read_bytes() == replacement
+    assert any("sidecar changed" in warning for warning in result.warnings)
+
+
+def test_explicit_legacy_recovery_allows_truly_absent_sidecar(
+    tmp_path: Path,
+) -> None:
+    path = "Knowledge Base/Notes/Insights/raw.txt"
+    restored = "Knowledge Base/Notes/Insights/restored-raw.txt"
+    _write(tmp_path, path, "raw")
+    trashed = delete_file_module.delete_file(
+        tmp_path,
+        path=path,
+        confirm=True,
+        now=dt.datetime(2026, 7, 14, 12, 3, 6),
+    )
+    sidecar = tmp_path / trashed.trash_meta_path
+    sidecar.unlink()
+
+    result = recover_module.recover_from_trash(
+        tmp_path,
+        trash_path=trashed.trash_path,
+        restore_path=restored,
+    )
+
+    assert result.restored_path == restored
+    assert (tmp_path / restored).read_text(encoding="utf-8") == "raw"
+    assert not sidecar.exists()
+
+
+def test_recovery_replaces_committed_review_with_exact_trash_proof(
+    tmp_path: Path,
+) -> None:
+    before = _source("Before review")
+    source = _source("No qualifying relation exists after review")
+    page = _write(tmp_path, _PAGE, before)
+    decision = _decision(source)
+    prepared = _prepared(
+        before,
+        source,
+        transition_id=_TRANSITION_AB,
+        decision=decision,
+    )
+    _apply_plan(
+        tmp_path,
+        relation_review.plan_lifecycle_transition(
+            tmp_path,
+            decision=decision,
+            prepared=prepared,
+            current=_binding(_PAGE, before),
+        ),
+    )
+    page.write_text(source, encoding="utf-8")
+    corpus = semantic_contract.build_corpus_context(tmp_path)
+    activation_manifest.ensure_manifest(
+        tmp_path, census=corpus.activation_census
+    )
+    current = relation_review.load_relation_review(
+        tmp_path, corpus.pages[_PAGE], corpus=corpus
+    )
+    assert current is not None
+    assert current.reference == decision.reference
+    trashed = delete_file_module.delete_file(
+        tmp_path,
+        path=_PAGE,
+        confirm=True,
+        now=dt.datetime(2026, 7, 14, 12, 4, 0),
+    )
+
+    recover_module.recover_from_trash(
+        tmp_path,
+        trash_path=trashed.trash_path,
+    )
+
+    recovered = (tmp_path / _PAGE).read_text(encoding="utf-8")
+    assert recovered == source
+    replacement = relation_review.load_lifecycle_prepared(tmp_path, _ID)
+    assert replacement is not None
+    assert replacement.operation == "recover"
+    assert replacement.before_path == trashed.trash_path
+    assert replacement.after_path == _PAGE
+    assert relation_review.load_lifecycle_decision(
+        tmp_path, _ID, decision.after_fingerprint
+    ) == decision
+
+
+@pytest.mark.parametrize("tamper", ["sidecar", "uuid", "bytes"])
+def test_recovery_rejects_inexact_committed_trash_proof_before_restore(
+    tmp_path: Path,
+    tamper: str,
+) -> None:
+    before = _source("Before review")
+    source = _source("No qualifying relation exists after review")
+    page = _write(tmp_path, _PAGE, before)
+    decision = _decision(source)
+    prepared = _prepared(
+        before,
+        source,
+        transition_id=_TRANSITION_AB,
+        decision=decision,
+    )
+    _apply_plan(
+        tmp_path,
+        relation_review.plan_lifecycle_transition(
+            tmp_path,
+            decision=decision,
+            prepared=prepared,
+            current=_binding(_PAGE, before),
+        ),
+    )
+    page.write_text(source, encoding="utf-8")
+    corpus = semantic_contract.build_corpus_context(tmp_path)
+    activation_manifest.ensure_manifest(
+        tmp_path, census=corpus.activation_census
+    )
+    trashed = delete_file_module.delete_file(
+        tmp_path,
+        path=_PAGE,
+        confirm=True,
+        now=dt.datetime(2026, 7, 14, 12, 5, 0),
+    )
+    trash = tmp_path / trashed.trash_path
+    sidecar = tmp_path / trashed.trash_meta_path
+    if tamper == "sidecar":
+        value = json.loads(sidecar.read_text(encoding="utf-8"))
+        value["original_path"] = _OTHER_PAGE
+        sidecar.write_text(json.dumps(value), encoding="utf-8")
+    elif tamper == "uuid":
+        trash.write_text(
+            source.replace(_ID, _OTHER_ID), encoding="utf-8"
+        )
+    else:
+        trash.write_text(f"{source}\nchanged after trash\n", encoding="utf-8")
+
+    with pytest.raises(recover_module.RecoverError) as blocked:
+        recover_module.recover_from_trash(
+            tmp_path,
+            trash_path=trashed.trash_path,
+            restore_path=_PAGE,
+        )
+
+    assert blocked.value.code == "LIFECYCLE_TRANSITION_MISMATCH"
+    assert trash.exists()
+    assert not (tmp_path / _PAGE).exists()
+
+
+def test_directory_recovery_evaluates_one_final_tree_and_indexes_each_page_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    directory = "Knowledge Base/Notes/Insights/recovery-tree"
+    first = f"{directory}/a.md"
+    second = f"{directory}/nested/b.md"
+    anchor = "Knowledge Base/Notes/Insights/recovery-anchor.md"
+    relation = (
+        "## Relations\n"
+        "- supports [[Knowledge Base/Notes/Insights/recovery-anchor]]\n"
+    )
+    _write(tmp_path, first, _source("A", page_id=_ID).replace("## Relations\n", relation))
+    _write(
+        tmp_path,
+        second,
+        _source("B", page_id=_OTHER_ID).replace("## Relations\n", relation),
+    )
+    _write(
+        tmp_path,
+        anchor,
+        _source("Anchor", page_id="00000000-0000-4000-8000-000000000063"),
+    )
+    corpus = semantic_contract.build_corpus_context(tmp_path)
+    activation_manifest.ensure_manifest(
+        tmp_path, census=corpus.activation_census
+    )
+    trashed = delete_directory_module.delete_directory(
+        tmp_path,
+        path=directory,
+        confirm=True,
+        recursive=True,
+        now=dt.datetime(2026, 7, 14, 12, 6, 0),
+    )
+    upserts: list[list[str]] = []
+    expected = [first, second]
+    report = index_sync.IndexSyncReport(
+        "upsert", tuple(expected), tuple(expected), ()
+    )
+
+    def capture_upsert(root: Path, paths: list[Path], **_kwargs):
+        upserts.append([path.relative_to(root).as_posix() for path in paths])
+        return report
+
+    monkeypatch.setattr(index_sync, "upsert_after_write", capture_upsert)
+
+    result = recover_module.recover_from_trash(
+        tmp_path, trash_path=trashed.trash_path
+    )
+
+    assert result.semantic is not None
+    assert upserts[-1] == expected
+    assert all(
+        sum(path == expected_path for batch in upserts for path in batch) == 1
+        for expected_path in expected
+    )
+    first_prepared = relation_review.load_lifecycle_prepared(tmp_path, _ID)
+    second_prepared = relation_review.load_lifecycle_prepared(tmp_path, _OTHER_ID)
+    assert first_prepared is not None
+    assert second_prepared is not None
+    assert first_prepared.operation == "recover"
+    assert second_prepared.operation == "recover"
+    assert not (tmp_path / trashed.trash_path).exists()
+
+
+def test_directory_recovery_accepts_exact_identity_keyed_review_mapping(
+    tmp_path: Path,
+) -> None:
+    empty = semantic_contract.build_corpus_context(tmp_path)
+    activation_manifest.ensure_manifest(
+        tmp_path, census=empty.activation_census
+    )
+    directory = "Knowledge Base/Notes/Insights/review-tree"
+    first = f"{directory}/a.md"
+    second = f"{directory}/b.md"
+    _write(tmp_path, first, _source("A has no honest relation", page_id=_ID))
+    _write(
+        tmp_path,
+        second,
+        _source("B has no honest relation", page_id=_OTHER_ID),
+    )
+    trashed = delete_directory_module.delete_directory(
+        tmp_path,
+        path=directory,
+        confirm=True,
+        recursive=True,
+        now=dt.datetime(2026, 7, 14, 12, 7, 0),
+    )
+
+    validation = recover_module.recover_from_trash(
+        tmp_path,
+        trash_path=trashed.trash_path,
+        validate_only=True,
+    )
+
+    assert validation.semantic is not None
+    requests = validation.semantic["relation_review_requests"]
+    assert [item["page_identity"] for item in requests] == [_ID, _OTHER_ID]
+    assert (tmp_path / trashed.trash_path).is_dir()
+    reviews = {
+        item["page_identity"]: {
+            "transition_token": item["transition_token"],
+            "transition_hash": item["transition_hash"],
+            "reason": f"No honest relation exists for {item['page_identity']}",
+        }
+        for item in requests
+    }
+
+    result = recover_module.recover_from_trash(
+        tmp_path,
+        trash_path=trashed.trash_path,
+        relation_reviews=reviews,
+    )
+
+    assert result.semantic is not None
+    for page_id in (_ID, _OTHER_ID):
+        prepared = relation_review.load_lifecycle_prepared(tmp_path, page_id)
+        assert prepared is not None
+        assert prepared.operation == "recover"
+        decision = relation_review.load_lifecycle_decision(
+            tmp_path, page_id, prepared.after_fingerprint
+        )
+        assert decision is not None
+        assert decision.reason == reviews[page_id]["reason"]
+
+
+def test_validate_only_never_restores_non_markdown_or_accepts_reviews(
+    tmp_path: Path,
+) -> None:
+    path = "Knowledge Base/Notes/Insights/raw.txt"
+    _write(tmp_path, path, "raw")
+    trashed = delete_file_module.delete_file(
+        tmp_path,
+        path=path,
+        confirm=True,
+        now=dt.datetime(2026, 7, 14, 12, 8, 0),
+    )
+
+    result = recover_module.recover_from_trash(
+        tmp_path,
+        trash_path=trashed.trash_path,
+        validate_only=True,
+    )
+
+    assert result.semantic is None
+    assert (tmp_path / trashed.trash_path).exists()
+    assert not (tmp_path / path).exists()
+    with pytest.raises(recover_module.RecoverError) as blocked:
+        recover_module.recover_from_trash(
+            tmp_path,
+            trash_path=trashed.trash_path,
+            validate_only=True,
+            relation_reviews={
+                _ID: {
+                    "transition_token": "invalid",
+                    "transition_hash": "0" * 64,
+                    "reason": "must not be ignored",
+                }
+            },
+        )
+    assert blocked.value.code == "INVALID_RELATION_REVIEW"
+
+
+def test_directory_recovery_binds_every_nested_directory_census(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    directory = "Knowledge Base/Notes/Insights/guarded-tree"
+    nested = f"{directory}/nested"
+    page = f"{nested}/a.md"
+    anchor = "Knowledge Base/Notes/Insights/guarded-anchor.md"
+    source = _source("A", page_id=_ID).replace(
+        "## Relations\n",
+        "## Relations\n"
+        "- supports [[Knowledge Base/Notes/Insights/guarded-anchor]]\n",
+    )
+    _write(tmp_path, page, source)
+    _write(tmp_path, anchor, _source("Anchor", page_id=_OTHER_ID))
+    corpus = semantic_contract.build_corpus_context(tmp_path)
+    activation_manifest.ensure_manifest(
+        tmp_path, census=corpus.activation_census
+    )
+    trashed = delete_directory_module.delete_directory(
+        tmp_path,
+        path=directory,
+        confirm=True,
+        recursive=True,
+        now=dt.datetime(2026, 7, 14, 12, 9, 0),
+    )
+    real_commit = semantic_writes.commit_recovery
+
+    def drift_then_commit(vault_root: Path, *, preflight, mutate):
+        trash_root = vault_root / trashed.trash_path
+        (trash_root / "nested" / "added.md").write_text(
+            _source("Unvalidated", page_id="00000000-0000-4000-8000-000000000099"),
+            encoding="utf-8",
+        )
+        return real_commit(vault_root, preflight=preflight, mutate=mutate)
+
+    monkeypatch.setattr(semantic_writes, "commit_recovery", drift_then_commit)
+
+    with pytest.raises(recover_module.RecoverError) as blocked:
+        recover_module.recover_from_trash(
+            tmp_path, trash_path=trashed.trash_path
+        )
+
+    assert blocked.value.code == "PATH_GUARD_CHANGED"
+    assert (tmp_path / trashed.trash_path).is_dir()
+    assert not (tmp_path / directory).exists()
+    assert relation_review.load_lifecycle_prepared(tmp_path, _ID) is None
+
+
+def test_directory_recovery_uses_root_sidecar_proof_for_committed_page(
+    tmp_path: Path,
+) -> None:
+    directory = "Knowledge Base/Notes/Insights/committed-tree"
+    page_path = f"{directory}/a.md"
+    before = _source("Before review")
+    source = _source("No qualifying relation exists after review")
+    page = _write(tmp_path, page_path, before)
+    decision = _decision(source)
+    prepared = _prepared(
+        before,
+        source,
+        transition_id=_TRANSITION_AB,
+        decision=decision,
+        before_path=page_path,
+        after_path=page_path,
+    )
+    _apply_plan(
+        tmp_path,
+        relation_review.plan_lifecycle_transition(
+            tmp_path,
+            decision=decision,
+            prepared=prepared,
+            current=relation_review.LifecyclePrimaryBinding(
+                page_path,
+                vault.content_hash(before),
+                semantic_contract.review_content_fingerprint(_ID, before),
+            ),
+        ),
+    )
+    page.write_text(source, encoding="utf-8")
+    corpus = semantic_contract.build_corpus_context(tmp_path)
+    activation_manifest.ensure_manifest(
+        tmp_path, census=corpus.activation_census
+    )
+    trashed = delete_directory_module.delete_directory(
+        tmp_path,
+        path=directory,
+        confirm=True,
+        recursive=True,
+        now=dt.datetime(2026, 7, 14, 12, 10, 0),
+    )
+
+    recover_module.recover_from_trash(
+        tmp_path, trash_path=trashed.trash_path
+    )
+
+    replacement = relation_review.load_lifecycle_prepared(tmp_path, _ID)
+    assert replacement is not None
+    assert replacement.operation == "recover"
+    assert replacement.after_path == page_path
+
+
+def test_directory_review_validation_does_not_truncate_actionable_pages(
+    tmp_path: Path,
+) -> None:
+    empty = semantic_contract.build_corpus_context(tmp_path)
+    activation_manifest.ensure_manifest(
+        tmp_path, census=empty.activation_census
+    )
+    directory = "Knowledge Base/Notes/Insights/many-reviews"
+    for index in range(33):
+        page_id = f"00000000-0000-4000-8000-{index + 100:012d}"
+        _write(
+            tmp_path,
+            f"{directory}/{index:02d}.md",
+            _source(f"Page {index}", page_id=page_id),
+        )
+    trashed = delete_directory_module.delete_directory(
+        tmp_path,
+        path=directory,
+        confirm=True,
+        recursive=True,
+        now=dt.datetime(2026, 7, 14, 12, 11, 0),
+    )
+
+    validation = recover_module.recover_from_trash(
+        tmp_path,
+        trash_path=trashed.trash_path,
+        validate_only=True,
+    )
+
+    assert validation.semantic is not None
+    assert len(validation.semantic["relation_review_requests"]) == 33
+    assert validation.semantic["truncation"]["byte_budget"] == 120 * 1024
+    assert validation.semantic["omitted_counts"]["contract_results"] == 1
+    assert len(json.dumps(validation.semantic).encode("utf-8")) < 120 * 1024
+    assert (tmp_path / trashed.trash_path).is_dir()
+
+
+def test_recovery_review_token_cannot_replay_at_another_destination(
+    tmp_path: Path,
+) -> None:
+    empty = semantic_contract.build_corpus_context(tmp_path)
+    activation_manifest.ensure_manifest(
+        tmp_path, census=empty.activation_census
+    )
+    source = _source("No honest relation exists")
+    _write(tmp_path, _PAGE, source)
+    trashed = delete_file_module.delete_file(
+        tmp_path,
+        path=_PAGE,
+        confirm=True,
+        now=dt.datetime(2026, 7, 14, 12, 12, 0),
+    )
+    validation = recover_module.recover_from_trash(
+        tmp_path,
+        trash_path=trashed.trash_path,
+        validate_only=True,
+    )
+    assert validation.semantic is not None
+    request = validation.semantic["relation_review_requests"][0]
+    review = {
+        _ID: {
+            "transition_token": request["transition_token"],
+            "transition_hash": request["transition_hash"],
+            "reason": "No honest relation exists",
+        }
+    }
+
+    with pytest.raises(recover_module.RecoverError) as blocked:
+        recover_module.recover_from_trash(
+            tmp_path,
+            trash_path=trashed.trash_path,
+            restore_path=_OTHER_PAGE,
+            relation_reviews=review,
+        )
+
+    assert blocked.value.code == "LIFECYCLE_TRANSITION_REVIEW_MISMATCH"
+    assert (tmp_path / trashed.trash_path).exists()
+    assert not (tmp_path / _OTHER_PAGE).exists()
+
+
+def test_recovery_attempts_index_when_watcher_suppression_degrades(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import file_watcher
+
+    anchor = "Knowledge Base/Notes/Insights/fanout-anchor.md"
+    source = _source("Recover me").replace(
+        "## Relations\n",
+        "## Relations\n"
+        "- supports [[Knowledge Base/Notes/Insights/fanout-anchor]]\n",
+    )
+    _write(tmp_path, _PAGE, source)
+    _write(tmp_path, anchor, _source("Anchor", page_id=_OTHER_ID))
+    corpus = semantic_contract.build_corpus_context(tmp_path)
+    activation_manifest.ensure_manifest(
+        tmp_path, census=corpus.activation_census
+    )
+    trashed = delete_file_module.delete_file(
+        tmp_path,
+        path=_PAGE,
+        confirm=True,
+        now=dt.datetime(2026, 7, 14, 12, 13, 0),
+    )
+    calls: list[list[str]] = []
+    report = index_sync.IndexSyncReport(
+        "upsert",
+        (_PAGE,),
+        (_PAGE,),
+        (
+            index_sync.IndexComponentOutcome(
+                "embeddings", "deferred", "deferred_durable"
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        file_watcher,
+        "register_self_write",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("watcher down")),
+    )
+
+    def capture_upsert(root: Path, paths: list[Path], **_kwargs):
+        calls.append([path.relative_to(root).as_posix() for path in paths])
+        return report
+
+    monkeypatch.setattr(index_sync, "upsert_after_write", capture_upsert)
+
+    result = recover_module.recover_from_trash(
+        tmp_path, trash_path=trashed.trash_path
+    )
+
+    assert calls[-1] == [_PAGE]
+    assert sum(_PAGE in batch for batch in calls) == 1
+    assert result.index is not None
+    assert result.index["reconcile_required"] is True
+    assert result.index["reconcile_guidance"]
+    outcomes = {
+        item["component"]: (item["outcome"], item["code"])
+        for item in result.index["components"]
+    }
+    assert outcomes["watcher"] == ("degraded", "self_write_registration_failed")
+    assert outcomes["embeddings"] == ("deferred", "deferred_durable")
+
+
+@pytest.mark.parametrize(
+    ("suffix", "source", "expects_semantic"),
+    [
+        (
+            "inactive.md",
+            _source("Inactive", page_id=_ID).replace(
+                "status: active", "status: superseded"
+            ),
+            True,
+        ),
+        (
+            "entity.md",
+            _source("Entity", page_id=_ID).replace(
+                "type: insight", "type: entity"
+            ),
+            True,
+        ),
+        ("arbitrary.md", "# Arbitrary Markdown\n", True),
+        ("raw.txt", "raw bytes", False),
+    ],
+)
+def test_recovery_structural_and_non_markdown_matrix(
+    tmp_path: Path,
+    suffix: str,
+    source: str,
+    expects_semantic: bool,
+) -> None:
+    path = f"Knowledge Base/Notes/Insights/{suffix}"
+    _write(tmp_path, path, source)
+    trashed = delete_file_module.delete_file(
+        tmp_path,
+        path=path,
+        confirm=True,
+        now=dt.datetime(2026, 7, 14, 12, 14, 0),
+    )
+
+    result = recover_module.recover_from_trash(
+        tmp_path, trash_path=trashed.trash_path
+    )
+
+    assert (tmp_path / path).read_text(encoding="utf-8") == source
+    assert (result.semantic is not None) is expects_semantic
+    assert relation_review.load_lifecycle_prepared(tmp_path, _ID) is None
+
+
+def test_recovery_structural_failure_blocks_before_restore(
+    tmp_path: Path,
+) -> None:
+    path = "Knowledge Base/Notes/Insights/malformed-inactive.md"
+    malformed = _source("Malformed inactive", page_id=_ID).replace(
+        "status: active", "status: inactive"
+    )
+    _write(tmp_path, path, malformed)
+    trashed = delete_file_module.delete_file(
+        tmp_path,
+        path=path,
+        confirm=True,
+        now=dt.datetime(2026, 7, 14, 12, 14, 1),
+    )
+
+    with pytest.raises(recover_module.RecoverError) as blocked:
+        recover_module.recover_from_trash(
+            tmp_path, trash_path=trashed.trash_path
+        )
+
+    assert blocked.value.code == "SEMANTIC_CONTRACT_BLOCKED"
+    assert (tmp_path / trashed.trash_path).exists()
+    assert not (tmp_path / path).exists()
+    assert relation_review.load_lifecycle_prepared(tmp_path, _ID) is None
+
+
+def test_legacy_recovery_requires_current_contract_and_cannot_request_review(
+    tmp_path: Path,
+) -> None:
+    anchor = "Knowledge Base/Notes/Insights/legacy-anchor.md"
+    qualifying = _source("Legacy qualifying", page_id=None).replace(
+        "## Relations\n",
+        "## Relations\n"
+        "- supports [[Knowledge Base/Notes/Insights/legacy-anchor]]\n",
+    )
+    _write(tmp_path, _PAGE, qualifying)
+    _write(tmp_path, anchor, _source("Anchor", page_id=_OTHER_ID))
+    trashed = delete_file_module.delete_file(
+        tmp_path,
+        path=_PAGE,
+        confirm=True,
+        now=dt.datetime(2026, 7, 14, 12, 15, 0),
+    )
+
+    result = recover_module.recover_from_trash(
+        tmp_path, trash_path=trashed.trash_path
+    )
+
+    assert result.semantic is not None
+    assert result.semantic["relation_review_requests"] == []
+    assert relation_review.load_lifecycle_prepared(tmp_path, _ID) is None
+
+    indebted_path = "Knowledge Base/Notes/Insights/legacy-indebted.md"
+    _write(tmp_path, indebted_path, _source("Legacy debt", page_id=None))
+    indebted = delete_file_module.delete_file(
+        tmp_path,
+        path=indebted_path,
+        confirm=True,
+        now=dt.datetime(2026, 7, 14, 12, 15, 1),
+    )
+    validation = recover_module.recover_from_trash(
+        tmp_path,
+        trash_path=indebted.trash_path,
+        validate_only=True,
+    )
+    assert validation.semantic is not None
+    assert validation.semantic["relation_review_requests"] == []
+    with pytest.raises(recover_module.RecoverError) as blocked:
+        recover_module.recover_from_trash(
+            tmp_path, trash_path=indebted.trash_path
+        )
+    assert blocked.value.code == "SEMANTIC_CONTRACT_BLOCKED"
+    assert (tmp_path / indebted.trash_path).exists()
+
+
+def test_recovery_custom_destination_preserves_id_and_rejects_live_owner(
+    tmp_path: Path,
+) -> None:
+    anchor = "Knowledge Base/Notes/Insights/custom-anchor.md"
+    source = _source("Custom destination").replace(
+        "## Relations\n",
+        "## Relations\n"
+        "- supports [[Knowledge Base/Notes/Insights/custom-anchor]]\n",
+    )
+    _write(tmp_path, _PAGE, source)
+    _write(tmp_path, anchor, _source("Anchor", page_id=_OTHER_ID))
+    corpus = semantic_contract.build_corpus_context(tmp_path)
+    activation_manifest.ensure_manifest(
+        tmp_path, census=corpus.activation_census
+    )
+    trashed = delete_file_module.delete_file(
+        tmp_path,
+        path=_PAGE,
+        confirm=True,
+        now=dt.datetime(2026, 7, 14, 12, 16, 0),
+    )
+    custom = "Knowledge Base/Notes/Insights/custom-restored.md"
+
+    recover_module.recover_from_trash(
+        tmp_path,
+        trash_path=trashed.trash_path,
+        restore_path=custom,
+    )
+
+    prepared = relation_review.load_lifecycle_prepared(tmp_path, _ID)
+    assert prepared is not None
+    assert prepared.after_path == custom
+    assert semantic_contract.build_page_state(
+        tmp_path, custom, (tmp_path / custom).read_text(encoding="utf-8")
+    ).identity == _ID
+
+    second_path = "Knowledge Base/Notes/Insights/stolen.md"
+    _write(tmp_path, second_path, source)
+    second = delete_file_module.delete_file(
+        tmp_path,
+        path=second_path,
+        confirm=True,
+        now=dt.datetime(2026, 7, 14, 12, 16, 1),
+    )
+    with pytest.raises(recover_module.RecoverError) as duplicate:
+        recover_module.recover_from_trash(
+            tmp_path, trash_path=second.trash_path
+        )
+    assert duplicate.value.code == "SEMANTIC_CONTRACT_BLOCKED"
+    assert (tmp_path / second.trash_path).exists()
+
+
+@pytest.mark.parametrize(
+    ("drift", "code"),
+    [
+        ("destination", "PATH_GUARD_CHANGED"),
+        ("trash", "PATH_GUARD_CONTENT"),
+        ("sidecar", "PATH_GUARD_CONTENT"),
+    ],
+)
+def test_recovery_commit_rejects_post_preflight_drift(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    drift: str,
+    code: str,
+) -> None:
+    anchor = "Knowledge Base/Notes/Insights/race-anchor.md"
+    source = _source("Race").replace(
+        "## Relations\n",
+        "## Relations\n"
+        "- supports [[Knowledge Base/Notes/Insights/race-anchor]]\n",
+    )
+    _write(tmp_path, _PAGE, source)
+    _write(tmp_path, anchor, _source("Anchor", page_id=_OTHER_ID))
+    corpus = semantic_contract.build_corpus_context(tmp_path)
+    activation_manifest.ensure_manifest(
+        tmp_path, census=corpus.activation_census
+    )
+    trashed = delete_file_module.delete_file(
+        tmp_path,
+        path=_PAGE,
+        confirm=True,
+        now=dt.datetime(2026, 7, 14, 12, 17, 0),
+    )
+    real_commit = semantic_writes.commit_recovery
+
+    def drift_then_commit(vault_root: Path, *, preflight, mutate):
+        if drift == "destination":
+            _write(vault_root, _PAGE, "racer")
+        elif drift == "trash":
+            (vault_root / trashed.trash_path).write_text(
+                f"{source}\nchanged", encoding="utf-8"
+            )
+        else:
+            (vault_root / trashed.trash_meta_path).write_text(
+                '{"original_path":"changed.md"}', encoding="utf-8"
+            )
+        return real_commit(vault_root, preflight=preflight, mutate=mutate)
+
+    monkeypatch.setattr(semantic_writes, "commit_recovery", drift_then_commit)
+
+    with pytest.raises(recover_module.RecoverError) as blocked:
+        recover_module.recover_from_trash(
+            tmp_path, trash_path=trashed.trash_path
+        )
+
+    assert blocked.value.code == code
+    assert (tmp_path / trashed.trash_path).exists()
+    assert relation_review.load_lifecycle_prepared(tmp_path, _ID) is None
+
+
+def test_existing_preflight_classifies_transition_without_mutation(tmp_path: Path) -> None:
+    before = _source("A")
+    page = _write(tmp_path, _PAGE, before)
+    after = before.replace("A\n\n## Relations", "B\n\n## Relations")
+
+    preflight = semantic_writes.preflight_existing(
+        tmp_path,
+        path=_PAGE,
+        after_source=after,
+        operation="edit",
+        expected_before_hash=vault.content_hash(before),
+    )
+
+    assert preflight.applicability == "full"
+    assert preflight.before.source_hash == vault.content_hash(before)
+    assert preflight.after.source_hash == vault.content_hash(after)
+    assert preflight.grandfathered is True
+    assert preflight.mutated is False
+    assert preflight.transition_token
+    assert preflight.transition_hash == hashlib.sha256(
+        preflight.transition_token.encode("utf-8")
+    ).hexdigest()
+    assert page.read_text(encoding="utf-8") == before
+    assert not activation_manifest.manifest_path(tmp_path).exists()
+
+
+def test_existing_preflight_returns_equivalent_findings_for_all_entry_operations(
+    tmp_path: Path,
+) -> None:
+    before = _source("A")
+    _write(tmp_path, _PAGE, before)
+    after = before.replace("A\n\n## Relations", "B\n\n## Relations")
+
+    results = [
+        semantic_writes.preflight_existing(
+            tmp_path,
+            path=_PAGE,
+            after_source=after,
+            operation=operation,
+            expected_before_hash=vault.content_hash(before),
+        ).contract_result
+        for operation in ("edit", "tier2_overwrite", "tier2_append")
+    ]
+
+    finding_shapes = [
+        [(item.code, item.key, item.severity) for item in result.findings]
+        for result in results
+    ]
+    assert finding_shapes[0] == finding_shapes[1] == finding_shapes[2]
+    assert [result.should_block for result in results] == [False, False, False]
+
+
+@pytest.mark.parametrize(
+    ("before_status", "after_status", "expected_applicability", "grandfathered"),
+    [
+        ("active", "active", "full", True),
+        ("active", "archived", "structural", True),
+        ("draft", "draft", "structural", False),
+        ("draft", "active", "full", False),
+    ],
+)
+def test_existing_preflight_applies_the_lifecycle_matrix(
+    tmp_path: Path,
+    before_status: str,
+    after_status: str,
+    expected_applicability: str,
+    grandfathered: bool,
+) -> None:
+    before = _source("A").replace("status: active", f"status: {before_status}")
+    after = before.replace(f"status: {before_status}", f"status: {after_status}")
+    _write(tmp_path, _PAGE, before)
+
+    preflight = semantic_writes.preflight_existing(
+        tmp_path,
+        path=_PAGE,
+        after_source=after,
+        operation="edit",
+        expected_before_hash=vault.content_hash(before),
+    )
+
+    assert preflight.applicability == expected_applicability
+    assert preflight.grandfathered is grandfathered
+    assert (_PAGE in preflight.after_corpus.eligible_compiled_paths) is (
+        after_status == "active"
+    )
+
+
+def test_existing_preflight_rejects_an_unknown_operation_before_mutation(
+    tmp_path: Path,
+) -> None:
+    source = _source("A")
+    page = _write(tmp_path, _PAGE, source)
+
+    with pytest.raises(semantic_writes.SemanticWriteError) as exc:
+        semantic_writes.preflight_existing(
+            tmp_path,
+            path=_PAGE,
+            after_source=source,
+            operation="move",  # type: ignore[arg-type]
+        )
+
+    assert exc.value.code == "LIFECYCLE_TRANSITION_INVALID_OPERATION"
+    assert page.read_text(encoding="utf-8") == source
+    assert not activation_manifest.manifest_path(tmp_path).exists()
+
+
+def test_existing_preflight_rejects_reviewed_none_for_inactive_result(
+    tmp_path: Path,
+) -> None:
+    source = _source("Draft").replace("status: active", "status: draft")
+    _write(tmp_path, _PAGE, source)
+    preview = semantic_writes.preflight_existing(
+        tmp_path,
+        path=_PAGE,
+        after_source=source.replace("Draft", "Still draft"),
+        operation="edit",
+    )
+
+    with pytest.raises(semantic_writes.SemanticWriteError) as exc:
+        semantic_writes.preflight_existing(
+            tmp_path,
+            path=_PAGE,
+            after_source=source.replace("Draft", "Still draft"),
+            operation="edit",
+            transition_token=preview.transition_token,
+            relation_disposition="reviewed_none",
+            relation_review_hash=preview.transition_hash,
+            relation_review_reason="Inactive pages do not receive review records",
+        )
+
+    assert exc.value.code == "INVALID_RELATION_REVIEW"
+    assert not relation_review.lifecycle_prepared_path(tmp_path, _ID).exists()
+
+
+def test_existing_commit_installs_boundary_and_commits_primary_last_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    before = _source("A")
+    page = _write(tmp_path, _PAGE, before)
+    after = before.replace("A\n\n## Relations", "B\n\n## Relations")
+    preflight = semantic_writes.preflight_existing(
+        tmp_path,
+        path=_PAGE,
+        after_source=after,
+        operation="edit",
+        expected_before_hash=vault.content_hash(before),
+    )
+    original_batch = vault.batch_atomic_write
+    ordered_batches: list[list[str]] = []
+
+    def capture_batch(writes, **kwargs):
+        materialized = list(writes)
+        ordered_batches.append(
+            [item.path.relative_to(tmp_path).as_posix() for item in materialized]
+        )
+        return original_batch(materialized, **kwargs)
+
+    fanouts: list[list[Path]] = []
+
+    def one_report(_root: Path, paths: list[Path], **_kwargs):
+        fanouts.append(paths)
+        rels = tuple(path.relative_to(tmp_path).as_posix() for path in paths)
+        return index_sync.IndexSyncReport("upsert", rels, rels, ())
+
+    monkeypatch.setattr(semantic_writes.vault, "batch_atomic_write", capture_batch)
+    monkeypatch.setattr(index_sync, "upsert_after_write", one_report)
+
+    committed = semantic_writes.commit_existing(tmp_path, preflight=preflight)
+
+    assert page.read_text(encoding="utf-8") == after
+    assert activation_manifest.manifest_path(tmp_path).exists()
+    assert relation_review.lifecycle_prepared_path(tmp_path, _ID).exists()
+    assert ordered_batches[-1][-1] == _PAGE
+    assert ordered_batches[-1][0].endswith("/prepared.json")
+    assert len(fanouts) == 2  # manifest install, then the actual existing-page commit
+    assert committed.index_report is not None
+    assert committed.index_report.requested_paths[-1] == _PAGE
+
+
+def test_material_edit_requires_and_commits_exact_reviewed_none_transition(
+    tmp_path: Path,
+) -> None:
+    before = _source("A")
+    page = _write(tmp_path, _PAGE, before)
+    current_decision = _decision(before, reason="Current state reviewed")
+    decision_path = relation_review.lifecycle_decision_path(
+        tmp_path, _ID, current_decision.after_fingerprint
+    )
+    decision_path.parent.mkdir(parents=True, exist_ok=True)
+    decision_path.write_text(
+        relation_review.serialize_lifecycle_decision(current_decision),
+        encoding="utf-8",
+    )
+    after = before.replace("A\n\n## Relations", "B\n\n## Relations")
+
+    preview = semantic_writes.preflight_existing(
+        tmp_path,
+        path=_PAGE,
+        after_source=after,
+        operation="edit",
+        expected_before_hash=vault.content_hash(before),
+    )
+    assert preview.contract_result.should_block is True
+
+    reviewed = semantic_writes.preflight_existing(
+        tmp_path,
+        path=_PAGE,
+        after_source=after,
+        operation="edit",
+        expected_before_hash=vault.content_hash(before),
+        transition_token=preview.transition_token,
+        relation_disposition="reviewed_none",
+        relation_review_hash=preview.transition_hash,
+        relation_review_reason="No honest relation exists for the revised page",
+    )
+
+    assert reviewed.contract_result.should_block is False
+    assert reviewed.requested_decision is not None
+    assert reviewed.requested_decision.after_fingerprint == reviewed.after.review_fingerprint
+    committed = semantic_writes.commit_existing(tmp_path, preflight=reviewed)
+    assert committed.mutated is True
+    assert page.read_text(encoding="utf-8") == after
+    loaded = relation_review.load_lifecycle_decision(
+        tmp_path, _ID, reviewed.after.review_fingerprint
+    )
+    assert loaded == reviewed.requested_decision
+
+
+def test_surgical_validate_only_adds_semantic_preflight_without_mutation(
+    tmp_path: Path,
+) -> None:
+    source = _source("A")
+    page = _write(tmp_path, _PAGE, source)
+
+    result = edit_module.edit(
+        tmp_path,
+        path=_PAGE,
+        why="preview semantic lifecycle",
+        old_string="A",
+        new_string="B",
+        validate_only=True,
+        today=dt.date(2026, 7, 14),
+    )
+
+    assert result.match_count == 1
+    assert result.semantic is not None
+    assert result.semantic["operation"] == "edit"
+    assert result.semantic["mutated"] is False
+    assert result.semantic["transition_token"]
+    assert page.read_text(encoding="utf-8") == source
+    assert not activation_manifest.manifest_path(tmp_path).exists()
+
+
+def test_surgical_edit_commits_through_existing_semantic_coordinator(
+    tmp_path: Path,
+) -> None:
+    source = _source("A")
+    page = _write(tmp_path, _PAGE, source)
+
+    result = edit_module.edit(
+        tmp_path,
+        path=_PAGE,
+        why="exercise semantic lifecycle",
+        old_string="A",
+        new_string="B",
+        today=dt.date(2026, 7, 14),
+    )
+
+    assert result.path == _PAGE
+    assert result.semantic is not None
+    assert result.semantic["operation"] == "edit"
+    assert result.semantic["mutated"] is True
+    assert "B" in page.read_text(encoding="utf-8")
+    assert activation_manifest.manifest_path(tmp_path).exists()
+    assert relation_review.lifecycle_prepared_path(tmp_path, _ID).exists()
+    assert set(result.as_dict()) == {"path", "warnings", "semantic"}
+
+
+@pytest.mark.parametrize("mode", ["surgical", "heading", "multi", "set_take"])
+def test_blocked_edit_rendering_does_not_warm_shared_resolver(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str
+) -> None:
+    source = _source(
+        "## Finding\n\nA [[Target]] row.\n\n- Film (2026) [take: ]"
+    )
+    _write(tmp_path, _PAGE, source)
+    cache = edit_module.find_module._RESOLVER_CACHE
+    cache.clear()
+
+    def block(*_args, **_kwargs):
+        raise semantic_writes.SemanticWriteError(
+            "SEMANTIC_CONTRACT_BLOCKED", "synthetic precommit blocker"
+        )
+
+    monkeypatch.setattr(semantic_writes, "preflight_existing", block)
+
+    if mode == "surgical":
+        def call():
+            return edit_module.edit(
+                tmp_path,
+                path=_PAGE,
+                why="blocked surgical",
+                old_string="A [[Target]] row.",
+                new_string="Changed [[Target]] row.",
+            )
+
+        error_type = edit_module.EditError
+    elif mode == "heading":
+        def call():
+            return edit_module.edit(
+                tmp_path,
+                path=_PAGE,
+                why="blocked heading",
+                heading="Finding",
+                section_position="replace",
+                new_string="Changed [[Target]] row.",
+            )
+
+        error_type = edit_module.EditError
+    elif mode == "multi":
+        def call():
+            return multi_edit_module.multi_edit(
+                tmp_path,
+                path=_PAGE,
+                why="blocked multi",
+                edits=[
+                    {
+                        "old_string": "A [[Target]] row.",
+                        "new_string": "Changed [[Target]] row.",
+                    }
+                ],
+            )
+
+        error_type = edit_module.EditError
+    else:
+        def call():
+            return set_take_module.set_take(
+                tmp_path,
+                path=_PAGE,
+                row_key="Film (2026)",
+                take="Blocked [[Target]].",
+                why="blocked take",
+            )
+
+        error_type = set_take_module.SetTakeError
+
+    with pytest.raises(error_type):
+        call()
+
+    assert cache == {}
+
+
+def test_multi_edit_validate_and_commit_preserve_shape_with_semantic_feedback(
+    tmp_path: Path,
+) -> None:
+    source = _source("A\n\nC")
+    _write(tmp_path, _PAGE, source)
+    edits = [
+        {"old_string": "A", "new_string": "B"},
+        {"old_string": "C", "new_string": "D"},
+    ]
+
+    preview = multi_edit_module.multi_edit(
+        tmp_path,
+        path=_PAGE,
+        why="preview batch",
+        edits=edits,
+        validate_only=True,
+        today=dt.date(2026, 7, 14),
+    )
+    assert preview.edits == [
+        {"index": 0, "match_count": 1, "replace_all": False},
+        {"index": 1, "match_count": 1, "replace_all": False},
+    ]
+    assert preview.semantic is not None
+    assert preview.semantic["mutated"] is False
+
+    committed = multi_edit_module.multi_edit(
+        tmp_path,
+        path=_PAGE,
+        why="commit batch",
+        edits=edits,
+        today=dt.date(2026, 7, 14),
+    )
+    assert committed.edits_applied == 2
+    assert committed.semantic is not None
+    assert committed.semantic["mutated"] is True
+    assert set(committed.as_dict()) == {
+        "path",
+        "edits_applied",
+        "warnings",
+        "semantic",
+    }
+
+
+def test_set_take_propagates_edit_semantic_feedback_unchanged(tmp_path: Path) -> None:
+    source = _source("- Film (2026) [take: ]")
+    _write(tmp_path, _PAGE, source)
+
+    result = set_take_module.set_take(
+        tmp_path,
+        path=_PAGE,
+        row_key="Film (2026)",
+        take="Sharp.",
+        why="record take",
+        today=dt.date(2026, 7, 14),
+    )
+
+    assert result.semantic is not None
+    assert result.semantic["operation"] == "edit"
+    assert result.semantic["mutated"] is True
+    assert set(result.as_dict()) == {"path", "row", "warnings", "semantic"}
+
+
+@pytest.mark.parametrize("validation", ["strict", "warn", "off"])
+def test_real_edit_honors_saved_contract_validation_mode(
+    tmp_path: Path, validation: str
+) -> None:
+    _save_required_block_contract(
+        tmp_path,
+        name=f"alpha-{validation}",
+        project="alpha",
+        block="finding",
+        validation=validation,
+    )
+    source = _source("## Finding\n\nRequired conclusion.").replace(
+        "status: active\n", "status: active\nproject: alpha\n"
+    )
+    page = _write(tmp_path, _PAGE, source)
+
+    if validation == "strict":
+        with pytest.raises(edit_module.EditError) as exc:
+            edit_module.edit(
+                tmp_path,
+                path=_PAGE,
+                why="remove required block",
+                new_body="No structured block remains.",
+                today=dt.date(2026, 7, 14),
+            )
+        assert exc.value.code == "SEMANTIC_CONTRACT_BLOCKED"
+        assert page.read_text(encoding="utf-8") == source
+        return
+
+    result = edit_module.edit(
+        tmp_path,
+        path=_PAGE,
+        why="remove required block",
+        new_body="No structured block remains.",
+        today=dt.date(2026, 7, 14),
+    )
+    assert result.semantic is not None
+    findings = result.semantic["contract_result"]["findings"]
+    contract_findings = [
+        item for item in findings if item["code"].startswith("CONTRACT_")
+    ]
+    if validation == "warn":
+        assert [item["code"] for item in contract_findings] == [
+            "CONTRACT_REQUIRED_BLOCK"
+        ]
+        assert contract_findings[0]["severity"] == "warning"
+    else:
+        assert contract_findings == []
+
+
+def test_real_edit_resolves_multi_project_saved_contracts(tmp_path: Path) -> None:
+    _save_required_block_contract(
+        tmp_path,
+        name="alpha-required",
+        project="alpha",
+        block="finding",
+        validation="strict",
+    )
+    _save_required_block_contract(
+        tmp_path,
+        name="beta-required",
+        project="beta",
+        block="decision",
+        validation="strict",
+    )
+    source = _source(
+        "## Finding\n\nAlpha.\n\n## Decision\n\nBeta."
+    ).replace("status: active\n", "status: active\nprojects: [alpha, beta]\n")
+    page = _write(tmp_path, _PAGE, source)
+
+    with pytest.raises(edit_module.EditError) as exc:
+        edit_module.edit(
+            tmp_path,
+            path=_PAGE,
+            why="remove beta block",
+            new_body="## Finding\n\nAlpha remains.",
+            today=dt.date(2026, 7, 14),
+        )
+
+    assert exc.value.code == "SEMANTIC_CONTRACT_BLOCKED"
+    assert page.read_text(encoding="utf-8") == source
+
+
+def test_set_frontmatter_project_plan_is_pure_until_semantic_commit(
+    tmp_path: Path,
+) -> None:
+    source = _source("A")
+    page = _write(tmp_path, _PAGE, source)
+    registry_path = tmp_path / "Knowledge Base/_Schema/project-keys.yaml"
+    registry_path.parent.mkdir(parents=True, exist_ok=True)
+
+    preview = set_frontmatter_module.set_frontmatter_field(
+        tmp_path,
+        path=_PAGE,
+        field="project",
+        value="new-domain",
+        why="preview project move",
+        validate_only=True,
+        today=dt.date(2026, 7, 14),
+    )
+
+    assert preview.validate_only is True
+    assert preview.semantic is not None
+    assert preview.semantic["mutated"] is False
+    assert page.read_text(encoding="utf-8") == source
+    assert not registry_path.exists()
+
+    committed = set_frontmatter_module.set_frontmatter_field(
+        tmp_path,
+        path=_PAGE,
+        field="project",
+        value="new-domain",
+        why="commit project move",
+        today=dt.date(2026, 7, 14),
+    )
+    assert committed.semantic is not None
+    assert committed.semantic["mutated"] is True
+    assert "project: new-domain" in page.read_text(encoding="utf-8")
+    assert "new-domain:" in registry_path.read_text(encoding="utf-8")
+
+
+def test_set_frontmatter_preliminary_block_does_not_register_project(
+    tmp_path: Path,
+) -> None:
+    source_path = "Knowledge Base/Sources/Articles/source.md"
+    _write(tmp_path, source_path, _source("Raw"))
+    registry_path = tmp_path / "Knowledge Base/_Schema/project-keys.yaml"
+
+    with pytest.raises(set_frontmatter_module.SetFrontmatterError) as exc:
+        set_frontmatter_module.set_frontmatter_field(
+            tmp_path,
+            path=source_path,
+            field="project",
+            value="blocked-domain",
+            why="must remain inert",
+        )
+
+    assert exc.value.code == "APPEND_ONLY"
+    assert not registry_path.exists()
+
+
+def test_set_frontmatter_draft_to_active_commits_exact_reviewed_none(
+    tmp_path: Path,
+) -> None:
+    draft = _source("Draft").replace("status: active", "status: draft")
+    page = _write(tmp_path, _PAGE, draft)
+    _write(tmp_path, _OTHER_PAGE, _source("Existing", page_id=_OTHER_ID))
+
+    preview = set_frontmatter_module.set_frontmatter_field(
+        tmp_path,
+        path=_PAGE,
+        field="status",
+        value="active",
+        why="preview activation",
+        validate_only=True,
+        today=dt.date(2026, 7, 14),
+    )
+    assert preview.semantic is not None
+    assert preview.semantic["applicability"] == "full"
+    assert preview.semantic["contract_result"]["should_block"] is True
+
+    reviewed = set_frontmatter_module.set_frontmatter_field(
+        tmp_path,
+        path=_PAGE,
+        field="status",
+        value="active",
+        why="review and activate",
+        validate_only=True,
+        today=dt.date(2026, 7, 14),
+        semantic_transition_token=preview.semantic["transition_token"],
+        relation_disposition="reviewed_none",
+        relation_review_hash=preview.semantic["transition_hash"],
+        relation_review_reason="No honest relation exists for this activation",
+    )
+    assert reviewed.semantic is not None
+    assert reviewed.semantic["contract_result"]["should_block"] is False
+
+    committed = set_frontmatter_module.set_frontmatter_field(
+        tmp_path,
+        path=_PAGE,
+        field="status",
+        value="active",
+        why="review and activate",
+        today=dt.date(2026, 7, 14),
+        semantic_transition_token=reviewed.semantic["transition_token"],
+        relation_disposition="reviewed_none",
+        relation_review_hash=reviewed.semantic["transition_hash"],
+        relation_review_reason="No honest relation exists for this activation",
+    )
+    assert committed.semantic is not None
+    assert committed.semantic["mutated"] is True
+    assert committed.semantic["lifecycle_state"] == "new"
+    assert "status: active" in page.read_text(encoding="utf-8")
+    assert relation_review.lifecycle_prepared_path(tmp_path, _ID).exists()
+
+
+def test_tier2_overwrite_validate_and_commit_use_existing_coordinator(
+    tmp_path: Path,
+) -> None:
+    source = _source("A")
+    page = _write(tmp_path, _PAGE, source)
+    after = source.replace("A\n\n## Relations", "B\n\n## Relations")
+
+    preview = create_file_module.create_file(
+        tmp_path,
+        path=_PAGE,
+        content=after,
+        overwrite=True,
+        validate_only=True,
+        today=dt.date(2026, 7, 14),
+    )
+    assert isinstance(preview, semantic_writes.ExistingPreflight)
+    assert preview.operation == "tier2_overwrite"
+    assert preview.mutated is False
+    assert page.read_text(encoding="utf-8") == source
+
+    committed = create_file_module.create_file(
+        tmp_path,
+        path=_PAGE,
+        content=after,
+        overwrite=True,
+        draft_token=preview.transition_token,
+        today=dt.date(2026, 7, 14),
+    )
+    assert committed.semantic is not None
+    assert committed.semantic["operation"] == "tier2_overwrite"
+    assert committed.semantic["mutated"] is True
+    assert page.read_text(encoding="utf-8") == after
+    assert set(committed.as_dict()) == {"path", "warnings", "semantic"}
+
+
+def test_tier2_overwrite_true_on_absent_path_preserves_creation_behavior(
+    tmp_path: Path,
+) -> None:
+    rel = "Knowledge Base/Identity/new.md"
+
+    result = create_file_module.create_file(
+        tmp_path,
+        path=rel,
+        content="---\ntype: identity\n---\n# New\n",
+        overwrite=True,
+        today=dt.date(2026, 7, 14),
+    )
+
+    assert result.creation is not None
+    assert result.semantic is None
+    assert (tmp_path / rel).exists()
+
+
+@pytest.mark.parametrize(
+    ("before", "after"),
+    [
+        (_source("A"), _source("A", page_id=None)),
+        (_source("A"), _source("A", page_id=_OTHER_ID)),
+        (
+            _source("A"),
+            _source("A").replace(
+                f"exomem_id: {_ID}\n", f"exomem_id: {_ID}\nexomem_id: {_ID}\n"
+            ),
+        ),
+        (_source("A", page_id=None), _source("A")),
+    ],
+)
+def test_tier2_overwrite_rejects_stable_identity_bypass(
+    tmp_path: Path, before: str, after: str
+) -> None:
+    page = _write(tmp_path, _PAGE, before)
+
+    with pytest.raises(create_file_module.CreateFileError) as exc:
+        create_file_module.create_file(
+            tmp_path,
+            path=_PAGE,
+            content=after,
+            overwrite=True,
+            today=dt.date(2026, 7, 14),
+        )
+
+    assert exc.value.code == "STABLE_ID_BYPASS"
+    assert page.read_text(encoding="utf-8") == before
+
+
+def test_tier2_overwrite_detects_concurrent_change_without_clobbering(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = _source("A")
+    after = source.replace("A\n\n## Relations", "B\n\n## Relations")
+    page = _write(tmp_path, _PAGE, source)
+    original = semantic_writes.preflight_existing
+
+    def race(*args, **kwargs):
+        page.write_text(source + "\nConcurrent writer.\n", encoding="utf-8")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(create_file_module.semantic_writes, "preflight_existing", race)
+
+    with pytest.raises(create_file_module.CreateFileError) as exc:
+        create_file_module.create_file(
+            tmp_path,
+            path=_PAGE,
+            content=after,
+            overwrite=True,
+            today=dt.date(2026, 7, 14),
+        )
+
+    assert exc.value.code == "STALE_SEMANTIC_WRITE"
+    assert page.read_text(encoding="utf-8") == source + "\nConcurrent writer.\n"
+
+
+def test_existing_coordinator_exact_committed_replay_is_mutation_free(
+    tmp_path: Path,
+) -> None:
+    source = _source("A")
+    after = source.replace("A\n\n## Relations", "B\n\n## Relations")
+    _write(tmp_path, _PAGE, source)
+    preview = semantic_writes.preflight_existing(
+        tmp_path,
+        path=_PAGE,
+        after_source=after,
+        operation="tier2_overwrite",
+    )
+    first = semantic_writes.commit_existing(tmp_path, preflight=preview)
+    before_replay = {
+        path.relative_to(tmp_path).as_posix(): path.read_bytes()
+        for path in tmp_path.rglob("*")
+        if path.is_file()
+    }
+
+    replay_preview = semantic_writes.preflight_existing(
+        tmp_path,
+        path=_PAGE,
+        after_source=after,
+        operation="tier2_overwrite",
+        transition_token=first.transition_token,
+    )
+    replay = semantic_writes.commit_existing(tmp_path, preflight=replay_preview)
+    after_replay = {
+        path.relative_to(tmp_path).as_posix(): path.read_bytes()
+        for path in tmp_path.rglob("*")
+        if path.is_file()
+    }
+
+    assert replay.mutated is False
+    assert replay.lifecycle_state == "committed_replay"
+    assert replay.written_paths == ()
+    assert after_replay == before_replay
+
+
+def test_existing_lifecycle_plan_and_commit_are_inside_semantic_creation_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    before = _source("A")
+    after = before.replace("A\n\n## Relations", "B\n\n## Relations")
+    _write(tmp_path, _PAGE, before)
+    preflight = semantic_writes.preflight_existing(
+        tmp_path,
+        path=_PAGE,
+        after_source=after,
+        operation="edit",
+    )
+    inside = False
+    events: list[str] = []
+    real_plan = semantic_writes.relation_review.plan_lifecycle_transition
+    real_batch = semantic_writes.vault.batch_atomic_write
+
+    @contextmanager
+    def tracked_lock(root: Path, namespace: str):
+        nonlocal inside
+        assert root == tmp_path
+        assert namespace == "semantic-creation"
+        events.append("lock-enter")
+        inside = True
+        try:
+            yield tmp_path / "semantic-creation.lock"
+        finally:
+            inside = False
+            events.append("lock-exit")
+
+    def tracked_plan(*args, **kwargs):
+        assert inside, "lifecycle planning escaped the semantic-creation lock"
+        events.append("plan")
+        return real_plan(*args, **kwargs)
+
+    def tracked_batch(writes, **kwargs):
+        assert inside, "atomic commit escaped the semantic-creation lock"
+        events.append("batch")
+        return real_batch(writes, **kwargs)
+
+    monkeypatch.setattr(semantic_writes.vault, "vault_creation_lock", tracked_lock)
+    monkeypatch.setattr(
+        semantic_writes.relation_review, "plan_lifecycle_transition", tracked_plan
+    )
+    monkeypatch.setattr(semantic_writes.vault, "batch_atomic_write", tracked_batch)
+
+    semantic_writes.commit_existing(tmp_path, preflight=preflight)
+
+    assert events == ["lock-enter", "plan", "batch", "lock-exit"]
+
+
+@pytest.mark.parametrize("page_kind", ["inactive", "entity"])
+def test_structural_existing_preflight_ignores_malformed_relation_history(
+    tmp_path: Path, page_kind: str
+) -> None:
+    if page_kind == "inactive":
+        before = _source("A").replace("status: active", "status: draft")
+    else:
+        before = _source("A").replace("type: insight", "type: entity")
+    after = before.replace("A\n\n## Relations", "B\n\n## Relations")
+    _write(tmp_path, _PAGE, before)
+    fingerprint = semantic_contract.review_content_fingerprint(_ID, before)
+    malformed = relation_review.lifecycle_decision_path(tmp_path, _ID, fingerprint)
+    malformed.parent.mkdir(parents=True, exist_ok=True)
+    malformed.write_text("{malformed lifecycle history", encoding="utf-8")
+
+    preflight = semantic_writes.preflight_existing(
+        tmp_path,
+        path=_PAGE,
+        after_source=after,
+        operation="edit",
+    )
+
+    assert preflight.applicability == "structural"
+    assert preflight.before_review is None
+    assert preflight.after_review is None
+    assert preflight.contract_result.relation_disposition is None
+
+
+@pytest.mark.parametrize(
+    "transition",
+    ["active_to_inactive", "inactive_to_inactive", "entity", "arbitrary"],
+)
+def test_non_full_exact_committed_replay_needs_no_lifecycle_prepared_slot(
+    tmp_path: Path, transition: str
+) -> None:
+    if transition == "active_to_inactive":
+        before = _source("A")
+        after = before.replace("status: active", "status: archived").replace(
+            "A\n\n## Relations", "B\n\n## Relations"
+        )
+    elif transition == "inactive_to_inactive":
+        before = _source("A").replace("status: active", "status: draft")
+        after = before.replace("A\n\n## Relations", "B\n\n## Relations")
+    elif transition == "entity":
+        before = _source("A").replace("type: insight", "type: entity")
+        after = before.replace("A\n\n## Relations", "B\n\n## Relations")
+    else:
+        before = "# Arbitrary\n\nA\n"
+        after = "# Arbitrary\n\nB\n"
+    _write(tmp_path, _PAGE, before)
+    preflight = semantic_writes.preflight_existing(
+        tmp_path,
+        path=_PAGE,
+        after_source=after,
+        operation="tier2_overwrite",
+    )
+    first = semantic_writes.commit_existing(tmp_path, preflight=preflight)
+    assert first.applicability == "structural"
+    if transition != "arbitrary":
+        assert not relation_review.lifecycle_prepared_path(tmp_path, _ID).exists()
+    before_replay = {
+        path.relative_to(tmp_path).as_posix(): path.read_bytes()
+        for path in tmp_path.rglob("*")
+        if path.is_file()
+    }
+
+    replay_preflight = semantic_writes.preflight_existing(
+        tmp_path,
+        path=_PAGE,
+        after_source=after,
+        operation="tier2_overwrite",
+        transition_token=first.transition_token,
+    )
+    replay = semantic_writes.commit_existing(tmp_path, preflight=replay_preflight)
+    after_replay = {
+        path.relative_to(tmp_path).as_posix(): path.read_bytes()
+        for path in tmp_path.rglob("*")
+        if path.is_file()
+    }
+
+    assert replay.mutated is False
+    assert replay.lifecycle_state == "committed_replay"
+    assert replay.written_paths == ()
+    assert after_replay == before_replay
+
+
+def test_existing_semantic_feedback_is_deterministically_bounded(tmp_path: Path) -> None:
+    source = _source("A")
+    _write(tmp_path, _PAGE, source)
+    preflight = semantic_writes.preflight_existing(
+        tmp_path,
+        path=_PAGE,
+        after_source=source.replace("A\n\n## Relations", "B\n\n## Relations"),
+        operation="edit",
+    )
+    findings = tuple(
+        semantic_contract.ContractFinding(
+            code=f"SYNTHETIC_{index:03d}",
+            severity="error",
+            path=_PAGE,
+            span=None,
+            detail=f"synthetic detail {index}",
+            remediation=f"synthetic remediation {index}",
+            governed_element_identity=("synthetic", str(index)),
+            resolved_rule=("synthetic", "*", str(index)),
+        )
+        for index in range(96)
+    )
+    facts = tuple(
+        semantic_contract.RelationFact(
+            identity=f"fact-{index:03d}",
+            logical_source_path=_PAGE,
+            logical_target_path=f"target-{index:03d}.md",
+            raw_target=f"Target {index:03d}",
+            resolved_target_path=f"target-{index:03d}.md",
+            target_anchor=None,
+            target_alias=None,
+            authored_path=_PAGE,
+            authored_line=index + 1,
+            authored_anchor=None,
+            authored_projects=(),
+            authored_page_type="insight",
+            source_kind="statement",
+            target_page_type="insight",
+            raw_relation="supports",
+            canonical_relation="supports",
+            family="support",
+            registry_status="active",
+            origin="semantic_relation",
+            authored=True,
+            reviewer_accepted=False,
+            target_status="resolved",
+        )
+        for index in range(96)
+    )
+    disposition = semantic_contract.RelationDisposition(
+        kind="qualifying_relation",
+        satisfied=True,
+        current=True,
+        qualifying_directions=tuple(f"direction-{index:03d}" for index in range(96)),
+        qualifying_facts=facts,
+        rejected_facts=tuple(
+            semantic_contract.RejectedRelationFact(fact, ("synthetic",))
+            for fact in facts
+        ),
+        actions=tuple(f"relation-action-{index:03d}" for index in range(96)),
+    )
+    large_result = replace(
+        preflight.contract_result,
+        findings=findings,
+        errors=findings,
+        warnings=findings,
+        blocking_findings=findings,
+        relation_disposition=disposition,
+        actions=tuple(f"action-{index:03d}" for index in range(96)),
+    )
+    commit = semantic_writes.ExistingCommit(
+        preflight.applicability,
+        preflight.operation,
+        preflight.path,
+        True,
+        (preflight.path,),
+        large_result,
+        None,
+        None,
+        preflight.transition_token,
+    )
+
+    for payload in (
+        replace(preflight, contract_result=large_result).as_dict()["contract_result"],
+        commit.as_dict()["contract_result"],
+    ):
+        assert len(payload["findings"]) == 32
+        assert len(payload["errors"]) == 32
+        assert len(payload["warnings"]) == 32
+        assert len(payload["blocking_findings"]) == 32
+        assert len(payload["actions"]) == 32
+        assert payload["omitted_counts"] == {
+            "actions": 64,
+            "blocking_findings": 64,
+            "errors": 64,
+            "findings": 64,
+            "warnings": 64,
+        }
+        relation = payload["relation_disposition"]
+        assert len(relation["qualifying_directions"]) == 32
+        assert len(relation["qualifying_facts"]) == 16
+        assert len(relation["rejected_facts"]) == 16
+        assert len(relation["actions"]) == 32
+        assert relation["omitted_counts"] == {
+            "actions": 64,
+            "qualifying_directions": 64,
+            "qualifying_facts": 80,
+            "rejected_facts": 80,
+        }
+        assert len(json.dumps(payload, sort_keys=True).encode("utf-8")) < 128 * 1024
+    assert len(large_result.findings) == 96
+    assert len(large_result.relation_disposition.qualifying_facts) == 96
+
+
+def _existing_feedback_payloads(
+    preflight: semantic_writes.ExistingPreflight,
+    result: semantic_contract.SemanticContractResult,
+) -> tuple[dict, dict]:
+    commit = semantic_writes.ExistingCommit(
+        preflight.applicability,
+        preflight.operation,
+        preflight.path,
+        True,
+        (preflight.path,),
+        result,
+        None,
+        None,
+        preflight.transition_token,
+    )
+    return (
+        replace(preflight, contract_result=result).as_dict()["contract_result"],
+        commit.as_dict()["contract_result"],
+    )
+
+
+def _feedback_preflight(tmp_path: Path) -> semantic_writes.ExistingPreflight:
+    source = _source("A")
+    _write(tmp_path, _PAGE, source)
+    return semantic_writes.preflight_existing(
+        tmp_path,
+        path=_PAGE,
+        after_source=source.replace("A\n\n## Relations", "B\n\n## Relations"),
+        operation="edit",
+    )
+
+
+def _assert_byte_bounded_feedback_pair(
+    preflight: semantic_writes.ExistingPreflight,
+    result: semantic_contract.SemanticContractResult,
+) -> tuple[dict, dict]:
+    first = _existing_feedback_payloads(preflight, result)
+    second = _existing_feedback_payloads(preflight, result)
+    assert first == second
+    for payload in first:
+        encoded = json.dumps(payload, ensure_ascii=True, sort_keys=True).encode("utf-8")
+        assert len(encoded) < 128 * 1024
+        assert payload["truncation"]["byte_budget"] < 128 * 1024
+    return first
+
+
+def test_existing_feedback_byte_bounds_one_oversized_diagnostic(tmp_path: Path) -> None:
+    preflight = _feedback_preflight(tmp_path)
+    oversized = "λ" * (512 * 1024)
+    finding = semantic_contract.ContractFinding(
+        code="OVERSIZED_DIAGNOSTIC",
+        severity="error",
+        path=_PAGE,
+        span=None,
+        detail=oversized,
+        remediation=oversized,
+        governed_element_identity=(oversized,),
+        resolved_rule=("synthetic", "*", "oversized"),
+    )
+    result = replace(
+        preflight.contract_result,
+        findings=(finding,),
+        errors=(finding,),
+        warnings=(),
+        blocking_findings=(finding,),
+    )
+
+    payloads = _assert_byte_bounded_feedback_pair(preflight, result)
+
+    for payload in payloads:
+        assert payload["truncation"]["strings_truncated"] >= 3
+        assert payload["truncation"]["string_bytes_omitted"] > 0
+        assert oversized not in json.dumps(payload, ensure_ascii=False)
+        projected = payload["findings"][0]
+        for value in (
+            projected["detail"],
+            projected["remediation"],
+            projected["governed_element_identity"][0],
+        ):
+            assert value.endswith("…")
+            assert len(value.encode("utf-8")) <= 256
+    assert result.findings[0].detail == oversized
+    assert result.findings[0].remediation == oversized
+    assert result.findings[0].governed_element_identity == (oversized,)
+
+
+def test_existing_feedback_byte_bounds_one_oversized_relation_fact(
+    tmp_path: Path,
+) -> None:
+    preflight = _feedback_preflight(tmp_path)
+    oversized = "界" * (512 * 1024)
+    fact = semantic_contract.RelationFact(
+        identity="oversized-relation",
+        logical_source_path=_PAGE,
+        logical_target_path=oversized,
+        raw_target=oversized,
+        resolved_target_path=oversized,
+        target_anchor=oversized,
+        target_alias=oversized,
+        authored_path=oversized,
+        authored_line=1,
+        authored_anchor=oversized,
+        authored_projects=(),
+        authored_page_type="insight",
+        source_kind="statement",
+        target_page_type="insight",
+        raw_relation="supports",
+        canonical_relation="supports",
+        family="support",
+        registry_status="active",
+        origin="semantic_relation",
+        authored=True,
+        reviewer_accepted=False,
+        target_status="resolved",
+    )
+    disposition = semantic_contract.RelationDisposition(
+        kind="qualifying_relation",
+        satisfied=True,
+        current=True,
+        qualifying_directions=("outbound",),
+        qualifying_facts=(fact,),
+        rejected_facts=(
+            semantic_contract.RejectedRelationFact(fact, (oversized,)),
+        ),
+        actions=(oversized,),
+    )
+    result = replace(
+        preflight.contract_result,
+        relation_disposition=disposition,
+        actions=(oversized,),
+    )
+
+    payloads = _assert_byte_bounded_feedback_pair(preflight, result)
+
+    for payload in payloads:
+        assert payload["truncation"]["strings_truncated"] >= 8
+        assert payload["truncation"]["string_bytes_omitted"] > 0
+        assert oversized not in json.dumps(payload, ensure_ascii=False)
+        projected = payload["relation_disposition"]["qualifying_facts"][0]
+        for value in (
+            projected["logical_target_path"],
+            projected["raw_target"],
+            projected["target_alias"],
+        ):
+            assert value.endswith("…")
+            assert len(value.encode("utf-8")) <= 256
+    assert result.relation_disposition is not None
+    assert result.relation_disposition.qualifying_facts[0].raw_target == oversized
+    assert result.relation_disposition.qualifying_facts[0].target_alias == oversized
+
+
+def test_existing_feedback_byte_bounds_oversized_nested_collections(
+    tmp_path: Path,
+) -> None:
+    preflight = _feedback_preflight(tmp_path)
+    nested_value = "nested-" + "é" * 4096
+    provenance = tuple(
+        (f"contract-{index}", nested_value, nested_value, nested_value)
+        for index in range(96)
+    )
+    finding = semantic_contract.ContractFinding(
+        code="OVERSIZED_NESTED",
+        severity="warning",
+        path=_PAGE,
+        span=None,
+        detail="nested diagnostic",
+        remediation="inspect truncation metadata",
+        governed_element_identity=("nested",),
+        resolved_rule=("synthetic", "*", "nested"),
+        provenance=provenance,
+    )
+    projects = tuple(f"project-{index}-{nested_value}" for index in range(96))
+    fact = semantic_contract.RelationFact(
+        identity="nested-relation",
+        logical_source_path=_PAGE,
+        logical_target_path="target.md",
+        raw_target="Target",
+        resolved_target_path="target.md",
+        target_anchor=None,
+        target_alias=None,
+        authored_path=_PAGE,
+        authored_line=1,
+        authored_anchor=None,
+        authored_projects=projects,
+        authored_page_type="insight",
+        source_kind="statement",
+        target_page_type="insight",
+        raw_relation="supports",
+        canonical_relation="supports",
+        family="support",
+        registry_status="active",
+        origin="semantic_relation",
+        authored=True,
+        reviewer_accepted=False,
+        target_status="resolved",
+    )
+    disposition = semantic_contract.RelationDisposition(
+        kind="qualifying_relation",
+        satisfied=True,
+        current=True,
+        qualifying_directions=("outbound",),
+        qualifying_facts=(fact,),
+    )
+    result = replace(
+        preflight.contract_result,
+        findings=(finding,),
+        errors=(),
+        warnings=(finding,),
+        blocking_findings=(),
+        relation_disposition=disposition,
+    )
+
+    payloads = _assert_byte_bounded_feedback_pair(preflight, result)
+
+    for payload in payloads:
+        assert payload["truncation"]["nested_items_omitted"] >= 176
+        assert payload["truncation"]["strings_truncated"] > 0
+        assert nested_value not in json.dumps(payload, ensure_ascii=False)
+        assert len(payload["findings"][0]["provenance"]) == 8
+        assert len(
+            payload["relation_disposition"]["qualifying_facts"][0][
+                "authored_projects"
+            ]
+        ) == 8
+    assert len(result.findings[0].provenance) == 96
+    assert result.relation_disposition is not None
+    assert len(result.relation_disposition.qualifying_facts[0].authored_projects) == 96
+
+
+def test_tier2_append_commits_semantics_log_and_primary_in_one_batch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = _source("A")
+    page = _write(tmp_path, _PAGE, source)
+    log_path = tmp_path / "Knowledge Base/log.md"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_path.write_text("# Log\n\n---\n", encoding="utf-8")
+    batches: list[list[str]] = []
+    original = semantic_writes.vault.batch_atomic_write
+
+    def capture(writes, **kwargs):
+        materialized = list(writes)
+        batches.append(
+            [item.path.relative_to(tmp_path).as_posix() for item in materialized]
+        )
+        return original(materialized, **kwargs)
+
+    monkeypatch.setattr(semantic_writes.vault, "batch_atomic_write", capture)
+
+    result = append_module.append_to_file(
+        tmp_path,
+        path=_PAGE,
+        content="\nAppended detail.\n",
+        today=dt.date(2026, 7, 14),
+    )
+
+    assert result.semantic is not None
+    assert result.semantic["operation"] == "tier2_append"
+    assert result.semantic["mutated"] is True
+    assert batches[-1][-1] == _PAGE
+    assert batches[-1].count("Knowledge Base/log.md") == 1
+    assert page.read_text(encoding="utf-8").endswith("\nAppended detail.\n")
+
+
+def test_tier2_append_detects_concurrent_change_without_losing_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = _source("A")
+    page = _write(tmp_path, _PAGE, source)
+    original = semantic_writes.preflight_existing
+
+    def race(*args, **kwargs):
+        page.write_text(source + "\nConcurrent writer.\n", encoding="utf-8")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(append_module.semantic_writes, "preflight_existing", race)
+
+    with pytest.raises(append_module.AppendError) as exc:
+        append_module.append_to_file(
+            tmp_path,
+            path=_PAGE,
+            content="Our append.\n",
+            today=dt.date(2026, 7, 14),
+        )
+
+    assert exc.value.code == "STALE_SEMANTIC_WRITE"
+    assert page.read_text(encoding="utf-8") == source + "\nConcurrent writer.\n"
+
+
+def test_tier2_append_exact_committed_retry_does_not_duplicate_content(
+    tmp_path: Path,
+) -> None:
+    source = _source("A").rstrip("\n")
+    page = _write(tmp_path, _PAGE, source)
+    preview = append_module.append_to_file(
+        tmp_path,
+        path=_PAGE,
+        content="Appended once.\n",
+        validate_only=True,
+        today=dt.date(2026, 7, 14),
+    )
+    assert isinstance(preview, semantic_writes.ExistingPreflight)
+    first = append_module.append_to_file(
+        tmp_path,
+        path=_PAGE,
+        content="Appended once.\n",
+        semantic_transition_token=preview.transition_token,
+        today=dt.date(2026, 7, 14),
+    )
+    after = page.read_text(encoding="utf-8")
+
+    replay = append_module.append_to_file(
+        tmp_path,
+        path=_PAGE,
+        content="Appended once.\n",
+        semantic_transition_token=first.semantic["transition_token"],
+        today=dt.date(2026, 7, 14),
+    )
+
+    assert replay.semantic is not None
+    assert replay.semantic["mutated"] is False
+    assert replay.semantic["lifecycle_state"] == "committed_replay"
+    assert page.read_text(encoding="utf-8") == after
+    assert after.count("Appended once.") == 1
+
+
+def test_canonical_decision_and_prepared_round_trip_with_direct_current_lookup(
+    tmp_path: Path,
+) -> None:
+    source_a = _source("A")
+    source_b = _source("B")
+    page = _write(tmp_path, _PAGE, source_a)
+    decision = _decision(source_b)
+    prepared = _prepared(
+        source_a,
+        source_b,
+        transition_id=_TRANSITION_AB,
+        decision=decision,
+    )
+
+    plan = relation_review.plan_lifecycle_transition(
+        tmp_path,
+        decision=decision,
+        prepared=prepared,
+        current=_binding(_PAGE, source_a),
+    )
+    assert plan.state == "new"
+    assert [write.path for write in plan.writes] == [
+        relation_review.lifecycle_decision_path(
+            tmp_path, _ID, decision.after_fingerprint
+        ),
+        relation_review.lifecycle_prepared_path(tmp_path, _ID),
+    ]
+    _apply_plan(tmp_path, plan)
+
+    assert relation_review.load_lifecycle_decision(
+        tmp_path, _ID, decision.after_fingerprint
+    ) == decision
+    assert relation_review.load_lifecycle_prepared(tmp_path, _ID) == prepared
+    assert page.read_text(encoding="utf-8") == source_a
+
+    corpus_a = semantic_contract.build_corpus_context(tmp_path)
+    state_a = corpus_a.pages[_PAGE]
+    assert relation_review.load_relation_review(tmp_path, state_a, corpus=corpus_a) is None
+
+    page.write_text(source_b, encoding="utf-8")
+    corpus_b = semantic_contract.build_corpus_context(tmp_path)
+    state_b = corpus_b.pages[_PAGE]
+    current = relation_review.load_relation_review(tmp_path, state_b, corpus=corpus_b)
+    assert current is not None
+    assert current.kind == "reviewed_none"
+    assert current.reference == decision.reference
+
+
+def test_pending_retry_committed_replay_pending_refusal_and_stale_detection(
+    tmp_path: Path,
+) -> None:
+    source_a = _source("A")
+    source_b = _source("B")
+    source_c = _source("C")
+    decision_b = _decision(source_b)
+    prepared_ab = _prepared(
+        source_a,
+        source_b,
+        transition_id=_TRANSITION_AB,
+        decision=decision_b,
+    )
+    initial = relation_review.plan_lifecycle_transition(
+        tmp_path,
+        decision=decision_b,
+        prepared=prepared_ab,
+        current=_binding(_PAGE, source_a),
+    )
+    _apply_plan(tmp_path, initial)
+
+    exact_pending = relation_review.plan_lifecycle_transition(
+        tmp_path,
+        decision=decision_b,
+        prepared=prepared_ab,
+        current=_binding(_PAGE, source_a),
+    )
+    assert exact_pending.state == "pending_retry"
+    assert exact_pending.writes == ()
+
+    decision_c = _decision(source_c, reason="C has no honest relation")
+    prepared_ac = _prepared(
+        source_a,
+        source_c,
+        transition_id=_TRANSITION_BC,
+        decision=decision_c,
+    )
+    with pytest.raises(relation_review.RelationReviewError) as pending:
+        relation_review.plan_lifecycle_transition(
+            tmp_path,
+            decision=decision_c,
+            prepared=prepared_ac,
+            current=_binding(_PAGE, source_a),
+        )
+    assert pending.value.code == "LIFECYCLE_TRANSITION_PENDING"
+
+    with pytest.raises(relation_review.RelationReviewError) as stale:
+        relation_review.plan_lifecycle_transition(
+            tmp_path,
+            decision=decision_b,
+            prepared=prepared_ab,
+            current=_binding(_PAGE, source_c),
+        )
+    assert stale.value.code == "LIFECYCLE_TRANSITION_STALE"
+
+    exact_committed = relation_review.plan_lifecycle_transition(
+        tmp_path,
+        decision=decision_b,
+        prepared=prepared_ab,
+        current=_binding(_PAGE, source_b),
+    )
+    assert exact_committed.state == "committed_replay"
+    assert exact_committed.writes == ()
+
+
+def test_committed_slot_replacement_and_exact_revert_reuse_decision(
+    tmp_path: Path,
+) -> None:
+    source_a = _source("A")
+    source_b = _source("B")
+    source_c = _source("C")
+    decision_b = _decision(source_b)
+    prepared_ab = _prepared(
+        source_a,
+        source_b,
+        transition_id=_TRANSITION_AB,
+        decision=decision_b,
+    )
+    _apply_plan(
+        tmp_path,
+        relation_review.plan_lifecycle_transition(
+            tmp_path,
+            decision=decision_b,
+            prepared=prepared_ab,
+            current=_binding(_PAGE, source_a),
+        ),
+    )
+    decision_path = relation_review.lifecycle_decision_path(
+        tmp_path, _ID, decision_b.after_fingerprint
+    )
+    decision_bytes = decision_path.read_bytes()
+
+    decision_c = _decision(source_c, reason="C has no honest relation")
+    prepared_bc = _prepared(
+        source_b,
+        source_c,
+        transition_id=_TRANSITION_BC,
+        decision=decision_c,
+    )
+    plan_bc = relation_review.plan_lifecycle_transition(
+        tmp_path,
+        decision=decision_c,
+        prepared=prepared_bc,
+        current=_binding(_PAGE, source_b),
+    )
+    assert plan_bc.state == "replace_committed"
+    _apply_plan(tmp_path, plan_bc)
+
+    prepared_cb = _prepared(
+        source_c,
+        source_b,
+        transition_id=_TRANSITION_CB,
+        decision=decision_b,
+    )
+    plan_cb = relation_review.plan_lifecycle_transition(
+        tmp_path,
+        decision=decision_b,
+        prepared=prepared_cb,
+        current=_binding(_PAGE, source_c),
+    )
+    assert plan_cb.state == "replace_committed"
+    _apply_plan(tmp_path, plan_cb)
+
+    assert decision_path.read_bytes() == decision_bytes
+    assert relation_review.load_lifecycle_prepared(tmp_path, _ID) == prepared_cb
+    assert len({_TRANSITION_AB, _TRANSITION_BC, _TRANSITION_CB}) == 3
+
+
+def test_decision_reason_and_pending_token_drift_fail_before_mutation(
+    tmp_path: Path,
+) -> None:
+    source_a = _source("A")
+    source_b = _source("B")
+    decision_b = _decision(source_b)
+    prepared_ab = _prepared(
+        source_a,
+        source_b,
+        transition_id=_TRANSITION_AB,
+        decision=decision_b,
+    )
+    _apply_plan(
+        tmp_path,
+        relation_review.plan_lifecycle_transition(
+            tmp_path,
+            decision=decision_b,
+            prepared=prepared_ab,
+            current=_binding(_PAGE, source_a),
+        ),
+    )
+    before = {
+        path.relative_to(tmp_path).as_posix(): path.read_bytes()
+        for path in tmp_path.rglob("*.json")
+    }
+
+    changed_reason = _decision(source_b, reason="A different judgment")
+    with pytest.raises(relation_review.RelationReviewError) as collision:
+        relation_review.plan_lifecycle_transition(
+            tmp_path,
+            decision=changed_reason,
+            prepared=_prepared(
+                source_a,
+                source_b,
+                transition_id=_TRANSITION_AB,
+                decision=changed_reason,
+            ),
+            current=_binding(_PAGE, source_a),
+        )
+    assert collision.value.code == "LIFECYCLE_TRANSITION_MISMATCH"
+
+    with pytest.raises(relation_review.RelationReviewError) as pending:
+        relation_review.plan_lifecycle_transition(
+            tmp_path,
+            decision=changed_reason,
+            prepared=_prepared(
+                source_a,
+                source_b,
+                transition_id=_TRANSITION_BC,
+                decision=changed_reason,
+            ),
+            current=_binding(_PAGE, source_a),
+        )
+    assert pending.value.code == "LIFECYCLE_TRANSITION_PENDING"
+
+    token_drift = _prepared(
+        source_a,
+        source_b,
+        transition_id=_TRANSITION_AB,
+        decision=decision_b,
+        token="changed-token",
+    )
+    with pytest.raises(relation_review.RelationReviewError) as mismatch:
+        relation_review.plan_lifecycle_transition(
+            tmp_path,
+            decision=decision_b,
+            prepared=token_drift,
+            current=_binding(_PAGE, source_a),
+        )
+    assert mismatch.value.code == "LIFECYCLE_TRANSITION_MISMATCH"
+    assert {
+        path.relative_to(tmp_path).as_posix(): path.read_bytes()
+        for path in tmp_path.rglob("*.json")
+    } == before
+
+
+@pytest.mark.parametrize(
+    ("mutate", "code"),
+    [
+        (lambda value: {**value, "extra": True}, "RELATION_REVIEW_INVALID_SCHEMA"),
+        (
+            lambda value: {key: item for key, item in value.items() if key != "reason"},
+            "RELATION_REVIEW_INVALID_SCHEMA",
+        ),
+        (
+            lambda value: {**value, "schema_version": True},
+            "RELATION_REVIEW_INVALID_SCHEMA",
+        ),
+        (
+            lambda value: {**value, "schema_version": 99},
+            "RELATION_REVIEW_UNSUPPORTED_VERSION",
+        ),
+        (
+            lambda value: {**value, "decision_hash": "A" * 64},
+            "RELATION_REVIEW_INVALID_SCHEMA",
+        ),
+        (lambda value: {**value, "reason": "  padded  "}, "RELATION_REVIEW_INVALID_SCHEMA"),
+    ],
+)
+def test_lifecycle_decision_schema_is_strict(
+    tmp_path: Path, mutate, code: str
+) -> None:
+    decision = _decision(_source("B"))
+    path = relation_review.lifecycle_decision_path(
+        tmp_path, _ID, decision.after_fingerprint
+    )
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps(mutate(decision.storage_dict())), encoding="utf-8")
+
+    with pytest.raises(relation_review.RelationReviewError) as exc:
+        relation_review.load_lifecycle_decision(
+            tmp_path, _ID, decision.after_fingerprint
+        )
+    assert exc.value.code == code
+
+
+def test_lifecycle_bounds_alias_symlink_and_history_limit_are_closed(
+    tmp_path: Path,
+) -> None:
+    decision = _decision(_source("B"))
+    path = relation_review.lifecycle_decision_path(
+        tmp_path, _ID, decision.after_fingerprint
+    )
+    path.parent.mkdir(parents=True)
+    path.write_bytes(b"{" + b"x" * (16 * 1024))
+    with pytest.raises(relation_review.RelationReviewError) as too_large:
+        relation_review.load_lifecycle_decision(
+            tmp_path, _ID, decision.after_fingerprint
+        )
+    assert too_large.value.code == "RELATION_REVIEW_TOO_LARGE"
+
+    path.unlink()
+    alias = path.with_name(f"{decision.after_fingerprint.upper()}.JSON")
+    alias.write_text("{}", encoding="utf-8")
+    with pytest.raises(relation_review.RelationReviewError) as alias_error:
+        relation_review.load_lifecycle_decision(
+            tmp_path, _ID, decision.after_fingerprint
+        )
+    assert alias_error.value.code == "RELATION_REVIEW_ALIAS"
+
+    alias.unlink()
+    target = tmp_path / "outside.json"
+    target.write_text("{}", encoding="utf-8")
+    try:
+        path.symlink_to(target)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks unavailable")
+    with pytest.raises(relation_review.RelationReviewError) as unsafe:
+        relation_review.load_lifecycle_decision(
+            tmp_path, _ID, decision.after_fingerprint
+        )
+    assert unsafe.value.code == "RELATION_REVIEW_UNSAFE_FILE"
+    path.unlink()
+
+    for index in range(257):
+        fingerprint = f"{index:064x}"
+        item = relation_review.build_lifecycle_decision(
+            page_identity=_ID,
+            after_fingerprint=fingerprint,
+            reason="Reviewed",
+        )
+        item_path = relation_review.lifecycle_decision_path(
+            tmp_path, _ID, fingerprint
+        )
+        item_path.write_text(
+            relation_review.serialize_lifecycle_decision(item), encoding="utf-8"
+        )
+    with pytest.raises(relation_review.RelationReviewError) as overflow:
+        relation_review.load_lifecycle_decision(tmp_path, _ID, f"{0:064x}")
+    assert overflow.value.code == "RELATION_REVIEW_HISTORY_LIMIT"
+
+
+def test_lifecycle_residue_policy_accepts_only_three_atomic_batch_files(
+    tmp_path: Path,
+) -> None:
+    decision = _decision(_source("B"))
+    path = relation_review.lifecycle_decision_path(
+        tmp_path, _ID, decision.after_fingerprint
+    )
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        relation_review.serialize_lifecycle_decision(decision), encoding="utf-8"
+    )
+    supported = (
+        f".{path.name}.abcdefgh.tmp",
+        ".prepared.json.abcdefgh.tmp",
+        ".prepared.json.abcdefgh.bak",
+    )
+    for name in supported:
+        (path.parent / name).write_text("atomic residue", encoding="utf-8")
+
+    assert (
+        relation_review.load_lifecycle_decision(
+            tmp_path, _ID, decision.after_fingerprint
+        )
+        == decision
+    )
+
+    (path.parent / f".{path.name}.ijklmnop.bak").write_text(
+        "excess residue", encoding="utf-8"
+    )
+    with pytest.raises(relation_review.RelationReviewError) as excessive:
+        relation_review.load_lifecycle_decision(
+            tmp_path, _ID, decision.after_fingerprint
+        )
+    assert excessive.value.code == "RELATION_REVIEW_DIRECTORY_LIMIT"
+
+
+def test_lifecycle_arbitrary_tmp_suffix_is_not_ignored(tmp_path: Path) -> None:
+    directory = relation_review.lifecycle_prepared_path(tmp_path, _ID).parent
+    directory.mkdir(parents=True)
+    (directory / "arbitrary.tmp").write_text("not batch residue", encoding="utf-8")
+
+    with pytest.raises(relation_review.RelationReviewError) as unsafe:
+        relation_review.load_lifecycle_prepared(tmp_path, _ID)
+
+    assert unsafe.value.code == "RELATION_REVIEW_ALIAS"
+
+
+def test_planning_a_257th_lifecycle_decision_fails_closed(tmp_path: Path) -> None:
+    directory = relation_review.lifecycle_prepared_path(tmp_path, _ID).parent
+    directory.mkdir(parents=True)
+    for index in range(256):
+        fingerprint = f"{index:064x}"
+        decision = relation_review.build_lifecycle_decision(
+            page_identity=_ID,
+            after_fingerprint=fingerprint,
+            reason="Reviewed",
+        )
+        relation_review.lifecycle_decision_path(
+            tmp_path, _ID, fingerprint
+        ).write_text(
+            relation_review.serialize_lifecycle_decision(decision), encoding="utf-8"
+        )
+
+    source_a = _source("A")
+    source_b = _source("B")
+    decision_b = _decision(source_b)
+    prepared_ab = _prepared(
+        source_a,
+        source_b,
+        transition_id=_TRANSITION_AB,
+        decision=decision_b,
+    )
+    with pytest.raises(relation_review.RelationReviewError) as overflow:
+        relation_review.plan_lifecycle_transition(
+            tmp_path,
+            decision=decision_b,
+            prepared=prepared_ab,
+            current=_binding(_PAGE, source_a),
+        )
+    assert overflow.value.code == "RELATION_REVIEW_HISTORY_LIMIT"
+
+
+def test_guarded_apply_refuses_a_concurrent_257th_lifecycle_decision(
+    tmp_path: Path,
+) -> None:
+    directory = relation_review.lifecycle_prepared_path(tmp_path, _ID).parent
+    directory.mkdir(parents=True)
+    for index in range(255):
+        fingerprint = f"{index:064x}"
+        decision = relation_review.build_lifecycle_decision(
+            page_identity=_ID,
+            after_fingerprint=fingerprint,
+            reason="Reviewed",
+        )
+        relation_review.lifecycle_decision_path(
+            tmp_path, _ID, fingerprint
+        ).write_text(
+            relation_review.serialize_lifecycle_decision(decision), encoding="utf-8"
+        )
+
+    source_a = _source("A")
+    source_b = _source("B")
+    primary = _write(tmp_path, _PAGE, source_a)
+    planned_decision = _decision(source_b)
+    prepared = _prepared(
+        source_a,
+        source_b,
+        transition_id=_TRANSITION_AB,
+        decision=planned_decision,
+    )
+    plan = relation_review.plan_lifecycle_transition(
+        tmp_path,
+        decision=planned_decision,
+        prepared=prepared,
+        current=_binding(_PAGE, source_a),
+    )
+
+    concurrent_fingerprint = f"{255:064x}"
+    concurrent_decision = relation_review.build_lifecycle_decision(
+        page_identity=_ID,
+        after_fingerprint=concurrent_fingerprint,
+        reason="Concurrent review",
+    )
+    relation_review.lifecycle_decision_path(
+        tmp_path, _ID, concurrent_fingerprint
+    ).write_text(
+        relation_review.serialize_lifecycle_decision(concurrent_decision),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(vault.PathGuardError) as changed:
+        _apply_plan(tmp_path, plan)
+
+    assert changed.value.code == "PATH_GUARD_CHANGED"
+    assert not relation_review.lifecycle_decision_path(
+        tmp_path, _ID, planned_decision.after_fingerprint
+    ).exists()
+    assert not relation_review.lifecycle_prepared_path(tmp_path, _ID).exists()
+    assert primary.read_text(encoding="utf-8") == source_a
+    assert len(tuple(directory.glob("[0-9a-f]" * 64 + ".json"))) == 256
+
+
+def test_lifecycle_identity_directory_swap_is_detected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    decision = _decision(_source("B"))
+    artifact = relation_review.lifecycle_decision_path(
+        tmp_path, _ID, decision.after_fingerprint
+    )
+    artifact.parent.mkdir(parents=True)
+    artifact.write_text(
+        relation_review.serialize_lifecycle_decision(decision), encoding="utf-8"
+    )
+    directory = artifact.parent
+    displaced = directory.with_name(f"{directory.name}-displaced")
+    real_open = os.open
+    swapped = False
+
+    def swap_before_artifact_open(path, flags, *args, **kwargs):
+        nonlocal swapped
+        if not swapped and Path(path).name == artifact.name:
+            swapped = True
+            directory.rename(displaced)
+            directory.mkdir()
+            os.link(displaced / artifact.name, directory / artifact.name)
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(relation_review.os, "open", swap_before_artifact_open)
+
+    with pytest.raises(relation_review.RelationReviewError) as exc:
+        relation_review.load_lifecycle_decision(
+            tmp_path, _ID, decision.after_fingerprint
+        )
+    assert exc.value.code == "RELATION_REVIEW_SWAPPED"
+
+
+def test_duplicate_key_prepared_alias_and_unsafe_identity_directory_are_rejected(
+    tmp_path: Path,
+) -> None:
+    prepared_path = relation_review.lifecycle_prepared_path(tmp_path, _ID)
+    prepared_path.parent.mkdir(parents=True)
+    prepared_path.write_text(
+        '{"schema_version":1,"schema_version":1}', encoding="utf-8"
+    )
+    with pytest.raises(relation_review.RelationReviewError) as duplicate:
+        relation_review.load_lifecycle_prepared(tmp_path, _ID)
+    assert duplicate.value.code == "RELATION_REVIEW_DUPLICATE_KEY"
+
+    prepared_path.unlink()
+    prepared_path.with_name("PREPARED.JSON").write_text("{}", encoding="utf-8")
+    with pytest.raises(relation_review.RelationReviewError) as alias:
+        relation_review.load_lifecycle_prepared(tmp_path, _ID)
+    assert alias.value.code == "RELATION_REVIEW_ALIAS"
+
+    identity_dir = prepared_path.parent
+    for child in identity_dir.iterdir():
+        child.unlink()
+    identity_dir.rmdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    try:
+        identity_dir.symlink_to(outside, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("directory symlinks unavailable")
+    with pytest.raises(relation_review.RelationReviewError) as unsafe:
+        relation_review.load_lifecycle_prepared(tmp_path, _ID)
+    assert unsafe.value.code == "RELATION_REVIEW_DIRECTORY_UNSAFE"
+
+
+@pytest.mark.parametrize(
+    ("mutate", "code"),
+    [
+        (lambda value: {**value, "extra": True}, "RELATION_REVIEW_INVALID_SCHEMA"),
+        (
+            lambda value: {
+                key: item for key, item in value.items() if key != "carried_from"
+            },
+            "RELATION_REVIEW_INVALID_SCHEMA",
+        ),
+        (
+            lambda value: {**value, "schema_version": True},
+            "RELATION_REVIEW_INVALID_SCHEMA",
+        ),
+        (
+            lambda value: {**value, "contract_version": 99},
+            "RELATION_REVIEW_UNSUPPORTED_VERSION",
+        ),
+        (
+            lambda value: {
+                **value,
+                "decision_reference": None,
+                "decision_bytes_hash": "a" * 64,
+            },
+            "RELATION_REVIEW_INVALID_SCHEMA",
+        ),
+        (
+            lambda value: {**value, "transition_id": _TRANSITION_AB.upper()},
+            "RELATION_REVIEW_INVALID_SCHEMA",
+        ),
+    ],
+)
+def test_lifecycle_prepared_schema_is_strict(
+    tmp_path: Path, mutate, code: str
+) -> None:
+    source_a = _source("A")
+    source_b = _source("B")
+    decision = _decision(source_b)
+    prepared = _prepared(
+        source_a,
+        source_b,
+        transition_id=_TRANSITION_AB,
+        decision=decision,
+    )
+    path = relation_review.lifecycle_prepared_path(tmp_path, _ID)
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps(mutate(prepared.storage_dict())), encoding="utf-8")
+
+    with pytest.raises(relation_review.RelationReviewError) as invalid:
+        relation_review.load_lifecycle_prepared(tmp_path, _ID)
+
+    assert invalid.value.code == code
+
+
+def test_lifecycle_loader_prefers_decision_then_current_creation_receipt_and_never_legacy(
+    tmp_path: Path,
+) -> None:
+    source = _source("Reviewed")
+    _write(tmp_path, _PAGE, source)
+    decision = _decision(source, reason="Lifecycle decision wins")
+    decision_path = relation_review.lifecycle_decision_path(
+        tmp_path, _ID, decision.after_fingerprint
+    )
+    decision_path.parent.mkdir(parents=True)
+    decision_path.write_text(
+        relation_review.serialize_lifecycle_decision(decision), encoding="utf-8"
+    )
+    legacy_receipt = relation_review.review_artifact_path(tmp_path, _ID)
+    legacy_receipt.parent.mkdir(parents=True, exist_ok=True)
+    legacy_receipt.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "kind": "reviewed_none",
+                "page_identity": _ID,
+                "page_path_at_review": _PAGE,
+                "content_fingerprint": decision.after_fingerprint,
+                "draft_hash": "a" * 64,
+                "auxiliary_hash": "b" * 64,
+                "reason": "Creation decision",
+            }
+        ),
+        encoding="utf-8",
+    )
+    corpus = semantic_contract.build_corpus_context(tmp_path)
+    page = corpus.pages[_PAGE]
+    loaded = relation_review.load_relation_review(tmp_path, page, corpus=corpus)
+    assert loaded is not None
+    assert loaded.reference == decision.reference
+    assert loaded.reason == "Lifecycle decision wins"
+
+    legacy_source = _source("Legacy", page_id=None)
+    legacy_path = _write(
+        tmp_path,
+        "Knowledge Base/Notes/Insights/legacy.md",
+        legacy_source,
+    )
+    legacy_corpus = semantic_contract.build_corpus_context(tmp_path)
+    legacy_state = legacy_corpus.pages[legacy_path.relative_to(tmp_path).as_posix()]
+    assert legacy_state.identity_kind == "path"
+    assert (
+        relation_review.load_relation_review(
+            tmp_path, legacy_state, corpus=legacy_corpus
+        )
+        is None
+    )
+    with pytest.raises(relation_review.RelationReviewError) as invalid:
+        relation_review.build_lifecycle_decision(
+            page_identity=legacy_state.identity,
+            after_fingerprint="c" * 64,
+            reason="must backfill first",
+        )
+    assert invalid.value.code == "RELATION_REVIEW_INVALID_ID"
+
+
+@pytest.mark.parametrize("malformed", [False, True])
+def test_lifecycle_state_reserves_uuid_against_new_6d_creation(
+    tmp_path: Path, malformed: bool
+) -> None:
+    source = _source("New creation")
+    fingerprint = semantic_contract.review_content_fingerprint(_ID, source)
+    if malformed:
+        path = relation_review.lifecycle_prepared_path(tmp_path, _ID)
+        path.parent.mkdir(parents=True)
+        path.write_text("not-json", encoding="utf-8")
+    else:
+        decision = relation_review.build_lifecycle_decision(
+            page_identity=_ID,
+            after_fingerprint=fingerprint,
+            reason="Reserved historical identity",
+        )
+        path = relation_review.lifecycle_decision_path(tmp_path, _ID, fingerprint)
+        path.parent.mkdir(parents=True)
+        path.write_text(
+            relation_review.serialize_lifecycle_decision(decision), encoding="utf-8"
+        )
+
+    with pytest.raises(relation_review.RelationReviewError) as exc:
+        relation_review.validate_creation_draft(
+            tmp_path,
+            path=_PAGE,
+            source=source,
+            draft_id=_ID,
+            operation="create",
+        )
+    assert exc.value.code == "DRAFT_ID_IN_USE"
+    assert not (tmp_path / _PAGE).exists()
+
+
+def test_malformed_lifecycle_state_does_not_break_exact_existing_6d_replay(
+    tmp_path: Path,
+) -> None:
+    source = _source("Committed creation")
+    committed = relation_review.commit_creation_draft(
+        tmp_path,
+        path=_PAGE,
+        source=source,
+        draft_id=_ID,
+        operation="create",
+    )
+    malformed = relation_review.lifecycle_prepared_path(tmp_path, _ID)
+    malformed.parent.mkdir(parents=True)
+    malformed.write_text("not-json", encoding="utf-8")
+
+    with pytest.raises(relation_review.RelationReviewError) as replay:
+        relation_review.commit_creation_draft(
+            tmp_path,
+            path=_PAGE,
+            source=source,
+            draft_id=_ID,
+            operation="create",
+        )
+    assert committed.relation_disposition == "bootstrap"
+    assert replay.value.code == "DRAFT_ALREADY_COMMITTED"
+
+
+def test_qualifying_v2_receipt_is_recovery_only_not_review_truth(tmp_path: Path) -> None:
+    source = _source("Qualifying")
+    _write(tmp_path, _PAGE, source)
+    artifact = relation_review.review_artifact_path(tmp_path, _ID)
+    artifact.parent.mkdir(parents=True, exist_ok=True)
+    artifact.write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "kind": "qualifying",
+                "page_identity": _ID,
+                "page_path_at_review": _PAGE,
+                "content_fingerprint": semantic_contract.review_content_fingerprint(
+                    _ID, source
+                ),
+                "draft_hash": "a" * 64,
+                "auxiliary_hash": "b" * 64,
+                "reason": None,
+                "operation": "create",
+                "draft_token_hash": hashlib.sha256(b"").hexdigest(),
+                "predecessor_path": None,
+                "predecessor_content_hash": None,
+            }
+        ),
+        encoding="utf-8",
+    )
+    corpus = semantic_contract.build_corpus_context(tmp_path)
+    assert (
+        relation_review.load_relation_review(
+            tmp_path, corpus.pages[_PAGE], corpus=corpus
+        )
+        is None
+    )
+
+
+def test_pure_activation_snapshot_and_boundary_plan_write_nothing_and_do_not_mutate(
+    tmp_path: Path,
+) -> None:
+    candidates = (
+        activation_manifest.ActivationCandidate(
+            _PAGE, "a" * 64, _ID
+        ),
+        activation_manifest.ActivationCandidate(
+            _OTHER_PAGE, "b" * 64, _OTHER_ID
+        ),
+    )
+    census = activation_manifest.ActivationCensus.from_candidates(candidates)
+    before_candidates = census.candidates
+    before_files = tuple(tmp_path.rglob("*"))
+
+    snapshot = activation_manifest.snapshot_from_census(census)
+    prospective = activation_manifest.plan_activation_boundary(census, manifest=None)
+    observed = activation_manifest.plan_activation_boundary(
+        census, manifest=snapshot
+    )
+
+    assert snapshot == activation_manifest._snapshot(tmp_path, census=census)
+    assert prospective.manifest == snapshot
+    assert prospective.install_required is True
+    assert observed.manifest == snapshot
+    assert observed.install_required is False
+    assert census.candidates == before_candidates
+    assert tuple(tmp_path.rglob("*")) == before_files
+
+
+def test_prepared_currentness_is_pure_and_never_treats_pending_as_review() -> None:
+    source_a = _source("A")
+    source_b = _source("B")
+    decision_b = _decision(source_b)
+    prepared = _prepared(
+        source_a,
+        source_b,
+        transition_id=_TRANSITION_AB,
+        decision=decision_b,
+    )
+    pending = _binding(_PAGE, source_a)
+    committed = _binding(_PAGE, source_b)
+    stale = replace(pending, source_hash="f" * 64)
+
+    assert relation_review.lifecycle_prepared_state(prepared, pending) == "pending"
+    assert relation_review.lifecycle_prepared_state(prepared, committed) == "committed"
+    assert relation_review.lifecycle_prepared_state(prepared, stale) == "stale"
+    assert not semantic_contract.is_relation_review_current(
+        semantic_contract.RelationReviewState(
+            "reviewed_none",
+            _ID,
+            decision_b.after_fingerprint,
+            reason=decision_b.reason,
+        ),
+        semantic_contract.build_page_state(Path("."), _PAGE, source_a),
+        semantic_contract.SemanticCorpusContext.from_states(
+            Path("."),
+            (semantic_contract.build_page_state(Path("."), _PAGE, source_a),),
+            registry=semantic_contract.relation_registry.core_registry(),
+            identity_census=semantic_contract.StableIdentityCensus(
+                (semantic_contract.StableIdentityEntry(_PAGE, _ID),)
+            ),
+        ),
+    )

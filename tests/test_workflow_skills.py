@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import re
 
+import yaml
+
 from exomem import workflow_skills
 
 EXPECTED_WORKFLOW_SKILLS = [
@@ -79,6 +81,16 @@ def test_workflow_skill_docs_have_required_contract_sections() -> None:
         assert f"name: {name}" in text
         for section in REQUIRED_SECTIONS:
             assert section in text, f"{name} missing {section}"
+
+
+def test_workflow_skill_frontmatter_is_valid_yaml() -> None:
+    for name in EXPECTED_WORKFLOW_SKILLS:
+        skill_md = workflow_skills.source_dir(name) / "SKILL.md"
+        text = skill_md.read_text(encoding="utf-8")
+        frontmatter = text.removeprefix("---\n").split("\n---\n", 1)[0]
+        parsed = yaml.safe_load(frontmatter)
+        assert parsed["name"] == name
+        assert isinstance(parsed["description"], str)
 
 
 def test_workflow_skill_docs_route_through_product_commands() -> None:

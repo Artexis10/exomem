@@ -25,6 +25,7 @@ import re
 import threading
 from functools import lru_cache
 from pathlib import Path
+from typing import Any
 
 from . import find as find_module
 from .kbdir import kb_dirname
@@ -73,7 +74,7 @@ class BM25Index:
 
     def __init__(self) -> None:
         # (vault_root, scope) -> (freshness key triple, bm25, paths)
-        self._cache: dict[tuple[Path, str], tuple[tuple, object, list[str]]] = {}
+        self._cache: dict[tuple[Path, str], tuple[tuple, Any, list[str]]] = {}
         # Per-doc token cache, shared across scopes (a file's tokens don't depend
         # on scope; KB ⊆ vault). Mirrors find.FrontmatterCache's mtime
         # invalidation: a doc is Snowball-tokenized once and reused until its
@@ -101,7 +102,7 @@ class BM25Index:
         self.last_tokenized += 1
         return tokens
 
-    def _build(self, vault_root: Path, scope: str) -> tuple[object, list[str]]:
+    def _build(self, vault_root: Path, scope: str) -> tuple[Any, list[str]]:
         """Walk the KB (or full vault), tokenize each file, build BM25Okapi.
 
         Returns (bm25, paths) where `paths` is parallel to the BM25 document
@@ -139,7 +140,7 @@ class BM25Index:
 
     def _fresh_corpus(
         self, vault_root: Path, scope: str, freshness: tuple | None
-    ) -> tuple[object, list[str]]:
+    ) -> tuple[Any, list[str]]:
         """The cached (bm25, paths) pair, rebuilt when the freshness key moved.
 
         The key is find's digest-strength `_walk_freshness_key` triple — the
@@ -173,6 +174,7 @@ class BM25Index:
         *,
         scope: str = "kb",
         freshness: tuple | None = None,
+        allowed_paths: set[str] | None = None,
     ) -> list[tuple[str, float]]:
         """Return top-k `(rel_path, bm25_score)` for `query`. Empty query → [].
 
@@ -188,7 +190,12 @@ class BM25Index:
         from . import lexstore
 
         indexed = lexstore.search_bm25(
-            vault_root, query, k, scope=scope, freshness=freshness
+            vault_root,
+            query,
+            k,
+            scope=scope,
+            freshness=freshness,
+            allowed_paths=allowed_paths,
         )
         if indexed is not None:
             return indexed
@@ -200,7 +207,12 @@ class BM25Index:
             return []
         scores = bm25.get_scores(tokens)
         ranked = sorted(
-            zip(paths, scores), key=lambda t: (-t[1], t[0])
+            (
+                (path, score)
+                for path, score in zip(paths, scores, strict=True)
+                if allowed_paths is None or path in allowed_paths
+            ),
+            key=lambda item: (-item[1], item[0]),
         )[:k]
         # Drop zero-score hits — they aren't really matches.
         return [(p, float(s)) for p, s in ranked if s > 0]
@@ -270,9 +282,17 @@ def search(
     *,
     scope: str = "kb",
     freshness: tuple | None = None,
+    allowed_paths: set[str] | None = None,
 ) -> list[tuple[str, float]]:
     """Module-level convenience using the per-process singleton."""
-    return _INDEX.search(vault_root, query, k, scope=scope, freshness=freshness)
+    return _INDEX.search(
+        vault_root,
+        query,
+        k,
+        scope=scope,
+        freshness=freshness,
+        allowed_paths=allowed_paths,
+    )
 
 
 def warm(vault_root: Path, scope: str = "kb") -> None:

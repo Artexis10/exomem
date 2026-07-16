@@ -279,6 +279,7 @@ def test_governed_writers_return_canonical_refs(
             content="# Reference note\n\n## Claim\n\nStable identity survives paths.\n",
             note_type="insight",
             title="Reference note",
+            status="draft",
             today=TODAY,
         ),
         link.link(
@@ -313,6 +314,7 @@ def test_read_and_edit_accept_canonical_reference(vault: Path) -> None:
         content="# Referenced command\n\nBefore.\n",
         note_type="insight",
         title="Referenced command",
+        status="draft",
         today=TODAY,
     )
     fetched = commands.op_get(vault, path=created.ref)
@@ -336,6 +338,7 @@ def test_product_move_preserves_identity_and_heals_reference(vault: Path) -> Non
         content="# Move identity\n\nStable across a governed move.\n",
         note_type="insight",
         title="Move identity",
+        status="draft",
         today=TODAY,
     )
     before = yaml.safe_load(

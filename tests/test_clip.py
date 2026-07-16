@@ -98,6 +98,16 @@ def test_clip_index_empty_search(vault) -> None:
     assert embeddings.ClipIndex(vault).search(_unit(0), k=5) == []
 
 
+def test_clip_search_ranks_only_the_allowed_artifact_set(vault) -> None:
+    idx = embeddings.ClipIndex(vault)
+    idx.upsert("excluded.jpg", _unit(0), 1.0)
+    idx.upsert("allowed.jpg", _unit(1), 1.0)
+
+    hits = idx.search(_unit(0), k=1, allowed_paths={"allowed.jpg"})
+
+    assert [hit[0] for hit in hits] == ["allowed.jpg"]
+
+
 def test_clip_enabled_flag(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("EXOMEM_DISABLE_CLIP", "1")
     assert embeddings.clip_enabled() is False

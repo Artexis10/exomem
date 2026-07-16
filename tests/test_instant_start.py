@@ -242,8 +242,12 @@ def test_warm_all_marks_components_ready_in_lexical_embeddings_reranker_clip_ord
     monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
     call_order: list[str] = []
     monkeypatch.setattr(warmup, "warm_caches", lambda vr, **_kw: call_order.append("lexical") or {})
-    monkeypatch.setattr(embeddings, "get_model", lambda: call_order.append("embeddings") or object())
-    monkeypatch.setattr(embeddings, "get_reranker", lambda: call_order.append("reranker") or object())
+    monkeypatch.setattr(
+        embeddings, "get_model", lambda: call_order.append("embeddings") or object()
+    )
+    monkeypatch.setattr(
+        embeddings, "get_reranker", lambda: call_order.append("reranker") or object()
+    )
     monkeypatch.setattr(embeddings, "get_clip_model", lambda: call_order.append("clip") or object())
     monkeypatch.setattr(embeddings, "clip_enabled", lambda: True)
 
