@@ -20,8 +20,8 @@
 - [x] 3.2 Add failing lifecycle tests for every exact qualifying-relation predicate branch, normal origins, the frontmatter+supersession-only exception, family exclusions, target resolution, fingerprint-bound reviewed-none, empty-corpus bootstrap expiry, invalid placeholder, generic-link exclusion, and provenance separation.
 - [x] 3.3 Extend saved memory contracts and infer/validate/diff output to semantic-unit kinds/categories with deterministic scope resolution.
 - [x] 3.4 Implement one pure semantic contract result over fields, units, categories, typed relations, schema findings, page lifecycle, and review disposition, with precommit-blocking and posthoc-nonblocking caller modes.
-- [ ] 3.5 Add portable fingerprint-bound reviewed-none state plus validate-only `draft_id`/`draft_hash`/candidate output, primary-page-last logical commit visibility, exact unchanged-draft crash recovery, and reuse guards.
-- [ ] 3.6 Route remember/note, replace, edit, entity creation, Tier-2 compiled writes, and adoption compile through precommit evaluation; encode the move/delete/trash/other-KB/Sources/Evidence/watcher/reconcile applicability matrix.
+- [x] 3.5 Add portable fingerprint-bound reviewed-none state plus validate-only `draft_id`/`draft_hash`/candidate output, primary-page-last logical commit visibility, exact unchanged-draft crash recovery, and reuse guards.
+- [x] 3.6 Route remember/note, replace, edit, entity creation, Tier-2 compiled writes, and adoption compile through precommit evaluation; encode the move/delete/trash/other-KB/Sources/Evidence/watcher/reconcile applicability matrix.
 - [x] 3.7 Remove malformed `- (none yet)` generation and make empty Relations sections conditional on a valid non-edge disposition.
 - [x] 3.8 Grandfather existing pages into activation/review using stable finding keys and the mechanical after-errors-subset-of-before-errors rule while preventing invalidated accepted dispositions.
 - [x] 3.9 Replace pathname-addressed atomic-batch backup authority with descriptor-owned private per-parent workspaces and in-memory prior-byte/supported-metadata rollback snapshots, preserving ordinary caught-failure semantics and auxiliary-first/primary-last ordering.
@@ -88,8 +88,8 @@
 - [ ] 9.2 Extend adoption scan-only output with semantic-language census and safe next actions; never rewrite originals or require categories.
 - [x] 9.3 Implement the portable governed activation manifest that snapshots existing-page ID/hash baselines without page rewrites and survives rebuild/transfer.
 - [ ] 9.4 Extend audit/attention/review with malformed-unit, category-governance, strict-schema-drift, and stale relation-disposition findings using stable fingerprints.
-- [ ] 9.5 Add empty-vault, first-note, portable existing-vault activation-manifest, legacy-no-ID/move fallback, direct-editor/new-file, sync-conflict, rebuild/transfer, and registry-upgrade acceptance fixtures.
-- [ ] 9.6 Verify default installs and upgrades do not fabricate observations, categories, relations, IDs, or review decisions.
+- [x] 9.5 Add empty-vault, first-note, portable existing-vault activation-manifest, legacy-no-ID/move fallback, direct-editor/new-file, sync-conflict, rebuild/transfer, and registry-upgrade acceptance fixtures.
+- [x] 9.6 Verify default installs and upgrades do not fabricate observations, categories, relations, IDs, or review decisions.
 
 ## 10. Layered Basic Memory Local-Core Benchmark
 
