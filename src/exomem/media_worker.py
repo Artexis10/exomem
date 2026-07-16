@@ -310,7 +310,13 @@ class MediaWorker:
             speaker_verification=result.speaker_verification or "unavailable",
         )
         if not committed:
-            return _ProcessOutcome(_STALE, "media changed before transcript commit")
+            stale_parts: list[str] = []
+            if _content_digest(job.sidecar_path) != expected_sidecar:
+                stale_parts.append("sidecar content changed")
+            if _binary_identity(job.binary_path) != expected_binary:
+                stale_parts.append("media identity changed")
+            detail = ", ".join(stale_parts) or "commit precondition changed"
+            return _ProcessOutcome(_STALE, f"stale extraction: {detail}")
         log.info(
             "extracted %s via %s (%d chars)", job.binary_path.name, result.engine, len(result.text)
         )
@@ -724,7 +730,22 @@ def run_child(vault_root: Path, *, parent_pid: int, idle_seconds: float) -> int:
                 elif outcome.state == FAILED:
                     store.mark(job.id, FAILED, outcome.error)
                 elif outcome.state == _STALE:
-                    store.discard(job)
+                    try:
+                        current_content = job.sidecar_path.read_text(encoding="utf-8")
+                    except (OSError, UnicodeError):
+                        current_content = ""
+                    from . import media_processing
+
+                    if media_processing.has_completed_transcript(
+                        current_content, media_type=job.media_type
+                    ) or "media identity changed" in (outcome.error or ""):
+                        store.discard(job)
+                    else:
+                        store.mark(
+                            job.id,
+                            FAILED,
+                            outcome.error or "stale extraction commit",
+                        )
                 else:
                     store.complete(job)
         log.info("media worker: parent exited; child stopping")

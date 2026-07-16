@@ -247,6 +247,42 @@ def test_changed_media_identity_is_automatically_reconciled_without_retry(
     assert frontmatter["binary_sha256"] == hashlib.sha256(replacement).hexdigest()
 
 
+def test_pending_sidecar_edit_during_durable_asr_is_persisted_as_retryable_failure(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    result = _preserve_media_stub(vault, filename="durable-sidecar-stale.m4a")
+    binary = vault / result.path
+    sidecar = vault / result.sidecar_path
+
+    def _edit_pending_sidecar(*_args, **_kwargs):
+        sidecar.write_text(
+            sidecar.read_text(encoding="utf-8") + "\nUSER CANONICAL EDIT\n",
+            encoding="utf-8",
+        )
+        return extract.ExtractResult(
+            text="[0:00] stale transcript",
+            media_type="audio",
+            engine="faster-whisper:test+timed",
+        )
+
+    monkeypatch.setattr(extract, "asr_prewarm_enabled", lambda: False)
+    monkeypatch.setattr(extract, "log_diarization_readiness", lambda _vault: None)
+    monkeypatch.setattr(extract, "extract_text", _edit_pending_sidecar)
+    store = media_jobs.MediaJobStore(vault)
+    store.enqueue(
+        media_jobs.MediaJob(binary_path=binary, sidecar_path=sidecar, media_type="audio")
+    )
+
+    assert media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.1) == 0
+
+    [failed] = media_jobs.status(vault)["jobs"]
+    assert failed["state"] == media_jobs.FAILED
+    assert failed["retryable"] is True
+    assert failed["error"] == "stale extraction: sidecar content changed"
+    assert "USER CANONICAL EDIT" in sidecar.read_text(encoding="utf-8")
+    assert "stale transcript" not in sidecar.read_text(encoding="utf-8")
+
+
 def test_clip_compute_stays_outside_guard_and_index_commit_is_inside(
     vault, monkeypatch: pytest.MonkeyPatch
 ) -> None:
