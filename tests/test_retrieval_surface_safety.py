@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import typing
 from pathlib import Path
 
 import pytest
+from pydantic import TypeAdapter
 
 from exomem import commands
 from exomem import find as find_module
@@ -77,15 +79,54 @@ def test_product_mcp_retrieval_schemas_are_safe(
     ask_schema = tools["ask_memory"]["outputSchema"]
     assert "explain" in tools["ask_memory"]["inputSchema"]["properties"]
     ask_result = ask_schema["properties"]["result"]
-    assert ask_result["anyOf"][0]["type"] == "array"
-    assert ask_result["anyOf"][0]["items"]["type"] == "object"
-    assert ask_result["anyOf"][1]["type"] == "object"
+    encoded_ask_schema = json.dumps(ask_result, sort_keys=True)
+    assert "retrieval_profile" in encoded_ask_schema
+    assert "ranking_explanation" in encoded_ask_schema
+    assert "unit_ref" in encoded_ask_schema
+    assert "parent_path" in encoded_ask_schema
 
     read_schema = tools["read_memory"]["outputSchema"]
     assert read_schema["type"] == "object"
     assert read_schema["additionalProperties"] is True
     read_inputs = tools["read_memory"]["inputSchema"]["properties"]
     assert {"path", "unit_ref"} <= set(read_inputs)
+
+    result = asyncio.run(
+        _build_server(monkeypatch, vault).call_tool(
+            "ask_memory",
+            {
+                "query": "metabolism",
+                "mode": "keyword",
+                "scope": "kb-only",
+                "explain": True,
+            },
+            run_middleware=False,
+        )
+    ).structured_content["result"]
+    assert result["retrieval_profile"]["effective_mode"] == "keyword"
+    assert result["hits"][0]["ranking_explanation"]["final_rank"] == 1
+
+
+def test_retrieval_return_annotation_models_page_unit_mixed_and_explanation() -> None:
+    annotation = typing.get_type_hints(commands.op_ask_memory)["return"]
+    schema = TypeAdapter(annotation).json_schema()
+    encoded = json.dumps(schema, sort_keys=True)
+
+    assert "FindEnvelope" in encoded
+    assert "PageHit" in encoded
+    assert "SemanticUnitHit" in encoded
+    assert "RetrievalProfile" in encoded
+    assert "RankingExplanation" in encoded
+    assert all(
+        field in encoded
+        for field in (
+            "unit_ref",
+            "parent_path",
+            "source_anchor",
+            "retrieval_profile",
+            "ranking_explanation",
+        )
+    )
 
 
 def test_legacy_mcp_leaf_names_are_opt_in(

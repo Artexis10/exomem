@@ -651,6 +651,9 @@ def find(
             retrieval_trace=retrieval_trace,
         )
 
+    if retrieval_trace is not None and (mode == "keyword" or not query_norm):
+        retrieval_trace.record_keyword_hits(hits, filter_only=not query_norm)
+
     # Auto-widen: reach into the wider vault (sibling folders like Tracking/,
     # Reference/, plus curated trees) so content outside Knowledge Base/ isn't
     # silently invisible. Only for scope="kb" (not "kb-only"/"vault") and
@@ -677,6 +680,7 @@ def find(
                     file_types=file_types, exclude_file_types=exclude_file_types,
                     limit=limit, snapshot=snapshot,
                     filter_plan=filter_plan if filter_plan.root is not None else None,
+                    retrieval_trace=retrieval_trace,
                 )
                 if h.path not in seen
             ]
@@ -695,6 +699,18 @@ def find(
                 reserve = min(len(outside), max(1, limit // 5), max(0, limit - 1))
                 kb_keep = limit - reserve
                 hits = ((strong + weak)[:kb_keep] + outside)[:limit]
+                if retrieval_trace is not None:
+                    retrieval_trace.record_auto_widen(
+                        hits,
+                        strong_paths=[hit.path for hit in strong[:kb_keep]],
+                        weak_paths=[
+                            hit.path
+                            for hit in weak[: max(0, kb_keep - len(strong))]
+                        ],
+                        outside_paths=[hit.path for hit in outside],
+                        reserve=reserve,
+                        kb_keep=kb_keep,
+                    )
 
     # Explicit recency window (off by default) — drop out-of-window hits last,
     # after auto-widen, so it governs every mode uniformly.
@@ -706,8 +722,13 @@ def find(
             recency_days=recency_days,
         )
 
-    if retrieval_trace is not None and (mode == "keyword" or not query_norm):
-        retrieval_trace.record_keyword_hits(hits, filter_only=not query_norm)
+    if retrieval_trace is not None:
+        retrieval_trace.finalize_page_results(
+            hits,
+            updated_after=updated_after,
+            updated_before=updated_before,
+            recency_days=recency_days,
+        )
 
     if filter_plan.has_unit_predicate:
         with _span(timings, "matched_units"):
@@ -1217,6 +1238,8 @@ def _find_semantic_units(
             rrf_k=config.rrf_k,
             prefer_active=prefer_active,
             superseded_penalty=config.superseded_penalty,
+            lexical_used=(mode != "vector" or not vector_succeeded),
+            vector_used=vector_succeeded,
         )
     return [
         _semantic_unit_hit(
@@ -1767,21 +1790,42 @@ def _find_semantic(
     # Resolve the rerank decision. An explicit rerank=True/False always wins;
     # otherwise (rerank is None) auto_rerank consults should_rerank on the built
     # hits. Keeps the reranker model out of the default/test path.
-    if rerank is None:
-        do_rerank = auto_rerank and should_rerank(hits, query, config)
+    rerank_outcome: dict[str, Any]
+    if not hits:
+        do_rerank = False
+        rerank_outcome = {"decision": "skipped", "reason": "no_hits"}
+    elif rerank is False:
+        do_rerank = False
+        rerank_outcome = {"decision": "skipped", "reason": "explicit_false"}
+    elif rerank is None:
+        if not auto_rerank:
+            do_rerank = False
+            rerank_outcome = {
+                "decision": "skipped",
+                "reason": "auto_policy_not_allowed",
+            }
+        else:
+            do_rerank = should_rerank(hits, query, config)
+            rerank_outcome = {
+                "decision": "pending" if do_rerank else "skipped",
+                "reason": "auto_policy_selected" if do_rerank else "auto_policy_declined",
+            }
     else:
-        do_rerank = rerank
+        do_rerank = True
+        rerank_outcome = {"decision": "pending", "reason": "explicit_true"}
 
     if do_rerank and not embeddings.ranking_enabled():
         do_rerank = False  # EXOMEM_DISABLE_RANKING — hard off, even for explicit rerank=True
+        rerank_outcome = {"decision": "skipped", "reason": "hard_disabled"}
 
-    if do_rerank and hits and readiness.should_defer("reranker"):
+    if do_rerank and readiness.should_defer("reranker"):
         # Background warm-up owns the reranker load right now — calling
         # rerank_pairs would block on the singleton lock. Skip; caller marks
         # the response as warming.
         if degraded_out is not None:
             degraded_out.append("reranker")
         do_rerank = False
+        rerank_outcome = {"decision": "deferred", "reason": "model_warming"}
 
     if timings is not None and not (do_rerank and hits):
         timings.skipped("rerank")
@@ -1805,54 +1849,72 @@ def _find_semantic(
                 h.rerank_input_rank = input_rank
                 h.rerank_raw_score = float(s)
                 adjusted = h.rerank_raw_score
-                chain: list[dict[str, float | str]] = []
+                chain: list[dict[str, float | str]] | None = (
+                    [] if retrieval_trace is not None else None
+                )
                 if prefer_compiled:
                     factor = _type_multiplier(h.type, config)
                     before = adjusted
                     adjusted *= factor
-                    chain.append(
-                        {
-                            "name": "type",
-                            "factor": factor,
-                            "before": before,
-                            "after": adjusted,
-                        }
-                    )
+                    if chain is not None:
+                        chain.append(
+                            {
+                                "name": "type",
+                                "factor": factor,
+                                "before": before,
+                                "after": adjusted,
+                            }
+                        )
                 if prefer_active:
                     factor = _status_multiplier(h.status, config)
                     before = adjusted
                     adjusted *= factor
-                    chain.append(
-                        {
-                            "name": "status",
-                            "factor": factor,
-                            "before": before,
-                            "after": adjusted,
-                        }
-                    )
+                    if chain is not None:
+                        chain.append(
+                            {
+                                "name": "status",
+                                "factor": factor,
+                                "before": before,
+                                "after": adjusted,
+                            }
+                        )
                 if usage_map and h.usage_boost_applied:
                     factor = h.usage_boost_applied
                     before = adjusted
                     adjusted *= factor
-                    chain.append(
-                        {
-                            "name": "usage",
-                            "factor": factor,
-                            "before": before,
-                            "after": adjusted,
-                        }
-                    )
+                    if chain is not None:
+                        chain.append(
+                            {
+                                "name": "usage",
+                                "factor": factor,
+                                "before": before,
+                                "after": adjusted,
+                            }
+                        )
                 h.rerank_score = adjusted
-                h.rerank_multiplier_chain = chain
-            hits.sort(key=lambda h: -(h.rerank_score if h.rerank_score is not None else float("-inf")))
+                if chain is not None:
+                    h.rerank_multiplier_chain = chain
+            hits.sort(
+                key=lambda h: -(
+                    h.rerank_score
+                    if h.rerank_score is not None
+                    else float("-inf")
+                )
+            )
+            rerank_outcome = {"decision": "ran", "reason": "ran"}
         except ImportError as e:
             log.warning("rerank requested but reranker unavailable: %s", e)
             if timings is not None:
                 timings.error("rerank", e)
+            rerank_outcome = {
+                "decision": "unavailable",
+                "reason": "dependency_unavailable",
+            }
         except Exception as e:
             log.warning("rerank failed: %s; returning fused order", e)
             if timings is not None:
                 timings.error("rerank", e)
+            rerank_outcome = {"decision": "failed", "reason": "runtime_failure"}
         finally:
             if timings is not None:
                 timings.stages.setdefault("rerank", {})["ms"] = round(
@@ -1865,6 +1927,7 @@ def _find_semantic(
             bundle,
             final_hits,
             reranker_model=embeddings.RERANKER_NAME,
+            rerank_outcome=rerank_outcome,
         )
     return final_hits
 
@@ -1883,6 +1946,7 @@ def _find_outside_kb(
     limit: int,
     snapshot: FreshnessSnapshot | None = None,
     filter_plan: structured_filters.FilterPlan | None = None,
+    retrieval_trace: Any | None = None,
 ) -> list[Hit]:
     """BM25/keyword recall over the vault, RESTRICTED to paths outside
     `Knowledge Base/`. Powers scope="kb" auto-widening.
@@ -1924,6 +1988,8 @@ def _find_outside_kb(
         else max(limit * 5, 100)
     )
     candidates: list[str] = []
+    score_by_path: dict[str, float] = {}
+    lexical_backend = "keyword_fallback"
     try:
         bm25_hits = (
             bm25.search(
@@ -1946,6 +2012,10 @@ def _find_outside_kb(
         for path, _score in bm25_hits:
             if not path.startswith(kb_prefix()):
                 candidates.append(path)
+                score_by_path[path] = float(_score)
+        from . import lexstore
+
+        lexical_backend = lexstore.cache_token(vault_root)
     except ImportError:
         candidates = _outside_kb_keyword_paths(vault_root, query_norm)
     except Exception as e:  # noqa: BLE001 — widening must never break find
@@ -1988,6 +2058,12 @@ def _find_outside_kb(
         ))
         if len(hits) >= limit:
             break
+    if retrieval_trace is not None:
+        retrieval_trace.record_outside_candidates(
+            hits,
+            scores=score_by_path,
+            backend=lexical_backend,
+        )
     return hits
 
 

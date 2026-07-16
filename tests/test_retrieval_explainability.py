@@ -9,10 +9,18 @@ import pytest
 from exomem import commands
 from exomem import embeddings
 from exomem import epistemic_graph
+from exomem import find as find_module
 from exomem import readiness
 
 
-def _write_page(root: Path, *, name: str, updated: str, priority: int) -> str:
+def _write_page(
+    root: Path,
+    *,
+    name: str,
+    updated: str,
+    priority: int,
+    body: str = "Private page content must not leak into compact explanations.",
+) -> str:
     rel = f"Knowledge Base/Notes/Insights/{name}.md"
     path = root / rel
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -26,7 +34,7 @@ def _write_page(root: Path, *, name: str, updated: str, priority: int) -> str:
         f"  priority: {priority}\n"
         "---\n\n"
         f"# {name}\n\n"
-        "Private page content must not leak into compact explanations.\n",
+        f"{body}\n",
         encoding="utf-8",
     )
     return rel
@@ -84,6 +92,13 @@ def test_explain_is_opt_in_and_filter_only_profile_is_truthful(tmp_path: Path) -
     assert profile["requested_result_level"] == "auto"
     assert profile["effective_result_level"] == "page"
     assert profile["normalized_filters"] == request["filters"]
+    assert profile["compute"] == {
+        "mode": "normal",
+        "preload_models": False,
+        "retain_cpu_caches": False,
+        "defer_expensive_indexes": False,
+        "release_when_idle": True,
+    }
     assert "fusion" not in profile
     assert profile["lanes"]["vector"]["status"] == "non_applicable"
     assert profile["lanes"]["vector"]["reason"] == "empty_query"
@@ -160,7 +175,11 @@ def test_disabled_embeddings_explain_lexical_fusion_without_loading_model(
     }
     assert profile["lanes"]["bm25"]["metric"]["name"] == "raw_bm25_score"
     assert profile["lanes"]["bm25"]["metric"]["direction"] == "higher"
-    assert profile["fusion"] == {"algorithm": "weighted_rrf", "k": 60}
+    assert profile["fusion"] == {
+        "algorithm": "weighted_rrf",
+        "k": 60,
+        "weights": {"bm25": 1.0, "keyword": 1.0},
+    }
 
     first = explained["hits"][0]["ranking_explanation"]
     assert set(first["lanes"]) == {"bm25", "keyword"}
@@ -169,8 +188,8 @@ def test_disabled_embeddings_explain_lexical_fusion_without_loading_model(
         "rank": first["lanes"]["keyword"]["rank"],
         "weight": 1.0,
         "rrf_k": 60,
-        "rrf_contribution": pytest.approx(
-            1.0 / (60 + first["lanes"]["keyword"]["rank"])
+        "rrf_contribution": round(
+            1.0 / (60 + first["lanes"]["keyword"]["rank"]), 6
         ),
     }
     assert first["fusion"]["rrf_sum"] == pytest.approx(
@@ -221,8 +240,501 @@ def test_available_vector_lane_is_reported_only_on_hits_it_returned(
     vector_lane = hits[vector_path]["ranking_explanation"]["lanes"]["vector"]
     assert vector_lane["rank"] == 1
     assert vector_lane["cosine"] == pytest.approx(0.73)
-    assert vector_lane["rrf_contribution"] == pytest.approx(1.0 / 61.0)
+    assert vector_lane["rrf_contribution"] == round(1.0 / 61.0, 6)
     assert "vector" not in hits[lexical_only_path]["ranking_explanation"]["lanes"]
+
+
+def test_available_hybrid_vector_reports_effective_mode_and_two_lane_fusion(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = _write_page(
+        tmp_path,
+        name="hybrid-regulator",
+        updated="2026-07-16",
+        priority=3,
+        body="A regulator controls the system.",
+    )
+
+    class FakeIndex:
+        def search(self, _query_vector, *, k: int, allowed_paths=None):
+            assert k > 0
+            assert allowed_paths is None
+            return [(path, 0, "A regulator controls the system.", 0.731234567)]
+
+    monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
+    monkeypatch.setenv("EXOMEM_DISABLE_CLIP", "1")
+    monkeypatch.setattr(embeddings, "get_embedding_index", lambda _root: FakeIndex())
+    monkeypatch.setattr(
+        embeddings, "embed_texts", lambda _texts, *, is_query: [[0.1, 0.2]]
+    )
+
+    explained = commands.op_ask_memory(
+        tmp_path,
+        query="regulation",
+        mode="hybrid",
+        graph=False,
+        rerank=False,
+        scope="kb-only",
+        detail="compact",
+        explain=True,
+    )
+
+    profile = explained["retrieval_profile"]
+    assert profile["effective_mode"] == "hybrid"
+    assert profile["fusion"] == {
+        "algorithm": "weighted_rrf",
+        "k": 60,
+        "weights": {"vector": 1.0, "bm25": 1.0},
+    }
+    lanes = explained["hits"][0]["ranking_explanation"]["lanes"]
+    assert set(lanes) == {"vector", "bm25"}
+    assert lanes["vector"]["rrf_contribution"] == round(1.0 / 61.0, 6)
+    assert lanes["bm25"]["rrf_contribution"] == round(1.0 / 61.0, 6)
+
+
+def test_vector_only_page_is_single_lane_without_fusion(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = _write_page(
+        tmp_path, name="vector-only", updated="2026-07-16", priority=3
+    )
+
+    class FakeIndex:
+        def search(self, _query_vector, *, k: int, allowed_paths=None):
+            return [(path, 0, "bounded chunk", 0.812345678)]
+
+    monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
+    monkeypatch.setenv("EXOMEM_DISABLE_CLIP", "1")
+    monkeypatch.setattr(embeddings, "get_embedding_index", lambda _root: FakeIndex())
+    monkeypatch.setattr(
+        embeddings, "embed_texts", lambda _texts, *, is_query: [[0.1, 0.2]]
+    )
+
+    explained = commands.op_ask_memory(
+        tmp_path,
+        query="semantic-only-query",
+        mode="vector",
+        graph=False,
+        rerank=False,
+        scope="kb-only",
+        detail="compact",
+        explain=True,
+    )
+
+    profile = explained["retrieval_profile"]
+    assert profile["effective_mode"] == "vector"
+    assert "fusion" not in profile
+    ranking = explained["hits"][0]["ranking_explanation"]
+    assert set(ranking["lanes"]) == {"vector"}
+    assert ranking["lanes"]["vector"] == {
+        "rank": 1,
+        "cosine": pytest.approx(0.812346),
+    }
+    assert "fusion" not in ranking
+
+
+def test_auto_widened_hit_has_outside_lane_and_final_merge_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _write_page(
+        tmp_path,
+        name="kb-scope-match-one",
+        updated="2026-07-16",
+        priority=3,
+        body="scopewidener token",
+    )
+    _write_page(
+        tmp_path,
+        name="kb-scope-match-two",
+        updated="2026-07-15",
+        priority=3,
+        body="scopewidener token",
+    )
+    outside_path = tmp_path / "Reference" / "scopewidener.md"
+    outside_path.parent.mkdir(parents=True)
+    outside_path.write_text(
+        "# Outside scopewidener\n\nscopewidener token\n", encoding="utf-8"
+    )
+    monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")
+
+    explained = commands.op_ask_memory(
+        tmp_path,
+        query="scopewidener",
+        mode="hybrid",
+        graph=False,
+        rerank=False,
+        scope="kb",
+        limit=2,
+        detail="compact",
+        explain=True,
+    )
+
+    assert [hit["outside_kb"] for hit in explained["hits"] if hit.get("outside_kb")] == [
+        True
+    ]
+    outside = next(hit for hit in explained["hits"] if hit.get("outside_kb"))
+    ranking = outside["ranking_explanation"]
+    assert ranking["lanes"]["outside_bm25"]["rank"] == 1
+    assert ranking["lanes"]["outside_bm25"]["raw_score"] != 0
+    assert any(
+        stage["stage"] == "scope_kb_auto_widen"
+        and stage["segment"] == "outside"
+        for stage in ranking["ordering_path"]
+    )
+    widening = next(
+        stage
+        for stage in explained["retrieval_profile"]["final_ordering"]["pipeline"]
+        if stage["stage"] == "scope_kb_auto_widen"
+    )
+    assert widening["reserve"] == 1
+    assert widening["kb_keep"] == 1
+    assert explained["retrieval_profile"]["final_ordering"]["pipeline"][-2:] == [
+        {
+            "stage": "date_filter",
+            "active": False,
+            "updated_after": None,
+            "updated_before": None,
+            "recency_days": None,
+            "preserves_order": True,
+        },
+        {"stage": "final_emit", "count": 2, "preserves_order": True},
+    ]
+    assert ranking["ordering_path"][-1] == {
+        "stage": "final_emit",
+        "rank": 2,
+    }
+
+
+def test_unit_vector_success_marks_lexical_non_applicable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _write_unit_page(tmp_path)
+
+    class UnitVectorHit:
+        def __init__(self, unit_ref: str, cosine: float) -> None:
+            self.unit_ref = unit_ref
+            self.cosine = cosine
+
+    class FakeUnitIndex:
+        def search_semantic_units(
+            self, _query_vector, *, k: int, allowed_unit_refs: set[str]
+        ):
+            unit_ref = sorted(allowed_unit_refs)[0]
+            return [UnitVectorHit(unit_ref, 0.876543219)]
+
+    monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
+    monkeypatch.setattr(
+        embeddings, "get_embedding_index", lambda _root: FakeUnitIndex()
+    )
+    monkeypatch.setattr(
+        embeddings, "embed_texts", lambda _texts, *, is_query: [[0.1, 0.2]]
+    )
+
+    explained = commands.op_ask_memory(
+        tmp_path,
+        query="semantic vector query",
+        categories=["config"],
+        result_level="unit",
+        mode="vector",
+        scope="kb-only",
+        detail="compact",
+        explain=True,
+    )
+
+    profile = explained["retrieval_profile"]
+    assert profile["effective_mode"] == "vector"
+    assert profile["lanes"]["bm25"] == {
+        "status": "non_applicable",
+        "reason": "requested_mode_vector",
+    }
+    assert "fusion" not in profile
+    ranking = explained["hits"][0]["ranking_explanation"]
+    assert set(ranking["lanes"]) == {"vector"}
+    assert ranking["lanes"]["vector"] == {
+        "rank": 1,
+        "cosine": pytest.approx(0.876543),
+    }
+
+
+def test_unit_vector_failure_reports_lexical_fallback_truth(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _write_unit_page(tmp_path)
+
+    class FailingUnitIndex:
+        def search_semantic_units(self, *_args, **_kwargs):
+            raise RuntimeError("unit vector backend failed")
+
+    monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
+    monkeypatch.setattr(
+        embeddings, "get_embedding_index", lambda _root: FailingUnitIndex()
+    )
+    monkeypatch.setattr(
+        embeddings, "embed_texts", lambda _texts, *, is_query: [[0.1, 0.2]]
+    )
+
+    explained = commands.op_ask_memory(
+        tmp_path,
+        query="session lifetime",
+        categories=["config"],
+        result_level="unit",
+        mode="vector",
+        scope="kb-only",
+        detail="compact",
+        explain=True,
+    )
+
+    profile = explained["retrieval_profile"]
+    assert profile["effective_mode"] == "vector_lexical_fallback"
+    assert profile["lanes"]["vector"]["status"] == "failed"
+    assert profile["lanes"]["vector"]["reason"] == "search_failed"
+    assert profile["lanes"]["bm25"]["status"] == "participated"
+    ranking = explained["hits"][0]["ranking_explanation"]
+    assert set(ranking["lanes"]) == {"bm25"}
+    assert "fusion" not in ranking
+
+
+def _rerank_request(
+    root: Path,
+    *,
+    rerank: bool | None,
+) -> dict:
+    return commands.op_ask_memory(
+        root,
+        query="private page content",
+        mode="hybrid",
+        graph=False,
+        rerank=rerank,
+        scope="kb-only",
+        detail="compact",
+        explain=True,
+    )
+
+
+def test_rerank_hard_disabled_reason_is_exact(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _write_page(tmp_path, name="rerank-hard-off", updated="2026-07-16", priority=3)
+    monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")
+    monkeypatch.setattr(embeddings, "ranking_enabled", lambda: False)
+
+    profile = _rerank_request(tmp_path, rerank=True)["retrieval_profile"]
+
+    assert profile["rerank"]["decision"] == "skipped"
+    assert profile["rerank"]["reason"] == "hard_disabled"
+
+
+def test_rerank_warming_reason_is_exact(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _write_page(tmp_path, name="rerank-warming", updated="2026-07-16", priority=3)
+    monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")
+    monkeypatch.setattr(embeddings, "ranking_enabled", lambda: True)
+    monkeypatch.setattr(
+        readiness, "should_defer", lambda component: component == "reranker"
+    )
+    monkeypatch.setattr(
+        embeddings,
+        "rerank_pairs",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("warming reranker must not execute")
+        ),
+    )
+
+    profile = _rerank_request(tmp_path, rerank=True)["retrieval_profile"]
+
+    assert profile["rerank"]["decision"] == "deferred"
+    assert profile["rerank"]["reason"] == "model_warming"
+
+
+def test_rerank_runtime_failure_reason_is_exact(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _write_page(tmp_path, name="rerank-runtime", updated="2026-07-16", priority=3)
+    monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")
+    monkeypatch.setattr(embeddings, "ranking_enabled", lambda: True)
+    monkeypatch.setattr(readiness, "should_defer", lambda _component: False)
+    monkeypatch.setattr(
+        embeddings,
+        "rerank_pairs",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+
+    profile = _rerank_request(tmp_path, rerank=True)["retrieval_profile"]
+
+    assert profile["rerank"]["decision"] == "failed"
+    assert profile["rerank"]["reason"] == "runtime_failure"
+
+
+def test_rerank_auto_declined_reason_is_exact(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _write_page(tmp_path, name="rerank-auto", updated="2026-07-16", priority=3)
+    monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")
+    monkeypatch.setattr(find_module, "auto_rerank_allowed_by_policy", lambda: True)
+    monkeypatch.setattr(find_module, "should_rerank", lambda *_args, **_kwargs: False)
+
+    profile = _rerank_request(tmp_path, rerank=None)["retrieval_profile"]
+
+    assert profile["rerank"]["decision"] == "skipped"
+    assert profile["rerank"]["reason"] == "auto_policy_declined"
+
+
+def test_rerank_explicit_false_and_no_hits_have_distinct_reasons(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _write_page(tmp_path, name="rerank-explicit-off", updated="2026-07-16", priority=3)
+    monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")
+
+    explicit = _rerank_request(tmp_path, rerank=False)["retrieval_profile"]["rerank"]
+    empty = commands.op_ask_memory(
+        tmp_path,
+        query="no-match-anywhere",
+        mode="hybrid",
+        graph=False,
+        rerank=True,
+        scope="kb-only",
+        detail="compact",
+        explain=True,
+    )["retrieval_profile"]["rerank"]
+
+    assert (explicit["decision"], explicit["reason"]) == ("skipped", "explicit_false")
+    assert (empty["decision"], empty["reason"]) == ("skipped", "no_hits")
+
+
+def test_rerank_dependency_unavailable_reason_is_distinct(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _write_page(tmp_path, name="rerank-unavailable", updated="2026-07-16", priority=3)
+    monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")
+    monkeypatch.setattr(embeddings, "ranking_enabled", lambda: True)
+    monkeypatch.setattr(readiness, "should_defer", lambda _component: False)
+    monkeypatch.setattr(
+        embeddings,
+        "rerank_pairs",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            ImportError("optional dependency absent")
+        ),
+    )
+
+    profile = _rerank_request(tmp_path, rerank=True)["retrieval_profile"]
+
+    assert profile["rerank"]["decision"] == "unavailable"
+    assert profile["rerank"]["reason"] == "dependency_unavailable"
+
+
+def test_temporal_lane_reports_rank_contribution_and_recency_multiplier(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _write_page(
+        tmp_path,
+        name="recent-regulator",
+        updated="2026-07-16",
+        priority=3,
+        body="A regulator controls the system.",
+    )
+    monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")
+
+    explained = commands.op_ask_memory(
+        tmp_path,
+        query="recent regulator",
+        mode="hybrid",
+        graph=False,
+        rerank=False,
+        scope="kb-only",
+        detail="compact",
+        explain=True,
+    )
+
+    profile = explained["retrieval_profile"]
+    assert profile["lanes"]["temporal"]["status"] == "participated"
+    assert profile["fusion"]["weights"]["temporal"] > 0
+    ranking = explained["hits"][0]["ranking_explanation"]
+    assert ranking["lanes"]["temporal"]["rank"] == 1
+    assert ranking["lanes"]["temporal"]["rrf_contribution"] > 0
+
+
+def test_available_clip_lane_is_metric_labelled_without_optional_artifacts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rel = "Knowledge Base/Evidence/fixture.jpg.md"
+    sidecar = tmp_path / rel
+    sidecar.parent.mkdir(parents=True)
+    sidecar.write_text(
+        "---\ntype: source\nstatus: active\nupdated: 2026-07-16\n"
+        "media_type: image\nmedia_file: Knowledge Base/Evidence/fixture.jpg\n---\n\n"
+        "# Fixture image\n",
+        encoding="utf-8",
+    )
+
+    class FakeClipIndex:
+        def search(self, _query_vector, *, k: int, allowed_paths=None):
+            return [(rel.removesuffix(".md"), None, 0.654321987)]
+
+    monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")
+    monkeypatch.setattr(embeddings, "clip_enabled", lambda: True)
+    monkeypatch.setattr(embeddings, "get_clip_index", lambda _root: FakeClipIndex())
+    monkeypatch.setattr(embeddings, "embed_clip_text", lambda _query: [0.1, 0.2])
+    monkeypatch.setattr(readiness, "should_defer", lambda _component: False)
+
+    explained = commands.op_ask_memory(
+        tmp_path,
+        query="purely visual fixture",
+        mode="vector",
+        graph=False,
+        rerank=False,
+        scope="kb-only",
+        detail="compact",
+        explain=True,
+    )
+
+    profile = explained["retrieval_profile"]
+    assert profile["lanes"]["clip"]["status"] == "participated"
+    assert profile["lanes"]["clip"]["metric"]["name"] == "cosine_similarity"
+    ranking = explained["hits"][0]["ranking_explanation"]
+    assert ranking["lanes"]["clip"] == {
+        "rank": 1,
+        "cosine": pytest.approx(0.654322),
+    }
+    assert "fusion" not in ranking
+
+
+def test_explanation_free_rerank_does_not_build_multiplier_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _write_page(tmp_path, name="cheap-rerank", updated="2026-07-16", priority=3)
+    monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")
+    monkeypatch.setattr(embeddings, "ranking_enabled", lambda: True)
+    monkeypatch.setattr(readiness, "should_defer", lambda _component: False)
+    monkeypatch.setattr(
+        embeddings, "rerank_pairs", lambda _query, passages: [0.5] * len(passages)
+    )
+
+    hits = find_module.find(
+        tmp_path,
+        query="private page content",
+        mode="hybrid",
+        graph=False,
+        rerank=True,
+        scope="kb-only",
+    )
+
+    assert hits
+    assert all(hit.rerank_multiplier_chain == [] for hit in hits)
 
 
 def test_unit_filter_only_explanation_uses_parent_date_and_source_order(
@@ -287,7 +799,12 @@ def test_unit_lexical_fallback_has_raw_score_without_invented_fusion(
     assert ranking["lanes"]["bm25"]["raw_score"] != 0
     assert "fusion" not in ranking
     assert ranking["multipliers"] == [
-        {"name": "status", "factor": 1.0, "before": ranking["lanes"]["bm25"]["raw_score"], "after": ranking["lanes"]["bm25"]["raw_score"]}
+        {
+            "name": "status",
+            "factor": 1.0,
+            "before": ranking["lanes"]["bm25"]["raw_score"],
+            "after": ranking["lanes"]["bm25"]["raw_score"],
+        }
     ]
 
 
@@ -385,7 +902,7 @@ def test_typed_graph_explanation_names_seed_relation_direction_and_hop(
         "direction": "outbound",
         "hop": 1,
     }
-    assert graph["rrf_contribution"] == pytest.approx(1.0 / 61.0)
+    assert graph["rrf_contribution"] == round(1.0 / 61.0, 6)
 
 
 def test_mixed_explanation_reports_the_actual_page_unit_result_fusion(
@@ -425,8 +942,8 @@ def test_mixed_explanation_reports_the_actual_page_unit_result_fusion(
         lane_name = "page" if hit["result_type"] == "page" else "unit"
         mixed = ranking["result_fusion"]
         assert mixed["lane"] == lane_name
-        assert mixed["contribution"] == pytest.approx(
-            1.0 / (60 + mixed["lane_rank"])
+        assert mixed["contribution"] == round(
+            1.0 / (60 + mixed["lane_rank"]), 6
         )
         assert ranking["final_sort_tuple"] == [
             mixed["contribution"],

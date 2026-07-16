@@ -106,6 +106,7 @@ def test_ask_memory_semantic_unit_filters(vault: Path, capsys) -> None:
             '{"page.frontmatter:/metadata/priority":{"$eq":7}}',
             "--result-level",
             "unit",
+            "--explain",
             "--json",
         ],
         capsys,
@@ -113,8 +114,10 @@ def test_ask_memory_semantic_unit_filters(vault: Path, capsys) -> None:
 
     assert code == 0, err
     data = json.loads(out.strip().splitlines()[-1])["data"]
-    assert [item["parent_path"] for item in data] == [rel]
-    assert data[0]["result_type"] == "semantic_unit"
+    assert [item["parent_path"] for item in data["hits"]] == [rel]
+    assert data["hits"][0]["result_type"] == "semantic_unit"
+    assert data["hits"][0]["ranking_explanation"]["final_rank"] == 1
+    assert data["retrieval_profile"]["effective_result_level"] == "unit"
 
 
 def test_read_memory_reads_a_page(vault: Path, capsys) -> None:

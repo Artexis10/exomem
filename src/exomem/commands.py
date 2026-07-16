@@ -75,6 +75,7 @@ from . import recover_from_trash as recover_from_trash_module
 from . import relation_queue as relation_queue_module
 from . import relation_registry as relation_registry_module
 from . import replace as replace_module
+from . import retrieval_models
 from . import review_context as review_context_module
 from . import review_state as review_state_module
 from . import retrieval_explain as retrieval_explain_module
@@ -135,32 +136,9 @@ def _video_frames_module():
 
 
 
-class FindHit(TypedDict):
-    path: str
-    type: str
-    scope: str
-    title: str
-    updated: str
-    excerpt: NotRequired[str]
-    outside_kb: NotRequired[bool]
-    status: NotRequired[str]
-    superseded_by: NotRequired[str]
-    signals: NotRequired[dict[str, Any]]
-    media_type: NotRequired[str]
-    media_file: NotRequired[str]
-    clip_match_at: NotRequired[str]
-    scene_frame: NotRequired[str]
-    scene_match_at: NotRequired[str]
-    transcript_match_at: NotRequired[str]
-
-
-class FindEnvelope(TypedDict):
-    hits: list[FindHit]
-    pack: NotRequired[dict[str, Any]]
-    timings: NotRequired[dict[str, Any]]
-    warming: NotRequired[dict[str, Any]]
-    degraded: NotRequired[list[str]]
-    retrieval_profile: NotRequired[dict[str, Any]]
+FindHit = retrieval_models.PageHit
+RetrievalHit = retrieval_models.RetrievalHit
+FindEnvelope = retrieval_models.FindEnvelope
 
 
 class SearchResult(TypedDict):
@@ -518,7 +496,7 @@ def op_find(
     detail: str = "full",
     include_timings: bool = False,
     explain: bool = False,
-) -> list[FindHit] | FindEnvelope:
+) -> list[RetrievalHit] | FindEnvelope:
     """Search / find / look up / query / retrieve / recall pages in the Knowledge Base (KB vault): notes, sources, insights, failures, patterns, experiments, entities. Hybrid semantic + keyword search, read-only. Filters are AND'd; tag/project lists are OR'd within.
 
     Args:
@@ -684,12 +662,28 @@ def op_find(
             f"find: detail must be 'full' or 'compact', got {detail!r}"
         )
     auto_rerank = rerank is None and find_module.auto_rerank_allowed_by_policy()
+    compute_profile: dict[str, str | bool] = {}
+    if explain:
+        from . import mode as mode_module
+
+        policy = mode_module.resolved()
+        compute_profile = {
+            key: policy[key]
+            for key in (
+                "mode",
+                "preload_models",
+                "retain_cpu_caches",
+                "defer_expensive_indexes",
+                "release_when_idle",
+            )
+        }
     retrieval_trace = (
         retrieval_explain_module.RetrievalTrace(
             requested_mode=mode,
             requested_result_level=result_level,
             rerank_requested=rerank,
             auto_rerank=auto_rerank,
+            compute_profile=compute_profile,
         )
         if explain
         else None
@@ -3007,7 +3001,7 @@ def op_ask_memory(
     graph_enrich: bool = False,
     include_timings: bool = False,
     explain: bool = False,
-) -> list[dict] | dict:
+) -> list[RetrievalHit] | FindEnvelope:
     """Recall durable knowledge from Exomem with product defaults.
 
     This is the normal first read: search compiled knowledge, sources,

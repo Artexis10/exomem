@@ -22,6 +22,7 @@ class RetrievalTrace:
     effective_mode: str = "hybrid"
     effective_result_level: str = "page"
     normalized_filters: dict[str, Any] = field(default_factory=dict)
+    compute_profile: dict[str, str | bool] = field(default_factory=dict)
     lane_profiles: dict[str, dict[str, Any]] = field(default_factory=dict)
     evidence_by_id: dict[str, dict[str, Any]] = field(default_factory=dict)
     fusion_profile: dict[str, Any] | None = None
@@ -68,11 +69,13 @@ class RetrievalTrace:
             "requested": self.rerank_requested,
             "auto_allowed": self.auto_rerank,
             "ran": False,
+            "decision": "skipped",
             "reason": "empty_query" if filter_only else "requested_mode_keyword",
         }
         for rank, hit in enumerate(hits, start=1):
             self.evidence_by_id[hit.path] = {
                 "lanes": {lane: {"rank": rank}},
+                "ordering_path": [{"stage": lane, "rank": rank}],
                 "final_sort_tuple": [hit.updated, hit.path],
                 "tie_breaks": {"path": hit.path},
             }
@@ -88,7 +91,10 @@ class RetrievalTrace:
         self.lane_profiles.update(lane_profiles)
         self.lane_profiles["keyword"] = keyword_profile
         self.effective_mode = "keyword_fallback"
-        self.rerank_profile["reason"] = "candidate_lanes_empty"
+        self.rerank_profile.update(
+            decision="skipped",
+            reason="no_hits" if not hits else "candidate_lanes_empty",
+        )
 
     def record_page_candidates(
         self,
@@ -96,20 +102,27 @@ class RetrievalTrace:
         hits: list[Any],
         *,
         reranker_model: str,
+        rerank_outcome: dict[str, Any],
     ) -> None:
         self.effective_mode = self.requested_mode
-        if (
-            self.requested_mode == "hybrid"
-            and bundle.lane_statuses.get("vector", {}).get("status") != "available"
-        ):
-            self.effective_mode = "hybrid_lexical"
+        vector_status = bundle.lane_statuses.get("vector", {}).get("status")
+        if self.requested_mode == "hybrid":
+            self.effective_mode = (
+                "hybrid"
+                if vector_status in {"participated", "available_nonmatching"}
+                else "hybrid_lexical"
+            )
         self.lane_profiles = _base_lane_profiles(reason="not_requested")
         self.lane_profiles.update(bundle.lane_statuses)
         active_lanes = [name for name, ranking in bundle.lane_rankings.items() if ranking]
-        if active_lanes:
+        fused = len(active_lanes) >= 2
+        if fused:
             self.fusion_profile = {
                 "algorithm": "weighted_rrf",
                 "k": bundle.rrf_k,
+                "weights": {
+                    name: bundle.lane_weights[name] for name in active_lanes
+                },
             }
         rerank_ran = any(hit.rerank_raw_score is not None for hit in hits)
         self.final_ordering = (
@@ -131,7 +144,7 @@ class RetrievalTrace:
             "requested": self.rerank_requested,
             "auto_allowed": self.auto_rerank,
             "ran": rerank_ran,
-            "reason": "ran" if rerank_ran else "request_disabled",
+            **rerank_outcome,
         }
         if rerank_ran:
             self.rerank_profile.update(
@@ -155,20 +168,30 @@ class RetrievalTrace:
                     continue
                 lane = {
                     "rank": rank,
-                    "weight": bundle.lane_weights[lane_name],
-                    "rrf_k": bundle.rrf_k,
-                    "rrf_contribution": bundle.lane_weights[lane_name]
-                    / (bundle.rrf_k + rank),
                 }
+                if fused:
+                    lane.update(
+                        {
+                            "weight": bundle.lane_weights[lane_name],
+                            "rrf_k": bundle.rrf_k,
+                            "rrf_contribution": round(
+                                bundle.lane_weights[lane_name]
+                                / (bundle.rrf_k + rank),
+                                6,
+                            ),
+                        }
+                    )
                 if lane_name == "bm25":
-                    lane["raw_score"] = bundle.bm25_score_by_path[hit.path]
+                    lane["raw_score"] = round(
+                        bundle.bm25_score_by_path[hit.path], 6
+                    )
                 elif lane_name in ("vector", "clip"):
                     scores = (
                         bundle.vector_score_by_path
                         if lane_name == "vector"
                         else bundle.clip_score_by_path
                     )
-                    lane["cosine"] = scores[hit.path]
+                    lane["cosine"] = round(scores[hit.path], 6)
                 if lane_name == "graph" and hit.graph_provenance is not None:
                     lane["provenance"] = {
                         "seed": hit.graph_provenance.seed,
@@ -179,11 +202,22 @@ class RetrievalTrace:
                 lanes[lane_name] = lane
             evidence: dict[str, Any] = {
                 "lanes": lanes,
-                "fusion": {"rrf_sum": bundle.raw_fused_score_by_path[hit.path]},
                 "multipliers": bundle.multiplier_chain_by_path.get(hit.path, []),
+                "ordering_path": [{"stage": "candidate_ranking"}],
                 "final_sort_tuple": [bundle.adjusted_score_by_path[hit.path], hit.path],
                 "tie_breaks": {"path": hit.path},
             }
+            if fused:
+                evidence["fusion"] = {
+                    "rrf_sum": round(
+                        sum(
+                            lane["rrf_contribution"]
+                            for lane in lanes.values()
+                            if "rrf_contribution" in lane
+                        ),
+                        6,
+                    )
+                }
             if hit.rerank_raw_score is not None:
                 evidence["reranker"] = {
                     "raw_score": hit.rerank_raw_score,
@@ -199,6 +233,144 @@ class RetrievalTrace:
                     "reranker_input_rank": hit.rerank_input_rank
                 }
             self.evidence_by_id[hit.path] = evidence
+
+    def record_outside_candidates(
+        self,
+        hits: list[Any],
+        *,
+        scores: dict[str, float],
+        backend: str,
+    ) -> None:
+        """Record the lexical lane used only by default-scope widening."""
+        lane_name = "outside_keyword" if backend == "keyword_fallback" else "outside_bm25"
+        metric = (
+            {"name": "rank", "direction": "lower", "rounding": "none"}
+            if lane_name == "outside_keyword"
+            else {
+                "name": "raw_bm25_score",
+                "direction": "higher",
+                "range": "backend_dependent",
+                "rounding": 6,
+                "caveat": "diagnostic; not comparable across backends or corpora",
+            }
+        )
+        self.lane_profiles[lane_name] = {
+            "status": "participated" if hits else "available_nonmatching",
+            "backend": backend,
+            "metric": metric,
+        }
+        for rank, hit in enumerate(hits, start=1):
+            lane_evidence: dict[str, Any] = {"rank": rank}
+            if lane_name == "outside_bm25":
+                lane_evidence["raw_score"] = round(scores[hit.path], 6)
+            self.evidence_by_id[hit.path] = {
+                "lanes": {lane_name: lane_evidence},
+                "ordering_path": [
+                    {
+                        "stage": lane_name,
+                        "rank": rank,
+                    }
+                ],
+            }
+
+    def record_auto_widen(
+        self,
+        hits: list[Any],
+        *,
+        strong_paths: list[str],
+        weak_paths: list[str],
+        outside_paths: list[str],
+        reserve: int,
+        kb_keep: int,
+    ) -> None:
+        """Finalize the stable reserved-tail merge performed above page ranking."""
+        prior_sort = self.final_ordering.get("sort", [])
+        self.final_ordering = {
+            "pipeline": [
+                {"stage": "candidate_ranking", "sort": prior_sort},
+                {
+                    "stage": "scope_kb_auto_widen",
+                    "policy": "reserved_tail",
+                    "reserve": reserve,
+                    "kb_keep": kb_keep,
+                    "segments": ["strong_kb", "weak_kb", "outside"],
+                    "stable_within_segment": True,
+                },
+            ],
+            "sort": [
+                {"field": "merge_segment", "direction": "ascending"},
+                {"field": "stable_segment_rank", "direction": "ascending"},
+            ],
+        }
+        segments = (
+            ("strong_kb", strong_paths),
+            ("weak_kb", weak_paths),
+            ("outside", outside_paths),
+        )
+        position = {
+            path: (segment_order, segment_name, rank)
+            for segment_order, (segment_name, paths) in enumerate(segments)
+            for rank, path in enumerate(paths, start=1)
+        }
+        for hit in hits:
+            segment_order, segment_name, segment_rank = position[hit.path]
+            evidence = self.evidence_by_id.setdefault(hit.path, {"lanes": {}})
+            evidence.setdefault("ordering_path", []).append(
+                {
+                    "stage": "scope_kb_auto_widen",
+                    "segment": segment_name,
+                    "segment_rank": segment_rank,
+                }
+            )
+            evidence["candidate_sort_tuple"] = evidence.get("final_sort_tuple")
+            evidence["final_sort_tuple"] = [segment_order, segment_rank]
+            evidence["tie_breaks"] = {"stable_segment_rank": segment_rank}
+
+    def finalize_page_results(
+        self,
+        hits: list[Any],
+        *,
+        updated_after: str | None,
+        updated_before: str | None,
+        recency_days: int | None,
+    ) -> None:
+        """Finalize page evidence after widening and top-level date filtering."""
+        pipeline = list(self.final_ordering.get("pipeline", []))
+        if not pipeline:
+            pipeline.append(
+                {
+                    "stage": "candidate_ranking",
+                    "sort": self.final_ordering.get("sort", []),
+                }
+            )
+        date_stage = {
+            "stage": "date_filter",
+            "active": any(
+                value is not None
+                for value in (updated_after, updated_before, recency_days)
+            ),
+            "updated_after": updated_after,
+            "updated_before": updated_before,
+            "recency_days": recency_days,
+            "preserves_order": True,
+        }
+        pipeline.extend(
+            (date_stage, {"stage": "final_emit", "count": len(hits), "preserves_order": True})
+        )
+        self.final_ordering["pipeline"] = pipeline
+        for rank, hit in enumerate(hits, start=1):
+            if hit.path not in self.evidence_by_id:
+                raise RuntimeError(f"missing ranking evidence for emitted hit: {hit.path}")
+            evidence = self.evidence_by_id[hit.path]
+            ordering_path = evidence.setdefault("ordering_path", [])
+            ordering_path.append(
+                {
+                    "stage": "date_filter",
+                    "passed": True,
+                    "active": date_stage["active"],
+                }
+            )
+            ordering_path.append({"stage": "final_emit", "rank": rank})
 
     def record_unit_filter_only(
         self,
@@ -225,6 +397,7 @@ class RetrievalTrace:
             "requested": self.rerank_requested,
             "auto_allowed": self.auto_rerank,
             "ran": False,
+            "decision": "skipped",
             "reason": "empty_query",
         }
         for rank, (page, unit, source_order) in enumerate(ordered, start=1):
@@ -260,6 +433,7 @@ class RetrievalTrace:
             "requested": self.rerank_requested,
             "auto_allowed": self.auto_rerank,
             "ran": False,
+            "decision": "skipped",
             "reason": "requested_mode_keyword",
         }
         for rank, (page, unit, source_order) in enumerate(ordered, start=1):
@@ -292,32 +466,47 @@ class RetrievalTrace:
         rrf_k: int,
         prefer_active: bool,
         superseded_penalty: float,
+        lexical_used: bool,
+        vector_used: bool,
     ) -> None:
         self.lane_profiles = _base_lane_profiles(reason="not_requested")
-        self.lane_profiles["bm25"] = {
-            "status": "participated" if lexical_ranking else "available_nonmatching",
-            "backend": lexical_backend,
-            "metric": {
-                "name": "raw_bm25_score",
-                "direction": "higher",
-                "range": "backend_dependent",
-                "rounding": 6,
-                "caveat": "diagnostic; not comparable across backends or corpora",
-            },
-        }
+        if lexical_used:
+            self.lane_profiles["bm25"] = {
+                "status": "participated" if lexical_ranking else "available_nonmatching",
+                "backend": lexical_backend,
+                "metric": {
+                    "name": "raw_bm25_score",
+                    "direction": "higher",
+                    "range": "backend_dependent",
+                    "rounding": 6,
+                    "caveat": "diagnostic; not comparable across backends or corpora",
+                },
+            }
+        elif self.requested_mode == "vector":
+            self.lane_profiles["bm25"] = {
+                "status": "non_applicable",
+                "reason": "requested_mode_vector",
+            }
         self.lane_profiles["vector"] = vector_profile
         self.rerank_profile = {
             "requested": self.rerank_requested,
             "auto_allowed": self.auto_rerank,
             "ran": False,
+            "decision": "skipped",
             "reason": "result_level_unit",
         }
-        fused = bool(vector_ranking and lexical_ranking and self.requested_mode == "hybrid")
+        fused = bool(vector_used and lexical_used and self.requested_mode == "hybrid")
         if fused:
             self.effective_mode = "hybrid"
-            self.fusion_profile = {"algorithm": "weighted_rrf", "k": rrf_k}
-        elif vector_ranking and self.requested_mode == "vector":
+            self.fusion_profile = {
+                "algorithm": "weighted_rrf",
+                "k": rrf_k,
+                "weights": {"vector": weights[0], "bm25": weights[1]},
+            }
+        elif vector_used and self.requested_mode == "vector":
             self.effective_mode = "vector"
+        elif lexical_used and self.requested_mode == "vector":
+            self.effective_mode = "vector_lexical_fallback"
         else:
             self.effective_mode = "hybrid_lexical"
         self.final_ordering = {
@@ -335,30 +524,34 @@ class RetrievalTrace:
             page, _unit, source_order = records[unit_ref]
             lanes: dict[str, dict[str, Any]] = {}
             raw_score: float
-            if unit_ref in lexical_rank and self.requested_mode != "vector":
+            if lexical_used and unit_ref in lexical_rank:
                 rank = lexical_rank[unit_ref]
                 lane: dict[str, Any] = {
                     "rank": rank,
-                    "raw_score": lexical_scores[unit_ref],
+                    "raw_score": round(lexical_scores[unit_ref], 6),
                 }
                 if fused:
                     lane.update(
                         {
                             "weight": weights[1],
                             "rrf_k": rrf_k,
-                            "rrf_contribution": weights[1] / (rrf_k + rank),
+                            "rrf_contribution": round(
+                                weights[1] / (rrf_k + rank), 6
+                            ),
                         }
                     )
                 lanes["bm25"] = lane
-            if unit_ref in vector_rank:
+            if vector_used and unit_ref in vector_rank:
                 rank = vector_rank[unit_ref]
-                lane = {"rank": rank, "cosine": vector_scores[unit_ref]}
+                lane = {"rank": rank, "cosine": round(vector_scores[unit_ref], 6)}
                 if fused:
                     lane.update(
                         {
                             "weight": weights[0],
                             "rrf_k": rrf_k,
-                            "rrf_contribution": weights[0] / (rrf_k + rank),
+                            "rrf_contribution": round(
+                                weights[0] / (rrf_k + rank), 6
+                            ),
                         }
                     )
                 lanes["vector"] = lane
@@ -450,6 +643,7 @@ class RetrievalTrace:
             "requested_result_level": self.requested_result_level,
             "effective_result_level": self.effective_result_level,
             "normalized_filters": self.normalized_filters,
+            "compute": self.compute_profile,
             "lanes": self.lane_profiles,
             "rerank": self.rerank_profile,
             "final_ordering": self.final_ordering,
@@ -458,7 +652,7 @@ class RetrievalTrace:
             out["fusion"] = self.fusion_profile
         if self.result_fusion_profile is not None:
             out["result_fusion"] = self.result_fusion_profile
-        return out
+        return _round_public_metrics(out)
 
 
 def attach_hit_explanations(
@@ -468,9 +662,22 @@ def attach_hit_explanations(
     """Attach bounded evidence by stable result identity after serialization."""
     for final_rank, hit in enumerate(hits, start=1):
         identity = str(hit.get("unit_ref") or hit.get("path") or "")
-        evidence = dict(trace.evidence_by_id.get(identity, {}))
+        if identity not in trace.evidence_by_id:
+            raise RuntimeError(f"missing ranking evidence for emitted hit: {identity}")
+        evidence = dict(trace.evidence_by_id[identity])
         evidence["final_rank"] = final_rank
-        hit["ranking_explanation"] = evidence
+        hit["ranking_explanation"] = _round_public_metrics(evidence)
+
+
+def _round_public_metrics(value: Any) -> Any:
+    """Apply the declared six-decimal precision at the serialization boundary."""
+    if isinstance(value, float):
+        return round(value, 6)
+    if isinstance(value, list):
+        return [_round_public_metrics(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _round_public_metrics(item) for key, item in value.items()}
+    return value
 
 
 def _base_lane_profiles(*, reason: str) -> dict[str, dict[str, Any]]:

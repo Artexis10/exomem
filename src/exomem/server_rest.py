@@ -5,10 +5,12 @@ from __future__ import annotations
 import json
 import os
 import secrets
+import typing
 from pathlib import Path
 from typing import Any
 
 from fastmcp import FastMCP
+from pydantic import TypeAdapter
 from starlette.concurrency import run_in_threadpool
 from starlette.requests import Request
 from starlette.responses import JSONResponse
@@ -86,6 +88,37 @@ _OPENAPI_ERROR_RESPONSE = {
         "application/json": {"schema": {"$ref": "#/components/schemas/ErrorEnvelope"}}
     },
 }
+
+
+def _openapi_success_schema(
+    command: commands_module.Command,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Derive a REST success envelope from the command's public return type."""
+    try:
+        annotation = typing.get_type_hints(command.leaf).get("return", Any)
+        result_schema = TypeAdapter(annotation).json_schema(
+            ref_template=(
+                f"#/components/schemas/{command.name}_" + "{model}"
+            )
+        )
+    except Exception:  # noqa: BLE001 - undocumented legacy returns stay generic
+        result_schema = {}
+    definitions = result_schema.pop("$defs", {})
+    components = {
+        f"{command.name}_{name}": schema for name, schema in definitions.items()
+    }
+    return (
+        {
+            "type": "object",
+            "properties": {
+                "success": {"const": True},
+                "data": result_schema,
+            },
+            "required": ["success", "data"],
+            "additionalProperties": False,
+        },
+        components,
+    )
 
 
 def register_rest_facade(
@@ -197,6 +230,7 @@ def register_rest_facade(
         if not rest_enabled:
             return _rest_err("REST_DISABLED", "set EXOMEM_REST_API_KEY to enable", 503)
         paths: dict = {}
+        response_schemas: dict[str, Any] = {}
         for cmd in rest_commands:
             properties: dict = {}
             required: list[str] = []
@@ -213,6 +247,8 @@ def register_rest_facade(
             if required:
                 request_schema["required"] = required
             summary = (cmd.description or cmd.name).strip().splitlines()[0]
+            success_schema, command_schemas = _openapi_success_schema(cmd)
+            response_schemas.update(command_schemas)
             paths[f"/api/{cmd.name}"] = {
                 "post": {
                     "operationId": cmd.name,
@@ -222,7 +258,12 @@ def register_rest_facade(
                         "content": {"application/json": {"schema": request_schema}}
                     },
                     "responses": {
-                        "200": {"description": "{success: true, data: ...}"},
+                        "200": {
+                            "description": "{success: true, data: ...}",
+                            "content": {
+                                "application/json": {"schema": success_schema}
+                            },
+                        },
                         "400": _OPENAPI_ERROR_RESPONSE,
                         "409": _OPENAPI_ERROR_RESPONSE,
                         "401": {"description": "missing/invalid API key"},
@@ -241,6 +282,7 @@ def register_rest_facade(
                     "schemas": {
                         "Error": _OPENAPI_ERROR_SCHEMA,
                         "ErrorEnvelope": _OPENAPI_ERROR_ENVELOPE_SCHEMA,
+                        **response_schemas,
                     },
                 },
                 "paths": paths,

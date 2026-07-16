@@ -4,6 +4,7 @@ registry-derived OpenAPI, and the preserved binary-blob guard.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Literal, get_args, get_type_hints
 
@@ -107,6 +108,19 @@ def test_ask_memory_route_calls_the_same_find_leaf(vault, monkeypatch: pytest.Mo
     find_module.clear_cache()
     expected = [h.as_dict() for h in find_module.find(vault, query="metabolism", mode="keyword")]
     assert payload["data"] == expected
+
+    explained = client.post(
+        "/api/ask_memory",
+        json={
+            "query": "metabolism",
+            "mode": "keyword",
+            "scope": "kb-only",
+            "explain": True,
+        },
+        headers=_auth(),
+    ).json()["data"]
+    assert explained["retrieval_profile"]["effective_mode"] == "keyword"
+    assert explained["hits"][0]["ranking_explanation"]["final_rank"] == 1
 
 
 def test_replace_memory_route_exists(vault, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -368,6 +382,19 @@ def test_openapi_lists_real_product_params(vault, monkeypatch: pytest.MonkeyPatc
     assert props["limit"]["type"] == "integer"
     assert props["graph"]["type"] == "boolean"
     assert props["tags"]["type"] == "array"
+    success = doc["paths"]["/api/ask_memory"]["post"]["responses"]["200"]
+    response_schema = success["content"]["application/json"]["schema"]
+    encoded_response = json.dumps(
+        {
+            "response": response_schema,
+            "components": doc["components"]["schemas"],
+        },
+        sort_keys=True,
+    )
+    assert "retrieval_profile" in encoded_response
+    assert "ranking_explanation" in encoded_response
+    assert "unit_ref" in encoded_response
+    assert "parent_path" in encoded_response
     observe_schema = doc["paths"]["/api/observe_memory"]["post"]["requestBody"]["content"][
         "application/json"
     ]["schema"]
