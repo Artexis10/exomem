@@ -223,23 +223,33 @@ def test_batch_atomic_write_uses_private_workspaces_and_fans_out_once(
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows directory-handle regression")
-def test_batch_atomic_write_replaces_existing_file_on_windows(tmp_path: Path) -> None:
-    target = tmp_path / "sidecar.md"
-    target.write_text("old\n", encoding="utf-8")
+def test_batch_atomic_write_replaces_and_creates_on_windows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    parent = tmp_path / "Knowledge Base" / "Evidence"
+    parent.mkdir(parents=True)
+    existing = parent / "existing.md"
+    created = parent / "created.md"
+    existing.write_text("old\n", encoding="utf-8")
+    monkeypatch.setattr("exomem.file_watcher.register_self_write", lambda *_: None)
+    monkeypatch.setattr("exomem.index_sync.upsert_after_write", lambda *_: None)
 
     replaced = vault_module.batch_atomic_write(
         [
             vault_module.PlannedWrite(
-                target,
+                existing,
                 "new\n",
                 expected_hash=vault_module.content_hash("old\n"),
-            )
-        ]
+            ),
+            vault_module.PlannedWrite(created, "created\n"),
+        ],
+        vault_root=tmp_path,
     )
 
-    assert replaced == [target]
-    assert target.read_text(encoding="utf-8") == "new\n"
-    assert _workspaces(tmp_path) == []
+    assert replaced == [existing, created]
+    assert existing.read_text(encoding="utf-8") == "new\n"
+    assert created.read_text(encoding="utf-8") == "created\n"
+    assert _workspaces(parent) == []
 
 
 def test_batch_target_summary_is_bounded_safe_and_vault_relative(

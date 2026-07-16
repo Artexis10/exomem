@@ -1222,6 +1222,7 @@ class _BatchWorkspace:
             descriptor = os.open(self.path / name, flags, 0o600)
         artifact: _WorkspaceArtifact | None = None
         try:
+            self.recheck_identity()
             info = os.fstat(descriptor)
             if not stat.S_ISREG(info.st_mode) or _is_reparse(info):
                 raise PathGuardError("PATH_GUARD_UNSAFE", "batch stage is unsafe")
@@ -1428,8 +1429,10 @@ def _restore_bound_source_timestamps(
         os.utime(descriptor, ns=(atime_ns, mtime_ns))
     elif os.utime in getattr(os, "supports_follow_symlinks", set()):
         os.utime(source.path, ns=(atime_ns, mtime_ns), follow_symlinks=False)
-    elif os.name == "nt":  # Windows has path utime but no follow_symlinks capability
-        os.utime(source.path, ns=(atime_ns, mtime_ns))
+    elif os.name == "nt":
+        _set_windows_path_timestamps(
+            source.path, source.identity, atime_ns, mtime_ns
+        )
     else:  # pragma: no cover - supported Python platforms expose one safe form
         raise PathGuardError("PATH_GUARD_IO", "batch timestamp restore is unavailable")
     restored = os.fstat(descriptor)
@@ -1487,8 +1490,10 @@ def _apply_workspace_timestamps(
             ns=(atime_ns, mtime_ns),
             follow_symlinks=False,
         )
-    elif os.name == "nt":  # Windows path is rebound before and after this call
-        os.utime(artifact.path, ns=(atime_ns, mtime_ns))
+    elif os.name == "nt":
+        _set_windows_path_timestamps(
+            artifact.path, artifact.identity, atime_ns, mtime_ns
+        )
     else:  # pragma: no cover - platform has no exact path-based utime
         raise PathGuardError("PATH_GUARD_IO", "batch timestamp restore is unavailable")
     artifact.refresh_identity()
@@ -1540,8 +1545,13 @@ def _reset_restored_timestamps(
             raise PathGuardError("PATH_GUARD_CHANGED", "restored batch artifact changed")
         if os.utime in getattr(os, "supports_fd", set()):
             os.utime(descriptor, ns=(snapshot.atime_ns, snapshot.mtime_ns))
-        elif os.name == "nt":  # Windows path is identity-bound above and below
-            os.utime(path, ns=(snapshot.atime_ns, snapshot.mtime_ns))
+        elif os.name == "nt":
+            _set_windows_path_timestamps(
+                path,
+                expected_identity,
+                snapshot.atime_ns,
+                snapshot.mtime_ns,
+            )
         elif os.utime in getattr(os, "supports_follow_symlinks", set()):
             os.utime(
                 path,
@@ -2236,14 +2246,13 @@ def _directory_flags() -> int:
     return os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
 
 
-def _open_directory_path(path: Path) -> int:
-    """Open a directory as a CRT descriptor on every supported platform."""
-    if os.name != "nt":
-        return os.open(path, _directory_flags())
-
-    # Windows' CRT os.open() refuses directories. A Win32 directory handle
-    # created with backup semantics can still be owned by a CRT descriptor,
-    # giving the batch guard the same fstat/close lifecycle used on POSIX.
+def _open_windows_path_descriptor(
+    path: Path,
+    *,
+    desired_access: int,
+    attributes: int,
+    crt_flags: int,
+) -> int:
     import ctypes
     from ctypes import wintypes
 
@@ -2259,23 +2268,98 @@ def _open_directory_path(path: Path) -> int:
         wintypes.HANDLE,
     )
     create_file.restype = wintypes.HANDLE
+    close_handle = kernel32.CloseHandle
+    close_handle.argtypes = (wintypes.HANDLE,)
+    close_handle.restype = wintypes.BOOL
     handle = create_file(
-        str(path),
-        0,
+        os.path.abspath(path),
+        desired_access,
         0x00000001 | 0x00000002 | 0x00000004,
         None,
         3,
-        0x02000000 | 0x00200000,
+        attributes,
         None,
     )
     invalid_handle = ctypes.c_void_p(-1).value
     if handle == invalid_handle:
         raise ctypes.WinError(ctypes.get_last_error())
     try:
-        return msvcrt.open_osfhandle(handle, os.O_RDONLY)
+        return msvcrt.open_osfhandle(handle, crt_flags)
     except BaseException:
-        kernel32.CloseHandle(handle)
+        close_handle(handle)
         raise
+
+
+def _open_directory_path(path: Path) -> int:
+    """Open a directory as a CRT descriptor on every supported platform."""
+    if os.name != "nt":
+        return os.open(path, _directory_flags())
+
+    # Windows' CRT os.open() refuses directories. A Win32 directory handle
+    # created with backup semantics can still be owned by a CRT descriptor,
+    # giving the batch guard the same fstat/close lifecycle used on POSIX.
+    return _open_windows_path_descriptor(
+        path,
+        desired_access=0,
+        attributes=0x02000000 | 0x00200000,
+        crt_flags=os.O_RDONLY,
+    )
+
+
+def _set_windows_path_timestamps(
+    path: Path,
+    expected_identity: PathIdentity,
+    atime_ns: int,
+    mtime_ns: int,
+) -> None:
+    """Set Windows timestamps through the exact identity-checked file handle."""
+    import ctypes
+    from ctypes import wintypes
+
+    class FileTime(ctypes.Structure):
+        _fields_ = (("low", wintypes.DWORD), ("high", wintypes.DWORD))
+
+    def filetime(value_ns: int) -> FileTime:
+        value = value_ns // 100 + 116_444_736_000_000_000
+        return FileTime(value & 0xFFFFFFFF, value >> 32)
+
+    descriptor = _open_windows_path_descriptor(
+        path,
+        desired_access=0x00000100,
+        attributes=0x00200000,
+        crt_flags=os.O_RDWR,
+    )
+    try:
+        before = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or _is_reparse(before)
+            or not _same_identity(expected_identity, before)
+        ):
+            raise PathGuardError("PATH_GUARD_CHANGED", "batch artifact changed")
+        atime = filetime(atime_ns)
+        mtime = filetime(mtime_ns)
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        set_file_time = kernel32.SetFileTime
+        set_file_time.argtypes = (
+            wintypes.HANDLE,
+            ctypes.POINTER(FileTime),
+            ctypes.POINTER(FileTime),
+            ctypes.POINTER(FileTime),
+        )
+        set_file_time.restype = wintypes.BOOL
+        handle = msvcrt.get_osfhandle(descriptor)
+        if not set_file_time(handle, None, ctypes.byref(atime), ctypes.byref(mtime)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        after = os.fstat(descriptor)
+        if (
+            not _same_identity(expected_identity, after)
+            or after.st_atime_ns != atime_ns
+            or after.st_mtime_ns != mtime_ns
+        ):
+            raise PathGuardError("PATH_GUARD_CHANGED", "batch metadata restore changed")
+    finally:
+        os.close(descriptor)
 
 
 def _open_directory_at(
