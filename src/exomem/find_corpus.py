@@ -18,6 +18,7 @@ from .find_types import ParsedPage
 log = logging.getLogger(__name__)
 
 EXCLUDED_DIR_NAMES = frozenset({"_Schema", "_attachments", "_archive", "_trash"})
+EXCLUDED_DIR_PREFIXES = (".exomem-batch-",)
 NAVIGATION_BASENAMES = frozenset({"index.md", "log.md"})
 FRONTMATTER_PATTERN = re.compile(r"^---\n(.*?)\n---\n(.*)", re.DOTALL)
 H1_PATTERN = re.compile(r"^# (.+)$", re.MULTILINE)
@@ -122,7 +123,9 @@ def walk_md(root: Path):
     """
     for child in root.iterdir():
         if child.is_dir():
-            if child.name in EXCLUDED_DIR_NAMES:
+            if child.name in EXCLUDED_DIR_NAMES or child.name.startswith(
+                EXCLUDED_DIR_PREFIXES
+            ):
                 continue
             yield from walk_md(child)
         elif (
