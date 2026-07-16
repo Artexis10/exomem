@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
+
+import pytest
 
 from exomem import (
     commands,
     embeddings,
     epistemic_graph,
+    memory_context,
+    memory_refs,
     semantic_index,
     semantic_language_registry,
 )
@@ -190,6 +195,7 @@ def test_graph_context_reports_ambiguous_unit_ref_without_selecting_a_collision(
 
 def test_graph_context_applies_freshness_before_the_unit_seed_cap(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     stale_path = _write(
         tmp_path,
@@ -204,11 +210,27 @@ def test_graph_context_applies_freshness_before_the_unit_seed_cap(
     fresh_ref = semantic_index.build_parent_index_state(
         tmp_path, fresh_path
     ).document.units[0].unit_ref
+    for index in range(20):
+        _write(
+            tmp_path,
+            f"Knowledge Base/Notes/Insights/c-extra-{index:02d}.md",
+            "---\ntype: insight\n---\n"
+            f"# Extra {index}\n\n- [config] Extra indexed unit {index}\n",
+        )
     epistemic_graph.EpistemicGraphIndex(tmp_path).rebuild_all()
     stale_path.write_text(
         stale_path.read_text(encoding="utf-8").replace("Old indexed", "Changed"),
         encoding="utf-8",
     )
+    validate_calls = 0
+    original_validate = semantic_index.validate_parent_record
+
+    def tracked_validate(*args, **kwargs):
+        nonlocal validate_calls
+        validate_calls += 1
+        return original_validate(*args, **kwargs)
+
+    monkeypatch.setattr(semantic_index, "validate_parent_record", tracked_validate)
 
     context = epistemic_graph.graph_context(
         tmp_path, categories=["config"], depth=0, max_nodes=1
@@ -219,6 +241,201 @@ def test_graph_context_applies_freshness_before_the_unit_seed_cap(
         warning["code"] == "semantic_unit_index_drift"
         for warning in context["warnings"]
     )
+    assert validate_calls <= 4
+
+
+def test_graph_context_reports_when_unit_freshness_work_is_exhausted(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths = [
+        _write(
+            tmp_path,
+            f"Knowledge Base/Notes/Insights/stale-{index}.md",
+            "---\ntype: insight\n---\n"
+            f"# Stale {index}\n\n- [config] Indexed value {index}\n",
+        )
+        for index in range(6)
+    ]
+    epistemic_graph.EpistemicGraphIndex(tmp_path).rebuild_all()
+    for path in paths:
+        path.write_text(
+            path.read_text(encoding="utf-8").replace("Indexed value", "Changed value"),
+            encoding="utf-8",
+        )
+    validate_calls = 0
+    original_validate = semantic_index.validate_parent_record
+
+    def tracked_validate(*args, **kwargs):
+        nonlocal validate_calls
+        validate_calls += 1
+        return original_validate(*args, **kwargs)
+
+    monkeypatch.setattr(semantic_index, "validate_parent_record", tracked_validate)
+
+    context = epistemic_graph.graph_context(
+        tmp_path, categories=["config"], depth=0, max_nodes=1
+    )
+
+    assert context["seeds"] == []
+    assert validate_calls == epistemic_graph.UNIT_SEED_MAX_BATCHES
+    assert context["truncation"] == [
+        "unit seed freshness work capped at 4; "
+        "additional matching rows were not checked"
+    ]
+
+
+def test_graph_context_unit_seed_queries_use_indexed_columns(tmp_path: Path) -> None:
+    _source, compact, _rich = _unit_context_fixture(tmp_path)
+    conn = sqlite3.connect(epistemic_graph.sidecar_path(tmp_path))
+    try:
+        columns = {
+            row[1]: row
+            for row in conn.execute("PRAGMA table_info(graph_nodes)").fetchall()
+        }
+        assert {"unit_ref", "unit_category", "unit_kind"} <= set(columns)
+        unit_row = conn.execute(
+            "SELECT unit_ref, unit_category, unit_kind FROM graph_nodes "
+            "WHERE node_key = ?",
+            (epistemic_graph._compact_unit_key(compact),),
+        ).fetchone()
+        file_row = conn.execute(
+            "SELECT unit_ref, unit_category, unit_kind FROM graph_nodes "
+            "WHERE kind = 'file' LIMIT 1"
+        ).fetchone()
+        assert unit_row == (compact.unit_ref, "config", "observation")
+        assert file_row == (None, None, None)
+
+        exact_plan = conn.execute(
+            "EXPLAIN QUERY PLAN SELECT node_key FROM graph_nodes WHERE unit_ref = ?",
+            (compact.unit_ref,),
+        ).fetchall()
+        filter_plan = conn.execute(
+            "EXPLAIN QUERY PLAN SELECT node_key FROM graph_nodes "
+            "WHERE unit_category = ? AND unit_kind = ?",
+            ("config", "observation"),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    assert any("idx_graph_nodes_unit_ref" in str(row[3]) for row in exact_plan)
+    assert any("idx_graph_nodes_unit_category_kind" in str(row[3]) for row in filter_plan)
+
+
+def test_graph_schema_v3_sidecar_rebuilds_with_queryable_unit_columns(
+    tmp_path: Path,
+) -> None:
+    source, compact, _rich = _unit_context_fixture(tmp_path)
+    sidecar = epistemic_graph.sidecar_path(tmp_path)
+    sidecar.unlink()
+    conn = sqlite3.connect(sidecar)
+    try:
+        conn.execute(
+            "CREATE TABLE graph_nodes ("
+            "node_key TEXT PRIMARY KEY, kind TEXT NOT NULL, path TEXT NOT NULL, "
+            "anchor TEXT, title TEXT, text TEXT NOT NULL, source_hash TEXT NOT NULL, "
+            "line_start INTEGER, line_end INTEGER, metadata TEXT NOT NULL)"
+        )
+        conn.execute("CREATE TABLE graph_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+        conn.execute(
+            "INSERT INTO graph_meta(key, value) VALUES ('schema_version', '3')"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    idx = epistemic_graph.EpistemicGraphIndex(tmp_path)
+    assert idx.available() is False
+
+    report = idx.refresh_paths([source])
+
+    assert report["indexed_files"] == 2
+    assert idx.available() is True
+    conn = sqlite3.connect(sidecar)
+    try:
+        columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(graph_nodes)").fetchall()
+        }
+        row = conn.execute(
+            "SELECT unit_category, unit_kind FROM graph_nodes WHERE unit_ref = ?",
+            (compact.unit_ref,),
+        ).fetchone()
+    finally:
+        conn.close()
+    assert {"unit_ref", "unit_category", "unit_kind"} <= columns
+    assert row == ("config", "observation")
+
+
+def test_graph_context_exact_unit_status_does_not_scan_the_vault(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _source, compact, _rich = _unit_context_fixture(tmp_path)
+
+    def forbidden_scan(*_args, **_kwargs):
+        raise AssertionError("exact unit graph context must not scan vault references")
+
+    monkeypatch.setattr(memory_refs, "resolve_identifier_read_only", forbidden_scan)
+
+    context = epistemic_graph.graph_context(
+        tmp_path, unit_ref=compact.unit_ref, depth=0
+    )
+
+    assert context["unit_status"] == "found"
+    assert _seed_refs(context) == [compact.unit_ref]
+
+
+def test_graph_context_legacy_path_seeds_are_not_capped_by_max_nodes(
+    tmp_path: Path,
+) -> None:
+    _unit_context_fixture(tmp_path)
+
+    context = epistemic_graph.graph_context(tmp_path, path=_SOURCE, depth=0, max_nodes=1)
+
+    assert len(context["seeds"]) == 3
+    assert not any(item.startswith("seed nodes capped") for item in context["truncation"])
+
+
+def test_product_context_with_unit_filters_uses_only_filtered_graph_seeds(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _source, compact, _rich = _unit_context_fixture(tmp_path)
+
+    def forbidden_context_hits(*_args, **_kwargs):
+        raise AssertionError("unit-aware context must not invoke hybrid page recall")
+
+    def forbidden_embed(*_args, **_kwargs):
+        raise AssertionError("unit-aware context must not load an embedding model")
+
+    monkeypatch.setattr(memory_context, "_context_hits", forbidden_context_hits)
+    monkeypatch.setattr(embeddings, "embed_texts", forbidden_embed)
+
+    context = commands.op_connect_memory(
+        tmp_path,
+        operation="graph-context",
+        query="Compact",
+        categories=["configuration"],
+        depth=0,
+    )
+
+    assert [document["path"] for document in context["documents"]] == [_SOURCE]
+    assert _seed_refs(context["graph"]) == [compact.unit_ref]
+    assert [item["path"] for item in context["provenance"]] == [_SOURCE]
+    assert [item["path"] for item in context["supersession"]] == [_SOURCE]
+
+
+def test_product_context_rejects_unit_ref_with_conflicting_path(tmp_path: Path) -> None:
+    _source, compact, _rich = _unit_context_fixture(tmp_path)
+
+    with pytest.raises(ValueError, match="INVALID_CONTEXT.*unit_ref.*path"):
+        commands.op_connect_memory(
+            tmp_path,
+            operation="graph-context",
+            path=_TARGET,
+            unit_ref=compact.unit_ref,
+            depth=0,
+        )
 
 
 def test_graph_context_unit_filters_work_with_embeddings_disabled(

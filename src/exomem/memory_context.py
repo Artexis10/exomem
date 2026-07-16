@@ -40,6 +40,13 @@ def assemble_context(
     max_body_chars = max(500, min(int(max_body_chars), 6000))
     graph: dict[str, Any] | None = None
     if unit_controls:
+        if path:
+            try:
+                path = get_page.get_page(vault_root, path=path).path
+            except get_page.GetError as exc:
+                raise ValueError(f"{exc.code}: {exc.reason}") from exc
+        if unit_ref is not None and path:
+            _validate_unit_parent_path(vault_root, unit_ref=unit_ref, path=path)
         graph = epistemic_graph.graph_context(
             vault_root,
             path=path,
@@ -54,10 +61,11 @@ def assemble_context(
             max_edges=max_edges,
             traversal_profile=traversal_profile,
         )
-    if path or query:
+        hits = _hits_for_graph_seeds(vault_root, graph, limit=limit)
+    elif path or query:
         hits = _context_hits(vault_root, path=path, query=query, limit=limit)
     else:
-        hits = _hits_for_graph_seeds(vault_root, graph or {}, limit=limit)
+        hits = []
     pages = [
         page
         for hit in hits
@@ -202,6 +210,15 @@ def _hits_for_graph_seeds(
         if len(hits) >= limit:
             break
     return hits
+
+
+def _validate_unit_parent_path(vault_root: Path, *, unit_ref: str, path: str) -> None:
+    parent_paths = epistemic_graph.indexed_unit_parent_paths(vault_root, unit_ref)
+    if len(parent_paths) == 1 and parent_paths[0] != path:
+        raise ValueError(
+            "INVALID_CONTEXT: unit_ref parent "
+            f"{parent_paths[0]} does not match path {path}"
+        )
 
 
 def _merge_graph_contexts(
