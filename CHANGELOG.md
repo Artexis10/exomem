@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.24.0](https://github.com/Artexis10/exomem/compare/v0.23.0...v0.24.0) (2026-07-16)
+
+
+### Features
+
+* Adoption Studio v1 — governed adoption runs, agent proposals, Studio UI, hosted staging ([#234](https://github.com/Artexis10/exomem/issues/234)) ([74341fa](https://github.com/Artexis10/exomem/commit/74341fa4bc7f1dfe203ebc2c597846032b8d759e))
+* complete the semantic language product contract ([#245](https://github.com/Artexis10/exomem/issues/245)) ([7e89a3f](https://github.com/Artexis10/exomem/commit/7e89a3f7bff78d7dac8155dfd194624a33193796))
+
+
+### Bug Fixes
+
+* bound reconcile maintenance work ([#248](https://github.com/Artexis10/exomem/issues/248)) ([46b61ab](https://github.com/Artexis10/exomem/commit/46b61ab30482773be81e29b084042cd33eca01f3))
+* exclude nested dot-trash from corpus scans ([#249](https://github.com/Artexis10/exomem/issues/249)) ([c32ec26](https://github.com/Artexis10/exomem/commit/c32ec26c306b86358778452ca69d641b243b6cf3))
+* keep doctor SQLite checks filesystem read-only ([#246](https://github.com/Artexis10/exomem/issues/246)) ([62db3a0](https://github.com/Artexis10/exomem/commit/62db3a0d7f5486a62bbfbf7e6d656d2f8b4f446c))
+* make deferred embedding replay durable ([#247](https://github.com/Artexis10/exomem/issues/247)) ([567647a](https://github.com/Artexis10/exomem/commit/567647ae82b8c2fe6e14a9ae9d6a11c51d06df7f))
+* preserve exact bytes and review access on Windows ([#244](https://github.com/Artexis10/exomem/issues/244)) ([dc55888](https://github.com/Artexis10/exomem/commit/dc5588814de2527f466c6aea4019ba40dfcb18bf))
+
 ## [0.23.0](https://github.com/Artexis10/exomem/compare/v0.22.0...v0.23.0) (2026-07-16)
 
 
