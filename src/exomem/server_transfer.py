@@ -22,16 +22,16 @@ DEFAULT_UPLOAD_MAX_BYTES = 100 * 1024 * 1024
 log = logging.getLogger(__name__)
 
 
-def _extract_module():
-    from . import extract
-
-    return extract
-
-
 def _preserve_module():
     from . import preserve as preserve_module
 
     return preserve_module
+
+
+def _media_processing_module():
+    from . import media_processing
+
+    return media_processing
 
 
 def _preserve_under_guard(
@@ -186,29 +186,19 @@ def register_transfer_routes(
                 status_code=http_status_for(error["code"]),
             )
 
-        if media_worker is not None and result.sidecar_path:
-            extract = _extract_module()
-            media_type = extract.media_type_for(filename)
-            if media_type:
-                do_ocr = text is None
-                do_clip = media_type in ("image", "video") and not os.environ.get(
-                    "EXOMEM_DISABLE_CLIP"
+        if media_worker is not None:
+            try:
+                _media_processing_module().reconcile_media(
+                    vault_root,
+                    vault_root / result.path,
+                    explicit=False,
                 )
-                if do_ocr or do_clip:
-                    try:
-                        media_worker.enqueue(
-                            binary_path=vault_root / result.path,
-                            sidecar_path=vault_root / result.sidecar_path,
-                            media_type=media_type,
-                            do_ocr=do_ocr,
-                            do_clip=do_clip,
-                        )
-                    except Exception:  # noqa: BLE001 - pending sidecar enables later recovery
-                        log.warning(
-                            "media enqueue failed for %s; evidence remains pending",
-                            result.path,
-                            exc_info=True,
-                        )
+            except Exception:  # noqa: BLE001 - preserved evidence remains recoverable
+                log.warning(
+                    "media reconciliation failed for %s; evidence remains recoverable",
+                    result.path,
+                    exc_info=True,
+                )
         return JSONResponse(result.as_dict(), status_code=201)
 
     @mcp_app.custom_route("/upload", methods=["GET"])

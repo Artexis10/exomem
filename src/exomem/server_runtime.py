@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import env_compat, hosted_runtime, privacy_log, project_keys, schema
+from . import env_compat, hosted_runtime, media_processing, privacy_log, project_keys, schema
 from .hosted_runtime import (
     HostedBindingV2,
     HostedCellConfig,
@@ -313,6 +313,13 @@ def _start_media_worker(vault_root: Path) -> Any | None:
             pass
         log.warning("media runtime unavailable; core service continuing: %s", exc)
         return None
+    try:
+        media_processing.reconcile_all_media(
+            vault_root,
+            limit=media_processing.DEFAULT_RECONCILE_LIMIT,
+        )
+    except Exception as exc:  # noqa: BLE001 - startup discovery is best-effort
+        log.warning("media worker startup discovery failed: %s", exc)
     try:
         worker.scan_pending()
     except Exception as exc:  # noqa: BLE001 - startup scan is best-effort

@@ -36,7 +36,7 @@ import time
 from collections.abc import Iterable
 from pathlib import Path
 
-from . import freshness, index_sync, mode
+from . import freshness, index_sync, media_processing, mode
 from .kbdir import kb_dirname, kb_prefix
 
 log = logging.getLogger(__name__)
@@ -52,6 +52,7 @@ RECONCILE_INTERVAL_SECONDS = 300.0
 # dispatch is capped, and it logs the cap so the remainder can be closed with an
 # explicit `reconcile`.
 RECONCILE_MAX_EMBED_FILES = 500
+RECONCILE_MAX_MEDIA_FILES = media_processing.DEFAULT_RECONCILE_LIMIT
 
 # ---- Self-write suppression registry (module-level: available to writers even
 # when no FileWatcher is running; keyed by (resolved vault root, vault-rel path)) ----
@@ -237,6 +238,7 @@ class FileWatcher:
         self._lock = threading.Lock()
         self._pending_upsert: set[Path] = set()
         self._pending_delete: set[Path] = set()
+        self._pending_media: set[Path] = set()
         self._last_change = 0.0
         self._wake = threading.Event()
         self._stop = threading.Event()
@@ -272,9 +274,7 @@ class FileWatcher:
     # ---- change recording (called by the watchdog handler AND by tests) ----
 
     def _record(self, path: Path, *, deleted: bool) -> None:
-        """Record a `.md` change. Coalesces rapid events for the same path."""
-        if path.suffix.lower() != ".md":
-            return  # only markdown is embedded; ignore attachments / sidecars-of-binaries churn
+        """Record a Markdown or supported-media change, coalesced by path."""
         from .vault import in_excluded_scan_dir
 
         rel = self._rel(path)
@@ -282,6 +282,14 @@ class FileWatcher:
             # _trash/_archive/_Schema/…: every full walk skips these, so the
             # event path must too — else a delete's move-to-trash re-embeds
             # the trashed note under its trash path.
+            return
+        if path.suffix.lower() != ".md":
+            if deleted or not self._is_kb(path) or media_processing.classify_media(path) is None:
+                return
+            with self._lock:
+                self._pending_media.add(path)
+                self._last_change = time.monotonic()
+            self._wake.set()
             return
         if _is_self_write_event(self._vault_root, path, deleted=deleted):
             log.debug("file watcher: suppressed self-write echo for %s", path)
@@ -307,19 +315,29 @@ class FileWatcher:
             except ValueError:
                 return None
 
-    def _drain(self) -> tuple[list[Path], list[str]]:
+    def _drain(self) -> tuple[list[Path], list[Path], list[str]]:
         with self._lock:
+            media = sorted(self._pending_media)
             ups = sorted(self._pending_upsert)
             dels = sorted(self._pending_delete)
+            self._pending_media.clear()
             self._pending_upsert.clear()
             self._pending_delete.clear()
         del_rels = [r for r in (self._rel(p) for p in dels) if r]
-        return ups, del_rels
+        return media, ups, del_rels
 
     def _flush(self) -> None:
         """Dispatch the coalesced batch: publish freshness/inbound for every
         changed path (vault-wide), and re-embed only the Knowledge Base subset."""
-        ups, del_rels = self._drain()
+        media, ups, del_rels = self._drain()
+        if not (media or ups or del_rels):
+            return
+
+        for path in media:
+            try:
+                media_processing.reconcile_media(self._vault_root, path, explicit=False)
+            except Exception:  # noqa: BLE001 - a bad artifact must never kill the watcher
+                log.exception("file watcher: media reconciliation failed for %s", path)
         if not (ups or del_rels):
             return
 
@@ -403,6 +421,14 @@ class FileWatcher:
                             deleted_union.setdefault(sp, None)
             except Exception:  # noqa: BLE001 — reconcile must never kill the watcher
                 log.exception("file watcher: freshness reconcile failed (scope=%s)", scope)
+        if not seed:
+            try:
+                media_processing.reconcile_all_media(
+                    self._vault_root,
+                    limit=RECONCILE_MAX_MEDIA_FILES,
+                )
+            except Exception:  # noqa: BLE001 - discovery must never kill the watcher
+                log.exception("file watcher: periodic media reconciliation failed")
         if seed or not drifted:
             return
         # Maps are healed; fan the drift delta out and pre-warm the triple-keyed

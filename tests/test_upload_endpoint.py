@@ -12,6 +12,7 @@ import hashlib
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
+from pathlib import Path
 
 import httpx
 import pytest
@@ -107,6 +108,45 @@ def test_upload_happy_path_lands_in_evidence(vault, monkeypatch: pytest.MonkeyPa
     assert body["content_type"] == "image/png"
     written = vault / body["path"]
     assert written.read_bytes() == b"\x89PNGrealbytes"
+
+
+def test_upload_supported_media_routes_through_canonical_reconciliation(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import media_processing, server_runtime
+
+    monkeypatch.delenv("EXOMEM_DISABLE_MEDIA_EXTRACTION")
+    calls: list[tuple[Path, Path, bool]] = []
+
+    class Worker:
+        def enqueue(self, **_kwargs) -> None:
+            pytest.fail("upload bypassed canonical media reconciliation")
+
+    monkeypatch.setattr(server_runtime, "_start_media_worker", lambda _vault: Worker())
+    monkeypatch.setattr(
+        media_processing,
+        "reconcile_media",
+        lambda root, path, *, explicit=True: calls.append((root, path, explicit)),
+    )
+    client = _client(vault, monkeypatch, EXOMEM_UPLOAD_TOKEN="sekret")
+
+    response = client.post(
+        "/upload",
+        files={"file": ("field-note.m4a", b"audio bytes", "audio/mp4")},
+        data={"scope": "Interviews", "category": "Raw"},
+        headers={"Authorization": "Bearer sekret"},
+    )
+
+    assert response.status_code == 201, response.text
+    body = response.json()
+    binary = vault / body["path"]
+    assert calls == [(vault, binary, False)]
+    assert body["stored_path"] == body["path"]
+    assert body["sidecar_path"].endswith("field-note.m4a.md")
+    assert body["size"] == len(b"audio bytes")
+    assert body["hash"] == hashlib.sha256(b"audio bytes").hexdigest()
+    assert body["media_id"] == f"sha256:{body['hash']}"
+    assert body["content_type"] == "audio/mp4"
 
 
 def test_upload_parses_before_guard_and_preserves_inside_it(

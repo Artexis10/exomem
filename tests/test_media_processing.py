@@ -293,6 +293,57 @@ def test_reconciliation_is_byte_stable_and_job_deduplicated(vault: Path) -> None
     assert _job_count(vault) == 1
 
 
+def test_reconcile_all_media_is_bounded_pruned_and_soft_fails_per_artifact(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    media_processing = _media_processing()
+    kb = vault / "Knowledge Base"
+    first = _drop_media(vault, "a-broken.m4a")
+    second = _drop_media(vault, "b-good.wav")
+    _drop_media(vault, "c-bounded.mp3")
+    _drop_media(vault, "unsupported.bin")
+    hidden = kb / "Evidence" / ".hidden" / "hidden.m4a"
+    hidden.parent.mkdir(parents=True)
+    hidden.write_bytes(b"hidden")
+    archived = kb / "_archive" / "archived.m4a"
+    archived.parent.mkdir(parents=True)
+    archived.write_bytes(b"archived")
+    outside = vault / "Attachments" / "outside.m4a"
+    outside.parent.mkdir(parents=True)
+    outside.write_bytes(b"outside")
+    calls: list[tuple[Path, bool]] = []
+
+    def reconcile_media(
+        root: Path, path: Path, *, explicit: bool = True
+    ) -> None:
+        assert root == vault
+        calls.append((path, explicit))
+        if path == first:
+            raise OSError("one unreadable artifact must not abort the pass")
+
+    monkeypatch.setattr(media_processing, "reconcile_media", reconcile_media)
+
+    attempted = media_processing.reconcile_all_media(vault, limit=2)
+
+    assert attempted == 2
+    assert calls == [(first, False), (second, False)]
+
+
+def test_reconcile_all_media_repeats_without_duplicate_work(vault: Path) -> None:
+    media_processing = _media_processing()
+    binary = _drop_media(vault, "scan-repeat.m4a")
+
+    assert media_processing.reconcile_all_media(vault, limit=10) == 1
+    sidecar = binary.with_name(binary.name + ".md")
+    first_bytes = sidecar.read_bytes()
+    first_mtime = sidecar.stat().st_mtime_ns
+    assert media_processing.reconcile_all_media(vault, limit=10) == 1
+
+    assert sidecar.read_bytes() == first_bytes
+    assert sidecar.stat().st_mtime_ns == first_mtime
+    assert _job_count(vault) == 1
+
+
 @pytest.mark.parametrize("terminal_state", [media_jobs.BLOCKED, media_jobs.FAILED])
 def test_reconciliation_retains_actionable_terminal_ledger_state(
     vault: Path, terminal_state: str

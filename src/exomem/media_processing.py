@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import datetime as dt
 import hashlib
+import logging
 import os
 import re
 from dataclasses import dataclass
@@ -17,12 +18,16 @@ from . import extract, media_jobs, memory_refs, preserve
 from .kbdir import kb_dirname
 from .vault import (
     MISSING_CONTENT_HASH,
+    VAULT_SCAN_SKIP_DIRS,
     PlannedWrite,
     batch_atomic_write,
     content_hash,
     parse_frontmatter,
     yaml_scalar,
 )
+
+log = logging.getLogger(__name__)
+DEFAULT_RECONCILE_LIMIT = 100
 
 
 class MediaProcessingError(Exception):
@@ -135,6 +140,59 @@ def reconcile_media(
     durable_job = store.get(job_id)
     state = durable_job.state if durable_job is not None else media_jobs.PENDING
     return ReconcileResult(media_type, state, sidecar, job_id)
+
+
+def reconcile_all_media(
+    vault_root: Path,
+    *,
+    limit: int = DEFAULT_RECONCILE_LIMIT,
+) -> int:
+    """Reconcile a bounded, pruned pass of supported governed binaries.
+
+    Each artifact is independent: one unreadable or racing file is logged and
+    does not prevent later candidates from converging.
+    """
+    if isinstance(limit, bool) or limit <= 0:
+        raise ValueError("media reconciliation limit must be a positive integer")
+    vault = Path(vault_root).resolve()
+    kb = vault / kb_dirname()
+    if not kb.is_dir():
+        return 0
+
+    attempted = 0
+    for binary in _iter_governed_media(kb):
+        if attempted >= limit:
+            break
+        attempted += 1
+        try:
+            reconcile_media(vault, binary, explicit=False)
+        except Exception:  # noqa: BLE001 - one artifact must not abort discovery
+            log.warning("media reconciliation failed for %s", binary, exc_info=True)
+    return attempted
+
+
+def _iter_governed_media(kb_root: Path):
+    """Yield supported binaries from a deterministic, hidden/pruned KB walk."""
+    stack = [kb_root]
+    while stack:
+        directory = stack.pop()
+        try:
+            children = sorted(directory.iterdir(), key=lambda path: path.name.casefold())
+        except OSError:
+            continue
+        directories: list[Path] = []
+        for child in children:
+            if child.name.startswith("."):
+                continue
+            try:
+                if child.is_dir():
+                    if not child.is_symlink() and child.name not in VAULT_SCAN_SKIP_DIRS:
+                        directories.append(child)
+                elif child.is_file() and not child.is_symlink() and classify_media(child):
+                    yield child
+            except OSError:
+                continue
+        stack.extend(reversed(directories))
 
 
 def retry_media(vault_root: Path, binary_path: str | Path) -> ReconcileResult:
