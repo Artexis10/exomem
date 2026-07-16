@@ -114,40 +114,51 @@ def test_lexical_check_reads_clean_wal_database_without_creating_sidecars(
     assert not shm.exists()
 
 
-def test_lexical_check_uses_live_readonly_connection_when_wal_sidecars_exist(
-    vault: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize(
+    "live_suffixes",
+    [("-wal",), ("-shm",), ("-wal", "-shm")],
+)
+def test_lexical_check_refuses_live_sqlite_companions_without_connecting(
+    vault: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    live_suffixes: tuple[str, ...],
 ) -> None:
     from exomem import lexstore
 
     sidecar = lexstore.lexical_path(vault)
-    writer = sqlite3.connect(sidecar)
-    real_connect = sqlite3.connect
+    conn = sqlite3.connect(sidecar)
     try:
-        assert writer.execute("PRAGMA journal_mode=WAL").fetchone()[0] == "wal"
-        writer.execute("CREATE TABLE pages (id INTEGER PRIMARY KEY)")
-        writer.execute("INSERT INTO pages DEFAULT VALUES")
-        writer.commit()
-        wal = sidecar.with_name(f"{sidecar.name}-wal")
-        shm = sidecar.with_name(f"{sidecar.name}-shm")
-        assert wal.exists()
-        assert shm.exists()
-        connections: list[str] = []
-
-        def record_connect(database, *args, **kwargs):
-            connections.append(str(database))
-            return real_connect(database, *args, **kwargs)
-
-        monkeypatch.setattr(lexstore, "backend", lambda: "fts5")
-        monkeypatch.setattr(lexstore, "fts5_available", lambda: True)
-        monkeypatch.setattr(doctor_module.sqlite3, "connect", record_connect)
-
-        check = doctor_module._check_lexical(vault)
-
-        assert check.status == "pass"
-        assert "1 pages indexed" in check.message
-        assert connections == [f"{sidecar.resolve().as_uri()}?mode=ro"]
+        conn.execute("CREATE TABLE pages (id INTEGER PRIMARY KEY)")
+        conn.commit()
     finally:
-        writer.close()
+        conn.close()
+    companions = [sidecar.with_name(f"{sidecar.name}{suffix}") for suffix in live_suffixes]
+    for index, companion in enumerate(companions):
+        companion.write_bytes(f"live-{index}".encode())
+    before = {
+        companion: (companion.read_bytes(), companion.stat()) for companion in companions
+    }
+
+    def reject_connect(*_args, **_kwargs):
+        pytest.fail("doctor must not sqlite-connect while WAL/SHM exists")
+
+    monkeypatch.setattr(lexstore, "backend", lambda: "fts5")
+    monkeypatch.setattr(lexstore, "fts5_available", lambda: True)
+    monkeypatch.setattr(doctor_module.sqlite3, "connect", reject_connect)
+
+    check = doctor_module._check_lexical(vault)
+
+    assert check.status == "warn"
+    assert "unreadable" in check.message
+    for companion, (content, info) in before.items():
+        after = companion.stat()
+        assert companion.read_bytes() == content
+        assert (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns) == (
+            info.st_dev,
+            info.st_ino,
+            info.st_size,
+            info.st_mtime_ns,
+        )
 
 
 @pytest.mark.parametrize("change", ["wal", "identity"])

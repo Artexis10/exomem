@@ -342,28 +342,28 @@ def _sqlite_companion_exists(companions: tuple[Path, Path]) -> bool:
 
 def _lexical_page_count(path: Path) -> int:
     companions = _sqlite_companions(path)
-    immutable = not _sqlite_companion_exists(companions)
-    identity: tuple[int, int, int, int] | None = None
-    if immutable:
-        identity = _sqlite_snapshot_identity(path)
-        with path.open("rb") as stream:
-            if not stream.read(1):
-                raise OSError("lexical sidecar is empty")
-        if (
-            _sqlite_snapshot_identity(path) != identity
-            or _sqlite_companion_exists(companions)
-        ):
-            raise OSError("lexical sidecar is not a stable standalone snapshot")
+    if _sqlite_companion_exists(companions):
+        raise OSError("lexical sidecar has live SQLite companions")
+    identity = _sqlite_snapshot_identity(path)
+    with path.open("rb") as stream:
+        if not stream.read(1):
+            raise OSError("lexical sidecar is empty")
+    if (
+        _sqlite_snapshot_identity(path) != identity
+        or _sqlite_companion_exists(companions)
+    ):
+        raise OSError("lexical sidecar is not a stable standalone snapshot")
 
-    query = "mode=ro&immutable=1" if immutable else "mode=ro"
-    conn = sqlite3.connect(f"{path.resolve().as_uri()}?{query}", uri=True)
+    conn = sqlite3.connect(
+        f"{path.resolve().as_uri()}?mode=ro&immutable=1", uri=True
+    )
     try:
         conn.execute("PRAGMA query_only = ON")
         count = int(conn.execute("SELECT count(*) FROM pages").fetchone()[0])
     finally:
         conn.close()
 
-    if immutable and (
+    if (
         _sqlite_snapshot_identity(path) != identity
         or _sqlite_companion_exists(companions)
     ):

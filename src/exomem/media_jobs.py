@@ -554,11 +554,13 @@ def _sqlite_sidecar_exists(sidecars: tuple[Path, Path]) -> bool:
 def _diagnostic_snapshot_rows(
     path: Path,
 ) -> tuple[list[Any], Any, list[Any], list[Any]]:
+    sidecars = _sqlite_sidecars(path)
+    if _sqlite_sidecar_exists(sidecars):
+        raise OSError("media job database has live SQLite companions")
     identity = _sqlite_file_identity(path)
     with path.open("rb") as stream:
         if not stream.read(1):
             raise OSError("media job database is empty")
-    sidecars = _sqlite_sidecars(path)
     if _sqlite_file_identity(path) != identity or _sqlite_sidecar_exists(sidecars):
         raise OSError("media job database is not a stable standalone snapshot")
 
@@ -575,11 +577,6 @@ def _diagnostic_snapshot_rows(
     if _sqlite_file_identity(path) != identity or _sqlite_sidecar_exists(sidecars):
         raise OSError("media job database changed during diagnostic snapshot")
     return result
-
-
-def _is_sqlite_cantopen(error: sqlite3.Error) -> bool:
-    code = getattr(error, "sqlite_errorcode", None)
-    return isinstance(code, int) and code & 0xFF == sqlite3.SQLITE_CANTOPEN
 
 
 def status(
@@ -602,17 +599,15 @@ def status(
     if not path.exists():
         return empty
     try:
-        store = MediaJobStore(vault_root, create=False)
-        try:
+        if diagnostic_snapshot:
+            rows, runtime, errors, jobs = _diagnostic_snapshot_rows(path)
+        else:
+            store = MediaJobStore(vault_root, create=False)
             conn = store._connect(readonly=True)
             try:
                 rows, runtime, errors, jobs = _read_status_rows(conn)
             finally:
                 conn.close()
-        except sqlite3.Error as error:
-            if not diagnostic_snapshot or not _is_sqlite_cantopen(error):
-                raise
-            rows, runtime, errors, jobs = _diagnostic_snapshot_rows(path)
         counts = {state: 0 for state in STATES}
         counts.update({str(row["state"]): int(row["n"]) for row in rows})
         pid = int(runtime["worker_pid"]) if runtime and runtime["worker_pid"] else None
