@@ -633,6 +633,53 @@ def test_unit_vector_success_marks_lexical_non_applicable(
     }
 
 
+def test_unit_hybrid_vector_only_is_single_lane_without_fabricated_fusion(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _write_unit_page(tmp_path)
+
+    class UnitVectorHit:
+        def __init__(self, unit_ref: str, cosine: float) -> None:
+            self.unit_ref = unit_ref
+            self.cosine = cosine
+
+    class FakeUnitIndex:
+        def search_semantic_units(
+            self, _query_vector, *, k: int, allowed_unit_refs: set[str]
+        ):
+            unit_ref = sorted(allowed_unit_refs)[0]
+            return [UnitVectorHit(unit_ref, 0.7654321)]
+
+    monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
+    monkeypatch.setattr(
+        embeddings, "get_embedding_index", lambda _root: FakeUnitIndex()
+    )
+    monkeypatch.setattr(
+        embeddings, "embed_texts", lambda _texts, *, is_query: [[0.1, 0.2]]
+    )
+
+    explained = commands.op_ask_memory(
+        tmp_path,
+        query="vector-only semantic phrase",
+        categories=["config"],
+        result_level="unit",
+        mode="hybrid",
+        scope="kb-only",
+        detail="compact",
+        explain=True,
+    )
+
+    profile = explained["retrieval_profile"]
+    assert profile["effective_mode"] == "vector"
+    assert profile["lanes"]["bm25"]["status"] == "available_nonmatching"
+    assert profile["lanes"]["vector"]["status"] == "participated"
+    assert "fusion" not in profile
+    ranking = explained["hits"][0]["ranking_explanation"]
+    assert set(ranking["lanes"]) == {"vector"}
+    assert "fusion" not in ranking
+
+
 def test_unit_vector_failure_reports_lexical_fallback_truth(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

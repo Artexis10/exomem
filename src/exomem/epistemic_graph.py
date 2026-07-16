@@ -33,6 +33,7 @@ from .markdown_relations import MarkdownRelation
 SCHEMA_VERSION = 4
 UNIT_SEED_MAX_BATCHES = 4
 UNIT_PARENT_REF_MAX_CANDIDATES = 16
+EDGE_INSPECTION_MULTIPLIER = 4
 
 RELATION_TYPES: frozenset[str] = relation_registry.core_registry().keys
 
@@ -700,6 +701,12 @@ def graph_context(
         type_filter = set(node_types or [])
         seen_nodes: set[str] = {s["node_key"] for s in seeds}
         seen_edges: dict[str, dict[str, Any]] = {}
+        edge_cap_hit = False
+        edge_inspection_cap_hit = False
+        edge_inspection_budget = _edge_inspection_budget(
+            max_nodes=max_nodes, max_edges=max_edges
+        )
+        inspected_edges = 0
         placeholder_nodes: dict[str, dict[str, Any]] = {}
         node_cap_hit = False
         excluded_profile = 0
@@ -709,7 +716,14 @@ def graph_context(
         for _ in range(max(0, depth)):
             if not frontier:
                 break
-            rows = _neighbor_edges(conn, frontier, set())
+            rows, inspection_overflow = _neighbor_edges(
+                conn,
+                frontier,
+                set(),
+                limit=max(0, edge_inspection_budget - inspected_edges),
+            )
+            inspected_edges += len(rows)
+            edge_inspection_cap_hit = edge_inspection_cap_hit or inspection_overflow
             rows.sort(key=lambda edge: _edge_priority(edge, profile, idx.registry))
             next_frontier: set[str] = set()
             for edge in rows:
@@ -743,8 +757,11 @@ def graph_context(
                     continue
                 if profile.direction == "incoming" and edge["dst_key"] not in frontier:
                     continue
-                if len(seen_edges) < max_edges:
-                    seen_edges.setdefault(edge["edge_key"], edge)
+                if edge["edge_key"] not in seen_edges:
+                    if len(seen_edges) >= max_edges:
+                        edge_cap_hit = True
+                        break
+                    seen_edges[edge["edge_key"]] = edge
                 for key in (edge["src_key"], edge["dst_key"]):
                     if key not in seen_nodes:
                         node = _node_by_key(conn, key)
@@ -764,6 +781,8 @@ def graph_context(
                             placeholder_nodes[key] = node
                         else:
                             next_frontier.add(key)
+            if edge_cap_hit or edge_inspection_cap_hit:
+                break
             frontier = next_frontier
         nodes = [
             node
@@ -787,8 +806,12 @@ def graph_context(
             nodes = nodes[:max_nodes]
         elif node_cap_hit:
             truncation.append(f"nodes capped at {max_nodes}")
-        if len(seen_edges) >= max_edges:
+        if edge_cap_hit:
             truncation.append(f"edges capped at {max_edges}")
+        if edge_inspection_cap_hit:
+            truncation.append(
+                f"edge inspection capped at {edge_inspection_budget} records"
+            )
         warnings: list[dict[str, Any]] = []
         if unknown:
             warnings.append(
@@ -1867,24 +1890,39 @@ def _drift_warning(drift_counts: dict[str, int]) -> dict[str, Any]:
 
 
 def _neighbor_edges(
-    conn: sqlite3.Connection, frontier: set[str], relation_filter: set[str]
-) -> list[dict[str, Any]]:
-    out: list[dict[str, Any]] = []
+    conn: sqlite3.Connection,
+    frontier: set[str],
+    relation_filter: set[str],
+    *,
+    limit: int,
+) -> tuple[list[dict[str, Any]], bool]:
+    if not frontier:
+        return [], False
     select = (
         "SELECT edge_key, src_key, dst_key, relation_type, raw_relation, "
         "parent_relation, registry_status, registry_version, registry_hash, "
         "origin, source_path, source_anchor, metadata FROM graph_edges"
     )
-    for key in sorted(frontier):
-        rows = conn.execute(
-            select + " WHERE src_key = ? OR dst_key = ? ORDER BY edge_key", (key, key)
-        ).fetchall()
-        for row in rows:
-            edge = _edge_row_to_dict(row)
-            if relation_filter and edge["relation_type"] not in relation_filter:
-                continue
-            out.append(edge)
-    return out
+    keys = sorted(frontier)
+    placeholders = ",".join("?" for _ in keys)
+    where = f" WHERE (src_key IN ({placeholders}) OR dst_key IN ({placeholders}))"
+    params: list[Any] = [*keys, *keys]
+    if relation_filter:
+        relations = sorted(relation_filter)
+        relation_placeholders = ",".join("?" for _ in relations)
+        where += f" AND relation_type IN ({relation_placeholders})"
+        params.extend(relations)
+    rows = conn.execute(
+        select + where + " ORDER BY edge_key LIMIT ?",
+        (*params, limit + 1),
+    ).fetchall()
+    overflow = len(rows) > limit
+    return [_edge_row_to_dict(row) for row in rows[:limit]], overflow
+
+
+def _edge_inspection_budget(*, max_nodes: int, max_edges: int) -> int:
+    """Bound raw adjacency work while leaving room for filtered/stale edges."""
+    return max(1, (max_nodes + max_edges) * EDGE_INSPECTION_MULTIPLIER)
 
 
 def _edge_priority(

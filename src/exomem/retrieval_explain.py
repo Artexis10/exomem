@@ -497,7 +497,13 @@ class RetrievalTrace:
             "decision": "skipped",
             "reason": "result_level_unit",
         }
-        fused = bool(vector_used and lexical_used and self.requested_mode == "hybrid")
+        lexical_participated = bool(lexical_used and lexical_ranking)
+        vector_participated = bool(vector_used and vector_ranking)
+        fused = bool(
+            vector_participated
+            and lexical_participated
+            and self.requested_mode == "hybrid"
+        )
         if fused:
             self.effective_mode = "hybrid"
             self.fusion_profile = {
@@ -505,9 +511,9 @@ class RetrievalTrace:
                 "k": rrf_k,
                 "weights": {"vector": weights[0], "bm25": weights[1]},
             }
-        elif vector_used and self.requested_mode == "vector":
+        elif vector_participated:
             self.effective_mode = "vector"
-        elif lexical_used and self.requested_mode == "vector":
+        elif lexical_participated and self.requested_mode == "vector":
             self.effective_mode = "vector_lexical_fallback"
         else:
             self.effective_mode = "hybrid_lexical"

@@ -594,6 +594,65 @@ def test_graph_context_keeps_unresolved_relation_as_placeholder(tmp_path: Path) 
     )
 
 
+def test_graph_context_reports_edge_truncation_only_on_actual_overflow(
+    tmp_path: Path,
+) -> None:
+    vault = _seed_graph_vault(tmp_path)
+    epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()
+
+    full = epistemic_graph.graph_context(
+        vault, path=CURRENT, depth=1, max_nodes=80, max_edges=80
+    )
+    edge_count = len(full["edges"])
+    assert 1 < edge_count < 80
+
+    exact = epistemic_graph.graph_context(
+        vault, path=CURRENT, depth=1, max_nodes=80, max_edges=edge_count
+    )
+    overflow = epistemic_graph.graph_context(
+        vault, path=CURRENT, depth=1, max_nodes=80, max_edges=edge_count - 1
+    )
+
+    assert not any("edges capped" in item for item in exact["truncation"])
+    assert any("edges capped" in item for item in overflow["truncation"])
+
+
+def test_graph_context_bounds_raw_edge_inspection_by_public_limits(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    vault = _seed_graph_vault(tmp_path)
+    current = vault / CURRENT
+    links = "\n".join(
+        f"- [[Knowledge Base/Notes/Insights/bounded-target-{index}]]"
+        for index in range(100)
+    )
+    current.write_text(
+        current.read_text(encoding="utf-8") + "\n## Bounded links\n" + links + "\n",
+        encoding="utf-8",
+    )
+    epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()
+
+    converted = 0
+    original = epistemic_graph._edge_row_to_dict
+
+    def counted(row):
+        nonlocal converted
+        converted += 1
+        return original(row)
+
+    monkeypatch.setattr(epistemic_graph, "_edge_row_to_dict", counted)
+    context = epistemic_graph.graph_context(
+        vault, path=CURRENT, depth=1, max_nodes=2, max_edges=1
+    )
+
+    assert converted <= epistemic_graph._edge_inspection_budget(
+        max_nodes=2, max_edges=1
+    )
+    assert len(context["edges"]) == 1
+    assert any("edges capped" in item for item in context["truncation"])
+
+
 def test_unified_context_matches_quality_golden_and_is_markdown_read_only(
     tmp_path: Path,
 ) -> None:

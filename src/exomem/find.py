@@ -1196,7 +1196,7 @@ def _find_semantic_units(
 
     if not vector_ranking:
         final_ranking = _preferred_ranking(scores)
-    elif mode == "vector":
+    elif mode == "vector" or not lexical_ranking:
         final_ranking = _preferred_ranking(vector_scores)
     else:
         from . import fusion
