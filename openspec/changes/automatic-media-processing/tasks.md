@@ -34,7 +34,7 @@
 
 ### Task 8
 
-- [ ] 3.1 Add failing command-registry, MCP schema, REST/OpenAPI, and CLI tests for `process_media` process/status/retry operations and shared error behavior.
+- [x] 3.1 Add failing command-registry, MCP schema, REST/OpenAPI, and CLI tests for `process_media` process/status/retry operations and shared error behavior.
 
 ### Task 9
 
