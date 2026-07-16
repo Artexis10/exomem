@@ -409,6 +409,159 @@ tags: []
     assert not (schema / "semantic-contract-activation.json").exists()
 
 
+def test_adopt_semantic_census_parses_each_markdown_page_once_and_reports_metadata_work(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    vault = _legacy_vault(tmp_path, kb=True)
+    page = vault / "Knowledge Base" / "Notes" / "semantic.md"
+    page.write_text(
+        """---
+type: insight
+exomem_id: 00000000-0000-4000-8000-000000000311
+title: Semantic
+status: active
+created: 2026-07-16
+updated: 2026-07-16
+sources: []
+tags: []
+---
+
+# Semantic
+
+- [config] Parse once.
+""",
+        encoding="utf-8",
+    )
+    real_build_page_state = semantic_census.semantic_contract.build_page_state
+    parser_calls: list[str] = []
+    markdown_path_reads: list[str] = []
+    real_read_text = Path.read_text
+
+    def counting_build_page_state(*args: object, **kwargs: object) -> object:
+        parser_calls.append(str(args[1]))
+        return real_build_page_state(*args, **kwargs)
+
+    def counting_read_text(path: Path, *args: object, **kwargs: object) -> str:
+        if path.suffix.casefold() == ".md":
+            markdown_path_reads.append(path.as_posix())
+        return real_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(
+        semantic_census.semantic_contract,
+        "build_page_state",
+        counting_build_page_state,
+    )
+    monkeypatch.setattr(Path, "read_text", counting_read_text)
+
+    census = semantic_census.scan(vault)
+
+    assert len(parser_calls) == census["coverage"]["markdown_files_scanned"]
+    assert len(parser_calls) == len(set(parser_calls))
+    assert markdown_path_reads == []
+    assert census["coverage"]["metadata_work"] == {
+        "bounded": True,
+        "counted_as_markdown_bytes": False,
+        "sources": [
+            "relation_registry",
+            "relation_review_state",
+            "saved_contracts",
+            "semantic_language_registry",
+        ],
+    }
+
+
+def test_adopt_semantic_census_governance_uses_exact_scanned_page_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    vault = _legacy_vault(tmp_path, kb=True)
+    page = vault / "Knowledge Base" / "Notes" / "semantic.md"
+    original = """---
+type: insight
+exomem_id: 00000000-0000-4000-8000-000000000312
+title: Semantic
+status: active
+created: 2026-07-16
+updated: 2026-07-16
+sources: []
+tags: []
+---
+
+# Semantic
+
+- [before] Exact scanned bytes.
+"""
+    replacement = original.replace("[before] Exact scanned bytes", "[after] Replaced")
+    page.write_text(original, encoding="utf-8")
+    relative = page.relative_to(vault).as_posix()
+    real_build_page_state = semantic_census.semantic_contract.build_page_state
+    observed_texts: list[str] = []
+
+    def mutate_after_first_parse(*args: object, **kwargs: object) -> object:
+        state = real_build_page_state(*args, **kwargs)
+        if str(args[1]) == relative:
+            observed_texts.append(str(args[2]))
+            if len(observed_texts) == 1:
+                page.write_text(replacement, encoding="utf-8")
+        return state
+
+    monkeypatch.setattr(
+        semantic_census.semantic_contract,
+        "build_page_state",
+        mutate_after_first_parse,
+    )
+
+    census = semantic_census.scan(vault)
+
+    assert observed_texts == [original]
+    assert census["categories"]["raw_frequencies"] == {"before": 1}
+    assert census["governance"]["relation_dispositions"] == {
+        "status": "current",
+        "counts": {"missing": 1},
+    }
+
+
+def test_adopt_semantic_census_separates_general_registry_findings_from_category_aliases(
+    tmp_path: Path,
+) -> None:
+    vault = _legacy_vault(tmp_path, kb=True)
+    schema = vault / "Knowledge Base" / "_Schema"
+    schema.mkdir(parents=True)
+    (schema / "semantic-language-registry.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "schema_version": 1,
+                "categories": {
+                    "config": {"aliases": ["shared-category"]},
+                    "policy": {"aliases": ["shared-category"]},
+                    "malformed": {"aliases": [123]},
+                },
+                "kinds": {
+                    "finding": {"aliases": ["shared-kind"]},
+                    "claim": {"aliases": ["shared-kind"]},
+                },
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+
+    census = semantic_census.scan(vault)
+
+    findings = census["categories"]["registry_findings"]
+    aliases = census["categories"]["alias_conflicts"]
+    assert len(findings) > len(aliases)
+    assert {finding["namespace"] for finding in findings} >= {"categories", "kinds"}
+    assert aliases
+    assert all(finding["code"] == "alias_conflict" for finding in aliases)
+    assert all(finding["namespace"] == "categories" for finding in aliases)
+    assert all(
+        str(finding.get("path", "")).startswith("categories.")
+        for finding in aliases
+    )
+
+
 def test_adopt_vault_surface_exposes_semantic_census_bounds(tmp_path: Path) -> None:
     vault = _legacy_vault(tmp_path, kb=False)
 

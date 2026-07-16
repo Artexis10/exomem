@@ -189,6 +189,14 @@ def _bounded_frequencies(counter: Counter[str]) -> tuple[dict[str, int], int]:
     return dict(retained), len(ordered) - len(retained)
 
 
+def _registry_finding_payload(
+    finding: semantic_language_registry.RegistryFinding,
+) -> dict[str, str]:
+    payload = finding.as_dict()
+    payload["namespace"] = finding.path.split(".", 1)[0]
+    return payload
+
+
 def _safe_span(diagnostic: Any) -> dict[str, int] | None:
     span = diagnostic.span
     if span is None:
@@ -223,9 +231,12 @@ def _category_collisions(
 def _governance_report(
     root: Path,
     *,
-    scanned_paths: list[str],
+    states: tuple[semantic_contract.SemanticPageState, ...],
+    relations: relation_registry.RelationRegistry,
+    language: semantic_language_registry.SemanticLanguageRegistry,
     complete_root_scan: bool,
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], set[str]]:
+    metadata_work: set[str] = set()
     kb_present = (root / kb_dirname()).is_dir()
     unavailable = {
         "kb_present": kb_present,
@@ -240,16 +251,32 @@ def _governance_report(
         },
     }
     if not kb_present:
-        return unavailable
+        return unavailable, metadata_work
     if not complete_root_scan:
-        return unavailable
+        return unavailable, metadata_work
 
+    metadata_work.add("saved_contracts")
     try:
         saved = memory_schema.load_saved_contracts(root)
+        kb_states = tuple(
+            state for state in states if state.path.startswith(kb_prefix())
+        )
+        identity_census = semantic_contract.StableIdentityCensus.from_states(kb_states)
+        corpus = semantic_contract.SemanticCorpusContext.from_states(
+            root,
+            states,
+            registry=relations,
+            identity_census=identity_census,
+        )
+        if any(state.eligible_compiled for state in kb_states):
+            metadata_work.add("relation_review_state")
         batch = semantic_writes.evaluate_posthoc_batch(
             root,
-            paths=[path for path in scanned_paths if path.startswith(kb_prefix())],
+            paths=[state.path for state in kb_states],
             operation="audit",
+            corpus=corpus,
+            language_registry=language,
+            saved_contracts=saved,
         )
     except (OSError, UnicodeDecodeError, ValueError) as error:
         unavailable["saved_contracts"].update(
@@ -264,7 +291,7 @@ def _governance_report(
                 "error": type(error).__name__,
             }
         )
-        return unavailable
+        return unavailable, metadata_work
 
     debt: Counter[str] = Counter()
     dispositions: Counter[str] = Counter()
@@ -275,18 +302,21 @@ def _governance_report(
         disposition = evaluation.contract_result.relation_disposition
         if disposition is not None:
             dispositions[disposition.kind] += 1
-    return {
-        "kb_present": True,
-        "saved_contracts": {
-            "status": "current",
-            "count": len(saved),
-            "debt": dict(sorted(debt.items())),
+    return (
+        {
+            "kb_present": True,
+            "saved_contracts": {
+                "status": "current",
+                "count": len(saved),
+                "debt": dict(sorted(debt.items())),
+            },
+            "relation_dispositions": {
+                "status": "current",
+                "counts": dict(sorted(dispositions.items())),
+            },
         },
-        "relation_dispositions": {
-            "status": "current",
-            "counts": dict(sorted(dispositions.items())),
-        },
-    }
+        metadata_work,
+    )
 
 
 def _safe_next_actions(
@@ -395,7 +425,7 @@ def scan(
     units = Counter(total=0, compact=0, rich=0)
     diagnostic_counts: Counter[str] = Counter()
     diagnostic_examples: list[dict[str, Any]] = []
-    scanned_paths: list[str] = []
+    page_states: list[semantic_contract.SemanticPageState] = []
     markdown_seen = 0
     markdown_scanned = 0
     markdown_omitted = 0
@@ -486,7 +516,6 @@ def scan(
             bytes_scanned += len(raw)
             markdown_scanned += 1
             rel_path = disk_path.relative_to(root_path).as_posix()
-            scanned_paths.append(rel_path)
             state = semantic_contract.build_page_state(
                 root_path,
                 rel_path,
@@ -494,6 +523,7 @@ def scan(
                 relation_registry=relations,
                 language_registry=language,
             )
+            page_states.append(state)
             document = state.document
             if document.is_valid:
                 parseable_pages += 1
@@ -544,10 +574,24 @@ def scan(
     canonical_values, canonical_omitted = _bounded_frequencies(canonical_frequencies)
     resolved_values, resolved_omitted = _bounded_frequencies(resolved_frequencies)
     registry_findings = [
-        finding.as_dict() for finding in language.findings[:effective_example_limit]
+        _registry_finding_payload(finding)
+        for finding in language.findings[:effective_example_limit]
     ]
     registry_findings_omitted = max(
         0, len(language.findings) - effective_example_limit
+    )
+    category_alias_findings = tuple(
+        finding
+        for finding in language.findings
+        if finding.code == "alias_conflict"
+        and finding.path.startswith("categories.")
+    )
+    alias_conflicts = [
+        _registry_finding_payload(finding)
+        for finding in category_alias_findings[:effective_example_limit]
+    ]
+    alias_conflicts_omitted = max(
+        0, len(category_alias_findings) - effective_example_limit
     )
     complete_root_scan = (
         not scope
@@ -556,11 +600,18 @@ def scan(
         and unreadable_files == 0
         and unreadable_directories == 0
     )
-    governance = _governance_report(
+    governance, governance_metadata_work = _governance_report(
         root_path,
-        scanned_paths=scanned_paths,
+        states=tuple(page_states),
+        relations=relations,
+        language=language,
         complete_root_scan=complete_root_scan,
     )
+    metadata_work = {
+        "relation_registry",
+        "semantic_language_registry",
+        *governance_metadata_work,
+    }
     contract_debt = sum(governance["saved_contracts"]["debt"].values())
     relation_counts = governance["relation_dispositions"]["counts"]
     relation_debt = sum(
@@ -596,6 +647,11 @@ def scan(
             "hidden_entries_omitted": hidden_omitted,
             "directory_entries_enumerated": directory_entries_enumerated,
             "directory_entry_budget_exhausted": directory_entry_budget_exhausted,
+            "metadata_work": {
+                "bounded": True,
+                "counted_as_markdown_bytes": False,
+                "sources": sorted(metadata_work),
+            },
             "truncated": truncated,
         },
         "units": dict(units),
@@ -613,8 +669,10 @@ def scan(
             "canonical_collisions_omitted": canonical_collision_omitted,
             "resolved_alias_collisions": resolved_alias_collisions,
             "resolved_alias_collisions_omitted": alias_collision_omitted,
-            "alias_conflicts": registry_findings,
-            "alias_conflicts_omitted": registry_findings_omitted,
+            "registry_findings": registry_findings,
+            "registry_findings_omitted": registry_findings_omitted,
+            "alias_conflicts": alias_conflicts,
+            "alias_conflicts_omitted": alias_conflicts_omitted,
         },
         "diagnostics": {
             "malformed_candidates": malformed_count,

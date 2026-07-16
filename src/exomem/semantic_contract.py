@@ -217,6 +217,22 @@ class StableIdentityCensus:
         )
         return StableIdentityCensus(tuple(entries))
 
+    @classmethod
+    def from_states(
+        cls,
+        states: Iterable[SemanticPageState],
+    ) -> StableIdentityCensus:
+        """Derive stable UUID ownership from already-built page states."""
+        return cls(
+            tuple(
+                StableIdentityEntry(
+                    state.path,
+                    state.identity if state.identity_kind == "exomem_id" else None,
+                )
+                for state in states
+            )
+        )
+
     def as_dict(self) -> dict[str, Any]:
         return {
             "entry_count": len(self.entries),
