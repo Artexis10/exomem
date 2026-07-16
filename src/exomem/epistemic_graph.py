@@ -615,6 +615,7 @@ def graph_context(
         seed_cap_hit = False
         unit_work_exhausted = False
         unit_parent_work_exhausted = False
+        seeds: list[dict[str, Any]]
         if unit_ref is not None:
             indexed = _seed_nodes(
                 conn,
@@ -825,7 +826,7 @@ def graph_context(
             warnings.append({"code": "scope_violations", "count": excluded_scope})
         if drift_counts:
             warnings.append(_drift_warning(drift_counts))
-        result = {
+        result: dict[str, Any] = {
             "available": True,
             "reason": None,
             "seeds": seeds,

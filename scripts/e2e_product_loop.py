@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import dataclasses
 import json
 import os
 import re
@@ -95,10 +96,16 @@ def _result_data(result: Any) -> Any:
 
 
 def _unwrap_result(value: Any) -> Any:
+    if dataclasses.is_dataclass(value) and not isinstance(value, type):
+        return _unwrap_result(dataclasses.asdict(value))
     if hasattr(value, "model_dump"):
-        value = value.model_dump(mode="json")
-    if isinstance(value, dict) and "result" in value:
-        return value["result"]
+        return _unwrap_result(value.model_dump(mode="json"))
+    if isinstance(value, dict):
+        value = {key: _unwrap_result(item) for key, item in value.items()}
+        if "result" in value:
+            return value["result"]
+    elif isinstance(value, (list, tuple)):
+        return [_unwrap_result(item) for item in value]
     return value
 
 
