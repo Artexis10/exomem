@@ -38,6 +38,24 @@ def _bootstrap(**_kwargs: object) -> int:
     return 1
 
 
+def test_hosted_cell_config_defaults_are_import_safe_without_posix_ids(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delattr(hosted_runtime.os, "geteuid", raising=False)
+    monkeypatch.delattr(hosted_runtime.os, "getegid", raising=False)
+
+    config = HostedCellConfig(
+        cell_id="cell-portable",
+        vault_root=tmp_path / "vault",
+        state_root=tmp_path / "state",
+        log_root=tmp_path / "logs",
+        service_credential=None,
+    )
+
+    assert config.runtime_uid == 0
+    assert config.runtime_gid == 0
+
+
 def test_v2_runtime_config_uses_bound_identity_without_plaintext_env_credential(
     tmp_path: Path,
 ) -> None:
