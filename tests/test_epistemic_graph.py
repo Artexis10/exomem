@@ -653,6 +653,45 @@ def test_graph_context_bounds_raw_edge_inspection_by_public_limits(
     assert any("edges capped" in item for item in context["truncation"])
 
 
+def test_graph_context_reports_edge_inspection_overflow(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    vault = _seed_graph_vault(tmp_path)
+    epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()
+    monkeypatch.setattr(epistemic_graph, "_edge_inspection_budget", lambda **_: 1)
+
+    context = epistemic_graph.graph_context(
+        vault, path=CURRENT, depth=1, max_nodes=80, max_edges=80
+    )
+
+    assert any("edge inspection capped at 1 record" in item for item in context["truncation"])
+
+
+def test_neighbor_edge_query_uses_limit_plus_one_overflow_sentinel(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class Result:
+        def fetchall(self):
+            return [{"edge_key": f"edge-{index}"} for index in range(4)]
+
+    class Connection:
+        def execute(self, sql, params):
+            captured["sql"] = sql
+            captured["params"] = params
+            return Result()
+
+    monkeypatch.setattr(epistemic_graph, "_edge_row_to_dict", lambda row: row)
+    rows, overflow = epistemic_graph._neighbor_edges(
+        Connection(), {"node:b", "node:a"}, set(), limit=3
+    )
+
+    assert str(captured["sql"]).endswith("ORDER BY edge_key LIMIT ?")
+    assert captured["params"] == ("node:a", "node:b", "node:a", "node:b", 4)
+    assert [row["edge_key"] for row in rows] == ["edge-0", "edge-1", "edge-2"]
+    assert overflow is True
+
+
 def test_unified_context_matches_quality_golden_and_is_markdown_read_only(
     tmp_path: Path,
 ) -> None:
