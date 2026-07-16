@@ -28,7 +28,7 @@
 
 ### Task 7
 
-- [ ] 2.4 Implement worker timestamp requests, speaker-verification metadata, and actionable blocked/failed persistence without changing ungated low-level extraction output.
+- [x] 2.4 Implement worker timestamp requests, speaker-verification metadata, and actionable blocked/failed persistence without changing ungated low-level extraction output.
 
 ## 3. Product Surface
 
