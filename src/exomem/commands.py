@@ -68,7 +68,7 @@ from . import observe_memory as observe_memory_module
 from . import overview as overview_module
 from . import provenance as provenance_module
 from . import query_data as query_data_module
-from . import query_log, retrieval_models, upload_tokens, vault
+from . import query_log, retrieval_models, semantic_census, upload_tokens, vault
 from . import readiness as readiness_module
 from . import reconcile as reconcile_module
 from . import recover_from_trash as recover_from_trash_module
@@ -2562,6 +2562,9 @@ def op_adopt(
     pack_limit: int = 6,
     manifest_path: str | None = None,
     selected_paths: list[str] | None = None,
+    semantic_max_files: int = semantic_census.DEFAULT_MAX_FILES,
+    semantic_max_bytes: int = semantic_census.DEFAULT_MAX_BYTES,
+    semantic_example_limit: int = semantic_census.DEFAULT_EXAMPLE_LIMIT,
 ) -> dict:
     """Adopt / import an existing vault safely: scan first, preserve originals.
 
@@ -2589,6 +2592,9 @@ def op_adopt(
         manifest_path: Optional markdown destination under Knowledge Base/ for
             save-manifest. A default under _Adoption/ is used when omitted.
         selected_paths: Explicit vault-relative legacy files for copy-as-sources or compile-selected.
+        semantic_max_files: Maximum Markdown files read by the scan-only semantic census.
+        semantic_max_bytes: Maximum total Markdown bytes read by the scan-only semantic census.
+        semantic_example_limit: Maximum examples per semantic census grouping.
     """
     try:
         return adopt_module.adopt(
@@ -2601,6 +2607,9 @@ def op_adopt(
             pack_limit=pack_limit,
             manifest_path=manifest_path,
             selected_paths=selected_paths,
+            semantic_max_files=semantic_max_files,
+            semantic_max_bytes=semantic_max_bytes,
+            semantic_example_limit=semantic_example_limit,
         )
     except adopt_module.AdoptError as e:
         raise ValueError(f"adopt: {e.code}: {e.reason}") from e
@@ -4287,6 +4296,9 @@ def op_adopt_vault(
     pack_limit: int = 6,
     manifest_path: str | None = None,
     selected_paths: list[str] | None = None,
+    semantic_max_files: int = semantic_census.DEFAULT_MAX_FILES,
+    semantic_max_bytes: int = semantic_census.DEFAULT_MAX_BYTES,
+    semantic_example_limit: int = semantic_census.DEFAULT_EXAMPLE_LIMIT,
 ) -> dict:
     """Adopt an existing vault safely without replacing originals.
 
@@ -4302,6 +4314,9 @@ def op_adopt_vault(
         pack_limit: Max suggested knowledge packs.
         manifest_path: Optional manifest destination.
         selected_paths: Explicit legacy files for copy/compile modes.
+        semantic_max_files: Maximum Markdown files read by the semantic census.
+        semantic_max_bytes: Maximum total Markdown bytes read by the semantic census.
+        semantic_example_limit: Maximum bounded semantic examples per grouping.
     """
     return op_adopt(
         vault_root,
@@ -4313,6 +4328,9 @@ def op_adopt_vault(
         pack_limit=pack_limit,
         manifest_path=manifest_path,
         selected_paths=selected_paths,
+        semantic_max_files=semantic_max_files,
+        semantic_max_bytes=semantic_max_bytes,
+        semantic_example_limit=semantic_example_limit,
     )
 
 

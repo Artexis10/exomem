@@ -12,7 +12,7 @@ import pytest
 import yaml
 
 from exomem import adopt as adopt_module
-from exomem import knowledge_packs
+from exomem import commands, knowledge_packs
 from exomem.__main__ import main
 
 
@@ -63,6 +63,220 @@ def test_adopt_scan_only_is_read_only_before_init(tmp_path: Path) -> None:
     assert report["governance"]["kb_present"] is False
     assert report["summary"]["kb"] == {"present": False}
     assert {a["action"] for a in report["next_actions"]} == {"scan-only", "initialize-kb"}
+
+
+def test_adopt_scan_only_reports_bounded_semantic_census_without_fabrication(
+    tmp_path: Path,
+) -> None:
+    vault = _legacy_vault(tmp_path, kb=False)
+    notes = vault / "Legacy Notes"
+    notes.mkdir()
+    (notes / "semantic.md").write_text(
+        """# Semantic sample
+
+- [Config] Compact observation. ^config-one
+
+## Finding
+- category: Rule
+
+Rich semantic unit.
+
+- [bad/category] malformed candidate
+- [x] ordinary task box
+
+```markdown
+- [hidden] fenced example
+```
+""",
+        encoding="utf-8",
+    )
+    before = _snapshot(vault)
+
+    report = adopt_module.adopt(vault, mode="scan-only")
+
+    assert _snapshot(vault) == before
+    census = report["semantic_census"]
+    assert census["read_only"] is True
+    assert census["coverage"]["markdown_files_scanned"] == 4
+    assert census["coverage"]["parseable_pages"] == 3
+    assert census["units"] == {"total": 2, "compact": 1, "rich": 1}
+    assert census["categories"]["raw_frequencies"] == {"Config": 1, "Rule": 1}
+    assert census["categories"]["canonical_frequencies"] == {"config": 1, "rule": 1}
+    assert census["categories"]["resolved_frequencies"] == {"config": 1, "rule": 1}
+    assert census["categories"]["open_categories_valid"] is True
+    assert census["diagnostics"]["malformed_candidates"] == 1
+    [example] = census["diagnostics"]["examples"]
+    assert example["path"] == "Legacy Notes/semantic.md"
+    assert example["code"] == "invalid_compact_category"
+    assert example["span"]["start_line"] == 10
+    encoded = json.dumps(census, sort_keys=True)
+    assert "ordinary task box" not in encoded
+    assert "fenced example" not in encoded
+    assert census["governance"] == {
+        "kb_present": False,
+        "saved_contracts": {"status": "unavailable", "count": 0, "debt": {}},
+        "relation_dispositions": {"status": "unavailable", "counts": {}},
+    }
+    assert {item["action"] for item in census["safe_next_actions"]} >= {
+        "review-malformed-candidates",
+        "initialize-kb",
+    }
+
+
+def test_adopt_scan_only_semantic_census_honors_subtree_hidden_and_resource_bounds(
+    tmp_path: Path,
+) -> None:
+    vault = _legacy_vault(tmp_path, kb=False)
+    focus = vault / "Focus"
+    focus.mkdir()
+    (focus / "a.md").write_text("- [alpha] First.\n", encoding="utf-8")
+    (focus / "b.md").write_text("- [beta] Second.\n", encoding="utf-8")
+    (focus / ".hidden.md").write_text("- [secret] Hidden.\n", encoding="utf-8")
+    (vault / "outside.md").write_text("- [outside] Ignore.\n", encoding="utf-8")
+    before = _snapshot(vault)
+
+    report = adopt_module.adopt(
+        vault,
+        mode="scan-only",
+        path="Focus",
+        include_hidden=False,
+        semantic_max_files=1,
+        semantic_max_bytes=1024,
+        semantic_example_limit=1,
+    )
+
+    assert _snapshot(vault) == before
+    census = report["semantic_census"]
+    assert census["scope"] == "Focus"
+    assert census["limits"] == {
+        "max_files": 1,
+        "max_bytes": 1024,
+        "example_limit": 1,
+        "include_hidden": False,
+    }
+    assert census["coverage"]["markdown_files_scanned"] == 1
+    assert census["coverage"]["markdown_files_omitted"] == 1
+    assert census["coverage"]["truncated"] is True
+    assert census["units"]["total"] == 1
+    assert set(census["categories"]["raw_frequencies"]) <= {"alpha", "beta"}
+    assert "secret" not in census["categories"]["raw_frequencies"]
+    assert "outside" not in census["categories"]["raw_frequencies"]
+
+
+def test_adopt_scan_only_semantic_census_reports_saved_governance_read_only(
+    tmp_path: Path,
+) -> None:
+    vault = _legacy_vault(tmp_path, kb=True)
+    schema = vault / "Knowledge Base" / "_Schema"
+    schema.mkdir(parents=True)
+    (schema / "semantic-language-registry.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "schema_version": 1,
+                "categories": {
+                    "config": {
+                        "description": "Configuration facts",
+                        "aliases": ["configuration"],
+                    }
+                },
+                "kinds": {},
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    contracts = schema / "contracts"
+    contracts.mkdir()
+    (contracts / "census.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "schema_version": 1,
+                "name": "census",
+                "scope": {"page_type": "insight"},
+                "validation": "strict",
+                "sample_size": 0,
+                "fields": {},
+                "blocks": {},
+                "kinds": {},
+                "categories": {"must_have": {"required": True}},
+                "relations": {},
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    page = vault / "Knowledge Base" / "Notes" / "semantic.md"
+    page.write_text(
+        """---
+type: insight
+exomem_id: 00000000-0000-4000-8000-000000000301
+title: Semantic
+status: active
+created: 2026-07-16
+updated: 2026-07-16
+sources: []
+tags: []
+---
+
+# Semantic
+
+- [Config] Canonical spelling.
+- [configuration] Alias spelling.
+""",
+        encoding="utf-8",
+    )
+    before = _snapshot(vault)
+
+    report = adopt_module.adopt(vault, mode="scan-only")
+
+    assert _snapshot(vault) == before
+    census = report["semantic_census"]
+    assert census["categories"]["raw_frequencies"] == {
+        "Config": 1,
+        "configuration": 1,
+    }
+    assert census["categories"]["canonical_frequencies"] == {
+        "config": 1,
+        "configuration": 1,
+    }
+    assert census["categories"]["resolved_frequencies"] == {"config": 2}
+    assert census["categories"]["resolved_alias_collisions"] == [
+        {
+            "resolved": "config",
+            "canonical_labels": ["config", "configuration"],
+            "count": 2,
+        }
+    ]
+    governance = census["governance"]
+    assert governance["kb_present"] is True
+    assert governance["saved_contracts"] == {
+        "status": "current",
+        "count": 1,
+        "debt": {"CONTRACT_REQUIRED_CATEGORY": 1},
+    }
+    assert governance["relation_dispositions"] == {
+        "status": "current",
+        "counts": {"missing": 1},
+    }
+    assert not (schema / "semantic-contract-activation.json").exists()
+
+
+def test_adopt_vault_surface_exposes_semantic_census_bounds(tmp_path: Path) -> None:
+    vault = _legacy_vault(tmp_path, kb=False)
+
+    report = commands.op_adopt_vault(
+        vault,
+        semantic_max_files=1,
+        semantic_max_bytes=1024,
+        semantic_example_limit=1,
+    )
+
+    assert report["semantic_census"]["limits"] == {
+        "max_files": 1,
+        "max_bytes": 1024,
+        "example_limit": 1,
+        "include_hidden": False,
+    }
 
 
 def test_adopt_suggests_builtin_packs_from_structure(tmp_path: Path) -> None:
