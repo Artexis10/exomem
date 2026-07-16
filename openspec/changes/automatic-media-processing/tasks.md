@@ -16,7 +16,7 @@
 
 ### Task 4
 
-- [ ] 2.1 Add failing watcher and runtime tests for direct audio discovery, debounce/deduplication, startup and periodic missed-event reconciliation, unsupported attachments, and no binary text-index dispatch.
+- [x] 2.1 Add failing watcher and runtime tests for direct audio discovery, debounce/deduplication, startup and periodic missed-event reconciliation, unsupported attachments, and no binary text-index dispatch.
 
 ### Task 5
 
