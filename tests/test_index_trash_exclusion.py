@@ -58,6 +58,22 @@ def test_graph_coordination_directory_is_excluded_from_both_full_walkers(
     assert coordination_note not in set(walk_vault_md(vault))
 
 
+def test_nested_dot_trash_directory_is_excluded_from_both_full_walkers(
+    vault: Path,
+) -> None:
+    kb = vault / "Knowledge Base"
+    trashed_note = kb / "Imported" / "Legacy" / ".trash" / "gone.md"
+    normal_note = kb / "Imported" / "Legacy" / "kept.md"
+    trashed_note.parent.mkdir(parents=True, exist_ok=True)
+    normal_note.write_text("# Kept\n", encoding="utf-8")
+    trashed_note.write_text("# Gone\n", encoding="utf-8")
+
+    assert normal_note in set(find_corpus.walk_md(kb))
+    assert normal_note in set(walk_vault_md(vault))
+    assert trashed_note not in set(find_corpus.walk_md(kb))
+    assert trashed_note not in set(walk_vault_md(vault))
+
+
 def test_index_sync_upsert_drops_excluded_paths(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
