@@ -360,6 +360,41 @@ def test_transient_stable_commit_precondition_is_retried_without_repeating_asr(
     assert "[0:00] recovered transcript" in sidecar.read_text(encoding="utf-8")
 
 
+def test_pending_state_cas_preserves_concurrent_completed_transcript(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    result = _preserve_media_stub(vault, filename="pending-cas.m4a")
+    sidecar = vault / result.sidecar_path
+    expected_hash = media_worker._content_digest(sidecar)
+    assert expected_hash is not None
+    completed_bytes: bytes | None = None
+    real_batch = preserve.batch_atomic_write
+
+    def _complete_before_pending_write(*args, **kwargs):
+        nonlocal completed_bytes
+        completed = sidecar.read_text(encoding="utf-8").replace(
+            "extracted_by: pending", "extracted_by: external-asr+timed"
+        )
+        completed += "\n[0:00] External completed transcript must survive.\n"
+        sidecar.write_text(completed, encoding="utf-8")
+        completed_bytes = sidecar.read_bytes()
+        return real_batch(*args, **kwargs)
+
+    monkeypatch.setattr(preserve, "batch_atomic_write", _complete_before_pending_write)
+
+    updated = preserve.update_sidecar_processing_pending(
+        vault,
+        sidecar,
+        attempts=1,
+        expected_hash=expected_hash,
+    )
+
+    assert updated is False
+    assert completed_bytes is not None
+    assert sidecar.read_bytes() == completed_bytes
+    assert "extracted_by: external-asr+timed" in sidecar.read_text(encoding="utf-8")
+
+
 def test_clip_compute_stays_outside_guard_and_index_commit_is_inside(
     vault, monkeypatch: pytest.MonkeyPatch
 ) -> None:

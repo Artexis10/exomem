@@ -333,6 +333,7 @@ class MediaWorker:
                     self._vault_root,
                     job.sidecar_path,
                     attempts=max(1, job.attempts),
+                    expected_hash=expected_sidecar,
                 )
             detail = ", ".join(stale_parts) or "commit precondition changed"
             return _ProcessOutcome(_STALE, f"stale extraction: {detail}")

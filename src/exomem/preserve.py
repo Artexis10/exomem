@@ -37,6 +37,7 @@ from typing import BinaryIO
 from . import indexes, memory_refs, privacy_log
 from .kbdir import kb_prefix
 from .vault import (
+    ContentHashMismatchError,
     PlannedWrite,
     batch_atomic_write,
     escape_wikilinks_for_log,
@@ -719,7 +720,8 @@ def update_sidecar_processing_pending(
     sidecar_path: Path,
     *,
     attempts: int,
-) -> None:
+    expected_hash: str | None = None,
+) -> bool:
     """Keep changed-in-flight media automatic and actionable until reconciliation."""
     content = sidecar_path.read_text(encoding="utf-8")
     fields = (
@@ -732,7 +734,20 @@ def update_sidecar_processing_pending(
     )
     for field, value in fields:
         content = _set_frontmatter_field(content, field, value)
-    batch_atomic_write([PlannedWrite(path=sidecar_path, content=content)], vault_root=vault_root)
+    try:
+        batch_atomic_write(
+            [
+                PlannedWrite(
+                    path=sidecar_path,
+                    content=content,
+                    expected_hash=expected_hash,
+                )
+            ],
+            vault_root=vault_root,
+        )
+    except ContentHashMismatchError:
+        return False
+    return True
 
 
 def _set_frontmatter_field(content: str, field: str, value: str) -> str:
