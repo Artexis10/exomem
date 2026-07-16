@@ -24,7 +24,7 @@
 
 ### Task 6
 
-- [ ] 2.3 Add failing extraction/worker tests for explicitly timestamped automatic ASR, `.mp4` regression behavior, configured diarization with neutral/profile labels, unavailable dependencies, corrupt media, durable failure state, and successful sidecar/index refresh.
+- [x] 2.3 Add failing extraction/worker tests for explicitly timestamped automatic ASR, `.mp4` regression behavior, configured diarization with neutral/profile labels, unavailable dependencies, corrupt media, durable failure state, and successful sidecar/index refresh.
 
 ### Task 7
 
