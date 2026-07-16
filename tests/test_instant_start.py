@@ -905,6 +905,60 @@ def test_warm_defer_is_durable_before_in_memory_item_is_visible(
     assert deferred_index.status(tmp_path)["count"] == 1
 
 
+def test_warm_defer_stays_in_memory_when_durable_receipt_creation_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
+    readiness.begin_warm()
+    path = tmp_path / "Knowledge Base" / "Notes" / "store-failed.md"
+    path.parent.mkdir(parents=True)
+    path.write_text("# failed store\n", encoding="utf-8")
+
+    def fail_receipt(*_args, **_kwargs):
+        raise OSError("registry unavailable")
+
+    monkeypatch.setattr(deferred_index, "add_receipts", fail_receipt)
+    monkeypatch.setattr(
+        embeddings,
+        "get_model",
+        lambda: pytest.fail("warm-deferred write loaded the model"),
+    )
+
+    status = embeddings.upsert_after_write_status(tmp_path, [path])
+
+    assert status.code == "deferred_warmup"
+    [(item_vault, item_paths, receipts)] = readiness.mark_ready("embeddings")
+    assert item_vault == tmp_path
+    assert list(item_paths) == [path]
+    assert list(receipts) == []
+
+
+def test_uppercase_markdown_warm_defer_has_durable_receipt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
+    readiness.begin_warm()
+    path = tmp_path / "Knowledge Base" / "Notes" / "uppercase.MD"
+    path.parent.mkdir(parents=True)
+    path.write_text("# uppercase\n", encoding="utf-8")
+    monkeypatch.setattr(
+        embeddings,
+        "get_model",
+        lambda: pytest.fail("warm-deferred write loaded the model"),
+    )
+
+    status = embeddings.upsert_after_write_status(tmp_path, [path])
+
+    assert status.code == "deferred_warmup"
+    [(item_vault, item_paths, receipts)] = readiness.mark_ready("embeddings")
+    assert item_vault == tmp_path
+    assert list(item_paths) == [path]
+    assert list(receipts) == deferred_index.snapshot(tmp_path)
+    assert [receipt.rel_path for receipt in receipts] == [
+        "Knowledge Base/Notes/uppercase.MD"
+    ]
+
+
 @pytest.mark.parametrize(
     ("mode_name", "preload_succeeds", "status_name", "receipt_cleared"),
     [

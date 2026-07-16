@@ -84,7 +84,13 @@ def add_receipts(vault_root: Path, rel_paths: list[str]) -> list[DeferredReceipt
 def _add_receipts(
     vault_root: Path, rel_paths: list[str]
 ) -> tuple[list[DeferredReceipt], int]:
-    rels = sorted({rel.replace("\\", "/") for rel in rel_paths if rel.endswith(".md")})
+    rels = sorted(
+        {
+            rel.replace("\\", "/")
+            for rel in rel_paths
+            if rel.lower().endswith(".md")
+        }
+    )
     if not rels:
         return [], 0
     now = time.time()
@@ -173,7 +179,12 @@ def snapshot(
         return []
     conn = _connect(vault_root, create=False)
     try:
-        sql = "SELECT rel_path, revision FROM semantic_upserts ORDER BY rel_path"
+        columns = {
+            str(row[1])
+            for row in conn.execute("PRAGMA table_info(semantic_upserts)")
+        }
+        revision = "revision" if "revision" in columns else "1 AS revision"
+        sql = f"SELECT rel_path, {revision} FROM semantic_upserts ORDER BY rel_path"
         params: tuple[Any, ...] = ()
         if limit is not None:
             sql += " LIMIT ?"

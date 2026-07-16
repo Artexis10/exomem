@@ -1079,9 +1079,9 @@ def upsert_after_write_status(
             try:
                 race_receipts = deferred_index.add_receipts(vault_root, rels)
             except (OSError, sqlite3.Error):
-                log.warning("durable warm defer failed; embedding inline")
+                log.warning("durable warm defer failed; deferring in memory only")
                 race_receipts = []
-            if race_receipts and readiness.defer(
+            if readiness.defer(
                 "embeddings", (vault_root, tuple(md_paths), tuple(race_receipts))
             ):
                 log.info(

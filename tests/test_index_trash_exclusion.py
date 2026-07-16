@@ -413,6 +413,48 @@ def test_drain_deferred_work_processes_and_clears_semantic_upserts(
     assert index_sync.deferred_work_status(vault)["semantic_upserts"]["count"] == 0
 
 
+def test_drain_legacy_receipt_registry_before_any_writable_migration(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import embeddings
+
+    rel = "Knowledge Base/Notes/Insights/legacy-drain.md"
+    target = vault / rel
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("# legacy drain\n", encoding="utf-8")
+    registry = deferred_index.store_path(vault)
+    registry.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(registry)
+    try:
+        conn.execute(
+            "CREATE TABLE semantic_upserts ("
+            "rel_path TEXT PRIMARY KEY, created_at REAL NOT NULL, "
+            "updated_at REAL NOT NULL)"
+        )
+        conn.execute(
+            "CREATE TABLE full_upserts ("
+            "rel_path TEXT PRIMARY KEY, created_at REAL NOT NULL, "
+            "updated_at REAL NOT NULL)"
+        )
+        conn.execute(
+            "INSERT INTO semantic_upserts VALUES (?, 1, 1)",
+            (rel,),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    monkeypatch.setattr(
+        embeddings,
+        "upsert_after_write_status",
+        lambda *_args, **_kwargs: embeddings.EmbeddingSyncStatus(
+            "completed", "embedding_upsert_completed", 1
+        ),
+    )
+
+    assert index_sync.drain_deferred_work(vault) == 1
+    assert deferred_index.snapshot(vault) == []
+
+
 def test_drain_deferred_work_preserves_failed_semantic_upserts(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
