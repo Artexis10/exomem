@@ -105,7 +105,7 @@ resource "b2_application_key" "recovery_restore" {
 resource "b2_application_key" "recovery_delete" {
   key_name     = "exomem-recovery-delete"
   bucket_ids   = [b2_bucket.recovery.bucket_id]
-  capabilities = ["bypassGovernance", "deleteFiles", "listBuckets", "listFiles", "readFiles", "readFileRetentions"]
+  capabilities = ["deleteFiles", "listBuckets", "listFiles", "readFiles", "readFileRetentions"]
 }
 
 resource "b2_application_key" "user_export_upload" {
@@ -145,13 +145,6 @@ resource "b2_application_key" "database_backup_restore" {
   bucket_ids   = [b2_bucket.database_backup.bucket_id]
   name_prefix  = "database-backup/"
   capabilities = ["listBuckets", "listFiles", "readFiles", "readFileRetentions"]
-}
-
-resource "b2_application_key" "database_backup_delete" {
-  key_name     = "exomem-database-backup-delete-jit"
-  bucket_ids   = [b2_bucket.database_backup.bucket_id]
-  name_prefix  = "database-backup/"
-  capabilities = ["bypassGovernance", "deleteFiles", "listBuckets", "listFiles", "readFiles", "readFileRetentions"]
 }
 
 resource "b2_application_key" "etcd_snapshot_upload" {

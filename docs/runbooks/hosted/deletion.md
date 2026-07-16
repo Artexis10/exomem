@@ -23,16 +23,24 @@ Use the product destroy action. It immediately revokes service, stops billing,
 removes online resources, and remains pending while Object Lock protects recovery
 data. Never force-delete finalizers or buckets.
 
-The continuously reconciled `exomem-deletion-worker` is the only workload that
-receives HCloud write plus the tenant-recovery and user-export delete
-credentials. Complete database backups are system-scoped and are never exposed
-to tenant deletion; their aggregate retention cleanup is part of database
-durability. The deletion worker receives the provider-recovery public verifier,
-never the signing key. Its
-admission policy permits mutation only in opaque `exo-*` tenant namespaces or
-against a PV carrying an authenticated recovery envelope; its Secret RBAC is
-delete-only. The separate `exomem-volume-worker` owns authenticated PV/PVC and
-HCloud lifecycle work with the same governed provider-identity signing seed.
+`exomem-deletion-dispatcher` is the minute-scheduled, credential-free CronJob. It
+atomically claims one eligible destroy/discard operation under a precomputed
+exact `exomem-deletion-<16 lowercase hex>` Job identity before creating that
+Job; when no work exists it creates nothing. The Job resumes only its named,
+unexpired claim, and a failed Kubernetes create leaves a bounded claim that
+expires for retry. Its
+namespaced RBAC can create/get/list/watch Jobs only, and admission restricts the
+created Job to the pinned deletion-worker image, command, credentials, mounts,
+`exomem-deletion-worker` service account, and deadline. Only that short-lived Job receives HCloud write,
+the wrapping key and public recovery verifier, and the tenant-recovery and
+user-export delete credentials. Complete database backups are system-scoped,
+have no delete credential synced into K3s, and are never exposed to tenant
+deletion. The deletion Job receives the provider-recovery public verifier, never
+the signing key. Its worker admission policy permits mutation only in opaque
+`exo-*` tenant namespaces or against a PV carrying an authenticated recovery
+envelope; its Secret RBAC is delete-only. The separate `exomem-volume-worker`
+owns authenticated PV/PVC and HCloud lifecycle work with the same governed
+provider-identity signing seed.
 
 ```bash
 kubectl -n exomem-platform port-forward service/exomem-provisioner 18080:8080
@@ -58,8 +66,20 @@ curl --fail-with-body --silent --show-error --max-redirs 0 --max-time 30 \
 ```bash
 kubectl get all,pvc,secret,ingressroute -A -l "exomem.io/tenant=$tenant_id"
 kubectl get pv -o jsonpath='{range .items[*]}{.metadata.labels.exomem\.io/tenant}{"\n"}{end}'
-kubectl -n exomem-platform rollout status deployment/exomem-deletion-worker --timeout=120s
+kubectl -n exomem-platform get cronjob/exomem-deletion-dispatcher
+kubectl -n exomem-platform get jobs -l exomem.io/deletion-job=true
 ```
 
 Final `deleted` requires independently true compute, storage, key, and all-tenant-
 resource proofs after locked objects expire and provider absence is verified.
+The provider proof starts from the durable tenant recovery and plaintext-delivery
+ledgers, then performs an exact-key B2 version/marker check for each recorded
+reference with an explicit page size and hard page/item/cursor bounds, stopping
+as soon as the listing moves lexicographically into prefix siblings. It takes the
+maximum durable-row/live retention deadline for versions, markers, and phantom
+expected versions, then deletes only exact version IDs after that lock expires and
+must re-read the ledger to prove every provider object absent and every wrapped
+key erased before completion. A crash after object deletion but before key
+erasure therefore resumes key destruction instead of producing a false final
+proof. Governance-retention bypass and routine whole-bucket scans are not
+permitted.

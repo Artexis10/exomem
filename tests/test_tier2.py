@@ -294,8 +294,10 @@ def test_move_file_updates_inbound_wikilinks(vault: Path) -> None:
     # Set up: drop a file that wikilinks to a known insight.
     referrer_path = vault / "Knowledge Base" / "Notes" / "Insights" / "referrer.md"
     referrer_path.write_text(
-        "---\ntype: insight\ncreated: 2026-05-23\nupdated: 2026-05-23\ntags: []\n---\n"
-        "# Referrer\n\nSee [[Knowledge Base/Notes/Insights/progressive-disclosure-without-mode-fragmentation]] for context.\n",
+        "---\ntype: insight\nstatus: draft\ncreated: 2026-05-23\n"
+        "updated: 2026-05-23\ntags: []\n---\n"
+        "# Referrer\n\nSee [[Knowledge Base/Notes/Insights/"
+        "progressive-disclosure-without-mode-fragmentation]] for context.\n",
         encoding="utf-8",
     )
     src_rel = "Knowledge Base/Notes/Insights/progressive-disclosure-without-mode-fragmentation.md"
@@ -319,10 +321,14 @@ def test_move_file_rewrites_wikilinks_with_anchor(vault: Path) -> None:
     """
     referrer_path = vault / "Knowledge Base" / "Notes" / "Insights" / "anchor-referrer.md"
     referrer_path.write_text(
-        "---\ntype: insight\ncreated: 2026-05-28\nupdated: 2026-05-28\ntags: []\n---\n"
+        "---\ntype: insight\nstatus: draft\ncreated: 2026-05-28\n"
+        "updated: 2026-05-28\ntags: []\n---\n"
         "# Anchor Referrer\n\n"
-        "See [[Knowledge Base/Notes/Insights/progressive-disclosure-without-mode-fragmentation#Mechanism|the mechanism]] "
-        "and [[Notes/Insights/progressive-disclosure-without-mode-fragmentation#Mechanism]] (stripped form).\n",
+        "See [[Knowledge Base/Notes/Insights/"
+        "progressive-disclosure-without-mode-fragmentation"
+        "#Mechanism|the mechanism]] and [[Notes/Insights/"
+        "progressive-disclosure-without-mode-fragmentation"
+        "#Mechanism]] (stripped form).\n",
         encoding="utf-8",
     )
     src_rel = "Knowledge Base/Notes/Insights/progressive-disclosure-without-mode-fragmentation.md"
@@ -365,7 +371,11 @@ def test_move_file_allows_intra_sources_relocation(vault: Path) -> None:
     src_rel = "Knowledge Base/Sources/Articles/2026-05-04-best-egcg-supplements.md"
     dst_rel = "Knowledge Base/Sources/Articles/Health/2026-05-04-best-egcg-supplements.md"
     result = move_module.move_file(
-        vault, old_path=src_rel, new_path=dst_rel, today=TODAY
+        vault,
+        old_path=src_rel,
+        new_path=dst_rel,
+        update_wikilinks=False,
+        today=TODAY,
     )
     assert not (vault / src_rel).exists()
     assert (vault / dst_rel).exists()
@@ -377,7 +387,10 @@ def test_move_file_refuses_into_sources_from_outside(vault: Path) -> None:
     with pytest.raises(move_module.MoveFileError) as exc:
         move_module.move_file(
             vault,
-            old_path="Knowledge Base/Notes/Insights/progressive-disclosure-without-mode-fragmentation.md",
+            old_path=(
+                "Knowledge Base/Notes/Insights/"
+                "progressive-disclosure-without-mode-fragmentation.md"
+            ),
             new_path="Knowledge Base/Sources/Articles/smuggled-in.md",
             today=TODAY,
         )
@@ -420,13 +433,17 @@ def test_delete_file_refuses_when_inbound_links_exist(vault: Path) -> None:
     referrer = vault / "Knowledge Base" / "Notes" / "Insights" / "referrer.md"
     referrer.write_text(
         "---\ntype: insight\ncreated: 2026-05-23\nupdated: 2026-05-23\ntags: []\n---\n"
-        "# Referrer\n\nLinks to [[Knowledge Base/Notes/Insights/progressive-disclosure-without-mode-fragmentation]].\n",
+        "# Referrer\n\nLinks to [[Knowledge Base/Notes/Insights/"
+        "progressive-disclosure-without-mode-fragmentation]].\n",
         encoding="utf-8",
     )
     with pytest.raises(delete_module.DeleteFileError) as exc:
         delete_module.delete_file(
             vault,
-            path="Knowledge Base/Notes/Insights/progressive-disclosure-without-mode-fragmentation.md",
+            path=(
+                "Knowledge Base/Notes/Insights/"
+                "progressive-disclosure-without-mode-fragmentation.md"
+            ),
             confirm=True,
             today=TODAY,
         )
@@ -437,10 +454,17 @@ def test_delete_file_force_orphan_overrides(vault: Path) -> None:
     referrer = vault / "Knowledge Base" / "Notes" / "Insights" / "referrer.md"
     referrer.write_text(
         "---\ntype: insight\ncreated: 2026-05-23\nupdated: 2026-05-23\ntags: []\n---\n"
-        "# Referrer\n\n[[Knowledge Base/Notes/Insights/progressive-disclosure-without-mode-fragmentation]]\n",
+        "# Referrer\n\n[[Knowledge Base/Notes/Insights/"
+        "progressive-disclosure-without-mode-fragmentation]]\n",
         encoding="utf-8",
     )
-    target = vault / "Knowledge Base" / "Notes" / "Insights" / "progressive-disclosure-without-mode-fragmentation.md"
+    target = (
+        vault
+        / "Knowledge Base"
+        / "Notes"
+        / "Insights"
+        / "progressive-disclosure-without-mode-fragmentation.md"
+    )
     delete_module.delete_file(
         vault,
         path=str(target.relative_to(vault).as_posix()),
@@ -628,7 +652,8 @@ def test_list_inbound_links_finds_matches(vault: Path) -> None:
     referrer = vault / "Knowledge Base" / "Notes" / "Insights" / "referrer.md"
     referrer.write_text(
         "---\ntype: insight\ncreated: 2026-05-23\nupdated: 2026-05-23\ntags: []\n---\n"
-        "# Referrer\n\nLinks to [[Knowledge Base/Notes/Insights/progressive-disclosure-without-mode-fragmentation]].\n",
+        "# Referrer\n\nLinks to [[Knowledge Base/Notes/Insights/"
+        "progressive-disclosure-without-mode-fragmentation]].\n",
         encoding="utf-8",
     )
     result = inbound_module.list_inbound_links(
@@ -732,7 +757,8 @@ def _trash_a_file(vault: Path, rel: str) -> tuple[str, str]:
     abs_path = vault / rel
     if not abs_path.exists():
         abs_path.write_text(
-            "---\ntype: insight\ncreated: 2026-05-23\nupdated: 2026-05-23\ntags: []\n---\n# x\n",
+            "---\ntype: insight\nstatus: draft\ncreated: 2026-05-23\n"
+            "updated: 2026-05-23\ntags: []\n---\n# x\n",
             encoding="utf-8",
         )
     result = delete_module.delete_file(
@@ -811,7 +837,10 @@ def test_recover_from_trash_refuses_non_trash_paths(vault: Path) -> None:
     with pytest.raises(recover_module.RecoverError) as exc:
         recover_module.recover_from_trash(
             vault,
-            trash_path="Knowledge Base/Notes/Insights/progressive-disclosure-without-mode-fragmentation.md",
+            trash_path=(
+                "Knowledge Base/Notes/Insights/"
+                "progressive-disclosure-without-mode-fragmentation.md"
+            ),
             today=TODAY,
         )
     assert exc.value.code == "NOT_IN_TRASH"
@@ -890,7 +919,14 @@ def test_tier2_registered_by_default(
     monkeypatch.delenv("EXOMEM_DISABLE_TIER2", raising=False)
     names = _registered_tool_names(monkeypatch)
     # Tier 1 read/write ops are always present...
-    assert {"ask_memory", "read_memory", "remember", "capture_source", "edit_memory", "review_memory"} <= names
+    assert {
+        "ask_memory",
+        "read_memory",
+        "remember",
+        "capture_source",
+        "edit_memory",
+        "review_memory",
+    } <= names
     # ...and so are the Tier 2 escape hatches when the flag is unset.
     assert TIER2_TOOLS <= names
 
@@ -901,7 +937,15 @@ def test_tier2_dropped_when_disabled(
     monkeypatch.setenv("EXOMEM_DISABLE_TIER2", "1")
     names = _registered_tool_names(monkeypatch)
     # Tier 1 stays fully registered — only the escape hatches drop.
-    assert {"ask_memory", "read_memory", "remember", "capture_source", "edit_memory", "review_memory", "connect_memory"} <= names
+    assert {
+        "ask_memory",
+        "read_memory",
+        "remember",
+        "capture_source",
+        "edit_memory",
+        "review_memory",
+        "connect_memory",
+    } <= names
     assert names.isdisjoint(TIER2_TOOLS)
 
 

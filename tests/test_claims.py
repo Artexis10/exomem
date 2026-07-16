@@ -24,10 +24,11 @@ from exomem import (
     claims,
     corpus_aware,
     embeddings,
-    find as find_module,
     sidecar_store,
 )
-
+from exomem import (
+    find as find_module,
+)
 
 # ---------------- extraction (deterministic, torch-free) ----------------
 
@@ -40,6 +41,36 @@ def test_extract_insight_uses_claim_section() -> None:
     assert "Tools should retrieve from owned files." in out
     # The claim body is the Claim section, NOT the Why section.
     assert "Because silos." not in out
+
+
+def test_extract_claim_uses_first_rich_claim_not_compact_observation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    body = """\
+- [claim] Compact observation must not win
+
+## Claim
+
+First rich claim wins.
+
+## Claim
+
+Second rich claim loses.
+"""
+    parse_calls = 0
+    original_parse = claims.semantic_units.parse_semantic_units
+
+    def counted_parse(*args, **kwargs):
+        nonlocal parse_calls
+        parse_calls += 1
+        return original_parse(*args, **kwargs)
+
+    monkeypatch.setattr(claims.semantic_units, "parse_semantic_units", counted_parse)
+
+    result = claims.extract_claim_text("Title", body, page_type="insight")
+
+    assert result == "Title\n\nFirst rich claim wins."
+    assert parse_calls == 1
 
 
 def test_extract_experiment_uses_conclusion_section() -> None:

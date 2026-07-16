@@ -8,11 +8,12 @@ embedding-dependent `tension` path is tested by monkeypatching
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
 
-from exomem import context_pack, corpus_aware, epistemic_graph
+from exomem import context_pack, corpus_aware, epistemic_graph, semantic_blocks
 from exomem import find as find_module
 from exomem.find import Hit
 
@@ -332,6 +333,48 @@ def test_pack_without_graph_enrichment_preserves_shape(cluster: Path) -> None:
         "embeddings_available",
         "truncation",
     }
+
+
+def test_pack_parses_each_readable_page_once_and_preserves_exact_json(
+    cluster: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    hits = [_hit(ALPHA_P), _hit(BETA_P)]
+    parse_calls = 0
+    original_parse = context_pack.semantic_units.parse_semantic_units
+
+    def counted_parse(*args, **kwargs):
+        nonlocal parse_calls
+        parse_calls += 1
+        return original_parse(*args, **kwargs)
+
+    monkeypatch.setattr(
+        context_pack.semantic_units, "parse_semantic_units", counted_parse
+    )
+
+    actual = context_pack.assemble_pack(cluster, hits)
+    legacy_block_map = {}
+    for rel_path in (ALPHA_P, BETA_P):
+        page = find_module._CACHE.get(cluster / rel_path, cluster)
+        blocks = semantic_blocks.parse_semantic_blocks(
+            page.body, validate=False
+        ).blocks
+        if blocks:
+            legacy_block_map[rel_path] = [block.to_dict() for block in blocks]
+    expected = {
+        "packed_paths": actual["packed_paths"],
+        "claims": actual["claims"],
+        "semantic_blocks": legacy_block_map,
+        "neighborhood": actual["neighborhood"],
+        "contradictions": actual["contradictions"],
+        "embeddings_available": actual["embeddings_available"],
+        "truncation": actual["truncation"],
+    }
+
+    assert parse_calls == 2
+    assert json.dumps(actual, ensure_ascii=False, sort_keys=False) == json.dumps(
+        expected, ensure_ascii=False, sort_keys=False
+    )
 
 
 def test_graph_enriched_pack_includes_typed_neighborhood(cluster: Path) -> None:

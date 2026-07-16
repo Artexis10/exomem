@@ -110,19 +110,19 @@ def test_durability_has_object_lock_retention_and_split_credentials() -> None:
     assert 'capabilities = ["listBuckets", "listFiles", "readFiles"]' in storage
     assert 'key_name     = "exomem-recovery-delete"' in storage
     assert (
-        'capabilities = ["bypassGovernance", "deleteFiles", "listBuckets", "listFiles", '
-        '"readFiles", "readFileRetentions"]'
+        'capabilities = ["deleteFiles", "listBuckets", "listFiles", "readFiles", '
+        '"readFileRetentions"]'
         in storage
     )
     assert 'key_name     = "exomem-database-backup-upload"' in storage
     assert 'key_name     = "exomem-database-backup-restore-jit"' in storage
-    assert 'key_name     = "exomem-database-backup-delete-jit"' in storage
-    assert storage.count('"bypassGovernance"') == 2
+    assert 'key_name     = "exomem-database-backup-delete-jit"' not in storage
+    assert '"bypassGovernance"' not in storage
     assert 'key_name     = "exomem-etcd-snapshot-upload"' in storage
     assert 'key_name     = "exomem-etcd-snapshot-restore-jit"' in storage
-    assert storage.count('name_prefix  = "database-backup/"') == 3
+    assert storage.count('name_prefix  = "database-backup/"') == 2
     assert storage.count('"writeFileRetentions"') == 2
-    assert storage.count('"readFileRetentions"') == 6
+    assert storage.count('"readFileRetentions"') == 5
     assert storage.count('name_prefix  = "etcd-snapshot/"') == 2
     assert 'key_name     = "exomem-user-export-upload"' in storage
     assert 'key_name     = "exomem-user-export-restore"' in storage
@@ -134,7 +134,6 @@ def test_durability_has_object_lock_retention_and_split_credentials() -> None:
         "recovery_delete_application_key",
         "database_backup_upload_application_key",
         "database_backup_restore_application_key",
-        "database_backup_delete_application_key",
         "etcd_snapshot_upload_application_key",
         "etcd_snapshot_restore_application_key",
         "user_export_upload_application_key",
@@ -144,6 +143,8 @@ def test_durability_has_object_lock_retention_and_split_credentials() -> None:
     ):
         block = outputs.split(f'output "{secret_output}"', 1)[1].split("}", 1)[0]
         assert re.search(r"sensitive\s*=\s*true", block)
+
+    assert "database_backup_delete_application_key" not in outputs
 
 
 def test_durability_bucket_outputs_have_one_exact_platform_configmap_contract() -> None:

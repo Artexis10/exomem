@@ -30,13 +30,14 @@ registry is opportunistic: a missed registration merely costs the old harmless e
 
 from __future__ import annotations
 
+import json
 import logging
 import threading
 import time
 from collections.abc import Iterable
 from pathlib import Path
 
-from . import freshness, index_sync, media_processing, mode
+from . import freshness, index_sync, media_processing, mode, semantic_writes
 from .kbdir import kb_dirname, kb_prefix
 
 log = logging.getLogger(__name__)
@@ -547,6 +548,27 @@ class FileWatcher:
         if not (up_rels or del_rels):
             return
 
+        kb_ups = [p for p in ups if self._is_kb(p)]
+        if kb_ups:
+            try:
+                posthoc = semantic_writes.evaluate_posthoc_batch(
+                    self._vault_root,
+                    paths=kb_ups,
+                    operation="watcher",
+                )
+                summary = posthoc.as_dict()
+                logger = (
+                    log.warning
+                    if summary["semantic_contract_findings"]
+                    else log.info
+                )
+                logger(
+                    "file watcher: semantic posthoc batch %s",
+                    json.dumps(summary, ensure_ascii=True, sort_keys=True),
+                )
+            except Exception:  # noqa: BLE001 — posthoc reporting never blocks fan-out
+                log.exception("file watcher: semantic posthoc evaluation failed")
+
         # Inbound + resolver: the whole vault (both index sibling folders). The
         # resolver patch also restamps its freshness triple, so the next graph
         # query HITS the cache instead of paying the full-vault rebuild.
@@ -564,7 +586,6 @@ class FileWatcher:
             log.exception("file watcher: resolver publish failed")
 
         # Index sidecars (embedding + lexical): Knowledge Base markdown only.
-        kb_ups = [p for p in ups if self._is_kb(p)]
         kb_del_rels = [r for r in del_rels if r.startswith(kb_prefix())]
         policy = self._watcher_policy()
         defer_semantic = False

@@ -12,9 +12,9 @@ from sqlalchemy.ext.asyncio import (
 from sqlalchemy.pool import StaticPool
 
 from .config import ProvisionerSettings
-from .models import Base
+from .models import Base, CapacityLedger
 
-DATABASE_REVISION = "0003_cell_operation_lock"
+DATABASE_REVISION = "0005_capacity_reservations"
 
 
 class ProvisionerDatabase:
@@ -56,6 +56,13 @@ class ProvisionerDatabase:
             await connection.execute(
                 insert(self._revision_table).values(version_num=DATABASE_REVISION)
             )
+            if (
+                await connection.scalar(
+                    select(CapacityLedger.id).where(CapacityLedger.id == 1)
+                )
+                is None
+            ):
+                await connection.execute(insert(CapacityLedger).values(id=1, revision=0))
 
     async def ready(self) -> bool:
         try:

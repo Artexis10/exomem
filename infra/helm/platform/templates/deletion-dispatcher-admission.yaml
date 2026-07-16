@@ -1,0 +1,259 @@
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: exomem-deletion-dispatcher-job-scope
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["batch"]
+        apiVersions: ["v1"]
+        operations: ["CREATE"]
+        resources: ["jobs"]
+        scope: Namespaced
+  matchConditions:
+    - name: dispatcher-only
+      expression: >-
+        request.userInfo.username ==
+        {{ printf "system:serviceaccount:%s:exomem-deletion-dispatcher" .Release.Namespace | quote }}
+  validations:
+    - expression: request.namespace == {{ .Release.Namespace | quote }}
+      message: The deletion dispatcher may create Jobs only in the platform namespace.
+    - expression: >-
+        has(object.metadata.name) &&
+        object.metadata.name.matches('^exomem-deletion-[0-9a-f]{16}$') &&
+        !has(object.metadata.generateName) &&
+        has(object.metadata.labels) &&
+        size(object.metadata.labels) == 1 &&
+        object.metadata.labels['exomem.io/deletion-job'] == 'true' &&
+        has(object.metadata.annotations) &&
+        size(object.metadata.annotations) == 1 &&
+        !has(object.metadata.ownerReferences) &&
+        !has(object.metadata.finalizers) &&
+        object.metadata.annotations['exomem.io/deletion-operation-sha256'].matches('^[0-9a-f]{64}$')
+      message: The deletion dispatcher requires the authenticated deletion Job identity.
+    - expression: >-
+        object.spec.activeDeadlineSeconds == 240 &&
+        object.spec.backoffLimit == 0 &&
+        object.spec.ttlSecondsAfterFinished == 300 &&
+        object.spec.template.spec.serviceAccountName == 'exomem-deletion-worker' &&
+        object.spec.template.spec.automountServiceAccountToken == true &&
+        object.spec.template.spec.restartPolicy == 'Never' &&
+        object.spec.template.spec.terminationGracePeriodSeconds == 30 &&
+        object.spec.template.spec.dnsPolicy == 'ClusterFirst' &&
+        object.spec.template.spec.schedulerName == 'default-scheduler' &&
+        object.spec.template.spec.enableServiceLinks == false &&
+        !has(object.spec.parallelism) &&
+        !has(object.spec.completions) &&
+        !has(object.spec.completionMode) &&
+        !has(object.spec.suspend) &&
+        !has(object.spec.manualSelector) &&
+        !has(object.spec.selector) &&
+        !has(object.spec.podFailurePolicy) &&
+        !has(object.spec.successPolicy)
+      message: The deletion dispatcher may create only bounded one-shot worker Jobs.
+    - expression: >-
+        size(object.spec.template.spec.containers) == 1 &&
+        !has(object.spec.template.spec.initContainers) &&
+        !has(object.spec.template.spec.ephemeralContainers) &&
+        object.spec.template.spec.containers[0].name == 'deletion-worker' &&
+        object.spec.template.spec.containers[0].image == {{ .Values.provisioner.image | quote }} &&
+        object.spec.template.spec.containers[0].imagePullPolicy == 'IfNotPresent' &&
+        object.spec.template.spec.containers[0].command == ['exomem-deletion-worker'] &&
+        object.spec.template.spec.containers[0].terminationMessagePath == '/dev/termination-log' &&
+        object.spec.template.spec.containers[0].terminationMessagePolicy == 'File' &&
+        !has(object.spec.template.spec.containers[0].args) &&
+        !has(object.spec.template.spec.containers[0].envFrom) &&
+        !has(object.spec.template.spec.containers[0].lifecycle) &&
+        !has(object.spec.template.spec.containers[0].workingDir) &&
+        !has(object.spec.template.spec.containers[0].stdin) &&
+        !has(object.spec.template.spec.containers[0].stdinOnce) &&
+        !has(object.spec.template.spec.containers[0].tty) &&
+        !has(object.spec.template.spec.containers[0].ports) &&
+        !has(object.spec.template.spec.containers[0].volumeDevices) &&
+        !has(object.spec.template.spec.containers[0].restartPolicy) &&
+        !has(object.spec.template.spec.containers[0].resizePolicy)
+      message: The deletion dispatcher may run only the pinned deletion worker command.
+    - expression: >-
+        !has(object.spec.template.spec.containers[0].startupProbe) &&
+        !has(object.spec.template.spec.containers[0].livenessProbe) &&
+        !has(object.spec.template.spec.containers[0].readinessProbe)
+      message: The deletion worker may not add exec, HTTP, TCP, or gRPC probes.
+    - expression: >-
+        object.spec.template.spec.containers[0].resources.requests.cpu == quantity('25m') &&
+        object.spec.template.spec.containers[0].resources.requests.memory == quantity('96Mi') &&
+        object.spec.template.spec.containers[0].resources.limits.cpu == quantity('500m') &&
+        object.spec.template.spec.containers[0].resources.limits.memory == quantity('384Mi') &&
+        !has(object.spec.template.spec.containers[0].resources.claims)
+      message: The deletion worker resources must match the reviewed bounded shape.
+    - expression: >-
+        object.spec.template.spec.containers[0].env.map(item, item.name) == [
+          'EXOMEM_PROVISIONER_DATABASE_URL',
+          'EXOMEM_PROVISIONER_DATABASE_SCHEMA',
+          'EXOMEM_PROVISIONER_DATABASE_ROLE',
+          'EXOMEM_PROVISIONER_ENVELOPE_KEY',
+          'EXOMEM_PROVIDER_RECOVERY_PUBLIC_KEY',
+          'EXOMEM_PROVISIONER_HCLOUD_TOKEN',
+          'EXOMEM_PROVISIONER_B2_ENDPOINT_URL',
+          'EXOMEM_PROVISIONER_B2_REGION',
+          'EXOMEM_PROVISIONER_RECOVERY_BUCKET',
+          'EXOMEM_PROVISIONER_USER_EXPORT_BUCKET',
+          'EXOMEM_PROVISIONER_RECOVERY_DELETE_KEY_ID',
+          'EXOMEM_PROVISIONER_RECOVERY_DELETE_KEY',
+          'EXOMEM_PROVISIONER_USER_EXPORT_DELETE_KEY_ID',
+          'EXOMEM_PROVISIONER_USER_EXPORT_DELETE_KEY',
+          'EXOMEM_DELETION_BATCH_SIZE',
+          'EXOMEM_PROVISIONER_WORKER_ID',
+          'HOME'
+        ]
+      message: The deletion worker environment must match the reviewed privileged surface.
+    - expression: >-
+        object.spec.template.spec.containers[0].env[0].valueFrom.secretKeyRef.name == 'exomem-provisioner-database' &&
+        object.spec.template.spec.containers[0].env[0].valueFrom.secretKeyRef.key == 'url' &&
+        object.spec.template.spec.containers[0].env[1].value == {{ .Values.provisioner.databaseSchema | quote }} &&
+        object.spec.template.spec.containers[0].env[2].value == {{ .Values.provisioner.databaseRole | quote }} &&
+        object.spec.template.spec.containers[0].env[3].valueFrom.secretKeyRef.name == 'exomem-provisioner-wrapping-key' &&
+        object.spec.template.spec.containers[0].env[3].valueFrom.secretKeyRef.key == 'key-material' &&
+        object.spec.template.spec.containers[0].env[4].valueFrom.secretKeyRef.name == {{ .Values.provisioner.providerRecoveryPublicKeySecret.name | quote }} &&
+        object.spec.template.spec.containers[0].env[4].valueFrom.secretKeyRef.key == {{ .Values.provisioner.providerRecoveryPublicKeySecret.key | quote }} &&
+        object.spec.template.spec.containers[0].env[5].valueFrom.secretKeyRef.name == 'exomem-provisioner-hcloud-token' &&
+        object.spec.template.spec.containers[0].env[5].valueFrom.secretKeyRef.key == 'token'
+      message: The deletion worker database, wrapping, verifier, and HCloud inputs must match the reviewed credentials.
+    - expression: >-
+        object.spec.template.spec.containers[0].env[6].valueFrom.configMapKeyRef.name == 'exomem-durability-storage' &&
+        object.spec.template.spec.containers[0].env[6].valueFrom.configMapKeyRef.key == 's3-endpoint' &&
+        object.spec.template.spec.containers[0].env[7].valueFrom.configMapKeyRef.name == 'exomem-durability-storage' &&
+        object.spec.template.spec.containers[0].env[7].valueFrom.configMapKeyRef.key == 's3-region' &&
+        object.spec.template.spec.containers[0].env[8].valueFrom.configMapKeyRef.name == 'exomem-durability-storage' &&
+        object.spec.template.spec.containers[0].env[8].valueFrom.configMapKeyRef.key == 'recovery-bucket' &&
+        object.spec.template.spec.containers[0].env[9].valueFrom.configMapKeyRef.name == 'exomem-durability-storage' &&
+        object.spec.template.spec.containers[0].env[9].valueFrom.configMapKeyRef.key == 'user-export-bucket' &&
+        object.spec.template.spec.containers[0].env[10].valueFrom.secretKeyRef.name == 'exomem-recovery-delete-key-id' &&
+        object.spec.template.spec.containers[0].env[10].valueFrom.secretKeyRef.key == 'application-key-id' &&
+        object.spec.template.spec.containers[0].env[11].valueFrom.secretKeyRef.name == 'exomem-recovery-delete-key' &&
+        object.spec.template.spec.containers[0].env[11].valueFrom.secretKeyRef.key == 'application-key' &&
+        object.spec.template.spec.containers[0].env[12].valueFrom.secretKeyRef.name == 'exomem-user-export-delete-key-id' &&
+        object.spec.template.spec.containers[0].env[12].valueFrom.secretKeyRef.key == 'application-key-id' &&
+        object.spec.template.spec.containers[0].env[13].valueFrom.secretKeyRef.name == 'exomem-user-export-delete-key' &&
+        object.spec.template.spec.containers[0].env[13].valueFrom.secretKeyRef.key == 'application-key'
+      message: The deletion worker provider inputs must match the reviewed exact references.
+    - expression: >-
+        object.spec.template.spec.containers[0].env[14].value == '1' &&
+        object.spec.template.spec.containers[0].env[15].valueFrom.fieldRef.fieldPath == "metadata.labels['batch.kubernetes.io/job-name']" &&
+        object.spec.template.spec.containers[0].env[16].value == '/tmp'
+      message: The deletion worker batch and runtime identity must match the reviewed template.
+    - expression: >-
+        !has(object.spec.template.spec.containers[0].env[0].value) &&
+        !has(object.spec.template.spec.containers[0].env[0].valueFrom.secretKeyRef.optional) &&
+        !has(object.spec.template.spec.containers[0].env[1].valueFrom) &&
+        !has(object.spec.template.spec.containers[0].env[2].valueFrom) &&
+        !has(object.spec.template.spec.containers[0].env[3].value) &&
+        !has(object.spec.template.spec.containers[0].env[3].valueFrom.secretKeyRef.optional) &&
+        !has(object.spec.template.spec.containers[0].env[4].value) &&
+        !has(object.spec.template.spec.containers[0].env[4].valueFrom.secretKeyRef.optional) &&
+        !has(object.spec.template.spec.containers[0].env[5].value) &&
+        !has(object.spec.template.spec.containers[0].env[5].valueFrom.secretKeyRef.optional) &&
+        !has(object.spec.template.spec.containers[0].env[6].value) &&
+        !has(object.spec.template.spec.containers[0].env[6].valueFrom.configMapKeyRef.optional) &&
+        !has(object.spec.template.spec.containers[0].env[7].value) &&
+        !has(object.spec.template.spec.containers[0].env[7].valueFrom.configMapKeyRef.optional) &&
+        !has(object.spec.template.spec.containers[0].env[8].value) &&
+        !has(object.spec.template.spec.containers[0].env[8].valueFrom.configMapKeyRef.optional) &&
+        !has(object.spec.template.spec.containers[0].env[9].value) &&
+        !has(object.spec.template.spec.containers[0].env[9].valueFrom.configMapKeyRef.optional) &&
+        !has(object.spec.template.spec.containers[0].env[10].value) &&
+        !has(object.spec.template.spec.containers[0].env[10].valueFrom.secretKeyRef.optional) &&
+        !has(object.spec.template.spec.containers[0].env[11].value) &&
+        !has(object.spec.template.spec.containers[0].env[11].valueFrom.secretKeyRef.optional) &&
+        !has(object.spec.template.spec.containers[0].env[12].value) &&
+        !has(object.spec.template.spec.containers[0].env[12].valueFrom.secretKeyRef.optional) &&
+        !has(object.spec.template.spec.containers[0].env[13].value) &&
+        !has(object.spec.template.spec.containers[0].env[13].valueFrom.secretKeyRef.optional) &&
+        !has(object.spec.template.spec.containers[0].env[14].valueFrom) &&
+        !has(object.spec.template.spec.containers[0].env[15].value) &&
+        !has(object.spec.template.spec.containers[0].env[15].valueFrom.fieldRef.apiVersion) &&
+        !has(object.spec.template.spec.containers[0].env[16].valueFrom)
+      message: The deletion worker environment sources may not add alternate or optional inputs.
+    - expression: >-
+        size(object.spec.template.spec.volumes) == 1 &&
+        object.spec.template.spec.volumes[0].name == 'temporary' &&
+        has(object.spec.template.spec.volumes[0].emptyDir) &&
+        object.spec.template.spec.volumes[0].emptyDir.sizeLimit == quantity('64Mi') &&
+        !has(object.spec.template.spec.volumes[0].emptyDir.medium) &&
+        size(object.spec.template.spec.containers[0].volumeMounts) == 1 &&
+        object.spec.template.spec.containers[0].volumeMounts[0].name == 'temporary' &&
+        object.spec.template.spec.containers[0].volumeMounts[0].mountPath == '/tmp' &&
+        !has(object.spec.template.spec.containers[0].volumeMounts[0].readOnly) &&
+        !has(object.spec.template.spec.containers[0].volumeMounts[0].subPath) &&
+        !has(object.spec.template.spec.containers[0].volumeMounts[0].subPathExpr) &&
+        !has(object.spec.template.spec.containers[0].volumeMounts[0].mountPropagation)
+      message: The deletion worker may mount only its bounded temporary volume.
+    - expression: >-
+        object.spec.template.spec.securityContext.runAsNonRoot == true &&
+        object.spec.template.spec.securityContext.runAsUser == 10001 &&
+        object.spec.template.spec.securityContext.fsGroup == 10001 &&
+        object.spec.template.spec.securityContext.fsGroupChangePolicy == 'OnRootMismatch' &&
+        object.spec.template.spec.securityContext.seccompProfile.type == 'RuntimeDefault' &&
+        !has(object.spec.template.spec.securityContext.seccompProfile.localhostProfile) &&
+        !has(object.spec.template.spec.securityContext.runAsGroup) &&
+        !has(object.spec.template.spec.securityContext.supplementalGroups) &&
+        !has(object.spec.template.spec.securityContext.supplementalGroupsPolicy) &&
+        !has(object.spec.template.spec.securityContext.sysctls) &&
+        !has(object.spec.template.spec.securityContext.seLinuxOptions) &&
+        !has(object.spec.template.spec.securityContext.appArmorProfile) &&
+        !has(object.spec.template.spec.securityContext.windowsOptions) &&
+        object.spec.template.spec.containers[0].securityContext.allowPrivilegeEscalation == false &&
+        object.spec.template.spec.containers[0].securityContext.readOnlyRootFilesystem == true &&
+        object.spec.template.spec.containers[0].securityContext.runAsNonRoot == true &&
+        object.spec.template.spec.containers[0].securityContext.runAsUser == 10001 &&
+        object.spec.template.spec.containers[0].securityContext.capabilities.drop == ['ALL'] &&
+        !has(object.spec.template.spec.containers[0].securityContext.capabilities.add) &&
+        !has(object.spec.template.spec.containers[0].securityContext.privileged) &&
+        !has(object.spec.template.spec.containers[0].securityContext.runAsGroup) &&
+        !has(object.spec.template.spec.containers[0].securityContext.procMount) &&
+        !has(object.spec.template.spec.containers[0].securityContext.seccompProfile) &&
+        !has(object.spec.template.spec.containers[0].securityContext.seLinuxOptions) &&
+        !has(object.spec.template.spec.containers[0].securityContext.appArmorProfile) &&
+        !has(object.spec.template.spec.containers[0].securityContext.windowsOptions)
+      message: The deletion worker security context must remain locked down.
+    - expression: >-
+        size(object.spec.template.metadata.labels) == 1 &&
+        object.spec.template.metadata.labels['exomem.io/deletion-job'] == 'true' &&
+        !has(object.spec.template.metadata.annotations) &&
+        !has(object.spec.template.spec.initContainers) &&
+        !has(object.spec.template.spec.ephemeralContainers) &&
+        !has(object.spec.template.spec.hostAliases) &&
+        !has(object.spec.template.spec.hostNetwork) &&
+        !has(object.spec.template.spec.hostPID) &&
+        !has(object.spec.template.spec.hostIPC) &&
+        !has(object.spec.template.spec.shareProcessNamespace) &&
+        !has(object.spec.template.spec.serviceAccount) &&
+        !has(object.spec.template.spec.nodeName) &&
+        !has(object.spec.template.spec.nodeSelector) &&
+        !has(object.spec.template.spec.affinity) &&
+        !has(object.spec.template.spec.tolerations) &&
+        !has(object.spec.template.spec.topologySpreadConstraints) &&
+        !has(object.spec.template.spec.runtimeClassName) &&
+        !has(object.spec.template.spec.priorityClassName) &&
+        !has(object.spec.template.spec.priority) &&
+        !has(object.spec.template.spec.preemptionPolicy) &&
+        !has(object.spec.template.spec.dnsConfig) &&
+        !has(object.spec.template.spec.hostname) &&
+        !has(object.spec.template.spec.subdomain) &&
+        !has(object.spec.template.spec.setHostnameAsFQDN) &&
+        !has(object.spec.template.spec.imagePullSecrets) &&
+        !has(object.spec.template.spec.readinessGates) &&
+        !has(object.spec.template.spec.resourceClaims) &&
+        !has(object.spec.template.spec.schedulingGates) &&
+        !has(object.spec.template.spec.overhead) &&
+        !has(object.spec.template.spec.os) &&
+        !has(object.spec.template.spec.hostUsers)
+      message: The deletion worker pod shape may not add scheduling, host, or mutation surfaces.
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: exomem-deletion-dispatcher-job-scope
+spec:
+  policyName: exomem-deletion-dispatcher-job-scope
+  validationActions: [Deny]

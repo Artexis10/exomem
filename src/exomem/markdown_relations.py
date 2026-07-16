@@ -59,6 +59,8 @@ class RelationValidationError:
 class MarkdownRelationDocument:
     relations: list[MarkdownRelation]
     errors: list[RelationValidationError]
+    canonical_section_present: bool = False
+    canonical_bullet_count: int = 0
 
     @property
     def canonical_relations(self) -> list[MarkdownRelation]:
@@ -86,6 +88,8 @@ def parse_markdown_relations(
     errors: list[RelationValidationError] = []
     in_fence = False
     relations_level: int | None = None
+    canonical_section_present = False
+    canonical_bullet_count = 0
     allowed_relations = RELATION_TYPES if relation_types is None else relation_types
 
     for line_no, line in enumerate(markdown.splitlines(), start=1):
@@ -101,11 +105,14 @@ def parse_markdown_relations(
             title = _normalize_heading(heading.group("title"))
             if title == "relations":
                 relations_level = level
+                canonical_section_present = True
             elif relations_level is not None and level <= relations_level:
                 relations_level = None
             continue
 
         canonical = relations_level is not None
+        if canonical and _BULLET_RE.match(line):
+            canonical_bullet_count += 1
         match = _CANONICAL_RE.match(line) if canonical else None
         if match is None and include_legacy and not canonical:
             match = _LEGACY_RE.match(line)
@@ -173,7 +180,12 @@ def parse_markdown_relations(
             )
         )
 
-    return MarkdownRelationDocument(relations=relations, errors=errors)
+    return MarkdownRelationDocument(
+        relations=relations,
+        errors=errors,
+        canonical_section_present=canonical_section_present,
+        canonical_bullet_count=canonical_bullet_count,
+    )
 
 
 def _normalize_heading(value: str) -> str:

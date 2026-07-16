@@ -383,6 +383,16 @@ async def test_database_workflow_encrypts_only_after_empty_restore_proof_and_rec
         assert events == ["scratch-verified", "uploaded", "uploaded-envelope"]
         primary = next(head for key, head in store.heads.items() if not key.endswith(".envelope"))
         assert primary.metadata["wrapped-key-reference"] == result["databaseBackupRef"]
+        recorded = await repository.get_recovery_object(str(result["databaseBackupRef"]))
+        assert recorded is not None
+        assert ProviderReference.parse(recorded.provider_reference) == {
+            "bucket": "database-test-bucket",
+            "deleteMarker": False,
+            "key": next(key for key in store.heads if not key.endswith(".envelope")),
+            "objectVersionId": "database-version-opaque",
+            "provider": "b2",
+            "version": 1,
+        }
         for key, head in store.heads.items():
             observation = ProviderRecoveryIdentityDecoder.b2(
                 provider_reference=ProviderReference.b2(bucket="database-test-bucket", key=key),

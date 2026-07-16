@@ -20,6 +20,7 @@ from .adapters import (
     _require_annotations,
     mint_maintenance_transfer_grant,
 )
+from .capacity import CapacityError
 from .driver import EffectContext
 from .lifecycle import (
     HealthObservation,
@@ -30,7 +31,7 @@ from .lifecycle import (
     _digest,
     _fixed_helm_values,
 )
-from .models import ResourceKind
+from .models import CapacityReservationClass, ResourceKind
 from .provider_identity import (
     ProviderIdentityConflict,
     ProviderRecoveryIdentityVerifier,
@@ -50,46 +51,6 @@ class KubernetesProviderSnapshot:
     serving: bool
     runtime_admitted: bool
     routes: tuple[bool, bool]
-
-
-class KubernetesCapacityGate:
-    """Live, fail-closed alpha capacity gate with no caller-authored receipt input."""
-
-    ACTIVE_USER_CELL_LIMIT = 6
-    RESERVED_VOLUME_ATTACHMENTS = 2
-    PROVIDER_VOLUME_ATTACHMENT_LIMIT = 16
-    MINIMUM_UNUSED_PROVIDER_HEADROOM = 8
-
-    def __init__(self, *, core_v1: Any, storage_v1: Any) -> None:
-        self._core = core_v1
-        self._storage = storage_v1
-
-    async def block_reason(self, metadata: OpaqueProviderMetadata) -> str | None:
-        namespaces, attachments = await asyncio.gather(
-            asyncio.to_thread(
-                self._core.list_namespace,
-                label_selector="exomem.io/tenant-cell=true",
-            ),
-            asyncio.to_thread(self._storage.list_volume_attachment),
-        )
-        active_names = {
-            str(item.metadata.name)
-            for item in (getattr(namespaces, "items", ()) or ())
-            if isinstance(getattr(item.metadata, "name", None), str)
-        }
-        if metadata.resource_name in active_names:
-            return None
-        if len(active_names) >= self.ACTIVE_USER_CELL_LIMIT:
-            return "active-user-cell-capacity-exhausted"
-        attached_volumes = sum(
-            bool(getattr(getattr(item, "status", None), "attached", False))
-            for item in (getattr(attachments, "items", ()) or ())
-        )
-        safe_limit = self.PROVIDER_VOLUME_ATTACHMENT_LIMIT - self.MINIMUM_UNUSED_PROVIDER_HEADROOM
-        projected = attached_volumes + 1 + self.RESERVED_VOLUME_ATTACHMENTS
-        if projected > safe_limit:
-            return "safe-volume-attachment-headroom-exhausted"
-        return None
 
 
 class KubernetesProviderRegistry:
@@ -282,7 +243,10 @@ class KubernetesProviderRegistry:
         )
 
     async def ensure_namespace(
-        self, metadata: OpaqueProviderMetadata, recovery_envelope: str
+        self,
+        metadata: OpaqueProviderMetadata,
+        recovery_envelope: str,
+        provision_mode: str,
     ) -> None:
         labels = dict(self._PSS_LABELS)
         labels.update(
@@ -302,6 +266,7 @@ class KubernetesProviderRegistry:
                 "exomem.io/pvc-name": metadata.resource_name + "-data",
                 "exomem.io/credentials-secret-name": "exomem-cell-credentials",
                 "exomem.io/init-request-configmap-name": metadata.resource_name + "-init-request",
+                "exomem.io/provision-mode": provision_mode,
             }
         )
         body = {
@@ -320,6 +285,15 @@ class KubernetesProviderRegistry:
                 raise
             existing = await asyncio.to_thread(self._core.read_namespace, metadata.resource_name)
             _require_annotations(getattr(existing.metadata, "annotations", None), metadata)
+            if (
+                dict(getattr(existing.metadata, "annotations", None) or {}).get(
+                    "exomem.io/provision-mode"
+                )
+                != provision_mode
+            ):
+                raise MetadataConflict(
+                    "Kubernetes namespace provision mode differs"
+                ) from error
 
     async def record_operation(
         self, metadata: OpaqueProviderMetadata, recovery_envelope: str
@@ -429,7 +403,7 @@ class LiveLifecyclePlane:
         runtime: PrivateCellApiAdapter,
         routes: TraefikRoutingAdapter,
         maintenance: KubernetesMaintenanceLeaseAdapter,
-        capacity: KubernetesCapacityGate,
+        capacity: Any,
         identity_verifier: ProviderRecoveryIdentityVerifier,
         config: LifecycleConfig,
         now: Any = time.time,
@@ -449,6 +423,7 @@ class LiveLifecyclePlane:
         self._snapshots: dict[str, KubernetesProviderSnapshot] = {}
         self._recovery_envelopes: dict[str, dict[str, str]] = {}
         self._helm_requests: dict[str, dict[str, Any]] = {}
+        self._operation_ids: dict[str, str] = {}
 
     @staticmethod
     def _key(metadata: OpaqueProviderMetadata) -> str:
@@ -496,6 +471,7 @@ class LiveLifecyclePlane:
         except ProviderIdentityConflict as error:
             raise MetadataConflict("provider recovery envelope set did not authenticate") from error
         self._recovery_envelopes[self._key(current)] = recovery_envelopes
+        self._operation_ids[self._key(current)] = context.operation_id
         resources = await self._repository.list_resources(
             tenant_id=context.tenant_id,
             cell_id=context.cell_id,
@@ -523,12 +499,50 @@ class LiveLifecyclePlane:
     def has_namespace(self, metadata: OpaqueProviderMetadata) -> bool:
         return self._snapshot(metadata).namespace
 
-    async def capacity_block_reason(self, metadata: OpaqueProviderMetadata) -> str | None:
-        return await self._capacity.block_reason(metadata)
+    async def _require_capacity_reservation(
+        self,
+        metadata: OpaqueProviderMetadata,
+        request: dict[str, Any],
+    ) -> CapacityReservationClass:
+        mode = request.get("provisionMode")
+        if mode == "serve":
+            reservation_class = CapacityReservationClass.USER
+        elif mode == "restore-candidate":
+            reservation_class = CapacityReservationClass.RECOVERY
+        else:
+            raise MetadataConflict("provision mode is invalid")
+        internal_operation_id = self._operation_ids.get(self._key(metadata))
+        if internal_operation_id is None:
+            raise MetadataConflict("capacity reservation operation is unavailable")
+        try:
+            await self._capacity.require_active(
+                internal_operation_id=internal_operation_id,
+                tenant_id=metadata.tenant_id,
+                cell_id=metadata.subject_id,
+                provider_operation_id=metadata.operation_id,
+                fence_generation=metadata.fence_generation,
+                reservation_class=reservation_class,
+            )
+        except CapacityError as error:
+            raise MetadataConflict("exact active capacity reservation is absent") from error
+        return reservation_class
 
-    async def ensure_namespace(self, metadata: OpaqueProviderMetadata) -> None:
+    async def ensure_namespace(
+        self,
+        metadata: OpaqueProviderMetadata,
+        request: dict[str, Any],
+    ) -> None:
+        reservation_class = await self._require_capacity_reservation(metadata, request)
         envelopes = self._recovery_envelopes[self._key(metadata)]
-        await self._registry.ensure_namespace(metadata, envelopes["namespace"])
+        await self._registry.ensure_namespace(
+            metadata,
+            envelopes["namespace"],
+            (
+                "serve"
+                if reservation_class is CapacityReservationClass.USER
+                else "restore-candidate"
+            ),
+        )
         self._owned[self._key(metadata)] = metadata
         await self._registry.record_operation(metadata, envelopes["providerOperationConfigMap"])
         await self._refresh(metadata)
@@ -542,6 +556,7 @@ class LiveLifecyclePlane:
         request: dict[str, Any],
         values: dict[str, Any],
     ) -> None:
+        await self._require_capacity_reservation(metadata, request)
         owned = self._owner(metadata)
         await self._cell.write_credential_bundle(
             owned,

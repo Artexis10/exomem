@@ -52,7 +52,14 @@ def test_index_sync_upsert_drops_excluded_paths(
     from exomem import embeddings, find, lexstore
 
     monkeypatch.setattr(lexstore, "upsert_after_write", _rec("lexstore"))
-    monkeypatch.setattr(embeddings, "upsert_after_write", _rec("embeddings"))
+    monkeypatch.setattr(
+        embeddings,
+        "upsert_after_write_status",
+        lambda root, paths: _rec("embeddings")(root, paths)
+        or embeddings.EmbeddingSyncStatus(
+            "completed", "embedding_upsert_completed", len(paths)
+        ),
+    )
     resolver_rels: list[str] = []
     monkeypatch.setattr(
         find, "on_resolver_files_changed",
@@ -109,8 +116,11 @@ def test_index_sync_quiet_defers_semantic_upserts(
     )
     monkeypatch.setattr(
         embeddings,
-        "upsert_after_write",
-        lambda root, paths: seen["embeddings"].append(list(paths)),
+        "upsert_after_write_status",
+        lambda root, paths: seen["embeddings"].append(list(paths))
+        or embeddings.EmbeddingSyncStatus(
+            "completed", "embedding_upsert_completed", len(paths)
+        ),
     )
     monkeypatch.setattr(
         find,
@@ -204,8 +214,11 @@ def test_index_sync_nonquiet_keeps_immediate_embedding_upsert(
     )
     monkeypatch.setattr(
         embeddings,
-        "upsert_after_write",
-        lambda root, paths: seen["embeddings"].append(list(paths)),
+        "upsert_after_write_status",
+        lambda root, paths: seen["embeddings"].append(list(paths))
+        or embeddings.EmbeddingSyncStatus(
+            "completed", "embedding_upsert_completed", len(paths)
+        ),
     )
     monkeypatch.setattr(
         find,
@@ -293,14 +306,26 @@ def test_full_index_drain_keeps_work_when_embeddings_report_incomplete(
     monkeypatch.setattr(memory_refs, "upsert_after_write", lambda *_a, **_kw: None)
     monkeypatch.setattr(find, "on_resolver_files_changed", lambda *_a, **_kw: None)
     monkeypatch.setattr(epistemic_graph, "upsert_after_write", lambda *_a, **_kw: None)
-    monkeypatch.setattr(embeddings, "upsert_after_write", lambda *_a, **_kw: False)
+    monkeypatch.setattr(
+        embeddings,
+        "upsert_after_write_status",
+        lambda *_a, **_kw: embeddings.EmbeddingSyncStatus(
+            "degraded", "embedding_upsert_failed", 1
+        ),
+    )
 
     assert index_sync.drain_deferred_work(vault) == 0
     assert deferred_index.full_status(vault)["paths"] == [
         target.relative_to(vault).as_posix()
     ]
 
-    monkeypatch.setattr(embeddings, "upsert_after_write", lambda *_a, **_kw: True)
+    monkeypatch.setattr(
+        embeddings,
+        "upsert_after_write_status",
+        lambda *_a, **_kw: embeddings.EmbeddingSyncStatus(
+            "completed", "embedding_upsert_completed", 1
+        ),
+    )
     assert index_sync.drain_deferred_work(vault) == 2
     assert deferred_index.full_status(vault)["count"] == 0
     assert deferred_index.status(vault)["count"] == 0

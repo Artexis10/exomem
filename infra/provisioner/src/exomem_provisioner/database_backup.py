@@ -707,7 +707,11 @@ class DatabaseBackupWorkflow:
             **claim,
             value=RecoveryObjectInput(
                 opaque_reference=opaque_reference,
-                provider_reference=f"b2://{key}#{state.get('provider_version_id', '')}",
+                provider_reference=ProviderReference.b2(
+                    bucket=self._provider_bucket,
+                    key=key,
+                    version_id=self._required_provider_version(state),
+                ),
                 wrapped_data_key=str(state["wrapped_data_key"]),
                 archive_sha256=identity.archive_sha256,
                 manifest_sha256=identity.manifest_sha256,
@@ -734,6 +738,15 @@ class DatabaseBackupWorkflow:
             now=now,
         )
         return result
+
+    @staticmethod
+    def _required_provider_version(state: dict[str, object]) -> str:
+        version_id = str(state.get("provider_version_id", ""))
+        if not version_id:
+            raise DatabaseRecoveryVerificationError(
+                "uploaded database recovery object has no exact version ID"
+            )
+        return version_id
 
     @staticmethod
     def _write_private_file(path: Path, contents: bytes) -> None:

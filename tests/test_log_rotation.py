@@ -89,3 +89,44 @@ def test_write_log_entry_triggers_rotation(
     assert archives, "write_log_entry should have triggered a rotation"
     live = (vault / "Knowledge Base" / "log.md").read_text(encoding="utf-8")
     assert "rotation trigger probe" in live  # the new entry stays live
+
+
+def test_log_rotation_plan_is_pure_deterministic_and_replay_stable(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("EXOMEM_LOG_ROTATE_BYTES", "1000")
+    _seed_log(vault, LOG_ROTATE_KEEP_ENTRIES + 5)
+    before = {
+        path.relative_to(vault).as_posix(): path.read_bytes()
+        for path in vault.rglob("*")
+        if path.is_file()
+    }
+
+    kwargs = {
+        "date_iso": "2026-07-14",
+        "op": "note",
+        "rel_path_no_ext": "Knowledge Base/Notes/Insights/replayable",
+        "body": "Stable log operation.",
+        "operation_token": "semantic-create:00000000-0000-4000-8000-000000000001",
+    }
+    first = vault_module.plan_log_writes(vault, **kwargs)
+    second = vault_module.plan_log_writes(vault, **kwargs)
+
+    assert first == second
+    assert len(first.writes) == 2
+    assert first.writes[0].path.parent.name == "logs"
+    assert first.writes[1].path.name == "log.md"
+    assert before == {
+        path.relative_to(vault).as_posix(): path.read_bytes()
+        for path in vault.rglob("*")
+        if path.is_file()
+    }
+
+    vault_module.batch_atomic_write(first.writes, vault_root=vault)
+    replay = vault_module.plan_log_writes(vault, **kwargs)
+    assert tuple(write.path for write in replay.writes) == tuple(
+        write.path for write in first.writes
+    )
+    assert tuple(write.content for write in replay.writes) == tuple(
+        write.content for write in first.writes
+    )

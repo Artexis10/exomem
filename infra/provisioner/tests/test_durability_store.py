@@ -69,6 +69,91 @@ class RecordingS3Client:
             "NextContinuationToken": str(next_offset),
         }
 
+    def list_object_versions(
+        self,
+        *,
+        Bucket: str,
+        Prefix: str,
+        MaxKeys: int,
+        KeyMarker: str | None = None,
+        VersionIdMarker: str | None = None,
+    ) -> dict[str, object]:
+        assert MaxKeys == 100
+        del Bucket, KeyMarker, VersionIdMarker
+        return {
+            "Versions": [
+                {"Key": key, "VersionId": str(value["VersionId"])}
+                for key, value in self.objects.items()
+                if key.startswith(Prefix)
+            ],
+            "DeleteMarkers": [],
+            "IsTruncated": False,
+        }
+
+
+class VersionedS3Client:
+    def __init__(self) -> None:
+        self.entries = {
+            ("user-export/object-opaque", "version-older", False),
+            ("user-export/object-opaque", "version-newer", False),
+            ("user-export/object-opaque", "marker-latest", True),
+        }
+        self.deleted: list[tuple[str, str]] = []
+
+    def head_object(self, *, Bucket: str, Key: str) -> dict[str, object]:
+        del Bucket, Key
+        error = RuntimeError("hidden by delete marker")
+        error.response = {"Error": {"Code": "404"}}  # type: ignore[attr-defined]
+        raise error
+
+    def list_object_versions(self, **kwargs: object) -> dict[str, object]:
+        prefix = str(kwargs["Prefix"])
+        versions = [
+            {"Key": key, "VersionId": version_id}
+            for key, version_id, marker in sorted(self.entries)
+            if key.startswith(prefix) and not marker
+        ]
+        markers = [
+            {"Key": key, "VersionId": version_id}
+            for key, version_id, marker in sorted(self.entries)
+            if key.startswith(prefix) and marker
+        ]
+        return {
+            "Versions": versions,
+            "DeleteMarkers": markers,
+            "IsTruncated": False,
+        }
+
+    def delete_object(self, *, Bucket: str, Key: str, VersionId: str) -> None:
+        del Bucket
+        for entry in tuple(self.entries):
+            if entry[:2] == (Key, VersionId):
+                self.entries.remove(entry)
+                self.deleted.append((Key, VersionId))
+
+
+class TruncatedSiblingFloodS3Client:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def list_object_versions(self, **arguments: object) -> dict[str, object]:
+        self.calls += 1
+        assert arguments["MaxKeys"] == 100
+        if self.calls > 1:
+            raise AssertionError("absence proof page-walked prefix siblings")
+        key = str(arguments["Prefix"])
+        sibling = f"{key}-sibling"
+        return {
+            "Versions": [
+                {"Key": sibling, "VersionId": f"sibling-{index:03d}"}
+                for index in range(100)
+            ],
+            "DeleteMarkers": [],
+            "IsTruncated": True,
+            "NextKeyMarker": sibling,
+            "NextVersionIdMarker": "sibling-099",
+        }
+
 
 @pytest.mark.asyncio
 async def test_upload_capability_sets_governance_lock_and_verifies_exact_metadata(
@@ -165,6 +250,29 @@ async def test_read_presign_and_delete_are_separate_privileged_capabilities(tmp_
     assert await deletion.absent("recovery/object-opaque") is True
     assert not hasattr(upload, "download_file")
     assert not hasattr(upload, "delete")
+
+
+@pytest.mark.asyncio
+async def test_deletion_absence_cannot_be_faked_by_a_delete_marker() -> None:
+    client = VersionedS3Client()
+    deletion = B2DeletionObjectStore(client, bucket="user-export-bucket")
+
+    assert await deletion.head("user-export/object-opaque") is None
+    assert await deletion.absent("user-export/object-opaque") is False
+
+    for version_id in ("marker-latest", "version-newer", "version-older"):
+        await deletion.delete("user-export/object-opaque", version_id=version_id)
+
+    assert await deletion.absent("user-export/object-opaque") is True
+
+
+@pytest.mark.asyncio
+async def test_deletion_absence_stops_at_truncated_prefix_siblings_in_one_bounded_call() -> None:
+    client = TruncatedSiblingFloodS3Client()
+    deletion = B2DeletionObjectStore(client, bucket="user-export-bucket")
+
+    assert await deletion.absent("user-export/object-opaque") is True
+    assert client.calls == 1
 
 
 @pytest.mark.asyncio

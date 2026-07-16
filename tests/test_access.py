@@ -106,3 +106,22 @@ def test_find_hides_excluded_tree(vault: Path) -> None:
     _write_cfg(vault, "excluded:\n  - Private\n")
     find_module.clear_cache()
     assert not any("secret" in h.path.lower() for h in find_module.find(vault, query="zzqqxx"))
+
+
+def test_find_hot_cache_invalidates_when_access_policy_changes(vault: Path) -> None:
+    from exomem import find as find_module
+
+    secret = vault / "Knowledge Base" / "Private" / "cached-secret.md"
+    secret.parent.mkdir(parents=True, exist_ok=True)
+    secret.write_text(
+        "---\ntype: source\n---\naccess-cache-secret-marker\n",
+        encoding="utf-8",
+    )
+    find_module.clear_cache()
+    first = find_module.find(vault, query="access-cache-secret-marker")
+    assert any(hit.path.endswith("cached-secret.md") for hit in first)
+
+    _write_cfg(vault, "excluded:\n  - Private\n")
+
+    second = find_module.find(vault, query="access-cache-secret-marker")
+    assert not any(hit.path.endswith("cached-secret.md") for hit in second)

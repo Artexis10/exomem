@@ -94,11 +94,35 @@ may therefore write the K3s `v1` value to a previously unused Vercel-previous
 `v1` slot, but only through the shown direct pipe. A single multi-destination
 handoff reads once and therefore does guarantee the same value for that command.
 
-Use the matrix's exact durability output/destination pair for each B2 key. The
-upload, restore, delete, and database-backup identities are separate on purpose;
-never combine or substitute them.
+Use the matrix's exact durability output/destination pair for each B2 key.
+Recovery and user-export upload, restore, and delete identities are separate on
+purpose; database backup has upload and restore identities only. There is no
+database-backup delete output or K3s Secret. Never combine or substitute them.
 
 ## Generated shared credentials
+
+Create the capacity receipt keypair atomically; never copy its private seed into
+a worker Secret. The matrix sends the private half only to
+`exomem-capacity-receipt-signer/private-key`, sends the public half to
+`exomem-capacity-receipt-verifier/public-key` for the routine and
+volume-registration workers, and retains a separately encrypted public escrow
+copy for operator verification:
+
+```bash
+SOPS_AGE_RECIPIENTS=age1... \
+  infra/scripts/provider_recovery_keypair_handoff.py \
+  --matrix "$matrix" \
+  --repository-root "$repo_root" \
+  --version v1 \
+  --pair capacity-receipt
+```
+
+Include both K3s ciphertext destinations in the signed active-secret registry.
+The receipt public key is unpadded base64url Ed25519 material; it is not secret,
+but its exact destination and trust-root binding are governed. The collector's
+HCloud read token and signing seed must remain absent from both worker
+Deployments. The privileged volume worker's separate HCloud mutation token does
+not authorize receipt signing.
 
 Read once and deliver the initial hosted-scheduler bearer to both named peers:
 
@@ -159,6 +183,37 @@ openssl rand -base64 48 | infra/scripts/secret_handoff.py \
 
 The database-backup B2 key also has an exact SOPS Ansible-var destination. None
 of these host-bootstrap values becomes a general cluster Secret.
+
+## Ephemeral provisioner database bootstrap authority
+
+The destination matrix contains only the dedicated runtime database URL. It
+deliberately has no admin URL destination. An admin URL may exist in K3s only as
+`exomem-provisioner-database-bootstrap-admin` for the one-shot bootstrap Job in
+the deployment runbook. It must be read through a non-printing prompt, FIFO, or
+provider helper, streamed to `kubectl` over stdin, and removed on both success
+and failure. Stable hooks, Deployments, CronJobs, SOPS artifacts, receipts, and
+the active-secret registry must never contain or reference it.
+
+After every bootstrap attempt, verify the Job and Secret are absent, then rotate
+or revoke the provider-side admin credential before Helm may continue. Retain a
+content-free provider receipt out of band and set its path as
+`EXOMEM_DATABASE_ADMIN_ROTATION_RECEIPT` for the deployment gate. Set a stable,
+private path outside the ephemeral deploy workspace as
+`EXOMEM_DATABASE_BOOTSTRAP_ATTEMPT_STATE`; it binds a failed, timed-out, or
+interrupted attempt to the exact receipt required before another attempt.
+Repository
+automation cannot perform this provider mutation, so an absent receipt blocks a
+live install. A crash that leaves either ephemeral resource behind is not a
+retry signal: delete it, rotate/revoke the exposed admin credential, obtain a
+new one-use URL, and start the whole bootstrap boundary again.
+
+The runtime and admin URLs must be direct or backed by a reviewed
+session-affinity guarantee. For Neon, use the direct
+`postgresql+asyncpg://ROLE:PASSWORD@ep-<endpoint-id>.<region>.aws.neon.tech/DATABASE?ssl=require`
+shape; the `ep-<endpoint-id>-pooler...neon.tech` transaction pool is refused.
+For a separately reviewed session-mode proxy, append the local
+`pool_mode=session` contract marker; that marker never converts a transaction
+pool into a supported endpoint.
 
 ## Run Ansible with SOPS vars on tmpfs
 

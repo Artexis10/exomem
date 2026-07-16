@@ -22,6 +22,17 @@ only the authoritative durable destroy/discard claim: it never calls back into
 Substrate for admission, billing, or lifecycle state. No production process has
 a fake-provider selection path.
 
+Every PROVISION-capable worker also shares one public-only capacity admission
+authority. It verifies a five-minute Ed25519 receipt bound to the current
+cluster, configured HCloud server/location, separate serve/recovery counts, and
+attached-volume count; reconciles that receipt with a fresh Kubernetes
+namespace/PV/PVC/VolumeAttachment/Node observation; then serializes admission on
+the singleton PostgreSQL capacity ledger. Active reservations survive retries,
+claims, failures, and restarts. The exact limits are six USER cells, two
+RECOVERY cells, and eight potential attachments, leaving eight unused slots
+beneath the provider limit of sixteen. Only a final provider-proved DISCARD or
+DESTROY releases reservations, atomically with operation completion.
+
 Credential-dependent HCloud, B2 Object Lock, Cloudflare, and clean-cluster
 rebind drills remain release gates even when deterministic and exact-K3s suites
 pass.
@@ -38,6 +49,8 @@ Vault backups stop and verify routes, quiesce the cell, stage and authenticate t
 portable archive, reopen service, then encrypt and upload. Every archive uses a
 unique AES-256-GCM data key; the wrapped key remains in the provisioner database.
 Recovery objects use seven-day B2 governance retention and a 30-day lifecycle.
+After the lock expires, deletion uses exact B2 version IDs without governance
+bypass and proves that neither object versions nor delete markers remain.
 User exports use a separate private bucket without Object Lock: their exact
 caller-supplied expiry is authenticated in the durable checkpoint, object row,
 and B2 metadata, while a 31-day provider lifecycle is only a cleanup backstop.
@@ -79,11 +92,41 @@ uv run --frozen alembic upgrade head
 ```
 
 Production uses `postgresql+asyncpg`, a dedicated role, and a dedicated schema.
-The role is created outside the application. Alembic creates the schema before
-its version table in the same migration transaction and rejects an existing
-schema owned by any other role. The opt-in PostgreSQL 17 suite proves fresh
-bootstrap, ownership rejection, readiness, database-clock leases, and concurrent
-fence/claim interleavings against a real server.
+Both bootstrap URLs must use direct PostgreSQL or an endpoint whose reviewed
+contract guarantees backend-session affinity for the connection lifetime. The
+supported Neon direct shape is
+`postgresql+asyncpg://ROLE:PASSWORD@ep-<endpoint-id>.<region>.aws.neon.tech/DATABASE?ssl=require`.
+Neon's `ep-<endpoint-id>-pooler...neon.tech` transaction-pooling shape is
+rejected. A separately reviewed session-mode proxy may record that guarantee as
+`postgresql+asyncpg://ROLE:PASSWORD@session-pooler.internal/DATABASE?ssl=require&pool_mode=session`;
+the `pool_mode=session` marker is validated and removed before `asyncpg`
+connects. It does not turn a transaction pool into a session-stable endpoint.
+The immutable image carries the exact `alembic.ini` and revision tree at
+`/opt/exomem/provisioner-migrations`, root-owned and non-writable. Production
+database lifecycle uses three zero-argument, environment-only commands:
+
+- `exomem-provisioner-database-bootstrap` briefly requires
+  `EXOMEM_PROVISIONER_DATABASE_ADMIN_URL`. It creates or exactly validates the
+  least-privilege runtime role/schema, migrates through a runtime-authenticated
+  connection, and proves final runtime access while one bounded deterministic
+  advisory lock spans the whole operation. A second unpredictable admin-held
+  advisory lock proves the runtime connection reached the same database lock
+  domain before migration can succeed.
+- `exomem-provisioner-database-migrate` uses only the runtime URL, accepts an
+  empty or known packaged revision, and migrates to the single packaged head.
+- `exomem-provisioner-database-validate` uses only the runtime URL and succeeds
+  only when the database already equals that head. The platform uses this
+  validation-only command on upgrade so Helm never implies a rollback-safe
+  revision advance.
+
+Existing role attributes, incoming or outgoing memberships, database/schema ownership, unknown or
+multiple revisions, and mismatched admin/runtime database identities fail
+closed. Bootstrap never repairs privilege drift. The admin URL belongs only to
+the ephemeral operator bootstrap Job; stable chart resources never reference
+it. The opt-in PostgreSQL 17 suite runs the built image without a checkout mount
+and proves fresh/concurrent/retry bootstrap, exact role authority, lock
+serialization, package integrity, exact-head upgrade refusal, and credential
+non-disclosure.
 
 Worker claims lock the tenant fence before the operation row and recheck that
 the claimed generation is still current. Every checkpoint and durable side
@@ -130,6 +173,11 @@ helm upgrade --install exomem-platform infra/helm/platform \
 - `EXOMEM_PROVISIONER_DATABASE_URL`: `postgresql+asyncpg://...` in production
 - `EXOMEM_PROVISIONER_DATABASE_SCHEMA`: dedicated lower-case SQL identifier
 - `EXOMEM_PROVISIONER_DATABASE_ROLE`: dedicated lower-case SQL identifier
+- `EXOMEM_PROVISIONER_DATABASE_ADMIN_URL`: one-use operator credential accepted
+  only by `exomem-provisioner-database-bootstrap`; never configure it on API,
+  worker, recurring migration, or validation workloads
+- `EXOMEM_PROVISIONER_DATABASE_LOCK_TIMEOUT_SECONDS`: bounded database-command
+  advisory-lock wait in seconds (default 60, range 1-300)
 - `EXOMEM_PROVISIONER_TRUSTED_PROXY_IPS`: comma-separated private/loopback IPs
   or networks whose forwarded HTTPS metadata Uvicorn may trust; wildcards and
   public networks are rejected
@@ -138,13 +186,17 @@ helm upgrade --install exomem-platform infra/helm/platform \
 - `EXOMEM_PROVIDER_RECOVERY_SIGNING_KEY`: URL-safe base64 Ed25519 seed confined
   to signer-bearing processes. The API uses its governed seed to pre-seal the
   bounded recovery-identity pool, and the volume worker uses that same governed
-  trust root for retained-volume identities. The routine and deletion workers
-  receive only the corresponding public verifier and must never receive the
+  trust root for retained-volume identities. The routine worker and short-lived
+  deletion Jobs receive only the corresponding public verifier and must never receive the
   seed.
 
 The routine worker additionally requires the release-manifest path, pinned
 Helm/chart details, internal/control/transfer origins, a worker ID, and
-`EXOMEM_PROVIDER_RECOVERY_PUBLIC_KEY`. The Helm chart supplies non-secret
+`EXOMEM_PROVIDER_RECOVERY_PUBLIC_KEY`. Both routine and volume-registration
+workers require `EXOMEM_PROVISIONER_CAPACITY_RECEIPT_PUBLIC_KEY`, the immutable
+`EXOMEM_PROVISIONER_CAPACITY_CONTRACT_PATH`, the receipt ConfigMap namespace and
+name, and the expected HCloud server ID/location. Neither receives the capacity
+receipt signing key or collector HCloud read token. The Helm chart supplies non-secret
 fields, mounts the release ConfigMap, and consumes each governed Secret by its
 exact key. Its RBAC is read-mostly cluster discovery plus admission-bounded
 namespaced lifecycle mutation; it has no `pods/exec` or persistent-volume write
@@ -152,12 +204,13 @@ rule.
 
 The privileged volume worker receives only the common operation-store settings,
 an HCloud token, the volume-encryption Secret identity, location, worker ID, and
-its governed `EXOMEM_PROVIDER_RECOVERY_SIGNING_KEY`. Its queue filter accepts
+its governed `EXOMEM_PROVIDER_RECOVERY_SIGNING_KEY`, plus the same public
+capacity verifier inputs. Its queue filter accepts
 only `volume-registration-required` continuations. B2 credentials are confined
 to the corresponding durability workloads, and Cloudflare Access credentials
 remain outside K3s.
 
-Run `exomem-provisioner-api` only after `alembic upgrade head`. Startup fails
+Run `exomem-provisioner-api` only after the packaged runtime migration gate. Startup fails
 closed when configuration is missing or invalid. Readiness verifies the exact
 database role, schema owner, current schema, and singleton Alembic revision.
 Access logs are disabled and the installed application/server formatter emits

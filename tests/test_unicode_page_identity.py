@@ -29,6 +29,7 @@ def test_note_preserves_unicode_title_with_explicit_ascii_slug(vault: Path) -> N
         note_type="insight",
         title="睡眠: 基本 #1",
         slug="sleep-basics",
+        status="draft",
         today=TODAY,
     )
 
@@ -45,6 +46,7 @@ def test_note_does_not_duplicate_matching_caller_h1(vault: Path) -> None:
         note_type="insight",
         title="睡眠",
         slug="sleep",
+        status="draft",
         today=TODAY,
     )
     _, body = _page(vault / result.path)
@@ -75,6 +77,7 @@ def test_automatic_non_ascii_slug_warns_but_preserves_title(vault: Path) -> None
         content="本文。",
         note_type="insight",
         title="睡眠",
+        status="draft",
         today=TODAY,
     )
     frontmatter, body = _page(vault / result.path)
@@ -137,6 +140,7 @@ def test_search_and_fetch_return_same_structured_title(vault: Path) -> None:
         note_type="insight",
         title="睡眠",
         slug="sleep",
+        status="draft",
         today=TODAY,
     )
     search = commands.op_search(vault, query="multilingual marker 7799", scope="kb")
@@ -151,7 +155,11 @@ def test_renamed_product_commands_forward_explicit_slugs(
 ) -> None:
     remembered = commands.op_remember(
         vault,
-        content="本文。",
+        content=(
+            "本文。\n\n## Relations\n"
+            "- relates_to [[Knowledge Base/Notes/Insights/"
+            "progressive-disclosure-without-mode-fragmentation]]\n"
+        ),
         title="睡眠",
         slug="sleep-memory",
     )

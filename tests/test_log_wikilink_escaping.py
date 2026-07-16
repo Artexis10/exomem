@@ -44,7 +44,9 @@ def test_edit_rationale_does_not_leak_wikilink_into_log(vault: Path) -> None:
         vault,
         path="Knowledge Base/Notes/Insights/progressive-disclosure-without-mode-fragmentation",
         why="de-link [[Foo Bar]] and repoint [[a/b/Baz|alias]] to the hub",
-        new_body="Body touched by the escaping integration test.",
+        heading="Claim",
+        section_position="replace",
+        new_string="Body touched by the escaping integration test.",
         today=dt.date(2026, 5, 31),
     )
 

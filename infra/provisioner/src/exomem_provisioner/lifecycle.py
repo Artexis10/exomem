@@ -567,8 +567,9 @@ class LifecyclePlane(Protocol):
     async def observed_fence(self, tenant_id: str) -> int: ...
     async def observe_operation(self, context: EffectContext, request: dict[str, Any]) -> None: ...
     def has_namespace(self, metadata: OpaqueProviderMetadata) -> bool: ...
-    async def capacity_block_reason(self, metadata: OpaqueProviderMetadata) -> str | None: ...
-    async def ensure_namespace(self, metadata: OpaqueProviderMetadata) -> None: ...
+    async def ensure_namespace(
+        self, metadata: OpaqueProviderMetadata, request: dict[str, Any]
+    ) -> None: ...
     def has_release(self, metadata: OpaqueProviderMetadata) -> bool: ...
     async def install_release(
         self,
@@ -720,7 +721,6 @@ class HighFidelityProviderPlane:
         self._billing_stopped: set[str] = set()
         self._tickets: dict[str, tuple[str, bool]] = {}
         self._lose_after_bind = False
-        self._capacity_block_reason: str | None = None
 
     def __repr__(self) -> str:
         return (
@@ -756,13 +756,10 @@ class HighFidelityProviderPlane:
             raise DriverTerminal("PROVISIONER_STALE_FENCE")
         self._tenant_fences[context.tenant_id] = context.fence_generation
 
-    async def capacity_block_reason(self, metadata: OpaqueProviderMetadata) -> str | None:
-        return self._capacity_block_reason
-
-    def block_capacity(self, reason: str | None) -> None:
-        self._capacity_block_reason = reason
-
-    async def ensure_namespace(self, metadata: OpaqueProviderMetadata) -> None:
+    async def ensure_namespace(
+        self, metadata: OpaqueProviderMetadata, request: dict[str, Any]
+    ) -> None:
+        del request
         self._observe(metadata)
         cell = self._cell(metadata)
         if cell is not None:
@@ -1112,7 +1109,7 @@ class HighFidelityProviderPlane:
         candidate: bool = False,
         failed: bool = False,
     ) -> None:
-        await self.ensure_namespace(metadata)
+        await self.ensure_namespace(metadata, request)
         await self.install_release(metadata, request, _fixed_helm_values(metadata, request, config))
         await VolumeLifecycleWorker(self, self).register_bound_volume(metadata)
         await self.initialize(metadata, request, config)
@@ -1517,19 +1514,13 @@ class CellLifecycleDriver:
     ) -> DriverPending | DriverFinal:
         metadata = _metadata_from_context(context)
         if not self._plane.has_namespace(metadata):
-            capacity_reason = await self._plane.capacity_block_reason(metadata)
-            if capacity_reason is not None:
-                return DriverPending(f"capacity-{capacity_reason}", 300)
-            await self._plane.ensure_namespace(metadata)
+            await self._plane.ensure_namespace(metadata, request)
             return DriverPending(
                 "namespace-ready",
                 1,
                 (DriverResource(ResourceKind.KUBERNETES_NAMESPACE, metadata.resource_name),),
             )
         if not self._plane.has_release(metadata):
-            capacity_reason = await self._plane.capacity_block_reason(metadata)
-            if capacity_reason is not None:
-                return DriverPending(f"capacity-{capacity_reason}", 300)
             await self._plane.install_release(
                 metadata, request, _fixed_helm_values(metadata, request, self._config)
             )

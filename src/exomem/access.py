@@ -26,6 +26,7 @@ untouched. The migration that folds the curated trees into the KB seeds
 
 from __future__ import annotations
 
+import hashlib
 import logging
 from pathlib import Path
 
@@ -44,8 +45,11 @@ TIER_READ_WRITE = "read-write"
 # single source of truth for the tier of a path.
 _APPEND_ONLY = ("Sources", "Evidence")
 
-# (mtime, parsed_config) per config-file path, so an unchanged file isn't re-read.
-_CACHE: dict[str, tuple[float, dict[str, list[str]]]] = {}
+# (stat signature, byte fingerprint, parsed config) per config-file path. Find
+# refreshes the byte fingerprint once before its hot-cache lookup; page-level
+# access checks then reuse this parsed snapshot without rereading the policy.
+_PolicySignature = tuple[int, int, int, int, int]
+_CACHE: dict[str, tuple[_PolicySignature, str, dict[str, list[str]]]] = {}
 
 
 def access_config_path(vault_root: Path) -> Path:
@@ -60,26 +64,75 @@ def _load_config(vault_root: Path) -> dict[str, list[str]]:
     """
     p = access_config_path(vault_root)
     try:
-        mtime = p.stat().st_mtime
+        signature = _policy_signature(p)
     except OSError:
+        _CACHE.pop(str(p), None)
         return {"readonly": [], "excluded": []}
     key = str(p)
     cached = _CACHE.get(key)
-    if cached is not None and cached[0] == mtime:
-        return cached[1]
+    if cached is not None and cached[0] == signature:
+        return cached[2]
+    return _refresh_config(p, signature)[1]
+
+
+def policy_fingerprint(vault_root: Path) -> str:
+    """Return current access-policy byte identity and refresh its parsed cache.
+
+    This is intentionally content-based rather than mtime-based: access policy
+    changes are security boundaries and must invalidate find's hot result cache
+    even after a same-size or timestamp-preserving replacement.
+    """
+    path = access_config_path(vault_root)
     try:
-        data = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
+        signature = _policy_signature(path)
+    except OSError:
+        _CACHE.pop(str(path), None)
+        return "missing"
+    return _refresh_config(path, signature)[0]
+
+
+def _policy_signature(path: Path) -> _PolicySignature:
+    stat = path.stat()
+    return (
+        stat.st_mtime_ns,
+        stat.st_ctime_ns,
+        stat.st_size,
+        stat.st_dev,
+        stat.st_ino,
+    )
+
+
+def _refresh_config(
+    path: Path,
+    signature: _PolicySignature,
+) -> tuple[str, dict[str, list[str]]]:
+    try:
+        raw = path.read_bytes()
+    except OSError as error:
+        log.warning("could not read %s (%s); treating as no access policy", path.name, error)
+        fingerprint = f"unavailable:{type(error).__name__}"
+        cfg: dict[str, list[str]] = {"readonly": [], "excluded": []}
+        _CACHE[str(path)] = (signature, fingerprint, cfg)
+        return fingerprint, cfg
+    fingerprint = hashlib.sha256(raw).hexdigest()
+    cached = _CACHE.get(str(path))
+    if cached is not None and cached[1] == fingerprint:
+        if cached[0] != signature:
+            _CACHE[str(path)] = (signature, fingerprint, cached[2])
+        return fingerprint, cached[2]
+    try:
+        data = yaml.safe_load(raw.decode("utf-8")) or {}
         if not isinstance(data, dict):
             data = {}
-    except (OSError, yaml.YAMLError) as e:
-        log.warning("could not read %s (%s); treating as no access policy", p.name, e)
+    except (UnicodeError, yaml.YAMLError) as error:
+        log.warning("could not read %s (%s); treating as no access policy", path.name, error)
         data = {}
     cfg = {
         "readonly": [str(x) for x in (data.get("readonly") or [])],
         "excluded": [str(x) for x in (data.get("excluded") or [])],
     }
-    _CACHE[key] = (mtime, cfg)
-    return cfg
+    _CACHE[str(path)] = (signature, fingerprint, cfg)
+    return fingerprint, cfg
 
 
 def _kb_relative(rel_path: str) -> str:

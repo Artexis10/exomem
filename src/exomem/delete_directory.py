@@ -33,7 +33,6 @@ from .vault import (
     write_log_entry,
 )
 
-
 log = logging.getLogger(__name__)
 
 TRASH_SUBPATH = "_trash"
@@ -47,6 +46,7 @@ class DeleteDirectoryResult:
     file_count: int
     inbound_link_count: int
     warnings: list[str]
+    index: dict | None = None
 
     def as_dict(self) -> dict:
         return {
@@ -56,6 +56,7 @@ class DeleteDirectoryResult:
             "file_count": self.file_count,
             "inbound_link_count": self.inbound_link_count,
             "warnings": self.warnings,
+            "index": self.index,
         }
 
 
@@ -130,7 +131,7 @@ def delete_directory(
         )
 
     # Enumerate contents.
-    contents = list(abs_path.rglob("*"))
+    contents = sorted(abs_path.rglob("*"), key=lambda item: item.as_posix())
     files = [p for p in contents if p.is_file()]
     if files and not recursive:
         raise DeleteDirectoryError(
@@ -143,7 +144,10 @@ def delete_directory(
 
     # Inbound-wikilink scan: any .md file inside the tree could have
     # external referents. Aggregate the count across all .md children.
-    md_files = [p for p in files if p.suffix.lower() == ".md"]
+    md_files = sorted(
+        (p for p in files if p.suffix.lower() == ".md"),
+        key=lambda item: item.as_posix(),
+    )
     inbound_total = 0
     inbound_samples: list[str] = []
     for md in md_files:
@@ -226,15 +230,32 @@ def delete_directory(
             reason=f"could not move {rel_path} to trash: {e}",
         ) from e
 
+    index_feedback: dict | None = None
     if md_rels_to_unindex:
         try:
             from . import index_sync
-            index_sync.delete_after_remove(vault_root, md_rels_to_unindex)
+            raw_report = index_sync.delete_after_remove(
+                vault_root, md_rels_to_unindex
+            )
+            report = (
+                raw_report
+                if isinstance(raw_report, index_sync.IndexSyncReport)
+                else index_sync.observed_delete_report(
+                    md_rels_to_unindex, degraded=False
+                )
+            )
         except Exception:  # noqa: BLE001 — sidecars are best-effort
             log.exception(
                 "index delete failed for trashed tree %s; sidecar may be stale",
                 rel_path,
             )
+            warnings.append(
+                "trash succeeded but derived-index cleanup failed; run reconcile"
+            )
+            report = index_sync.observed_delete_report(
+                md_rels_to_unindex, degraded=True
+            )
+        index_feedback = report.as_dict()
 
     # Metadata sidecar.
     meta = {
@@ -292,4 +313,5 @@ def delete_directory(
         file_count=len(files),
         inbound_link_count=inbound_total,
         warnings=warnings,
+        index=index_feedback,
     )

@@ -24,7 +24,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import indexes, memory_refs
+from . import indexes, memory_refs, semantic_writes
 from .kbdir import kb_prefix
 from .vault import (
     InvalidSlugError,
@@ -35,6 +35,8 @@ from .vault import (
     kb_root,
     normalize_body_wikilinks,
     normalize_wikilink,
+    plan_log_writes,
+    read_guarded_text,
     render_wikilink_target,
     resolve_filename_slug,
     rotate_log_if_needed,
@@ -61,9 +63,13 @@ class LinkResult:
     path: str  # vault-relative
     ref: str
     warnings: list[str]
+    creation: dict | None = None
 
     def as_dict(self) -> dict:
-        return {"path": self.path, "ref": self.ref, "warnings": self.warnings}
+        value = {"path": self.path, "ref": self.ref, "warnings": self.warnings}
+        if self.creation is not None:
+            value["creation"] = self.creation
+        return value
 
 
 @dataclass
@@ -76,7 +82,7 @@ class LinkError(Exception):
         return {"code": self.code, "missing": self.missing, "reason": self.reason}
 
 
-def link(
+def _legacy_link(
     vault_root: Path,
     *,
     entity_type: str,
@@ -431,14 +437,12 @@ def _render_entity(
         lines.append("## Why in the KB")
         lines.append("")
         lines.append(why_in_kb.strip())
-    lines.append("")
-    lines.append("## Relations")
-    lines.append("")
     if connections:
+        lines.append("")
+        lines.append("## Relations")
+        lines.append("")
         for c in connections:
             lines.append(f"- relates_to [[{c}]]")
-    else:
-        lines.append("- (none yet)")
     lines.append("")
     return "\n".join(lines)
 
@@ -542,8 +546,206 @@ def _prepend_log_entry(
     """Insert `## [<date>] link | <kb-relative-path>` after the `---` separator."""
     title = rel_path.replace(kb_prefix(), "", 1)
     new_entry = f"## [{date_iso}] link | {title}\n\n{escape_wikilinks_for_log(body)}\n"
+    if new_entry in text:
+        return text
     sep_idx = text.find(indexes.LOG_SEPARATOR)
     if sep_idx == -1:
         return text.rstrip() + "\n\n" + new_entry + "\n"
     insertion_point = sep_idx + len(indexes.LOG_SEPARATOR)
     return text[:insertion_point] + "\n" + new_entry + "\n" + text[insertion_point:]
+
+
+def link(
+    vault_root: Path,
+    *,
+    entity_type: str,
+    name: str,
+    slug: str | None = None,
+    summary: str,
+    why_in_kb: str | None = None,
+    tags: list[str] | None = None,
+    connections: list[str] | None = None,
+    affiliation: str | None = None,
+    relationship: str | None = None,
+    domain: str | None = None,
+    language: str | None = None,
+    repo: str | None = None,
+    license: str | None = None,
+    used_in: list[str] | None = None,
+    decided: str | None = None,
+    project: str | None = None,
+    decision_status: str | None = None,
+    today: dt.date | None = None,
+) -> LinkResult:
+    """Create an entity through detached structural preflight."""
+    slug_warnings: list[str] = []
+    filename_slug: str | None = None
+    if slug is not None:
+        try:
+            filename_slug, slug_warnings = resolve_filename_slug(name, slug)
+        except InvalidSlugError as error:
+            raise LinkError("INVALID_SLUG", ["slug"], str(error)) from error
+    err = _validate(
+        entity_type=entity_type,
+        name=name,
+        summary=summary,
+        decision_status=decision_status,
+    )
+    if err is not None:
+        raise LinkError(err.code, err.missing, err.reason)
+    from . import find as find_module
+    from . import project_keys as project_keys_module
+
+    try:
+        key_plan = project_keys_module.plan_project_keys(
+            vault_root,
+            [project] if entity_type == "decision" and project else [],
+        )
+    except project_keys_module.ProjectKeyTypoError as error:
+        raise LinkError("PROJECT_KEY_TYPO", ["project"], str(error)) from error
+    except ValueError as error:
+        raise LinkError("INVALID_LINK", ["project"], str(error)) from error
+    date_iso = (today or dt.date.today()).isoformat()
+    identity = memory_refs.new_id()
+    display_name = name.strip()
+    folder = kb_root(vault_root) / "Entities" / ENTITY_TYPE_TO_FOLDER[entity_type]
+    entity_path = folder / f"{filename_slug or _sanitize_name(name)}.md"
+    rel_entity = entity_path.relative_to(vault_root).as_posix()
+    if entity_path.exists():
+        raise LinkError(
+            "ENTITY_EXISTS",
+            ["name"],
+            f"{rel_entity!r} already exists. Entities are create-only via `link`; "
+            "use `replace` to supersede.",
+        )
+    rel_entity_no_ext = rel_entity.removesuffix(".md")
+    resolver = find_module.writer_resolver_snapshot(vault_root)
+    resolver.add_pending(rel_entity_no_ext, title=display_name)
+    connections_norm, connection_warnings = _normalize_connections(
+        connections, vault_root=vault_root, resolver=resolver
+    )
+    summary_clean, summary_warnings = normalize_body_wikilinks(
+        summary, vault_root, resolver=resolver
+    )
+    why_clean: str | None = None
+    why_warnings: list[str] = []
+    if why_in_kb:
+        why_clean, why_warnings = normalize_body_wikilinks(
+            why_in_kb, vault_root, resolver=resolver
+        )
+    source = _render_entity(
+        entity_type=entity_type,
+        name=display_name,
+        summary=summary_clean,
+        why_in_kb=why_clean,
+        date_iso=date_iso,
+        tags=_clean_tags(tags),
+        connections=[
+            render_wikilink_target(item, vault_root) for item in connections_norm
+        ],
+        affiliation=affiliation,
+        relationship=relationship,
+        domain=domain,
+        language=language,
+        repo=repo,
+        license=license,
+        used_in=used_in,
+        decided=decided,
+        project=project,
+        decision_status=decision_status,
+        exomem_id=identity,
+    )
+    registrations = tuple(
+        semantic_writes.DraftRegistration(item.key, item.category, item.folder)
+        for item in key_plan.introductions
+    )
+    token = semantic_writes.DraftToken(
+        "link",
+        "create",
+        rel_entity,
+        date_iso,
+        registrations,
+    ).encode()
+    try:
+        preflight = semantic_writes.preflight_creation(
+            vault_root,
+            path=rel_entity,
+            source=source,
+            operation="create",
+            writer="link",
+            draft_id=identity,
+            draft_token=token,
+            registrations=registrations,
+        )
+    except semantic_writes.SemanticWriteError as error:
+        raise LinkError(error.code, [], error.reason) from error
+    warnings = (
+        list(slug_warnings)
+        + list(connection_warnings)
+        + list(summary_warnings)
+        + list(why_warnings)
+    )
+    auxiliary: list[PlannedWrite] = list(key_plan.writes)
+    kb = kb_root(vault_root)
+    activity = _activity_summary(
+        rel_entity_no_ext=rel_entity_no_ext,
+        name=display_name,
+        entity_type=entity_type,
+        domain=domain,
+        project=project,
+    )
+    top_index = kb / "index.md"
+    if top_index.is_file():
+        top_text, top_guard = read_guarded_text(vault_root, top_index)
+        new_top, _ = indexes._prepend_recent_activity(
+            top_text, date_iso=date_iso, summary=activity
+        )
+        sub_writes, counted_top = indexes.compute_subindex_writes(
+            vault_root,
+            top_index_text=new_top,
+            pending_paths=[rel_entity_no_ext],
+            include_unchanged=True,
+        )
+        auxiliary.append(
+            PlannedWrite(top_index, counted_top or new_top, guard=top_guard)
+        )
+        auxiliary.extend(sub_writes)
+    else:
+        warnings.append(f"{kb_prefix()}index.md missing; skipped Recent activity bump")
+    try:
+        log_plan = plan_log_writes(
+            vault_root,
+            date_iso=date_iso,
+            op="link",
+            rel_path_no_ext=rel_entity_no_ext,
+            body=_log_entry_body(
+                entity_type=entity_type,
+                name=display_name,
+                domain=domain,
+                project=project,
+                decision_status=decision_status,
+                tags=_clean_tags(tags),
+            ),
+            operation_token=token,
+        )
+    except (OSError, UnicodeError, ValueError) as error:
+        raise LinkError(
+            "LOG_PLAN_CONFLICT", [], "entity log update could not be planned safely"
+        ) from error
+    auxiliary.extend(log_plan.writes)
+    if log_plan.warning is not None:
+        warnings.append(log_plan.warning)
+    if log_plan.rotation_note is not None:
+        warnings.append(log_plan.rotation_note)
+    committed = semantic_writes.commit_creation(
+        vault_root,
+        preflight=preflight,
+        auxiliary_writes=tuple(auxiliary),
+        operation="create",
+    )
+    return LinkResult(
+        rel_entity,
+        memory_refs.memory_ref(identity),
+        warnings,
+        committed.as_dict(),
+    )

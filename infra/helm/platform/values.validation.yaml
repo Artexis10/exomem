@@ -43,6 +43,8 @@ provisioner:
     }
 scheduler:
   contractVersion: 1
+capacityCollector:
+  hcloudServerId: 101
 durability:
   b2Endpoint: https://s3.eu-central-003.backblazeb2.com
   b2Region: eu-central-003

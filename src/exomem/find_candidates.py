@@ -115,6 +115,7 @@ def collect_candidates(
     record_degradation: Callable[[str], None],
     degraded_out: list[str] | None,
     failed_out: list[str] | None,
+    eligible_paths: set[str] | None = None,
 ) -> CandidateBundle:
     """Collect vector/BM25/keyword/CLIP/graph/temporal lanes and fuse them."""
     from . import bm25, embeddings, epistemic_graph, fusion, readiness
@@ -124,7 +125,16 @@ def collect_candidates(
         from . import usage as usage_module
         usage_map = usage_module.activation_map(config)
 
-    candidate_k = max(limit * config.candidate_multiplier, config.candidate_floor)
+    candidate_k = max(
+        limit * config.candidate_multiplier,
+        config.candidate_floor,
+        len(eligible_paths) if eligible_paths is not None else 0,
+    )
+
+    def _eligible(ranking: list[str]) -> list[str]:
+        if eligible_paths is None:
+            return ranking
+        return [path for path in ranking if path in eligible_paths]
     frame_attribution: dict[str, tuple[str, float | None]] = {}
 
     vector_ranking: list[str] = []
@@ -140,7 +150,15 @@ def collect_candidates(
             with _span(timings, "vector"):
                 idx = embeddings.get_embedding_index(vault_root)
                 query_vec = embeddings.embed_texts([query], is_query=True)[0]
-                chunk_hits = idx.search(query_vec, k=candidate_k * 3)
+                chunk_hits = (
+                    idx.search(query_vec, k=candidate_k * 3)
+                    if eligible_paths is None
+                    else idx.search(
+                        query_vec,
+                        k=candidate_k * 3,
+                        allowed_paths=eligible_paths,
+                    )
+                )
                 best_per_file: dict[str, tuple[float, str]] = {}
                 for fp, _idx, ctext, score in chunk_hits:
                     existing = best_per_file.get(fp)
@@ -170,6 +188,7 @@ def collect_candidates(
         chunk_text_by_path,
         vector_score_by_path,
     )
+    vector_ranking = _eligible(vector_ranking)
 
     clip_ranking: list[str] = []
     clip_score_by_path: dict[str, float] = {}
@@ -184,7 +203,25 @@ def collect_candidates(
             with _span(timings, "clip"):
                 clip_idx = embeddings.get_clip_index(vault_root)
                 clip_qvec = embeddings.embed_clip_text(query)
-                for img_rel, frame_ts, score in clip_idx.search(clip_qvec, k=candidate_k * 8):
+                allowed_images = (
+                    None
+                    if eligible_paths is None
+                    else {
+                        path.removesuffix(".md")
+                        for path in eligible_paths
+                        if path.endswith(".md")
+                    }
+                )
+                clip_hits = (
+                    clip_idx.search(clip_qvec, k=candidate_k * 8)
+                    if allowed_images is None
+                    else clip_idx.search(
+                        clip_qvec,
+                        k=candidate_k * 8,
+                        allowed_paths=allowed_images,
+                    )
+                )
+                for img_rel, frame_ts, score in clip_hits:
                     if len(clip_ranking) >= candidate_k:
                         break
                     sidecar_rel = img_rel + ".md"
@@ -216,6 +253,7 @@ def collect_candidates(
         clip_score_by_path,
         clip_frame_ts_by_path,
     )
+    clip_ranking = _eligible(clip_ranking)
 
     bm25_ranking: list[str] = []
     keyword_ranking: list[str] = []
@@ -227,12 +265,23 @@ def collect_candidates(
     else:
         try:
             with _span(timings, "bm25"):
-                bm25_hits = bm25.search(
-                    vault_root,
-                    query,
-                    k=candidate_k,
-                    scope=scope,
-                    freshness=snapshot.for_scope(scope),
+                bm25_hits = (
+                    bm25.search(
+                        vault_root,
+                        query,
+                        k=candidate_k,
+                        scope=scope,
+                        freshness=snapshot.for_scope(scope),
+                    )
+                    if eligible_paths is None
+                    else bm25.search(
+                        vault_root,
+                        query,
+                        k=candidate_k,
+                        scope=scope,
+                        freshness=snapshot.for_scope(scope),
+                        allowed_paths=eligible_paths,
+                    )
                 )
                 bm25_ranking = [p for p, _ in bm25_hits]
         except ImportError as e:
@@ -246,6 +295,7 @@ def collect_candidates(
         bm25_ranking = collapse_frame_children(
             bm25_ranking, vault_root, page_of, frame_attribution
         )
+        bm25_ranking = _eligible(bm25_ranking)
 
         with _span(timings, "keyword"):
             keyword_ranking = keyword_match_paths(
@@ -254,6 +304,7 @@ def collect_candidates(
         keyword_ranking = collapse_frame_children(
             keyword_ranking, vault_root, page_of, frame_attribution
         )
+        keyword_ranking = _eligible(keyword_ranking)
         rankings = [
             r for r in (vector_ranking, bm25_ranking, keyword_ranking, clip_ranking) if r
         ]
@@ -317,6 +368,8 @@ def collect_candidates(
                 )
                 if target_rel in primary_set:
                     continue
+                if eligible_paths is not None and target_rel not in eligible_paths:
+                    continue
                 family = neighbor.family
                 tier = 0 if (neighbor.relation_type and family and family != "link") else 1
                 current_best = best_tier_for_target.get(target_rel)
@@ -351,6 +404,8 @@ def collect_candidates(
                             graph_in_degree_by_path.get(target_rel, 0) + 1
                         )
                         if target_rel in primary_set or target_rel in seen_target:
+                            continue
+                        if eligible_paths is not None and target_rel not in eligible_paths:
                             continue
                         seen_target.add(target_rel)
                         legacy_targets.append(target_rel)
@@ -389,6 +444,8 @@ def collect_candidates(
                         graph_in_degree_by_path.get(target_rel, 0) + 1
                     )
                     if target_rel in primary_set or target_rel in seen_target:
+                        continue
+                    if eligible_paths is not None and target_rel not in eligible_paths:
                         continue
                     seen_target.add(target_rel)
                     graph_ranking.append(target_rel)

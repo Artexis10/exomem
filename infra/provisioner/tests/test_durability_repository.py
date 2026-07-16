@@ -16,6 +16,7 @@ from exomem_provisioner.durability_repository import (
     RunIdentity,
     RunKind,
 )
+from exomem_provisioner.provider_identity import ProviderReference
 from exomem_provisioner.repository import OperationRepository
 
 
@@ -171,6 +172,67 @@ async def test_recovery_object_is_bound_to_claimed_run_identity_and_immutable(
     )
     assert erased.wrapped_data_key is None
     assert erased.key_destroyed_at is not None
+
+
+@pytest.mark.asyncio
+async def test_export_delivery_exact_version_survives_repository_restart(
+    durability_repository: tuple[ProvisionerDatabase, DurabilityRepository],
+) -> None:
+    database, repository = durability_repository
+    now = datetime(2030, 1, 1, 12, 0, tzinfo=UTC)
+    run = await repository.begin(
+        _identity(kind=RunKind.USER_EXPORT, operation_id="export-delivery-source")
+    )
+    claimed = await repository.claim(run.id, "export-worker", now=now)
+    source = await repository.record_verified_object(
+        run.id,
+        "export-worker",
+        claim_token=claimed.claim_token,
+        claim_generation=claimed.claim_generation,
+        value=RecoveryObjectInput(
+            opaque_reference="export_source_opaque",
+            provider_reference=ProviderReference.b2(
+                bucket="user-export-bucket",
+                key="user-export/source.enc",
+                version_id="source-version",
+            ),
+            wrapped_data_key="wrapped-secret-key-material",
+            archive_sha256="a" * 64,
+            manifest_sha256="b" * 64,
+            archive_size=123_456,
+            ciphertext_sha256="c" * 64,
+            ciphertext_size=123_999,
+            metadata_sha256="d" * 64,
+            object_lock_until=now,
+            expires_at=now + timedelta(days=30),
+        ),
+        verified_at=now,
+    )
+    provider_reference = ProviderReference.b2(
+        bucket="user-export-bucket",
+        key="user-export-delivery/aa/delivery.portable",
+        version_id="delivery-version-exact",
+    )
+
+    saved = await repository.record_export_delivery(
+        source_object_id=source.id,
+        tenant_id="tenant-durable-alpha",
+        provider_reference=provider_reference,
+        expires_at=now + timedelta(minutes=15),
+        verified_at=now,
+    )
+    restarted = DurabilityRepository(
+        database.session_factory,
+        codec=AesGcmEnvelopeCodec.from_secret("k" * 32),
+    )
+    records = await restarted.tenant_export_deliveries("tenant-durable-alpha")
+
+    assert records == [saved]
+    assert ProviderReference.parse(records[0].provider_reference)["objectVersionId"] == (
+        "delivery-version-exact"
+    )
+    assert records[0].source_object_id == source.id
+    assert records[0].deleted_at is None
 
 
 @pytest.mark.asyncio

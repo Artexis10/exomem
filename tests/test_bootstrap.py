@@ -69,6 +69,7 @@ def test_bootstrap_compact_contract_is_public_safe(vault: Path) -> None:
     assert "connect_memory" in " ".join(authoring["canonical_loop"])
     assert authoring["route_by_intent"]["new_durable_conclusion"] == "remember"
     assert authoring["route_by_intent"]["small_correction"] == "edit_memory"
+    assert authoring["route_by_intent"]["semantic_unit_mutation"] == "observe_memory"
     assert authoring["route_by_intent"]["substantial_rewrite"] == "replace_memory"
     assert "near_duplicate_warnings" in authoring["preflight"]
     assert "write_feedback" in authoring["post_write"]
@@ -78,12 +79,18 @@ def test_bootstrap_compact_contract_is_public_safe(vault: Path) -> None:
     assert "ask_memory" in out["common_tools"]
     assert "read_memory" in out["common_tools"]
     assert "remember" in out["common_tools"]
+    assert "observe_memory" in out["common_tools"]
     assert out["tool_defaults"]["normal_lookup"]["tool"] == "ask_memory"
     assert out["tool_defaults"]["normal_lookup"]["args"] == {
         "detail": "compact",
         "rerank": False,
     }
     assert out["tool_defaults"]["read_full_page"]["tool"] == "read_memory"
+    assert out["tool_defaults"]["mutate_semantic_unit"]["tool"] == "observe_memory"
+    unit_contract = authoring["semantic_units"]
+    assert unit_contract["compact_syntax"].startswith("- [category]")
+    assert unit_contract["compact_kind"] == "observation"
+    assert unit_contract["rich_relation_rule"]
     serialized = json.dumps(out)
     assert str(vault) not in serialized
     assert "Progressive disclosure" not in serialized
@@ -93,7 +100,7 @@ def test_bootstrap_teaches_human_readable_memory_citations(vault: Path) -> None:
     out = commands.op_bootstrap(vault)
     guidance = json.dumps(out["workflow"]).lower()
 
-    assert out["contract_version"] == "2026-07-15.1"
+    assert out["contract_version"] == "2026-07-16.1"
     for required in (
         "show the note title by default",
         "normal user-facing prose",

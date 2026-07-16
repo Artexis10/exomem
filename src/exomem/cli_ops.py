@@ -32,17 +32,42 @@ _CODE_PREFIX = re.compile(r"^([A-Z][A-Z0-9_]+):\s*(.*)$", re.DOTALL)
 # Stable, machine-readable codes → a one-line remediation. Only the codes worth a
 # pointer are listed; everything else carries `remediation: null`.
 _REMEDIATION: dict[str, str] = {
-    "UNKNOWN_PARAM": "Remove the unknown field; run with --help or see /api/openapi.json for the accepted params.",
+    "UNKNOWN_PARAM": (
+        "Remove the unknown field; run with --help or see /api/openapi.json for the "
+        "accepted params."
+    ),
     "MISSING_ARGUMENT": "Provide the required argument; run the subcommand with --help.",
     "BAD_INT": "Pass an integer.",
     "BAD_BOOL": "Pass a boolean (true/false).",
     "BAD_JSON": "Pass valid JSON for this field.",
     "BINARY_BLOB_REJECTED": "Don't push binaries through text fields; use the /upload endpoint.",
     "NOT_FOUND": "Check the path; try `ask_memory` to locate it.",
-    "WRITER_LEASE_REQUIRED": "Send the mutation to the current writer or retry after its lease expires.",
-    "WRITER_COORDINATOR_UNAVAILABLE": "Check the coordinator URL, credentials, and service health; reads remain available.",
+    "STALE_PARENT_HASH": "Re-read the parent page and retry with its current content hash.",
+    "STALE_UNIT_REFERENCE": (
+        "Re-read the exact unit and retry with its current reference/fingerprint."
+    ),
+    "AMBIGUOUS_UNIT_REFERENCE": (
+        "Re-read the parent and select one exact current unit reference."
+    ),
+    "COMPACT_RELATIONS_REQUIRE_RICH_KIND": (
+        "Select an explicit governed rich kind or author a canonical note-level relation."
+    ),
+    "DRIFT_GUARDS_REQUIRED": (
+        "Re-read the parent and exact unit, then pass both expected_hash and "
+        "expected_fingerprint."
+    ),
+    "WRITER_LEASE_REQUIRED": (
+        "Send the mutation to the current writer or retry after its lease expires."
+    ),
+    "WRITER_COORDINATOR_UNAVAILABLE": (
+        "Check the coordinator URL, credentials, and service health; reads remain "
+        "available."
+    ),
+    "WRITER_FENCED": "Retry the mutation on the current writer.",
     "MUTATION_BUSY": "Retry after the active vault mutation finishes.",
-    "MUTATION_LOCK_UNAVAILABLE": "Check that the runtime state root is writable and supports host file locking.",
+    "MUTATION_LOCK_UNAVAILABLE": (
+        "Check that the runtime state root is writable and supports host file locking."
+    ),
     "INVALID_MEDIA_OPERATION": "Use operation=process, operation=status, or operation=retry.",
     "UNSUPPORTED_MEDIA": "Use a supported audio, video, image, document, or text-media extension.",
     "MEDIA_NOT_FOUND": "Check the governed Knowledge Base path and original filename.",
@@ -63,11 +88,17 @@ _CONFLICT_CODES = frozenset(
         "ALREADY_SUPERSEDED",
         "ALREADY_TRASHED",
         "STALE_EDIT",
+        "STALE_PARENT_HASH",
+        "STALE_UNIT_REFERENCE",
+        "AMBIGUOUS_UNIT_REFERENCE",
         "STALE_CONTRACT",
         "CONTRACT_EXISTS",
         "WRITER_LEASE_REQUIRED",
+        "WRITER_FENCED",
         "IDEMPOTENCY_KEY_REUSED",
         "IDEMPOTENCY_IN_PROGRESS",
+        "BATCH_ROLLBACK_INCOMPLETE",
+        "BATCH_CLEANUP_INCOMPLETE",
         "MUTATION_BUSY",
     }
 )
@@ -100,6 +131,14 @@ def error_dict(exc: Exception) -> dict:
     `OpError` carries its fields directly; a leaf-contract `ValueError`
     ("CODE: reason") is parsed into {code, message}; anything else is `INTERNAL`.
     """
+    public_dict = getattr(exc, "as_public_dict", None)
+    if callable(public_dict):
+        try:
+            public_payload = public_dict()
+        except Exception:  # noqa: BLE001 - fall through to the shared parser
+            public_payload = None
+        if isinstance(public_payload, dict):
+            return public_payload
     if isinstance(exc, OpError):
         return {"code": exc.code, "message": exc.message, "remediation": exc.remediation}
     text = str(exc)

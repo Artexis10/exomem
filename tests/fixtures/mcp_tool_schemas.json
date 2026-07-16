@@ -1,12 +1,4 @@
 {
-  "coordination_status": {
-    "description": "Report this replica's writer-lease role and coordinator health.\n\nRead-only and safe during coordinator outages. Credentials and vault content\nare never included.",
-    "inputSchema": {
-      "additionalProperties": false,
-      "properties": {},
-      "type": "object"
-    }
-  },
   "adopt_vault": {
     "description": "Adopt an existing vault safely without replacing originals.\n\nDefault mode scans only. Copy/compile modes write under the governed\nKnowledge Base layer and preserve original path/hash provenance.",
     "inputSchema": {
@@ -172,6 +164,54 @@
           ],
           "default": null,
           "description": "Optional artifact kinds to exclude."
+        },
+        "categories": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Semantic-unit category shortcuts, such as config or rule."
+        },
+        "kinds": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Semantic-unit kind shortcuts, such as decision or claim."
+        },
+        "filters": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Structured page/unit metadata filters."
+        },
+        "result_level": {
+          "default": "auto",
+          "description": "auto, page, unit, or mixed.",
+          "type": "string"
         },
         "limit": {
           "default": 15,
@@ -846,6 +886,14 @@
       "type": "object"
     }
   },
+  "coordination_status": {
+    "description": "Report this replica's writer-lease role and coordinator health.\n\nRead-only and safe during coordinator outages. Credentials and vault content\nare never included.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {},
+      "type": "object"
+    }
+  },
   "edit_memory": {
     "description": "Edit an existing memory page with an auditable reason.\n\nUse for small corrections, section edits, batch string edits, opinion-row\nfills, or one frontmatter field. Substantial rewrites should use\n`replace_memory` so history stays explicit.",
     "inputSchema": {
@@ -1251,8 +1299,269 @@
           ],
           "default": null,
           "description": "YYYY-MM-DD filter for trash-list."
+        },
+        "validate_only": {
+          "default": false,
+          "description": "Validate a Markdown create-file operation without writing.",
+          "type": "boolean"
+        },
+        "draft_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Draft identity returned by validate_only."
+        },
+        "draft_hash": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Exact reviewed draft hash returned by validate_only."
+        },
+        "draft_token": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Opaque destination/date token returned by validate_only."
+        },
+        "relation_disposition": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Reviewed relation outcome for semantic file creation."
+        },
+        "relation_review_hash": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Draft hash covered by the relation review."
+        },
+        "relation_review_reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Audit reason for a reviewed-none disposition."
         }
       },
+      "type": "object"
+    }
+  },
+  "observe_memory": {
+    "description": "Validate or mutate one semantic unit on a compiled memory page.\n\nCompact observation is the default form. Supply an explicit governed\nnon-observation `kind` for rich semantic-block form and typed relations.\nUse `validate` before a guarded commit when semantic review is required.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "description": "Parent page path or canonical memory reference.",
+          "type": "string"
+        },
+        "operation": {
+          "default": "add",
+          "description": "add, update, remove, or validate.",
+          "type": "string"
+        },
+        "category": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Open semantic category for add/update/validate."
+        },
+        "content": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Unit content for add/update/validate."
+        },
+        "kind": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional governed rich kind; omitted means compact observation."
+        },
+        "tags": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional compact suffix tags or rich metadata tags."
+        },
+        "context": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional compact suffix context or rich metadata context."
+        },
+        "relations": {
+          "anyOf": [
+            {
+              "items": {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Rich typed relations as {kind, target} objects."
+        },
+        "unit_ref": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Current exact unit reference for update/remove or update validation."
+        },
+        "expected_fingerprint": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Current exact unit fingerprint; required for update/remove."
+        },
+        "expected_hash": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Current exact parent-page content hash; required for update/remove."
+        },
+        "transition_token": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Exact transition token returned by validate."
+        },
+        "relation_disposition": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Existing-page semantic review disposition."
+        },
+        "relation_review_hash": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Transition hash covered by reviewed-none."
+        },
+        "relation_review_reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Audit reason for reviewed-none."
+        }
+      },
+      "required": [
+        "path"
+      ],
       "type": "object"
     }
   },
@@ -1510,7 +1819,7 @@
     }
   },
   "read_memory": {
-    "description": "Read one memory page or curated vault file by path.\n\nUse after `ask_memory` chooses a hit, or when a caller already knows the\npath. This wraps the canonical page reader and can include history and\nlink summaries in the same call.",
+    "description": "Read one memory page or one exact semantic unit by reference.\n\nUse after `ask_memory` chooses a hit, or when a caller already knows the\npath. With `unit_ref`, returns that exact current semantic unit, its parent\ncitation/lifecycle, and at most 2,400 characters of surrounding Markdown.\nMissing, stale, ambiguous, and superseded references are reported through\nthe response `status`; no nearby unit is silently substituted. Without\n`unit_ref`, this preserves the existing page-read response exactly.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -1537,6 +1846,18 @@
           "default": false,
           "description": "Include the raw markdown file text.",
           "type": "boolean"
+        },
+        "unit_ref": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Exact unit reference returned by unit-level recall. Page-only expansion flags are not accepted together with an exact unit read."
         }
       },
       "required": [
@@ -1816,6 +2137,83 @@
           ],
           "default": null,
           "description": "Category for a new project key."
+        },
+        "validate_only": {
+          "default": false,
+          "description": "Validate and return an immutable creation draft without writing.",
+          "type": "boolean"
+        },
+        "draft_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Draft identity returned by validate_only."
+        },
+        "draft_hash": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Exact reviewed draft hash returned by validate_only."
+        },
+        "draft_token": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Opaque destination/date token returned by validate_only."
+        },
+        "relation_disposition": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Reviewed relation outcome for commit."
+        },
+        "relation_review_hash": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Draft hash covered by the relation review."
+        },
+        "relation_review_reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Audit reason for a reviewed-none disposition."
         }
       },
       "required": [
@@ -2107,6 +2505,83 @@
           ],
           "default": null,
           "description": "Category for a new project key."
+        },
+        "validate_only": {
+          "default": false,
+          "description": "Validate the replacement draft without writing either page.",
+          "type": "boolean"
+        },
+        "draft_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Draft identity returned by validate_only."
+        },
+        "draft_hash": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Exact reviewed draft hash returned by validate_only."
+        },
+        "draft_token": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Opaque destination/date token returned by validate_only."
+        },
+        "relation_disposition": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Reviewed relation outcome for commit."
+        },
+        "relation_review_hash": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Draft hash covered by the relation review."
+        },
+        "relation_review_reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Audit reason for a reviewed-none disposition."
         }
       },
       "required": [
@@ -2329,7 +2804,7 @@
         },
         "subject": {
           "default": "contract",
-          "description": "`contract`, `relations`, or `traversal-profiles`.",
+          "description": "`contract`, `categories`, `relations`, or `traversal-profiles`.",
           "type": "string"
         },
         "project": {
@@ -2401,7 +2876,7 @@
             }
           ],
           "default": null,
-          "description": "Reviewed relation registry or traversal-profile proposal."
+          "description": "Reviewed semantic-language, relation, or traversal-profile proposal."
         },
         "include_model_suggestions": {
           "default": false,

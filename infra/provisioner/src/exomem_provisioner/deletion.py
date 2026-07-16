@@ -23,6 +23,7 @@ class DeletionResourceKind(StrEnum):
     VOLUME = "volume"
     EXPORT = "export"
     BACKUP = "backup"
+    DELIVERY = "delivery"
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,6 +35,8 @@ class DeletionResource:
     cell_id: str | None
     retained_until: datetime | None = None
     wrapped_key_reference: str | None = None
+    ledger_reference: str | None = None
+    delete_marker: bool = False
 
     def __post_init__(self) -> None:
         if not self.provider or not self.reference or not self.tenant_id:
@@ -41,22 +44,24 @@ class DeletionResource:
         if self.retained_until is not None and self.retained_until.tzinfo is None:
             raise ValueError("deletion retention timestamp must be timezone-aware")
         if self.kind in {DeletionResourceKind.EXPORT, DeletionResourceKind.BACKUP}:
-            if not self.wrapped_key_reference:
+            if not self.delete_marker and not self.wrapped_key_reference:
                 raise ValueError("recovery objects require a wrapped-key reference")
 
 
 class DeletionProvider(Protocol):
     async def scan_tenant(self, tenant_id: str) -> tuple[DeletionResource, ...]: ...
 
-    async def delete_resource(
-        self, resource: DeletionResource, *, bypass_governance: bool
-    ) -> None: ...
+    async def delete_resource(self, resource: DeletionResource) -> None: ...
 
     async def resource_absent(self, resource: DeletionResource) -> bool: ...
+
+    async def record_resource_absence(self, resource: DeletionResource) -> None: ...
 
     async def destroy_wrapped_key(self, resource: DeletionResource) -> None: ...
 
     async def wrapped_key_absent(self, resource: DeletionResource) -> bool: ...
+
+    async def tenant_deletion_complete(self, tenant_id: str) -> bool: ...
 
     async def active_cells_ready_excluding(self, tenant_id: str, excluded_cell_id: str) -> bool: ...
 
@@ -94,7 +99,7 @@ class OrderedDeletionWorkflow:
         if not candidate:
             raise DeletionVerificationError("failed candidate was not rediscovered")
         for resource in candidate:
-            await self._provider.delete_resource(resource, bypass_governance=False)
+            await self._provider.delete_resource(resource)
         proofs = {
             resource: await self._provider.resource_absent(resource) for resource in candidate
         }
@@ -139,16 +144,29 @@ class OrderedDeletionWorkflow:
         )
         deletable = tuple(resource for resource in inventory if resource not in locked)
         for resource in deletable:
-            bypass = (
-                resource.kind is DeletionResourceKind.BACKUP and resource.retained_until is not None
-            )
-            await self._provider.delete_resource(resource, bypass_governance=bypass)
             if not await self._provider.resource_absent(resource):
-                return DriverPending("absence-verification", 2)
-            if resource.wrapped_key_reference is not None:
-                await self._provider.destroy_wrapped_key(resource)
-                if not await self._provider.wrapped_key_absent(resource):
-                    return DriverPending("key-absence-verification", 2)
+                await self._provider.delete_resource(resource)
+        if not all(
+            [await self._provider.resource_absent(resource) for resource in deletable]
+        ):
+            return DriverPending("absence-verification", 2)
+        for resource in deletable:
+            await self._provider.record_resource_absence(resource)
+        remaining_references = {
+            resource.wrapped_key_reference
+            for resource in locked
+            if resource.wrapped_key_reference is not None
+        }
+        keyed_resources = {
+            resource.wrapped_key_reference: resource
+            for resource in deletable
+            if resource.wrapped_key_reference is not None
+            and resource.wrapped_key_reference not in remaining_references
+        }
+        for resource in keyed_resources.values():
+            await self._provider.destroy_wrapped_key(resource)
+            if not await self._provider.wrapped_key_absent(resource):
+                return DriverPending("key-absence-verification", 2)
         if locked:
             wait_seconds = min(
                 300,
@@ -170,6 +188,8 @@ class OrderedDeletionWorkflow:
         remaining = await self._provider.scan_tenant(tenant_id)
         if remaining:
             return DriverPending("provider-rediscovery", 2)
+        if not await self._provider.tenant_deletion_complete(tenant_id):
+            return DriverPending("ledger-absence-verification", 2)
         return DriverFinal(
             {
                 "computeDestroyed": True,

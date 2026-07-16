@@ -62,6 +62,7 @@ from . import memory_schema as memory_schema_module
 from . import move_file as move_file_module
 from . import multi_edit as multi_edit_module
 from . import note as note_module
+from . import observe_memory as observe_memory_module
 from . import overview as overview_module
 from . import provenance as provenance_module
 from . import query_data as query_data_module
@@ -74,6 +75,8 @@ from . import relation_registry as relation_registry_module
 from . import replace as replace_module
 from . import review_context as review_context_module
 from . import review_state as review_state_module
+from . import semantic_language_registry as semantic_language_registry_module
+from . import semantic_unit_read as semantic_unit_read_module
 from . import set_frontmatter_field as set_frontmatter_field_module
 from . import set_take as set_take_module
 from . import traversal_profiles as traversal_profiles_module
@@ -237,7 +240,7 @@ def op_bootstrap(
     requested_workflow = workflow.strip() if workflow and workflow.strip() else "general"
     selected_packs = knowledge_packs_module.selected_pack_state(vault_root)
     payload: dict = {
-        "contract_version": "2026-07-15.1",
+        "contract_version": "2026-07-16.1",
         "profile": profile,
         "server": {
             "name": "exomem",
@@ -286,7 +289,7 @@ def op_bootstrap(
                 ),
                 "reason in the agent",
                 "use connect_memory(operation='suggest-links' or 'suggest-relations') before important compiled writes",
-                "remember, edit_memory, or replace_memory when there is a durable conclusion",
+                "remember or replace_memory for page-level conclusions; observe_memory for one semantic unit; edit_memory for other small page corrections",
                 "read warnings/suggestions/write_feedback and follow up on unresolved links or duplicate warnings",
             ],
             "save_rule": (
@@ -307,7 +310,7 @@ def op_bootstrap(
                 "draft the smallest durable compiled conclusion",
                 "run connect_memory(operation='suggest-links') and, when directional meaning matters, 'suggest-relations' on the draft",
                 "write accepted note-level edges under `## Relations` as `- relation_type [[Target]]`",
-                "write with remember, edit_memory, replace_memory, capture_source, preserve_evidence, or connect_memory as appropriate",
+                "write with remember, observe_memory, edit_memory, replace_memory, capture_source, preserve_evidence, or connect_memory as appropriate",
                 "inspect warnings, suggestions, and write_feedback from the write result",
                 "apply any accepted links through edit_memory",
                 "report the written path",
@@ -317,6 +320,7 @@ def op_bootstrap(
                 "raw_evidence_or_artifact": "preserve_evidence or transfer_artifact",
                 "new_durable_conclusion": "remember",
                 "small_correction": "edit_memory",
+                "semantic_unit_mutation": "observe_memory",
                 "substantial_rewrite": "replace_memory",
                 "named_person_concept_library_or_decision": "connect_memory(operation='entity')",
             },
@@ -336,6 +340,15 @@ def op_bootstrap(
                 "pattern": "Reusable solution with Problem, Solution, When to use, When not to use, and typed Relations.",
                 "experiment": "Primary protocol with Hypothesis, Protocol, Results, and Conclusion.",
                 "production-log": "Creative artifact record with Frame, Artifact, Outcomes, Reflection, and typed Relations.",
+            },
+            "semantic_units": {
+                "compact_syntax": "- [category] content #tags (context) ^anchor",
+                "compact_kind": "observation",
+                "category_rule": "category is open vocabulary; kind is governed independently",
+                "rich_form": "select an explicit governed non-observation kind",
+                "rich_relation_rule": "typed unit relations require rich form; compact units use a canonical note-level relation instead",
+                "mutation_rule": "use observe_memory add/update/remove/validate instead of whole-page string surgery for one unit",
+                "drift_guards": "update/remove require the current parent content hash and unit fingerprint",
             },
         },
         "tool_defaults": {
@@ -372,6 +385,10 @@ def op_bootstrap(
                 "when": "new durable conclusion",
             },
             "minor_edit": {"tool": "edit_memory", "when": "small correction to an existing page"},
+            "mutate_semantic_unit": {
+                "tool": "observe_memory",
+                "when": "add, update, remove, or validate one compact/rich semantic unit",
+            },
             "supersede": {
                 "tool": "replace_memory",
                 "when": "substantial rewrite of compiled material",
@@ -424,6 +441,7 @@ def op_bootstrap(
             "read_memory",
             "remember",
             "edit_memory",
+            "observe_memory",
             "replace_memory",
             "connect_memory",
             "transfer_artifact",
@@ -479,6 +497,10 @@ def op_find(
     speakers: list[str] | None = None,
     file_types: list[str] | None = None,
     exclude_file_types: list[str] | None = None,
+    categories: list[str] | None = None,
+    kinds: list[str] | None = None,
+    filters: dict[str, Any] | None = None,
+    result_level: str = "auto",
     limit: int = 15,
     scope: str = "kb",
     mode: str = "hybrid",
@@ -513,6 +535,11 @@ def op_find(
             (csv/json). Omit to return ALL kinds (the default — search never
             hides a type unless you ask).
         exclude_file_types: Drop these kinds from results (same vocabulary).
+        categories: Semantic-unit category shortcuts, such as config or rule.
+        kinds: Semantic-unit kind shortcuts, such as decision or claim.
+        filters: Structured page/unit metadata filters.
+        result_level: auto, page, unit, or mixed. Auto preserves page recall
+            unless semantic-unit filters request independently ranked units.
         limit: Max hits to return. Default 15, hard cap 100.
         scope: "kb" (default) searches Knowledge Base/ first and
             AUTO-WIDENS to the whole vault when the KB doesn't fill
@@ -662,6 +689,7 @@ def op_find(
                 "prefer_compiled": prefer_compiled,
                 "prefer_active": prefer_active,
                 "prefer_used": prefer_used,
+                "result_level": result_level,
                 "compute_policy": mode_module.resolved(),
             }
         )
@@ -676,6 +704,10 @@ def op_find(
         speakers=speakers,
         file_types=file_types,
         exclude_file_types=exclude_file_types,
+        categories=categories,
+        kinds=kinds,
+        filters=filters,
+        result_level=result_level,
         limit=limit,
         scope=scope,
         mode=mode,
@@ -693,6 +725,11 @@ def op_find(
     )
     pack_obj: dict | None = None
     if pack:
+        if any(isinstance(hit, find_module.SemanticUnitHit) for hit in hits):
+            raise ValueError(
+                "PACK_REQUIRES_PAGE_RESULTS: deep context currently requires "
+                "result_level='page'; use shallow semantic-unit recall first"
+            )
         with find_module._span(timings, "pack"):
             pack_obj = context_pack_module.assemble_pack(
                 vault_root, hits, graph_enrich=graph_enrich
@@ -1825,6 +1862,13 @@ def op_replace(
     host: str | None = None,
     editor: str | None = None,
     project_category: str | None = None,
+    validate_only: bool = False,
+    draft_id: str | None = None,
+    draft_hash: str | None = None,
+    draft_token: str | None = None,
+    relation_disposition: str | None = None,
+    relation_review_hash: str | None = None,
+    relation_review_reason: str | None = None,
 ) -> dict:
     """Supersede an existing compiled page with a new one.
 
@@ -1848,6 +1892,13 @@ def op_replace(
             happening; lands in the log entry body.
         (all other args): Same as the `note` tool — define the new page's
             content, type, project/projects, sources, etc.
+        validate_only: Validate the replacement draft without writing either page.
+        draft_id: Draft identity returned by validate_only.
+        draft_hash: Exact reviewed draft hash returned by validate_only.
+        draft_token: Opaque destination/date token returned by validate_only.
+        relation_disposition: Reviewed relation outcome for commit.
+        relation_review_hash: Draft hash covered by the relation review.
+        relation_review_reason: Audit reason for a reviewed-none disposition.
 
     Returns:
         {old_path, new_path, warnings}.
@@ -1886,6 +1937,13 @@ def op_replace(
             host=host,
             editor=editor,
             project_category=project_category,
+            validate_only=validate_only,
+            draft_id=draft_id,
+            draft_hash=draft_hash,
+            draft_token=draft_token,
+            relation_disposition=relation_disposition,
+            relation_review_hash=relation_review_hash,
+            relation_review_reason=relation_review_reason,
         )
     except replace_module.ReplaceError as e:
         raise ValueError(
@@ -1896,9 +1954,10 @@ def op_replace(
         raise ValueError(
             f"{e.code}: {e.reason} (missing: {e.missing})"
         ) from e
-    query_log.log_write_call(
-        tool="replace", written_path=result.new_path, cited_sources=sources
-    )
+    if written_path := getattr(result, "new_path", None):
+        query_log.log_write_call(
+            tool="replace", written_path=written_path, cited_sources=sources
+        )
     return result.as_dict()
 
 
@@ -2074,6 +2133,13 @@ def op_note(
     editor: str | None = None,
     suggestions: bool = True,
     project_category: str | None = None,
+    validate_only: bool = False,
+    draft_id: str | None = None,
+    draft_hash: str | None = None,
+    draft_token: str | None = None,
+    relation_disposition: str | None = None,
+    relation_review_hash: str | None = None,
+    relation_review_reason: str | None = None,
 ) -> dict:
     """Create a compiled note in the Knowledge Base.
 
@@ -2161,6 +2227,14 @@ def op_note(
             `connect_memory(operation="suggest-links")`, use
             `operation="suggest-relations"` when direction matters, and write
             accepted note-level edges under `## Relations`.
+        validate_only: Validate and return an immutable creation draft without writing.
+        draft_id: Draft identity returned by validate_only.
+        draft_hash: Exact reviewed draft hash returned by validate_only.
+        draft_token: Opaque destination/date token returned by validate_only.
+        relation_disposition: Reviewed relation outcome for commit, usually
+            reviewed_none when no honest relation exists.
+        relation_review_hash: Draft hash covered by the relation review.
+        relation_review_reason: Audit reason for a reviewed-none disposition.
 
     Returns:
         {path, warnings, suggestions?, write_feedback}. `write_feedback` is
@@ -2196,14 +2270,22 @@ def op_note(
             editor=editor,
             suggestions=suggestions,
             project_category=project_category,
+            validate_only=validate_only,
+            draft_id=draft_id,
+            draft_hash=draft_hash,
+            draft_token=draft_token,
+            relation_disposition=relation_disposition,
+            relation_review_hash=relation_review_hash,
+            relation_review_reason=relation_review_reason,
         )
     except note_module.NoteError as e:
         raise ValueError(
             f"{e.code}: {e.reason} (missing: {e.missing})"
         ) from e
-    query_log.log_write_call(
-        tool="note", written_path=result.path, cited_sources=sources
-    )
+    if written_path := getattr(result, "path", None):
+        query_log.log_write_call(
+            tool="note", written_path=written_path, cited_sources=sources
+        )
     return result.as_dict()
 
 
@@ -2295,6 +2377,13 @@ def op_create_file(
     allow_curated: bool = False,
     kind: str = "file",
     parents: bool = True,
+    validate_only: bool = False,
+    draft_id: str | None = None,
+    draft_hash: str | None = None,
+    draft_token: str | None = None,
+    relation_disposition: str | None = None,
+    relation_review_hash: str | None = None,
+    relation_review_reason: str | None = None,
 ) -> dict:
     """Tier 2: write a file — or, with `kind="dir"`, create a folder — at an
     arbitrary vault path.
@@ -2331,12 +2420,33 @@ def op_create_file(
             instead of a file (former `create_directory`).
         parents: In "dir" mode, create intermediate folders (mkdir -p).
             Default true.
+        validate_only: Validate a Markdown file creation/overwrite without writing.
+        draft_id: Draft identity returned by validate_only.
+        draft_hash: Exact reviewed draft hash returned by validate_only.
+        draft_token: Opaque destination/date token returned by validate_only.
+        relation_disposition: Reviewed relation outcome for semantic file creation.
+        relation_review_hash: Draft hash covered by the relation review.
+        relation_review_reason: Audit reason for a reviewed-none disposition.
 
     Returns: {path, warnings} for files; {path, created, warnings} for dirs.
     Errors: INVALID_PATH; APPEND_ONLY; CURATED_PROTECTED; FILE_EXISTS;
             NOT_A_FILE; (dir mode) NOT_A_DIR; MISSING_PARENT; MKDIR_FAILED.
     """
     if kind == "dir":
+        if validate_only or any(
+            value is not None
+            for value in (
+                draft_id,
+                draft_hash,
+                draft_token,
+                relation_disposition,
+                relation_review_hash,
+                relation_review_reason,
+            )
+        ):
+            raise ValueError(
+                "INVALID_CREATE: creation review fields apply only to kind='file'"
+            )
         try:
             result = create_directory_module.create_directory(
                 vault_root,
@@ -2355,6 +2465,13 @@ def op_create_file(
             frontmatter=frontmatter,
             overwrite=overwrite,
             allow_curated=allow_curated,
+            validate_only=validate_only,
+            draft_id=draft_id,
+            draft_hash=draft_hash,
+            draft_token=draft_token,
+            relation_disposition=relation_disposition,
+            relation_review_hash=relation_review_hash,
+            relation_review_reason=relation_review_reason,
         )
     except create_file_module.CreateFileError as e:
         raise ValueError(f"{e.code}: {e.reason}") from e
@@ -2846,6 +2963,10 @@ def op_ask_memory(
     speakers: list[str] | None = None,
     file_types: list[str] | None = None,
     exclude_file_types: list[str] | None = None,
+    categories: list[str] | None = None,
+    kinds: list[str] | None = None,
+    filters: dict[str, Any] | None = None,
+    result_level: str = "auto",
     limit: int = 15,
     scope: str = "kb",
     mode: str = "hybrid",
@@ -2876,6 +2997,10 @@ def op_ask_memory(
         speakers: Optional diarized speaker filters.
         file_types: Optional artifact kind filters such as pdf, image, csv, json.
         exclude_file_types: Optional artifact kinds to exclude.
+        categories: Semantic-unit category shortcuts, such as config or rule.
+        kinds: Semantic-unit kind shortcuts, such as decision or claim.
+        filters: Structured page/unit metadata filters.
+        result_level: auto, page, unit, or mixed.
         limit: Max hits. Default 15.
         scope: kb, vault, or kb-only.
         mode: hybrid, keyword, or vector.
@@ -2898,6 +3023,10 @@ def op_ask_memory(
         speakers=speakers,
         file_types=file_types,
         exclude_file_types=exclude_file_types,
+        categories=categories,
+        kinds=kinds,
+        filters=filters,
+        result_level=result_level,
         limit=limit,
         scope=scope,
         mode=mode,
@@ -2921,12 +3050,16 @@ def op_read_memory(
     include_history: bool = False,
     links: bool = False,
     include_raw: bool = False,
+    unit_ref: str | None = None,
 ) -> dict:
-    """Read one memory page or curated vault file by path.
+    """Read one memory page or one exact semantic unit by reference.
 
     Use after `ask_memory` chooses a hit, or when a caller already knows the
-    path. This wraps the canonical page reader and can include history and
-    link summaries in the same call.
+    path. With `unit_ref`, returns that exact current semantic unit, its parent
+    citation/lifecycle, and at most 2,400 characters of surrounding Markdown.
+    Missing, stale, ambiguous, and superseded references are reported through
+    the response `status`; no nearby unit is silently substituted. Without
+    `unit_ref`, this preserves the existing page-read response exactly.
 
     Args:
         path: Vault-relative path or Knowledge Base-relative shorthand.
@@ -2934,7 +3067,30 @@ def op_read_memory(
         include_history: Include recorded edit/supersession history.
         links: Include inbound and outbound wikilink summaries.
         include_raw: Include the raw markdown file text.
+        unit_ref: Exact unit reference returned by unit-level recall. Page-only
+            expansion flags are not accepted together with an exact unit read.
     """
+    if unit_ref is not None:
+        if frontmatter_only or include_history or links or include_raw:
+            raise ValueError(
+                "INVALID_UNIT_READ_OPTIONS: unit_ref cannot be combined with "
+                "frontmatter_only, include_history, links, or include_raw"
+            )
+        resolved_path = _resolve_memory_identifier(vault_root, path)
+        try:
+            page = get_page_module.get_page(vault_root, path=resolved_path)
+        except get_page_module.GetError as e:
+            raise ValueError(f"{e.code}: {e.reason}") from e
+        query_log.log_get_call(
+            read_path=page.path,
+            frontmatter_only=False,
+            include_history=False,
+        )
+        return semantic_unit_read_module.read_semantic_unit(
+            vault_root,
+            page=page,
+            unit_ref=unit_ref,
+        ).as_dict()
     return op_get(
         vault_root,
         path=path,
@@ -3011,6 +3167,13 @@ def op_remember(
     editor: str | None = None,
     suggestions: bool = True,
     project_category: str | None = None,
+    validate_only: bool = False,
+    draft_id: str | None = None,
+    draft_hash: str | None = None,
+    draft_token: str | None = None,
+    relation_disposition: str | None = None,
+    relation_review_hash: str | None = None,
+    relation_review_reason: str | None = None,
 ) -> dict:
     """Remember a durable conclusion as compiled governed knowledge.
 
@@ -3043,6 +3206,13 @@ def op_remember(
         editor: Production editor/producer.
         suggestions: Include link suggestions in the result.
         project_category: Category for a new project key.
+        validate_only: Validate and return an immutable creation draft without writing.
+        draft_id: Draft identity returned by validate_only.
+        draft_hash: Exact reviewed draft hash returned by validate_only.
+        draft_token: Opaque destination/date token returned by validate_only.
+        relation_disposition: Reviewed relation outcome for commit.
+        relation_review_hash: Draft hash covered by the relation review.
+        relation_review_reason: Audit reason for a reviewed-none disposition.
     """
     return op_note(
         vault_root,
@@ -3070,6 +3240,13 @@ def op_remember(
         editor=editor,
         suggestions=suggestions,
         project_category=project_category,
+        validate_only=validate_only,
+        draft_id=draft_id,
+        draft_hash=draft_hash,
+        draft_token=draft_token,
+        relation_disposition=relation_disposition,
+        relation_review_hash=relation_review_hash,
+        relation_review_reason=relation_review_reason,
     )
 
 
@@ -3143,6 +3320,109 @@ def op_edit_memory(
     )
 
 
+def op_observe_memory(
+    vault_root: Path,
+    path: str,
+    operation: str = "add",
+    category: str | None = None,
+    content: str | None = None,
+    kind: str | None = None,
+    tags: list[str] | None = None,
+    context: str | None = None,
+    relations: list[dict] | None = None,
+    unit_ref: str | None = None,
+    expected_fingerprint: str | None = None,
+    expected_hash: str | None = None,
+    transition_token: str | None = None,
+    relation_disposition: str | None = None,
+    relation_review_hash: str | None = None,
+    relation_review_reason: str | None = None,
+) -> dict:
+    """Validate or mutate one semantic unit on a compiled memory page.
+
+    Compact observation is the default form. Supply an explicit governed
+    non-observation `kind` for rich semantic-block form and typed relations.
+    Use `validate` before a guarded commit when semantic review is required.
+
+    Args:
+        path: Parent page path or canonical memory reference.
+        operation: add, update, remove, or validate.
+        category: Open semantic category for add/update/validate.
+        content: Unit content for add/update/validate.
+        kind: Optional governed rich kind; omitted means compact observation.
+        tags: Optional compact suffix tags or rich metadata tags.
+        context: Optional compact suffix context or rich metadata context.
+        relations: Rich typed relations as {kind, target} objects.
+        unit_ref: Current exact unit reference for update/remove or update validation.
+        expected_fingerprint: Current exact unit fingerprint; required for update/remove.
+        expected_hash: Current exact parent-page content hash; required for update/remove.
+        transition_token: Exact transition token returned by validate.
+        relation_disposition: Existing-page semantic review disposition.
+        relation_review_hash: Transition hash covered by reviewed-none.
+        relation_review_reason: Audit reason for reviewed-none.
+
+    Returns:
+        The normalized unit, stable unit reference, parent hashes, bounded
+        semantic-contract feedback, and derived-index outcome.
+    """
+    raw_path = str(path or "").strip()
+    if Path(raw_path).is_absolute() or (
+        len(raw_path) >= 3
+        and raw_path[0].isalpha()
+        and raw_path[1] == ":"
+        and raw_path[2] in {"/", "\\"}
+    ):
+        raise ValueError(
+            "INVALID_PATH: observe_memory requires a governed KB-relative "
+            "path or reference"
+        )
+    try:
+        resolved_path = memory_refs_module.resolve_identifier_read_only(
+            vault_root, path
+        )
+    except memory_refs_module.ReferenceError as error:
+        raise ValueError(f"{error.code}: {error.reason}") from error
+    if raw_path.lower().startswith(("exomem://vault/", "exomem://source/")) and not (
+        resolved_path == kb_dirname()
+        or resolved_path.startswith(f"{kb_dirname()}/")
+    ):
+        raise ValueError(
+            "INVALID_PATH: observe_memory parent reference resolves outside "
+            f"{kb_dirname()}/"
+        )
+    try:
+        result = observe_memory_module.observe_memory(
+            vault_root,
+            path=resolved_path,
+            operation=operation,  # type: ignore[arg-type]
+            category=category,
+            content=content,
+            kind=kind,
+            tags=tags,
+            context=context,
+            relations=relations,
+            unit_ref=unit_ref,
+            expected_fingerprint=expected_fingerprint,
+            expected_hash=expected_hash,
+            transition_token=transition_token,
+            relation_disposition=relation_disposition,
+            relation_review_hash=relation_review_hash,
+            relation_review_reason=relation_review_reason,
+        )
+        if result.get("mutated"):
+            query_log.log_write_call(
+                tool="observe_memory",
+                written_path=str(result.get("path") or "") or None,
+                cited_sources=[],
+            )
+        return result
+    except observe_memory_module.ObserveMemoryError as error:
+        message = f"{error.code}: {error.reason}"
+        if error.remediation:
+            message += f" Remediation: {error.remediation}"
+        raise ValueError(message) from error
+
+
 def op_replace_memory(
     vault_root: Path,
     old_path: str,
@@ -3170,6 +3450,13 @@ def op_replace_memory(
     host: str | None = None,
     editor: str | None = None,
     project_category: str | None = None,
+    validate_only: bool = False,
+    draft_id: str | None = None,
+    draft_hash: str | None = None,
+    draft_token: str | None = None,
+    relation_disposition: str | None = None,
+    relation_review_hash: str | None = None,
+    relation_review_reason: str | None = None,
 ) -> dict:
     """Supersede an existing compiled memory with a new version.
 
@@ -3202,6 +3489,13 @@ def op_replace_memory(
         host: Production host/creator.
         editor: Production editor/producer.
         project_category: Category for a new project key.
+        validate_only: Validate the replacement draft without writing either page.
+        draft_id: Draft identity returned by validate_only.
+        draft_hash: Exact reviewed draft hash returned by validate_only.
+        draft_token: Opaque destination/date token returned by validate_only.
+        relation_disposition: Reviewed relation outcome for commit.
+        relation_review_hash: Draft hash covered by the relation review.
+        relation_review_reason: Audit reason for a reviewed-none disposition.
     """
     return op_replace(
         vault_root,
@@ -3230,6 +3524,13 @@ def op_replace_memory(
         host=host,
         editor=editor,
         project_category=project_category,
+        validate_only=validate_only,
+        draft_id=draft_id,
+        draft_hash=draft_hash,
+        draft_token=draft_token,
+        relation_disposition=relation_disposition,
+        relation_review_hash=relation_review_hash,
+        relation_review_reason=relation_review_reason,
     )
 
 
@@ -4008,14 +4309,14 @@ def op_schema_memory(
     Args:
         operation: infer, validate, or diff.
         name: Lowercase contract slug; required only for `subject="contract"`.
-        subject: `contract`, `relations`, or `traversal-profiles`.
+        subject: `contract`, `categories`, `relations`, or `traversal-profiles`.
         project: Optional project scope for inference.
         page_type: Optional page-type scope for inference.
         save: Persist an inferred proposal. Default false.
         expected_hash: Required current hash when overwriting a saved contract.
         strict: In validate mode, signal a failing CLI/CI outcome on findings.
         compare_to: In diff mode, compare to this saved contract instead of corpus reality.
-        proposal: Reviewed relation registry or traversal-profile proposal.
+        proposal: Reviewed semantic-language, relation, or traversal-profile proposal.
         include_model_suggestions: Request response-only optional relation suggestions.
 
     Returns:
@@ -4023,6 +4324,86 @@ def op_schema_memory(
     """
     operation = operation.strip().lower()
     subject = subject.strip().lower()
+    if subject == "categories":
+        if operation == "infer":
+            result = memory_schema_module.infer_category_registry(
+                vault_root,
+                project=project,
+                page_type=page_type,
+            )
+            if save:
+                if proposal is None or not isinstance(proposal, dict) or not {
+                    "categories",
+                    "kinds",
+                } <= set(proposal):
+                    raise ValueError(
+                        "INCOMPLETE_SEMANTIC_LANGUAGE_PROPOSAL: "
+                        "save requires one reviewed categories-and-kinds document"
+                    )
+                current = semantic_language_registry_module.load_registry(vault_root)
+                candidate = semantic_language_registry_module.load_registry(
+                    proposal=proposal
+                )
+                registry_file_exists = semantic_language_registry_module.registry_path(
+                    vault_root
+                ).exists()
+                if (
+                    registry_file_exists
+                    and not candidate.findings
+                    and semantic_language_registry_module.registry_proposal(current)["kinds"]
+                    != semantic_language_registry_module.registry_proposal(candidate)["kinds"]
+                ):
+                    raise ValueError(
+                        "CATEGORY_SAVE_KIND_CHANGE: category governance must preserve "
+                        "the reviewed custom-kind namespace"
+                    )
+                result["saved"] = semantic_language_registry_module.save_registry(
+                    vault_root,
+                    proposal,
+                    expected_hash=expected_hash,
+                )
+            return result
+        if save:
+            raise ValueError(
+                "INVALID_SCHEMA_OPERATION: save is supported only for infer"
+            )
+        if operation == "validate":
+            return memory_schema_module.validate_category_registry(
+                vault_root,
+                proposal=proposal,
+                project=project,
+                page_type=page_type,
+                strict=strict,
+            )
+        if operation == "diff":
+            before = semantic_language_registry_module.load_registry(vault_root)
+            if proposal is not None:
+                after = semantic_language_registry_module.load_registry(proposal=proposal)
+                comparison = "proposal"
+            else:
+                inferred = memory_schema_module.infer_category_registry(
+                    vault_root,
+                    project=project,
+                    page_type=page_type,
+                )
+                after = semantic_language_registry_module.load_registry(
+                    proposal=inferred["proposal"]
+                )
+                comparison = "corpus"
+            result = memory_schema_module.diff_category_registries(before, after)
+            result.update(
+                {
+                    "content_hash": before.content_hash,
+                    "comparison": comparison,
+                    "registry_findings": [
+                        item.as_dict() for item in after.findings
+                    ],
+                }
+            )
+            return result
+        raise ValueError(
+            "INVALID_SCHEMA_OPERATION: operation must be infer, validate, or diff"
+        )
     if subject == "relations":
         if operation == "infer":
             result = memory_schema_module.infer_relation_registry(
@@ -4115,7 +4496,10 @@ def op_schema_memory(
             }
         raise ValueError("INVALID_SCHEMA_OPERATION: operation must be infer, validate, or diff")
     if subject != "contract":
-        raise ValueError("INVALID_SCHEMA_SUBJECT: subject must be contract, relations, or traversal-profiles")
+        raise ValueError(
+            "INVALID_SCHEMA_SUBJECT: subject must be contract, categories, relations, "
+            "or traversal-profiles"
+        )
     if not name:
         raise ValueError("INVALID_CONTRACT: name is required for contract governance")
     if operation == "infer":
@@ -4187,6 +4571,13 @@ def op_manage_memory_file(
     trash_path: str | None = None,
     restore_path: str | None = None,
     date: str | None = None,
+    validate_only: bool = False,
+    draft_id: str | None = None,
+    draft_hash: str | None = None,
+    draft_token: str | None = None,
+    relation_disposition: str | None = None,
+    relation_review_hash: str | None = None,
+    relation_review_reason: str | None = None,
 ) -> dict:
     """Manage files through one governed file operation.
 
@@ -4215,7 +4606,29 @@ def op_manage_memory_file(
         trash_path: Trash entry to recover.
         restore_path: Optional recovery destination.
         date: YYYY-MM-DD filter for trash-list.
+        validate_only: Validate a Markdown create-file operation without writing.
+        draft_id: Draft identity returned by validate_only.
+        draft_hash: Exact reviewed draft hash returned by validate_only.
+        draft_token: Opaque destination/date token returned by validate_only.
+        relation_disposition: Reviewed relation outcome for semantic file creation.
+        relation_review_hash: Draft hash covered by the relation review.
+        relation_review_reason: Audit reason for a reviewed-none disposition.
     """
+    review_requested = validate_only or any(
+        value is not None
+        for value in (
+            draft_id,
+            draft_hash,
+            draft_token,
+            relation_disposition,
+            relation_review_hash,
+            relation_review_reason,
+        )
+    )
+    if operation != "create" and review_requested:
+        raise ValueError(
+            "INVALID_FILE_OPERATION: creation review fields require operation='create'"
+        )
     if operation == "list":
         return op_list_directory(vault_root, path=path, recursive=recursive, include_hidden=include_hidden)
     if operation == "create":
@@ -4228,6 +4641,13 @@ def op_manage_memory_file(
             allow_curated=allow_curated,
             kind=kind,
             parents=parents,
+            validate_only=validate_only,
+            draft_id=draft_id,
+            draft_hash=draft_hash,
+            draft_token=draft_token,
+            relation_disposition=relation_disposition,
+            relation_review_hash=relation_review_hash,
+            relation_review_reason=relation_review_reason,
         )
     if operation == "append":
         return op_append_to_file(vault_root, path=path, content=content, allow_curated=allow_curated)
@@ -4354,6 +4774,7 @@ _CONNECT_MEMORY_READ_ONLY_OPERATIONS = frozenset(
 )
 _ADOPT_VAULT_READ_ONLY_MODES = frozenset({"scan-only"})
 _PROCESS_MEDIA_READ_ONLY_OPERATIONS = frozenset({"status"})
+_OBSERVE_MEMORY_READ_ONLY_OPERATIONS = frozenset({"validate"})
 _MISSING_SELECTOR_DEFAULT = object()
 
 
@@ -4375,7 +4796,7 @@ def invocation_is_read_only(command: Command, kwargs: dict[str, Any]) -> bool:
     """Classify one resolved product-command invocation for lease gating.
 
     Write-capable product commands default to requiring the lease. Mixed
-    mixed read/write commands opt into a finite read-only allowlist, with their
+    read/write commands opt into a finite read-only allowlist, with their
     Python signature defaults applied only when the selector was truly omitted.
     """
     if command.read_only:
@@ -4394,6 +4815,12 @@ def invocation_is_read_only(command: Command, kwargs: dict[str, Any]) -> bool:
         return (
             isinstance(operation, str)
             and operation in _PROCESS_MEDIA_READ_ONLY_OPERATIONS
+        )
+    if command.name == "observe_memory":
+        operation = _resolved_invocation_selector(command, kwargs, "operation")
+        return (
+            isinstance(operation, str)
+            and operation in _OBSERVE_MEMORY_READ_ONLY_OPERATIONS
         )
     return False
 
@@ -4432,7 +4859,12 @@ _SIMPLE_ACTION_DEFS: dict[str, dict] = {
         "intent": "Save a durable conclusion as compiled governed knowledge.",
         "route": {"tool": "remember", "args": {"note_type": "insight"}},
         "safety": "additive write; uses note validation and does not preserve raw provenance unless sources are provided",
-        "advanced": ["replace_memory", "edit_memory", "connect_memory"],
+        "advanced": [
+            "replace_memory",
+            "edit_memory",
+            "observe_memory",
+            "connect_memory",
+        ],
     },
     "capture": {
         "intent": "Capture raw material or proof-bearing text without turning it into a conclusion.",
@@ -4533,6 +4965,7 @@ _SPEC: tuple[tuple, ...] = (
     ("propose_compilation", op_propose_compilation, 1, False, False, None, _MCRC),
     ("get", op_get, 1, False, False, "path", _MCRC),
     ("edit", op_edit, 1, True, False, "path", _MCRC),
+    ("observe_memory", op_observe_memory, 1, True, False, "path", _MCRC),
     ("replace", op_replace, 1, True, False, "old_path", _MCRC),
     ("link", op_link, 1, True, False, None, _MCRC),
     ("preserve", op_preserve, 1, True, False, None, _MCRC),
@@ -4660,6 +5093,17 @@ _PRODUCT_SPEC: tuple[tuple, ...] = (
         _MCRC,
         ("edit",),
         {"surface": "primary", "actions": ("update",), "first_run_safe": False},
+    ),
+    (
+        "observe_memory",
+        op_observe_memory,
+        1,
+        True,
+        False,
+        "path",
+        _MCRC,
+        ("observe_memory",),
+        {"surface": "primary", "actions": ("update", "save"), "first_run_safe": False},
     ),
     (
         "replace_memory",

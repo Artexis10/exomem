@@ -74,3 +74,24 @@ def test_fenced_relation_example_is_ignored() -> None:
 
     assert document.relations == []
     assert document.errors == []
+
+
+def test_canonical_section_metadata_counts_valid_and_malformed_bullets() -> None:
+    document = markdown_relations.parse_markdown_relations(
+        "## Relations\n- supports [[Target]]\n- (none yet)\n\n## Finding\n- ordinary\n"
+    )
+
+    assert document.canonical_section_present is True
+    assert document.canonical_bullet_count == 2
+    assert [error.code for error in document.errors] == ["malformed_relation"]
+
+
+def test_missing_and_empty_canonical_sections_are_distinct() -> None:
+    missing = markdown_relations.parse_markdown_relations("# Note\n")
+    empty = markdown_relations.parse_markdown_relations("# Note\n\n## Relations\n")
+
+    assert (missing.canonical_section_present, missing.canonical_bullet_count) == (
+        False,
+        0,
+    )
+    assert (empty.canonical_section_present, empty.canonical_bullet_count) == (True, 0)

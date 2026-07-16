@@ -173,6 +173,17 @@ def test_spliced_matrix_is_searchable_and_correct(tmp_path):
     assert hits[0][0] == "a.md"
 
 
+def test_search_ranks_only_the_allowed_parent_set(tmp_path):
+    vault = _fresh_vault(tmp_path)
+    idx = embeddings.get_embedding_index(vault)
+    idx.upsert_file("excluded.md", ["excluded"], _mat([1, 0]), 1.0)
+    idx.upsert_file("allowed.md", ["allowed"], _mat([0.8, 0.2]), 1.0)
+
+    hits = idx.search(_pad([1, 0]), k=1, allowed_paths={"allowed.md"})
+
+    assert [hit[0] for hit in hits] == ["allowed.md"]
+
+
 def test_delete_to_empty_keeps_zero_row_shape(tmp_path):
     vault = _fresh_vault(tmp_path)
     idx = embeddings.get_embedding_index(vault)

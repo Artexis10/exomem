@@ -24,6 +24,7 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 
@@ -206,7 +207,7 @@ def _is_embeddable_path(path: Path) -> bool:
 
 
 def get_model():
-    """Lazy singleton. Device via `accel.select_device` — CPU-default, `EXOMEM_EMBED_DEVICE` opts in."""
+    """Lazy singleton selected by ``accel``, CPU-default unless explicitly set."""
     global _MODEL
     if _MODEL is not None:
         return _MODEL
@@ -225,7 +226,7 @@ def get_model():
 
 
 def get_reranker():
-    """Lazy singleton for the cross-encoder reranker. Shares the text-path device (`EXOMEM_EMBED_DEVICE`)."""
+    """Lazy cross-encoder reranker sharing the configured text-path device."""
     global _RERANKER
     if _RERANKER is not None:
         return _RERANKER
@@ -1001,24 +1002,59 @@ def index_cache_status() -> dict:
     }
 
 
-def upsert_after_write(vault_root: Path, written_paths: list[Path]) -> bool:
-    """Re-embed each markdown file in `written_paths` and refresh the sidecar.
+@dataclass(frozen=True, slots=True)
+class EmbeddingSyncStatus:
+    """Bounded outcome from one embedding-sidecar dispatch.
 
-    Soft no-op when sentence-transformers/torch aren't importable — keyword
-    mode keeps working in stripped environments. Non-`.md` paths are skipped
-    silently (writers pass log.md, index.md, etc. through here too). Returns
-    whether all eligible semantic writes completed, for durable queue draining.
+    ``code`` is deliberately a stable enum-like value rather than an exception
+    message.  Writer results can therefore report observed degradation without
+    leaking backend, model, or filesystem details.
     """
+
+    status: str
+    code: str
+    eligible_count: int
+
+    def __post_init__(self) -> None:
+        if type(self.status) is not str or self.status not in {
+            "completed",
+            "disabled",
+            "deferred",
+            "degraded",
+        }:
+            raise ValueError("unsupported embedding sync status")
+        if type(self.code) is not str or not self.code or len(self.code) > 64:
+            raise ValueError("embedding sync code must be bounded and nonempty")
+        if type(self.eligible_count) is not int or self.eligible_count < 0:
+            raise ValueError("embedding eligible_count must be nonnegative")
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "status": self.status,
+            "code": self.code,
+            "eligible_count": self.eligible_count,
+        }
+
+
+def upsert_after_write_status(
+    vault_root: Path, written_paths: list[Path]
+) -> EmbeddingSyncStatus:
+    """Re-embed eligible files and return an observable bounded outcome."""
     global _IMPORT_FAILED
-    if _IMPORT_FAILED:
-        return False
+    md_paths = [p for p in written_paths if index_paths.is_embeddable_path(p)]
+    eligible_count = len(md_paths)
     # Test runs disable the heavy embedding path to keep the suite fast.
     # Production servers leave EXOMEM_DISABLE_EMBEDDINGS unset.
     if os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
-        return False
-    md_paths = [p for p in written_paths if index_paths.is_embeddable_path(p)]
+        return EmbeddingSyncStatus(
+            "disabled", "embeddings_disabled", eligible_count
+        )
     if not md_paths:
-        return True
+        return EmbeddingSyncStatus("completed", "no_eligible_paths", 0)
+    if _IMPORT_FAILED:
+        return EmbeddingSyncStatus(
+            "disabled", "embeddings_import_unavailable", eligible_count
+        )
 
     # While the background warm-up is loading the model, don't block this
     # write on the singleton lock — park the batch; the warm thread drains it
@@ -1026,8 +1062,11 @@ def upsert_after_write(vault_root: Path, written_paths: list[Path]) -> bool:
     # process dies before draining, audit/reconcile recover the stale sidecar.
     from . import readiness
     if readiness.defer("embeddings", (vault_root, tuple(md_paths))):
-        log.info("write-embed deferred until the embedding model is warm (%d file(s))", len(md_paths))
-        return False
+        log.info(
+            "write-embed deferred until the embedding model is warm (%d file(s))",
+            len(md_paths),
+        )
+        return EmbeddingSyncStatus("deferred", "deferred_warmup", eligible_count)
 
     try:
         get_model()  # triggers the heavy import; cheap thereafter.
@@ -1039,10 +1078,14 @@ def upsert_after_write(vault_root: Path, written_paths: list[Path]) -> bool:
                 e,
             )
             _IMPORT_FAILED = True
-        return False
+        return EmbeddingSyncStatus(
+            "disabled", "embeddings_import_unavailable", eligible_count
+        )
     except Exception as e:  # noqa: BLE001 - model backends soft-fail by contract
         log.warning("embedding model load failed: %s; skipping upsert", e)
-        return False
+        return EmbeddingSyncStatus(
+            "degraded", "embedding_model_load_failed", eligible_count
+        )
 
     from . import find as find_module
 
@@ -1050,8 +1093,11 @@ def upsert_after_write(vault_root: Path, written_paths: list[Path]) -> bool:
         index = get_embedding_index(vault_root)
     except Exception as e:  # noqa: BLE001 - derived index open is best-effort
         log.warning("could not open embedding sidecar for upsert: %s", e)
-        return False
-    per_file: list[tuple[str, list[str], float]] = []
+        return EmbeddingSyncStatus(
+            "degraded", "embedding_index_open_failed", eligible_count
+        )
+    per_file: list[tuple[Path, Any, list[str], float]] = []
+    failure_code: str | None = None
     for md in md_paths:
         try:
             mtime = md.stat().st_mtime
@@ -1061,30 +1107,78 @@ def upsert_after_write(vault_root: Path, written_paths: list[Path]) -> bool:
                 rel = md.resolve().relative_to(vault_root.resolve()).as_posix()
                 index.delete_file(rel)
             except ValueError:
-                pass
+                continue
+            except Exception as e:  # noqa: BLE001 - derived delete is observable
+                log.warning("embedding cleanup failed for disappeared file: %s", e)
+                failure_code = "embedding_delete_failed"
             continue
-        page = find_module._CACHE.get(md, vault_root)
+        except OSError as e:
+            log.warning("embedding input metadata could not be read: %s", e)
+            failure_code = "embedding_input_unavailable"
+            continue
+        try:
+            page = find_module._CACHE.get(md, vault_root)
+        except Exception as e:  # noqa: BLE001 - parsing/cache failures are observable
+            log.warning("embedding input could not be parsed: %s", e)
+            failure_code = "embedding_input_unavailable"
+            continue
         if page is None:
+            failure_code = "embedding_input_unavailable"
             continue
-        chunks = _chunks_for_page(vault_root, page)
-        if not chunks:
-            # Page has no embeddable content — drop any stale rows for it.
-            index.delete_file(page.rel_path)
+        try:
+            chunks = _chunks_for_page(vault_root, page)
+        except Exception as e:  # noqa: BLE001 - chunk extraction is best-effort
+            log.warning("embedding chunks could not be prepared: %s", e)
+            failure_code = "embedding_chunking_failed"
             continue
-        per_file.append((page.rel_path, chunks, mtime))
+        per_file.append((md, page, chunks, mtime))
 
     if not per_file:
-        return True
+        return EmbeddingSyncStatus(
+            "completed" if failure_code is None else "degraded",
+            failure_code or "embedding_upsert_completed",
+            eligible_count,
+        )
 
-    succeeded = True
-    for rel_path, chunks, mtime in per_file:
+    from . import semantic_index
+
+    for md, page, chunks, mtime in per_file:
+        rel_path = page.rel_path
+        if chunks:
+            try:
+                vectors = _embed_live_chunks(chunks)
+                index.upsert_file(rel_path, chunks, vectors, mtime)
+            except Exception as e:  # noqa: BLE001 - one bad encode must not fail the writer
+                log.warning(
+                    "embedding encode failed for %s: %s; sidecar left stale",
+                    rel_path,
+                    e,
+                )
+                failure_code = failure_code or "embedding_encode_failed"
+        else:
+            # Page has no embeddable chunks — drop stale page rows. Unit rows
+            # are rebuilt independently below from the normalized unit parse.
+            try:
+                index.delete_file(rel_path)
+            except Exception as e:  # noqa: BLE001 - stale-row cleanup is observable
+                log.warning("embedding stale-row cleanup failed: %s", e)
+                failure_code = failure_code or "embedding_delete_failed"
+
         try:
-            vectors = _embed_live_chunks(chunks)
-            index.upsert_file(rel_path, chunks, vectors, mtime)
-        except Exception as e:  # noqa: BLE001 - one bad encode must not fail the writer
-            log.warning("embedding encode failed for %s: %s; sidecar left stale", rel_path, e)
-            succeeded = False
-            continue
+            state = semantic_index.current_parent_index_state(vault_root, md)
+            units = [unit for unit in state.document.units if unit.unit_ref is not None]
+            if units:
+                unit_vectors = _embed_live_chunks([unit.content for unit in units])
+                index.upsert_semantic_units(state, unit_vectors, mtime)
+            else:
+                index.delete_semantic_units(rel_path)
+        except Exception as e:  # noqa: BLE001 - optional unit vectors soft-fail
+            log.warning(
+                "semantic-unit embedding update failed for %s: %s; sidecar left stale",
+                rel_path,
+                e,
+            )
+            failure_code = failure_code or "semantic_unit_embedding_encode_failed"
 
     # Claim-level sidecar (.claims.sqlite) rides the same write seam — opt-in via
     # EXOMEM_CLAIM_LEVEL, no-op otherwise. Local import avoids a module cycle
@@ -1097,7 +1191,23 @@ def upsert_after_write(vault_root: Path, written_paths: list[Path]) -> bool:
             claims.upsert_claims_after_write(vault_root, md_paths)
     except Exception as e:  # noqa: BLE001
         log.debug("claim sidecar upsert skipped (%s)", e)
-    return succeeded
+        failure_code = failure_code or "embedding_auxiliary_failed"
+    return EmbeddingSyncStatus(
+        "completed" if failure_code is None else "degraded",
+        failure_code or "embedding_upsert_completed",
+        eligible_count,
+    )
+
+
+def upsert_after_write(vault_root: Path, written_paths: list[Path]) -> bool:
+    """Preserve the historical Boolean for primary vector work completion."""
+    status = upsert_after_write_status(vault_root, written_paths)
+    # Preserve the legacy memoized-import-failure precedence: historically a
+    # stripped install returned ``False`` even for a batch containing no
+    # embeddable paths.
+    return not _IMPORT_FAILED and (
+        status.status == "completed" or status.code == "embedding_auxiliary_failed"
+    )
 
 
 def _live_embed_max_chunks() -> int:
@@ -1121,24 +1231,45 @@ def _embed_live_chunks(chunks: list[str]) -> np.ndarray:
     return np.concatenate(parts, axis=0)
 
 
-def delete_after_remove(vault_root: Path, removed_rel_paths: list[str]) -> None:
-    """Drop sidecar rows for files that were trashed. No-op if torch missing."""
-    if _IMPORT_FAILED:
-        return
+def delete_after_remove_status(
+    vault_root: Path, removed_rel_paths: list[str]
+) -> EmbeddingSyncStatus:
+    """Drop sidecar rows and return an observable bounded outcome."""
+    eligible_count = len(removed_rel_paths)
     if os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
-        return
+        return EmbeddingSyncStatus(
+            "disabled", "embeddings_disabled", eligible_count
+        )
     if not removed_rel_paths:
-        return
+        return EmbeddingSyncStatus("completed", "no_eligible_paths", 0)
+    if _IMPORT_FAILED:
+        return EmbeddingSyncStatus(
+            "disabled", "embeddings_import_unavailable", eligible_count
+        )
     try:
         index = get_embedding_index(vault_root)
     except Exception as e:  # noqa: BLE001 - derived index deletion is best-effort
         log.warning("could not open embedding sidecar for delete: %s", e)
-        return
+        return EmbeddingSyncStatus(
+            "degraded", "embedding_index_open_failed", eligible_count
+        )
+    succeeded = True
     for rel in removed_rel_paths:
         try:
             index.delete_file(rel)
         except Exception as e:  # noqa: BLE001 - derived index deletion is best-effort
             log.warning("delete_file(%s) failed in sidecar: %s", rel, e)
+            succeeded = False
+    return EmbeddingSyncStatus(
+        "completed" if succeeded else "degraded",
+        "embedding_delete_completed" if succeeded else "embedding_delete_failed",
+        eligible_count,
+    )
+
+
+def delete_after_remove(vault_root: Path, removed_rel_paths: list[str]) -> None:
+    """Compatibility wrapper preserving the legacy ``None`` return."""
+    delete_after_remove_status(vault_root, removed_rel_paths)
 
 
 def index_incremental(
@@ -1162,15 +1293,18 @@ def index_incremental(
     selection `rebuild_all` uses — so the two agree on WHICH files belong in the index.
     Returns a small stats dict (also the CLI's machine-readable output).
     """
-    from . import access
+    from . import access, semantic_index
     from . import find as find_module
 
     scope = index_paths.index_scope()
     index = get_embedding_index(vault_root)
     row_mtimes = index.file_mtimes()
+    unit_parent_states = index.semantic_unit_parent_states()
 
     pending: list[tuple[str, list[str], float]] = []
+    pending_units: list[tuple[semantic_index.SemanticParentIndexState, float]] = []
     seen_on_disk: set[str] = set()
+    unit_seen_on_disk: set[str] = set()
     scanned = 0
     for md in index_paths.iter_index_markdown(vault_root):
         if not index_paths.is_embeddable_path(md):
@@ -1180,6 +1314,24 @@ def index_incremental(
             continue
         if not access.is_indexable(vault_root, page.rel_path):
             continue  # excluded tree (_access.yaml) — keep it out of the index
+        try:
+            unit_state = semantic_index.build_parent_index_state(vault_root, md)
+        except (OSError, UnicodeError, ValueError):
+            unit_state = None
+        if unit_state is not None:
+            unit_seen_on_disk.add(page.rel_path)
+            expected_refs = frozenset(
+                unit.unit_ref
+                for unit in unit_state.document.units
+                if unit.unit_ref is not None
+            )
+            stored = unit_parent_states.get(page.rel_path)
+            expected_stored = (
+                frozenset({unit_state.parent_generation}),
+                expected_refs,
+            )
+            if stored != expected_stored and (stored is not None or expected_refs):
+                pending_units.append((unit_state, page.mtime))
         chunks = _chunks_for_page(vault_root, page)
         if not chunks:
             continue
@@ -1192,18 +1344,24 @@ def index_incremental(
 
     # Rows for files no longer walked (deleted or newly excluded) → prune, so the
     # incremental index stays a faithful reflection of the scope without a full wipe.
-    stale = [rp for rp in row_mtimes if rp not in seen_on_disk]
+    stale = sorted(
+        {rp for rp in row_mtimes if rp not in seen_on_disk}
+        | {rp for rp in unit_parent_states if rp not in unit_seen_on_disk}
+    )
 
     stats = {
         "scope": scope,
         "scanned": scanned,
         "files_to_embed": len(pending),
         "chunks_embedded": 0,
+        "unit_parents_to_embed": len(pending_units),
+        "unit_vectors_embedded": 0,
         "files_pruned": len(stale),
         "dry_run": dry_run,
     }
     log_fn(
         f"index({scope}): {scanned} indexable file(s); {len(pending)} to (re)embed, "
+        f"{len(pending_units)} semantic-unit parent(s) to (re)embed, "
         f"{len(stale)} stale row-set(s) to prune (dry_run={dry_run})"
     )
     if dry_run:
@@ -1245,6 +1403,49 @@ def index_incremental(
             batch = []
             batch_chunks = 0
     _flush(batch)
+
+    unit_batch: list[tuple[semantic_index.SemanticParentIndexState, float]] = []
+    unit_batch_size = 0
+
+    def _flush_units(
+        group: list[tuple[semantic_index.SemanticParentIndexState, float]],
+    ) -> None:
+        if not group:
+            return
+        texts = [
+            unit.content
+            for state, _mtime in group
+            for unit in state.document.units
+            if unit.unit_ref is not None
+        ]
+        vectors = (
+            embed_texts(texts, is_query=False)
+            if texts
+            else np.zeros((0, VECTOR_DIM), dtype=np.float32)
+        )
+        offset = 0
+        for state, mtime in group:
+            count = sum(
+                unit.unit_ref is not None for unit in state.document.units
+            )
+            index.upsert_semantic_units(
+                state,
+                vectors[offset : offset + count],
+                mtime,
+            )
+            offset += count
+        stats["unit_vectors_embedded"] += len(texts)
+
+    for item in pending_units:
+        unit_batch.append(item)
+        unit_batch_size += sum(
+            unit.unit_ref is not None for unit in item[0].document.units
+        )
+        if unit_batch_size >= batch_size:
+            _flush_units(unit_batch)
+            unit_batch = []
+            unit_batch_size = 0
+    _flush_units(unit_batch)
 
     log_fn(f"index done: {stats}")
     return stats

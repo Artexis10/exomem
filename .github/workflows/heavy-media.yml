@@ -27,5 +27,5 @@ jobs:
           key: heavy-media-tiny-whisper-clip-v1
       - name: Run real media product smoke
         run: >-
-          uv run --extra embeddings --extra media
+          uv run --frozen --extra embeddings --extra media
           python scripts/smoke-media-pipeline.py --require-all

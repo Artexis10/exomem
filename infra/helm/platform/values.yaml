@@ -27,6 +27,9 @@ provisioner:
   providerRecoverySigningKeySecret:
     name: exomem-provider-recovery-signer
     key: private-key
+  capacityReceiptPublicKeySecret:
+    name: exomem-capacity-receipt-verifier
+    key: public-key
 
 admission:
   namespaceContractOperatorUsernames:
@@ -45,7 +48,8 @@ observability:
 
 capacityCollector:
   schedule: "* * * * *"
-  contractSha256: 1ff4737fa940bffefddd260d02b0a67f0bdffbcf56ec26e40264ee21895f9598
+  contractSha256: 1cbb5f93c71d2e85c6b54ed09fa1da9909c3fc13a588a1968bb1b330698a635e
+  hcloudServerId: 0
   stateConfigMap: exomem-capacity-receipt
   privateKeySecret:
     name: exomem-capacity-receipt-signer
@@ -55,7 +59,7 @@ capacityCollector:
     key: token
 
 durability:
-  contractSha256: c1ff30978d21f6dd24177821f119dd44610b2dd8a012ea4dcec98aa1df62aa37
+  contractSha256: 1e51097d5ff2570cb1c523916c1827e17bd285cc4f6499b0b09d019f0f424975
   storageContractSha256: 68e26665af9a48c831c975bc96afb03fbf47e229f89a3c13bc852809787de0f5
   b2Endpoint: ""
   b2Region: ""

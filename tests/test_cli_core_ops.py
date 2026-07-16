@@ -12,10 +12,20 @@ from pathlib import Path
 import pytest
 import yaml
 
-from exomem import media_jobs
+from exomem import commands, media_jobs, semantic_index, writer_lease
 from exomem.__main__ import main
 
 _INSIGHT = "Knowledge Base/Notes/Insights/progressive-disclosure-without-mode-fragmentation.md"
+
+
+@pytest.fixture(autouse=True)
+def _isolated_writer_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv(
+        "EXOMEM_WRITER_LEASE_STATE_DIR", str(tmp_path / "writer-lease-state")
+    )
+    writer_lease.reset_managers_for_tests()
+    yield
+    writer_lease.reset_managers_for_tests()
 
 
 def _run(argv: list[str], capsys) -> tuple[int, str, str]:
@@ -43,6 +53,52 @@ def test_ask_memory_human_output(vault: Path, capsys) -> None:
     assert '"success"' not in out
 
 
+def test_ask_memory_semantic_unit_filters(vault: Path, capsys) -> None:
+    rel = "Knowledge Base/Notes/Insights/cli-semantic-recall.md"
+    (vault / rel).write_text(
+        "---\n"
+        "type: insight\n"
+        "title: CLI semantic recall\n"
+        "exomem_id: 9d17ec74-79e1-4cb2-9828-9b245166dc95\n"
+        "status: active\n"
+        "updated: 2026-07-16\n"
+        "metadata:\n"
+        "  priority: 7\n"
+        "---\n\n"
+        "## Decision\n"
+        "- category: config\n"
+        "- id: cli-semantic\n\n"
+        "CLI semantic needle.\n",
+        encoding="utf-8",
+    )
+
+    code, out, err = _run(
+        [
+            "ask_memory",
+            "CLI semantic needle",
+            "--mode",
+            "keyword",
+            "--scope",
+            "kb-only",
+            "--categories",
+            "config",
+            "--kinds",
+            "decision",
+            "--filters",
+            '{"page.frontmatter:/metadata/priority":{"$eq":7}}',
+            "--result-level",
+            "unit",
+            "--json",
+        ],
+        capsys,
+    )
+
+    assert code == 0, err
+    data = json.loads(out.strip().splitlines()[-1])["data"]
+    assert [item["parent_path"] for item in data] == [rel]
+    assert data[0]["result_type"] == "semantic_unit"
+
+
 def test_read_memory_reads_a_page(vault: Path, capsys) -> None:
     code, out, _ = _run(
         ["read_memory", "Notes/Insights/progressive-disclosure-without-mode-fragmentation", "--json"],
@@ -52,6 +108,77 @@ def test_read_memory_reads_a_page(vault: Path, capsys) -> None:
     payload = json.loads(out.strip().splitlines()[-1])
     assert payload["success"] is True
     assert payload["data"]["frontmatter"]["type"] == "insight"
+
+
+def test_observe_memory_adds_and_returns_exact_unit(vault: Path, capsys) -> None:
+    rel = "Knowledge Base/Notes/Insights/cli-observe.md"
+    (vault / rel).write_text(
+        "---\n"
+        "type: insight\n"
+        "exomem_id: 0cd1fa26-ad3f-4df0-bc82-e57d011b7ace\n"
+        "title: CLI observe\n"
+        "status: active\n"
+        "updated: 2026-07-16\n"
+        "---\n\n"
+        "# CLI observe\n",
+        encoding="utf-8",
+    )
+
+    code, out, err = _run(
+        [
+            "observe_memory",
+            rel,
+            "--operation",
+            "add",
+            "--category",
+            "Config Rule",
+            "--content",
+            "CLI structured unit",
+            "--tags",
+            "cli",
+            "--tags",
+            "storage",
+            "--json",
+        ],
+        capsys,
+    )
+
+    assert code == 0, f"{err}\n{out}"
+    data = json.loads(out.strip().splitlines()[-1])["data"]
+    assert data["unit"]["category_key"] == "config_rule"
+    assert data["unit"]["tags"] == ["cli", "storage"]
+    assert data["unit_ref"].endswith(data["unit"]["anchor"])
+
+
+def test_read_memory_reads_exact_semantic_unit(vault: Path, capsys) -> None:
+    rel = "Knowledge Base/Notes/Insights/cli-exact-unit.md"
+    (vault / rel).write_text(
+        "---\n"
+        "type: insight\n"
+        "exomem_id: 12345678-1234-5678-1234-567812345678\n"
+        "title: CLI exact unit\n"
+        "status: active\n"
+        "updated: 2026-07-16\n"
+        "---\n\n"
+        "- [config] CLI can read this unit ^cli-unit\n",
+        encoding="utf-8",
+    )
+    state = semantic_index.current_parent_index_state(vault, rel)
+    unit_ref = state.document.units[0].unit_ref
+    assert unit_ref is not None
+    expected = commands.op_read_memory(vault, path=rel, unit_ref=unit_ref)
+
+    code, out, _ = _run(
+        ["read_memory", rel, "--unit-ref", unit_ref, "--json"],
+        capsys,
+    )
+
+    assert code == 0
+    data = json.loads(out.strip().splitlines()[-1])["data"]
+    assert data == expected
+    assert data["status"] == "found"
+    assert data["unit"]["unit_ref"] == unit_ref
+    assert data["unit"]["content"] == "CLI can read this unit"
 
 
 def test_review_memory_attention_runs(vault: Path, capsys) -> None:
@@ -126,6 +253,7 @@ def test_remember_write(vault: Path, capsys) -> None:
             "remember",
             "--title", "CLI can write",
             "--content", "# CLI can write\n\n## Claim\n\nThe kb CLI writes notes.\n",
+            "--field", "status=draft",
             "--json",
         ],
         capsys,
@@ -138,6 +266,32 @@ def test_remember_write(vault: Path, capsys) -> None:
     assert "CLI can write" in written.read_text(encoding="utf-8")
 
 
+def test_remember_validate_only_exposes_review_draft(vault: Path, capsys) -> None:
+    code, out, err = _run(
+        [
+            "remember",
+            "--title",
+            "CLI review draft",
+            "--slug",
+            "cli-review-draft",
+            "--content",
+            "# CLI review draft\n\nA disconnected conclusion.\n",
+            "--field",
+            "suggestions=false",
+            "--field",
+            "validate_only=true",
+            "--json",
+        ],
+        capsys,
+    )
+
+    assert code == 0, err
+    data = json.loads(out.strip().splitlines()[-1])["data"]
+    assert data["mutated"] is False
+    assert data["draft_id"] and data["draft_hash"] and data["draft_token"]
+    assert not (vault / data["destination"]).exists()
+
+
 def test_remember_unicode_title_with_explicit_slug(vault: Path, capsys) -> None:
     code, out, err = _run(
         [
@@ -145,6 +299,7 @@ def test_remember_unicode_title_with_explicit_slug(vault: Path, capsys) -> None:
             "--title", "睡眠",
             "--slug", "sleep",
             "--content", "## 要約\n\n本文。\n",
+            "--field", "status=draft",
             "--json",
         ],
         capsys,
@@ -165,6 +320,7 @@ def test_remember_field_escape(vault: Path, capsys) -> None:
             "--content", "# Field escape works\n\n## Question\n\nq\n",
             "--field", "note_type=research-note",
             "--field", "project=project-alpha",
+            "--field", "status=draft",
             "--json",
         ],
         capsys,
@@ -327,6 +483,8 @@ def test_generated_remember_command_writes(vault: Path, capsys) -> None:
             "# Product command memory\n\n## Claim\n\nProduct commands write through canonical note.\n",
             "--title",
             "Product command memory",
+            "--field",
+            "status=draft",
             "--json",
         ],
         capsys,

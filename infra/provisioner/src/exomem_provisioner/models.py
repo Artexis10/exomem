@@ -20,6 +20,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    Uuid,
     text,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
@@ -145,6 +146,154 @@ class CellOperationLock(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False
     )
+
+
+class CapacityReservationClass(StrEnum):
+    USER = "USER"
+    RECOVERY = "RECOVERY"
+
+
+class CapacityReleaseReason(StrEnum):
+    DISCARD = "DISCARD"
+    DESTROY = "DESTROY"
+
+
+class CapacityLedger(Base):
+    """The singleton serialization point for hosted capacity decisions."""
+
+    __tablename__ = "capacity_ledger"
+    __table_args__ = (
+        CheckConstraint("id = 1", name="ck_capacity_ledger_singleton"),
+        CheckConstraint("revision >= 0", name="ck_capacity_ledger_revision"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    revision: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False
+    )
+
+
+class CapacityReservation(Base):
+    """Immutable reservation history with nullable, atomic release metadata."""
+
+    __tablename__ = "capacity_reservations"
+    __table_args__ = (
+        UniqueConstraint(
+            "reserving_operation_id", name="uq_capacity_reservation_reserving_operation"
+        ),
+        CheckConstraint(
+            "reserving_fence_generation >= 1",
+            name="ck_capacity_reservation_positive_reserving_fence",
+        ),
+        CheckConstraint(
+            "releasing_fence_generation IS NULL OR releasing_fence_generation >= 1",
+            name="ck_capacity_reservation_positive_releasing_fence",
+        ),
+        CheckConstraint(
+            "(released_at IS NULL AND releasing_operation_id IS NULL "
+            "AND releasing_provider_operation_id IS NULL "
+            "AND releasing_fence_generation IS NULL AND release_reason IS NULL) "
+            "OR (released_at IS NOT NULL AND releasing_operation_id IS NOT NULL "
+            "AND releasing_provider_operation_id IS NOT NULL "
+            "AND releasing_fence_generation IS NOT NULL AND release_reason IS NOT NULL)",
+            name="ck_capacity_reservation_release_all_or_none",
+        ),
+        Index(
+            "uq_capacity_reservation_active_tenant_cell",
+            "tenant_id",
+            "cell_id",
+            unique=True,
+            postgresql_where=text("released_at IS NULL"),
+            sqlite_where=text("released_at IS NULL"),
+        ),
+        Index(
+            "uq_capacity_reservation_active_resource",
+            "resource_name",
+            unique=True,
+            postgresql_where=text("released_at IS NULL"),
+            sqlite_where=text("released_at IS NULL"),
+        ),
+        Index(
+            "ix_capacity_reservation_active_class",
+            "reservation_class",
+            "released_at",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(
+        Uuid(as_uuid=False), primary_key=True, default=lambda: str(uuid.uuid4())
+    )
+    tenant_id: Mapped[str] = mapped_column(String(256), nullable=False)
+    cell_id: Mapped[str] = mapped_column(String(256), nullable=False)
+    resource_name: Mapped[str] = mapped_column(String(253), nullable=False)
+    reservation_class: Mapped[CapacityReservationClass] = mapped_column(
+        Enum(CapacityReservationClass, native_enum=False, length=16), nullable=False
+    )
+    reserving_operation_id: Mapped[str] = mapped_column(
+        ForeignKey("operations.id", ondelete="RESTRICT"), nullable=False
+    )
+    reserving_provider_operation_id: Mapped[str] = mapped_column(String(256), nullable=False)
+    reserving_fence_generation: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    reserved_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+    released_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    releasing_operation_id: Mapped[str | None] = mapped_column(
+        ForeignKey("operations.id", ondelete="RESTRICT")
+    )
+    releasing_provider_operation_id: Mapped[str | None] = mapped_column(String(256))
+    releasing_fence_generation: Mapped[int | None] = mapped_column(BigInteger)
+    release_reason: Mapped[CapacityReleaseReason | None] = mapped_column(
+        Enum(CapacityReleaseReason, native_enum=False, length=16)
+    )
+
+
+class CapacityDestructiveFence(Base):
+    """Immutable proof-valid DISCARD/DESTROY completion history."""
+
+    __tablename__ = "capacity_destructive_fences"
+    __table_args__ = (
+        UniqueConstraint(
+            "destructive_operation_id",
+            name="uq_capacity_destructive_fence_operation",
+        ),
+        CheckConstraint(
+            "fence_generation >= 1",
+            name="ck_capacity_destructive_fence_positive_fence",
+        ),
+        CheckConstraint(
+            "(release_reason = 'DISCARD' AND cell_id IS NOT NULL) OR "
+            "(release_reason = 'DESTROY' AND cell_id IS NULL)",
+            name="ck_capacity_destructive_fence_scope",
+        ),
+        Index(
+            "ix_capacity_destructive_fence_tenant_fence",
+            "tenant_id",
+            "fence_generation",
+        ),
+        Index(
+            "ix_capacity_destructive_fence_tenant_cell_fence",
+            "tenant_id",
+            "cell_id",
+            "fence_generation",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(
+        Uuid(as_uuid=False), primary_key=True, default=lambda: str(uuid.uuid4())
+    )
+    tenant_id: Mapped[str] = mapped_column(String(256), nullable=False)
+    cell_id: Mapped[str | None] = mapped_column(String(256))
+    release_reason: Mapped[CapacityReleaseReason] = mapped_column(
+        Enum(CapacityReleaseReason, native_enum=False, length=16), nullable=False
+    )
+    destructive_operation_id: Mapped[str] = mapped_column(
+        ForeignKey("operations.id", ondelete="RESTRICT"), nullable=False
+    )
+    provider_operation_id: Mapped[str] = mapped_column(String(256), nullable=False)
+    fence_generation: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    completed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
 class Resource(Base):
@@ -344,6 +493,29 @@ class RecoveryObject(Base):
     verified_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     key_destroyed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class ExportDelivery(Base):
+    __tablename__ = "export_deliveries"
+    __table_args__ = (
+        UniqueConstraint("provider_reference_digest", name="uq_export_delivery_provider_ref"),
+        CheckConstraint("fence_generation >= 1", name="ck_export_delivery_fence"),
+        Index("ix_export_delivery_tenant_deleted", "tenant_id", "deleted_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    source_object_id: Mapped[str] = mapped_column(
+        ForeignKey("recovery_objects.id", ondelete="RESTRICT"), nullable=False
+    )
+    tenant_id: Mapped[str] = mapped_column(String(256), nullable=False)
+    cell_id: Mapped[str] = mapped_column(String(256), nullable=False)
+    operation_id: Mapped[str] = mapped_column(String(256), nullable=False)
+    fence_generation: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    provider_reference_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    provider_reference_ciphertext: Mapped[str] = mapped_column(Text, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    verified_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class ProviderDisposition(StrEnum):

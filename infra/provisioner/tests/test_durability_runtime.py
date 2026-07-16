@@ -176,6 +176,7 @@ def test_production_builders_pass_explicit_disjoint_action_allowlists() -> None:
         repository=repository,  # type: ignore[arg-type]
         driver=object(),  # type: ignore[arg-type]
         worker_id="routine-worker",
+        capacity_admission=object(),
     )
     deletion = build_deletion_operation_worker(
         repository=repository,  # type: ignore[arg-type]
@@ -221,9 +222,17 @@ async def test_production_deletion_builder_performs_a_canonical_empty_provider_s
             return []
 
     class B2:
-        def list_objects_v2(self, **arguments):
-            assert arguments["Bucket"] in {"recovery-bucket", "export-bucket"}
-            return {"Contents": [], "IsTruncated": False}
+        def list_object_versions(self, **arguments):
+            raise AssertionError(f"empty durable ledger must not scan B2: {arguments}")
+
+    class Ledger:
+        async def tenant_recovery_objects(self, tenant_id):
+            assert tenant_id == "tenant-alpha"
+            return []
+
+        async def tenant_export_deliveries(self, tenant_id):
+            assert tenant_id == "tenant-alpha"
+            return []
 
     class Authority:
         async def current_fence(self, tenant_id):
@@ -251,7 +260,7 @@ async def test_production_deletion_builder_performs_a_canonical_empty_provider_s
         export_bucket="export-bucket",
         provider_recovery_public_key=codec.public_key(),
         authority=Authority(),
-        key_store=SimpleNamespace(),
+        key_store=Ledger(),
     )
     context = EffectContext(
         "operation-alpha",
@@ -273,9 +282,9 @@ def test_bucket_scoped_b2_client_dispatches_only_the_exact_bucket() -> None:
             self.name = name
             self.calls: list[tuple[str, dict[str, object]]] = []
 
-        def list_objects_v2(self, **kwargs):
+        def list_object_versions(self, **kwargs):
             self.calls.append(("list", kwargs))
-            return {"Contents": []}
+            return {"Versions": [], "DeleteMarkers": []}
 
         def head_object(self, **kwargs):
             self.calls.append(("head", kwargs))
@@ -294,17 +303,17 @@ def test_bucket_scoped_b2_client_dispatches_only_the_exact_bucket() -> None:
         }
     )
 
-    client.list_objects_v2(Bucket="exomem-recovery-deadbeef")
+    client.list_object_versions(Bucket="exomem-recovery-deadbeef")
     client.head_object(Bucket="exomem-export-deadbeef", Key="opaque")
     client.delete_object(
         Bucket="exomem-recovery-deadbeef",
         Key="opaque",
-        BypassGovernanceRetention=True,
+        VersionId="version-opaque",
     )
     assert [call[0] for call in recovery.calls] == ["list", "delete"]
     assert [call[0] for call in exports.calls] == ["head"]
     with pytest.raises(ValueError, match="outside deletion scope"):
-        client.list_objects_v2(Bucket="database-backup")
+        client.list_object_versions(Bucket="database-backup")
 
 
 @pytest.mark.asyncio
@@ -441,7 +450,7 @@ async def test_deletion_driver_maps_provider_failures_without_leaking_detail(
 
 
 @pytest.mark.asyncio
-async def test_deletion_worker_claims_only_discard_and_destroy(tmp_path: Path) -> None:
+async def test_deletion_worker_resumes_only_reserved_discard_or_destroy(tmp_path: Path) -> None:
     settings = _settings(tmp_path / "deletion-worker.sqlite")
     database = ProvisionerDatabase(settings)
     await database.create_for_tests()
@@ -484,6 +493,11 @@ async def test_deletion_worker_claims_only_discard_and_destroy(tmp_path: Path) -
             "destroy-must-run",
             _request(operation_id="provider-destroy", tenant_id="tenant-destroy"),
         )
+        reserved = await repository.claim_next(
+            "deletion-worker",
+            allowed_actions=DELETION_OPERATION_ACTIONS,
+        )
+        assert reserved is not None and reserved.id == destroy.id
         worker = build_deletion_operation_worker(
             repository=repository,
             workflow=Workflow(),

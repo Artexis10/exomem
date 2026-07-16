@@ -40,6 +40,35 @@ The platform SHALL install CSI, SOPS-managed static secrets, Traefik, Cloudflare
 - **WHEN** the platform release is installed into a freshly bootstrapped cluster with the same inputs
 - **THEN** the rendered resources and immutable image references match the reviewed release inventory and become healthy
 
+### Requirement: Provisioner database bootstrap is packaged, serialized, and split-authority
+The immutable provisioner image SHALL carry byte-matching Alembic configuration and revisions at a fixed root-owned, non-writable, recursively non-symlinked path, SHALL expose environment-only bootstrap, runtime-migration, and exact-head-validation commands, and SHALL require one packaged head equal to the runtime `DATABASE_REVISION`. Every packaged directory and file SHALL be root-owned and non-writable, and every packaged file byte SHALL match the canonical input. Bootstrap SHALL accept direct or explicitly session-stable PostgreSQL endpoints and SHALL reject known transaction-pooling shapes. It SHALL hold one deterministic bounded database-and-schema advisory lock across exact role/schema validation or creation, runtime-authenticated migration, and final runtime authentication proof. While retaining the admin session, it SHALL also hold a cryptographically unpredictable advisory challenge that the runtime connection non-blockingly proves is already held; successful acquisition by runtime SHALL be released immediately and SHALL fail bootstrap as a different database lock domain. The runtime role SHALL be distinct from admin, target the same database, own only its dedicated schema and not the database, and SHALL be `LOGIN`, non-superuser, without `CREATEDB`, `CREATEROLE`, replication, `BYPASSRLS`, or incoming or outgoing role membership. Existing authority or revision drift SHALL fail closed rather than be repaired.
+
+Admin authority SHALL exist in K3s only as an ephemeral Secret consumed by one bootstrap Job and SHALL be deleted on success, failure, timeout, or interruption, followed by required provider-side rotation or revocation. Its receipt SHALL be a private, non-symlinked regular file owned by the operator, SHALL bind the current attempt and credential version, and SHALL be newer than the attempt boundary. Persistent private attempt state SHALL prevent another attempt from materializing authority until the preceding attempt's receipt validates. Stable hooks and long-lived workloads MUST NOT reference admin authority. The pre-install gate SHALL migrate to and prove the packaged head using only runtime authority before API/worker rollout. The pre-upgrade gate SHALL validate/no-op only when already at the new head and SHALL block ordinary Helm rollout instead of advancing a revision. A future revision-advancing release requires a separately reviewed forward-only expand/contract procedure.
+
+#### Scenario: Fresh control plane is reconstructed from immutable artifacts
+- **WHEN** a fresh PostgreSQL 17 database and empty cluster are bootstrapped from the reviewed provisioner image and runbook
+- **THEN** the dedicated runtime role/schema are created under one lock, packaged migrations reach the exact runtime head through runtime authentication, the admin Job and Secret are absent, and stable workloads become eligible to roll out
+
+#### Scenario: Concurrent or interrupted bootstrap is retried
+- **WHEN** two bootstrap attempts race or one fails after committing the valid role/schema boundary
+- **THEN** the advisory lock serializes them, retry validates the exact partial state without privilege repair, and no bootstrap/migration self-deadlock or secret disclosure occurs
+
+#### Scenario: Admin and runtime URLs reach different clusters with the same database name
+- **WHEN** the admin URL targets one PostgreSQL cluster and the runtime URL targets an already-migrated database of the same name on another cluster
+- **THEN** the runtime connection can acquire and immediately releases the unpredictable challenge, and bootstrap fails closed without accepting the unrelated migration state
+
+#### Scenario: Another login inherits the runtime role
+- **WHEN** the runtime role is granted to another login even though the runtime role itself has no parent membership
+- **THEN** bootstrap and exact-head validation reject the incoming membership edge as unsafe authority drift
+
+#### Scenario: Upgrade would advance the database revision
+- **WHEN** a platform upgrade renders an image head different from the current database revision
+- **THEN** the runtime-only pre-upgrade gate fails content-free before API/worker rollout and performs no revision advance
+
+#### Scenario: Bootstrap authority cleanup is incomplete
+- **WHEN** the ephemeral admin Secret or Job remains, or a current attempt/version/time-bound provider rotation/revocation receipt is absent after any bootstrap attempt outcome
+- **THEN** deployment remains blocked and the admin URL is not copied into any stable or governed secret destination
+
 ### Requirement: Frequent Substrate schedules are external, exact, and observable
 Vercel SHALL continue to host the authenticated cron route handlers, but the three minute/hour Exomem schedules MUST NOT be declared in Vercel Hobby cron configuration. The K3s platform release SHALL consume pinned version `1` of Substrate's `ops/exomem-hosted-schedules.json` contract. The contract itself SHALL encode canonical origin `https://substratesystems.io` and exactly: `GET /api/cron/exomem-access-delivery` at `* * * * *`; `GET /api/cron/exomem-reconcile` at `* * * * *`; and `GET /api/cron/exomem-export-gc` at `17 * * * *`.
 
