@@ -137,6 +137,26 @@ def reconcile_media(
     return ReconcileResult(media_type, state, sidecar, job_id)
 
 
+def retry_media(vault_root: Path, binary_path: str | Path) -> ReconcileResult:
+    """Explicitly retry one blocked/failed artifact without replacing valid output."""
+    vault = Path(vault_root).resolve()
+    binary = Path(binary_path)
+    if not binary.is_absolute():
+        binary = vault / binary
+    binary = Path(os.path.abspath(binary))
+
+    result = reconcile_media(vault, binary)
+    if result.state == "completed" or result.job_id is None:
+        return result
+
+    store = media_jobs.MediaJobStore(vault)
+    if store.retry(binary_path=binary, include_failed=True) == 0:
+        return result
+    durable_job = store.get(result.job_id)
+    state = durable_job.state if durable_job is not None else media_jobs.PENDING
+    return ReconcileResult(result.media_type, state, result.sidecar_path, result.job_id)
+
+
 def _discard_stale_job(
     vault: Path, binary: Path, sidecar: Path, media_type: str
 ) -> None:

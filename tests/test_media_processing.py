@@ -318,6 +318,55 @@ def test_reconciliation_retains_actionable_terminal_ledger_state(
     assert job["error"] == error
 
 
+def test_retry_media_preserves_completed_transcript_and_discards_stale_job(
+    vault: Path,
+) -> None:
+    media_processing = _media_processing()
+    binary = _drop_media(vault, "retry-completed.m4a")
+    first = media_processing.reconcile_media(vault, binary)
+    store = media_jobs.MediaJobStore(vault)
+    claimed = store.claim_next()
+    assert claimed is not None and claimed.id == first.job_id
+    store.mark(claimed.id, media_jobs.FAILED, "InvalidDataError: stale failure")
+    completed = first.sidecar_path.read_text(encoding="utf-8").replace(
+        "extracted_by: pending", "extracted_by: faster-whisper:test+timed"
+    ).replace("processing_state: pending", "processing_state: completed")
+    completed += "\n## Extracted text\n\n[0:00] This valid transcript must survive retry.\n"
+    first.sidecar_path.write_text(completed, encoding="utf-8")
+    before = first.sidecar_path.read_bytes()
+
+    retried = media_processing.retry_media(vault, binary)
+
+    assert retried.state == "completed"
+    assert retried.job_id is None
+    assert first.sidecar_path.read_bytes() == before
+    assert media_jobs.status(vault)["jobs"] == []
+    assert _job_count(vault) == 0
+
+
+def test_retry_media_requeues_only_the_targeted_terminal_artifact(vault: Path) -> None:
+    media_processing = _media_processing()
+    blocked_binary = _drop_media(vault, "retry-blocked.m4a")
+    failed_binary = _drop_media(vault, "retry-failed.m4a")
+    blocked = media_processing.reconcile_media(vault, blocked_binary)
+    failed = media_processing.reconcile_media(vault, failed_binary)
+    store = media_jobs.MediaJobStore(vault)
+    blocked_claim = store.claim_next()
+    assert blocked_claim is not None and blocked_claim.id == blocked.job_id
+    store.mark(blocked_claim.id, media_jobs.BLOCKED, "engine absent")
+    failed_claim = store.claim_next()
+    assert failed_claim is not None and failed_claim.id == failed.job_id
+    store.mark(failed_claim.id, media_jobs.FAILED, "corrupt container")
+
+    retried = media_processing.retry_media(vault, failed_binary)
+
+    assert retried.job_id == failed.job_id
+    assert retried.state == media_jobs.PENDING
+    jobs = {job["path"]: job for job in media_jobs.status(vault)["jobs"]}
+    assert jobs[failed_binary.relative_to(vault).as_posix()]["state"] == media_jobs.PENDING
+    assert jobs[blocked_binary.relative_to(vault).as_posix()]["state"] == media_jobs.BLOCKED
+
+
 @pytest.mark.parametrize(
     "location", ["outside-vault", "outside-knowledge-base", "symlink-escape"]
 )

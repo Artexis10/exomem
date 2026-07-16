@@ -113,9 +113,6 @@ class MediaWorker:
             self._stop_event.clear()
             if self._execution_mode == "process":
                 assert self._store is not None
-                retried = self._store.retry()
-                if retried:
-                    log.info("media worker: retried %d blocked job(s)", retried)
                 target = self._supervise
                 name = "exomem-media-supervisor"
             else:

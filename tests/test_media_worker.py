@@ -8,7 +8,7 @@ from contextlib import contextmanager
 import numpy as np
 import pytest
 
-from exomem import embeddings, extract, media_worker, preserve, server_runtime
+from exomem import embeddings, extract, media_jobs, media_worker, preserve, server_runtime
 from exomem import find as find_module
 
 
@@ -614,6 +614,37 @@ def test_child_marks_unavailable_engine_blocked(vault, monkeypatch: pytest.Monke
 
     assert media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.1) == 0
     assert store.counts()["blocked"] == 1
+
+
+def test_process_worker_restart_preserves_blocked_job_until_explicit_retry(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("EXOMEM_DISABLE_MEDIA_EXTRACTION", raising=False)
+    result = _preserve_media_stub(vault, filename="restart-blocked.mp3")
+    store = media_jobs.MediaJobStore(vault)
+    job_id = store.enqueue(
+        media_jobs.MediaJob(
+            binary_path=vault / result.path,
+            sidecar_path=vault / result.sidecar_path,
+            media_type="audio",
+        )
+    )
+    claimed = store.claim_next()
+    assert claimed is not None and claimed.id == job_id
+    error = "ExtractionUnavailable: install the ASR extra"
+    store.mark(job_id, media_jobs.BLOCKED, error)
+    monkeypatch.setattr(media_worker.MediaWorker, "_supervise", lambda _self: None)
+    monkeypatch.setattr(extract, "log_diarization_readiness", lambda _vault: None)
+
+    worker = media_worker.MediaWorker(vault, execution_mode="process")
+    worker.start()
+    try:
+        [status] = media_jobs.status(vault)["jobs"]
+        assert status["state"] == media_jobs.BLOCKED
+        assert status["attempts"] == 1
+        assert status["error"] == error
+    finally:
+        worker.stop()
 
 
 def test_media_runtime_failure_does_not_deny_core_service(
