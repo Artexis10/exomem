@@ -133,4 +133,3 @@ Default initialization, scanning, reading, registry upgrades, and index
 rebuilds do not fabricate observations, categories, relations, page IDs, or
 review decisions. Existing pages are activation-snapshotted by stable ID or
 portable path/hash fallback without rewriting their Markdown.
-
