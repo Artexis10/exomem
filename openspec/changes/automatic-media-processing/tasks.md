@@ -10,7 +10,7 @@
 
 ### Task 3
 
-- [ ] 1.3 Add failing durable-ledger tests for per-path status, attempt/error details, retryability/next action, deduplicated targeted retry, and failed-job retention, then implement the ledger behavior.
+- [x] 1.3 Add failing durable-ledger tests for per-path status, attempt/error details, retryability/next action, deduplicated targeted retry, and failed-job retention, then implement the ledger behavior.
 
 ## 2. Automatic Dispatch And Timestamped Processing
 
