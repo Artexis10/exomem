@@ -61,6 +61,8 @@ def _spy_media_and_text_dispatch(monkeypatch: pytest.MonkeyPatch) -> dict[str, l
     calls: dict[str, list] = {
         "media": [],
         "freshness": [],
+        "inbound": [],
+        "resolver": [],
         "upsert": [],
         "delete": [],
     }
@@ -88,6 +90,18 @@ def _spy_media_and_text_dispatch(monkeypatch: pytest.MonkeyPatch) -> dict[str, l
         "delete_after_remove",
         lambda root, rels: calls["delete"].append((root, list(rels))),
     )
+    monkeypatch.setattr(
+        "exomem.vault.on_inbound_files_changed",
+        lambda root, up, deleted: calls["inbound"].append(
+            (root, list(up), list(deleted))
+        ),
+    )
+    monkeypatch.setattr(
+        "exomem.find.on_resolver_files_changed",
+        lambda root, up, deleted: calls["resolver"].append(
+            (root, list(up), list(deleted))
+        ),
+    )
     return calls
 
 
@@ -104,6 +118,8 @@ def test_supported_audio_event_dispatches_media_only(
     watcher._flush()
 
     assert calls["media"] == [(vault, recording, False)]
+    assert calls["inbound"] == []
+    assert calls["resolver"] == []
 
 
 def test_supported_audio_never_enters_markdown_freshness_or_embedding(
@@ -120,6 +136,8 @@ def test_supported_audio_never_enters_markdown_freshness_or_embedding(
 
     assert calls["media"] == [(vault, recording, False)]
     assert calls["freshness"] == []
+    assert calls["inbound"] == []
+    assert calls["resolver"] == []
     assert calls["upsert"] == []
     assert calls["delete"] == []
 
@@ -148,6 +166,8 @@ def test_supported_audio_events_are_debounced_and_deduplicated(
 
     assert calls["media"] == [(vault, recording, False)]
     assert calls["freshness"] == []
+    assert calls["inbound"] == []
+    assert calls["resolver"] == []
     assert calls["upsert"] == []
 
 
@@ -163,7 +183,14 @@ def test_unsupported_attachment_dispatches_neither_media_nor_text(
     watcher._record(attachment, deleted=False)
     watcher._flush()
 
-    assert calls == {"media": [], "freshness": [], "upsert": [], "delete": []}
+    assert calls == {
+        "media": [],
+        "freshness": [],
+        "inbound": [],
+        "resolver": [],
+        "upsert": [],
+        "delete": [],
+    }
 
 
 def test_delete_routes_to_delete_after_remove(vault, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -594,6 +621,8 @@ def test_periodic_reconcile_discovers_missed_media_without_text_reembed(
     root, limit = discovery_calls[0]
     assert root == vault
     assert isinstance(limit, int) and limit > 0
+    assert calls["inbound"] == []
+    assert calls["resolver"] == []
     assert calls["upsert"] == []
     assert calls["delete"] == []
 
