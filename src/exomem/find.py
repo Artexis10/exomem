@@ -2352,16 +2352,26 @@ def shared_resolver(vault_root: Path):
     return _get_query_resolver(vault_root)
 
 
-def writer_resolver_snapshot(vault_root: Path):
+def writer_resolver_snapshot(
+    vault_root: Path,
+    *,
+    freshness_key: tuple[int, int, str] | None = None,
+):
     """Return a detached resolver snapshot without warming the shared cache.
 
     A fresh matching cached resolver is forked.  A cold/stale cache remains
-    untouched and preparation gets a one-off resolver built from disk.
+    untouched and preparation gets a one-off resolver built from disk. Callers
+    that already measured direct disk freshness may supply that key to bypass
+    potentially stale event-registry state.
     """
     from .vault import WikilinkResolver
 
     root = Path(vault_root)
-    current_freshness = FreshnessSnapshot(root).vault()
+    current_freshness = (
+        freshness_key
+        if freshness_key is not None
+        else FreshnessSnapshot(root).vault()
+    )
     with _RESOLVER_LOCK:
         cached = _RESOLVER_CACHE.get(root)
         if cached and cached[0] == current_freshness:

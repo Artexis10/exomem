@@ -350,17 +350,17 @@ def reconcile(vault_root: Path, *, dry_run: bool = False) -> ReconcileReport:
     )
     report.remaining_drift = [f.as_dict() for f in post.findings]
 
-    # ---- 5. Invalidate the event-maintained registries ----
+    # ---- 5. Rebaseline the event-maintained registries ----
     # reconcile is the "I edited around the system, heal it" command — after it
     # runs, no in-memory freshness/inbound registry should keep trusting
-    # pre-reconcile state. Freshness re-seeds on the watcher's next reconcile
-    # tick; inbound rebuilds on next read. (The embedding matrix cache is
+    # pre-reconcile state. Freshness is immediately re-derived from final disk
+    # state; inbound rebuilds on next read. (The embedding matrix cache is
     # maintained separately by the shared-index memo and its own mtime check.)
     if not dry_run:
         from . import freshness
         from . import vault as vault_module
 
-        freshness.invalidate(vault_root)
+        freshness.rebaseline(vault_root)
         vault_module.clear_inbound_index()
 
     return report
