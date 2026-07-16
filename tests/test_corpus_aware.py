@@ -226,7 +226,12 @@ def test_note_surfaces_overlap_warning(vault, _no_embed_writes, monkeypatch) -> 
     monkeypatch.setattr(corpus_aware, "detect_duplicates", lambda *a, **k: [])
     monkeypatch.setattr(corpus_aware, "detect_contradictions", lambda *a, **k: [cand])
     res = note_module.note(
-        vault, content="Body.", note_type="insight", title="New One", tags=["t"]
+        vault,
+        content="Body.",
+        note_type="insight",
+        title="New One",
+        tags=["t"],
+        status="draft",
     )
     assert any("overlaps active note" in w for w in res.warnings), res.warnings
 
@@ -283,7 +288,12 @@ def test_note_shares_one_embedding_pass(vault, monkeypatch) -> None:
 
     monkeypatch.setattr(corpus_aware, "_best_cosine_per_file", _spy)
     note_module.note(
-        vault, content="Body.", note_type="insight", title="Shared Pass One", tags=["t"]
+        vault,
+        content="Body.",
+        note_type="insight",
+        title="Shared Pass One",
+        tags=["t"],
+        status="draft",
     )
     assert calls["n"] == 1  # dup + contradiction partitions share ONE encode
 
@@ -335,6 +345,7 @@ def test_note_attaches_suggestions_for_near_twin(vault: Path, embeddings_enabled
         note_type="insight",
         title="Near twin of progressive disclosure",
         tags=["ux"],
+        status="draft",
     )
     d = res.as_dict()
     assert d["path"]

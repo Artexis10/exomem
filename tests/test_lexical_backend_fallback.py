@@ -190,6 +190,37 @@ def test_bm25_match_sets_agree_between_backends(tmp_path, monkeypatch):
     assert ft == py == {"Knowledge Base/a.md", "Knowledge Base/b.md", "Knowledge Base/d.md"}
 
 
+@pytest.mark.parametrize("backend", ["python", "fts5"])
+def test_bm25_allowed_paths_are_applied_before_top_k(
+    tmp_path, monkeypatch, backend
+):
+    """An eligible lower-ranked page must not be buried by excluded hits."""
+    if backend == "fts5" and not _HAS_FTS5:
+        pytest.skip("SQLite build lacks FTS5")
+    monkeypatch.setenv("EXOMEM_LEXICAL_BACKEND", backend)
+    excluded = "Knowledge Base/excluded.md"
+    allowed = "Knowledge Base/allowed.md"
+    _write_page(tmp_path, excluded, "needle " * 20)
+    _write_page(
+        tmp_path,
+        allowed,
+        "needle with a deliberately longer body of unrelated lexical terms",
+    )
+    _fill_corpus(tmp_path)
+
+    unfiltered = bm25.search(tmp_path, "needle", k=1, scope="kb")
+    assert unfiltered and unfiltered[0][0] == excluded
+
+    filtered = bm25.search(
+        tmp_path,
+        "needle",
+        k=1,
+        scope="kb",
+        allowed_paths={allowed},
+    )
+    assert [path for path, _score in filtered] == [allowed]
+
+
 # ---------------------------------------------------------------- keyword parity
 
 

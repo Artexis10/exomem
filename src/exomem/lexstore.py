@@ -54,10 +54,12 @@ Availability is a ladder, decided per process (the `vecstore` idiom):
 from __future__ import annotations
 
 import ast
+import json
 import logging
 import os
 import sqlite3
 import threading
+from dataclasses import dataclass
 from pathlib import Path
 
 from .kbdir import kb_dirname
@@ -65,12 +67,41 @@ from .kbdir import kb_dirname
 log = logging.getLogger(__name__)
 
 _NAV_BASENAMES = frozenset({"index.md", "log.md"})
+SCHEMA_VERSION = 2
 
 _PROBE_RESULT: bool | None = None
 _PROBE_LOCK = threading.Lock()
 
 _STORES: dict[Path, LexicalStore] = {}
 _STORES_LOCK = threading.Lock()
+
+
+@dataclass(frozen=True, slots=True)
+class SemanticUnitLexicalHit:
+    """One internal lexical semantic-unit candidate."""
+
+    record_type: str
+    unit_ref: str
+    parent_path: str
+    parent_ref: str | None
+    parent_generation: str
+    parent_source_hash: str
+    parser_version: int
+    form: str
+    category_raw: str
+    category_key: str
+    category: str
+    kind: str
+    content: str
+    tags: tuple[str, ...]
+    context: str | None
+    source_hash: str
+    anchor: str | None
+    line: int
+    end_line: int
+    fingerprint: str | None
+    source_order: int
+    lexical_score: float | None
 
 
 def backend() -> str:
@@ -155,6 +186,7 @@ def search_bm25(
     *,
     scope: str = "kb",
     freshness: tuple | None = None,
+    allowed_paths: set[str] | None = None,
 ) -> list[tuple[str, float]] | None:
     """Top-k `(rel_path, score)` from the FTS5 index, or None → use the
     in-process rung. Matches the python rung's shape: OR membership,
@@ -170,7 +202,7 @@ def search_bm25(
     if not tokens:
         return []
     store = get_store(vault_root)
-    return store.search_bm25(tokens, k, scope, freshness)
+    return store.search_bm25(tokens, k, scope, freshness, allowed_paths)
 
 
 def search_substring(
@@ -193,6 +225,65 @@ def search_substring(
         return []
     store = get_store(vault_root)
     return store.search_substring(tokens, scope, freshness)
+
+
+def search_semantic_units(
+    vault_root: Path,
+    query: str,
+    k: int,
+    *,
+    categories: list[str] | None = None,
+    kinds: list[str] | None = None,
+    scope: str = "kb",
+    freshness: tuple | None = None,
+    allowed_unit_refs: set[str] | None = None,
+) -> list[SemanticUnitLexicalHit] | None:
+    """Return exact-metadata semantic-unit candidates from the lexical sidecar."""
+    if not _usable():
+        return None
+    from . import bm25 as bm25_module
+    from .semantic_units import canonicalize_category
+
+    tokens = bm25_module.tokenize(query) if query.strip() else []
+    if query.strip() and not tokens:
+        return []
+    category_keys = tuple(sorted({canonicalize_category(value) for value in categories or ()}))
+    kind_keys = tuple(sorted({canonicalize_category(value) for value in kinds or ()}))
+    hits = get_store(vault_root).search_semantic_units(
+        tokens,
+        k,
+        category_keys,
+        kind_keys,
+        scope,
+        freshness,
+        allowed_unit_refs,
+    )
+    if hits is None:
+        return None
+    from .semantic_index import validate_parent_record
+
+    current: list[SemanticUnitLexicalHit] = []
+    freshness_by_stamp: dict[tuple[str, str, str, int], bool] = {}
+    for hit in hits:
+        stamp = (
+            hit.parent_path,
+            hit.parent_generation,
+            hit.parent_source_hash,
+            hit.parser_version,
+        )
+        accepted = freshness_by_stamp.get(stamp)
+        if accepted is None:
+            accepted = validate_parent_record(
+                vault_root,
+                parent_path=hit.parent_path,
+                parent_generation_value=hit.parent_generation,
+                parent_source_hash=hit.parent_source_hash,
+                parser_version=hit.parser_version,
+            ).current
+            freshness_by_stamp[stamp] = accepted
+        if accepted:
+            current.append(hit)
+    return current
 
 
 def ensure_fresh(vault_root: Path) -> None:
@@ -288,7 +379,7 @@ class LexicalStore:
         conn.execute("PRAGMA busy_timeout=5000")
         return conn
 
-    def _ensure_schema(self, conn: sqlite3.Connection) -> None:
+    def _ensure_schema(self, conn: sqlite3.Connection) -> bool:
         conn.execute(
             "CREATE TABLE IF NOT EXISTS pages("
             " path TEXT PRIMARY KEY,"
@@ -311,6 +402,49 @@ class LexicalStore:
         # (repr'd) — the cross-process "nothing changed while we were down"
         # attestation that lets a restart skip the exact verify.
         conn.execute("CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT)")
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS semantic_units("
+            " record_type TEXT NOT NULL CHECK(record_type = 'semantic_unit'),"
+            " unit_ref TEXT NOT NULL,"
+            " parent_path TEXT NOT NULL,"
+            " parent_ref TEXT,"
+            " parent_generation TEXT NOT NULL,"
+            " parent_source_hash TEXT NOT NULL,"
+            " parser_version INTEGER NOT NULL,"
+            " form TEXT NOT NULL,"
+            " category_raw TEXT NOT NULL,"
+            " category_key TEXT NOT NULL,"
+            " category TEXT NOT NULL,"
+            " kind TEXT NOT NULL,"
+            " content TEXT NOT NULL,"
+            " tags_json TEXT NOT NULL,"
+            " context TEXT,"
+            " unit_source_hash TEXT NOT NULL,"
+            " anchor TEXT,"
+            " line INTEGER NOT NULL,"
+            " end_line INTEGER NOT NULL,"
+            " fingerprint TEXT,"
+            " source_order INTEGER NOT NULL,"
+            " updated TEXT NOT NULL DEFAULT '0000-00-00',"
+            " in_kb INTEGER NOT NULL DEFAULT 0,"
+            " in_vault INTEGER NOT NULL DEFAULT 0,"
+            " UNIQUE(parent_path, unit_ref))"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS semantic_units_parent "
+            "ON semantic_units(parent_path, parent_generation)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS semantic_units_category "
+            "ON semantic_units(category, in_kb, in_vault)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS semantic_units_kind "
+            "ON semantic_units(kind, in_kb, in_vault)"
+        )
+        conn.execute("CREATE VIRTUAL TABLE IF NOT EXISTS unit_fts USING fts5(stemmed)")
+        row = conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()
+        return bool(row and row[0] == str(SCHEMA_VERSION))
 
     # -------------------------------------------------------------- freshness
 
@@ -360,7 +494,9 @@ class LexicalStore:
         with self._lock:
             if self._synced.get(scope) == freshness:
                 return
-            self._ensure_schema(conn)
+            if not self._ensure_schema(conn):
+                self._rebuild(conn)
+                return
             if self._stored_count_max(conn, scope) != (freshness[0], freshness[1]):
                 self._heal_delta(conn)  # incremental: patch only the drifted rows
                 return
@@ -442,8 +578,15 @@ class LexicalStore:
             conn.execute("DELETE FROM pages")
             conn.execute("DELETE FROM fts")
             conn.execute("DELETE FROM tri")
+            conn.execute("DELETE FROM semantic_units")
+            conn.execute("DELETE FROM unit_fts")
             for path, (in_kb, in_vault) in members.items():
                 self._insert_page(conn, path, signatures[path][0], in_kb, in_vault)
+            conn.execute(
+                "INSERT INTO meta(key, value) VALUES('schema_version', ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (str(SCHEMA_VERSION),),
+            )
         self._witnessed.clear()
         for scope, idx in (("kb", 0), ("vault", 1)):
             entries = [(str(p), signatures[p]) for p, flags in members.items() if flags[idx]]
@@ -501,12 +644,9 @@ class LexicalStore:
             for row in conn.execute("SELECT path, rowid, mtime_ns, in_kb, in_vault FROM pages")
         }
         with conn:
-            # External page-row corruption can leave index rowids that SQLite
-            # will reuse for missing pages. Clear those orphans before inserts,
-            # or the replacement FTS insert can fail its rowid constraint and
-            # retire the sidecar instead of healing it.
-            conn.execute("DELETE FROM fts WHERE rowid NOT IN (SELECT rowid FROM pages)")
-            conn.execute("DELETE FROM tri WHERE rowid NOT IN (SELECT rowid FROM pages)")
+            # External owner-row corruption can leave page and semantic-unit
+            # index rows behind; purge them before SQLite reuses rowids.
+            self._delete_orphan_rows(conn)
             for rel, (rowid, mtime_ns, in_kb, in_vault) in stored.items():
                 w = walk.get(rel)
                 if w is None or (w[1][0], w[2], w[3]) != (mtime_ns, in_kb, in_vault):
@@ -563,8 +703,101 @@ class LexicalStore:
             "INSERT INTO tri(rowid, title_lower, body_lower) VALUES(?, ?, ?)",
             (rowid, title_lower, body_lower),
         )
+        if page is not None:
+            self._insert_semantic_units(
+                conn,
+                path,
+                updated=updated,
+                in_kb=in_kb,
+                in_vault=in_vault,
+            )
+
+    def _insert_semantic_units(
+        self,
+        conn: sqlite3.Connection,
+        path: Path,
+        *,
+        updated: str,
+        in_kb: bool,
+        in_vault: bool,
+    ) -> None:
+        from . import bm25 as bm25_module
+        from .semantic_index import current_parent_index_state
+
+        try:
+            state = current_parent_index_state(self.vault_root, path)
+        except (OSError, UnicodeError, ValueError):
+            return
+        for source_order, unit in enumerate(state.document.units):
+            if unit.unit_ref is None:
+                continue
+            cur = conn.execute(
+                "INSERT INTO semantic_units("
+                "record_type, unit_ref, parent_path, parent_ref, parent_generation, "
+                "parent_source_hash, parser_version, form, category_raw, category_key, "
+                "category, kind, content, tags_json, context, unit_source_hash, anchor, "
+                "line, end_line, fingerprint, source_order, updated, in_kb, in_vault) "
+                "VALUES('semantic_unit', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
+                "?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    unit.unit_ref,
+                    state.path,
+                    state.parent_ref,
+                    state.parent_generation,
+                    state.parent_source_hash,
+                    state.parser_version,
+                    unit.form,
+                    unit.category_raw,
+                    unit.category_key,
+                    unit.category,
+                    unit.kind,
+                    unit.content,
+                    json.dumps(list(unit.tags), ensure_ascii=False, separators=(",", ":")),
+                    unit.context,
+                    unit.source_hash,
+                    unit.anchor,
+                    unit.line,
+                    unit.end_line,
+                    unit.fingerprint,
+                    source_order,
+                    updated,
+                    int(in_kb),
+                    int(in_vault),
+                ),
+            )
+            stemmed = " ".join(bm25_module.tokenize(unit.content))
+            conn.execute(
+                "INSERT INTO unit_fts(rowid, stemmed) VALUES(?, ?)",
+                (cur.lastrowid, stemmed),
+            )
+
+    def _delete_semantic_units(self, conn: sqlite3.Connection, parent_path: str) -> None:
+        rowids = conn.execute(
+            "SELECT rowid FROM semantic_units WHERE parent_path = ?", (parent_path,)
+        ).fetchall()
+        for (rowid,) in rowids:
+            conn.execute("DELETE FROM unit_fts WHERE rowid = ?", (rowid,))
+        conn.execute("DELETE FROM semantic_units WHERE parent_path = ?", (parent_path,))
+
+    def _delete_orphan_rows(self, conn: sqlite3.Connection) -> None:
+        """Remove side-table rows whose owning record was deleted out-of-band."""
+        orphan_parents = conn.execute(
+            "SELECT DISTINCT u.parent_path FROM semantic_units u "
+            "LEFT JOIN pages p ON p.path = u.parent_path WHERE p.path IS NULL"
+        ).fetchall()
+        for (parent_path,) in orphan_parents:
+            self._delete_semantic_units(conn, str(parent_path))
+        conn.execute(
+            "DELETE FROM unit_fts WHERE rowid NOT IN "
+            "(SELECT rowid FROM semantic_units)"
+        )
+        conn.execute("DELETE FROM fts WHERE rowid NOT IN (SELECT rowid FROM pages)")
+        conn.execute("DELETE FROM tri WHERE rowid NOT IN (SELECT rowid FROM pages)")
 
     def _delete_rowid(self, conn: sqlite3.Connection, rowid: int) -> None:
+        row = conn.execute("SELECT path FROM pages WHERE rowid = ?", (rowid,)).fetchone()
+        if row is not None:
+            self._delete_semantic_units(conn, row[0])
         conn.execute("DELETE FROM fts WHERE rowid = ?", (rowid,))
         conn.execute("DELETE FROM tri WHERE rowid = ?", (rowid,))
         conn.execute("DELETE FROM pages WHERE rowid = ?", (rowid,))
@@ -596,7 +829,8 @@ class LexicalStore:
             return
         conn = self._connect()
         try:
-            self._ensure_schema(conn)
+            if not self._ensure_schema(conn):
+                self._rebuild(conn)
             with conn:
                 for path in paths:
                     try:
@@ -606,6 +840,8 @@ class LexicalStore:
                     row = conn.execute("SELECT rowid FROM pages WHERE path = ?", (rel,)).fetchone()
                     if row is not None:
                         self._delete_rowid(conn, row[0])
+                    else:
+                        self._delete_semantic_units(conn, rel)
                     try:
                         mtime_ns = path.stat().st_mtime_ns
                     except OSError:
@@ -623,12 +859,15 @@ class LexicalStore:
             return
         conn = self._connect()
         try:
-            self._ensure_schema(conn)
+            if not self._ensure_schema(conn):
+                self._rebuild(conn)
             with conn:
                 for rel in rel_paths:
                     row = conn.execute("SELECT rowid FROM pages WHERE path = ?", (rel,)).fetchone()
                     if row is not None:
                         self._delete_rowid(conn, row[0])
+                    else:
+                        self._delete_semantic_units(conn, rel)
             self._remember_live_witnesses()
         finally:
             conn.close()
@@ -658,7 +897,9 @@ class LexicalStore:
         try:
             conn = self._connect()
             try:
-                self._ensure_schema(conn)
+                if not self._ensure_schema(conn):
+                    self._rebuild(conn)
+                    return
                 self._witnessed.clear()
                 self._synced.clear()
                 conn.execute("DELETE FROM meta WHERE key LIKE 'triple:%'")
@@ -677,7 +918,12 @@ class LexicalStore:
     # -------------------------------------------------------------- search
 
     def search_bm25(
-        self, stemmed_tokens: list[str], k: int, scope: str, freshness: tuple | None
+        self,
+        stemmed_tokens: list[str],
+        k: int,
+        scope: str,
+        freshness: tuple | None,
+        allowed_paths: set[str] | None = None,
     ) -> list[tuple[str, float]] | None:
         if self._failed:
             return None
@@ -685,7 +931,9 @@ class LexicalStore:
             conn = self._connect()
             try:
                 self._ensure_synced(conn, scope, freshness)
-                return self._bm25_query(conn, stemmed_tokens, k, scope)
+                return self._bm25_query(
+                    conn, stemmed_tokens, k, scope, allowed_paths
+                )
             finally:
                 conn.close()
         except sqlite3.Error as e:
@@ -697,20 +945,148 @@ class LexicalStore:
             return None
 
     def _bm25_query(
-        self, conn: sqlite3.Connection, tokens: list[str], k: int, scope: str
+        self,
+        conn: sqlite3.Connection,
+        tokens: list[str],
+        k: int,
+        scope: str,
+        allowed_paths: set[str] | None = None,
     ) -> list[tuple[str, float]]:
         # Tokens are [a-z0-9]+ — no FTS5 syntax can hide in them, but quote
         # anyway; OR mirrors get_scores() membership (any-term match).
         match = " OR ".join(f'"{t}"' for t in tokens)
         col = "in_vault" if scope == "vault" else "in_kb"
+        allowed_clause = ""
+        params: list[object] = [match]
+        if allowed_paths is not None:
+            allowed_clause = " AND p.path IN (SELECT value FROM json_each(?))"
+            params.append(json.dumps(sorted(allowed_paths), ensure_ascii=False))
+        params.append(k)
         rows = conn.execute(
             "SELECT p.path, -bm25(fts) AS score "
             "FROM fts JOIN pages p ON p.rowid = fts.rowid "
-            f"WHERE fts MATCH ? AND p.{col} = 1 "
+            f"WHERE fts MATCH ? AND p.{col} = 1"
+            + allowed_clause
+            + " "
             "ORDER BY bm25(fts), p.path LIMIT ?",
-            (match, k),
+            params,
         ).fetchall()
         return [(p, float(s)) for p, s in rows]
+
+    def search_semantic_units(
+        self,
+        stemmed_tokens: list[str],
+        k: int,
+        categories: tuple[str, ...],
+        kinds: tuple[str, ...],
+        scope: str,
+        freshness: tuple | None,
+        allowed_unit_refs: set[str] | None = None,
+    ) -> list[SemanticUnitLexicalHit] | None:
+        if self._failed:
+            return None
+        try:
+            conn = self._connect()
+            try:
+                self._ensure_synced(conn, scope, freshness)
+                return self._semantic_unit_query(
+                    conn,
+                    stemmed_tokens,
+                    k,
+                    categories,
+                    kinds,
+                    scope,
+                    allowed_unit_refs,
+                )
+            finally:
+                conn.close()
+        except sqlite3.Error as e:
+            self._failed = True
+            log.warning(
+                "lexical semantic-unit sidecar failed (%s); unit retrieval degrades",
+                e,
+            )
+            return None
+
+    def _semantic_unit_query(
+        self,
+        conn: sqlite3.Connection,
+        tokens: list[str],
+        k: int,
+        categories: tuple[str, ...],
+        kinds: tuple[str, ...],
+        scope: str,
+        allowed_unit_refs: set[str] | None = None,
+    ) -> list[SemanticUnitLexicalHit]:
+        col = "in_vault" if scope == "vault" else "in_kb"
+        clauses = [f"u.{col} = 1"]
+        params: list[object] = []
+        if categories:
+            placeholders = ",".join("?" for _ in categories)
+            clauses.append(f"u.category IN ({placeholders})")
+            params.extend(categories)
+        if kinds:
+            placeholders = ",".join("?" for _ in kinds)
+            clauses.append(f"u.kind IN ({placeholders})")
+            params.extend(kinds)
+        if allowed_unit_refs is not None:
+            clauses.append("u.unit_ref IN (SELECT value FROM json_each(?))")
+            params.append(
+                json.dumps(sorted(allowed_unit_refs), ensure_ascii=False)
+            )
+        columns = (
+            "u.record_type, u.unit_ref, u.parent_path, u.parent_ref, "
+            "u.parent_generation, u.parent_source_hash, u.parser_version, u.form, "
+            "u.category_raw, u.category_key, u.category, u.kind, u.content, "
+            "u.tags_json, u.context, u.unit_source_hash, u.anchor, u.line, "
+            "u.end_line, u.fingerprint, u.source_order"
+        )
+        if tokens:
+            match = " OR ".join(f'"{token}"' for token in tokens)
+            rows = conn.execute(
+                f"SELECT {columns}, -bm25(unit_fts) AS lexical_score "
+                "FROM unit_fts JOIN semantic_units u ON u.rowid = unit_fts.rowid "
+                "WHERE unit_fts MATCH ? AND "
+                + " AND ".join(clauses)
+                + " ORDER BY bm25(unit_fts), u.parent_path, u.source_order LIMIT ?",
+                [match, *params, k],
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                f"SELECT {columns}, NULL AS lexical_score FROM semantic_units u WHERE "
+                + " AND ".join(clauses)
+                + " ORDER BY u.updated DESC, u.parent_path DESC, u.source_order LIMIT ?",
+                [*params, k],
+            ).fetchall()
+        return [self._semantic_unit_hit(row) for row in rows]
+
+    @staticmethod
+    def _semantic_unit_hit(row: tuple) -> SemanticUnitLexicalHit:
+        tags = json.loads(row[13])
+        return SemanticUnitLexicalHit(
+            record_type=str(row[0]),
+            unit_ref=str(row[1]),
+            parent_path=str(row[2]),
+            parent_ref=str(row[3]) if row[3] is not None else None,
+            parent_generation=str(row[4]),
+            parent_source_hash=str(row[5]),
+            parser_version=int(row[6]),
+            form=str(row[7]),
+            category_raw=str(row[8]),
+            category_key=str(row[9]),
+            category=str(row[10]),
+            kind=str(row[11]),
+            content=str(row[12]),
+            tags=tuple(str(tag) for tag in tags),
+            context=str(row[14]) if row[14] is not None else None,
+            source_hash=str(row[15]),
+            anchor=str(row[16]) if row[16] is not None else None,
+            line=int(row[17]),
+            end_line=int(row[18]),
+            fingerprint=str(row[19]) if row[19] is not None else None,
+            source_order=int(row[20]),
+            lexical_score=float(row[21]) if row[21] is not None else None,
+        )
 
     def search_substring(
         self, tokens: list[str], scope: str, freshness: tuple | None

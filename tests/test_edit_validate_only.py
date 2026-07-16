@@ -15,7 +15,6 @@ import pytest
 
 from exomem import edit as edit_module
 
-
 TODAY = dt.date(2026, 6, 1)
 
 

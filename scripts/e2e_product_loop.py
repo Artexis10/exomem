@@ -330,7 +330,11 @@ async def _stdio_session(
                         client,
                         "remember",
                         {
-                            "content": f"# {title}\n\n## Record\n\nCross-file graph target.\n",
+                            "content": (
+                                f"# {title}\n\n## Record\n\nCross-file graph target.\n\n"
+                                "## Relations\n\n"
+                                f"- supports [[{replacement['new_path'].removesuffix('.md')}]]\n"
+                            ),
                             "title": title,
                             "note_type": "insight",
                         },
@@ -758,6 +762,7 @@ def _installed_http(args: argparse.Namespace) -> int:
                     "content": "# HTTP lifecycle\n\n## Claim\n\nHTTP writes complete cleanly.\n",
                     "title": "HTTP lifecycle",
                     "note_type": "insight",
+                    "status": "draft",
                 },
                 token="e2e-rest-key",
                 timeout=args.request_timeout,
@@ -928,6 +933,7 @@ def _installed_lease(args: argparse.Namespace) -> int:
                     "content": f"# {title}\n\n## Claim\n\nWriter-lease serialization.\n",
                     "title": title,
                     "note_type": "insight",
+                    "status": "draft",
                 },
                 token="e2e-rest-key",
                 timeout=timeout,

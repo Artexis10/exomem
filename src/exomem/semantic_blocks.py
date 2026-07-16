@@ -9,6 +9,7 @@ validation only; no model, sidecar, or graph store is involved.
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -126,6 +127,25 @@ class SemanticBlockValidationError:
 
 
 @dataclass(frozen=True)
+class SemanticBlockKindFinding:
+    """One resolver finding awaiting source-line binding by the parser."""
+
+    code: str
+    message: str
+
+
+@dataclass(frozen=True)
+class SemanticBlockKindResolution:
+    """Optional rich-kind resolution plus non-blocking governance findings."""
+
+    kind: str | None
+    findings: tuple[SemanticBlockKindFinding, ...] = ()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "findings", tuple(self.findings))
+
+
+@dataclass(frozen=True)
 class SemanticBlock:
     type: str
     title: str
@@ -188,11 +208,45 @@ def normalize_label(label: str) -> str:
     return normalized.strip("_")
 
 
-def normalize_block_type(label: str) -> str | None:
+def normalize_block_type(
+    label: str,
+    *,
+    resolver: Callable[
+        [str], str | SemanticBlockKindResolution | None
+    ]
+    | None = None,
+) -> str | None:
     """Return the canonical semantic block type for a heading label."""
+    block_type, _ = _resolve_block_type(label, resolver=resolver)
+    return block_type
+
+
+def _resolve_block_type(
+    label: str,
+    *,
+    resolver: Callable[
+        [str], str | SemanticBlockKindResolution | None
+    ]
+    | None,
+) -> tuple[str | None, tuple[SemanticBlockKindFinding, ...]]:
     normalized = normalize_label(label)
     block_type = _BLOCK_TYPE_ALIASES.get(normalized, normalized)
-    return block_type if block_type in BLOCK_TYPES else None
+    if block_type in BLOCK_TYPES:
+        return block_type, ()
+    if resolver is None:
+        return None, ()
+    result = resolver(label)
+    if isinstance(result, SemanticBlockKindResolution):
+        candidate = result.kind
+        findings = result.findings
+    else:
+        candidate = result
+        findings = ()
+    if candidate is not None and not isinstance(candidate, str):
+        candidate = None
+    if candidate is not None and normalize_label(candidate) == "observation":
+        candidate = None
+    return candidate, findings
 
 
 def parse_semantic_blocks(
@@ -200,6 +254,10 @@ def parse_semantic_blocks(
     *,
     validate: bool = True,
     registry: relation_registry.RelationRegistry | None = None,
+    kind_resolver: Callable[
+        [str], str | SemanticBlockKindResolution | None
+    ]
+    | None = None,
 ) -> SemanticBlockDocument:
     """Parse semantic blocks from Markdown.
 
@@ -210,6 +268,7 @@ def parse_semantic_blocks(
     lines = (markdown or "").splitlines()
     blocks: list[SemanticBlock] = []
     errors: list[SemanticBlockValidationError] = []
+    warnings: list[SemanticBlockValidationError] = []
     current: tuple[str, str, int, int, list[tuple[int, str]]] | None = None
     in_fence = False
 
@@ -243,7 +302,18 @@ def parse_semantic_blocks(
         if heading and not in_fence:
             flush(line_number - 1)
             title = heading.group(2).strip()
-            block_type = normalize_block_type(title)
+            block_type, kind_findings = _resolve_block_type(
+                title, resolver=kind_resolver
+            )
+            if validate:
+                warnings.extend(
+                    SemanticBlockValidationError(
+                        code=finding.code,
+                        message=finding.message,
+                        line=line_number,
+                    )
+                    for finding in kind_findings
+                )
             if block_type is not None:
                 current = (block_type, title, len(heading.group(1)), line_number, [])
             continue
@@ -253,7 +323,8 @@ def parse_semantic_blocks(
 
     flush(len(lines))
 
-    warnings = _duplicate_id_warnings(blocks) if validate else []
+    if validate:
+        warnings.extend(_duplicate_id_warnings(blocks))
     return SemanticBlockDocument(blocks=blocks, errors=errors, warnings=warnings)
 
 

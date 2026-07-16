@@ -117,6 +117,7 @@ def test_compilation_proposal_preserves_source_until_confirmed_remember(
             "note_type": "insight",
             "content": proposal["outline_markdown"],
             "sources": [source_rel],
+            "status": "draft",
             "suggestions": False,
         },
     )

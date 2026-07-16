@@ -27,7 +27,6 @@ from . import edit as edit_module
 from .edit import EditError, load_editable
 from .vault import _mask_code_spans
 
-
 FIELD = "take"
 # An empty placeholder: `[take: ]` or `[take:]`.
 _FIELD_EMPTY_RE = re.compile(rf"\[{FIELD}:\s*\]")
@@ -42,9 +41,13 @@ class SetTakeResult:
     path: str            # vault-relative, with .md
     row: str             # the row after filling (for caller confirmation)
     warnings: list[str]
+    semantic: dict | None = None
 
     def as_dict(self) -> dict:
-        return {"path": self.path, "row": self.row, "warnings": self.warnings}
+        value = {"path": self.path, "row": self.row, "warnings": self.warnings}
+        if self.semantic is not None:
+            value["semantic"] = self.semantic
+        return value
 
 
 @dataclass
@@ -105,7 +108,7 @@ def set_take(
     # candidates: (original_line, existing_take) for list items carrying a take
     # field (outside code) whose pre-field head matches row_key.
     candidates: list[tuple[str, str]] = []
-    for line, mline in zip(lines, masked_lines):
+    for line, mline in zip(lines, masked_lines, strict=True):
         if not _LIST_ITEM_RE.match(line):
             continue
         field_in_code = _FIELD_RE.search(mline)  # masked → None if inside code
@@ -165,4 +168,9 @@ def set_take(
     except EditError as e:
         raise SetTakeError(code=e.code, candidates=[], reason=e.reason) from e
 
-    return SetTakeResult(path=result.path, row=new_line, warnings=result.warnings)
+    return SetTakeResult(
+        path=result.path,
+        row=new_line,
+        warnings=result.warnings,
+        semantic=result.semantic,
+    )

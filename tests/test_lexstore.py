@@ -232,11 +232,19 @@ def test_manual_row_drift_self_heals(tmp_path, monkeypatch):
     """Highest page rowids deleted while their index rows remain are restored
     incrementally by the next fresh store."""
     for i in range(4):
-        _write_page(tmp_path, f"Knowledge Base/n{i}.md", f"payload token{i}")
+        _write_page(
+            tmp_path,
+            f"Knowledge Base/n{i}.md",
+            f"- [config] payload token{i} ^unit{i}",
+        )
     assert lexstore.search_bm25(tmp_path, "payload", k=10, scope="kb")
     side = lexstore.lexical_path(tmp_path)
+    assert _count(side, "semantic_units") == 4
     conn = sqlite3.connect(side)
     try:
+        # Delete the highest rowids so SQLite will reuse them while the
+        # contentless FTS tables still contain the orphaned rowids. The heal
+        # must remove those orphans before reinserting the missing pages.
         conn.execute(
             "DELETE FROM pages WHERE rowid IN "
             "(SELECT rowid FROM pages ORDER BY rowid DESC LIMIT 2)"
@@ -261,6 +269,7 @@ def test_manual_row_drift_self_heals(tmp_path, monkeypatch):
     hits = lexstore.search_bm25(tmp_path, "payload", k=10, scope="kb")
     assert hits is not None and len(hits) == 4
     assert _count(side, "pages") == 4
+    assert _count(side, "semantic_units") == 4
     assert _count(side, "fts") == 4
     assert _count(side, "tri") == 4
     assert rebuilds == 0

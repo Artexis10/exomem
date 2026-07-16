@@ -47,7 +47,13 @@ from pathlib import Path
 
 import yaml
 
-from . import access, indexes, markdown_relations, semantic_blocks
+from . import (
+    access,
+    indexes,
+    relation_registry,
+    semantic_language_registry,
+    semantic_units,
+)
 from . import find as find_module
 from .kbdir import kb_dirname, kb_prefix
 from .vault import (
@@ -68,7 +74,10 @@ ALL_CATEGORIES: tuple[str, ...] = (
     "relevance_pairs_pending", "stale_review", "corpus_contradictions",
     "relation_debt",
 )
-OPTIONAL_CATEGORIES: tuple[str, ...] = ("relation_registry",)
+OPTIONAL_CATEGORIES: tuple[str, ...] = (
+    "relation_registry",
+    "semantic_contract_drift",
+)
 
 # Repo-global feedback-loop logs (written by the running service) + the golden
 # query set, used by the relevance_pairs_pending check. Module-level so tests
@@ -129,12 +138,16 @@ class AuditFinding:
 class AuditReport:
     findings: list[AuditFinding]
     summary: dict[str, int]  # category → count
+    metadata: dict | None = None
 
     def as_dict(self) -> dict:
-        return {
+        value = {
             "findings": [f.as_dict() for f in self.findings],
             "summary": self.summary,
         }
+        if self.metadata:
+            value["metadata"] = self.metadata
+        return value
 
 
 def audit(
@@ -158,9 +171,14 @@ def audit(
         )
 
     kb = kb_root(vault_root)
-    pages = _parse_all(kb, vault_root)
+    pages = (
+        []
+        if selected == {"semantic_contract_drift"}
+        else _parse_all(kb, vault_root)
+    )
 
     findings: list[AuditFinding] = []
+    metadata: dict = {}
     if "broken_wikilink" in selected:
         findings.extend(_check_broken_wikilinks(vault_root, pages))
     if "orphan_entity" in selected:
@@ -191,6 +209,12 @@ def audit(
         findings.extend(_check_relation_registry(vault_root))
     if "relation_debt" in selected:
         findings.extend(_check_relation_debt(vault_root, pages))
+    if "semantic_contract_drift" in selected:
+        semantic_findings, semantic_metadata = _check_semantic_contract_drift(
+            vault_root
+        )
+        findings.extend(semantic_findings)
+        metadata["semantic_contract_drift"] = semantic_metadata
 
     summary: dict[str, int] = {}
     for f in findings:
@@ -200,7 +224,60 @@ def audit(
         "audit complete: categories=%s findings=%d summary=%s",
         sorted(selected), len(findings), summary,
     )
-    return AuditReport(findings=findings, summary=summary)
+    return AuditReport(
+        findings=findings,
+        summary=summary,
+        metadata=metadata or None,
+    )
+
+
+def _check_semantic_contract_drift(
+    vault_root: Path,
+) -> tuple[list[AuditFinding], dict]:
+    """Project the shared bounded posthoc result into audit findings."""
+    from . import semantic_writes
+
+    batch = semantic_writes.evaluate_posthoc_batch(
+        vault_root,
+        operation="audit",
+    ).as_dict()
+    out: list[AuditFinding] = []
+    for item in batch["semantic_contract_findings"]:
+        key = {
+            "code": item["code"],
+            "governed_element_identity": item["governed_element_identity"],
+            "resolved_rule": item["resolved_rule"],
+        }
+        actions = item["actions"]
+        out.append(
+            AuditFinding(
+                category="semantic_contract_drift",
+                severity="error" if item["severity"] == "error" else "warn",
+                path=item["path"],
+                detail=f"Semantic contract finding {item['code']} requires review.",
+                proposed_fix=(
+                    ", ".join(actions)
+                    if actions
+                    else "Review the current semantic contract finding."
+                ),
+                meta={
+                    "finding_key": key,
+                    "code": item["code"],
+                    "governed_element_identity": item[
+                        "governed_element_identity"
+                    ],
+                    "resolved_rule": item["resolved_rule"],
+                    "relation_disposition": item["relation_disposition"],
+                    "actions": actions,
+                    "activation": item["activation"],
+                    "grandfathered": item["grandfathered"],
+                },
+            )
+        )
+    return out, {
+        "omitted_counts": batch["omitted_counts"],
+        "truncation": batch["truncation"],
+    }
 
 
 # ---------------- vault walk ----------------
@@ -367,7 +444,9 @@ def _check_orphan_entities(
     for page in pages:
         # Don't count self-references and don't count from inside Entities/index.md
         # (those are hub listings, not real "uses").
-        if page.rel_path.endswith("/Entities/index.md") or page.rel_path == f"{kb_prefix()}Entities/index.md":
+        if page.rel_path.endswith("/Entities/index.md") or page.rel_path == (
+            f"{kb_prefix()}Entities/index.md"
+        ):
             continue
         for match in WIKILINK_PATTERN.finditer(page.body):
             target = match.group(1).strip().removeprefix(kb_prefix()).lstrip("/")
@@ -1102,6 +1181,8 @@ def _check_relation_debt(
 ) -> list[AuditFinding]:
     """Surface active compiled pages with no explicit outbound Markdown edges."""
     findings: list[AuditFinding] = []
+    relations = relation_registry.load_registry(vault_root)
+    language = semantic_language_registry.load_registry(vault_root)
     for page in pages:
         if page.page_type not in _RELATION_DEBT_TYPES:
             continue
@@ -1117,12 +1198,15 @@ def _check_relation_debt(
         if _STALE_SKIP_TAGS & set(page.tags):
             continue
 
-        note_relations = markdown_relations.parse_markdown_relations(page.body)
-        block_relations = semantic_blocks.parse_semantic_blocks(
-            page.body, validate=False
+        document = semantic_units.parse_semantic_units(
+            page.body,
+            validate=False,
+            language_registry=language,
+            relation_registry=relations,
+            page_type=page.page_type,
         )
-        typed_count = len(note_relations.relations) + sum(
-            len(block.relations) for block in block_relations.blocks
+        typed_count = len(document.note_relations) + sum(
+            len(unit.relations) for unit in document.rich_units
         )
         body_link_count = sum(1 for _ in find_body_wikilinks(page.body))
         if typed_count or body_link_count:

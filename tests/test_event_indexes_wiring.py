@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from exomem import file_watcher, freshness
+from exomem import embeddings, file_watcher, freshness
 from exomem import find as find_module
 from exomem.vault import walk_vault_md
 
@@ -77,8 +77,11 @@ def test_watcher_flush_publishes_freshness_and_embeds_only_kb(vault, monkeypatch
     _seed(vault)
     embed_calls: list[list[Path]] = []
     monkeypatch.setattr(
-        "exomem.embeddings.upsert_after_write",
-        lambda root, paths: embed_calls.append(list(paths)),
+        "exomem.embeddings.upsert_after_write_status",
+        lambda root, paths: embed_calls.append(list(paths))
+        or embeddings.EmbeddingSyncStatus(
+            "completed", "embedding_upsert_completed", len(paths)
+        ),
     )
     w = file_watcher.FileWatcher(vault)
 

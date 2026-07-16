@@ -39,7 +39,6 @@ from .vault import (
     write_log_entry,
 )
 
-
 log = logging.getLogger(__name__)
 
 TRASH_SUBPATH = "_trash"
@@ -53,6 +52,7 @@ class DeleteFileResult:
     inbound_link_count: int
     inbound_ignored_count: int
     warnings: list[str]
+    index: dict | None = None
 
     def as_dict(self) -> dict:
         return {
@@ -62,6 +62,7 @@ class DeleteFileResult:
             "inbound_link_count": self.inbound_link_count,
             "inbound_ignored_count": self.inbound_ignored_count,
             "warnings": self.warnings,
+            "index": self.index,
         }
 
 
@@ -231,11 +232,13 @@ def delete_file(
     # Register the self-authored removal BEFORE the move so the watcher's
     # delete event for the KB path is dropped (we purge the sidecar ourselves
     # below). Harmless if the move then fails — the entry TTLs out.
-    try:
-        from . import file_watcher
-        file_watcher.register_self_delete(vault_root, [rel_path])
-    except Exception:  # noqa: BLE001 — suppression is best-effort
-        log.debug("self-delete suppression registration failed", exc_info=True)
+    if rel_path.lower().endswith(".md"):
+        try:
+            from . import file_watcher
+
+            file_watcher.register_self_delete(vault_root, [rel_path])
+        except Exception:  # noqa: BLE001 — suppression is best-effort
+            log.debug("self-delete suppression registration failed", exc_info=True)
 
     try:
         shutil.move(str(abs_path), str(trash_abs))
@@ -245,13 +248,25 @@ def delete_file(
             reason=f"could not move {rel_path} to trash: {e}",
         ) from e
 
-    # Drop the file's rows from the index sidecars (embedding + lexical).
-    # Soft no-op wherever a backend is unavailable.
-    try:
-        from . import index_sync
-        index_sync.delete_after_remove(vault_root, [rel_path])
-    except Exception:  # noqa: BLE001 — sidecars are best-effort
-        log.exception("index delete failed for %s; sidecar may be stale", rel_path)
+    # Drop Markdown rows from the semantic index sidecars. Non-Markdown files
+    # have an exact affected Markdown set of zero and must not enter fan-out.
+    index_feedback: dict | None = None
+    if rel_path.lower().endswith(".md"):
+        try:
+            from . import index_sync
+            raw_report = index_sync.delete_after_remove(vault_root, [rel_path])
+            report = (
+                raw_report
+                if isinstance(raw_report, index_sync.IndexSyncReport)
+                else index_sync.observed_delete_report([rel_path], degraded=False)
+            )
+        except Exception:  # noqa: BLE001 — sidecars are best-effort
+            log.exception("index delete failed for %s; sidecar may be stale", rel_path)
+            warnings.append(
+                "trash succeeded but derived-index cleanup failed; run reconcile"
+            )
+            report = index_sync.observed_delete_report([rel_path], degraded=True)
+        index_feedback = report.as_dict()
 
     # Write metadata sidecar capturing what we know at trash time.
     meta = {
@@ -311,6 +326,7 @@ def delete_file(
         inbound_link_count=len(inbound),
         inbound_ignored_count=len(inbound_ignored),
         warnings=warnings,
+        index=index_feedback,
     )
 
 

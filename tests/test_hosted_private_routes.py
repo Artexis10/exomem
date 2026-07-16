@@ -278,6 +278,7 @@ def _remember_body(sentinel: str) -> dict[str, str]:
         "note_type": "insight",
         "title": "Identical hosted title",
         "content": f"# Identical hosted title\n\n## Claim\n\n{sentinel}\n",
+        "status": "draft",
     }
 
 

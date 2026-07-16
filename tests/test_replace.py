@@ -29,12 +29,26 @@ def _fm(p: Path) -> dict:
 
 def _make_insight(vault: Path, title: str) -> str:
     """Create a fresh insight via note() so the supersession chain has a real target."""
+    kwargs = {
+        "content": f"# {title}\n\nbody.\n",
+        "note_type": "insight",
+        "title": title,
+        "today": TODAY,
+    }
+    validation = note_module.note(
+        vault,
+        validate_only=True,
+        **kwargs,
+    )
     result = note_module.note(
         vault,
-        content=f"# {title}\n\nbody.\n",
-        note_type="insight",
-        title=title,
-        today=TODAY,
+        draft_id=validation.draft_id,
+        draft_hash=validation.draft_hash,
+        draft_token=validation.draft_token,
+        relation_disposition="reviewed_none",
+        relation_review_hash=validation.draft_hash,
+        relation_review_reason="Fixture predecessor has no honest relation.",
+        **kwargs,
     )
     return result.path
 
@@ -44,6 +58,29 @@ def _markdown_snapshot(vault: Path) -> dict[str, str]:
         path.relative_to(vault).as_posix(): _read(path)
         for path in sorted((vault / "Knowledge Base").rglob("*.md"))
     }
+
+
+def _preflight_replace(vault: Path, **kwargs):  # noqa: ANN003, ANN202
+    validation = replace_module.replace(vault, validate_only=True, **kwargs)
+    return {
+        **kwargs,
+        "draft_id": validation.draft_id,
+        "draft_hash": validation.draft_hash,
+        "draft_token": validation.draft_token,
+    }
+
+
+def _commit_replace(vault: Path, **kwargs):  # noqa: ANN003, ANN202
+    return replace_module.replace(vault, **_preflight_replace(vault, **kwargs))
+
+
+def _assert_cause_contains(error: BaseException, text: str) -> None:
+    current: BaseException | None = error
+    while current is not None:
+        if text in str(current):
+            return
+        current = current.__cause__
+    raise AssertionError(f"{text!r} missing from exception cause chain")
 
 
 def test_replace_writes_new_and_flips_old(vault: Path) -> None:
@@ -210,17 +247,28 @@ def test_replace_accepts_novel_type(vault: Path) -> None:
     p = vault / rel
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(
-        "---\ntype: identity\nscope: products\ncreated: 2026-05-24\nupdated: 2026-05-24\ntags: []\n---\n"
+        "---\ntype: identity\nscope: products\ncreated: 2026-05-24\n"
+        "updated: 2026-05-24\ntags: []\n---\n"
         "# Products\n\nold facts.\n",
         encoding="utf-8",
     )
+    kwargs = {
+        "old_path": rel,
+        "content": "# Products v2\n\nupdated facts.\n",
+        "note_type": "insight",  # new page goes to Notes/Insights/
+        "title": "Identity Products v2",
+        "today": TODAY,
+    }
+    validation = replace_module.replace(vault, validate_only=True, **kwargs)
     result = replace_module.replace(
         vault,
-        old_path=rel,
-        content="# Products v2\n\nupdated facts.\n",
-        note_type="insight",  # new page goes to Notes/Insights/
-        title="Identity Products v2",
-        today=TODAY,
+        draft_id=validation.draft_id,
+        draft_hash=validation.draft_hash,
+        draft_token=validation.draft_token,
+        relation_disposition="reviewed_none",
+        relation_review_hash=validation.draft_hash,
+        relation_review_reason="Legacy identity predecessor is outside the compiled corpus.",
+        **kwargs,
     )
     # Old page flipped to superseded
     old_fm = _fm(vault / rel)
@@ -256,6 +304,17 @@ def test_concurrent_replace_has_exactly_one_winner(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     old_rel = _make_insight(vault, "Concurrent Supersession Source")
+    prepared = {
+        label: _preflight_replace(
+            vault,
+            old_path=old_rel,
+            content=f"# Concurrent Successor {label}\n\nrevised by {label}.\n",
+            note_type="insight",
+            title=f"Concurrent Successor {label}",
+            today=TODAY,
+        )
+        for label in ("A", "B")
+    }
     real_note = note_module.note
     both_eligible = threading.Barrier(2)
 
@@ -266,16 +325,8 @@ def test_concurrent_replace_has_exactly_one_winner(
     monkeypatch.setattr(replace_module.note_module, "note", note_after_both_eligibility_reads)
 
     def supersede(label: str):
-        title = f"Concurrent Successor {label}"
         try:
-            return label, replace_module.replace(
-                vault,
-                old_path=old_rel,
-                content=f"# {title}\n\nrevised by {label}.\n",
-                note_type="insight",
-                title=title,
-                today=TODAY,
-            )
+            return label, replace_module.replace(vault, **prepared[label])
         except replace_module.ReplaceError as error:
             return label, error
 
@@ -294,7 +345,11 @@ def test_concurrent_replace_has_exactly_one_winner(
     ]
     assert len(winners) == 1
     assert len(losers) == 1
-    assert losers[0][1].code == "STALE_SUPERSEDE"
+    assert losers[0][1].code in {
+        "ALREADY_SUPERSEDED",
+        "PATH_GUARD_CHANGED",
+        "SEMANTIC_CONTRACT_BLOCKED",
+    }
 
     winner_label, winner = winners[0]
     loser_label = losers[0][0]
@@ -313,8 +368,9 @@ def test_concurrent_replace_has_exactly_one_winner(
     )
     assert not loser_path.exists()
     log_text = _read(vault / "Knowledge Base" / "log.md")
-    assert f"Concurrent Successor {winner_label}" in log_text
-    assert f"Concurrent Successor {loser_label}" not in log_text
+    winner_log_target = winner.new_path.removeprefix("Knowledge Base/").removesuffix(".md")
+    assert winner_log_target in log_text
+    assert f"concurrent-successor-{loser_label.lower()}" not in log_text
 
 
 def test_replace_rolls_back_entire_note_plan_on_mid_commit_failure(
@@ -322,28 +378,21 @@ def test_replace_rolls_back_entire_note_plan_on_mid_commit_failure(
 ) -> None:
     old_rel = _make_insight(vault, "Atomic Supersession Source")
     before = _markdown_snapshot(vault)
-    real_batch = replace_module.batch_atomic_write
     real_os_replace = os.replace
+    replacements = 0
 
-    def fail_second_destination(writes, *, vault_root):
-        replacements = 0
+    def injected_replace(src, dst, *args, **kwargs):  # noqa: ANN002, ANN003
+        nonlocal replacements
+        if str(src).endswith(".tmp"):
+            replacements += 1
+            if replacements == 2:
+                raise OSError("injected supersession commit failure")
+        return real_os_replace(src, dst, *args, **kwargs)
 
-        def injected_replace(src, dst):
-            nonlocal replacements
-            if str(src).endswith(".tmp"):
-                replacements += 1
-                if replacements == 2:
-                    raise OSError("injected supersession commit failure")
-            return real_os_replace(src, dst)
+    monkeypatch.setattr(vault_module.os, "replace", injected_replace)
 
-        with monkeypatch.context() as patch:
-            patch.setattr(vault_module.os, "replace", injected_replace)
-            return real_batch(writes, vault_root=vault_root)
-
-    monkeypatch.setattr(replace_module, "batch_atomic_write", fail_second_destination)
-
-    with pytest.raises(OSError, match="injected supersession commit failure"):
-        replace_module.replace(
+    with pytest.raises(replace_module.ReplaceError) as failure:
+        _commit_replace(
             vault,
             old_path=old_rel,
             content="# Atomic Successor\n\nreplacement body.\n",
@@ -354,6 +403,8 @@ def test_replace_rolls_back_entire_note_plan_on_mid_commit_failure(
             ],
             today=TODAY,
         )
+    assert failure.value.code == "SEMANTIC_CREATION_FAILED"
+    _assert_cause_contains(failure.value, "injected supersession commit failure")
 
     assert _markdown_snapshot(vault) == before
     resolver = replace_module.find_module._get_query_resolver(vault)
@@ -386,28 +437,21 @@ def test_replace_failure_does_not_leave_project_registration_or_folder(
     )
     registry_before = _read(registry) if registry_existed else None
     folder_existed = project_folder.exists()
-    real_batch = replace_module.batch_atomic_write
     real_os_replace = os.replace
+    replacements = 0
 
-    def fail_second_destination(writes, *, vault_root):
-        replacements = 0
+    def injected_replace(src, dst, *args, **kwargs):  # noqa: ANN002, ANN003
+        nonlocal replacements
+        if str(src).endswith(".tmp"):
+            replacements += 1
+            if replacements == 2:
+                raise OSError("injected project supersession failure")
+        return real_os_replace(src, dst, *args, **kwargs)
 
-        def injected_replace(src, dst):
-            nonlocal replacements
-            if str(src).endswith(".tmp"):
-                replacements += 1
-                if replacements == 2:
-                    raise OSError("injected project supersession failure")
-            return real_os_replace(src, dst)
+    monkeypatch.setattr(vault_module.os, "replace", injected_replace)
 
-        with monkeypatch.context() as patch:
-            patch.setattr(vault_module.os, "replace", injected_replace)
-            return real_batch(writes, vault_root=vault_root)
-
-    monkeypatch.setattr(replace_module, "batch_atomic_write", fail_second_destination)
-
-    with pytest.raises(OSError, match="injected project supersession failure"):
-        replace_module.replace(
+    with pytest.raises(replace_module.ReplaceError) as failure:
+        _commit_replace(
             vault,
             old_path=old_rel,
             content="# Atomic Project Successor\n\nreplacement body.\n",
@@ -416,6 +460,8 @@ def test_replace_failure_does_not_leave_project_registration_or_folder(
             project="atomic-deferred-project",
             today=TODAY,
         )
+    assert failure.value.code == "SEMANTIC_CREATION_FAILED"
+    _assert_cause_contains(failure.value, "injected project supersession failure")
 
     assert registry.exists() is registry_existed
     if registry_existed:
@@ -435,21 +481,21 @@ def test_replace_staging_failure_cleans_temp_registry_and_project_folder(
         / "Research"
         / "Staging Failure Project"
     )
-    real_write_text = Path.write_text
-    temp_writes = 0
+    real_create_artifact = vault_module._BatchWorkspace.create_artifact
+    stage_writes = 0
 
-    def fail_second_temp_write(path: Path, *args, **kwargs):
-        nonlocal temp_writes
-        if path.name.endswith(".tmp"):
-            temp_writes += 1
-            if temp_writes == 2:
+    def fail_second_stage(workspace, name: str, content: bytes):  # noqa: ANN001
+        nonlocal stage_writes
+        if name.startswith("stage-"):
+            stage_writes += 1
+            if stage_writes == 2:
                 raise OSError("injected supersession staging failure")
-        return real_write_text(path, *args, **kwargs)
+        return real_create_artifact(workspace, name, content)
 
-    monkeypatch.setattr(Path, "write_text", fail_second_temp_write)
+    monkeypatch.setattr(vault_module._BatchWorkspace, "create_artifact", fail_second_stage)
 
-    with pytest.raises(OSError, match="injected supersession staging failure"):
-        replace_module.replace(
+    with pytest.raises(replace_module.ReplaceError) as failure:
+        _commit_replace(
             vault,
             old_path=old_rel,
             content="# Staging Failure Successor\n\nreplacement body.\n",
@@ -457,10 +503,12 @@ def test_replace_staging_failure_cleans_temp_registry_and_project_folder(
             title="Staging Failure Successor",
             project="staging-failure-project",
             today=TODAY,
-    )
+        )
+    assert failure.value.code == "SEMANTIC_CREATION_FAILED"
+    _assert_cause_contains(failure.value, "injected supersession staging failure")
 
     assert not registry.exists()
-    assert list(vault.rglob("*.tmp")) == []
+    assert list(vault.rglob(".exomem-batch-*")) == []
     assert not project_folder.exists()
 
 
@@ -479,28 +527,21 @@ def test_plural_project_registration_creates_folder_only_on_success(
         / "Research"
         / "Successful Plural Project"
     )
-    real_batch = replace_module.batch_atomic_write
     real_os_replace = os.replace
+    replacements = 0
 
-    def fail_second_destination(writes, *, vault_root):
-        replacements = 0
-
-        def injected_replace(src, dst):
-            nonlocal replacements
-            if str(src).endswith(".tmp"):
-                replacements += 1
-                if replacements == 2:
-                    raise OSError("injected plural project failure")
-            return real_os_replace(src, dst)
-
-        with monkeypatch.context() as patch:
-            patch.setattr(vault_module.os, "replace", injected_replace)
-            return real_batch(writes, vault_root=vault_root)
+    def injected_replace(src, dst, *args, **kwargs):  # noqa: ANN002, ANN003
+        nonlocal replacements
+        if str(src).endswith(".tmp"):
+            replacements += 1
+            if replacements == 2:
+                raise OSError("injected plural project failure")
+        return real_os_replace(src, dst, *args, **kwargs)
 
     with monkeypatch.context() as patch:
-        patch.setattr(replace_module, "batch_atomic_write", fail_second_destination)
-        with pytest.raises(OSError, match="injected plural project failure"):
-            replace_module.replace(
+        patch.setattr(vault_module.os, "replace", injected_replace)
+        with pytest.raises(replace_module.ReplaceError) as failure:
+            _commit_replace(
                 vault,
                 old_path=old_rel,
                 content="# Failed Plural Successor\n\nreplacement body.\n",
@@ -509,11 +550,13 @@ def test_plural_project_registration_creates_folder_only_on_success(
                 projects=["failed-plural-project"],
                 today=TODAY,
             )
+        assert failure.value.code == "SEMANTIC_CREATION_FAILED"
+        _assert_cause_contains(failure.value, "injected plural project failure")
 
     assert not registry.exists()
     assert not failed_folder.exists()
 
-    replace_module.replace(
+    _commit_replace(
         vault,
         old_path=old_rel,
         content="# Successful Plural Successor\n\nreplacement body.\n",

@@ -23,8 +23,21 @@ from exomem import find as find_module
 def _stub_embeddings(monkeypatch: pytest.MonkeyPatch):
     ups: list[list[Path]] = []
     dels: list[list[str]] = []
-    monkeypatch.setattr(embeddings, "upsert_after_write", lambda root, paths: ups.append(list(paths)))
-    monkeypatch.setattr(embeddings, "delete_after_remove", lambda root, rels: dels.append(list(rels)))
+
+    def upsert_status(root, paths):
+        ups.append(list(paths))
+        return embeddings.EmbeddingSyncStatus(
+            "completed", "embedding_upsert_completed", len(paths)
+        )
+
+    def delete_status(root, rels):
+        dels.append(list(rels))
+        return embeddings.EmbeddingSyncStatus(
+            "completed", "embedding_delete_completed", len(rels)
+        )
+
+    monkeypatch.setattr(embeddings, "upsert_after_write_status", upsert_status)
+    monkeypatch.setattr(embeddings, "delete_after_remove_status", delete_status)
     return ups, dels
 
 
@@ -315,7 +328,9 @@ def test_delete_suppression_expires(vault, monkeypatch: pytest.MonkeyPatch) -> N
     assert dels == [[rel]]
 
 
-def test_unregistered_external_events_still_dispatch(vault, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_unregistered_external_events_still_dispatch(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
     ups, dels = _stub_embeddings(monkeypatch)
     file_watcher.clear_self_write_registry()
     w = file_watcher.FileWatcher(vault)
@@ -453,7 +468,9 @@ def test_reconcile_no_drift_dispatches_nothing(vault, monkeypatch: pytest.Monkey
     assert calls == {"inbound": [], "resolver": [], "upsert": [], "delete": [], "warm": []}
 
 
-def test_reconcile_delete_routes_to_delete_after_remove(vault, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_reconcile_delete_routes_to_delete_after_remove(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
     file_watcher.clear_self_write_registry()
     calls = _spy_reconcile_fanout(monkeypatch)
     w = file_watcher.FileWatcher(vault)
@@ -491,7 +508,9 @@ def test_reconcile_reembeds_missed_kb_file(vault, monkeypatch: pytest.MonkeyPatc
     assert dels == []
 
 
-def test_reconcile_restamps_resolver_triple_no_rebuild(vault, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_reconcile_restamps_resolver_triple_no_rebuild(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """The 11.3s fix: after reconcile dispatch, the cached resolver's freshness
     triple is restamped, so the next _get_query_resolver HITS the same instance
     instead of a full-vault rebuild."""

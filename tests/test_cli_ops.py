@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 from exomem import cli_ops
+from exomem import vault as vault_module
 from exomem.commands import Param
 
 
@@ -42,9 +43,31 @@ def test_http_status_mapping() -> None:
     assert cli_ops.http_status_for("NOT_FOUND") == 404
     assert cli_ops.http_status_for("OLD_NOT_FOUND") == 404
     assert cli_ops.http_status_for("ENTITY_EXISTS") == 409
+    assert cli_ops.http_status_for("WRITER_FENCED") == 409
     assert cli_ops.http_status_for("MUTATION_BUSY") == 409
     assert cli_ops.http_status_for("MUTATION_LOCK_UNAVAILABLE") == 503
     assert cli_ops.http_status_for("INVALID_NOTE") == 400
+
+
+@pytest.mark.parametrize(
+    ("code", "committed"),
+    [
+        ("BATCH_ROLLBACK_INCOMPLETE", False),
+        ("BATCH_CLEANUP_INCOMPLETE", True),
+    ],
+)
+def test_batch_write_error_uses_shared_public_payload_and_conflict_status(
+    code: str,
+    committed: bool,
+) -> None:
+    error = vault_module.BatchWriteError(
+        code,
+        vault_module.BatchTargetSummary(2, ("first.md", "second.md"), 0),
+        committed=committed,
+    )
+
+    assert cli_ops.error_dict(error) == error.as_public_dict()
+    assert cli_ops.http_status_for(code) == 409
 
 
 @pytest.mark.parametrize("code", ["MUTATION_BUSY", "MUTATION_LOCK_UNAVAILABLE"])

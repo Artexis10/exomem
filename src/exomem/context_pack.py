@@ -26,7 +26,13 @@ import os
 import re
 from pathlib import Path
 
-from . import corpus_aware, epistemic_graph, semantic_blocks
+from . import (
+    corpus_aware,
+    epistemic_graph,
+    relation_registry,
+    semantic_language_registry,
+    semantic_units,
+)
 from . import find as find_module
 from . import vault as vault_module
 from .find import Hit, ParsedPage
@@ -200,9 +206,12 @@ def _extract_claims(page: ParsedPage, *, claim_chars: int = _DEFAULT_CLAIM_CHARS
     }
 
 
-def _extract_semantic_blocks(page: ParsedPage) -> list[dict]:
-    document = semantic_blocks.parse_semantic_blocks(page.body, validate=False)
-    return [block.to_dict() for block in document.blocks]
+def _extract_semantic_blocks(
+    page: ParsedPage,
+    document: semantic_units.SemanticUnitDocument,
+) -> list[dict]:
+    del page
+    return document.semantic_blocks
 
 
 # ----------------------------- neighbourhood -----------------------------
@@ -390,9 +399,23 @@ def assemble_pack(
         truncation.append(f"{missing} packed hit(s) unreadable or missing, not packed")
 
     claims = {p.rel_path: _extract_claims(p, claim_chars=claim_chars) for p in packed_pages}
+    relations = relation_registry.load_registry(vault_root)
+    language = semantic_language_registry.load_registry(vault_root)
+    semantic_documents = {
+        page.rel_path: semantic_units.parse_semantic_units(
+            page.body,
+            path=page.rel_path,
+            validate=False,
+            language_registry=language,
+            relation_registry=relations,
+            project=(str(page.frontmatter.get("project")) if page.frontmatter.get("project") else None),
+            page_type=page.page_type,
+        )
+        for page in packed_pages
+    }
     semantic_block_map: dict[str, list[dict]] = {}
     for page in packed_pages:
-        blocks = _extract_semantic_blocks(page)
+        blocks = _extract_semantic_blocks(page, semantic_documents[page.rel_path])
         if blocks:
             semantic_block_map[page.rel_path] = blocks
 

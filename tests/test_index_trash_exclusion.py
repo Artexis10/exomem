@@ -52,7 +52,14 @@ def test_index_sync_upsert_drops_excluded_paths(
     from exomem import embeddings, find, lexstore
 
     monkeypatch.setattr(lexstore, "upsert_after_write", _rec("lexstore"))
-    monkeypatch.setattr(embeddings, "upsert_after_write", _rec("embeddings"))
+    monkeypatch.setattr(
+        embeddings,
+        "upsert_after_write_status",
+        lambda root, paths: _rec("embeddings")(root, paths)
+        or embeddings.EmbeddingSyncStatus(
+            "completed", "embedding_upsert_completed", len(paths)
+        ),
+    )
     resolver_rels: list[str] = []
     monkeypatch.setattr(
         find, "on_resolver_files_changed",
@@ -109,8 +116,11 @@ def test_index_sync_quiet_defers_semantic_upserts(
     )
     monkeypatch.setattr(
         embeddings,
-        "upsert_after_write",
-        lambda root, paths: seen["embeddings"].append(list(paths)),
+        "upsert_after_write_status",
+        lambda root, paths: seen["embeddings"].append(list(paths))
+        or embeddings.EmbeddingSyncStatus(
+            "completed", "embedding_upsert_completed", len(paths)
+        ),
     )
     monkeypatch.setattr(
         find,
@@ -204,8 +214,11 @@ def test_index_sync_nonquiet_keeps_immediate_embedding_upsert(
     )
     monkeypatch.setattr(
         embeddings,
-        "upsert_after_write",
-        lambda root, paths: seen["embeddings"].append(list(paths)),
+        "upsert_after_write_status",
+        lambda root, paths: seen["embeddings"].append(list(paths))
+        or embeddings.EmbeddingSyncStatus(
+            "completed", "embedding_upsert_completed", len(paths)
+        ),
     )
     monkeypatch.setattr(
         find,

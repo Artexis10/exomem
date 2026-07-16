@@ -1,6 +1,6 @@
 ---
 name: exomem-research
-description: Run a focused research loop with Exomem: gather sources, preserve evidence, compile attributed findings, and connect prior notes.
+description: "Run a focused research loop with Exomem: gather sources, preserve evidence, compile attributed findings, and connect prior notes."
 version: 0.1.0
 ---
 
