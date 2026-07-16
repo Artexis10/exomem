@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import inspect
 import logging
 import os
 import queue
@@ -24,6 +25,7 @@ import subprocess
 import sys
 import threading
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 from . import embeddings, extract, index_sync, preserve, scene_frames, semantic_segments
@@ -47,6 +49,15 @@ _EVIDENCE_FILE_RE = re.compile(r"(?m)^evidence_file:\s*(.+?)\s*$")
 _PENDING_MARKER = "extracted_by: pending"
 _PARENT_MEDIA_MARKER = "\nparent_media:"
 _MAX_IDENTITY_HASH_BYTES = 8 * 1024 * 1024
+_COMPLETE = "complete"
+_BLOCKED_ACTION = "install the required media dependency, then retry"
+_FAILED_ACTION = "repair or replace the media artifact, then retry"
+
+
+@dataclass(frozen=True)
+class _ProcessOutcome:
+    state: str
+    error: str | None = None
 
 
 def _content_digest(path: Path) -> str | None:
@@ -199,15 +210,15 @@ class MediaWorker:
             finally:
                 self._q.task_done()
 
-    def _process(self, job: _Job) -> str:
-        blocked = False
+    def _process(self, job: _Job) -> _ProcessOutcome:
+        outcome = _ProcessOutcome(_COMPLETE)
         if job.do_ocr:
-            blocked = not self._run_extraction(job)
+            outcome = self._run_extraction(job)
         if job.do_clip:
             self._run_clip(job)
         if job.do_reembed:
             self._run_reembed(job)
-        return BLOCKED if blocked else "complete"
+        return outcome
 
     def _run_reembed(self, job: _Job) -> None:
         """Re-embed a sidecar so semantic segmentation re-runs with late signals.
@@ -223,31 +234,44 @@ class MediaWorker:
         except Exception:  # noqa: BLE001 — enrichment, never fatal
             log.exception("re-embed failed for %s", job.sidecar_path.name)
 
-    def _run_extraction(self, job: _Job) -> bool:
+    def _run_extraction(self, job: _Job) -> _ProcessOutcome:
         expected_sidecar = _content_digest(job.sidecar_path)
         expected_binary = _binary_identity(job.binary_path)
         if expected_sidecar is None or expected_binary is None:
             log.warning("extraction skip %s: input identity unavailable", job.binary_path.name)
-            return True
+            return _ProcessOutcome(FAILED, "input identity unavailable")
         try:
-            result = extract.extract_text(
-                job.binary_path, media_type=job.media_type, vault_root=self._vault_root
-            )
+            kwargs = {"media_type": job.media_type, "vault_root": self._vault_root}
+            signature = inspect.signature(extract.extract_text)
+            parameters = signature.parameters.values()
+            accepts_kwargs = any(p.kind is inspect.Parameter.VAR_KEYWORD for p in parameters)
+            if accepts_kwargs or "timestamps" in signature.parameters:
+                kwargs["timestamps"] = job.media_type in {"audio", "video"}
+            result = extract.extract_text(job.binary_path, **kwargs)
         except extract.ExtractionUnavailable as e:
-            # Engine not installed on this box right now — leave the sidecar `pending`
-            # so a properly-provisioned box picks it up on its next restart scan.
+            error = f"{type(e).__name__}: {e}"
             log.warning("extraction unavailable for %s: %s", job.binary_path.name, e)
-            return False
-        except Exception as e:  # noqa: BLE001 — a corrupt file shouldn't re-loop forever
-            log.exception("extraction failed for %s", job.binary_path.name)
-            self._commit_sidecar_extraction(
+            self._commit_processing_failure(
                 job,
                 expected_sidecar=expected_sidecar,
                 expected_binary=expected_binary,
-                text="",
-                engine=f"failed: {type(e).__name__}",
+                state=BLOCKED,
+                error=error,
+                next_action=_BLOCKED_ACTION,
             )
-            return True
+            return _ProcessOutcome(BLOCKED, error)
+        except Exception as e:  # noqa: BLE001 — a corrupt file shouldn't re-loop forever
+            error = f"{type(e).__name__}: {e}"
+            log.exception("extraction failed for %s", job.binary_path.name)
+            self._commit_processing_failure(
+                job,
+                expected_sidecar=expected_sidecar,
+                expected_binary=expected_binary,
+                state=FAILED,
+                error=error,
+                next_action=_FAILED_ACTION,
+            )
+            return _ProcessOutcome(FAILED, error)
         text = result.text.strip() or "(no text detected)"
         committed = self._commit_sidecar_extraction(
             job,
@@ -256,13 +280,14 @@ class MediaWorker:
             text=text,
             engine=result.engine,
             speakers=result.speakers,
+            speaker_verification=result.speaker_verification or "unavailable",
         )
         if not committed:
-            return True
+            return _ProcessOutcome(FAILED, "media changed before transcript commit")
         log.info(
             "extracted %s via %s (%d chars)", job.binary_path.name, result.engine, len(result.text)
         )
-        return True
+        return _ProcessOutcome(_COMPLETE)
 
     def _commit_sidecar_extraction(
         self,
@@ -273,6 +298,7 @@ class MediaWorker:
         text: str,
         engine: str,
         speakers: list[dict] | None = None,
+        speaker_verification: str | None = None,
     ) -> bool:
         with get_manager().mutation_guard(self._vault_root):
             if (
@@ -290,6 +316,39 @@ class MediaWorker:
                 text=text,
                 engine=engine,
                 speakers=speakers,
+                speaker_verification=speaker_verification,
+                attempts=max(1, job.attempts),
+            )
+            return True
+
+    def _commit_processing_failure(
+        self,
+        job: _Job,
+        *,
+        expected_sidecar: str,
+        expected_binary: tuple[tuple[int, int, int, int, int], str | None],
+        state: str,
+        error: str,
+        next_action: str,
+    ) -> bool:
+        with get_manager().mutation_guard(self._vault_root):
+            if (
+                _content_digest(job.sidecar_path) != expected_sidecar
+                or _binary_identity(job.binary_path) != expected_binary
+            ):
+                log.warning(
+                    "processing failure stale for %s; newer canonical input preserved",
+                    job.sidecar_path.name,
+                )
+                return False
+            preserve.update_sidecar_processing_failure(
+                self._vault_root,
+                job.sidecar_path,
+                state=state,
+                attempts=max(1, job.attempts),
+                error=error,
+                retryable=True,
+                next_action=next_action,
             )
             return True
 
@@ -595,8 +654,10 @@ def run_child(vault_root: Path, *, parent_pid: int, idle_seconds: float) -> int:
                 store.mark(job.id, FAILED, f"{type(exc).__name__}: {exc}")
             else:
                 assert job.id is not None
-                if outcome == BLOCKED:
-                    store.mark(job.id, BLOCKED, "optional extraction engine unavailable")
+                if outcome.state == BLOCKED:
+                    store.mark(job.id, BLOCKED, outcome.error)
+                elif outcome.state == FAILED:
+                    store.mark(job.id, FAILED, outcome.error)
                 else:
                     store.complete(job)
         log.info("media worker: parent exited; child stopping")

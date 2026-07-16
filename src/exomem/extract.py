@@ -103,6 +103,9 @@ class ExtractResult:
     # None so every existing call site and engine is unchanged; only set when
     # diarization is enabled AND succeeds (else the plain transcript flows through).
     speakers: list[dict] | None = None
+    # Governed attribution state. Automatic media processing persists this alongside
+    # the transcript; profile matching is deliberately distinct from human review.
+    speaker_verification: str | None = None
 
 
 class ExtractionUnavailable(Exception):
@@ -148,7 +151,11 @@ def extraction_enabled() -> bool:
 
 
 def extract_text(
-    path: str | Path, *, media_type: str | None = None, vault_root: Path | None = None
+    path: str | Path,
+    *,
+    media_type: str | None = None,
+    vault_root: Path | None = None,
+    timestamps: bool = False,
 ) -> ExtractResult:
     """Extract text from a media file. Raises ExtractionUnavailable if no engine fits/installed.
 
@@ -159,6 +166,8 @@ def extract_text(
     p = Path(path)
     mt = media_type or media_type_for(p)
     if mt in ("audio", "video"):
+        if timestamps:
+            return _transcribe(p, mt, vault_root=vault_root, timestamps=True)
         return _transcribe(p, mt, vault_root=vault_root)
     if mt == "image":
         return _ocr_image(p)
@@ -467,7 +476,13 @@ def log_diarization_readiness(vault_root: Path | None = None) -> None:
         log.debug("diarization readiness check failed", exc_info=True)
 
 
-def _transcribe(path: Path, media_type: str, vault_root: Path | None = None) -> ExtractResult:
+def _transcribe(
+    path: Path,
+    media_type: str,
+    vault_root: Path | None = None,
+    *,
+    timestamps: bool = False,
+) -> ExtractResult:
     # A silent video (no audio stream) can't be transcribed — that's NOT a failure.
     # Return an empty transcript cleanly; its visual content is still searchable via
     # per-keyframe CLIP (embeddings.embed_video_frames). A video IS a sequence of images.
@@ -487,7 +502,12 @@ def _transcribe(path: Path, media_type: str, vault_root: Path | None = None) -> 
         # guards can't cover everything (a mid-run source change once escaped via an
         # unguarded import). Any exception here degrades to the plain transcript.
         try:
-            labeled = _diarize(path, seg_list, vault_root=vault_root)
+            if timestamps:
+                labeled = _diarize(
+                    path, seg_list, vault_root=vault_root, timestamps=True
+                )
+            else:
+                labeled = _diarize(path, seg_list, vault_root=vault_root)
         except Exception:  # noqa: BLE001 — diarization must never break extraction
             log.warning(
                 "diarization failed for %s; using plain transcript", path.name, exc_info=True
@@ -500,16 +520,25 @@ def _transcribe(path: Path, media_type: str, vault_root: Path | None = None) -> 
             # the marker is backfill's idempotency key. Order matters:
             # `_needs_rediarize` matches endswith("+diarized").
             timed = "+timed" if _is_timed_text(text) else ""
-            return ExtractResult(
-                text=text, media_type=media_type, engine=f"{engine}{timed}+diarized",
-                speakers=speakers,
-            )
+            if timestamps and not timed:
+                log.warning(
+                    "timed diarized rendering unavailable for %s; using timed plain transcript",
+                    path.name,
+                )
+            else:
+                return ExtractResult(
+                    text=text,
+                    media_type=media_type,
+                    engine=f"{engine}{timed}+diarized",
+                    speakers=speakers,
+                    speaker_verification=_speaker_verification(speakers),
+                )
 
     # Timed rendering (EXOMEM_SEMANTIC_SEGMENTS, default OFF): one line per ASR
     # segment with a `[m:ss]` prefix — the substrate for semantic segmentation
     # and `transcript_match_at`. Soft-fail: any renderer error falls back to the
     # flat join below; gate unset is byte-identical to it.
-    if _semantic_segments_enabled():
+    if timestamps or _semantic_segments_enabled():
         try:
             semantic_segments = _semantic_segments_module()
             timed_text = semantic_segments.render_timed_lines(
@@ -525,13 +554,32 @@ def _transcribe(path: Path, media_type: str, vault_root: Path | None = None) -> 
             ).strip()
             if timed_text:
                 return ExtractResult(
-                    text=timed_text, media_type=media_type, engine=f"{engine}+timed"
+                    text=timed_text,
+                    media_type=media_type,
+                    engine=f"{engine}+timed",
+                    speaker_verification="unavailable" if _diarize_enabled() else None,
                 )
-        except Exception:  # noqa: BLE001 — timed rendering must never block extraction
+            if timestamps:
+                raise RuntimeError("timed transcript rendering produced no output")
+        except Exception as exc:  # noqa: BLE001 — legacy rendering remains soft-fail
+            if timestamps:
+                raise RuntimeError("timed transcript rendering failed") from exc
             log.warning("timed transcript rendering failed for %s; using flat text", path.name)
 
     text = " ".join(seg.text.strip() for seg in seg_list).strip()
-    return ExtractResult(text=text, media_type=media_type, engine=engine)
+    return ExtractResult(
+        text=text,
+        media_type=media_type,
+        engine=engine,
+        speaker_verification="unavailable" if _diarize_enabled() else None,
+    )
+
+
+def _speaker_verification(speakers: list[dict]) -> str:
+    neutral = re.compile(r"Speaker [A-Z]+\Z")
+    labels = {str(turn.get("speaker", "")).strip() for turn in speakers}
+    matched = any(label and not neutral.fullmatch(label) for label in labels)
+    return "profile-matched" if matched else "anonymous"
 
 
 def _is_timed_text(text: str) -> bool:
@@ -761,7 +809,11 @@ def _resolve_named_labels(
 
 
 def _diarize(
-    path: Path, seg_list: list, vault_root: Path | None = None
+    path: Path,
+    seg_list: list,
+    vault_root: Path | None = None,
+    *,
+    timestamps: bool = False,
 ) -> tuple[str, list[dict]] | None:
     """Label ASR segments with speakers and render `[Speaker A]: …` (or `[<name>]: …`) turns.
 
@@ -823,13 +875,15 @@ def _diarize(
     # and match localization. The structured `merged` list keeps the merged-turn
     # shape either way (speakers: frontmatter + filters are unaffected). Soft-fail
     # to the merged-turn rendering below.
-    if _semantic_segments_enabled():
+    if timestamps or _semantic_segments_enabled():
         try:
             semantic_segments = _semantic_segments_module()
             timed_text = semantic_segments.render_timed_lines(timed_segs).strip()
             if timed_text:
                 return timed_text, merged
-        except Exception:  # noqa: BLE001 — timed rendering must never block diarization
+            if timestamps:
+                raise RuntimeError("timed diarized rendering produced no output")
+        except Exception:  # noqa: BLE001 — diarization is optional and soft-failing
             log.warning("timed diarized rendering failed for %s; using merged turns", path.name)
     labeled_text = "\n".join(f"[{m['speaker']}]: {m['text']}" for m in merged).strip()
     return labeled_text, merged
