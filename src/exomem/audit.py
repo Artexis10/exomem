@@ -38,6 +38,8 @@ existing write tools (no auto-fix).
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
+import json
 import logging
 import math
 import os
@@ -77,6 +79,19 @@ ALL_CATEGORIES: tuple[str, ...] = (
 OPTIONAL_CATEGORIES: tuple[str, ...] = (
     "relation_registry",
     "semantic_contract_drift",
+    "semantic_malformed_unit",
+    "semantic_category_governance",
+    "semantic_strict_schema_drift",
+    "semantic_relation_disposition",
+)
+TYPED_SEMANTIC_CATEGORIES: tuple[str, ...] = (
+    "semantic_malformed_unit",
+    "semantic_category_governance",
+    "semantic_strict_schema_drift",
+    "semantic_relation_disposition",
+)
+_SEMANTIC_AUDIT_CATEGORIES = frozenset(
+    {"semantic_contract_drift", *TYPED_SEMANTIC_CATEGORIES}
 )
 
 # Repo-global feedback-loop logs (written by the running service) + the golden
@@ -171,11 +186,7 @@ def audit(
         )
 
     kb = kb_root(vault_root)
-    pages = (
-        []
-        if selected == {"semantic_contract_drift"}
-        else _parse_all(kb, vault_root)
-    )
+    pages = [] if selected <= _SEMANTIC_AUDIT_CATEGORIES else _parse_all(kb, vault_root)
 
     findings: list[AuditFinding] = []
     metadata: dict = {}
@@ -209,9 +220,11 @@ def audit(
         findings.extend(_check_relation_registry(vault_root))
     if "relation_debt" in selected:
         findings.extend(_check_relation_debt(vault_root, pages))
-    if "semantic_contract_drift" in selected:
+    semantic_categories = selected & _SEMANTIC_AUDIT_CATEGORIES
+    if semantic_categories:
         semantic_findings, semantic_metadata = _check_semantic_contract_drift(
-            vault_root
+            vault_root,
+            categories=semantic_categories,
         )
         findings.extend(semantic_findings)
         metadata["semantic_contract_drift"] = semantic_metadata
@@ -233,6 +246,8 @@ def audit(
 
 def _check_semantic_contract_drift(
     vault_root: Path,
+    *,
+    categories: set[str] | frozenset[str] | None = None,
 ) -> tuple[list[AuditFinding], dict]:
     """Project the shared bounded posthoc result into audit findings."""
     from . import semantic_writes
@@ -242,42 +257,80 @@ def _check_semantic_contract_drift(
         operation="audit",
     ).as_dict()
     out: list[AuditFinding] = []
+    selected = set(categories or {"semantic_contract_drift"})
     for item in batch["semantic_contract_findings"]:
+        typed_category = semantic_finding_group(item)
+        projected_categories: list[str] = []
+        if "semantic_contract_drift" in selected:
+            projected_categories.append("semantic_contract_drift")
+        if typed_category is not None and typed_category in selected:
+            projected_categories.append(typed_category)
+        if not projected_categories:
+            continue
         key = {
             "code": item["code"],
             "governed_element_identity": item["governed_element_identity"],
             "resolved_rule": item["resolved_rule"],
         }
+        signal_version = hashlib.sha256(
+            json.dumps(
+                key,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+            ).encode("utf-8")
+        ).hexdigest()[:16]
         actions = item["actions"]
-        out.append(
-            AuditFinding(
-                category="semantic_contract_drift",
-                severity="error" if item["severity"] == "error" else "warn",
-                path=item["path"],
-                detail=f"Semantic contract finding {item['code']} requires review.",
-                proposed_fix=(
-                    ", ".join(actions)
-                    if actions
-                    else "Review the current semantic contract finding."
-                ),
-                meta={
-                    "finding_key": key,
-                    "code": item["code"],
-                    "governed_element_identity": item[
-                        "governed_element_identity"
-                    ],
-                    "resolved_rule": item["resolved_rule"],
-                    "relation_disposition": item["relation_disposition"],
-                    "actions": actions,
-                    "activation": item["activation"],
-                    "grandfathered": item["grandfathered"],
-                },
+        for category in projected_categories:
+            out.append(
+                AuditFinding(
+                    category=category,
+                    severity="error" if item["severity"] == "error" else "warn",
+                    path=item["path"],
+                    detail=f"Semantic contract finding {item['code']} requires review.",
+                    proposed_fix=(
+                        ", ".join(actions)
+                        if actions
+                        else "Review the current semantic contract finding."
+                    ),
+                    meta={
+                        "finding_key": key,
+                        "signal_version": signal_version,
+                        "code": item["code"],
+                        "governed_element_identity": item[
+                            "governed_element_identity"
+                        ],
+                        "resolved_rule": item["resolved_rule"],
+                        "relation_disposition": item["relation_disposition"],
+                        "actions": actions,
+                        "activation": item["activation"],
+                        "grandfathered": item["grandfathered"],
+                    },
+                )
             )
-        )
     return out, {
         "omitted_counts": batch["omitted_counts"],
         "truncation": batch["truncation"],
     }
+
+
+def semantic_finding_group(item: dict) -> str | None:
+    """Return the stable typed audit grouping for one shared posthoc finding."""
+    code = str(item.get("code") or "")
+    resolved_rule = tuple(str(value) for value in (item.get("resolved_rule") or ()))
+    namespace = resolved_rule[0] if resolved_rule else ""
+    rule = resolved_rule[2] if len(resolved_rule) >= 3 else ""
+    if code in {"RELATION_DISPOSITION_MISSING", "RELATION_DISPOSITION_STALE"}:
+        return "semantic_relation_disposition"
+    if rule == "syntax":
+        return "semantic_malformed_unit"
+    if namespace in {"categories", "kinds"} and (
+        rule == "registry" or "REGISTRY" in code.upper()
+    ):
+        return "semantic_category_governance"
+    if code.startswith("CONTRACT_") and item.get("severity") == "error":
+        return "semantic_strict_schema_drift"
+    return None
 
 
 # ---------------- vault walk ----------------
