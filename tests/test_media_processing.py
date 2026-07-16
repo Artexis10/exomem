@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from exomem import commands as commands_module
 from exomem import media_jobs
 
 
@@ -700,6 +701,92 @@ def test_retry_media_requeues_only_the_targeted_terminal_artifact(vault: Path) -
     jobs = {job["path"]: job for job in media_jobs.status(vault)["jobs"]}
     assert jobs[failed_binary.relative_to(vault).as_posix()]["state"] == media_jobs.PENDING
     assert jobs[blocked_binary.relative_to(vault).as_posix()]["state"] == media_jobs.BLOCKED
+
+
+def test_process_media_product_leaf_dispatches_process_status_and_retry(vault: Path) -> None:
+    binary = _drop_media(vault, "product-leaf.m4a")
+    relative = binary.relative_to(vault).as_posix()
+
+    processed = commands_module.op_process_media(vault, path=relative, operation="process")
+
+    assert processed == {
+        "operation": "process",
+        "path": relative,
+        "media_type": "audio",
+        "state": media_jobs.PENDING,
+        "sidecar_path": f"{relative}.md",
+        "job_id": processed["job_id"],
+    }
+    assert processed["job_id"] is not None
+
+    status = commands_module.op_process_media(vault, operation="status")
+    assert status["operation"] == "status"
+    assert status["counts"][media_jobs.PENDING] == 1
+    assert len(status["jobs"]) <= media_jobs.STATUS_JOB_LIMIT
+    assert status == commands_module.op_process_media(vault, operation="status")
+
+    store = media_jobs.MediaJobStore(vault)
+    claimed = store.claim_next()
+    assert claimed is not None and claimed.id == processed["job_id"]
+    store.mark(claimed.id, media_jobs.FAILED, "InvalidDataError: corrupt container")
+
+    retried = commands_module.op_process_media(vault, path=relative, operation="retry")
+    assert retried["operation"] == "retry"
+    assert retried["path"] == relative
+    assert retried["state"] == media_jobs.PENDING
+    assert retried["requeued"] == 1
+
+
+def test_process_media_product_leaf_reconciles_and_retries_all_without_asr_wait(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    media_processing = _media_processing()
+    calls: list[tuple[str, object]] = []
+    monkeypatch.setattr(
+        media_processing,
+        "reconcile_all_media",
+        lambda vault_root, *, limit: calls.append(("reconcile", limit)) or 3,
+    )
+    monkeypatch.setattr(
+        media_jobs.MediaJobStore,
+        "retry",
+        lambda self, *, include_failed, binary_path=None: (
+            calls.append(("retry", (include_failed, binary_path))) or 2
+        ),
+    )
+
+    processed = commands_module.op_process_media(vault, operation="process")
+    retried = commands_module.op_process_media(vault, operation="retry")
+
+    assert processed == {"operation": "process", "reconciled": 3}
+    assert retried == {"operation": "retry", "requeued": 2}
+    assert calls == [("reconcile", media_processing.DEFAULT_RECONCILE_LIMIT), ("retry", (True, None))]
+
+
+def test_process_media_product_leaf_preserves_a_completed_transcript(vault: Path) -> None:
+    media_processing = _media_processing()
+    binary = _drop_media(vault, "product-completed.m4a")
+    relative = binary.relative_to(vault).as_posix()
+    initial = media_processing.reconcile_media(vault, binary)
+    assert initial is not None
+    store = media_jobs.MediaJobStore(vault)
+    claimed = store.claim_next()
+    assert claimed is not None
+    store.complete(claimed)
+    completed = initial.sidecar_path.read_text(encoding="utf-8").replace(
+        "extracted_by: pending", "extracted_by: faster-whisper:test+timed"
+    ).replace("processing_state: pending", "processing_state: completed")
+    completed += "\n## Extracted text\n\n[0:00] Already complete.\n"
+    initial.sidecar_path.write_text(completed, encoding="utf-8")
+    before = initial.sidecar_path.read_bytes()
+
+    processed = commands_module.op_process_media(vault, path=relative, operation="process")
+    retried = commands_module.op_process_media(vault, path=relative, operation="retry")
+
+    assert processed["state"] == retried["state"] == media_jobs.COMPLETED
+    assert processed["job_id"] is retried["job_id"] is None
+    assert initial.sidecar_path.read_bytes() == before
+    assert _job_count(vault) == 0
 
 
 @pytest.mark.parametrize(

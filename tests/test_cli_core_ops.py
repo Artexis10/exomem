@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from exomem import media_jobs
 from exomem.__main__ import main
 
 _INSIGHT = "Knowledge Base/Notes/Insights/progressive-disclosure-without-mode-fragmentation.md"
@@ -231,6 +232,57 @@ def test_op_error_json_envelope(vault: Path, capsys) -> None:
     payload = json.loads(out.strip().splitlines()[-1])
     assert payload["success"] is False
     assert payload["error"]["code"] == "NOT_FOUND"
+
+
+def test_process_media_cli_process_status_and_retry(vault: Path, capsys) -> None:
+    binary = vault / "Knowledge Base/Evidence/Audio/cli-contract.m4a"
+    binary.parent.mkdir(parents=True, exist_ok=True)
+    binary.write_bytes(b"tiny media")
+    relative = binary.relative_to(vault).as_posix()
+
+    code, out, err = _run(
+        ["process_media", "--path", relative, "--operation", "process", "--json"], capsys
+    )
+    assert code == 0, err
+    processed = json.loads(out.strip().splitlines()[-1])["data"]
+    assert processed["path"] == relative
+    store = media_jobs.MediaJobStore(vault)
+    claimed = store.claim_next()
+    assert claimed is not None
+    store.mark(claimed.id, media_jobs.BLOCKED, "ExtractionUnavailable: engine absent")
+
+    code, out, err = _run(
+        ["process_media", "--operation", "status", "--json"], capsys
+    )
+    assert code == 0, err
+    status = json.loads(out.strip().splitlines()[-1])["data"]
+    assert status["counts"][media_jobs.BLOCKED] == 1
+
+    code, out, err = _run(
+        ["process_media", "--path", relative, "--operation", "retry", "--json"], capsys
+    )
+    assert code == 0, err
+    retried = json.loads(out.strip().splitlines()[-1])["data"]
+    assert retried["requeued"] == 1
+    assert retried["state"] == media_jobs.PENDING
+
+
+@pytest.mark.parametrize(
+    ("args", "expected_code"),
+    [
+        (["--operation", "invalid"], "INVALID_MEDIA_OPERATION"),
+        (["--path", "Knowledge Base/Evidence/Audio/missing.m4a"], "MEDIA_NOT_FOUND"),
+        (["--path", "Knowledge Base/Evidence/Audio/unsupported.bin"], "UNSUPPORTED_MEDIA"),
+        (["--path", "../outside.m4a"], "MEDIA_PATH_OUTSIDE_KB"),
+    ],
+)
+def test_process_media_cli_uses_shared_error_codes(
+    vault: Path, capsys, args: list[str], expected_code: str
+) -> None:
+    code, out, _err = _run(["process_media", *args, "--json"], capsys)
+
+    assert code == 1
+    assert json.loads(out.strip().splitlines()[-1])["error"]["code"] == expected_code
 
 
 def test_unknown_field_key_rejected(vault: Path, capsys) -> None:

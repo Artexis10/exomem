@@ -8,8 +8,9 @@ import pytest
 import yaml
 from starlette.testclient import TestClient
 
+from exomem import access, server
+from exomem import commands as commands_module
 from exomem import find as find_module
-from exomem import server
 
 PRODUCT_ROUTES = [
     "bootstrap",
@@ -32,6 +33,7 @@ PRODUCT_ROUTES = [
     "schema_memory",
     "manage_memory_file",
     "query_dataset",
+    "process_media",
 ]
 
 
@@ -301,3 +303,72 @@ def test_openapi_has_no_hand_list(vault, monkeypatch: pytest.MonkeyPatch) -> Non
     client = _client(vault, monkeypatch, EXOMEM_REST_API_KEY="sekret")
     doc = client.get("/api/openapi.json").json()
     assert "/api/query_dataset" in doc["paths"]
+
+
+def test_process_media_has_one_generated_registry_rest_and_openapi_contract(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    [command] = [cmd for cmd in commands_module.PRODUCT_COMMANDS if cmd.name == "process_media"]
+    assert command.leaf is commands_module.op_process_media
+    assert command.surfaces == frozenset({"mcp", "rest", "cli"})
+    assert command.cli_writes is True
+
+    binary = vault / "Knowledge Base/Evidence/Audio/rest-contract.m4a"
+    binary.parent.mkdir(parents=True, exist_ok=True)
+    binary.write_bytes(b"tiny media")
+    relative = binary.relative_to(vault).as_posix()
+    client = _client(vault, monkeypatch, EXOMEM_REST_API_KEY="sekret")
+    response = client.post(
+        "/api/process_media",
+        json={"path": relative, "operation": "process"},
+        headers=_auth(),
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["data"]["path"] == relative
+
+    schema = client.get("/api/openapi.json").json()["paths"]["/api/process_media"]["post"][
+        "requestBody"
+    ]["content"]["application/json"]["schema"]
+    assert set(schema["properties"]) == {"path", "operation"}
+    assert schema.get("required", []) == []
+    assert schema["properties"]["operation"]["enum"] == ["process", "status", "retry"]
+
+
+@pytest.mark.parametrize(
+    ("case", "expected_code"),
+    [
+        ("invalid-operation", "INVALID_MEDIA_OPERATION"),
+        ("unsupported", "UNSUPPORTED_MEDIA"),
+        ("missing", "MEDIA_NOT_FOUND"),
+        ("outside", "MEDIA_PATH_OUTSIDE_KB"),
+        ("excluded", "MEDIA_PATH_ACCESS_DENIED"),
+    ],
+)
+def test_process_media_rest_uses_shared_actionable_error_envelope(
+    vault, monkeypatch: pytest.MonkeyPatch, case: str, expected_code: str
+) -> None:
+    client = _client(vault, monkeypatch, EXOMEM_REST_API_KEY="sekret")
+    operation = "invalid" if case == "invalid-operation" else "process"
+    relative = "Knowledge Base/Evidence/Audio/item.m4a"
+    if case == "unsupported":
+        relative = "Knowledge Base/Evidence/Audio/item.bin"
+    if case == "outside":
+        relative = "../outside.m4a"
+    if case not in {"invalid-operation", "missing", "outside"}:
+        binary = vault / relative
+        binary.parent.mkdir(parents=True, exist_ok=True)
+        binary.write_bytes(b"tiny")
+    if case == "excluded":
+        monkeypatch.setattr(access, "access_tier", lambda *_a, **_kw: access.TIER_EXCLUDED)
+
+    response = client.post(
+        "/api/process_media",
+        json={"path": relative, "operation": operation},
+        headers=_auth(),
+    )
+
+    assert response.status_code in {400, 404}
+    error = response.json()["error"]
+    assert error["code"] == expected_code
+    assert error["message"]
+    assert "remediation" in error

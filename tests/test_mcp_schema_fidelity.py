@@ -35,7 +35,9 @@ FIXTURE_PATH = REPO_ROOT / "tests" / "fixtures" / "mcp_tool_schemas.json"
 FIXTURE_VAULT = REPO_ROOT / "tests" / "fixtures"
 
 
-def _build_server(monkeypatch: pytest.MonkeyPatch):
+def _build_server(
+    monkeypatch: pytest.MonkeyPatch, vault_root: Path = FIXTURE_VAULT
+):
     """Build the server exactly as the fixture was captured (see module docstring)."""
     monkeypatch.setattr(server_module, "load_dotenv", lambda *a, **k: None)
     monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")
@@ -43,7 +45,7 @@ def _build_server(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("EXOMEM_DISABLE_MEDIA_EXTRACTION", "1")
     monkeypatch.setenv("EXOMEM_DISABLE_CLIP", "1")
     monkeypatch.delenv("EXOMEM_DISABLE_TIER2", raising=False)
-    monkeypatch.setenv("EXOMEM_VAULT_PATH", str(FIXTURE_VAULT))
+    monkeypatch.setenv("EXOMEM_VAULT_PATH", str(vault_root))
     return server_module.build_server(require_auth=False)
 
 
@@ -121,3 +123,33 @@ def test_hand_registered_exceptions_are_explicit(monkeypatch: pytest.MonkeyPatch
         f"HAND_REGISTERED_EXCEPTIONS names a tool that isn't registered: "
         f"{sorted(exceptions - live)}"
     )
+
+
+def test_process_media_mcp_schema_annotations_and_leaf_result(
+    vault: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem import media_jobs
+
+    mcp = _build_server(monkeypatch, vault)
+    tools = {tool.name: tool for tool in asyncio.run(mcp.list_tools())}
+    tool = tools["process_media"].to_mcp_tool().model_dump(mode="json")
+    schema = tool["inputSchema"]
+    assert set(schema["properties"]) == {"path", "operation"}
+    assert schema.get("required", []) == []
+    assert schema["properties"]["operation"]["enum"] == ["process", "status", "retry"]
+    assert "governed" in schema["properties"]["path"]["description"].lower()
+    assert "process" in schema["properties"]["operation"]["description"].lower()
+    assert tool["annotations"] == {
+        "title": "process_media",
+        "readOnlyHint": False,
+        "destructiveHint": False,
+        "idempotentHint": False,
+        "openWorldHint": False,
+    }
+
+    result = asyncio.run(
+        mcp.call_tool("process_media", {"operation": "status"}, run_middleware=False)
+    )
+    structured = result.structured_content
+    assert structured["operation"] == "status"
+    assert structured["counts"] == media_jobs.status(vault)["counts"]
