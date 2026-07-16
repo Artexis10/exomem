@@ -169,24 +169,57 @@ def reconcile_all_media(
     if not kb.is_dir():
         return 0
 
-    store = (
-        media_jobs.MediaJobStore(vault, create=False)
-        if media_jobs.job_store_path(vault).exists()
-        else None
-    )
+    store = media_jobs.MediaJobStore(vault)
 
+    examined = 0
     attempted = 0
-    for binary in _iter_governed_media(vault, kb):
-        if not _needs_reconciliation(vault, binary, store):
-            continue
-        if attempted >= limit:
+    last_examined: Path | None = None
+    for binary in _iter_rotating_governed_media(
+        vault,
+        kb,
+        after=store.discovery_cursor(),
+    ):
+        if examined >= limit:
             break
-        attempted += 1
-        try:
-            reconcile_media(vault, binary, explicit=False)
-        except Exception:  # noqa: BLE001 - one artifact must not abort discovery
-            log.warning("media reconciliation failed for %s", binary, exc_info=True)
+        examined += 1
+        last_examined = binary
+        if _needs_reconciliation(vault, binary, store):
+            attempted += 1
+            try:
+                reconcile_media(vault, binary, explicit=False)
+            except Exception:  # noqa: BLE001 - one artifact must not abort discovery
+                log.warning("media reconciliation failed for %s", binary, exc_info=True)
+    if last_examined is not None:
+        store.set_discovery_cursor(last_examined)
     return attempted
+
+
+def _iter_rotating_governed_media(
+    vault: Path,
+    kb_root: Path,
+    *,
+    after: str | None,
+):
+    if after is None:
+        yield from _iter_governed_media(vault, kb_root)
+        return
+
+    found_cursor = False
+    for binary in _iter_governed_media(vault, kb_root):
+        relative = binary.relative_to(vault).as_posix()
+        if found_cursor:
+            yield binary
+        elif relative == after:
+            found_cursor = True
+    if not found_cursor:
+        yield from _iter_governed_media(vault, kb_root)
+        return
+
+    for binary in _iter_governed_media(vault, kb_root):
+        relative = binary.relative_to(vault).as_posix()
+        if relative == after:
+            break
+        yield binary
 
 
 def _iter_governed_media(vault: Path, kb_root: Path):
@@ -221,7 +254,7 @@ def _iter_governed_media(vault: Path, kb_root: Path):
 def _needs_reconciliation(
     vault: Path,
     binary: Path,
-    store: media_jobs.MediaJobStore | None,
+    store: media_jobs.MediaJobStore,
 ) -> bool:
     sidecar = binary.with_name(binary.name + ".md")
     try:
@@ -232,44 +265,78 @@ def _needs_reconciliation(
     media_type = classify_media(binary)
     if media_type is None:
         return False
-    try:
-        resolved_binary = binary.resolve(strict=True)
-        provenance = _read_provenance(vault, binary, resolved_binary)
-    except (OSError, MediaProcessingError):
-        return True
-    if _is_valid_completed_sidecar(
-        original,
-        media_type=media_type,
-        provenance=provenance,
-    ):
-        return False
 
-    frontmatter, _body, raw_frontmatter = parse_frontmatter(original)
-    if raw_frontmatter is None or store is None:
+    frontmatter, body, raw_frontmatter = parse_frontmatter(original)
+    if raw_frontmatter is None:
         return True
-    return not (
-        _is_converged_pending_shape(frontmatter, media_type, provenance)
-        and store.has_binary(binary)
+    if _is_completed_sidecar_shape(frontmatter, body, media_type):
+        return store.has_binary(binary)
+    if _is_pending_sidecar_shape(vault, binary, frontmatter, media_type):
+        return not store.has_binary(binary)
+    return True
+
+
+def _is_pending_sidecar_shape(
+    vault: Path,
+    binary: Path,
+    frontmatter: dict[str, object],
+    media_type: str,
+) -> bool:
+    captured = frontmatter.get("captured")
+    try:
+        if isinstance(captured, dt.date):
+            captured.isoformat()
+        else:
+            dt.date.fromisoformat(str(captured))
+    except (TypeError, ValueError):
+        return False
+    tags = frontmatter.get("tags")
+    ingested_into = frontmatter.get("ingested_into")
+    digest = str(frontmatter.get("binary_sha256", ""))
+    expected_path = binary.relative_to(vault).as_posix()
+    return (
+        frontmatter.get("type") == "source"
+        and memory_refs.normalize_id(frontmatter.get("exomem_id")) is not None
+        and isinstance(frontmatter.get("title"), str)
+        and bool(str(frontmatter["title"]).strip())
+        and frontmatter.get("source_type") == "other"
+        and frontmatter.get("media_type") == media_type
+        and frontmatter.get("evidence_file") == expected_path
+        and frontmatter.get("original_filename") == binary.name
+        and str(frontmatter.get("extracted_by", "")).strip().lower() == "pending"
+        and frontmatter.get("processing_state") == "pending"
+        and re.fullmatch(r"[0-9a-f]{64}", digest) is not None
+        and _is_nonnegative_int(frontmatter.get("binary_size"))
+        and _is_nonnegative_int(frontmatter.get("binary_mtime_ns"))
+        and _is_nonnegative_int(frontmatter.get("binary_ctime_ns"))
+        and isinstance(tags, list)
+        and bool(tags)
+        and all(isinstance(tag, str) and tag.strip() for tag in tags)
+        and isinstance(ingested_into, list)
     )
 
 
-def _is_converged_pending_shape(
+def _is_completed_sidecar_shape(
     frontmatter: dict[str, object],
+    body: str,
     media_type: str,
-    provenance: _BinaryProvenance,
 ) -> bool:
-    if not _is_canonical_pending_shape(frontmatter, media_type, provenance):
-        return False
-    expected = {
-        "processing_state": "pending",
-        "evidence_file": provenance.relative_path,
-        "original_filename": provenance.original_filename,
-        "binary_sha256": provenance.sha256,
-        "binary_size": provenance.size,
-        "binary_mtime_ns": provenance.mtime_ns,
-        "binary_ctime_ns": provenance.ctime_ns,
-    }
-    return all(str(frontmatter.get(field)) == str(value) for field, value in expected.items())
+    engine = str(frontmatter.get("extracted_by", "")).strip()
+    return (
+        frontmatter.get("type") == "source"
+        and frontmatter.get("media_type") == media_type
+        and frontmatter.get("processing_state") in (None, "completed")
+        and engine.lower() not in _INCOMPLETE_ENGINES
+        and not engine.lower().startswith("failed")
+        and any(
+            bool(match.group(1).strip())
+            for match in _EXTRACTED_SECTION_RE.finditer(body)
+        )
+    )
+
+
+def _is_nonnegative_int(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
 
 
 def retry_media(vault_root: Path, binary_path: str | Path) -> ReconcileResult:

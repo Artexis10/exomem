@@ -68,6 +68,16 @@ def test_has_binary_uses_exact_vault_relative_path(vault: Path) -> None:
     assert store.has_binary(sibling) is False
 
 
+def test_discovery_cursor_is_durable_and_vault_relative(vault: Path) -> None:
+    store = media_jobs.MediaJobStore(vault)
+    binary = _job(vault, name="cursor.mp3").binary_path
+
+    store.set_discovery_cursor(binary)
+
+    reopened = media_jobs.MediaJobStore(vault, create=False)
+    assert reopened.discovery_cursor() == binary.relative_to(vault).as_posix()
+
+
 def test_recover_and_retry_states(vault: Path) -> None:
     store = media_jobs.MediaJobStore(vault)
     store.enqueue(_job(vault))

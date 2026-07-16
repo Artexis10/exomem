@@ -23,6 +23,7 @@ BLOCKED = "blocked"
 FAILED = "failed"
 STATES = (PENDING, RUNNING, BLOCKED, FAILED)
 STATUS_JOB_LIMIT = 100
+DISCOVERY_CURSOR_KEY = "discovery_cursor"
 
 
 def job_store_path(vault_root: Path) -> Path:
@@ -144,6 +145,14 @@ class MediaJobStore:
                         worker_pid INTEGER,
                         idle_seconds REAL,
                         updated_at REAL NOT NULL
+                    )
+                    """
+                )
+                conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS meta (
+                        key TEXT PRIMARY KEY,
+                        value TEXT NOT NULL
                     )
                     """
                 )
@@ -311,6 +320,34 @@ class MediaJobStore:
                 "SELECT 1 FROM jobs WHERE binary_rel = ? LIMIT 1",
                 (binary_rel,),
             ).fetchone() is not None
+        finally:
+            conn.close()
+
+    def discovery_cursor(self) -> str | None:
+        """Return the last vault-relative binary examined by bounded discovery."""
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                "SELECT value FROM meta WHERE key = ?",
+                (DISCOVERY_CURSOR_KEY,),
+            ).fetchone()
+            return str(row[0]) if row is not None else None
+        finally:
+            conn.close()
+
+    def set_discovery_cursor(self, binary_path: Path) -> None:
+        """Durably advance bounded discovery to an exact vault-relative path."""
+        cursor = self._relative(binary_path)
+        conn = self._connect()
+        try:
+            with conn:
+                conn.execute(
+                    """
+                    INSERT INTO meta(key, value) VALUES (?, ?)
+                    ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                    """,
+                    (DISCOVERY_CURSOR_KEY, cursor),
+                )
         finally:
             conn.close()
 

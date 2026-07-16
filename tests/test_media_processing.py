@@ -344,6 +344,79 @@ def test_reconcile_all_media_repeats_without_duplicate_work(vault: Path) -> None
     assert _job_count(vault) == 1
 
 
+def test_reconcile_limit_caps_cheap_examination_without_hashing_converged_media(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    media_processing = _media_processing()
+    binaries = [_drop_media(vault, f"converged-{index}.mp3") for index in range(3)]
+    for binary in binaries:
+        media_processing.reconcile_media(vault, binary)
+
+    examined: list[Path] = []
+    original_needs_reconciliation = media_processing._needs_reconciliation
+
+    def track_examination(
+        root: Path,
+        binary: Path,
+        store: media_jobs.MediaJobStore,
+    ) -> bool:
+        examined.append(binary)
+        return original_needs_reconciliation(root, binary, store)
+
+    def reject_hash(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("bounded discovery must not hash converged binaries")
+
+    monkeypatch.setattr(media_processing, "_needs_reconciliation", track_examination)
+    monkeypatch.setattr(media_processing, "_read_provenance", reject_hash)
+
+    assert media_processing.reconcile_all_media(vault, limit=1) == 0
+    assert examined == [binaries[0]]
+
+
+def test_rotating_cursor_reaches_later_missing_media_across_bounded_passes(
+    vault: Path,
+) -> None:
+    media_processing = _media_processing()
+    converged = vault / "Knowledge Base" / "Evidence" / "z-converged.mp3"
+    converged.parent.mkdir(parents=True, exist_ok=True)
+    converged.write_bytes(b"converged")
+    media_processing.reconcile_media(vault, converged)
+    missing = _drop_media(vault, "a-nested-missing.mp3")
+    missing_sidecar = missing.with_name(missing.name + ".md")
+
+    assert media_processing.reconcile_all_media(vault, limit=1) == 0
+    assert not missing_sidecar.exists()
+    assert media_processing.reconcile_all_media(vault, limit=1) == 1
+    assert missing_sidecar.exists()
+
+    assert media_processing.reconcile_all_media(vault, limit=1) == 0
+    assert (
+        media_jobs.MediaJobStore(vault, create=False).discovery_cursor()
+        == converged.relative_to(vault).as_posix()
+    )
+
+
+def test_periodic_reconciliation_discards_stale_job_for_completed_sidecar(
+    vault: Path,
+) -> None:
+    media_processing = _media_processing()
+    binary = _drop_media(vault, "completed-with-stale-job.mp3")
+    result = media_processing.reconcile_media(vault, binary)
+    completed_text = result.sidecar_path.read_text(encoding="utf-8").replace(
+        "extracted_by: pending", "extracted_by: faster-whisper:test+timed"
+    ).replace("processing_state: pending", "processing_state: completed")
+    completed_text += "\n## Extracted text\n\n[0:00] Already complete.\n"
+    result.sidecar_path.write_text(completed_text, encoding="utf-8")
+    before = result.sidecar_path.read_bytes()
+    store = media_jobs.MediaJobStore(vault, create=False)
+    assert store.has_binary(binary) is True
+
+    assert media_processing.reconcile_all_media(vault, limit=1) == 1
+
+    assert result.sidecar_path.read_bytes() == before
+    assert store.has_binary(binary) is False
+
+
 def test_bounded_reconcile_skips_converged_prefix_and_advances_later_work(
     vault: Path,
 ) -> None:
@@ -385,6 +458,8 @@ def test_bounded_reconcile_skips_converged_prefix_and_advances_later_work(
     malformed_sidecar.write_text("Waiting for canonical repair.\n", encoding="utf-8")
     missing = _drop_media(vault, "z-missing.mp3")
 
+    assert media_processing.reconcile_all_media(vault, limit=2) == 0
+    assert media_processing.reconcile_all_media(vault, limit=2) == 0
     assert media_processing.reconcile_all_media(vault, limit=2) == 2
     assert store.has_binary(orphan) is True
     assert "type: source" in malformed_sidecar.read_text(encoding="utf-8")
