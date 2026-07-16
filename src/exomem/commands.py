@@ -221,7 +221,7 @@ def op_bootstrap(
     requested_workflow = workflow.strip() if workflow and workflow.strip() else "general"
     selected_packs = knowledge_packs_module.selected_pack_state(vault_root)
     payload: dict = {
-        "contract_version": "2026-07-16.1",
+        "contract_version": "2026-07-16.2",
         "profile": profile,
         "server": {
             "name": "exomem",
@@ -331,6 +331,25 @@ def op_bootstrap(
                 "mutation_rule": "use observe_memory add/update/remove/validate instead of whole-page string surgery for one unit",
                 "drift_guards": "update/remove require the current parent content hash and unit fingerprint",
             },
+            "reviewed_creation": {
+                "validate_only": (
+                    "call the intended creation writer with validate_only=true and retain "
+                    "its draft_id, draft_hash, candidate, and semantic feedback"
+                ),
+                "commit": (
+                    "after review, call the same writer with the unchanged draft_id and "
+                    "draft_hash; changed candidates must be validated again"
+                ),
+                "reviewed_none": (
+                    "when a governed qualifying relation has no accepted edge, use the "
+                    "returned relation review hash and an explicit reason; never fabricate "
+                    "a none decision or infer review from missing relations"
+                ),
+                "adoption_handoff": (
+                    "adopt_vault(mode='compile-selected') returns a proposal only; review "
+                    "it, then call note() so normal semantic precommit still applies"
+                ),
+            },
         },
         "tool_defaults": {
             "normal_lookup": {
@@ -402,6 +421,29 @@ def op_bootstrap(
             "prefer_compiled_default": True,
             "compiled_types": ["research-note", "insight", "failure", "pattern", "entity"],
             "raw_types": ["source", "evidence"],
+            "semantic_recall": {
+                "result_levels": ["page", "unit", "mixed"],
+                "structured_filters": (
+                    "use filters for typed page.* or unit.* predicates; categories and "
+                    "kinds are shortcuts compiled into the same bounded filter plan"
+                ),
+                "filter_only": (
+                    "an empty query with filters is a filter-only lookup ordered by the "
+                    "documented filtered-most-recent tuple, not a fabricated text match"
+                ),
+                "explanation": (
+                    "set explain=true only when ranking interpretation is useful; it adds "
+                    "a bounded retrieval profile and per-hit evidence without changing recall"
+                ),
+                "score_interpretation": {
+                    "bm25": "backend relevance value; interpret using the returned direction and range",
+                    "cosine": "vector similarity measurement, not probability",
+                    "rrf": "rank-fusion contribution computed only for participating fused lanes",
+                    "reranker": "separate raw and adjusted reranker values when reranking runs",
+                    "final_rank": "the final deterministic order after boosts, reranking, and tie-breaks",
+                    "rule": "none of these metrics is confidence; compare only within its labelled profile",
+                },
+            },
             "retry_examples": [
                 "try synonyms and singular/plural forms",
                 "try adjacent domain terms",

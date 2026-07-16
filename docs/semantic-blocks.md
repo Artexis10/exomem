@@ -4,9 +4,11 @@ Semantic blocks are optional Markdown sections that make Exomem notes easier to
 parse without making them harder to read. They are normal headings plus optional
 metadata bullets. The body remains ordinary Markdown.
 
-This is not a separate DSL and not a Basic Memory clone. The goal is governed
-cognition: claims, evidence, decisions, assumptions, risks, records, cases, and
-actions can be named, related, validated, and reused by Exomem tooling.
+This is not a separate DSL. The goal is governed cognition: claims, evidence,
+decisions, assumptions, risks, records, cases, and actions can be named,
+related, validated, and reused by Exomem tooling. Compact observations, rich
+units, category/kind governance, retrieval, and exact unit reads are documented
+in [first-class semantic language](semantic-language.md).
 
 ## Block shape
 
@@ -152,6 +154,11 @@ Add parser, validation, claim extraction, and context-pack tests.
 ```
 
 ## Integration
+
+Rich blocks are governed semantic units and may carry typed relations. Compact
+`- [category] ... ^anchor` observations remain ordinary one-line Markdown and
+cannot imply typed graph edges; use rich form or a canonical note-level
+relation when direction matters.
 
 `claims.extract_claim_text` prefers the first semantic `claim` block when one is
 present, then falls back to the legacy section-based extraction.

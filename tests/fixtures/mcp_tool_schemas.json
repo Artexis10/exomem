@@ -68,6 +68,21 @@
           ],
           "default": null,
           "description": "Explicit legacy files for copy/compile modes."
+        },
+        "semantic_max_files": {
+          "default": 512,
+          "description": "Maximum Markdown files read by the semantic census.",
+          "type": "integer"
+        },
+        "semantic_max_bytes": {
+          "default": 8388608,
+          "description": "Maximum total Markdown bytes read by the semantic census.",
+          "type": "integer"
+        },
+        "semantic_example_limit": {
+          "default": 12,
+          "description": "Maximum bounded semantic examples per grouping.",
+          "type": "integer"
         }
       },
       "type": "object"

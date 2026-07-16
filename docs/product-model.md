@@ -42,12 +42,23 @@ The adoption modes are explicit:
 
 | Mode | Writes? | Purpose |
 | --- | --- | --- |
-| `scan-only` | No | Report structure, likely packs, governed vs read-only areas, and next actions |
+| `scan-only` | No | Report structure, likely packs, governed vs read-only areas, bounded semantic-language census, and next actions |
 | `save-manifest` | Yes, under `Knowledge Base/_Adoption/` only | Save the scan as a durable onboarding artifact |
 | `copy-as-sources` | Yes, under `Knowledge Base/Sources/Imported/` only | Copy selected legacy text files with original path and SHA-256 provenance |
-| `compile-selected` | Yes, under `Knowledge Base/Sources/Imported/` when legacy files need source copies | Copy selected legacy text files when needed, then return a reviewable compile plan; compiled notes are written later through `remember` |
+| `compile-selected` | Yes, under `Knowledge Base/Sources/Imported/` when legacy files need source copies | Copy selected legacy text files when needed, then return a reviewable compile plan; compiled notes are written later through `remember` / `note()` |
 
-There is no rewrite-in-place onboarding path in the normal product flow. `compile-selected` is a planning step, not auto-migration: it prepares governed sources and a note scaffold so the user or agent can deliberately compile with `remember`.
+There is no rewrite-in-place onboarding path in the normal product flow.
+`scan-only` does not require initialization and never changes page bytes. Its
+semantic census reports compact/rich coverage, category resolution/collisions,
+malformed candidates, contract/schema debt, and relation dispositions within
+explicit file/byte/example bounds. `compile-selected` is a planning step, not
+auto-migration: it prepares governed sources and a note scaffold so the user or
+agent can deliberately compile with `remember` through the normal `note()`
+precommit path.
+
+Initialization and registry/index upgrades do not manufacture semantic units,
+categories, relations, IDs, or review decisions. Existing compiled pages are
+captured in a portable activation manifest without rewriting them.
 
 ## Sources versus evidence
 

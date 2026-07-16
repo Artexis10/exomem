@@ -91,6 +91,25 @@ def test_bootstrap_compact_contract_is_public_safe(vault: Path) -> None:
     assert unit_contract["compact_syntax"].startswith("- [category]")
     assert unit_contract["compact_kind"] == "observation"
     assert unit_contract["rich_relation_rule"]
+    reviewed_creation = authoring["reviewed_creation"]
+    assert {"validate_only", "commit", "reviewed_none", "adoption_handoff"} <= set(
+        reviewed_creation
+    )
+    assert "draft_id" in reviewed_creation["validate_only"]
+    assert "draft_hash" in reviewed_creation["commit"]
+    assert "never fabricate" in reviewed_creation["reviewed_none"]
+    assert "note()" in reviewed_creation["adoption_handoff"]
+    semantic_recall = out["search_guidance"]["semantic_recall"]
+    assert semantic_recall["result_levels"] == ["page", "unit", "mixed"]
+    assert "empty query" in semantic_recall["filter_only"]
+    assert "filters" in semantic_recall["structured_filters"]
+    assert "explain=true" in semantic_recall["explanation"]
+    score_guidance = semantic_recall["score_interpretation"]
+    assert all(
+        metric in score_guidance
+        for metric in ("bm25", "cosine", "rrf", "reranker", "final_rank")
+    )
+    assert "confidence" in score_guidance["rule"]
     serialized = json.dumps(out)
     assert str(vault) not in serialized
     assert "Progressive disclosure" not in serialized
@@ -100,7 +119,7 @@ def test_bootstrap_teaches_human_readable_memory_citations(vault: Path) -> None:
     out = commands.op_bootstrap(vault)
     guidance = json.dumps(out["workflow"]).lower()
 
-    assert out["contract_version"] == "2026-07-16.1"
+    assert out["contract_version"] == "2026-07-16.2"
     for required in (
         "show the note title by default",
         "normal user-facing prose",
