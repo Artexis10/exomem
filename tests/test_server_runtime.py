@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from exomem import server_runtime
+from exomem import media_processing, server_runtime
 
 
 def test_initialize_runtime_loads_dotenv_from_service_working_directory(
@@ -33,3 +33,49 @@ def test_initialize_runtime_loads_dotenv_from_service_working_directory(
 
     assert calls == [(tmp_path / ".env", True)]
     assert runtime.vault_root == vault
+
+
+def test_media_worker_startup_reconciles_media_missed_while_service_was_stopped(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    recording = vault / "Knowledge Base" / "Evidence" / "Audio" / "offline.m4a"
+    recording.parent.mkdir(parents=True)
+    recording.write_bytes(b"created while the service was stopped")
+    calls: list[tuple[str, object]] = []
+
+    class Worker:
+        def start(self) -> None:
+            calls.append(("start", None))
+
+        def stop(self) -> None:
+            calls.append(("stop", None))
+
+        def scan_pending(self) -> int:
+            calls.append(("scan_pending", None))
+            return 0
+
+    worker = Worker()
+
+    def reconcile_all_media(root, *, limit: int) -> None:
+        assert calls and calls[0][0] == "start"
+        assert recording.is_file()
+        calls.append(("reconcile_all_media", (root, limit)))
+
+    monkeypatch.setattr(server_runtime, "_create_media_worker", lambda _vault: worker)
+    monkeypatch.setattr(
+        media_processing,
+        "reconcile_all_media",
+        reconcile_all_media,
+        raising=False,
+    )
+
+    result = server_runtime._start_media_worker(vault)
+
+    assert result is worker
+    discovery = [payload for name, payload in calls if name == "reconcile_all_media"]
+    assert len(discovery) == 1
+    root, limit = discovery[0]
+    assert root == vault
+    assert isinstance(limit, int) and limit > 0

@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from exomem import embeddings, file_watcher
+from exomem import embeddings, file_watcher, media_processing
 from exomem import find as find_module
 
 
@@ -51,6 +51,119 @@ def test_non_markdown_is_ignored(vault, monkeypatch: pytest.MonkeyPatch) -> None
     w._record(vault / "Knowledge Base" / "Evidence" / "scan.png", deleted=False)
     w._flush()
     assert ups == [] and dels == []
+
+
+# ---- Automatic governed-media dispatch (OpenSpec: automatic-media-processing) ----
+
+
+def _spy_media_and_text_dispatch(monkeypatch: pytest.MonkeyPatch) -> dict[str, list]:
+    """Capture the separate media leaf and every Markdown freshness/index seam."""
+    calls: dict[str, list] = {
+        "media": [],
+        "freshness": [],
+        "upsert": [],
+        "delete": [],
+    }
+
+    def reconcile_media(root: Path, path: Path, *, explicit: bool = True) -> None:
+        calls["media"].append((root, path, explicit))
+
+    monkeypatch.setattr(media_processing, "reconcile_media", reconcile_media)
+    monkeypatch.setattr(
+        file_watcher.freshness,
+        "on_files_changed",
+        lambda root, changed, deleted: calls["freshness"].append(
+            (root, list(changed), list(deleted))
+        ),
+    )
+    monkeypatch.setattr(
+        file_watcher.index_sync,
+        "upsert_after_write",
+        lambda root, paths, **kwargs: calls["upsert"].append(
+            (root, list(paths), dict(kwargs))
+        ),
+    )
+    monkeypatch.setattr(
+        file_watcher.index_sync,
+        "delete_after_remove",
+        lambda root, rels: calls["delete"].append((root, list(rels))),
+    )
+    return calls
+
+
+def test_supported_audio_event_dispatches_media_only(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = _spy_media_and_text_dispatch(monkeypatch)
+    recording = vault / "Knowledge Base" / "Evidence" / "Audio" / "field-note.M4A"
+    recording.parent.mkdir(parents=True, exist_ok=True)
+    recording.write_bytes(b"direct watcher audio")
+    watcher = file_watcher.FileWatcher(vault)
+
+    watcher._record(recording, deleted=False)
+    watcher._flush()
+
+    assert calls["media"] == [(vault, recording, False)]
+
+
+def test_supported_audio_never_enters_markdown_freshness_or_embedding(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = _spy_media_and_text_dispatch(monkeypatch)
+    recording = vault / "Knowledge Base" / "Evidence" / "Audio" / "binary-only.wav"
+    recording.parent.mkdir(parents=True, exist_ok=True)
+    recording.write_bytes(b"binary audio must not be treated as markdown")
+    watcher = file_watcher.FileWatcher(vault)
+
+    watcher._record(recording, deleted=False)
+    watcher._flush()
+
+    assert calls["media"] == [(vault, recording, False)]
+    assert calls["freshness"] == []
+    assert calls["upsert"] == []
+    assert calls["delete"] == []
+
+
+def test_supported_audio_events_are_debounced_and_deduplicated(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = _spy_media_and_text_dispatch(monkeypatch)
+    recording = vault / "Knowledge Base" / "Evidence" / "Audio" / "burst.m4a"
+    recording.parent.mkdir(parents=True, exist_ok=True)
+    recording.write_bytes(b"one recording, several filesystem events")
+    watcher = file_watcher.FileWatcher(vault, debounce_seconds=0.02)
+    dispatch = threading.Thread(target=watcher._run_dispatch, daemon=True)
+    dispatch.start()
+    try:
+        watcher._record(recording, deleted=False)
+        watcher._record(recording, deleted=False)
+        watcher._record(recording, deleted=False)
+        deadline = time.monotonic() + 2.0
+        while not calls["media"] and time.monotonic() < deadline:
+            time.sleep(0.01)
+    finally:
+        watcher._stop.set()
+        watcher._wake.set()
+        dispatch.join(timeout=2)
+
+    assert calls["media"] == [(vault, recording, False)]
+    assert calls["freshness"] == []
+    assert calls["upsert"] == []
+
+
+def test_unsupported_attachment_dispatches_neither_media_nor_text(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = _spy_media_and_text_dispatch(monkeypatch)
+    attachment = vault / "Knowledge Base" / "Evidence" / "payload.bin"
+    attachment.parent.mkdir(parents=True, exist_ok=True)
+    attachment.write_bytes(b"unsupported attachment")
+    watcher = file_watcher.FileWatcher(vault)
+
+    watcher._record(attachment, deleted=False)
+    watcher._flush()
+
+    assert calls == {"media": [], "freshness": [], "upsert": [], "delete": []}
 
 
 def test_delete_routes_to_delete_after_remove(vault, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -451,6 +564,38 @@ def test_reconcile_no_drift_dispatches_nothing(vault, monkeypatch: pytest.Monkey
     w._reconcile_once(seed=False)  # nothing changed on disk since the seed
 
     assert calls == {"inbound": [], "resolver": [], "upsert": [], "delete": [], "warm": []}
+
+
+def test_periodic_reconcile_discovers_missed_media_without_text_reembed(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    discovery_calls: list[tuple[Path, int]] = []
+
+    def reconcile_all_media(root: Path, *, limit: int) -> None:
+        discovery_calls.append((root, limit))
+
+    monkeypatch.setattr(
+        media_processing,
+        "reconcile_all_media",
+        reconcile_all_media,
+        raising=False,
+    )
+    calls = _spy_reconcile_fanout(monkeypatch)
+    watcher = file_watcher.FileWatcher(vault)
+    watcher._reconcile_once(seed=True)
+    discovery_calls.clear()
+
+    recording = vault / "Knowledge Base" / "Evidence" / "Audio" / "missed.m4a"
+    recording.parent.mkdir(parents=True, exist_ok=True)
+    recording.write_bytes(b"event missed while watcher was disconnected")
+    watcher._reconcile_once(seed=False)
+
+    assert len(discovery_calls) == 1
+    root, limit = discovery_calls[0]
+    assert root == vault
+    assert isinstance(limit, int) and limit > 0
+    assert calls["upsert"] == []
+    assert calls["delete"] == []
 
 
 def test_reconcile_delete_routes_to_delete_after_remove(vault, monkeypatch: pytest.MonkeyPatch) -> None:
