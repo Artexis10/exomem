@@ -20,7 +20,7 @@
 
 ### Task 5
 
-- [ ] 2.2 Wire watcher, startup/periodic reconciliation, and upload preservation into the shared orchestration leaf while keeping repeated reconciliation idempotent.
+- [x] 2.2 Wire watcher, startup/periodic reconciliation, and upload preservation into the shared orchestration leaf while keeping repeated reconciliation idempotent.
 
 ### Task 6
 
