@@ -300,21 +300,40 @@ class MediaWorker:
             )
             return _ProcessOutcome(FAILED, error) if committed else _ProcessOutcome(_STALE)
         text = result.text.strip() or "(no text detected)"
-        committed = self._commit_sidecar_extraction(
-            job,
-            expected_sidecar=expected_sidecar,
-            expected_binary=expected_binary,
-            text=text,
-            engine=result.engine,
-            speakers=result.speakers,
-            speaker_verification=result.speaker_verification or "unavailable",
-        )
+        committed = False
+        for commit_attempt in range(3):
+            committed = self._commit_sidecar_extraction(
+                job,
+                expected_sidecar=expected_sidecar,
+                expected_binary=expected_binary,
+                text=text,
+                engine=result.engine,
+                speakers=result.speakers,
+                speaker_verification=result.speaker_verification or "unavailable",
+            )
+            if committed:
+                break
+            if (
+                _content_digest(job.sidecar_path) != expected_sidecar
+                or _binary_identity(job.binary_path) != expected_binary
+            ):
+                break
+            if commit_attempt < 2:
+                time.sleep(0.02)
         if not committed:
             stale_parts: list[str] = []
-            if _content_digest(job.sidecar_path) != expected_sidecar:
+            sidecar_changed = _content_digest(job.sidecar_path) != expected_sidecar
+            binary_changed = _binary_identity(job.binary_path) != expected_binary
+            if sidecar_changed:
                 stale_parts.append("sidecar content changed")
-            if _binary_identity(job.binary_path) != expected_binary:
+            if binary_changed:
                 stale_parts.append("media identity changed")
+            if binary_changed and not sidecar_changed:
+                preserve.update_sidecar_processing_pending(
+                    self._vault_root,
+                    job.sidecar_path,
+                    attempts=max(1, job.attempts),
+                )
             detail = ", ".join(stale_parts) or "commit precondition changed"
             return _ProcessOutcome(_STALE, f"stale extraction: {detail}")
         log.info(
@@ -347,12 +366,6 @@ class MediaWorker:
                     "extraction result stale for %s; newer canonical input preserved",
                     job.sidecar_path.name,
                 )
-                if current_sidecar == expected_sidecar and current_binary != expected_binary:
-                    preserve.update_sidecar_processing_pending(
-                        self._vault_root,
-                        job.sidecar_path,
-                        attempts=max(1, job.attempts),
-                    )
                 return False
             if media_processing.has_completed_transcript(
                 current_content, media_type=job.media_type
@@ -391,12 +404,6 @@ class MediaWorker:
                     "processing failure stale for %s; newer canonical input preserved",
                     job.sidecar_path.name,
                 )
-                if current_sidecar == expected_sidecar and current_binary != expected_binary:
-                    preserve.update_sidecar_processing_pending(
-                        self._vault_root,
-                        job.sidecar_path,
-                        attempts=max(1, job.attempts),
-                    )
                 return False
             try:
                 current_content = job.sidecar_path.read_text(encoding="utf-8")
@@ -736,9 +743,13 @@ def run_child(vault_root: Path, *, parent_pid: int, idle_seconds: float) -> int:
                         current_content = ""
                     from . import media_processing
 
+                    binary_only_stale = (
+                        "media identity changed" in (outcome.error or "")
+                        and "sidecar content changed" not in (outcome.error or "")
+                    )
                     if media_processing.has_completed_transcript(
                         current_content, media_type=job.media_type
-                    ) or "media identity changed" in (outcome.error or ""):
+                    ) or binary_only_stale:
                         store.discard(job)
                     else:
                         store.mark(

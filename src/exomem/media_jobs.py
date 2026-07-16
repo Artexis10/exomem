@@ -594,6 +594,10 @@ def _status_job(row: Any) -> dict[str, Any]:
         )
     if state == BLOCKED and error and error.startswith("MediaRuntimeUnavailable:"):
         actions[BLOCKED] = "fix the media runtime configuration, restart the service, then retry"
+    if state == FAILED and error and "sidecar content changed" in error:
+        actions[FAILED] = "review the sidecar changes, then retry media processing"
+    elif state == FAILED and error and error.startswith("stale extraction:"):
+        actions[FAILED] = "retry media processing"
     return {
         "id": int(row["id"]),
         "path": str(row["binary_rel"]),
