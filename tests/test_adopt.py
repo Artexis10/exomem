@@ -311,6 +311,102 @@ def test_adopt_semantic_census_rejects_file_growth_during_bounded_read(
     assert census["categories"]["raw_frequencies"] == {}
 
 
+@pytest.mark.parametrize(
+    ("extra_entries", "expected_truncated"),
+    [(0, False), (1, True)],
+)
+def test_adopt_semantic_census_exact_entry_budget_uses_bounded_sentinel_probe(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    extra_entries: int,
+    expected_truncated: bool,
+) -> None:
+    vault = _legacy_vault(tmp_path, kb=False)
+    focus = vault / "Focus"
+    focus.mkdir()
+    entry_budget = semantic_census._directory_entry_budget(1)
+    for index in range(entry_budget + extra_entries):
+        (focus / f"ordinary-{index:03d}.bin").write_bytes(b"not markdown")
+    real_scandir = os.scandir
+    probes = 0
+
+    class ProbedScandir:
+        def __init__(self, target: object) -> None:
+            self._inner = real_scandir(target)
+
+        def __enter__(self) -> ProbedScandir:
+            self._inner.__enter__()
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            self._inner.__exit__(*args)
+
+        def __iter__(self) -> ProbedScandir:
+            return self
+
+        def __next__(self) -> os.DirEntry[str]:
+            nonlocal probes
+            probes += 1
+            return next(self._inner)
+
+    monkeypatch.setattr(semantic_census.os, "scandir", ProbedScandir)
+
+    census = semantic_census.scan(vault, path="Focus", max_files=1)
+
+    assert census["limits"]["max_directory_entries"] == entry_budget + 1
+    assert probes <= census["limits"]["max_directory_entries"]
+    assert census["coverage"]["truncated"] is expected_truncated
+    assert (
+        census["coverage"]["directory_entry_budget_exhausted"]
+        is expected_truncated
+    )
+
+
+def test_adopt_semantic_census_revalidates_parent_identity_after_enumeration(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    vault = _legacy_vault(tmp_path, kb=False)
+    focus = vault / "Focus"
+    child = focus / "child"
+    child.mkdir(parents=True)
+    (child / "candidate.md").write_text("- [safe] Inside.\n", encoding="utf-8")
+    outside = vault / "Outside"
+    outside.mkdir()
+    (outside / "candidate.md").write_text("- [escaped] Outside.\n", encoding="utf-8")
+    parked = focus / "parked"
+    real_open = semantic_census._open_regular_file_descriptor
+    received_ancestors: list[object] = []
+    swapped = False
+
+    def swap_parent_before_open(
+        root: Path,
+        path: Path,
+        **kwargs: object,
+    ) -> int:
+        nonlocal swapped
+        received_ancestors.append(kwargs.get("expected_ancestors"))
+        if not swapped:
+            child.rename(parked)
+            child.symlink_to(outside, target_is_directory=True)
+            swapped = True
+        if kwargs:
+            return real_open(root, path, **kwargs)
+        return real_open(root, path)
+
+    monkeypatch.setattr(
+        semantic_census,
+        "_open_regular_file_descriptor",
+        swap_parent_before_open,
+    )
+
+    census = semantic_census.scan(vault, path="Focus")
+
+    assert received_ancestors and received_ancestors[0]
+    assert census["categories"]["raw_frequencies"] == {}
+    assert census["coverage"]["unreadable_files"] >= 1
+
+
 def test_adopt_scan_only_semantic_census_reports_saved_governance_read_only(
     tmp_path: Path,
 ) -> None:

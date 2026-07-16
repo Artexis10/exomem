@@ -34,7 +34,8 @@ _SKIP_DEFAULT = frozenset({"_trash", "_attachments", ".trash"})
 
 
 def _directory_entry_budget(max_files: int) -> int:
-    return max(MIN_DIRECTORY_ENTRY_BUDGET, max_files * DIRECTORY_ENTRIES_PER_FILE)
+    work_budget = max(MIN_DIRECTORY_ENTRY_BUDGET, max_files * DIRECTORY_ENTRIES_PER_FILE)
+    return work_budget - 1
 
 
 def _is_reparse(info: os.stat_result) -> bool:
@@ -61,7 +62,56 @@ def _same_file_state(left: os.stat_result, right: os.stat_result) -> bool:
     )
 
 
-def _open_regular_file_descriptor(root: Path, path: Path) -> int:
+def _directory_identity_chain(
+    root: Path,
+    directory: Path,
+) -> tuple[vault.PathIdentity, ...]:
+    relative = directory.relative_to(root)
+    paths = [Path(".")]
+    current = Path()
+    for component in relative.parts:
+        current /= component
+        paths.append(current)
+    identities: list[vault.PathIdentity] = []
+    for relative_path in paths:
+        disk_path = root if relative_path == Path(".") else root / relative_path
+        info = disk_path.lstat()
+        if (
+            not stat.S_ISDIR(info.st_mode)
+            or stat.S_ISLNK(info.st_mode)
+            or _is_reparse(info)
+        ):
+            raise RuntimeError("unsafe census directory")
+        identities.append(vault._identity(relative_path.as_posix(), info))
+    return tuple(identities)
+
+
+def _directory_identities_current(
+    root: Path,
+    expected_ancestors: tuple[vault.PathIdentity, ...],
+) -> bool:
+    for expected in expected_ancestors:
+        path = root if expected.relative_path == "." else root / expected.relative_path
+        try:
+            current = path.lstat()
+        except OSError:
+            return False
+        if (
+            not stat.S_ISDIR(current.st_mode)
+            or stat.S_ISLNK(current.st_mode)
+            or _is_reparse(current)
+            or not vault._same_identity(expected, current)
+        ):
+            return False
+    return True
+
+
+def _open_regular_file_descriptor(
+    root: Path,
+    path: Path,
+    *,
+    expected_ancestors: tuple[vault.PathIdentity, ...],
+) -> int:
     flags = (
         os.O_RDONLY
         | getattr(os, "O_BINARY", 0)
@@ -69,7 +119,8 @@ def _open_regular_file_descriptor(root: Path, path: Path) -> int:
         | getattr(os, "O_NOFOLLOW", 0)
     )
     if os.name == "nt":  # pragma: no cover - exercised on Windows CI
-        from . import vault
+        if not _directory_identities_current(root, expected_ancestors):
+            raise RuntimeError("census directory changed before file open")
 
         return vault._open_windows_path_descriptor(
             path,
@@ -89,13 +140,22 @@ def _open_regular_file_descriptor(root: Path, path: Path) -> int:
 
     directory_fd: int | None = None
     file_fd: int | None = None
+    expected_by_path = {
+        identity.relative_path: identity for identity in expected_ancestors
+    }
     try:
         directory_flags = os.O_RDONLY | directory | nofollow | getattr(os, "O_CLOEXEC", 0)
         directory_fd = os.open(root, directory_flags)
         root_info = os.fstat(directory_fd)
-        if not stat.S_ISDIR(root_info.st_mode) or _is_reparse(root_info):
+        if (
+            not stat.S_ISDIR(root_info.st_mode)
+            or _is_reparse(root_info)
+            or not vault._same_identity(expected_by_path["."], root_info)
+        ):
             raise RuntimeError("unsafe census root")
+        traversed = Path()
         for component in parts[:-1]:
+            traversed /= component
             next_fd = os.open(
                 component,
                 directory_flags,
@@ -104,7 +164,13 @@ def _open_regular_file_descriptor(root: Path, path: Path) -> int:
             os.close(directory_fd)
             directory_fd = next_fd
             directory_info = os.fstat(directory_fd)
-            if not stat.S_ISDIR(directory_info.st_mode) or _is_reparse(directory_info):
+            expected = expected_by_path.get(traversed.as_posix())
+            if (
+                expected is None
+                or not stat.S_ISDIR(directory_info.st_mode)
+                or _is_reparse(directory_info)
+                or not vault._same_identity(expected, directory_info)
+            ):
                 raise RuntimeError("unsafe census directory")
         file_fd = os.open(parts[-1], flags, dir_fd=directory_fd)
         descriptor = file_fd
@@ -121,6 +187,9 @@ def _read_regular_file_bounded(
     root: Path,
     path: Path,
     remaining: int,
+    *,
+    expected_ancestors: tuple[vault.PathIdentity, ...],
+    expected_file: vault.PathIdentity,
 ) -> tuple[str, bytes | None]:
     """Read one stable regular file without following links or exceeding remaining+1."""
     try:
@@ -131,11 +200,17 @@ def _read_regular_file_bounded(
         not stat.S_ISREG(expected.st_mode)
         or stat.S_ISLNK(expected.st_mode)
         or _is_reparse(expected)
+        or not vault._same_identity(expected_file, expected)
+        or not _directory_identities_current(root, expected_ancestors)
     ):
         return "unsafe", None
 
     try:
-        descriptor = _open_regular_file_descriptor(root, path)
+        descriptor = _open_regular_file_descriptor(
+            root,
+            path,
+            expected_ancestors=expected_ancestors,
+        )
     except (OSError, RuntimeError, ValueError):
         return "unsafe", None
     try:
@@ -143,7 +218,7 @@ def _read_regular_file_bounded(
         if (
             not stat.S_ISREG(opened.st_mode)
             or _is_reparse(opened)
-            or not _same_identity(expected, opened)
+            or not vault._same_identity(expected_file, opened)
         ):
             return "unsafe", None
         if opened.st_size > remaining:
@@ -171,7 +246,12 @@ def _read_regular_file_bounded(
         current = path.lstat()
     except OSError:
         return "unsafe", None
-    if _is_reparse(current) or not _same_file_state(opened, current):
+    if (
+        not _directory_identities_current(root, expected_ancestors)
+        or _is_reparse(current)
+        or not vault._same_identity(expected_file, current)
+        or not _same_file_state(opened, current)
+    ):
         return "unsafe", None
     return "ok", b"".join(chunks)
 
@@ -434,7 +514,8 @@ def scan(
         hard_max=HARD_EXAMPLE_LIMIT,
         name="example_limit",
     )
-    effective_max_directory_entries = _directory_entry_budget(effective_max_files)
+    effective_directory_entry_budget = _directory_entry_budget(effective_max_files)
+    effective_max_directory_entries = effective_directory_entry_budget + 1
 
     language = semantic_language_registry.load_registry(root_path)
     relations = relation_registry.load_registry(root_path)
@@ -459,29 +540,51 @@ def scan(
     unreadable_directories = 0
     enumeration_incomplete = False
     directory_entry_budget_exhausted = False
-    pending_directories = [scan_root]
+    try:
+        initial_ancestors = _directory_identity_chain(root_path, scan_root)
+    except (OSError, RuntimeError, ValueError):
+        initial_ancestors = ()
+        enumeration_incomplete = True
+        unreadable_directories += 1
+    pending_directories = (
+        [(scan_root, initial_ancestors)] if initial_ancestors else []
+    )
+    directory_entries_admitted = 0
 
     while pending_directories:
-        dirpath = pending_directories.pop()
+        dirpath, expected_ancestors = pending_directories.pop()
+        if not _directory_identities_current(root_path, expected_ancestors):
+            unreadable_directories += 1
+            enumeration_incomplete = True
+            continue
         entries: list[os.DirEntry[str]] = []
+        sentinel_observed = False
         try:
             with os.scandir(dirpath) as iterator:
-                while directory_entries_enumerated < effective_max_directory_entries:
+                while directory_entries_admitted < effective_directory_entry_budget:
                     try:
                         entry = next(iterator)
                     except StopIteration:
                         break
                     directory_entries_enumerated += 1
+                    directory_entries_admitted += 1
                     entries.append(entry)
+                if directory_entries_admitted >= effective_directory_entry_budget:
+                    try:
+                        next(iterator)
+                    except StopIteration:
+                        pass
+                    else:
+                        directory_entries_enumerated += 1
+                        sentinel_observed = True
         except OSError:
             unreadable_directories += 1
             enumeration_incomplete = True
             continue
 
-        reached_entry_budget = (
-            directory_entries_enumerated >= effective_max_directory_entries
-        )
-        child_directories: list[Path] = []
+        child_directories: list[
+            tuple[Path, tuple[vault.PathIdentity, ...]]
+        ] = []
         for entry in sorted(entries, key=lambda item: item.name):
             filename = entry.name
             try:
@@ -504,7 +607,14 @@ def scan(
                 ):
                     hidden_omitted += 1
                     continue
-                child_directories.append(Path(entry.path))
+                child_path = Path(entry.path)
+                child_identity = vault._identity(
+                    child_path.relative_to(root_path).as_posix(),
+                    entry_info,
+                )
+                child_directories.append(
+                    (child_path, (*expected_ancestors, child_identity))
+                )
                 continue
             if not include_hidden and filename.startswith("."):
                 hidden_omitted += 1
@@ -516,10 +626,16 @@ def scan(
                 markdown_omitted += 1
                 continue
             disk_path = Path(entry.path)
+            expected_file = vault._identity(
+                disk_path.relative_to(root_path).as_posix(),
+                entry_info,
+            )
             read_status, raw = _read_regular_file_bounded(
                 root_path,
                 disk_path,
                 effective_max_bytes - bytes_scanned,
+                expected_ancestors=expected_ancestors,
+                expected_file=expected_file,
             )
             if read_status == "oversized":
                 markdown_omitted += 1
@@ -573,6 +689,10 @@ def scan(
                             "remediation": diagnostic.remediation,
                         }
                     )
+        reached_entry_budget = sentinel_observed or (
+            directory_entries_admitted >= effective_directory_entry_budget
+            and bool(pending_directories or child_directories)
+        )
         if reached_entry_budget:
             enumeration_incomplete = True
             directory_entry_budget_exhausted = True
