@@ -16,6 +16,7 @@ from exomem import (
     semantic_index,
     semantic_language_registry,
 )
+from exomem import find as find_module
 
 _PAGE_ID = "33333333-3333-4333-8333-333333333333"
 _SOURCE = "Knowledge Base/Notes/Insights/unit-source.md"
@@ -195,6 +196,7 @@ def test_graph_context_reports_ambiguous_unit_ref_without_selecting_a_collision(
 
 def test_graph_context_ignores_deleted_parent_ref_collision(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _write(tmp_path, _TARGET, "---\ntype: insight\n---\n# Target\n")
     first = _write(
@@ -212,13 +214,25 @@ def test_graph_context_ignores_deleted_parent_ref_collision(
     unit_ref = semantic_index.build_parent_index_state(tmp_path, first).document.units[
         0
     ].unit_ref
+    kb = tmp_path / "Knowledge Base"
+    paths = sorted(find_module._walk_md(kb), reverse=True)
+    monkeypatch.setattr(find_module, "_walk_md", lambda _root: iter(paths))
     epistemic_graph.EpistemicGraphIndex(tmp_path).rebuild_all()
     first.unlink()
 
-    context = epistemic_graph.graph_context(tmp_path, unit_ref=unit_ref, depth=0)
+    context = epistemic_graph.graph_context(tmp_path, unit_ref=unit_ref, depth=1)
 
     assert context["unit_status"] == "found"
     assert _seed_refs(context) == [unit_ref]
+    assert {edge["source_path"] for edge in context["edges"]} == {
+        "Knowledge Base/Notes/Insights/second.md"
+    }
+    assert any(
+        node["node_key"] == context["seeds"][0]["node_key"]
+        and node["path"] == "Knowledge Base/Notes/Insights/second.md"
+        for node in context["nodes"]
+    )
+    assert context["warnings"][0]["reasons"]["current_graph_row_overwritten"] == 1
     with pytest.raises(ValueError, match="INVALID_CONTEXT.*unit_ref.*path"):
         commands.op_connect_memory(
             tmp_path,
@@ -227,6 +241,41 @@ def test_graph_context_ignores_deleted_parent_ref_collision(
             unit_ref=unit_ref,
             depth=0,
         )
+
+
+def test_graph_context_rejects_collision_recovery_when_survivor_graph_is_stale(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first = _write(
+        tmp_path,
+        "Knowledge Base/Notes/Insights/first.md",
+        f"---\ntype: insight\nexomem_id: {_PAGE_ID}\n---\n"
+        "# First\n\n- [config] First unit ^shared\n",
+    )
+    second = _write(
+        tmp_path,
+        "Knowledge Base/Notes/Insights/second.md",
+        f"---\ntype: insight\nexomem_id: {_PAGE_ID}\n---\n"
+        "# Second\n\n- [config] Second unit ^shared\n",
+    )
+    unit_ref = semantic_index.build_parent_index_state(tmp_path, first).document.units[
+        0
+    ].unit_ref
+    kb = tmp_path / "Knowledge Base"
+    paths = sorted(find_module._walk_md(kb), reverse=True)
+    monkeypatch.setattr(find_module, "_walk_md", lambda _root: iter(paths))
+    epistemic_graph.EpistemicGraphIndex(tmp_path).rebuild_all()
+    first.unlink()
+    second.write_text(
+        second.read_text(encoding="utf-8").replace("Second unit", "Changed second unit"),
+        encoding="utf-8",
+    )
+
+    context = epistemic_graph.graph_context(tmp_path, unit_ref=unit_ref, depth=1)
+
+    assert context["unit_status"] == "stale"
+    assert context["seeds"] == []
 
 
 @pytest.mark.parametrize("mutation", ["ref_changed", "unit_removed"])

@@ -615,6 +615,7 @@ def graph_context(
         seed_cap_hit = False
         unit_work_exhausted = False
         unit_parent_work_exhausted = False
+        seed_node_overrides: dict[str, dict[str, Any]] = {}
         seeds: list[dict[str, Any]]
         if unit_ref is not None:
             indexed = _seed_nodes(
@@ -632,6 +633,7 @@ def graph_context(
             (
                 resolved_status,
                 current_parent_paths,
+                canonical_seeds,
                 parent_drift_counts,
                 unit_parent_work_exhausted,
             ) = _current_unit_status(conn, vault_root, unit_ref)
@@ -640,17 +642,44 @@ def graph_context(
             current = [
                 seed for seed in current if str(seed.get("path") or "") in current_parent_paths
             ]
-            if resolved_status == "ambiguous" or len(current) > 1:
+            collision_candidate = (
+                resolved_status == "found"
+                and bool(indexed)
+                and bool(canonical_seeds)
+                and not any(
+                    str(seed.get("path") or "") in current_parent_paths
+                    for seed in indexed
+                )
+            )
+            recovery_seeds = (
+                [
+                    seed
+                    for seed in canonical_seeds
+                    if _current_unit_seed_has_graph_proof(conn, seed)
+                ]
+                if collision_candidate
+                else []
+            )
+            collision_recovery = bool(recovery_seeds)
+            if resolved_status == "ambiguous":
                 unit_status = "ambiguous"
                 seeds = []
             elif unit_parent_work_exhausted:
                 unit_status = "stale"
                 seeds = []
-            elif current and resolved_status == "found":
+            elif resolved_status == "found" and (current or collision_recovery):
                 unit_status = "found"
+                if collision_recovery:
+                    drift_counts["current_graph_row_overwritten"] = 1
                 seeds = _filter_unit_nodes(
-                    current, categories=category_filter, kinds=kind_filter
+                    current or recovery_seeds,
+                    categories=category_filter,
+                    kinds=kind_filter,
                 )
+                if collision_recovery:
+                    seed_node_overrides.update(
+                        (str(seed["node_key"]), seed) for seed in seeds
+                    )
                 if category_filter is not None or kind_filter is not None:
                     unit_filter_status = "matched" if seeds else "excluded"
             elif indexed:
@@ -789,7 +818,14 @@ def graph_context(
             node
             for node in _nodes_by_keys(conn, seen_nodes)
             if _current_record(node, parent_path=str(node.get("path") or ""))
-        ] + [
+        ]
+        present_node_keys = {str(node["node_key"]) for node in nodes}
+        nodes.extend(
+            seed_node_overrides[key]
+            for key in sorted(seed_node_overrides)
+            if key in seen_nodes and key not in present_node_keys
+        )
+        nodes += [
             placeholder_nodes[key] for key in sorted(placeholder_nodes)
         ]
         edges = list(seen_edges.values())
@@ -1785,11 +1821,11 @@ def _resolved_unit_filters(
 
 def _current_unit_status(
     conn: sqlite3.Connection, vault_root: Path, unit_ref: str
-) -> tuple[str, list[str], dict[str, int], bool]:
+) -> tuple[str, list[str], list[dict[str, Any]], dict[str, int], bool]:
     parent_ref, separator, _fragment = str(unit_ref or "").rpartition("#")
     if not separator or not parent_ref:
-        return "missing", [], {}, False
-    paths, drift_counts, work_exhausted = _current_unit_parent_paths(
+        return "missing", [], [], {}, False
+    paths, seeds, drift_counts, work_exhausted = _current_unit_parent_paths(
         conn,
         vault_root,
         parent_ref=parent_ref,
@@ -1797,12 +1833,12 @@ def _current_unit_status(
     )
     if work_exhausted:
         drift_counts["parent_ref_validation_work_exhausted"] = 1
-        return "stale", paths, drift_counts, True
+        return "stale", paths, seeds, drift_counts, True
     if len(paths) > 1:
-        return "ambiguous", paths, drift_counts, False
+        return "ambiguous", paths, seeds, drift_counts, False
     if not paths:
-        return "missing", [], drift_counts, False
-    return "found", paths, drift_counts, False
+        return "missing", [], [], drift_counts, False
+    return "found", paths, seeds, drift_counts, False
 
 
 def _current_unit_parent_paths(
@@ -1811,13 +1847,14 @@ def _current_unit_parent_paths(
     *,
     parent_ref: str,
     unit_ref: str,
-) -> tuple[list[str], dict[str, int], bool]:
+) -> tuple[list[str], list[dict[str, Any]], dict[str, int], bool]:
     rows = conn.execute(
         "SELECT path FROM graph_parent_refs WHERE parent_ref = ? "
         "ORDER BY path LIMIT ?",
         (parent_ref, UNIT_PARENT_REF_MAX_CANDIDATES + 1),
     ).fetchall()
     current_paths: list[str] = []
+    current_seeds: list[dict[str, Any]] = []
     drift_counts: dict[str, int] = {}
     for row in rows[:UNIT_PARENT_REF_MAX_CANDIDATES]:
         rel = str(row[0])
@@ -1846,18 +1883,62 @@ def _current_unit_parent_paths(
                 drift_counts.get("invalid_current_parent", 0) + 1
             )
             continue
-        if state.document.resolve_unit(unit_ref).status != "found":
+        resolution = state.document.resolve_unit(unit_ref)
+        if resolution.status != "found" or resolution.unit is None:
             drift_counts["missing_current_unit"] = (
                 drift_counts.get("missing_current_unit", 0) + 1
             )
             continue
+        page = find_module._parse_page(
+            path,
+            0.0,
+            vault_root,
+            content=source.encode("utf-8"),
+        )
+        if page is None:
+            drift_counts["invalid_current_parent"] = (
+                drift_counts.get("invalid_current_parent", 0) + 1
+            )
+            continue
         current_paths.append(rel)
+        current_seeds.append(_unit_node(page, resolution.unit, state).as_dict())
         if len(current_paths) == 2:
-            return current_paths, drift_counts, False
+            return current_paths, current_seeds, drift_counts, False
     return (
         current_paths,
+        current_seeds,
         drift_counts,
         len(rows) > UNIT_PARENT_REF_MAX_CANDIDATES,
+    )
+
+
+def _current_unit_seed_has_graph_proof(
+    conn: sqlite3.Connection, seed: dict[str, Any]
+) -> bool:
+    metadata = seed.get("metadata")
+    if not isinstance(metadata, dict):
+        return False
+    node_key = str(seed.get("node_key") or "")
+    parent_path = str(seed.get("path") or "")
+    if not node_key or not parent_path:
+        return False
+    origin = "semantic_block" if metadata.get("form") == "rich" else "semantic_unit"
+    rows = conn.execute(
+        "SELECT metadata FROM graph_edges "
+        "WHERE src_key = ? AND dst_key = ? AND relation_type = 'derived_from' "
+        "AND origin = ? AND source_path = ? ORDER BY edge_key LIMIT 2",
+        (node_key, _file_key(parent_path), origin, parent_path),
+    ).fetchall()
+    generation_fields = (
+        "record_type",
+        "unit_ref",
+        "parent_generation",
+        "parent_source_hash",
+        "parser_version",
+    )
+    return any(
+        all(_json(row[0]).get(field) == metadata.get(field) for field in generation_fields)
+        for row in rows
     )
 
 
@@ -1869,7 +1950,7 @@ def indexed_unit_parent_path_resolution(
         return [], False
     conn = idx._connect()
     try:
-        _status, paths, _drift_counts, work_exhausted = _current_unit_status(
+        _status, paths, _seeds, _drift_counts, work_exhausted = _current_unit_status(
             conn, vault_root, unit_ref
         )
         return paths, work_exhausted
