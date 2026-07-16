@@ -139,6 +139,9 @@ class MediaJobStore:
                     "CREATE INDEX IF NOT EXISTS jobs_state_id ON jobs(state, id)"
                 )
                 conn.execute(
+                    "CREATE INDEX IF NOT EXISTS jobs_binary_rel ON jobs(binary_rel)"
+                )
+                conn.execute(
                     """
                     CREATE TABLE IF NOT EXISTS runtime (
                         singleton INTEGER PRIMARY KEY CHECK (singleton = 1),

@@ -68,6 +68,20 @@ def test_has_binary_uses_exact_vault_relative_path(vault: Path) -> None:
     assert store.has_binary(sibling) is False
 
 
+def test_has_binary_uses_binary_relative_index(vault: Path) -> None:
+    store = media_jobs.MediaJobStore(vault)
+    conn = store._connect(readonly=True)
+    try:
+        plan = conn.execute(
+            "EXPLAIN QUERY PLAN SELECT 1 FROM jobs WHERE binary_rel = ? LIMIT 1",
+            ("Knowledge Base/Evidence/exact.mp3",),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    assert any("jobs_binary_rel" in str(row[3]) for row in plan)
+
+
 def test_discovery_cursor_is_durable_and_vault_relative(vault: Path) -> None:
     store = media_jobs.MediaJobStore(vault)
     binary = _job(vault, name="cursor.mp3").binary_path
