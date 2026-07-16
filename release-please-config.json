@@ -41,6 +41,10 @@
         {
           "type": "generic",
           "path": "src/exomem/__init__.py"
+        },
+        {
+          "type": "generic",
+          "path": "uv.lock"
         }
       ]
     }
