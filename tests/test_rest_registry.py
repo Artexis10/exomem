@@ -35,6 +35,16 @@ PRODUCT_ROUTES = [
     "query_dataset",
 ]
 
+REVIEW_FIELDS = {
+    "validate_only",
+    "draft_id",
+    "draft_hash",
+    "draft_token",
+    "relation_disposition",
+    "relation_review_hash",
+    "relation_review_reason",
+}
+
 
 def _client(vault, monkeypatch: pytest.MonkeyPatch, **env: str) -> TestClient:
     monkeypatch.setattr(server, "load_dotenv", lambda *a, **k: None)
@@ -202,6 +212,45 @@ def test_remember_route_preserves_unicode_title_and_explicit_slug(
     assert yaml.safe_load(frontmatter)["title"] == "睡眠"
 
 
+def test_remember_route_completes_creation_review_round_trip(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client = _client(vault, monkeypatch, EXOMEM_REST_API_KEY="sekret")
+    base = {
+        "title": "REST review round trip",
+        "slug": "rest-review-round-trip",
+        "content": "# REST review round trip\n\nA disconnected conclusion.\n",
+        "suggestions": False,
+    }
+    validation_response = client.post(
+        "/api/remember",
+        json={**base, "validate_only": True},
+        headers=_auth(),
+    )
+    assert validation_response.status_code == 200, validation_response.text
+    validation = validation_response.json()["data"]
+    assert validation["mutated"] is False
+    assert not (vault / validation["destination"]).exists()
+
+    commit_response = client.post(
+        "/api/remember",
+        json={
+            **base,
+            "draft_id": validation["draft_id"],
+            "draft_hash": validation["draft_hash"],
+            "draft_token": validation["draft_token"],
+            "relation_disposition": "reviewed_none",
+            "relation_review_hash": validation["draft_hash"],
+            "relation_review_reason": "No honest relation exists in the fixture corpus.",
+        },
+        headers=_auth(),
+    )
+    assert commit_response.status_code == 200, commit_response.text
+    result = commit_response.json()["data"]
+    assert result["path"] == validation["destination"]
+    assert (vault / result["path"]).is_file()
+
+
 def test_unknown_param_rejected(vault, monkeypatch: pytest.MonkeyPatch) -> None:
     client = _client(vault, monkeypatch, EXOMEM_REST_API_KEY="sekret")
     r = client.post(
@@ -249,14 +298,25 @@ def test_openapi_lists_real_product_params(vault, monkeypatch: pytest.MonkeyPatc
         "application/json"
     ]["schema"]
     props = ask_schema["properties"]
-    assert {"query", "limit", "scope", "mode", "tags", "deep"} <= set(props)
+    assert {
+        "query",
+        "limit",
+        "scope",
+        "mode",
+        "tags",
+        "deep",
+        "categories",
+        "kinds",
+        "filters",
+        "result_level",
+    } <= set(props)
     assert props["limit"]["type"] == "integer"
     assert props["graph"]["type"] == "boolean"
     assert props["tags"]["type"] == "array"
     remember_schema = doc["paths"]["/api/remember"]["post"]["requestBody"]["content"][
         "application/json"
     ]["schema"]
-    assert "slug" in remember_schema["properties"]
+    assert {"slug", *REVIEW_FIELDS} <= set(remember_schema["properties"])
     read_schema = doc["paths"]["/api/read_memory"]["post"]["requestBody"]["content"][
         "application/json"
     ]["schema"]

@@ -1,12 +1,4 @@
 {
-  "coordination_status": {
-    "description": "Report this replica's writer-lease role and coordinator health.\n\nRead-only and safe during coordinator outages. Credentials and vault content\nare never included.",
-    "inputSchema": {
-      "additionalProperties": false,
-      "properties": {},
-      "type": "object"
-    }
-  },
   "adopt_vault": {
     "description": "Adopt an existing vault safely without replacing originals.\n\nDefault mode scans only. Copy/compile modes write under the governed\nKnowledge Base layer and preserve original path/hash provenance.",
     "inputSchema": {
@@ -172,6 +164,54 @@
           ],
           "default": null,
           "description": "Optional artifact kinds to exclude."
+        },
+        "categories": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Semantic-unit category shortcuts, such as config or rule."
+        },
+        "kinds": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Semantic-unit kind shortcuts, such as decision or claim."
+        },
+        "filters": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Structured page/unit metadata filters."
+        },
+        "result_level": {
+          "default": "auto",
+          "description": "auto, page, unit, or mixed.",
+          "type": "string"
         },
         "limit": {
           "default": 15,
@@ -846,6 +886,14 @@
       "type": "object"
     }
   },
+  "coordination_status": {
+    "description": "Report this replica's writer-lease role and coordinator health.\n\nRead-only and safe during coordinator outages. Credentials and vault content\nare never included.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {},
+      "type": "object"
+    }
+  },
   "edit_memory": {
     "description": "Edit an existing memory page with an auditable reason.\n\nUse for small corrections, section edits, batch string edits, opinion-row\nfills, or one frontmatter field. Substantial rewrites should use\n`replace_memory` so history stays explicit.",
     "inputSchema": {
@@ -1251,6 +1299,83 @@
           ],
           "default": null,
           "description": "YYYY-MM-DD filter for trash-list."
+        },
+        "validate_only": {
+          "default": false,
+          "description": "Validate a Markdown create-file operation without writing.",
+          "type": "boolean"
+        },
+        "draft_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Draft identity returned by validate_only."
+        },
+        "draft_hash": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Exact reviewed draft hash returned by validate_only."
+        },
+        "draft_token": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Opaque destination/date token returned by validate_only."
+        },
+        "relation_disposition": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Reviewed relation outcome for semantic file creation."
+        },
+        "relation_review_hash": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Draft hash covered by the relation review."
+        },
+        "relation_review_reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Audit reason for a reviewed-none disposition."
         }
       },
       "type": "object"
@@ -1797,6 +1922,83 @@
           ],
           "default": null,
           "description": "Category for a new project key."
+        },
+        "validate_only": {
+          "default": false,
+          "description": "Validate and return an immutable creation draft without writing.",
+          "type": "boolean"
+        },
+        "draft_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Draft identity returned by validate_only."
+        },
+        "draft_hash": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Exact reviewed draft hash returned by validate_only."
+        },
+        "draft_token": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Opaque destination/date token returned by validate_only."
+        },
+        "relation_disposition": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Reviewed relation outcome for commit."
+        },
+        "relation_review_hash": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Draft hash covered by the relation review."
+        },
+        "relation_review_reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Audit reason for a reviewed-none disposition."
         }
       },
       "required": [
@@ -2088,6 +2290,83 @@
           ],
           "default": null,
           "description": "Category for a new project key."
+        },
+        "validate_only": {
+          "default": false,
+          "description": "Validate the replacement draft without writing either page.",
+          "type": "boolean"
+        },
+        "draft_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Draft identity returned by validate_only."
+        },
+        "draft_hash": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Exact reviewed draft hash returned by validate_only."
+        },
+        "draft_token": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Opaque destination/date token returned by validate_only."
+        },
+        "relation_disposition": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Reviewed relation outcome for commit."
+        },
+        "relation_review_hash": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Draft hash covered by the relation review."
+        },
+        "relation_review_reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Audit reason for a reviewed-none disposition."
         }
       },
       "required": [

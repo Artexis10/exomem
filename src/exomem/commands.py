@@ -481,6 +481,10 @@ def op_find(
     speakers: list[str] | None = None,
     file_types: list[str] | None = None,
     exclude_file_types: list[str] | None = None,
+    categories: list[str] | None = None,
+    kinds: list[str] | None = None,
+    filters: dict[str, Any] | None = None,
+    result_level: str = "auto",
     limit: int = 15,
     scope: str = "kb",
     mode: str = "hybrid",
@@ -515,6 +519,11 @@ def op_find(
             (csv/json). Omit to return ALL kinds (the default — search never
             hides a type unless you ask).
         exclude_file_types: Drop these kinds from results (same vocabulary).
+        categories: Semantic-unit category shortcuts, such as config or rule.
+        kinds: Semantic-unit kind shortcuts, such as decision or claim.
+        filters: Structured page/unit metadata filters.
+        result_level: auto, page, unit, or mixed. Auto preserves page recall
+            unless semantic-unit filters request independently ranked units.
         limit: Max hits to return. Default 15, hard cap 100.
         scope: "kb" (default) searches Knowledge Base/ first and
             AUTO-WIDENS to the whole vault when the KB doesn't fill
@@ -664,6 +673,7 @@ def op_find(
                 "prefer_compiled": prefer_compiled,
                 "prefer_active": prefer_active,
                 "prefer_used": prefer_used,
+                "result_level": result_level,
                 "compute_policy": mode_module.resolved(),
             }
         )
@@ -678,6 +688,10 @@ def op_find(
         speakers=speakers,
         file_types=file_types,
         exclude_file_types=exclude_file_types,
+        categories=categories,
+        kinds=kinds,
+        filters=filters,
+        result_level=result_level,
         limit=limit,
         scope=scope,
         mode=mode,
@@ -695,6 +709,11 @@ def op_find(
     )
     pack_obj: dict | None = None
     if pack:
+        if any(isinstance(hit, find_module.SemanticUnitHit) for hit in hits):
+            raise ValueError(
+                "PACK_REQUIRES_PAGE_RESULTS: deep context currently requires "
+                "result_level='page'; use shallow semantic-unit recall first"
+            )
         with find_module._span(timings, "pack"):
             pack_obj = context_pack_module.assemble_pack(
                 vault_root, hits, graph_enrich=graph_enrich
@@ -1827,6 +1846,13 @@ def op_replace(
     host: str | None = None,
     editor: str | None = None,
     project_category: str | None = None,
+    validate_only: bool = False,
+    draft_id: str | None = None,
+    draft_hash: str | None = None,
+    draft_token: str | None = None,
+    relation_disposition: str | None = None,
+    relation_review_hash: str | None = None,
+    relation_review_reason: str | None = None,
 ) -> dict:
     """Supersede an existing compiled page with a new one.
 
@@ -1850,6 +1876,13 @@ def op_replace(
             happening; lands in the log entry body.
         (all other args): Same as the `note` tool — define the new page's
             content, type, project/projects, sources, etc.
+        validate_only: Validate the replacement draft without writing either page.
+        draft_id: Draft identity returned by validate_only.
+        draft_hash: Exact reviewed draft hash returned by validate_only.
+        draft_token: Opaque destination/date token returned by validate_only.
+        relation_disposition: Reviewed relation outcome for commit.
+        relation_review_hash: Draft hash covered by the relation review.
+        relation_review_reason: Audit reason for a reviewed-none disposition.
 
     Returns:
         {old_path, new_path, warnings}.
@@ -1888,6 +1921,13 @@ def op_replace(
             host=host,
             editor=editor,
             project_category=project_category,
+            validate_only=validate_only,
+            draft_id=draft_id,
+            draft_hash=draft_hash,
+            draft_token=draft_token,
+            relation_disposition=relation_disposition,
+            relation_review_hash=relation_review_hash,
+            relation_review_reason=relation_review_reason,
         )
     except replace_module.ReplaceError as e:
         raise ValueError(
@@ -1898,9 +1938,10 @@ def op_replace(
         raise ValueError(
             f"{e.code}: {e.reason} (missing: {e.missing})"
         ) from e
-    query_log.log_write_call(
-        tool="replace", written_path=result.new_path, cited_sources=sources
-    )
+    if written_path := getattr(result, "new_path", None):
+        query_log.log_write_call(
+            tool="replace", written_path=written_path, cited_sources=sources
+        )
     return result.as_dict()
 
 
@@ -2076,6 +2117,13 @@ def op_note(
     editor: str | None = None,
     suggestions: bool = True,
     project_category: str | None = None,
+    validate_only: bool = False,
+    draft_id: str | None = None,
+    draft_hash: str | None = None,
+    draft_token: str | None = None,
+    relation_disposition: str | None = None,
+    relation_review_hash: str | None = None,
+    relation_review_reason: str | None = None,
 ) -> dict:
     """Create a compiled note in the Knowledge Base.
 
@@ -2163,6 +2211,14 @@ def op_note(
             `connect_memory(operation="suggest-links")`, use
             `operation="suggest-relations"` when direction matters, and write
             accepted note-level edges under `## Relations`.
+        validate_only: Validate and return an immutable creation draft without writing.
+        draft_id: Draft identity returned by validate_only.
+        draft_hash: Exact reviewed draft hash returned by validate_only.
+        draft_token: Opaque destination/date token returned by validate_only.
+        relation_disposition: Reviewed relation outcome for commit, usually
+            reviewed_none when no honest relation exists.
+        relation_review_hash: Draft hash covered by the relation review.
+        relation_review_reason: Audit reason for a reviewed-none disposition.
 
     Returns:
         {path, warnings, suggestions?, write_feedback}. `write_feedback` is
@@ -2198,14 +2254,22 @@ def op_note(
             editor=editor,
             suggestions=suggestions,
             project_category=project_category,
+            validate_only=validate_only,
+            draft_id=draft_id,
+            draft_hash=draft_hash,
+            draft_token=draft_token,
+            relation_disposition=relation_disposition,
+            relation_review_hash=relation_review_hash,
+            relation_review_reason=relation_review_reason,
         )
     except note_module.NoteError as e:
         raise ValueError(
             f"{e.code}: {e.reason} (missing: {e.missing})"
         ) from e
-    query_log.log_write_call(
-        tool="note", written_path=result.path, cited_sources=sources
-    )
+    if written_path := getattr(result, "path", None):
+        query_log.log_write_call(
+            tool="note", written_path=written_path, cited_sources=sources
+        )
     return result.as_dict()
 
 
@@ -2297,6 +2361,13 @@ def op_create_file(
     allow_curated: bool = False,
     kind: str = "file",
     parents: bool = True,
+    validate_only: bool = False,
+    draft_id: str | None = None,
+    draft_hash: str | None = None,
+    draft_token: str | None = None,
+    relation_disposition: str | None = None,
+    relation_review_hash: str | None = None,
+    relation_review_reason: str | None = None,
 ) -> dict:
     """Tier 2: write a file — or, with `kind="dir"`, create a folder — at an
     arbitrary vault path.
@@ -2333,12 +2404,33 @@ def op_create_file(
             instead of a file (former `create_directory`).
         parents: In "dir" mode, create intermediate folders (mkdir -p).
             Default true.
+        validate_only: Validate a Markdown file creation/overwrite without writing.
+        draft_id: Draft identity returned by validate_only.
+        draft_hash: Exact reviewed draft hash returned by validate_only.
+        draft_token: Opaque destination/date token returned by validate_only.
+        relation_disposition: Reviewed relation outcome for semantic file creation.
+        relation_review_hash: Draft hash covered by the relation review.
+        relation_review_reason: Audit reason for a reviewed-none disposition.
 
     Returns: {path, warnings} for files; {path, created, warnings} for dirs.
     Errors: INVALID_PATH; APPEND_ONLY; CURATED_PROTECTED; FILE_EXISTS;
             NOT_A_FILE; (dir mode) NOT_A_DIR; MISSING_PARENT; MKDIR_FAILED.
     """
     if kind == "dir":
+        if validate_only or any(
+            value is not None
+            for value in (
+                draft_id,
+                draft_hash,
+                draft_token,
+                relation_disposition,
+                relation_review_hash,
+                relation_review_reason,
+            )
+        ):
+            raise ValueError(
+                "INVALID_CREATE: creation review fields apply only to kind='file'"
+            )
         try:
             result = create_directory_module.create_directory(
                 vault_root,
@@ -2357,6 +2449,13 @@ def op_create_file(
             frontmatter=frontmatter,
             overwrite=overwrite,
             allow_curated=allow_curated,
+            validate_only=validate_only,
+            draft_id=draft_id,
+            draft_hash=draft_hash,
+            draft_token=draft_token,
+            relation_disposition=relation_disposition,
+            relation_review_hash=relation_review_hash,
+            relation_review_reason=relation_review_reason,
         )
     except create_file_module.CreateFileError as e:
         raise ValueError(f"{e.code}: {e.reason}") from e
@@ -2848,6 +2947,10 @@ def op_ask_memory(
     speakers: list[str] | None = None,
     file_types: list[str] | None = None,
     exclude_file_types: list[str] | None = None,
+    categories: list[str] | None = None,
+    kinds: list[str] | None = None,
+    filters: dict[str, Any] | None = None,
+    result_level: str = "auto",
     limit: int = 15,
     scope: str = "kb",
     mode: str = "hybrid",
@@ -2878,6 +2981,10 @@ def op_ask_memory(
         speakers: Optional diarized speaker filters.
         file_types: Optional artifact kind filters such as pdf, image, csv, json.
         exclude_file_types: Optional artifact kinds to exclude.
+        categories: Semantic-unit category shortcuts, such as config or rule.
+        kinds: Semantic-unit kind shortcuts, such as decision or claim.
+        filters: Structured page/unit metadata filters.
+        result_level: auto, page, unit, or mixed.
         limit: Max hits. Default 15.
         scope: kb, vault, or kb-only.
         mode: hybrid, keyword, or vector.
@@ -2900,6 +3007,10 @@ def op_ask_memory(
         speakers=speakers,
         file_types=file_types,
         exclude_file_types=exclude_file_types,
+        categories=categories,
+        kinds=kinds,
+        filters=filters,
+        result_level=result_level,
         limit=limit,
         scope=scope,
         mode=mode,
@@ -3040,6 +3151,13 @@ def op_remember(
     editor: str | None = None,
     suggestions: bool = True,
     project_category: str | None = None,
+    validate_only: bool = False,
+    draft_id: str | None = None,
+    draft_hash: str | None = None,
+    draft_token: str | None = None,
+    relation_disposition: str | None = None,
+    relation_review_hash: str | None = None,
+    relation_review_reason: str | None = None,
 ) -> dict:
     """Remember a durable conclusion as compiled governed knowledge.
 
@@ -3072,6 +3190,13 @@ def op_remember(
         editor: Production editor/producer.
         suggestions: Include link suggestions in the result.
         project_category: Category for a new project key.
+        validate_only: Validate and return an immutable creation draft without writing.
+        draft_id: Draft identity returned by validate_only.
+        draft_hash: Exact reviewed draft hash returned by validate_only.
+        draft_token: Opaque destination/date token returned by validate_only.
+        relation_disposition: Reviewed relation outcome for commit.
+        relation_review_hash: Draft hash covered by the relation review.
+        relation_review_reason: Audit reason for a reviewed-none disposition.
     """
     return op_note(
         vault_root,
@@ -3099,6 +3224,13 @@ def op_remember(
         editor=editor,
         suggestions=suggestions,
         project_category=project_category,
+        validate_only=validate_only,
+        draft_id=draft_id,
+        draft_hash=draft_hash,
+        draft_token=draft_token,
+        relation_disposition=relation_disposition,
+        relation_review_hash=relation_review_hash,
+        relation_review_reason=relation_review_reason,
     )
 
 
@@ -3199,6 +3331,13 @@ def op_replace_memory(
     host: str | None = None,
     editor: str | None = None,
     project_category: str | None = None,
+    validate_only: bool = False,
+    draft_id: str | None = None,
+    draft_hash: str | None = None,
+    draft_token: str | None = None,
+    relation_disposition: str | None = None,
+    relation_review_hash: str | None = None,
+    relation_review_reason: str | None = None,
 ) -> dict:
     """Supersede an existing compiled memory with a new version.
 
@@ -3231,6 +3370,13 @@ def op_replace_memory(
         host: Production host/creator.
         editor: Production editor/producer.
         project_category: Category for a new project key.
+        validate_only: Validate the replacement draft without writing either page.
+        draft_id: Draft identity returned by validate_only.
+        draft_hash: Exact reviewed draft hash returned by validate_only.
+        draft_token: Opaque destination/date token returned by validate_only.
+        relation_disposition: Reviewed relation outcome for commit.
+        relation_review_hash: Draft hash covered by the relation review.
+        relation_review_reason: Audit reason for a reviewed-none disposition.
     """
     return op_replace(
         vault_root,
@@ -3259,6 +3405,13 @@ def op_replace_memory(
         host=host,
         editor=editor,
         project_category=project_category,
+        validate_only=validate_only,
+        draft_id=draft_id,
+        draft_hash=draft_hash,
+        draft_token=draft_token,
+        relation_disposition=relation_disposition,
+        relation_review_hash=relation_review_hash,
+        relation_review_reason=relation_review_reason,
     )
 
 
@@ -4178,6 +4331,13 @@ def op_manage_memory_file(
     trash_path: str | None = None,
     restore_path: str | None = None,
     date: str | None = None,
+    validate_only: bool = False,
+    draft_id: str | None = None,
+    draft_hash: str | None = None,
+    draft_token: str | None = None,
+    relation_disposition: str | None = None,
+    relation_review_hash: str | None = None,
+    relation_review_reason: str | None = None,
 ) -> dict:
     """Manage files through one governed file operation.
 
@@ -4206,7 +4366,29 @@ def op_manage_memory_file(
         trash_path: Trash entry to recover.
         restore_path: Optional recovery destination.
         date: YYYY-MM-DD filter for trash-list.
+        validate_only: Validate a Markdown create-file operation without writing.
+        draft_id: Draft identity returned by validate_only.
+        draft_hash: Exact reviewed draft hash returned by validate_only.
+        draft_token: Opaque destination/date token returned by validate_only.
+        relation_disposition: Reviewed relation outcome for semantic file creation.
+        relation_review_hash: Draft hash covered by the relation review.
+        relation_review_reason: Audit reason for a reviewed-none disposition.
     """
+    review_requested = validate_only or any(
+        value is not None
+        for value in (
+            draft_id,
+            draft_hash,
+            draft_token,
+            relation_disposition,
+            relation_review_hash,
+            relation_review_reason,
+        )
+    )
+    if operation != "create" and review_requested:
+        raise ValueError(
+            "INVALID_FILE_OPERATION: creation review fields require operation='create'"
+        )
     if operation == "list":
         return op_list_directory(vault_root, path=path, recursive=recursive, include_hidden=include_hidden)
     if operation == "create":
@@ -4219,6 +4401,13 @@ def op_manage_memory_file(
             allow_curated=allow_curated,
             kind=kind,
             parents=parents,
+            validate_only=validate_only,
+            draft_id=draft_id,
+            draft_hash=draft_hash,
+            draft_token=draft_token,
+            relation_disposition=relation_disposition,
+            relation_review_hash=relation_review_hash,
+            relation_review_reason=relation_review_reason,
         )
     if operation == "append":
         return op_append_to_file(vault_root, path=path, content=content, allow_curated=allow_curated)

@@ -12,10 +12,20 @@ from pathlib import Path
 import pytest
 import yaml
 
-from exomem import commands, semantic_index
+from exomem import commands, semantic_index, writer_lease
 from exomem.__main__ import main
 
 _INSIGHT = "Knowledge Base/Notes/Insights/progressive-disclosure-without-mode-fragmentation.md"
+
+
+@pytest.fixture(autouse=True)
+def _isolated_writer_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv(
+        "EXOMEM_WRITER_LEASE_STATE_DIR", str(tmp_path / "writer-lease-state")
+    )
+    writer_lease.reset_managers_for_tests()
+    yield
+    writer_lease.reset_managers_for_tests()
 
 
 def _run(argv: list[str], capsys) -> tuple[int, str, str]:
@@ -41,6 +51,52 @@ def test_ask_memory_human_output(vault: Path, capsys) -> None:
     assert code == 0
     assert ".md" in out
     assert '"success"' not in out
+
+
+def test_ask_memory_semantic_unit_filters(vault: Path, capsys) -> None:
+    rel = "Knowledge Base/Notes/Insights/cli-semantic-recall.md"
+    (vault / rel).write_text(
+        "---\n"
+        "type: insight\n"
+        "title: CLI semantic recall\n"
+        "exomem_id: 9d17ec74-79e1-4cb2-9828-9b245166dc95\n"
+        "status: active\n"
+        "updated: 2026-07-16\n"
+        "metadata:\n"
+        "  priority: 7\n"
+        "---\n\n"
+        "## Decision\n"
+        "- category: config\n"
+        "- id: cli-semantic\n\n"
+        "CLI semantic needle.\n",
+        encoding="utf-8",
+    )
+
+    code, out, err = _run(
+        [
+            "ask_memory",
+            "CLI semantic needle",
+            "--mode",
+            "keyword",
+            "--scope",
+            "kb-only",
+            "--categories",
+            "config",
+            "--kinds",
+            "decision",
+            "--filters",
+            '{"page.frontmatter:/metadata/priority":{"$eq":7}}',
+            "--result-level",
+            "unit",
+            "--json",
+        ],
+        capsys,
+    )
+
+    assert code == 0, err
+    data = json.loads(out.strip().splitlines()[-1])["data"]
+    assert [item["parent_path"] for item in data] == [rel]
+    assert data[0]["result_type"] == "semantic_unit"
 
 
 def test_read_memory_reads_a_page(vault: Path, capsys) -> None:
@@ -168,6 +224,32 @@ def test_remember_write(vault: Path, capsys) -> None:
     written = vault / payload["data"]["path"]
     assert written.exists()
     assert "CLI can write" in written.read_text(encoding="utf-8")
+
+
+def test_remember_validate_only_exposes_review_draft(vault: Path, capsys) -> None:
+    code, out, err = _run(
+        [
+            "remember",
+            "--title",
+            "CLI review draft",
+            "--slug",
+            "cli-review-draft",
+            "--content",
+            "# CLI review draft\n\nA disconnected conclusion.\n",
+            "--field",
+            "suggestions=false",
+            "--field",
+            "validate_only=true",
+            "--json",
+        ],
+        capsys,
+    )
+
+    assert code == 0, err
+    data = json.loads(out.strip().splitlines()[-1])["data"]
+    assert data["mutated"] is False
+    assert data["draft_id"] and data["draft_hash"] and data["draft_token"]
+    assert not (vault / data["destination"]).exists()
 
 
 def test_remember_unicode_title_with_explicit_slug(vault: Path, capsys) -> None:

@@ -160,6 +160,22 @@ def create_file(
                 ) from error
 
     is_markdown = rel_path.casefold().endswith(".md")
+    review_requested = validate_only or any(
+        value is not None
+        for value in (
+            draft_id,
+            draft_hash,
+            draft_token,
+            relation_disposition,
+            relation_review_hash,
+            relation_review_reason,
+        )
+    )
+    if not is_markdown and review_requested:
+        raise CreateFileError(
+            "CREATION_REVIEW_REQUIRES_MARKDOWN",
+            "creation review fields apply only to Markdown files",
+        )
     today = today or dt.date.today()
     date_iso = today.isoformat()
     if draft_token is not None and is_markdown and not existing_file:
