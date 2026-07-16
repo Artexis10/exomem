@@ -18,6 +18,7 @@ from typing import Any
 
 from . import find as find_module
 from . import (
+    memory_refs,
     relation_registry,
     semantic_blocks,
     semantic_index,
@@ -492,6 +493,9 @@ def graph_context(
     *,
     path: str | None = None,
     query: str | None = None,
+    unit_ref: str | None = None,
+    categories: list[str] | None = None,
+    kinds: list[str] | None = None,
     depth: int = 1,
     relation_types: list[str] | None = None,
     node_types: list[str] | None = None,
@@ -559,13 +563,59 @@ def graph_context(
                     drift_counts[freshness.code] = drift_counts.get(freshness.code, 0) + 1
             return accepted
 
-        seeds = [
-            seed
-            for seed in _seed_nodes(conn, path=path, query=query)
-            if _current_record(seed, parent_path=str(seed.get("path") or ""))
-        ]
+        category_filter = _resolved_unit_filters(
+            idx.language_registry, categories, namespace="category"
+        )
+        kind_filter = _resolved_unit_filters(
+            idx.language_registry, kinds, namespace="kind"
+        )
+        unit_status: str | None = None
+        unit_filter_status: str | None = None
+        seed_cap_hit = False
+        if unit_ref is not None:
+            indexed = _seed_nodes(conn, path=None, query=None, unit_ref=unit_ref)
+            current = [
+                seed
+                for seed in indexed
+                if _current_record(seed, parent_path=str(seed.get("path") or ""))
+            ]
+            resolved_status = _current_unit_status(vault_root, unit_ref)
+            if resolved_status == "ambiguous" or len(current) > 1:
+                unit_status = "ambiguous"
+                seeds = []
+            elif current:
+                unit_status = "found"
+                seeds = _filter_unit_nodes(
+                    current, categories=category_filter, kinds=kind_filter
+                )
+                if category_filter is not None or kind_filter is not None:
+                    unit_filter_status = "matched" if seeds else "excluded"
+            elif indexed:
+                unit_status = "stale"
+                seeds = []
+            else:
+                if resolved_status in {"found", "stale"}:
+                    unit_status = "stale"
+                    drift_counts["missing_graph_row"] = 1
+                else:
+                    unit_status = resolved_status
+                seeds = []
+        else:
+            current_seeds = [
+                seed
+                for seed in _seed_nodes(
+                    conn,
+                    path=path,
+                    query=query,
+                    categories=category_filter,
+                    kinds=kind_filter,
+                )
+                if _current_record(seed, parent_path=str(seed.get("path") or ""))
+            ]
+            seed_cap_hit = len(current_seeds) > max_nodes
+            seeds = current_seeds[:max_nodes]
         if not seeds:
-            return {
+            empty: dict[str, Any] = {
                 "available": True,
                 "reason": None,
                 "seeds": [],
@@ -573,6 +623,13 @@ def graph_context(
                 "edges": [],
                 "truncation": [],
             }
+            if unit_status is not None:
+                empty["unit_status"] = unit_status
+            if unit_filter_status is not None:
+                empty["unit_filter_status"] = unit_filter_status
+            if drift_counts:
+                empty["warnings"] = [_drift_warning(drift_counts)]
+            return empty
         type_filter = set(node_types or [])
         seen_nodes: set[str] = {s["node_key"] for s in seeds}
         seen_edges: dict[str, dict[str, Any]] = {}
@@ -650,6 +707,8 @@ def graph_context(
         ]
         edges = list(seen_edges.values())
         truncation: list[str] = []
+        if seed_cap_hit:
+            truncation.append(f"seed nodes capped at {max_nodes}")
         if len(nodes) > max_nodes:
             truncation.append(
                 f"nodes capped at {max_nodes} ({len(nodes) - max_nodes} more not shown)"
@@ -671,14 +730,8 @@ def graph_context(
         if excluded_scope:
             warnings.append({"code": "scope_violations", "count": excluded_scope})
         if drift_counts:
-            warnings.append(
-                {
-                    "code": "semantic_unit_index_drift",
-                    "count": sum(drift_counts.values()),
-                    "reasons": dict(sorted(drift_counts.items())),
-                }
-            )
-        return {
+            warnings.append(_drift_warning(drift_counts))
+        result = {
             "available": True,
             "reason": None,
             "seeds": seeds,
@@ -699,6 +752,11 @@ def graph_context(
             },
             "warnings": warnings,
         }
+        if unit_status is not None:
+            result["unit_status"] = unit_status
+        if unit_filter_status is not None:
+            result["unit_filter_status"] = unit_filter_status
+        return result
     finally:
         conn.close()
 
@@ -1417,23 +1475,115 @@ def _json(value: str | None) -> dict[str, Any]:
         return {}
 
 
-def _seed_nodes(conn: sqlite3.Connection, *, path: str | None, query: str | None):
+def _seed_nodes(
+    conn: sqlite3.Connection,
+    *,
+    path: str | None,
+    query: str | None,
+    unit_ref: str | None = None,
+    categories: set[str] | None = None,
+    kinds: set[str] | None = None,
+):
     select = (
         "SELECT node_key, kind, path, anchor, title, text, source_hash, "
         "line_start, line_end, metadata FROM graph_nodes"
     )
+    unit_controls = unit_ref is not None or bool(categories) or bool(kinds)
+    if not unit_controls:
+        if path:
+            rows = conn.execute(
+                select + " WHERE path = ? ORDER BY kind, node_key", (_with_md(path),)
+            ).fetchall()
+            return [_node_row_to_dict(row) for row in rows]
+        if query:
+            like = f"%{query}%"
+            rows = conn.execute(
+                select + " WHERE title LIKE ? OR text LIKE ? ORDER BY kind, path LIMIT 5",
+                (like, like),
+            ).fetchall()
+            return [_node_row_to_dict(r) for r in rows]
+        return []
+
     if path:
         rows = conn.execute(
             select + " WHERE path = ? ORDER BY kind, node_key", (_with_md(path),)
         ).fetchall()
-        return [_node_row_to_dict(row) for row in rows]
-    if query:
+    elif query:
         like = f"%{query}%"
         rows = conn.execute(
-            select + " WHERE title LIKE ? OR text LIKE ? ORDER BY kind, path LIMIT 5", (like, like)
+            select + " WHERE title LIKE ? OR text LIKE ? ORDER BY kind, path, node_key",
+            (like, like),
         ).fetchall()
-        return [_node_row_to_dict(r) for r in rows]
-    return []
+    else:
+        rows = conn.execute(select + " ORDER BY kind, path, node_key").fetchall()
+    candidates = [_node_row_to_dict(row) for row in rows]
+    if unit_ref is not None:
+        candidates = [
+            node
+            for node in candidates
+            if (node.get("metadata") or {}).get("unit_ref") == unit_ref
+        ]
+    return _filter_unit_nodes(candidates, categories=categories, kinds=kinds)
+
+
+def _filter_unit_nodes(
+    nodes: list[dict[str, Any]],
+    *,
+    categories: set[str] | None,
+    kinds: set[str] | None,
+) -> list[dict[str, Any]]:
+    filtered: list[dict[str, Any]] = []
+    for node in nodes:
+        metadata = node.get("metadata") or {}
+        if metadata.get("record_type") != "semantic_unit":
+            continue
+        if categories and metadata.get("category") not in categories:
+            continue
+        if kinds and metadata.get("kind") not in kinds:
+            continue
+        filtered.append(node)
+    return filtered
+
+
+def _resolved_unit_filters(
+    registry: semantic_language_registry.SemanticLanguageRegistry,
+    values: list[str] | None,
+    *,
+    namespace: str,
+) -> set[str] | None:
+    if not values:
+        return None
+    resolver = registry.resolve_category if namespace == "category" else registry.resolve_kind
+    resolved: set[str] = set()
+    for value in values:
+        resolution = resolver(value)
+        resolved.add(resolution.resolved or resolution.key)
+    return resolved
+
+
+def _current_unit_status(vault_root: Path, unit_ref: str) -> str:
+    parent_ref, separator, _fragment = str(unit_ref or "").rpartition("#")
+    if not separator or not parent_ref:
+        return "missing"
+    try:
+        rel = memory_refs.resolve_identifier_read_only(vault_root, parent_ref)
+    except memory_refs.ReferenceError as exc:
+        return "ambiguous" if exc.code == "AMBIGUOUS_REFERENCE" else "missing"
+    path = vault_root / rel
+    try:
+        source = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return "missing"
+    state = semantic_index.current_parent_index_state(vault_root, path, source=source)
+    return state.document.resolve_unit(unit_ref).status
+
+
+def _drift_warning(drift_counts: dict[str, int]) -> dict[str, Any]:
+    return {
+        "code": "semantic_unit_index_drift",
+        "count": sum(drift_counts.values()),
+        "reasons": dict(sorted(drift_counts.items())),
+    }
 
 
 def _neighbor_edges(

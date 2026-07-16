@@ -14,7 +14,7 @@ relations:
   cites: {direction: directed, origins: [semantic_relation]}
   contradicts: {direction: symmetric, origins: [semantic_relation]}
   depends_on: {direction: directed, origins: [semantic_relation]}
-  derived_from: {direction: directed, origins: [frontmatter, semantic_block, semantic_relation]}
+  derived_from: {direction: directed, origins: [frontmatter, semantic_block, semantic_relation, semantic_unit]}
   duplicates: {direction: symmetric, origins: [semantic_relation]}
   evidenced_by: {direction: directed, origins: [frontmatter, semantic_relation]}
   implements: {direction: directed, origins: [semantic_relation]}

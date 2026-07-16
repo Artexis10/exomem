@@ -1091,6 +1091,9 @@ def op_graph_context(
     vault_root: Path,
     path: str | None = None,
     query: str | None = None,
+    unit_ref: str | None = None,
+    categories: list[str] | None = None,
+    kinds: list[str] | None = None,
     depth: int = 1,
     relation_types: list[str] | None = None,
     node_types: list[str] | None = None,
@@ -1112,6 +1115,9 @@ def op_graph_context(
             is supplied.
         query: Text seed for matching graph node titles/content. Optional when
             `path` is supplied.
+        unit_ref: Exact current semantic-unit reference to use as the graph seed.
+        categories: Optional registry-resolved semantic-unit category allowlist.
+        kinds: Optional governed semantic-unit kind allowlist.
         depth: Traversal depth from seed nodes. Default 1.
         relation_types: Optional allowlist of relation types, e.g.
             `derived_from`, `evidenced_by`, `supports`, `contradicts`,
@@ -1133,6 +1139,9 @@ def op_graph_context(
         vault_root,
         path=path,
         query=query,
+        unit_ref=unit_ref,
+        categories=categories,
+        kinds=kinds,
         depth=depth,
         relation_types=relation_types,
         node_types=node_types,
@@ -4066,6 +4075,9 @@ def op_connect_memory(
     path: str | None = None,
     target: str | None = None,
     query: str | None = None,
+    unit_ref: str | None = None,
+    categories: list[str] | None = None,
+    kinds: list[str] | None = None,
     draft_title: str | None = None,
     draft_body: str | None = None,
     limit: int = 8,
@@ -4113,6 +4125,9 @@ def op_connect_memory(
         path: Existing page path for link, graph, or relation context.
         target: Target path for inbound-links; defaults to path.
         query: Query seed for graph-context.
+        unit_ref: Exact current semantic-unit seed for graph-context.
+        categories: Registry-resolved semantic-unit category allowlist.
+        kinds: Governed semantic-unit kind allowlist.
         draft_title: Draft title for suggestion modes.
         draft_body: Draft body for suggestion modes.
         limit: Candidate cap for suggestion modes.
@@ -4210,6 +4225,9 @@ def op_connect_memory(
             vault_root,
             path=path,
             query=query,
+            unit_ref=unit_ref,
+            categories=categories,
+            kinds=kinds,
             depth=depth,
             relation_types=relation_types,
             node_types=node_types,

@@ -752,6 +752,48 @@
           "default": null,
           "description": "Query seed for graph-context."
         },
+        "unit_ref": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Exact current semantic-unit seed for graph-context."
+        },
+        "categories": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Registry-resolved semantic-unit category allowlist."
+        },
+        "kinds": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Governed semantic-unit kind allowlist."
+        },
         "draft_title": {
           "anyOf": [
             {

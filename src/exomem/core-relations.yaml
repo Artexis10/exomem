@@ -1,11 +1,11 @@
-schema_version: 1
+schema_version: 2
 relations:
   supports: {description: Provides support for, family: support, direction: directed, origins: [semantic_relation]}
   contradicts: {description: Conflicts with, family: contradiction, direction: symmetric, origins: [semantic_relation]}
   refines: {description: Makes more precise, family: refinement, direction: directed, origins: [semantic_relation]}
   duplicates: {description: Duplicates, family: duplication, direction: symmetric, origins: [semantic_relation]}
   supersedes: {description: Replaces as the current view, family: supersession, direction: directed, origins: [semantic_relation, frontmatter]}
-  derived_from: {description: Is derived from, family: derivation, direction: directed, origins: [semantic_relation, semantic_block, frontmatter]}
+  derived_from: {description: Is derived from, family: derivation, direction: directed, origins: [semantic_relation, semantic_block, semantic_unit, frontmatter]}
   evidenced_by: {description: Is evidenced by, family: evidence, direction: directed, origins: [semantic_relation, frontmatter]}
   depends_on: {description: Depends on, family: dependency, direction: directed, origins: [semantic_relation]}
   implements: {description: Implements, family: implementation, direction: directed, origins: [semantic_relation]}

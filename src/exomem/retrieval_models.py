@@ -71,7 +71,7 @@ class LaneEvidence(TypedDict):
     weight: NotRequired[float]
     rrf_k: NotRequired[int]
     rrf_contribution: NotRequired[float]
-    provenance: NotRequired[dict[str, str | int]]
+    provenance: NotRequired[dict[str, str | int | None]]
 
 
 class MultiplierEvidence(TypedDict):

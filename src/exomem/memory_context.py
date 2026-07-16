@@ -15,6 +15,9 @@ def assemble_context(
     *,
     path: str | None = None,
     query: str | None = None,
+    unit_ref: str | None = None,
+    categories: list[str] | None = None,
+    kinds: list[str] | None = None,
     depth: int = 1,
     relation_types: list[str] | None = None,
     node_types: list[str] | None = None,
@@ -25,14 +28,36 @@ def assemble_context(
     max_body_chars: int = 3000,
 ) -> dict[str, Any]:
     """Return a single bounded context envelope for one page or a query."""
-    if not path and not query:
-        raise ValueError("INVALID_CONTEXT: provide `path` or `query`")
+    unit_controls = unit_ref is not None or bool(categories) or bool(kinds)
+    if not path and not query and not unit_controls:
+        raise ValueError(
+            "INVALID_CONTEXT: provide `path`, `query`, `unit_ref`, `categories`, or `kinds`"
+        )
     depth = max(0, min(int(depth), 5))
     max_nodes = max(1, min(int(max_nodes), 200))
     max_edges = max(0, min(int(max_edges), 400))
     limit = max(1, min(int(limit), 10))
     max_body_chars = max(500, min(int(max_body_chars), 6000))
-    hits = _context_hits(vault_root, path=path, query=query, limit=limit)
+    graph: dict[str, Any] | None = None
+    if unit_controls:
+        graph = epistemic_graph.graph_context(
+            vault_root,
+            path=path,
+            query=query,
+            unit_ref=unit_ref,
+            categories=categories,
+            kinds=kinds,
+            depth=depth,
+            relation_types=relation_types,
+            node_types=node_types,
+            max_nodes=max_nodes,
+            max_edges=max_edges,
+            traversal_profile=traversal_profile,
+        )
+    if path or query:
+        hits = _context_hits(vault_root, path=path, query=query, limit=limit)
+    else:
+        hits = _hits_for_graph_seeds(vault_root, graph or {}, limit=limit)
     pages = [
         page
         for hit in hits
@@ -84,21 +109,28 @@ def assemble_context(
         page_history = vault.read_log_entries(vault_root, page.rel_path)[:10]
         if page_history:
             history[page.rel_path] = page_history
-    graph = _merge_graph_contexts(
-        vault_root,
-        pages,
-        depth=depth,
-        relation_types=relation_types,
-        node_types=node_types,
-        max_nodes=max_nodes,
-        max_edges=max_edges,
-        traversal_profile=traversal_profile,
-    )
+    if graph is None:
+        graph = _merge_graph_contexts(
+            vault_root,
+            pages,
+            depth=depth,
+            relation_types=relation_types,
+            node_types=node_types,
+            max_nodes=max_nodes,
+            max_edges=max_edges,
+            traversal_profile=traversal_profile,
+        )
     truncation.extend(str(item) for item in graph.get("truncation", []))
     resolved_seed_path = hits[0].path if path and hits else path
     seed: dict[str, Any] = {"path": resolved_seed_path, "query": query}
     if path:
         seed["ref"] = ref_index.ref_for_path(str(resolved_seed_path))
+    if unit_ref is not None:
+        seed["unit_ref"] = unit_ref
+    if categories:
+        seed["categories"] = list(categories)
+    if kinds:
+        seed["kinds"] = list(kinds)
     return {
         "available": bool(documents),
         "seed": seed,
@@ -152,6 +184,24 @@ def _hit_for_page(page: ParsedPage) -> Hit:
         status=page.status,
         superseded_by=page.superseded_by,
     )
+
+
+def _hits_for_graph_seeds(
+    vault_root: Path, graph: dict[str, Any], *, limit: int
+) -> list[Hit]:
+    hits: list[Hit] = []
+    paths: set[str] = set()
+    for seed in graph.get("seeds", []):
+        rel = str(seed.get("path") or "")
+        if not rel or rel in paths:
+            continue
+        paths.add(rel)
+        page = find_module._CACHE.get(vault_root / rel, vault_root)
+        if page is not None:
+            hits.append(_hit_for_page(page))
+        if len(hits) >= limit:
+            break
+    return hits
 
 
 def _merge_graph_contexts(
