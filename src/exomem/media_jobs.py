@@ -202,6 +202,20 @@ class MediaJobStore:
         finally:
             conn.close()
 
+    def discard(self, job: MediaJob) -> int:
+        """Remove the durable row for an artifact already completed in Markdown."""
+        binary_rel = self._relative(job.binary_path)
+        sidecar_rel = self._relative(job.sidecar_path)
+        key = self._key(binary_rel, sidecar_rel, job.media_type)
+        conn = self._connect()
+        try:
+            with conn:
+                return int(
+                    conn.execute("DELETE FROM jobs WHERE job_key = ?", (key,)).rowcount
+                )
+        finally:
+            conn.close()
+
     def claim_next(self) -> MediaJob | None:
         conn = self._connect()
         try:

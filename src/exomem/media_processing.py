@@ -98,9 +98,12 @@ def reconcile_media(
     _confine_sidecar(vault, sidecar)
     original = sidecar.read_text(encoding="utf-8") if sidecar.exists() else None
 
-    if original is not None and _is_valid_completed_sidecar(
+    completed = original is not None and _is_valid_completed_sidecar(
         original, media_type=media_type, provenance=provenance
-    ):
+    )
+    if completed:
+        _verify_binary_identity(binary, resolved_binary, provenance)
+        _discard_stale_job(vault, binary, sidecar, media_type)
         return ReconcileResult(media_type, "completed", sidecar, None)
 
     pending = _render_pending_sidecar(
@@ -117,6 +120,7 @@ def reconcile_media(
             vault_root=vault,
         )
 
+    _verify_binary_identity(binary, resolved_binary, provenance)
     store = media_jobs.MediaJobStore(vault)
     job_id = store.enqueue(
         media_jobs.MediaJob(
@@ -129,6 +133,20 @@ def reconcile_media(
         )
     )
     return ReconcileResult(media_type, "pending", sidecar, job_id)
+
+
+def _discard_stale_job(
+    vault: Path, binary: Path, sidecar: Path, media_type: str
+) -> None:
+    if not media_jobs.job_store_path(vault).exists():
+        return
+    media_jobs.MediaJobStore(vault, create=False).discard(
+        media_jobs.MediaJob(
+            binary_path=binary,
+            sidecar_path=sidecar,
+            media_type=media_type,
+        )
+    )
 
 
 def _confine_to_knowledge_base(vault: Path, binary: Path) -> Path:
@@ -235,7 +253,7 @@ def _render_pending_sidecar(
     if original is not None:
         frontmatter, body, raw_frontmatter = parse_frontmatter(original)
         existing_id = memory_refs.normalize_id(frontmatter.get("exomem_id"))
-        if _is_canonical_pending_shape(frontmatter, media_type):
+        if _is_canonical_pending_shape(frontmatter, media_type, provenance):
             rendered = original
             for field, value in _pending_fields(provenance):
                 rendered = preserve._set_frontmatter_field(rendered, field, str(value))
@@ -279,11 +297,34 @@ def _pending_fields(provenance: _BinaryProvenance) -> tuple[tuple[str, object], 
     )
 
 
-def _is_canonical_pending_shape(frontmatter: dict[str, object], media_type: str) -> bool:
+def _is_canonical_pending_shape(
+    frontmatter: dict[str, object],
+    media_type: str,
+    provenance: _BinaryProvenance,
+) -> bool:
+    captured = frontmatter.get("captured")
+    try:
+        if isinstance(captured, dt.date):
+            captured.isoformat()
+        else:
+            dt.date.fromisoformat(str(captured))
+    except (TypeError, ValueError):
+        return False
+    tags = frontmatter.get("tags")
+    ingested_into = frontmatter.get("ingested_into")
     return (
         frontmatter.get("type") == "source"
+        and memory_refs.normalize_id(frontmatter.get("exomem_id")) is not None
+        and isinstance(frontmatter.get("title"), str)
+        and bool(str(frontmatter["title"]).strip())
+        and frontmatter.get("source_type") == "other"
         and frontmatter.get("media_type") == media_type
+        and frontmatter.get("evidence_file") == provenance.relative_path
         and str(frontmatter.get("extracted_by", "")).strip().lower() == "pending"
+        and isinstance(tags, list)
+        and bool(tags)
+        and all(isinstance(tag, str) and tag.strip() for tag in tags)
+        and isinstance(ingested_into, list)
     )
 
 
@@ -309,6 +350,6 @@ def _is_valid_completed_sidecar(
     if recorded_hash is not None and str(recorded_hash) != provenance.sha256:
         return False
     return any(
-        len(match.group(1).strip()) >= 40
+        bool(match.group(1).strip())
         for match in _EXTRACTED_SECTION_RE.finditer(body)
     )

@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import importlib
 import os
+import uuid
 from pathlib import Path
 
 import pytest
@@ -147,6 +148,126 @@ def test_valid_completed_transcript_is_preserved_and_not_requeued(vault: Path) -
     )
     sidecar.write_text(completed, encoding="utf-8")
     before = sidecar.read_bytes()
+
+    result = media_processing.reconcile_media(vault, binary)
+
+    assert result.state == "completed"
+    assert result.job_id is None
+    assert sidecar.read_bytes() == before
+    assert _job_count(vault) == 0
+
+
+def test_short_completed_transcript_is_preserved_and_not_requeued(vault: Path) -> None:
+    media_processing = _media_processing()
+    binary = _drop_media(vault, "short-completed.m4a")
+    first = media_processing.reconcile_media(vault, binary)
+    store = media_jobs.MediaJobStore(vault)
+    claimed = store.claim_next()
+    assert claimed is not None
+    store.complete(claimed)
+
+    sidecar = first.sidecar_path
+    completed = sidecar.read_text(encoding="utf-8").replace(
+        "extracted_by: pending", "extracted_by: faster-whisper:test+timed"
+    ).replace("processing_state: pending", "processing_state: completed")
+    completed += "\n## Extracted text\n\n[0:00] Yes.\n"
+    sidecar.write_text(completed, encoding="utf-8")
+    before = sidecar.read_bytes()
+
+    result = media_processing.reconcile_media(vault, binary)
+
+    assert result.state == "completed"
+    assert result.job_id is None
+    assert sidecar.read_bytes() == before
+    assert _job_count(vault) == 0
+
+
+def test_partial_pending_sidecar_is_canonically_repaired_with_prose(vault: Path) -> None:
+    media_processing = _media_processing()
+    binary = _drop_media(vault, "partial.m4a")
+    sidecar = binary.with_name(binary.name + ".md")
+    prose = "Keep this manually recorded note verbatim.\n"
+    sidecar.write_text(
+        "---\n"
+        "type: source\n"
+        "media_type: audio\n"
+        "extracted_by: pending\n"
+        "---\n\n"
+        + prose,
+        encoding="utf-8",
+    )
+
+    media_processing.reconcile_media(vault, binary)
+
+    frontmatter, body = _frontmatter_and_body(sidecar)
+    assert uuid.UUID(str(frontmatter["exomem_id"]))
+    assert frontmatter["title"] == "Evidence: partial.m4a"
+    assert frontmatter["source_type"] == "other"
+    assert frontmatter["captured"]
+    assert isinstance(frontmatter["tags"], list)
+    assert frontmatter["ingested_into"] == []
+    assert frontmatter["evidence_file"] == (
+        "Knowledge Base/Evidence/Audio/partial.m4a"
+    )
+    assert frontmatter["media_type"] == "audio"
+    assert f"## Preserved notes\n\n{prose}" in body
+
+
+@pytest.mark.parametrize("terminal_state", ["pending", "completed"])
+def test_revalidates_binary_before_no_write_terminal_paths(
+    vault: Path, monkeypatch: pytest.MonkeyPatch, terminal_state: str
+) -> None:
+    media_processing = _media_processing()
+    binary = _drop_media(vault, f"race-{terminal_state}.m4a")
+    first = media_processing.reconcile_media(vault, binary)
+    store = media_jobs.MediaJobStore(vault)
+    if terminal_state == "completed":
+        claimed = store.claim_next()
+        assert claimed is not None
+        store.complete(claimed)
+        completed = first.sidecar_path.read_text(encoding="utf-8").replace(
+            "extracted_by: pending", "extracted_by: faster-whisper:test+timed"
+        ).replace("processing_state: pending", "processing_state: completed")
+        completed += (
+            "\n## Extracted text\n\n"
+            "[0:00] This transcript is long enough for the pre-fix completed path.\n"
+        )
+        first.sidecar_path.write_text(completed, encoding="utf-8")
+
+    sidecar_before = first.sidecar_path.read_bytes()
+    jobs_before = _job_count(vault)
+    read_provenance = media_processing._read_provenance
+
+    def _read_then_replace(*args, **kwargs):
+        provenance = read_provenance(*args, **kwargs)
+        binary.write_bytes(b"replacement media after provenance")
+        return provenance
+
+    monkeypatch.setattr(media_processing, "_read_provenance", _read_then_replace)
+
+    with pytest.raises(media_processing.MediaProcessingError) as exc:
+        media_processing.reconcile_media(vault, binary)
+
+    assert exc.value.code == "MEDIA_CHANGED_DURING_RECONCILIATION"
+    assert first.sidecar_path.read_bytes() == sidecar_before
+    assert _job_count(vault) == jobs_before
+
+
+def test_completed_sidecar_clears_stale_crash_window_job(vault: Path) -> None:
+    media_processing = _media_processing()
+    binary = _drop_media(vault, "crash-window.m4a")
+    first = media_processing.reconcile_media(vault, binary)
+    sidecar = first.sidecar_path
+    completed = sidecar.read_text(encoding="utf-8").replace(
+        "extracted_by: pending", "extracted_by: faster-whisper:test+timed"
+    ).replace("processing_state: pending", "processing_state: completed")
+    completed += (
+        "\n## Extracted text\n\n"
+        "[0:00] The sidecar committed, but the worker crashed before ledger cleanup.\n"
+    )
+    sidecar.write_text(completed, encoding="utf-8")
+    before = sidecar.read_bytes()
+    assert _job_count(vault) == 1
 
     result = media_processing.reconcile_media(vault, binary)
 
