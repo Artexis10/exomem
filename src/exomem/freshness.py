@@ -232,7 +232,8 @@ def reconcile(
         _maps[key] = fresh
         _triples[key] = None
         _live.add(key)
-    old = old or {}
+    if old is None:
+        return ReconcileDelta(drifted=False, changed=[], deleted=[])
     changed = [sp for sp, signature in fresh.items() if old.get(sp) != signature]
     deleted = [sp for sp in old if sp not in fresh]
     drifted = bool(changed or deleted)
@@ -400,6 +401,42 @@ def invalidate(vault_root: Path | None = None) -> None:
             _maps.pop(key, None)
             _triples.pop(key, None)
             _live.discard(key)
+
+
+def rebaseline(vault_root: Path) -> dict[str, bool]:
+    """Install exact final on-disk baselines for each event-maintained scope.
+
+    Each scope is independent: a failed walk leaves only that scope non-live so
+    the watcher's next periodic reconcile can initialize it without fanout.
+    """
+    invalidate(vault_root)
+    result = {scope: False for scope in SCOPES}
+    if not event_indexes_enabled():
+        return result
+
+    from . import find as find_module
+    from .vault import walk_vault_md
+
+    for scope in SCOPES:
+        try:
+            if scope == "kb":
+                root = vault_root / kb_dirname()
+                paths = find_module._walk_md(root) if root.is_dir() else ()
+            else:
+                paths = walk_vault_md(vault_root)
+            seed(
+                vault_root,
+                scope,
+                ((str(path), stat_signature(path)) for path in paths),
+            )
+            result[scope] = True
+        except Exception:  # noqa: BLE001 - periodic reconcile safely retries
+            log.exception(
+                "freshness rebaseline failed; scope remains non-live: %s scope=%s",
+                vault_root,
+                scope,
+            )
+    return result
 
 
 def snapshot() -> dict:

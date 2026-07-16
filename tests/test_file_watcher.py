@@ -16,8 +16,9 @@ from pathlib import Path
 
 import pytest
 
-from exomem import embeddings, file_watcher, media_processing
+from exomem import deferred_index, embeddings, file_watcher, freshness, media_processing
 from exomem import find as find_module
+from exomem import reconcile as reconcile_module
 
 
 def _stub_embeddings(monkeypatch: pytest.MonkeyPatch):
@@ -644,6 +645,50 @@ def test_reconcile_no_drift_dispatches_nothing(vault, monkeypatch: pytest.Monkey
     w._reconcile_once(seed=False)  # nothing changed on disk since the seed
 
     assert calls == {"inbound": [], "resolver": [], "upsert": [], "delete": [], "warm": []}
+
+
+def test_missing_baseline_and_post_reconcile_watcher_do_not_phantom_fanout(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    file_watcher.clear_self_write_registry()
+    freshness.clear()
+    index_sync = file_watcher.index_sync
+    index_sync.clear_deferred_work(vault)
+    calls = _spy_reconcile_fanout(monkeypatch)
+    watcher = file_watcher.FileWatcher(vault)
+
+    watcher._reconcile_once(seed=False)
+
+    assert calls == {
+        "inbound": [],
+        "resolver": [],
+        "upsert": [],
+        "delete": [],
+        "warm": [],
+    }
+    reconcile_module.reconcile(vault)
+    for recorded in calls.values():
+        recorded.clear()
+    watcher._reconcile_once(seed=False)
+    assert calls == {
+        "inbound": [],
+        "resolver": [],
+        "upsert": [],
+        "delete": [],
+        "warm": [],
+    }
+    assert deferred_index.status(vault)["count"] == 0
+
+    target = next(find_module._walk_md(vault / "Knowledge Base"))
+    target.write_text(
+        target.read_text(encoding="utf-8") + "\nreal watcher change\n",
+        encoding="utf-8",
+    )
+    watcher._reconcile_once(seed=False)
+
+    assert len(calls["upsert"]) == 1
+    assert [path.resolve() for path in calls["upsert"][0]] == [target.resolve()]
+    assert calls["delete"] == []
 
 
 def test_periodic_reconcile_discovers_missed_media_without_text_reembed(

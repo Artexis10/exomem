@@ -19,12 +19,14 @@ import pytest
 from exomem import (
     activation_manifest,
     commands,
+    freshness,
     index_sync,
     relation_review,
     semantic_contract,
     semantic_writes,
 )
 from exomem import audit as audit_module
+from exomem import find as find_module
 from exomem import reconcile as reconcile_module
 from exomem import (
     vault as vault_module,
@@ -899,6 +901,27 @@ def test_reconcile_reports_embeddings_disabled_in_test_env(vault: Path) -> None:
     assert rep.embeddings_status == "disabled"
     assert rep.embeddings_refreshed == 0
     assert rep.dry_run is False
+
+
+def test_successful_write_reconcile_installs_exact_live_freshness_baselines(
+    vault: Path,
+) -> None:
+    freshness.clear()
+    try:
+        reconcile_module.reconcile(vault)
+
+        expected_kb = {
+            str(path): freshness.stat_signature(path)
+            for path in find_module._walk_md(vault / "Knowledge Base")
+        }
+        expected_vault = {
+            str(path): freshness.stat_signature(path)
+            for path in vault_module.walk_vault_md(vault)
+        }
+        assert freshness.live_entries(vault, "kb") == expected_kb
+        assert freshness.live_entries(vault, "vault") == expected_vault
+    finally:
+        freshness.clear()
 
 
 def test_reconcile_heals_index_count_drift(vault: Path) -> None:

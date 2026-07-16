@@ -230,6 +230,7 @@ class EpistemicGraphIndex:
     def rebuild_all(self) -> dict[str, int]:
         if not graph_enabled():
             return {"indexed_files": 0, "nodes": 0, "edges": 0, "disabled": 1}
+        resolver = find_module.writer_resolver_snapshot(self.vault_root)
         conn = self._connect()
         try:
             with conn:
@@ -266,7 +267,7 @@ class EpistemicGraphIndex:
             kb = self.vault_root / kb_dirname()
             if kb.is_dir():
                 for md in find_module._walk_md(kb):
-                    if self._index_path(conn, md):
+                    if self._index_path(conn, md, resolver=resolver):
                         indexed += 1
             with conn:
                 n_nodes = conn.execute("SELECT COUNT(*) FROM graph_nodes").fetchone()[0]
@@ -280,11 +281,12 @@ class EpistemicGraphIndex:
             return {"indexed_files": 0, "nodes": 0, "edges": 0, "disabled": 1}
         if self.path.exists() and not self.available():
             return self.rebuild_all()
+        resolver = find_module.writer_resolver_snapshot(self.vault_root)
         conn = self._connect()
         indexed = 0
         try:
             for path in paths:
-                if self._index_path(conn, path):
+                if self._index_path(conn, path, resolver=resolver):
                     indexed += 1
             with conn:
                 n_nodes = conn.execute("SELECT COUNT(*) FROM graph_nodes").fetchone()[0]
@@ -345,7 +347,13 @@ class EpistemicGraphIndex:
             conn.close()
         return [_edge_row_to_dict(r) for r in rows]
 
-    def _index_path(self, conn: sqlite3.Connection, path: Path) -> bool:
+    def _index_path(
+        self,
+        conn: sqlite3.Connection,
+        path: Path,
+        *,
+        resolver: vault_module.WikilinkResolver,
+    ) -> bool:
         try:
             rel = path.resolve().relative_to(self.vault_root.resolve()).as_posix()
         except (ValueError, OSError):
@@ -381,6 +389,7 @@ class EpistemicGraphIndex:
             registry=self.registry,
             source_hash=file_node.source_hash,
             parent_state=state,
+            resolver=resolver,
         )
         with conn:
             conn.execute("DELETE FROM graph_edges WHERE source_path = ?", (rel,))
@@ -1157,6 +1166,7 @@ def _edges_for_page(
     registry: relation_registry.RelationRegistry | None = None,
     source_hash: str | None = None,
     parent_state: semantic_index.SemanticParentIndexState | None = None,
+    resolver: vault_module.WikilinkResolver | None = None,
 ) -> list[GraphEdge]:
     registry = registry or relation_registry.load_registry(vault_root)
     source_hash = source_hash or vault_module.content_hash(page.body)
@@ -1174,7 +1184,8 @@ def _edges_for_page(
 
     rel = page.rel_path
     file_key = _file_key(rel)
-    resolver = find_module.shared_resolver(vault_root)
+    if resolver is None:
+        resolver = find_module.shared_resolver(vault_root)
     edges: list[GraphEdge] = []
     for unit in document.units:
         if unit.unit_ref is None or unit.form == "rich":

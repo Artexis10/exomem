@@ -275,6 +275,96 @@ def test_reconcile_with_no_drift_returns_false(vault: Path) -> None:
     assert freshness.triple(vault, "kb") == _fresh_walk_triple(vault, "kb")
 
 
+def test_reconcile_missing_baseline_initializes_without_reporting_corpus(
+    vault: Path,
+) -> None:
+    kb_dir = vault / "Knowledge Base"
+    entries = [
+        (str(path), freshness.stat_signature(path))
+        for path in find_module._walk_md(kb_dir)
+    ]
+
+    delta = freshness.reconcile(vault, "kb", entries)
+
+    assert delta == freshness.ReconcileDelta(False, [], [])
+    assert freshness.live_entries(vault, "kb") == dict(entries)
+    assert freshness.triple(vault, "kb") == _fresh_walk_triple(vault, "kb")
+
+
+def test_reconcile_seeded_empty_baseline_reports_new_file(vault: Path) -> None:
+    freshness.seed(vault, "kb", [])
+    path = vault / "Knowledge Base" / "Notes" / "Insights" / "after-empty.md"
+    path.write_text("# After empty\n", encoding="utf-8")
+
+    delta = freshness.reconcile(
+        vault,
+        "kb",
+        [(str(path), freshness.stat_signature(path))],
+    )
+
+    assert delta == freshness.ReconcileDelta(True, [str(path)], [])
+
+
+def test_reconcile_missing_and_existing_scope_baselines_are_independent(
+    vault: Path,
+) -> None:
+    kb_dir = vault / "Knowledge Base"
+    kb_entries = [
+        (str(path), freshness.stat_signature(path))
+        for path in find_module._walk_md(kb_dir)
+    ]
+    freshness.seed(vault, "kb", kb_entries)
+    target = Path(kb_entries[0][0])
+    future = time.time() + 10_000
+    os.utime(target, (future, future))
+    vault_entries = [
+        (str(path), freshness.stat_signature(path))
+        for path in vault_module.walk_vault_md(vault)
+    ]
+
+    vault_delta = freshness.reconcile(vault, "vault", vault_entries)
+    kb_delta = freshness.reconcile(
+        vault,
+        "kb",
+        [
+            (str(path), freshness.stat_signature(path))
+            for path in find_module._walk_md(kb_dir)
+        ],
+    )
+
+    assert vault_delta == freshness.ReconcileDelta(False, [], [])
+    assert kb_delta.changed == [str(target)]
+    assert kb_delta.deleted == []
+
+
+def test_rebaseline_scope_failure_leaves_only_failed_scope_non_live(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def fail_kb_walk(*_args, **_kwargs):
+        raise OSError("kb scan failed")
+
+    monkeypatch.setattr(find_module, "_walk_md", fail_kb_walk)
+
+    result = freshness.rebaseline(vault)
+
+    assert result == {"kb": False, "vault": True}
+    assert freshness.live_entries(vault, "kb") is None
+    assert freshness.live_entries(vault, "vault") is not None
+
+
+def test_rebaseline_respects_event_index_kill_switch(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _seed_both_scopes(vault)
+    monkeypatch.setenv("EXOMEM_DISABLE_EVENT_INDEXES", "1")
+
+    result = freshness.rebaseline(vault)
+
+    assert result == {"kb": False, "vault": False}
+    root = str(vault.resolve())
+    assert all(item[0] != root for item in freshness.snapshot()["live"])
+
+
 def test_reconcile_delta_reports_changed_and_deleted_paths(vault: Path) -> None:
     _seed_both_scopes(vault)
 

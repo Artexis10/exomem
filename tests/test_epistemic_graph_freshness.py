@@ -4,7 +4,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from exomem import audit, epistemic_graph, reconcile
+import pytest
+
+from exomem import audit, epistemic_graph, reconcile, semantic_index
+from exomem import find as find_module
 
 A = "Knowledge Base/Notes/Insights/a.md"
 B = "Knowledge Base/Notes/Insights/b.md"
@@ -49,6 +52,122 @@ B claim.
 """,
     )
     return a, b
+
+
+def test_full_rebuild_reuses_one_detached_resolver_without_shared_cache(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault = tmp_path / "vault"
+    _seed(vault)
+    find_module._RESOLVER_CACHE.clear()
+    real_snapshot = find_module.writer_resolver_snapshot
+    acquisitions: list[Path] = []
+
+    def acquire(root: Path):
+        acquisitions.append(root)
+        return real_snapshot(root)
+
+    monkeypatch.setattr(find_module, "writer_resolver_snapshot", acquire)
+    monkeypatch.setattr(
+        find_module,
+        "shared_resolver",
+        lambda *_args: pytest.fail("graph maintenance used the shared resolver"),
+    )
+
+    report = epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()
+
+    assert report["indexed_files"] == 2
+    assert acquisitions == [vault]
+    assert vault not in find_module._RESOLVER_CACHE
+
+
+def test_refresh_batch_reuses_one_snapshot_and_separate_calls_reacquire(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault = tmp_path / "vault"
+    a, b = _seed(vault)
+    index = epistemic_graph.EpistemicGraphIndex(vault)
+    index.rebuild_all()
+    real_snapshot = find_module.writer_resolver_snapshot
+    acquisitions: list[Path] = []
+
+    def acquire(root: Path):
+        acquisitions.append(root)
+        return real_snapshot(root)
+
+    monkeypatch.setattr(find_module, "writer_resolver_snapshot", acquire)
+    monkeypatch.setattr(
+        find_module,
+        "shared_resolver",
+        lambda *_args: pytest.fail("graph maintenance used the shared resolver"),
+    )
+
+    index.refresh_paths([a, b])
+    assert acquisitions == [vault]
+
+    index.refresh_paths([a])
+    assert acquisitions == [vault, vault]
+
+
+def test_rebuild_resolver_failure_preserves_committed_graph_rows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault = tmp_path / "vault"
+    _seed(vault)
+    index = epistemic_graph.EpistemicGraphIndex(vault)
+    index.rebuild_all()
+    before_nodes = index.nodes()
+    before_edges = index.edges()
+    monkeypatch.setattr(
+        find_module,
+        "writer_resolver_snapshot",
+        lambda *_args: (_ for _ in ()).throw(RuntimeError("resolver failed")),
+    )
+
+    with pytest.raises(RuntimeError, match="resolver failed"):
+        index.rebuild_all()
+
+    assert index.nodes() == before_nodes
+    assert index.edges() == before_edges
+
+
+def test_explicit_detached_resolver_matches_direct_fallback_for_ambiguous_links(
+    tmp_path: Path,
+) -> None:
+    vault = tmp_path / "vault"
+    source, _target = _seed(vault)
+    _write(vault, "Knowledge Base/Notes/one/collision.md", "# First collision\n")
+    _write(vault, "Knowledge Base/Notes/two/collision.md", "# Second collision\n")
+    source.write_text(
+        source.read_text(encoding="utf-8") + "\n- supports: [[collision]]\n",
+        encoding="utf-8",
+    )
+    page = find_module._parse_page(source, source.stat().st_mtime, vault)
+    assert page is not None
+    state = semantic_index.build_parent_index_state(vault, source)
+    index = epistemic_graph.EpistemicGraphIndex(vault)
+    kwargs = {
+        "registry": index.registry,
+        "source_hash": epistemic_graph.vault_module.content_hash(
+            source.read_text(encoding="utf-8")
+        ),
+        "parent_state": state,
+    }
+
+    fallback = epistemic_graph._edges_for_page(
+        vault, page, state.document, **kwargs
+    )
+    explicit = epistemic_graph._edges_for_page(
+        vault,
+        page,
+        state.document,
+        resolver=find_module.writer_resolver_snapshot(vault),
+        **kwargs,
+    )
+
+    assert [edge.as_dict() for edge in explicit] == [
+        edge.as_dict() for edge in fallback
+    ]
 
 
 def test_single_file_edit_refreshes_affected_graph_rows(tmp_path: Path) -> None:
