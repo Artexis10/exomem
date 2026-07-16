@@ -4,6 +4,9 @@ registry-derived OpenAPI, and the preserved binary-blob guard.
 
 from __future__ import annotations
 
+from pathlib import Path
+from typing import Literal, get_args, get_type_hints
+
 import pytest
 import yaml
 from starlette.testclient import TestClient
@@ -35,6 +38,19 @@ PRODUCT_ROUTES = [
     "query_dataset",
     "process_media",
 ]
+
+
+def test_literal_param_choices_are_retained_by_the_canonical_registry_projection() -> None:
+    def leaf(
+        vault_root: Path,  # noqa: ARG001
+        operation: Literal["process", "status", "retry"] = "process",
+    ) -> dict:
+        return {}
+
+    [operation] = commands_module._derive_params(leaf, skip=1)
+
+    assert operation.type == "str"
+    assert operation.choices == ("process", "status", "retry")
 
 
 def _client(vault, monkeypatch: pytest.MonkeyPatch, **env: str) -> TestClient:
@@ -312,6 +328,10 @@ def test_process_media_has_one_generated_registry_rest_and_openapi_contract(
     assert command.leaf is commands_module.op_process_media
     assert command.surfaces == frozenset({"mcp", "rest", "cli"})
     assert command.cli_writes is True
+    operation_param = next(param for param in command.params if param.name == "operation")
+    expected_operations = ("process", "status", "retry")
+    assert get_args(get_type_hints(command.leaf)["operation"]) == expected_operations
+    assert operation_param.choices == expected_operations
 
     binary = vault / "Knowledge Base/Evidence/Audio/rest-contract.m4a"
     binary.parent.mkdir(parents=True, exist_ok=True)
@@ -331,7 +351,7 @@ def test_process_media_has_one_generated_registry_rest_and_openapi_contract(
     ]["content"]["application/json"]["schema"]
     assert set(schema["properties"]) == {"path", "operation"}
     assert schema.get("required", []) == []
-    assert schema["properties"]["operation"]["enum"] == ["process", "status", "retry"]
+    assert schema["properties"]["operation"]["enum"] == list(operation_param.choices)
 
 
 @pytest.mark.parametrize(

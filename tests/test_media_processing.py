@@ -722,7 +722,6 @@ def test_process_media_product_leaf_dispatches_process_status_and_retry(vault: P
     status = commands_module.op_process_media(vault, operation="status")
     assert status["operation"] == "status"
     assert status["counts"][media_jobs.PENDING] == 1
-    assert len(status["jobs"]) <= media_jobs.STATUS_JOB_LIMIT
     assert status == commands_module.op_process_media(vault, operation="status")
 
     store = media_jobs.MediaJobStore(vault)
@@ -735,6 +734,27 @@ def test_process_media_product_leaf_dispatches_process_status_and_retry(vault: P
     assert retried["path"] == relative
     assert retried["state"] == media_jobs.PENDING
     assert retried["requeued"] == 1
+
+
+def test_process_media_product_status_is_stably_bounded(vault: Path) -> None:
+    store = media_jobs.MediaJobStore(vault)
+    total = media_jobs.STATUS_JOB_LIMIT + 7
+    for index in range(total):
+        binary = vault / "Knowledge Base/Evidence/Audio" / f"status-{index}.m4a"
+        store.enqueue(
+            media_jobs.MediaJob(
+                binary_path=binary,
+                sidecar_path=binary.with_name(binary.name + ".md"),
+                media_type="audio",
+            )
+        )
+
+    first = commands_module.op_process_media(vault, operation="status")
+    second = commands_module.op_process_media(vault, operation="status")
+
+    assert first == second
+    assert first["counts"][media_jobs.PENDING] == total
+    assert len(first["jobs"]) == media_jobs.STATUS_JOB_LIMIT
 
 
 def test_process_media_product_leaf_reconciles_and_retries_all_without_asr_wait(
