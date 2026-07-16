@@ -52,4 +52,4 @@
 
 ### Task 12
 
-- [ ] 4.3 Deploy/restart the updated service, invoke canonical processing for the two specified `.m4a` Evidence paths, monitor actionable status to completion, and verify timestamped sidecars, preserved hashes/provenance, search refresh, and explicit speaker-verification state.
+- [x] 4.3 Deploy/restart the updated service, invoke canonical processing for the two specified `.m4a` Evidence paths, monitor actionable status to completion, and verify timestamped sidecars, preserved hashes/provenance, search refresh, and explicit speaker-verification state.
