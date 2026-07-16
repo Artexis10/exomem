@@ -6,12 +6,12 @@ Run `uv run python scripts/generate-capabilities.py --check` to verify it is cur
 
 ## Summary
 
-- Product commands: 23
-- Tier 1 commands: 20
+- Product commands: 24
+- Tier 1 commands: 21
 - Tier 2 commands: 3
-- Registry-generated MCP commands: 23
-- REST commands: 22
-- CLI commands: 22
+- Registry-generated MCP commands: 24
+- REST commands: 23
+- CLI commands: 23
 - Hand-registered MCP tools: none
 
 ## Hosted Cell Capability Boundary

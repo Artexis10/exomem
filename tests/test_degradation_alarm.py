@@ -36,6 +36,7 @@ def test_vector_lane_failure_bumps_counter_and_sets_degraded_marker(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A post-warm vector-lane exception → counter += 1 and envelope `degraded`."""
+    monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
 
     def _boom(*_a, **_k):
         raise RuntimeError("sidecar corrupt")

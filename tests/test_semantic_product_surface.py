@@ -63,19 +63,24 @@ def test_ask_memory_returns_filtered_semantic_units(tmp_path: Path) -> None:
     assert hits[0]["parent_path"].endswith("semantic-surface.md")
 
 
-def test_deep_semantic_unit_recall_fails_with_a_stable_error(tmp_path: Path) -> None:
+def test_deep_semantic_unit_recall_returns_a_citable_context_pack(tmp_path: Path) -> None:
     _write_semantic_page(tmp_path)
 
-    with pytest.raises(ValueError, match="PACK_REQUIRES_PAGE_RESULTS"):
-        commands.op_ask_memory(
-            tmp_path,
-            query="SQLite",
-            mode="keyword",
-            scope="kb-only",
-            categories=["config"],
-            result_level="unit",
-            deep=True,
-        )
+    result = commands.op_ask_memory(
+        tmp_path,
+        query="SQLite",
+        mode="keyword",
+        scope="kb-only",
+        categories=["config"],
+        result_level="unit",
+        deep=True,
+    )
+
+    hit = result["hits"][0]
+    entry = result["pack"]["semantic_units"][hit["parent_path"]]
+    assert entry["units"][0]["unit_ref"] == hit["unit_ref"]
+    assert entry["units"][0]["kind"] == "decision"
+    assert entry["parent"]["ref"] == hit["parent_ref"]
 
 
 @pytest.mark.parametrize(

@@ -609,13 +609,16 @@ def op_find(
             usual hit list, unchanged). The pack is PURE MEASUREMENT over the
             notes you already wrote — no server-side reasoning: each top note's
             structurally-extracted key claims (lede + headline-section lines +
-            heading outline), the 1-hop wikilink neighbourhood of those notes
-            ranked by co-citation, and the contradictions among them (recorded
-            supersession edges + proximity "tension" pairs in the embedding
-            band, surfaced for you to judge — proximity, not polarity). Lets you
-            reason over the matches in one shot instead of fanning out `get`
-            calls. Bounded with explicit `truncation`; the tension part needs
-            the embedding sidecar and reports `embeddings_available`.
+            heading outline), bounded cited compact/rich semantic units with
+            parent provenance/lifecycle and authored relations, the 1-hop
+            wikilink neighbourhood of those notes ranked by co-citation, and
+            the contradictions among them (recorded supersession edges +
+            proximity "tension" pairs in the embedding band, surfaced for you
+            to judge — proximity, not polarity). Page, unit, and mixed results
+            all group by parent before packing. Lets you reason over the matches
+            in one shot instead of fanning out `get` calls. Bounded with explicit
+            `truncation`; the tension part needs the embedding sidecar and reports
+            `embeddings_available`.
         graph_enrich: When true with `pack=true`, add typed graph neighborhood
             data from the derived epistemic graph sidecar to the pack. Default
             false; missing/disabled/stale graph state soft-fails inside
@@ -654,8 +657,10 @@ def op_find(
         independent of graph_hop, which only fires for graph-only
         results.
         With pack on: {"hits": [...the same list...], "pack": {packed_paths,
-        claims, neighborhood, contradictions: {superseded, tension},
-        embeddings_available, truncation}}.
+        claims, semantic_units, semantic_blocks, neighborhood, contradictions:
+        {superseded, tension}, embeddings_available, truncation}}. `semantic_units`
+        groups bounded citable units under one parent context; `semantic_blocks`
+        is a bounded compatibility projection from those same rich units.
         With detail="compact": each hit is the routing stub described under
         `detail` (no excerpt/signals) — same paths, same order.
         With include_timings on: {"hits": [...], ["pack": {...},]
@@ -725,11 +730,6 @@ def op_find(
     )
     pack_obj: dict | None = None
     if pack:
-        if any(isinstance(hit, find_module.SemanticUnitHit) for hit in hits):
-            raise ValueError(
-                "PACK_REQUIRES_PAGE_RESULTS: deep context currently requires "
-                "result_level='page'; use shallow semantic-unit recall first"
-            )
         with find_module._span(timings, "pack"):
             pack_obj = context_pack_module.assemble_pack(
                 vault_root, hits, graph_enrich=graph_enrich

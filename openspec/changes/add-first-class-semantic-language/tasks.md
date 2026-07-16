@@ -61,7 +61,7 @@
 - [ ] 6.9 Add isolated-lane fidelity tests proving public hybrid explanations reproduce candidate membership, ranks, fusion contributions, degradation, and final ordering within documented rounding.
 - [x] 6.10 Extend `read_memory` to resolve exact anchored/fingerprint-bound unit references and return bounded parent context or explicit stale/ambiguous status.
 - [ ] 6.11 Extend graph context to seed/filter compact and rich unit nodes by category/kind without inferring semantics.
-- [ ] 6.12 Extend context packs with bounded cited semantic units, unit-seeded authored relations, provenance/lifecycle context, explicit truncation, and a nonduplicating legacy `semantic_blocks` projection.
+- [x] 6.12 Extend context packs with bounded cited semantic units, unit-seeded authored relations, provenance/lifecycle context, explicit truncation, and a nonduplicating legacy `semantic_blocks` projection.
 - [ ] 6.13 Add embeddings-disabled and degraded-path tests proving lexical/category/filter recall, explanations, and context remain useful without loading a model.
 
 ## 7. Structured Unit Mutation And Lifecycle
