@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -140,7 +141,10 @@ def collect_candidates(
     vector_ranking: list[str] = []
     chunk_text_by_path: dict[str, str] = {}
     vector_score_by_path: dict[str, float] = {}
-    if readiness.should_defer("embeddings"):
+    if os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
+        if timings is not None:
+            timings.skipped("vector")
+    elif readiness.should_defer("embeddings"):
         if timings is not None:
             timings.skipped("vector")
         if degraded_out is not None:
