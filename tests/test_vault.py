@@ -137,6 +137,17 @@ def test_path_guards_share_new_parent_chain_safely(tmp_path: Path) -> None:
     assert [path.read_text(encoding="utf-8") for path in paths] == ["one", "two"]
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Windows binary-read regression")
+def test_read_guarded_text_preserves_crlf_bytes_on_windows(tmp_path: Path) -> None:
+    target = tmp_path / "guarded.md"
+    target.write_bytes(b"first\r\nsecond\r\n")
+
+    text, guard = vault.read_guarded_text(tmp_path, target)
+
+    assert text == "first\r\nsecond\r\n"
+    guard.recheck(tmp_path)
+
+
 def test_missing_parent_swap_cannot_redirect_nested_directory_creation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

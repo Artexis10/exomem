@@ -2427,9 +2427,8 @@ def _open_review_directory(
     if chain is None:
         yield None
         return
-    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
-        descriptor = os.open(directory, flags)
+        descriptor = vault._open_directory_path(directory)
     except OSError as error:
         raise RelationReviewError(
             "RELATION_REVIEW_DIRECTORY_UNSAFE", "review directory cannot be opened"
@@ -2514,7 +2513,11 @@ def _read_artifact_bytes(
         or not stat.S_ISREG(before.st_mode)
     ):
         raise RelationReviewError("RELATION_REVIEW_UNSAFE_FILE", "review artifact is unsafe")
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_BINARY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
     try:
         descriptor = (
             os.open(name, flags, dir_fd=opened.descriptor)

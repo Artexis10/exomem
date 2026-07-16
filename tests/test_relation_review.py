@@ -1044,6 +1044,14 @@ def test_review_directory_parent_symlink_fails_closed(tmp_path: Path) -> None:
     assert exc.value.code == "RELATION_REVIEW_DIRECTORY_UNSAFE"
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Windows directory descriptor regression")
+def test_existing_review_directory_opens_on_windows(tmp_path: Path) -> None:
+    directory = tmp_path / "Knowledge Base/_Schema/relation-reviews"
+    directory.mkdir(parents=True)
+
+    assert relation_review.load_relation_reviews(tmp_path) == ()
+
+
 def test_auxiliary_traversal_and_final_symlink_fail_before_activation(
     tmp_path: Path,
 ) -> None:
