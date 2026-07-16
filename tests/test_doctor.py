@@ -9,6 +9,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import sqlite3
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -42,6 +43,193 @@ def test_doctor_lean_passes_with_fixture_vault(vault: Path) -> None:
     assert checks["python.version"].status == "pass"
     assert checks["vault.path"].status == "pass"
     assert checks["command.registry"].status == "pass"
+
+
+def test_lexical_check_uses_escaped_immutable_query_only_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import lexstore
+
+    vault = tmp_path / "vault #% name"
+    sidecar = lexstore.lexical_path(vault)
+    sidecar.parent.mkdir(parents=True)
+    conn = sqlite3.connect(sidecar)
+    try:
+        conn.execute("CREATE TABLE pages (id INTEGER PRIMARY KEY)")
+        conn.commit()
+    finally:
+        conn.close()
+
+    real_connect = sqlite3.connect
+    connections: list[tuple[object, dict[str, object]]] = []
+    statements: list[str] = []
+
+    def traced_connect(database, *args, **kwargs):
+        connections.append((database, kwargs.copy()))
+        opened = real_connect(database, *args, **kwargs)
+        opened.set_trace_callback(statements.append)
+        return opened
+
+    monkeypatch.setattr(lexstore, "backend", lambda: "fts5")
+    monkeypatch.setattr(lexstore, "fts5_available", lambda: True)
+    monkeypatch.setattr(doctor_module.sqlite3, "connect", traced_connect)
+
+    check = doctor_module._check_lexical(vault)
+
+    assert check.status == "pass"
+    [(database, kwargs)] = connections
+    assert database == f"{sidecar.resolve().as_uri()}?mode=ro&immutable=1"
+    assert kwargs["uri"] is True
+    assert any(statement.upper().startswith("PRAGMA QUERY_ONLY") for statement in statements)
+
+
+def test_lexical_check_reads_clean_wal_database_without_creating_sidecars(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import lexstore
+
+    sidecar = lexstore.lexical_path(vault)
+    conn = sqlite3.connect(sidecar)
+    try:
+        assert conn.execute("PRAGMA journal_mode=WAL").fetchone()[0] == "wal"
+        conn.execute("CREATE TABLE pages (id INTEGER PRIMARY KEY)")
+        conn.execute("INSERT INTO pages DEFAULT VALUES")
+        conn.commit()
+        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    finally:
+        conn.close()
+    wal = sidecar.with_name(f"{sidecar.name}-wal")
+    shm = sidecar.with_name(f"{sidecar.name}-shm")
+    assert not wal.exists()
+    assert not shm.exists()
+
+    monkeypatch.setattr(lexstore, "backend", lambda: "fts5")
+    monkeypatch.setattr(lexstore, "fts5_available", lambda: True)
+
+    check = doctor_module._check_lexical(vault)
+
+    assert check.status == "pass"
+    assert "1 pages indexed" in check.message
+    assert not wal.exists()
+    assert not shm.exists()
+
+
+@pytest.mark.parametrize(
+    "live_suffixes",
+    [("-wal",), ("-shm",), ("-wal", "-shm")],
+)
+def test_lexical_check_refuses_live_sqlite_companions_without_connecting(
+    vault: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    live_suffixes: tuple[str, ...],
+) -> None:
+    from exomem import lexstore
+
+    sidecar = lexstore.lexical_path(vault)
+    conn = sqlite3.connect(sidecar)
+    try:
+        conn.execute("CREATE TABLE pages (id INTEGER PRIMARY KEY)")
+        conn.commit()
+    finally:
+        conn.close()
+    companions = [sidecar.with_name(f"{sidecar.name}{suffix}") for suffix in live_suffixes]
+    for index, companion in enumerate(companions):
+        companion.write_bytes(f"live-{index}".encode())
+    before = {
+        companion: (companion.read_bytes(), companion.stat()) for companion in companions
+    }
+
+    def reject_connect(*_args, **_kwargs):
+        pytest.fail("doctor must not sqlite-connect while WAL/SHM exists")
+
+    monkeypatch.setattr(lexstore, "backend", lambda: "fts5")
+    monkeypatch.setattr(lexstore, "fts5_available", lambda: True)
+    monkeypatch.setattr(doctor_module.sqlite3, "connect", reject_connect)
+
+    check = doctor_module._check_lexical(vault)
+
+    assert check.status == "warn"
+    assert "unreadable" in check.message
+    for companion, (content, info) in before.items():
+        after = companion.stat()
+        assert companion.read_bytes() == content
+        assert (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns) == (
+            info.st_dev,
+            info.st_ino,
+            info.st_size,
+            info.st_mtime_ns,
+        )
+
+
+@pytest.mark.parametrize("change", ["wal", "identity"])
+def test_lexical_immutable_snapshot_refuses_state_change_during_query(
+    vault: Path, monkeypatch: pytest.MonkeyPatch, change: str
+) -> None:
+    from exomem import lexstore
+
+    sidecar = lexstore.lexical_path(vault)
+    conn = sqlite3.connect(sidecar)
+    try:
+        conn.execute("CREATE TABLE pages (id INTEGER PRIMARY KEY)")
+        conn.commit()
+    finally:
+        conn.close()
+    wal = sidecar.with_name(f"{sidecar.name}-wal")
+    real_connect = sqlite3.connect
+
+    class ChangingConnection:
+        def __init__(self, connection: sqlite3.Connection) -> None:
+            self.connection = connection
+
+        def __getattr__(self, name: str):
+            return getattr(self.connection, name)
+
+        def execute(self, statement: str, *args, **kwargs):
+            result = self.connection.execute(statement, *args, **kwargs)
+            if statement.startswith("SELECT count"):
+                if change == "wal":
+                    wal.write_bytes(b"appeared during snapshot")
+                else:
+                    info = sidecar.stat()
+                    os.utime(
+                        sidecar,
+                        ns=(info.st_atime_ns, info.st_mtime_ns + 1_000_000_000),
+                    )
+            return result
+
+    def changing_connect(database, *args, **kwargs):
+        return ChangingConnection(real_connect(database, *args, **kwargs))
+
+    monkeypatch.setattr(lexstore, "backend", lambda: "fts5")
+    monkeypatch.setattr(lexstore, "fts5_available", lambda: True)
+    monkeypatch.setattr(doctor_module.sqlite3, "connect", changing_connect)
+
+    check = doctor_module._check_lexical(vault)
+
+    assert check.status == "warn"
+    assert "unreadable" in check.message
+
+
+def test_media_runtime_requests_diagnostic_snapshot(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import media_jobs
+
+    calls: list[bool] = []
+
+    def fake_status(_vault: Path, *, diagnostic_snapshot: bool = False):
+        calls.append(diagnostic_snapshot)
+        return {
+            "healthy": True,
+            "counts": {state: 0 for state in media_jobs.STATES},
+        }
+
+    monkeypatch.setattr(media_jobs, "status", fake_status)
+
+    check = doctor_module._check_media_runtime(vault)
+
+    assert check is not None and check.status == "pass"
+    assert calls == [True]
 
 
 def test_doctor_json_cli(vault: Path, capsys) -> None:

@@ -102,7 +102,9 @@ class MediaJobStore:
 
     def _connect(self, *, readonly: bool = False) -> sqlite3.Connection:
         if readonly:
-            conn = sqlite3.connect(f"file:{self.path}?mode=ro", uri=True, timeout=5.0)
+            conn = sqlite3.connect(
+                f"{self.path.resolve().as_uri()}?mode=ro", uri=True, timeout=5.0
+            )
         else:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             conn = sqlite3.connect(self.path, timeout=5.0)
@@ -517,7 +519,69 @@ class MediaJobStore:
         )
 
 
-def status(vault_root: Path | None) -> dict[str, Any]:
+def _read_status_rows(
+    conn: sqlite3.Connection,
+) -> tuple[list[Any], Any, list[Any], list[Any]]:
+    rows = conn.execute("SELECT state, count(*) AS n FROM jobs GROUP BY state").fetchall()
+    runtime = conn.execute(
+        "SELECT worker_pid, idle_seconds FROM runtime WHERE singleton = 1"
+    ).fetchone()
+    errors = conn.execute(
+        "SELECT state, last_error FROM jobs "
+        "WHERE state IN ('blocked', 'failed') ORDER BY updated_at DESC LIMIT 5"
+    ).fetchall()
+    jobs = conn.execute(
+        "SELECT id, binary_rel, sidecar_rel, media_type, state, attempts, last_error "
+        "FROM jobs ORDER BY updated_at DESC, id DESC LIMIT ?",
+        (STATUS_JOB_LIMIT,),
+    ).fetchall()
+    return rows, runtime, errors, jobs
+
+
+def _sqlite_file_identity(path: Path) -> tuple[int, int, int, int]:
+    info = path.stat()
+    return info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns
+
+
+def _sqlite_sidecars(path: Path) -> tuple[Path, Path]:
+    return path.with_name(f"{path.name}-wal"), path.with_name(f"{path.name}-shm")
+
+
+def _sqlite_sidecar_exists(sidecars: tuple[Path, Path]) -> bool:
+    return any(os.path.lexists(item) for item in sidecars)
+
+
+def _diagnostic_snapshot_rows(
+    path: Path,
+) -> tuple[list[Any], Any, list[Any], list[Any]]:
+    sidecars = _sqlite_sidecars(path)
+    if _sqlite_sidecar_exists(sidecars):
+        raise OSError("media job database has live SQLite companions")
+    identity = _sqlite_file_identity(path)
+    with path.open("rb") as stream:
+        if not stream.read(1):
+            raise OSError("media job database is empty")
+    if _sqlite_file_identity(path) != identity or _sqlite_sidecar_exists(sidecars):
+        raise OSError("media job database is not a stable standalone snapshot")
+
+    uri = f"{path.resolve().as_uri()}?mode=ro&immutable=1"
+    conn = sqlite3.connect(uri, uri=True, timeout=5.0)
+    try:
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA query_only = ON")
+        conn.execute("PRAGMA busy_timeout=5000")
+        result = _read_status_rows(conn)
+    finally:
+        conn.close()
+
+    if _sqlite_file_identity(path) != identity or _sqlite_sidecar_exists(sidecars):
+        raise OSError("media job database changed during diagnostic snapshot")
+    return result
+
+
+def status(
+    vault_root: Path | None, *, diagnostic_snapshot: bool = False
+) -> dict[str, Any]:
     """Read ledger state without creating a DB or importing model modules."""
     empty = {
         "store": "missing",
@@ -535,24 +599,15 @@ def status(vault_root: Path | None) -> dict[str, Any]:
     if not path.exists():
         return empty
     try:
-        store = MediaJobStore(vault_root, create=False)
-        conn = store._connect(readonly=True)
-        try:
-            rows = conn.execute("SELECT state, count(*) AS n FROM jobs GROUP BY state").fetchall()
-            runtime = conn.execute(
-                "SELECT worker_pid, idle_seconds FROM runtime WHERE singleton = 1"
-            ).fetchone()
-            errors = conn.execute(
-                "SELECT state, last_error FROM jobs "
-                "WHERE state IN ('blocked', 'failed') ORDER BY updated_at DESC LIMIT 5"
-            ).fetchall()
-            jobs = conn.execute(
-                "SELECT id, binary_rel, sidecar_rel, media_type, state, attempts, last_error "
-                "FROM jobs ORDER BY updated_at DESC, id DESC LIMIT ?",
-                (STATUS_JOB_LIMIT,),
-            ).fetchall()
-        finally:
-            conn.close()
+        if diagnostic_snapshot:
+            rows, runtime, errors, jobs = _diagnostic_snapshot_rows(path)
+        else:
+            store = MediaJobStore(vault_root, create=False)
+            conn = store._connect(readonly=True)
+            try:
+                rows, runtime, errors, jobs = _read_status_rows(conn)
+            finally:
+                conn.close()
         counts = {state: 0 for state in STATES}
         counts.update({str(row["state"]): int(row["n"]) for row in rows})
         pid = int(runtime["worker_pid"]) if runtime and runtime["worker_pid"] else None
