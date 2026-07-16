@@ -25,9 +25,154 @@ HARD_MAX_FILES = 4096
 HARD_MAX_BYTES = 32 * 1024 * 1024
 HARD_EXAMPLE_LIMIT = 50
 FREQUENCY_LIMIT = 128
+MIN_DIRECTORY_ENTRY_BUDGET = 32
+DIRECTORY_ENTRIES_PER_FILE = 16
 
 _SKIP_ALWAYS = frozenset({".git", "node_modules"})
 _SKIP_DEFAULT = frozenset({"_trash", "_attachments", ".trash"})
+
+
+def _directory_entry_budget(max_files: int) -> int:
+    return max(MIN_DIRECTORY_ENTRY_BUDGET, max_files * DIRECTORY_ENTRIES_PER_FILE)
+
+
+def _is_reparse(info: os.stat_result) -> bool:
+    marker = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+    return bool(getattr(info, "st_file_attributes", 0) & marker)
+
+
+def _same_identity(left: os.stat_result, right: os.stat_result) -> bool:
+    return (
+        getattr(left, "st_dev", None) == getattr(right, "st_dev", None)
+        and getattr(left, "st_ino", None) == getattr(right, "st_ino", None)
+        and left.st_mode == right.st_mode
+    )
+
+
+def _same_file_state(left: os.stat_result, right: os.stat_result) -> bool:
+    return (
+        _same_identity(left, right)
+        and left.st_size == right.st_size
+        and getattr(left, "st_mtime_ns", None)
+        == getattr(right, "st_mtime_ns", None)
+        and getattr(left, "st_ctime_ns", None)
+        == getattr(right, "st_ctime_ns", None)
+    )
+
+
+def _open_regular_file_descriptor(root: Path, path: Path) -> int:
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_BINARY", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    if os.name == "nt":  # pragma: no cover - exercised on Windows CI
+        from . import vault
+
+        return vault._open_windows_path_descriptor(
+            path,
+            desired_access=0x80000000,
+            attributes=0x00200000,
+            crt_flags=os.O_RDONLY | getattr(os, "O_BINARY", 0),
+        )
+
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    directory = getattr(os, "O_DIRECTORY", 0)
+    if not nofollow or not directory or os.open not in os.supports_dir_fd:
+        raise RuntimeError("safe descriptor-relative open unavailable")
+    relative = path.relative_to(root)
+    parts = relative.parts
+    if not parts:
+        raise RuntimeError("safe descriptor-relative open requires a file")
+
+    directory_fd: int | None = None
+    file_fd: int | None = None
+    try:
+        directory_flags = os.O_RDONLY | directory | nofollow | getattr(os, "O_CLOEXEC", 0)
+        directory_fd = os.open(root, directory_flags)
+        root_info = os.fstat(directory_fd)
+        if not stat.S_ISDIR(root_info.st_mode) or _is_reparse(root_info):
+            raise RuntimeError("unsafe census root")
+        for component in parts[:-1]:
+            next_fd = os.open(
+                component,
+                directory_flags,
+                dir_fd=directory_fd,
+            )
+            os.close(directory_fd)
+            directory_fd = next_fd
+            directory_info = os.fstat(directory_fd)
+            if not stat.S_ISDIR(directory_info.st_mode) or _is_reparse(directory_info):
+                raise RuntimeError("unsafe census directory")
+        file_fd = os.open(parts[-1], flags, dir_fd=directory_fd)
+        descriptor = file_fd
+        file_fd = None
+        return descriptor
+    finally:
+        if file_fd is not None:
+            os.close(file_fd)
+        if directory_fd is not None:
+            os.close(directory_fd)
+
+
+def _read_regular_file_bounded(
+    root: Path,
+    path: Path,
+    remaining: int,
+) -> tuple[str, bytes | None]:
+    """Read one stable regular file without following links or exceeding remaining+1."""
+    try:
+        expected = path.lstat()
+    except OSError:
+        return "unsafe", None
+    if (
+        not stat.S_ISREG(expected.st_mode)
+        or stat.S_ISLNK(expected.st_mode)
+        or _is_reparse(expected)
+    ):
+        return "unsafe", None
+
+    try:
+        descriptor = _open_regular_file_descriptor(root, path)
+    except (OSError, RuntimeError, ValueError):
+        return "unsafe", None
+    try:
+        opened = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or _is_reparse(opened)
+            or not _same_identity(expected, opened)
+        ):
+            return "unsafe", None
+        if opened.st_size > remaining:
+            return "oversized", None
+
+        chunks: list[bytes] = []
+        total = 0
+        while total <= remaining:
+            chunk = os.read(descriptor, min(65536, remaining + 1 - total))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+        if total > remaining:
+            return "oversized", None
+        after = os.fstat(descriptor)
+        if not _same_file_state(opened, after):
+            return "unsafe", None
+    except OSError:
+        return "unsafe", None
+    finally:
+        os.close(descriptor)
+
+    try:
+        current = path.lstat()
+    except OSError:
+        return "unsafe", None
+    if _is_reparse(current) or not _same_file_state(opened, current):
+        return "unsafe", None
+    return "ok", b"".join(chunks)
 
 
 def _bounded_limit(value: int, *, default: int, hard_max: int, name: str) -> int:
@@ -238,6 +383,7 @@ def scan(
         hard_max=HARD_EXAMPLE_LIMIT,
         name="example_limit",
     )
+    effective_max_directory_entries = _directory_entry_budget(effective_max_files)
 
     language = semantic_language_registry.load_registry(root_path)
     relations = relation_registry.load_registry(root_path)
@@ -258,19 +404,57 @@ def scan(
     bytes_scanned = 0
     parseable_pages = 0
     pages_with_diagnostics = 0
+    directory_entries_enumerated = 0
+    unreadable_directories = 0
+    enumeration_incomplete = False
+    directory_entry_budget_exhausted = False
+    pending_directories = [scan_root]
 
-    for dirpath, dirnames, filenames in os.walk(scan_root):
-        kept_dirs: list[str] = []
-        for dirname in sorted(dirnames):
-            if dirname in _SKIP_ALWAYS or (
-                not include_hidden
-                and (dirname.startswith(".") or dirname in _SKIP_DEFAULT)
-            ):
-                hidden_omitted += 1
+    while pending_directories:
+        dirpath = pending_directories.pop()
+        entries: list[os.DirEntry[str]] = []
+        try:
+            with os.scandir(dirpath) as iterator:
+                while directory_entries_enumerated < effective_max_directory_entries:
+                    try:
+                        entry = next(iterator)
+                    except StopIteration:
+                        break
+                    directory_entries_enumerated += 1
+                    entries.append(entry)
+        except OSError:
+            unreadable_directories += 1
+            enumeration_incomplete = True
+            continue
+
+        reached_entry_budget = (
+            directory_entries_enumerated >= effective_max_directory_entries
+        )
+        child_directories: list[Path] = []
+        for entry in sorted(entries, key=lambda item: item.name):
+            filename = entry.name
+            try:
+                entry_info = entry.stat(follow_symlinks=False)
+            except OSError:
+                if filename.casefold().endswith(".md"):
+                    markdown_seen += 1
+                    markdown_omitted += 1
+                    unreadable_files += 1
                 continue
-            kept_dirs.append(dirname)
-        dirnames[:] = kept_dirs
-        for filename in sorted(filenames):
+            is_directory = (
+                stat.S_ISDIR(entry_info.st_mode)
+                and not stat.S_ISLNK(entry_info.st_mode)
+                and not _is_reparse(entry_info)
+            )
+            if is_directory:
+                if filename in _SKIP_ALWAYS or (
+                    not include_hidden
+                    and (filename.startswith(".") or filename in _SKIP_DEFAULT)
+                ):
+                    hidden_omitted += 1
+                    continue
+                child_directories.append(Path(entry.path))
+                continue
             if not include_hidden and filename.startswith("."):
                 hidden_omitted += 1
                 continue
@@ -280,24 +464,22 @@ def scan(
             if markdown_scanned >= effective_max_files:
                 markdown_omitted += 1
                 continue
-            disk_path = Path(dirpath) / filename
-            try:
-                info = disk_path.lstat()
-            except OSError:
+            disk_path = Path(entry.path)
+            read_status, raw = _read_regular_file_bounded(
+                root_path,
+                disk_path,
+                effective_max_bytes - bytes_scanned,
+            )
+            if read_status == "oversized":
+                markdown_omitted += 1
+                continue
+            if read_status != "ok" or raw is None:
                 unreadable_files += 1
                 markdown_omitted += 1
                 continue
-            if not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode):
-                unreadable_files += 1
-                markdown_omitted += 1
-                continue
-            if info.st_size > effective_max_bytes - bytes_scanned:
-                markdown_omitted += 1
-                continue
             try:
-                raw = disk_path.read_bytes()
                 text = raw.decode("utf-8")
-            except (OSError, UnicodeDecodeError):
+            except UnicodeDecodeError:
                 unreadable_files += 1
                 markdown_omitted += 1
                 continue
@@ -340,6 +522,11 @@ def scan(
                             "remediation": diagnostic.remediation,
                         }
                     )
+        if reached_entry_budget:
+            enumeration_incomplete = True
+            directory_entry_budget_exhausted = True
+            break
+        pending_directories.extend(reversed(child_directories))
 
     canonical_collisions, canonical_collision_omitted = _category_collisions(
         canonical_raw,
@@ -362,7 +549,13 @@ def scan(
     registry_findings_omitted = max(
         0, len(language.findings) - effective_example_limit
     )
-    complete_root_scan = not scope and markdown_omitted == 0 and unreadable_files == 0
+    complete_root_scan = (
+        not scope
+        and not enumeration_incomplete
+        and markdown_omitted == 0
+        and unreadable_files == 0
+        and unreadable_directories == 0
+    )
     governance = _governance_report(
         root_path,
         scanned_paths=scanned_paths,
@@ -373,7 +566,10 @@ def scan(
     relation_debt = sum(
         count for kind, count in relation_counts.items() if kind in {"missing", "stale"}
     )
-    truncated = markdown_omitted > 0
+    truncated = markdown_omitted > 0 or enumeration_incomplete
+    coverage_complete = (
+        not truncated and unreadable_files == 0 and unreadable_directories == 0
+    )
     malformed_count = sum(diagnostic_counts.values())
     return {
         "read_only": True,
@@ -381,18 +577,25 @@ def scan(
         "limits": {
             "max_files": effective_max_files,
             "max_bytes": effective_max_bytes,
+            "max_directory_entries": effective_max_directory_entries,
             "example_limit": effective_example_limit,
             "include_hidden": include_hidden,
         },
         "coverage": {
+            "complete": coverage_complete,
+            "omitted_is_lower_bound": enumeration_incomplete,
             "markdown_files_seen": markdown_seen,
+            "markdown_files_seen_is_lower_bound": enumeration_incomplete,
             "markdown_files_scanned": markdown_scanned,
             "markdown_files_omitted": markdown_omitted,
             "bytes_scanned": bytes_scanned,
             "parseable_pages": parseable_pages,
             "pages_with_diagnostics": pages_with_diagnostics,
             "unreadable_files": unreadable_files,
+            "unreadable_directories": unreadable_directories,
             "hidden_entries_omitted": hidden_omitted,
+            "directory_entries_enumerated": directory_entries_enumerated,
+            "directory_entry_budget_exhausted": directory_entry_budget_exhausted,
             "truncated": truncated,
         },
         "units": dict(units),

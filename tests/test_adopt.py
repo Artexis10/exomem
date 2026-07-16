@@ -5,6 +5,7 @@ from __future__ import annotations
 import datetime as dt
 import hashlib
 import json
+import os
 from importlib import resources
 from pathlib import Path
 
@@ -12,7 +13,7 @@ import pytest
 import yaml
 
 from exomem import adopt as adopt_module
-from exomem import commands, knowledge_packs
+from exomem import commands, knowledge_packs, semantic_census
 from exomem.__main__ import main
 
 
@@ -151,6 +152,7 @@ def test_adopt_scan_only_semantic_census_honors_subtree_hidden_and_resource_boun
     assert census["limits"] == {
         "max_files": 1,
         "max_bytes": 1024,
+        "max_directory_entries": 32,
         "example_limit": 1,
         "include_hidden": False,
     }
@@ -161,6 +163,152 @@ def test_adopt_scan_only_semantic_census_honors_subtree_hidden_and_resource_boun
     assert set(census["categories"]["raw_frequencies"]) <= {"alpha", "beta"}
     assert "secret" not in census["categories"]["raw_frequencies"]
     assert "outside" not in census["categories"]["raw_frequencies"]
+
+
+def test_adopt_semantic_census_bounds_directory_entry_enumeration(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    vault = _legacy_vault(tmp_path, kb=False)
+    focus = vault / "Focus"
+    focus.mkdir()
+    (focus / "00-semantic.md").write_text("- [bounded] First.\n", encoding="utf-8")
+    for index in range(80):
+        (focus / f"directory-{index:03d}").mkdir()
+        (focus / f"ordinary-{index:03d}.bin").write_bytes(b"not markdown")
+
+    real_scandir = os.scandir
+    enumerated = 0
+
+    class CountingScandir:
+        def __init__(self, target: object) -> None:
+            self._inner = real_scandir(target)
+
+        def __enter__(self) -> CountingScandir:
+            self._inner.__enter__()
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            self._inner.__exit__(*args)
+
+        def __iter__(self) -> CountingScandir:
+            return self
+
+        def __next__(self) -> os.DirEntry[str]:
+            nonlocal enumerated
+            entry = next(self._inner)
+            enumerated += 1
+            return entry
+
+    monkeypatch.setattr(semantic_census.os, "scandir", CountingScandir)
+
+    census = semantic_census.scan(vault, path="Focus", max_files=1)
+
+    entry_budget = census["limits"].get("max_directory_entries")
+    assert isinstance(entry_budget, int)
+    assert enumerated == census["coverage"]["directory_entries_enumerated"]
+    assert enumerated <= entry_budget
+    assert census["coverage"]["omitted_is_lower_bound"] is True
+    assert census["coverage"]["truncated"] is True
+
+
+def test_adopt_semantic_census_rejects_symlink_and_identity_swap(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    vault = _legacy_vault(tmp_path, kb=False)
+    focus = vault / "Focus"
+    focus.mkdir()
+    candidate = focus / "candidate.md"
+    candidate.write_text("- [safe] Original.\n", encoding="utf-8")
+    outside = vault / "outside.md"
+    outside.write_text("- [escaped] Outside.\n", encoding="utf-8")
+    (focus / "link.md").symlink_to(outside)
+    real_lstat = Path.lstat
+    swapped = False
+
+    def swapping_lstat(path: Path) -> os.stat_result:
+        nonlocal swapped
+        result = real_lstat(path)
+        if path == candidate and not swapped:
+            candidate.unlink()
+            candidate.symlink_to(outside)
+            swapped = True
+        return result
+
+    monkeypatch.setattr(Path, "lstat", swapping_lstat)
+
+    census = semantic_census.scan(vault, path="Focus", max_files=4)
+
+    assert census["categories"]["raw_frequencies"] == {}
+    assert census["coverage"]["unreadable_files"] >= 1
+
+
+def test_adopt_semantic_census_never_reads_past_remaining_byte_budget(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    vault = _legacy_vault(tmp_path, kb=False)
+    focus = vault / "Focus"
+    focus.mkdir()
+    candidate = focus / "candidate.md"
+    candidate.write_text("- [safe] Original.\n", encoding="utf-8")
+    real_read_bytes = Path.read_bytes
+
+    def oversized_read(path: Path) -> bytes:
+        if path == candidate:
+            return b"x" * 4096
+        return real_read_bytes(path)
+
+    monkeypatch.setattr(Path, "read_bytes", oversized_read)
+
+    census = semantic_census.scan(
+        vault,
+        path="Focus",
+        max_files=1,
+        max_bytes=32,
+    )
+
+    assert census["coverage"]["bytes_scanned"] <= 32
+    assert census["categories"]["raw_frequencies"] == {"safe": 1}
+
+
+def test_adopt_semantic_census_rejects_file_growth_during_bounded_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    vault = _legacy_vault(tmp_path, kb=False)
+    focus = vault / "Focus"
+    focus.mkdir()
+    candidate = focus / "candidate.md"
+    candidate.write_text("- [safe] Original.\n", encoding="utf-8")
+    real_read = os.read
+    requested: list[int] = []
+    grown = False
+
+    def growing_read(descriptor: int, count: int) -> bytes:
+        nonlocal grown
+        requested.append(count)
+        if not grown:
+            with candidate.open("ab") as stream:
+                stream.write(b"x" * 4096)
+            grown = True
+        return real_read(descriptor, count)
+
+    monkeypatch.setattr(semantic_census.os, "read", growing_read)
+
+    census = semantic_census.scan(
+        vault,
+        path="Focus",
+        max_files=1,
+        max_bytes=32,
+    )
+
+    assert requested
+    assert max(requested) <= 33
+    assert census["coverage"]["bytes_scanned"] == 0
+    assert census["coverage"]["markdown_files_scanned"] == 0
+    assert census["categories"]["raw_frequencies"] == {}
 
 
 def test_adopt_scan_only_semantic_census_reports_saved_governance_read_only(
@@ -274,6 +422,7 @@ def test_adopt_vault_surface_exposes_semantic_census_bounds(tmp_path: Path) -> N
     assert report["semantic_census"]["limits"] == {
         "max_files": 1,
         "max_bytes": 1024,
+        "max_directory_entries": 32,
         "example_limit": 1,
         "include_hidden": False,
     }
