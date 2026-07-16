@@ -38,6 +38,6 @@
 
 ## 5. Verification and Delivery
 
-- [ ] 5.1 Run focused graph/freshness/watcher/reconcile tests, Ruff, OpenSpec validation, and the lean suite while recording inherited baseline failures separately.
-- [ ] 5.2 Run an independent review for spec conformance, race safety, and regression scope; address all actionable findings.
+- [x] 5.1 Run focused graph/freshness/watcher/reconcile tests, Ruff, OpenSpec validation, and the lean suite while recording inherited baseline failures separately.
+- [x] 5.2 Run an independent review for spec conformance, race safety, and regression scope; address all actionable findings.
 - [ ] 5.3 Benchmark a quiescent production reconcile, verify queue counts and derived-index drift remain zero, and confirm local/public health after deployment.
