@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime
+from typing import Any, Protocol
 
+from .capacity import CapacityIdentityConflict
 from .driver import (
     DriverFinal,
     DriverPending,
@@ -18,6 +20,21 @@ from .models import OperationAction
 from .repository import ClaimConflict, OperationRepository, OperationSnapshot, StaleFence
 
 
+class CapacityAdmission(Protocol):
+    async def admit(
+        self,
+        operation: OperationSnapshot,
+        request: dict[str, Any],
+        *,
+        worker_id: str,
+        claim_token: str,
+        claim_generation: int,
+        provider_operation_id: str,
+        provider_fence_generation: int,
+        now: datetime | None,
+    ) -> str | None: ...
+
+
 class ProvisionerWorker:
     def __init__(
         self,
@@ -29,7 +46,17 @@ class ProvisionerWorker:
         exclude_checkpoints: frozenset[str] = frozenset(),
         allowed_actions: frozenset[OperationAction] | None = None,
         excluded_actions: frozenset[OperationAction] = frozenset(),
+        resume_claim: bool = False,
+        capacity_admission: CapacityAdmission | None = None,
     ) -> None:
+        if allowed_actions is not None and allowed_actions & excluded_actions:
+            raise ValueError("worker action scopes overlap")
+        provision_capable = (
+            (allowed_actions is None or OperationAction.PROVISION in allowed_actions)
+            and OperationAction.PROVISION not in excluded_actions
+        )
+        if provision_capable and capacity_admission is None:
+            raise ValueError("PROVISION-capable worker requires capacity admission")
         self._repository = repository
         self._driver = driver
         self._worker_id = worker_id
@@ -37,9 +64,16 @@ class ProvisionerWorker:
         self._exclude_checkpoints = exclude_checkpoints
         self._allowed_actions = allowed_actions
         self._excluded_actions = excluded_actions
+        self._resume_claim = resume_claim
+        self._capacity_admission = capacity_admission
 
     async def run_once(self, *, now: datetime | None = None) -> bool:
-        operation = await self._repository.claim_next(
+        claim_method = (
+            self._repository.resume_claim
+            if self._resume_claim
+            else self._repository.claim_next
+        )
+        operation = await claim_method(
             self._worker_id,
             now=now,
             include_checkpoints=self._include_checkpoints,
@@ -117,6 +151,41 @@ class ProvisionerWorker:
             )
             return True
         request = await self._repository.load_request(operation.id)
+        if operation.action is OperationAction.PROVISION:
+            if self._capacity_admission is None:
+                raise RuntimeError("PROVISION-capable worker has no capacity admission")
+            try:
+                block_reason = await self._capacity_admission.admit(
+                    operation,
+                    request,
+                    worker_id=self._worker_id,
+                    claim_token=claim["claim_token"],
+                    claim_generation=claim["claim_generation"],
+                    provider_operation_id=operation.external_operation_id,
+                    provider_fence_generation=operation.fence_generation,
+                    now=now,
+                )
+            except CapacityIdentityConflict:
+                if claim_lost.is_set():
+                    return True
+                await self._repository.fail(
+                    operation.id,
+                    self._worker_id,
+                    code="PROVISIONER_CAPACITY_CONFLICT",
+                    **claim,
+                )
+                return True
+            if claim_lost.is_set():
+                return True
+            if block_reason is not None:
+                await self._repository.mark_pending(
+                    operation.id,
+                    self._worker_id,
+                    checkpoint=block_reason,
+                    retry_after_seconds=300,
+                    **claim,
+                )
+                return True
         context = EffectContext(
             operation_id=operation.id,
             provider_operation_id=operation.external_operation_id,

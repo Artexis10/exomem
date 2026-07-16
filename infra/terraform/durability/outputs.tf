@@ -100,16 +100,6 @@ output "database_backup_restore_application_key" {
   sensitive = true
 }
 
-output "database_backup_delete_application_key_id" {
-  value     = b2_application_key.database_backup_delete.application_key_id
-  sensitive = true
-}
-
-output "database_backup_delete_application_key" {
-  value     = b2_application_key.database_backup_delete.application_key
-  sensitive = true
-}
-
 output "etcd_snapshot_upload_application_key_id" {
   value     = b2_application_key.etcd_snapshot_upload.application_key_id
   sensitive = true

@@ -42,10 +42,30 @@ class DeletionAuthority(Protocol):
     ) -> bool: ...
 
 
-class WrappedKeyStore(Protocol):
+class DeletionLedger(Protocol):
+    async def tenant_recovery_objects(self, tenant_id: str) -> list[Any]: ...
+
+    async def tenant_export_deliveries(self, tenant_id: str) -> list[Any]: ...
+
+    async def mark_recovery_object_deleted(
+        self,
+        reference: str,
+        *,
+        tenant_id: str,
+    ) -> None: ...
+
+    async def mark_export_delivery_deleted(
+        self,
+        reference: str,
+        *,
+        tenant_id: str,
+    ) -> None: ...
+
     async def destroy(self, reference: str, *, tenant_id: str) -> None: ...
 
     async def absent(self, reference: str, *, tenant_id: str) -> bool: ...
+
+    async def deletion_complete(self, tenant_id: str) -> bool: ...
 
 
 class LiveDeletionProvider:
@@ -59,6 +79,9 @@ class LiveDeletionProvider:
     _CREDENTIAL_NAME = "exomem-cell-credentials"
     _CREDENTIAL_DELETION_OPERATION = "exomem.io/credential-deletion-operation-digest"
     _CREDENTIAL_DELETION_FENCE = "exomem.io/credential-deletion-fence"
+    _B2_EXACT_MAX_KEYS = 100
+    _B2_EXACT_MAX_PAGES = 10
+    _B2_EXACT_MAX_ITEMS = 1000
 
     def __init__(
         self,
@@ -72,7 +95,7 @@ class LiveDeletionProvider:
         export_bucket: str,
         identity_verifier: ProviderRecoveryIdentityVerifier,
         authority: DeletionAuthority,
-        key_store: WrappedKeyStore,
+        key_store: DeletionLedger,
     ) -> None:
         if not recovery_bucket or not export_bucket or recovery_bucket == export_bucket:
             raise ValueError("deletion buckets must be distinct and non-empty")
@@ -152,6 +175,8 @@ class LiveDeletionProvider:
         claims: dict[str, object],
         retained_until: datetime | None = None,
         wrapped_key_reference: str | None = None,
+        ledger_reference: str | None = None,
+        delete_marker: bool = False,
     ) -> DeletionResource:
         self._claims[reference] = claims
         return DeletionResource(
@@ -162,6 +187,8 @@ class LiveDeletionProvider:
             cell_id=str(claims["cellId"]),
             retained_until=retained_until,
             wrapped_key_reference=wrapped_key_reference,
+            ledger_reference=ledger_reference,
+            delete_marker=delete_marker,
         )
 
     async def scan_tenant(self, tenant_id: str) -> tuple[DeletionResource, ...]:
@@ -192,7 +219,17 @@ class LiveDeletionProvider:
                     context.fence_generation,
                 ):
                     raise DeletionLeaseBusy("cell operation lock is held by another operation")
-        return tuple(sorted(resources, key=lambda item: (item.provider, item.reference, item.kind)))
+        return tuple(
+            sorted(
+                resources,
+                key=lambda item: (
+                    item.provider,
+                    0 if item.delete_marker else 1,
+                    item.reference,
+                    item.kind,
+                ),
+            )
+        )
 
     async def _scan_kubernetes(self, tenant_id: str) -> list[DeletionResource]:
         result: list[DeletionResource] = []
@@ -328,59 +365,296 @@ class LiveDeletionProvider:
 
     async def _scan_b2(self, tenant_id: str) -> list[DeletionResource]:
         result: list[DeletionResource] = []
-        for bucket, kind in (
-            (self._export_bucket, DeletionResourceKind.EXPORT),
-            (self._recovery_bucket, DeletionResourceKind.BACKUP),
-        ):
-            token: str | None = None
-            while True:
-                request: dict[str, object] = {"Bucket": bucket}
-                if token is not None:
-                    request["ContinuationToken"] = token
-                page = await asyncio.to_thread(self._b2.list_objects_v2, **request)
-                for item in page.get("Contents", ()):
-                    key = str(item["Key"])
-                    head = await asyncio.to_thread(
-                        self._b2.head_object,
-                        Bucket=bucket,
-                        Key=key,
-                    )
-                    object_metadata = {
-                        str(name).lower(): str(value)
-                        for name, value in dict(head.get("Metadata", {})).items()
-                    }
-                    reference = ProviderReference.b2(bucket=bucket, key=key)
-                    claims = self._authenticated_claims(
-                        envelope=object_metadata.get("identity-envelope", ""),
-                        provider="b2",
-                        reference=reference,
-                    )
-                    if claims["tenantId"] != tenant_id:
-                        continue
-                    retained = head.get("ObjectLockRetainUntilDate")
-                    if retained is not None and (
-                        not isinstance(retained, datetime) or retained.tzinfo is None
-                    ):
-                        raise MetadataConflict("B2 retention timestamp is invalid")
-                    wrapped_key = object_metadata.get("wrapped-key-reference")
-                    result.append(
-                        self._record(
-                            provider="b2",
-                            reference=reference,
-                            kind=kind,
-                            claims=claims,
-                            retained_until=retained,
-                            wrapped_key_reference=wrapped_key,
-                        )
-                    )
-                if not page.get("IsTruncated"):
-                    break
-                token = page.get("NextContinuationToken")
-                if not isinstance(token, str) or not token:
-                    raise MetadataConflict("B2 deletion scan pagination is invalid")
+        recovery_records = await self._key_store.tenant_recovery_objects(tenant_id)
+        for record in recovery_records:
+            if record.tenant_id != tenant_id:
+                raise MetadataConflict("recovery ledger crossed tenant boundary")
+            if (
+                record.deleted_at is not None
+                and record.wrapped_data_key is None
+                and record.key_destroyed_at is not None
+            ):
+                continue
+            result.extend(await self._scan_recovery_record(record))
+        delivery_records = await self._key_store.tenant_export_deliveries(tenant_id)
+        for record in delivery_records:
+            if record.tenant_id != tenant_id:
+                raise MetadataConflict("delivery ledger crossed tenant boundary")
+            if record.deleted_at is not None:
+                continue
+            result.extend(await self._scan_delivery_record(record))
         return result
 
-    async def delete_resource(self, resource: DeletionResource, *, bypass_governance: bool) -> None:
+    async def _scan_recovery_record(self, record: Any) -> list[DeletionResource]:
+        parsed = self._exact_b2_ledger_reference(record.provider_reference)
+        bucket = str(parsed["bucket"])
+        key = str(parsed["key"])
+        expected_version = str(parsed["objectVersionId"])
+        kind = self._recovery_kind(record, bucket=bucket)
+        claims = self._ledger_claims(record, provider_reference=record.provider_reference)
+        versions, markers = await self._b2_entries(bucket=bucket, prefix=key)
+        versions = [item for item in versions if self._b2_entry_identity(item)[0] == key]
+        markers = [item for item in markers if self._b2_entry_identity(item)[0] == key]
+        resources: list[DeletionResource] = []
+        listed_versions: set[str] = set()
+        listed_version_order: list[str] = []
+        locked_until = getattr(record, "object_lock_until", None)
+        if not isinstance(locked_until, datetime) or locked_until.tzinfo is None:
+            raise MetadataConflict("recovery ledger retention timestamp is invalid")
+        for item in versions:
+            _, version_id = self._b2_entry_identity(item)
+            listed_versions.add(version_id)
+            head = await asyncio.to_thread(
+                self._b2.head_object,
+                Bucket=bucket,
+                Key=key,
+                VersionId=version_id,
+            )
+            if head.get("VersionId") not in {None, version_id}:
+                raise MetadataConflict("B2 exact version proof differs")
+            object_metadata = {
+                str(name).lower(): str(value)
+                for name, value in dict(head.get("Metadata", {})).items()
+            }
+            authenticated = self._authenticated_claims(
+                envelope=object_metadata.get("identity-envelope", ""),
+                provider="b2",
+                reference=ProviderReference.b2(bucket=bucket, key=key),
+            )
+            self._require_ledger_claims(authenticated, claims)
+            if object_metadata.get("wrapped-key-reference") != record.opaque_reference:
+                raise MetadataConflict("B2 wrapped-key ledger reference differs")
+            retained = head.get("ObjectLockRetainUntilDate")
+            if retained is not None and (
+                not isinstance(retained, datetime) or retained.tzinfo is None
+            ):
+                raise MetadataConflict("B2 retention timestamp is invalid")
+            if retained is not None and (locked_until is None or retained > locked_until):
+                locked_until = retained
+            listed_version_order.append(version_id)
+        for version_id in listed_version_order:
+            resources.append(
+                self._record(
+                    provider="b2",
+                    reference=ProviderReference.b2(
+                        bucket=bucket,
+                        key=key,
+                        version_id=version_id,
+                    ),
+                    kind=kind,
+                    claims=claims,
+                    retained_until=locked_until,
+                    wrapped_key_reference=record.opaque_reference,
+                    ledger_reference=record.opaque_reference,
+                )
+            )
+        if expected_version not in listed_versions:
+            resources.append(
+                self._record(
+                    provider="b2",
+                    reference=record.provider_reference,
+                    kind=kind,
+                    claims=claims,
+                    retained_until=locked_until,
+                    wrapped_key_reference=record.opaque_reference,
+                    ledger_reference=record.opaque_reference,
+                )
+            )
+        for item in markers:
+            _, version_id = self._b2_entry_identity(item)
+            resources.append(
+                self._record(
+                    provider="b2",
+                    reference=ProviderReference.b2(
+                        bucket=bucket,
+                        key=key,
+                        version_id=version_id,
+                        delete_marker=True,
+                    ),
+                    kind=kind,
+                    claims=claims,
+                    retained_until=locked_until,
+                    ledger_reference=record.opaque_reference,
+                    delete_marker=True,
+                )
+            )
+        return resources
+
+    async def _scan_delivery_record(self, record: Any) -> list[DeletionResource]:
+        parsed = self._exact_b2_ledger_reference(record.provider_reference)
+        bucket = str(parsed["bucket"])
+        key = str(parsed["key"])
+        expected_version = str(parsed["objectVersionId"])
+        if bucket != self._export_bucket or not key.startswith("user-export-delivery/"):
+            raise MetadataConflict("delivery ledger provider reference is out of scope")
+        claims = self._ledger_claims(record, provider_reference=record.provider_reference)
+        versions, markers = await self._b2_entries(bucket=bucket, prefix=key)
+        exact_versions = [item for item in versions if self._b2_entry_identity(item)[0] == key]
+        exact_markers = [item for item in markers if self._b2_entry_identity(item)[0] == key]
+        listed_versions = {
+            version_id for _, version_id in map(self._b2_entry_identity, exact_versions)
+        }
+        resources = [
+            self._record(
+                provider="b2",
+                reference=ProviderReference.b2(bucket=bucket, key=key, version_id=version_id),
+                kind=DeletionResourceKind.DELIVERY,
+                claims=claims,
+                ledger_reference=record.id,
+            )
+            for _, version_id in map(self._b2_entry_identity, exact_versions)
+        ]
+        if expected_version not in listed_versions:
+            resources.append(
+                self._record(
+                    provider="b2",
+                    reference=record.provider_reference,
+                    kind=DeletionResourceKind.DELIVERY,
+                    claims=claims,
+                    ledger_reference=record.id,
+                )
+            )
+        resources.extend(
+            self._record(
+                provider="b2",
+                reference=ProviderReference.b2(
+                    bucket=bucket,
+                    key=key,
+                    version_id=version_id,
+                    delete_marker=True,
+                ),
+                kind=DeletionResourceKind.DELIVERY,
+                claims=claims,
+                ledger_reference=record.id,
+                delete_marker=True,
+            )
+            for _, version_id in map(self._b2_entry_identity, exact_markers)
+        )
+        return resources
+
+    def _exact_b2_ledger_reference(self, reference: str) -> dict[str, object]:
+        parsed = ProviderReference.parse(reference)
+        if (
+            parsed.get("provider") != "b2"
+            or not isinstance(parsed.get("bucket"), str)
+            or not isinstance(parsed.get("key"), str)
+            or not isinstance(parsed.get("objectVersionId"), str)
+            or not parsed.get("objectVersionId")
+            or parsed.get("deleteMarker") is not False
+        ):
+            raise MetadataConflict("deletion ledger requires an exact B2 version reference")
+        return parsed
+
+    def _recovery_kind(self, record: Any, *, bucket: str) -> DeletionResourceKind:
+        kind = getattr(record.kind, "value", str(record.kind))
+        if kind == "user-export" and bucket == self._export_bucket:
+            return DeletionResourceKind.EXPORT
+        if kind == "vault-backup" and bucket == self._recovery_bucket:
+            return DeletionResourceKind.BACKUP
+        raise MetadataConflict("recovery ledger provider bucket differs from object kind")
+
+    @staticmethod
+    def _ledger_claims(record: Any, *, provider_reference: str) -> dict[str, object]:
+        return {
+            "provider": "b2",
+            "providerReference": provider_reference,
+            "tenantId": record.tenant_id,
+            "cellId": record.cell_id,
+            "operationId": record.operation_id,
+            "fenceGeneration": record.fence_generation,
+        }
+
+    @staticmethod
+    def _require_ledger_claims(
+        authenticated: dict[str, object],
+        ledger: dict[str, object],
+    ) -> None:
+        for field in ("tenantId", "cellId", "operationId", "fenceGeneration"):
+            if authenticated.get(field) != ledger.get(field):
+                raise MetadataConflict("B2 provider identity differs from durable ledger")
+
+    async def _b2_entries(
+        self,
+        *,
+        bucket: str,
+        prefix: str,
+    ) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+        if not prefix:
+            raise MetadataConflict("B2 exact-key listing requires a key")
+        versions: list[dict[str, object]] = []
+        markers: list[dict[str, object]] = []
+        key_marker: str | None = None
+        version_marker: str | None = None
+        seen_cursors: set[tuple[str, str | None]] = set()
+        total_items = 0
+        for _page_number in range(1, self._B2_EXACT_MAX_PAGES + 1):
+            request: dict[str, object] = {
+                "Bucket": bucket,
+                "Prefix": prefix,
+                "MaxKeys": self._B2_EXACT_MAX_KEYS,
+            }
+            if key_marker is not None:
+                request["KeyMarker"] = key_marker
+            if version_marker is not None:
+                request["VersionIdMarker"] = version_marker
+            page = await asyncio.to_thread(self._b2.list_object_versions, **request)
+            page_items = 0
+            moved_beyond_exact_key = False
+            for field, target in (("Versions", versions), ("DeleteMarkers", markers)):
+                entries = page.get(field, ())
+                if not isinstance(entries, (list, tuple)):
+                    raise MetadataConflict("B2 version listing is invalid")
+                page_items += len(entries)
+                previous_entry_key: str | None = None
+                for item in entries:
+                    entry_key, _ = self._b2_entry_identity(item)
+                    if previous_entry_key is not None and entry_key < previous_entry_key:
+                        raise MetadataConflict("B2 exact-key results are out of order")
+                    previous_entry_key = entry_key
+                    if entry_key < prefix:
+                        raise MetadataConflict("B2 exact-key results moved backwards")
+                    if entry_key == prefix:
+                        target.append(item)
+                    else:
+                        moved_beyond_exact_key = True
+            if page_items > self._B2_EXACT_MAX_KEYS:
+                raise MetadataConflict("B2 exact-key page exceeded its item bound")
+            total_items += page_items
+            if total_items > self._B2_EXACT_MAX_ITEMS:
+                raise MetadataConflict("B2 exact-key listing exceeded its item bound")
+            if moved_beyond_exact_key:
+                return versions, markers
+            if not page.get("IsTruncated"):
+                return versions, markers
+            next_key = page.get("NextKeyMarker")
+            next_version = page.get("NextVersionIdMarker")
+            if not isinstance(next_key, str) or not next_key:
+                raise MetadataConflict("B2 version pagination is invalid")
+            if next_key < prefix or (key_marker is not None and next_key < key_marker):
+                raise MetadataConflict("B2 version pagination moved backwards")
+            if next_key > prefix:
+                return versions, markers
+            if not isinstance(next_version, str) or not next_version:
+                raise MetadataConflict("B2 version pagination is invalid")
+            cursor = (next_key, next_version)
+            if cursor in seen_cursors:
+                raise MetadataConflict("B2 version pagination did not advance")
+            seen_cursors.add(cursor)
+            key_marker = next_key
+            version_marker = next_version
+        raise MetadataConflict("B2 exact-key listing exceeded its page bound")
+
+    @staticmethod
+    def _b2_entry_identity(item: object) -> tuple[str, str]:
+        if not isinstance(item, dict):
+            raise MetadataConflict("B2 version listing is invalid")
+        key = item.get("Key")
+        version_id = item.get("VersionId")
+        if not isinstance(key, str) or not key or not isinstance(version_id, str) or not version_id:
+            raise MetadataConflict("B2 version identity is invalid")
+        return key, version_id
+
+    async def delete_resource(self, resource: DeletionResource) -> None:
         await self._assert_authorized(resource.tenant_id)
         if resource.reference not in self._claims:
             raise MetadataConflict("deletion resource was not authenticated by this scan")
@@ -392,12 +666,14 @@ class LiveDeletionProvider:
         elif resource.provider == "hcloud":
             await self._delete_hcloud(parsed, resource)
         elif resource.provider == "b2":
+            version_id = parsed.get("objectVersionId")
+            if not isinstance(version_id, str) or not version_id:
+                raise MetadataConflict("B2 deletion requires an exact version ID")
             arguments: dict[str, object] = {
                 "Bucket": str(parsed["bucket"]),
                 "Key": str(parsed["key"]),
+                "VersionId": version_id,
             }
-            if bypass_governance:
-                arguments["BypassGovernanceRetention"] = True
             await asyncio.to_thread(self._b2.delete_object, **arguments)
         else:
             raise MetadataConflict("deletion provider kind is unsupported")
@@ -580,17 +856,45 @@ class LiveDeletionProvider:
                     for pv in (getattr(pvs, "items", ()) or ())
                 )
             if resource.provider == "b2":
-                await asyncio.to_thread(
-                    self._b2.head_object,
-                    Bucket=str(parsed["bucket"]),
-                    Key=str(parsed["key"]),
+                version_id = parsed.get("objectVersionId")
+                if not isinstance(version_id, str) or not version_id:
+                    raise MetadataConflict("B2 absence proof requires an exact version ID")
+                versions, markers = await self._b2_entries(
+                    bucket=str(parsed["bucket"]),
+                    prefix=str(parsed["key"]),
                 )
-                return False
+                return not any(
+                    self._b2_entry_identity(item)
+                    == (str(parsed["key"]), version_id)
+                    for item in (*versions, *markers)
+                )
         except Exception as error:
             if _is_not_found(error):
                 return True
             raise
         raise MetadataConflict("deletion provider kind is unsupported")
+
+    async def record_resource_absence(self, resource: DeletionResource) -> None:
+        await self._assert_authorized(resource.tenant_id)
+        if resource.provider != "b2" or resource.delete_marker:
+            return
+        if resource.ledger_reference is None:
+            raise MetadataConflict("B2 deletion resource lacks a durable ledger reference")
+        if resource.kind is DeletionResourceKind.DELIVERY:
+            await self._key_store.mark_export_delivery_deleted(
+                resource.ledger_reference,
+                tenant_id=resource.tenant_id,
+            )
+            return
+        if resource.kind in {DeletionResourceKind.EXPORT, DeletionResourceKind.BACKUP}:
+            await self._key_store.mark_recovery_object_deleted(
+                resource.ledger_reference,
+                tenant_id=resource.tenant_id,
+            )
+
+    async def tenant_deletion_complete(self, tenant_id: str) -> bool:
+        await self._assert_authorized(tenant_id)
+        return await self._key_store.deletion_complete(tenant_id)
 
     async def destroy_wrapped_key(self, resource: DeletionResource) -> None:
         await self._assert_authorized(resource.tenant_id)

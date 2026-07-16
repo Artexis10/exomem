@@ -2700,7 +2700,10 @@ def test_prune_skips_multiprocess_writer_then_removes_after_release(
         )
         child.kill()
         child.wait(timeout=5)
-        assert (
+        # Pruning is deadline-bounded and cursor-resumed. A loaded runner may
+        # exhaust one 50 ms callback after the writer releases, so assert the
+        # specified eventual result across bounded subsequent callbacks.
+        removals = [
             checkpoint.prune_expired(
                 home,
                 "codex",
@@ -2708,8 +2711,9 @@ def test_prune_skips_multiprocess_writer_then_removes_after_release(
                 now_ns=100 + checkpoint.RETENTION_NS + 1,
                 force_fallback=force_fallback,
             )
-            == 1
-        )
+            for _ in range(checkpoint.MAX_PRUNE_ENUM_ENTRIES + 2)
+        ]
+        assert sum(removals) == 1
     finally:
         if child.poll() is None:
             child.kill()
@@ -3264,11 +3268,14 @@ def test_prune_removes_authorized_expired_interrupted_first_write(tmp_path: Path
     state = checkpoint.session_state_dir(home, "codex", "interrupted-first-write")
 
     assert {item.name for item in state.iterdir()} == {".lock"}
-    removed = checkpoint.prune_expired(
-        home,
-        "codex",
-        current_session="other",
-        now_ns=100 + checkpoint.RETENTION_NS + 1,
+    removed = sum(
+        checkpoint.prune_expired(
+            home,
+            "codex",
+            current_session="other",
+            now_ns=100 + checkpoint.RETENTION_NS + 1,
+        )
+        for _ in range(checkpoint.MAX_PRUNE_ENUM_ENTRIES + 2)
     )
 
     assert removed == 1

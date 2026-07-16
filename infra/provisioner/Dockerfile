@@ -53,6 +53,8 @@ FROM docker.io/library/postgres:17-bookworm@sha256:67870dc097790edf2bd6726658db9
 COPY --from=python-runtime /usr/local /usr/local
 COPY --from=helm /helm /opt/exomem/bin/helm
 COPY infra/helm/cell /opt/exomem/charts/cell
+COPY infra/provisioner/alembic.ini /opt/exomem/provisioner-migrations/alembic.ini
+COPY infra/provisioner/alembic /opt/exomem/provisioner-migrations/alembic
 RUN case "$(pg_dump --version)" in "pg_dump (PostgreSQL) 17."*) ;; *) exit 1;; esac \
     && for tool in pg_dump pg_restore psql dropdb createdb; do test -x "/usr/bin/${tool}"; done \
     && exomem-provisioner-api --help >/dev/null \
@@ -61,8 +63,14 @@ RUN case "$(pg_dump --version)" in "pg_dump (PostgreSQL) 17."*) ;; *) exit 1;; e
     && exomem-provisioner-volume-rebind --help >/dev/null \
     && exomem-durability-actions --help >/dev/null \
     && exomem-restore-fetch --help >/dev/null \
-    && for command in exomem-durability-backup-worker exomem-database-backup-worker \
+    && for command in exomem-provisioner-database-bootstrap \
+        exomem-provisioner-database-migrate exomem-provisioner-database-validate \
+        exomem-durability-backup-worker exomem-database-backup-worker \
         exomem-deletion-worker exomem-export-gc; do command -v "${command}" >/dev/null; done \
+    && chown -R 0:0 /opt/exomem/provisioner-migrations \
+    && find /opt/exomem/provisioner-migrations -type d -exec chmod 0555 {} + \
+    && find /opt/exomem/provisioner-migrations -type f -exec chmod 0444 {} + \
+    && chmod -R a-w /opt/exomem/provisioner-migrations \
     && groupadd --gid 10001 exomem-provisioner \
     && useradd --uid 10001 --gid 10001 --no-create-home --home-dir /nonexistent exomem-provisioner
 USER 10001:10001

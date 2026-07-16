@@ -251,10 +251,11 @@ def test_platform_renders_real_provisioner_composition() -> None:
         "key": "public-key",
     }
     assert "EXOMEM_PROVIDER_RECOVERY_SIGNING_KEY" not in environment
+    assert "EXOMEM_PROVISIONER_HCLOUD_SERVER_ID" in environment
     assert not any(
         privileged_fragment in name
         for name in environment
-        for privileged_fragment in ("HCLOUD", "B2_", "DELETE_CREDENTIAL")
+        for privileged_fragment in ("HCLOUD_TOKEN", "B2_", "DELETE_CREDENTIAL")
     )
     assert environment["EXOMEM_PROVISIONER_RELEASE_MANIFEST_PATH"]["value"] == (
         "/etc/exomem/release/exomem-hosted-release-v1.json"
@@ -285,8 +286,15 @@ def test_platform_renders_real_provisioner_composition() -> None:
         and rule.get("resources") == ["volumeattachments"]
     )
     assert volume_attachment_rule["verbs"] == ["get", "list", "watch"]
+    persistent_volume_rule = next(
+        rule
+        for rule in provisioner_role["rules"]
+        if rule.get("apiGroups") == [""]
+        and "persistentvolumes" in rule.get("resources", [])
+    )
+    assert persistent_volume_rule["verbs"] == ["get", "list", "watch"]
     assert not any(
-        resource in {"persistentvolumes", "pods", "pods/exec"}
+        resource in {"pods", "pods/exec"}
         for rule in provisioner_role["rules"]
         for resource in rule.get("resources", [])
     )
@@ -311,6 +319,7 @@ def test_platform_renders_real_provisioner_composition() -> None:
 def test_platform_renders_live_capacity_receipt_collector_with_isolated_keys() -> None:
     documents = _render(PLATFORM, PLATFORM / "values.validation.yaml", namespace="exomem-platform")
     runtime = _find(documents, "ConfigMap", "exomem-operational-receipt-collector")
+    assert runtime["immutable"] is True
     assert runtime["data"]["private-alpha-capacity-v1.json"] == (
         ROOT / "infra/operations/private-alpha-capacity-v1.json"
     ).read_text(encoding="utf-8")
@@ -335,6 +344,18 @@ def test_platform_renders_live_capacity_receipt_collector_with_isolated_keys() -
         "python",
         "/opt/exomem-hosted/operational_receipt_collector.py",
         "capacity",
+    ]
+    assert container["args"] == [
+        "--contract",
+        "/opt/exomem-hosted/private-alpha-capacity-v1.json",
+        "--namespace",
+        "exomem-platform",
+        "--state-configmap",
+        "exomem-capacity-receipt",
+        "--hcloud-server-id",
+        "101",
+        "--hcloud-location",
+        "fsn1",
     ]
     environment = {item["name"]: item for item in container["env"]}
     assert environment["EXOMEM_CAPACITY_RECEIPT_PRIVATE_KEY"]["valueFrom"]["secretKeyRef"] == {
@@ -375,8 +396,55 @@ def test_platform_renders_live_capacity_receipt_collector_with_isolated_keys() -
     rendered = json.dumps(documents)
     api = _find(documents, "Deployment", "exomem-provisioner-api")
     worker = _find(documents, "Deployment", "exomem-provisioner-worker")
-    assert "EXOMEM_CAPACITY_RECEIPT_PRIVATE_KEY" not in json.dumps([api, worker])
+    volume_worker = _find(documents, "Deployment", "exomem-volume-worker")
+    assert "EXOMEM_CAPACITY_RECEIPT_PRIVATE_KEY" not in json.dumps(
+        [api, worker, volume_worker]
+    )
+    assert "EXOMEM_HCLOUD_CAPACITY_TOKEN" not in json.dumps([api, worker, volume_worker])
     assert rendered.count("exomem-capacity-receipt-signer") == 1
+
+    contract = _find(documents, "ConfigMap", "exomem-capacity-contract")
+    assert contract["immutable"] is True
+    assert contract["data"]["private-alpha-capacity-v1.json"] == (
+        ROOT / "infra/operations/private-alpha-capacity-v1.json"
+    ).read_text(encoding="utf-8")
+    for deployment in (worker, volume_worker):
+        container = deployment["spec"]["template"]["spec"]["containers"][0]
+        environment = {item["name"]: item for item in container["env"]}
+        assert environment["EXOMEM_PROVISIONER_CAPACITY_RECEIPT_PUBLIC_KEY"]["valueFrom"][
+            "secretKeyRef"
+        ] == {
+            "name": "exomem-capacity-receipt-verifier",
+            "key": "public-key",
+        }
+        assert environment["EXOMEM_PROVISIONER_CAPACITY_CONTRACT_PATH"]["value"] == (
+            "/etc/exomem/capacity/private-alpha-capacity-v1.json"
+        )
+        assert environment["EXOMEM_PROVISIONER_CAPACITY_RECEIPT_NAMESPACE"]["value"] == (
+            "exomem-platform"
+        )
+        assert environment["EXOMEM_PROVISIONER_CAPACITY_RECEIPT_CONFIG_MAP"]["value"] == (
+            "exomem-capacity-receipt"
+        )
+        assert environment["EXOMEM_PROVISIONER_HCLOUD_SERVER_ID"]["value"] == "101"
+        assert any(
+            mount["name"] == "capacity-contract"
+            and mount["mountPath"] == "/etc/exomem/capacity"
+            and mount["readOnly"] is True
+            for mount in container["volumeMounts"]
+        )
+    provisioner_role = _find(documents, "ClusterRole", "exomem-cell-provisioner")
+    for resource, api_group in (
+        ("nodes", ""),
+        ("persistentvolumes", ""),
+        ("volumeattachments", "storage.k8s.io"),
+    ):
+        rule = next(
+            item
+            for item in provisioner_role["rules"]
+            if resource in item.get("resources", []) and api_group in item.get("apiGroups", [])
+        )
+        assert rule["verbs"] == ["get", "list", "watch"]
 
 
 def test_platform_renders_disjoint_durability_workloads() -> None:
@@ -410,10 +478,10 @@ def test_platform_renders_disjoint_durability_workloads() -> None:
             "*/30 * * * *",
             False,
         ),
-        "exomem-deletion-worker": (
-            "Deployment",
-            ["exomem-deletion-worker"],
-            None,
+        "exomem-deletion-dispatcher": (
+            "CronJob",
+            ["exomem-deletion-dispatcher"],
+            "* * * * *",
             True,
         ),
         "exomem-volume-worker": (
@@ -468,15 +536,8 @@ def test_platform_renders_disjoint_durability_workloads() -> None:
             "exomem-database-backup-pg-service/pg_service.conf",
             "exomem-database-backup-pgpass/pgpass",
         },
-        "exomem-deletion-worker": {
+        "exomem-deletion-dispatcher": {
             "exomem-provisioner-database/url",
-            "exomem-provisioner-wrapping-key/key-material",
-            "exomem-provider-recovery-verifier/public-key",
-            "exomem-provisioner-hcloud-token/token",
-            "exomem-recovery-delete-key-id/application-key-id",
-            "exomem-recovery-delete-key/application-key",
-            "exomem-user-export-delete-key-id/application-key-id",
-            "exomem-user-export-delete-key/application-key",
         },
         "exomem-volume-worker": {
             "exomem-provisioner-auth/credential",
@@ -484,6 +545,7 @@ def test_platform_renders_disjoint_durability_workloads() -> None:
             "exomem-provisioner-wrapping-key/key-material",
             "exomem-provider-recovery-signer/private-key",
             "exomem-provisioner-hcloud-token/token",
+            "exomem-capacity-receipt-verifier/public-key",
         },
     }
     for name, (kind, command, schedule, token) in expected.items():
@@ -528,8 +590,30 @@ def test_platform_renders_disjoint_durability_workloads() -> None:
     assert volume_env["EXOMEM_PROVISIONER_VOLUME_ENCRYPTION_SECRET_NAMESPACE"] == (
         "exomem-platform"
     )
+    assert volume_env["EXOMEM_PROVISIONER_CAPACITY_CONTRACT_PATH"] == (
+        "/etc/exomem/capacity/private-alpha-capacity-v1.json"
+    )
+    assert volume_env["EXOMEM_PROVISIONER_CAPACITY_RECEIPT_NAMESPACE"] == "exomem-platform"
+    assert volume_env["EXOMEM_PROVISIONER_CAPACITY_RECEIPT_CONFIG_MAP"] == (
+        "exomem-capacity-receipt"
+    )
+    assert volume_env["EXOMEM_PROVISIONER_HCLOUD_SERVER_ID"] == "101"
 
-    deletion_pod = pod_spec(_find(documents, "Deployment", "exomem-deletion-worker"))
+    deletion_job = json.loads(
+        _find(documents, "ConfigMap", "exomem-deletion-job-template")["data"][
+            "job-template.json"
+        ]
+    )
+    assert not any(
+        item.get("kind") == "Deployment"
+        and item.get("metadata", {}).get("name") == "exomem-deletion-worker"
+        for item in documents
+    )
+    assert deletion_job["kind"] == "Job"
+    assert deletion_job["metadata"]["generateName"] == "exomem-deletion-"
+    assert deletion_job["spec"]["backoffLimit"] == 0
+    assert deletion_job["spec"]["ttlSecondsAfterFinished"] == 300
+    deletion_pod = deletion_job["spec"]["template"]["spec"]
     deletion_env_names = {item["name"] for item in deletion_pod["containers"][0]["env"]}
     assert {
         "EXOMEM_PROVISIONER_HCLOUD_TOKEN",
@@ -608,6 +692,16 @@ def test_platform_renders_disjoint_durability_workloads() -> None:
     )
     assert namespace_rule["resources"] == ["namespaces"]
     assert namespace_rule["verbs"] == ["get", "list", "watch"]
+    for resource, api_group in (
+        ("nodes", ""),
+        ("volumeattachments", "storage.k8s.io"),
+    ):
+        rule = next(
+            item
+            for item in volume_role["rules"]
+            if resource in item.get("resources", []) and api_group in item.get("apiGroups", [])
+        )
+        assert rule["verbs"] == ["get", "list", "watch"]
 
     for policy_name, service_account in (
         ("exomem-provisioner-scope", "exomem-cell-provisioner"),
@@ -690,6 +784,118 @@ def test_platform_renders_disjoint_durability_workloads() -> None:
     ):
         assert required_guard in rendered_deletion_scope
     assert "middlewares" not in rendered_deletion_scope
+
+
+def test_platform_deletion_dispatcher_is_credential_free_and_worker_is_job_only() -> None:
+    documents = _render(PLATFORM, PLATFORM / "values.validation.yaml", namespace="exomem-platform")
+    dispatcher = _find(documents, "CronJob", "exomem-deletion-dispatcher")
+    dispatcher_pod = dispatcher["spec"]["jobTemplate"]["spec"]["template"]["spec"]
+    dispatcher_container = dispatcher_pod["containers"][0]
+    dispatcher_secret_refs = {
+        f"{item['valueFrom']['secretKeyRef']['name']}/{item['valueFrom']['secretKeyRef']['key']}"
+        for item in dispatcher_container["env"]
+        if item.get("valueFrom", {}).get("secretKeyRef")
+    }
+
+    assert dispatcher_pod["serviceAccountName"] == "exomem-deletion-dispatcher"
+    assert dispatcher_container["command"] == ["exomem-deletion-dispatcher"]
+    assert dispatcher_secret_refs == {"exomem-provisioner-database/url"}
+    assert not any(
+        fragment in item["name"]
+        for item in dispatcher_container["env"]
+        for fragment in ("ENVELOPE", "WRAPPING", "HCLOUD", "B2", "DELETE", "RECOVERY")
+    )
+    assert not any(
+        item.get("kind") == "CronJob"
+        and item.get("metadata", {}).get("name") == "exomem-deletion-worker"
+        for item in documents
+    )
+
+    template_config = _find(documents, "ConfigMap", "exomem-deletion-job-template")
+    job = json.loads(template_config["data"]["job-template.json"])
+    assert job["kind"] == "Job"
+    assert job["metadata"]["generateName"] == "exomem-deletion-"
+    worker_pod = job["spec"]["template"]["spec"]
+    assert worker_pod["serviceAccountName"] == "exomem-deletion-worker"
+    assert worker_pod["containers"][0]["command"] == ["exomem-deletion-worker"]
+    worker_env = {item["name"]: item for item in worker_pod["containers"][0]["env"]}
+    assert worker_env["EXOMEM_PROVISIONER_WORKER_ID"]["valueFrom"]["fieldRef"] == {
+        "fieldPath": "metadata.labels['batch.kubernetes.io/job-name']"
+    }
+    worker_secret_refs = {
+        f"{item['valueFrom']['secretKeyRef']['name']}/{item['valueFrom']['secretKeyRef']['key']}"
+        for item in worker_pod["containers"][0]["env"]
+        if item.get("valueFrom", {}).get("secretKeyRef")
+    }
+    assert worker_secret_refs == {
+        "exomem-provisioner-database/url",
+        "exomem-provisioner-wrapping-key/key-material",
+        "exomem-provider-recovery-verifier/public-key",
+        "exomem-provisioner-hcloud-token/token",
+        "exomem-recovery-delete-key-id/application-key-id",
+        "exomem-recovery-delete-key/application-key",
+        "exomem-user-export-delete-key-id/application-key-id",
+        "exomem-user-export-delete-key/application-key",
+    }
+
+    dispatcher_role = _find(documents, "Role", "exomem-deletion-dispatcher")
+    assert dispatcher_role["rules"] == [
+        {
+            "apiGroups": ["batch"],
+            "resources": ["jobs"],
+            "verbs": ["create", "get", "list", "watch"],
+        }
+    ]
+    admission = _find(
+        documents,
+        "ValidatingAdmissionPolicy",
+        "exomem-deletion-dispatcher-job-scope",
+    )
+    rendered_admission = json.dumps(admission)
+    assert "system:serviceaccount:exomem-platform:exomem-deletion-dispatcher" in rendered_admission
+    assert "exomem.io/deletion-job" in rendered_admission
+    assert "exomem-deletion-worker" in rendered_admission
+
+
+def test_deletion_dispatcher_admission_closes_probe_and_container_override_surfaces() -> None:
+    documents = _render(PLATFORM, PLATFORM / "values.validation.yaml", namespace="exomem-platform")
+    admission = _find(
+        documents,
+        "ValidatingAdmissionPolicy",
+        "exomem-deletion-dispatcher-job-scope",
+    )
+    expressions = "\n".join(
+        validation["expression"] for validation in admission["spec"]["validations"]
+    )
+    container = "object.spec.template.spec.containers[0]"
+
+    assert "object.metadata.name.matches('^exomem-deletion-[0-9a-f]{16}$')" in expressions
+    assert "!has(object.metadata.generateName)" in expressions
+    for field in (
+        "args",
+        "envFrom",
+        "lifecycle",
+        "workingDir",
+        "stdin",
+        "stdinOnce",
+        "tty",
+        "ports",
+        "volumeDevices",
+        "startupProbe",
+        "livenessProbe",
+        "readinessProbe",
+    ):
+        assert f"!has({container}.{field})" in expressions
+
+    # These are the two concrete mutation regressions from the adversarial review:
+    # an exec probe and a per-container privilege/seccomp override are both outside
+    # the reviewed Job shape and therefore denied at admission.
+    assert f"!has({container}.startupProbe)" in expressions
+    assert f"!has({container}.securityContext.privileged)" in expressions
+    assert f"!has({container}.securityContext.seccompProfile)" in expressions
+    assert "metadata.labels['batch.kubernetes.io/job-name']" in expressions
+    assert f"{container}.resources.requests.cpu == quantity('25m')" in expressions
+    assert f"{container}.resources.limits.memory == quantity('384Mi')" in expressions
 
 
 def test_platform_renders_one_shot_durability_actions_and_exact_restore_scope() -> None:

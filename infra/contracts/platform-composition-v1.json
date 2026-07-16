@@ -68,13 +68,20 @@
     }
   },
   "capacity_gate": {
-    "implementation": "KubernetesHCloudCapacityGate",
-    "invoked_before": ["namespace-create", "pvc-create"],
+    "implementation": "SignedLiveReceiptPostgreSQLCapacityAuthority",
+    "invoked_before": ["routine-provider-effect", "volume-registration-provider-effect"],
+    "provider_defense_checks": ["namespace-create", "helm-install"],
     "pending_retry_seconds": 300,
-    "sources": ["kubernetes-tenant-namespaces", "hcloud-attached-volumes"],
+    "sources": [
+      "signed-kubernetes-hcloud-receipt",
+      "fresh-kubernetes-observation",
+      "postgresql-capacity-reservations"
+    ],
+    "public_material_consumers": ["exomem-provisioner-worker", "exomem-volume-worker"],
     "limits": {
       "active_user_cells": 6,
-      "reserved_volume_attachments": 2,
+      "active_recovery_cells": 2,
+      "maximum_potential_attachments": 8,
       "provider_volume_attachment_limit": 16,
       "minimum_unused_provider_headroom": 8
     }
@@ -107,7 +114,8 @@
       "delivery_gc": "exomem-export-gc",
       "vault_backup": "exomem-durability-backup",
       "database_backup": "exomem-database-backup",
-      "deletion": "exomem-deletion-worker",
+      "deletion_dispatcher": "exomem-deletion-dispatcher",
+      "deletion_job_template": "exomem-deletion-job-template",
       "volume_lifecycle": "exomem-volume-worker"
     },
     "private_signers": ["exomem-provider-recovery-signer/private-key"],

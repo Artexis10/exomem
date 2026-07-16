@@ -18,6 +18,7 @@ from exomem_provisioner.driver import FakeDriver
 from exomem_provisioner.provider_identity import ProviderRecoveryIdentityCodec
 from exomem_provisioner.repository import OperationRepository
 from exomem_provisioner.schemas import FailureResponse, ProvisionRequest, TargetRequest
+from exomem_provisioner.volume import build_volume_registration_worker
 from exomem_provisioner.worker import ProvisionerWorker
 
 _BEARER = "provisioner-bearer-sentinel-000000000000"
@@ -33,6 +34,36 @@ _NEXT_CREDENTIAL = _credential(32)
 _RESTORE_REF = "restore-ref-sentinel"
 _EXPORT_REF = "export-ref-sentinel"
 _RELEASE_REF = "release-ref-sentinel"
+
+
+class _AllowCapacityAdmission:
+    async def admit(self, *args: object, **kwargs: object) -> None:
+        return None
+
+
+_ALLOW_CAPACITY = _AllowCapacityAdmission()
+
+
+def test_volume_registration_worker_cannot_bypass_capacity_admission() -> None:
+    repository = object()
+    driver = object()
+
+    with pytest.raises(ValueError, match="requires capacity admission"):
+        build_volume_registration_worker(
+            repository=repository,
+            driver=driver,
+            worker_id="volume-worker",
+            capacity_admission=None,
+        )
+
+    worker = build_volume_registration_worker(
+        repository=repository,
+        driver=driver,
+        worker_id="volume-worker",
+        capacity_admission=_ALLOW_CAPACITY,
+    )
+    assert worker._capacity_admission is _ALLOW_CAPACITY
+    assert worker._include_checkpoints == frozenset({"volume-registration-required"})
 
 
 def _settings(path: Path) -> ProvisionerSettings:
@@ -645,7 +676,12 @@ async def test_pending_replay_echoes_immutable_caller_checkpoint_not_worker_prog
     first = await client.post("/cells/restore", headers=headers, json=body)
     driver = FakeDriver()
     driver.remain_pending("restore", polls=1)
-    worker = ProvisionerWorker(repository, driver, worker_id="checkpoint-worker")
+    worker = ProvisionerWorker(
+        repository,
+        driver,
+        worker_id="checkpoint-worker",
+        capacity_admission=_ALLOW_CAPACITY,
+    )
 
     assert first.status_code == 202
     assert await worker.run_once() is True
@@ -723,7 +759,12 @@ async def test_fake_worker_produces_client_compatible_final_union_for_every_acti
 ) -> None:
     client, repository, _ = api
     driver = FakeDriver()
-    worker = ProvisionerWorker(repository, driver, worker_id="api-integration-worker")
+    worker = ProvisionerWorker(
+        repository,
+        driver,
+        worker_id="api-integration-worker",
+        capacity_admission=_ALLOW_CAPACITY,
+    )
     final_fields: dict[str, set[str]] = {
         "provision": {"providerRef", "privateEndpoint"},
         "health": {

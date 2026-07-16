@@ -12,8 +12,10 @@ coordination, bounded 6 GiB scratch, the recovery upload-only B2 key, and the
 provider identity signer. `exomem-database-backup` runs every 30 minutes without
 a Kubernetes token, uses mode-`0600` PGSERVICE/PGPASS copies and the independent
 database-backup upload key, and proves a clean scratch restore for the configured
-opaque owner tenant/cell. `exomem-export-gc` deletes expired delivery objects
-every five minutes without a Kubernetes token. The live bucket names and B2
+opaque owner tenant/cell. Every plaintext portable delivery records its exact B2
+version in the encrypted durability ledger before a URL is returned;
+`exomem-export-gc` deletes expired recorded versions every five minutes without a
+Kubernetes token or whole-bucket scan. The live bucket names and B2
 origin are read from ConfigMap `exomem-durability-storage`; credentials are
 individual Secret refs and never appear in that ConfigMap.
 

@@ -78,8 +78,26 @@ class ProviderReference:
         )
 
     @classmethod
-    def b2(cls, *, bucket: str, key: str) -> str:
-        return cls._build({"bucket": bucket, "key": key, "provider": "b2", "version": 1})
+    def b2(
+        cls,
+        *,
+        bucket: str,
+        key: str,
+        version_id: str | None = None,
+        delete_marker: bool = False,
+    ) -> str:
+        if delete_marker and version_id is None:
+            raise ValueError("B2 delete-marker identity requires an exact version ID")
+        value: dict[str, object] = {
+            "bucket": bucket,
+            "key": key,
+            "provider": "b2",
+            "version": 1,
+        }
+        if version_id is not None:
+            value["objectVersionId"] = version_id
+            value["deleteMarker"] = delete_marker
+        return cls._build(value)
 
     @classmethod
     def parse(cls, value: str) -> dict[str, object]:
@@ -103,9 +121,11 @@ class ProviderReference:
         if any(
             not isinstance(item, str) or not item
             for key, item in value.items()
-            if key != "version" and key != "namespace"
+            if key not in {"version", "namespace", "deleteMarker"}
         ):
             raise ValueError("provider reference fields must be non-empty strings")
+        if "deleteMarker" in value and not isinstance(value["deleteMarker"], bool):
+            raise ValueError("provider reference delete-marker field is invalid")
         canonical = ProviderRecoveryIdentityCodec._canonical(value)
         return cls._PREFIX + ProviderRecoveryIdentityCodec._encode(canonical)
 

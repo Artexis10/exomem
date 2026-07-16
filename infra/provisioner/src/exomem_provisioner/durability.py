@@ -394,7 +394,14 @@ class ExportBackupWorkflow:
                 lock_until=lock_until,
             )
 
-        provider_reference = f"b2://{key}#{state.get('provider_version_id', '')}"
+        provider_version_id = str(state.get("provider_version_id", ""))
+        if not provider_version_id:
+            raise DurabilityVerificationError("uploaded recovery object has no exact version ID")
+        provider_reference = ProviderReference.b2(
+            bucket=self._provider_bucket,
+            key=key,
+            version_id=provider_version_id,
+        )
         await self._repository.record_verified_object(
             run.id,
             worker_id,
@@ -893,7 +900,10 @@ class RestoreWorkflow:
                 run,
                 worker_id=worker_id,
             )
-        key, expected_version = self._provider_location(source.provider_reference)
+        key, expected_version = self._provider_location(
+            source.provider_reference,
+            expected_bucket=self._provider_bucket,
+        )
         head = await self._restore_store.head(key)
         if head is None:
             raise RestoreVerificationError("provider object is unavailable")
@@ -1030,10 +1040,29 @@ class RestoreWorkflow:
         return result
 
     @staticmethod
-    def _provider_location(reference: str) -> tuple[str, str | None]:
-        if not reference.startswith("b2://") or "#" not in reference:
+    def _provider_location(
+        reference: str,
+        *,
+        expected_bucket: str | None = None,
+    ) -> tuple[str, str | None]:
+        if reference.startswith("pr1_"):
+            try:
+                parsed = ProviderReference.parse(reference)
+            except RuntimeError as error:
+                raise RestoreVerificationError("provider reference is invalid") from error
+            if (
+                parsed.get("provider") != "b2"
+                or parsed.get("deleteMarker") is not False
+                or not isinstance(parsed.get("objectVersionId"), str)
+                or (expected_bucket is not None and parsed.get("bucket") != expected_bucket)
+            ):
+                raise RestoreVerificationError("provider reference is invalid")
+            key = str(parsed.get("key", ""))
+            version = str(parsed["objectVersionId"])
+        elif reference.startswith("b2://") and "#" in reference:
+            key, version = reference[5:].split("#", 1)
+        else:
             raise RestoreVerificationError("provider reference is invalid")
-        key, version = reference[5:].split("#", 1)
         if (
             not key
             or key.startswith("/")
@@ -1178,40 +1207,24 @@ class ExportGarbageCollector:
         if not 1 <= limit <= 10_000:
             raise ValueError("delivery expiry batch size is invalid")
         checked_at = self._clock()
-        continuation: str | None = None
-        seen_tokens: set[str] = set()
-        keys_to_check: list[str] = []
-        while True:
-            keys, next_token = await self._deletion_store.list_page(
-                prefix="user-export-delivery/",
-                continuation_token=continuation,
-            )
-            keys_to_check.extend(keys)
-            if next_token is None:
-                break
-            if next_token in seen_tokens:
-                raise ExportObjectUnavailable("delivery listing cursor did not advance")
-            seen_tokens.add(next_token)
-            continuation = next_token
+        records = await self._repository.expired_export_deliveries(
+            now=checked_at,
+            limit=limit,
+        )
         deleted = 0
-        for key in keys_to_check:
-            if deleted >= limit:
-                break
-            head = await self._deletion_store.head(key)
-            if head is None:
-                continue
-            raw_expiry = head.metadata.get("expires-at")
-            try:
-                expires_at = datetime.fromisoformat(str(raw_expiry).replace("Z", "+00:00"))
-            except ValueError as error:
-                raise ExportObjectUnavailable("delivery expiry metadata is invalid") from error
-            if expires_at.tzinfo is None:
-                raise ExportObjectUnavailable("delivery expiry metadata is invalid")
-            if expires_at > checked_at:
-                continue
-            await self._deletion_store.delete(key, version_id=head.version_id)
+        for record in records:
+            key, version_id = ExportObjectService._provider_location(record.provider_reference)
+            if version_id is None:
+                raise ExportObjectUnavailable("delivery ledger lacks an exact provider version")
+            if not await self._deletion_store.absent(key):
+                await self._deletion_store.delete(key, version_id=version_id)
             if not await self._deletion_store.absent(key):
                 raise ExportObjectUnavailable("delivery deletion lacks provider absence proof")
+            await self._repository.mark_export_delivery_deleted(
+                record.id,
+                tenant_id=record.tenant_id,
+                deleted_at=checked_at,
+            )
             deleted += 1
         return deleted
 
@@ -1313,9 +1326,28 @@ class ExportObjectService:
                 receipt.key != delivery_key
                 or receipt.size != record.archive_size
                 or receipt.metadata != metadata
+                or not receipt.version_id
                 or receipt.retain_until is not None
             ):
                 raise ExportObjectUnavailable("portable export delivery proof differs")
+            try:
+                source_provider = ProviderReference.parse(record.provider_reference)
+            except RuntimeError as error:
+                raise ExportObjectUnavailable("export object is unavailable") from error
+            bucket = source_provider.get("bucket")
+            if source_provider.get("provider") != "b2" or not isinstance(bucket, str) or not bucket:
+                raise ExportObjectUnavailable("export object is unavailable")
+            await self._repository.record_export_delivery(
+                source_object_id=record.id,
+                tenant_id=record.tenant_id,
+                provider_reference=ProviderReference.b2(
+                    bucket=bucket,
+                    key=delivery_key,
+                    version_id=receipt.version_id,
+                ),
+                expires_at=expires,
+                verified_at=self._clock(),
+            )
             url = await self._delivery_store.presigned_download(
                 delivery_key, ttl_seconds=ttl_seconds
             )
@@ -1341,51 +1373,29 @@ class ExportObjectService:
         return len(records)
 
     async def delete_expired_deliveries(self, *, limit: int = 1000) -> int:
-        """Delete expired plaintext deliveries and prove each provider absence.
-
-        Delivery objects are deliberately not part of the durable ledger: they
-        exist only for one short-lived presigned URL. Their signed expiry is
-        provider metadata, and this bounded, paginated sweep is the active
-        cleanup path. A one-day bucket lifecycle is the independent backstop.
-        """
+        """Delete expired plaintext deliveries from durable exact provider references."""
 
         if not 1 <= limit <= 10_000:
             raise ValueError("delivery expiry batch size is invalid")
         checked_at = self._clock()
-        continuation: str | None = None
-        seen_tokens: set[str] = set()
-        keys_to_check: list[str] = []
-        while True:
-            keys, next_token = await self._deletion_store.list_page(
-                prefix="user-export-delivery/",
-                continuation_token=continuation,
-            )
-            keys_to_check.extend(keys)
-            if next_token is None:
-                break
-            if next_token in seen_tokens:
-                raise ExportObjectUnavailable("delivery listing cursor did not advance")
-            seen_tokens.add(next_token)
-            continuation = next_token
+        records = await self._repository.expired_export_deliveries(
+            now=checked_at,
+            limit=limit,
+        )
         deleted = 0
-        for key in keys_to_check:
-            if deleted >= limit:
-                break
-            head = await self._deletion_store.head(key)
-            if head is None:
-                continue
-            raw_expiry = head.metadata.get("expires-at")
-            try:
-                expires_at = datetime.fromisoformat(str(raw_expiry).replace("Z", "+00:00"))
-            except ValueError as error:
-                raise ExportObjectUnavailable("delivery expiry metadata is invalid") from error
-            if expires_at.tzinfo is None:
-                raise ExportObjectUnavailable("delivery expiry metadata is invalid")
-            if expires_at > checked_at:
-                continue
-            await self._deletion_store.delete(key, version_id=head.version_id)
+        for record in records:
+            key, version_id = self._provider_location(record.provider_reference)
+            if version_id is None:
+                raise ExportObjectUnavailable("delivery ledger lacks an exact provider version")
+            if not await self._deletion_store.absent(key):
+                await self._deletion_store.delete(key, version_id=version_id)
             if not await self._deletion_store.absent(key):
                 raise ExportObjectUnavailable("delivery deletion lacks provider absence proof")
+            await self._repository.mark_export_delivery_deleted(
+                record.id,
+                tenant_id=record.tenant_id,
+                deleted_at=checked_at,
+            )
             deleted += 1
         return deleted
 
@@ -1435,14 +1445,29 @@ class ExportObjectService:
 
     @staticmethod
     def _provider_location(reference: str) -> tuple[str, str | None]:
-        if not reference.startswith("b2://"):
+        if reference.startswith("pr1_"):
+            try:
+                parsed = ProviderReference.parse(reference)
+            except RuntimeError as error:
+                raise ExportObjectUnavailable("export object is unavailable") from error
+            if (
+                parsed.get("provider") != "b2"
+                or parsed.get("deleteMarker") is not False
+                or not isinstance(parsed.get("objectVersionId"), str)
+            ):
+                raise ExportObjectUnavailable("export object is unavailable")
+            key = str(parsed.get("key", ""))
+            version = str(parsed["objectVersionId"])
+        elif reference.startswith("b2://"):
+            raw = reference[5:]
+            key, separator, legacy_version = raw.partition("#")
+            version = legacy_version if separator and legacy_version else None
+        else:
             raise ExportObjectUnavailable("export object is unavailable")
-        raw = reference[5:]
-        key, separator, version = raw.partition("#")
         if (
             not key
             or key.startswith("/")
             or any(part in {"", ".", ".."} for part in key.split("/"))
         ):
             raise ExportObjectUnavailable("export object is unavailable")
-        return key, version if separator and version else None
+        return key, version

@@ -19,6 +19,11 @@ infra/provisioner/*
 !infra/provisioner/pyproject.toml
 !infra/provisioner/uv.lock
 !infra/provisioner/README.md
+!infra/provisioner/alembic.ini
+!infra/provisioner/alembic/
+!infra/provisioner/alembic/**
+infra/provisioner/alembic/**/__pycache__/
+infra/provisioner/alembic/**/*.pyc
 !infra/provisioner/src/
 !infra/provisioner/src/**
 !infra/helm/
