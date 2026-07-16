@@ -21,6 +21,7 @@ import {
   planBullets,
   pollDelay,
   selectionCounts,
+  selectionFromRules,
   selectionPayload,
   staleNotice,
   suggestionChips,
@@ -56,15 +57,21 @@ const adoptionApi = {
     command("adoption_studio", {action: "cancel", run_id: runId, why: why || null}),
   finish: (runId) => command("adoption_studio", {action: "finish", run_id: runId}),
   workItem: (runId) => command("adoption_studio", {action: "work-item", run_id: runId}),
-  proposals: (_runId) => command("review_memory", {mode: "adoption", limit: 50}),
+  // Scoped by the run's ref so a run's review screen never shows (or acts on)
+  // another run's proposals.
+  proposals: (runRef) =>
+    command("review_memory", {mode: "adoption", ref: runRef || null, limit: 50}),
   proposalContext: (ref, fingerprint) =>
     command("review_item_context", {ref, expected_fingerprint: fingerprint}),
-  approveProposal: (ref, fingerprint, why) =>
+  approveProposal: (ref, fingerprint, why, expectedHash) =>
     command("adoption_studio", {
       action: "apply-proposal",
       ref,
       expected_fingerprint: fingerprint,
       why,
+      // Relation-kind approvals are CAS-guarded on the target page: echo the
+      // content_hash the reviewer just inspected.
+      expected_hash: expectedHash || null,
     }),
   rejectProposal: (ref, fingerprint, why) =>
     command("triage_memory", {
@@ -860,7 +867,7 @@ let proposals = null;
 async function populateProposals() {
   setStatus("");
   try {
-    proposals = await adoptionApi.proposals(run.run_id);
+    proposals = await adoptionApi.proposals(run.run_ref);
   } catch (error) {
     showAdoptError(error);
     return;
@@ -890,21 +897,39 @@ function flattenProposals(data) {
   return [];
 }
 
+// Kind-aware rendering of the proposal's actual payload: the reviewer must be
+// able to inspect exactly what will be written before approval is enabled.
+function proposalSummary(context, item) {
+  const payload = context.payload || {};
+  const rows = [];
+  if (payload.title) rows.push(el("strong", payload.title));
+  if (payload.relation_type || context.kind === "relation") {
+    const from = payload.from || payload.subject_path || "";
+    const to = payload.to || payload.duplicate_of || "";
+    if (from || to) rows.push(el("p", `${payload.relation_type || "relates_to"}: ${from} → ${to}`));
+  }
+  if (payload.name) rows.push(el("p", `${payload.entity_type || "entity"}: ${payload.name}`));
+  if (payload.summary) rows.push(el("p", payload.summary, "fine-print"));
+  if (payload.content) rows.push(el("pre", payload.content, "note-body"));
+  const target = context.target || {};
+  if (target.excerpt) {
+    rows.push(el("h3", "Current target"), el("pre", target.excerpt, "note-body"));
+  }
+  if (!rows.length) rows.push(el("p", item.title || "Suggested change."));
+  return rows;
+}
+
 async function openProposalDetail(item) {
   const detail = byId("adopt-proposal-detail");
   if (!detail) return;
   replaceChildren(detail, [el("p", "Loading suggestion…", "section-note")]);
   try {
     const context = await adoptionApi.proposalContext(item.ref, item.fingerprint);
-    const target = context.target || context.item || {};
-    replaceChildren(detail, [
-      el("h3", "What it wants to do"),
-      el("p", target.body || item.title || "Suggested change."),
-    ]);
+    replaceChildren(detail, [el("h3", "What it wants to do"), ...proposalSummary(context, item)]);
     const actions = el("div", "", "actions");
     const approve = el("button", "Make this change");
     approve.type = "button";
-    approve.addEventListener("click", () => approveProposal(item));
+    approve.addEventListener("click", () => approveProposal(item, context));
     const reject = el("button", "No thanks", "secondary");
     reject.type = "button";
     reject.addEventListener("click", () => rejectProposal(item));
@@ -920,7 +945,8 @@ async function openProposalDetail(item) {
   }
 }
 
-function approveProposal(item) {
+function approveProposal(item, context) {
+  const expectedHash = ((context || {}).target || {}).content_hash || null;
   openConfirm({
     kicker: "SUGGESTIONS FROM YOUR ASSISTANT",
     title: "Make this change?",
@@ -928,7 +954,7 @@ function approveProposal(item) {
     confirmLabel: "Make this change",
     onConfirm: async () => {
       try {
-        await adoptionApi.approveProposal(item.ref, item.fingerprint, "Approved from adoption review");
+        await adoptionApi.approveProposal(item.ref, item.fingerprint, "Approved from adoption review", expectedHash);
         await populateProposals();
       } catch (error) {
         if (isDrift(error)) {
@@ -1200,7 +1226,12 @@ export async function enter(incoming) {
     if (!run || run.run_id !== route.run) {
       try {
         run = await adoptionApi.status(route.run);
-        selection = null;
+        // Resume with the persisted rules; a fresh default (all-on) would
+        // silently overwrite the user's exclusions on the next preview.
+        selection = selectionFromRules(
+          (run.selection || {}).rules,
+          inventoryRows().map((row) => row.path),
+        );
       } catch (error) {
         run = null;
         showScreen("start");

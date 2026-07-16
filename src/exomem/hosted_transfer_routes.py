@@ -781,7 +781,11 @@ def _stage_adoption_zip(
                 total_bytes += _extract_zip_member(
                     zip_file, info, target, per_entry_limit=max_bytes
                 )
-                if total_bytes > _ADOPTION_STAGING_MAX_TOTAL_BYTES:
+                # The signed grant's byte allowance bounds the AGGREGATE
+                # expansion too — otherwise a tiny compressed archive could
+                # expand entry-by-entry up to the global constant and bypass
+                # the per-upload / tenant resource allowance.
+                if total_bytes > min(max_bytes, _ADOPTION_STAGING_MAX_TOTAL_BYTES):
                     raise PublicRequestError("TRANSFER_TOO_LARGE")
                 staged.append(member)
         # The whole archive validated in the hosted temp root: only now is the

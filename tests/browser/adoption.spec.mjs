@@ -53,6 +53,7 @@ function makeRun(phase, extra = {}) {
   return {
     schema_version: 1,
     run_id: "adr-test-1",
+    run_ref: "exomem://adoption/run/adr-test-1",
     phase,
     inventory: INVENTORY,
     scan_summary: {totals: {files: 6, dirs: 3, markdown: 3, binary: 1}, junk_counts: {conflict: 1}},
@@ -330,7 +331,14 @@ test("suggestions approve and reject ride governed verbs, and drift refreshes ho
   await connectAdopt(page, calls, {
     review_memory: emptyInbox(() => open),
     "adoption_studio:status": () => run,
-    review_item_context: (body) => ({item: open.find((i) => i.ref === body.ref) || {}, target: {body: "Recorded proposal detail."}}),
+    review_item_context: (body) => {
+      const found = open.find((i) => i.ref === body.ref) || {};
+      return {
+        kind: "compilation",
+        payload: {title: found.title, content: "Recorded proposal detail."},
+        target: {content_hash: `hash-${(found.ref || "").split("/").pop()}`, excerpt: ""},
+      };
+    },
     "adoption_studio:apply-proposal": (body) => {
       approveAttempts += 1;
       if (approveAttempts === 1) {
@@ -365,7 +373,14 @@ test("suggestions approve and reject ride governed verbs, and drift refreshes ho
   const approvals = calls.filter((c) => c.name === "adoption_studio" && c.body.action === "apply-proposal");
   expect(approvals).toHaveLength(2);
   expect(approvals[1].body.expected_fingerprint).toBe("fp-p1");
+  expect(approvals[1].body.expected_hash).toBe("hash-p1");
   expect(approvals[1].body.why).toBeTruthy();
+  // The proposals queue is scoped to THIS run's ref, never the global queue.
+  const queueCalls = calls.filter((c) => c.name === "review_memory" && c.body.mode === "adoption");
+  expect(queueCalls.length).toBeGreaterThan(0);
+  for (const call of queueCalls) {
+    expect(call.body.ref).toBe("exomem://adoption/run/adr-test-1");
+  }
 
   // Reject rides triage_memory(dismiss) and the list empties.
   await page.getByRole("button", {name: "Link meeting to alpha"}).click();

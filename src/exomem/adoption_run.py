@@ -12,6 +12,7 @@ scan/select/plan write nothing outside the run object.
 
 from __future__ import annotations
 
+import dataclasses
 import datetime as dt
 import hashlib
 import json
@@ -242,12 +243,21 @@ def build_inventory(
                 except OSError:
                     continue
                 eligible = fpath.suffix.lower() in _TEXT_IMPORT_SUFFIXES
+                # Stat-level junk classification (no reads), mirroring overview's
+                # categories. Rows are the UNCAPPED source of truth for the
+                # selection junk filter; overview's junk path lists are
+                # display-capped per category and must never gate writes.
+                name_l = fn.lower()
+                junk = st.st_size == 0 or any(
+                    token in name_l for token in overview_module._CONFLICT_TOKENS
+                )
                 rows.append(
                     {
                         "path": rel,
                         "bytes": st.st_size,
                         "mtime": st.st_mtime,
                         "eligible": eligible,
+                        "junk": junk,
                         "reason": None if eligible else "UNSUPPORTED_IMPORT_TYPE",
                     }
                 )
@@ -312,7 +322,7 @@ def _materialize_selection(
     At equal depth an exclude wins over an include of the same path.
     """
     eligible = {r["path"] for r in run.get("inventory") or [] if r.get("eligible")}
-    junk = set(run.get("scan_summary", {}).get("junk_paths") or [])
+    junk = {r["path"] for r in run.get("inventory") or [] if r.get("junk")}
     accepted: set[str] = set()
     rejected: list[dict] = []
 
@@ -416,7 +426,7 @@ def _handoff(run: dict) -> dict:
     return {
         "prompt_text": prompt_text,
         "links": {
-            "claude": "claude://new?" + urlencode({"q": prompt_text}),
+            "claude": "claude://claude.ai/new?" + urlencode({"q": prompt_text}),
             "codex": f'codex "{prompt_text}"',
             "gemini": f'gemini "{prompt_text}"',
         },
@@ -720,18 +730,58 @@ def apply(
         store.save(run)
 
         if validated:
-            fresh_items, _sk = adopt_module.plan_import_items(root, validated, today=run_date)
+            # Re-read and re-render with the PLAN's date so content and slugs
+            # match the approved preview even across midnight, then pin every
+            # item to its persisted target: apply commits EXACTLY the plan.
+            plan_created = str(plan.get("created") or "")[:10]
             try:
-                result = adopt_module.commit_import_items(root, fresh_items, today=run_date)
+                render_date = dt.date.fromisoformat(plan_created)
+            except ValueError:
+                render_date = run_date
+            fresh_items, _sk = adopt_module.plan_import_items(
+                root, validated, today=render_date
+            )
+            planned_by_original = {pi["original_path"]: pi for pi in plan_items}
+            commit_items: list[adopt_module.ImportItem] = []
+            for item in fresh_items:
+                pi = planned_by_original.get(item.original_path) or {}
+                target_rel = pi.get("target_path") or item.target_rel
+                target_abs = root / target_rel
+                if target_abs.exists():
+                    if _is_prior_import(target_abs, item.original_path, item.sha256):
+                        # Our own earlier commit (crash before the outcomes
+                        # save): record it instead of writing a duplicate.
+                        outcomes[item.original_path] = {
+                            "status": "already-applied",
+                            "target_path": target_rel,
+                            "source_ref": context_refs.source_ref(target_rel),
+                            "sha256": item.sha256,
+                            "at": _now_iso(),
+                        }
+                        continue
+                    # Foreign occupant at the planned target: design-pinned
+                    # fallback — keep the re-plan's fresh unique target.
+                    commit_items.append(item)
+                    continue
+                commit_items.append(
+                    dataclasses.replace(item, target_rel=target_rel, target=target_abs)
+                )
+            try:
+                # The apply date (not the plan date) stamps the Sources-index
+                # "recent captures" line: the log records when it happened.
+                result = adopt_module.commit_import_items(
+                    root, commit_items, today=run_date
+                )
             except Exception as exc:  # noqa: BLE001 — batch rollback is a retryable outcome
-                for op in validated:
-                    outcomes[op] = {
+                for item in commit_items:
+                    outcomes[item.original_path] = {
                         "status": "failed", "code": "BATCH_ROLLED_BACK",
                         "reason": str(exc), "at": _now_iso(),
                     }
             else:
                 by_path = {c["original_path"]: c for c in result["copied_sources"]}
-                for op in validated:
+                for item in commit_items:
+                    op = item.original_path
                     c = by_path.get(op)
                     if c is None:
                         outcomes[op] = {
@@ -764,6 +814,16 @@ def apply(
         run,
         apply_result={"verified_unchanged": verified_unchanged, "verified_total": verified_total},
     )
+
+
+def _is_prior_import(target_abs: Path, original_path: str, sha256: str) -> bool:
+    """Provenance check: is the file at the planned target OUR import of this
+    exact original? Matches the rendered frontmatter's provenance fields."""
+    try:
+        head = target_abs.read_text(encoding="utf-8", errors="replace")[:2000]
+    except OSError:
+        return False
+    return f"original_sha256: {sha256}" in head and original_path in head
 
 
 def cancel(root: Path, *, run_id: str, why: str | None) -> dict:

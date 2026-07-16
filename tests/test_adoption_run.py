@@ -560,3 +560,79 @@ def test_select_rules_apply_by_specificity(tmp_path: Path) -> None:
         "Old Notes/quarterly-planning.md",
         "Old Notes/work/goals.md",
     }
+
+
+def test_apply_commits_exactly_the_previewed_targets(tmp_path: Path) -> None:
+    """Apply on a later date must commit the plan's persisted targets, not re-plan."""
+    vault = _legacy_vault(tmp_path)
+    run = adoption_run.start(vault, today=TODAY)
+    rid = run["run_id"]
+    adoption_run.select(vault, run_id=rid, include=["Old Notes"])
+    planned = adoption_run.plan(vault, run_id=rid, today=TODAY)
+    plan_targets = {
+        it["original_path"]: it["target_path"] for it in planned["plan"]["items"]
+    }
+    applied = adoption_run.apply(
+        vault,
+        run_id=rid,
+        plan_id=planned["plan"]["plan_id"],
+        today=TODAY + dt.timedelta(days=1),
+    )
+    for op, outcome in applied["outcomes"].items():
+        assert outcome["status"] == "applied"
+        assert outcome["target_path"] == plan_targets[op]
+
+
+def test_interrupted_apply_recovers_already_applied_without_duplicates(tmp_path: Path) -> None:
+    """A crash after the batch commit but before the outcomes save must not duplicate."""
+    vault = _legacy_vault(tmp_path)
+    run = adoption_run.start(vault, today=TODAY)
+    rid = run["run_id"]
+    adoption_run.select(vault, run_id=rid, include=["Old Notes"])
+    planned = adoption_run.plan(vault, run_id=rid, today=TODAY)
+    pid = planned["plan"]["plan_id"]
+    adoption_run.apply(vault, run_id=rid, plan_id=pid, today=TODAY)
+    imported = vault / "Knowledge Base" / "Sources" / "Imported"
+    before = sorted(p.name for p in imported.glob("*.md"))
+
+    store = adoption_run.AdoptionRunStore(vault)
+    raw = store.load(rid)
+    raw["phase"] = "applying"
+    raw["outcomes"] = {}
+    raw.pop("verify", None)
+    store.save(raw)
+
+    recovered = adoption_run.apply(vault, run_id=rid, plan_id=pid, today=TODAY)
+    assert recovered["outcomes"]
+    assert all(
+        o["status"] == "already-applied" for o in recovered["outcomes"].values()
+    )
+    assert sorted(p.name for p in imported.glob("*.md")) == before
+
+
+def test_sync_conflicts_and_zero_byte_files_are_junk_by_default(tmp_path: Path) -> None:
+    vault = _legacy_vault(tmp_path)
+    conflict = "Old Notes/notes (conflicted copy).md"
+    empty = "Old Notes/empty.md"
+    (vault / conflict).write_text("duplicated text\n", encoding="utf-8")
+    (vault / empty).write_text("", encoding="utf-8")
+    run = adoption_run.start(vault, today=TODAY)
+    rows = {r["path"]: r for r in run["inventory"]}
+    assert rows[conflict]["junk"] is True
+    assert rows[empty]["junk"] is True
+    assert rows["Old Notes/quarterly-planning.md"]["junk"] is False
+
+    sel = adoption_run.select(vault, run_id=run["run_id"], include=["Old Notes"])
+    assert conflict not in sel["selection"]["paths"]
+    assert empty not in sel["selection"]["paths"]
+    sel = adoption_run.select(
+        vault, run_id=run["run_id"], include=["Old Notes"], include_junk=True
+    )
+    assert conflict in sel["selection"]["paths"]
+
+
+def test_handoff_claude_link_targets_the_new_chat_route(tmp_path: Path) -> None:
+    vault = _legacy_vault(tmp_path)
+    run = adoption_run.start(vault, today=TODAY)
+    status = adoption_run.status(vault, run_id=run["run_id"])
+    assert status["handoff"]["links"]["claude"].startswith("claude://claude.ai/new?")

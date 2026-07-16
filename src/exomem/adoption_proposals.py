@@ -498,6 +498,11 @@ def work_item(
     Measurements plus recorded content only — zero judgment. Writes nothing.
     """
     root = Path(root)
+    # Server-side clamps keep the pack bounded regardless of caller input: a
+    # negative char cap must not slice from the end, and a huge one must not
+    # put a whole large import into an MCP response.
+    max_sources = max(0, min(int(max_sources), 50))
+    max_chars_per_source = max(1, min(int(max_chars_per_source), 20_000))
     store = AdoptionRunStore(root)
     run = _load_run(store, run_id)
 
@@ -636,6 +641,20 @@ def propose(root: Path, *, run_id: str, proposals: list[dict]) -> dict:
             )
 
         bindings = _live_bindings(root, run, kind, prop_payload)
+        # A submitted source hash records what the agent actually read: if the
+        # live file no longer matches it, refuse at submission instead of
+        # silently rebinding the proposal to content the agent never saw.
+        for spath, submitted_hash in (submitted_bindings.get("sources") or {}).items():
+            live_hash = (bindings.get("sources") or {}).get(_clean(spath))
+            if live_hash is not None and submitted_hash and submitted_hash != live_hash:
+                findings.append(
+                    _finding(
+                        "SOURCE_CHANGED",
+                        f"bindings.sources.{spath}",
+                        "this source changed between the work-item read and "
+                        "submission; re-load the work item and resubmit",
+                    )
+                )
         review_id = _review_id(run_id, proposal_id)
         fingerprint = _proposal_fingerprint(prop_payload, bindings, kind)
         status = "invalid" if findings else "proposed"
@@ -733,6 +752,7 @@ def build_queue(
     flat_items: list[dict] = []
     total = 0
     cap = max(0, int(limit))
+    remaining = cap
 
     for rid in _run_ids(store, run_id):
         try:
@@ -767,14 +787,20 @@ def build_queue(
             items.append(view)
             flat_items.append(view)
         if items:
-            groups.append(
-                {
-                    "run_id": rid,
-                    "run_ref": run.get("run_ref"),
-                    "phase": run.get("phase"),
-                    "items": items[:cap] if cap else items,
-                }
-            )
+            # The limit is a GLOBAL result cap: spend the remaining budget in
+            # run order rather than granting every group the full limit.
+            take = items[:remaining] if cap else items
+            if cap:
+                remaining -= len(take)
+            if take:
+                groups.append(
+                    {
+                        "run_id": rid,
+                        "run_ref": run.get("run_ref"),
+                        "phase": run.get("phase"),
+                        "items": take,
+                    }
+                )
 
     shown = sum(len(group["items"]) for group in groups)
     return {
@@ -844,7 +870,9 @@ def assemble_context(
 ) -> dict:
     """Bounded deterministic context pack for one proposal incl. a live binding check."""
     root = Path(root)
-    max_chars = int(caps.get("max_body_chars", caps.get("max_chars_per_source", 2000)) or 2000)
+    max_chars = max(
+        1, min(int(caps.get("max_body_chars", caps.get("max_chars_per_source", 2000)) or 2000), 20_000)
+    )
     run, proposal, _store = _resolve(root, ref)
     fingerprint = _recompute_fingerprint(root, run, proposal)
     stored_bindings = proposal.get("bindings") or {}
@@ -934,6 +962,12 @@ def apply_proposal(
         raise AdoptionProposalError(
             "PROPOSAL_INVALID", "this proposal failed validation and can never be applied"
         )
+    if proposal.get("status") == "applying":
+        raise AdoptionProposalError(
+            "APPLY_IN_FLIGHT",
+            "a previous approval of this proposal may have been interrupted "
+            "mid-write; verify whether its result landed before retrying",
+        )
 
     kind = proposal.get("kind") or ""
     payload = proposal.get("payload") or {}
@@ -962,7 +996,19 @@ def apply_proposal(
             f"refresh and inspect {ref} again",
         )
 
-    result = _route_apply(root, kind, payload, why=str(why).strip(), expected_hash=expected_hash)
+    # Persist the transient `applying` marker BEFORE the governed mutation so a
+    # crash between the mutation and its completion record stays visible and a
+    # blind retry cannot duplicate the write (mirrors the run's `applying`).
+    _persist_proposal(store, run["run_id"], {**proposal, "status": "applying"})
+    try:
+        result = _route_apply(
+            root, kind, payload, why=str(why).strip(), expected_hash=expected_hash
+        )
+    except Exception:
+        # A clean refusal (drift, CAS) wrote nothing: restore `proposed` so the
+        # reviewer can refresh and retry.
+        _persist_proposal(store, run["run_id"], proposal)
+        raise
 
     proposal["status"] = "applied"
     proposal["applied"] = {
@@ -971,12 +1017,7 @@ def apply_proposal(
         "result_ref": result.get("result_ref"),
         "why": str(why).strip(),
     }
-    saved = store.load_proposals(run["run_id"])
-    for idx, existing in enumerate(saved.get("proposals") or []):
-        if existing.get("proposal_id") == proposal.get("proposal_id"):
-            saved["proposals"][idx] = proposal
-            break
-    store.save_proposals(run["run_id"], saved)
+    _persist_proposal(store, run["run_id"], proposal)
 
     return {
         "applied": True,
@@ -990,6 +1031,16 @@ def apply_proposal(
         "why": str(why).strip(),
         "result": result.get("raw"),
     }
+
+
+def _persist_proposal(store: Any, run_id: str, proposal: dict) -> None:
+    """Replace one proposal record in proposals.json by proposal_id."""
+    saved = store.load_proposals(run_id)
+    for idx, existing in enumerate(saved.get("proposals") or []):
+        if existing.get("proposal_id") == proposal.get("proposal_id"):
+            saved["proposals"][idx] = proposal
+            break
+    store.save_proposals(run_id, saved)
 
 
 def _bullet(relation_type: str, to_path: str) -> str:

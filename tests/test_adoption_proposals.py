@@ -624,3 +624,100 @@ def test_apply_proposal_requires_fingerprint_and_why(tmp_path: Path) -> None:
             vault, ref=ref, expected_fingerprint=fingerprint, why=None
         )
     assert ei_why.value.code == "INVALID_APPLY"
+
+
+def _submit_compilation(vault: Path, run_id: str, run_fp: str, imported: list[str], *, title: str = "Combined", bindings_extra: dict | None = None) -> dict:
+    bindings = {"run_fingerprint": run_fp, **(bindings_extra or {})}
+    submitted = adoption_proposals.propose(
+        vault,
+        run_id=run_id,
+        proposals=[
+            {
+                "kind": "compilation",
+                "why": "combine",
+                "payload": {
+                    "sources": imported,
+                    "title": title,
+                    "note_type": "insight",
+                    "content": f"# {title}\n\nBoth notes are related.\n",
+                },
+                "bindings": bindings,
+            }
+        ],
+    )
+    return submitted["proposals"][0]
+
+
+def test_propose_refuses_stale_submitted_source_bindings(tmp_path: Path) -> None:
+    """A source hash the agent read must be honored: drift => invalid, not silently rebound."""
+    vault = _legacy_vault(tmp_path)
+    applied = _applied_run(vault)
+    rec = _submit_compilation(
+        vault,
+        applied["run_id"],
+        applied["inventory_fingerprint"],
+        _imported_paths(applied),
+        bindings_extra={"sources": {_imported_paths(applied)[0]: "0" * 64}},
+    )
+    assert rec["status"] == "invalid"
+    assert any(f.get("code") == "SOURCE_CHANGED" for f in rec.get("findings") or [])
+
+
+def test_apply_proposal_interrupted_apply_refuses_silent_retry(tmp_path: Path) -> None:
+    """A proposal caught mid-apply (crash window) must refuse a blind re-apply."""
+    vault = _legacy_vault(tmp_path)
+    applied = _applied_run(vault)
+    run_id = applied["run_id"]
+    rec = _submit_compilation(
+        vault, run_id, applied["inventory_fingerprint"], _imported_paths(applied)
+    )
+    store = adoption_run.AdoptionRunStore(vault)
+    saved = store.load_proposals(run_id)
+    saved["proposals"][0]["status"] = "applying"
+    store.save_proposals(run_id, saved)
+    with pytest.raises(adoption_proposals.AdoptionProposalError) as excinfo:
+        adoption_proposals.apply_proposal(
+            vault, ref=rec["ref"], expected_fingerprint=rec["fingerprint"], why="retry"
+        )
+    assert excinfo.value.code == "APPLY_IN_FLIGHT"
+
+
+def test_work_item_clamps_source_char_caps(tmp_path: Path) -> None:
+    vault = _legacy_vault(tmp_path)
+    applied = _applied_run(vault)
+    run_id = applied["run_id"]
+    negative = adoption_proposals.work_item(vault, run_id=run_id, max_chars_per_source=-5)
+    for row in negative["sources"]:
+        assert len(row["excerpt"]) <= 1
+    huge = adoption_proposals.work_item(vault, run_id=run_id, max_chars_per_source=10**9)
+    for row in huge["sources"]:
+        assert len(row["excerpt"]) <= 20_000
+
+
+def test_build_queue_limit_applies_across_runs(tmp_path: Path) -> None:
+    vault = _legacy_vault(tmp_path)
+    first = _applied_run(vault)
+    extra = vault / "More Notes"
+    extra.mkdir()
+    (extra / "c.md").write_text("# C\n\nThird note.\n", encoding="utf-8")
+    (extra / "d.md").write_text("# D\n\nFourth note.\n", encoding="utf-8")
+    run2 = adoption_run.start(vault, path="More Notes", today=TODAY)
+    adoption_run.select(vault, run_id=run2["run_id"], include=["More Notes"])
+    plan2 = adoption_run.plan(vault, run_id=run2["run_id"], today=TODAY)
+    second = adoption_run.apply(
+        vault, run_id=run2["run_id"], plan_id=plan2["plan"]["plan_id"], today=TODAY
+    )
+    for idx, applied_run_doc in enumerate((first, second)):
+        for title in (f"Alpha {idx}", f"Beta {idx}"):
+            _submit_compilation(
+                vault,
+                applied_run_doc["run_id"],
+                applied_run_doc["inventory_fingerprint"],
+                _imported_paths(applied_run_doc),
+                title=title,
+            )
+    queue = adoption_proposals.build_queue(vault, limit=3)
+    assert queue["total"] == 4
+    assert queue["shown"] == 3
+    assert len(queue["items"]) == 3
+    assert sum(len(g["items"]) for g in queue["runs"]) == 3

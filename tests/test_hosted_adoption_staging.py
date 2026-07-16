@@ -487,3 +487,32 @@ def test_default_scope_upload_still_uses_preserve_and_never_stages(tmp_path: Pat
     assert len(calls) == 1
     assert calls[0]["scope"] == "research"
     assert not (config.vault_root / "_Staging").exists()
+
+
+def test_zip_aggregate_expansion_is_capped_by_the_grant(tmp_path: Path) -> None:
+    security = FakeSecurityAuthority()
+    app, config, _lifecycle = _app(tmp_path, security)
+    # Each entry fits the 1 KiB grant on its own, but the archive expands to
+    # 8x the signed per-upload allowance: the AGGREGATE must ride the grant,
+    # not only the global constant.
+    archive = _build_zip([(f"part-{i}.bin", b"\x00" * 1024) for i in range(8)])
+    assert len(archive) <= 1024  # the compressed upload itself fits the grant
+
+    response = asyncio.run(
+        _put(
+            app,
+            _grant(
+                archive,
+                filename="bundle.zip",
+                content_type="application/zip",
+                max_bytes=1024,
+            ),
+            archive,
+            "application/zip",
+        )
+    )
+
+    assert response.status_code == 413, response.text
+    assert response.json()["error"]["code"] == "TRANSFER_TOO_LARGE"
+    assert not _run_dir(config).exists()
+    assert _temp_entries(config) == []

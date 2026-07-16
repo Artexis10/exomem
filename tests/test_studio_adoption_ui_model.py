@@ -365,3 +365,27 @@ def test_state_v2_roundtrips_adopt_params_and_keeps_legacy_urls_byte_identical()
       console.log(JSON.stringify({{target: global.target}}));
     """
     assert _node(adopt_default)["target"] == "/studio/?view=adopt"
+
+
+def test_selection_rules_round_trip_after_resume() -> None:
+    source = f"""
+      import {{initialSelection, toggleFolder, overrideFile, selectionPayload,
+               selectionFromRules}} from {MODEL.as_uri()!r};
+      const inventoryPaths = [
+        'Docs/Notes/a.md', 'Docs/Notes/b.md', 'Archive/c.md', 'Archive/img.png',
+      ];
+      let sel = initialSelection([], {{}});
+      sel = toggleFolder(sel, 'Archive', false);
+      sel = overrideFile(sel, 'Archive/c.md', true);
+      sel = overrideFile(sel, 'Docs/Notes/b.md', false);
+      const payload = selectionPayload(sel, ['Docs', 'Archive']);
+      const revived = selectionFromRules(payload, inventoryPaths);
+      const payload2 = selectionPayload(revived, ['Docs', 'Archive']);
+      console.log(JSON.stringify({{payload, payload2, revived,
+        missing: selectionFromRules(null, inventoryPaths)}}));
+    """
+    result = _node(source)
+    assert result["payload2"] == result["payload"]
+    assert result["revived"]["files"] == {"Archive/c.md": True, "Docs/Notes/b.md": False}
+    assert result["revived"]["folders"]["Archive"] is False
+    assert result["missing"] is None

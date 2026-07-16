@@ -104,6 +104,25 @@ export function selectionPayload(sel, roots = []) {
   };
 }
 
+// Inverse of selectionPayload: rebuild the explicit-choice model from a run's
+// persisted selection rules so a URL resume never silently resets the user's
+// exclusions and overrides. File-vs-folder is decided by inventory membership.
+export function selectionFromRules(rules, inventoryPaths) {
+  if (!rules) return null;
+  const files = new Set(inventoryPaths || []);
+  const sel = {folders: {}, files: {}, includeJunk: !!rules.include_junk};
+  for (const p of rules.include || []) {
+    if (files.has(p)) sel.files[p] = true;
+    else sel.folders[p] = true;
+  }
+  for (const p of rules.exclude || []) {
+    if (files.has(p)) sel.files[p] = false;
+    else sel.folders[p] = false;
+  }
+  for (const p of rules.overrides || []) sel.files[p] = true;
+  return sel;
+}
+
 export function planBullets(totals) {
   const copy = Number((totals && totals.copy) || 0);
   const unsupported = Number((totals && totals.skip_unsupported) || 0);
