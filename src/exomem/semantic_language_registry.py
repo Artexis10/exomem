@@ -317,6 +317,15 @@ class AttachedProjectsLanguageRegistry:
     ) -> LabelResolution:
         return self._resolve(self.registry.resolve_heading, raw, page_type=page_type)
 
+    def resolve_kind(
+        self,
+        raw: str,
+        *,
+        project: str | None = None,
+        page_type: str | None = None,
+    ) -> LabelResolution:
+        return self._resolve(self.registry.resolve_kind, raw, page_type=page_type)
+
     def resolve_category(
         self,
         raw: str,

@@ -62,6 +62,7 @@ from . import memory_schema as memory_schema_module
 from . import move_file as move_file_module
 from . import multi_edit as multi_edit_module
 from . import note as note_module
+from . import observe_memory as observe_memory_module
 from . import overview as overview_module
 from . import provenance as provenance_module
 from . import query_data as query_data_module
@@ -239,7 +240,7 @@ def op_bootstrap(
     requested_workflow = workflow.strip() if workflow and workflow.strip() else "general"
     selected_packs = knowledge_packs_module.selected_pack_state(vault_root)
     payload: dict = {
-        "contract_version": "2026-07-15.1",
+        "contract_version": "2026-07-16.1",
         "profile": profile,
         "server": {
             "name": "exomem",
@@ -288,7 +289,7 @@ def op_bootstrap(
                 ),
                 "reason in the agent",
                 "use connect_memory(operation='suggest-links' or 'suggest-relations') before important compiled writes",
-                "remember, edit_memory, or replace_memory when there is a durable conclusion",
+                "remember or replace_memory for page-level conclusions; observe_memory for one semantic unit; edit_memory for other small page corrections",
                 "read warnings/suggestions/write_feedback and follow up on unresolved links or duplicate warnings",
             ],
             "save_rule": (
@@ -309,7 +310,7 @@ def op_bootstrap(
                 "draft the smallest durable compiled conclusion",
                 "run connect_memory(operation='suggest-links') and, when directional meaning matters, 'suggest-relations' on the draft",
                 "write accepted note-level edges under `## Relations` as `- relation_type [[Target]]`",
-                "write with remember, edit_memory, replace_memory, capture_source, preserve_evidence, or connect_memory as appropriate",
+                "write with remember, observe_memory, edit_memory, replace_memory, capture_source, preserve_evidence, or connect_memory as appropriate",
                 "inspect warnings, suggestions, and write_feedback from the write result",
                 "apply any accepted links through edit_memory",
                 "report the written path",
@@ -319,6 +320,7 @@ def op_bootstrap(
                 "raw_evidence_or_artifact": "preserve_evidence or transfer_artifact",
                 "new_durable_conclusion": "remember",
                 "small_correction": "edit_memory",
+                "semantic_unit_mutation": "observe_memory",
                 "substantial_rewrite": "replace_memory",
                 "named_person_concept_library_or_decision": "connect_memory(operation='entity')",
             },
@@ -338,6 +340,15 @@ def op_bootstrap(
                 "pattern": "Reusable solution with Problem, Solution, When to use, When not to use, and typed Relations.",
                 "experiment": "Primary protocol with Hypothesis, Protocol, Results, and Conclusion.",
                 "production-log": "Creative artifact record with Frame, Artifact, Outcomes, Reflection, and typed Relations.",
+            },
+            "semantic_units": {
+                "compact_syntax": "- [category] content #tags (context) ^anchor",
+                "compact_kind": "observation",
+                "category_rule": "category is open vocabulary; kind is governed independently",
+                "rich_form": "select an explicit governed non-observation kind",
+                "rich_relation_rule": "typed unit relations require rich form; compact units use a canonical note-level relation instead",
+                "mutation_rule": "use observe_memory add/update/remove/validate instead of whole-page string surgery for one unit",
+                "drift_guards": "update/remove require the current parent content hash and unit fingerprint",
             },
         },
         "tool_defaults": {
@@ -374,6 +385,10 @@ def op_bootstrap(
                 "when": "new durable conclusion",
             },
             "minor_edit": {"tool": "edit_memory", "when": "small correction to an existing page"},
+            "mutate_semantic_unit": {
+                "tool": "observe_memory",
+                "when": "add, update, remove, or validate one compact/rich semantic unit",
+            },
             "supersede": {
                 "tool": "replace_memory",
                 "when": "substantial rewrite of compiled material",
@@ -426,6 +441,7 @@ def op_bootstrap(
             "read_memory",
             "remember",
             "edit_memory",
+            "observe_memory",
             "replace_memory",
             "connect_memory",
             "transfer_artifact",
@@ -3304,6 +3320,109 @@ def op_edit_memory(
     )
 
 
+def op_observe_memory(
+    vault_root: Path,
+    path: str,
+    operation: str = "add",
+    category: str | None = None,
+    content: str | None = None,
+    kind: str | None = None,
+    tags: list[str] | None = None,
+    context: str | None = None,
+    relations: list[dict] | None = None,
+    unit_ref: str | None = None,
+    expected_fingerprint: str | None = None,
+    expected_hash: str | None = None,
+    transition_token: str | None = None,
+    relation_disposition: str | None = None,
+    relation_review_hash: str | None = None,
+    relation_review_reason: str | None = None,
+) -> dict:
+    """Validate or mutate one semantic unit on a compiled memory page.
+
+    Compact observation is the default form. Supply an explicit governed
+    non-observation `kind` for rich semantic-block form and typed relations.
+    Use `validate` before a guarded commit when semantic review is required.
+
+    Args:
+        path: Parent page path or canonical memory reference.
+        operation: add, update, remove, or validate.
+        category: Open semantic category for add/update/validate.
+        content: Unit content for add/update/validate.
+        kind: Optional governed rich kind; omitted means compact observation.
+        tags: Optional compact suffix tags or rich metadata tags.
+        context: Optional compact suffix context or rich metadata context.
+        relations: Rich typed relations as {kind, target} objects.
+        unit_ref: Current exact unit reference for update/remove or update validation.
+        expected_fingerprint: Current exact unit fingerprint; required for update/remove.
+        expected_hash: Current exact parent-page content hash; required for update/remove.
+        transition_token: Exact transition token returned by validate.
+        relation_disposition: Existing-page semantic review disposition.
+        relation_review_hash: Transition hash covered by reviewed-none.
+        relation_review_reason: Audit reason for reviewed-none.
+
+    Returns:
+        The normalized unit, stable unit reference, parent hashes, bounded
+        semantic-contract feedback, and derived-index outcome.
+    """
+    raw_path = str(path or "").strip()
+    if Path(raw_path).is_absolute() or (
+        len(raw_path) >= 3
+        and raw_path[0].isalpha()
+        and raw_path[1] == ":"
+        and raw_path[2] in {"/", "\\"}
+    ):
+        raise ValueError(
+            "INVALID_PATH: observe_memory requires a governed KB-relative "
+            "path or reference"
+        )
+    try:
+        resolved_path = memory_refs_module.resolve_identifier_read_only(
+            vault_root, path
+        )
+    except memory_refs_module.ReferenceError as error:
+        raise ValueError(f"{error.code}: {error.reason}") from error
+    if raw_path.lower().startswith(("exomem://vault/", "exomem://source/")) and not (
+        resolved_path == kb_dirname()
+        or resolved_path.startswith(f"{kb_dirname()}/")
+    ):
+        raise ValueError(
+            "INVALID_PATH: observe_memory parent reference resolves outside "
+            f"{kb_dirname()}/"
+        )
+    try:
+        result = observe_memory_module.observe_memory(
+            vault_root,
+            path=resolved_path,
+            operation=operation,  # type: ignore[arg-type]
+            category=category,
+            content=content,
+            kind=kind,
+            tags=tags,
+            context=context,
+            relations=relations,
+            unit_ref=unit_ref,
+            expected_fingerprint=expected_fingerprint,
+            expected_hash=expected_hash,
+            transition_token=transition_token,
+            relation_disposition=relation_disposition,
+            relation_review_hash=relation_review_hash,
+            relation_review_reason=relation_review_reason,
+        )
+        if result.get("mutated"):
+            query_log.log_write_call(
+                tool="observe_memory",
+                written_path=str(result.get("path") or "") or None,
+                cited_sources=[],
+            )
+        return result
+    except observe_memory_module.ObserveMemoryError as error:
+        message = f"{error.code}: {error.reason}"
+        if error.remediation:
+            message += f" Remediation: {error.remediation}"
+        raise ValueError(message) from error
+
+
 def op_replace_memory(
     vault_root: Path,
     old_path: str,
@@ -4533,6 +4652,7 @@ _CONNECT_MEMORY_READ_ONLY_OPERATIONS = frozenset(
     {"suggest-links", "suggest-relations", "context", "graph-context", "inbound-links"}
 )
 _ADOPT_VAULT_READ_ONLY_MODES = frozenset({"scan-only"})
+_OBSERVE_MEMORY_READ_ONLY_OPERATIONS = frozenset({"validate"})
 _MISSING_SELECTOR_DEFAULT = object()
 
 
@@ -4553,8 +4673,8 @@ def _resolved_invocation_selector(
 def invocation_is_read_only(command: Command, kwargs: dict[str, Any]) -> bool:
     """Classify one resolved product-command invocation for lease gating.
 
-    Write-capable product commands default to requiring the lease. The two
-    mixed read/write commands opt into a finite read-only allowlist, with their
+    Write-capable product commands default to requiring the lease. Mixed
+    read/write commands opt into a finite read-only allowlist, with their
     Python signature defaults applied only when the selector was truly omitted.
     """
     if command.read_only:
@@ -4568,6 +4688,12 @@ def invocation_is_read_only(command: Command, kwargs: dict[str, Any]) -> bool:
     if command.name == "adopt_vault":
         mode = _resolved_invocation_selector(command, kwargs, "mode")
         return isinstance(mode, str) and mode in _ADOPT_VAULT_READ_ONLY_MODES
+    if command.name == "observe_memory":
+        operation = _resolved_invocation_selector(command, kwargs, "operation")
+        return (
+            isinstance(operation, str)
+            and operation in _OBSERVE_MEMORY_READ_ONLY_OPERATIONS
+        )
     return False
 
 
@@ -4605,7 +4731,12 @@ _SIMPLE_ACTION_DEFS: dict[str, dict] = {
         "intent": "Save a durable conclusion as compiled governed knowledge.",
         "route": {"tool": "remember", "args": {"note_type": "insight"}},
         "safety": "additive write; uses note validation and does not preserve raw provenance unless sources are provided",
-        "advanced": ["replace_memory", "edit_memory", "connect_memory"],
+        "advanced": [
+            "replace_memory",
+            "edit_memory",
+            "observe_memory",
+            "connect_memory",
+        ],
     },
     "capture": {
         "intent": "Capture raw material or proof-bearing text without turning it into a conclusion.",
@@ -4706,6 +4837,7 @@ _SPEC: tuple[tuple, ...] = (
     ("propose_compilation", op_propose_compilation, 1, False, False, None, _MCRC),
     ("get", op_get, 1, False, False, "path", _MCRC),
     ("edit", op_edit, 1, True, False, "path", _MCRC),
+    ("observe_memory", op_observe_memory, 1, True, False, "path", _MCRC),
     ("replace", op_replace, 1, True, False, "old_path", _MCRC),
     ("link", op_link, 1, True, False, None, _MCRC),
     ("preserve", op_preserve, 1, True, False, None, _MCRC),
@@ -4833,6 +4965,17 @@ _PRODUCT_SPEC: tuple[tuple, ...] = (
         _MCRC,
         ("edit",),
         {"surface": "primary", "actions": ("update",), "first_run_safe": False},
+    ),
+    (
+        "observe_memory",
+        op_observe_memory,
+        1,
+        True,
+        False,
+        "path",
+        _MCRC,
+        ("observe_memory",),
+        {"surface": "primary", "actions": ("update", "save"), "first_run_safe": False},
     ),
     (
         "replace_memory",

@@ -28,6 +28,7 @@ GUARDED_WRITE_FIELDS: dict[str, tuple[str, ...]] = {
     "capture_source": ("content",),
     "preserve_evidence": ("content",),
     "edit_memory": ("new_body", "new_string"),
+    "observe_memory": ("content",),
     "replace_memory": ("content",),
     "manage_memory_file": ("content",),
 }
@@ -45,6 +46,7 @@ DESTRUCTIVE_OPS: frozenset[str] = frozenset(
         "move_file",
         "audit_fix",
         "edit_memory",
+        "observe_memory",
         "replace_memory",
         "manage_memory_file",
         "maintain_memory",

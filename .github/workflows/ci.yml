@@ -184,6 +184,7 @@ jobs:
         run: >-
           uvx ruff check
           src/exomem/memory_refs.py
+          src/exomem/observe_memory.py
           src/exomem/memory_context.py
           src/exomem/memory_schema.py
           src/exomem/relation_registry.py
@@ -193,6 +194,7 @@ jobs:
           scripts/e2e_http_server.py
           scripts/smoke-media-pipeline.py
           tests/test_memory_refs.py
+          tests/test_observe_memory.py
           tests/test_memory_schema.py
           tests/test_relation_registry.py
           tests/test_traversal_profiles.py
@@ -201,6 +203,7 @@ jobs:
         run: >-
           uvx mypy --follow-imports skip --ignore-missing-imports --check-untyped-defs
           src/exomem/memory_refs.py
+          src/exomem/observe_memory.py
           src/exomem/memory_context.py
           src/exomem/memory_schema.py
           src/exomem/relation_registry.py

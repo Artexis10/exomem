@@ -19,6 +19,7 @@ PRODUCT_ROUTES = [
     "browse_memory",
     "remember",
     "edit_memory",
+    "observe_memory",
     "replace_memory",
     "capture_source",
     "compile_source",
@@ -97,6 +98,40 @@ def test_replace_memory_route_exists(vault, monkeypatch: pytest.MonkeyPatch) -> 
     body = r.json()
     assert body["success"] is False
     assert "code" in body["error"]
+
+
+def test_observe_memory_route_mutates_one_structured_unit(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rel = "Knowledge Base/Notes/Insights/rest-observe.md"
+    (vault / rel).write_text(
+        "---\n"
+        "type: insight\n"
+        "title: REST observe\n"
+        "exomem_id: e356dbfd-d79a-4870-a931-9082283b1728\n"
+        "status: active\n"
+        "updated: 2026-07-16\n"
+        "---\n\n"
+        "# REST observe\n",
+        encoding="utf-8",
+    )
+    client = _client(vault, monkeypatch, EXOMEM_REST_API_KEY="sekret")
+
+    response = client.post(
+        "/api/observe_memory",
+        json={
+            "path": rel,
+            "operation": "add",
+            "category": "config",
+            "content": "REST structured unit",
+        },
+        headers=_auth(),
+    )
+
+    assert response.status_code == 200, response.text
+    result = response.json()["data"]
+    assert result["unit"]["category_key"] == "config"
+    assert result["unit_ref"] == result["unit"]["unit_ref"]
 
 
 def test_product_review_connection_dataset_and_file_routes_exist(
@@ -294,6 +329,7 @@ def test_openapi_lists_real_product_params(vault, monkeypatch: pytest.MonkeyPatc
     assert doc["openapi"].startswith("3.1")
     assert "/api/replace_memory" in doc["paths"]
     assert "/api/ask_memory" in doc["paths"]
+    assert "/api/observe_memory" in doc["paths"]
     ask_schema = doc["paths"]["/api/ask_memory"]["post"]["requestBody"]["content"][
         "application/json"
     ]["schema"]
@@ -313,6 +349,26 @@ def test_openapi_lists_real_product_params(vault, monkeypatch: pytest.MonkeyPatc
     assert props["limit"]["type"] == "integer"
     assert props["graph"]["type"] == "boolean"
     assert props["tags"]["type"] == "array"
+    observe_schema = doc["paths"]["/api/observe_memory"]["post"]["requestBody"]["content"][
+        "application/json"
+    ]["schema"]
+    assert "path" in observe_schema.get("required", [])
+    assert {
+        "operation",
+        "category",
+        "content",
+        "kind",
+        "tags",
+        "context",
+        "relations",
+        "unit_ref",
+        "expected_fingerprint",
+        "expected_hash",
+        "transition_token",
+        "relation_disposition",
+        "relation_review_hash",
+        "relation_review_reason",
+    } <= set(observe_schema["properties"])
     remember_schema = doc["paths"]["/api/remember"]["post"]["requestBody"]["content"][
         "application/json"
     ]["schema"]

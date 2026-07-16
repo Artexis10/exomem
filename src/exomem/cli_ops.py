@@ -42,6 +42,20 @@ _REMEDIATION: dict[str, str] = {
     "BAD_JSON": "Pass valid JSON for this field.",
     "BINARY_BLOB_REJECTED": "Don't push binaries through text fields; use the /upload endpoint.",
     "NOT_FOUND": "Check the path; try `ask_memory` to locate it.",
+    "STALE_PARENT_HASH": "Re-read the parent page and retry with its current content hash.",
+    "STALE_UNIT_REFERENCE": (
+        "Re-read the exact unit and retry with its current reference/fingerprint."
+    ),
+    "AMBIGUOUS_UNIT_REFERENCE": (
+        "Re-read the parent and select one exact current unit reference."
+    ),
+    "COMPACT_RELATIONS_REQUIRE_RICH_KIND": (
+        "Select an explicit governed rich kind or author a canonical note-level relation."
+    ),
+    "DRIFT_GUARDS_REQUIRED": (
+        "Re-read the parent and exact unit, then pass both expected_hash and "
+        "expected_fingerprint."
+    ),
     "WRITER_LEASE_REQUIRED": (
         "Send the mutation to the current writer or retry after its lease expires."
     ),
@@ -69,6 +83,9 @@ _CONFLICT_CODES = frozenset(
         "ALREADY_SUPERSEDED",
         "ALREADY_TRASHED",
         "STALE_EDIT",
+        "STALE_PARENT_HASH",
+        "STALE_UNIT_REFERENCE",
+        "AMBIGUOUS_UNIT_REFERENCE",
         "STALE_CONTRACT",
         "CONTRACT_EXISTS",
         "WRITER_LEASE_REQUIRED",

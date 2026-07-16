@@ -110,6 +110,46 @@ def test_read_memory_reads_a_page(vault: Path, capsys) -> None:
     assert payload["data"]["frontmatter"]["type"] == "insight"
 
 
+def test_observe_memory_adds_and_returns_exact_unit(vault: Path, capsys) -> None:
+    rel = "Knowledge Base/Notes/Insights/cli-observe.md"
+    (vault / rel).write_text(
+        "---\n"
+        "type: insight\n"
+        "exomem_id: 0cd1fa26-ad3f-4df0-bc82-e57d011b7ace\n"
+        "title: CLI observe\n"
+        "status: active\n"
+        "updated: 2026-07-16\n"
+        "---\n\n"
+        "# CLI observe\n",
+        encoding="utf-8",
+    )
+
+    code, out, err = _run(
+        [
+            "observe_memory",
+            rel,
+            "--operation",
+            "add",
+            "--category",
+            "Config Rule",
+            "--content",
+            "CLI structured unit",
+            "--tags",
+            "cli",
+            "--tags",
+            "storage",
+            "--json",
+        ],
+        capsys,
+    )
+
+    assert code == 0, f"{err}\n{out}"
+    data = json.loads(out.strip().splitlines()[-1])["data"]
+    assert data["unit"]["category_key"] == "config_rule"
+    assert data["unit"]["tags"] == ["cli", "storage"]
+    assert data["unit_ref"].endswith(data["unit"]["anchor"])
+
+
 def test_read_memory_reads_exact_semantic_unit(vault: Path, capsys) -> None:
     rel = "Knowledge Base/Notes/Insights/cli-exact-unit.md"
     (vault / rel).write_text(

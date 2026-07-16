@@ -225,7 +225,7 @@ Watcher and reconcile paths MUST NOT delete, revert, or rewrite externally autho
 - **THEN** stale findings and stale derived rows disappear and repeated reconcile is a no-op
 
 ### Requirement: Structured Semantic Unit Mutation
-The system SHALL expose `observe_memory` with `add`, `update`, `remove`, and `validate` operations for writable compiled pages. It SHALL accept parent path/reference, category, content, optional kind/tags/context, expected parent hash, and current unit reference/fingerprint where required. Compact observation SHALL be the default authoring form. Typed `relations` SHALL be rejected unless an explicit governed non-observation kind selects rich form; remediation SHALL tell the caller to select rich form or author a canonical note-level relation.
+The system SHALL expose `observe_memory` with `add`, `update`, `remove`, and `validate` operations for writable compiled pages. It SHALL accept parent path/reference, category, content, optional kind/tags/context, expected parent hash, and current unit reference/fingerprint where required. Update and remove SHALL require both the current expected parent hash and current unit fingerprint. Compact observation SHALL be the default authoring form. Typed `relations` SHALL be rejected unless an explicit governed non-observation kind selects rich form; remediation SHALL tell the caller to select rich form or author a canonical note-level relation.
 
 #### Scenario: Add compact observation
 - **WHEN** `observe_memory(operation="add")` receives a parent, category, and content

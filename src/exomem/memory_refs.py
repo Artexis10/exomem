@@ -343,6 +343,33 @@ def resolve_identifier(vault_root: Path, value: str) -> str:
     return raw
 
 
+def resolve_identifier_read_only(vault_root: Path, value: str) -> str:
+    """Resolve a path/reference without creating or refreshing the ref sidecar."""
+    raw = str(value or "").strip()
+    memory_id = parse_memory_ref(raw)
+    if raw.lower().startswith(REF_PREFIX):
+        if memory_id is None:
+            raise ReferenceError("INVALID_REFERENCE", f"invalid memory reference: {raw!r}")
+        rows = ReferenceIndex(vault_root)._scan_paths_for_id(memory_id)
+        if len(rows) > 1:
+            raise ReferenceError(
+                "AMBIGUOUS_REFERENCE",
+                f"memory id {memory_id} appears in multiple pages: {rows}",
+            )
+        if not rows:
+            raise ReferenceError(
+                "REFERENCE_NOT_FOUND", f"memory id not found: {memory_id}"
+            )
+        return rows[0]
+    for prefix in ("exomem://vault/", "exomem://source/"):
+        if raw.lower().startswith(prefix):
+            decoded = unquote(raw[len(prefix) :])
+            if prefix.endswith("source/") and not decoded.lower().endswith(".md"):
+                decoded += ".md"
+            return decoded
+    return raw
+
+
 def add_id_to_markdown(markdown: str, exomem_id: str | None = None) -> tuple[str, str]:
     """Add an identity without reserializing or reordering existing frontmatter."""
     fm, body, fm_text = vault_module.parse_frontmatter(markdown)
