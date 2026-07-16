@@ -40,6 +40,7 @@ from .media_jobs import (
 from .media_jobs import (
     MediaJob as _Job,
 )
+from .vault import content_hash
 from .writer_lease import get_manager
 
 log = logging.getLogger(__name__)
@@ -251,6 +252,7 @@ class MediaWorker:
         ):
             return _ProcessOutcome(_COMPLETE)
         expected_sidecar = _content_digest(job.sidecar_path)
+        expected_sidecar_text_hash = content_hash(claimed_content)
         expected_binary = _binary_identity(job.binary_path)
         if expected_sidecar is None or expected_binary is None:
             log.warning("extraction skip %s: input identity unavailable", job.binary_path.name)
@@ -333,7 +335,7 @@ class MediaWorker:
                     self._vault_root,
                     job.sidecar_path,
                     attempts=max(1, job.attempts),
-                    expected_hash=expected_sidecar,
+                    expected_hash=expected_sidecar_text_hash,
                 )
             detail = ", ".join(stale_parts) or "commit precondition changed"
             return _ProcessOutcome(_STALE, f"stale extraction: {detail}")

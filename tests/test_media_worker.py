@@ -12,6 +12,7 @@ import yaml
 
 from exomem import embeddings, extract, media_jobs, media_worker, preserve, server_runtime
 from exomem import find as find_module
+from exomem.vault import content_hash
 
 
 @pytest.fixture(autouse=True)
@@ -392,8 +393,8 @@ def test_pending_state_cas_preserves_concurrent_completed_transcript(
 ) -> None:
     result = _preserve_media_stub(vault, filename="pending-cas.m4a")
     sidecar = vault / result.sidecar_path
-    expected_hash = media_worker._content_digest(sidecar)
-    assert expected_hash is not None
+    sidecar.write_bytes(sidecar.read_bytes().replace(b"\n", b"\r\n"))
+    expected_hash = content_hash(sidecar.read_text(encoding="utf-8"))
     completed_bytes: bytes | None = None
     real_batch = preserve.batch_atomic_write
 
@@ -420,6 +421,25 @@ def test_pending_state_cas_preserves_concurrent_completed_transcript(
     assert completed_bytes is not None
     assert sidecar.read_bytes() == completed_bytes
     assert "extracted_by: external-asr+timed" in sidecar.read_text(encoding="utf-8")
+
+
+def test_pending_state_cas_updates_unchanged_crlf_sidecar(vault) -> None:
+    result = _preserve_media_stub(vault, filename="pending-cas-crlf.m4a")
+    sidecar = vault / result.sidecar_path
+    sidecar.write_bytes(sidecar.read_bytes().replace(b"\n", b"\r\n"))
+    expected_hash = content_hash(sidecar.read_text(encoding="utf-8"))
+
+    updated = preserve.update_sidecar_processing_pending(
+        vault,
+        sidecar,
+        attempts=2,
+        expected_hash=expected_hash,
+    )
+
+    assert updated is True
+    content = sidecar.read_text(encoding="utf-8")
+    assert "processing_state: pending" in content
+    assert "processing_attempts: 2" in content
 
 
 def test_clip_compute_stays_outside_guard_and_index_commit_is_inside(
