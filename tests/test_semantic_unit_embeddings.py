@@ -200,9 +200,17 @@ def test_disabled_or_warming_embedding_path_never_loads_unit_work(
     )
 
     monkeypatch.setattr(embeddings, "_IMPORT_FAILED", False)
-    monkeypatch.setattr(readiness, "defer", lambda *_args: True)
-    deferred = embeddings.upsert_after_write_status(tmp_path, [page])
-    assert (deferred.status, deferred.code) == ("deferred", "deferred_warmup")
+    readiness.reset()
+    readiness.begin_warm()
+    try:
+        deferred = embeddings.upsert_after_write_status(tmp_path, [page])
+        assert (deferred.status, deferred.code) == (
+            "deferred",
+            "deferred_warmup",
+        )
+    finally:
+        readiness.finish_warm()
+        readiness.reset()
 
 
 def test_post_start_unit_encode_failure_degrades_without_raising(

@@ -301,7 +301,7 @@ def _rel_md_paths(vault_root: Path, paths: list[Path]) -> list[str]:
 
 
 def _record_deferred_semantic_upserts(
-    vault_root: Path, paths: list[Path]
+    vault_root: Path, paths: list[Path], *, omit_proven_current: bool = False
 ) -> tuple[int, int]:
     from . import index_paths
 
@@ -310,7 +310,37 @@ def _record_deferred_semantic_upserts(
         for rel in _rel_md_paths(vault_root, paths)
         if index_paths.is_embeddable_path(vault_root / rel)
     ]
+    if omit_proven_current and rels:
+        freshness = deferred_index.inspect_embedding_freshness(vault_root, rels)
+        rels = [
+            rel
+            for rel in rels
+            if freshness.get(rel) is not deferred_index.EmbeddingFreshness.CURRENT
+        ]
     return len(rels), deferred_index.add(vault_root, rels)
+
+
+def replay_deferred_embedding(
+    vault_root: Path,
+    paths: list[Path],
+    receipts: list[deferred_index.DeferredReceipt] | tuple[deferred_index.DeferredReceipt, ...] | None = None,
+):
+    """Replay one durable embedding batch and clear only its completed revisions."""
+    from . import embeddings
+
+    if receipts is None:
+        rels = set(_rel_md_paths(vault_root, paths))
+        receipts = [
+            receipt
+            for receipt in deferred_index.snapshot(vault_root)
+            if receipt.rel_path in rels
+        ]
+    status = embeddings.upsert_after_write_status(
+        vault_root, paths, defer_during_warm=False
+    )
+    if status.status == "completed":
+        deferred_index.clear_receipts(vault_root, list(receipts))
+    return status
 
 
 def deferred_work_status(vault_root: Path | None = None) -> dict:
@@ -401,21 +431,19 @@ def drain_deferred_work(
         return processed
 
     remaining_limit = None if limit is None else max(0, limit - processed)
-    pending = deferred_index.list_paths(vault_root, limit=remaining_limit)
-    if not pending:
+    receipts = deferred_index.snapshot(vault_root, limit=remaining_limit)
+    if not receipts:
         return processed
-    from . import embeddings
-
-    paths = [vault_root / rel for rel in pending]
+    paths = [vault_root / receipt.rel_path for receipt in receipts]
     try:
-        dispatched = embeddings.upsert_after_write(vault_root, paths)
+        status = replay_deferred_embedding(vault_root, paths, receipts)
     except Exception:  # noqa: BLE001 - durable work must survive a failed dispatch
         log.warning("deferred semantic dispatch failed; work remains queued", exc_info=True)
         return processed
-    if dispatched is False:
+    if status.status != "completed":
         log.warning("deferred semantic dispatch incomplete; work remains queued")
         return processed
-    return processed + clear_deferred_work(vault_root, paths=paths)
+    return processed + len(receipts)
 
 
 def _dispatch_upsert_components(
@@ -452,7 +480,9 @@ def _dispatch_upsert_components(
     if defer_semantic or mode.defer_expensive_indexes():
         try:
             semantic_count, added = _record_deferred_semantic_upserts(
-                vault_root, eligible
+                vault_root,
+                eligible,
+                omit_proven_current=defer_semantic,
             )
         except Exception:  # noqa: BLE001 - degradation is reported, other lanes landed
             log.warning("durable semantic defer failed", exc_info=True)
@@ -489,7 +519,7 @@ def _dispatch_upsert_components(
             )
         else:
             components.append(component)
-            if status.status != "completed":
+            if status.status != "completed" and status.code != "deferred_warmup":
                 try:
                     _record_deferred_semantic_upserts(vault_root, eligible)
                 except Exception:  # noqa: BLE001 - report remains the primary outcome
