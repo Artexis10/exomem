@@ -55,6 +55,31 @@ so an incremental refresh already admitted against the old current graph cannot
 resurrect a failed overlapping rebuild. Refresh against a missing or unavailable
 sidecar routes through a full rebuild rather than publishing a partial graph.
 
+All public graph mutators (`rebuild_all`, `refresh_paths`, and `delete_paths`)
+share one `VaultMutationCoordinator` boundary. Its state root is
+`<Knowledge Base>/.graph-coordination`, keyed by the canonical vault identity,
+with a 30-second bounded acquisition timeout. Keeping the OS-backed lock inside
+the vault is intentional: the LocalSystem service and an interactive user have
+different per-account runtime/cache roots, but both see the same vault path and
+therefore the same lock file. The coordinator's process-local `RLock` preserves
+same-thread re-entrancy; refresh routes to a locked rebuild internal while still
+holding the outer boundary.
+
+The lock covers availability decisions, resolver acquisition, graph row and
+metadata changes, disk-truth stabilization checks, and final marker publication.
+An older operation therefore cannot publish or remove availability after a
+newer mutation has begun, and a refresh admitted before a rebuild cannot mutate
+the sidecar during that rebuild.
+
+`.graph-coordination` is excluded by both the KB corpus walker and the full
+vault walker. Lock state is not corpus content, and excluding the subtree before
+recursion prevents lock-file ACL/read behavior from entering freshness or
+resolver scans. Structured lock failures (`MUTATION_BUSY` and
+`MUTATION_LOCK_UNAVAILABLE`) propagate through the graph leaf wrapper to
+`index_sync`, which records that component as degraded while allowing the
+canonical Markdown write and other index lanes to complete. Unstructured graph
+leaf failures retain the existing soft-failure behavior.
+
 Failure ordering follows the same mutation boundary. An initial disk-freshness
 or resolver acquisition failure occurs before the first pass and preserves the
 previously current graph. Once a pass starts, any exceptional exit—including

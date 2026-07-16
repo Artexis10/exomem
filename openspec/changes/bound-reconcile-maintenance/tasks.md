@@ -7,6 +7,8 @@
 - [x] 1.5 Mutate the shared cached resolver after detached acquisition and prove the active graph pass remains isolated.
 - [x] 1.6 Add failure-ordering regressions for retry freshness/resolver acquisition and partial-pass failures while preserving initial acquisition behavior.
 - [x] 1.7 Add marker-publication regressions for stable passes, post-check failure, an already-admitted refresh overlapping a failed rebuild, and missing-sidecar refresh.
+- [x] 1.8 Add a spawned-process serialization regression and assert graph coordination state is vault-rooted and shared.
+- [x] 1.9 Add regressions for walker exclusion, pre-mutation lock failure, and degraded index-sync reporting of structured lock errors.
 
 ## 2. Bounded Graph Implementation
 
@@ -15,6 +17,8 @@
 - [x] 2.3 Bracket full rebuild passes with disk-truth freshness, retry once on movement, and mark repeated churn unavailable before raising.
 - [x] 2.4 Invalidate every exceptional exit after a rebuild pass starts without invalidating failures before the first mutation boundary.
 - [x] 2.5 Make stable full-rebuild completion the only schema-version publisher and route non-current incremental refresh through a full rebuild.
+- [x] 2.6 Serialize all public graph mutators with one vault-rooted re-entrant OS-backed mutation coordinator.
+- [x] 2.7 Exclude coordination state from both walkers and propagate structured lock failures to the index-sync degradation boundary.
 
 ## 3. Freshness and Fanout Regressions
 

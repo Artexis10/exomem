@@ -21,8 +21,8 @@ from pathlib import Path
 
 import pytest
 
-from exomem import deferred_index, index_sync
-from exomem.vault import in_excluded_scan_dir
+from exomem import deferred_index, find_corpus, index_sync
+from exomem.vault import in_excluded_scan_dir, walk_vault_md
 
 
 def test_excluded_scan_dir_predicate() -> None:
@@ -30,6 +30,7 @@ def test_excluded_scan_dir_predicate() -> None:
     assert in_excluded_scan_dir(f"{kb}/_trash/2026-07-04/foo.md")
     assert in_excluded_scan_dir(f"{kb}/_archive/old.md")
     assert in_excluded_scan_dir(f"{kb}/_Schema/SKILL.md")
+    assert in_excluded_scan_dir(f"{kb}/.graph-coordination/mutation-locks/lock.md")
     assert in_excluded_scan_dir(".obsidian/workspace.json")
     # Backslash tolerance (Windows callers).
     assert in_excluded_scan_dir(f"{kb}\\_trash\\2026-07-04\\foo.md")
@@ -38,6 +39,23 @@ def test_excluded_scan_dir_predicate() -> None:
     assert not in_excluded_scan_dir(f"{kb}/Sources/Articles/bar.md")
     # Only whole segments match — a note ABOUT trash isn't excluded.
     assert not in_excluded_scan_dir(f"{kb}/Notes/Insights/_trash-handling.md")
+
+
+def test_graph_coordination_directory_is_excluded_from_both_full_walkers(
+    vault: Path,
+) -> None:
+    kb = vault / "Knowledge Base"
+    coordination_note = kb / ".graph-coordination" / "unreadable-lock-state.md"
+    normal_note = kb / "Notes" / "normal.md"
+    coordination_note.parent.mkdir(parents=True, exist_ok=True)
+    normal_note.parent.mkdir(parents=True, exist_ok=True)
+    coordination_note.write_text("# coordination state\n", encoding="utf-8")
+    normal_note.write_text("# normal\n", encoding="utf-8")
+
+    assert normal_note in set(find_corpus.walk_md(kb))
+    assert normal_note in set(walk_vault_md(vault))
+    assert coordination_note not in set(find_corpus.walk_md(kb))
+    assert coordination_note not in set(walk_vault_md(vault))
 
 
 def test_index_sync_upsert_drops_excluded_paths(

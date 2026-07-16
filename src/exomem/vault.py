@@ -93,6 +93,7 @@ VAULT_SCAN_SKIP_DIRS = frozenset(
     {
         ".obsidian",
         ".git",
+        ".graph-coordination",
         ".trash",
         "_attachments",
         "_archive",

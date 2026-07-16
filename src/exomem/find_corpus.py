@@ -17,7 +17,9 @@ from .find_types import ParsedPage
 
 log = logging.getLogger(__name__)
 
-EXCLUDED_DIR_NAMES = frozenset({"_Schema", "_attachments", "_archive", "_trash"})
+EXCLUDED_DIR_NAMES = frozenset(
+    {".graph-coordination", "_Schema", "_attachments", "_archive", "_trash"}
+)
 EXCLUDED_DIR_PREFIXES = (".exomem-batch-",)
 NAVIGATION_BASENAMES = frozenset({"index.md", "log.md"})
 FRONTMATTER_PATTERN = re.compile(r"^---\n(.*?)\n---\n(.*)", re.DOTALL)

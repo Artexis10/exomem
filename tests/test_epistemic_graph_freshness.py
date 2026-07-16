@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+import multiprocessing
+import os
+import threading
 from pathlib import Path
 
 import pytest
 
 from exomem import audit, epistemic_graph, reconcile, semantic_index
 from exomem import find as find_module
+from exomem.cli_ops import OpError
+from exomem.mutation_lock import VaultMutationCoordinator
 
 A = "Knowledge Base/Notes/Insights/a.md"
 B = "Knowledge Base/Notes/Insights/b.md"
@@ -52,6 +57,146 @@ B claim.
 """,
     )
     return a, b
+
+
+def _spawn_graph_mutation(
+    vault_root: str,
+    operation: str,
+    rel_path: str,
+    attempting,
+    completed,
+) -> None:
+    os.environ["EXOMEM_DISABLE_EMBEDDINGS"] = "1"
+    attempting.set()
+    index = epistemic_graph.EpistemicGraphIndex(Path(vault_root))
+    if operation == "refresh":
+        index.refresh_paths([Path(vault_root) / rel_path])
+    else:
+        index.delete_paths([rel_path])
+    completed.set()
+
+
+def test_graph_mutation_lock_is_shared_and_rooted_inside_vault_kb(
+    tmp_path: Path,
+) -> None:
+    vault = tmp_path / "vault"
+    _seed(vault)
+
+    first = epistemic_graph.EpistemicGraphIndex(vault)
+    second = epistemic_graph.EpistemicGraphIndex(vault / ".")
+
+    expected_root = (vault / "Knowledge Base" / ".graph-coordination").resolve()
+    assert first._mutation_coordinator.state_root == expected_root
+    assert first._mutation_coordinator.lock_path == second._mutation_coordinator.lock_path
+    assert first._mutation_coordinator.timeout_seconds == 30.0
+
+
+def test_graph_mutation_lock_unavailable_preserves_current_graph(
+    tmp_path: Path,
+) -> None:
+    vault = tmp_path / "vault"
+    _seed(vault)
+    index = epistemic_graph.EpistemicGraphIndex(vault)
+    index.rebuild_all()
+    before_nodes = index.nodes()
+    before_edges = index.edges()
+    unusable_state_root = tmp_path / "not-a-directory"
+    unusable_state_root.write_text("occupied", encoding="utf-8")
+    index._mutation_coordinator = VaultMutationCoordinator(
+        unusable_state_root,
+        vault,
+        timeout_seconds=0.05,
+    )
+
+    with pytest.raises(OpError) as raised:
+        index.rebuild_all()
+
+    assert raised.value.code == "MUTATION_LOCK_UNAVAILABLE"
+    assert index.available() is True
+    assert index.nodes() == before_nodes
+    assert index.edges() == before_edges
+
+
+def test_graph_dispatch_wrappers_propagate_structured_lock_errors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / A
+    lock_error = OpError("MUTATION_BUSY", "graph mutation is busy")
+    monkeypatch.setattr(
+        epistemic_graph.EpistemicGraphIndex,
+        "refresh_paths",
+        lambda *_args: (_ for _ in ()).throw(lock_error),
+    )
+
+    with pytest.raises(OpError, match="MUTATION_BUSY"):
+        epistemic_graph.upsert_after_write(tmp_path, [target])
+
+    monkeypatch.setattr(
+        epistemic_graph.EpistemicGraphIndex,
+        "delete_paths",
+        lambda *_args: (_ for _ in ()).throw(lock_error),
+    )
+    with pytest.raises(OpError, match="MUTATION_BUSY"):
+        epistemic_graph.delete_after_remove(tmp_path, [A])
+
+
+@pytest.mark.parametrize("operation", ["refresh", "delete"])
+def test_spawned_mutator_waits_for_full_rebuild_mutation_boundary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str
+) -> None:
+    context = multiprocessing.get_context("spawn")
+    vault = tmp_path / "vault"
+    _seed(vault)
+    index = epistemic_graph.EpistemicGraphIndex(vault)
+    index.rebuild_all()
+    real_index_path = index._index_path
+    rebuild_entered = threading.Event()
+    release_rebuild = threading.Event()
+    rebuild_errors: list[Exception] = []
+    blocked_once = False
+
+    def blocking_index_path(*args, **kwargs):
+        nonlocal blocked_once
+        if not blocked_once:
+            blocked_once = True
+            rebuild_entered.set()
+            if not release_rebuild.wait(8.0):
+                raise RuntimeError("test rebuild release signal was not received")
+        return real_index_path(*args, **kwargs)
+
+    def rebuild() -> None:
+        try:
+            index.rebuild_all()
+        except Exception as exc:  # noqa: BLE001 - asserted in parent thread
+            rebuild_errors.append(exc)
+
+    monkeypatch.setattr(index, "_index_path", blocking_index_path)
+    rebuild_thread = threading.Thread(target=rebuild)
+    attempting = context.Event()
+    completed = context.Event()
+    child = context.Process(
+        target=_spawn_graph_mutation,
+        args=(str(vault), operation, A, attempting, completed),
+    )
+
+    rebuild_thread.start()
+    assert rebuild_entered.wait(3.0)
+    child.start()
+    try:
+        assert attempting.wait(5.0)
+        assert not completed.wait(0.5)
+    finally:
+        release_rebuild.set()
+        rebuild_thread.join(timeout=8.0)
+        child.join(timeout=8.0)
+        if child.is_alive():
+            child.terminate()
+            child.join(timeout=3.0)
+
+    assert not rebuild_thread.is_alive()
+    assert rebuild_errors == []
+    assert completed.is_set()
+    assert child.exitcode == 0
 
 
 def test_full_rebuild_reuses_one_detached_resolver_without_shared_cache(

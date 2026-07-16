@@ -67,18 +67,63 @@ schema-version marker. `refresh_paths` on a missing or unavailable sidecar MUST
 route to a full rebuild so a partial path set is never advertised as a complete
 current graph.
 
-#### Scenario: Admitted refresh overlaps a failing rebuild
+#### Scenario: Refresh contends with a full rebuild
 
-- **WHEN** a refresh passes its initial availability decision
-- **AND** an overlapping full rebuild removes the marker and fails partially
-- **THEN** the admitted refresh may update its owned rows
-- **BUT** it does not restore current graph availability
+- **WHEN** refresh and full rebuild are requested concurrently for one vault
+- **THEN** one operation holds the shared mutation boundary
+- **AND** the other waits or reports bounded `MUTATION_BUSY` without mutating graph rows or availability
 
 #### Scenario: Refresh starts without a current sidecar
 
 - **WHEN** `refresh_paths` starts with a missing or unavailable graph sidecar
 - **THEN** it routes to a full rebuild
 - **AND** availability is published only after the complete rebuild stabilizes
+
+### Requirement: Graph mutations serialize across processes and accounts
+
+The system SHALL serialize `rebuild_all`, `refresh_paths`, and `delete_paths`
+through one re-entrant OS-backed mutation boundary keyed to the canonical vault
+identity. The lock state MUST be rooted at
+`<Knowledge Base>/.graph-coordination` rather than a per-account runtime root,
+so service and interactive processes coordinate through the same lock file.
+Acquisition SHALL use a bounded timeout of approximately 30 seconds. The held
+boundary MUST include the initial availability decision, all row and metadata
+mutation, stabilization checks, and final availability-marker publication.
+
+#### Scenario: Cross-process mutation waits for an active rebuild
+
+- **WHEN** one process is inside a full graph rebuild mutation boundary
+- **AND** another process calls refresh or delete for the same canonical vault
+- **THEN** the later mutator does not enter graph mutation until the rebuild releases the boundary
+
+#### Scenario: Service and interactive accounts share authority
+
+- **WHEN** two processes use different per-account runtime state directories but the same vault
+- **THEN** all graph mutators resolve the lock beneath that vault's Knowledge Base
+- **AND** they contend on the same canonical lock path
+
+#### Scenario: Refresh routes to rebuild while holding the boundary
+
+- **WHEN** refresh observes a missing or unavailable graph while holding mutation authority
+- **THEN** it performs the required full rebuild without deadlocking or releasing authority between the decision and rebuild
+
+#### Scenario: Older operation cannot reorder availability
+
+- **WHEN** an older graph operation would otherwise publish or remove the schema marker after a newer overlapping mutation
+- **THEN** serialization prevents the operations from overlapping
+- **AND** marker state reflects completed mutation order
+
+#### Scenario: Coordination state is outside the indexed corpus
+
+- **WHEN** KB-only or full-vault Markdown traversal reaches the Knowledge Base
+- **THEN** it excludes the `.graph-coordination` subtree before recursion
+- **AND** lock state or its host ACLs do not participate in graph freshness or resolver input
+
+#### Scenario: Lock acquisition cannot establish mutation authority
+
+- **WHEN** a graph writer cannot acquire or open the shared mutation lock
+- **THEN** it does not mutate graph rows or availability
+- **AND** its structured lock error reaches index-sync reporting as a degraded graph component rather than accepted success
 
 ### Requirement: Bounded graph maintenance preserves correctness and failure ordering
 

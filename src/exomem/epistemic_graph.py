@@ -19,6 +19,7 @@ from typing import Any
 from . import find as find_module
 from . import (
     memory_refs,
+    mutation_lock,
     relation_registry,
     semantic_blocks,
     semantic_index,
@@ -27,6 +28,7 @@ from . import (
     traversal_profiles,
 )
 from . import vault as vault_module
+from .cli_ops import OpError
 from .kbdir import kb_dirname, kb_prefix
 from .markdown_relations import MarkdownRelation
 
@@ -35,6 +37,8 @@ UNIT_SEED_MAX_BATCHES = 4
 UNIT_PARENT_REF_MAX_CANDIDATES = 16
 EDGE_INSPECTION_MULTIPLIER = 4
 REBUILD_STABILIZATION_ATTEMPTS = 2
+GRAPH_MUTATION_TIMEOUT_SECONDS = 30.0
+GRAPH_COORDINATION_DIRNAME = ".graph-coordination"
 
 RELATION_TYPES: frozenset[str] = relation_registry.core_registry().keys
 
@@ -142,6 +146,11 @@ class EpistemicGraphIndex:
         self.path = sidecar_path(self.vault_root)
         self.registry = relation_registry.load_registry(self.vault_root)
         self.language_registry = semantic_language_registry.load_registry(self.vault_root)
+        self._mutation_coordinator = mutation_lock.VaultMutationCoordinator(
+            self.vault_root / kb_dirname() / GRAPH_COORDINATION_DIRNAME,
+            self.vault_root,
+            timeout_seconds=GRAPH_MUTATION_TIMEOUT_SECONDS,
+        )
 
     def _connect(self) -> sqlite3.Connection:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -238,6 +247,10 @@ class EpistemicGraphIndex:
     def rebuild_all(self) -> dict[str, int]:
         if not graph_enabled():
             return {"indexed_files": 0, "nodes": 0, "edges": 0, "disabled": 1}
+        with self._mutation_coordinator.hold():
+            return self._rebuild_all_locked()
+
+    def _rebuild_all_locked(self) -> dict[str, int]:
         pass_started = False
         stable = False
         try:
@@ -334,8 +347,12 @@ class EpistemicGraphIndex:
     def refresh_paths(self, paths: list[Path]) -> dict[str, int]:
         if not graph_enabled():
             return {"indexed_files": 0, "nodes": 0, "edges": 0, "disabled": 1}
+        with self._mutation_coordinator.hold():
+            return self._refresh_paths_locked(paths)
+
+    def _refresh_paths_locked(self, paths: list[Path]) -> dict[str, int]:
         if not self.available():
-            return self.rebuild_all()
+            return self._rebuild_all_locked()
         resolver = find_module.writer_resolver_snapshot(self.vault_root)
         conn = self._connect()
         indexed = 0
@@ -351,6 +368,10 @@ class EpistemicGraphIndex:
             conn.close()
 
     def delete_paths(self, rel_paths: list[str]) -> int:
+        with self._mutation_coordinator.hold():
+            return self._delete_paths_locked(rel_paths)
+
+    def _delete_paths_locked(self, rel_paths: list[str]) -> int:
         if not self.path.exists():
             return 0
         conn = self._connect()
@@ -1042,6 +1063,8 @@ def upsert_after_write(vault_root: Path, written_paths: list[Path]) -> None:
         return
     try:
         EpistemicGraphIndex(vault_root).refresh_paths(written_paths)
+    except OpError:
+        raise
     except Exception:  # noqa: BLE001 - writer hooks must not break Markdown writes
         return
 
@@ -1051,6 +1074,8 @@ def delete_after_remove(vault_root: Path, removed_rel_paths: list[str]) -> None:
         return
     try:
         EpistemicGraphIndex(vault_root).delete_paths(removed_rel_paths)
+    except OpError:
+        raise
     except Exception:  # noqa: BLE001 - writer hooks must not break Markdown writes
         return
 

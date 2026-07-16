@@ -353,6 +353,41 @@ def test_batch_atomic_write_collector_observes_existing_fanout_once(
     assert collected == [report]
 
 
+def test_graph_lock_error_reaches_index_sync_as_degraded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import epistemic_graph, find, lexstore, memory_refs
+    from exomem.cli_ops import OpError
+
+    target = tmp_path / "Knowledge Base" / "Notes" / "item.md"
+    target.parent.mkdir(parents=True)
+    target.write_text("# Item\n", encoding="utf-8")
+    monkeypatch.setattr(lexstore, "upsert_after_write", lambda *_args: None)
+    monkeypatch.setattr(memory_refs, "upsert_after_write", lambda *_args: None)
+    monkeypatch.setattr(find, "on_resolver_files_changed", lambda *_args: None)
+    monkeypatch.setattr(
+        epistemic_graph.EpistemicGraphIndex,
+        "refresh_paths",
+        lambda *_args: (_ for _ in ()).throw(
+            OpError("MUTATION_BUSY", "graph mutation is busy")
+        ),
+    )
+    monkeypatch.setattr(
+        embeddings,
+        "upsert_after_write_status",
+        lambda *_args: embeddings.EmbeddingSyncStatus(
+            "completed", "embedding_upsert_completed", 1
+        ),
+    )
+
+    report = index_sync.upsert_after_write(tmp_path, [target])
+
+    graph = _outcome(report, "epistemic_graph")
+    assert graph.outcome == "degraded"
+    assert graph.code == "dispatch_failed"
+    assert report.reconcile_required is True
+
+
 def test_delete_report_continues_after_observable_component_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
