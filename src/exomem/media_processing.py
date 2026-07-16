@@ -269,7 +269,7 @@ def _needs_reconciliation(
     frontmatter, body, raw_frontmatter = parse_frontmatter(original)
     if raw_frontmatter is None:
         return True
-    if _is_completed_sidecar_shape(frontmatter, body, media_type):
+    if _is_completed_sidecar_shape(vault, binary, frontmatter, body, media_type):
         return store.has_binary(binary)
     if _is_pending_sidecar_shape(vault, binary, frontmatter, media_type):
         return not store.has_binary(binary)
@@ -317,6 +317,33 @@ def _is_pending_sidecar_shape(
 
 
 def _is_completed_sidecar_shape(
+    vault: Path,
+    binary: Path,
+    frontmatter: dict[str, object],
+    body: str,
+    media_type: str,
+) -> bool:
+    if not _is_completed_transcript_shape(frontmatter, body, media_type):
+        return False
+    try:
+        current = binary.stat()
+    except OSError:
+        return False
+    expected = {
+        "evidence_file": binary.relative_to(vault).as_posix(),
+        "original_filename": binary.name,
+        "binary_size": current.st_size,
+        "binary_mtime_ns": current.st_mtime_ns,
+        "binary_ctime_ns": current.st_ctime_ns,
+    }
+    digest = str(frontmatter.get("binary_sha256", ""))
+    return (
+        re.fullmatch(r"[0-9a-f]{64}", digest) is not None
+        and all(frontmatter.get(field) == value for field, value in expected.items())
+    )
+
+
+def _is_completed_transcript_shape(
     frontmatter: dict[str, object],
     body: str,
     media_type: str,
@@ -561,19 +588,14 @@ def _is_valid_completed_sidecar(
     frontmatter, body, raw_frontmatter = parse_frontmatter(content)
     if raw_frontmatter is None:
         return False
-    engine = str(frontmatter.get("extracted_by", "")).strip()
-    if (
-        frontmatter.get("type") != "source"
-        or frontmatter.get("media_type") != media_type
-        or frontmatter.get("processing_state") not in (None, "completed")
-        or engine.lower() in _INCOMPLETE_ENGINES
-        or engine.lower().startswith("failed")
-    ):
+    if not _is_completed_transcript_shape(frontmatter, body, media_type):
         return False
-    recorded_hash = frontmatter.get("binary_sha256")
-    if recorded_hash is not None and str(recorded_hash) != provenance.sha256:
-        return False
-    return any(
-        bool(match.group(1).strip())
-        for match in _EXTRACTED_SECTION_RE.finditer(body)
-    )
+    expected = {
+        "evidence_file": provenance.relative_path,
+        "original_filename": provenance.original_filename,
+        "binary_sha256": provenance.sha256,
+        "binary_size": provenance.size,
+        "binary_mtime_ns": provenance.mtime_ns,
+        "binary_ctime_ns": provenance.ctime_ns,
+    }
+    return all(frontmatter.get(field) == value for field, value in expected.items())

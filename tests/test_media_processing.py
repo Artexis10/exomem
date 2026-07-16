@@ -417,6 +417,88 @@ def test_periodic_reconciliation_discards_stale_job_for_completed_sidecar(
     assert store.has_binary(binary) is False
 
 
+@pytest.mark.parametrize(
+    ("field", "replacement"),
+    [
+        ("binary_sha256", None),
+        ("binary_sha256", "malformed"),
+        ("evidence_file", "Knowledge Base/Evidence/wrong.mp3"),
+        ("binary_size", "999999"),
+    ],
+)
+def test_completed_sidecar_with_invalid_cheap_provenance_is_reconciled(
+    vault: Path,
+    field: str,
+    replacement: str | None,
+) -> None:
+    media_processing = _media_processing()
+    binary = _drop_media(vault, f"completed-invalid-{field}.mp3")
+    result = media_processing.reconcile_media(vault, binary)
+    completed_text = result.sidecar_path.read_text(encoding="utf-8").replace(
+        "extracted_by: pending", "extracted_by: faster-whisper:test+timed"
+    ).replace("processing_state: pending", "processing_state: completed")
+    transcript = "[0:00] Preserve this completed transcript during repair."
+    completed_text += f"\n## Extracted text\n\n{transcript}\n"
+    prefix = f"{field}:"
+    lines = []
+    for line in completed_text.splitlines():
+        if line.startswith(prefix):
+            if replacement is not None:
+                lines.append(f"{field}: {replacement}")
+            continue
+        lines.append(line)
+    result.sidecar_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    store = media_jobs.MediaJobStore(vault)
+    store.discard(
+        media_jobs.MediaJob(
+            binary_path=binary,
+            sidecar_path=result.sidecar_path,
+            media_type="audio",
+        )
+    )
+
+    assert media_processing.reconcile_all_media(vault, limit=1) == 1
+
+    repaired, body = _frontmatter_and_body(result.sidecar_path)
+    assert repaired["processing_state"] == "pending"
+    assert repaired["binary_sha256"] == hashlib.sha256(binary.read_bytes()).hexdigest()
+    assert repaired["evidence_file"] == binary.relative_to(vault).as_posix()
+    assert repaired["binary_size"] == binary.stat().st_size
+    assert transcript in body
+    assert store.has_binary(binary) is True
+
+
+def test_valid_completed_sidecar_without_job_is_skipped_by_periodic_scan(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    media_processing = _media_processing()
+    binary = _drop_media(vault, "completed-valid-no-job.mp3")
+    result = media_processing.reconcile_media(vault, binary)
+    completed_text = result.sidecar_path.read_text(encoding="utf-8").replace(
+        "extracted_by: pending", "extracted_by: faster-whisper:test+timed"
+    ).replace("processing_state: pending", "processing_state: completed")
+    completed_text += "\n## Extracted text\n\n[0:00] Already complete.\n"
+    result.sidecar_path.write_text(completed_text, encoding="utf-8")
+    store = media_jobs.MediaJobStore(vault)
+    store.discard(
+        media_jobs.MediaJob(
+            binary_path=binary,
+            sidecar_path=result.sidecar_path,
+            media_type="audio",
+        )
+    )
+    before = result.sidecar_path.read_bytes()
+
+    def reject_reconcile(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("valid completed media must remain skipped")
+
+    monkeypatch.setattr(media_processing, "reconcile_media", reject_reconcile)
+
+    assert media_processing.reconcile_all_media(vault, limit=1) == 0
+    assert result.sidecar_path.read_bytes() == before
+    assert store.has_binary(binary) is False
+
+
 def test_bounded_reconcile_skips_converged_prefix_and_advances_later_work(
     vault: Path,
 ) -> None:
