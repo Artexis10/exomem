@@ -65,6 +65,13 @@ _REMEDIATION: dict[str, str] = {
     ),
     "WRITER_FENCED": "Retry the mutation on the current writer.",
     "MUTATION_BUSY": "Retry after the active vault mutation finishes.",
+    "MUTATION_ACKNOWLEDGEMENT_PENDING": (
+        "Retry with the same mutation identity; do not submit a revised payload."
+    ),
+    "MUTATION_COMMITTED_ACKNOWLEDGEMENT_UNCERTAIN": (
+        "Do not rerun with a new identity; reconcile the committed mutation and retry "
+        "only with the same identity."
+    ),
     "MUTATION_LOCK_UNAVAILABLE": (
         "Check that the runtime state root is writable and supports host file locking."
     ),
@@ -100,6 +107,8 @@ _CONFLICT_CODES = frozenset(
         "BATCH_ROLLBACK_INCOMPLETE",
         "BATCH_CLEANUP_INCOMPLETE",
         "MUTATION_BUSY",
+        "MUTATION_ACKNOWLEDGEMENT_PENDING",
+        "MUTATION_COMMITTED_ACKNOWLEDGEMENT_UNCERTAIN",
         # Adoption Studio drift codes (add-adoption-studio): a stale plan/apply or a
         # proposal whose bound content changed since review is a conflict, not a
         # plain bad-request — the client's honest recourse is to re-scan/re-read,
@@ -118,11 +127,40 @@ class OpError(Exception):
     `ValueError`s when surfaced as plain text.
     """
 
-    def __init__(self, code: str, message: str, remediation: str | None = None):
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        remediation: str | None = None,
+        *,
+        details: dict[str, Any] | None = None,
+    ):
         self.code = code
         self.message = message
         self.remediation = remediation or _REMEDIATION.get(code)
+        self.details = dict(details or {})
         super().__init__(f"{code}: {message}")
+
+    def as_public_dict(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "code": self.code,
+            "message": self.message,
+            "remediation": self.remediation,
+        }
+        if self.details:
+            payload.update(ok=False, error_code=self.code)
+        payload.update(self.details)
+        return payload
+
+    def __str__(self) -> str:
+        if self.details:
+            return json.dumps(
+                self.as_public_dict(),
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        return f"{self.code}: {self.message}"
 
 
 def envelope(success: bool, data: Any = None, error: dict | None = None) -> dict:

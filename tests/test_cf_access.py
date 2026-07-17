@@ -28,7 +28,7 @@ class _FakeJWKS:
 
 
 def _make(priv, *, aud=AUD, iss=f"https://{TEAM}", exp_delta=3600, drop=None) -> str:
-    now = dt.datetime.now(dt.timezone.utc)
+    now = dt.datetime.now(dt.UTC)
     payload = {
         "aud": aud,
         "iss": iss,
@@ -49,6 +49,21 @@ def _verify(token, priv_for_jwks) -> bool:
 def test_valid_token_passes() -> None:
     priv = _key()
     assert _verify(_make(priv), priv) is True
+
+
+def test_verified_claims_returns_signed_identity() -> None:
+    priv = _key()
+    token = _make(priv)
+    claims = cf_access.verified_claims(
+        token,
+        jwks_client=_FakeJWKS(priv.public_key()),
+        team_domain=TEAM,
+        audience=AUD,
+    )
+
+    assert claims is not None
+    assert claims["sub"] == "user@example.com"
+    assert claims["iss"] == f"https://{TEAM}"
 
 
 def test_none_token_fails() -> None:

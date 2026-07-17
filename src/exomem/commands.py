@@ -5133,6 +5133,9 @@ def invocation_is_read_only(command: Command, kwargs: dict[str, Any]) -> bool:
             isinstance(operation, str)
             and operation in _OBSERVE_MEMORY_READ_ONLY_OPERATIONS
         )
+    if command.name == "maintain_memory":
+        mode = _resolved_invocation_selector(command, kwargs, "mode")
+        return mode == "audit"
     return False
 
 

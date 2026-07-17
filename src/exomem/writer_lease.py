@@ -21,21 +21,25 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 from collections.abc import Iterator, Mapping
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar, Token
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from .cli_ops import OpError
-from .mutation_lock import VaultMutationCoordinator
+from .mutation_lock import VaultMutationCoordinator, canonical_mutation_identity
 from .privacy_log import content_private_logging_enabled
 
 _COORDINATOR_USER_AGENT = (
     "Mozilla/5.0 (compatible; Exomem-Coordinator/1.0; +https://github.com/Artexis10/exomem)"
 )
 _IMPLICIT_RETRY_TTL_SECONDS = 60.0
+_EXPLICIT_RETRY_TTL_SECONDS = 24 * 60 * 60.0
+_IDEMPOTENCY_WAIT_SECONDS = 5.0
+_IDEMPOTENCY_POLL_INTERVAL_SECONDS = 0.025
 _COMMITTED_FAILURE_CODE = "BATCH_CLEANUP_INCOMPLETE"
 _COMMITTED_FAILURE_MESSAGE = "The batch workspace cleanup is incomplete."
 _COMMITTED_FAILURE_REMEDIATION = (
@@ -53,11 +57,64 @@ _COMMITTED_FAILURE_OUTCOME_KEYS = frozenset(
         "omitted_target_count",
     }
 )
+_RETRY_IDEMPOTENCY_CLAIM = object()
 _WINDOWS_DRIVE_PREFIX = re.compile(r"^[A-Za-z]:")
 logger = logging.getLogger(__name__)
+_mutation_logger = logging.getLogger("exomem.calls")
 _ACTIVE_WRITE_FENCE: ContextVar[tuple[Any, int] | None] = ContextVar(
     "exomem_active_write_fence", default=None
 )
+_ACTIVE_MUTATION_TRACE: ContextVar[tuple[str, str, str] | None] = ContextVar(
+    "exomem_active_mutation_trace", default=None
+)
+_ACTIVE_MUTATION_COMMITTED: ContextVar[bool] = ContextVar(
+    "exomem_active_mutation_committed", default=False
+)
+
+
+def _log_mutation_event(phase: str, *, level: int = logging.INFO, **fields: Any) -> None:
+    prefix = (
+        "event=hosted_call kind=mutation"
+        if content_private_logging_enabled()
+        else "event=mutation"
+    )
+    suffix = " ".join(f"{name}={value}" for name, value in fields.items())
+    _mutation_logger.log(level, f"{prefix} phase={phase} {suffix}".rstrip())
+
+
+def log_active_mutation_phase(phase: str, **fields: Any) -> None:
+    """Log a canonical-writer phase against the active privacy-safe trace."""
+    active = _ACTIVE_MUTATION_TRACE.get()
+    if active is None:
+        return
+    request_id, command, receipt = active
+    _log_mutation_event(
+        phase,
+        request_id=request_id,
+        command=command,
+        receipt=receipt,
+        **fields,
+    )
+
+
+def mark_active_mutation_committed() -> None:
+    """Mark that the current canonical writer crossed its durable commit boundary."""
+    if _ACTIVE_MUTATION_TRACE.get() is not None:
+        _ACTIVE_MUTATION_COMMITTED.set(True)
+
+
+class _PostCommitOutcomeUncertain(OpError):
+    """Sanitized terminal state for an unexpected exception after canonical commit."""
+
+    committed = True
+
+    def __init__(self) -> None:
+        super().__init__(
+            "MUTATION_COMMITTED_ACKNOWLEDGEMENT_UNCERTAIN",
+            "the mutation completed but its exact terminal result could not be persisted",
+            "Do not rerun with a new identity; reconcile and retry only with the same identity.",
+            details={"status": "committed", "committed": True},
+        )
 
 
 def _invalid_committed_failure_payload() -> ValueError:
@@ -342,9 +399,27 @@ class LeaseCoordinatorClient:
 class IdempotencyStore:
     """Durable per-replica retry cache, deliberately outside the synced vault."""
 
-    def __init__(self, path: Path, *, clock=time.time):  # noqa: ANN001
+    def __init__(
+        self,
+        path: Path,
+        *,
+        clock=time.time,  # noqa: ANN001
+        monotonic=time.monotonic,  # noqa: ANN001
+        wait_seconds: float = _IDEMPOTENCY_WAIT_SECONDS,
+        poll_interval_seconds: float = _IDEMPOTENCY_POLL_INTERVAL_SECONDS,
+        after_terminal_persisted=None,  # noqa: ANN001
+    ):
+        if wait_seconds < 0:
+            raise ValueError("idempotency wait must be non-negative")
+        if poll_interval_seconds <= 0:
+            raise ValueError("idempotency poll interval must be positive")
         self.path = path
         self.clock = clock
+        self.monotonic = monotonic
+        self.wait_seconds = wait_seconds
+        self.poll_interval_seconds = poll_interval_seconds
+        self.after_terminal_persisted = after_terminal_persisted
+        self._condition = threading.Condition()
         path.parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as conn:
             conn.execute(
@@ -366,134 +441,229 @@ class IdempotencyStore:
         *,
         expires_after: float | None = None,
         on_replay=None,  # noqa: ANN001
+        operation_guard=None,  # noqa: ANN001
+        commit_observed=None,  # noqa: ANN001
     ) -> Any:
         if not key:
-            return operation()
+            with operation_guard() if operation_guard is not None else nullcontext():
+                return operation()
+
+        while True:
+            disposition, stored = self._claim_or_inspect(key, digest, expires_after)
+            if disposition == "owner":
+                break
+            if disposition == "pending":
+                waited = self._wait_for_terminal(key, digest, on_replay=on_replay)
+                if waited is _RETRY_IDEMPOTENCY_CLAIM:
+                    continue
+                return waited
+            return self._replay(disposition, stored, on_replay)
+
+        guard = operation_guard() if operation_guard is not None else nullcontext()
+        leaf_returned = False
+        terminal_persisted = False
+        try:
+            with guard:
+                try:
+                    result = operation()
+                except Exception as operation_error:
+                    if isinstance(operation_error, _PostCommitOutcomeUncertain):
+                        leaf_returned = True
+                        try:
+                            self._persist_committed_uncertain(key, digest)
+                        except Exception as storage_error:
+                            raise operation_error from storage_error
+                        terminal_persisted = True
+                        self._notify_waiters()
+                        self._after_terminal_persisted()
+                        raise
+                    committed_failure = _committed_failure_payload(operation_error)
+                    if committed_failure is None:
+                        raise
+                    leaf_returned = True
+                    try:
+                        self._persist_committed_failure(key, digest, committed_failure)
+                    except Exception as storage_error:
+                        raise operation_error from storage_error
+                    terminal_persisted = True
+                    self._notify_waiters()
+                    self._after_terminal_persisted()
+                    raise
+                leaf_returned = True
+                try:
+                    self._persist_completed(key, digest, result)
+                except Exception as storage_error:
+                    if commit_observed is not None and commit_observed():
+                        uncertain = _PostCommitOutcomeUncertain()
+                        try:
+                            self._persist_committed_uncertain(key, digest)
+                        except Exception:  # noqa: BLE001 - leave pending fail-closed
+                            pass
+                        else:
+                            terminal_persisted = True
+                    else:
+                        uncertain = OpError(
+                            "MUTATION_ACKNOWLEDGEMENT_PENDING",
+                            "the mutation result could not be persisted; its commit outcome "
+                            "is not known",
+                            "Retry with the same mutation identity; do not submit a revised "
+                            "payload.",
+                        )
+                    self._notify_waiters()
+                    raise uncertain from storage_error
+                terminal_persisted = True
+                self._notify_waiters()
+                self._after_terminal_persisted()
+                return result
+        except Exception:
+            # Guard acquisition is pre-leaf and safe to retry. Once a leaf has
+            # returned (or reported a recognized committed outcome), storage or
+            # acknowledgement failures must leave the pending/terminal receipt
+            # fail-closed rather than allow a duplicate execution.
+            if not leaf_returned and not terminal_persisted:
+                self._delete_pending(key, digest)
+            raise
+
+    def _claim_or_inspect(
+        self, key: str, digest: str, expires_after: float | None
+    ) -> tuple[str, Any]:
         now = self.clock()
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            if expires_after is not None:
-                cutoff = now - expires_after
-                conn.execute(
-                    "DELETE FROM mutations WHERE key LIKE 'implicit:%' "
-                    "AND state = 'completed' "
-                    "AND typeof(updated_at) IN ('integer', 'real') "
-                    "AND updated_at >= 0 AND updated_at <= ?",
-                    (cutoff,),
-                )
-                expired_failures = conn.execute(
-                    "SELECT key, result FROM mutations WHERE key LIKE 'implicit:%' "
-                    "AND state = 'committed_failure' "
-                    "AND typeof(updated_at) IN ('integer', 'real') "
-                    "AND updated_at >= 0 AND updated_at <= ?",
-                    (cutoff,),
-                ).fetchall()
-                for expired_key, expired_payload in expired_failures:
-                    try:
-                        _deserialize_committed_failure_payload(expired_payload)
-                    except Exception:  # noqa: BLE001 - corrupt markers remain fail-closed
-                        continue
-                    conn.execute(
-                        "DELETE FROM mutations WHERE key = ? AND state = 'committed_failure'",
-                        (expired_key,),
-                    )
+            self._prune_expired(conn, now, expires_after, key)
             row = conn.execute(
                 "SELECT digest, state, result, updated_at FROM mutations WHERE key = ?", (key,)
             ).fetchone()
-            if (
-                row
-                and expires_after is not None
-                and row[1] in {"completed", "committed_failure"}
-            ):
-                updated_at = row[3]
-                if row[1] == "committed_failure":
-                    try:
-                        _deserialize_committed_failure_payload(row[2])
-                    except Exception:  # noqa: BLE001 - corrupt state blocks mutation
-                        raise OpError(
-                            "IDEMPOTENCY_IN_PROGRESS",
-                            "cached committed mutation state requires reconciliation",
-                            "Reconcile the local idempotency store before retrying this mutation.",
-                        ) from None
-                if (
-                    type(updated_at) not in {int, float}
-                    or not math.isfinite(updated_at)
-                    or updated_at < 0
-                ):
-                    raise OpError(
-                        "IDEMPOTENCY_IN_PROGRESS",
-                        "cached mutation state requires reconciliation",
-                        "Reconcile the local idempotency store before retrying this mutation.",
-                    )
-                if updated_at <= now - expires_after:
-                    conn.execute("DELETE FROM mutations WHERE key = ?", (key,))
-                    row = None
-            if row:
-                if row[0] != digest:
-                    raise OpError(
-                        "IDEMPOTENCY_KEY_REUSED",
-                        "idempotency key was already used for different input",
-                    )
-                if row[1] == "completed":
-                    if on_replay is not None:
-                        on_replay()
-                    return pickle.loads(row[2])  # noqa: S301 - local trusted runtime state
-                if row[1] == "committed_failure":
-                    try:
-                        failure = _CachedCommittedFailure(
-                            _deserialize_committed_failure_payload(row[2])
-                        )
-                    except Exception:  # noqa: BLE001 - corrupt state blocks mutation
-                        raise OpError(
-                            "IDEMPOTENCY_IN_PROGRESS",
-                            "cached committed mutation state requires reconciliation",
-                            "Reconcile the local idempotency store before retrying this mutation.",
-                        ) from None
-                    if on_replay is not None:
-                        on_replay()
-                    raise failure
-                if row[1] != "pending":
-                    raise OpError(
-                        "IDEMPOTENCY_IN_PROGRESS",
-                        "cached mutation state requires reconciliation",
-                        "Reconcile the local idempotency store before retrying this mutation.",
-                    )
-                raise OpError(
-                    "IDEMPOTENCY_IN_PROGRESS",
-                    "an identical mutation with this key is already in progress",
-                )
-            else:
-                conn.execute(
-                    "INSERT INTO mutations(key, digest, state, updated_at) "
-                    "VALUES (?, ?, 'pending', ?)",
-                    (key, digest, now),
-                )
-        try:
-            result = operation()
-        except Exception as operation_error:
-            committed_failure = _committed_failure_payload(operation_error)
-            if committed_failure is None:
-                with self._connect() as conn:
-                    conn.execute(
-                        "DELETE FROM mutations WHERE key = ? AND digest = ? AND state = 'pending'",
-                        (key, digest),
-                    )
-                raise
+            if row and self._expired_row(row, now, expires_after):
+                conn.execute("DELETE FROM mutations WHERE key = ?", (key,))
+                row = None
+            if row is not None:
+                return self._decode_disposition(row, digest)
+            conn.execute(
+                "INSERT INTO mutations(key, digest, state, updated_at) "
+                "VALUES (?, ?, 'pending', ?)",
+                (key, digest, now),
+            )
+        _log_mutation_event("reserved", receipt=_receipt_tag(key))
+        return "owner", None
+
+    def _prune_expired(
+        self,
+        conn: sqlite3.Connection,
+        now: float,
+        expires_after: float | None,
+        key: str,
+    ) -> None:
+        if expires_after is None:
+            return
+        cutoff = now - expires_after
+        key_pattern = f"{key.partition(':')[0]}:%"
+        conn.execute(
+            "DELETE FROM mutations WHERE key LIKE ? "
+            "AND state = 'completed' "
+            "AND typeof(updated_at) IN ('integer', 'real') "
+            "AND updated_at >= 0 AND updated_at <= ?",
+            (key_pattern, cutoff),
+        )
+        expired_failures = conn.execute(
+            "SELECT key, result FROM mutations WHERE key LIKE ? "
+            "AND state = 'committed_failure' "
+            "AND typeof(updated_at) IN ('integer', 'real') "
+            "AND updated_at >= 0 AND updated_at <= ?",
+            (key_pattern, cutoff),
+        ).fetchall()
+        for expired_key, expired_payload in expired_failures:
             try:
-                payload = _serialize_committed_failure_payload(committed_failure)
-                with self._connect() as conn:
-                    cursor = conn.execute(
-                        "UPDATE mutations SET state = 'committed_failure', result = ?, "
-                        "updated_at = ? WHERE key = ? AND digest = ? AND state = 'pending'",
-                        (payload, self.clock(), key, digest),
-                    )
-                    if cursor.rowcount != 1:
-                        raise sqlite3.OperationalError(
-                            "pending idempotency marker changed before committed failure update"
-                        )
-            except Exception as storage_error:
-                raise operation_error from storage_error
-            raise
+                _deserialize_committed_failure_payload(expired_payload)
+            except Exception:  # noqa: BLE001 - corrupt markers remain fail-closed
+                continue
+            conn.execute(
+                "DELETE FROM mutations WHERE key = ? AND state = 'committed_failure'",
+                (expired_key,),
+            )
+
+    def _expired_row(
+        self, row: tuple[Any, ...], now: float, expires_after: float | None
+    ) -> bool:
+        if expires_after is None or row[1] not in {"completed", "committed_failure"}:
+            return False
+        updated_at = row[3]
+        if row[1] == "committed_failure":
+            try:
+                _deserialize_committed_failure_payload(row[2])
+            except Exception:  # noqa: BLE001 - corrupt state blocks mutation
+                raise self._reconciliation_error("cached committed mutation state") from None
+        if (
+            type(updated_at) not in {int, float}
+            or not math.isfinite(updated_at)
+            or updated_at < 0
+        ):
+            raise self._reconciliation_error("cached mutation state")
+        return updated_at <= now - expires_after
+
+    def _decode_disposition(self, row: tuple[Any, ...], digest: str) -> tuple[str, Any]:
+        if row[0] != digest:
+            raise OpError(
+                "IDEMPOTENCY_KEY_REUSED",
+                "idempotency key was already used for different input",
+            )
+        state = row[1]
+        if state == "completed":
+            return "completed", pickle.loads(row[2])  # noqa: S301 - trusted runtime state
+        if state == "committed_failure":
+            try:
+                failure = _CachedCommittedFailure(
+                    _deserialize_committed_failure_payload(row[2])
+                )
+            except Exception:  # noqa: BLE001 - corrupt state blocks mutation
+                raise self._reconciliation_error("cached committed mutation state") from None
+            return "committed_failure", failure
+        if state == "committed_uncertain":
+            if row[2] is not None:
+                raise self._reconciliation_error("cached committed mutation state")
+            return "committed_uncertain", _PostCommitOutcomeUncertain()
+        if state == "pending":
+            return "pending", None
+        raise self._reconciliation_error("cached mutation state")
+
+    def _wait_for_terminal(
+        self, key: str, digest: str, *, on_replay=None  # noqa: ANN001
+    ) -> Any:
+        _log_mutation_event("pending", receipt=_receipt_tag(key))
+        deadline = self.monotonic() + self.wait_seconds
+        while True:
+            with self._connect() as conn:
+                row = conn.execute(
+                    "SELECT digest, state, result, updated_at FROM mutations WHERE key = ?",
+                    (key,),
+                ).fetchone()
+            if row is None:
+                return _RETRY_IDEMPOTENCY_CLAIM
+            disposition, stored = self._decode_disposition(row, digest)
+            if disposition != "pending":
+                return self._replay(disposition, stored, on_replay)
+            remaining = deadline - self.monotonic()
+            if remaining <= 0:
+                raise OpError(
+                    "MUTATION_ACKNOWLEDGEMENT_PENDING",
+                    "an identical mutation is still executing; its commit outcome is not yet known",
+                    "Retry with the same mutation identity; do not submit a revised payload.",
+                )
+            with self._condition:
+                self._condition.wait(timeout=min(self.poll_interval_seconds, remaining))
+
+    def _replay(self, disposition: str, stored: Any, on_replay) -> Any:  # noqa: ANN001
+        if on_replay is not None:
+            on_replay()
+        if disposition == "completed":
+            return stored
+        if disposition == "committed_failure":
+            raise stored
+        if disposition == "committed_uncertain":
+            raise stored
+        raise self._reconciliation_error("cached mutation state")
+
+    def _persist_completed(self, key: str, digest: str, result: Any) -> None:
         payload = pickle.dumps(result)
         with self._connect() as conn:
             cursor = conn.execute(
@@ -502,21 +672,119 @@ class IdempotencyStore:
                 (payload, self.clock(), key, digest),
             )
             if cursor.rowcount != 1:
-                raise OpError(
-                    "IDEMPOTENCY_IN_PROGRESS",
-                    "completed mutation state requires reconciliation",
-                    "Reconcile the local idempotency store before retrying this mutation.",
-                )
+                raise self._reconciliation_error("completed mutation state")
+        _log_mutation_event("terminal", receipt=_receipt_tag(key))
+
+    def _persist_committed_failure(
+        self, key: str, digest: str, committed_failure: dict[str, Any]
+    ) -> None:
+        payload = _serialize_committed_failure_payload(committed_failure)
+        with self._connect() as conn:
+            cursor = conn.execute(
+                "UPDATE mutations SET state = 'committed_failure', result = ?, "
+                "updated_at = ? WHERE key = ? AND digest = ? AND state = 'pending'",
+                (payload, self.clock(), key, digest),
+            )
             if cursor.rowcount != 1:
                 raise sqlite3.OperationalError(
-                    "pending idempotency marker changed before completion update"
+                    "pending idempotency marker changed before committed failure update"
                 )
-        return result
+        _log_mutation_event("terminal", receipt=_receipt_tag(key))
+
+    def _persist_committed_uncertain(self, key: str, digest: str) -> None:
+        with self._connect() as conn:
+            cursor = conn.execute(
+                "UPDATE mutations SET state = 'committed_uncertain', result = NULL, "
+                "updated_at = ? WHERE key = ? AND digest = ? AND state = 'pending'",
+                (self.clock(), key, digest),
+            )
+            if cursor.rowcount != 1:
+                raise self._reconciliation_error("committed mutation state")
+        _log_mutation_event("terminal_uncertain", receipt=_receipt_tag(key))
+
+    def _delete_pending(self, key: str, digest: str) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                "DELETE FROM mutations WHERE key = ? AND digest = ? AND state = 'pending'",
+                (key, digest),
+            )
+        self._notify_waiters()
+
+    def _notify_waiters(self) -> None:
+        with self._condition:
+            self._condition.notify_all()
+
+    def _after_terminal_persisted(self) -> None:
+        if self.after_terminal_persisted is not None:
+            self.after_terminal_persisted()
+
+    @staticmethod
+    def _reconciliation_error(subject: str) -> OpError:
+        return OpError(
+            "IDEMPOTENCY_IN_PROGRESS",
+            f"{subject} requires reconciliation",
+            "Reconcile the local idempotency store before retrying this mutation.",
+        )
 
 
 def _namespaced_idempotency_key(kind: str, identity: str, public_key: str) -> str:
     digest = hashlib.sha256(f"{identity}\0{public_key}".encode()).hexdigest()
     return f"{kind}:{digest}"
+
+
+def _receipt_tag(key: str) -> str:
+    """Return a short privacy-safe correlation tag for an internal receipt key."""
+    return hashlib.sha256(key.encode()).hexdigest()[:16]
+
+
+def _command_digest(command: Any, kwargs: Mapping[str, Any]) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            {"command": command.name, "kwargs": kwargs},
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _effective_idempotency_key(
+    manager: LeaseManager,
+    *,
+    command: Any,
+    mutation_subject: os.PathLike[str] | str,
+    digest: str,
+    idempotency_key: str | None,
+    principal_scope: str | None,
+    implicit_idempotency_scope: str | None = None,
+) -> tuple[str | None, float | None, Any]:
+    identity = canonical_mutation_identity(mutation_subject)
+    namespace = f"cell:{manager.config.vault_id}" if manager.config.vault_id else identity
+    if idempotency_key:
+        explicit_namespace = (
+            f"{namespace}\0principal:{principal_scope}" if principal_scope else namespace
+        )
+        return (
+            _namespaced_idempotency_key("explicit", explicit_namespace, idempotency_key),
+            _EXPLICIT_RETRY_TTL_SECONDS,
+            None,
+        )
+    if implicit_idempotency_scope:
+        key = _namespaced_idempotency_key(
+            "implicit",
+            namespace,
+            f"{implicit_idempotency_scope}\0{digest}",
+        )
+
+        def log_replay() -> None:
+            _log_mutation_event(
+                "replayed",
+                command=command.name,
+                receipt=_receipt_tag(key),
+            )
+
+        return key, _IMPLICIT_RETRY_TTL_SECONDS, log_replay
+    return None, None, None
 
 
 class LeaseManager:
@@ -528,6 +796,8 @@ class LeaseManager:
         clock=time.time,  # noqa: ANN001
         mutation_timeout_seconds: float = 5.0,
         mutation_poll_interval_seconds: float = 0.025,
+        idempotency_wait_seconds: float = _IDEMPOTENCY_WAIT_SECONDS,
+        after_terminal_persisted=None,  # noqa: ANN001
     ):
         self.config = config
         self.client = (
@@ -539,7 +809,10 @@ class LeaseManager:
         vault = config.vault_id or "standalone"
         safe_name = hashlib.sha256(f"{vault}\0{replica}".encode()).hexdigest()[:20]
         self.idempotency = IdempotencyStore(
-            config.state_dir / f"idempotency-{safe_name}.sqlite", clock=clock
+            config.state_dir / f"idempotency-{safe_name}.sqlite",
+            clock=clock,
+            wait_seconds=idempotency_wait_seconds,
+            after_terminal_persisted=after_terminal_persisted,
         )
         self._fencing_token: int | None = None
         self._expires_at: float | None = None
@@ -603,53 +876,95 @@ class LeaseManager:
         *,
         read_only: bool | None = None,
         idempotency_key: str | None = None,
+        idempotency_principal_scope: str | None = None,
         implicit_idempotency_scope: str | None = None,
+        mutation_request_id: str | None = None,
     ) -> Any:
         invocation_read_only = command.read_only if read_only is None else read_only
         if invocation_read_only:
-            if content_private_logging_enabled():
+            audit_without_consistency_lock = (
+                command.name == "maintain_memory"
+                and kwargs.get("mode", "audit") == "audit"
+            )
+            if content_private_logging_enabled() and not audit_without_consistency_lock:
                 with self.consistency_guard(self._mutation_subject(injected)):
                     return command.leaf(*injected, **kwargs)
             return command.leaf(*injected, **kwargs)
         mutation_subject = self._mutation_subject(injected)
-        with self.mutation_guard(mutation_subject) as mutation:
-            digest = hashlib.sha256(
-                json.dumps(
-                    {"command": command.name, "kwargs": kwargs},
-                    sort_keys=True,
-                    separators=(",", ":"),
-                    default=str,
-                ).encode("utf-8")
-            ).hexdigest()
-            key = None
-            expires_after = None
-            on_replay = None
-            idempotency_namespace = (
-                f"cell:{self.config.vault_id}" if self.config.vault_id else mutation.identity
+        digest = _command_digest(command, kwargs)
+        key, expires_after, on_replay = _effective_idempotency_key(
+            self,
+            command=command,
+            mutation_subject=mutation_subject,
+            digest=digest,
+            idempotency_key=idempotency_key,
+            principal_scope=idempotency_principal_scope,
+            implicit_idempotency_scope=implicit_idempotency_scope,
+        )
+        request_id = mutation_request_id or str(uuid.uuid4())
+        receipt = _receipt_tag(key) if key else None
+        commit_state = {"observed": False}
+        _log_mutation_event(
+            "received",
+            request_id=request_id,
+            command=command.name,
+            receipt=receipt or "none",
+        )
+
+        def invoke_leaf() -> Any:
+            trace_token = _ACTIVE_MUTATION_TRACE.set(
+                (request_id, command.name, receipt or "none")
             )
-            if idempotency_key:
-                key = _namespaced_idempotency_key(
-                    "explicit", idempotency_namespace, idempotency_key
-                )
-            elif implicit_idempotency_scope:
-                key = _namespaced_idempotency_key(
-                    "implicit",
-                    idempotency_namespace,
-                    f"{implicit_idempotency_scope}\0{digest}",
-                )
-                expires_after = _IMPLICIT_RETRY_TTL_SECONDS
+            commit_token = _ACTIVE_MUTATION_COMMITTED.set(False)
+            try:
+                return command.leaf(*injected, **kwargs)
+            except Exception as error:
+                if (
+                    _ACTIVE_MUTATION_COMMITTED.get()
+                    and getattr(error, "committed", None) is not True
+                ):
+                    raise _PostCommitOutcomeUncertain() from error
+                raise
+            finally:
+                commit_state["observed"] = _ACTIVE_MUTATION_COMMITTED.get()
+                _ACTIVE_MUTATION_COMMITTED.reset(commit_token)
+                _ACTIVE_MUTATION_TRACE.reset(trace_token)
 
-                def log_replay() -> None:
-                    logger.info("Replayed retry-safe MCP mutation command=%s", command.name)
-
-                on_replay = log_replay
-            return self.idempotency.run(
+        try:
+            result = self.idempotency.run(
                 key,
                 digest,
-                lambda: command.leaf(*injected, **kwargs),
+                invoke_leaf,
                 expires_after=expires_after,
                 on_replay=on_replay,
+                operation_guard=lambda: self.mutation_guard(mutation_subject),
+                commit_observed=lambda: commit_state["observed"],
             )
+        except BaseException as error:
+            if isinstance(error, OpError):
+                if error.code == "MUTATION_BUSY":
+                    error.details.update(status="retryable", committed=False, retry_after_ms=750)
+                elif error.code == "MUTATION_ACKNOWLEDGEMENT_PENDING":
+                    error.details.update(status="uncertain", committed=None)
+                error.details.update(request_id=request_id, receipt_id=receipt)
+                if idempotency_key is not None:
+                    error.details["idempotency_key"] = idempotency_key
+            _log_mutation_event(
+                "interrupted",
+                level=logging.WARNING,
+                request_id=request_id,
+                command=command.name,
+                receipt=receipt or "none",
+                error=type(error).__name__,
+            )
+            raise
+        _log_mutation_event(
+            "returned",
+            request_id=request_id,
+            command=command.name,
+            receipt=receipt or "none",
+        )
+        return result
 
     def _mutation_subject(self, injected: tuple[Any, ...]) -> os.PathLike[str] | str:
         if injected and isinstance(injected[0], os.PathLike):
@@ -781,7 +1096,9 @@ def invoke_command(
     command: Any,
     *injected: Any,
     idempotency_key: str | None = None,
+    idempotency_principal_scope: str | None = None,
     implicit_idempotency_scope: str | None = None,
+    mutation_request_id: str | None = None,
     **kwargs: Any,
 ) -> Any:
     from .commands import invocation_is_read_only
@@ -792,7 +1109,9 @@ def invoke_command(
         kwargs,
         read_only=invocation_is_read_only(command, kwargs),
         idempotency_key=idempotency_key,
+        idempotency_principal_scope=idempotency_principal_scope,
         implicit_idempotency_scope=implicit_idempotency_scope,
+        mutation_request_id=mutation_request_id,
     )
 
 

@@ -16,6 +16,7 @@ from exomem import access, commands, server, writer_lease
 from exomem import commands as commands_module
 from exomem import find as find_module
 from exomem import vault as vault_module
+from exomem.cli_ops import OpError
 
 PRODUCT_ROUTES = [
     "bootstrap",
@@ -257,6 +258,106 @@ def test_committed_batch_failure_rest_replay_is_exact_409_and_invokes_once(
     assert calls == 1
 
 
+def test_structured_busy_error_matches_openapi_and_preserves_public_identity(
+    vault, tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def busy_before_commit(*args, **kwargs):  # noqa: ANN002, ANN003, ARG001
+        raise OpError(
+            "MUTATION_BUSY",
+            "vault mutation boundary is busy",
+            details={"status": "retryable", "committed": False, "retry_after_ms": 750},
+        )
+
+    writer_lease.reset_managers_for_tests()
+    monkeypatch.setattr(commands, "op_create_file", busy_before_commit)
+    client = _client(
+        vault,
+        monkeypatch,
+        EXOMEM_REST_API_KEY="sekret",
+        EXOMEM_WRITER_LEASE_STATE_DIR=str(tmp_path / "lease-state"),
+    )
+    request_id = "11111111-1111-4111-8111-111111111111"
+    response = client.post(
+        "/api/manage_memory_file",
+        json={
+            "operation": "create",
+            "path": "Knowledge Base/Notes/Insights/not-written.md",
+            "content": "not written",
+        },
+        headers={
+            **_auth(),
+            "Idempotency-Key": "rest-busy",
+            "X-Exomem-Request-Id": request_id,
+        },
+    )
+
+    assert response.status_code == 409
+    error = response.json()["error"]
+    assert error["status"] == "retryable"
+    assert error["committed"] is False
+    assert error["request_id"] == request_id
+    assert error["idempotency_key"] == "rest-busy"
+    assert error["receipt_id"] != "rest-busy"
+    schema_properties = client.get("/api/openapi.json").json()["components"]["schemas"][
+        "Error"
+    ]["properties"]
+    assert set(error) <= set(schema_properties)
+
+
+def test_cf_access_principals_isolate_explicit_rest_idempotency(
+    vault, tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[str] = []
+
+    def committed_create(*args, **kwargs):  # noqa: ANN002, ANN003, ARG001
+        calls.append("write")
+        return {"sequence": len(calls)}
+
+    def verified_claims(token, **kwargs):  # noqa: ANN001, ARG001
+        return {
+            "iss": "https://team.cloudflareaccess.com",
+            "sub": token,
+        }
+
+    writer_lease.reset_managers_for_tests()
+    monkeypatch.setattr(commands, "op_create_file", committed_create)
+    monkeypatch.setattr("exomem.cf_access.make_jwks_client", lambda _team: object())
+    monkeypatch.setattr("exomem.cf_access.verified_claims", verified_claims)
+    client = _client(
+        vault,
+        monkeypatch,
+        EXOMEM_REST_API_KEY="sekret",
+        EXOMEM_CF_ACCESS_TEAM_DOMAIN="team.cloudflareaccess.com",
+        EXOMEM_CF_ACCESS_AUD="rest-audience",
+        EXOMEM_WRITER_LEASE_STATE_DIR=str(tmp_path / "lease-state"),
+    )
+    request = {
+        "operation": "create",
+        "path": "Knowledge Base/Notes/Insights/principal-isolation.md",
+        "content": "same canonical payload",
+    }
+
+    def invoke(principal: str):
+        return client.post(
+            "/api/manage_memory_file",
+            json=request,
+            headers={
+                "Cf-Access-Jwt-Assertion": principal,
+                "Idempotency-Key": "shared-public-key",
+            },
+        )
+
+    alice = invoke("alice")
+    bob = invoke("bob")
+    alice_replay = invoke("alice")
+
+    assert alice.status_code == bob.status_code == alice_replay.status_code == 200
+    assert alice.json()["data"] == {"sequence": 1}
+    assert bob.json()["data"] == {"sequence": 2}
+    assert alice_replay.json()["data"] == {"sequence": 1}
+    assert calls == ["write", "write"]
+
+
 def test_remember_route_preserves_unicode_title_and_explicit_slug(
     vault, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -436,6 +537,16 @@ def test_openapi_lists_real_product_params(vault, monkeypatch: pytest.MonkeyPatc
 
     error_schema = doc["components"]["schemas"]["Error"]
     assert "outcome" in error_schema["properties"]
+    assert {
+        "ok",
+        "error_code",
+        "status",
+        "committed",
+        "retry_after_ms",
+        "request_id",
+        "receipt_id",
+        "idempotency_key",
+    } <= set(error_schema["properties"])
     assert "outcome" not in error_schema.get("required", [])
     outcome_schema = error_schema["properties"]["outcome"]
     assert set(outcome_schema["required"]) == {

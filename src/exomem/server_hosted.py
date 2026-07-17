@@ -806,6 +806,7 @@ def register_hosted_routes(
                             *injected,
                             idempotency_key=gateway.scoped_idempotency_key(context),
                             implicit_idempotency_scope=gateway.implicit_retry_scope(context),
+                            mutation_request_id=context.request_id,
                             **kwargs,
                         )
                 with lifecycle.admit_mutation():
@@ -814,6 +815,7 @@ def register_hosted_routes(
                         *injected,
                         idempotency_key=gateway.scoped_idempotency_key(context),
                         implicit_idempotency_scope=gateway.implicit_retry_scope(context),
+                        mutation_request_id=context.request_id,
                         **kwargs,
                     )
 

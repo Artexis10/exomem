@@ -287,6 +287,20 @@ const toolCall = (name = "remember") => mcp({
   params: { name, arguments: {} },
 });
 
+const restMutation = (name = "remember") =>
+  new Request(`https://exomem.example.com/api/${name}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ content: "one canonical payload" }),
+  });
+
+const transferUpload = () =>
+  new Request("https://exomem.example.com/public/exomem/v2/transfers/upload", {
+    method: "PUT",
+    headers: { "content-type": "application/octet-stream" },
+    body: "artifact bytes",
+  });
+
 test("classifies single and batched tool calls conservatively", async () => {
   assert.equal(await isMcpToolCall(toolCall()), true);
   assert.equal(await isMcpToolCall(mcp([
@@ -362,11 +376,13 @@ test("lease admission is bound to holder and fencing token and cleared on takeov
 
 test("active-holder tool call uses the long timeout and is never replayed", async () => {
   const calls = [];
+  const requestIds = [];
   const timeouts = [];
   const originalFetch = globalThis.fetch;
   const originalTimeout = AbortSignal.timeout;
   globalThis.fetch = async (request) => {
     calls.push(new URL(request.url).origin);
+    requestIds.push(request.headers.get("x-exomem-request-id"));
     return new Response("tool failed after execution", { status: 500 });
   };
   AbortSignal.timeout = (ms) => {
@@ -377,10 +393,34 @@ test("active-holder tool call uses the long timeout and is never replayed", asyn
     const response = await worker.fetch(toolCall(), edgeEnv("desktop"));
     assert.equal(response.status, 500);
     assert.deepEqual(calls, ["https://desktop.example.com"]);
+    assert.match(requestIds[0], /^[0-9a-f-]{36}$/);
     assert.deepEqual(timeouts, [15_000]);
   } finally {
     globalThis.fetch = originalFetch;
     AbortSignal.timeout = originalTimeout;
+  }
+});
+
+test("edge replaces non-UUID mutation correlation text before forwarding and logging", async () => {
+  const forwarded = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (request) => {
+    forwarded.push(request.headers.get("x-exomem-request-id"));
+    return new Response("ok", { status: 200 });
+  };
+  try {
+    const request = toolCall();
+    request.headers.set("x-exomem-request-id", "attacker-controlled-log-text");
+    const response = await worker.fetch(request, edgeEnv("desktop"));
+    assert.equal(response.status, 200);
+    assert.equal(forwarded.length, 1);
+    assert.match(
+      forwarded[0],
+      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+    );
+    assert.notEqual(forwarded[0], "attacker-controlled-log-text");
+  } finally {
+    globalThis.fetch = originalFetch;
   }
 });
 
@@ -394,6 +434,41 @@ test("active-holder tool timeout fails closed without passive replay", async () 
   try {
     const response = await worker.fetch(toolCall(), edgeEnv("desktop"));
     assert.equal(response.status, 504);
+    assert.deepEqual(calls, ["https://desktop.example.com"]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("personal REST mutation failure and timeout never replay to passive origin", async () => {
+  for (const outcome of ["response", "timeout"]) {
+    const calls = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async (request) => {
+      calls.push(new URL(request.url).origin);
+      if (outcome === "timeout") throw new DOMException("timed out", "TimeoutError");
+      return new Response("write failed after possible commit", { status: 500 });
+    };
+    try {
+      const response = await worker.fetch(restMutation(), edgeEnv("desktop"));
+      assert.equal(response.status, outcome === "timeout" ? 504 : 500);
+      assert.deepEqual(calls, ["https://desktop.example.com"]);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  }
+});
+
+test("public transfer PUT failure never replays to passive origin", async () => {
+  const calls = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (request) => {
+    calls.push(new URL(request.url).origin);
+    return new Response("upload failed after possible commit", { status: 500 });
+  };
+  try {
+    const response = await worker.fetch(transferUpload(), edgeEnv("desktop"));
+    assert.equal(response.status, 500);
     assert.deepEqual(calls, ["https://desktop.example.com"]);
   } finally {
     globalThis.fetch = originalFetch;

@@ -4,6 +4,7 @@ import asyncio
 import base64
 import hashlib
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -246,6 +247,21 @@ def test_hosted_idempotency_scope_changes_by_cell_and_principal(tmp_path: Path) 
     assert len(keys) == 3
     assert all(key and key.startswith("hosted:") for key in keys)
     assert not any("principal" in key or "tenant" in key for key in keys)
+
+
+def test_implicit_retry_scope_is_stable_across_gateway_request_ids() -> None:
+    first = gateway.TrustedGatewayContext(
+        cell_id="cell-alpha",
+        protocol_version="1",
+        request_id="11111111-1111-4111-8111-111111111111",
+        principal_scope=PRINCIPAL_ALPHA,
+    )
+    second = replace(
+        first,
+        request_id="22222222-2222-4222-8222-222222222222",
+    )
+
+    assert gateway.implicit_retry_scope(first) == gateway.implicit_retry_scope(second)
 
 
 def test_gateway_context_identity_formats_are_exact() -> None:

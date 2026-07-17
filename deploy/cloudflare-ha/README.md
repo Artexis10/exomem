@@ -25,27 +25,32 @@ different replica ID; set `EXOMEM_WRITER_LEASE_PREFERRED=1` only on the preferre
 desktop. See `docs/deployment.md` for the complete environment block and takeover
 test.
 
-## Tool-call routing safety
+## Mutation-capable routing safety
 
 Use two edge timeouts:
 
 - `ORIGIN_TIMEOUT_MS` (default `2500`) is the short connectivity/fallback window
   for OAuth, discovery, initialization, tool listing, and GET/SSE traffic.
 - `MCP_TOOL_TIMEOUT_MS` (default `15000`) is the execution window for
-  `tools/call`; correctness comes from single-origin routing, not from ordering
-  this timeout against the writer-lease TTL.
+  `tools/call` and other unsafe non-`/mcp` methods, including personal REST and
+  lifecycle POSTs plus public transfer PUT uploads. Correctness comes from
+  single-origin routing, not from ordering this timeout against the writer-lease
+  TTL.
 
-While a writer lease is active, a tool call goes only to that replica. The edge
-never replays an ambiguous timeout or 5xx response to the passive replica: the
-first origin may already have completed a mutation. Before routing, it admits the
-runtime through `/health/ready`: supported runtime contract, stateless transport,
+While a writer lease is active, a tool call or other mutation-capable request
+goes only to that replica. The edge never replays an ambiguous timeout or 5xx
+response to the passive replica: the first origin may already have completed a
+mutation. Safe GET/HEAD/OPTIONS traffic and non-tool MCP initialization retain
+the short fallback path. Before single-origin routing, the edge admits the runtime
+through `/health/ready`: supported runtime contract, stateless transport,
 expected replica identity, healthy coordination, and takeover eligibility. The
 admission is bound to the lease fencing token in the Durable Object, so steady
 state does not add a readiness round trip to every MCP call.
 
-With no holder, both origins are probed concurrently and the call is forwarded
-exactly once to the first eligible replica. A live but stale service that lacks
-the readiness contract is skipped instead of becoming the failover writer.
+With no holder, both origins are probed concurrently and the mutation-capable
+request is forwarded exactly once to the first eligible replica. A live but stale
+service that lacks the readiness contract is skipped instead of becoming the
+failover writer.
 
 Configure `SUPPORTED_RUNTIME_CONTRACTS` with behavioral contract versions, not
 package versions. Compatible releases can differ during a rolling deployment.
