@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-
 ROOT = Path(__file__).parents[1]
 BROWSER_ROOT = ROOT / "tests" / "browser"
 LIVE_SPEC = BROWSER_ROOT / "live-transfer.spec.mjs"
