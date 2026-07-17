@@ -485,6 +485,28 @@ def _existing_context(root: Path, imported_path: str, title: str, body: str) -> 
     return {"for": imported_path, "related": related}
 
 
+def _semantic_unit_pack(root: Path, imported_path: str, char_bound: int) -> dict:
+    """The bound Source's semantic-unit context pack for a work item.
+
+    Reuses the SAME pack constructor ``context-packs`` defines (``#242``) — never a
+    reimplementation — so pack content matches the primary surface exactly. Read-only
+    and deterministic. Bounded by the work item's server-clamped ``char_bound``; the
+    pack's own per-unit/per-page item caps stay. An absent-or-unit-less source yields
+    an explicit empty marker, never a silently missing field.
+    """
+    if not imported_path or not (root / imported_path).is_file():
+        return {"units": [], "available": True}
+    from . import context_pack as context_pack_module
+    from .find_types import Hit
+
+    hit = Hit(path=imported_path, type=None, scope=None, title="", updated="", excerpt="")
+    pack = context_pack_module.assemble_pack(root, [hit], max_unit_total_chars=char_bound)
+    entry = (pack.get("semantic_units") or {}).get(imported_path)
+    if not entry or not entry.get("units"):
+        return {"units": [], "available": True}
+    return {"available": True, "parent": entry.get("parent"), "units": entry["units"]}
+
+
 def work_item(
     root: Path,
     *,
@@ -547,6 +569,9 @@ def work_item(
                 "source_ref": outcome.get("source_ref") or item.get("target_ref"),
                 "excerpt": excerpt,
                 "excerpt_truncated": truncated,
+                "semantic_units": _semantic_unit_pack(
+                    root, imported_path, max_chars_per_source
+                ),
             }
         )
         if imported_path:
@@ -589,6 +614,75 @@ def _load_run(store: AdoptionRunStore, run_id: str | None) -> dict:
         raise AdoptionProposalError(exc.code, exc.reason) from exc
 
 
+def _contract_validation(root: Path, kind: str, payload: dict, *, why: str) -> dict:
+    """Propose-time semantic-write-contract check for compilation/supersession.
+
+    Runs the create path's ``validate_only`` phase with the payload mapped EXACTLY as
+    ``_route_apply`` maps it at apply time, so a contract violation surfaces in the
+    review queue instead of failing after approval. Returns a compact record:
+    ``contract_findings`` (code/severity/detail per blocking finding) plus the
+    ``committable_after_review``/``reviewed_none_required`` booleans, and an
+    ``invalid_finding`` when the content carries a non-review blocker (the two-phase
+    writer refuses those before any write — the existing ``invalid`` mechanism). The
+    validate call is read-only: draft registration is ephemeral and writes nothing.
+    """
+    from . import commands as commands_module
+
+    if kind == "compilation":
+        op: Any = commands_module.op_remember
+        base_kwargs: dict = {
+            "content": payload.get("content") or "",
+            "title": payload.get("title") or "",
+            "note_type": payload.get("note_type") or "insight",
+            "sources": [_clean(s) for s in (payload.get("sources") or [])],
+            "tags": payload.get("tags"),
+            "project": payload.get("project"),
+            "suggestions": False,
+        }
+    else:  # supersession
+        op = commands_module.op_replace_memory
+        base_kwargs = {
+            "old_path": _clean(payload.get("old_path")),
+            "content": payload.get("content") or "",
+            "title": payload.get("title") or "",
+            "note_type": payload.get("note_type") or "insight",
+            "reason": why,
+            "sources": payload.get("sources"),
+            "tags": payload.get("tags"),
+            "project": payload.get("project"),
+        }
+
+    try:
+        validation = op(root, validate_only=True, **base_kwargs)
+    except Exception as exc:  # noqa: BLE001 - the writer refuses non-review blockers here
+        return {
+            "contract_findings": [],
+            "committable_after_review": False,
+            "reviewed_none_required": False,
+            "invalid_finding": _finding(
+                "CONTRACT_BLOCKED",
+                "content",
+                f"the semantic write contract blocks this content: {exc}",
+            ),
+        }
+
+    contract_result = validation.get("contract_result") or {}
+    contract_findings = [
+        {"code": f.get("code"), "severity": f.get("severity"), "detail": f.get("detail")}
+        for f in (contract_result.get("blocking_findings") or [])
+    ]
+    invalid_finding = None
+    if validation.get("has_non_review_blockers"):
+        detail = contract_findings[0]["detail"] if contract_findings else "a blocking contract finding"
+        invalid_finding = _finding("CONTRACT_BLOCKED", "content", str(detail))
+    return {
+        "contract_findings": contract_findings,
+        "committable_after_review": bool(validation.get("committable_after_review")),
+        "reviewed_none_required": bool(validation.get("reviewed_none_required")),
+        "invalid_finding": invalid_finding,
+    }
+
+
 def propose(root: Path, *, run_id: str, proposals: list[dict]) -> dict:
     """Validate and persist structured proposals. Writes only ``proposals.json``."""
     root = Path(root)
@@ -621,6 +715,9 @@ def propose(root: Path, *, run_id: str, proposals: list[dict]) -> dict:
                     "kind": prior.get("kind"),
                     "status": prior.get("status"),
                     "findings": prior.get("findings") or [],
+                    "contract_findings": prior.get("contract_findings") or [],
+                    "reviewed_none_required": bool(prior.get("reviewed_none_required")),
+                    "committable_after_review": bool(prior.get("committable_after_review")),
                     "deduplicated": True,
                 }
             )
@@ -655,6 +752,20 @@ def propose(root: Path, *, run_id: str, proposals: list[dict]) -> dict:
                         "submission; re-load the work item and resubmit",
                     )
                 )
+        # Semantic write contract check for kinds that create/replace governed pages.
+        # A blocking finding no reviewed disposition can clear invalidates now; a
+        # relation-review gap rides the proposal (resolved at apply via reviewed-none).
+        contract_findings: list[dict] = []
+        reviewed_none_required = False
+        committable_after_review = False
+        if not findings and kind in ("compilation", "supersession"):
+            contract = _contract_validation(root, kind, prop_payload, why=why)
+            contract_findings = contract["contract_findings"]
+            reviewed_none_required = contract["reviewed_none_required"]
+            committable_after_review = contract["committable_after_review"]
+            if contract["invalid_finding"] is not None:
+                findings.append(contract["invalid_finding"])
+
         review_id = _review_id(run_id, proposal_id)
         fingerprint = _proposal_fingerprint(prop_payload, bindings, kind)
         status = "invalid" if findings else "proposed"
@@ -669,6 +780,9 @@ def propose(root: Path, *, run_id: str, proposals: list[dict]) -> dict:
             "bindings": bindings,
             "status": status,
             "findings": findings,
+            "contract_findings": contract_findings,
+            "reviewed_none_required": reviewed_none_required,
+            "committable_after_review": committable_after_review,
             "submitted_at": _now_iso(),
             "applied": None,
         }
@@ -682,6 +796,9 @@ def propose(root: Path, *, run_id: str, proposals: list[dict]) -> dict:
                 "kind": kind,
                 "status": status,
                 "findings": findings,
+                "contract_findings": contract_findings,
+                "reviewed_none_required": reviewed_none_required,
+                "committable_after_review": committable_after_review,
             }
         )
 
@@ -723,6 +840,7 @@ def _item_view(proposal: dict, fingerprint: str) -> dict:
         "why": proposal.get("why"),
         "title": payload.get("title") or payload.get("name"),
         "status": proposal.get("status"),
+        "contract_findings": proposal.get("contract_findings") or [],
         "submitted_at": proposal.get("submitted_at"),
         "state": "open",
     }
@@ -922,6 +1040,9 @@ def assemble_context(
         ),
         "payload": payload,
         "findings": proposal.get("findings") or [],
+        "contract_findings": proposal.get("contract_findings") or [],
+        "reviewed_none_required": bool(proposal.get("reviewed_none_required")),
+        "committable_after_review": bool(proposal.get("committable_after_review")),
         "binding_check": binding_check,
         "target": target,
     }

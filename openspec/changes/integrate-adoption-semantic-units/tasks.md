@@ -2,10 +2,10 @@
 
 ## Lane A — engine (adoption_proposals.py; executor: opus)
 
-- [ ] A.1 Red-first in `tests/test_adoption_proposals.py`: `test_work_item_rows_include_semantic_unit_packs` (source with units → row `semantic_units` populated and bounded; source without units → explicit empty pack), `test_work_item_pack_assembly_is_read_only` (byte-snapshot vault before/after), `test_propose_records_contract_findings_for_reviewable_gaps` (compilation w/o typed relation → status `proposed`, `contract_findings` non-empty, `reviewed_none_required` true), `test_propose_invalidates_on_non_review_blockers` (a finding no review can clear → status `invalid`), `test_queue_and_context_carry_contract_findings` (`_item_view` + `assemble_context` shapes), `test_reviewed_none_review_reason_is_approver_why` (regression pin on landed behavior).
-- [ ] A.2 Implement per design 1: `semantic_units` per source row in `work_item`, reusing the context-pack constructor (find it via `semantic_unit_read` imports; do not reimplement), bounded by the clamped `max_chars_per_source`.
-- [ ] A.3 Implement per design 2: propose-time `validate_only` for compilation/supersession; persist compact `contract_findings` + `committable_after_review`/`reviewed_none_required`; classify invalid vs proposed. Confirm validate_only writes nothing (assert in A.1's read-only test).
-- [ ] A.4 Implement per design 3: `contract_findings` in `_item_view` and `assemble_context`.
+- [x] A.1 Red-first in `tests/test_adoption_proposals.py`: `test_work_item_rows_include_semantic_unit_packs` (source with units → row `semantic_units` populated and bounded; source without units → explicit empty pack), `test_work_item_pack_assembly_is_read_only` (byte-snapshot vault before/after), `test_propose_records_contract_findings_for_reviewable_gaps` (compilation w/o typed relation → status `proposed`, `contract_findings` non-empty, `reviewed_none_required` true), `test_propose_invalidates_on_non_review_blockers` (a finding no review can clear → status `invalid`), `test_queue_and_context_carry_contract_findings` (`_item_view` + `assemble_context` shapes), `test_reviewed_none_review_reason_is_approver_why` (regression pin on landed behavior).
+- [x] A.2 Implement per design 1: `semantic_units` per source row in `work_item`, reusing the context-pack constructor (find it via `semantic_unit_read` imports; do not reimplement), bounded by the clamped `max_chars_per_source`.
+- [x] A.3 Implement per design 2: propose-time `validate_only` for compilation/supersession; persist compact `contract_findings` + `committable_after_review`/`reviewed_none_required`; classify invalid vs proposed. Confirm validate_only writes nothing (assert in A.1's read-only test).
+- [x] A.4 Implement per design 3: `contract_findings` in `_item_view` and `assemble_context`.
 
 ## Lane B — Studio UI (studio assets; executor: opus; file-disjoint from Lane A)
 

@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from exomem import adoption_proposals, adoption_run, commands, find, get_page
+from exomem import adoption_proposals, adoption_run, commands, find, get_page, relation_review
 
 TODAY = dt.date(2026, 7, 14)
 
@@ -21,6 +21,15 @@ def _snapshot_md(root: Path) -> dict[str, bytes]:
     return {
         p.relative_to(root).as_posix(): p.read_bytes()
         for p in root.rglob("*.md")
+        if p.is_file()
+    }
+
+
+def _snapshot_all(root: Path) -> dict[str, bytes]:
+    """Full-tree byte snapshot of EVERY file (pack assembly must write nothing)."""
+    return {
+        p.relative_to(root).as_posix(): p.read_bytes()
+        for p in root.rglob("*")
         if p.is_file()
     }
 
@@ -721,3 +730,221 @@ def test_build_queue_limit_applies_across_runs(tmp_path: Path) -> None:
     assert queue["shown"] == 3
     assert len(queue["items"]) == 3
     assert sum(len(g["items"]) for g in queue["runs"]) == 3
+
+
+# --------------------------------------------------------------------------- #
+# Lane A — adoption × semantic units integration
+# --------------------------------------------------------------------------- #
+def _seed_governed_insight(vault: Path, imported: list[str], *, title: str = "Seed") -> str:
+    """Commit one governed insight so the corpus is non-empty.
+
+    A create into an empty corpus auto-bootstraps (no review needed); once a
+    governed page exists, the NEXT create with no honest typed relation needs an
+    explicit reviewed-none disposition — which is what the propose-time contract
+    validation must surface.
+    """
+    result = commands.op_remember(
+        vault,
+        content=f"# {title}\n\nA seeded governed conclusion.\n",
+        title=title,
+        note_type="insight",
+        sources=imported,
+        suggestions=False,
+    )
+    find.clear_cache()
+    return result["path"]
+
+
+def _enrich_source_with_units(vault: Path, imported_path: str) -> None:
+    """Append authored semantic units OUTSIDE the fenced capture so the Source has units."""
+    page = vault / imported_path
+    page.write_text(
+        page.read_text(encoding="utf-8")
+        + "\n## Observations\n\n"
+        "- [config] Widget cache TTL is thirty seconds #runtime ^ttl\n"
+        "- [rule] Evict least-recently-used widgets first #runtime ^lru\n",
+        encoding="utf-8",
+    )
+    find.clear_cache()
+
+
+def test_work_item_rows_include_semantic_unit_packs(tmp_path: Path) -> None:
+    vault = _legacy_vault(tmp_path)
+    applied = _applied_run(vault)
+    run_id = applied["run_id"]
+    imported = _imported_paths(applied)
+    _enrich_source_with_units(vault, imported[0])
+
+    item = adoption_proposals.work_item(vault, run_id=run_id, max_sources=5)
+    by_import = {row["imported_path"]: row for row in item["sources"]}
+
+    enriched = by_import[imported[0]]["semantic_units"]
+    assert enriched["available"] is True
+    assert len(enriched["units"]) >= 1
+    assert {u["kind"] for u in enriched["units"]} <= {"observation", "decision", "rule", "config"}
+
+    plain = by_import[imported[1]]["semantic_units"]
+    assert plain == {"units": [], "available": True}
+
+
+def test_work_item_pack_assembly_is_read_only(tmp_path: Path) -> None:
+    vault = _legacy_vault(tmp_path)
+    applied = _applied_run(vault)
+    imported = _imported_paths(applied)
+    _enrich_source_with_units(vault, imported[0])
+
+    # Exercise the pack constructor directly: a full-tree byte snapshot proves the
+    # shared semantic-unit pack assembly mutates no vault file, index, or unit record.
+    before = _snapshot_all(vault)
+    pack = adoption_proposals._semantic_unit_pack(vault, imported[0], 2000)
+    assert pack["available"] is True
+    assert pack["units"], "the enriched source must yield a populated pack"
+    assert _snapshot_all(vault) == before
+
+
+def test_propose_records_contract_findings_for_reviewable_gaps(tmp_path: Path) -> None:
+    vault = _legacy_vault(tmp_path)
+    applied = _applied_run(vault)
+    run_id = applied["run_id"]
+    imported = _imported_paths(applied)
+    run_fp = applied["inventory_fingerprint"]
+    _seed_governed_insight(vault, imported)
+    before_all = _snapshot_all(vault)
+
+    result = adoption_proposals.propose(
+        vault,
+        run_id=run_id,
+        proposals=[
+            {
+                "kind": "compilation",
+                "why": "combine the widget notes",
+                "payload": {
+                    "sources": imported,
+                    "title": "Widget synthesis",
+                    "note_type": "insight",
+                    "content": "# Widget synthesis\n\nA fresh disconnected conclusion.\n",
+                },
+                "bindings": {"run_fingerprint": run_fp},
+            }
+        ],
+    )
+    row = result["proposals"][0]
+    assert row["status"] == "proposed"
+    assert row["contract_findings"]
+    assert row["contract_findings"][0]["code"] == "RELATION_DISPOSITION_MISSING"
+    assert set(row["contract_findings"][0]) == {"code", "severity", "detail"}
+    assert row["reviewed_none_required"] is True
+
+    # validate_only must write NOTHING: the only file to change is proposals.json.
+    after_all = _snapshot_all(vault)
+    changed = {k for k in after_all if before_all.get(k) != after_all[k]}
+    assert changed, "propose must persist the proposal"
+    assert all("proposals.json" in k for k in changed), changed
+
+    stored = adoption_run.AdoptionRunStore(vault).load_proposals(run_id)["proposals"][-1]
+    assert stored["contract_findings"] == row["contract_findings"]
+    assert stored["reviewed_none_required"] is True
+    assert stored["committable_after_review"] is True
+
+
+def test_propose_invalidates_on_non_review_blockers(tmp_path: Path) -> None:
+    vault = _legacy_vault(tmp_path)
+    applied = _applied_run(vault)
+    run_id = applied["run_id"]
+    imported = _imported_paths(applied)
+    run_fp = applied["inventory_fingerprint"]
+
+    result = adoption_proposals.propose(
+        vault,
+        run_id=run_id,
+        proposals=[
+            {
+                "kind": "compilation",
+                "why": "combine with a broken unit",
+                "payload": {
+                    "sources": imported,
+                    "title": "Broken synthesis",
+                    "note_type": "insight",
+                    # Two units claim the same ^dup anchor — a blocking contract
+                    # finding no reviewed-none disposition can ever clear.
+                    "content": (
+                        "# Broken synthesis\n\n## Observations\n\n"
+                        "- [config] First widget note #tag ^dup\n"
+                        "- [rule] Second widget note #tag ^dup\n"
+                    ),
+                },
+                "bindings": {"run_fingerprint": run_fp},
+            }
+        ],
+    )
+    row = result["proposals"][0]
+    assert row["status"] == "invalid"
+    assert any(f["code"] == "CONTRACT_BLOCKED" for f in row["findings"])
+
+    with pytest.raises(adoption_proposals.AdoptionProposalError) as excinfo:
+        adoption_proposals.apply_proposal(
+            vault, ref=row["ref"], expected_fingerprint=row["fingerprint"], why="approve"
+        )
+    assert excinfo.value.code == "PROPOSAL_INVALID"
+
+
+def test_queue_and_context_carry_contract_findings(tmp_path: Path) -> None:
+    vault = _legacy_vault(tmp_path)
+    applied = _applied_run(vault)
+    run_id = applied["run_id"]
+    imported = _imported_paths(applied)
+    run_fp = applied["inventory_fingerprint"]
+    _seed_governed_insight(vault, imported)
+
+    submitted = adoption_proposals.propose(
+        vault,
+        run_id=run_id,
+        proposals=[
+            {
+                "kind": "compilation",
+                "why": "combine",
+                "payload": {
+                    "sources": imported,
+                    "title": "Synthesis two",
+                    "note_type": "insight",
+                    "content": "# Synthesis two\n\nAnother disconnected conclusion.\n",
+                },
+                "bindings": {"run_fingerprint": run_fp},
+            }
+        ],
+    )
+    row = submitted["proposals"][0]
+    assert row["status"] == "proposed"
+
+    queue = adoption_proposals.build_queue(vault, run_id=run_id)
+    item = queue["items"][0]
+    assert item["contract_findings"]
+    assert item["contract_findings"][0]["code"] == "RELATION_DISPOSITION_MISSING"
+
+    ctx = adoption_proposals.assemble_context(vault, ref=row["ref"])
+    assert ctx["contract_findings"] == item["contract_findings"]
+    assert ctx["reviewed_none_required"] is True
+    assert ctx["committable_after_review"] is True
+    assert ctx["status"] == "proposed"
+
+
+def test_reviewed_none_review_reason_is_approver_why(tmp_path: Path) -> None:
+    vault = _legacy_vault(tmp_path)
+    applied = _applied_run(vault)
+    run_id = applied["run_id"]
+    imported = _imported_paths(applied)
+    run_fp = applied["inventory_fingerprint"]
+    # A non-empty corpus forces the applied compilation through the reviewed-none path.
+    _seed_governed_insight(vault, imported)
+
+    rec = _submit_compilation(vault, run_id, run_fp, imported, title="Reviewed synthesis")
+    why = "Approved: no honest typed relation yet, resurface later"
+    result = adoption_proposals.apply_proposal(
+        vault, ref=rec["ref"], expected_fingerprint=rec["fingerprint"], why=why
+    )
+    assert result["applied"] is True
+    assert get_page.get_page(vault, path=result["result_path"]).path
+
+    reviews = relation_review.load_relation_reviews(vault)
+    reviewed_none = [r for r in reviews if r.kind == "reviewed_none" and r.reason == why]
+    assert reviewed_none, "the approver's why must be recorded as the reviewed-none reason"
