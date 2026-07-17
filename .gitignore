@@ -28,6 +28,7 @@ scripts/generic/substitutions.txt
 # session transcripts, and project memory). Untracked but present in working
 # checkouts; ignored so a stray `git add` can't leak them into the public repo.
 .omc/
+*.storage-state.json
 # Ignore everything under .claude/ EXCEPT shared tooling that should travel with
 # the repo (OpenSpec's /opsx: commands). settings.local.json, skills/, and
 # worktrees/ (machine paths) stay ignored.
