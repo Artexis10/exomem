@@ -256,10 +256,9 @@ def implicit_retry_scope(context: TrustedGatewayContext) -> str:
         (
             context.cell_id,
             context.principal_scope,
-            context.request_id,
         )
     )
-    return f"hosted-request:{hashlib.sha256(payload.encode('utf-8')).hexdigest()}"
+    return f"hosted-principal:{hashlib.sha256(payload.encode('utf-8')).hexdigest()}"
 
 
 def _b64encode(value: bytes) -> str:

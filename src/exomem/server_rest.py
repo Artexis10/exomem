@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import secrets
@@ -17,6 +18,7 @@ from starlette.responses import JSONResponse
 
 from . import cf_access, cli_ops, upload_tokens
 from . import commands as commands_module
+from .command_surface import canonical_request_id
 from .server_transfer import TransferConfig
 
 
@@ -69,6 +71,16 @@ _OPENAPI_ERROR_SCHEMA = {
         "message": {"type": "string"},
         "remediation": {"type": ["string", "null"]},
         "outcome": _OPENAPI_OUTCOME_SCHEMA,
+        "ok": {"type": "boolean"},
+        "error_code": {"type": "string"},
+        "status": {"type": "string"},
+        "committed": {"type": ["boolean", "null"]},
+        "retry_after_ms": {"type": "integer", "minimum": 0},
+        "holder_operation": {"type": ["string", "null"]},
+        "holder_age_ms": {"type": ["integer", "null"], "minimum": 0},
+        "request_id": {"type": "string", "format": "uuid"},
+        "receipt_id": {"type": ["string", "null"]},
+        "idempotency_key": {"type": "string"},
     },
     "required": ["code", "message", "remediation"],
     "additionalProperties": False,
@@ -83,7 +95,9 @@ _OPENAPI_ERROR_ENVELOPE_SCHEMA = {
     "additionalProperties": False,
 }
 _OPENAPI_ERROR_RESPONSE = {
-    "description": "{success: false, error: {code, message, remediation, outcome?}}",
+    "description": (
+        "{success: false, error: {code, message, remediation, terminal-state fields?}}"
+    ),
     "content": {
         "application/json": {"schema": {"$ref": "#/components/schemas/ErrorEnvelope"}}
     },
@@ -134,24 +148,29 @@ def register_rest_facade(
     expose_tier2 = not os.environ.get("EXOMEM_DISABLE_TIER2")
     rest_commands = commands_module.product_commands_for("rest", expose_tier2=expose_tier2)
 
-    def _rest_authorized(request: Request) -> bool:
+    def _rest_principal(request: Request) -> tuple[bool, str | None]:
         if rest_api_key is not None:
             header = request.headers.get("authorization", "")
             if header.startswith("Bearer "):
                 presented = header[len("Bearer ") :].strip()
                 if secrets.compare_digest(presented, rest_api_key):
-                    return True
+                    return True, None
                 if upload_tokens.verify(presented, rest_api_key, scope="rest"):
-                    return True
+                    return True, None
         if transfer_config.cf_jwks is not None:
-            if cf_access.verify(
+            claims = cf_access.verified_claims(
                 request.headers.get("cf-access-jwt-assertion"),
                 jwks_client=transfer_config.cf_jwks,
                 team_domain=transfer_config.cf_team,
                 audience=transfer_config.cf_aud,
-            ):
-                return True
-        return False
+            )
+            if claims is not None:
+                subject = str(claims.get("sub") or claims.get("email") or "").strip()
+                issuer = str(claims.get("iss") or "").strip()
+                if subject and issuer:
+                    digest = hashlib.sha256(f"{issuer}\0{subject}".encode()).hexdigest()
+                    return True, f"cf-access:{digest}"
+        return False, None
 
     def _rest_err(
         code: str, message: str, status: int, remediation: str | None = None
@@ -163,16 +182,23 @@ def register_rest_facade(
             status_code=status,
         )
 
-    def _rest_gate(request: Request) -> JSONResponse | None:
+    def _rest_gate(request: Request) -> tuple[JSONResponse | None, str | None]:
         if not rest_enabled:
-            return _rest_err(
-                "REST_DISABLED",
-                "REST API is off: set EXOMEM_REST_API_KEY to enable the /api/* facade",
-                503,
+            return (
+                _rest_err(
+                    "REST_DISABLED",
+                    "REST API is off: set EXOMEM_REST_API_KEY to enable the /api/* facade",
+                    503,
+                ),
+                None,
             )
-        if not _rest_authorized(request):
-            return _rest_err("UNAUTHORIZED", "missing or invalid REST API key", 401)
-        return None
+        authorized, principal_scope = _rest_principal(request)
+        if not authorized:
+            return (
+                _rest_err("UNAUTHORIZED", "missing or invalid REST API key", 401),
+                None,
+            )
+        return None, principal_scope
 
     async def _rest_body(request: Request) -> dict | None:
         try:
@@ -192,7 +218,7 @@ def register_rest_facade(
         async def _handler(
             request: Request, _cmd: commands_module.Command = cmd
         ) -> JSONResponse:
-            gate = _rest_gate(request)
+            gate, principal_scope = _rest_gate(request)
             if gate is not None:
                 return gate
             body = await _rest_body(request)
@@ -210,6 +236,10 @@ def register_rest_facade(
                     _cmd,
                     *injected,
                     idempotency_key=request.headers.get("idempotency-key"),
+                    idempotency_principal_scope=principal_scope,
+                    mutation_request_id=canonical_request_id(
+                        request.headers.get("x-exomem-request-id")
+                    ),
                     **kwargs,
                 )
             except (cli_ops.OpError, ValueError, TypeError) as exc:

@@ -79,40 +79,52 @@ class CallTraceMiddleware(Middleware):
         self.hosted = hosted
 
     async def on_call_tool(self, context: MiddlewareContext, call_next):
-        tool_name = _extract_tool_name(context.message)
-        guarded_fields = _GUARDED_WRITE_FIELDS.get(tool_name)
-        if guarded_fields:
-            args = _extract_tool_args(context.message)
-            for field in guarded_fields:
-                guards.guard_text_content(args.get(field), tool=tool_name, field=field)
-            if tool_name in ("edit", "edit_memory"):
-                for item in args.get("edits") or []:
-                    if isinstance(item, dict):
-                        guards.guard_text_content(
-                            item.get("new_string"),
-                            tool=tool_name,
-                            field="edits[].new_string",
-                        )
+        from .command_surface import mcp_request_context, mcp_request_id
 
-        extras = (
-            _find_call_summary(context.message)
-            if tool_name == "ask_memory" and not self.hosted
-            else ""
-        )
-        _call_log.info(f"event=tool_start tool={tool_name}{extras}")
-        t0 = time.perf_counter()
-        try:
-            result = await call_next(context)
-            dur = round((time.perf_counter() - t0) * 1000, 2)
-            _call_log.info(f"event=tool_success tool={tool_name} duration_ms={dur}{extras}")
-            return result
-        except Exception as exc:
-            dur = round((time.perf_counter() - t0) * 1000, 2)
-            _call_log.error(
-                f"event=tool_error tool={tool_name} duration_ms={dur} "
-                f"err={type(exc).__name__}{extras}"
+        tool_name = _extract_tool_name(context.message)
+        request_id = mcp_request_id()
+        with mcp_request_context(request_id):
+            guarded_fields = _GUARDED_WRITE_FIELDS.get(tool_name)
+            if guarded_fields:
+                args = _extract_tool_args(context.message)
+                for field in guarded_fields:
+                    guards.guard_text_content(args.get(field), tool=tool_name, field=field)
+                if tool_name in ("edit", "edit_memory"):
+                    for item in args.get("edits") or []:
+                        if isinstance(item, dict):
+                            guards.guard_text_content(
+                                item.get("new_string"),
+                                tool=tool_name,
+                                field="edits[].new_string",
+                            )
+
+            extras = (
+                _find_call_summary(context.message)
+                if tool_name == "ask_memory" and not self.hosted
+                else ""
             )
-            raise
+            event_prefix = "hosted_call kind=" if self.hosted else ""
+            _call_log.info(
+                f"event={event_prefix}tool_start tool={tool_name} "
+                f"request_id={request_id}{extras}"
+            )
+            t0 = time.perf_counter()
+            try:
+                result = await call_next(context)
+                dur = round((time.perf_counter() - t0) * 1000, 2)
+                _call_log.info(
+                    f"event={event_prefix}tool_success tool={tool_name} "
+                    f"request_id={request_id} duration_ms={dur}{extras}"
+                )
+                return result
+            except Exception as exc:
+                dur = round((time.perf_counter() - t0) * 1000, 2)
+                _call_log.error(
+                    f"event={event_prefix}tool_error tool={tool_name} "
+                    f"request_id={request_id} duration_ms={dur} "
+                    f"err={type(exc).__name__}{extras}"
+                )
+                raise
 
 
 def _extract_tool_name(message) -> str:

@@ -6,7 +6,10 @@ import hashlib
 import inspect
 import types
 import typing
+import uuid
 from collections.abc import Callable
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 
 from mcp.types import ToolAnnotations
@@ -32,6 +35,11 @@ GUARDED_WRITE_FIELDS: dict[str, tuple[str, ...]] = {
     "replace_memory": ("content",),
     "manage_memory_file": ("content",),
 }
+
+
+_MCP_REQUEST_ID: ContextVar[str | None] = ContextVar(
+    "exomem_mcp_request_id", default=None
+)
 
 
 # Write ops whose mutation OVERWRITES or REMOVES existing vault content, as opposed
@@ -152,6 +160,7 @@ def bind_vault(
         return invoke_command(
             command,
             *injected,
+            mutation_request_id=mcp_request_id(),
             implicit_idempotency_scope=(
                 None if invocation_read_only else mcp_retry_scope()
             ),
@@ -174,9 +183,21 @@ def bind_vault(
 
 
 def mcp_retry_scope() -> str | None:
-    """Return a credential-safe caller scope for bounded MCP retry replay."""
+    """Return a stable, privacy-safe principal scope for bounded MCP replay."""
     try:
-        from fastmcp.server.dependencies import get_context, get_http_headers
+        from fastmcp.server.dependencies import (
+            get_access_token,
+            get_context,
+            get_http_headers,
+        )
+
+        access_token = get_access_token()
+        claims = getattr(access_token, "claims", None) or {}
+        subject = str(claims.get("sub") or "").strip()
+        if subject:
+            issuer = str(claims.get("iss") or "verified-principal").strip()
+            digest = hashlib.sha256(f"{issuer}\0{subject}".encode()).hexdigest()
+            return f"principal:{digest}"
 
         headers = get_http_headers(include={"authorization"})
         authorization = headers.get("authorization", "").strip()
@@ -187,6 +208,47 @@ def mcp_retry_scope() -> str | None:
         return f"session:{get_context().session_id}"
     except (LookupError, RuntimeError):
         return None
+
+
+def mcp_request_id() -> str:
+    """Return one canonical correlation ID for the active MCP tool call."""
+    active = _MCP_REQUEST_ID.get()
+    if active is not None:
+        return active
+    try:
+        from fastmcp.server.dependencies import get_http_headers
+
+        value = get_http_headers(include={"x-exomem-request-id"}).get(
+            "x-exomem-request-id", ""
+        )
+        canonical = canonical_request_id(value)
+        if canonical is not None:
+            return canonical
+    except (LookupError, RuntimeError):
+        pass
+    return str(uuid.uuid4())
+
+
+def canonical_request_id(value: object) -> str | None:
+    """Return a canonical UUIDv4 request ID or reject caller-controlled log text."""
+    clean = str(value or "").strip()
+    try:
+        parsed = uuid.UUID(clean)
+    except (AttributeError, ValueError):
+        return None
+    if parsed.version != 4 or parsed.variant != uuid.RFC_4122 or str(parsed) != clean:
+        return None
+    return clean
+
+
+@contextmanager
+def mcp_request_context(request_id: str):
+    """Bind the middleware correlation ID through the synchronous tool wrapper."""
+    token = _MCP_REQUEST_ID.set(request_id)
+    try:
+        yield
+    finally:
+        _MCP_REQUEST_ID.reset(token)
 
 
 def _annotate_description(annotation: object, description: str) -> object:

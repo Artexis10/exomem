@@ -219,4 +219,9 @@ def _mutation_busy() -> OpError:
         "MUTATION_BUSY",
         "vault mutation boundary is busy",
         "Retry after the current mutation completes; inspect cell health if it remains busy.",
+        details={
+            "status": "retryable",
+            "committed": False,
+            "retry_after_ms": 750,
+        },
     )
