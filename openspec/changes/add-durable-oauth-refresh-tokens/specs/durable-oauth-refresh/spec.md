@@ -56,10 +56,10 @@ A consumed refresh token presented more than 30 seconds after its first redempti
 - **AND** no access token remains usable after revocation is authoritative
 
 ### Requirement: Revocation and signing rotation fail closed
-Revoking a refresh token SHALL revoke its complete family, while revoking a v2 access token SHALL revoke that access token. Replacing the signing generation SHALL invalidate every legacy session, v2 access token, and refresh family issued under the old generation. Revocation endpoints MUST NOT disclose whether an unknown token existed.
+Revoking a refresh token or v2 access token SHALL revoke its complete family so the credential cannot silently resurrect through refresh. Replacing the signing generation SHALL invalidate every legacy session, v2 access token, and refresh family issued under the old generation. Revocation endpoints MUST NOT disclose whether an unknown token existed.
 
 #### Scenario: Client disconnects an offline grant
-- **WHEN** the client revokes any refresh token from an active family
+- **WHEN** the client revokes any refresh token or access token from an active family
 - **THEN** every refresh token in that family and every family-bound access token is rejected thereafter
 
 #### Scenario: Operator rotates the signing generation

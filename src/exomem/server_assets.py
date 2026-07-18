@@ -13,6 +13,7 @@ from starlette.responses import FileResponse, JSONResponse, RedirectResponse
 
 from . import runtime_readiness as runtime_readiness_module
 from . import tool_surface as tool_surface_module
+from .session_oauth import OAUTH_SUPPORTED_SCOPES
 
 _STUDIO_SECURITY_HEADERS = {
     "Content-Security-Policy": (
@@ -202,7 +203,7 @@ def register_oauth_metadata_route(
                 "authorization_endpoint": f"{base_url}/authorize",
                 "token_endpoint": f"{base_url}/token",
                 "registration_endpoint": f"{base_url}/register",
-                "scopes_supported": [],
+                "scopes_supported": list(OAUTH_SUPPORTED_SCOPES),
                 "response_types_supported": ["code"],
                 "grant_types_supported": ["authorization_code", "refresh_token"],
                 "token_endpoint_auth_methods_supported": [
@@ -223,7 +224,7 @@ def register_oauth_metadata_route(
             {
                 "resource": resource_url,
                 "authorization_servers": [issuer_url],
-                "scopes_supported": [],
+                "scopes_supported": list(OAUTH_SUPPORTED_SCOPES),
                 "bearer_methods_supported": ["header"],
             },
             headers={"Cache-Control": "public, max-age=3600"},

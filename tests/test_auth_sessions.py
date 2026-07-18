@@ -10,6 +10,9 @@ from typing import Any
 import pytest
 
 from exomem.auth_sessions import (
+    ACCESS_TOKEN_TTL_SECONDS,
+    REFRESH_RETRY_GRACE_SECONDS,
+    InvalidRefreshToken,
     SessionAuthority,
     SessionIdentity,
     SessionStoreUnavailable,
@@ -152,13 +155,14 @@ def _authority(
     signing_root: str = "test-signing-root",
     issuer: str = "https://memory.example",
     audience: str = "https://memory.example/mcp",
+    clock: Any = None,
 ) -> SessionAuthority:
     return SessionAuthority(
         storage=store,
         signing_root=signing_root,
         issuer=issuer,
         audience=audience,
-        clock=lambda: 1_800_000_000.0,
+        clock=clock or (lambda: 1_800_000_000.0),
     )
 
 
@@ -263,6 +267,109 @@ async def test_issue_validate_list_and_tombstone_without_storing_bearer() -> Non
     assert revoked.status == "revoked"
     assert revoked.revoked_at == 1_800_000_000.0
     assert revoked.revocation_reason == "operator"
+
+
+@pytest.mark.anyio
+async def test_offline_issue_creates_one_hour_access_and_unstored_refresh_token() -> None:
+    raw = AtomicMemoryStore()
+    authority = _authority(raw)
+
+    access, record, refresh = await authority.issue_offline(
+        client_id="chatgpt",
+        scopes=("offline_access", "exomem:read"),
+        identity=_identity(),
+    )
+
+    assert access.startswith("exo_a2.")
+    assert refresh.startswith("exo_r2.")
+    assert record.schema_version == 2
+    assert record.expires_at == record.issued_at + ACCESS_TOKEN_TTL_SECONDS
+    assert record.family_id
+    assert await authority.validate(access) == record
+    grant = await authority.validate_refresh(refresh, client_id="chatgpt")
+    assert grant is not None
+    assert grant.scopes == ("offline_access", "exomem:read")
+    assert access not in repr(raw.data)
+    assert refresh not in repr(raw.data)
+    assert all("__encrypted_data__" in value for value in raw.data.values())
+
+
+@pytest.mark.anyio
+async def test_refresh_rotation_is_cross_authority_idempotent_then_revokes_on_replay() -> None:
+    raw = AtomicMemoryStore()
+    now = [1_800_000_000.0]
+    first = _authority(raw, clock=lambda: now[0])
+    second = _authority(raw, clock=lambda: now[0])
+    access, _, refresh = await first.issue_offline(
+        client_id="chatgpt",
+        scopes=("offline_access", "exomem:read"),
+        identity=_identity(),
+    )
+
+    rotated_a, rotated_record_a, next_refresh_a = await first.rotate_refresh(
+        refresh,
+        client_id="chatgpt",
+        scopes=("offline_access", "exomem:read"),
+    )
+    now[0] += REFRESH_RETRY_GRACE_SECONDS - 1
+    rotated_b, rotated_record_b, next_refresh_b = await second.rotate_refresh(
+        refresh,
+        client_id="chatgpt",
+        scopes=("offline_access", "exomem:read"),
+    )
+
+    assert next_refresh_a == next_refresh_b
+    assert rotated_a != rotated_b
+    assert await first.validate(rotated_a) == rotated_record_a
+    assert await second.validate(rotated_b) == rotated_record_b
+
+    now[0] += 2
+    with pytest.raises(InvalidRefreshToken, match="reuse"):
+        await second.rotate_refresh(
+            refresh,
+            client_id="chatgpt",
+            scopes=("offline_access", "exomem:read"),
+        )
+
+    assert await first.validate(access) is None
+    assert await first.validate(rotated_a) is None
+    assert await first.validate_refresh(next_refresh_a, client_id="chatgpt") is None
+
+
+@pytest.mark.anyio
+async def test_offline_access_expiry_revocation_and_generation_fail_closed() -> None:
+    raw = AtomicMemoryStore()
+    now = [1_800_000_000.0]
+    authority = _authority(raw, clock=lambda: now[0])
+    access, record, refresh = await authority.issue_offline(
+        client_id="chatgpt",
+        scopes=("offline_access",),
+        identity=_identity(),
+    )
+
+    now[0] = record.expires_at
+    assert await authority.validate(access) is None
+    assert await authority.validate_refresh(refresh, client_id="other") is None
+    assert await authority.validate_refresh(refresh, client_id="chatgpt") is not None
+
+    assert await authority.revoke_bearer(access, reason="oauth-client-revocation")
+    assert await authority.validate_refresh(refresh, client_id="chatgpt") is None
+
+    _, tombstone_record, tombstone_refresh = await authority.issue_offline(
+        client_id="chatgpt",
+        scopes=("offline_access",),
+        identity=_identity(),
+    )
+    assert await authority.tombstone(tombstone_record.session_id, reason="operator")
+    assert await authority.validate_refresh(tombstone_refresh, client_id="chatgpt") is None
+
+    _, _, another_refresh = await authority.issue_offline(
+        client_id="chatgpt",
+        scopes=("offline_access",),
+        identity=_identity(),
+    )
+    await authority.replace_generation()
+    assert await authority.validate_refresh(another_refresh, client_id="chatgpt") is None
 
 
 @pytest.mark.anyio

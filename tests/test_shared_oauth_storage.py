@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 import httpx
@@ -153,6 +154,49 @@ async def test_remote_session_authority_is_cross_replica_and_revocation_safe(tmp
     assert await first.validate(bearer) is None
     [listed] = await first.list_sessions()
     assert listed.status == "revoked"
+
+
+@pytest.mark.anyio
+async def test_remote_refresh_rotation_converges_across_replicas(tmp_path: Path) -> None:
+    now = [1_800_000_000.0]
+    database = tmp_path / "refresh-coordinator.sqlite"
+    app = create_app(database=database, bearer_token="secret")
+    transport = httpx.ASGITransport(app=app)
+    kwargs = {
+        "url": "https://coordinator.example",
+        "namespace": "main",
+        "storage_token": "secret",
+        "signing_root": "stable-root",
+        "issuer": "https://memory.example",
+        "audience": "https://memory.example/mcp",
+        "transport": transport,
+        "clock": lambda: now[0],
+    }
+    first = SessionAuthority.remote(**kwargs)
+    second = SessionAuthority.remote(**kwargs)
+    _, _, refresh = await first.issue_offline(
+        client_id="chatgpt",
+        scopes=("offline_access", "exomem:read"),
+        identity=SessionIdentity(github_user_id=123, github_login="person"),
+    )
+
+    first_result, second_result = await asyncio.gather(
+        first.rotate_refresh(
+            refresh,
+            client_id="chatgpt",
+            scopes=("offline_access", "exomem:read"),
+        ),
+        second.rotate_refresh(
+            refresh,
+            client_id="chatgpt",
+            scopes=("offline_access", "exomem:read"),
+        ),
+    )
+
+    assert first_result[2] == second_result[2]
+    assert await first.validate(first_result[0]) == first_result[1]
+    assert await second.validate(second_result[0]) == second_result[1]
+    assert refresh.encode() not in database.read_bytes()
 
 
 def test_remote_session_authority_requires_storage_bearer() -> None:

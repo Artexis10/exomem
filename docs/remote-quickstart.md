@@ -219,8 +219,10 @@ asking it to call `bootstrap(profile="compact")` once before using the KB.
 Create the Personal Plugin with MCP Server URL `https://<host>/mcp` and
 Authentication set to **OAuth**. Keep the discovered authorization, token,
 registration, authorization-server, resource, CIMD metadata, and callback
-values. Leave **Default scopes** and **Base scopes** blank, and turn **OIDC
-enabled** off. Exomem deliberately provides OAuth authorization-code flow, not
+values. Leave **Default scopes** blank, set **Base scopes** to
+`offline_access`, and turn **OIDC enabled** off. That base scope lets Exomem's
+one-hour access tokens renew through durable rotating refresh tokens without
+another GitHub login. Exomem deliberately provides OAuth authorization-code flow, not
 OpenID identity claims; the compatibility discovery alias is not permission to
 invent a `userinfo` endpoint. In particular, never accept a placeholder such as
 `https://example.com` for that field.

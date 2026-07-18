@@ -26,7 +26,12 @@ from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
 from pydantic import AnyUrl
 from starlette.requests import Request
 
-from exomem.auth_sessions import SessionIdentity, SessionStoreUnavailable
+from exomem.auth_sessions import (
+    ACCESS_TOKEN_TTL_SECONDS,
+    RefreshGrant,
+    SessionIdentity,
+    SessionStoreUnavailable,
+)
 from exomem.session_oauth import ExomemSessionOAuthProxy
 
 
@@ -132,13 +137,18 @@ class FakeRecord:
     audience: str = "https://memory.example/mcp"
     github_user_id: int = 123456
     github_login: str = "person"
+    expires_at: float | None = None
 
 
 class FakeAuthority:
     def __init__(self) -> None:
         self.sessions: dict[str, FakeRecord] = {}
         self.issue_calls: list[dict[str, Any]] = []
+        self.offline_issue_calls: list[dict[str, Any]] = []
+        self.rotate_calls: list[dict[str, Any]] = []
         self.tombstones: list[tuple[str, str]] = []
+        self.revoked_bearers: list[tuple[str, str]] = []
+        self.refreshes: dict[str, RefreshGrant] = {}
         self.validation_error: Exception | None = None
 
     async def issue(
@@ -162,6 +172,72 @@ class FakeAuthority:
         self.sessions[token] = record
         return token, record
 
+    async def issue_offline(
+        self,
+        *,
+        client_id: str,
+        scopes: list[str],
+        identity: SessionIdentity,
+    ) -> tuple[str, FakeRecord, str]:
+        index = len(self.offline_issue_calls)
+        access = f"local-access-{index}"
+        refresh = f"local-refresh-{index}"
+        record = FakeRecord(
+            session_id=f"access-session-{index}",
+            client_id=client_id,
+            scopes=tuple(scopes),
+            github_user_id=identity.github_user_id,
+            github_login=identity.github_login,
+            expires_at=time.time() + ACCESS_TOKEN_TTL_SECONDS,
+        )
+        call = {"client_id": client_id, "scopes": list(scopes), "identity": identity}
+        self.offline_issue_calls.append(call)
+        self.sessions[access] = record
+        self.refreshes[refresh] = RefreshGrant(
+            family_id=f"family-{index:016d}",
+            sequence=0,
+            client_id=client_id,
+            scopes=tuple(scopes),
+        )
+        return access, record, refresh
+
+    async def validate_refresh(
+        self, token: str, *, client_id: str
+    ) -> RefreshGrant | None:
+        grant = self.refreshes.get(token)
+        return grant if grant is not None and grant.client_id == client_id else None
+
+    async def rotate_refresh(
+        self,
+        token: str,
+        *,
+        client_id: str,
+        scopes: list[str],
+    ) -> tuple[str, FakeRecord, str]:
+        grant = await self.validate_refresh(token, client_id=client_id)
+        if grant is None:
+            raise AssertionError("proxy attempted to rotate an invalid fake refresh")
+        index = len(self.rotate_calls)
+        access = f"rotated-access-{index}"
+        refresh = f"rotated-refresh-{index}"
+        record = FakeRecord(
+            session_id=f"rotated-session-{index}",
+            client_id=client_id,
+            scopes=tuple(scopes),
+            expires_at=time.time() + ACCESS_TOKEN_TTL_SECONDS,
+        )
+        self.rotate_calls.append(
+            {"token": token, "client_id": client_id, "scopes": list(scopes)}
+        )
+        self.sessions[access] = record
+        self.refreshes[refresh] = RefreshGrant(
+            family_id=grant.family_id,
+            sequence=grant.sequence + 1,
+            client_id=client_id,
+            scopes=grant.scopes,
+        )
+        return access, record, refresh
+
     async def validate(self, token: str) -> FakeRecord | None:
         if self.validation_error is not None:
             raise self.validation_error
@@ -174,6 +250,12 @@ class FakeAuthority:
                 del self.sessions[token]
                 return True
         return False
+
+    async def revoke_bearer(self, token: str, *, reason: str) -> bool:
+        self.revoked_bearers.append((token, reason))
+        self.sessions.pop(token, None)
+        self.refreshes.pop(token, None)
+        return True
 
 
 class StubVerifier:
@@ -279,9 +361,9 @@ def _install_token_exchange(
     proxy._upstream_oauth_client = client_factory
 
 
-def _client() -> OAuthClientInformationFull:
+def _client(client_id: str = "codex-client") -> OAuthClientInformationFull:
     return OAuthClientInformationFull(
-        client_id="codex-client",
+        client_id=client_id,
         client_secret="client-secret",
         redirect_uris=[AnyUrl("http://127.0.0.1:8765/callback")],
         token_endpoint_auth_method="client_secret_post",
@@ -317,6 +399,45 @@ def _token_request(*, code: str, code_verifier: str) -> Request:
             "code_verifier": code_verifier,
         }
     ).encode()
+    sent = False
+
+    async def receive() -> dict[str, Any]:
+        nonlocal sent
+        if sent:
+            return {"type": "http.disconnect"}
+        sent = True
+        return {"type": "http.request", "body": body, "more_body": False}
+
+    return Request(
+        {
+            "type": "http",
+            "http_version": "1.1",
+            "method": "POST",
+            "scheme": "https",
+            "path": "/token",
+            "raw_path": b"/token",
+            "query_string": b"",
+            "headers": [
+                (b"content-type", b"application/x-www-form-urlencoded"),
+                (b"content-length", str(len(body)).encode()),
+            ],
+            "client": ("127.0.0.1", 12345),
+            "server": ("memory.example", 443),
+        },
+        receive,
+    )
+
+
+def _refresh_request(refresh_token: str, *, scope: str | None = None) -> Request:
+    values = {
+            "grant_type": "refresh_token",
+            "client_id": "codex-client",
+            "client_secret": "client-secret",
+            "refresh_token": refresh_token,
+    }
+    if scope is not None:
+        values["scope"] = scope
+    body = urlencode(values).encode()
     sent = False
 
     async def receive() -> dict[str, Any]:
@@ -661,6 +782,91 @@ async def test_token_endpoint_omits_expiry_and_refresh_fields() -> None:
 
 
 @pytest.mark.anyio
+async def test_offline_code_exchange_issues_expiring_access_and_refresh_token() -> None:
+    authority = FakeAuthority()
+    proxy = _proxy(authority=authority)
+    code = "offline-downstream-code"
+    await proxy._code_store.put(
+        key=code,
+        value=ClientCode(
+            code=code,
+            client_id="codex-client",
+            redirect_uri="http://127.0.0.1:8765/callback",
+            code_challenge="downstream-pkce-challenge",
+            code_challenge_method="S256",
+            scopes=["offline_access", "exomem:read"],
+            idp_tokens={
+                "exomem_identity": {
+                    "github_user_id": 123456,
+                    "github_login": "person",
+                }
+            },
+            expires_at=int(time.time() + 300),
+            created_at=time.time(),
+        ),
+        ttl=300,
+    )
+
+    token = await proxy.exchange_authorization_code(
+        _client(), _authorization_code(code)
+    )
+
+    assert token.access_token == "local-access-0"
+    assert token.refresh_token == "local-refresh-0"
+    assert token.expires_in == ACCESS_TOKEN_TTL_SECONDS
+    assert token.scope == "offline_access exomem:read"
+    assert authority.issue_calls == []
+    assert len(authority.offline_issue_calls) == 1
+
+
+@pytest.mark.anyio
+async def test_proxy_loads_rotates_and_revokes_exomem_refresh_without_legacy_store() -> None:
+    authority = FakeAuthority()
+    proxy = _proxy(authority=authority)
+    _, _, refresh = await authority.issue_offline(
+        client_id="codex-client",
+        scopes=["offline_access", "exomem:read"],
+        identity=SessionIdentity(github_user_id=123456, github_login="person"),
+    )
+
+    loaded = await proxy.load_refresh_token(_client(), refresh)
+    assert loaded is not None
+    assert loaded.client_id == "codex-client"
+    assert loaded.scopes == ["offline_access", "exomem:read"]
+    assert loaded.expires_at is None
+    assert await proxy.load_refresh_token(_client("other-client"), refresh) is None
+
+    expanded = await TokenHandler(proxy, _ClientAuthenticator()).handle(
+        _refresh_request(refresh, scope="offline_access exomem:admin")
+    )
+    assert expanded.status_code == 400
+    assert json.loads(expanded.body)["error"] == "invalid_scope"
+    assert authority.rotate_calls == []
+
+    response = await TokenHandler(proxy, _ClientAuthenticator()).handle(
+        _refresh_request(refresh)
+    )
+    assert response.status_code == 200
+    rotated = json.loads(response.body)
+    assert rotated["access_token"] == "rotated-access-0"
+    assert rotated["refresh_token"] == "rotated-refresh-0"
+    assert rotated["expires_in"] == ACCESS_TOKEN_TTL_SECONDS
+    assert rotated["scope"] == "offline_access exomem:read"
+    assert authority.rotate_calls == [
+        {
+            "token": refresh,
+            "client_id": "codex-client",
+            "scopes": ["offline_access", "exomem:read"],
+        }
+    ]
+
+    await proxy.revoke_token(loaded)
+    assert authority.revoked_bearers == [
+        (refresh, "oauth-client-revocation")
+    ]
+
+
+@pytest.mark.anyio
 async def test_exchange_rejects_corrupt_boolean_identity_proof() -> None:
     authority = FakeAuthority()
     proxy = _proxy(authority=authority)
@@ -763,9 +969,14 @@ async def test_rfc7009_revocation_tombstones_shared_session_and_unknown_is_succe
         AccessToken(token="session-token", client_id="codex-client", scopes=["exomem:read"])
     )
 
-    assert authority.tombstones == [("session-id", "oauth-client-revocation")]
+    assert authority.revoked_bearers == [
+        ("session-token", "oauth-client-revocation")
+    ]
     assert await proxy.load_access_token("session-token") is None
     await proxy.revoke_token(
         AccessToken(token="unknown", client_id="codex-client", scopes=["exomem:read"])
     )
-    assert authority.tombstones == [("session-id", "oauth-client-revocation")]
+    assert authority.revoked_bearers == [
+        ("session-token", "oauth-client-revocation"),
+        ("unknown", "oauth-client-revocation"),
+    ]

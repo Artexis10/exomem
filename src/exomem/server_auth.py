@@ -24,7 +24,7 @@ from key_value.aio.wrappers.encryption import FernetEncryptionWrapper
 
 from .auth_sessions import SessionAuthority
 from .remote_oauth_storage import ReadThroughMirrorStorage, RemoteOAuthStorage
-from .session_oauth import ExomemSessionOAuthProxy
+from .session_oauth import OAUTH_SUPPORTED_SCOPES, ExomemSessionOAuthProxy
 
 if TYPE_CHECKING:
     from .hosted_runtime import HostedCellConfig
@@ -323,4 +323,5 @@ def build_oauth(*, require_auth: bool, base_url: str) -> OAuthProxy | None:
         base_url=base_url,
         jwt_signing_key=signing_root,
         client_storage=client_storage,
+        valid_scopes=list(OAUTH_SUPPORTED_SCOPES),
     )

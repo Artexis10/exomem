@@ -5,7 +5,7 @@
   "client_registration": "cimd",
   "oidc_enabled": false,
   "default_scopes": [],
-  "base_scopes": [],
+  "base_scopes": ["offline_access"],
   "registered_tool_surface_sha256": null,
   "pending_tool_surface_sha256": "91927b86184f40dd9e99f98bec4c0d31373a807a2333a4eca947771096b9a5bf",
   "refresh_required": true,

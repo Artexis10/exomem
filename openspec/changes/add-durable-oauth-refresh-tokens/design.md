@@ -45,7 +45,7 @@ Alternative considered: rotate a mutable `current_sequence` field with ordinary 
 
 ### 4. Family revocation is authoritative and generation rotation remains the global kill switch
 
-Revoking an `exo_r2` token revokes its complete family. Revoking an `exo_a2` token tombstones that access token only. Reuse detection revokes the family and therefore invalidates every access token bound to it. Replacing the existing signing generation invalidates legacy sessions, v2 access tokens, and refresh families without enumerating records. Unknown tokens still receive RFC 7009's non-disclosing success response.
+Revoking an `exo_r2` or `exo_a2` token revokes its complete family; otherwise an operator or client could "disconnect" an access token and have it silently resurrected through refresh. Reuse detection likewise revokes the family and therefore invalidates every access token bound to it. Replacing the existing signing generation invalidates legacy sessions, v2 access tokens, and refresh families without enumerating records. Unknown tokens still receive RFC 7009's non-disclosing success response.
 
 ### 5. Honest discovery and bounded scope behavior
 

@@ -1,20 +1,20 @@
 ## 1. Token Authority Tests
 
-- [ ] 1.1 Add failing codec and record tests for `exo_a2` access tokens, deterministic `exo_r2` refresh descendants, expiry, encrypted family metadata, and v1 record compatibility.
-- [ ] 1.2 Add failing authority tests for offline issuance, successful rotation, scope narrowing, 30-second retry idempotency, late-replay family revocation, and access invalidation.
-- [ ] 1.3 Add failing shared-storage tests proving concurrent claims, restart/failover behavior, and fail-closed store outages.
+- [x] 1.1 Add failing codec and record tests for `exo_a2` access tokens, deterministic `exo_r2` refresh descendants, expiry, encrypted family metadata, and v1 record compatibility.
+- [x] 1.2 Add failing authority tests for offline issuance, successful rotation, scope narrowing, 30-second retry idempotency, late-replay family revocation, and access invalidation.
+- [x] 1.3 Add failing shared-storage tests proving concurrent claims, restart/failover behavior, and fail-closed store outages.
 
 ## 2. Token Authority Implementation
 
-- [ ] 2.1 Add purpose-separated v2 access/refresh codecs and backward-compatible session record fields without changing `exo_s1` validation.
-- [ ] 2.2 Add encrypted refresh-family and redemption-receipt records plus offline family issuance to `SessionAuthority`.
-- [ ] 2.3 Implement atomic refresh rotation, deterministic retry responses, late-replay family revocation, v2 access expiry/family checks, and refresh/access revocation.
+- [x] 2.1 Add purpose-separated v2 access/refresh codecs and backward-compatible session record fields without changing `exo_s1` validation.
+- [x] 2.2 Add encrypted refresh-family and redemption-receipt records plus offline family issuance to `SessionAuthority`.
+- [x] 2.3 Implement atomic refresh rotation, deterministic retry responses, late-replay family revocation, v2 access expiry/family checks, and refresh/access revocation.
 
 ## 3. OAuth Boundary
 
-- [ ] 3.1 Add failing proxy and HTTP boundary tests for offline authorization-code exchange, refresh loading/exchange, invalid client/scope/grant behavior, RFC 7009 revocation, and absence of GitHub/legacy FastMCP token-store access.
-- [ ] 3.2 Wire the v2 authority into `ExomemSessionOAuthProxy` while retaining legacy issuance for authorization without `offline_access`.
-- [ ] 3.3 Add failing discovery tests, then advertise `offline_access`, `exomem:read`, and `exomem:write` consistently in canonical and compatibility OAuth metadata.
+- [x] 3.1 Add failing proxy and HTTP boundary tests for offline authorization-code exchange, refresh loading/exchange, invalid client/scope/grant behavior, RFC 7009 revocation, and absence of GitHub/legacy FastMCP token-store access.
+- [x] 3.2 Wire the v2 authority into `ExomemSessionOAuthProxy` while retaining legacy issuance for authorization without `offline_access`.
+- [x] 3.3 Add failing discovery tests, then advertise `offline_access`, `exomem:read`, and `exomem:write` consistently in canonical and compatibility OAuth metadata.
 
 ## 4. Verification and Rollout
 

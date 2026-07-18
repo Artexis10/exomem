@@ -27,6 +27,7 @@ from pydantic import AnyUrl
 from starlette.applications import Starlette
 from starlette.requests import Request
 
+from exomem.auth_sessions import InvalidRefreshToken
 from exomem.session_oauth import ExomemSessionOAuthProxy
 
 
@@ -44,11 +45,27 @@ class Verifier:
 class Authority:
     def __init__(self) -> None:
         self.validations: list[str] = []
+        self.refresh_validations: list[str] = []
+        self.revocations: list[str] = []
         self.sessions = {"new-session": object()}
 
     async def validate(self, token: str) -> Any:
         self.validations.append(token)
         return None
+
+    async def validate_refresh(self, token: str, *, client_id: str) -> Any:
+        del client_id
+        self.refresh_validations.append(token)
+        return None
+
+    async def rotate_refresh(self, token: str, **kwargs: Any) -> Any:
+        del kwargs
+        raise InvalidRefreshToken(f"invalid Exomem refresh token: {token[:8]}")
+
+    async def revoke_bearer(self, token: str, *, reason: str) -> bool:
+        del reason
+        self.revocations.append(token)
+        return False
 
 
 def _kwargs(storage: MemoryStore) -> dict[str, Any]:
@@ -240,7 +257,7 @@ async def test_authorize_preserves_downstream_state_pkce_resource_and_redirect()
     proxy.get_routes("/mcp")
     params = AuthorizationParams(
         state="downstream-state",
-        scopes=["exomem:read"],
+        scopes=["offline_access", "exomem:read"],
         code_challenge="downstream-code-challenge",
         redirect_uri=AnyUrl("http://127.0.0.1:8765/callback"),
         redirect_uri_provided_explicitly=True,
@@ -256,9 +273,11 @@ async def test_authorize_preserves_downstream_state_pkce_resource_and_redirect()
     assert transaction.client_state == "downstream-state"
     assert transaction.client_redirect_uri == "http://127.0.0.1:8765/callback"
     assert transaction.code_challenge == "downstream-code-challenge"
+    assert transaction.scopes == ["offline_access", "exomem:read"]
     assert transaction.resource == "https://memory.example/mcp"
     assert transaction.proxy_code_verifier
     assert upstream_query["code_challenge"][0] != "downstream-code-challenge"
+    assert "scope" not in upstream_query
 
 
 @pytest.mark.anyio
@@ -368,7 +387,7 @@ async def test_refresh_and_revocation_paths_never_read_or_mutate_legacy_state(
         monkeypatch.setattr(adapter, "delete", forbidden_legacy_access)
 
     assert await proxy.load_refresh_token(_client(), refresh_token) is None
-    with pytest.raises(TokenError, match="Refresh tokens are not supported"):
+    with pytest.raises(TokenError, match="invalid Exomem refresh token"):
         await proxy.exchange_refresh_token(
             _client(),
             RefreshToken(
@@ -407,6 +426,8 @@ async def test_refresh_and_revocation_paths_never_read_or_mutate_legacy_state(
     )
     assert revoke_response.status_code == 200
     assert authority.validations == [refresh_token]
+    assert authority.refresh_validations
+    assert authority.revocations == []
     assert proxy._token_validator.calls == []
 
     after = {
