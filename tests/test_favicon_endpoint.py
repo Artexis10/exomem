@@ -67,7 +67,7 @@ def test_readiness_endpoint_is_public_and_content_free(
     monkeypatch.setattr(
         runtime_readiness,
         "runtime_readiness",
-        lambda: {
+        lambda **_kwargs: {
             "status": "ready",
             "service": "exomem",
             "release": "1.2.3",
@@ -101,7 +101,7 @@ def test_readiness_endpoint_returns_503_without_changing_liveness(
     monkeypatch.setattr(
         runtime_readiness,
         "runtime_readiness",
-        lambda: {
+        lambda **_kwargs: {
             "status": "not_ready",
             "service": "exomem",
             "release": "1.2.3",

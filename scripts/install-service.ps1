@@ -296,5 +296,24 @@ try {
     Write-Warning "Service is still installed and running; you can grant manually later."
 }
 
-Write-Host "Installed and started service '$ServiceName' bound to ${BindHost}:${Port}."
+$connectorPending = $false
+$connectorContractPath = Join-Path $repoRoot "deploy\chatgpt\personal-plugin-contract.json"
+if (Test-Path $connectorContractPath) {
+    try {
+        $connectorContract = Get-Content -Raw $connectorContractPath | ConvertFrom-Json
+        $connectorPending = $connectorContract.refresh_required -eq $true
+    } catch {
+        Write-Warning "Could not read ChatGPT connector rollout contract: $_"
+    }
+}
+
+if ($connectorPending) {
+    Write-Warning "CHATGPT_PLUGIN_REFRESH_REQUIRED: service is running, but connector rollout is incomplete."
+    Write-Host "  Confirm /health/ready.mcp_tool_surface_sha256 matches pending_tool_surface_sha256."
+    Write-Host "  Refresh or recreate the ChatGPT Personal Plugin, then invoke bootstrap and ask_memory from a fresh conversation."
+    Write-Host "  Promote the pending digest to registered_tool_surface_sha256 only after that smoke test passes."
+    Write-Host "Installed and started service '$ServiceName' bound to ${BindHost}:${Port}; connector promotion remains pending."
+} else {
+    Write-Host "Installed, started, and connector-cleared service '$ServiceName' bound to ${BindHost}:${Port}."
+}
 Write-Host "Logs: $logDir\service.out.log (stdout), service.err.log (stderr), exomem.log (app)"

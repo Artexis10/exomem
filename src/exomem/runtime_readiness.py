@@ -22,7 +22,10 @@ def package_release() -> str:
 
 
 def build_runtime_readiness(
-    *, coordination: Mapping[str, Any], release: str
+    *,
+    coordination: Mapping[str, Any],
+    release: str,
+    mcp_tool_surface_sha256: str | None,
 ) -> dict[str, Any]:
     """Build the public readiness payload from already-measured coordination state."""
     enabled = bool(coordination.get("enabled"))
@@ -32,6 +35,8 @@ def build_runtime_readiness(
     replica_id = replica_raw if isinstance(replica_raw, str) and replica_raw else None
 
     reasons: list[str] = []
+    if mcp_tool_surface_sha256 is None:
+        reasons.append("mcp_tool_surface_unavailable")
     if enabled:
         if not healthy:
             reasons.append("coordinator_unavailable")
@@ -45,6 +50,7 @@ def build_runtime_readiness(
         "status": "ready" if takeover_eligible else "not_ready",
         "service": "exomem",
         "release": release,
+        "mcp_tool_surface_sha256": mcp_tool_surface_sha256,
         "runtime_contract": RUNTIME_CONTRACT,
         "transport": HTTP_TRANSPORT,
         "replica_id": replica_id,
@@ -58,7 +64,7 @@ def build_runtime_readiness(
     }
 
 
-def runtime_readiness() -> dict[str, Any]:
+def runtime_readiness(*, mcp_tool_surface_sha256: str | None) -> dict[str, Any]:
     """Measure this process's eligibility without exposing vault or credential state."""
     from .writer_lease import coordination_status
 
@@ -71,4 +77,8 @@ def runtime_readiness() -> dict[str, Any]:
             "replica_id": os.environ.get("EXOMEM_WRITER_LEASE_REPLICA_ID") or None,
             "coordinator_healthy": False,
         }
-    return build_runtime_readiness(coordination=coordination, release=package_release())
+    return build_runtime_readiness(
+        coordination=coordination,
+        release=package_release(),
+        mcp_tool_surface_sha256=mcp_tool_surface_sha256,
+    )

@@ -337,6 +337,9 @@ Claude Code skill. Connect Exomem through whatever remote MCP/connector support
 the client offers, then add the instruction block above as account-level or
 project-level custom instructions.
 
+For ChatGPT Personal Plugins, follow the exact OAuth-only settings and
+tool-surface refresh gate in [remote-quickstart.md](remote-quickstart.md#chatgpt-personal-plugin-oauth-only).
+
 If the hosted client cannot reliably call `bootstrap()` on its own, start a new
 chat with:
 

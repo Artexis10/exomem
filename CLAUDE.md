@@ -69,7 +69,7 @@ decisions, and reusable conclusions.
 ## Connector triage ("MCP not working" / slow first call / forced reconnect)
 
 claude.ai connector problems are almost always **connection-side, not the service**.
-The public ingress is a **Cloudflare Tunnel** (`kb.substratesystems.io`, cloudflared
+The public ingress is a **Cloudflare Tunnel** (`exomem.substratesystems.io`, cloudflared
 Windows service; migrated FROM Tailscale Funnel 2026-06-21 — the funnel throttled
 connector bursts, KB note `kb-mcp-ingress-migrated-to-cloudflare-tunnel-…`). Known
 connection-side patterns: (1) a long-lived claude.ai session's **first MCP call

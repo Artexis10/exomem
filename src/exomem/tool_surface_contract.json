@@ -1,0 +1,16 @@
+{
+  "contract_version": 1,
+  "fields": [
+    "name",
+    "title",
+    "description",
+    "inputSchema",
+    "outputSchema",
+    "icons",
+    "annotations",
+    "meta",
+    "execution"
+  ],
+  "tool_count": 25,
+  "sha256": "91927b86184f40dd9e99f98bec4c0d31373a807a2333a4eca947771096b9a5bf"
+}

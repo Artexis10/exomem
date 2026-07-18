@@ -216,12 +216,13 @@ def op_bootstrap(
         package_version = "0+unknown"
 
     from . import mode as mode_module
+    from . import tool_surface as tool_surface_module
 
     compute_policy = mode_module.resolved()
     requested_workflow = workflow.strip() if workflow and workflow.strip() else "general"
     selected_packs = knowledge_packs_module.selected_pack_state(vault_root)
     payload: dict = {
-        "contract_version": "2026-07-16.2",
+        "contract_version": "2026-07-18.1",
         "profile": profile,
         "server": {
             "name": "exomem",
@@ -229,6 +230,7 @@ def op_bootstrap(
             "kb_dir": kb_dirname(),
             "pure_substrate": True,
             "content_included": False,
+            "published_mcp_tool_surface_sha256": tool_surface_module.sha256(),
             "compute_policy": compute_policy,
         },
         "memory_model": {
