@@ -16,7 +16,12 @@ def test_standalone_runtime_is_ready_without_multi_host_coordination() -> None:
             "coordinator_healthy": True,
         },
         release="1.2.3",
+        mcp_tool_surface_sha256="a" * 64,
     )
+
+    fingerprint = snapshot.pop("mcp_tool_surface_sha256", None)
+    assert isinstance(fingerprint, str)
+    assert fingerprint == "a" * 64
 
     assert snapshot == {
         "status": "ready",
@@ -47,6 +52,7 @@ def test_healthy_coordinated_follower_is_takeover_eligible() -> None:
             "coordinator_healthy": True,
         },
         release="1.2.4",
+        mcp_tool_surface_sha256="b" * 64,
     )
 
     assert snapshot["status"] == "ready"
@@ -72,6 +78,7 @@ def test_coordinator_outage_is_not_ready_and_uses_stable_reason() -> None:
             "coordinator_healthy": False,
         },
         release="1.2.3",
+        mcp_tool_surface_sha256="c" * 64,
     )
 
     assert snapshot["status"] == "not_ready"
@@ -88,6 +95,7 @@ def test_missing_replica_identity_is_not_ready_when_coordination_enabled() -> No
             "coordinator_healthy": True,
         },
         release="1.2.3",
+        mcp_tool_surface_sha256="d" * 64,
     )
 
     assert snapshot["status"] == "not_ready"

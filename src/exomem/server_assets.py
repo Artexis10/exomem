@@ -12,6 +12,7 @@ from starlette.requests import Request
 from starlette.responses import FileResponse, JSONResponse, RedirectResponse
 
 from . import runtime_readiness as runtime_readiness_module
+from . import tool_surface as tool_surface_module
 
 _STUDIO_SECURITY_HEADERS = {
     "Content-Security-Policy": (
@@ -104,7 +105,17 @@ def register_asset_routes(mcp_app: FastMCP) -> None:
     @mcp_app.custom_route("/health/ready", methods=["GET"])
     async def _runtime_ready(request: Request) -> JSONResponse:  # noqa: ARG001
         """Content-free admission probe; liveness remains the separate /health route."""
-        snapshot = runtime_readiness_module.runtime_readiness()
+        digest = getattr(mcp_app, "_exomem_tool_surface_sha256", None)
+        if digest is None:
+            try:
+                live = await tool_surface_module.live_contract(mcp_app)
+                digest = live["sha256"]
+                mcp_app._exomem_tool_surface_sha256 = digest
+            except Exception:  # noqa: BLE001 - readiness must stay structured
+                digest = None
+        snapshot = runtime_readiness_module.runtime_readiness(
+            mcp_tool_surface_sha256=digest
+        )
         status_code = 200 if snapshot["status"] == "ready" else 503
         return JSONResponse(
             snapshot,

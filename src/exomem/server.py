@@ -216,8 +216,6 @@ def build_server(*, require_auth: bool) -> FastMCP:
                 else (runtime.vault_root,)
             )
             description = cmd.doc
-            if cmd.name == "remember":
-                description = commands_module.remember_description(runtime.project_keys_hint)
             mcp.tool(
                 commands_module.bind_vault(
                     cmd.leaf,
@@ -371,8 +369,6 @@ def _register_legacy_mcp_tools(
             continue
         injected = (vault_root, source_schema) if cmd.needs_schema else (vault_root,)
         description = cmd.doc
-        if cmd.name == "note":
-            description = commands_module.remember_description(project_keys_hint)
         mcp.tool(
             commands_module.bind_vault(
                 cmd.leaf,

@@ -214,6 +214,38 @@ Then add Exomem behavior to the hosted client. Paste the instruction block from
 [ai-assistant-guide.md](ai-assistant-guide.md), or at minimum start new chats by
 asking it to call `bootstrap(profile="compact")` once before using the KB.
 
+### ChatGPT Personal Plugin (OAuth only)
+
+Create the Personal Plugin with MCP Server URL `https://<host>/mcp` and
+Authentication set to **OAuth**. Keep the discovered authorization, token,
+registration, authorization-server, resource, CIMD metadata, and callback
+values. Leave **Default scopes** and **Base scopes** blank, and turn **OIDC
+enabled** off. Exomem deliberately provides OAuth authorization-code flow, not
+OpenID identity claims; the compatibility discovery alias is not permission to
+invent a `userinfo` endpoint. In particular, never accept a placeholder such as
+`https://example.com` for that field.
+
+Tool-surface changes use a truthful two-phase rollout. Before release, record
+the new packaged digest as `pending_tool_surface_sha256` with
+`refresh_required: true`; do not claim it is already registered. After the new
+service is deployed, confirm `/health/ready.mcp_tool_surface_sha256` matches the
+pending digest, refresh or recreate the Personal Plugin, and verify from a fresh
+conversation that `bootstrap` and `ask_memory` both invoke. Only then promote
+the pending digest to `registered_tool_surface_sha256`, clear the pending value,
+and set `refresh_required: false`. The release gate accepts an explicit pending
+rollout but blocks an unacknowledged schema change. The post-deploy promotion is
+a manual attestation because ChatGPT exposes no API for reading its registered
+plugin snapshot.
+
+`bootstrap.server.published_mcp_tool_surface_sha256` identifies the packaged
+canonical surface; `/health/ready` fingerprints the tools actually registered
+by that process, including configuration differences. Tool discovery alone is
+not proof that calls are routable. If an existing conversation says it is
+restricted to developer MCPs, advertises a missing resource, or keeps the
+previous schema after refresh, that conversation's host policy is poisoned: use
+a fresh conversation. Server or plugin changes cannot repair policy state
+already frozen into that thread.
+
 ## ngrok free-tier limits
 
 - **120 requests/minute**, **~20,000 requests/month** per endpoint.
@@ -234,6 +266,8 @@ asking it to call `bootstrap(profile="compact")` once before using the KB.
 | "Couldn't reach the MCP server" during connector add | OAuth discovery failed | See [deployment.md's troubleshooting table](deployment.md#troubleshooting) — the rest of the fixes there apply regardless of ingress profile. |
 | An existing connector gets one `401 invalid_token` immediately after the durable-session cutover | Its legacy FastMCP reference token is intentionally no longer accepted | Complete one final browser login. Do not delete or recreate the connector. |
 | Tools return `503` without an OAuth challenge | The authoritative session store is unavailable, not the login | Repair coordinator/network/storage health and retry. Re-authorizing cannot fix a 503. |
+| ChatGPT enables OIDC or proposes `https://example.com` as `userinfo` | The Personal Plugin UI inferred OpenID from Exomem's OAuth compatibility alias | Turn OIDC off, leave scopes blank, and keep the discovered OAuth/CIMD endpoints. |
+| ChatGPT discovers tools but invocation says `Resource not found` | Its registered tool snapshot is older than the deployed MCP surface | Refresh or recreate the Personal Plugin, verify the tool-surface fingerprint, then test from a fresh conversation. |
 
 For everything else — service management, GPU/CUDA, revoking access,
 restarting, logs, multi-host setups — see [deployment.md](deployment.md).

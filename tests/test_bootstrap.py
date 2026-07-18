@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -33,6 +34,9 @@ def test_bootstrap_compact_contract_is_public_safe(vault: Path) -> None:
     assert out["server"]["name"] == "exomem"
     assert out["server"]["content_included"] is False
     assert out["server"]["pure_substrate"] is True
+    assert re.fullmatch(
+        r"[0-9a-f]{64}", out["server"]["published_mcp_tool_surface_sha256"]
+    )
     assert "compute_policy" in out["server"]
     assert {
         "workflow",
@@ -119,7 +123,7 @@ def test_bootstrap_teaches_human_readable_memory_citations(vault: Path) -> None:
     out = commands.op_bootstrap(vault)
     guidance = json.dumps(out["workflow"]).lower()
 
-    assert out["contract_version"] == "2026-07-16.2"
+    assert out["contract_version"] == "2026-07-18.1"
     for required in (
         "show the note title by default",
         "normal user-facing prose",

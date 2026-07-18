@@ -174,3 +174,11 @@ def test_openid_discovery_alias_returns_oauth_metadata() -> None:
     assert metadata["token_endpoint"] == "https://memory.example/token"
     assert metadata["registration_endpoint"] == "https://memory.example/register"
     assert metadata["code_challenge_methods_supported"] == ["S256"]
+    assert "openid" not in metadata["scopes_supported"]
+    for oidc_only_field in (
+        "userinfo_endpoint",
+        "jwks_uri",
+        "subject_types_supported",
+        "id_token_signing_alg_values_supported",
+    ):
+        assert oidc_only_field not in metadata

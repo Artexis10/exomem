@@ -75,8 +75,34 @@ jobs:
               raise SystemExit(f"pyproject version {actual} does not match release tag {expected}")
           PY
 
+      - name: Validate external connector rollout state
+        run: >-
+          uv run --frozen pytest
+          tests/test_connector_guardrails.py
+          tests/test_mcp_schema_fidelity.py
+          tests/test_runtime_readiness.py
+          tests/test_bootstrap.py
+          tests/test_server_transport.py
+          -q
+
       - name: Build package artifacts
         run: uv build
+
+      - name: Smoke packaged connector fingerprint
+        run: |
+          python - <<'PY'
+          import glob
+          import sys
+
+          [wheel] = glob.glob("dist/*.whl")
+          sys.path.insert(0, wheel)
+          from exomem.tool_surface import contract, sha256
+
+          payload = contract()
+          assert payload["tool_count"] > 0
+          assert payload["sha256"] == sha256()
+          print(payload["tool_count"], payload["sha256"])
+          PY
 
       - name: Upload artifacts to GitHub release
         env:

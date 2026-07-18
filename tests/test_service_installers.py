@@ -382,5 +382,8 @@ def test_windows_installer_gates_remote_and_verifies_before_success() -> None:
     assert "function Test-McpEndpoint" in text
     assert "-SkipHttpErrorCheck" in text
     assert "OAuth is not enforced" in text
+    assert "CHATGPT_PLUGIN_REFRESH_REQUIRED" in text
+    assert "connector rollout is incomplete" in text
     assert text.index("Preflight: exomem doctor --profile remote") < text.index("& $NssmPath install")
     assert text.index("Test-McpEndpoint -HostName") < text.index("Granted no-UAC")
+    assert text.index("Test-McpEndpoint -HostName") < text.index("CHATGPT_PLUGIN_REFRESH_REQUIRED")
