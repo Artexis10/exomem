@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import multiprocessing
+import time
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -10,6 +11,9 @@ from typing import Any
 import pytest
 
 from exomem.auth_sessions import (
+    ACCESS_TOKEN_TTL_SECONDS,
+    REFRESH_RETRY_GRACE_SECONDS,
+    InvalidRefreshToken,
     SessionAuthority,
     SessionIdentity,
     SessionStoreUnavailable,
@@ -22,7 +26,9 @@ from exomem.auth_sessions import (
 class AtomicMemoryStore:
     def __init__(self) -> None:
         self.data: dict[tuple[str | None, str], dict[str, Any]] = {}
+        self.expiries: dict[tuple[str | None, str], float] = {}
         self.calls: list[tuple[str, str | None, str]] = []
+        self.clock = time.time
         self.pause_after_session_put = False
         self.session_written = asyncio.Event()
         self.resume_session_put = asyncio.Event()
@@ -33,6 +39,11 @@ class AtomicMemoryStore:
         self.calls.append(("get", collection, key))
         if self.fail_get:
             raise OSError("store unavailable")
+        storage_key = (collection, key)
+        expires_at = self.expiries.get(storage_key)
+        if expires_at is not None and self.clock() >= expires_at:
+            self.data.pop(storage_key, None)
+            self.expiries.pop(storage_key, None)
         value = self.data.get((collection, key))
         return dict(value) if value is not None else None
 
@@ -44,9 +55,12 @@ class AtomicMemoryStore:
         collection: str | None = None,
         ttl: float | None = None,
     ) -> None:
-        del ttl
         self.calls.append(("put", collection, key))
         self.data[(collection, key)] = dict(value)
+        if ttl is None:
+            self.expiries.pop((collection, key), None)
+        else:
+            self.expiries[(collection, key)] = self.clock() + ttl
         if self.pause_after_session_put and collection and "sessions" in collection:
             self.pause_after_session_put = False
             self.session_written.set()
@@ -60,11 +74,17 @@ class AtomicMemoryStore:
         collection: str | None = None,
         ttl: float | None = None,
     ) -> bool:
-        del ttl
         async with self._lock:
+            storage_key = (collection, key)
+            expires_at = self.expiries.get(storage_key)
+            if expires_at is not None and self.clock() >= expires_at:
+                self.data.pop(storage_key, None)
+                self.expiries.pop(storage_key, None)
             if (collection, key) in self.data:
                 return False
             self.data[(collection, key)] = dict(value)
+            if ttl is not None:
+                self.expiries[(collection, key)] = self.clock() + ttl
         if self.pause_after_session_put and collection and "sessions" in collection:
             self.pause_after_session_put = False
             self.session_written.set()
@@ -152,13 +172,14 @@ def _authority(
     signing_root: str = "test-signing-root",
     issuer: str = "https://memory.example",
     audience: str = "https://memory.example/mcp",
+    clock: Any = None,
 ) -> SessionAuthority:
     return SessionAuthority(
         storage=store,
         signing_root=signing_root,
         issuer=issuer,
         audience=audience,
-        clock=lambda: 1_800_000_000.0,
+        clock=clock or (lambda: 1_800_000_000.0),
     )
 
 
@@ -263,6 +284,228 @@ async def test_issue_validate_list_and_tombstone_without_storing_bearer() -> Non
     assert revoked.status == "revoked"
     assert revoked.revoked_at == 1_800_000_000.0
     assert revoked.revocation_reason == "operator"
+
+
+@pytest.mark.anyio
+async def test_literal_pre_0242_session_mapping_still_validates_lists_and_revokes() -> None:
+    raw = AtomicMemoryStore()
+    authority = _authority(raw)
+    generation = await authority.current_generation()
+    bearer, session_id, digest = authority.codec.issue()
+    legacy_mapping = {
+        "schema_version": 1,
+        "session_id": session_id,
+        "token_digest": digest,
+        "client_id": "codex",
+        "scopes": ["exomem:read"],
+        "issuer": "https://memory.example",
+        "audience": "https://memory.example/mcp",
+        "github_user_id": 123456,
+        "github_login": "person",
+        "issued_at": 1_800_000_000.0,
+        "generation": generation,
+        "status": "active",
+        "revoked_at": None,
+        "revocation_reason": None,
+    }
+    assert "expires_at" not in legacy_mapping and "family_id" not in legacy_mapping
+    await authority._storage.put(
+        session_id,
+        legacy_mapping,
+        collection=authority.sessions_collection,
+    )
+
+    validated = await authority.validate(bearer)
+    assert validated is not None and validated.schema_version == 1
+    assert validated.expires_at is None and validated.family_id is None
+    assert await authority.list_sessions() == [validated]
+    assert await authority.tombstone(session_id, reason="operator")
+    assert await authority.validate(bearer) is None
+
+
+@pytest.mark.anyio
+async def test_offline_issue_creates_one_hour_access_and_unstored_refresh_token() -> None:
+    raw = AtomicMemoryStore()
+    authority = _authority(raw)
+
+    access, record, refresh = await authority.issue_offline(
+        client_id="chatgpt",
+        scopes=("offline_access", "exomem:read"),
+        identity=_identity(),
+    )
+
+    assert access.startswith("exo_a2.")
+    assert refresh.startswith("exo_r2.")
+    assert record.schema_version == 2
+    assert record.expires_at == record.issued_at + ACCESS_TOKEN_TTL_SECONDS
+    assert record.family_id
+    assert await authority.validate(access) == record
+    grant = await authority.validate_refresh(refresh, client_id="chatgpt")
+    assert grant is not None
+    assert grant.scopes == ("offline_access", "exomem:read")
+    assert access not in repr(raw.data)
+    assert refresh not in repr(raw.data)
+    assert all("__encrypted_data__" in value for value in raw.data.values())
+
+
+@pytest.mark.anyio
+async def test_refresh_rotation_is_cross_authority_idempotent_then_revokes_on_replay() -> None:
+    raw = AtomicMemoryStore()
+    now = [1_800_000_000.0]
+    raw.clock = lambda: now[0]
+    first = _authority(raw, clock=lambda: now[0])
+    second = _authority(raw, clock=lambda: now[0])
+    access, _, refresh = await first.issue_offline(
+        client_id="chatgpt",
+        scopes=("offline_access", "exomem:read"),
+        identity=_identity(),
+    )
+
+    rotated_a, rotated_record_a, next_refresh_a = await first.rotate_refresh(
+        refresh,
+        client_id="chatgpt",
+        scopes=("offline_access", "exomem:read"),
+    )
+    now[0] += REFRESH_RETRY_GRACE_SECONDS - 1
+    rotated_b, rotated_record_b, next_refresh_b = await second.rotate_refresh(
+        refresh,
+        client_id="chatgpt",
+        scopes=("offline_access", "exomem:read"),
+    )
+
+    assert next_refresh_a == next_refresh_b
+    assert rotated_a != rotated_b
+    assert await first.validate(rotated_a) == rotated_record_a
+    assert await second.validate(rotated_b) == rotated_record_b
+
+    now[0] += 2
+    with pytest.raises(InvalidRefreshToken, match="reuse"):
+        await second.rotate_refresh(
+            refresh,
+            client_id="chatgpt",
+            scopes=("offline_access", "exomem:read"),
+        )
+
+    assert await first.validate(access) is None
+    assert await first.validate(rotated_a) is None
+    assert await first.validate_refresh(next_refresh_a, client_id="chatgpt") is None
+
+
+@pytest.mark.anyio
+async def test_refresh_grace_uses_store_time_not_replica_clocks() -> None:
+    raw = AtomicMemoryStore()
+    store_now = [1_800_000_000.0]
+    raw.clock = lambda: store_now[0]
+    ahead = _authority(raw, clock=lambda: store_now[0] + 3600)
+    behind = _authority(raw, clock=lambda: store_now[0] - 3600)
+    _, _, refresh = await ahead.issue_offline(
+        client_id="chatgpt",
+        scopes=("offline_access",),
+        identity=_identity(),
+    )
+
+    first = await ahead.rotate_refresh(
+        refresh,
+        client_id="chatgpt",
+        scopes=("offline_access",),
+    )
+    concurrent = await behind.rotate_refresh(
+        refresh,
+        client_id="chatgpt",
+        scopes=("offline_access",),
+    )
+    assert first[2] == concurrent[2]
+
+    store_now[0] += REFRESH_RETRY_GRACE_SECONDS + 1
+    with pytest.raises(InvalidRefreshToken, match="reuse"):
+        await behind.rotate_refresh(
+            refresh,
+            client_id="chatgpt",
+            scopes=("offline_access",),
+        )
+    assert await ahead.validate(first[0]) is None
+
+
+@pytest.mark.anyio
+async def test_late_replay_wins_race_with_current_refresh_issuance() -> None:
+    raw = AtomicMemoryStore()
+    now = [1_800_000_000.0]
+    raw.clock = lambda: now[0]
+    first = _authority(raw, clock=lambda: now[0])
+    second = _authority(raw, clock=lambda: now[0])
+    _, _, old_refresh = await first.issue_offline(
+        client_id="chatgpt",
+        scopes=("offline_access",),
+        identity=_identity(),
+    )
+    prior_access, _, current_refresh = await first.rotate_refresh(
+        old_refresh,
+        client_id="chatgpt",
+        scopes=("offline_access",),
+    )
+    now[0] += REFRESH_RETRY_GRACE_SECONDS + 1
+    raw.pause_after_session_put = True
+
+    current_task = asyncio.create_task(
+        second.rotate_refresh(
+            current_refresh,
+            client_id="chatgpt",
+            scopes=("offline_access",),
+        )
+    )
+    await raw.session_written.wait()
+    with pytest.raises(InvalidRefreshToken, match="reuse"):
+        await first.rotate_refresh(
+            old_refresh,
+            client_id="chatgpt",
+            scopes=("offline_access",),
+        )
+    raw.resume_session_put.set()
+
+    with pytest.raises(InvalidRefreshToken, match="inactive"):
+        await current_task
+    assert await first.validate(prior_access) is None
+    assert await first.validate_refresh(current_refresh, client_id="chatgpt") is None
+    family_records = [
+        record for record in await first.list_sessions() if record.family_id is not None
+    ]
+    assert any(record.status == "revoked" for record in family_records)
+
+
+@pytest.mark.anyio
+async def test_offline_access_expiry_revocation_and_generation_fail_closed() -> None:
+    raw = AtomicMemoryStore()
+    now = [1_800_000_000.0]
+    authority = _authority(raw, clock=lambda: now[0])
+    access, record, refresh = await authority.issue_offline(
+        client_id="chatgpt",
+        scopes=("offline_access",),
+        identity=_identity(),
+    )
+
+    now[0] = record.expires_at
+    assert await authority.validate(access) is None
+    assert await authority.validate_refresh(refresh, client_id="other") is None
+    assert await authority.validate_refresh(refresh, client_id="chatgpt") is not None
+
+    assert await authority.revoke_bearer(access, reason="oauth-client-revocation")
+    assert await authority.validate_refresh(refresh, client_id="chatgpt") is None
+
+    _, tombstone_record, tombstone_refresh = await authority.issue_offline(
+        client_id="chatgpt",
+        scopes=("offline_access",),
+        identity=_identity(),
+    )
+    assert await authority.tombstone(tombstone_record.session_id, reason="operator")
+    assert await authority.validate_refresh(tombstone_refresh, client_id="chatgpt") is None
+
+    _, _, another_refresh = await authority.issue_offline(
+        client_id="chatgpt",
+        scopes=("offline_access",),
+        identity=_identity(),
+    )
+    await authority.replace_generation()
+    assert await authority.validate_refresh(another_refresh, client_id="chatgpt") is None
 
 
 @pytest.mark.anyio

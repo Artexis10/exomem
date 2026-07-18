@@ -6,7 +6,7 @@ import logging
 import secrets
 import time
 from typing import Any
-from urllib.parse import urlencode
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import httpx
 from fastmcp.server.auth.auth import AccessToken
@@ -18,16 +18,27 @@ from fastmcp.server.auth.oauth_proxy.models import (
 )
 from fastmcp.server.auth.oauth_proxy.ui import create_error_html
 from mcp.server.auth.provider import AuthorizationCode, RefreshToken, TokenError
+from mcp.server.auth.routes import create_protected_resource_routes
 from mcp.server.auth.settings import RevocationOptions
 from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
 from starlette.middleware import Middleware
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse
+from starlette.routing import Route
 from typing_extensions import override
 
-from .auth_sessions import SessionAuthority, SessionIdentity, SessionStoreUnavailable
+from .auth_sessions import (
+    ACCESS_TOKEN_TTL_SECONDS,
+    InvalidRefreshToken,
+    SessionAuthority,
+    SessionIdentity,
+    SessionStoreUnavailable,
+)
 
 logger = logging.getLogger(__name__)
+
+OAUTH_AUTHORIZATION_SCOPES = ("offline_access", "exomem:read", "exomem:write")
+OAUTH_RESOURCE_SCOPES = ("exomem:read", "exomem:write")
 
 
 class SessionStoreUnavailableMiddleware:
@@ -111,17 +122,27 @@ class ExomemSessionOAuthProxy(OAuthProxy):
         if client.client_id is None:
             raise TokenError("invalid_client", "Client ID is required")
         scopes = list(code_model.scopes)
-        bearer, _ = await self._session_authority.issue(
-            client_id=client.client_id,
-            scopes=scopes,
-            identity=identity,
-        )
+        refresh_token: str | None = None
+        if "offline_access" in scopes:
+            bearer, _, refresh_token = await self._session_authority.issue_offline(
+                client_id=client.client_id,
+                scopes=scopes,
+                identity=identity,
+            )
+            expires_in: int | None = ACCESS_TOKEN_TTL_SECONDS
+        else:
+            bearer, _ = await self._session_authority.issue(
+                client_id=client.client_id,
+                scopes=scopes,
+                identity=identity,
+            )
+            expires_in = None
         return OAuthToken(
             access_token=bearer,
             token_type="Bearer",
-            expires_in=None,
+            expires_in=expires_in,
             scope=" ".join(scopes) or None,
-            refresh_token=None,
+            refresh_token=refresh_token,
         )
 
     @override
@@ -133,7 +154,9 @@ class ExomemSessionOAuthProxy(OAuthProxy):
             token=token,
             client_id=record.client_id,
             scopes=list(record.scopes),
-            expires_at=None,
+            expires_at=(
+                None if record.expires_at is None else int(record.expires_at)
+            ),
             resource=record.audience,
             claims={
                 "sub": str(record.github_user_id),
@@ -150,9 +173,21 @@ class ExomemSessionOAuthProxy(OAuthProxy):
         client: OAuthClientInformationFull,
         refresh_token: str,
     ) -> RefreshToken | None:
-        """Refuse refresh without consulting preserved FastMCP legacy state."""
-        del client, refresh_token
-        return None
+        """Load only an Exomem-owned refresh grant, never FastMCP legacy state."""
+        if client.client_id is None:
+            return None
+        grant = await self._session_authority.validate_refresh(
+            refresh_token,
+            client_id=client.client_id,
+        )
+        if grant is None:
+            return None
+        return RefreshToken(
+            token=refresh_token,
+            client_id=grant.client_id,
+            scopes=list(grant.scopes),
+            expires_at=None,
+        )
 
     @override
     async def exchange_refresh_token(
@@ -161,17 +196,30 @@ class ExomemSessionOAuthProxy(OAuthProxy):
         refresh_token: RefreshToken,
         scopes: list[str],
     ) -> OAuthToken:
-        """Defensively prevent callers from re-entering FastMCP's legacy flow."""
-        del client, refresh_token, scopes
-        raise TokenError("invalid_grant", "Refresh tokens are not supported")
+        """Rotate an Exomem refresh token through the shared session authority."""
+        if client.client_id is None:
+            raise TokenError("invalid_client", "Client ID is required")
+        normalized_scopes = list(dict.fromkeys(scopes))
+        try:
+            access, record, next_refresh = await self._session_authority.rotate_refresh(
+                refresh_token.token,
+                client_id=client.client_id,
+                scopes=normalized_scopes,
+            )
+        except InvalidRefreshToken as error:
+            raise TokenError("invalid_grant", str(error)) from error
+        return OAuthToken(
+            access_token=access,
+            token_type="Bearer",
+            expires_in=ACCESS_TOKEN_TTL_SECONDS,
+            scope=" ".join(record.scopes) or None,
+            refresh_token=next_refresh,
+        )
 
     @override
     async def revoke_token(self, token: AccessToken | RefreshToken) -> None:
-        record = await self._session_authority.validate(token.token)
-        if record is None:
-            return
-        await self._session_authority.tombstone(
-            record.session_id,
+        await self._session_authority.revoke_bearer(
+            token.token,
             reason="oauth-client-revocation",
         )
 
@@ -181,6 +229,43 @@ class ExomemSessionOAuthProxy(OAuthProxy):
             Middleware(SessionStoreUnavailableMiddleware),
             *super().get_middleware(),
         ]
+
+    @override
+    def get_routes(self, mcp_path: str | None = None) -> list[Route]:
+        """Keep protocol-only scopes out of protected-resource metadata."""
+        routes = super().get_routes(mcp_path)
+        if self._resource_url is None or self.issuer_url is None:
+            return routes
+        resource_routes = create_protected_resource_routes(
+            resource_url=self._resource_url,
+            authorization_servers=[self.issuer_url],
+            scopes_supported=list(OAUTH_RESOURCE_SCOPES),
+        )
+        replacements = {route.path: route for route in resource_routes}
+        return [replacements.get(route.path, route) for route in routes]
+
+    @override
+    def _build_upstream_authorize_url(
+        self,
+        txn_id: str,
+        transaction: dict[str, Any],
+    ) -> str:
+        """Keep Exomem protocol scopes out of the GitHub identity request."""
+        upstream = super()._build_upstream_authorize_url(
+            txn_id,
+            {**transaction, "scopes": []},
+        )
+        parts = urlsplit(upstream)
+        query = urlencode(
+            [(key, value) for key, value in parse_qsl(parts.query) if key != "scope"]
+        )
+        return urlunsplit((parts.scheme, parts.netloc, parts.path, query, parts.fragment))
+
+    @override
+    def _prepare_scopes_for_token_exchange(self, scopes: list[str]) -> list[str]:
+        """GitHub proves identity only; downstream Exomem scopes stay local."""
+        del scopes
+        return []
 
     async def _cleanup_github_token(self, access_token: str) -> None:
         if self._upstream_client_secret is None:

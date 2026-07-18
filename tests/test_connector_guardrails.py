@@ -26,7 +26,7 @@ def test_chatgpt_personal_plugin_tracks_current_tool_surface_rollout() -> None:
     assert plugin["client_registration"] == "cimd"
     assert plugin["oidc_enabled"] is False
     assert plugin["default_scopes"] == []
-    assert plugin["base_scopes"] == []
+    assert plugin["base_scopes"] == ["offline_access"]
     registered = plugin["registered_tool_surface_sha256"]
     pending = plugin["pending_tool_surface_sha256"]
     if registered == surface["sha256"]:
@@ -65,4 +65,5 @@ def test_remote_quickstart_documents_chatgpt_oauth_only_setup() -> None:
     assert "https://<host>/mcp" in guide
     assert "oidc" in guide and "off" in guide
     assert "default scopes" in guide and "blank" in guide
+    assert "base scopes" in guide and "offline_access" in guide
     assert "fresh conversation" in guide
