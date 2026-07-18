@@ -219,15 +219,17 @@ def test_delete_detects_directory(vault: Path, monkeypatch) -> None:
     assert not d.exists()
 
 
-# ---------------- note: project key description is dynamic + open ----------------
+# ---------------- note: project key description is stable + open ----------------
 
-def test_remember_project_description_is_dynamic_and_open(vault: Path, monkeypatch) -> None:
-    """The `remember` tool schema must advertise the live project-key set + the
-    auto-register contract, not a frozen closed list.
+def test_remember_project_description_is_stable_and_open(vault: Path, monkeypatch) -> None:
+    """The `remember` schema must expose a stable open-set project contract.
 
     Regression: claude.ai burned reasoning cycles (and nearly misfiled a note)
     treating an unlisted scope like `home` as illegal, because the docstring
     listed a fixed `Valid: ...` enum with no hint that keys auto-register.
+
+    Hosted connector clients cache discovered schemas, so live project names
+    must not leak into the tool description and cause per-vault schema drift.
     """
     mcp = _build(monkeypatch)
     tool = asyncio.run(mcp.get_tool("remember"))
@@ -239,12 +241,11 @@ def test_remember_project_description_is_dynamic_and_open(vault: Path, monkeypat
     assert "__PROJECT_KEYS_HINT__" not in projects_desc
     # Open-set framing: the model must know unlisted keys are legal.
     assert "auto-register" in project_desc.lower()
-    assert "not exhaustive" in project_desc.lower()
+    assert "any slug" in project_desc.lower()
     assert "auto-register" in projects_desc.lower()
-    # The list is sourced from the live registry (fixture falls back to the
-    # built-in set, which includes these), not a hand-maintained string.
-    assert "project-alpha" in project_desc
-    assert "personal" in project_desc
+    # Live registry values must not alter the discovery surface.
+    assert "project-alpha" not in project_desc
+    assert "personal" not in project_desc
 
 
 def test_review_memory_attention_mode_composes_review_surface(vault: Path, monkeypatch) -> None:
