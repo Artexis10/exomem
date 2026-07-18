@@ -18,7 +18,7 @@
 
 ## 4. Verification and Rollout
 
-- [ ] 4.1 Run focused auth/session tests, the full test suite with embeddings disabled, and `ruff check`.
+- [x] 4.1 Run focused auth/session tests, the full test suite with embeddings disabled, and `ruff check`.
 - [x] 4.2 Run an independent security review covering concurrent refresh races, replay, revocation, secret persistence, failover, and legacy compatibility; address every actionable finding.
 - [ ] 4.3 Open the implementation PR, pass CI, release version 0.24.2, deploy/restart Exomem, and verify health plus public OAuth discovery.
 - [ ] 4.4 Refresh or recreate the ChatGPT Exomem app with base scope `offline_access`, authorize once, and verify an actual refresh grant succeeds without GitHub reauthentication.
