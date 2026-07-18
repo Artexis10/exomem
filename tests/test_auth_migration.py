@@ -249,6 +249,29 @@ async def test_discovery_and_real_http_dcr_match_legacy_fastmcp() -> None:
 
 
 @pytest.mark.anyio
+async def test_canonical_discovery_separates_offline_and_resource_scopes() -> None:
+    proxy = ExomemSessionOAuthProxy(
+        session_authority=Authority(),
+        valid_scopes=["offline_access", "exomem:read", "exomem:write"],
+        **_kwargs(MemoryStore()),
+    )
+    app = Starlette(routes=proxy.get_routes("/mcp"))
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="https://memory.example",
+    ) as client:
+        authorization = await client.get("/.well-known/oauth-authorization-server")
+        resource = await client.get("/.well-known/oauth-protected-resource/mcp")
+
+    assert authorization.json()["scopes_supported"] == [
+        "offline_access",
+        "exomem:read",
+        "exomem:write",
+    ]
+    assert resource.json()["scopes_supported"] == ["exomem:read", "exomem:write"]
+
+
+@pytest.mark.anyio
 async def test_authorize_preserves_downstream_state_pkce_resource_and_redirect() -> None:
     proxy = ExomemSessionOAuthProxy(
         session_authority=Authority(),

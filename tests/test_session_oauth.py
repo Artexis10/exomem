@@ -68,8 +68,12 @@ def test_fastmcp_private_adapter_contract_is_pinned() -> None:
         assert list(
             inspect.signature(getattr(ExomemSessionOAuthProxy, seam)).parameters
         ) == list(inspect.signature(getattr(OAuthProxy, seam)).parameters)
-    for inherited_compatibility_seam in ("register_client", "get_client", "get_routes"):
+    for inherited_compatibility_seam in ("register_client", "get_client"):
         assert inherited_compatibility_seam not in ExomemSessionOAuthProxy.__dict__
+    assert list(inspect.signature(ExomemSessionOAuthProxy.get_routes).parameters) == [
+        "self",
+        "mcp_path",
+    ]
     assert list(
         inspect.signature(OAuthProxy._validate_client_redirect_uri).parameters
     ) == ["self", "redirect_uri"]
@@ -844,7 +848,10 @@ async def test_proxy_loads_rotates_and_revokes_exomem_refresh_without_legacy_sto
     assert authority.rotate_calls == []
 
     response = await TokenHandler(proxy, _ClientAuthenticator()).handle(
-        _refresh_request(refresh)
+        _refresh_request(
+            refresh,
+            scope="offline_access exomem:read exomem:read",
+        )
     )
     assert response.status_code == 200
     rotated = json.loads(response.body)

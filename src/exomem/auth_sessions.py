@@ -422,7 +422,7 @@ class RefreshRedemptionRecord:
     schema_version: int
     family_id: str
     sequence: int
-    redeemed_at: float
+    claim_id: str
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -434,7 +434,7 @@ class RefreshRedemptionRecord:
                 schema_version=int(value["schema_version"]),
                 family_id=str(value["family_id"]),
                 sequence=int(value["sequence"]),
-                redeemed_at=float(value["redeemed_at"]),
+                claim_id=str(value["claim_id"]),
             )
         except (KeyError, TypeError, ValueError) as error:
             raise ValueError("invalid refresh redemption record") from error
@@ -442,8 +442,7 @@ class RefreshRedemptionRecord:
             record.schema_version != _ACCESS_SCHEMA_VERSION
             or not re.fullmatch(r"[A-Za-z0-9_-]{16,64}", record.family_id)
             or record.sequence < 0
-            or not math.isfinite(record.redeemed_at)
-            or record.redeemed_at <= 0
+            or not re.fullmatch(r"[A-Za-z0-9_-]{16,64}", record.claim_id)
         ):
             raise ValueError("invalid refresh redemption record")
         return record
@@ -533,7 +532,12 @@ class _EncryptedStorage:
             raise self._unavailable("write", error) from error
 
     async def put_if_absent(
-        self, key: str, value: Mapping[str, Any], *, collection: str
+        self,
+        key: str,
+        value: Mapping[str, Any],
+        *,
+        collection: str,
+        ttl: float | None = None,
     ) -> bool:
         encrypted = self._encrypt(value)
         try:
@@ -542,7 +546,14 @@ class _EncryptedStorage:
                 raise SessionStoreUnavailable(
                     "session store lacks atomic put-if-absent support"
                 )
-            return bool(await operation(key, encrypted, collection=collection))
+            return bool(
+                await operation(
+                    key,
+                    encrypted,
+                    collection=collection,
+                    ttl=ttl,
+                )
+            )
         except Exception as error:
             if isinstance(error, SessionStoreUnavailable):
                 raise
@@ -695,6 +706,9 @@ class SessionAuthority:
         self.refresh_redemptions_collection = (
             f"exomem-auth-refresh-redemptions-v2-{keys.fingerprint}"
         )
+        self.refresh_grace_collection = (
+            f"exomem-auth-refresh-grace-v2-{keys.fingerprint}"
+        )
         self._storage = _EncryptedStorage(storage, keys.storage_key)
 
     @classmethod
@@ -793,9 +807,9 @@ class SessionAuthority:
 
     @staticmethod
     def _normalize_scopes(scopes: Sequence[str]) -> tuple[str, ...]:
-        normalized = tuple(str(scope) for scope in scopes)
-        if any(not scope for scope in normalized) or len(set(normalized)) != len(normalized):
-            raise ValueError("session scopes must be non-empty and unique")
+        normalized = tuple(dict.fromkeys(str(scope) for scope in scopes))
+        if any(not scope for scope in normalized):
+            raise ValueError("session scopes must be non-empty")
         return normalized
 
     async def issue(
@@ -997,42 +1011,87 @@ class SessionAuthority:
         if any(scope not in grant.scopes for scope in normalized_scopes):
             raise InvalidRefreshToken("refresh scopes exceed the family grant")
 
-        now = float(self.clock())
-        receipt = RefreshRedemptionRecord(
-            schema_version=_ACCESS_SCHEMA_VERSION,
-            family_id=grant.family_id,
-            sequence=grant.sequence,
-            redeemed_at=now,
-        )
         receipt_key = f"{grant.family_id}.{grant.sequence}"
-        created = await self._storage.put_if_absent(
+
+        def parse_redemption(
+            raw: Mapping[str, Any],
+            *,
+            label: str,
+        ) -> RefreshRedemptionRecord:
+            try:
+                record = RefreshRedemptionRecord.from_dict(raw)
+            except ValueError as error:
+                raise SessionStoreUnavailable(f"refresh {label} record is corrupt") from error
+            if record.family_id != grant.family_id or record.sequence != grant.sequence:
+                raise SessionStoreUnavailable(
+                    f"refresh {label} does not match its authoritative storage key"
+                )
+            return record
+
+        raw_receipt = await self._storage.get(
             receipt_key,
-            receipt.to_dict(),
             collection=self.refresh_redemptions_collection,
         )
-        if not created:
-            raw = await self._storage.get(
+        if raw_receipt is None:
+            proposed = RefreshRedemptionRecord(
+                schema_version=_ACCESS_SCHEMA_VERSION,
+                family_id=grant.family_id,
+                sequence=grant.sequence,
+                claim_id=secrets.token_urlsafe(18),
+            )
+            grace_created = await self._storage.put_if_absent(
                 receipt_key,
+                proposed.to_dict(),
+                collection=self.refresh_grace_collection,
+                ttl=REFRESH_RETRY_GRACE_SECONDS,
+            )
+            if grace_created:
+                grace = proposed
+            else:
+                raw_grace = await self._storage.get(
+                    receipt_key,
+                    collection=self.refresh_grace_collection,
+                )
+                if raw_grace is None:
+                    raise SessionStoreUnavailable(
+                        "refresh grace disappeared during an atomic claim"
+                    )
+                grace = parse_redemption(raw_grace, label="grace")
+            receipt_created = await self._storage.put_if_absent(
+                receipt_key,
+                grace.to_dict(),
                 collection=self.refresh_redemptions_collection,
             )
-            if raw is None:
-                raise SessionStoreUnavailable(
-                    "refresh redemption disappeared after an atomic claim"
+            if receipt_created:
+                receipt = grace
+            else:
+                raw_receipt = await self._storage.get(
+                    receipt_key,
+                    collection=self.refresh_redemptions_collection,
                 )
-            try:
-                receipt = RefreshRedemptionRecord.from_dict(raw)
-            except ValueError as error:
-                raise SessionStoreUnavailable("refresh redemption record is corrupt") from error
-            if receipt.family_id != grant.family_id or receipt.sequence != grant.sequence:
-                raise SessionStoreUnavailable(
-                    "refresh redemption does not match its authoritative storage key"
-                )
-            if now - receipt.redeemed_at > REFRESH_RETRY_GRACE_SECONDS:
-                await self._revoke_family(
-                    grant.family_id,
-                    reason="refresh-token-reuse",
-                )
-                raise InvalidRefreshToken("refresh token reuse detected")
+                if raw_receipt is None:
+                    raise SessionStoreUnavailable(
+                        "refresh redemption disappeared after an atomic claim"
+                    )
+                receipt = parse_redemption(raw_receipt, label="redemption")
+        else:
+            receipt = parse_redemption(raw_receipt, label="redemption")
+
+        raw_grace = await self._storage.get(
+            receipt_key,
+            collection=self.refresh_grace_collection,
+        )
+        grace = (
+            None
+            if raw_grace is None
+            else parse_redemption(raw_grace, label="grace")
+        )
+        if grace is None or grace.claim_id != receipt.claim_id:
+            await self._revoke_family(
+                grant.family_id,
+                reason="refresh-token-reuse",
+            )
+            raise InvalidRefreshToken("refresh token reuse detected")
 
         family = await self._load_family(grant.family_id)
         if family is None or not await self._family_is_active(family):

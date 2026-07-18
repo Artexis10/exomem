@@ -18,11 +18,13 @@ from fastmcp.server.auth.oauth_proxy.models import (
 )
 from fastmcp.server.auth.oauth_proxy.ui import create_error_html
 from mcp.server.auth.provider import AuthorizationCode, RefreshToken, TokenError
+from mcp.server.auth.routes import create_protected_resource_routes
 from mcp.server.auth.settings import RevocationOptions
 from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
 from starlette.middleware import Middleware
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse
+from starlette.routing import Route
 from typing_extensions import override
 
 from .auth_sessions import (
@@ -35,7 +37,8 @@ from .auth_sessions import (
 
 logger = logging.getLogger(__name__)
 
-OAUTH_SUPPORTED_SCOPES = ("offline_access", "exomem:read", "exomem:write")
+OAUTH_AUTHORIZATION_SCOPES = ("offline_access", "exomem:read", "exomem:write")
+OAUTH_RESOURCE_SCOPES = ("exomem:read", "exomem:write")
 
 
 class SessionStoreUnavailableMiddleware:
@@ -196,11 +199,12 @@ class ExomemSessionOAuthProxy(OAuthProxy):
         """Rotate an Exomem refresh token through the shared session authority."""
         if client.client_id is None:
             raise TokenError("invalid_client", "Client ID is required")
+        normalized_scopes = list(dict.fromkeys(scopes))
         try:
-            access, _, next_refresh = await self._session_authority.rotate_refresh(
+            access, record, next_refresh = await self._session_authority.rotate_refresh(
                 refresh_token.token,
                 client_id=client.client_id,
-                scopes=scopes,
+                scopes=normalized_scopes,
             )
         except InvalidRefreshToken as error:
             raise TokenError("invalid_grant", str(error)) from error
@@ -208,7 +212,7 @@ class ExomemSessionOAuthProxy(OAuthProxy):
             access_token=access,
             token_type="Bearer",
             expires_in=ACCESS_TOKEN_TTL_SECONDS,
-            scope=" ".join(scopes) or None,
+            scope=" ".join(record.scopes) or None,
             refresh_token=next_refresh,
         )
 
@@ -225,6 +229,20 @@ class ExomemSessionOAuthProxy(OAuthProxy):
             Middleware(SessionStoreUnavailableMiddleware),
             *super().get_middleware(),
         ]
+
+    @override
+    def get_routes(self, mcp_path: str | None = None) -> list[Route]:
+        """Keep protocol-only scopes out of protected-resource metadata."""
+        routes = super().get_routes(mcp_path)
+        if self._resource_url is None or self.issuer_url is None:
+            return routes
+        resource_routes = create_protected_resource_routes(
+            resource_url=self._resource_url,
+            authorization_servers=[self.issuer_url],
+            scopes_supported=list(OAUTH_RESOURCE_SCOPES),
+        )
+        replacements = {route.path: route for route in resource_routes}
+        return [replacements.get(route.path, route) for route in routes]
 
     @override
     def _build_upstream_authorize_url(

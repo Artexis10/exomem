@@ -37,9 +37,9 @@ Alternative considered: store each next refresh bearer encrypted in a redemption
 
 ### 3. Atomic redemption receipts implement rotation and retry idempotency
 
-Redeeming refresh sequence `n` atomically creates one encrypted receipt keyed by `(family_id, n)` via the existing shared `put_if_absent`. The winner returns the deterministic `n+1` refresh token and a new one-hour access token. A concurrent or repeated redemption that observes the same receipt within 30 seconds returns the same `n+1` refresh token and may issue a fresh access token. A use after that window tombstones the family as refresh-token reuse and returns `invalid_grant`.
+Redeeming refresh sequence `n` creates one permanent encrypted receipt keyed by `(family_id, n)` via the existing shared `put_if_absent`. A matching encrypted grace marker carries the same random claim ID and a 30-second TTL enforced by the authoritative storage coordinator, not a replica clock. Creating the grace marker before the permanent receipt makes crash recovery safe; claim-ID matching prevents a late observer from recreating an expired marker around an older receipt. The winner returns the deterministic `n+1` refresh token and a new one-hour access token. A concurrent or repeated redemption with the matching live marker returns the same `n+1` refresh token and may issue a fresh access token. A use after the marker expires tombstones the family as refresh-token reuse and returns `invalid_grant`.
 
-No compare-and-swap or replica-local lock is required: the receipt is the single global claim. Family state is re-read after claiming and access-token validation checks the family, so a concurrent family revocation fails closed or invalidates any just-issued access token.
+No compare-and-swap, replica-local clock, or replica-local lock is required: the permanent receipt plus coordinator-TTL marker is the single global claim. Family state is re-read after claiming and access-token validation checks the family, so a concurrent family revocation fails closed or invalidates any just-issued access token.
 
 Alternative considered: rotate a mutable `current_sequence` field with ordinary writes. Rejected because the current store has no compare-and-swap and two replicas could both accept different rotations or overwrite revocation state.
 

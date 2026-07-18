@@ -187,3 +187,24 @@ def test_openid_discovery_alias_returns_oauth_metadata() -> None:
         "id_token_signing_alg_values_supported",
     ):
         assert oidc_only_field not in metadata
+
+
+def test_bare_protected_resource_alias_omits_protocol_scope() -> None:
+    mcp = server.ExomemFastMCP("discovery-test")
+    register_oauth_metadata_route(
+        mcp,
+        base_url="https://memory.example",
+        auth_enabled=True,
+    )
+    app = mcp.http_app(transport="streamable-http", stateless_http=True)
+    route = next(
+        route
+        for route in app.routes
+        if getattr(route, "path", None) == "/.well-known/oauth-protected-resource"
+    )
+
+    response = asyncio.run(route.endpoint(None))
+    metadata = json.loads(response.body)
+
+    assert metadata["scopes_supported"] == ["exomem:read", "exomem:write"]
+    assert "offline_access" not in metadata["scopes_supported"]
