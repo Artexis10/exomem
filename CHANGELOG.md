@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.24.2](https://github.com/Artexis10/exomem/compare/v0.24.1...v0.24.2) (2026-07-18)
+
+
+### Features
+
+* add durable OAuth refresh tokens ([#255](https://github.com/Artexis10/exomem/issues/255)) ([4298567](https://github.com/Artexis10/exomem/commit/4298567fceee1dc10d235cce487b2c8b97d6b953))
+
 ## [0.24.1](https://github.com/Artexis10/exomem/compare/v0.24.0...v0.24.1) (2026-07-18)
 
 
