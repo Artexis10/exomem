@@ -258,6 +258,28 @@ def test_exception_releases_mutation_authority(tmp_path: Path) -> None:
         pass
 
 
+def test_holder_snapshot_is_content_free_and_clears_after_release(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    coordinator = VaultMutationCoordinator(tmp_path / "state", vault)
+
+    with coordinator.hold(
+        timeout_seconds=0.2,
+        request_id="req-123",
+        operation="edit_memory",
+        holder_kind="command",
+    ):
+        snapshot = coordinator.snapshot()
+        assert snapshot["state"] == "held"
+        assert snapshot["request_id"] == "req-123"
+        assert snapshot["operation"] == "edit_memory"
+        assert snapshot["holder_kind"] == "command"
+        assert snapshot["age_seconds"] >= 0
+        assert str(vault) not in str(snapshot)
+
+    assert coordinator.snapshot() == {"state": "free"}
+
+
 def test_process_exit_releases_os_mutation_lock(tmp_path: Path) -> None:
     context = multiprocessing.get_context("spawn")
     state_root = tmp_path / "state"

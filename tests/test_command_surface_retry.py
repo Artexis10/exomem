@@ -2,11 +2,112 @@ from __future__ import annotations
 
 from pathlib import Path
 from types import SimpleNamespace
+import threading
+import time
 
 import pytest
 
 from exomem import command_surface, writer_lease
 from exomem import vault as vault_module
+
+
+def test_edit_memory_validate_only_is_read_only() -> None:
+    from exomem.commands import invocation_is_read_only, product_commands_for
+
+    command = next(
+        item for item in product_commands_for("mcp") if item.name == "edit_memory"
+    )
+
+    assert invocation_is_read_only(command, {"validate_only": True}) is True
+    assert invocation_is_read_only(command, {"validate_only": False}) is False
+    assert invocation_is_read_only(command, {}) is False
+
+
+def test_bound_validate_only_edit_bypasses_live_mutation_boundary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    entered = threading.Event()
+    release = threading.Event()
+
+    def leaf(vault: Path, *, validate_only: bool = False) -> dict:  # noqa: ARG001
+        return {"validate_only": validate_only}
+
+    command = SimpleNamespace(name="edit_memory", leaf=leaf, read_only=False)
+    manager = writer_lease.LeaseManager(
+        writer_lease.LeaseConfig(state_dir=tmp_path / "state"),
+        mutation_timeout_seconds=0.05,
+    )
+    monkeypatch.setattr(writer_lease, "get_manager", lambda: manager)
+    monkeypatch.setattr(command_surface, "mcp_retry_scope", lambda: "session:test")
+    bound = command_surface.bind_vault(leaf, tmp_path / "vault", command=command)
+
+    def hold_live_mutation() -> None:
+        with manager.mutation_guard(tmp_path / "vault"):
+            entered.set()
+            assert release.wait(2.0)
+
+    holder = threading.Thread(target=hold_live_mutation)
+    holder.start()
+    assert entered.wait(1.0)
+    try:
+        assert bound(validate_only=True) == {"validate_only": True}
+    finally:
+        release.set()
+        holder.join(timeout=2.0)
+    assert not holder.is_alive()
+
+
+def test_identical_pending_retry_waits_outside_mutation_boundary_and_replays(
+    tmp_path: Path,
+) -> None:
+    entered = threading.Event()
+    release = threading.Event()
+    calls = 0
+    results: list[dict] = []
+    errors: list[BaseException] = []
+
+    def leaf(vault: Path, *, value: int) -> dict:  # noqa: ARG001
+        nonlocal calls
+        calls += 1
+        entered.set()
+        assert release.wait(2.0)
+        return {"value": value}
+
+    command = SimpleNamespace(name="edit_memory", leaf=leaf, read_only=False)
+    manager = writer_lease.LeaseManager(
+        writer_lease.LeaseConfig(state_dir=tmp_path / "state"),
+        mutation_timeout_seconds=0.05,
+    )
+
+    def invoke() -> None:
+        try:
+            results.append(
+                manager.invoke(
+                    command,
+                    (tmp_path / "vault",),
+                    {"value": 7},
+                    implicit_idempotency_scope="session:test",
+                )
+            )
+        except BaseException as error:  # noqa: BLE001 - assertion captures worker outcome
+            errors.append(error)
+
+    first = threading.Thread(target=invoke)
+    retry = threading.Thread(target=invoke)
+    first.start()
+    assert entered.wait(1.0)
+    retry.start()
+    time.sleep(0.08)
+    release.set()
+    first.join(timeout=2.0)
+    retry.join(timeout=2.0)
+
+    assert not first.is_alive()
+    assert not retry.is_alive()
+    assert errors == []
+    assert results == [{"value": 7}, {"value": 7}]
+    assert calls == 1
 
 
 def test_mcp_retry_scope_hashes_bearer_and_falls_back_to_session(monkeypatch) -> None:
