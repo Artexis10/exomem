@@ -1497,7 +1497,14 @@ def _windows_rename_at(
         share=0x7,
     )
     try:
-        encoded = destination.encode("utf-16-le")
+        # SetFileInformationByHandle's Win32 FILE_RENAME_INFO contract requires
+        # RootDirectory to be NULL.  Keep the already-validated directory tree
+        # pinned by its retained handles, but pass the destination as the absolute
+        # final path of that retained directory rather than as a handle-relative
+        # basename (which fails with ERROR_INVALID_PARAMETER on Windows 11).
+        directory_path = _windows_final_path(directory.windows_handle).rstrip("\\/")
+        destination_path = f"{directory_path}\\{destination}"
+        encoded = destination_path.encode("utf-16-le")
 
         class _RenameHeader(ctypes.Structure):
             _fields_ = [
@@ -1507,10 +1514,16 @@ def _windows_rename_at(
             ]
 
         offset = _RenameHeader.length.offset + ctypes.sizeof(wintypes.DWORD)
-        buffer = ctypes.create_string_buffer(offset + len(encoded))
+        # FILE_RENAME_INFO's FileNameLength excludes the terminator, but the
+        # FileName member itself must still be NUL-terminated.  Without these
+        # two zero bytes Windows can consume adjacent memory as a filename
+        # suffix and report success after renaming to the wrong path.
+        buffer = ctypes.create_string_buffer(
+            offset + len(encoded) + ctypes.sizeof(wintypes.WCHAR)
+        )
         header = _RenameHeader.from_buffer(buffer)
         header.replace = bool(replace)
-        header.root = wintypes.HANDLE(directory.windows_handle)
+        header.root = wintypes.HANDLE()
         header.length = len(encoded)
         ctypes.memmove(ctypes.addressof(buffer) + offset, encoded, len(encoded))
         kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -1521,7 +1534,7 @@ def _windows_rename_at(
             error = ctypes.get_last_error()
             if error in {5, 32}:
                 raise PermissionError(error, "Windows entry is held open")
-            raise OSError(error, "handle-relative Windows rename failed")
+            raise OSError(error, "secure Windows rename failed")
     finally:
         _windows_close_handle(source_handle)
 

@@ -739,6 +739,24 @@ def test_real_config_change_creates_unique_mode_preserving_backup(tmp_path: Path
     assert first["config_changed"] is True
 
 
+@pytest.mark.skipif(os.name != "nt", reason="requires live Windows rename semantics")
+def test_windows_safe_replace_atomically_replaces_existing_file(tmp_path: Path) -> None:
+    expected: set[str] = set()
+    for index in range(32):
+        source = tmp_path / f"replacement-{index}.tmp"
+        destination = tmp_path / f"current-{index}.json"
+        source.write_text("new", encoding="utf-8")
+        destination.write_text("old", encoding="utf-8")
+
+        checkpoint._safe_replace(source, destination)
+
+        assert destination.read_text(encoding="utf-8") == "new"
+        assert not source.exists()
+        expected.add(destination.name)
+
+    assert {path.name for path in tmp_path.iterdir()} == expected
+
+
 def test_postcommit_replace_error_retains_backup_and_committed_config(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
