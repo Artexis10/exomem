@@ -66,6 +66,10 @@ _TRANSIENT_OPERATION_CODES = frozenset(
     }
 )
 _FOLLOWER_RECHECK_SECONDS = 5.0
+_TRANSIENT_EXIT_CODE = 75
+_LOCK_UNAVAILABLE_EXIT_CODE = 76
+_TRANSIENT_RECHECK_SECONDS = 5.0
+_LOCK_UNAVAILABLE_RECHECK_SECONDS = 30.0
 
 
 def _writer_authority_available() -> bool:
@@ -590,13 +594,26 @@ class MediaWorker:
                     recovered = self._store.recover_interrupted() if owns_runtime else 0
                     if owns_runtime:
                         self._store.clear_worker(child_pid)
-                    if returncode:
+                    if returncode in {_TRANSIENT_EXIT_CODE, _LOCK_UNAVAILABLE_EXIT_CODE}:
+                        delay = (
+                            _LOCK_UNAVAILABLE_RECHECK_SECONDS
+                            if returncode == _LOCK_UNAVAILABLE_EXIT_CODE
+                            else _TRANSIENT_RECHECK_SECONDS
+                        )
+                        log.info(
+                            "media child deferred work; retrying after %.1fs",
+                            delay,
+                        )
+                    elif returncode:
+                        delay = 2.0
                         log.warning(
                             "media child exited %s; recovered %d job(s)",
                             returncode,
                             recovered,
                         )
-                    relaunch_after = time.monotonic() + (2.0 if returncode else 0.5)
+                    else:
+                        delay = 0.5
+                    relaunch_after = time.monotonic() + delay
                 if (
                     self._child is None
                     and time.monotonic() >= relaunch_after
@@ -745,7 +762,7 @@ def run_child(vault_root: Path, *, parent_pid: int, idle_seconds: float) -> int:
     store.recover_interrupted()
     if not _writer_authority_available():
         log.info("media worker: writer authority unavailable; leaving work queued")
-        return 0
+        return _TRANSIENT_EXIT_CODE
     store.set_worker(os.getpid(), idle_seconds)
     # Process mode makes scene-frame follow-up enqueue durable in this same ledger;
     # the nested supervisor is never started because the child calls _process directly.
@@ -775,7 +792,9 @@ def run_child(vault_root: Path, *, parent_pid: int, idle_seconds: float) -> int:
                         job.binary_path,
                         exc.code,
                     )
-                    return 0
+                    if exc.code == "MUTATION_LOCK_UNAVAILABLE":
+                        return _LOCK_UNAVAILABLE_EXIT_CODE
+                    return _TRANSIENT_EXIT_CODE
                 log.exception("media child job crashed: %s", job.binary_path)
                 store.mark(job.id, FAILED, f"{type(exc).__name__}: {exc}")
             except Exception as exc:  # noqa: BLE001 - preserve worker availability

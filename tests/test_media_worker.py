@@ -1012,7 +1012,10 @@ def test_child_defers_transient_writer_failure_without_poisoning_job(
         ),
     )
 
-    assert media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.1) == 0
+    assert (
+        media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.1)
+        == media_worker._TRANSIENT_EXIT_CODE
+    )
 
     [status] = media_jobs.status(vault)["jobs"]
     assert status["state"] == media_jobs.PENDING
@@ -1048,6 +1051,47 @@ def test_follower_supervisor_does_not_launch_media_child(
         assert worker._child is None
         assert worker._store is not None
         assert worker._store.counts()[media_jobs.PENDING] == 1
+    finally:
+        worker._stop_event.set()
+        worker._wake.set()
+        thread.join(timeout=2)
+    assert not thread.is_alive()
+
+
+@pytest.mark.parametrize(
+    "returncode",
+    [media_worker._TRANSIENT_EXIT_CODE, media_worker._LOCK_UNAVAILABLE_EXIT_CODE],
+)
+def test_supervisor_backs_off_after_transient_child_exit(
+    vault, monkeypatch: pytest.MonkeyPatch, returncode: int
+) -> None:
+    result = _preserve_media_stub(vault, filename=f"transient-exit-{returncode}.mp3")
+    worker = media_worker.MediaWorker(vault, execution_mode="process")
+    worker.enqueue(
+        binary_path=vault / result.path,
+        sidecar_path=vault / result.sidecar_path,
+        media_type="audio",
+    )
+
+    class _TransientChild:
+        pid = 2_147_483_645
+
+        @staticmethod
+        def poll():
+            return returncode
+
+    worker._child = _TransientChild()
+    monkeypatch.setattr(
+        worker,
+        "_launch_child",
+        lambda: pytest.fail("transient child was relaunched before backoff"),
+    )
+
+    thread = threading.Thread(target=worker._supervise)
+    thread.start()
+    try:
+        time.sleep(0.1)
+        assert worker._child is None
     finally:
         worker._stop_event.set()
         worker._wake.set()
