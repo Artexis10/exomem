@@ -30,13 +30,19 @@ Startup recovery will requeue only historical failures matching Exomem's exact s
 
 ### ChatGPT batch-edit compatibility
 
-Keep the public `edit_memory` name and object-array schema. Before semantic validation, normalize each element as follows:
+Keep the public `edit_memory` name and object-array schema. A typed pre-validation
+adapter accepts connector-encoded values at runtime while continuing to publish an
+object-only item schema. Before semantic validation, normalize each element as follows:
 
 1. Accept an object unchanged.
 2. If an element is a string, decode it as JSON and accept it only when the decoded value is an object.
 3. Reject malformed JSON, non-object JSON, missing fields, and all other input types through the existing `INVALID_EDIT` path.
 
-This is a compatibility shim for connector serialization, not a relaxation of edit semantics. Expected hashes, semantic preflight, idempotency, and guarded commit behavior remain unchanged.
+The call middleware inspects the decoded `new_string`, and the edit leaf repeats the
+same text-content guard so direct and middleware-bypass surfaces cannot use encoding to
+smuggle binary blobs. This is a compatibility shim for connector serialization, not a
+relaxation of edit semantics. Expected hashes, semantic preflight, idempotency, and
+guarded commit behavior remain unchanged.
 
 ## Verification
 

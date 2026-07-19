@@ -8,7 +8,9 @@ this derived database is safe because startup scans reconstruct missing work.
 
 from __future__ import annotations
 
+import ast
 import os
+import re
 import sqlite3
 import time
 from dataclasses import dataclass
@@ -25,6 +27,15 @@ COMPLETED = "completed"
 STATES = (PENDING, RUNNING, BLOCKED, FAILED)
 STATUS_JOB_LIMIT = 100
 DISCOVERY_CURSOR_KEY = "discovery_cursor"
+MAX_SHARING_ATTEMPTS = 3
+_SHARING_WINERRORS = frozenset({5, 32})
+_BATCH_WORKSPACE_RE = re.compile(r"^\.exomem-batch-[0-9a-f]{32}$")
+_BATCH_STAGE_RE = re.compile(r"^stage-[0-9]+\.tmp$")
+_QUOTED_PATH = r"(?:'(?:[^'\\]|\\.)*'|\"(?:[^\"\\]|\\.)*\")"
+_STORED_SHARING_ERROR_RE = re.compile(
+    rf"^PermissionError: \[WinError (?P<winerror>5|32)\] .*?: "
+    rf"(?P<source>{_QUOTED_PATH}) -> (?P<destination>{_QUOTED_PATH})$"
+)
 _TRANSIENT_OPERATION_CODES = frozenset(
     {
         "MUTATION_BUSY",
@@ -42,6 +53,61 @@ def _is_transient_operation_error(error: str | None) -> bool:
     return any(
         f"{code}:" in error or f'"code":"{code}"' in error for code in _TRANSIENT_OPERATION_CODES
     )
+
+
+def _normalized_path(path: str | os.PathLike[str]) -> str:
+    return os.path.normcase(os.path.abspath(os.fspath(path)))
+
+
+def _sharing_error_paths(
+    error: PermissionError | str,
+) -> tuple[int, str, str] | None:
+    if isinstance(error, PermissionError):
+        winerror = getattr(error, "winerror", None)
+        source = error.filename
+        destination = error.filename2
+        if (
+            winerror not in _SHARING_WINERRORS
+            or not isinstance(source, str)
+            or not isinstance(destination, str)
+        ):
+            return None
+        return int(winerror), source, destination
+
+    match = _STORED_SHARING_ERROR_RE.fullmatch(error)
+    if match is None:
+        return None
+    try:
+        source = ast.literal_eval(match.group("source"))
+        destination = ast.literal_eval(match.group("destination"))
+    except (SyntaxError, ValueError):
+        return None
+    if not isinstance(source, str) or not isinstance(destination, str):
+        return None
+    return int(match.group("winerror")), source, destination
+
+
+def is_guarded_sidecar_sharing_violation(
+    error: PermissionError | str,
+    sidecar_path: Path,
+) -> bool:
+    """Match only Exomem's staged atomic replacement of this existing sidecar."""
+    paths = _sharing_error_paths(error)
+    if paths is None:
+        return False
+    _winerror, source_raw, destination_raw = paths
+    source = Path(source_raw)
+    destination = Path(destination_raw)
+    if (
+        not source.is_absolute()
+        or not destination.is_absolute()
+        or _normalized_path(destination) != _normalized_path(sidecar_path)
+        or _normalized_path(source.parent.parent) != _normalized_path(destination.parent)
+        or _BATCH_WORKSPACE_RE.fullmatch(source.parent.name) is None
+        or _BATCH_STAGE_RE.fullmatch(source.name) is None
+    ):
+        return False
+    return os.path.lexists(destination)
 
 
 def job_store_path(vault_root: Path) -> Path:
@@ -344,6 +410,23 @@ class MediaJobStore:
         finally:
             conn.close()
 
+    def defer_sharing_violation(self, job_id: int, error: str) -> bool:
+        """Requeue a bounded sharing retry without refunding the claimed attempt."""
+        conn = self._connect()
+        try:
+            with conn:
+                changed = conn.execute(
+                    """
+                    UPDATE jobs
+                    SET state = 'pending', last_error = ?, updated_at = ?
+                    WHERE id = ? AND state = 'running' AND attempts < ?
+                    """,
+                    (error[:1000], time.time(), job_id, MAX_SHARING_ATTEMPTS),
+                ).rowcount
+                return changed == 1
+        finally:
+            conn.close()
+
     def get(self, job_id: int) -> MediaJob | None:
         conn = self._connect()
         try:
@@ -426,6 +509,36 @@ class MediaJobStore:
                     "attempts = MAX(0, attempts - 1), last_error = NULL, updated_at = ? "
                     f"WHERE state = 'failed' AND id IN ({placeholders})",
                     (time.time(), *job_ids),
+                ).rowcount
+                return int(changed)
+        finally:
+            conn.close()
+
+    def recover_sharing_failures(self) -> int:
+        """Requeue only exact historical sidecar sharing failures below the limit."""
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                "SELECT id, sidecar_rel, attempts, last_error "
+                "FROM jobs WHERE state = 'failed' AND attempts < ?",
+                (MAX_SHARING_ATTEMPTS,),
+            ).fetchall()
+            job_ids = [
+                int(row["id"])
+                for row in rows
+                if row["last_error"]
+                and is_guarded_sidecar_sharing_violation(
+                    str(row["last_error"]), self.vault_root / str(row["sidecar_rel"])
+                )
+            ]
+            if not job_ids:
+                return 0
+            placeholders = ",".join("?" for _ in job_ids)
+            with conn:
+                changed = conn.execute(
+                    f"UPDATE jobs SET state = 'pending', last_error = NULL, updated_at = ? "
+                    f"WHERE state = 'failed' AND attempts < ? AND id IN ({placeholders})",
+                    (time.time(), MAX_SHARING_ATTEMPTS, *job_ids),
                 ).rowcount
                 return int(changed)
         finally:

@@ -36,6 +36,7 @@ from .media_jobs import (
     BLOCKED,
     FAILED,
     MediaJobStore,
+    is_guarded_sidecar_sharing_violation,
     pid_alive,
 )
 from .media_jobs import (
@@ -157,6 +158,12 @@ class MediaWorker:
                     log.info(
                         "media worker: recovered %d transient coordination failure(s)",
                         recovered,
+                    )
+                sharing_recovered = self._store.recover_sharing_failures()
+                if sharing_recovered:
+                    log.info(
+                        "media worker: recovered %d sidecar sharing failure(s)",
+                        sharing_recovered,
                     )
                 target = self._supervise
                 name = "exomem-media-supervisor"
@@ -797,6 +804,23 @@ def run_child(vault_root: Path, *, parent_pid: int, idle_seconds: float) -> int:
                     return _TRANSIENT_EXIT_CODE
                 log.exception("media child job crashed: %s", job.binary_path)
                 store.mark(job.id, FAILED, f"{type(exc).__name__}: {exc}")
+            except PermissionError as exc:
+                assert job.id is not None
+                error = f"{type(exc).__name__}: {exc}"
+                if is_guarded_sidecar_sharing_violation(exc, job.sidecar_path):
+                    if store.defer_sharing_violation(job.id, error):
+                        log.info(
+                            "media worker: deferred %s after Windows sidecar sharing denial",
+                            job.binary_path,
+                        )
+                        return _LOCK_UNAVAILABLE_EXIT_CODE
+                    log.error(
+                        "media worker: sidecar sharing retry limit exhausted for %s",
+                        job.binary_path,
+                    )
+                else:
+                    log.exception("media child job crashed: %s", job.binary_path)
+                store.mark(job.id, FAILED, error)
             except Exception as exc:  # noqa: BLE001 - preserve worker availability
                 log.exception("media child job crashed: %s", job.binary_path)
                 assert job.id is not None

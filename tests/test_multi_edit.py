@@ -9,6 +9,7 @@ the write, so nothing partial lands.
 from __future__ import annotations
 
 import datetime as dt
+import json
 from pathlib import Path
 
 import pytest
@@ -49,6 +50,44 @@ def test_multi_edit_applies_all_pairs_in_one_write(vault: Path) -> None:
     assert "beta" in text  # untouched
     assert result.edits_applied == 2
     assert "updated: 2026-06-01" in text
+
+
+def test_multi_edit_accepts_json_object_string_pairs(vault: Path) -> None:
+    rel = _make_page(vault, "# Scratch\n\nalpha\nbeta\n")
+
+    result = multi_edit_module.multi_edit(
+        vault,
+        path=rel,
+        why="connector-encoded batch",
+        edits=[
+            json.dumps({"old_string": "alpha", "new_string": "ALPHA"}),
+            json.dumps({"old_string": "beta", "new_string": "BETA"}),
+        ],  # type: ignore[list-item]
+        today=TODAY,
+    )
+
+    assert result.edits_applied == 2
+    text = (vault / rel).read_text(encoding="utf-8")
+    assert "ALPHA" in text and "BETA" in text
+
+
+@pytest.mark.parametrize("encoded", ["{not-json", "[]", '"plain string"', "null"])
+def test_multi_edit_rejects_json_strings_that_do_not_decode_to_objects(
+    vault: Path, encoded: str
+) -> None:
+    rel = _make_page(vault, "# Scratch\n\nalpha\n")
+
+    with pytest.raises(edit_module.EditError) as exc:
+        multi_edit_module.multi_edit(
+            vault,
+            path=rel,
+            why="bad connector batch",
+            edits=[encoded],  # type: ignore[list-item]
+            today=TODAY,
+        )
+
+    assert exc.value.code == "INVALID_EDIT"
+    assert exc.value.missing == ["edits[0]"]
 
 
 def test_multi_edit_sequential_semantics(vault: Path) -> None:
