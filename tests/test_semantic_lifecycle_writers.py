@@ -198,6 +198,38 @@ def test_stable_id_move_prepares_exact_lifecycle_and_indexes_each_path_once(
     assert deletes == [[old_path]]
 
 
+def test_move_with_crlf_inbound_referrer_uses_logical_hash_for_semantic_preflight(
+    tmp_path: Path,
+) -> None:
+    new_path = "Knowledge Base/Notes/Insights/lifecycle-renamed.md"
+    target = _source("Target", page_id=_ID)
+    referrer = _source(
+        "See [[Knowledge Base/Notes/Insights/lifecycle]].", page_id=_OTHER_ID
+    )
+    old = tmp_path / _PAGE
+    inbound = tmp_path / _OTHER_PAGE
+    old.parent.mkdir(parents=True, exist_ok=True)
+    old.write_bytes(target.replace("\n", "\r\n").encode("utf-8"))
+    inbound.write_bytes(referrer.replace("\n", "\r\n").encode("utf-8"))
+    before_corpus = semantic_contract.build_corpus_context(tmp_path)
+    activation_manifest.ensure_manifest(
+        tmp_path, census=before_corpus.activation_census
+    )
+
+    result = move_module.move_file(
+        tmp_path,
+        old_path=_PAGE,
+        new_path=new_path,
+        update_wikilinks=True,
+    )
+
+    assert result.semantic is not None
+    assert not old.exists()
+    assert "[[Knowledge Base/Notes/Insights/lifecycle-renamed]]" in inbound.read_text(
+        encoding="utf-8"
+    )
+
+
 def test_move_without_wikilink_updates_blocks_unchanged_referrer_in_final_corpus(
     tmp_path: Path,
 ) -> None:

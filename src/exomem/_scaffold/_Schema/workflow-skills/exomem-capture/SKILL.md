@@ -18,7 +18,7 @@ Use when the user asks to save or the session lands on durable reusable knowledg
 3. Use `preserve_evidence` for factual text artifacts and `transfer_artifact` for binary evidence.
 4. Use `remember` for distilled conclusions: `research-note`, `insight`, `failure`, or `pattern`.
 5. For an entity, consult the active entity registry and selected knowledge packs,
-   then search the exact name and aliases before writing.
+   then call `connect_memory(operation="resolve-entity", name=...)` before writing.
 6. When one active entity matches, use `edit_memory` for a small stable-fact
    correction or the canonical relation workflow for a new connection.
 7. Only when no entity matches and the identity is stable, recurring, central,

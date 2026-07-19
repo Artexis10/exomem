@@ -60,7 +60,7 @@ accumulates reusable facts, history, or relations — capture it:
   directional meaning matters, and run the near-duplicate check first,
   then write and report one line: `Saved -> <path>`.
 - Resolve entity candidates against the active entity registry and selected knowledge packs.
-  Search the exact name and aliases first. If one active page
+  Call `connect_memory(operation="resolve-entity", name=...)` first. If one active page
   matches, use `edit_memory` for a small stable-fact correction or the canonical
   relation workflow for a new connection. If none matches, use
   `connect_memory(operation="create-entity")` only when the identity is stable,

@@ -11,6 +11,7 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
+from typing import Literal, TypeAlias
 
 
 @dataclass(frozen=True, slots=True)
@@ -120,6 +121,7 @@ def _build_indexes() -> tuple[
 
 ENTITY_TYPES_BY_ID, ENTITY_TYPES_BY_FOLDER, ENTITY_TYPES_BY_ALIAS = _build_indexes()
 ENTITY_TYPE_IDS: tuple[str, ...] = tuple(ENTITY_TYPES_BY_ID)
+EntityTypeId: TypeAlias = Literal[*ENTITY_TYPE_IDS]
 ENTITY_TYPE_TO_FOLDER: Mapping[str, str] = MappingProxyType(
     {key: definition.folder for key, definition in ENTITY_TYPES_BY_ID.items()}
 )

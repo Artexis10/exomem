@@ -55,8 +55,9 @@ REMINDER = (
     "[Exomem capture check] This turn did substantial work. If your Exomem knowledge-base "
     "skill is available, check whether the turn reached a durable conclusion or a "
     "durable recurring entity recognized by the active entity registry, prioritizing "
-    "the selected knowledge packs. For an entity, resolve the exact name and aliases "
-    "first: update stable facts with edit_memory or add a governed relation when one "
+    "the selected knowledge packs. For an entity, first call "
+    'connect_memory(operation="resolve-entity", name=...). Update stable facts with '
+    "edit_memory or add a governed relation when one "
     "active page matches. Only when none matches and the identity is stable, recurring, "
     "central, and useful beyond this source may you call "
     'connect_memory(operation="create-entity"). A single incidental mention, unresolved '
@@ -127,8 +128,8 @@ def _content_blocks(msg: dict) -> list[dict]:
     return []
 
 
-def _latest_turn(path: str, max_bytes: int = 262_144) -> tuple[str, list[str]]:
-    """Return (assistant_text, tool_names) for the latest turn from the JSONL
+def _latest_turn(path: str, max_bytes: int = 262_144) -> tuple[str, list[dict]]:
+    """Return (assistant_text, tool calls) for the latest turn from the JSONL
     transcript. Walks backward, stopping at the human message that began the turn
     (a user message with real text and no tool_result block)."""
     try:
@@ -141,7 +142,8 @@ def _latest_turn(path: str, max_bytes: int = 262_144) -> tuple[str, list[str]]:
     except OSError:
         return "", []
     chunks: list[str] = []
-    tools: list[str] = []
+    tools: list[dict] = []
+    failed_tool_ids: set[str] = set()
     for line in reversed([ln for ln in raw.splitlines() if ln.strip()]):
         try:
             obj = json.loads(line)
@@ -162,14 +164,45 @@ def _latest_turn(path: str, max_bytes: int = 262_144) -> tuple[str, list[str]]:
                         if isinstance(tool_input, dict)
                         else ""
                     )
-                    tools.append(f"{name}:{operation}" if operation else name)
+                    tools.append(
+                        {
+                            "id": str(b.get("id") or ""),
+                            "name": name,
+                            "operation": operation,
+                            "input": tool_input if isinstance(tool_input, dict) else {},
+                        }
+                    )
         elif role == "user" or typ == "user":
             blocks = _content_blocks(msg)
+            for b in blocks:
+                if b.get("type") == "tool_result" and b.get("is_error") is True:
+                    failed_tool_ids.add(str(b.get("tool_use_id") or ""))
             if any(b.get("type") == "text" for b in blocks) and not any(
                 b.get("type") == "tool_result" for b in blocks
             ):
                 break  # reached the human prompt that began this turn
+    for tool in tools:
+        tool["failed"] = bool(tool["id"] and tool["id"] in failed_tool_ids)
     return "".join(reversed(chunks)), tools
+
+
+def _successful_kb_write(tool: dict) -> bool:
+    """Whether one observed tool call completed a real KB mutation."""
+    if tool.get("failed"):
+        return False
+    name = str(tool.get("name") or "")
+    operation = str(tool.get("operation") or "")
+    selector = f"{name}:{operation}" if operation else name
+    if not _KB_WRITE.search(selector):
+        return False
+    tool_input = tool.get("input")
+    if (
+        "edit_memory" in name.lower()
+        and isinstance(tool_input, dict)
+        and tool_input.get("validate_only") is True
+    ):
+        return False
+    return True
 
 
 def _cooldown_ok(session_id: str, cooldown: int) -> tuple[bool, Path]:
@@ -224,7 +257,7 @@ def main() -> int:
     cooldown = _env_int("EXOMEM_CAPTURE_NUDGE_COOLDOWN_SEC", 300)
 
     assistant_text, tools = _latest_turn(tpath)
-    if any(_KB_WRITE.search(t) for t in tools):  # already captured this turn
+    if any(_successful_kb_write(tool) for tool in tools):  # already captured this turn
         return 0
     if re.search(r"Saved\s*(?:->|→|:)", assistant_text):
         return 0

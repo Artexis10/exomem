@@ -728,7 +728,7 @@
       "properties": {
         "operation": {
           "default": "suggest-links",
-          "description": "context, suggest-links, suggest-relations, graph-context, inbound-links, create-entity, or accept-relation.",
+          "description": "context, suggest-links, suggest-relations, graph-context, inbound-links, resolve-entity, create-entity, or accept-relation.",
           "type": "string"
         },
         "path": {
@@ -913,6 +913,13 @@
         "entity_type": {
           "anyOf": [
             {
+              "enum": [
+                "person",
+                "organization",
+                "concept",
+                "library",
+                "decision"
+              ],
               "type": "string"
             },
             {

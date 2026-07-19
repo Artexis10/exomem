@@ -47,6 +47,7 @@ from . import create_file as create_file_module
 from . import delete_directory as delete_directory_module
 from . import delete_file as delete_file_module
 from . import edit as edit_module
+from . import entity_candidates as entity_candidates_module
 from . import entity_types as entity_types_module
 from . import epistemic_graph as epistemic_graph_module
 from . import evolution as evolution_module
@@ -102,6 +103,7 @@ from .command_surface import (
 from .command_surface import (
     type_tag as _type_tag,  # noqa: F401 - re-exported for server.py
 )
+from .entity_types import EntityTypeId
 from .kbdir import kb_dirname
 from .vault import (
     VaultPathError,
@@ -259,6 +261,7 @@ def op_bootstrap(
                     "id": definition.id,
                     "label": definition.label,
                     "folder": definition.folder,
+                    "aliases": list(definition.aliases),
                     "capture_guidance": definition.capture_guidance,
                 }
                 for definition in entity_types_module.ENTITY_TYPE_REGISTRY
@@ -268,6 +271,7 @@ def op_bootstrap(
                 "Create only stable, recurring identities; update an existing entity only "
                 "with new durable facts or relations; skip incidental mentions."
             ),
+            "candidate_route": "connect_memory(operation='resolve-entity')",
         },
         "workflow": {
             "requested": requested_workflow,
@@ -2078,7 +2082,7 @@ def op_replace(
 
 def op_link(
     vault_root: Path,
-    entity_type: str,
+    entity_type: EntityTypeId,
     name: str,
     summary: str,
     slug: str | None = None,
@@ -2130,7 +2134,8 @@ def op_link(
 
     Errors:
         INVALID_LINK (bad entity_type, decision_status, missing required);
-        ENTITY_EXISTS (use `replace` instead).
+        ENTITY_EXISTS (update/link the returned active entity instead);
+        ENTITY_AMBIGUOUS (reconcile the returned bounded candidates first).
     """
     try:
         result = link_module.link(
@@ -2154,9 +2159,10 @@ def op_link(
             decision_status=decision_status,
         )
     except link_module.LinkError as e:
-        raise ValueError(
-            f"{e.code}: {e.reason} (missing: {e.missing})"
-        ) from e
+        suffix = f" (missing: {e.missing})"
+        if e.candidates:
+            suffix += f" (candidates: {e.candidates})"
+        raise ValueError(f"{e.code}: {e.reason}{suffix}") from e
     return result.as_dict()
 
 
@@ -4191,7 +4197,7 @@ def op_connect_memory(
     max_edges: int = 80,
     traversal_profile: str | None = None,
     max_body_chars: int = 3000,
-    entity_type: str | None = None,
+    entity_type: EntityTypeId | None = None,
     name: str | None = None,
     slug: str | None = None,
     summary: str | None = None,
@@ -4222,7 +4228,7 @@ def op_connect_memory(
 
     Args:
         operation: context, suggest-links, suggest-relations, graph-context,
-            inbound-links, create-entity, or accept-relation.
+            inbound-links, resolve-entity, create-entity, or accept-relation.
         path: Existing page path for link, graph, or relation context.
         target: Target path for inbound-links; defaults to path.
         query: Query seed for graph-context.
@@ -4343,6 +4349,12 @@ def op_connect_memory(
         if not target_path:
             raise ValueError("INVALID_TARGET: inbound-links requires `target` or `path`")
         return op_list_inbound_links(vault_root, target=target_path)
+    if operation == "resolve-entity":
+        if not name:
+            raise ValueError("INVALID_TARGET: resolve-entity requires `name`")
+        return entity_candidates_module.resolve_entity_candidate(
+            vault_root, name=name, entity_type=entity_type, limit=limit
+        )
     if operation == "create-entity":
         missing = [
             field
@@ -4373,7 +4385,7 @@ def op_connect_memory(
         )
     raise ValueError(
         "INVALID_MODE: connect_memory operation must be context, suggest-links, "
-        "suggest-relations, graph-context, inbound-links, create-entity, or "
+        "suggest-relations, graph-context, inbound-links, resolve-entity, create-entity, or "
         "accept-relation"
     )
 
@@ -5125,7 +5137,14 @@ def note_description(project_keys_hint: str) -> str:
 # --------------------------------------------------------------------------- #
 # (name, leaf, tier, cli_writes, needs_schema, cli_positional, surfaces)
 _CONNECT_MEMORY_READ_ONLY_OPERATIONS = frozenset(
-    {"suggest-links", "suggest-relations", "context", "graph-context", "inbound-links"}
+    {
+        "suggest-links",
+        "suggest-relations",
+        "context",
+        "graph-context",
+        "inbound-links",
+        "resolve-entity",
+    }
 )
 _ADOPT_VAULT_READ_ONLY_MODES = frozenset({"scan-only"})
 _ADOPTION_STUDIO_READ_ONLY_ACTIONS = frozenset({"status", "work-item"})

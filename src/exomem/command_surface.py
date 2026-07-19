@@ -316,6 +316,19 @@ def type_tag(annotation: object) -> str:
     return "json"
 
 
+def _literal_string_values(annotation: object) -> tuple[str, ...]:
+    """Return registry-style string Literal values, including Optional aliases."""
+    origin = typing.get_origin(annotation)
+    if origin is typing.Literal:
+        values = typing.get_args(annotation)
+        return tuple(values) if all(isinstance(value, str) for value in values) else ()
+    if origin is typing.Union or origin is types.UnionType:
+        non_none = [item for item in typing.get_args(annotation) if item is not type(None)]
+        if len(non_none) == 1:
+            return _literal_string_values(non_none[0])
+    return ()
+
+
 def derive_params(
     leaf: Callable, *, skip: int, positional: str | None = None
 ) -> tuple[Param, ...]:
@@ -329,7 +342,7 @@ def derive_params(
     params: list[Param] = []
     for p in list(sig.parameters.values())[skip:]:
         ann = hints.get(p.name, p.annotation)
-        literal_values = typing.get_args(ann) if typing.get_origin(ann) is typing.Literal else ()
+        literal_values = _literal_string_values(ann)
         params.append(
             Param(
                 name=p.name,

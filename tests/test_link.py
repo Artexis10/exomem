@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from exomem import entity_candidates
 from exomem import link as link_module
 
 TODAY = dt.date(2026, 5, 25)
@@ -184,6 +185,54 @@ def test_link_refuses_when_entity_exists(vault: Path) -> None:
             today=TODAY,
         )
     assert exc.value.code == "ENTITY_EXISTS"
+
+
+def test_entity_candidate_resolver_matches_active_page_alias(vault: Path) -> None:
+    entity = vault / "Knowledge Base" / "Entities" / "People" / "Grace Hopper.md"
+    source = _read(entity).replace("status: active\n", "status: active\naliases: [Amazing Grace]\n")
+    entity.write_text(source, encoding="utf-8", newline="\n")
+
+    resolution = entity_candidates.resolve_entity_candidate(vault, name="Amazing Grace")
+
+    assert resolution["status"] == "match"
+    assert [candidate["path"] for candidate in resolution["candidates"]] == [
+        "Knowledge Base/Entities/People/Grace Hopper.md"
+    ]
+    with pytest.raises(link_module.LinkError) as exc:
+        link_module.link(
+            vault,
+            entity_type="person",
+            name="Amazing Grace",
+            summary="Would duplicate an existing aliased identity.",
+            today=TODAY,
+        )
+    assert exc.value.code == "ENTITY_EXISTS"
+    assert exc.value.candidates == list(resolution["candidates"])
+
+
+def test_entity_candidate_resolver_returns_bounded_alias_ambiguity(vault: Path) -> None:
+    for filename in ("Ada Lovelace.md", "Grace Hopper.md"):
+        entity = vault / "Knowledge Base" / "Entities" / "People" / filename
+        source = _read(entity).replace("status: active\n", "status: active\naliases: [The Pioneer]\n")
+        entity.write_text(source, encoding="utf-8", newline="\n")
+
+    resolution = entity_candidates.resolve_entity_candidate(
+        vault, name="The Pioneer", limit=1
+    )
+
+    assert resolution["status"] == "ambiguous"
+    assert len(resolution["candidates"]) == 1
+    assert resolution["omitted_candidate_count"] == 1
+    with pytest.raises(link_module.LinkError) as exc:
+        link_module.link(
+            vault,
+            entity_type="person",
+            name="The Pioneer",
+            summary="Would silently merge ambiguous identities.",
+            today=TODAY,
+        )
+    assert exc.value.code == "ENTITY_AMBIGUOUS"
+    assert len(exc.value.candidates) == 2
 
 
 def test_link_normalizes_tags(vault: Path) -> None:

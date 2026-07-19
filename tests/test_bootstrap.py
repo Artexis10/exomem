@@ -71,6 +71,18 @@ def test_bootstrap_compact_contract_is_public_safe(vault: Path) -> None:
     assert [item["id"] for item in out["entity_registry"]["types"]] == list(
         entity_types.ENTITY_TYPE_IDS
     )
+    assert out["entity_registry"]["types"][0]["aliases"] == list(
+        entity_types.ENTITY_TYPE_REGISTRY[0].aliases
+    )
+    assert out["entity_registry"]["candidate_route"] == (
+        "connect_memory(operation='resolve-entity')"
+    )
+    organization = next(
+        item
+        for item in out["entity_registry"]["types"]
+        if item["id"] == "organization"
+    )
+    assert "company" in organization["aliases"]
     assert (
         out["authoring_contract"]["route_by_intent"]["stable_named_entity"]
         == "connect_memory(operation='create-entity')"

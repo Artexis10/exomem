@@ -1802,21 +1802,26 @@ def preflight_move(
     for write in rewrite_tuple:
         rel = write.path.relative_to(root).as_posix()
         before_rewrite = before_corpus.pages.get(rel)
-        if (
-            before_rewrite is None
-            or before_rewrite.source_hash != write.guard.expected_content_hash
-        ):
-            raise SemanticWriteError(
-                "STALE_SEMANTIC_WRITE",
-                "inbound page changed during semantic move preflight",
-            )
         try:
-            before_source = write.path.read_text(encoding="utf-8")
+            before_source = write.path.read_bytes().decode("utf-8")
         except (OSError, UnicodeDecodeError) as error:
             raise SemanticWriteError(
                 "STALE_SEMANTIC_WRITE",
                 "inbound page changed during semantic move preflight",
             ) from error
+        normalized_before_source = before_source.replace("\r\n", "\n").replace(
+            "\r", "\n"
+        )
+        if (
+            before_rewrite is None
+            or before_rewrite.source_hash
+            != vault.content_hash(normalized_before_source)
+            or write.guard.expected_content_hash != vault.content_hash(before_source)
+        ):
+            raise SemanticWriteError(
+                "STALE_SEMANTIC_WRITE",
+                "inbound page changed during semantic move preflight",
+            )
         expected_source, changed_count = rewrite_wikilinks_for_move(
             before_source, old_path, new_path
         )

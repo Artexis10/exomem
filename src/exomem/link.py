@@ -18,7 +18,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import indexes, memory_refs, semantic_writes
+from . import entity_candidates, indexes, memory_refs, semantic_writes
 from .entity_types import (
     ENTITY_TYPE_IDS,
     ENTITY_TYPE_TO_FOLDER,
@@ -70,9 +70,17 @@ class LinkError(Exception):
     code: str
     missing: list[str]
     reason: str
+    candidates: list[dict[str, str]] | None = None
 
     def as_dict(self) -> dict:
-        return {"code": self.code, "missing": self.missing, "reason": self.reason}
+        value: dict[str, object] = {
+            "code": self.code,
+            "missing": self.missing,
+            "reason": self.reason,
+        }
+        if self.candidates:
+            value["candidates"] = self.candidates
+        return value
 
 
 def _legacy_link(
@@ -603,6 +611,23 @@ def link(
     date_iso = (today or dt.date.today()).isoformat()
     identity = memory_refs.new_id()
     display_name = name.strip()
+    identity_resolution = entity_candidates.resolve_entity_candidate(
+        vault_root, name=display_name
+    )
+    if identity_resolution["status"] == "match":
+        raise LinkError(
+            "ENTITY_EXISTS",
+            ["name"],
+            "an active entity already has this exact title or alias; update or link it instead",
+            list(identity_resolution["candidates"]),
+        )
+    if identity_resolution["status"] == "ambiguous":
+        raise LinkError(
+            "ENTITY_AMBIGUOUS",
+            ["name"],
+            "the exact title or alias matches multiple active entities; reconcile the identity first",
+            list(identity_resolution["candidates"]),
+        )
     folder = kb_root(vault_root) / "Entities" / ENTITY_TYPE_TO_FOLDER[entity_type]
     entity_path = folder / f"{filename_slug or _sanitize_name(name)}.md"
     rel_entity = entity_path.relative_to(vault_root).as_posix()

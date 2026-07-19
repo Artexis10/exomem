@@ -64,6 +64,26 @@ _OPENAPI_OUTCOME_SCHEMA = {
     ],
     "additionalProperties": False,
 }
+_OPENAPI_MUTATION_HOLDER_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "state": {"const": "held"},
+        "request_id": {"type": "string"},
+        "operation": {"type": "string"},
+        "holder_kind": {"type": "string"},
+        "age_seconds": {"type": "number", "minimum": 0},
+        "overdue": {"type": "boolean"},
+    },
+    "required": [
+        "state",
+        "request_id",
+        "operation",
+        "holder_kind",
+        "age_seconds",
+        "overdue",
+    ],
+    "additionalProperties": False,
+}
 _OPENAPI_ERROR_SCHEMA = {
     "type": "object",
     "properties": {
@@ -76,8 +96,7 @@ _OPENAPI_ERROR_SCHEMA = {
         "status": {"type": "string"},
         "committed": {"type": ["boolean", "null"]},
         "retry_after_ms": {"type": "integer", "minimum": 0},
-        "holder_operation": {"type": ["string", "null"]},
-        "holder_age_ms": {"type": ["integer", "null"], "minimum": 0},
+        "holder": _OPENAPI_MUTATION_HOLDER_SCHEMA,
         "request_id": {"type": "string", "format": "uuid"},
         "receipt_id": {"type": ["string", "null"]},
         "idempotency_key": {"type": "string"},

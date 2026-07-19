@@ -265,7 +265,19 @@ def test_structured_busy_error_matches_openapi_and_preserves_public_identity(
         raise OpError(
             "MUTATION_BUSY",
             "vault mutation boundary is busy",
-            details={"status": "retryable", "committed": False, "retry_after_ms": 750},
+            details={
+                "status": "retryable",
+                "committed": False,
+                "retry_after_ms": 750,
+                "holder": {
+                    "state": "held",
+                    "request_id": "opaque-request",
+                    "operation": "edit_memory",
+                    "holder_kind": "command",
+                    "age_seconds": 1.25,
+                    "overdue": False,
+                },
+            },
         )
 
     writer_lease.reset_managers_for_tests()
@@ -302,6 +314,59 @@ def test_structured_busy_error_matches_openapi_and_preserves_public_identity(
         "Error"
     ]["properties"]
     assert set(error) <= set(schema_properties)
+    assert set(error["holder"]) <= set(schema_properties["holder"]["properties"])
+    assert schema_properties["holder"]["additionalProperties"] is False
+
+
+def test_busy_holder_telemetry_matches_nested_openapi_schema(
+    vault, tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    holder = {
+        "state": "held",
+        "request_id": "opaque-request",
+        "operation": "edit_memory",
+        "holder_kind": "command",
+        "age_seconds": 1.25,
+        "overdue": False,
+    }
+
+    def busy_before_commit(*args, **kwargs):  # noqa: ANN002, ANN003, ARG001
+        raise OpError(
+            "MUTATION_BUSY",
+            "vault mutation boundary is busy",
+            details={
+                "status": "retryable",
+                "committed": False,
+                "retry_after_ms": 750,
+                "holder": holder,
+            },
+        )
+
+    writer_lease.reset_managers_for_tests()
+    monkeypatch.setattr(commands, "op_create_file", busy_before_commit)
+    client = _client(
+        vault,
+        monkeypatch,
+        EXOMEM_REST_API_KEY="sekret",
+        EXOMEM_WRITER_LEASE_STATE_DIR=str(tmp_path / "lease-state"),
+    )
+    response = client.post(
+        "/api/manage_memory_file",
+        json={
+            "operation": "create",
+            "path": "Knowledge Base/Notes/Insights/not-written.md",
+            "content": "not written",
+        },
+        headers={**_auth(), "Idempotency-Key": "holder-shape"},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["error"]["holder"] == holder
+    holder_schema = client.get("/api/openapi.json").json()["components"]["schemas"][
+        "Error"
+    ]["properties"]["holder"]
+    assert holder_schema["additionalProperties"] is False
+    assert set(holder) == set(holder_schema["properties"])
 
 
 def test_cf_access_principals_isolate_explicit_rest_idempotency(
@@ -483,6 +548,12 @@ def test_openapi_lists_real_product_params(vault, monkeypatch: pytest.MonkeyPatc
     assert props["limit"]["type"] == "integer"
     assert props["graph"]["type"] == "boolean"
     assert props["tags"]["type"] == "array"
+    connect_schema = doc["paths"]["/api/connect_memory"]["post"]["requestBody"][
+        "content"
+    ]["application/json"]["schema"]
+    assert connect_schema["properties"]["entity_type"]["enum"] == list(
+        commands.entity_types_module.ENTITY_TYPE_IDS
+    )
     success = doc["paths"]["/api/ask_memory"]["post"]["responses"]["200"]
     response_schema = success["content"]["application/json"]["schema"]
     encoded_response = json.dumps(

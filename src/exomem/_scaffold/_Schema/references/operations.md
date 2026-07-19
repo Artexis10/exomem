@@ -228,7 +228,7 @@ an explicit reviewed operation because paths are graph addresses.
 
 ### Procedure
 1. Read the active entity registry and selected knowledge-pack priorities.
-2. Search the exact name and aliases. If one active entity matches, use a guarded
+2. Call `connect_memory(operation="resolve-entity", name=...)`. If one active entity matches, use a guarded
    `edit_memory` correction or the canonical relation workflow instead of create.
 3. If no entity matches and the identity is stable, recurring, central, and
    useful beyond this source, call `connect_memory(operation="create-entity")`.

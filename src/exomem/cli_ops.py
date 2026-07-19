@@ -42,6 +42,9 @@ _REMEDIATION: dict[str, str] = {
     "BAD_JSON": "Pass valid JSON for this field.",
     "BINARY_BLOB_REJECTED": "Don't push binaries through text fields; use the /upload endpoint.",
     "NOT_FOUND": "Check the path; try `ask_memory` to locate it.",
+    "ENTITY_AMBIGUOUS": (
+        "Review the returned active candidates and reconcile the identity before creating."
+    ),
     "STALE_PARENT_HASH": "Re-read the parent page and retry with its current content hash.",
     "STALE_UNIT_REFERENCE": (
         "Re-read the exact unit and retry with its current reference/fingerprint."
@@ -92,6 +95,7 @@ _CONFLICT_CODES = frozenset(
         "FILE_EXISTS",
         "DEST_EXISTS",
         "ENTITY_EXISTS",
+        "ENTITY_AMBIGUOUS",
         "ALREADY_SUPERSEDED",
         "ALREADY_TRASHED",
         "STALE_EDIT",
