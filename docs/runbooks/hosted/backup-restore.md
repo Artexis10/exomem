@@ -23,6 +23,14 @@ individual Secret refs and never appear in that ConfigMap.
 python3 infra/scripts/external_blackbox.py --contract infra/contracts/observability-v1.json
 ```
 
+The GitHub Actions black-box schedule stays disabled until the hosted deployment
+exists. Before the first production invite, configure the repository secrets
+`EXOMEM_BLACKBOX_CONTROL_URL`, `EXOMEM_BLACKBOX_BACKUP_FRESHNESS_URL`, and
+`EXOMEM_BLACKBOX_SCHEDULER_URL`; run the workflow manually and require three
+healthy observations; then restore the `*/5 * * * *` schedule in
+`.github/workflows/hosted-infrastructure.yml`. The five-minute cadence must stay
+aligned with `poll_interval_seconds: 300` in the observability contract.
+
 Start backup or restore through the product lifecycle endpoint with the original
 idempotency key. Never archive a live filesystem or copy a source binding marker.
 The restore request is the control plane's complete mode-`0600` `RestoreRequest`;
