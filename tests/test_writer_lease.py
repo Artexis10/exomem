@@ -410,7 +410,7 @@ def test_invoke_routes_writes_through_reusable_mutation_guard(
     events: list[str] = []
 
     @contextmanager
-    def guard(subject: Path):
+    def guard(subject: Path, **_metadata):
         assert subject == vault
         events.append("guard-enter")
         yield SimpleNamespace(identity="vault:test")

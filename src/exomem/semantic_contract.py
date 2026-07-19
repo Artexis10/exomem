@@ -682,6 +682,7 @@ def build_page_state(
     """Build detached semantic state from one already-read Markdown string."""
     root = Path(vault_root)
     rel_path = _normalize_path(root, path)
+    source = source.replace("\r\n", "\n").replace("\r", "\n")
     frontmatter, body, _ = vault.parse_frontmatter(source)
     page_type_value = frontmatter.get("type")
     page_type = str(page_type_value) if page_type_value else None

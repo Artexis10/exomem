@@ -47,6 +47,7 @@ from . import create_file as create_file_module
 from . import delete_directory as delete_directory_module
 from . import delete_file as delete_file_module
 from . import edit as edit_module
+from . import entity_types as entity_types_module
 from . import epistemic_graph as epistemic_graph_module
 from . import evolution as evolution_module
 from . import find as find_module
@@ -222,7 +223,7 @@ def op_bootstrap(
     requested_workflow = workflow.strip() if workflow and workflow.strip() else "general"
     selected_packs = knowledge_packs_module.selected_pack_state(vault_root)
     payload: dict = {
-        "contract_version": "2026-07-18.1",
+        "contract_version": "2026-07-19.1",
         "profile": profile,
         "server": {
             "name": "exomem",
@@ -250,6 +251,22 @@ def op_bootstrap(
             "selection_rule": (
                 "Packs are product guidance only. They help route simple user intent "
                 "into typed tools; they do not create folders, migrate files, or bypass governance."
+            ),
+        },
+        "entity_registry": {
+            "types": [
+                {
+                    "id": definition.id,
+                    "label": definition.label,
+                    "folder": definition.folder,
+                    "capture_guidance": definition.capture_guidance,
+                }
+                for definition in entity_types_module.ENTITY_TYPE_REGISTRY
+            ],
+            "capture_rule": (
+                "After durable work, run one bounded exact-match-first entity pass. "
+                "Create only stable, recurring identities; update an existing entity only "
+                "with new durable facts or relations; skip incidental mentions."
             ),
         },
         "workflow": {
@@ -305,7 +322,7 @@ def op_bootstrap(
                 "small_correction": "edit_memory",
                 "semantic_unit_mutation": "observe_memory",
                 "substantial_rewrite": "replace_memory",
-                "named_person_concept_library_or_decision": "connect_memory(operation='entity')",
+                "stable_named_entity": "connect_memory(operation='create-entity')",
             },
             "preflight": {
                 "connect_memory": "standard read-only suggest-links/suggest-relations check before a compiled note write",
@@ -1845,6 +1862,11 @@ def op_edit(
             `old_string`. Reports how many rows would be hit instead of
             committing — use it before a `replace_all` to avoid an
             ambiguous match silently touching more rows than intended.
+        transition_token: Exact semantic transition token returned by a
+            validate-only preflight.
+        relation_disposition: Reviewed relation outcome for the commit.
+        relation_review_hash: Transition hash covered by reviewed-none.
+        relation_review_reason: Audit reason for reviewed-none.
 
     Returns:
         Shape varies by mode (take-row -> {path, row, warnings};
@@ -1883,6 +1905,10 @@ def op_edit(
                 relation_review_reason=relation_review_reason,
             )
         elif row_key is not None:
+            if validate_only:
+                raise ValueError(
+                    "INVALID_EDIT: validate_only is not supported for row_key mode"
+                )
             if take is None:
                 raise ValueError("INVALID_EDIT: row_key mode requires `take`")
             result = set_take_module.set_take(
@@ -2072,20 +2098,14 @@ def op_link(
 ) -> dict:
     """Create a typed entity under Entities/<Folder>/<Name>.md.
 
-    Entities are the typed nodes of the KB graph — people, concepts,
-    libraries, decisions. Name them after the thing they are (Title Case,
-    not slugified): `Ada Lovelace`, `Agentic RAG`, `pgvector`.
+    Entities are typed nodes of the KB graph. The stable entity registry returned
+    by `bootstrap` is authoritative for IDs, labels, folders, aliases, and capture
+    guidance. Name entities after the thing they are (Title Case, not slugified):
+    `Ada Lovelace`, `Agentic RAG`, `pgvector`.
 
-    Four entity types with conditional frontmatter:
-    - `person`   → Entities/People/. Optional: `affiliation`, `relationship`.
-    - `concept`  → Entities/Concepts/. Optional: `domain` (e.g.
-      "retrieval", "workflow", "infrastructure").
-    - `library`  → Entities/Libraries/. Optional: `language`, `repo`,
-      `license`, `used_in` (list of projects).
-    - `decision` → Entities/Decisions/. Optional: `decided` (YYYY-MM-DD),
-      `project` (project key — any slug; unknown keys auto-register on first
-      use, same as `note`), `decision_status` ∈ {proposed, accepted,
-      superseded}.
+    Conditional frontmatter is accepted only when the selected registry kind
+    supports it: `affiliation`/`relationship`, `domain`, software metadata, or
+    decision metadata. Unknown fields and unregistered kinds are refused.
 
     v1 is create-only. If the entity file already exists, returns
     ENTITY_EXISTS — use `replace` to supersede instead. Sub-folder index
@@ -2093,7 +2113,7 @@ def op_link(
     reconcile via desk audit.
 
     Args:
-        entity_type: One of person, concept, library, decision.
+        entity_type: Stable ID returned by bootstrap.entity_registry.
         name: Unicode display name stored in frontmatter and the H1.
         slug: Optional lowercase ASCII kebab-case filename component.
         summary: One-paragraph description for the `## Summary` section.
@@ -3401,6 +3421,10 @@ def op_edit_memory(
         allow_curated: Permit frontmatter patch under curated trees.
         expected_hash: Refuse write if content changed since read.
         validate_only: Preview a surgical match without writing.
+        transition_token: Exact semantic transition token returned by validate_only.
+        relation_disposition: Reviewed relation outcome for the commit.
+        relation_review_hash: Transition hash covered by reviewed-none.
+        relation_review_reason: Audit reason for reviewed-none.
     """
     return op_edit(
         vault_root,

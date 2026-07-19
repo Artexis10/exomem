@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
+import time
 import uuid
 from pathlib import Path
 from types import SimpleNamespace
-import threading
-import time
 
 import pytest
 
@@ -43,6 +43,24 @@ def test_edit_memory_validate_only_is_read_only() -> None:
     assert invocation_is_read_only(command, {"validate_only": True}) is True
     assert invocation_is_read_only(command, {"validate_only": False}) is False
     assert invocation_is_read_only(command, {}) is False
+
+
+def test_validate_only_row_edit_refuses_instead_of_mutating(vault: Path) -> None:
+    from exomem.commands import op_edit_memory
+
+    path = _write_editable_note(vault, body="- Example [take: ]")
+
+    with pytest.raises(ValueError, match="validate_only is not supported"):
+        op_edit_memory(
+            vault,
+            path=path,
+            why="preview take",
+            row_key="Example",
+            take="A view",
+            validate_only=True,
+        )
+
+    assert "[take: ]" in (vault / path).read_text(encoding="utf-8")
 
 
 def test_bound_validate_only_edit_bypasses_live_mutation_boundary(

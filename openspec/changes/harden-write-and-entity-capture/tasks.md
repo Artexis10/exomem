@@ -1,32 +1,32 @@
 ## 1. Baseline And Red Tests
 
-- [ ] 1.1 Run the current focused mutation, command-classification, entity/link, index, pack, bootstrap, hook, and connector-fingerprint tests from the clean v0.24.2 worktree.
-- [ ] 1.2 Add and run failing tests proving `edit_memory(validate_only=true)` is read-only, bypasses writer/idempotency/mutation admission, and remains usable while another mutation owns the boundary.
-- [ ] 1.3 Add and run failing real-surface tests for edit semantic-preflight failure, transport cancellation, identical pending retry, terminal replay, and no self-induced `MUTATION_BUSY`.
-- [ ] 1.4 Add and run failing tests for content-free mutation-holder telemetry and bounded background reconciliation lock ownership.
-- [ ] 1.5 Add and run failing registry tests covering the five core entity kinds, pack-default validation, Organizations, registry-derived indexes, bootstrap guidance, and unchanged MCP fingerprint.
-- [ ] 1.6 Add and run failing capture-hook/scaffold tests for bounded exact-match-first entity routing, update-before-create behavior, one-off-name suppression, correct `create-entity` operation, and recognition of modern entity writes.
+- [x] 1.1 Run the current focused mutation, command-classification, entity/link, index, pack, bootstrap, hook, and connector-fingerprint tests from the clean v0.24.2 worktree.
+- [x] 1.2 Add and run failing tests proving `edit_memory(validate_only=true)` is read-only, bypasses writer/idempotency/mutation admission, and remains usable while another mutation owns the boundary.
+- [x] 1.3 Add and run failing real-surface tests for edit semantic-preflight failure, transport cancellation, identical pending retry, terminal replay, and no self-induced `MUTATION_BUSY`.
+- [x] 1.4 Add and run failing tests for content-free mutation-holder telemetry and bounded background reconciliation lock ownership.
+- [x] 1.5 Add and run failing registry tests covering the five core entity kinds, pack-default validation, Organizations, registry-derived indexes, bootstrap guidance, and an intentionally versioned MCP fingerprint.
+- [x] 1.6 Add and run failing capture-hook/scaffold tests for bounded exact-match-first entity routing, update-before-create behavior, one-off-name suppression, correct `create-entity` operation, and recognition of modern entity writes.
 
 ## 2. Mutation Safety
 
-- [ ] 2.1 Integrate the receipt-first replay implementation from PR #252 without changing the public `edit_memory` name or mutation result contract.
-- [ ] 2.2 Classify only `edit_memory(validate_only=true)` as read-only and keep guarded semantic validation correct without acquiring write authorities.
-- [ ] 2.3 Add opaque request/operation/holder-kind/age state to the vault mutation coordinator and expose bounded content-free coordination/readiness diagnostics plus long-holder warnings.
-- [ ] 2.4 Bound file-watcher/media reconciliation mutation batches and release the global boundary between batches.
-- [ ] 2.5 Run the focused mutation, real command-surface, FastMCP cancellation, lease, hosted admission, and readiness suites green.
+- [x] 2.1 Integrate the receipt-first replay implementation from PR #252 without changing the public `edit_memory` name or mutation result contract.
+- [x] 2.2 Classify only `edit_memory(validate_only=true)` as read-only and keep guarded semantic validation correct without acquiring write authorities.
+- [x] 2.3 Add opaque request/operation/holder-kind/age state to the vault mutation coordinator and expose bounded content-free coordination/readiness diagnostics plus long-holder warnings.
+- [x] 2.4 Bound file-watcher/media reconciliation mutation batches and release the global boundary between batches.
+- [x] 2.5 Run the focused mutation, real command-surface, FastMCP cancellation, lease, hosted admission, and readiness suites green.
 
 ## 3. Registry-Driven Entity Capture
 
-- [ ] 3.1 Add the immutable central entity registry for person, organization, concept, library, and decision with unique IDs, folders, labels, and aliases.
-- [ ] 3.2 Refactor entity validation/render routing, initialization, reverse folder lookup, counts, subindexes, and missing-Organizations reconciliation to consume the registry while preserving custom index prose.
-- [ ] 3.3 Validate every knowledge-pack `default_entity_types` value against the registry and add Organization capture priority to the relevant built-in packs.
-- [ ] 3.4 Expose registry and selected-pack priorities in bootstrap, fix the stale `entity` versus `create-entity` route guidance, and keep the MCP schema/tool fingerprint unchanged.
-- [ ] 3.5 Update the capture hook, scaffold, workflow skills, and generated/fixture documentation with bounded exact-match-first, update/link-before-create, durable-central-entity, and no-spam guidance.
-- [ ] 3.6 Run entity/link/index/init/pack/bootstrap/hook/scaffold/filter and connector-guardrail suites green.
+- [x] 3.1 Add the immutable central entity registry for person, organization, concept, library, and decision with unique IDs, folders, labels, and aliases.
+- [x] 3.2 Refactor entity validation/render routing, initialization, reverse folder lookup, counts, subindexes, and missing-Organizations reconciliation to consume the registry while preserving custom index prose.
+- [x] 3.3 Validate every knowledge-pack `default_entity_types` value against the registry and add Organization capture priority to the relevant built-in packs.
+- [x] 3.4 Expose registry and selected-pack priorities in bootstrap, fix the stale `entity` versus `create-entity` route guidance, expose the semantic review fields required to commit `edit_memory`, and version the MCP schema/tool fingerprint without renaming the tool.
+- [x] 3.5 Update the capture hook, scaffold, workflow skills, and generated/fixture documentation with bounded exact-match-first, update/link-before-create, durable-central-entity, and no-spam guidance.
+- [x] 3.6 Run entity/link/index/init/pack/bootstrap/hook/scaffold/filter and connector-guardrail suites green.
 
 ## 4. Verification And Review
 
-- [ ] 4.1 Run strict OpenSpec validation, Ruff on changed files, targeted type checks, package build/import, and tool-fingerprint verification.
+- [x] 4.1 Run strict OpenSpec validation, Ruff on changed files, targeted type checks, package build/import, and tool-fingerprint verification.
 - [ ] 4.2 Run the full lean pytest suite on Python 3.13 and required product E2E/retrieval/package gates.
 - [ ] 4.3 Commit the implementation in reviewable mutation-safety and entity-registry units and request an independent adversarial code review against the exact base/head SHAs.
 - [ ] 4.4 Resolve every critical/important review finding and have the original reviewer verify only the corrected findings.

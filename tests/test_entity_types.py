@@ -6,7 +6,7 @@ from dataclasses import FrozenInstanceError
 
 import pytest
 
-from exomem import entity_types
+from exomem import commands, entity_types
 
 
 def test_core_entity_registry_is_complete_unique_and_immutable() -> None:
@@ -49,3 +49,11 @@ def test_entity_type_aliases_resolve_to_stable_ids(value: str, expected: str) ->
 
 def test_unknown_entity_type_does_not_resolve() -> None:
     assert entity_types.resolve_entity_type("vendor") is None
+
+
+def test_public_entity_writer_guidance_covers_every_registered_kind() -> None:
+    guidance = commands.op_link.__doc__ or ""
+
+    assert "stable entity registry returned" in guidance
+    assert "bootstrap.entity_registry" in guidance
+    assert "One of person" not in guidance

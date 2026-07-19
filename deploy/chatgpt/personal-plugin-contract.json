@@ -7,10 +7,10 @@
   "default_scopes": [],
   "base_scopes": ["offline_access"],
   "registered_tool_surface_sha256": null,
-  "pending_tool_surface_sha256": "91927b86184f40dd9e99f98bec4c0d31373a807a2333a4eca947771096b9a5bf",
+  "pending_tool_surface_sha256": "68439afa2102cca7ffc006a396a285f33d2752e52eb4a56d6223e231d8745803",
   "refresh_required": true,
   "rollout_state": "awaiting-post-deploy-refresh",
   "last_verified_release": "0.24.0",
   "last_verified_at": "2026-07-18",
-  "verification": "Current 0.24.0 Personal Plugin works, but its pre-fingerprint dynamic schema is not claimed as the pending invariant surface. After deployment, recreate or rescan, invoke bootstrap and ask_memory from a fresh conversation, then promote pending to registered and clear refresh_required."
+  "verification": "The changed edit_memory review schema is pending deployment and Personal Plugin refresh. After deployment, recreate or rescan, invoke bootstrap, ask_memory, and a validate/commit edit_memory flow from a fresh conversation, then promote pending to registered and clear refresh_required."
 }

@@ -1368,6 +1368,54 @@
           "default": false,
           "description": "Preview a surgical match without writing.",
           "type": "boolean"
+        },
+        "transition_token": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Exact semantic transition token returned by validate_only."
+        },
+        "relation_disposition": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Reviewed relation outcome for the commit."
+        },
+        "relation_review_hash": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Transition hash covered by reviewed-none."
+        },
+        "relation_review_reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Audit reason for reviewed-none."
         }
       },
       "required": [

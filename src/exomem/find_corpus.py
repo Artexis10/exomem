@@ -169,6 +169,11 @@ def parse_page(
             log.warning("could not read %s: %s", path, e)
         return None
 
+    # Markdown has a logical LF grammar even when editors persist CRLF on
+    # Windows. Normalize for parsing while callers that need exact bytes keep
+    # using the original `content`/PathGuard.
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+
     fm_match = FRONTMATTER_PATTERN.match(text)
     if fm_match:
         try:

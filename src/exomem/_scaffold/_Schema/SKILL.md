@@ -660,7 +660,8 @@ distinctions:
   it spans projects.
 - **experiment** — hypothesis + protocol + primary data, `Notes/Experiments/<domain>/`.
 - **production-log** — creative artifact + production knowledge, `Notes/Productions/<medium>/`.
-- **entity** — typed node, `Entities/<entity-type>/` (People / Concepts / Libraries / Decisions).
+- **entity** — typed node under the folder resolved by the stable entity registry
+  (People / Organizations / Concepts / Libraries / Decisions).
 
 ### Research scope keys
 
