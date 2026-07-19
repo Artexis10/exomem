@@ -25,6 +25,23 @@ COMPLETED = "completed"
 STATES = (PENDING, RUNNING, BLOCKED, FAILED)
 STATUS_JOB_LIMIT = 100
 DISCOVERY_CURSOR_KEY = "discovery_cursor"
+_TRANSIENT_OPERATION_CODES = frozenset(
+    {
+        "MUTATION_BUSY",
+        "MUTATION_LOCK_UNAVAILABLE",
+        "WRITER_COORDINATOR_UNAVAILABLE",
+        "WRITER_FENCED",
+        "WRITER_LEASE_REQUIRED",
+    }
+)
+
+
+def _is_transient_operation_error(error: str | None) -> bool:
+    if not error or not error.startswith("OpError:"):
+        return False
+    return any(
+        f"{code}:" in error or f'"code":"{code}"' in error for code in _TRANSIENT_OPERATION_CODES
+    )
 
 
 def job_store_path(vault_root: Path) -> Path:
@@ -309,6 +326,24 @@ class MediaJobStore:
         finally:
             conn.close()
 
+    def defer(self, job_id: int) -> bool:
+        """Return a claimed job to pending after transient coordination refusal."""
+        conn = self._connect()
+        try:
+            with conn:
+                changed = conn.execute(
+                    """
+                    UPDATE jobs
+                    SET state = 'pending', attempts = MAX(0, attempts - 1),
+                        last_error = NULL, updated_at = ?
+                    WHERE id = ? AND state = 'running'
+                    """,
+                    (time.time(), job_id),
+                ).rowcount
+                return changed == 1
+        finally:
+            conn.close()
+
     def get(self, job_id: int) -> MediaJob | None:
         conn = self._connect()
         try:
@@ -369,6 +404,28 @@ class MediaJobStore:
                     f"UPDATE jobs SET state = 'pending', updated_at = ? "
                     f"WHERE state IN ({placeholders})",
                     (time.time(), *states),
+                ).rowcount
+                return int(changed)
+        finally:
+            conn.close()
+
+    def recover_transient_failures(self) -> int:
+        """Repair jobs poisoned by older workers treating coordination as media failure."""
+        conn = self._connect()
+        try:
+            rows = conn.execute("SELECT id, last_error FROM jobs WHERE state = 'failed'").fetchall()
+            job_ids = [
+                int(row["id"]) for row in rows if _is_transient_operation_error(row["last_error"])
+            ]
+            if not job_ids:
+                return 0
+            placeholders = ",".join("?" for _ in job_ids)
+            with conn:
+                changed = conn.execute(
+                    f"UPDATE jobs SET state = 'pending', "
+                    "attempts = MAX(0, attempts - 1), last_error = NULL, updated_at = ? "
+                    f"WHERE state = 'failed' AND id IN ({placeholders})",
+                    (time.time(), *job_ids),
                 ).rowcount
                 return int(changed)
         finally:
