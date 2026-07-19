@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 from starlette.testclient import TestClient
 
-from exomem import commands, server
+from exomem import commands, entity_types, server
 from exomem.__main__ import main
 
 
@@ -46,6 +46,7 @@ def test_bootstrap_compact_contract_is_public_safe(vault: Path) -> None:
         "performance_profiles",
         "memory_model",
         "knowledge_packs",
+        "entity_registry",
         "authoring_contract",
     } <= set(out)
     assert set(out["common_actions"]) == set(commands.simple_action_names())
@@ -67,6 +68,26 @@ def test_bootstrap_compact_contract_is_public_safe(vault: Path) -> None:
     assert out["workflow_skills"][0]["path"].startswith("Knowledge Base/_Schema/")
     assert out["knowledge_packs"]["selected"]["selected_pack_ids"] == ["personal-records"]
     assert out["knowledge_packs"]["available"][0]["beginner_description"]
+    assert [item["id"] for item in out["entity_registry"]["types"]] == list(
+        entity_types.ENTITY_TYPE_IDS
+    )
+    assert out["entity_registry"]["types"][0]["aliases"] == list(
+        entity_types.ENTITY_TYPE_REGISTRY[0].aliases
+    )
+    assert out["entity_registry"]["candidate_route"] == (
+        "connect_memory(operation='resolve-entity')"
+    )
+    organization = next(
+        item
+        for item in out["entity_registry"]["types"]
+        if item["id"] == "organization"
+    )
+    assert "company" in organization["aliases"]
+    assert (
+        out["authoring_contract"]["route_by_intent"]["stable_named_entity"]
+        == "connect_memory(operation='create-entity')"
+    )
+    assert "operation='entity'" not in repr(out)
     assert out["front_door_actions"]["save"]["selected_pack_guidance"][0]["pack_id"] == "personal-records"
     assert out["tool_defaults"]["adopt_existing_vault"]["tool"] == "adopt_vault"
     authoring = out["authoring_contract"]
@@ -123,7 +144,7 @@ def test_bootstrap_teaches_human_readable_memory_citations(vault: Path) -> None:
     out = commands.op_bootstrap(vault)
     guidance = json.dumps(out["workflow"]).lower()
 
-    assert out["contract_version"] == "2026-07-18.1"
+    assert out["contract_version"] == "2026-07-19.1"
     for required in (
         "show the note title by default",
         "normal user-facing prose",

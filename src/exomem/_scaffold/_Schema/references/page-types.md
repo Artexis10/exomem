@@ -369,14 +369,15 @@ metrics, is a production-log.
 
 ## entity
 
-**Location:** `Entities/<entity-type>/` where entity-type ∈ {People, Concepts, Libraries, Decisions}
+**Location:** `Entities/<registered-folder>/`, with the folder resolved from the
+active entity registry exposed by bootstrap.
 **Naming:**
 
 - **People:** the working short used in daily reference — typically the first name
   for people in your working circle, the full name for public figures. The H1
   carries the full disambiguating name when it differs from the filename.
   Disambiguate the filename only when two entities would otherwise collide.
-- **Concepts, Libraries, Decisions:** Title Case, the entity's canonical name.
+- **Other registered kinds:** Title Case, the entity's canonical name.
   `Agentic RAG.md`, `pgvector.md`, `Adopt pgvector for the engine.md`.
 
 **Required frontmatter:** `type: entity`, `entity_type`, `status`, `created`, `updated`, `tags`. Optional fields by entity-type.
@@ -411,6 +412,13 @@ What this person is relevant to in your work.
 
 - relates_to [[...]]
 ```
+
+### Organizations
+
+Use for a stable company, institution, team, agency, nonprofit, or other
+organization whose facts, history, or relations recur across sources. Keep
+incidental or unresolved names in source/note context instead of creating a
+speculative entity.
 
 ### Concepts
 

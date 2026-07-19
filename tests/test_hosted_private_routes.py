@@ -115,6 +115,7 @@ class IsolatedInvoker:
         *injected,
         idempotency_key: str | None = None,
         implicit_idempotency_scope: str | None = None,
+        mutation_request_id: str | None = None,
         **kwargs,
     ) -> Any:
         self.calls.append(
@@ -123,6 +124,7 @@ class IsolatedInvoker:
                 "vault": injected[0],
                 "idempotency_key": idempotency_key,
                 "implicit_scope": implicit_idempotency_scope,
+                "request_id": mutation_request_id,
             }
         )
         digest = hashlib.sha256(repr((command.name, sorted(kwargs.items()))).encode()).hexdigest()

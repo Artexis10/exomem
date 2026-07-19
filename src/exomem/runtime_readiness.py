@@ -11,6 +11,19 @@ RUNTIME_CONTRACT = 1
 HTTP_TRANSPORT = "streamable-http-stateless"
 
 
+def _public_mutation_boundary(value: object) -> dict[str, Any]:
+    if not isinstance(value, Mapping) or value.get("state") != "held":
+        return {"state": "free"}
+    return {
+        "state": "held",
+        "request_id": str(value.get("request_id") or "untracked"),
+        "operation": str(value.get("operation") or "unknown"),
+        "holder_kind": str(value.get("holder_kind") or "unknown"),
+        "age_seconds": float(value.get("age_seconds") or 0.0),
+        "overdue": bool(value.get("overdue")),
+    }
+
+
 def package_release() -> str:
     """Return the installed distribution release without making readiness fragile."""
     try:
@@ -58,6 +71,9 @@ def build_runtime_readiness(
             "enabled": enabled,
             "role": role,
             "coordinator_healthy": healthy,
+            "mutation_boundary": _public_mutation_boundary(
+                coordination.get("mutation_boundary")
+            ),
         },
         "takeover_eligible": takeover_eligible,
         "reasons": reasons,

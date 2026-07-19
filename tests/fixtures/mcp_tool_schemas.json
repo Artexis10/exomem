@@ -728,7 +728,7 @@
       "properties": {
         "operation": {
           "default": "suggest-links",
-          "description": "context, suggest-links, suggest-relations, graph-context, inbound-links, create-entity, or accept-relation.",
+          "description": "context, suggest-links, suggest-relations, graph-context, inbound-links, resolve-entity, create-entity, or accept-relation.",
           "type": "string"
         },
         "path": {
@@ -913,6 +913,13 @@
         "entity_type": {
           "anyOf": [
             {
+              "enum": [
+                "person",
+                "organization",
+                "concept",
+                "library",
+                "decision"
+              ],
               "type": "string"
             },
             {
@@ -1368,6 +1375,54 @@
           "default": false,
           "description": "Preview a surgical match without writing.",
           "type": "boolean"
+        },
+        "transition_token": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Exact semantic transition token returned by validate_only."
+        },
+        "relation_disposition": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Reviewed relation outcome for the commit."
+        },
+        "relation_review_hash": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Transition hash covered by reviewed-none."
+        },
+        "relation_review_reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Audit reason for reviewed-none."
         }
       },
       "required": [

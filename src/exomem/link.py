@@ -1,10 +1,4 @@
-"""The `link` MCP tool: create a typed entity under Entities/.
-
-Four entity types per page-types.md:
-- person   → Entities/People/<Name>.md
-- concept  → Entities/Concepts/<Name>.md
-- library  → Entities/Libraries/<Name>.md
-- decision → Entities/Decisions/<Name>.md
+"""The `link` MCP tool: create a registered typed entity under Entities/.
 
 Name is **Title Case**, not slugified — entities are named after the thing
 they are (e.g., `Ada Lovelace.md`, `Agentic RAG.md`, `pgvector.md`).
@@ -24,7 +18,13 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import indexes, memory_refs, semantic_writes
+from . import entity_candidates, indexes, memory_refs, semantic_writes
+from .entity_types import (
+    ENTITY_TYPE_IDS,
+    ENTITY_TYPE_TO_FOLDER,
+    ENTITY_TYPES_BY_ID,
+    resolve_entity_type,
+)
 from .kbdir import kb_prefix
 from .vault import (
     InvalidSlugError,
@@ -46,14 +46,7 @@ from .vault import (
 log = logging.getLogger(__name__)
 
 
-ENTITY_TYPES = ("person", "concept", "library", "decision")
-
-ENTITY_TYPE_TO_FOLDER: dict[str, str] = {
-    "person": "People",
-    "concept": "Concepts",
-    "library": "Libraries",
-    "decision": "Decisions",
-}
+ENTITY_TYPES = ENTITY_TYPE_IDS
 
 DECISION_STATUS_VALUES = ("proposed", "accepted", "superseded")
 
@@ -77,9 +70,17 @@ class LinkError(Exception):
     code: str
     missing: list[str]
     reason: str
+    candidates: list[dict[str, str]] | None = None
 
     def as_dict(self) -> dict:
-        return {"code": self.code, "missing": self.missing, "reason": self.reason}
+        value: dict[str, object] = {
+            "code": self.code,
+            "missing": self.missing,
+            "reason": self.reason,
+        }
+        if self.candidates:
+            value["candidates"] = self.candidates
+        return value
 
 
 def _legacy_link(
@@ -109,6 +110,9 @@ def _legacy_link(
     today: dt.date | None = None,
 ) -> LinkResult:
     """Create a typed entity page + update top index + log."""
+    definition = resolve_entity_type(entity_type)
+    if definition is not None:
+        entity_type = definition.id
     slug_warnings: list[str] = []
     filename_slug: str | None = None
     if slug is not None:
@@ -396,30 +400,26 @@ def _render_entity(
     lines.append(f"created: {date_iso}")
     lines.append(f"updated: {date_iso}")
 
-    if entity_type == "person":
-        if affiliation:
-            lines.append(f"affiliation: {affiliation}")
-        if relationship:
-            lines.append(f"relationship: {relationship}")
-    elif entity_type == "concept":
-        if domain:
-            lines.append(f"domain: {domain}")
-    elif entity_type == "library":
-        if language:
-            lines.append(f"language: {language}")
-        if repo:
-            lines.append(f"repo: {repo}")
-        if license:
-            lines.append(f"license: {license}")
-        if used_in:
-            lines.append("used_in: [" + ", ".join(used_in) + "]")
-    elif entity_type == "decision":
-        if decided:
-            lines.append(f"decided: {decided}")
-        if project:
-            lines.append(f"project: {project}")
-        if decision_status:
-            lines.append(f"decision_status: {decision_status}")
+    optional_values: dict[str, str | list[str] | None] = {
+        "affiliation": affiliation,
+        "relationship": relationship,
+        "domain": domain,
+        "language": language,
+        "repo": repo,
+        "license": license,
+        "used_in": used_in,
+        "decided": decided,
+        "project": project,
+        "decision_status": decision_status,
+    }
+    for field in ENTITY_TYPES_BY_ID[entity_type].optional_frontmatter:
+        value = optional_values[field]
+        if not value:
+            continue
+        if isinstance(value, list):
+            lines.append(f"{field}: [" + ", ".join(value) + "]")
+        else:
+            lines.append(f"{field}: {value}")
 
     if tags:
         lines.append("tags: [" + ", ".join(tags) + "]")
@@ -578,6 +578,9 @@ def link(
     today: dt.date | None = None,
 ) -> LinkResult:
     """Create an entity through detached structural preflight."""
+    definition = resolve_entity_type(entity_type)
+    if definition is not None:
+        entity_type = definition.id
     slug_warnings: list[str] = []
     filename_slug: str | None = None
     if slug is not None:
@@ -608,6 +611,23 @@ def link(
     date_iso = (today or dt.date.today()).isoformat()
     identity = memory_refs.new_id()
     display_name = name.strip()
+    identity_resolution = entity_candidates.resolve_entity_candidate(
+        vault_root, name=display_name
+    )
+    if identity_resolution["status"] == "match":
+        raise LinkError(
+            "ENTITY_EXISTS",
+            ["name"],
+            "an active entity already has this exact title or alias; update or link it instead",
+            list(identity_resolution["candidates"]),
+        )
+    if identity_resolution["status"] == "ambiguous":
+        raise LinkError(
+            "ENTITY_AMBIGUOUS",
+            ["name"],
+            "the exact title or alias matches multiple active entities; reconcile the identity first",
+            list(identity_resolution["candidates"]),
+        )
     folder = kb_root(vault_root) / "Entities" / ENTITY_TYPE_TO_FOLDER[entity_type]
     entity_path = folder / f"{filename_slug or _sanitize_name(name)}.md"
     rel_entity = entity_path.relative_to(vault_root).as_posix()

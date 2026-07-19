@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import inspect
 import json
 import sqlite3
@@ -14,7 +15,7 @@ import pytest
 
 from exomem import vault as vault_module
 from exomem import writer_lease as writer_lease_module
-from exomem.cli_ops import OpError, http_status_for
+from exomem.cli_ops import OpError, error_dict, http_status_for
 from exomem.lease_coordinator import SQLiteLeaseStore
 from exomem.mutation_lock import VaultMutationCoordinator
 from exomem.vault import PlannedWrite, batch_atomic_write
@@ -409,7 +410,7 @@ def test_invoke_routes_writes_through_reusable_mutation_guard(
     events: list[str] = []
 
     @contextmanager
-    def guard(subject: Path):
+    def guard(subject: Path, **_metadata):
         assert subject == vault
         events.append("guard-enter")
         yield SimpleNamespace(identity="vault:test")
@@ -778,6 +779,431 @@ def test_idempotency_returns_saved_result_and_rejects_mismatch(tmp_path: Path) -
     assert calls == [1]
 
 
+def test_identical_inflight_retry_waits_for_original_terminal_result(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    leaf_started = threading.Event()
+    release_leaf = threading.Event()
+    pending_seen = threading.Event()
+    calls: list[int] = []
+    outcomes: dict[str, object] = {}
+    manager = LeaseManager(
+        LeaseConfig(state_dir=tmp_path),
+        mutation_timeout_seconds=0,
+        idempotency_wait_seconds=2,
+    )
+
+    def leaf(value: int) -> dict[str, object]:
+        calls.append(value)
+        leaf_started.set()
+        assert release_leaf.wait(timeout=2)
+        return {"committed": True, "value": value}
+
+    command = _command(writes=True, leaf=leaf)
+    original_wait = manager.idempotency._wait_for_terminal
+
+    def observed_wait(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        pending_seen.set()
+        return original_wait(*args, **kwargs)
+
+    monkeypatch.setattr(manager.idempotency, "_wait_for_terminal", observed_wait)
+
+    def invoke(name: str) -> None:
+        try:
+            outcomes[name] = manager.invoke(
+                command,
+                (),
+                {"value": 1},
+                implicit_idempotency_scope="principal:alice",
+            )
+        except BaseException as error:  # noqa: BLE001 - assert thread outcome below
+            outcomes[name] = error
+
+    original = threading.Thread(target=invoke, args=("original",), daemon=True)
+    retry = threading.Thread(target=invoke, args=("retry",), daemon=True)
+    original.start()
+    assert leaf_started.wait(timeout=2)
+    retry.start()
+    assert pending_seen.wait(timeout=2)
+    release_leaf.set()
+    original.join(timeout=2)
+    retry.join(timeout=2)
+
+    assert not original.is_alive()
+    assert not retry.is_alive()
+    expected = {"committed": True, "value": 1}
+    assert outcomes == {"original": expected, "retry": expected}
+    assert calls == [1]
+
+
+def test_terminal_receipt_survives_acknowledgement_cancellation(tmp_path: Path) -> None:
+    calls: list[int] = []
+    interrupt = True
+
+    def after_terminal_persisted() -> None:
+        nonlocal interrupt
+        if interrupt:
+            interrupt = False
+            raise asyncio.CancelledError
+
+    manager = LeaseManager(
+        LeaseConfig(state_dir=tmp_path),
+        after_terminal_persisted=after_terminal_persisted,
+    )
+    command = _command(
+        writes=True,
+        leaf=lambda value: calls.append(value) or {"committed": True, "value": value},
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        manager.invoke(
+            command,
+            (),
+            {"value": 1},
+            idempotency_key="ack-lost",
+            idempotency_principal_scope="principal:alice",
+        )
+
+    assert manager.invoke(
+        command,
+        (),
+        {"value": 1},
+        idempotency_key="ack-lost",
+        idempotency_principal_scope="principal:alice",
+    ) == {"committed": True, "value": 1}
+    assert calls == [1]
+
+
+def test_identical_orphaned_pending_reports_acknowledgement_uncertain(
+    tmp_path: Path,
+) -> None:
+    manager = LeaseManager(
+        LeaseConfig(state_dir=tmp_path),
+        idempotency_wait_seconds=0,
+    )
+    command = _command(writes=True, leaf=lambda: pytest.fail("pending retry ran leaf"))
+    digest = writer_lease_module._command_digest(command, {})
+    key = writer_lease_module._effective_idempotency_key(
+        manager,
+        command=command,
+        mutation_subject="standalone",
+        digest=digest,
+        idempotency_key="pending",
+        principal_scope="principal:alice",
+    )[0]
+    with sqlite3.connect(manager.idempotency.path) as connection:
+        connection.execute(
+            "INSERT INTO mutations(key, digest, state, updated_at) "
+            "VALUES (?, ?, 'pending', ?)",
+            (key, digest, 100.0),
+        )
+
+    with pytest.raises(OpError) as pending:
+        manager.invoke(
+            command,
+            (),
+            {},
+            idempotency_key="pending",
+            idempotency_principal_scope="principal:alice",
+        )
+    assert pending.value.code == "MUTATION_ACKNOWLEDGEMENT_PENDING"
+    pending_payload = error_dict(pending.value)
+    assert pending_payload["status"] == "uncertain"
+    assert pending_payload["committed"] is None
+    assert pending_payload["request_id"]
+    assert pending_payload["idempotency_key"] == "pending"
+    assert pending_payload["receipt_id"]
+
+
+def test_different_identity_busy_is_precommit(tmp_path: Path) -> None:
+    leaf_started = threading.Event()
+    release_leaf = threading.Event()
+    first_calls: list[str] = []
+    second_calls: list[str] = []
+    outcome: list[object] = []
+    manager = LeaseManager(
+        LeaseConfig(state_dir=tmp_path),
+        mutation_timeout_seconds=0,
+    )
+
+    def first_leaf() -> str:
+        first_calls.append("first")
+        leaf_started.set()
+        assert release_leaf.wait(timeout=2)
+        return "committed"
+
+    first = _command(writes=True, leaf=first_leaf)
+    second = SimpleNamespace(
+        name="other-mutation",
+        read_only=False,
+        leaf=lambda: second_calls.append("second") or "unexpected",
+    )
+
+    def invoke_first() -> None:
+        try:
+            outcome.append(
+                manager.invoke(
+                    first,
+                    (),
+                    {},
+                    idempotency_key="first",
+                    idempotency_principal_scope="alice",
+                )
+            )
+        except BaseException as error:  # noqa: BLE001
+            outcome.append(error)
+
+    worker = threading.Thread(target=invoke_first, daemon=True)
+    worker.start()
+    assert leaf_started.wait(timeout=2)
+    with pytest.raises(OpError) as busy:
+        manager.invoke(
+            second,
+            (),
+            {},
+            idempotency_key="second",
+            idempotency_principal_scope="alice",
+        )
+    assert busy.value.code == "MUTATION_BUSY"
+    busy_payload = error_dict(busy.value)
+    assert busy_payload["status"] == "retryable"
+    assert busy_payload["committed"] is False
+    assert busy_payload["retry_after_ms"] == 750
+    assert busy_payload["request_id"]
+    assert busy_payload["idempotency_key"] == "second"
+    assert busy_payload["receipt_id"]
+    busy_wire = json.loads(str(busy.value))
+    assert busy_wire["ok"] is False
+    assert busy_wire["error_code"] == "MUTATION_BUSY"
+    assert busy_wire["request_id"] == busy_payload["request_id"]
+    assert second_calls == []
+    release_leaf.set()
+    worker.join(timeout=2)
+    assert outcome == ["committed"]
+    assert first_calls == ["first"]
+
+
+def test_postcommit_error_cannot_escape_as_precommit_retryable(tmp_path: Path) -> None:
+    target = tmp_path / "note.md"
+    calls = 0
+    manager = LeaseManager(LeaseConfig(state_dir=tmp_path / "state"))
+
+    def commits_then_misreports(vault: Path) -> None:
+        nonlocal calls
+        calls += 1
+        batch_atomic_write(
+            [PlannedWrite(target, "committed\n")],
+            vault_root=vault,
+        )
+        raise OpError("MUTATION_BUSY", "misleading post-commit error")
+
+    command = _command(writes=True, leaf=commits_then_misreports)
+    for _ in range(2):
+        with pytest.raises(OpError) as uncertain:
+            manager.invoke(
+                command,
+                (tmp_path,),
+                {},
+                idempotency_key="postcommit-error",
+                idempotency_principal_scope="principal:alice",
+            )
+        assert uncertain.value.code == "MUTATION_COMMITTED_ACKNOWLEDGEMENT_UNCERTAIN"
+        payload = error_dict(uncertain.value)
+        assert payload["status"] == "committed"
+        assert payload["committed"] is True
+
+    assert target.read_text(encoding="utf-8") == "committed\n"
+    assert calls == 1
+
+
+def test_empty_batch_does_not_mark_a_commit(tmp_path: Path) -> None:
+    manager = LeaseManager(LeaseConfig(state_dir=tmp_path / "state"))
+    calls = 0
+
+    def no_commit(vault: Path) -> None:
+        nonlocal calls
+        calls += 1
+        batch_atomic_write([], vault_root=vault)
+        raise OpError("MUTATION_BUSY", "pre-commit rejection")
+
+    command = _command(writes=True, leaf=no_commit)
+    for _ in range(2):
+        with pytest.raises(OpError) as busy:
+            manager.invoke(command, (tmp_path,), {}, idempotency_key="empty-batch")
+        assert busy.value.code == "MUTATION_BUSY"
+        assert error_dict(busy.value)["committed"] is False
+
+    assert calls == 2
+
+
+def test_completed_result_receipt_failure_is_committed_uncertain(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "note.md"
+    calls = 0
+    manager = LeaseManager(LeaseConfig(state_dir=tmp_path / "state"))
+
+    def commit(vault: Path) -> dict[str, bool]:
+        nonlocal calls
+        calls += 1
+        batch_atomic_write([PlannedWrite(target, "committed\n")], vault_root=vault)
+        return {"committed": True}
+
+    def fail_terminal_receipt(*_args, **_kwargs) -> None:
+        raise sqlite3.OperationalError("deterministic receipt write failure")
+
+    monkeypatch.setattr(manager.idempotency, "_persist_completed", fail_terminal_receipt)
+    command = _command(writes=True, leaf=commit)
+
+    for _ in range(2):
+        with pytest.raises(OpError) as uncertain:
+            manager.invoke(
+                command,
+                (tmp_path,),
+                {},
+                idempotency_key="receipt-failure",
+                idempotency_principal_scope="principal:alice",
+            )
+        assert uncertain.value.code == "MUTATION_COMMITTED_ACKNOWLEDGEMENT_UNCERTAIN"
+        assert error_dict(uncertain.value)["committed"] is True
+
+    assert target.read_text(encoding="utf-8") == "committed\n"
+    assert calls == 1
+
+
+def test_uncommitted_result_receipt_failure_does_not_claim_commit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = 0
+    manager = LeaseManager(
+        LeaseConfig(state_dir=tmp_path / "state"), idempotency_wait_seconds=0
+    )
+
+    def validate_only() -> dict[str, bool]:
+        nonlocal calls
+        calls += 1
+        return {"validate_only": True, "committed": False}
+
+    def fail_terminal_receipt(*_args, **_kwargs) -> None:
+        raise sqlite3.OperationalError("deterministic receipt write failure")
+
+    monkeypatch.setattr(manager.idempotency, "_persist_completed", fail_terminal_receipt)
+    command = _command(writes=True, leaf=validate_only)
+
+    for _ in range(2):
+        with pytest.raises(OpError) as pending:
+            manager.invoke(
+                command,
+                (),
+                {},
+                idempotency_key="validate-receipt-failure",
+            )
+        assert pending.value.code == "MUTATION_ACKNOWLEDGEMENT_PENDING"
+        assert error_dict(pending.value)["committed"] is None
+
+    assert calls == 1
+
+
+def test_precommit_failure_releases_pending_receipt_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manager = LeaseManager(LeaseConfig(state_dir=tmp_path))
+    command = _command(writes=True, leaf=lambda: (_ for _ in ()).throw(ValueError("no commit")))
+    deletes = 0
+    original_delete = manager.idempotency._delete_pending
+
+    def counted_delete(key: str, digest: str) -> None:
+        nonlocal deletes
+        deletes += 1
+        original_delete(key, digest)
+
+    monkeypatch.setattr(manager.idempotency, "_delete_pending", counted_delete)
+
+    with pytest.raises(ValueError, match="no commit"):
+        manager.invoke(command, (), {}, idempotency_key="precommit-failure")
+
+    assert deletes == 1
+
+
+def test_hosted_audit_does_not_hold_mutation_boundary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    audit_started = threading.Event()
+    release_audit = threading.Event()
+    audit_outcome: list[object] = []
+    manager = LeaseManager(LeaseConfig(state_dir=tmp_path / "state"), mutation_timeout_seconds=0)
+
+    def audit_leaf(_vault: Path, *, mode: str = "audit") -> str:  # noqa: ARG001
+        audit_started.set()
+        assert release_audit.wait(timeout=2)
+        return "audited"
+
+    audit = SimpleNamespace(name="maintain_memory", read_only=False, leaf=audit_leaf)
+    mutation = SimpleNamespace(
+        name="remember", read_only=False, leaf=lambda _vault: "committed"
+    )
+    monkeypatch.setattr(writer_lease_module, "content_private_logging_enabled", lambda: True)
+
+    def run_audit() -> None:
+        try:
+            audit_outcome.append(
+                manager.invoke(audit, (tmp_path,), {"mode": "audit"}, read_only=True)
+            )
+        except BaseException as error:  # noqa: BLE001
+            audit_outcome.append(error)
+
+    worker = threading.Thread(target=run_audit, daemon=True)
+    worker.start()
+    assert audit_started.wait(timeout=2)
+    assert manager.invoke(mutation, (tmp_path,), {}) == "committed"
+    release_audit.set()
+    worker.join(timeout=2)
+
+    assert audit_outcome == ["audited"]
+
+
+def test_explicit_idempotency_receipts_have_bounded_retention(tmp_path: Path) -> None:
+    clock = Clock()
+    calls: list[int] = []
+    manager = LeaseManager(LeaseConfig(state_dir=tmp_path), clock=clock)
+    command = _command(writes=True, leaf=lambda: calls.append(1) or len(calls))
+
+    assert manager.invoke(command, (), {}, idempotency_key="bounded-explicit") == 1
+    assert manager.invoke(command, (), {}, idempotency_key="bounded-explicit") == 1
+    clock.value += writer_lease_module._EXPLICIT_RETRY_TTL_SECONDS + 1
+    assert manager.invoke(command, (), {}, idempotency_key="bounded-explicit") == 2
+    assert calls == [1, 1]
+
+
+def test_explicit_idempotency_is_isolated_by_principal(tmp_path: Path) -> None:
+    calls: list[str] = []
+    manager = LeaseManager(LeaseConfig(state_dir=tmp_path))
+    command = _command(writes=True, leaf=lambda: calls.append("write") or len(calls))
+
+    assert manager.invoke(
+        command,
+        (),
+        {},
+        idempotency_key="same-public-key",
+        idempotency_principal_scope="principal:alice",
+    ) == 1
+    assert manager.invoke(
+        command,
+        (),
+        {},
+        idempotency_key="same-public-key",
+        idempotency_principal_scope="principal:bob",
+    ) == 2
+    assert manager.invoke(
+        command,
+        (),
+        {},
+        idempotency_key="same-public-key",
+        idempotency_principal_scope="principal:alice",
+    ) == 1
+    assert calls == ["write", "write"]
+
+
 @pytest.mark.parametrize("implicit", [False, True], ids=["explicit", "implicit"])
 def test_committed_cleanup_failure_replays_exact_public_payload_without_reinvoking(
     tmp_path: Path,
@@ -811,7 +1237,7 @@ def test_committed_cleanup_failure_replays_exact_public_payload_without_reinvoki
     assert calls == 1
 
 
-def test_lost_writer_authority_rejects_before_committed_failure_replay(
+def test_committed_failure_replays_without_reacquiring_writer_authority(
     tmp_path: Path,
 ) -> None:
     calls = 0
@@ -837,10 +1263,11 @@ def test_lost_writer_authority_rejects_before_committed_failure_replay(
         manager.invoke(command, (), {}, idempotency_key="authority-bound")
 
     client.record = LeaseRecord("laptop", 99, 5)
-    with pytest.raises(OpError) as rejected:
+    with pytest.raises(ValueError) as replay:
         manager.invoke(command, (), {}, idempotency_key="authority-bound")
-    assert rejected.value.code == "WRITER_LEASE_REQUIRED"
+    assert replay.value.as_public_dict() == original.as_public_dict()
     assert calls == 1
+    assert client.acquisitions == 1
 
 
 def test_committed_failure_persists_only_sanitized_public_json(tmp_path: Path) -> None:
@@ -1196,7 +1623,7 @@ def test_committed_marker_storage_failure_keeps_pending_and_blocks_retry(
 
     with pytest.raises(OpError) as blocked:
         manager.invoke(command, (), {}, idempotency_key="storage-failure")
-    assert blocked.value.code == "IDEMPOTENCY_IN_PROGRESS"
+    assert blocked.value.code == "MUTATION_ACKNOWLEDGEMENT_PENDING"
     assert calls == 1
 
 
@@ -1224,7 +1651,7 @@ def test_explicit_idempotency_blocks_orphaned_pending_after_process_abort(
     )
     with pytest.raises(OpError) as blocked:
         manager.invoke(recovered, (), {}, idempotency_key="request-after-crash")
-    assert blocked.value.code == "IDEMPOTENCY_IN_PROGRESS"
+    assert blocked.value.code == "MUTATION_ACKNOWLEDGEMENT_PENDING"
     assert calls == ["aborted"]
 
 
@@ -1345,3 +1772,22 @@ def test_coordination_status_is_a_read_only_public_command() -> None:
     for surface in ("mcp", "rest", "cli"):
         command = next(c for c in product_commands_for(surface) if c.name == "coordination_status")
         assert command.read_only
+
+
+def test_coordination_status_includes_content_free_mutation_boundary(tmp_path: Path) -> None:
+    manager = LeaseManager(LeaseConfig(state_dir=tmp_path / "state"))
+    vault = tmp_path / "private-vault"
+    vault.mkdir()
+
+    assert manager.status()["mutation_boundary"] == {"state": "free"}
+    with manager.mutation_guard(
+        vault,
+        request_id="req-health",
+        operation="edit_memory",
+        holder_kind="command",
+    ):
+        boundary = manager.status()["mutation_boundary"]
+        assert boundary["state"] == "held"
+        assert boundary["request_id"] == "req-health"
+        assert boundary["operation"] == "edit_memory"
+        assert str(vault) not in str(boundary)

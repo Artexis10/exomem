@@ -87,7 +87,7 @@ losslessly; the server never guesses a language, pronunciation, or translation.
 
 | Field | Required | Notes |
 |---|---|---|
-| `entity_type` | yes | `person`, `concept`, `library`, `decision` |
+| `entity_type` | yes | Stable ID from the active entity registry; use bootstrap guidance rather than maintaining a separate validity list. |
 | Other | per type | see `page-types.md` for entity-type-specific fields |
 
 ## Status semantics

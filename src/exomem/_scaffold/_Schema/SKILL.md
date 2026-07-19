@@ -1,6 +1,6 @@
 ---
 name: exomem
-description: Use when working with Exomem — your personal knowledge base (a markdown vault, Obsidian optional, of raw sources, compiled research notes, insights, failures, patterns, experiments, production-logs, typed entities, and Evidence artifacts). Triggers whenever you name Exomem (the connector/MCP you talk to) or want to save, file, log, compile, distill, search, audit, supersede, or preserve anything in Exomem, your KB, vault, Obsidian, or notes — including oblique phrasings ("interesting, save it," "I want to remember this," "what does Exomem have on X"). Also engages proactively — it consults Exomem for prior conclusions when a turn touches a topic it likely covers, and captures durable conclusions when the conversation reaches a stepping-stone (a decision, a solved problem, a diagnosed failure, a recognized pattern). Governed writes stay inside the folder Exomem manages; the rest of your vault is read-only input.
+description: Use when working with Exomem — your personal knowledge base (a markdown vault, Obsidian optional, of raw sources, compiled research notes, insights, failures, patterns, experiments, production-logs, typed entities, and Evidence artifacts). Triggers whenever you name Exomem (the connector/MCP you talk to) or want to save, file, log, compile, distill, search, audit, supersede, or preserve anything in Exomem, your KB, vault, Obsidian, or notes — including oblique phrasings ("interesting, save it," "I want to remember this," "what does Exomem have on X"). Also engages proactively — it consults Exomem for prior conclusions when a turn touches a topic it likely covers, and captures durable conclusions or a durable recurring entity when the conversation reaches a stepping-stone. Governed writes stay inside the folder Exomem manages; the rest of your vault is read-only input.
 version: 0.32.0
 ---
 
@@ -48,8 +48,8 @@ what I searched," never "it doesn't exist" — an empty `ask_memory` result mean
 yet*, which is a reason to consider capturing, not to disengage.
 
 **Stepping-stone capture (write) — then report.** When the conversation reaches
-a **stepping-stone** — a decision is made, a problem is solved, a failure is
-diagnosed, a pattern is recognized — capture it:
+a **stepping-stone** — a durable conclusion lands or a durable recurring entity
+accumulates reusable facts, history, or relations — capture it:
 
 - Capture whether or not the KB already holds the topic. A durable conclusion on
   brand-new ground is first-class: it becomes the first page on that topic, which
@@ -59,6 +59,14 @@ diagnosed, a pattern is recognized — capture it:
   `connect_memory(operation="suggest-links")`, use `suggest-relations` when
   directional meaning matters, and run the near-duplicate check first,
   then write and report one line: `Saved -> <path>`.
+- Resolve entity candidates against the active entity registry and selected knowledge packs.
+  Call `connect_memory(operation="resolve-entity", name=...)` first. If one active page
+  matches, use `edit_memory` for a small stable-fact correction or the canonical
+  relation workflow for a new connection. If none matches, use
+  `connect_memory(operation="create-entity")` only when the identity is stable,
+  recurring, central to the conclusion, and useful beyond the current source.
+  A single incidental mention, unresolved identity, or transient participant
+  stays in source/note context.
 - The guardrails that remain are the ones that matter: dedupe (prefer
   **edit_memory**/**replace_memory** over a parallel page; surface a near-duplicate warning when
   it fires) and clean links.
@@ -66,7 +74,8 @@ diagnosed, a pattern is recognized — capture it:
   insight vs. experiment; which `Notes/Research/<scope>`).
 
 Not a stepping-stone: mid-thought exploration, brainstorm tangents, unresolved
-questions. Capture at the landing, not during the flight.
+questions, or incidental names without durable reusable context. Capture at the
+landing, not during the flight.
 
 ## Agent write loop
 
@@ -651,7 +660,8 @@ distinctions:
   it spans projects.
 - **experiment** — hypothesis + protocol + primary data, `Notes/Experiments/<domain>/`.
 - **production-log** — creative artifact + production knowledge, `Notes/Productions/<medium>/`.
-- **entity** — typed node, `Entities/<entity-type>/` (People / Concepts / Libraries / Decisions).
+- **entity** — typed node under the folder resolved by the stable entity registry
+  (People / Organizations / Concepts / Libraries / Decisions).
 
 ### Research scope keys
 

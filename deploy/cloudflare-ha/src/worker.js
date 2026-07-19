@@ -259,8 +259,8 @@ export default {
 
     const lease = await currentLease(env);
     const holder = lease.holder;
-    if (await isMcpToolCall(request)) {
-      return proxyToolCall(request, env, lease);
+    if (await isMutationCapableRequest(request)) {
+      return proxyMutationRequest(request, env, lease);
     }
 
     const replicas = holder === env.LAPTOP_REPLICA_ID
@@ -300,7 +300,19 @@ export async function isMcpToolCall(request) {
   return messages.some((message) => message && message.method === "tools/call");
 }
 
-async function proxyToolCall(request, env, lease) {
+export async function isMutationCapableRequest(request) {
+  if (await isMcpToolCall(request)) return true;
+  if (["GET", "HEAD", "OPTIONS"].includes(request.method)) return false;
+  const pathname = new URL(request.url).pathname;
+  // Non-tool MCP messages retain their compatibility fallback. Every other
+  // unsafe method is single-origin by default, including REST/lifecycle POSTs
+  // and the capability-bound public transfer PUT.
+  return pathname !== "/mcp";
+}
+
+async function proxyMutationRequest(request, env, lease) {
+  request = withMutationRequestId(request);
+  const requestId = request.headers.get("x-exomem-request-id");
   const shortTimeout = Number(env.ORIGIN_TIMEOUT_MS || 2500);
   const toolTimeout = Number(env.MCP_TOOL_TIMEOUT_MS || 15000);
   const holder = lease.holder;
@@ -324,13 +336,36 @@ async function proxyToolCall(request, env, lease) {
   }
 
   try {
+    console.log(JSON.stringify({
+      event: "mutation_proxy",
+      request_id: requestId,
+      origin: candidate.origin,
+    }));
     return await proxyOnce(request, candidate.origin, toolTimeout);
   } catch {
-    // Never replay an ambiguous tools/call request. The origin may have
+    // Never replay an ambiguous mutation-capable request. The origin may have
     // committed after the edge stopped waiting; cross-replica replay turns a
     // transport timeout into duplicate governed state.
-    return json({ error: "active Exomem tool call did not complete at the edge" }, 504);
+    console.warn(JSON.stringify({
+      event: "mutation_timeout",
+      request_id: requestId,
+      origin: candidate.origin,
+    }));
+    return json({
+      error: "active Exomem mutation-capable request did not complete at the edge",
+      request_id: requestId,
+    }, 504);
   }
+}
+
+function withMutationRequestId(request) {
+  const headers = new Headers(request.headers);
+  const presented = String(headers.get("x-exomem-request-id") || "").trim();
+  const requestId = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(presented)
+    ? presented
+    : crypto.randomUUID();
+  headers.set("x-exomem-request-id", requestId);
+  return new Request(request, { headers });
 }
 
 function candidateForHolder(env, holder) {

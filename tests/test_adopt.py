@@ -1063,6 +1063,37 @@ def test_pack_validation_rejects_invalid_primitives_and_actions() -> None:
     assert ei.value.code == "INVALID_ACTION"
 
 
+def test_pack_validation_rejects_unknown_entity_priority() -> None:
+    raw = knowledge_packs.list_builtin_packs()[0]
+    raw["default_entity_types"] = ["person", "vendor"]
+
+    with pytest.raises(knowledge_packs.PackValidationError) as ei:
+        knowledge_packs.validate_pack_dict(raw)
+
+    assert ei.value.code == "INVALID_ENTITY_TYPE"
+    assert "vendor" in ei.value.reason
+
+
+def test_business_pack_prioritizes_registered_organizations() -> None:
+    business = knowledge_packs.get_builtin_pack("business")
+    assert "organization" in business["default_entity_types"]
+    assert "Knowledge Base/Entities/Organizations" in business["suggested_folders"]
+
+
+def test_selected_pack_state_exposes_entity_capture_priorities(tmp_path: Path) -> None:
+    vault = _legacy_vault(tmp_path, kb=True)
+    knowledge_packs.write_selected_packs(vault, ["business"], source="test")
+
+    state = knowledge_packs.selected_pack_state(vault)
+
+    assert state["packs"][0]["default_entity_types"] == [
+        "person",
+        "organization",
+        "concept",
+        "decision",
+    ]
+
+
 def test_adopt_registry_exposure_survives_tier2_optout() -> None:
     from exomem.commands import product_commands_for
 

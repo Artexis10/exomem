@@ -259,7 +259,7 @@ def edit(
                         path=rel_path,
                         after_source=proposed,
                         operation="edit",
-                        expected_before_hash=content_hash(editable.original_text),
+                        expected_before_hash=editable.semantic_before_hash,
                         transition_token=semantic_transition_token,
                         relation_disposition=relation_disposition,
                         relation_review_hash=relation_review_hash,
@@ -336,7 +336,7 @@ def edit(
         why=why,
         changed=changed,
         extra_warnings=body_warnings,
-        expected_before_hash=content_hash(editable.original_text),
+        expected_before_hash=editable.semantic_before_hash,
         semantic_transition_token=semantic_transition_token,
         relation_disposition=relation_disposition,
         relation_review_hash=relation_review_hash,
@@ -389,6 +389,7 @@ class _Editable:
     abs_path: Path
     rel_path: str
     original_text: str
+    semantic_before_hash: str
     fm_text: str
     body: str
 
@@ -440,7 +441,13 @@ def load_editable(
             ),
         )
 
-    original_text = abs_path.read_text(encoding="utf-8")
+    try:
+        raw_text = abs_path.read_bytes().decode("utf-8")
+    except (OSError, UnicodeError) as error:
+        raise EditError(code="UNREADABLE", missing=["path"], reason=str(error)) from error
+    # Match Path.read_text/newline=None and the public get-memory hash contract
+    # while retaining the raw-byte text hash required by semantic preflight.
+    original_text = raw_text.replace("\r\n", "\n").replace("\r", "\n")
 
     # Optimistic-concurrency guard. If the caller passed the hash it read via
     # `get`, refuse when the file changed on disk since — don't clobber another
@@ -471,6 +478,7 @@ def load_editable(
         abs_path=abs_path,
         rel_path=rel_path,
         original_text=original_text,
+        semantic_before_hash=content_hash(original_text),
         fm_text=fm_match.group(1),
         body=fm_match.group(2),
     )

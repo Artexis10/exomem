@@ -1137,8 +1137,16 @@ def preflight_existing(
         )
     root = Path(vault_root)
     before_source, primary_guard = vault.read_guarded_text(root, root / path)
+    raw_before_hash = vault.content_hash(before_source)
+    # The parser/corpus and public content-hash contract normalize platform
+    # newlines. Keep the raw-byte PathGuard, but evaluate the same logical text
+    # on Windows so CRLF alone never looks like concurrent semantic drift.
+    before_source = before_source.replace("\r\n", "\n").replace("\r", "\n")
     before_hash = vault.content_hash(before_source)
-    if expected_before_hash is not None and expected_before_hash != before_hash:
+    if expected_before_hash is not None and expected_before_hash not in {
+        raw_before_hash,
+        before_hash,
+    }:
         raise SemanticWriteError(
             "STALE_SEMANTIC_WRITE", "page changed before semantic preflight"
         )
@@ -1782,7 +1790,15 @@ def preflight_move(
         root, registry=registry, language_registry=language
     )
     before_moved = before_corpus.pages.get(old_path)
-    if before_moved is None or before_moved.source_hash != vault.content_hash(source):
+    normalized_source = source.replace("\r\n", "\n").replace("\r", "\n")
+    if (
+        before_moved is None
+        or before_moved.source_hash
+        not in {
+            vault.content_hash(source),
+            vault.content_hash(normalized_source),
+        }
+    ):
         raise SemanticWriteError(
             "STALE_SEMANTIC_WRITE", "move source changed during semantic preflight"
         )
@@ -1790,21 +1806,29 @@ def preflight_move(
     for write in rewrite_tuple:
         rel = write.path.relative_to(root).as_posix()
         before_rewrite = before_corpus.pages.get(rel)
-        if (
-            before_rewrite is None
-            or before_rewrite.source_hash != write.guard.expected_content_hash
-        ):
-            raise SemanticWriteError(
-                "STALE_SEMANTIC_WRITE",
-                "inbound page changed during semantic move preflight",
-            )
         try:
-            before_source = write.path.read_text(encoding="utf-8")
+            before_source = write.path.read_bytes().decode("utf-8")
         except (OSError, UnicodeDecodeError) as error:
             raise SemanticWriteError(
                 "STALE_SEMANTIC_WRITE",
                 "inbound page changed during semantic move preflight",
             ) from error
+        normalized_before_source = before_source.replace("\r\n", "\n").replace(
+            "\r", "\n"
+        )
+        if (
+            before_rewrite is None
+            or before_rewrite.source_hash
+            not in {
+                vault.content_hash(before_source),
+                vault.content_hash(normalized_before_source),
+            }
+            or write.guard.expected_content_hash != vault.content_hash(before_source)
+        ):
+            raise SemanticWriteError(
+                "STALE_SEMANTIC_WRITE",
+                "inbound page changed during semantic move preflight",
+            )
         expected_source, changed_count = rewrite_wikilinks_for_move(
             before_source, old_path, new_path
         )

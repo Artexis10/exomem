@@ -16,6 +16,7 @@ from importlib import resources
 from pathlib import Path
 from typing import Any
 
+from .entity_types import ENTITY_TYPE_IDS
 from .kbdir import kb_dirname, kb_prefix
 from .vault import PlannedWrite, batch_atomic_write, kb_root
 
@@ -236,6 +237,14 @@ def validate_pack_dict(raw: dict[str, Any]) -> KnowledgePack:
     if bad_actions:
         raise PackValidationError("INVALID_ACTION", f"unsupported action(s): {bad_actions}")
 
+    default_entity_types = _string_tuple("default_entity_types")
+    bad_entity_types = sorted(set(default_entity_types) - set(ENTITY_TYPE_IDS))
+    if bad_entity_types:
+        raise PackValidationError(
+            "INVALID_ENTITY_TYPE",
+            f"unsupported default_entity_types value(s): {bad_entity_types}",
+        )
+
     return KnowledgePack(
         id=_nonempty_string("id"),
         name=_nonempty_string("name"),
@@ -245,7 +254,7 @@ def validate_pack_dict(raw: dict[str, Any]) -> KnowledgePack:
         beginner_description=_nonempty_string("beginner_description"),
         agent_instructions=_nonempty_string("agent_instructions"),
         default_note_types=_string_tuple("default_note_types"),
-        default_entity_types=_string_tuple("default_entity_types"),
+        default_entity_types=default_entity_types,
         default_block_types=_string_tuple("default_block_types"),
         suggested_folders=_string_tuple("suggested_folders"),
         suggested_workflows=_workflow_tuple("suggested_workflows"),
@@ -348,6 +357,7 @@ def _pack_summaries(pack_ids: tuple[str, ...]) -> list[dict]:
             "name": pack.name,
             "beginner_description": pack.beginner_description,
             "agent_instructions": pack.agent_instructions,
+            "default_entity_types": list(pack.default_entity_types),
             "suggested_workflows": list(pack.suggested_workflows),
             "actions": list(pack.actions),
         }

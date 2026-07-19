@@ -2838,9 +2838,14 @@ def _batch_atomic_write_locked(
     replaced: list[Path] = []
     final_guards: dict[Path, _BatchArtifactGuard] = {}
     try:
-        from .writer_lease import validate_active_write_fence
+        from .writer_lease import (
+            log_active_mutation_phase,
+            mark_active_mutation_committed,
+            validate_active_write_fence,
+        )
 
         validate_active_write_fence()
+        log_active_mutation_phase("canonical_commit_started", affected_count=len(staged))
         for index, (final, workspace, artifact) in enumerate(staged):
             for candidate_workspace in workspace_by_parent.values():
                 candidate_workspace.recheck()
@@ -2908,6 +2913,9 @@ def _batch_atomic_write_locked(
                 guard.recheck(root, allowed_changes=allowed_census_changes)
         for guard in final_guards.values():
             guard.recheck()
+        log_active_mutation_phase("canonical_files_committed", affected_count=len(replaced))
+        if replaced:
+            mark_active_mutation_committed()
     except Exception as commit_error:
         rollback_errors: list[BaseException] = []
         implicated_workspaces: list[_BatchWorkspace] = []

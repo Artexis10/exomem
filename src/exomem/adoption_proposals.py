@@ -34,6 +34,7 @@ from . import relation_registry as relation_registry_module
 from . import review_state as review_state_module
 from . import vault as vault_module
 from .adoption_run import AdoptionRunStore
+from .entity_types import ENTITY_TYPE_IDS
 from .kbdir import kb_dirname
 
 ADOPTION_REVIEW_PREFIX = "exomem://review/adoption/"
@@ -54,7 +55,7 @@ _WORK_ITEM_CONSTRAINTS = (
 _PROPOSAL_KIND_SUMMARY = {
     "compilation": "sources (governed Sources paths) + title + note_type + content "
     "markdown; applied via remember",
-    "entity": "entity_type (person|concept|library|decision) + name + summary "
+    "entity": f"entity_type ({'|'.join(ENTITY_TYPE_IDS)}) + name + summary "
     "[+ slug, why_in_kb, tags, connections]; applied via create-entity",
     "relation": "from + to + relation_type (must exist in the relation registry); "
     "applied as a reviewed Relations bullet",

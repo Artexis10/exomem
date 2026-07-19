@@ -47,6 +47,8 @@ from . import create_file as create_file_module
 from . import delete_directory as delete_directory_module
 from . import delete_file as delete_file_module
 from . import edit as edit_module
+from . import entity_candidates as entity_candidates_module
+from . import entity_types as entity_types_module
 from . import epistemic_graph as epistemic_graph_module
 from . import evolution as evolution_module
 from . import find as find_module
@@ -101,6 +103,7 @@ from .command_surface import (
 from .command_surface import (
     type_tag as _type_tag,  # noqa: F401 - re-exported for server.py
 )
+from .entity_types import EntityTypeId
 from .kbdir import kb_dirname
 from .vault import (
     VaultPathError,
@@ -222,7 +225,7 @@ def op_bootstrap(
     requested_workflow = workflow.strip() if workflow and workflow.strip() else "general"
     selected_packs = knowledge_packs_module.selected_pack_state(vault_root)
     payload: dict = {
-        "contract_version": "2026-07-18.1",
+        "contract_version": "2026-07-19.1",
         "profile": profile,
         "server": {
             "name": "exomem",
@@ -251,6 +254,24 @@ def op_bootstrap(
                 "Packs are product guidance only. They help route simple user intent "
                 "into typed tools; they do not create folders, migrate files, or bypass governance."
             ),
+        },
+        "entity_registry": {
+            "types": [
+                {
+                    "id": definition.id,
+                    "label": definition.label,
+                    "folder": definition.folder,
+                    "aliases": list(definition.aliases),
+                    "capture_guidance": definition.capture_guidance,
+                }
+                for definition in entity_types_module.ENTITY_TYPE_REGISTRY
+            ],
+            "capture_rule": (
+                "After durable work, run one bounded exact-match-first entity pass. "
+                "Create only stable, recurring identities; update an existing entity only "
+                "with new durable facts or relations; skip incidental mentions."
+            ),
+            "candidate_route": "connect_memory(operation='resolve-entity')",
         },
         "workflow": {
             "requested": requested_workflow,
@@ -305,7 +326,7 @@ def op_bootstrap(
                 "small_correction": "edit_memory",
                 "semantic_unit_mutation": "observe_memory",
                 "substantial_rewrite": "replace_memory",
-                "named_person_concept_library_or_decision": "connect_memory(operation='entity')",
+                "stable_named_entity": "connect_memory(operation='create-entity')",
             },
             "preflight": {
                 "connect_memory": "standard read-only suggest-links/suggest-relations check before a compiled note write",
@@ -1751,6 +1772,10 @@ def op_edit(
     allow_curated: bool = False,
     expected_hash: str | None = None,
     validate_only: bool = False,
+    transition_token: str | None = None,
+    relation_disposition: str | None = None,
+    relation_review_hash: str | None = None,
+    relation_review_reason: str | None = None,
 ) -> dict:
     """Lightweight in-place edit of a page (body, tags, a surgical snippet,
     a batch, an opinion row, or one frontmatter field).
@@ -1841,6 +1866,11 @@ def op_edit(
             `old_string`. Reports how many rows would be hit instead of
             committing — use it before a `replace_all` to avoid an
             ambiguous match silently touching more rows than intended.
+        transition_token: Exact semantic transition token returned by a
+            validate-only preflight.
+        relation_disposition: Reviewed relation outcome for the commit.
+        relation_review_hash: Transition hash covered by reviewed-none.
+        relation_review_reason: Audit reason for reviewed-none.
 
     Returns:
         Shape varies by mode (take-row -> {path, row, warnings};
@@ -1873,8 +1903,16 @@ def op_edit(
             result = multi_edit_module.multi_edit(
                 vault_root, path=path, why=why, edits=edits,
                 expected_hash=expected_hash, validate_only=validate_only,
+                semantic_transition_token=transition_token,
+                relation_disposition=relation_disposition,
+                relation_review_hash=relation_review_hash,
+                relation_review_reason=relation_review_reason,
             )
         elif row_key is not None:
+            if validate_only:
+                raise ValueError(
+                    "INVALID_EDIT: validate_only is not supported for row_key mode"
+                )
             if take is None:
                 raise ValueError("INVALID_EDIT: row_key mode requires `take`")
             result = set_take_module.set_take(
@@ -1884,7 +1922,11 @@ def op_edit(
         elif field is not None:
             result = set_frontmatter_field_module.set_frontmatter_field(
                 vault_root, path=path, field=field, value=value,
-                why=why, allow_curated=allow_curated,
+                why=why, allow_curated=allow_curated, validate_only=validate_only,
+                semantic_transition_token=transition_token,
+                relation_disposition=relation_disposition,
+                relation_review_hash=relation_review_hash,
+                relation_review_reason=relation_review_reason,
             )
         else:
             result = edit_module.edit(
@@ -1893,6 +1935,10 @@ def op_edit(
                 replace_all=replace_all, heading=heading,
                 section_position=section_position,
                 expected_hash=expected_hash, validate_only=validate_only,
+                semantic_transition_token=transition_token,
+                relation_disposition=relation_disposition,
+                relation_review_hash=relation_review_hash,
+                relation_review_reason=relation_review_reason,
             )
     except (
         edit_module.EditError,
@@ -2036,7 +2082,7 @@ def op_replace(
 
 def op_link(
     vault_root: Path,
-    entity_type: str,
+    entity_type: EntityTypeId,
     name: str,
     summary: str,
     slug: str | None = None,
@@ -2056,20 +2102,14 @@ def op_link(
 ) -> dict:
     """Create a typed entity under Entities/<Folder>/<Name>.md.
 
-    Entities are the typed nodes of the KB graph — people, concepts,
-    libraries, decisions. Name them after the thing they are (Title Case,
-    not slugified): `Ada Lovelace`, `Agentic RAG`, `pgvector`.
+    Entities are typed nodes of the KB graph. The stable entity registry returned
+    by `bootstrap` is authoritative for IDs, labels, folders, aliases, and capture
+    guidance. Name entities after the thing they are (Title Case, not slugified):
+    `Ada Lovelace`, `Agentic RAG`, `pgvector`.
 
-    Four entity types with conditional frontmatter:
-    - `person`   → Entities/People/. Optional: `affiliation`, `relationship`.
-    - `concept`  → Entities/Concepts/. Optional: `domain` (e.g.
-      "retrieval", "workflow", "infrastructure").
-    - `library`  → Entities/Libraries/. Optional: `language`, `repo`,
-      `license`, `used_in` (list of projects).
-    - `decision` → Entities/Decisions/. Optional: `decided` (YYYY-MM-DD),
-      `project` (project key — any slug; unknown keys auto-register on first
-      use, same as `note`), `decision_status` ∈ {proposed, accepted,
-      superseded}.
+    Conditional frontmatter is accepted only when the selected registry kind
+    supports it: `affiliation`/`relationship`, `domain`, software metadata, or
+    decision metadata. Unknown fields and unregistered kinds are refused.
 
     v1 is create-only. If the entity file already exists, returns
     ENTITY_EXISTS — use `replace` to supersede instead. Sub-folder index
@@ -2077,7 +2117,7 @@ def op_link(
     reconcile via desk audit.
 
     Args:
-        entity_type: One of person, concept, library, decision.
+        entity_type: Stable ID returned by bootstrap.entity_registry.
         name: Unicode display name stored in frontmatter and the H1.
         slug: Optional lowercase ASCII kebab-case filename component.
         summary: One-paragraph description for the `## Summary` section.
@@ -2094,7 +2134,8 @@ def op_link(
 
     Errors:
         INVALID_LINK (bad entity_type, decision_status, missing required);
-        ENTITY_EXISTS (use `replace` instead).
+        ENTITY_EXISTS (update/link the returned active entity instead);
+        ENTITY_AMBIGUOUS (reconcile the returned bounded candidates first).
     """
     try:
         result = link_module.link(
@@ -2118,9 +2159,10 @@ def op_link(
             decision_status=decision_status,
         )
     except link_module.LinkError as e:
-        raise ValueError(
-            f"{e.code}: {e.reason} (missing: {e.missing})"
-        ) from e
+        suffix = f" (missing: {e.missing})"
+        if e.candidates:
+            suffix += f" (candidates: {e.candidates})"
+        raise ValueError(f"{e.code}: {e.reason}{suffix}") from e
     return result.as_dict()
 
 
@@ -3355,6 +3397,10 @@ def op_edit_memory(
     allow_curated: bool = False,
     expected_hash: str | None = None,
     validate_only: bool = False,
+    transition_token: str | None = None,
+    relation_disposition: str | None = None,
+    relation_review_hash: str | None = None,
+    relation_review_reason: str | None = None,
 ) -> dict:
     """Edit an existing memory page with an auditable reason.
 
@@ -3381,6 +3427,10 @@ def op_edit_memory(
         allow_curated: Permit frontmatter patch under curated trees.
         expected_hash: Refuse write if content changed since read.
         validate_only: Preview a surgical match without writing.
+        transition_token: Exact semantic transition token returned by validate_only.
+        relation_disposition: Reviewed relation outcome for the commit.
+        relation_review_hash: Transition hash covered by reviewed-none.
+        relation_review_reason: Audit reason for reviewed-none.
     """
     return op_edit(
         vault_root,
@@ -3402,6 +3452,10 @@ def op_edit_memory(
         allow_curated=allow_curated,
         expected_hash=expected_hash,
         validate_only=validate_only,
+        transition_token=transition_token,
+        relation_disposition=relation_disposition,
+        relation_review_hash=relation_review_hash,
+        relation_review_reason=relation_review_reason,
     )
 
 
@@ -4143,7 +4197,7 @@ def op_connect_memory(
     max_edges: int = 80,
     traversal_profile: str | None = None,
     max_body_chars: int = 3000,
-    entity_type: str | None = None,
+    entity_type: EntityTypeId | None = None,
     name: str | None = None,
     slug: str | None = None,
     summary: str | None = None,
@@ -4174,7 +4228,7 @@ def op_connect_memory(
 
     Args:
         operation: context, suggest-links, suggest-relations, graph-context,
-            inbound-links, create-entity, or accept-relation.
+            inbound-links, resolve-entity, create-entity, or accept-relation.
         path: Existing page path for link, graph, or relation context.
         target: Target path for inbound-links; defaults to path.
         query: Query seed for graph-context.
@@ -4295,6 +4349,12 @@ def op_connect_memory(
         if not target_path:
             raise ValueError("INVALID_TARGET: inbound-links requires `target` or `path`")
         return op_list_inbound_links(vault_root, target=target_path)
+    if operation == "resolve-entity":
+        if not name:
+            raise ValueError("INVALID_TARGET: resolve-entity requires `name`")
+        return entity_candidates_module.resolve_entity_candidate(
+            vault_root, name=name, entity_type=entity_type, limit=limit
+        )
     if operation == "create-entity":
         missing = [
             field
@@ -4325,7 +4385,7 @@ def op_connect_memory(
         )
     raise ValueError(
         "INVALID_MODE: connect_memory operation must be context, suggest-links, "
-        "suggest-relations, graph-context, inbound-links, create-entity, or "
+        "suggest-relations, graph-context, inbound-links, resolve-entity, create-entity, or "
         "accept-relation"
     )
 
@@ -5077,7 +5137,14 @@ def note_description(project_keys_hint: str) -> str:
 # --------------------------------------------------------------------------- #
 # (name, leaf, tier, cli_writes, needs_schema, cli_positional, surfaces)
 _CONNECT_MEMORY_READ_ONLY_OPERATIONS = frozenset(
-    {"suggest-links", "suggest-relations", "context", "graph-context", "inbound-links"}
+    {
+        "suggest-links",
+        "suggest-relations",
+        "context",
+        "graph-context",
+        "inbound-links",
+        "resolve-entity",
+    }
 )
 _ADOPT_VAULT_READ_ONLY_MODES = frozenset({"scan-only"})
 _ADOPTION_STUDIO_READ_ONLY_ACTIONS = frozenset({"status", "work-item"})
@@ -5133,6 +5200,11 @@ def invocation_is_read_only(command: Command, kwargs: dict[str, Any]) -> bool:
             isinstance(operation, str)
             and operation in _OBSERVE_MEMORY_READ_ONLY_OPERATIONS
         )
+    if command.name == "maintain_memory":
+        mode = _resolved_invocation_selector(command, kwargs, "mode")
+        return mode == "audit"
+    if command.name == "edit_memory":
+        return kwargs.get("validate_only") is True
     return False
 
 

@@ -1617,10 +1617,19 @@ def _transcript(
     user_text: str,
     assistant_text: str | None = None,
     assistant_tool: str | None = None,
+    assistant_tool_input: dict | None = None,
+    assistant_tool_result: dict | None = None,
 ) -> Path:
     content: list[dict] = []
     if assistant_tool:
-        content.append({"type": "tool_use", "name": assistant_tool})
+        content.append(
+            {
+                "type": "tool_use",
+                "id": "tool-1",
+                "name": assistant_tool,
+                "input": assistant_tool_input or {},
+            }
+        )
     if assistant_text is not None:
         content.append({"type": "text", "text": assistant_text})
     lines = [
@@ -1633,6 +1642,22 @@ def _transcript(
         },
         {"type": "assistant", "message": {"role": "assistant", "content": content}},
     ]
+    if assistant_tool_result is not None:
+        lines.append(
+            {
+                "type": "user",
+                "message": {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "tool-1",
+                            **assistant_tool_result,
+                        }
+                    ],
+                },
+            }
+        )
     p = tmp_path / "t.jsonl"
     p.write_text("\n".join(json.dumps(line) for line in lines), encoding="utf-8")
     return p
@@ -1679,6 +1704,67 @@ def test_capture_silent_when_already_saved(tmp_path: Path) -> None:
     )
     r = _run(CAPTURE_SCRIPT, {"transcript_path": str(t), "session_id": "s3"}, home)
     assert r.stdout.strip() == ""
+
+
+def test_capture_silent_after_modern_create_entity_write(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    t = _transcript(
+        tmp_path,
+        "q?",
+        "A durable recurring entity was captured. " + "x" * 450,
+        assistant_tool="mcp__claude_ai_Exomem__connect_memory",
+        assistant_tool_input={"operation": "create-entity"},
+    )
+
+    r = _run(CAPTURE_SCRIPT, {"transcript_path": str(t), "session_id": "entity"}, home)
+
+    assert r.stdout.strip() == ""
+
+
+def test_capture_still_fires_after_validate_only_edit(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    t = _transcript(
+        tmp_path,
+        "q?",
+        "The validation landed on a durable conclusion. " + "x" * 450,
+        assistant_tool="mcp__claude_ai_Exomem__edit_memory",
+        assistant_tool_input={"validate_only": True},
+    )
+
+    r = _run(CAPTURE_SCRIPT, {"transcript_path": str(t), "session_id": "preview"}, home)
+
+    assert '"decision": "block"' in r.stdout
+
+
+def test_capture_still_fires_after_failed_edit(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    t = _transcript(
+        tmp_path,
+        "q?",
+        "The failed write still left a durable conclusion. " + "x" * 450,
+        assistant_tool="mcp__claude_ai_Exomem__edit_memory",
+        assistant_tool_input={"validate_only": False},
+        assistant_tool_result={"is_error": True, "content": "STALE_EDIT"},
+    )
+
+    r = _run(CAPTURE_SCRIPT, {"transcript_path": str(t), "session_id": "failed"}, home)
+
+    assert '"decision": "block"' in r.stdout
+
+
+def test_capture_reminder_routes_entities_conservatively() -> None:
+    script = CAPTURE_SCRIPT.read_text(encoding="utf-8")
+
+    assert "active entity registry" in script
+    assert "selected knowledge packs" in script
+    assert 'connect_memory(operation="resolve-entity"' in script
+    assert "edit_memory" in script
+    assert 'connect_memory(operation="create-entity")' in script
+    assert "single incidental mention" in script
+    assert "person, organization" not in script
 
 
 def test_capture_silent_when_stop_hook_active(tmp_path: Path) -> None:

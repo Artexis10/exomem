@@ -211,26 +211,30 @@ an explicit reviewed operation because paths are graph addresses.
 
 ---
 
-## link
+## create entity
 
-**Goal:** Create or update a typed entity, wire backlinks.
+**Goal:** Create a registered typed entity without duplicating an existing identity.
 
 ### Triggers
 - "create an entity for X," "add a concept page for Y"
 - "this references [[X]]" where X doesn't exist yet (offered as a side-effect of `note`)
-- "add Ada Lovelace to People," "add pgvector to Libraries"
+- "create a durable page for this recurring organization"
 
 ### Inputs to gather
 - Entity name (becomes filename — see `page-types.md` § entity naming)
-- Entity type — `person`, `concept`, `library`, `decision`.
+- Entity type — a stable ID from the active entity registry returned by bootstrap.
 - For new entities: a one-paragraph summary; relevant frontmatter fields.
 - For updates: the field or section to change.
 
 ### Procedure
-1. Determine target path: `Entities/<People|Concepts|Libraries|Decisions>/<Name>.md`.
-2. **For new entities:** draft the page following `page-types.md` § entity, propose, write on confirm.
-3. **For updates:** show diff, write on confirm.
-4. Update `Entities/<type>/index.md` and top-level `index.md`.
+1. Read the active entity registry and selected knowledge-pack priorities.
+2. Call `connect_memory(operation="resolve-entity", name=...)`. If one active entity matches, use a guarded
+   `edit_memory` correction or the canonical relation workflow instead of create.
+3. If no entity matches and the identity is stable, recurring, central, and
+   useful beyond this source, call `connect_memory(operation="create-entity")`.
+4. Draft the page following `page-types.md` § entity, propose, and write on confirm.
+5. For an existing entity, show a guarded diff and update through `edit_memory`.
+6. Refresh the entity index and top-level counts through the governed writer.
 
 ### Edge cases
 - **Name collision / disambiguation.** Disambiguate in the filename: `John Smith (advisor).md`, `Agentic RAG (architecture).md`. Don't silently merge.

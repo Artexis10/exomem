@@ -1506,6 +1506,7 @@ def _add_command_args(sp: argparse.ArgumentParser, cmd) -> None:
                 p.name,
                 nargs=None if p.required else "?",
                 default=None,
+                metavar="{" + ",".join(p.choices) + "}" if p.choices else None,
                 help=p.help or None,
             )
         elif p.type == "bool":
@@ -1531,6 +1532,7 @@ def _add_command_args(sp: argparse.ArgumentParser, cmd) -> None:
                 dest=p.name,
                 default=None,
                 required=p.required and not p.cli_positional,
+                metavar="{" + ",".join(p.choices) + "}" if p.choices else None,
                 help=p.help or None,
             )
     if field_escape:
