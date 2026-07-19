@@ -135,7 +135,7 @@ def bind_vault(
     visible = params[len(injected):]
 
     try:
-        resolved = typing.get_type_hints(leaf)
+        resolved = typing.get_type_hints(leaf, include_extras=True)
     except Exception:  # noqa: BLE001 - fall back to inspect's annotations
         resolved = {}
 

@@ -17,10 +17,14 @@ re-syncs and defeat the entire point.
 from __future__ import annotations
 
 import datetime as dt
+import json
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Annotated
 
-from . import semantic_writes
+from pydantic import BeforeValidator
+
+from . import guards, semantic_writes
 from .edit import (
     EditError,
     _set_or_append,
@@ -29,6 +33,28 @@ from .edit import (
     load_editable,
 )
 from .vault import content_hash
+
+_INVALID_EDIT_ITEM = "__exomem_invalid_edit_item__"
+
+
+def normalize_edit_item(item: object) -> dict:
+    """Decode one connector-encoded object while retaining INVALID_EDIT routing."""
+    if isinstance(item, dict):
+        return item
+    if isinstance(item, str):
+        try:
+            decoded = json.loads(item)
+        except json.JSONDecodeError:
+            decoded = None
+        if isinstance(decoded, dict):
+            return decoded
+    return {_INVALID_EDIT_ITEM: item}
+
+
+EditItem = Annotated[
+    dict,
+    BeforeValidator(normalize_edit_item, json_schema_input_type=dict),
+]
 
 
 @dataclass
@@ -89,19 +115,25 @@ def multi_edit(
     guard via `load_editable` (append-only refusal, NOT_FOUND, superseded,
     `expected_hash` drift guard, frontmatter-required).
     """
+    normalized_edits = [normalize_edit_item(item) for item in edits]
+    for item in normalized_edits:
+        guards.guard_text_content(
+            item.get("new_string"), tool="edit_memory", field="edits[].new_string"
+        )
+
     # ---- argument validation ----
     missing: list[str] = []
     reasons: list[str] = []
     if not why or not why.strip():
         missing.append("why")
         reasons.append("why is required — edits without rationale aren't auditable")
-    if not edits:
+    if not normalized_edits:
         missing.append("edits")
         reasons.append(
             "edits is empty — supply at least one {old_string, new_string} pair"
         )
     else:
-        for i, e in enumerate(edits):
+        for i, e in enumerate(normalized_edits):
             if (
                 not isinstance(e, dict)
                 or "old_string" not in e
@@ -118,6 +150,8 @@ def multi_edit(
         raise EditError(
             code="INVALID_EDIT", missing=missing, reason="; ".join(reasons)
         )
+
+    edits = normalized_edits
 
     today = today or dt.date.today()
     date_iso = today.isoformat()

@@ -38,6 +38,14 @@ def _job(
     )
 
 
+def _sharing_failure(job: media_jobs.MediaJob, *, winerror: int = 5) -> str:
+    stage = job.sidecar_path.parent / f".exomem-batch-{'a' * 32}" / "stage-0.tmp"
+    return (
+        f"PermissionError: [WinError {winerror}] Access is denied: "
+        f"{str(stage)!r} -> {str(job.sidecar_path)!r}"
+    )
+
+
 def test_status_does_not_create_store(vault: Path) -> None:
     path = media_jobs.job_store_path(vault)
     assert not path.exists()
@@ -432,6 +440,45 @@ def test_transient_coordination_failures_recover_without_consuming_attempts(
     assert jobs[permanent_id]["state"] == media_jobs.FAILED
     assert jobs[permanent_id]["attempts"] == 1
     assert jobs[permanent_id]["error"] == "ValueError: corrupt container"
+
+
+def test_startup_recovers_only_exact_unexhausted_sidecar_sharing_failures(
+    vault: Path,
+) -> None:
+    store = media_jobs.MediaJobStore(vault)
+    eligible = _job(vault, name="eligible.mp3")
+    exhausted = _job(vault, name="exhausted.mp3")
+    unrelated = _job(vault, name="unrelated.mp3")
+    wrong_target = _job(vault, name="wrong-target.mp3")
+    jobs = (eligible, exhausted, unrelated, wrong_target)
+    ids: list[int] = []
+    for job in jobs:
+        job_id = store.enqueue(job)
+        claimed = store.claim_next()
+        assert claimed is not None and claimed.id == job_id
+        ids.append(job_id)
+
+    store.mark(ids[0], media_jobs.FAILED, _sharing_failure(eligible))
+    store.mark(ids[1], media_jobs.FAILED, _sharing_failure(exhausted, winerror=32))
+    store.mark(ids[2], media_jobs.FAILED, "PermissionError: [WinError 5] Access is denied")
+    wrong_error = _sharing_failure(wrong_target).replace(
+        str(wrong_target.sidecar_path), str(eligible.sidecar_path)
+    )
+    store.mark(ids[3], media_jobs.FAILED, wrong_error)
+    conn = store._connect()
+    try:
+        with conn:
+            conn.execute("UPDATE jobs SET attempts = 3 WHERE id = ?", (ids[1],))
+    finally:
+        conn.close()
+
+    assert store.recover_sharing_failures() == 1
+
+    recovered = {job["id"]: job for job in media_jobs.status(vault)["jobs"]}
+    assert recovered[ids[0]]["state"] == media_jobs.PENDING
+    assert recovered[ids[0]]["attempts"] == 1
+    for job_id in ids[1:]:
+        assert recovered[job_id]["state"] == media_jobs.FAILED
 
 
 def test_live_worker_prevents_duplicate_recovery(vault: Path) -> None:

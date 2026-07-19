@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from exomem import cli_ops
+from exomem import cli_ops, media_jobs
 from exomem import move_file as move_module
 from exomem import vault as vault_module
 
@@ -966,6 +966,39 @@ def test_batch_atomic_write_retains_fully_bound_stage_when_content_drifts(
     stage = next(workspace.glob("stage-*.tmp"))
     assert stage.read_bytes() == drifted
     assert target.read_bytes() == b"old"
+
+
+def test_clean_batch_cleanup_preserves_sharing_error_path_attributes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "sidecar.md"
+    target.write_bytes(b"old")
+    captured: list[PermissionError] = []
+    real_replace = os.replace
+
+    def deny_stage_replace(src, dst, *args, **kwargs):
+        if _leaf(src).startswith("stage-"):
+            workspace = _workspaces(tmp_path)[0]
+            error = PermissionError(13, "Access is denied", str(workspace / _leaf(src)))
+            error.winerror = 5
+            error.filename2 = str(target)
+            captured.append(error)
+            raise error
+        return real_replace(src, dst, *args, **kwargs)
+
+    monkeypatch.setattr(vault_module.os, "replace", deny_stage_replace)
+
+    with pytest.raises(PermissionError) as raised:
+        vault_module.batch_atomic_write(
+            [vault_module.PlannedWrite(target, "new")],
+            vault_root=tmp_path,
+        )
+
+    assert raised.value is captured[0]
+    assert raised.value.filename2 == str(target)
+    assert media_jobs.is_guarded_sidecar_sharing_violation(raised.value, target)
+    assert target.read_bytes() == b"old"
+    assert _workspaces(tmp_path) == []
 
 
 def test_batch_atomic_write_reports_cleanup_incomplete_after_complete_rollback(

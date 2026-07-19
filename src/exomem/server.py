@@ -19,7 +19,7 @@ from fastmcp.server.middleware.middleware import Middleware, MiddlewareContext
 from starlette.middleware import Middleware as ASGIMiddleware
 
 from . import commands as commands_module
-from . import guards
+from . import guards, multi_edit
 from .server_assets import (
     register_asset_routes,
     register_oauth_metadata_route,
@@ -91,12 +91,12 @@ class CallTraceMiddleware(Middleware):
                     guards.guard_text_content(args.get(field), tool=tool_name, field=field)
                 if tool_name in ("edit", "edit_memory"):
                     for item in args.get("edits") or []:
-                        if isinstance(item, dict):
-                            guards.guard_text_content(
-                                item.get("new_string"),
-                                tool=tool_name,
-                                field="edits[].new_string",
-                            )
+                        normalized = multi_edit.normalize_edit_item(item)
+                        guards.guard_text_content(
+                            normalized.get("new_string"),
+                            tool=tool_name,
+                            field="edits[].new_string",
+                        )
 
             extras = (
                 _find_call_summary(context.message)

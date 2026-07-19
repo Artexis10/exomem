@@ -30,8 +30,8 @@ def _build(monkeypatch: pytest.MonkeyPatch):
     return server_module.build_server(require_auth=False)
 
 
-def _call(mcp, name: str, args: dict) -> dict:
-    result = asyncio.run(mcp.call_tool(name, args, run_middleware=False))
+def _call(mcp, name: str, args: dict, *, run_middleware: bool = False) -> dict:
+    result = asyncio.run(mcp.call_tool(name, args, run_middleware=run_middleware))
     sc = getattr(result, "structured_content", None)
     if isinstance(sc, dict):
         return sc
@@ -104,6 +104,77 @@ def test_edit_batch_mode_routes_to_multi_edit(vault: Path, monkeypatch) -> None:
     assert out.get("edits_applied") == 2
     text = (vault / rel).read_text(encoding="utf-8")
     assert "ALPHA" in text and "BETA" in text
+
+
+def test_edit_batch_mode_accepts_connector_encoded_object_strings(
+    vault: Path, monkeypatch
+) -> None:
+    mcp = _build(monkeypatch)
+    rel = _make_page(vault, "# S\n\nalpha\nbeta\n")
+    tools = {
+        tool.name: tool.to_mcp_tool().model_dump(mode="json")
+        for tool in asyncio.run(mcp.list_tools())
+    }
+    edits_schema = tools["edit_memory"]["inputSchema"]["properties"]["edits"]
+    array_schema = next(item for item in edits_schema["anyOf"] if item.get("type") == "array")
+    assert array_schema["items"]["type"] == "object"
+
+    out = _call(
+        mcp,
+        "edit_memory",
+        {
+            "path": rel,
+            "why": "connector-encoded batch",
+            "edits": [
+                json.dumps({"old_string": "alpha", "new_string": "ALPHA"}),
+                json.dumps({"old_string": "beta", "new_string": "BETA"}),
+            ],
+        },
+        run_middleware=True,
+    )
+
+    assert out.get("edits_applied") == 2
+    text = (vault / rel).read_text(encoding="utf-8")
+    assert "ALPHA" in text and "BETA" in text
+
+
+def test_edit_batch_malformed_encoded_item_keeps_invalid_edit_error(
+    vault: Path, monkeypatch
+) -> None:
+    mcp = _build(monkeypatch)
+    rel = _make_page(vault, "# S\n\nalpha\n", name="malformed-encoded-edit.md")
+
+    with pytest.raises(Exception, match="INVALID_EDIT"):
+        _call(
+            mcp,
+            "edit_memory",
+            {"path": rel, "why": "invalid connector batch", "edits": ["[]"]},
+            run_middleware=True,
+        )
+
+
+def test_edit_batch_encoded_blob_is_rejected_by_middleware(
+    vault: Path, monkeypatch
+) -> None:
+    mcp = _build(monkeypatch)
+    rel = _make_page(vault, "# S\n\nalpha\n", name="encoded-blob.md")
+    before = (vault / rel).read_text(encoding="utf-8")
+    encoded = json.dumps(
+        {
+            "old_string": "alpha",
+            "new_string": "data:image/png;base64," + "A" * 40_000,
+        }
+    )
+
+    with pytest.raises(Exception, match="BINARY_BLOB_REJECTED"):
+        _call(
+            mcp,
+            "edit_memory",
+            {"path": rel, "why": "must be rejected", "edits": [encoded]},
+            run_middleware=True,
+        )
+
+    assert (vault / rel).read_text(encoding="utf-8") == before
 
 
 def test_edit_take_mode_routes_to_set_take(vault: Path, monkeypatch) -> None:

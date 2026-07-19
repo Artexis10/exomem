@@ -54,6 +54,14 @@ def _parsed_frontmatter(path) -> dict[str, object]:
     return parsed
 
 
+def _sharing_violation(sidecar, *, winerror: int = 5) -> PermissionError:
+    stage = sidecar.parent / f".exomem-batch-{'a' * 32}" / "stage-0.tmp"
+    error = PermissionError(13, "Access is denied", str(stage))
+    error.winerror = winerror
+    error.filename2 = str(sidecar)
+    return error
+
+
 def test_preserve_media_writes_pending_stub(vault, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("EXOMEM_DISABLE_MEDIA_EXTRACTION", raising=False)
     result = _preserve_media_stub(vault)
@@ -1021,6 +1029,114 @@ def test_child_defers_transient_writer_failure_without_poisoning_job(
     assert status["state"] == media_jobs.PENDING
     assert status["attempts"] == 0
     assert status["error"] is None
+
+
+def test_child_requeues_guarded_sidecar_sharing_violation_then_succeeds(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(extract, "asr_prewarm_enabled", lambda: False)
+    monkeypatch.setattr(extract, "log_diarization_readiness", lambda _vault: None)
+    monkeypatch.setattr(media_worker, "_writer_authority_available", lambda: True)
+    result = _preserve_media_stub(vault, filename="sharing-retry.mp3")
+    sidecar = vault / result.sidecar_path
+    store = media_jobs.MediaJobStore(vault)
+    store.enqueue(
+        media_jobs.MediaJob(
+            binary_path=vault / result.path,
+            sidecar_path=sidecar,
+            media_type="audio",
+        )
+    )
+    calls = 0
+
+    def _deny_once(_self, _job):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise _sharing_violation(sidecar)
+        return media_worker._ProcessOutcome(media_worker._COMPLETE)
+
+    monkeypatch.setattr(media_worker.MediaWorker, "_process", _deny_once)
+
+    assert (
+        media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.01)
+        == media_worker._LOCK_UNAVAILABLE_EXIT_CODE
+    )
+    [pending] = media_jobs.status(vault)["jobs"]
+    assert pending["state"] == media_jobs.PENDING
+    assert pending["attempts"] == 1
+
+    assert media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.01) == 0
+    assert media_jobs.status(vault)["jobs"] == []
+    assert calls == 2
+
+
+def test_child_terminalizes_sharing_violation_after_three_attempts(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(extract, "asr_prewarm_enabled", lambda: False)
+    monkeypatch.setattr(extract, "log_diarization_readiness", lambda _vault: None)
+    monkeypatch.setattr(media_worker, "_writer_authority_available", lambda: True)
+    result = _preserve_media_stub(vault, filename="sharing-exhausted.mp3")
+    sidecar = vault / result.sidecar_path
+    store = media_jobs.MediaJobStore(vault)
+    store.enqueue(
+        media_jobs.MediaJob(
+            binary_path=vault / result.path,
+            sidecar_path=sidecar,
+            media_type="audio",
+        )
+    )
+    monkeypatch.setattr(
+        media_worker.MediaWorker,
+        "_process",
+        lambda _self, _job: (_ for _ in ()).throw(_sharing_violation(sidecar)),
+    )
+
+    returncodes = [
+        media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.01)
+        for _ in range(3)
+    ]
+
+    assert returncodes == [
+        media_worker._LOCK_UNAVAILABLE_EXIT_CODE,
+        media_worker._LOCK_UNAVAILABLE_EXIT_CODE,
+        0,
+    ]
+    [failed] = media_jobs.status(vault)["jobs"]
+    assert failed["state"] == media_jobs.FAILED
+    assert failed["attempts"] == 3
+    assert "PermissionError" in failed["error"]
+
+
+def test_child_does_not_retry_unrelated_permission_error(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(extract, "asr_prewarm_enabled", lambda: False)
+    monkeypatch.setattr(extract, "log_diarization_readiness", lambda _vault: None)
+    monkeypatch.setattr(media_worker, "_writer_authority_available", lambda: True)
+    result = _preserve_media_stub(vault, filename="unrelated-permission.mp3")
+    store = media_jobs.MediaJobStore(vault)
+    store.enqueue(
+        media_jobs.MediaJob(
+            binary_path=vault / result.path,
+            sidecar_path=vault / result.sidecar_path,
+            media_type="audio",
+        )
+    )
+    monkeypatch.setattr(
+        media_worker.MediaWorker,
+        "_process",
+        lambda _self, _job: (_ for _ in ()).throw(
+            PermissionError(13, "Access is denied", str(vault / "unrelated.txt"))
+        ),
+    )
+
+    assert media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.01) == 0
+
+    [failed] = media_jobs.status(vault)["jobs"]
+    assert failed["state"] == media_jobs.FAILED
+    assert failed["attempts"] == 1
 
 
 def test_follower_supervisor_does_not_launch_media_child(
