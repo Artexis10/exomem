@@ -400,6 +400,40 @@ def test_duplicate_enqueue_does_not_implicitly_retry_terminal_job(vault: Path) -
     assert store.claim_next() is None
 
 
+def test_transient_coordination_failures_recover_without_consuming_attempts(
+    vault: Path,
+) -> None:
+    store = media_jobs.MediaJobStore(vault)
+    transient_errors = (
+        "OpError: WRITER_LEASE_REQUIRED: replica is read-only; current writer is desktop",
+        "OpError: MUTATION_BUSY: vault mutation boundary is busy",
+        'OpError: {"code":"WRITER_COORDINATOR_UNAVAILABLE","message":"offline"}',
+    )
+    transient_ids: list[int] = []
+    for index, error in enumerate(transient_errors):
+        job_id = store.enqueue(_job(vault, name=f"transient-{index}.mp3"))
+        claimed = store.claim_next()
+        assert claimed is not None and claimed.id == job_id
+        store.mark(job_id, media_jobs.FAILED, error)
+        transient_ids.append(job_id)
+
+    permanent_id = store.enqueue(_job(vault, name="corrupt.mp3"))
+    permanent = store.claim_next()
+    assert permanent is not None and permanent.id == permanent_id
+    store.mark(permanent_id, media_jobs.FAILED, "ValueError: corrupt container")
+
+    assert store.recover_transient_failures() == len(transient_ids)
+
+    jobs = {job["id"]: job for job in media_jobs.status(vault)["jobs"]}
+    for job_id in transient_ids:
+        assert jobs[job_id]["state"] == media_jobs.PENDING
+        assert jobs[job_id]["attempts"] == 0
+        assert jobs[job_id]["error"] is None
+    assert jobs[permanent_id]["state"] == media_jobs.FAILED
+    assert jobs[permanent_id]["attempts"] == 1
+    assert jobs[permanent_id]["error"] == "ValueError: corrupt container"
+
+
 def test_live_worker_prevents_duplicate_recovery(vault: Path) -> None:
     store = media_jobs.MediaJobStore(vault)
     store.enqueue(_job(vault))

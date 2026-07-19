@@ -30,6 +30,7 @@ from pathlib import Path
 
 from . import embeddings, extract, index_sync, preserve, scene_frames, semantic_segments
 from .backfill import iter_kb_files
+from .cli_ops import OpError
 from .kbdir import kb_dirname
 from .media_jobs import (
     BLOCKED,
@@ -55,6 +56,30 @@ _STALE = "stale"
 _BLOCKED_ACTION = "install the required media dependency, then retry"
 _RENDERER_ACTION = "check the timestamp renderer, then retry"
 _FAILED_ACTION = "repair or replace the media artifact, then retry"
+_TRANSIENT_OPERATION_CODES = frozenset(
+    {
+        "MUTATION_BUSY",
+        "MUTATION_LOCK_UNAVAILABLE",
+        "WRITER_COORDINATOR_UNAVAILABLE",
+        "WRITER_FENCED",
+        "WRITER_LEASE_REQUIRED",
+    }
+)
+_FOLLOWER_RECHECK_SECONDS = 5.0
+_TRANSIENT_EXIT_CODE = 75
+_LOCK_UNAVAILABLE_EXIT_CODE = 76
+_TRANSIENT_RECHECK_SECONDS = 5.0
+_LOCK_UNAVAILABLE_RECHECK_SECONDS = 30.0
+
+
+def _writer_authority_available() -> bool:
+    try:
+        get_manager().ensure_writer()
+    except OpError as exc:
+        if exc.code in _TRANSIENT_OPERATION_CODES:
+            return False
+        raise
+    return True
 
 
 @dataclass(frozen=True)
@@ -127,6 +152,12 @@ class MediaWorker:
             self._stop_event.clear()
             if self._execution_mode == "process":
                 assert self._store is not None
+                recovered = self._store.recover_transient_failures()
+                if recovered:
+                    log.info(
+                        "media worker: recovered %d transient coordination failure(s)",
+                        recovered,
+                    )
                 target = self._supervise
                 name = "exomem-media-supervisor"
             else:
@@ -234,6 +265,10 @@ class MediaWorker:
             with get_manager().mutation_guard(self._vault_root):
                 index_sync.upsert_after_write(self._vault_root, [job.sidecar_path])
             log.info("re-embedded %s (post-frame-OCR segmentation)", job.sidecar_path.name)
+        except OpError as exc:
+            if exc.code in _TRANSIENT_OPERATION_CODES:
+                raise
+            log.exception("re-embed failed for %s", job.sidecar_path.name)
         except Exception:  # noqa: BLE001 — enrichment, never fatal
             log.exception("re-embed failed for %s", job.sidecar_path.name)
 
@@ -559,23 +594,39 @@ class MediaWorker:
                     recovered = self._store.recover_interrupted() if owns_runtime else 0
                     if owns_runtime:
                         self._store.clear_worker(child_pid)
-                    if returncode:
+                    if returncode in {_TRANSIENT_EXIT_CODE, _LOCK_UNAVAILABLE_EXIT_CODE}:
+                        delay = (
+                            _LOCK_UNAVAILABLE_RECHECK_SECONDS
+                            if returncode == _LOCK_UNAVAILABLE_EXIT_CODE
+                            else _TRANSIENT_RECHECK_SECONDS
+                        )
+                        log.info(
+                            "media child deferred work; retrying after %.1fs",
+                            delay,
+                        )
+                    elif returncode:
+                        delay = 2.0
                         log.warning(
                             "media child exited %s; recovered %d job(s)",
                             returncode,
                             recovered,
                         )
-                    relaunch_after = time.monotonic() + (2.0 if returncode else 0.5)
+                    else:
+                        delay = 0.5
+                    relaunch_after = time.monotonic() + delay
                 if (
                     self._child is None
                     and time.monotonic() >= relaunch_after
                     and self._store.needs_worker()
                 ):
-                    try:
-                        self._child = self._launch_child()
-                    except OSError:
-                        log.exception("media worker: could not start child")
-                        relaunch_after = time.monotonic() + 5.0
+                    if not _writer_authority_available():
+                        relaunch_after = time.monotonic() + _FOLLOWER_RECHECK_SECONDS
+                    else:
+                        try:
+                            self._child = self._launch_child()
+                        except OSError:
+                            log.exception("media worker: could not start child")
+                            relaunch_after = time.monotonic() + 5.0
                 self._wake.wait(0.5)
                 self._wake.clear()
         finally:
@@ -709,6 +760,9 @@ def run_child(vault_root: Path, *, parent_pid: int, idle_seconds: float) -> int:
     """Claim and process durable jobs until idle or the parent disappears."""
     store = MediaJobStore(vault_root)
     store.recover_interrupted()
+    if not _writer_authority_available():
+        log.info("media worker: writer authority unavailable; leaving work queued")
+        return _TRANSIENT_EXIT_CODE
     store.set_worker(os.getpid(), idle_seconds)
     # Process mode makes scene-frame follow-up enqueue durable in this same ledger;
     # the nested supervisor is never started because the child calls _process directly.
@@ -729,6 +783,20 @@ def run_child(vault_root: Path, *, parent_pid: int, idle_seconds: float) -> int:
             last_work = time.monotonic()
             try:
                 outcome = worker._process(job)
+            except OpError as exc:
+                assert job.id is not None
+                if exc.code in _TRANSIENT_OPERATION_CODES:
+                    store.defer(job.id)
+                    log.info(
+                        "media worker: deferred %s after transient %s",
+                        job.binary_path,
+                        exc.code,
+                    )
+                    if exc.code == "MUTATION_LOCK_UNAVAILABLE":
+                        return _LOCK_UNAVAILABLE_EXIT_CODE
+                    return _TRANSIENT_EXIT_CODE
+                log.exception("media child job crashed: %s", job.binary_path)
+                store.mark(job.id, FAILED, f"{type(exc).__name__}: {exc}")
             except Exception as exc:  # noqa: BLE001 - preserve worker availability
                 log.exception("media child job crashed: %s", job.binary_path)
                 assert job.id is not None
