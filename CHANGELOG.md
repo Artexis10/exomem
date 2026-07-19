@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.25.4](https://github.com/Artexis10/exomem/compare/v0.25.3...v0.25.4) (2026-07-19)
+
+
+### Bug Fixes
+
+* **ci:** disable unconfigured hosted black-box schedule ([6b49b9d](https://github.com/Artexis10/exomem/commit/6b49b9d07a3d6b8089191e1939144cca679ea733))
+
 ## [0.25.3](https://github.com/Artexis10/exomem/compare/v0.25.2...v0.25.3) (2026-07-19)
 
 
