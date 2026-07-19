@@ -35,18 +35,17 @@ log = logging.getLogger(__name__)
 
 _TOKEN_RE = re.compile(r"[a-z0-9]+")
 
-_STEMMER = None
-_STEMMER_LOCK = threading.Lock()
+_STEMMER_LOCAL = threading.local()
 
 
 def _get_stemmer():
-    global _STEMMER
-    if _STEMMER is None:
-        with _STEMMER_LOCK:
-            if _STEMMER is None:
-                import snowballstemmer
-                _STEMMER = snowballstemmer.stemmer("english")
-    return _STEMMER
+    stemmer = getattr(_STEMMER_LOCAL, "stemmer", None)
+    if stemmer is None:
+        import snowballstemmer
+
+        stemmer = snowballstemmer.stemmer("english")
+        _STEMMER_LOCAL.stemmer = stemmer
+    return stemmer
 
 
 @lru_cache(maxsize=16384)
