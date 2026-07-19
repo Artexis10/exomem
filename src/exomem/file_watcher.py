@@ -43,10 +43,24 @@ from .kbdir import kb_dirname, kb_prefix
 log = logging.getLogger(__name__)
 
 
-def _media_mutation_guard(vault_root: Path):
+def _media_mutation_guard(
+    vault_root: Path,
+    *,
+    operation: str = "background_media_reconcile",
+):
     from .writer_lease import get_manager
 
-    return get_manager().mutation_guard(vault_root)
+    return get_manager().mutation_guard(
+        vault_root,
+        operation=operation,
+        holder_kind="background",
+    )
+
+
+def _reconcile_background_media(vault_root: Path, binary: Path) -> object:
+    """Reconcile one artifact, yielding the global mutation boundary afterward."""
+    with _media_mutation_guard(vault_root):
+        return media_processing.reconcile_media(vault_root, binary, explicit=False)
 
 DEBOUNCE_SECONDS = 0.5
 # How often the watcher re-walks and reconciles the freshness registry against
@@ -342,7 +356,9 @@ class FileWatcher:
 
         for path in media:
             try:
-                with _media_mutation_guard(self._vault_root):
+                with _media_mutation_guard(
+                    self._vault_root, operation="background_media_event"
+                ):
                     media_processing.reconcile_media(self._vault_root, path, explicit=False)
             except Exception:  # noqa: BLE001 - a bad artifact must never kill the watcher
                 log.exception("file watcher: media reconciliation failed for %s", path)
@@ -431,11 +447,13 @@ class FileWatcher:
                 log.exception("file watcher: freshness reconcile failed (scope=%s)", scope)
         if not seed:
             try:
-                with _media_mutation_guard(self._vault_root):
-                    media_processing.reconcile_all_media(
-                        self._vault_root,
-                        limit=RECONCILE_MAX_MEDIA_FILES,
-                    )
+                media_processing.reconcile_all_media(
+                    self._vault_root,
+                    limit=RECONCILE_MAX_MEDIA_FILES,
+                    reconcile_one=lambda binary: _reconcile_background_media(
+                        self._vault_root, binary
+                    ),
+                )
             except Exception:  # noqa: BLE001 - discovery must never kill the watcher
                 log.exception("file watcher: periodic media reconciliation failed")
         if seed or not drifted:

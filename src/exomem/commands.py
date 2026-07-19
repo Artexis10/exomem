@@ -1751,6 +1751,10 @@ def op_edit(
     allow_curated: bool = False,
     expected_hash: str | None = None,
     validate_only: bool = False,
+    transition_token: str | None = None,
+    relation_disposition: str | None = None,
+    relation_review_hash: str | None = None,
+    relation_review_reason: str | None = None,
 ) -> dict:
     """Lightweight in-place edit of a page (body, tags, a surgical snippet,
     a batch, an opinion row, or one frontmatter field).
@@ -1873,6 +1877,10 @@ def op_edit(
             result = multi_edit_module.multi_edit(
                 vault_root, path=path, why=why, edits=edits,
                 expected_hash=expected_hash, validate_only=validate_only,
+                semantic_transition_token=transition_token,
+                relation_disposition=relation_disposition,
+                relation_review_hash=relation_review_hash,
+                relation_review_reason=relation_review_reason,
             )
         elif row_key is not None:
             if take is None:
@@ -1884,7 +1892,11 @@ def op_edit(
         elif field is not None:
             result = set_frontmatter_field_module.set_frontmatter_field(
                 vault_root, path=path, field=field, value=value,
-                why=why, allow_curated=allow_curated,
+                why=why, allow_curated=allow_curated, validate_only=validate_only,
+                semantic_transition_token=transition_token,
+                relation_disposition=relation_disposition,
+                relation_review_hash=relation_review_hash,
+                relation_review_reason=relation_review_reason,
             )
         else:
             result = edit_module.edit(
@@ -1893,6 +1905,10 @@ def op_edit(
                 replace_all=replace_all, heading=heading,
                 section_position=section_position,
                 expected_hash=expected_hash, validate_only=validate_only,
+                semantic_transition_token=transition_token,
+                relation_disposition=relation_disposition,
+                relation_review_hash=relation_review_hash,
+                relation_review_reason=relation_review_reason,
             )
     except (
         edit_module.EditError,
@@ -3355,6 +3371,10 @@ def op_edit_memory(
     allow_curated: bool = False,
     expected_hash: str | None = None,
     validate_only: bool = False,
+    transition_token: str | None = None,
+    relation_disposition: str | None = None,
+    relation_review_hash: str | None = None,
+    relation_review_reason: str | None = None,
 ) -> dict:
     """Edit an existing memory page with an auditable reason.
 
@@ -3402,6 +3422,10 @@ def op_edit_memory(
         allow_curated=allow_curated,
         expected_hash=expected_hash,
         validate_only=validate_only,
+        transition_token=transition_token,
+        relation_disposition=relation_disposition,
+        relation_review_hash=relation_review_hash,
+        relation_review_reason=relation_review_reason,
     )
 
 
@@ -5136,6 +5160,8 @@ def invocation_is_read_only(command: Command, kwargs: dict[str, Any]) -> bool:
     if command.name == "maintain_memory":
         mode = _resolved_invocation_selector(command, kwargs, "mode")
         return mode == "audit"
+    if command.name == "edit_memory":
+        return kwargs.get("validate_only") is True
     return False
 
 

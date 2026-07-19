@@ -1772,3 +1772,22 @@ def test_coordination_status_is_a_read_only_public_command() -> None:
     for surface in ("mcp", "rest", "cli"):
         command = next(c for c in product_commands_for(surface) if c.name == "coordination_status")
         assert command.read_only
+
+
+def test_coordination_status_includes_content_free_mutation_boundary(tmp_path: Path) -> None:
+    manager = LeaseManager(LeaseConfig(state_dir=tmp_path / "state"))
+    vault = tmp_path / "private-vault"
+    vault.mkdir()
+
+    assert manager.status()["mutation_boundary"] == {"state": "free"}
+    with manager.mutation_guard(
+        vault,
+        request_id="req-health",
+        operation="edit_memory",
+        holder_kind="command",
+    ):
+        boundary = manager.status()["mutation_boundary"]
+        assert boundary["state"] == "held"
+        assert boundary["request_id"] == "req-health"
+        assert boundary["operation"] == "edit_memory"
+        assert str(vault) not in str(boundary)

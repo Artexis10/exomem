@@ -15,6 +15,24 @@ from exomem import server as server_module
 from exomem import vault as vault_module
 
 
+def _write_editable_note(vault: Path, *, body: str = "Before") -> str:
+    relative = "Knowledge Base/Notes/Insights/retry-safe-edit.md"
+    target = vault / relative
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(
+        "---\n"
+        "title: Retry-safe edit\n"
+        "type: insight\n"
+        "status: active\n"
+        "exomem_id: 00000000-0000-4000-8000-000000000071\n"
+        "---\n\n"
+        f"{body}\n\n"
+        "## Relations\n",
+        encoding="utf-8",
+    )
+    return relative
+
+
 def test_edit_memory_validate_only_is_read_only() -> None:
     from exomem.commands import invocation_is_read_only, product_commands_for
 
@@ -112,6 +130,108 @@ def test_identical_pending_retry_waits_outside_mutation_boundary_and_replays(
     assert errors == []
     assert results == [{"value": 7}, {"value": 7}]
     assert calls == 1
+
+
+def test_real_edit_semantic_preflight_failure_releases_mutation_boundary(
+    vault: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem import semantic_writes
+    from exomem.commands import product_commands_for
+
+    path = _write_editable_note(vault)
+    command = next(
+        item for item in product_commands_for("mcp") if item.name == "edit_memory"
+    )
+    manager = writer_lease.LeaseManager(
+        writer_lease.LeaseConfig(state_dir=vault.parent / "state")
+    )
+    bound = command_surface.bind_vault(command.leaf, vault, command=command)
+    monkeypatch.setattr(writer_lease, "get_manager", lambda: manager)
+    monkeypatch.setattr(command_surface, "mcp_retry_scope", lambda: "principal:test")
+    kwargs = {
+        "path": path,
+        "why": "verify failed preflight releases writer boundary",
+        "old_string": "Before",
+        "new_string": "After",
+    }
+    preview = bound(validate_only=True, **kwargs)
+    semantic = preview["semantic"]
+    kwargs.update(
+        transition_token=semantic["transition_token"],
+        relation_disposition="reviewed_none",
+        relation_review_hash=semantic["transition_hash"],
+        relation_review_reason="No honest relation exists in the isolated fixture.",
+    )
+    original = semantic_writes.preflight_existing
+    fail_once = True
+
+    def preflight(*args, **kwargs):  # noqa: ANN002, ANN003
+        nonlocal fail_once
+        if fail_once:
+            fail_once = False
+            raise semantic_writes.SemanticWriteError(
+                "STALE_SEMANTIC_WRITE", "synthetic semantic drift"
+            )
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(semantic_writes, "preflight_existing", preflight)
+    with pytest.raises(ValueError, match="STALE_SEMANTIC_WRITE"):
+        bound(**kwargs)
+    result = bound(**kwargs)
+
+    assert result["path"] == path
+    assert "After" in (vault / path).read_text(encoding="utf-8")
+    assert manager.status()["mutation_boundary"] == {"state": "free"}
+
+
+def test_real_edit_replays_after_terminal_acknowledgement_loss(
+    vault: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem.commands import product_commands_for
+
+    path = _write_editable_note(vault)
+    interrupt = True
+
+    def after_terminal_persisted() -> None:
+        nonlocal interrupt
+        if interrupt:
+            interrupt = False
+            raise asyncio.CancelledError
+
+    manager = writer_lease.LeaseManager(
+        writer_lease.LeaseConfig(state_dir=vault.parent / "state"),
+        after_terminal_persisted=after_terminal_persisted,
+    )
+    command = next(
+        item for item in product_commands_for("mcp") if item.name == "edit_memory"
+    )
+    bound = command_surface.bind_vault(command.leaf, vault, command=command)
+    monkeypatch.setattr(writer_lease, "get_manager", lambda: manager)
+    monkeypatch.setattr(command_surface, "mcp_retry_scope", lambda: "principal:test")
+    kwargs = {
+        "path": path,
+        "why": "verify edit acknowledgement replay",
+        "old_string": "Before",
+        "new_string": "After",
+    }
+    preview = bound(validate_only=True, **kwargs)
+    semantic = preview["semantic"]
+    kwargs.update(
+        transition_token=semantic["transition_token"],
+        relation_disposition="reviewed_none",
+        relation_review_hash=semantic["transition_hash"],
+        relation_review_reason="No honest relation exists in the isolated fixture.",
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        bound(**kwargs)
+    replay = bound(**kwargs)
+
+    assert replay["path"] == path
+    assert (vault / path).read_text(encoding="utf-8").count("After") == 1
+    assert manager.status()["mutation_boundary"] == {"state": "free"}
 
 
 def test_mcp_retry_scope_hashes_bearer_and_falls_back_to_session(monkeypatch) -> None:

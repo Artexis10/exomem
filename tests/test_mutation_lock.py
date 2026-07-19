@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import multiprocessing
 import os
 import threading
@@ -9,7 +10,7 @@ from pathlib import Path
 import pytest
 
 from exomem.cli_ops import OpError
-from exomem.mutation_lock import VaultMutationCoordinator
+from exomem.mutation_lock import VaultMutationCoordinator, active_mutation_snapshot
 
 
 def _process_hold(
@@ -278,6 +279,51 @@ def test_holder_snapshot_is_content_free_and_clears_after_release(tmp_path: Path
         assert str(vault) not in str(snapshot)
 
     assert coordinator.snapshot() == {"state": "free"}
+
+
+def test_active_mutation_snapshot_reports_oldest_process_holder(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    coordinator = VaultMutationCoordinator(tmp_path / "state", vault)
+
+    assert active_mutation_snapshot() == {"state": "free"}
+    with coordinator.hold(
+        request_id="req-status",
+        operation="edit_memory",
+        holder_kind="command",
+    ):
+        snapshot = active_mutation_snapshot()
+        assert snapshot["state"] == "held"
+        assert snapshot["request_id"] == "req-status"
+        assert snapshot["operation"] == "edit_memory"
+        assert snapshot["holder_kind"] == "command"
+        assert str(vault) not in str(snapshot)
+    assert active_mutation_snapshot() == {"state": "free"}
+
+
+def test_long_holder_warning_is_bounded_and_content_free(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    vault = tmp_path / "private-vault-name"
+    vault.mkdir()
+    coordinator = VaultMutationCoordinator(
+        tmp_path / "state", vault, long_holder_seconds=0.01
+    )
+
+    with caplog.at_level(logging.WARNING, logger="exomem.mutation_lock"):
+        with coordinator.hold(
+            request_id="req-slow",
+            operation="background_media_reconcile",
+            holder_kind="background",
+        ):
+            time.sleep(0.02)
+            assert coordinator.snapshot()["overdue"] is True
+            assert coordinator.snapshot()["overdue"] is True
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert len(messages) == 1
+    assert "req-slow" in messages[0]
+    assert "private-vault-name" not in messages[0]
 
 
 def test_process_exit_releases_os_mutation_lock(tmp_path: Path) -> None:

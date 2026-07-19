@@ -1137,6 +1137,10 @@ def preflight_existing(
         )
     root = Path(vault_root)
     before_source, primary_guard = vault.read_guarded_text(root, root / path)
+    # The parser/corpus and public content-hash contract normalize platform
+    # newlines. Keep the raw-byte PathGuard, but evaluate the same logical text
+    # on Windows so CRLF alone never looks like concurrent semantic drift.
+    before_source = before_source.replace("\r\n", "\n").replace("\r", "\n")
     before_hash = vault.content_hash(before_source)
     if expected_before_hash is not None and expected_before_hash != before_hash:
         raise SemanticWriteError(

@@ -30,7 +30,11 @@ from pathlib import Path
 from typing import Any
 
 from .cli_ops import OpError
-from .mutation_lock import VaultMutationCoordinator, canonical_mutation_identity
+from .mutation_lock import (
+    VaultMutationCoordinator,
+    active_mutation_snapshot,
+    canonical_mutation_identity,
+)
 from .privacy_log import content_private_logging_enabled
 
 _COORDINATOR_USER_AGENT = (
@@ -840,7 +844,12 @@ class LeaseManager:
 
     @contextmanager
     def consistency_guard(
-        self, vault_root: os.PathLike[str] | str
+        self,
+        vault_root: os.PathLike[str] | str,
+        *,
+        request_id: str | None = None,
+        operation: str | None = None,
+        holder_kind: str = "unknown",
     ) -> Iterator[VaultMutationCoordinator]:
         """Serialize hosted reads with mutations without requiring writer authority."""
         mutation = VaultMutationCoordinator(
@@ -849,15 +858,29 @@ class LeaseManager:
             timeout_seconds=self._mutation_timeout_seconds,
             poll_interval_seconds=self._mutation_poll_interval_seconds,
         )
-        with mutation.hold():
+        with mutation.hold(
+            request_id=request_id,
+            operation=operation,
+            holder_kind=holder_kind,
+        ):
             yield mutation
 
     @contextmanager
     def mutation_guard(
-        self, vault_root: os.PathLike[str] | str
+        self,
+        vault_root: os.PathLike[str] | str,
+        *,
+        request_id: str | None = None,
+        operation: str | None = None,
+        holder_kind: str = "command",
     ) -> Iterator[VaultMutationCoordinator]:
         """Hold the shared vault mutation boundary and revalidate writer authority."""
-        with self.consistency_guard(vault_root) as mutation:
+        with self.consistency_guard(
+            vault_root,
+            request_id=request_id,
+            operation=operation,
+            holder_kind=holder_kind,
+        ) as mutation:
             fence_context: Token[tuple[Any, int] | None] | None = None
             if self.config.enabled:
                 lease = self.ensure_writer()
@@ -937,7 +960,12 @@ class LeaseManager:
                 invoke_leaf,
                 expires_after=expires_after,
                 on_replay=on_replay,
-                operation_guard=lambda: self.mutation_guard(mutation_subject),
+                operation_guard=lambda: self.mutation_guard(
+                    mutation_subject,
+                    request_id=request_id,
+                    operation=command.name,
+                    holder_kind="command",
+                ),
                 commit_observed=lambda: commit_state["observed"],
             )
         except BaseException as error:
@@ -1011,6 +1039,7 @@ class LeaseManager:
             "expires_at": None,
             "fencing_token": None,
             "coordinator_healthy": True if not self.config.enabled else False,
+            "mutation_boundary": active_mutation_snapshot(),
         }
         if not self.config.enabled:
             return base
