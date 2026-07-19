@@ -40,20 +40,29 @@ import sys
 import time
 from pathlib import Path
 
-# KB write tools — if an Exomem write tool ran this turn (e.g. mcp__…_Exomem__note/add;
-# legacy `knowledge_base` names still matched for back-compat), the capture already happened.
-_KB_WRITE = re.compile(r"(?:exomem|knowledge[_-]?base).*(note|add|edit|append|create_file|replace)", re.I)
+# KB write tools — mixed tools include their operation selector so read-only
+# discovery does not suppress the reminder. Legacy names remain recognized.
+_KB_WRITE = re.compile(
+    r"(?:exomem|knowledge[_-]?base).*(?:"
+    r"note|add|edit|append|create_file|replace|remember|capture_source|"
+    r"preserve_evidence|manage_memory_file|"
+    r"connect_memory:(?:create-entity|accept-relation)"
+    r")",
+    re.I,
+)
 
 REMINDER = (
     "[Exomem capture check] This turn did substantial work. If your Exomem knowledge-base "
-    "skill is available and the turn reached a durable conclusion — a decision, a "
-    "solved problem, a diagnosed failure, or a recognized pattern, in whatever "
-    "language you were working in — capture it now as a *compiled note* (the "
-    "distilled conclusion plus links, NOT a transcript) under the standing waiver, "
-    "then report one line (Saved -> path). Ask only if the note's type/scope is "
-    "genuinely ambiguous. If it is NOT a stepping-stone, or no Knowledge Base is "
-    "configured here, do nothing and stop — that is the common case, and skipping "
-    "is correct and free."
+    "skill is available, check whether the turn reached a durable conclusion or a "
+    "durable recurring entity recognized by the active entity registry, prioritizing "
+    "the selected knowledge packs. For an entity, resolve the exact name and aliases "
+    "first: update stable facts with edit_memory or add a governed relation when one "
+    "active page matches. Only when none matches and the identity is stable, recurring, "
+    "central, and useful beyond this source may you call "
+    'connect_memory(operation="create-entity"). A single incidental mention, unresolved '
+    "identity, or transient participant stays in source/note context. Capture conclusions "
+    "as distilled compiled notes, not transcripts, then report Saved -> path. If neither "
+    "case applies, or no Knowledge Base is configured, do nothing and stop."
 )
 
 
@@ -146,7 +155,14 @@ def _latest_turn(path: str, max_bytes: int = 262_144) -> tuple[str, list[str]]:
                 if b.get("type") == "text":
                     chunks.append(b.get("text", ""))
                 elif b.get("type") == "tool_use":
-                    tools.append(b.get("name", ""))
+                    name = str(b.get("name", ""))
+                    tool_input = b.get("input")
+                    operation = (
+                        str(tool_input.get("operation", ""))
+                        if isinstance(tool_input, dict)
+                        else ""
+                    )
+                    tools.append(f"{name}:{operation}" if operation else name)
         elif role == "user" or typ == "user":
             blocks = _content_blocks(msg)
             if any(b.get("type") == "text" for b in blocks) and not any(

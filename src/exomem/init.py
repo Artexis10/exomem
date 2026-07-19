@@ -12,7 +12,10 @@ from __future__ import annotations
 import shutil
 from pathlib import Path
 
+from . import indexes
+from .entity_types import ENTITY_TYPE_REGISTRY
 from .kbdir import kb_dirname
+from .vault import render_wikilinks_for_vault
 
 _SCAFFOLD = Path(__file__).parent / "_scaffold"
 
@@ -26,10 +29,7 @@ _FOLDERS = (
     "Notes/Patterns",
     "Notes/Experiments",
     "Notes/Productions",
-    "Entities/People",
-    "Entities/Concepts",
-    "Entities/Libraries",
-    "Entities/Decisions",
+    *(f"Entities/{definition.folder}" for definition in ENTITY_TYPE_REGISTRY),
     "Evidence",
 )
 
@@ -52,18 +52,32 @@ def init_vault(vault_root: Path, *, force: bool = False) -> dict:
 
     created: list[str] = []
     for src in sorted(_SCAFFOLD.rglob("*")):
-        dest = kb / src.relative_to(_SCAFFOLD)
+        scaffold_rel = src.relative_to(_SCAFFOLD)
+        dest = kb / scaffold_rel
         if src.is_dir():
             dest.mkdir(parents=True, exist_ok=True)
             continue
         dest.parent.mkdir(parents=True, exist_ok=True)
-        if dest.exists() and not force:
+        if dest.exists() and (
+            not force or scaffold_rel == Path("Entities") / "index.md"
+        ):
             continue
         shutil.copy2(src, dest)
         created.append(dest.relative_to(vault_root).as_posix())
 
     for folder in _FOLDERS:
         (kb / folder).mkdir(parents=True, exist_ok=True)
+
+    entity_index = kb / "Entities" / "index.md"
+    if entity_index.is_file():
+        current = entity_index.read_text(encoding="utf-8")
+        refreshed = indexes._refresh_entities_subindex_text(
+            current,
+            counts_by_type=indexes._count_entities(kb / "Entities"),
+        )
+        refreshed = render_wikilinks_for_vault(refreshed, vault_root)
+        if refreshed != current:
+            entity_index.write_text(refreshed, encoding="utf-8")
 
     from .activation_manifest import ensure_manifest, manifest_path
 

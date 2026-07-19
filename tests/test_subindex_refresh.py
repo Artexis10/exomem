@@ -10,8 +10,9 @@ from __future__ import annotations
 import datetime as dt
 from pathlib import Path
 
-from exomem import indexes, link as link_module, note as note_module
-
+from exomem import indexes
+from exomem import link as link_module
+from exomem import note as note_module
 
 TODAY = dt.date(2026, 5, 27)
 
@@ -209,6 +210,34 @@ def test_count_entities_helper(vault: Path) -> None:
     # Fixture has 2 people + 3 concepts; libraries/decisions folders may not exist.
     assert counts.get("person", 0) == 2
     assert counts.get("concept", 0) == 3
+
+
+def test_entities_index_adds_missing_registered_kind_without_rewriting_prose(
+    vault: Path,
+) -> None:
+    entities_idx = _seed_entities_index(vault)
+    original = entities_idx.read_text(encoding="utf-8")
+    custom = original.replace(
+        "# Entities — Index",
+        "# Entities — Index\n\nCustom operator prose that must survive refresh.",
+    )
+    entities_idx.write_text(custom, encoding="utf-8")
+
+    link_module.link(
+        vault,
+        entity_type="organization",
+        name="Northwind Research",
+        summary="A durable organization.",
+        today=TODAY,
+    )
+
+    refreshed = entities_idx.read_text(encoding="utf-8")
+    assert "Custom operator prose that must survive refresh." in refreshed
+    assert (
+        "- [[Knowledge Base/Entities/Organizations/|Organizations]] (1)"
+        in refreshed
+    )
+    assert refreshed.count("Entities/Organizations/") == 1
 
 
 def test_count_notes_by_subfolder_helper(vault: Path) -> None:

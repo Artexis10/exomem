@@ -98,6 +98,22 @@ def test_link_creates_decision_entity_with_status(vault: Path) -> None:
     assert fm["decision_status"] == "accepted"
 
 
+def test_link_creates_organization_entity_from_registry(vault: Path) -> None:
+    result = link_module.link(
+        vault,
+        entity_type="organization",
+        name="Northwind Research",
+        summary="A durable research organization used across projects.",
+        today=TODAY,
+    )
+
+    assert result.path == "Knowledge Base/Entities/Organizations/Northwind Research.md"
+    written = vault / result.path
+    assert written.exists()
+    assert _fm(written)["entity_type"] == "organization"
+    assert "# Northwind Research" in _read(written)
+
+
 def test_link_rejects_invalid_entity_type(vault: Path) -> None:
     with pytest.raises(link_module.LinkError) as exc:
         link_module.link(

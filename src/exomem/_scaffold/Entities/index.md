@@ -7,6 +7,7 @@ See [[Knowledge Base/_Schema/references/page-types|page-types § entity]] and [[
 ## By type
 
 - [[Knowledge Base/Entities/People/|People]] (0)
+- [[Knowledge Base/Entities/Organizations/|Organizations]] (0)
 - [[Knowledge Base/Entities/Concepts/|Concepts]] (0)
 - [[Knowledge Base/Entities/Libraries/|Libraries]] (0)
 - [[Knowledge Base/Entities/Decisions/|Decisions]] (0)
