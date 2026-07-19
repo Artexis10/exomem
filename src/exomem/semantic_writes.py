@@ -1793,7 +1793,11 @@ def preflight_move(
     normalized_source = source.replace("\r\n", "\n").replace("\r", "\n")
     if (
         before_moved is None
-        or before_moved.source_hash != vault.content_hash(normalized_source)
+        or before_moved.source_hash
+        not in {
+            vault.content_hash(source),
+            vault.content_hash(normalized_source),
+        }
     ):
         raise SemanticWriteError(
             "STALE_SEMANTIC_WRITE", "move source changed during semantic preflight"
@@ -1815,7 +1819,10 @@ def preflight_move(
         if (
             before_rewrite is None
             or before_rewrite.source_hash
-            != vault.content_hash(normalized_before_source)
+            not in {
+                vault.content_hash(before_source),
+                vault.content_hash(normalized_before_source),
+            }
             or write.guard.expected_content_hash != vault.content_hash(before_source)
         ):
             raise SemanticWriteError(
