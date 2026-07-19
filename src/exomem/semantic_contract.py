@@ -682,9 +682,8 @@ def build_page_state(
     """Build detached semantic state from one already-read Markdown string."""
     root = Path(vault_root)
     rel_path = _normalize_path(root, path)
-    raw_source = source
-    logical_source = raw_source.replace("\r\n", "\n").replace("\r", "\n")
-    frontmatter, body, _ = vault.parse_frontmatter(logical_source)
+    source = source.replace("\r\n", "\n").replace("\r", "\n")
+    frontmatter, body, _ = vault.parse_frontmatter(source)
     page_type_value = frontmatter.get("type")
     page_type = str(page_type_value) if page_type_value else None
     projects = _page_projects(frontmatter)
@@ -723,7 +722,7 @@ def build_page_state(
     resolved_review_fingerprint = review_fingerprint
     if review_fingerprint is _REVIEW_FINGERPRINT_UNSET:
         resolved_review_fingerprint = (
-            review_content_fingerprint(normalized_id, logical_source)
+            review_content_fingerprint(normalized_id, source)
             if normalized_id is not None
             else None
         )
@@ -733,7 +732,7 @@ def build_page_state(
         path=rel_path,
         identity_kind=identity_kind,
         identity=identity,
-        source_hash=vault.content_hash(raw_source),
+        source_hash=vault.content_hash(source),
         language_registry_hash=(
             f"{language.schema_version}:{language.content_hash}"
         ),
