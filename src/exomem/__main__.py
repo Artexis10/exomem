@@ -51,6 +51,8 @@ def main(argv: list[str] | None = None) -> int:
         return _init_main(raw[1:])
     if raw and raw[0] == "install-skill":
         return _install_skill_main(raw[1:])
+    if raw and raw[0] == "package-skills":
+        return _package_skills_main(raw[1:])
     if raw and raw[0] == "personalize":
         from .personalize import personalize_main
 
@@ -848,14 +850,21 @@ def _install_skill_main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
         prog="exomem install-skill",
         description=(
-            "Install the Exomem skill into Claude Code's skills folder. "
-            "The MCP server is the hands; the skill is the brain that tells Claude "
-            "when to capture and how to file — without it, the tools sit unused."
+            "Install the Exomem skills into every agent client on this machine. "
+            "The MCP server is the hands; the skills are the brain that tells the agent "
+            "when to capture and how to file — without them, the tools sit unused."
         ),
     )
     parser.add_argument(
+        "--client",
+        default="auto",
+        help="Which client(s) to install into: auto (every client detected here), "
+        "all (every supported client), claude, or codex. Default: auto.",
+    )
+    parser.add_argument(
         "--target",
-        help="Skill folder to install into (default: ~/.claude/skills/exomem).",
+        help="Install into one explicit folder instead (default: ~/.claude/skills/exomem). "
+        "Overrides --client.",
     )
     parser.add_argument(
         "--force",
@@ -874,26 +883,88 @@ def _install_skill_main(argv: list[str]) -> int:
 
     target = Path(args.target) if args.target else None
     try:
-        report = install_module.install_skill(target, force=args.force, link=args.link)
-    except (FileExistsError, FileNotFoundError) as e:
+        if target is not None:
+            reports = {"claude": install_module.install_skill(target, force=args.force, link=args.link)}
+        else:
+            reports = install_module.install_skills(
+                client=args.client, force=args.force, link=args.link
+            )["clients"]
+    except (FileExistsError, FileNotFoundError, ValueError) as e:
         print(f"exomem install-skill: {e}", file=sys.stderr)
         return 1
-    print(
-        f"Installed the Exomem skill ({report['mode']}, "
-        f"{report['files']} files):"
-    )
-    print(f"  {report['target']}")
-    if report.get("workflow_skills"):
-        names = ", ".join(s["name"] for s in report["workflow_skills"])
-        print(f"  Workflow skills: {names}")
+
+    for client, report in reports.items():
+        print(
+            f"Installed the Exomem skills for {client} "
+            f"({report['mode']}, {report['files']} files):"
+        )
+        print(f"  {report['target']}")
+        if report.get("workflow_skills"):
+            names = ", ".join(s["name"] for s in report["workflow_skills"])
+            print(f"  Workflow skills: {names}")
     # Installing to the default location supersedes any pre-rename `knowledge-base`
     # skill; retire it so Claude Code doesn't load both.
     if target is None:
         removed = install_module.remove_legacy_skill()
         if removed is not None:
             print(f"  Removed the pre-rename skill at {removed}.")
-    print("Restart Claude Code to load it. Then just talk - it captures at")
+    clients = ", ".join(reports)
+    print(f"Restart {clients} to load them. Then just talk - it captures at")
     print('natural stopping points, or say "find my notes on X".')
+    return 0
+
+
+def _package_skills_main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(
+        prog="exomem package-skills",
+        description=(
+            "Build one uploadable .zip per skill for clients that have no filesystem "
+            "install path (claude.ai, ChatGPT). Claude Code and Codex should use "
+            "`exomem install-skill` instead."
+        ),
+    )
+    parser.add_argument(
+        "--out",
+        help="Output directory for the archives (default: ./dist/skills).",
+    )
+    parser.add_argument(
+        "--vault",
+        help="Vault root whose real project-keys.yaml to overlay into the core skill. "
+        "Omit for a generic, shareable archive.",
+    )
+    parser.add_argument(
+        "--plugin-root",
+        help="Instead of archives, regenerate the Claude Code plugin tree at this path "
+        "(maintainer task; the committed tree must mirror the packaged sources).",
+    )
+    args = parser.parse_args(argv)
+
+    from . import package_skills as package_module
+
+    if args.plugin_root:
+        report = package_module.sync_plugin(Path(args.plugin_root))
+        print(f"Synced plugin v{report['version']} at {report['plugin_root']}")
+        print(f"  skills: {', '.join(report['skills'])}")
+        return 0
+
+    vault = args.vault or os.environ.get("EXOMEM_VAULT_PATH")
+    try:
+        report = package_module.package_skills(
+            Path(args.out) if args.out else None,
+            vault=Path(vault) if vault else None,
+        )
+    except (FileNotFoundError, OSError) as e:
+        print(f"exomem package-skills: {e}", file=sys.stderr)
+        return 1
+
+    print(f"Wrote {report['count']} skill archives to {report['out_dir']}:")
+    for archive in report["archives"]:
+        print(f"  {Path(archive['path']).name} ({archive['bytes'] // 1024} KB)")
+    print()
+    print("Upload these in the client's settings:")
+    print("  claude.ai  -> Settings > Capabilities > Skills > upload")
+    print("  ChatGPT    -> Settings > Skills > upload")
+    print("Claude Code and Codex do not need these - run `exomem install-skill`.")
     return 0
 
 

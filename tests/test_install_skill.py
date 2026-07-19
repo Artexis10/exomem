@@ -116,3 +116,63 @@ def test_remove_legacy_skill_preserves_foreign(tmp_path: Path) -> None:
 
 def test_remove_legacy_skill_absent_is_noop(tmp_path: Path) -> None:
     assert install_module.remove_legacy_skill(tmp_path / "skills" / "knowledge-base") is None
+
+
+# ---- multi-client: Codex loads skills from disk exactly like Claude Code ----
+#
+# install_hook.py has always targeted both clients; skills never did, so a Codex
+# user got the MCP tools and no brain to drive them.
+
+
+def test_client_home_honours_the_same_env_overrides_as_hooks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude"))
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex"))
+
+    assert install_module.client_home("claude") == tmp_path / "claude"
+    assert install_module.client_home("codex") == tmp_path / "codex"
+    assert install_module.client_skill_target("codex") == tmp_path / "codex" / "skills" / "exomem"
+
+
+def test_unsupported_client_is_rejected() -> None:
+    with pytest.raises(ValueError, match="unsupported skill client"):
+        install_module.normalize_client("cursor")
+
+
+def test_auto_resolves_only_to_clients_present_on_this_machine(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude"))
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex"))
+    (tmp_path / "codex").mkdir()
+
+    assert install_module.resolve_clients("auto") == ("codex",)
+    # 'all' provisions ahead of time, whether or not the client is installed yet.
+    assert install_module.resolve_clients("all") == ("claude", "codex")
+
+
+def test_auto_falls_back_to_claude_when_no_client_is_detected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A first-run box with neither config dir must still install somewhere useful."""
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude"))
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex"))
+
+    assert install_module.resolve_clients("auto") == ("claude",)
+
+
+def test_install_skills_lands_the_full_set_in_both_clients(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude"))
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex"))
+
+    report = install_module.install_skills(client="all")
+
+    assert report["installed"] == ["claude", "codex"]
+    for client in ("claude", "codex"):
+        skills = tmp_path / client / "skills"
+        assert (skills / "exomem" / "SKILL.md").is_file()
+        for name in EXPECTED_WORKFLOW_SKILLS:
+            assert (skills / name / "SKILL.md").is_file(), f"{name} missing for {client}"
