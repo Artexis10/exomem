@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.25.0](https://github.com/Artexis10/exomem/compare/v0.24.2...v0.25.0) (2026-07-19)
+
+
+### Features
+
+* harden writes and proactive entity capture ([#258](https://github.com/Artexis10/exomem/issues/258)) ([9ef69ef](https://github.com/Artexis10/exomem/commit/9ef69ef0b5d2b7b2c6609b291cd03003a12d0850))
+
 ## [0.24.2](https://github.com/Artexis10/exomem/compare/v0.24.1...v0.24.2) (2026-07-18)
 
 
