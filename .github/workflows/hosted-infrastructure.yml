@@ -16,8 +16,9 @@ on:
       - "tests/test_hosted_*.py"
       - "openspec/changes/add-hosted-private-alpha-infrastructure/**"
       - ".github/workflows/hosted-infrastructure.yml"
-  schedule:
-    - cron: "*/5 * * * *"
+  # Re-enable the five-minute schedule only after the hosted deployment exists
+  # and all three EXOMEM_BLACKBOX_* repository secrets are configured. The
+  # cadence must match observability-v1.json poll_interval_seconds (300).
   workflow_dispatch:
     inputs:
       release_proof:
