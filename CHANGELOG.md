@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.25.3](https://github.com/Artexis10/exomem/compare/v0.25.2...v0.25.3) (2026-07-19)
+
+
+### Bug Fixes
+
+* harden Windows media, edits, and concurrent retrieval ([9911e13](https://github.com/Artexis10/exomem/commit/9911e13525a4faf08b1baf06671114e436b09413))
+
 ## [0.25.2](https://github.com/Artexis10/exomem/compare/v0.25.1...v0.25.2) (2026-07-19)
 
 
