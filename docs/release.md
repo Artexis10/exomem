@@ -58,6 +58,23 @@ Run the optional checks only on machines configured for those profiles. `media`
 expects the media extra plus Tesseract; `remote` expects OAuth and public-url
 environment variables.
 
+## Rolling a release onto a running service
+
+Use `scripts/deploy.ps1 -Version X.Y.Z` rather than upgrading by hand. It resolves the
+service interpreter from NSSM instead of assuming the current checkout, gates on `doctor`,
+and verifies the running server actually reports the requested version before claiming
+success. See [deployment.md](deployment.md#deploying-a-new-version).
+
+Two release-time hazards it exists to catch:
+
+- **The checkout is not necessarily the deploy target.** A wheel-backed service venv can sit
+  beside a checkout whose `uv sync` has no effect on what runs. `/health` now reports
+  `install_source`, so this is visible rather than inferred.
+- **The CUDA pin does not survive a PyPI upgrade.** `[tool.uv.sources]` is repo
+  configuration and does not travel with the published wheel, so upgrading a PyPI-backed
+  venv silently swaps the pinned `+cu132` torch for the default CPU wheel. The deploy fails
+  on that regression; pass `-AllowCpuTorch` on hosts that are intentionally CPU-only.
+
 ## Commit convention
 
 Release Please reads Conventional Commit messages after the latest release tag:
