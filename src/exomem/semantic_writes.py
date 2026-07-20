@@ -9,7 +9,7 @@ import hashlib
 import json
 import re
 import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
@@ -175,6 +175,71 @@ def _fit_feedback_byte_budget(value: dict[str, Any]) -> dict[str, Any]:
             sorted(relation["omitted_counts"].items())
         )
     return value
+
+
+_ERROR_FINDING_LIMIT = 3
+
+
+def _blocking_finding_text(finding: semantic_contract.ContractFinding) -> str:
+    text = finding.code
+    if finding.path:
+        text += f" at {finding.path}"
+    if finding.detail:
+        text += f": {finding.detail}"
+    if finding.remediation:
+        text += f" (fix: {finding.remediation})"
+    return text
+
+
+def _blocking_reason(
+    result: semantic_contract.SemanticContractResult,
+    prefix: str = "semantic contract has blocking findings",
+) -> str:
+    """Name the blocking findings in the error the caller actually receives.
+
+    Only `code` and `reason` survive out to the MCP caller, so a bare prefix
+    tells a writer that something is wrong while withholding what — forcing a
+    second `validate_only` round-trip purely to learn it. That round-trip is the
+    dominant source of write friction: 69 blocked writes in one day on
+    2026-07-20, none of them self-describing.
+
+    Bounded like `_bounded_semantic_feedback`, and the omitted count is stated
+    rather than silently dropped, so a truncated list never reads as complete.
+    """
+    findings = result.blocking_findings
+    if not findings:
+        return prefix
+    shown = findings[:_ERROR_FINDING_LIMIT]
+    rendered = "; ".join(_blocking_finding_text(item) for item in shown)
+    omitted = len(findings) - len(shown)
+    if omitted:
+        rendered += f"; +{omitted} more (validate_only returns the full set)"
+    return f"{prefix}: {rendered}"
+
+
+def _blocking_reason_for_evaluations(
+    evaluations: Sequence[Any],
+    prefix: str = "semantic contract has blocking findings",
+) -> str:
+    """Same as `_blocking_reason` for multi-page operations (move, recovery).
+
+    `should_block` on these preflights is an `any()` across evaluations, so the
+    blocking findings are spread over several pages. Naming the page each
+    finding came from is what makes a multi-page rejection actionable.
+    """
+    findings = tuple(
+        finding
+        for item in evaluations
+        for finding in item.contract_result.blocking_findings
+    )
+    if not findings:
+        return prefix
+    shown = findings[:_ERROR_FINDING_LIMIT]
+    rendered = "; ".join(_blocking_finding_text(item) for item in shown)
+    omitted = len(findings) - len(shown)
+    if omitted:
+        rendered += f"; +{omitted} more (validate_only returns the full set)"
+    return f"{prefix}: {rendered}"
 
 
 def _bounded_semantic_feedback(
@@ -1523,7 +1588,8 @@ def commit_existing(
     root = Path(vault_root)
     if preflight.contract_result.should_block:
         raise SemanticWriteError(
-            "SEMANTIC_CONTRACT_BLOCKED", "semantic contract has blocking findings"
+            "SEMANTIC_CONTRACT_BLOCKED",
+            _blocking_reason(preflight.contract_result),
         )
 
     result = preflight.contract_result
@@ -1536,7 +1602,10 @@ def commit_existing(
         if result.should_block:
             raise SemanticWriteError(
                 "SEMANTIC_CONTRACT_BLOCKED",
-                "semantic contract blocked against the activation boundary winner",
+                _blocking_reason(
+                    result,
+                    "semantic contract blocked against the activation boundary winner",
+                ),
             )
 
     try:
@@ -2073,7 +2142,8 @@ def commit_move(
     root = Path(vault_root)
     if preflight.should_block:
         raise SemanticWriteError(
-            "SEMANTIC_CONTRACT_BLOCKED", "semantic contract has blocking findings"
+            "SEMANTIC_CONTRACT_BLOCKED",
+            _blocking_reason_for_evaluations(preflight.evaluations),
         )
     if preflight.manifest_install_required:
         winner = activation_manifest.ensure_manifest(
@@ -2507,7 +2577,7 @@ def commit_recovery(
             if preflight.should_block:
                 raise SemanticWriteError(
                     "SEMANTIC_CONTRACT_BLOCKED",
-                    "semantic contract has blocking findings",
+                    _blocking_reason_for_evaluations(preflight.evaluations),
                 )
             destination_root_guard = (
                 preflight.destination_root_guard.prepare_and_bind_parents(root)
@@ -2641,7 +2711,7 @@ def preflight_creation(
         )
     ):
         raise SemanticWriteError(
-            "SEMANTIC_CONTRACT_BLOCKED", "semantic contract has blocking findings"
+            "SEMANTIC_CONTRACT_BLOCKED", _blocking_reason(result)
         )
     if page_type in _COMPILED_TYPES and state.eligible_compiled:
         if draft_id is None:
