@@ -66,6 +66,27 @@ def test_config_is_default_off_and_requires_identities() -> None:
         LeaseConfig.from_env({"EXOMEM_WRITER_LEASE_URL": "https://lease.example"})
 
 
+def test_mutation_timeout_defaults_above_critical_section_and_is_tunable() -> None:
+    """The boundary must outwait a normal write, and ops must be able to tune it.
+
+    A single `remember` holds the mutation boundary across its corpus-aware
+    embedding pass, which routinely runs for seconds. The former hardcoded 5s
+    sat below that, so concurrent writers failed MUTATION_BUSY instead of
+    queueing. The default must stay comfortably above the critical section and
+    well under the ~100s Cloudflare edge cap.
+    """
+    assert LeaseConfig.from_env({}).mutation_timeout_seconds == 15.0
+    tuned = LeaseConfig.from_env({"EXOMEM_MUTATION_TIMEOUT": "30"})
+    assert tuned.mutation_timeout_seconds == 30.0
+    # Misconfiguration fails loudly rather than silently reverting to a default,
+    # matching every other lease timeout. A silently-ignored value here would
+    # leave an operator believing they had widened the boundary when they had not.
+    with pytest.raises(ValueError, match="EXOMEM_MUTATION_TIMEOUT"):
+        LeaseConfig.from_env({"EXOMEM_MUTATION_TIMEOUT": "not-a-number"})
+    with pytest.raises(ValueError, match="EXOMEM_MUTATION_TIMEOUT"):
+        LeaseConfig.from_env({"EXOMEM_MUTATION_TIMEOUT": "0"})
+
+
 def test_config_loads_without_exposing_token_in_status(tmp_path: Path) -> None:
     config = LeaseConfig.from_env(
         {

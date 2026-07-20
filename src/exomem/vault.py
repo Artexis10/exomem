@@ -189,8 +189,10 @@ def slugify_with_truncation_check(
     full = _slugify(title, max_length=0, word_boundary=True, lowercase=True) or "untitled"
     if slug != full:
         return slug, (
-            f"slug truncated to {slug!r} (full would have been {full!r}); "
-            f"shorten the title if the truncation drops meaning"
+            f"SLUG_TRUNCATED: slug truncated to {slug!r} (full would have been "
+            f"{full!r}); link to this note using {slug!r} — re-deriving a slug "
+            f"from the title will not resolve. Shorten the title if the "
+            f"truncation drops meaning."
         )
     return slug, None
 

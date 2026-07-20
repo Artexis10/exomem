@@ -261,6 +261,14 @@ class LeaseConfig:
     timeout_seconds: float = 3.0
     preferred_writer: bool = False
     state_dir: Path = Path.home() / ".cache" / "exomem"
+    # How long a writer waits for the vault mutation boundary before giving up
+    # with MUTATION_BUSY. This must exceed the natural critical section: a
+    # single `remember` holds the boundary across its corpus-aware embedding
+    # pass, which routinely runs for seconds. The former 5s default sat *below*
+    # that, so any genuine overlap failed rather than queued. Retries are
+    # idempotency-protected, so waiting is safe; the ceiling is the ~100s
+    # Cloudflare edge cap, which 15s leaves ample room under.
+    mutation_timeout_seconds: float = 15.0
 
     @property
     def enabled(self) -> bool:
@@ -280,6 +288,9 @@ class LeaseConfig:
             timeout_seconds=_positive_float(values, "EXOMEM_WRITER_LEASE_TIMEOUT", 3.0),
             preferred_writer=_truthy(values.get("EXOMEM_WRITER_LEASE_PREFERRED", "")),
             state_dir=Path(state_raw).expanduser() if state_raw else cls.state_dir,
+            mutation_timeout_seconds=_positive_float(
+                values, "EXOMEM_MUTATION_TIMEOUT", 15.0
+            ),
         )
         if config.enabled and (not config.vault_id or not config.replica_id):
             raise ValueError(

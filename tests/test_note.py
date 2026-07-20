@@ -159,6 +159,38 @@ def test_note_short_title_no_truncation_warning(vault: Path) -> None:
     assert not any(
         "slug truncated" in w.lower() for w in result.warnings
     )
+    # Even with no truncation the authoritative slug is returned.
+    assert result.slug == Path(result.path).stem
+
+
+def test_note_returns_authoritative_slug_when_title_truncated(vault: Path) -> None:
+    """The result carries the slug actually written, so a caller never guesses one.
+
+    Regression: an agent linked to a note by re-deriving a slug from the title.
+    The write had truncated it, so the relation named a slug that resolved to
+    nothing and the semantic contract rejected the link. The written slug must
+    be readable straight off the result.
+    """
+    very_long_title = (
+        "Procedural pushback and evidentiary recording in "
+        "opponent-controlled meetings spanning multiple jurisdictions "
+        "and overlapping privilege regimes for the discovery period"
+    )
+    result = note_module.note(
+        vault,
+        content="# title H1\n\n## Claim\n\nBody.\n",
+        note_type="insight",
+        title=very_long_title,
+        status="draft",
+        today=TODAY,
+    )
+    # The slug is the on-disk filename stem — the thing a link must name.
+    assert result.slug == Path(result.path).stem
+    assert (vault / result.path).exists()
+    # It survives serialisation to the MCP/REST caller.
+    assert result.as_dict()["slug"] == result.slug
+    # The warning is machine-readable, not just prose buried in a mixed list.
+    assert any(w.startswith("SLUG_TRUNCATED:") for w in result.warnings), result.warnings
 
 
 def test_note_no_cap50_warning(vault: Path) -> None:
