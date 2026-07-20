@@ -90,18 +90,23 @@ def register_asset_routes(mcp_app: FastMCP) -> None:
 
     @mcp_app.custom_route("/health", methods=["GET"])
     async def _health(request: Request) -> JSONResponse:  # noqa: ARG001
-        """Unauthenticated liveness probe for tunnels/orchestrators. Reports only
-        that the process is up + its version — no vault data, no auth required."""
-        try:
-            from importlib.metadata import version
+        """Unauthenticated liveness probe for tunnels/orchestrators. Reports that
+        the process is up, its version, and where that code was installed from —
+        no vault data, no auth required.
 
-            ver = version("exomem")
-        except Exception:  # noqa: BLE001 — version lookup must never fail the probe
-            ver = "unknown"
-        return JSONResponse(
-            {"status": "ok", "service": "exomem", "version": ver},
-            headers={"Cache-Control": "no-store"},
-        )
+        Install provenance is included so an operator can tell a wheel-backed
+        service from one running a local checkout without inspecting the service
+        manager. Host-identifying detail (interpreter path, checkout location) is
+        deliberately withheld here because this route is publicly reachable; use
+        the local `provenance` command for that."""
+        payload: dict[str, object] = {"status": "ok", "service": "exomem"}
+        try:
+            from . import deploy_provenance
+
+            payload.update(deploy_provenance.provenance(include_local=False))
+        except Exception:  # noqa: BLE001 — provenance must never fail the probe
+            payload["version"] = "unknown"
+        return JSONResponse(payload, headers={"Cache-Control": "no-store"})
 
     @mcp_app.custom_route("/health/ready", methods=["GET"])
     async def _runtime_ready(request: Request) -> JSONResponse:  # noqa: ARG001

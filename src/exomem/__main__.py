@@ -67,6 +67,8 @@ def main(argv: list[str] | None = None) -> int:
         return _studio_main(raw[1:])
     if raw and raw[0] == "doctor":
         return _doctor_main(raw[1:])
+    if raw and raw[0] == "install-info":
+        return _install_info_main(raw[1:])
     if raw and raw[0] == "auth":
         return _auth_main(raw[1:])
     if raw and raw[0] == "status":
@@ -547,6 +549,53 @@ def _status_main(argv: list[str]) -> int:
         print(f"  deferred_work: {status['deferred_work']}")
         print(f"  cuda: {status['cuda']}")
     return 0
+
+def _install_info_main(argv: list[str]) -> int:
+    """Report where this install came from.
+
+    Answers "what version is deployed, and from which environment" without
+    inspecting service-manager config. Unlike the `/health` route, this runs
+    locally and so may include the interpreter path — the detail that identifies
+    the real deploy target when a service venv sits apart from the checkout.
+
+    Named `install-info` rather than `provenance` deliberately: in this codebase
+    provenance already means note/source provenance (see `provenance.py`), and
+    reusing the word for install origin would be genuinely ambiguous.
+    """
+    parser = argparse.ArgumentParser(
+        prog="exomem install-info",
+        description="Report install origin: version, source, revision, torch build, extras.",
+    )
+    parser.add_argument("--json", action="store_true", help="emit stable JSON")
+    args = parser.parse_args(argv)
+
+    from . import deploy_provenance
+
+    report = deploy_provenance.provenance(include_local=True)
+
+    if args.json:
+        print(json.dumps(report, ensure_ascii=False, default=str))
+        return 0
+
+    print(f"version:        {report['version']}")
+    print(f"install source: {report['install_source']}")
+    if report.get("revision"):
+        print(f"revision:       {report['revision']}")
+    print(f"interpreter:    {report.get('interpreter')}")
+    if report.get("checkout"):
+        print(f"checkout:       {report['checkout']}")
+    torch_build = report.get("torch") or "not installed"
+    accel = "accelerated" if report.get("accelerated") else "CPU-only"
+    print(f"torch:          {torch_build} ({accel})")
+    print(f"extras:         {', '.join(report['extras']) or 'none'}")
+    if report["install_source"] == "wheel":
+        print(
+            "\nThis is a wheel install: it does NOT run a local checkout. "
+            "Upgrade it with `uv pip install --python <this interpreter> ...`; "
+            "`uv sync` in a checkout will not affect it."
+        )
+    return 0
+
 
 def _doctor_main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
