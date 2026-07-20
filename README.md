@@ -45,20 +45,56 @@ Next: connect your own vault with `exomem setup`
 Runs fully local and read-only against a sample vault bundled in the package.
 Add `--keep` to leave that copy on disk afterward and open it in Obsidian.
 
-## Install on Mac (one line)
+## Install in one line
 
-Not comfortable with a terminal? Paste this into the macOS **Terminal** app —
-it installs `uv`, installs exomem, and walks you through `exomem setup`:
+**Mac / Linux** — paste into Terminal:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Artexis10/exomem/main/scripts/install.sh | sh
 ```
 
-Also works on Linux. Safe to run again later — it skips whatever's already
-done. If it can't prompt you interactively (e.g. run from another script), it
-prints the exact command to run next instead of guessing. Prefer to run each
-step yourself? See below or the full manual walkthrough in
+**Windows** — paste into PowerShell:
+
+```powershell
+irm https://raw.githubusercontent.com/Artexis10/exomem/main/scripts/install.ps1 | iex
+```
+
+Either one installs `uv`, installs exomem, and walks you through `exomem setup`,
+which wires up **every agent client on the machine** — Claude Code and Codex both
+get the MCP server, all ten skills, and the capture/retrieve hooks.
+
+Safe to run again later — it skips whatever's already done. If it can't prompt
+you interactively (e.g. run from another script), it prints the exact command to
+run next instead of guessing. Prefer to run each step yourself? See below or the
+full manual walkthrough in
 [QUICKSTART.md](https://github.com/Artexis10/exomem/blob/main/QUICKSTART.md).
+
+### Claude Code: install as a plugin
+
+If you only want it in Claude Code, the plugin is a single install — it carries
+the MCP server, the skills, and the hooks together, and the server registers
+itself (no separate `claude mcp add`):
+
+```
+/plugin marketplace add Artexis10/exomem
+/plugin install exomem@exomem
+```
+
+Set `EXOMEM_VAULT_PATH` to your vault first, or run `exomem setup` afterwards to
+create and configure one.
+
+### claude.ai and ChatGPT
+
+Neither platform can install skills programmatically — upload is manual. Build
+the archives, then upload them in the client's settings:
+
+```bash
+exomem package-skills          # writes dist/skills/*.zip (all ten)
+```
+
+Point the client at your server as a connector (see
+[docs/remote-quickstart.md](docs/remote-quickstart.md)). Neither platform has a
+hook system, so capture there is skill-driven rather than automatic.
 
 ## Set it up in 5 minutes
 
@@ -69,7 +105,11 @@ exomem setup --vault "/path/to/your/Obsidian"
 
 One command does the whole local setup: the wizard scans your vault and shows
 what's already there, initializes `Knowledge Base/`, runs the `doctor`
-preflight, registers the server with Claude Code, and installs the skill.
+preflight, registers the server with every client it detects (Claude Code and
+Codex), and installs the skills into each.
+
+Config files it did not create are treated as yours: it merges rather than
+overwrites, backs the file up first, and prints the diff.
 
 Already have a vault full of notes? That's the normal case: `adopt` gives a
 scan-first, read-only report of what's there, suggested knowledge packs, and

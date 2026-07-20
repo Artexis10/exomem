@@ -161,6 +161,73 @@ def _format_scopes(scopes: list[str]) -> str:
     return ", ".join(scopes) if scopes else "none"
 
 
+def _resolve_codex_home(codex_home: Path | None) -> Path:
+    """Codex's config home, injectable so tests never reach the real one."""
+    from . import client_config
+
+    return Path(codex_home) if codex_home is not None else client_config.codex_home()
+
+
+def _codex_present(which_fn, codex_home: Path | None) -> bool:
+    """True when Codex is installed here: the CLI on PATH, or its config home."""
+    return bool(which_fn("codex")) or _resolve_codex_home(codex_home).is_dir()
+
+
+def _register_codex(
+    *,
+    server_cmd: list[str],
+    env_dict: dict[str, str],
+    which_fn,
+    run_fn,
+    input_fn,
+    print_fn,
+    report,
+    yes: bool,
+    codex_home: Path | None = None,
+) -> None:
+    """Register the MCP server with Codex, preferring its CLI over file surgery."""
+    from . import client_config
+
+    codex = which_fn("codex")
+    if codex:
+        argv = [codex, "mcp", "add", "exomem"]
+        for key, value in env_dict.items():
+            argv += ["--env", f"{key}={value}"]
+        argv += ["--", *server_cmd]
+        run_kwargs = dict(capture_output=True, text=True, encoding="utf-8", errors="replace")
+        result = run_fn(argv, **run_kwargs)
+        if result.returncode == 0:
+            report("register-codex", "[done] registered with Codex")
+            return
+        # Older Codex builds have no `mcp add`; fall through to the config file
+        # rather than leaving the user unregistered.
+        print_fn("  codex mcp add unavailable; writing config.toml directly.")
+
+    block = client_config.render_codex_block(server_cmd[0], server_cmd[1:], env_dict)
+    path = _resolve_codex_home(codex_home) / "config.toml"
+    try:
+        outcome = client_config.merge_codex_mcp(block, path=path)
+        if outcome["action"] == "exists":
+            if yes:
+                report("register-codex", "[skipped: already in config.toml]")
+                return
+            if not _ask_yn(input_fn, f"exomem is already in {path}. Replace it?", False):
+                report("register-codex", "[skipped: already in config.toml]")
+                return
+            outcome = client_config.merge_codex_mcp(block, path=path, replace=True)
+    except (ValueError, OSError) as e:
+        report("register-codex", f"[failed: {e}]")
+        return
+
+    if outcome["diff"]:
+        print_fn(f"  {path}:")
+        for line in outcome["diff"].splitlines():
+            print_fn(f"    {line}")
+    if outcome["backup"]:
+        print_fn(f"  backup: {outcome['backup']}")
+    report("register-codex", f"[done] {outcome['action']} in config.toml")
+
+
 def run_setup(
     *,
     vault: str | None,
@@ -173,6 +240,7 @@ def run_setup(
     run_fn=subprocess.run,
     which_fn=shutil.which,
     home: Path | None = None,
+    codex_home: Path | None = None,
     print_fn=print,
 ) -> int:
     steps: list[tuple[str, str]] = []
@@ -417,11 +485,41 @@ def run_setup(
                     detail = (result.stderr or "").strip() or f"claude mcp add exited {result.returncode}"
                     report("register", f"[failed: {detail}]")
 
+    # 6b. Codex registration — symmetric with Claude Code above. Codex reads
+    # skills from disk and speaks MCP just like Claude Code does, so leaving it
+    # as a printed snippet was the reason Codex users ended up with tools and no
+    # working registration.
+    if skip_claude_register:
+        report("register-codex", "[skipped: --skip-claude-register]")
+    elif not _codex_present(which_fn, codex_home):
+        report("register-codex", "[skipped: Codex not detected on this machine]")
+    else:
+        _register_codex(
+            codex_home=codex_home,
+            server_cmd=_server_command(which_fn),
+            env_dict=(
+                {"EXOMEM_VAULT_PATH": str(vault_path)}
+                | ({"EXOMEM_DISABLE_EMBEDDINGS": "1"} if profile == "lean" else {})
+            ),
+            which_fn=which_fn,
+            run_fn=run_fn,
+            input_fn=input_fn,
+            print_fn=print_fn,
+            report=report,
+            yes=yes,
+        )
+
     # 7. skill — the brain; without it the tools sit unused
     skill_target = (home / "skills" / "exomem") if home else None
     try:
-        install_module.install_skill(skill_target)
-        report("skill", "[done] installed")
+        if skill_target is not None:
+            install_module.install_skill(skill_target)
+            report("skill", "[done] installed")
+        else:
+            # No explicit target: install into every client present on this
+            # machine, so a Codex user gets the brain too rather than just tools.
+            installed = install_module.install_skills(client="auto")["installed"]
+            report("skill", f"[done] installed for {', '.join(installed)}")
     except FileExistsError:
         target = skill_target if skill_target is not None else install_module.DEFAULT_TARGET
         skill_md = target / "SKILL.md"
@@ -432,8 +530,12 @@ def run_setup(
         if _SKILL_NAME_MARKER not in head:
             report("skill", f"[skipped: {target} exists and is not the bundled skill — not overwriting]")
         elif not yes and _ask_yn(input_fn, "Skill already installed. Refresh it from this repo?", False):
-            install_module.install_skill(skill_target, force=True)
-            report("skill", "[done] refreshed")
+            if skill_target is not None:
+                install_module.install_skill(skill_target, force=True)
+                report("skill", "[done] refreshed")
+            else:
+                installed = install_module.install_skills(client="auto", force=True)["installed"]
+                report("skill", f"[done] refreshed for {', '.join(installed)}")
         else:
             report("skill", "[skipped: already installed]")
     except FileNotFoundError as e:

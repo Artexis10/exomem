@@ -91,6 +91,12 @@ _PLUGIN_HOOK_SCRIPTS: dict[str, str] = {
 }
 
 
+def _write_generated(path: Path, payload: dict) -> None:
+    """Write generated JSON with LF endings on every platform."""
+    with path.open("w", encoding="utf-8", newline="\n") as handle:
+        handle.write(json.dumps(payload, indent=2) + "\n")
+
+
 def _package_version() -> str:
     try:
         return version("exomem")
@@ -174,14 +180,14 @@ def sync_plugin(plugin_root: Path) -> dict:
     for script in sorted(_HOOKS_SRC.iterdir()):
         if script.is_file() and script.suffix in (".sh", ".py"):
             shutil.copyfile(script, hooks_dir / script.name)
-    (hooks_dir / "hooks.json").write_text(
-        json.dumps(_plugin_hooks(), indent=2) + "\n", encoding="utf-8"
-    )
+    # newline="\n" pins the output byte-for-byte across platforms. Without it
+    # write_text emits CRLF on Windows and LF elsewhere, so the committed manifest
+    # and a regenerated one would differ purely by host -- and the sync test that
+    # guards this tree would fail depending on who ran it.
+    _write_generated(hooks_dir / "hooks.json", _plugin_hooks())
 
     manifest_dir.mkdir(parents=True, exist_ok=True)
-    (manifest_dir / "plugin.json").write_text(
-        json.dumps(_plugin_manifest(), indent=2) + "\n", encoding="utf-8"
-    )
+    _write_generated(manifest_dir / "plugin.json", _plugin_manifest())
 
     return {"plugin_root": str(plugin_root), "skills": names, "version": _package_version()}
 
