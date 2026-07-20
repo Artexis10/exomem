@@ -345,7 +345,7 @@ def op_bootstrap(
             },
             "post_write": {
                 "remember_suggestions": "non-binding related pages returned by remember(suggestions=true)",
-                "write_feedback": "structural feedback returned by note(): semantic blocks, typed note/block relations, generic/source links, relation debt, unresolved wikilinks, and next actions",
+                "write_feedback": "structural feedback returned by remember(): semantic blocks, typed note/block relations, generic/source links, relation debt, unresolved wikilinks, and next actions",
                 "accepted_links": "persist only through edit_memory/remember/replace_memory; never auto-write suggestions",
             },
             "note_type_recipes": {
@@ -381,7 +381,7 @@ def op_bootstrap(
                 ),
                 "adoption_handoff": (
                     "adopt_vault(mode='compile-selected') returns a proposal only; review "
-                    "it, then call note() so normal semantic precommit still applies"
+                    "it, then call remember() so normal semantic precommit still applies"
                 ),
             },
         },
@@ -493,8 +493,12 @@ def op_bootstrap(
         "front_door_actions": product_front_door_catalog(
             selected_packs, available_tools=active_product_names
         ),
-        "product_commands": product_tool_catalog(active_product_names),
-        "tool_catalog": product_tool_catalog(active_product_names),
+        "product_commands": product_tool_catalog(
+            active_product_names, callable_tools=active_descriptor.callable_commands
+        ),
+        "tool_catalog": product_tool_catalog(
+            active_product_names, callable_tools=active_descriptor.callable_commands
+        ),
         "common_tools": [
             "adopt_vault",
             "browse_memory",
@@ -5794,6 +5798,8 @@ def _active_bootstrap_descriptor() -> capabilities_module.ActiveSurfaceDescripto
 
 def product_tool_catalog(
     available_tools: frozenset[str] | set[str] | None = None,
+    *,
+    callable_tools: frozenset[str] | set[str] | None = None,
 ) -> dict:
     """Registry-derived product surface: primary tools first, advanced tools visible."""
     selected = tuple(
@@ -5807,19 +5813,37 @@ def product_tool_catalog(
         "primary": primary,
         "advanced": advanced,
         "first_run_safe": [c.name for c in selected if c.first_run_safe],
-        "routes": {c.name: list(c.routes) for c in selected},
+        "routes": {
+            c.name: [
+                route
+                for route in c.routes
+                if callable_tools is None or route in callable_tools
+            ]
+            for c in selected
+        },
     }
 
 
 _DROP_BOOTSTRAP_VALUE = object()
 
 
-def _mentions_unavailable_product_tool(
+def _bootstrap_known_callable_names() -> frozenset[str]:
+    return frozenset(
+        {
+            *PRODUCT_PUBLIC_NAMES,
+            *(command.name for command in COMMANDS),
+            *PRODUCT_ROUTE_HELPERS,
+            *simple_action_names(),
+        }
+    )
+
+
+def _mentions_unavailable_callable(
     value: str, unavailable: frozenset[str]
 ) -> bool:
     for name in unavailable:
         escaped = re.escape(name)
-        if "_" in name or name == "remember":
+        if "_" in name or name in PRODUCT_PUBLIC_NAMES:
             if re.search(rf"(?<!\w){escaped}(?!\w)", value):
                 return True
         elif re.search(rf"(?<!\w){escaped}\s*\(", value):
@@ -5833,32 +5857,33 @@ def _filter_bootstrap_payload(
 ) -> dict:
     """Remove recommendations that the trusted active surface cannot execute."""
 
-    unavailable = frozenset(PRODUCT_PUBLIC_NAMES) - frozenset(
+    unavailable = _bootstrap_known_callable_names() - descriptor.callable_commands
+    unavailable_products = frozenset(PRODUCT_PUBLIC_NAMES) - frozenset(
         descriptor.product_commands
     )
-    if not unavailable:
+    if not unavailable and not unavailable_products:
         return payload
 
     def filter_value(value: object) -> object:
         if isinstance(value, str):
-            if value in unavailable or _mentions_unavailable_product_tool(
+            if value in unavailable_products or _mentions_unavailable_callable(
                 value, unavailable
             ):
                 return _DROP_BOOTSTRAP_VALUE
             return value
-        if isinstance(value, list):
+        if isinstance(value, (list, tuple)):
             filtered = []
             for item in value:
                 candidate = filter_value(item)
                 if candidate is not _DROP_BOOTSTRAP_VALUE:
                     filtered.append(candidate)
-            return filtered
+            return tuple(filtered) if isinstance(value, tuple) else filtered
         if isinstance(value, dict):
             advertised_tool = value.get("tool")
             if isinstance(advertised_tool, str) and advertised_tool in unavailable:
                 return _DROP_BOOTSTRAP_VALUE
             call = value.get("call")
-            if isinstance(call, str) and _mentions_unavailable_product_tool(
+            if isinstance(call, str) and _mentions_unavailable_callable(
                 call, unavailable
             ):
                 return _DROP_BOOTSTRAP_VALUE
@@ -5868,7 +5893,7 @@ def _filter_bootstrap_payload(
 
             filtered_dict: dict = {}
             for child_key, child in value.items():
-                if child_key in unavailable:
+                if child_key in unavailable_products:
                     continue
                 candidate = filter_value(child)
                 if candidate is _DROP_BOOTSTRAP_VALUE:

@@ -123,7 +123,7 @@ def test_bootstrap_compact_contract_is_public_safe(vault: Path) -> None:
     assert "draft_id" in reviewed_creation["validate_only"]
     assert "draft_hash" in reviewed_creation["commit"]
     assert "never fabricate" in reviewed_creation["reviewed_none"]
-    assert "note()" in reviewed_creation["adoption_handoff"]
+    assert "remember()" in reviewed_creation["adoption_handoff"]
     semantic_recall = out["search_guidance"]["semantic_recall"]
     assert semantic_recall["result_levels"] == ["page", "unit", "mixed"]
     assert "empty query" in semantic_recall["filter_only"]

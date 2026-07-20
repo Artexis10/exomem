@@ -1086,13 +1086,10 @@ def _install_hook_main(argv: list[str]) -> int:
 # --------------------------------------------------------------------------- #
 # Simple product actions (friendly CLI aliases over canonical registry commands)
 # --------------------------------------------------------------------------- #
-_SIMPLE_CLI_ACTIONS = frozenset(
-    {"ask", "remember", "capture", "review", "connect", "adopt", "maintain"}
-)
-
-
 def _simple_cli_action_names() -> frozenset[str]:
-    return _SIMPLE_CLI_ACTIONS
+    from . import commands as commands_module
+
+    return frozenset(commands_module.simple_action_names())
 
 
 def _with_json(argv: list[str], enabled: bool) -> list[str]:
@@ -1887,6 +1884,7 @@ def _core_op_main(argv: list[str]) -> int:
         profile="product",
         tier2_enabled=expose_tier2,
         product_commands=tuple(command.name for command in registered_commands),
+        exported_aliases=commands_module.simple_action_names(),
     )
 
     parser = _CLIParser(prog="kb", description=f"Query and write the local {kb_dirname()}.")

@@ -13,11 +13,17 @@ from starlette.testclient import TestClient
 
 from exomem import commands
 from exomem import server as server_module
-from exomem.__main__ import main
+from exomem.__main__ import _simple_cli_action_names, main
 from exomem.capabilities import ActiveSurfaceDescriptor, active_surface
 
 PROFILES = ("compact", "full", "diagnostics")
 TIER2_PRODUCT_TOOLS = {"manage_memory_file", "query_dataset", "read_media"}
+KNOWN_CALLABLE_NAMES = (
+    set(commands.PRODUCT_PUBLIC_NAMES)
+    | {command.name for command in commands.COMMANDS}
+    | set(commands.PRODUCT_ROUTE_HELPERS)
+    | set(commands.simple_action_names())
+)
 _STRUCTURED_TOOL_LISTS = {
     "advanced",
     "advanced_tools",
@@ -49,7 +55,7 @@ def _extract_advertised_tool_refs(
     payload: object,
     *,
     product_names: set[str],
-    alias_names: set[str] | None = None,
+    known_names: set[str] | None = None,
 ) -> set[str]:
     """Recursively find structured and call-shaped advertised tool references.
 
@@ -58,18 +64,16 @@ def _extract_advertised_tool_refs(
     Product names containing underscores are specific enough to match in prose.
     """
 
-    aliases = alias_names or set()
-    known = product_names | aliases
+    known = known_names or product_names
     refs: set[str] = set()
 
     def text_refs(value: str) -> None:
-        for name in product_names:
-            if "_" in name and re.search(rf"(?<!\w){re.escape(name)}(?!\w)", value):
+        for name in known:
+            if ("_" in name or name in product_names) and re.search(
+                rf"(?<!\w){re.escape(name)}(?!\w)", value
+            ):
                 refs.add(name)
             elif re.search(rf"(?<!\w){re.escape(name)}\s*\(", value):
-                refs.add(name)
-        for name in aliases:
-            if re.search(rf"(?<!\w){re.escape(name)}\s*\(", value):
                 refs.add(name)
 
     def walk(value: object, *, key: str | None = None) -> None:
@@ -78,22 +82,30 @@ def _extract_advertised_tool_refs(
                 routes = value.get("routes")
                 if isinstance(routes, dict):
                     refs.update(set(routes) & known)
+                    for route_names in routes.values():
+                        if isinstance(route_names, (list, tuple)):
+                            refs.update(
+                                item
+                                for item in route_names
+                                if isinstance(item, str) and item in known
+                            )
             for child_key, child in value.items():
-                if child_key in product_names:
-                    refs.add(child_key)
                 if child_key == "tool" and isinstance(child, str) and child in known:
                     refs.add(child)
                     continue
-                if child_key in _STRUCTURED_TOOL_LISTS and isinstance(child, list):
+                if child_key == "route" and isinstance(child, str) and child in known:
+                    refs.add(child)
+                    continue
+                if child_key in _STRUCTURED_TOOL_LISTS and isinstance(
+                    child, (list, tuple)
+                ):
                     refs.update(
                         item for item in child if isinstance(item, str) and item in known
                     )
                 walk(child, key=str(child_key))
             return
-        if isinstance(value, list):
+        if isinstance(value, (list, tuple)):
             for child in value:
-                if isinstance(child, str) and child in known:
-                    refs.add(child)
                 walk(child, key=key)
             return
         if isinstance(value, str):
@@ -124,7 +136,7 @@ def _assert_conforms(
     refs = _extract_advertised_tool_refs(
         payload,
         product_names=set(commands.PRODUCT_PUBLIC_NAMES),
-        alias_names=aliases,
+        known_names=KNOWN_CALLABLE_NAMES,
     )
     assert refs <= exported_names, sorted(refs - exported_names)
 
@@ -191,12 +203,19 @@ def test_all_mcp_bootstrap_profiles_match_live_tools(
             tier2_enabled=tier2_enabled,
             aliases=aliases,
         )
+        refs = _extract_advertised_tool_refs(
+            payload,
+            product_names=set(commands.PRODUCT_PUBLIC_NAMES),
+            known_names=KNOWN_CALLABLE_NAMES,
+        )
+        if not legacy:
+            assert {"note", "find", "get", "transfer_token"}.isdisjoint(refs)
         if not tier2_enabled:
             assert TIER2_PRODUCT_TOOLS.isdisjoint(
                 _extract_advertised_tool_refs(
                     payload,
                     product_names=set(commands.PRODUCT_PUBLIC_NAMES),
-                    alias_names=aliases,
+                    known_names=KNOWN_CALLABLE_NAMES,
                 )
             )
 
@@ -239,7 +258,9 @@ def test_all_rest_bootstrap_profiles_match_openapi_operations(
             tier2_enabled=tier2_enabled,
         )
         assert "read_media" not in _extract_advertised_tool_refs(
-            payload, product_names=set(commands.PRODUCT_PUBLIC_NAMES)
+            payload,
+            product_names=set(commands.PRODUCT_PUBLIC_NAMES),
+            known_names=KNOWN_CALLABLE_NAMES,
         )
 
 
@@ -257,7 +278,10 @@ def test_all_cli_bootstrap_profiles_match_parser_registry(
             "cli", expose_tier2=tier2_enabled
         )
     )
-    exported = set(product_tuple)
+    aliases = set(_simple_cli_action_names())
+    assert aliases == set(commands.simple_action_names())
+    assert "remember" in aliases & set(product_tuple)
+    exported = set(product_tuple) | aliases
 
     for profile in PROFILES:
         assert main(["bootstrap", "--profile", profile, "--json"]) == 0
@@ -270,9 +294,12 @@ def test_all_cli_bootstrap_profiles_match_parser_registry(
             expected_surface="cli",
             expected_profile="product",
             tier2_enabled=tier2_enabled,
+            aliases=aliases,
         )
         assert "read_media" not in _extract_advertised_tool_refs(
-            payload, product_names=set(commands.PRODUCT_PUBLIC_NAMES)
+            payload,
+            product_names=set(commands.PRODUCT_PUBLIC_NAMES),
+            known_names=KNOWN_CALLABLE_NAMES,
         )
 
 
@@ -291,7 +318,9 @@ def test_narrow_surface_filters_every_profile_without_deleting_useful_routes(
 
     for payload in payloads:
         refs = _extract_advertised_tool_refs(
-            payload, product_names=set(commands.PRODUCT_PUBLIC_NAMES)
+            payload,
+            product_names=set(commands.PRODUCT_PUBLIC_NAMES),
+            known_names=KNOWN_CALLABLE_NAMES,
         )
         assert refs <= descriptor.callable_commands
         assert {"review_memory", "read_media"}.isdisjoint(refs)
@@ -304,7 +333,6 @@ def test_direct_python_bootstrap_defaults_to_canonical_full_mcp(vault: Path) -> 
     expected = tuple(
         command.name for command in commands.product_commands_for("mcp", expose_tier2=True)
     )
-
     _assert_conforms(
         payload,
         expected_product_tuple=expected,
@@ -315,14 +343,23 @@ def test_direct_python_bootstrap_defaults_to_canonical_full_mcp(vault: Path) -> 
     )
 
 
+def test_bootstrap_guidance_uses_product_writer_not_legacy_note(vault: Path) -> None:
+    for profile in PROFILES:
+        serialized = json.dumps(commands.op_bootstrap(vault, profile=profile))
+        assert "note()" not in serialized
+        assert "remember()" in serialized
+
+
 def test_active_surface_context_is_nested_and_concurrent_safe(vault: Path) -> None:
     outer = ActiveSurfaceDescriptor(
         surface="test", profile="outer", tier2_enabled=False,
         product_commands=("bootstrap", "ask_memory"),
+        exported_aliases=("ask",),
     )
     inner = ActiveSurfaceDescriptor(
         surface="test", profile="inner", tier2_enabled=False,
         product_commands=("bootstrap", "remember"),
+        exported_aliases=("capture",),
     )
 
     with active_surface(outer):
@@ -334,15 +371,21 @@ def test_active_surface_context_is_nested_and_concurrent_safe(vault: Path) -> No
     assert before["profile"] == after["profile"] == "outer"
     assert nested["profile"] == "inner"
 
-    def render(descriptor: ActiveSurfaceDescriptor) -> tuple[str, list[str]]:
+    def render(
+        descriptor: ActiveSurfaceDescriptor,
+    ) -> tuple[str, list[str], list[str]]:
         with active_surface(descriptor):
             active = commands.op_bootstrap(vault)["active_capabilities"]
-            return active["profile"], active["available_product_tools"]
+            return (
+                active["profile"],
+                active["available_product_tools"],
+                active["exported_aliases"],
+            )
 
     with ThreadPoolExecutor(max_workers=2) as pool:
         results = list(pool.map(render, (outer, inner)))
 
     assert results == [
-        ("outer", ["ask_memory", "bootstrap"]),
-        ("inner", ["bootstrap", "remember"]),
+        ("outer", ["ask_memory", "bootstrap"], ["ask"]),
+        ("inner", ["bootstrap", "remember"], ["capture"]),
     ]

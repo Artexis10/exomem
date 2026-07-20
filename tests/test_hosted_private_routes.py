@@ -449,6 +449,12 @@ def _headers(
 
 def _hosted_bootstrap_tool_refs(payload: object) -> set[str]:
     product_names = set(commands_module.PRODUCT_PUBLIC_NAMES)
+    known_names = (
+        product_names
+        | {command.name for command in commands_module.COMMANDS}
+        | set(commands_module.PRODUCT_ROUTE_HELPERS)
+        | set(commands_module.simple_action_names())
+    )
     structured_lists = {
         "advanced",
         "advanced_tools",
@@ -465,33 +471,50 @@ def _hosted_bootstrap_tool_refs(payload: object) -> set[str]:
             if key in {"product_commands", "tool_catalog"}:
                 routes = value.get("routes")
                 if isinstance(routes, dict):
-                    refs.update(set(routes) & product_names)
+                    refs.update(set(routes) & known_names)
+                    for route_names in routes.values():
+                        if isinstance(route_names, (list, tuple)):
+                            refs.update(
+                                item
+                                for item in route_names
+                                if isinstance(item, str) and item in known_names
+                            )
             for child_key, child in value.items():
-                if child_key in product_names:
-                    refs.add(child_key)
-                if child_key == "tool" and child in product_names:
+                if (
+                    child_key == "tool"
+                    and isinstance(child, str)
+                    and child in known_names
+                ):
                     refs.add(child)
                     continue
-                if child_key in structured_lists and isinstance(child, list):
+                if (
+                    child_key == "route"
+                    and isinstance(child, str)
+                    and child in known_names
+                ):
+                    refs.add(child)
+                    continue
+                if child_key in structured_lists and isinstance(
+                    child, (list, tuple)
+                ):
                     refs.update(
                         item
                         for item in child
-                        if isinstance(item, str) and item in product_names
+                        if isinstance(item, str) and item in known_names
                     )
                 walk(child, key=str(child_key))
             return
-        if isinstance(value, list):
+        if isinstance(value, (list, tuple)):
             for child in value:
-                if isinstance(child, str) and child in product_names:
-                    refs.add(child)
                 walk(child, key=key)
             return
         if isinstance(value, str):
-            for name in product_names:
-                if (
-                    "_" in name
-                    and re.search(rf"(?<!\w){re.escape(name)}(?!\w)", value)
-                ) or re.search(rf"(?<!\w){re.escape(name)}\s*\(", value):
+            for name in known_names:
+                if ("_" in name or name in product_names) and re.search(
+                    rf"(?<!\w){re.escape(name)}(?!\w)", value
+                ):
+                    refs.add(name)
+                elif re.search(rf"(?<!\w){re.escape(name)}\s*\(", value):
                     refs.add(name)
 
     walk(payload)
