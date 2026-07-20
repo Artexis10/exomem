@@ -110,11 +110,16 @@ def _plugin_manifest() -> dict:
         "description": (
             "Governed long-term memory over a markdown vault: raw sources stay "
             "immutable, conclusions are compiled with provenance, and nothing is "
-            "deleted - it is superseded."
+            "deleted - it is superseded. Requires EXOMEM_VAULT_PATH to point at "
+            "your vault; run `exomem setup` if you do not have one yet."
         ),
         "version": _package_version(),
+        # No "hooks" key: hooks/hooks.json is loaded automatically by convention,
+        # and declaring it as well fails the install with "Duplicate hooks file
+        # detected". The manifest key is only for ADDITIONAL hook files.
+        # skills/ is likewise auto-discovered; declared here because it is the
+        # documented form and does not collide.
         "skills": "./skills/",
-        "hooks": "./hooks/hooks.json",
         "mcpServers": {
             "exomem": {
                 # `uvx` fetches and runs the published package, so the plugin works
