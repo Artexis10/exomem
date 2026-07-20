@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -94,12 +95,66 @@ def test_windows_service_scripts_gate_selected_profile_before_success() -> None:
 
 def test_windows_service_installer_supports_release_env_and_cuda() -> None:
     install = _read("scripts/install-service.ps1")
+    # The package-install and CUDA-repair steps live in the shared helper so that
+    # upgrade.ps1 performs them identically; the installer delegates rather than
+    # carrying its own copy.
+    common = _read("scripts/_service-common.ps1")
 
     assert "[switch]$Release" in install
     assert "exomem-service-release" in install
-    assert '"pip", "install", "--upgrade", "--python", $venvPython, $pkg' in install
+    assert "Install-ExomemPackage" in install
+    assert "Repair-TorchCuda" in install
     assert "AppEnvironmentExtra" in install
     assert "EXOMEM_MCP_LEGACY_COMPAT" in install
-    assert "https://download.pytorch.org/whl/cu132" in install
-    assert "torch==2.12.0+cu132" in install
     assert "Test-McpEndpoint -HostName $BindHost -EndpointPort $Port" in install
+
+    assert '"uv", "pip", "install", "--upgrade", "--python", $Python, $pkg' in common
+    assert "https://download.pytorch.org/whl/cu132" in common
+
+
+def test_cuda_repair_derives_the_torch_version_instead_of_pinning_one() -> None:
+    """A hardcoded pin here goes stale and starts DOWNGRADING torch.
+
+    The previous `torch==2.12.0+cu132` pin would have knocked a box already on
+    2.13.0+cu132 backwards on every upgrade. The repair must reinstall the CUDA
+    build of whatever version is already installed, and never substitute another.
+    """
+    common = _read("scripts/_service-common.ps1")
+
+    assert "+cu132" in common
+    assert '$target = "torch==$(($installed -split \'\\+\')[0])+cu132"' in common
+    # No literal x.y.z pin may reappear.
+    assert not re.search(r"torch==\d+\.\d+\.\d+", common)
+
+
+def test_installer_reuses_the_venv_the_service_already_runs() -> None:
+    """Re-running to upgrade must not silently provision a second venv.
+
+    The default root is 'exomem-service-release', but a box may be installed
+    anywhere (-ServiceRoot); the NSSM registry is the only source of truth.
+    """
+    install = _read("scripts/install-service.ps1")
+    common = _read("scripts/_service-common.ps1")
+
+    assert "Get-ExomemServiceRoot" in install
+    assert "Parameters" in common and "Application" in common
+
+
+def test_installer_is_idempotent_for_an_already_registered_service() -> None:
+    """`nssm install` fails on an existing service, which made the documented
+    upgrade path unsafe -- so nobody re-ran it and the service drifted."""
+    install = _read("scripts/install-service.ps1")
+
+    assert "$NssmPath set $ServiceName Application $python" in install
+    assert "$NssmPath install $ServiceName $python" in install
+
+
+def test_upgrade_script_verifies_the_live_version_after_restart() -> None:
+    """Installing is not deploying: the running process must report the new
+    version, or the restart silently came back on the old code."""
+    upgrade = _read("scripts/upgrade.ps1")
+
+    assert "Install-ExomemPackage" in upgrade
+    assert "Repair-TorchCuda" in upgrade
+    assert "/health" in upgrade
+    assert "Version mismatch" in upgrade
