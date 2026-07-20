@@ -1085,12 +1085,38 @@ class LeaseManager:
         )
         self._renewer.start()
 
+    def _attempt_preferred_reclaim(self) -> None:
+        """Retry writer acquisition while this preferred replica is a follower.
+
+        `start_server_lifecycle()` attempts acquisition once at startup and
+        swallows the failure, reasoning that "mutations will retry
+        authoritatively". Under the HA edge that is false: the edge routes
+        mutation-capable requests to the current lease holder, so a follower is
+        never sent the mutation that would trigger a retry. Without this the
+        preferred replica loses one startup race and stays a follower for the
+        entire process lifetime — observed as a 15-hour outage on 2026-07-20
+        while reporting healthy and `takeover_eligible: true`.
+
+        This cannot displace a live holder. The coordinator grants acquisition
+        only when the existing lease is absent or expired, so a refused attempt
+        is the normal steady state for a follower, not a fault worth logging.
+        """
+        if not self.config.preferred_writer:
+            return
+        try:
+            self.ensure_writer()
+        except OpError:
+            return
+
     def _renew_loop(self) -> None:
         interval = max(1.0, self.config.ttl_seconds / 3)
         while not self._stop.wait(interval):
             with self._lock:
                 token = self._fencing_token
-            if token is None or self.client is None:
+            if self.client is None:
+                continue
+            if token is None:
+                self._attempt_preferred_reclaim()
                 continue
             try:
                 record = self.client.renew(token)
