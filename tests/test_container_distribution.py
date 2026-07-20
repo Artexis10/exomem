@@ -158,3 +158,56 @@ def test_upgrade_script_verifies_the_live_version_after_restart() -> None:
     assert "Repair-TorchCuda" in upgrade
     assert "/health" in upgrade
     assert "Version mismatch" in upgrade
+
+
+# ---- macOS/Linux deploy parity ----
+#
+# The one-command upgrade shipped Windows-first. These lock the same two
+# protections onto the unix path: gate the venv the service actually runs, and
+# assert the LIVE version after restart.
+
+
+def test_unix_upgrade_script_exists_and_verifies_the_live_version() -> None:
+    upgrade = _read("scripts/upgrade.sh")
+
+    assert "exomem_service_python" in upgrade
+    assert "doctor --profile" in upgrade
+    assert "/health" in upgrade
+    assert "version mismatch" in upgrade
+    # Both service managers, since the same repo serves macOS and Linux.
+    assert "launchctl kickstart" in upgrade
+    assert "systemctl --user restart" in upgrade
+
+
+def test_unix_restart_gates_doctor_on_the_service_venv() -> None:
+    """restart.sh used to restart blind - no preflight at all."""
+    restart = _read("scripts/restart.sh")
+
+    assert "exomem_service_python" in restart
+    assert "doctor --profile" in restart
+    assert "service NOT restarted" in restart
+    # Must not gate the repo venv: a release install never runs it. Checked against
+    # code lines only - the comment above that line legitimately names it.
+    code = [ln for ln in restart.splitlines() if not ln.lstrip().startswith("#")]
+    assert not [ln for ln in code if "REPO_ROOT/.venv" in ln]
+
+
+def test_unix_helper_reads_the_installed_unit_not_the_repo_layout() -> None:
+    """The rendered plist/unit is the source of truth, mirroring the NSSM
+    registry on Windows: the service root is wherever install time put it."""
+    common = _read("scripts/_service-common.sh")
+
+    assert "LaunchAgents" in common          # macOS plist
+    assert "systemd/user" in common          # Linux unit
+    assert "ExecStart=" in common
+    assert "ProgramArguments" in common or "/bin/python" in common
+    assert "8765" in common                  # documented port default
+
+
+def test_unix_upgrade_documents_why_it_skips_the_cuda_repair() -> None:
+    """Not an omission: PyPI's Linux torch is already CUDA-enabled and macOS uses
+    Metal, so the Windows-only repair would be wrong here."""
+    upgrade = _read("scripts/upgrade.sh")
+
+    assert "cu132" not in upgrade
+    assert "CUDA" in upgrade and "Windows" in upgrade
