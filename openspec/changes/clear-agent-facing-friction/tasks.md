@@ -15,8 +15,8 @@
 
 ## 4. Action-first audit
 
-- [ ] 4.1 Write failing tests with more than the semantic finding cap of grandfathered missing-disposition debt plus current blockers, proving pre-bound prioritization, info/backlog grouping, deterministic samples, exact omission facts, explicit full detail, and lease-free audit routes.
-- [ ] 4.2 Implement semantic pre-bound ordering and actionable/full audit projections through `audit`, `review_memory`, and `maintain_memory` without changing semantic precommit enforcement.
+- [x] 4.1 Write failing tests with more than the semantic finding cap of grandfathered missing-disposition debt plus current blockers, proving pre-bound prioritization, info/backlog grouping, deterministic samples, exact omission facts, explicit full detail, and lease-free audit routes.
+- [x] 4.2 Implement semantic pre-bound ordering and actionable/full audit projections through `audit`, `review_memory`, and `maintain_memory` without changing semantic precommit enforcement.
 
 ## 5. Bounded reranking
 
