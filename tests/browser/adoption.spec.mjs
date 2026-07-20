@@ -416,9 +416,13 @@ test("an invalid proposal shows its findings but exposes no enabled approve cont
       kind: "compilation",
       status: "invalid",
       reviewed_none_required: false,
-      contract_findings: [
-        {code: "CONTRACT_BLOCKED", severity: "error",
-          detail: "The write contract blocks this content."},
+      // Adversarial shape: the engine attached no contract_findings, but the
+      // generic findings still explain the block — the detail must fall back to
+      // them rather than disabling approve with no explanation at all.
+      contract_findings: [],
+      findings: [
+        {code: "VALIDATION_FAILED", path: "content",
+          detail: "This proposal was blocked before it could be applied."},
       ],
       payload: {title: "Blocked compilation", content: "Recorded proposal detail."},
       target: {content_hash: "hash-bad", excerpt: ""},
@@ -429,7 +433,7 @@ test("an invalid proposal shows its findings but exposes no enabled approve cont
   await page.getByRole("button", {name: "Blocked compilation"}).click();
   // The findings are shown so the reviewer sees why it can't be applied…
   await expect(page.locator("#adopt-proposal-detail")).toContainText(
-    "The write contract blocks this content.");
+    "This proposal was blocked before it could be applied.");
   // …but the approve control is absent (the server refuses invalid applies).
   await expect(page.locator("#adopt-proposal-detail")
     .getByRole("button", {name: "Make this change", exact: true})).toHaveCount(0);

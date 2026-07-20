@@ -888,6 +888,51 @@ def test_propose_invalidates_on_non_review_blockers(tmp_path: Path) -> None:
     assert excinfo.value.code == "PROPOSAL_INVALID"
 
 
+def test_propose_labels_non_contract_validation_errors_distinctly(tmp_path: Path) -> None:
+    # A near-miss project key raises PROJECT_KEY_TYPO from the note path — a plain
+    # validation error, NOT a semantic-contract block. The proposal must still
+    # invalidate, but the finding must be labelled VALIDATION_FAILED rather than
+    # masquerading as a contract block (the pre-fix branch mislabelled every
+    # exception as CONTRACT_BLOCKED).
+    vault = _legacy_vault(tmp_path)
+    applied = _applied_run(vault)
+    run_id = applied["run_id"]
+    imported = _imported_paths(applied)
+    run_fp = applied["inventory_fingerprint"]
+
+    result = adoption_proposals.propose(
+        vault,
+        run_id=run_id,
+        proposals=[
+            {
+                "kind": "compilation",
+                "why": "combine under a typo'd project key",
+                "payload": {
+                    "sources": imported,
+                    "title": "Typo project synthesis",
+                    "note_type": "insight",
+                    # 'persynal' is edit-distance 1 from the registered 'personal'
+                    # key → PROJECT_KEY_TYPO raised before any contract preflight.
+                    "project": "persynal",
+                    "content": (
+                        "# Typo project synthesis\n\n## Observations\n\n"
+                        "- [config] A single clean widget note #tag\n"
+                    ),
+                },
+                "bindings": {"run_fingerprint": run_fp},
+            }
+        ],
+    )
+    row = result["proposals"][0]
+    assert row["status"] == "invalid"
+    codes = {f["code"] for f in row["findings"]}
+    assert "VALIDATION_FAILED" in codes
+    assert "CONTRACT_BLOCKED" not in codes
+    detail = next(f["detail"] for f in row["findings"] if f["code"] == "VALIDATION_FAILED")
+    assert "proposal validation failed" in detail
+    assert "PROJECT_KEY_TYPO" in detail
+
+
 def test_queue_and_context_carry_contract_findings(tmp_path: Path) -> None:
     vault = _legacy_vault(tmp_path)
     applied = _applied_run(vault)

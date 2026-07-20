@@ -424,6 +424,60 @@ def test_contract_findings_view_lines_consequence_and_invalid_flag() -> None:
     assert result["empty"]["approveDisabled"] is False
 
 
+def test_contract_findings_view_invalid_fallback_to_generic_findings() -> None:
+    source = f"""
+      import {{contractFindingsView}} from {MODEL.as_uri()!r};
+      // Invalid + no contract_findings, but generic findings explain the block.
+      const withGeneric = contractFindingsView({{
+        status: 'invalid',
+        contract_findings: [],
+        findings: [
+          {{code: 'VALIDATION_FAILED', path: 'content',
+            detail: 'This proposal was blocked before it could be applied.'}},
+        ],
+      }});
+      // Invalid + nothing at all → one fixed generic explanation line.
+      const bothEmpty = contractFindingsView({{
+        status: 'invalid', contract_findings: [], findings: [],
+      }});
+      // A generic finding carrying only a code (no detail) shows the code text.
+      const codeOnly = contractFindingsView({{
+        status: 'invalid', contract_findings: [],
+        findings: [{{code: 'PROPOSAL_INVALID', path: 'x'}}],
+      }});
+      // A reviewable (non-invalid) proposal with empty contract_findings must NOT
+      // pull in generic findings — there is nothing to render.
+      const reviewableEmpty = contractFindingsView({{
+        status: 'proposed', contract_findings: [],
+        findings: [{{code: 'X', detail: 'should not show'}}],
+      }});
+      console.log(JSON.stringify({{withGeneric, bothEmpty, codeOnly, reviewableEmpty}}));
+    """
+
+    result = _node(source)
+
+    # Invalid with empty contract_findings falls back to the generic findings.
+    assert result["withGeneric"]["approveDisabled"] is True
+    assert result["withGeneric"]["hasFindings"] is True
+    assert result["withGeneric"]["findings"][0]["text"] == (
+        "This proposal was blocked before it could be applied."
+    )
+
+    # Both empty → one fixed generic explanation, approval still disabled.
+    assert result["bothEmpty"]["approveDisabled"] is True
+    assert result["bothEmpty"]["hasFindings"] is True
+    assert result["bothEmpty"]["findings"] == [
+        {"code": "", "severity": "", "text": "This suggestion can't be applied as written."}
+    ]
+
+    # detail-less generic finding falls back to its code as the line text.
+    assert result["codeOnly"]["findings"][0]["text"] == "PROPOSAL_INVALID"
+
+    # Non-invalid proposals never fall back to generic findings.
+    assert result["reviewableEmpty"]["hasFindings"] is False
+    assert result["reviewableEmpty"]["findings"] == []
+
+
 def test_junk_count_present_zero_map_is_authoritative() -> None:
     source = f"""
       import {{junkCount}} from {MODEL.as_uri()!r};

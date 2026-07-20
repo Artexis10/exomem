@@ -654,16 +654,34 @@ def _contract_validation(root: Path, kind: str, payload: dict, *, why: str) -> d
 
     try:
         validation = op(root, validate_only=True, **base_kwargs)
-    except Exception as exc:  # noqa: BLE001 - the writer refuses non-review blockers here
+    except Exception as exc:  # noqa: BLE001 - the writer refuses blockers here
+        # Only a genuine semantic-contract block earns the CONTRACT_BLOCKED
+        # framing. Non-contract validation failures (e.g. PROJECT_KEY_TYPO or
+        # INVALID_SLUG, which the note path wraps into a plain ValueError whose
+        # str() carries the code as a prefix) must NOT masquerade as contract
+        # blocks. Prefer a structured ``code`` attribute; fall back to the code
+        # string appearing in the wrapped message.
+        is_contract_block = (
+            getattr(exc, "code", None) == "SEMANTIC_CONTRACT_BLOCKED"
+            or "SEMANTIC_CONTRACT_BLOCKED" in str(exc)
+        )
+        if is_contract_block:
+            invalid_finding = _finding(
+                "CONTRACT_BLOCKED",
+                "content",
+                f"the semantic write contract blocks this content: {exc}",
+            )
+        else:
+            invalid_finding = _finding(
+                "VALIDATION_FAILED",
+                "content",
+                f"proposal validation failed: {exc}",
+            )
         return {
             "contract_findings": [],
             "committable_after_review": False,
             "reviewed_none_required": False,
-            "invalid_finding": _finding(
-                "CONTRACT_BLOCKED",
-                "content",
-                f"the semantic write contract blocks this content: {exc}",
-            ),
+            "invalid_finding": invalid_finding,
         }
 
     contract_result = validation.get("contract_result") or {}

@@ -259,6 +259,17 @@ const REVIEWED_NONE_CONSEQUENCE =
   "Approving records this as reviewed with no typed relation yet — "
   + "it will come back for relation review.";
 
+// Fixed, generic explanation for an invalid proposal that arrived with no
+// findings at all — the reviewer is still owed a reason approval is disabled.
+const GENERIC_INVALID_LINE = "This suggestion can't be applied as written.";
+
+function findingLine(f) {
+  if (!f) return null;
+  const text = String(f.detail || "").trim() || String(f.code || "").trim();
+  if (!text) return null;
+  return {code: f.code || "", severity: f.severity || "", text};
+}
+
 // Render-only model for a proposal's semantic-write-contract findings. Turns the
 // engine's compact `contract_findings` (code/severity/detail) into display lines,
 // states the reviewed-none consequence when the proposal needs a relation review,
@@ -268,19 +279,28 @@ export function contractFindingsView(context) {
   const source = (context && context.contract_findings) || [];
   const findings = [];
   for (const f of source) {
-    if (!f) continue;
-    const detail = String(f.detail || "").trim();
-    findings.push({
-      code: f.code || "",
-      severity: f.severity || "",
-      text: detail || String(f.code || "This change was flagged by the write contract."),
-    });
+    const line = findingLine(f);
+    if (line) findings.push(line);
+  }
+  const invalid = !!(context && context.status === "invalid");
+  // Belt-and-braces: an `invalid` proposal with no contract findings still owes
+  // the reviewer an explanation. Fall back to the context's generic `findings`
+  // (assemble_context exposes them; `_item_view` does not, so read the context
+  // object only), then to one fixed generic line if those are empty too.
+  if (invalid && findings.length === 0) {
+    for (const f of (context && context.findings) || []) {
+      const line = findingLine(f);
+      if (line) findings.push(line);
+    }
+    if (findings.length === 0) {
+      findings.push({code: "", severity: "", text: GENERIC_INVALID_LINE});
+    }
   }
   return {
     findings,
     hasFindings: findings.length > 0,
     consequence: context && context.reviewed_none_required ? REVIEWED_NONE_CONSEQUENCE : "",
-    approveDisabled: !!(context && context.status === "invalid"),
+    approveDisabled: invalid,
   };
 }
 
