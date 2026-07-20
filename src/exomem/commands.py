@@ -5696,6 +5696,19 @@ def _build_product_commands() -> tuple[Command, ...]:
         skip = 2 if needs_schema else 1
         desc = leaf.__doc__ or ""
         params = _derive_params(leaf, skip=skip, positional=positional)
+        if writes:
+            params = (
+                *params,
+                Param(
+                    name="response_detail",
+                    type="str",
+                    help=(
+                        "Successful committed mutation detail: compact (default), "
+                        "full diagnostics, or legacy raw leaf result."
+                    ),
+                    choices=("compact", "full", "legacy"),
+                ),
+            )
         if name == "remember":
             generic_hint = "(any slug; unknown keys auto-register on first use)"
             desc = desc.replace("__PROJECT_KEYS_HINT__", generic_hint)
@@ -5724,6 +5737,7 @@ def _build_product_commands() -> tuple[Command, ...]:
                 product_actions=tuple(meta.get("actions", ())),
                 first_run_safe=bool(meta.get("first_run_safe", False)),
                 routes=tuple(routes),
+                response_detail=writes,
             )
         )
     return tuple(cmds)

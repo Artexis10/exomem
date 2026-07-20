@@ -35,6 +35,11 @@ from .mutation_lock import (
     active_mutation_snapshot,
     canonical_mutation_identity,
 )
+from .mutation_terminal import (
+    committed_terminal,
+    project_terminal,
+    split_response_detail,
+)
 from .privacy_log import content_private_logging_enabled
 
 _COORDINATOR_USER_AGENT = (
@@ -923,6 +928,7 @@ class LeaseManager:
         implicit_idempotency_scope: str | None = None,
         mutation_request_id: str | None = None,
     ) -> Any:
+        kwargs, response_detail = split_response_detail(kwargs)
         invocation_read_only = command.read_only if read_only is None else read_only
         if invocation_read_only:
             audit_without_consistency_lock = (
@@ -960,7 +966,15 @@ class LeaseManager:
             )
             commit_token = _ACTIVE_MUTATION_COMMITTED.set(False)
             try:
-                return command.leaf(*injected, **kwargs)
+                leaf_result = command.leaf(*injected, **kwargs)
+                if _ACTIVE_MUTATION_COMMITTED.get():
+                    return committed_terminal(
+                        leaf_result,
+                        request_id=request_id,
+                        receipt_id=receipt,
+                        idempotency_key=idempotency_key,
+                    )
+                return leaf_result
             except Exception as error:
                 if (
                     _ACTIVE_MUTATION_COMMITTED.get()
@@ -1012,7 +1026,7 @@ class LeaseManager:
             command=command.name,
             receipt=receipt or "none",
         )
-        return result
+        return project_terminal(result, response_detail)
 
     def _mutation_subject(self, injected: tuple[Any, ...]) -> os.PathLike[str] | str:
         if injected and isinstance(injected[0], os.PathLike):

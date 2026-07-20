@@ -157,12 +157,13 @@ def test_observe_memory_route_mutates_one_structured_unit(
             "operation": "add",
             "category": "config",
             "content": "REST structured unit",
+            "response_detail": "full",
         },
         headers=_auth(),
     )
 
     assert response.status_code == 200, response.text
-    result = response.json()["data"]
+    result = response.json()["data"]["diagnostics"]
     assert result["unit"]["category_key"] == "config"
     assert result["unit_ref"] == result["unit"]["unit_ref"]
 
@@ -756,7 +757,12 @@ def test_process_media_has_one_generated_registry_rest_and_openapi_contract(
     schema = client.get("/api/openapi.json").json()["paths"]["/api/process_media"]["post"][
         "requestBody"
     ]["content"]["application/json"]["schema"]
-    assert set(schema["properties"]) == {"path", "operation"}
+    assert set(schema["properties"]) == {"path", "operation", "response_detail"}
+    assert schema["properties"]["response_detail"]["enum"] == [
+        "compact",
+        "full",
+        "legacy",
+    ]
     assert schema.get("required", []) == []
     assert schema["properties"]["operation"]["enum"] == list(operation_param.choices)
 

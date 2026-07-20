@@ -159,13 +159,15 @@ def test_observe_memory_adds_and_returns_exact_unit(vault: Path, capsys) -> None
             "cli",
             "--tags",
             "storage",
+            "--response-detail",
+            "full",
             "--json",
         ],
         capsys,
     )
 
     assert code == 0, f"{err}\n{out}"
-    data = json.loads(out.strip().splitlines()[-1])["data"]
+    data = json.loads(out.strip().splitlines()[-1])["data"]["diagnostics"]
     assert data["unit"]["category_key"] == "config_rule"
     assert data["unit"]["tags"] == ["cli", "storage"]
     assert data["unit_ref"].endswith(data["unit"]["anchor"])
@@ -355,13 +357,13 @@ def test_remember_field_escape(vault: Path, capsys) -> None:
 def test_edit_memory_value_plain_string(vault: Path, capsys) -> None:
     code, out, err = _run(
         ["edit_memory", _INSIGHT, "--why", "set domain", "--field", "domain",
-         "--value", "retrieval", "--json"],
+         "--value", "retrieval", "--response-detail", "full", "--json"],
         capsys,
     )
     assert code == 0, err
     payload = json.loads(out.strip().splitlines()[-1])
     assert payload["success"] is True
-    assert payload["data"]["new_value"] == "retrieval"
+    assert payload["data"]["diagnostics"]["new_value"] == "retrieval"
     assert "domain: retrieval" in (vault / _INSIGHT).read_text(encoding="utf-8")
 
 
@@ -534,7 +536,7 @@ def test_simple_capture_alias_routes_to_source_and_evidence(vault: Path, capsys)
     assert code == 0, err
     source_payload = json.loads(out.strip().splitlines()[-1])
     assert source_payload["success"] is True
-    assert "/Sources/Other/" in source_payload["data"]["source"]["path"]
+    assert "/Sources/Other/" in source_payload["data"]["path"]
 
     code2, out2, err2 = _run(
         [

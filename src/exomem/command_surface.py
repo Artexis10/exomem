@@ -15,6 +15,8 @@ from dataclasses import dataclass
 from mcp.types import ToolAnnotations
 from pydantic import Field
 
+from .mutation_terminal import ResponseDetail
+
 # Text-write ops -> the argument field(s) whose value must not be a base64 binary
 # blob. The model pays for those characters as output tokens before the request
 # arrives, so they are rejected at every write boundary (MCP middleware + REST
@@ -100,6 +102,7 @@ class Command:
     product_actions: tuple[str, ...] = ()
     first_run_safe: bool = False
     routes: tuple[str, ...] = ()
+    response_detail: bool = False
 
     @property
     def doc(self) -> str:
@@ -148,6 +151,30 @@ def bind_vault(
         )
         for p in visible
     ]
+    if command is not None and getattr(command, "response_detail", False):
+        response_detail = inspect.Parameter(
+            "response_detail",
+            kind=inspect.Parameter.KEYWORD_ONLY,
+            default="compact",
+            annotation=typing.Annotated[
+                ResponseDetail,
+                Field(
+                    description=(
+                        "Successful committed mutation detail: compact (default), "
+                        "full diagnostics, or legacy raw leaf result."
+                    )
+                ),
+            ],
+        )
+        insert_at = next(
+            (
+                index
+                for index, parameter in enumerate(visible)
+                if parameter.kind is inspect.Parameter.VAR_KEYWORD
+            ),
+            len(visible),
+        )
+        visible.insert(insert_at, response_detail)
     new_sig = sig.replace(parameters=visible)
 
     def wrapper(**kwargs):
