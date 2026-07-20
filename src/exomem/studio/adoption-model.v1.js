@@ -250,3 +250,48 @@ export function suggestionChips(packSuggestions, tree) {
   }
   return chips.slice(0, 4);
 }
+
+// Fixed, generic consequence stated before a reviewed-none approval: approving a
+// proposal whose content carries no typed relation records it as reviewed-with-
+// none, and the page resurfaces later for relation review (engine reviewed-none
+// flow). No vault strings, no URLs — honesty about what approval will record.
+const REVIEWED_NONE_CONSEQUENCE =
+  "Approving records this as reviewed with no typed relation yet — "
+  + "it will come back for relation review.";
+
+// Render-only model for a proposal's semantic-write-contract findings. Turns the
+// engine's compact `contract_findings` (code/severity/detail) into display lines,
+// states the reviewed-none consequence when the proposal needs a relation review,
+// and disables approval when the server already marked the proposal `invalid`
+// (this is honesty in the UI — the server refuses invalid applies regardless).
+export function contractFindingsView(context) {
+  const source = (context && context.contract_findings) || [];
+  const findings = [];
+  for (const f of source) {
+    if (!f) continue;
+    const detail = String(f.detail || "").trim();
+    findings.push({
+      code: f.code || "",
+      severity: f.severity || "",
+      text: detail || String(f.code || "This change was flagged by the write contract."),
+    });
+  }
+  return {
+    findings,
+    hasFindings: findings.length > 0,
+    consequence: context && context.reviewed_none_required ? REVIEWED_NONE_CONSEQUENCE : "",
+    approveDisabled: !!(context && context.status === "invalid"),
+  };
+}
+
+// Total junk file count for a scan. A present `junk_counts` map is authoritative
+// even when it sums to zero; only an ABSENT map falls back to counting the junk-
+// flagged inventory rows. (The old `sum || fallback` mis-counted a present-but-
+// zero map by treating the falsy 0 as "no data".)
+export function junkCount(scanSummary, junkRowCount = 0) {
+  const counts = scanSummary && scanSummary.junk_counts;
+  if (counts && typeof counts === "object") {
+    return Object.values(counts).reduce((sum, value) => sum + Number(value || 0), 0);
+  }
+  return Number(junkRowCount) || 0;
+}

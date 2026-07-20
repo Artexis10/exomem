@@ -333,8 +333,17 @@ test("suggestions approve and reject ride governed verbs, and drift refreshes ho
     "adoption_studio:status": () => run,
     review_item_context: (body) => {
       const found = open.find((i) => i.ref === body.ref) || {};
+      // p1 rides a reviewable relation-review gap (contract findings + reviewed-
+      // none consequence); the detail must show both before approval is offered.
+      const reviewable = (found.ref || "").endsWith("/p1");
       return {
         kind: "compilation",
+        status: "proposed",
+        reviewed_none_required: reviewable,
+        contract_findings: reviewable
+          ? [{code: "RELATION_DISPOSITION_MISSING", severity: "error",
+              detail: "This note builds on others but names no typed relation yet."}]
+          : [],
         payload: {title: found.title, content: "Recorded proposal detail."},
         target: {content_hash: `hash-${(found.ref || "").split("/").pop()}`, excerpt: ""},
       };
@@ -358,6 +367,14 @@ test("suggestions approve and reject ride governed verbs, and drift refreshes ho
   await expect(page.getByRole("heading", {name: "Review suggestions"})).toBeVisible();
   await page.getByRole("button", {name: "Group the project notes"}).click();
   await expect(page.locator("#adopt-proposal-detail")).toContainText("Recorded proposal detail.");
+  // The reviewable contract finding and the reviewed-none consequence show, and
+  // (because the proposal is not invalid) the approve control stays available.
+  await expect(page.locator("#adopt-proposal-detail")).toContainText(
+    "This note builds on others but names no typed relation yet.");
+  await expect(page.locator("#adopt-proposal-detail")).toContainText(
+    "Approving records this as reviewed with no typed relation yet");
+  await expect(page.locator("#adopt-proposal-detail")
+    .getByRole("button", {name: "Make this change", exact: true})).toBeVisible();
 
   // First approval drifts: the dialog reports it, nothing is applied, the list refreshes.
   await page.getByRole("button", {name: "Make this change", exact: true}).click();
@@ -386,6 +403,40 @@ test("suggestions approve and reject ride governed verbs, and drift refreshes ho
   await page.getByRole("button", {name: "Link meeting to alpha"}).click();
   await page.getByRole("button", {name: "No thanks"}).click();
   await expect(page.getByText("No suggestions to review.")).toBeVisible();
+});
+
+test("an invalid proposal shows its findings but exposes no enabled approve control", async ({page}) => {
+  const calls = [];
+  const open = [proposalItem("bad", "Blocked compilation")];
+  const run = makeRun("applied", {plan: PLAN, outcomes: APPLIED_OUTCOMES, handoff: HANDOFF});
+  await connectAdopt(page, calls, {
+    review_memory: emptyInbox(() => open),
+    "adoption_studio:status": () => run,
+    review_item_context: () => ({
+      kind: "compilation",
+      status: "invalid",
+      reviewed_none_required: false,
+      contract_findings: [
+        {code: "CONTRACT_BLOCKED", severity: "error",
+          detail: "The write contract blocks this content."},
+      ],
+      payload: {title: "Blocked compilation", content: "Recorded proposal detail."},
+      target: {content_hash: "hash-bad", excerpt: ""},
+    }),
+  }, {query: "?view=adopt&run=adr-test-1&astep=suggestions"});
+
+  await expect(page.getByRole("heading", {name: "Review suggestions"})).toBeVisible();
+  await page.getByRole("button", {name: "Blocked compilation"}).click();
+  // The findings are shown so the reviewer sees why it can't be applied…
+  await expect(page.locator("#adopt-proposal-detail")).toContainText(
+    "The write contract blocks this content.");
+  // …but the approve control is absent (the server refuses invalid applies).
+  await expect(page.locator("#adopt-proposal-detail")
+    .getByRole("button", {name: "Make this change", exact: true})).toHaveCount(0);
+  // Reject stays available so a reviewer can still dismiss it.
+  await expect(page.locator("#adopt-proposal-detail")
+    .getByRole("button", {name: "No thanks"})).toBeVisible();
+  expect(calls.some((c) => c.name === "adoption_studio" && c.body.action === "apply-proposal")).toBeFalsy();
 });
 
 test("deep link to a finished run resumes straight onto the done screen", async ({page}) => {

@@ -367,6 +367,87 @@ def test_state_v2_roundtrips_adopt_params_and_keeps_legacy_urls_byte_identical()
     assert _node(adopt_default)["target"] == "/studio/?view=adopt"
 
 
+def test_contract_findings_view_lines_consequence_and_invalid_flag() -> None:
+    source = f"""
+      import {{contractFindingsView}} from {MODEL.as_uri()!r};
+      const reviewable = contractFindingsView({{
+        status: 'proposed',
+        reviewed_none_required: true,
+        contract_findings: [
+          {{code: 'RELATION_DISPOSITION_MISSING', severity: 'error',
+            detail: 'This note builds on others but names no typed relation yet.'}},
+        ],
+      }});
+      const invalid = contractFindingsView({{
+        status: 'invalid',
+        reviewed_none_required: false,
+        contract_findings: [
+          {{code: 'CONTRACT_BLOCKED', severity: 'error',
+            detail: 'The write contract blocks this content.'}},
+        ],
+      }});
+      const clean = contractFindingsView({{status: 'proposed', contract_findings: []}});
+      const empty = contractFindingsView(null);
+      console.log(JSON.stringify({{reviewable, invalid, clean, empty}}));
+    """
+
+    result = _node(source)
+
+    # A reviewable gap: findings show, the reviewed-none consequence is stated,
+    # and approval stays enabled (the server refuses only truly invalid ones).
+    assert result["reviewable"]["approveDisabled"] is False
+    assert result["reviewable"]["hasFindings"] is True
+    assert result["reviewable"]["findings"][0]["severity"] == "error"
+    assert result["reviewable"]["findings"][0]["text"] == (
+        "This note builds on others but names no typed relation yet."
+    )
+    assert result["reviewable"]["consequence"] == (
+        "Approving records this as reviewed with no typed relation yet — "
+        "it will come back for relation review."
+    )
+
+    # An invalid proposal: findings show, but approval is disabled and there is
+    # no reviewed-none consequence to state (nothing can be approved).
+    assert result["invalid"]["approveDisabled"] is True
+    assert result["invalid"]["hasFindings"] is True
+    assert result["invalid"]["findings"][0]["text"] == (
+        "The write contract blocks this content."
+    )
+    assert result["invalid"]["consequence"] == ""
+
+    # No findings → nothing to render; a missing context is inert.
+    assert result["clean"]["hasFindings"] is False
+    assert result["clean"]["consequence"] == ""
+    assert result["clean"]["approveDisabled"] is False
+    assert result["empty"]["findings"] == []
+    assert result["empty"]["hasFindings"] is False
+    assert result["empty"]["approveDisabled"] is False
+
+
+def test_junk_count_present_zero_map_is_authoritative() -> None:
+    source = f"""
+      import {{junkCount}} from {MODEL.as_uri()!r};
+      console.log(JSON.stringify({{
+        presentZero: junkCount({{junk_counts: {{conflict: 0}}}}, 5),
+        presentNonZero: junkCount({{junk_counts: {{conflict: 2, dot_trash: 1}}}}, 5),
+        emptyMap: junkCount({{junk_counts: {{}}}}, 5),
+        absentMap: junkCount({{}}, 4),
+        noSummary: junkCount(null, 3),
+      }}));
+    """
+
+    result = _node(source)
+
+    # A present junk_counts map is authoritative even when it sums to zero;
+    # the old `sum || fallback` wrongly fell back to the flagged-row count here.
+    assert result["presentZero"] == 0
+    assert result["presentNonZero"] == 3
+    assert result["emptyMap"] == 0
+    # Only an ABSENT map falls back to counting junk-flagged inventory rows.
+    assert result["absentMap"] == 4
+    assert result["noSummary"] == 3
+
+
 def test_selection_rules_round_trip_after_resume() -> None:
     source = f"""
       import {{initialSelection, toggleFolder, overrideFile, selectionPayload,

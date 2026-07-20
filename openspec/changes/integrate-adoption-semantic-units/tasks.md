@@ -9,9 +9,9 @@
 
 ## Lane B — Studio UI (studio assets; executor: opus; file-disjoint from Lane A)
 
-- [ ] B.1 Red-first `tests/test_studio_adoption_ui_model.py`: findings-rendering model function (compact findings list → display lines; `reviewed_none_required` → fixed consequence sentence; `status=="invalid"` → approve disabled flag).
-- [ ] B.2 Red-first `tests/browser/adoption.spec.mjs`: proposal detail shows findings lines + consequence sentence; invalid proposal has no enabled approve control (extend the existing suggestions test's mock context with `contract_findings`/`status`).
-- [ ] B.3 Implement in `src/exomem/studio/adoption-model.v1.js` (pure) + `adoption.v1.js` `proposalSummary`/detail per design 4. Inertness gate (`tests/test_scaffold_no_leak.py`) must stay green.
+- [x] B.1 Red-first `tests/test_studio_adoption_ui_model.py`: findings-rendering model function (compact findings list → display lines; `reviewed_none_required` → fixed consequence sentence; `status=="invalid"` → approve disabled flag).
+- [x] B.2 Red-first `tests/browser/adoption.spec.mjs`: proposal detail shows findings lines + consequence sentence; invalid proposal has no enabled approve control (extend the existing suggestions test's mock context with `contract_findings`/`status`).
+- [x] B.3 Implement in `src/exomem/studio/adoption-model.v1.js` (pure) + `adoption.v1.js` `proposalSummary`/detail per design 4. Inertness gate (`tests/test_scaffold_no_leak.py`) must stay green.
 
 ## Integration verification (orchestrator)
 
