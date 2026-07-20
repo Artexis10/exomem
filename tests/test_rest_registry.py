@@ -729,6 +729,29 @@ def test_openapi_lists_real_product_params(vault, monkeypatch: pytest.MonkeyPatc
     assert "ranking_explanation" in encoded_response
     assert "unit_ref" in encoded_response
     assert "parent_path" in encoded_response
+    rerank_schema = next(
+        schema
+        for schema in doc["components"]["schemas"].values()
+        if {"requested", "auto_allowed", "ran", "decision", "reason"}
+        <= set(schema.get("properties", {}))
+    )
+    rerank_candidate_fields = {
+        "candidate_limit_requested",
+        "candidate_limit_effective",
+        "candidate_limit_hard_max",
+        "scorer_input_count",
+        "unscored_tail_count",
+    }
+    assert rerank_candidate_fields <= set(rerank_schema["properties"])
+    assert rerank_candidate_fields <= set(rerank_schema["required"])
+    assert {
+        branch["type"]
+        for branch in rerank_schema["properties"]["candidate_limit_requested"][
+            "anyOf"
+        ]
+    } == {"integer", "null"}
+    for field in rerank_candidate_fields - {"candidate_limit_requested"}:
+        assert rerank_schema["properties"][field]["type"] == "integer"
     observe_schema = doc["paths"]["/api/observe_memory"]["post"]["requestBody"]["content"][
         "application/json"
     ]["schema"]

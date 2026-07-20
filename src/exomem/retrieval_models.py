@@ -26,6 +26,11 @@ class LaneProfile(TypedDict):
 class RerankProfile(TypedDict):
     requested: bool | None
     auto_allowed: bool
+    candidate_limit_requested: int | None
+    candidate_limit_effective: int
+    candidate_limit_hard_max: int
+    scorer_input_count: int
+    unscored_tail_count: int
     ran: bool
     decision: str
     reason: str
