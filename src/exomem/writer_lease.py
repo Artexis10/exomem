@@ -262,13 +262,22 @@ class LeaseConfig:
     preferred_writer: bool = False
     state_dir: Path = Path.home() / ".cache" / "exomem"
     # How long a writer waits for the vault mutation boundary before giving up
-    # with MUTATION_BUSY. This must exceed the natural critical section: a
-    # single `remember` holds the boundary across its corpus-aware embedding
-    # pass, which routinely runs for seconds. The former 5s default sat *below*
-    # that, so any genuine overlap failed rather than queued. Retries are
-    # idempotency-protected, so waiting is safe; the ceiling is the ~100s
-    # Cloudflare edge cap, which 15s leaves ample room under.
-    mutation_timeout_seconds: float = 15.0
+    # with MUTATION_BUSY.
+    #
+    # This is a *share of the edge budget*, not a free parameter. The HA edge
+    # worker abandons a mutation-capable request at MCP_TOOL_TIMEOUT_MS
+    # (default 15s, deploy/cloudflare-ha/src/worker.js) and deliberately does
+    # not replay it, because the origin may commit after the edge stops
+    # waiting. Queueing here spends that same budget: time spent waiting is
+    # unavailable to the write itself. A value at or near the edge timeout
+    # guarantees the caller sees a 504 while the write commits anyway — the
+    # exact acknowledgement loss this system works hardest to avoid.
+    #
+    # 5s leaves the majority of the 15s budget for the write. Raise this only
+    # in tandem with MCP_TOOL_TIMEOUT_MS, and never to meet or exceed it. The
+    # real headroom win is shortening the critical section — the corpus-aware
+    # embedding pass currently runs inside the boundary — not widening the wait.
+    mutation_timeout_seconds: float = 5.0
 
     @property
     def enabled(self) -> bool:
@@ -289,7 +298,7 @@ class LeaseConfig:
             preferred_writer=_truthy(values.get("EXOMEM_WRITER_LEASE_PREFERRED", "")),
             state_dir=Path(state_raw).expanduser() if state_raw else cls.state_dir,
             mutation_timeout_seconds=_positive_float(
-                values, "EXOMEM_MUTATION_TIMEOUT", 15.0
+                values, "EXOMEM_MUTATION_TIMEOUT", 5.0
             ),
         )
         if config.enabled and (not config.vault_id or not config.replica_id):

@@ -66,18 +66,26 @@ def test_config_is_default_off_and_requires_identities() -> None:
         LeaseConfig.from_env({"EXOMEM_WRITER_LEASE_URL": "https://lease.example"})
 
 
-def test_mutation_timeout_defaults_above_critical_section_and_is_tunable() -> None:
-    """The boundary must outwait a normal write, and ops must be able to tune it.
+def test_mutation_timeout_stays_within_the_edge_budget_and_is_tunable() -> None:
+    """The boundary wait is a share of the edge budget, not a free parameter.
 
-    A single `remember` holds the mutation boundary across its corpus-aware
-    embedding pass, which routinely runs for seconds. The former hardcoded 5s
-    sat below that, so concurrent writers failed MUTATION_BUSY instead of
-    queueing. The default must stay comfortably above the critical section and
-    well under the ~100s Cloudflare edge cap.
+    The HA edge worker abandons a mutation-capable request at
+    MCP_TOOL_TIMEOUT_MS (default 15s) and never replays it, because the origin
+    may commit after the edge stops waiting. Time spent queueing here is time
+    unavailable to the write. A default at or near the edge timeout would make
+    a 504-with-a-committed-write the *expected* outcome under contention
+    rather than the incident it is.
     """
-    assert LeaseConfig.from_env({}).mutation_timeout_seconds == 15.0
-    tuned = LeaseConfig.from_env({"EXOMEM_MUTATION_TIMEOUT": "30"})
-    assert tuned.mutation_timeout_seconds == 30.0
+    # The edge budget this must stay under: MCP_TOOL_TIMEOUT_MS default, in
+    # seconds. Mirrored from deploy/cloudflare-ha/src/worker.js.
+    edge_tool_budget_seconds = 15.0
+    default = LeaseConfig.from_env({}).mutation_timeout_seconds
+    assert default == 5.0
+    # The invariant that matters: waiting must leave the majority of the edge
+    # budget for the write itself.
+    assert default < edge_tool_budget_seconds / 2
+    tuned = LeaseConfig.from_env({"EXOMEM_MUTATION_TIMEOUT": "8"})
+    assert tuned.mutation_timeout_seconds == 8.0
     # Misconfiguration fails loudly rather than silently reverting to a default,
     # matching every other lease timeout. A silently-ignored value here would
     # leave an operator believing they had widened the boundary when they had not.
