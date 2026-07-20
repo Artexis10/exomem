@@ -1,7 +1,7 @@
 ## 1. Mutation terminal contract
 
-- [ ] 1.1 Write failing pure-logic and invocation tests for compact/full/legacy terminal projection, detail-independent digesting, exact replay after acknowledgement loss, legacy receipt decoding, and unchanged busy/pending/uncertain errors.
-- [ ] 1.2 Implement the versioned persisted terminal record, generic response-detail adapter wiring, and compact/full/legacy projections without changing pre-commit error semantics.
+- [x] 1.1 Write failing pure-logic and invocation tests for compact/full/legacy terminal projection, detail-independent digesting, exact replay after acknowledgement loss, legacy receipt decoding, and unchanged busy/pending/uncertain errors.
+- [x] 1.2 Implement the versioned persisted terminal record, generic response-detail adapter wiring, and compact/full/legacy projections without changing pre-commit error semantics.
 
 ## 2. Discriminated edit schema
 
