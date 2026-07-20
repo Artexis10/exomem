@@ -93,14 +93,30 @@ def test_core_skill_does_not_nest_the_workflow_skills() -> None:
     assert not (PLUGIN_ROOT / "skills" / "exomem" / "workflow-skills").exists()
 
 
-def test_hook_commands_resolve_through_the_plugin_root_placeholder() -> None:
-    hooks = json.loads((PLUGIN_ROOT / "hooks" / "hooks.json").read_text(encoding="utf-8"))
+def test_hooks_file_nests_events_under_a_top_level_hooks_key() -> None:
+    """Events at the document root parse as JSON but the plugin refuses to load:
+    `expected record, received undefined` at path ["hooks"]. Only installing the
+    plugin surfaces that, so pin the shape here."""
+    document = json.loads((PLUGIN_ROOT / "hooks" / "hooks.json").read_text(encoding="utf-8"))
 
-    for event, groups in hooks.items():
+    assert set(document) <= {"description", "hooks"}
+    assert isinstance(document.get("hooks"), dict) and document["hooks"]
+    # A known event must live under "hooks", not at the root.
+    assert "Stop" in document["hooks"]
+    assert "Stop" not in document
+
+
+def test_hook_commands_resolve_through_the_plugin_root_placeholder() -> None:
+    document = json.loads((PLUGIN_ROOT / "hooks" / "hooks.json").read_text(encoding="utf-8"))
+
+    for event, groups in document["hooks"].items():
         for group in groups:
             for hook in group["hooks"]:
-                assert "${CLAUDE_PLUGIN_ROOT}" in hook["command"], event
-                script = hook["command"].rsplit("/", 1)[-1]
+                command = hook["command"]
+                assert "${CLAUDE_PLUGIN_ROOT}" in command, event
+                # Quoted: the expanded install path routinely contains spaces.
+                assert '"${CLAUDE_PLUGIN_ROOT}' in command, event
+                script = command.rstrip('"').rsplit("/", 1)[-1]
                 assert (PLUGIN_ROOT / "hooks" / script).is_file(), script
 
 

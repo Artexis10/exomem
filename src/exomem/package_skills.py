@@ -130,7 +130,17 @@ def _plugin_manifest() -> dict:
 
 
 def _plugin_hooks() -> dict:
-    hooks: dict[str, list] = {}
+    """Render hooks.json.
+
+    The event map MUST sit under a top-level "hooks" key. Emitting the events at
+    the document root parses as valid JSON but the plugin then fails to load with
+    `expected record, received undefined` at path ["hooks"] -- caught only by
+    actually installing the plugin, not by any schema we control.
+
+    The script path is quoted because ${CLAUDE_PLUGIN_ROOT} expands to a real
+    install path, which on Windows and macOS routinely contains spaces.
+    """
+    events: dict[str, list] = {}
     for event, matcher in _PLUGIN_HOOK_EVENTS:
         entry: dict = {}
         if matcher is not None:
@@ -139,12 +149,15 @@ def _plugin_hooks() -> dict:
             {
                 "type": "command",
                 "command": (
-                    f"bash ${{CLAUDE_PLUGIN_ROOT}}/hooks/{_PLUGIN_HOOK_SCRIPTS[event]}"
+                    f'bash "${{CLAUDE_PLUGIN_ROOT}}/hooks/{_PLUGIN_HOOK_SCRIPTS[event]}"'
                 ),
             }
         ]
-        hooks.setdefault(event, []).append(entry)
-    return hooks
+        events.setdefault(event, []).append(entry)
+    return {
+        "description": "Exomem capture, retrieval, and continuation hooks.",
+        "hooks": events,
+    }
 
 
 def sync_plugin(plugin_root: Path) -> dict:
