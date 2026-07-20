@@ -10,8 +10,8 @@
 
 ## 3. Bootstrap capability conformance
 
-- [ ] 3.1 Write failing conformance tests that recursively compare tool references in all bootstrap profiles with MCP Tier-2 on/off, REST/OpenAPI, CLI, and hosted exports.
-- [ ] 3.2 Implement immutable active-surface descriptors and filter every bootstrap route, default, example, catalog, and common-tool reference; distinguish active capability metadata from the canonical MCP fingerprint.
+- [x] 3.1 Write failing conformance tests that recursively compare tool references in all bootstrap profiles with MCP Tier-2 on/off, REST/OpenAPI, CLI, and hosted exports.
+- [x] 3.2 Implement immutable active-surface descriptors and filter every bootstrap route, default, example, catalog, and common-tool reference; distinguish active capability metadata from the canonical MCP fingerprint.
 
 ## 4. Action-first audit
 
