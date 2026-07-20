@@ -5,8 +5,8 @@
 
 ## 2. Discriminated edit schema
 
-- [ ] 2.1 Write failing schema and normalization tests for all seven edit variants, unrelated-field rejection, legacy/new canonical equivalence, JSON-encoded batch compatibility, and one-release deprecation behavior.
-- [ ] 2.2 Implement Pydantic edit operations, pre-digest normalization, primary MCP/OpenAPI schema projection, and the bounded flat runtime shim over the existing edit leaf.
+- [x] 2.1 Write failing schema and normalization tests for all seven edit variants, unrelated-field rejection, legacy/new canonical equivalence, JSON-encoded batch compatibility, and one-release deprecation behavior.
+- [x] 2.2 Implement Pydantic edit operations, pre-digest normalization, primary MCP/OpenAPI schema projection, and the bounded flat runtime shim over the existing edit leaf.
 
 ## 3. Bootstrap capability conformance
 
