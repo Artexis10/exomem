@@ -20,8 +20,8 @@
 
 ## 5. Bounded reranking
 
-- [ ] 5.1 Write failing candidate-count, validation, cache-key, telemetry, disabled, and soft-fail tests for `rerank_max_candidates`.
-- [ ] 5.2 Thread the cap through `ask_memory`, `find`, and the hybrid scorer; rerank only the bounded prefix, preserve the fused tail, and document why no hard synchronous latency promise is made.
+- [x] 5.1 Write failing candidate-count, validation, cache-key, telemetry, disabled, and soft-fail tests for `rerank_max_candidates`.
+- [x] 5.2 Thread the cap through `ask_memory`, `find`, and the hybrid scorer; rerank only the bounded prefix, preserve the fused tail, and document why no hard synchronous latency promise is made.
 
 ## 6. Contract, compatibility, and verification
 
