@@ -27,6 +27,7 @@ from starlette.responses import JSONResponse, Response, StreamingResponse
 
 from . import (
     __version__,
+    capabilities,
     cli_ops,
     edit_operations,
     hosted_portability,
@@ -708,6 +709,12 @@ def register_hosted_routes(
 
     commands = commands_module.product_commands_for("rest", expose_tier2=expose_tier2)
     by_name = {command.name: command for command in commands}
+    surface_descriptor = capabilities.ActiveSurfaceDescriptor(
+        surface="hosted",
+        profile="private-command-router",
+        tier2_enabled=expose_tier2,
+        product_commands=tuple(command.name for command in commands),
+    )
     contract = gateway.build_gateway_contract(
         protocol_version=config.protocol_version,
         expose_tier2=expose_tier2,
@@ -859,27 +866,32 @@ def register_hosted_routes(
             )
 
             def invoke_admitted() -> Any:
-                if commands_module.invocation_is_read_only(command, kwargs):
-                    with lifecycle.admit_read():
+                with capabilities.active_surface(surface_descriptor):
+                    if commands_module.invocation_is_read_only(command, kwargs):
+                        with lifecycle.admit_read():
+                            return invoke(
+                                command,
+                                *injected,
+                                idempotency_key=gateway.scoped_idempotency_key(context),
+                                public_idempotency_key=context.idempotency_key,
+                                implicit_idempotency_scope=gateway.implicit_retry_scope(
+                                    context
+                                ),
+                                mutation_request_id=context.request_id,
+                                **kwargs,
+                            )
+                    with lifecycle.admit_mutation():
                         return invoke(
                             command,
                             *injected,
                             idempotency_key=gateway.scoped_idempotency_key(context),
                             public_idempotency_key=context.idempotency_key,
-                            implicit_idempotency_scope=gateway.implicit_retry_scope(context),
+                            implicit_idempotency_scope=gateway.implicit_retry_scope(
+                                context
+                            ),
                             mutation_request_id=context.request_id,
                             **kwargs,
                         )
-                with lifecycle.admit_mutation():
-                    return invoke(
-                        command,
-                        *injected,
-                        idempotency_key=gateway.scoped_idempotency_key(context),
-                        public_idempotency_key=context.idempotency_key,
-                        implicit_idempotency_scope=gateway.implicit_retry_scope(context),
-                        mutation_request_id=context.request_id,
-                        **kwargs,
-                    )
 
             result = await run_in_threadpool(invoke_admitted)
         except gateway.HostedGatewayError as exc:

@@ -22,6 +22,7 @@ from __future__ import annotations
 import inspect
 import json
 import os
+import re
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Any, Literal, NotRequired
@@ -39,6 +40,7 @@ from . import append_to_file as append_to_file_module
 from . import attention as attention_module
 from . import audit as audit_module
 from . import audit_fix as audit_fix_module
+from . import capabilities as capabilities_module
 from . import compile_proposal as compile_proposal_module
 from . import context_pack as context_pack_module
 from . import corpus_aware as corpus_aware_module
@@ -223,6 +225,8 @@ def op_bootstrap(
     from . import tool_surface as tool_surface_module
 
     compute_policy = mode_module.resolved()
+    active_descriptor = _active_bootstrap_descriptor()
+    active_product_names = frozenset(active_descriptor.product_commands)
     requested_workflow = workflow.strip() if workflow and workflow.strip() else "general"
     selected_packs = knowledge_packs_module.selected_pack_state(vault_root)
     payload: dict = {
@@ -235,8 +239,14 @@ def op_bootstrap(
             "pure_substrate": True,
             "content_included": False,
             "published_mcp_tool_surface_sha256": tool_surface_module.sha256(),
+            "published_mcp_tool_surface_scope": "packaged-full-mcp-discovery",
+            "canonical_mcp_tool_surface": {
+                "scope": "packaged-full-mcp-discovery",
+                "sha256": tool_surface_module.sha256(),
+            },
             "compute_policy": compute_policy,
         },
+        "active_capabilities": active_descriptor.as_metadata(),
         "memory_model": {
             "built_in_ai_memory": (
                 "Use as short-term or behavioural memory for user preferences, working "
@@ -476,11 +486,15 @@ def op_bootstrap(
                 "try ask_memory(deep=true) for synthesis instead of many read_memory calls",
             ],
         },
-        "simple_actions": simple_action_catalog(selected_packs),
+        "simple_actions": simple_action_catalog(
+            selected_packs, available_tools=active_product_names
+        ),
         "common_actions": list(simple_action_names()),
-        "front_door_actions": product_front_door_catalog(selected_packs),
-        "product_commands": product_tool_catalog(),
-        "tool_catalog": product_tool_catalog(),
+        "front_door_actions": product_front_door_catalog(
+            selected_packs, available_tools=active_product_names
+        ),
+        "product_commands": product_tool_catalog(active_product_names),
+        "tool_catalog": product_tool_catalog(active_product_names),
         "common_tools": [
             "adopt_vault",
             "browse_memory",
@@ -532,7 +546,7 @@ def op_bootstrap(
                 "so the agent can report stored artifacts exactly."
             ),
         }
-    return payload
+    return _filter_bootstrap_payload(payload, active_descriptor)
 
 
 def op_find(
@@ -5761,16 +5775,117 @@ def validate_product_registry() -> dict:
 validate_product_registry()
 
 
-def product_tool_catalog() -> dict:
+def _active_bootstrap_descriptor() -> capabilities_module.ActiveSurfaceDescriptor:
+    """Resolve trusted adapter context or the direct-Python compatibility default."""
+
+    active = capabilities_module.current_active_surface()
+    if active is not None:
+        return active
+    return capabilities_module.ActiveSurfaceDescriptor(
+        surface="mcp",
+        profile="canonical-full-product",
+        tier2_enabled=True,
+        product_commands=tuple(
+            command.name
+            for command in product_commands_for("mcp", expose_tier2=True)
+        ),
+    )
+
+
+def product_tool_catalog(
+    available_tools: frozenset[str] | set[str] | None = None,
+) -> dict:
     """Registry-derived product surface: primary tools first, advanced tools visible."""
-    primary = [c.name for c in PRODUCT_COMMANDS if c.product_surface == "primary"]
-    advanced = [c.name for c in PRODUCT_COMMANDS if c.product_surface != "primary"]
+    selected = tuple(
+        command
+        for command in PRODUCT_COMMANDS
+        if available_tools is None or command.name in available_tools
+    )
+    primary = [c.name for c in selected if c.product_surface == "primary"]
+    advanced = [c.name for c in selected if c.product_surface != "primary"]
     return {
         "primary": primary,
         "advanced": advanced,
-        "first_run_safe": [c.name for c in PRODUCT_COMMANDS if c.first_run_safe],
-        "routes": {c.name: list(c.routes) for c in PRODUCT_COMMANDS},
+        "first_run_safe": [c.name for c in selected if c.first_run_safe],
+        "routes": {c.name: list(c.routes) for c in selected},
     }
+
+
+_DROP_BOOTSTRAP_VALUE = object()
+
+
+def _mentions_unavailable_product_tool(
+    value: str, unavailable: frozenset[str]
+) -> bool:
+    for name in unavailable:
+        escaped = re.escape(name)
+        if "_" in name or name == "remember":
+            if re.search(rf"(?<!\w){escaped}(?!\w)", value):
+                return True
+        elif re.search(rf"(?<!\w){escaped}\s*\(", value):
+            return True
+    return False
+
+
+def _filter_bootstrap_payload(
+    payload: dict,
+    descriptor: capabilities_module.ActiveSurfaceDescriptor,
+) -> dict:
+    """Remove recommendations that the trusted active surface cannot execute."""
+
+    unavailable = frozenset(PRODUCT_PUBLIC_NAMES) - frozenset(
+        descriptor.product_commands
+    )
+    if not unavailable:
+        return payload
+
+    def filter_value(value: object) -> object:
+        if isinstance(value, str):
+            if value in unavailable or _mentions_unavailable_product_tool(
+                value, unavailable
+            ):
+                return _DROP_BOOTSTRAP_VALUE
+            return value
+        if isinstance(value, list):
+            filtered = []
+            for item in value:
+                candidate = filter_value(item)
+                if candidate is not _DROP_BOOTSTRAP_VALUE:
+                    filtered.append(candidate)
+            return filtered
+        if isinstance(value, dict):
+            advertised_tool = value.get("tool")
+            if isinstance(advertised_tool, str) and advertised_tool in unavailable:
+                return _DROP_BOOTSTRAP_VALUE
+            call = value.get("call")
+            if isinstance(call, str) and _mentions_unavailable_product_tool(
+                call, unavailable
+            ):
+                return _DROP_BOOTSTRAP_VALUE
+            route = value.get("route")
+            if isinstance(route, str) and route in unavailable:
+                return _DROP_BOOTSTRAP_VALUE
+
+            filtered_dict: dict = {}
+            for child_key, child in value.items():
+                if child_key in unavailable:
+                    continue
+                candidate = filter_value(child)
+                if candidate is _DROP_BOOTSTRAP_VALUE:
+                    if child_key == "route":
+                        filtered_dict["available"] = False
+                        filtered_dict["unavailable_reason"] = (
+                            "No route for this action is exported by the active surface."
+                        )
+                    continue
+                filtered_dict[child_key] = candidate
+            return filtered_dict
+        return value
+
+    filtered = filter_value(payload)
+    assert isinstance(filtered, dict)
+    return filtered
+
 
 def _catalog_route_tools(entry: dict) -> set[str]:
     tools: set[str] = set()
@@ -5788,7 +5903,11 @@ def simple_action_names() -> tuple[str, ...]:
     return _SIMPLE_ACTIONS
 
 
-def simple_action_catalog(selected_packs: dict | None = None) -> dict:
+def simple_action_catalog(
+    selected_packs: dict | None = None,
+    *,
+    available_tools: frozenset[str] | set[str] | None = None,
+) -> dict:
     """Product action map over product commands; no duplicate command logic."""
     known_commands = {command.name for command in PRODUCT_COMMANDS} | {"doctor"}
     out: dict[str, dict] = {}
@@ -5801,10 +5920,21 @@ def simple_action_catalog(selected_packs: dict | None = None) -> dict:
             )
         out[action] = {
             "intent": definition["intent"],
-            "route": definition["route"],
             "safety": definition["safety"],
-            "advanced": definition.get("advanced", []),
+            "advanced": [
+                tool
+                for tool in definition.get("advanced", [])
+                if available_tools is None or tool in available_tools
+            ],
         }
+        primary_route = definition["route"]
+        if available_tools is None or primary_route["tool"] in available_tools:
+            out[action]["route"] = primary_route
+        else:
+            out[action]["available"] = False
+            out[action]["unavailable_reason"] = (
+                "No route for this action is exported by the active surface."
+            )
         for key in (
             "deep_route",
             "evidence_route",
@@ -5813,7 +5943,10 @@ def simple_action_catalog(selected_packs: dict | None = None) -> dict:
             "fix_route",
             "reconcile_route",
         ):
-            if key in definition:
+            if key in definition and (
+                available_tools is None
+                or definition[key]["tool"] in available_tools
+            ):
                 out[action][key] = definition[key]
 
     packs = (selected_packs or {}).get("packs") or []
@@ -5837,13 +5970,19 @@ def simple_action_catalog(selected_packs: dict | None = None) -> dict:
     return out
 
 
-def product_front_door_catalog(selected_packs: dict | None = None) -> dict:
+def product_front_door_catalog(
+    selected_packs: dict | None = None,
+    *,
+    available_tools: frozenset[str] | set[str] | None = None,
+) -> dict:
     """Map simple product verbs to the typed tools that enforce governance."""
     out = {
         action: {"primary_tools": [], "advanced_tools": []}
         for action in _PRODUCT_ACTIONS
     }
     for command in PRODUCT_COMMANDS:
+        if available_tools is not None and command.name not in available_tools:
+            continue
         bucket = "primary_tools" if command.product_surface == "primary" else "advanced_tools"
         for action in command.product_actions:
             if action in out:

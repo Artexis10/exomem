@@ -1872,15 +1872,22 @@ def _print_triage_human(result: dict) -> None:
 
 
 def _core_op_main(argv: list[str]) -> int:
-    from . import cli_ops
+    from . import capabilities, cli_ops
     from . import commands as commands_module
     from . import schema as schema_module
     from .vault import resolve_vault
 
-    cmds = {
-        c.name: c
-        for c in commands_module.product_commands_for("cli", expose_tier2=_expose_tier2())
-    }
+    expose_tier2 = _expose_tier2()
+    registered_commands = commands_module.product_commands_for(
+        "cli", expose_tier2=expose_tier2
+    )
+    cmds = {command.name: command for command in registered_commands}
+    surface_descriptor = capabilities.ActiveSurfaceDescriptor(
+        surface="cli",
+        profile="product",
+        tier2_enabled=expose_tier2,
+        product_commands=tuple(command.name for command in registered_commands),
+    )
 
     parser = _CLIParser(prog="kb", description=f"Query and write the local {kb_dirname()}.")
     sub = parser.add_subparsers(dest="op", required=True, parser_class=_CLIParser)
@@ -1914,12 +1921,13 @@ def _core_op_main(argv: list[str]) -> int:
             injected = (vault_root,)
         from .writer_lease import invoke_command
 
-        result = invoke_command(
-            cmd,
-            *injected,
-            idempotency_key=os.environ.get("EXOMEM_IDEMPOTENCY_KEY") or None,
-            **kwargs,
-        )
+        with capabilities.active_surface(surface_descriptor):
+            result = invoke_command(
+                cmd,
+                *injected,
+                idempotency_key=os.environ.get("EXOMEM_IDEMPOTENCY_KEY") or None,
+                **kwargs,
+            )
     except (cli_ops.OpError, ValueError, TypeError, RuntimeError) as e:
         err = cli_ops.error_dict(e)
         if as_json:

@@ -19,8 +19,8 @@ from fastmcp import FastMCP
 from fastmcp.server.middleware.middleware import Middleware, MiddlewareContext
 from starlette.middleware import Middleware as ASGIMiddleware
 
+from . import capabilities, edit_operations, guards, multi_edit
 from . import commands as commands_module
-from . import edit_operations, guards, multi_edit
 from .server_assets import (
     register_asset_routes,
     register_oauth_metadata_route,
@@ -264,7 +264,27 @@ def build_server(*, require_auth: bool) -> FastMCP:
             source_schema=runtime.source_schema,
             transfer_config=transfer_config,
         )
-        for cmd in commands_module.product_commands_for("mcp", expose_tier2=expose_tier2):
+        product_commands = commands_module.product_commands_for(
+            "mcp", expose_tier2=expose_tier2
+        )
+        legacy_commands = (
+            _legacy_mcp_commands(expose_tier2=expose_tier2)
+            if _legacy_mcp_compat_enabled()
+            else ()
+        )
+        surface_descriptor = capabilities.ActiveSurfaceDescriptor(
+            surface="mcp",
+            profile=(
+                "product-with-legacy-aliases" if legacy_commands else "product"
+            ),
+            tier2_enabled=expose_tier2,
+            product_commands=tuple(command.name for command in product_commands),
+            exported_aliases=tuple(command.name for command in legacy_commands),
+            hand_registered_tools=tuple(
+                sorted(commands_module.HAND_REGISTERED_EXCEPTIONS)
+            ),
+        )
+        for cmd in product_commands:
             if cmd.name in commands_module.HAND_REGISTERED_EXCEPTIONS:
                 continue
             injected = (
@@ -280,16 +300,18 @@ def build_server(*, require_auth: bool) -> FastMCP:
                     name=cmd.name,
                     description=description,
                     command=cmd,
+                    surface_descriptor=surface_descriptor,
                 ),
                 annotations=cmd.mcp_annotations,
             )
 
-        if _legacy_mcp_compat_enabled():
+        if legacy_commands:
             _register_legacy_mcp_tools(
                 mcp,
                 vault_root=runtime.vault_root,
                 source_schema=runtime.source_schema,
-                expose_tier2=expose_tier2,
+                legacy_commands=legacy_commands,
+                surface_descriptor=surface_descriptor,
                 project_keys_hint=runtime.project_keys_hint,
             )
 
@@ -410,20 +432,11 @@ def _register_legacy_mcp_tools(
     *,
     vault_root: Path,
     source_schema: object,
-    expose_tier2: bool,
+    legacy_commands: tuple[commands_module.Command, ...],
+    surface_descriptor: capabilities.ActiveSurfaceDescriptor,
     project_keys_hint: str,
 ) -> None:
-    product_names = {
-        c.name for c in commands_module.product_commands_for("mcp", expose_tier2=expose_tier2)
-    }
-    legacy = list(commands_module.commands_for("mcp", expose_tier2=expose_tier2))
-    legacy += [c for c in commands_module.COMMANDS if c.name == "note"]
-
-    for cmd in legacy:
-        if cmd.name in product_names:
-            continue
-        if "mcp" not in cmd.surfaces and cmd.name != "note":
-            continue
+    for cmd in legacy_commands:
         injected = (vault_root, source_schema) if cmd.needs_schema else (vault_root,)
         description = cmd.doc
         mcp.tool(
@@ -434,9 +447,33 @@ def _register_legacy_mcp_tools(
                 description="[Deprecated compatibility alias; prefer product commands.] "
                 + description,
                 command=cmd,
+                surface_descriptor=surface_descriptor,
             ),
             annotations=cmd.mcp_annotations,
         )
+
+
+def _legacy_mcp_commands(
+    *, expose_tier2: bool
+) -> tuple[commands_module.Command, ...]:
+    """Return the exact deprecated aliases the MCP adapter will register."""
+
+    product_names = {
+        command.name
+        for command in commands_module.product_commands_for(
+            "mcp", expose_tier2=expose_tier2
+        )
+    }
+    candidates = [
+        *commands_module.commands_for("mcp", expose_tier2=expose_tier2),
+        *(command for command in commands_module.COMMANDS if command.name == "note"),
+    ]
+    return tuple(
+        command
+        for command in candidates
+        if command.name not in product_names
+        and ("mcp" in command.surfaces or command.name == "note")
+    )
 
 
 def run(

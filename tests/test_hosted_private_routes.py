@@ -6,6 +6,7 @@ import hashlib
 import io
 import logging
 import os
+import re
 import zipfile
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -237,6 +238,7 @@ def _cell(
     invoker: Any | None = None,
     guard_events: list[str] | None = None,
     private_authenticator: Any | None = None,
+    expose_tier2: bool = True,
 ) -> tuple[_ASGIClient, HostedCellConfig, HostedCellLifecycle, IsolatedInvoker]:
     vault_root = tmp_path / cell_id / "vault"
     from exomem.init import init_vault
@@ -284,6 +286,7 @@ def _cell(
         invoke_command_func=isolated,
         mutation_guard_factory=mutation_guard,
         private_authenticator=private_authenticator,
+        expose_tier2=expose_tier2,
     )
     return _ASGIClient(app.http_app()), config, lifecycle, isolated
 
@@ -442,6 +445,104 @@ def _headers(
     if idempotency_key is not None:
         headers["Idempotency-Key"] = idempotency_key
     return headers
+
+
+def _hosted_bootstrap_tool_refs(payload: object) -> set[str]:
+    product_names = set(commands_module.PRODUCT_PUBLIC_NAMES)
+    structured_lists = {
+        "advanced",
+        "advanced_tools",
+        "available_product_tools",
+        "common_tools",
+        "first_run_safe",
+        "primary",
+        "primary_tools",
+    }
+    refs: set[str] = set()
+
+    def walk(value: object, *, key: str | None = None) -> None:
+        if isinstance(value, dict):
+            if key in {"product_commands", "tool_catalog"}:
+                routes = value.get("routes")
+                if isinstance(routes, dict):
+                    refs.update(set(routes) & product_names)
+            for child_key, child in value.items():
+                if child_key in product_names:
+                    refs.add(child_key)
+                if child_key == "tool" and child in product_names:
+                    refs.add(child)
+                    continue
+                if child_key in structured_lists and isinstance(child, list):
+                    refs.update(
+                        item
+                        for item in child
+                        if isinstance(item, str) and item in product_names
+                    )
+                walk(child, key=str(child_key))
+            return
+        if isinstance(value, list):
+            for child in value:
+                if isinstance(child, str) and child in product_names:
+                    refs.add(child)
+                walk(child, key=key)
+            return
+        if isinstance(value, str):
+            for name in product_names:
+                if (
+                    "_" in name
+                    and re.search(rf"(?<!\w){re.escape(name)}(?!\w)", value)
+                ) or re.search(rf"(?<!\w){re.escape(name)}\s*\(", value):
+                    refs.add(name)
+
+    walk(payload)
+    return refs
+
+
+@pytest.mark.parametrize("tier2_enabled", [True, False])
+def test_hosted_bootstrap_profiles_match_private_command_contract(
+    tmp_path: Path,
+    tier2_enabled: bool,
+) -> None:
+    client, config, _lifecycle, _invoker = _cell(
+        tmp_path,
+        cell_id=f"cell-bootstrap-{tier2_enabled}",
+        credential="bootstrap-private-service-credential-0001",
+        expose_tier2=tier2_enabled,
+    )
+    headers = _headers(config)
+    contract_response = client.get("/private/exomem/v1/contract", headers=headers)
+    assert contract_response.status_code == 200
+    contract = contract_response.json()
+    exported_tuple = tuple(command["name"] for command in contract["commands"])
+    expected_tuple = tuple(
+        command.name
+        for command in commands_module.product_commands_for(
+            "rest", expose_tier2=tier2_enabled
+        )
+    )
+    assert exported_tuple == expected_tuple
+
+    for profile in ("compact", "full", "diagnostics"):
+        response = client.post(
+            "/private/exomem/v1/command/bootstrap",
+            headers=headers,
+            json={"profile": profile},
+        )
+        assert response.status_code == 200, response.text
+        payload = response.json()["data"]
+        active = payload["active_capabilities"]
+        assert active["surface"] == "hosted"
+        assert active["profile"] == "private-command-router"
+        assert active["tier2_policy"] == (
+            "enabled" if tier2_enabled else "disabled"
+        )
+        assert active["available_product_tools"] == sorted(exported_tuple)
+        assert _hosted_bootstrap_tool_refs(payload) <= set(exported_tuple)
+        assert "read_media" not in _hosted_bootstrap_tool_refs(payload)
+        if not tier2_enabled:
+            assert {"manage_memory_file", "query_dataset"}.isdisjoint(
+                _hosted_bootstrap_tool_refs(payload)
+            )
 
 
 def _remember_body(sentinel: str) -> dict[str, str]:

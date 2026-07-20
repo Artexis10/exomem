@@ -8,13 +8,14 @@ import types
 import typing
 import uuid
 from collections.abc import Callable
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
 from dataclasses import dataclass
 
 from mcp.types import ToolAnnotations
 from pydantic import Field, WithJsonSchema
 
+from . import capabilities
 from .mutation_terminal import ResponseDetail
 
 # Text-write ops -> the argument field(s) whose value must not be a base64 binary
@@ -131,6 +132,7 @@ def bind_vault(
     name: str | None = None,
     description: str | None = None,
     command: Command | None = None,
+    surface_descriptor: capabilities.ActiveSurfaceDescriptor | None = None,
 ) -> Callable:
     """Return a callable FastMCP introspects exactly like a hand-written wrapper."""
     sig = inspect.signature(leaf)
@@ -195,21 +197,27 @@ def bind_vault(
     new_sig = sig.replace(parameters=visible)
 
     def wrapper(**kwargs):
-        if command is None:
-            return leaf(*injected, **kwargs)
-        from .commands import invocation_is_read_only
-        from .writer_lease import invoke_command
-
-        invocation_read_only = invocation_is_read_only(command, kwargs)
-        return invoke_command(
-            command,
-            *injected,
-            mutation_request_id=mcp_request_id(),
-            implicit_idempotency_scope=(
-                None if invocation_read_only else mcp_retry_scope()
-            ),
-            **kwargs,
+        context = (
+            capabilities.active_surface(surface_descriptor)
+            if surface_descriptor is not None
+            else nullcontext()
         )
+        with context:
+            if command is None:
+                return leaf(*injected, **kwargs)
+            from .commands import invocation_is_read_only
+            from .writer_lease import invoke_command
+
+            invocation_read_only = invocation_is_read_only(command, kwargs)
+            return invoke_command(
+                command,
+                *injected,
+                mutation_request_id=mcp_request_id(),
+                implicit_idempotency_scope=(
+                    None if invocation_read_only else mcp_retry_scope()
+                ),
+                **kwargs,
+            )
 
     wrapper.__signature__ = new_sig  # type: ignore[attr-defined]
     wrapper.__name__ = name or leaf.__name__

@@ -16,7 +16,7 @@ from starlette.concurrency import run_in_threadpool
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
-from . import cf_access, cli_ops, edit_operations, upload_tokens
+from . import capabilities, cf_access, cli_ops, edit_operations, upload_tokens
 from . import commands as commands_module
 from .command_surface import canonical_request_id
 from .server_transfer import TransferConfig
@@ -166,6 +166,12 @@ def register_rest_facade(
     rest_enabled = rest_api_key is not None
     expose_tier2 = not os.environ.get("EXOMEM_DISABLE_TIER2")
     rest_commands = commands_module.product_commands_for("rest", expose_tier2=expose_tier2)
+    surface_descriptor = capabilities.ActiveSurfaceDescriptor(
+        surface="rest",
+        profile="openapi",
+        tier2_enabled=expose_tier2,
+        product_commands=tuple(command.name for command in rest_commands),
+    )
 
     def _rest_principal(request: Request) -> tuple[bool, str | None]:
         if rest_api_key is not None:
@@ -252,17 +258,20 @@ def register_rest_facade(
                 injected = (vault_root, source_schema) if _cmd.needs_schema else (vault_root,)
                 from .writer_lease import invoke_command
 
-                result = await run_in_threadpool(
-                    invoke_command,
-                    _cmd,
-                    *injected,
-                    idempotency_key=request.headers.get("idempotency-key"),
-                    idempotency_principal_scope=principal_scope,
-                    mutation_request_id=canonical_request_id(
-                        request.headers.get("x-exomem-request-id")
-                    ),
-                    **kwargs,
-                )
+                def invoke_bound() -> Any:
+                    with capabilities.active_surface(surface_descriptor):
+                        return invoke_command(
+                            _cmd,
+                            *injected,
+                            idempotency_key=request.headers.get("idempotency-key"),
+                            idempotency_principal_scope=principal_scope,
+                            mutation_request_id=canonical_request_id(
+                                request.headers.get("x-exomem-request-id")
+                            ),
+                            **kwargs,
+                        )
+
+                result = await run_in_threadpool(invoke_bound)
             except (cli_ops.OpError, ValueError, TypeError) as exc:
                 err = cli_ops.error_dict(exc)
                 return RestJSONResponse(
