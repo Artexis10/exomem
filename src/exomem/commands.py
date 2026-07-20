@@ -1330,7 +1330,11 @@ def op_add(
 
 
 def op_audit(
-    vault_root: Path,categories: list[str] | None = None) -> dict:
+    vault_root: Path,
+    categories: list[str] | None = None,
+    detail: Literal["actionable", "full"] = "actionable",
+    legacy_sample_limit: int = audit_module.DEFAULT_LEGACY_SAMPLE_LIMIT,
+) -> dict:
     """Audit / lint / health-check the Knowledge Base: find orphans, broken wikilinks, supersession gaps, stale unprocessed sources, and stale-review candidates. Read-only.
 
     Returns a structured report Claude can read to propose follow-up
@@ -1375,13 +1379,25 @@ def op_audit(
     Args:
         categories: Optional filter; only run these checks. Each must be
             one of the categories above. Omit to run all.
+        detail: `actionable` (default) groups grandfathered relation debt and
+            prioritizes current work; `full` returns every raw finding.
+        legacy_sample_limit: Number of deterministic legacy-backlog samples in
+            actionable output. Integer from 0 to 50; default 5.
 
     Returns:
-        {findings: [{category, severity, path, detail, proposed_fix}],
-         summary: {category: count}}.
+        Action-first findings, summary, grouped legacy backlog, and explicit
+        presentation/truncation facts. Full detail preserves raw findings.
     """
-    report = audit_module.audit(vault_root, categories=categories)
-    return report.as_dict()
+    audit_module.validate_presentation_controls(detail, legacy_sample_limit)
+    report = audit_module.audit(
+        vault_root,
+        categories=categories,
+        semantic_detail=detail,
+    )
+    return report.as_public_dict(
+        detail=detail,
+        legacy_sample_limit=legacy_sample_limit,
+    )
 
 
 def op_attention(
@@ -3929,6 +3945,8 @@ def op_review_memory(
     path: str | None = None,
     state: str = "open",
     ref: str | None = None,
+    detail: Literal["actionable", "full"] = "actionable",
+    legacy_sample_limit: int = audit_module.DEFAULT_LEGACY_SAMPLE_LIMIT,
 ) -> dict:
     """Review memory health, provenance, drift, or source backlog.
 
@@ -3959,6 +3977,8 @@ def op_review_memory(
         path: Restrict provenance scan to one path.
         state: For attention/activation, open (default), all, snoozed, or dismissed.
         ref: Stable `exomem://review/<id>` reference for item mode.
+        detail: Audit output detail: actionable (default) or full.
+        legacy_sample_limit: Audit legacy-backlog sample count, from 0 to 50.
     """
     if path:
         path = _resolve_memory_identifier(vault_root, path)
@@ -3976,7 +3996,12 @@ def op_review_memory(
             raise ValueError("INVALID_REVIEW: item mode requires `ref`")
         return attention_module.item_by_ref(vault_root, ref).as_dict()
     if mode == "audit":
-        return op_audit(vault_root, categories=categories)
+        return op_audit(
+            vault_root,
+            categories=categories,
+            detail=detail,
+            legacy_sample_limit=legacy_sample_limit,
+        )
     if mode == "stale":
         return op_attention(
             vault_root, categories=["stale_review"], limit=limit, state=state
@@ -4582,6 +4607,8 @@ def op_maintain_memory(
     categories: list[str] | None = None,
     dry_run: bool | None = None,
     rebuild_embeddings: bool = False,
+    detail: Literal["actionable", "full"] = "actionable",
+    legacy_sample_limit: int = audit_module.DEFAULT_LEGACY_SAMPLE_LIMIT,
 ) -> dict:
     """Maintain vault health with explicit write-capable modes.
 
@@ -4599,9 +4626,16 @@ def op_maintain_memory(
             fix/backfill-ids (safety net) and false for reconcile (matches
             `op_reconcile`'s own default). Pass explicitly to override either way.
         rebuild_embeddings: For fix mode, rebuild embeddings when explicitly requested.
+        detail: Audit output detail: actionable (default) or full.
+        legacy_sample_limit: Audit legacy-backlog sample count, from 0 to 50.
     """
     if mode == "audit":
-        return op_audit(vault_root, categories=categories)
+        return op_audit(
+            vault_root,
+            categories=categories,
+            detail=detail,
+            legacy_sample_limit=legacy_sample_limit,
+        )
     if mode == "fix":
         return op_audit_fix(
             vault_root,

@@ -46,6 +46,7 @@ import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any, Literal
 
 import yaml
 
@@ -93,6 +94,9 @@ TYPED_SEMANTIC_CATEGORIES: tuple[str, ...] = (
 _SEMANTIC_AUDIT_CATEGORIES = frozenset(
     {"semantic_contract_drift", *TYPED_SEMANTIC_CATEGORIES}
 )
+_LEGACY_BACKLOG_CODE = "RELATION_DISPOSITION_MISSING"
+DEFAULT_LEGACY_SAMPLE_LIMIT = 5
+MAX_LEGACY_SAMPLE_LIMIT = 50
 
 # Repo-global feedback-loop logs (written by the running service) + the golden
 # query set, used by the relevance_pairs_pending check. Module-level so tests
@@ -164,12 +168,166 @@ class AuditReport:
             value["metadata"] = self.metadata
         return value
 
+    def as_public_dict(
+        self,
+        *,
+        detail: Literal["actionable", "full"] = "actionable",
+        legacy_sample_limit: int = DEFAULT_LEGACY_SAMPLE_LIMIT,
+    ) -> dict:
+        """Project raw diagnostic truth for action-first product consumers."""
+        validate_presentation_controls(detail, legacy_sample_limit)
+        upstream = _semantic_upstream_facts(self.metadata)
+        if detail == "full":
+            value = self.as_dict()
+            value["detail"] = "full"
+            value["presentation"] = {
+                "grouped_legacy_backlog": False,
+                "upstream_findings_complete": upstream["findings_complete"],
+                "upstream_omitted_count": upstream["omitted_count"],
+            }
+            return value
+
+        legacy = _unique_legacy_backlog_findings(self.findings)
+        actionable = sorted(
+            (finding for finding in self.findings if not _is_legacy_backlog(finding)),
+            key=_actionable_finding_sort_key,
+        )
+        value: dict[str, Any] = {
+            "detail": "actionable",
+            "findings": [finding.as_dict() for finding in actionable],
+            "summary": self.summary,
+        }
+        observed_count = upstream["summary"].get(
+            _LEGACY_BACKLOG_CODE, len(legacy)
+        )
+        if observed_count:
+            samples = []
+            for finding in legacy[:legacy_sample_limit]:
+                sample = finding.as_dict()
+                sample["raw_severity"] = sample["severity"]
+                sample["severity"] = "info"
+                sample["presentation"] = "legacy_backlog"
+                samples.append(sample)
+            value["legacy_backlog"] = {
+                "code": _LEGACY_BACKLOG_CODE,
+                "severity": "info",
+                "kind": "legacy_backlog",
+                "observed_count": observed_count,
+                "observed_complete": upstream["observation_complete"],
+                "available_sample_count": len(legacy),
+                "sample_limit": legacy_sample_limit,
+                "sample_omitted_count": max(0, observed_count - len(samples)),
+                "upstream_findings_truncated": not upstream["findings_complete"],
+                "upstream_omitted_count": upstream["omitted_count"],
+                "samples": samples,
+            }
+        value["presentation"] = {
+            "grouped_legacy_backlog": bool(observed_count),
+            "actionable_count": len(actionable),
+            "upstream_findings_complete": upstream["findings_complete"],
+            "upstream_omitted_count": upstream["omitted_count"],
+        }
+        if self.metadata:
+            value["metadata"] = self.metadata
+        return value
+
+
+def validate_presentation_controls(detail: str, legacy_sample_limit: int) -> None:
+    if detail not in {"actionable", "full"}:
+        raise ValueError(
+            "INVALID_AUDIT_DETAIL: detail must be 'actionable' or 'full'"
+        )
+    if (
+        isinstance(legacy_sample_limit, bool)
+        or not isinstance(legacy_sample_limit, int)
+        or not 0 <= legacy_sample_limit <= MAX_LEGACY_SAMPLE_LIMIT
+    ):
+        raise ValueError(
+            "INVALID_AUDIT_SAMPLE_LIMIT: legacy_sample_limit must be an integer "
+            f"from 0 to {MAX_LEGACY_SAMPLE_LIMIT}"
+        )
+
+
+def _semantic_upstream_facts(metadata: dict | None) -> dict[str, Any]:
+    semantic = (metadata or {}).get("semantic_contract_drift") or {}
+    omitted = semantic.get("omitted_counts") or {}
+    truncation = semantic.get("truncation") or {}
+    omitted_count = int(omitted.get("semantic_contract_findings") or 0)
+    return {
+        "summary": dict(semantic.get("semantic_contract_summary") or {}),
+        "omitted_count": omitted_count,
+        "observation_complete": bool(
+            truncation.get("observation_complete", omitted_count == 0)
+        ),
+        "findings_complete": bool(
+            truncation.get("findings_complete", omitted_count == 0)
+        ),
+    }
+
+
+def _is_legacy_backlog(finding: AuditFinding) -> bool:
+    meta = finding.meta or {}
+    return bool(
+        meta.get("code") == _LEGACY_BACKLOG_CODE
+        and meta.get("grandfathered") is True
+    )
+
+
+def _finding_identity(finding: AuditFinding) -> str:
+    meta = finding.meta or {}
+    return json.dumps(
+        meta.get("finding_key") or {},
+        sort_keys=True,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+
+
+def _unique_legacy_backlog_findings(
+    findings: list[AuditFinding],
+) -> list[AuditFinding]:
+    unique: dict[tuple[str, str], AuditFinding] = {}
+    for finding in findings:
+        if _is_legacy_backlog(finding):
+            unique.setdefault((finding.path, _finding_identity(finding)), finding)
+    return sorted(
+        unique.values(),
+        key=lambda finding: (
+            finding.category,
+            finding.path,
+            _finding_identity(finding),
+        ),
+    )
+
+
+def _actionable_finding_sort_key(finding: AuditFinding) -> tuple[str | int, ...]:
+    meta = finding.meta or {}
+    current = meta.get("activation") in {None, "current"}
+    grandfathered = meta.get("grandfathered") is True
+    if current and not grandfathered and finding.severity == "error":
+        priority = 0
+    elif finding.category in {
+        "semantic_malformed_unit",
+        "semantic_category_governance",
+    }:
+        priority = 1
+    else:
+        priority = 2
+    return (
+        priority,
+        finding.category,
+        str(meta.get("code") or ""),
+        finding.path,
+        _finding_identity(finding),
+    )
+
 
 def audit(
     vault_root: Path,
     *,
     categories: list[str] | None = None,
     today: dt.date | None = None,
+    semantic_detail: Literal["actionable", "full"] = "actionable",
 ) -> AuditReport:
     """Scan the KB and return a structured findings report.
 
@@ -225,6 +383,7 @@ def audit(
         semantic_findings, semantic_metadata = _check_semantic_contract_drift(
             vault_root,
             categories=semantic_categories,
+            detail=semantic_detail,
         )
         findings.extend(semantic_findings)
         metadata["semantic_contract_drift"] = semantic_metadata
@@ -248,14 +407,16 @@ def _check_semantic_contract_drift(
     vault_root: Path,
     *,
     categories: set[str] | frozenset[str] | None = None,
+    detail: Literal["actionable", "full"] = "actionable",
 ) -> tuple[list[AuditFinding], dict]:
     """Project the shared bounded posthoc result into audit findings."""
     from . import semantic_writes
 
-    batch = semantic_writes.evaluate_posthoc_batch(
+    posthoc = semantic_writes.evaluate_posthoc_batch(
         vault_root,
         operation="audit",
-    ).as_dict()
+    )
+    batch = posthoc.as_dict() if detail == "actionable" else posthoc.as_dict(detail=detail)
     out: list[AuditFinding] = []
     selected = set(categories or {"semantic_contract_drift"})
     for item in batch["semantic_contract_findings"]:
@@ -308,10 +469,13 @@ def _check_semantic_contract_drift(
                     },
                 )
             )
-    return out, {
+    metadata = {
         "omitted_counts": batch["omitted_counts"],
         "truncation": batch["truncation"],
     }
+    if "semantic_contract_summary" in batch:
+        metadata["semantic_contract_summary"] = batch["semantic_contract_summary"]
+    return out, metadata
 
 
 def semantic_finding_group(item: dict) -> str | None:

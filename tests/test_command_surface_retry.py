@@ -6,6 +6,7 @@ import logging
 import threading
 import time
 import uuid
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -515,6 +516,70 @@ def test_maintain_audit_is_read_only_for_common_invocation_boundary() -> None:
     assert invocation_is_read_only(command, {"mode": "audit"}) is True
     assert invocation_is_read_only(command, {"mode": "fix"}) is False
     assert invocation_is_read_only(command, {"mode": "reconcile"}) is False
+
+
+def test_all_public_audit_routes_are_classified_read_only() -> None:
+    from exomem.commands import (
+        commands_for,
+        invocation_is_read_only,
+        product_commands_for,
+    )
+
+    audit = next(item for item in commands_for("mcp") if item.name == "audit")
+    product = {item.name: item for item in product_commands_for("mcp")}
+
+    assert invocation_is_read_only(audit, {"detail": "full"}) is True
+    assert invocation_is_read_only(
+        product["review_memory"], {"mode": "audit", "detail": "full"}
+    ) is True
+    assert invocation_is_read_only(
+        product["maintain_memory"], {"mode": "audit", "detail": "full"}
+    ) is True
+
+
+def test_all_public_audit_routes_bypass_a_held_mutation_boundary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem.commands import commands_for, product_commands_for
+
+    manager = writer_lease.LeaseManager(
+        writer_lease.LeaseConfig(state_dir=tmp_path / "state"),
+        mutation_timeout_seconds=0.0,
+    )
+    monkeypatch.setattr(writer_lease, "get_manager", lambda: manager)
+    audit = next(item for item in commands_for("mcp") if item.name == "audit")
+    product = {item.name: item for item in product_commands_for("mcp")}
+    calls: list[tuple[str, dict]] = []
+
+    def recording(command):  # noqa: ANN001, ANN202
+        return replace(
+            command,
+            leaf=lambda _vault, **kwargs: calls.append((command.name, kwargs))
+            or command.name,
+        )
+
+    routes = (
+        (recording(audit), {"detail": "full"}),
+        (recording(product["review_memory"]), {"mode": "audit", "detail": "full"}),
+        (recording(product["maintain_memory"]), {"mode": "audit", "detail": "full"}),
+    )
+    vault = tmp_path / "vault"
+    vault.mkdir()
+
+    with manager.mutation_guard(vault):
+        results = [
+            writer_lease.invoke_command(command, vault, **kwargs)
+            for command, kwargs in routes
+        ]
+
+    assert results == ["audit", "review_memory", "maintain_memory"]
+    assert calls == [
+        ("audit", {"detail": "full"}),
+        ("review_memory", {"mode": "audit", "detail": "full"}),
+        ("maintain_memory", {"mode": "audit", "detail": "full"}),
+    ]
+    assert manager.status()["mutation_boundary"] == {"state": "free"}
 
 
 def test_bound_mcp_tool_passes_retry_scope(monkeypatch) -> None:
