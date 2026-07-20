@@ -755,6 +755,61 @@ Pick the strongest option that fits the situation:
 | Want to stop the service but leave the public URL configured | Stop the service (e.g. elevated `Start-Process -Verb RunAs -Wait sc.exe -ArgumentList 'stop','exomem'`). The tunnel stays up but proxies to nothing. |
 | Want a clean uninstall | Stop + remove service, turn off the tunnel/Funnel, delete the connector in claude.ai, delete the GitHub OAuth App. |
 
+## Deploying a new version
+
+**The service interpreter is the source of truth — not the checkout you are standing in.**
+A service can run from a standalone venv while its `AppDirectory` points at a checkout, so
+the checkout looks authoritative and is not. When that happens, `uv sync` in the checkout
+changes nothing the service runs and `/health` keeps reporting the old version through any
+number of clean restarts.
+
+Ask the running server where it came from:
+
+```bash
+curl -s http://127.0.0.1:8765/health
+```
+
+```json
+{"status": "ok", "service": "exomem", "version": "0.25.5",
+ "install_source": "wheel", "revision": null,
+ "torch": "2.13.0", "accelerated": false, "extras": ["embeddings", "media"]}
+```
+
+`install_source` is the field that matters. `wheel` with a null `revision` means the server
+is **not** running a local checkout — upgrade the venv directly. `editable` reports the git
+`revision` it is serving. For full detail including the interpreter path, run
+`exomem install-info` locally; `/health` withholds paths because it is unauthenticated and
+publicly reachable.
+
+The scripted path resolves the interpreter from NSSM, gates on `doctor` and accelerator
+capability, restarts, and verifies the running version:
+
+```powershell
+pwsh -File scripts/deploy.ps1 -Version 0.25.5
+```
+
+It fails rather than reporting success if the running server does not serve the requested
+version after restart.
+
+### The CUDA pin does not survive a PyPI upgrade
+
+`[tool.uv.sources]` pins torch to the `pytorch-cu132` index, but that is **repo
+configuration, not wheel metadata** — it does not travel with the published `exomem` wheel.
+Upgrading a PyPI-backed venv with `uv pip install` therefore resolves torch from default
+PyPI, which on Windows is CPU-only, silently replacing `2.12.0+cu132` with a bare `2.13.0`.
+
+`deploy.ps1` treats that as a hard failure. On a genuinely CPU-only host, pass
+`-AllowCpuTorch`. To restore the pinned wheel:
+
+```powershell
+uv pip install --python <service venv python> --index-url https://download.pytorch.org/whl/cu132 --upgrade torch
+```
+
+Note the difference in meaning between the two signals: `/health` reports **which wheel is
+installed** (a deploy property, read from metadata without importing torch), while `doctor`
+reports **whether a GPU is usable right now**. Conflating them is what let this regression
+hide as one advisory line among passing checks.
+
 ## Restarting the service
 
 Remote Streamable HTTP runs statelessly: authenticated tool calls do not rely
