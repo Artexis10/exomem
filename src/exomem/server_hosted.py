@@ -52,6 +52,20 @@ _MAX_UPLOAD_FIELDS = 8
 _MAX_UPLOAD_METADATA_BYTES = 32 * 1024
 _MAX_UPLOAD_SHORT_FIELD_BYTES = 512
 _DOWNLOAD_CHUNK_BYTES = 64 * 1024
+_HOSTED_MUTATION_DETAIL_FIELDS = (
+    "status",
+    "committed",
+    "retry_after_ms",
+    "request_id",
+    "receipt_id",
+    "idempotency_key",
+)
+_HOSTED_MUTATION_ERROR_SHAPES = {
+    "MUTATION_BUSY": ("retryable", False),
+    "MUTATION_ACKNOWLEDGEMENT_PENDING": ("uncertain", None),
+    "MUTATION_COMMITTED_ACKNOWLEDGEMENT_UNCERTAIN": ("committed", True),
+}
+_RECEIPT_TAG = re.compile(r"[0-9a-f]{16}")
 
 _RESERVED_FIELDS = frozenset(
     {
@@ -230,6 +244,7 @@ def _error_response(
     started: float,
     request_id: str | None = None,
     status: int | None = None,
+    details: Mapping[str, Any] | None = None,
 ) -> HostedJSONResponse:
     _trace(
         config=config,
@@ -239,17 +254,59 @@ def _error_response(
         code=code,
         started=started,
     )
+    error = {
+        "code": code,
+        "message": _message_for(code),
+        "remediation": None,
+    }
+    if details is not None:
+        error.update(
+            {
+                field: details[field]
+                for field in _HOSTED_MUTATION_DETAIL_FIELDS
+                if field in details
+            }
+        )
     return HostedJSONResponse(
-        cli_ops.envelope(
-            False,
-            error={
-                "code": code,
-                "message": _message_for(code),
-                "remediation": None,
-            },
-        ),
+        cli_ops.envelope(False, error=error),
         status_code=_status_for(code) if status is None else status,
     )
+
+
+def _hosted_mutation_error_details(
+    error: Mapping[str, Any],
+    *,
+    context: gateway.TrustedGatewayContext,
+) -> dict[str, Any]:
+    expected_shape = _HOSTED_MUTATION_ERROR_SHAPES.get(error.get("code"))
+    if expected_shape is None:
+        return {}
+    expected_status, expected_committed = expected_shape
+    details: dict[str, Any] = {}
+    if error.get("status") == expected_status:
+        details["status"] = expected_status
+    if "committed" in error and error["committed"] is expected_committed:
+        details["committed"] = expected_committed
+    retry_after_ms = error.get("retry_after_ms")
+    if (
+        error.get("code") == "MUTATION_BUSY"
+        and type(retry_after_ms) is int
+        and retry_after_ms >= 0
+    ):
+        details["retry_after_ms"] = retry_after_ms
+    if error.get("request_id") == context.request_id:
+        details["request_id"] = context.request_id
+    receipt_id = error.get("receipt_id")
+    if receipt_id is None and "receipt_id" in error:
+        details["receipt_id"] = None
+    elif isinstance(receipt_id, str) and _RECEIPT_TAG.fullmatch(receipt_id):
+        details["receipt_id"] = receipt_id
+    if (
+        context.idempotency_key is not None
+        and error.get("idempotency_key") == context.idempotency_key
+    ):
+        details["idempotency_key"] = context.idempotency_key
+    return details
 
 
 def _success_response(
@@ -846,6 +903,11 @@ def register_hosted_routes(
                 operation=operation,
                 request_id=context.request_id if context else None,
                 started=started,
+                details=(
+                    _hosted_mutation_error_details(error, context=context)
+                    if context is not None
+                    else None
+                ),
             )
         assert context is not None
         return _success_response(

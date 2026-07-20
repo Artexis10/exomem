@@ -181,6 +181,52 @@ class WriterBackedInvoker:
         )
 
 
+class MutationErrorInvoker:
+    def __init__(
+        self,
+        code: str,
+        *,
+        status: str,
+        committed: bool | None,
+        retry_after_ms: int | None = None,
+    ) -> None:
+        self.code = code
+        self.status = status
+        self.committed = committed
+        self.retry_after_ms = retry_after_ms
+
+    def __call__(
+        self,
+        _command,
+        *_injected,
+        idempotency_key: str | None = None,
+        public_idempotency_key: str | None = None,
+        mutation_request_id: str | None = None,
+        **_kwargs,
+    ) -> Any:
+        details: dict[str, Any] = {
+            "status": self.status,
+            "committed": self.committed,
+            "request_id": mutation_request_id,
+            "receipt_id": "0123456789abcdef",
+            "idempotency_key": (
+                public_idempotency_key
+                if public_idempotency_key is not None
+                else "hosted:" + "f" * 64
+            ),
+            "internal_idempotency_key": idempotency_key,
+            "holder": "private-holder-sentinel",
+            "arbitrary_exception_detail": "private-detail-sentinel",
+        }
+        if self.retry_after_ms is not None:
+            details["retry_after_ms"] = self.retry_after_ms
+        raise cli_ops.OpError(
+            self.code,
+            "private mutation exception sentinel",
+            details=details,
+        )
+
+
 def _cell(
     tmp_path: Path,
     *,
@@ -592,6 +638,81 @@ def test_hosted_terminal_exposes_public_key_and_never_internal_scope(
     assert "hosted:" not in without_key.text
     assert no_key_invoker.calls[0]["idempotency_key"] is None
     assert no_key_invoker.calls[0]["public_idempotency_key"] is None
+
+
+def test_hosted_busy_error_preserves_only_allowlisted_public_identity(
+    tmp_path: Path,
+) -> None:
+    public_key = "visible-hosted-busy-key"
+    client, config, _lifecycle, _invoker = _cell(
+        tmp_path,
+        cell_id="cell-public-busy-error",
+        credential="public-busy-service-credential-0001",
+        invoker=MutationErrorInvoker(
+            "MUTATION_BUSY",
+            status="retryable",
+            committed=False,
+            retry_after_ms=750,
+        ),
+    )
+
+    response = client.post(
+        "/private/exomem/v1/command/remember",
+        headers=_headers(config, idempotency_key=public_key),
+        json=_remember_body("HOSTED-BUSY-ERROR"),
+    )
+
+    assert response.status_code == 409, response.text
+    assert response.json()["error"] == {
+        "code": "MUTATION_BUSY",
+        "message": "hosted command failed",
+        "remediation": None,
+        "status": "retryable",
+        "committed": False,
+        "retry_after_ms": 750,
+        "request_id": DEFAULT_REQUEST_ID,
+        "receipt_id": "0123456789abcdef",
+        "idempotency_key": public_key,
+    }
+    assert "hosted:" not in response.text
+    assert "private-holder-sentinel" not in response.text
+    assert "private-detail-sentinel" not in response.text
+
+
+def test_hosted_pending_error_omits_absent_public_idempotency_key(
+    tmp_path: Path,
+) -> None:
+    client, config, _lifecycle, _invoker = _cell(
+        tmp_path,
+        cell_id="cell-no-public-pending-error",
+        credential="no-public-pending-service-credential-0001",
+        invoker=MutationErrorInvoker(
+            "MUTATION_ACKNOWLEDGEMENT_PENDING",
+            status="uncertain",
+            committed=None,
+        ),
+    )
+
+    response = client.post(
+        "/private/exomem/v1/command/remember",
+        headers=_headers(config),
+        json=_remember_body("HOSTED-PENDING-ERROR"),
+    )
+
+    assert response.status_code == 409, response.text
+    assert response.json()["error"] == {
+        "code": "MUTATION_ACKNOWLEDGEMENT_PENDING",
+        "message": "hosted command failed",
+        "remediation": None,
+        "status": "uncertain",
+        "committed": None,
+        "request_id": DEFAULT_REQUEST_ID,
+        "receipt_id": "0123456789abcdef",
+    }
+    assert "idempotency_key" not in response.json()["error"]
+    assert "hosted:" not in response.text
+    assert "private-holder-sentinel" not in response.text
+    assert "private-detail-sentinel" not in response.text
 
 
 def test_lifecycle_routes_gate_reads_writes_and_sealing(tmp_path: Path) -> None:

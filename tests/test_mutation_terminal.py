@@ -187,6 +187,30 @@ def test_explicit_multi_path_restore_and_safe_fallback_adapters(raw, expected) -
                 ]
             },
         ),
+        (
+            {
+                "compile_plan": {
+                    "copied_sources": [
+                        {
+                            "source_path": (
+                                "Knowledge Base/Sources/Imported/compiled-one.md"
+                            )
+                        },
+                        {
+                            "source_path": (
+                                "Knowledge Base/Sources/Imported/compiled-two.md"
+                            )
+                        },
+                    ]
+                }
+            },
+            {
+                "paths": [
+                    "Knowledge Base/Sources/Imported/compiled-one.md",
+                    "Knowledge Base/Sources/Imported/compiled-two.md",
+                ]
+            },
+        ),
     ],
 )
 def test_adopt_write_results_have_explicit_compact_paths(raw, expected) -> None:
