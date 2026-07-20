@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 import os
 import time
+from copy import copy
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -19,7 +20,7 @@ from fastmcp.server.middleware.middleware import Middleware, MiddlewareContext
 from starlette.middleware import Middleware as ASGIMiddleware
 
 from . import commands as commands_module
-from . import guards, multi_edit
+from . import edit_operations, guards, multi_edit
 from .server_assets import (
     register_asset_routes,
     register_oauth_metadata_route,
@@ -82,6 +83,8 @@ class CallTraceMiddleware(Middleware):
         from .command_surface import mcp_request_context, mcp_request_id
 
         tool_name = _extract_tool_name(context.message)
+        if tool_name == "edit_memory":
+            context = _translated_edit_context(context)
         request_id = mcp_request_id()
         with mcp_request_context(request_id):
             guarded_fields = _GUARDED_WRITE_FIELDS.get(tool_name)
@@ -89,7 +92,21 @@ class CallTraceMiddleware(Middleware):
                 args = _extract_tool_args(context.message)
                 for field in guarded_fields:
                     guards.guard_text_content(args.get(field), tool=tool_name, field=field)
-                if tool_name in ("edit", "edit_memory"):
+                if tool_name == "edit_memory":
+                    operation = args.get("operation") or {}
+                    for field in ("new_body", "new_string"):
+                        guards.guard_text_content(
+                            operation.get(field), tool=tool_name, field=f"operation.{field}"
+                        )
+                    batch_items = operation.get("edits") or []
+                    for item in batch_items:
+                        normalized = multi_edit.normalize_edit_item(item)
+                        guards.guard_text_content(
+                            normalized.get("new_string"),
+                            tool=tool_name,
+                            field="operation.edits[].new_string",
+                        )
+                elif tool_name == "edit":
                     for item in args.get("edits") or []:
                         normalized = multi_edit.normalize_edit_item(item)
                         guards.guard_text_content(
@@ -125,6 +142,34 @@ class CallTraceMiddleware(Middleware):
                     f"err={type(exc).__name__}{extras}"
                 )
                 raise
+
+
+def _translated_edit_context(context: MiddlewareContext) -> MiddlewareContext:
+    """Copy one edit call with legacy arguments translated before validation."""
+    arguments = _extract_tool_args(context.message)
+    translated = edit_operations.normalize_edit_surface_arguments(arguments)
+    message = context.message
+    if isinstance(message, dict):
+        new_message = dict(message)
+        params = dict(new_message.get("params") or {})
+        params["arguments"] = translated
+        new_message["params"] = params
+    elif hasattr(message, "model_copy"):
+        if hasattr(message, "params"):
+            params = message.params.model_copy(update={"arguments": translated})
+            new_message = message.model_copy(update={"params": params})
+        else:
+            new_message = message.model_copy(update={"arguments": translated})
+    else:
+        new_message = copy(message)
+        params = copy(new_message.params)
+        params.arguments = translated
+        new_message.params = params
+    if hasattr(context, "copy"):
+        return context.copy(message=new_message)
+    new_context = copy(context)
+    new_context.message = new_message
+    return new_context
 
 
 def _extract_tool_name(message) -> str:

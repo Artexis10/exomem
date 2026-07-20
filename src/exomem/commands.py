@@ -47,6 +47,7 @@ from . import create_file as create_file_module
 from . import delete_directory as delete_directory_module
 from . import delete_file as delete_file_module
 from . import edit as edit_module
+from . import edit_operations as edit_operations_module
 from . import entity_candidates as entity_candidates_module
 from . import entity_types as entity_types_module
 from . import epistemic_graph as epistemic_graph_module
@@ -3381,26 +3382,8 @@ def op_edit_memory(
     vault_root: Path,
     path: str,
     why: str,
-    new_body: str | None = None,
-    tags: list[str] | None = None,
-    old_string: str | None = None,
-    new_string: str | None = None,
-    replace_all: bool = False,
-    heading: str | None = None,
-    section_position: str = "append",
-    edits: list[multi_edit_module.EditItem] | None = None,
-    row_key: str | None = None,
-    take: str | None = None,
-    overwrite: bool = False,
-    field: str | None = None,
-    value: str | int | float | bool | list | dict | None = None,
-    allow_curated: bool = False,
-    expected_hash: str | None = None,
-    validate_only: bool = False,
-    transition_token: str | None = None,
-    relation_disposition: str | None = None,
-    relation_review_hash: str | None = None,
-    relation_review_reason: str | None = None,
+    operation: edit_operations_module.EditOperation = None,  # type: ignore[assignment]
+    **legacy: Any,
 ) -> dict:
     """Edit an existing memory page with an auditable reason.
 
@@ -3411,52 +3394,18 @@ def op_edit_memory(
     Args:
         path: Page to edit.
         why: One-line rationale recorded in the log.
-        new_body: Replace the whole markdown body.
-        tags: Replace tags.
-        old_string: Exact body snippet to replace.
-        new_string: Replacement text.
-        replace_all: Replace every occurrence of old_string.
-        heading: Section heading for section-targeted edits.
-        section_position: append, prepend, or replace.
-        edits: Batch edits, each with old_string/new_string/replace_all.
-        row_key: Opinion-row key to fill.
-        take: Opinion-row text.
-        overwrite: Allow replacing an existing take.
-        field: Frontmatter field to set.
-        value: New frontmatter value.
-        allow_curated: Permit frontmatter patch under curated trees.
-        expected_hash: Refuse write if content changed since read.
-        validate_only: Preview a surgical match without writing.
-        transition_token: Exact semantic transition token returned by validate_only.
-        relation_disposition: Reviewed relation outcome for the commit.
-        relation_review_hash: Transition hash covered by reviewed-none.
-        relation_review_reason: Audit reason for reviewed-none.
+        operation: Required nested edit selected by `kind`. The seven supported
+            kinds expose only fields their underlying edit leaf enforces.
+
+    The previous flat keyword arguments remain accepted by direct Python/runtime
+    callers for one compatibility release, but are deprecated and intentionally
+    absent from public discovery schemas.
     """
-    return op_edit(
-        vault_root,
-        path=path,
-        why=why,
-        new_body=new_body,
-        tags=tags,
-        old_string=old_string,
-        new_string=new_string,
-        replace_all=replace_all,
-        heading=heading,
-        section_position=section_position,
-        edits=edits,
-        row_key=row_key,
-        take=take,
-        overwrite=overwrite,
-        field=field,
-        value=value,
-        allow_curated=allow_curated,
-        expected_hash=expected_hash,
-        validate_only=validate_only,
-        transition_token=transition_token,
-        relation_disposition=relation_disposition,
-        relation_review_hash=relation_review_hash,
-        relation_review_reason=relation_review_reason,
-    )
+    arguments: dict[str, Any] = {"path": path, "why": why, **legacy}
+    if operation is not None:
+        arguments["operation"] = operation
+    normalized = edit_operations_module.normalize_edit_arguments(arguments)
+    return op_edit(vault_root, **normalized)
 
 
 def op_observe_memory(
@@ -5204,7 +5153,16 @@ def invocation_is_read_only(command: Command, kwargs: dict[str, Any]) -> bool:
         mode = _resolved_invocation_selector(command, kwargs, "mode")
         return mode == "audit"
     if command.name == "edit_memory":
-        return kwargs.get("validate_only") is True
+        if kwargs.get("validate_only") is True:
+            return True
+        operation = kwargs.get("operation")
+        if isinstance(operation, dict):
+            return (
+                operation.get("kind")
+                in {"replace_string", "batch_replace", "patch_frontmatter"}
+                and operation.get("validate_only") is True
+            )
+        return False
     return False
 
 
@@ -5696,6 +5654,19 @@ def _build_product_commands() -> tuple[Command, ...]:
         skip = 2 if needs_schema else 1
         desc = leaf.__doc__ or ""
         params = _derive_params(leaf, skip=skip, positional=positional)
+        if name == "edit_memory":
+            params = tuple(
+                Param(
+                    name=param.name,
+                    type=param.type,
+                    required=True if param.name == "operation" else param.required,
+                    help=param.help,
+                    cli_positional=param.cli_positional,
+                    choices=param.choices,
+                )
+                for param in params
+                if param.name in {"path", "why", "operation"}
+            )
         if writes:
             params = (
                 *params,

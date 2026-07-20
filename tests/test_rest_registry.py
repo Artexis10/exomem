@@ -514,12 +514,128 @@ def test_blob_guard_nested_edits_preserved(vault, monkeypatch: pytest.MonkeyPatc
         json={
             "path": "Knowledge Base/Notes/Insights/x.md",
             "why": "nested blob",
-            "edits": [{"old_string": "a", "new_string": blob}],
+            "operation": {
+                "kind": "batch_replace",
+                "edits": [{"old_string": "a", "new_string": blob}],
+            },
         },
         headers=_auth(),
     )
     assert r.status_code == 400, r.text
     assert r.json()["error"]["code"] == "BINARY_BLOB_REJECTED"
+
+
+def test_edit_memory_rest_and_openapi_use_discriminated_primary_shape(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client = _client(vault, monkeypatch, EXOMEM_REST_API_KEY="sekret")
+    schema = client.get("/api/openapi.json").json()["paths"]["/api/edit_memory"]["post"][
+        "requestBody"
+    ]["content"]["application/json"]["schema"]
+
+    assert set(schema["properties"]) == {
+        "path",
+        "why",
+        "operation",
+        "response_detail",
+    }
+    assert set(schema["required"]) == {"path", "why", "operation"}
+    assert schema["additionalProperties"] is False
+    operation = schema["properties"]["operation"]
+    assert operation["discriminator"]["propertyName"] == "kind"
+    branches = {
+        branch["properties"]["kind"]["const"]: branch
+        for branch in operation["oneOf"]
+    }
+    assert set(branches) == {
+        "replace_body",
+        "replace_tags",
+        "replace_string",
+        "batch_replace",
+        "edit_section",
+        "patch_frontmatter",
+        "fill_row",
+    }
+    assert set(branches["fill_row"]["properties"]) == {
+        "kind",
+        "row_key",
+        "take",
+        "overwrite",
+    }
+    assert "expected_hash" not in branches["patch_frontmatter"]["properties"]
+
+
+def test_edit_memory_rest_accepts_primary_and_legacy_runtime_shapes(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    primary_relative = "Knowledge Base/Notes/Insights/rest-edit-primary.md"
+    legacy_relative = "Knowledge Base/Notes/Insights/rest-edit-legacy.md"
+    for relative in (primary_relative, legacy_relative):
+        (vault / relative).write_text(
+            "---\ntype: insight\nstatus: active\ncreated: 2026-07-20\nupdated: 2026-07-20\n---\n\nBefore\n",
+            encoding="utf-8",
+        )
+    client = _client(vault, monkeypatch, EXOMEM_REST_API_KEY="sekret")
+
+    primary = client.post(
+        "/api/edit_memory",
+        json={
+            "path": primary_relative,
+            "why": "primary nested edit",
+            "operation": {
+                "kind": "replace_string",
+                "old_string": "Before",
+                "new_string": "After",
+            },
+            "response_detail": "full",
+        },
+        headers=_auth(),
+    )
+    with pytest.warns(DeprecationWarning):
+        legacy = client.post(
+            "/api/edit_memory",
+            json={
+                "path": legacy_relative,
+                "why": "legacy flat edit",
+                "old_string": "Before",
+                "new_string": "After",
+                "response_detail": "full",
+            },
+            headers=_auth(),
+        )
+
+    assert primary.status_code == 200, primary.text
+    assert legacy.status_code == 200, legacy.text
+    assert primary.json()["data"]["diagnostics"]["path"] == primary_relative
+    assert legacy.json()["data"]["diagnostics"]["path"] == legacy_relative
+    assert "After" in (vault / primary_relative).read_text(encoding="utf-8")
+    assert "After" in (vault / legacy_relative).read_text(encoding="utf-8")
+
+
+def test_invalid_rest_edit_fails_before_shared_invocation(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        writer_lease,
+        "invoke_command",
+        lambda *_args, **_kwargs: pytest.fail("invalid edit reached invocation"),
+    )
+    client = _client(vault, monkeypatch, EXOMEM_REST_API_KEY="sekret")
+
+    response = client.post(
+        "/api/edit_memory",
+        json={
+            "path": "Knowledge Base/Notes/Insights/example.md",
+            "why": "invalid",
+            "operation": {"kind": "fill_row", "row_key": "x", "take": "y"},
+            "expected_hash": "not-supported",
+        },
+        headers=_auth(),
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "INVALID_EDIT"
+    assert "cannot combine" in response.json()["error"]["message"]
 
 
 def test_openapi_lists_real_product_params(vault, monkeypatch: pytest.MonkeyPatch) -> None:

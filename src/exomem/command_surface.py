@@ -13,7 +13,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 
 from mcp.types import ToolAnnotations
-from pydantic import Field
+from pydantic import Field, WithJsonSchema
 
 from .mutation_terminal import ResponseDetail
 
@@ -151,6 +151,23 @@ def bind_vault(
         )
         for p in visible
     ]
+    if command is not None and command.name == "edit_memory":
+        from .edit_operations import EditOperation, public_edit_operation_schema
+
+        visible = [
+            parameter.replace(
+                default=inspect.Parameter.empty,
+                annotation=typing.Annotated[
+                    EditOperation,
+                    WithJsonSchema(public_edit_operation_schema()),
+                    Field(description=help_text.get("operation", "")),
+                ],
+            )
+            if parameter.name == "operation"
+            else parameter
+            for parameter in visible
+            if parameter.kind is not inspect.Parameter.VAR_KEYWORD
+        ]
     if command is not None and getattr(command, "response_detail", False):
         response_detail = inspect.Parameter(
             "response_detail",

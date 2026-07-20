@@ -1541,6 +1541,9 @@ def _simple_maintain_main(argv: list[str]) -> int:
 # repeatable `--field key=value`, so the CLI stays clean.
 _FIELD_ESCAPE = frozenset({"remember", "replace_memory"})
 _FIELD_ESCAPE_VISIBLE_PARAMS = frozenset({"slug", "response_detail"})
+_LEGACY_EDIT_BOOL_FIELDS = frozenset(
+    {"replace_all", "overwrite", "allow_curated", "validate_only"}
+)
 
 
 def _expose_tier2() -> bool:
@@ -1607,7 +1610,11 @@ def _add_command_args(sp: argparse.ArgumentParser, cmd) -> None:
                 _flag(p.name),
                 dest=p.name,
                 default=None,
-                required=p.required and not p.cli_positional,
+                required=(
+                    p.required
+                    and not p.cli_positional
+                    and not (cmd.name == "edit_memory" and p.name == "operation")
+                ),
                 metavar="{" + ",".join(p.choices) + "}" if p.choices else None,
                 help=p.help or None,
             )
@@ -1619,6 +1626,33 @@ def _add_command_args(sp: argparse.ArgumentParser, cmd) -> None:
             metavar="KEY=VALUE",
             help="set any other parameter (repeatable), e.g. --field severity=critical",
         )
+    if cmd.name == "edit_memory":
+        from .edit_operations import LEGACY_EDIT_FIELDS
+
+        for name in sorted(LEGACY_EDIT_FIELDS):
+            if name in _LEGACY_EDIT_BOOL_FIELDS:
+                sp.add_argument(
+                    _flag(name),
+                    dest=name,
+                    action=argparse.BooleanOptionalAction,
+                    default=None,
+                    help=argparse.SUPPRESS,
+                )
+            elif name == "tags":
+                sp.add_argument(
+                    _flag(name),
+                    dest=name,
+                    action="append",
+                    default=None,
+                    help=argparse.SUPPRESS,
+                )
+            else:
+                sp.add_argument(
+                    _flag(name),
+                    dest=name,
+                    default=None,
+                    help=argparse.SUPPRESS,
+                )
 
 
 def _collect_raw_args(
@@ -1644,7 +1678,49 @@ def _collect_raw_args(
                 # every other usage error (a bare `raise SystemExit(str)` is exit 1).
                 parser.error(f"--field expects KEY=VALUE, got {item!r}")
             raw[key.strip()] = value
+    if cmd.name == "edit_memory":
+        from .edit_operations import LEGACY_EDIT_FIELDS
+
+        for name in LEGACY_EDIT_FIELDS:
+            value = getattr(args, name, None)
+            if value is not None:
+                raw[name] = value
     return raw
+
+
+def _normalize_cli_edit(cmd, raw: dict, cli_ops) -> dict:  # noqa: ANN001
+    from . import edit_operations
+
+    primary_names = {parameter.name for parameter in cmd.params}
+    primary_raw = {name: value for name, value in raw.items() if name in primary_names}
+    legacy = {name: value for name, value in raw.items() if name not in primary_names}
+    primary = cli_ops.coerce(
+        cmd.params,
+        primary_raw,
+        guarded_fields=cmd.guarded_fields,
+        tool=cmd.name,
+        cli=True,
+    )
+    if isinstance(legacy.get("edits"), str):
+        try:
+            legacy["edits"] = json.loads(legacy["edits"])
+        except json.JSONDecodeError as error:
+            raise cli_ops.OpError(
+                "BAD_JSON", f"`edits` must be valid JSON: {error}"
+            ) from None
+    if isinstance(legacy.get("value"), str):
+        try:
+            legacy["value"] = json.loads(legacy["value"])
+        except json.JSONDecodeError:
+            pass
+    normalized = edit_operations.normalize_edit_surface_arguments({**primary, **legacy})
+    return cli_ops.coerce(
+        cmd.params,
+        normalized,
+        guarded_fields=cmd.guarded_fields,
+        tool=cmd.name,
+        cli=True,
+    )
 
 
 def _print_adopt_human(result: dict) -> None:
@@ -1825,9 +1901,12 @@ def _core_op_main(argv: list[str]) -> int:
 
     try:
         raw = _collect_raw_args(cmd, args, parser)
-        kwargs = cli_ops.coerce(
-            cmd.params, raw, guarded_fields=cmd.guarded_fields, tool=cmd.name, cli=True
-        )
+        if cmd.name == "edit_memory":
+            kwargs = _normalize_cli_edit(cmd, raw, cli_ops)
+        else:
+            kwargs = cli_ops.coerce(
+                cmd.params, raw, guarded_fields=cmd.guarded_fields, tool=cmd.name, cli=True
+            )
         vault_root = _resolve_core_op_vault(cmd.name, kwargs, resolve_vault)
         if cmd.needs_schema:
             injected = (vault_root, schema_module.load_source_schema(vault_root))

@@ -19,7 +19,6 @@ from fastmcp import FastMCP
 
 from exomem import (
     cli_ops,
-    commands as commands_module,
     find_corpus,
     hosted_portability,
     hosted_runtime,
@@ -29,6 +28,9 @@ from exomem import (
     server,
     server_runtime,
     writer_lease,
+)
+from exomem import (
+    commands as commands_module,
 )
 from exomem import hosted_gateway as gateway
 from exomem.hosted_runtime import (
@@ -334,6 +336,88 @@ def test_private_routes_use_the_injected_dynamic_authority_for_every_request(
     }
     assert rejected.status_code == 401
     assert rejected.json()["error"]["code"] == "HOSTED_UNAUTHORIZED"
+
+
+def test_hosted_edit_normalizes_primary_and_legacy_before_invocation(
+    tmp_path: Path,
+) -> None:
+    calls: list[dict[str, Any]] = []
+
+    def capture(command, *injected, **kwargs):  # noqa: ANN001, ARG001
+        calls.append(kwargs)
+        return {"path": kwargs["path"]}
+
+    client, config, _lifecycle, _invoker = _cell(
+        tmp_path,
+        cell_id="cell-edit-normalization",
+        credential="edit-normalization-service-credential-0001",
+        invoker=capture,
+    )
+    headers = _headers(config)
+    common = {
+        "path": "Knowledge Base/Notes/Insights/example.md",
+        "why": "hosted edit",
+    }
+
+    primary = client.post(
+        "/private/exomem/v1/command/edit_memory",
+        headers=headers,
+        json={
+            **common,
+            "operation": {
+                "kind": "replace_string",
+                "old_string": "Before",
+                "new_string": "After",
+            },
+        },
+    )
+    with pytest.warns(DeprecationWarning):
+        legacy = client.post(
+            "/private/exomem/v1/command/edit_memory",
+            headers=headers,
+            json={**common, "old_string": "Before", "new_string": "After"},
+        )
+
+    assert primary.status_code == 200, primary.text
+    assert legacy.status_code == 200, legacy.text
+    for call in calls:
+        assert call["operation"] == {
+            "kind": "replace_string",
+            "old_string": "Before",
+            "new_string": "After",
+            "replace_all": False,
+            "validate_only": False,
+        }
+        assert not ({"old_string", "new_string"} & set(call))
+
+
+def test_invalid_hosted_edit_fails_before_invoker(tmp_path: Path) -> None:
+    calls: list[dict[str, Any]] = []
+
+    def capture(command, *injected, **kwargs):  # noqa: ANN001, ARG001
+        calls.append(kwargs)
+        return {}
+
+    client, config, _lifecycle, _invoker = _cell(
+        tmp_path,
+        cell_id="cell-invalid-edit",
+        credential="invalid-edit-service-credential-0001",
+        invoker=capture,
+    )
+    response = client.post(
+        "/private/exomem/v1/command/edit_memory",
+        headers=_headers(config),
+        json={
+            "path": "Knowledge Base/Notes/Insights/example.md",
+            "why": "invalid",
+            "operation": {"kind": "fill_row", "row_key": "x", "take": "y"},
+            "validate_only": True,
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "INVALID_EDIT"
+    assert calls == []
 
 
 def _headers(

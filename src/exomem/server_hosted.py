@@ -28,6 +28,7 @@ from starlette.responses import JSONResponse, Response, StreamingResponse
 from . import (
     __version__,
     cli_ops,
+    edit_operations,
     hosted_portability,
     hosted_runtime,
     hosted_runtime_temp,
@@ -845,6 +846,8 @@ def register_hosted_routes(
                     "hosted imports must use the gateway lifecycle flow",
                 )
             operation = command.name
+            if command.name == "edit_memory":
+                body = edit_operations.normalize_edit_surface_arguments(body)
             kwargs = cli_ops.coerce(
                 command.params,
                 body,

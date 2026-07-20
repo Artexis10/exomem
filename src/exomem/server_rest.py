@@ -16,7 +16,7 @@ from starlette.concurrency import run_in_threadpool
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
-from . import cf_access, cli_ops, upload_tokens
+from . import cf_access, cli_ops, edit_operations, upload_tokens
 from . import commands as commands_module
 from .command_surface import canonical_request_id
 from .server_transfer import TransferConfig
@@ -244,6 +244,8 @@ def register_rest_facade(
             if body is None:
                 return _rest_err("INVALID_BODY", "request body must be a JSON object", 400)
             try:
+                if _cmd.name == "edit_memory":
+                    body = edit_operations.normalize_edit_surface_arguments(body)
                 kwargs = cli_ops.coerce(
                     _cmd.params, body, guarded_fields=_cmd.guarded_fields, tool=_cmd.name
                 )
@@ -292,7 +294,11 @@ def register_rest_facade(
                 properties[prm.name] = schema_obj
                 if prm.required:
                     required.append(prm.name)
+            if cmd.name == "edit_memory":
+                properties["operation"] = edit_operations.public_edit_operation_schema()
             request_schema: dict = {"type": "object", "properties": properties}
+            if cmd.name == "edit_memory":
+                request_schema["additionalProperties"] = False
             if required:
                 request_schema["required"] = required
             summary = (cmd.description or cmd.name).strip().splitlines()[0]

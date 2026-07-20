@@ -1205,6 +1205,11 @@ def invoke_command(
 ) -> Any:
     from .commands import invocation_is_read_only
 
+    if command.name == "edit_memory":
+        from .edit_operations import normalize_edit_surface_arguments
+
+        kwargs = normalize_edit_surface_arguments(kwargs)
+
     return get_manager().invoke(
         command,
         injected,

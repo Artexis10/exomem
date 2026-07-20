@@ -432,16 +432,138 @@ def test_adopt_human_renderer_prints_compact_terminal_decisively(capsys) -> None
 
 
 def test_edit_memory_value_plain_string(vault: Path, capsys) -> None:
-    code, out, err = _run(
-        ["edit_memory", _INSIGHT, "--why", "set domain", "--field", "domain",
-         "--value", "retrieval", "--response-detail", "full", "--json"],
-        capsys,
-    )
+    with pytest.warns(DeprecationWarning):
+        code, out, err = _run(
+            [
+                "edit_memory",
+                _INSIGHT,
+                "--why",
+                "set domain",
+                "--field",
+                "domain",
+                "--value",
+                "retrieval",
+                "--response-detail",
+                "full",
+                "--json",
+            ],
+            capsys,
+        )
     assert code == 0, err
     payload = json.loads(out.strip().splitlines()[-1])
     assert payload["success"] is True
     assert payload["data"]["diagnostics"]["new_value"] == "retrieval"
     assert "domain: retrieval" in (vault / _INSIGHT).read_text(encoding="utf-8")
+
+
+def test_edit_memory_cli_help_advertises_operation_and_hides_legacy_flags(capsys) -> None:
+    code, out, err = _run(["edit_memory", "--help"], capsys)
+
+    assert code == 0, err
+    assert "--operation" in out
+    for legacy in ("--new-body", "--old-string", "--edits", "--row-key", "--field"):
+        assert legacy not in out
+
+
+def test_edit_memory_cli_primary_operation_is_normalized_before_invocation(
+    vault: Path, capsys, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[dict] = []
+
+    def fake_invoke(command, *injected, **kwargs):  # noqa: ANN001, ARG001
+        calls.append(kwargs)
+        return {"ok": True, "status": "committed", "mutated": True, "paths": []}
+
+    monkeypatch.setattr(writer_lease, "invoke_command", fake_invoke)
+    code, out, err = _run(
+        [
+            "edit_memory",
+            _INSIGHT,
+            "--why",
+            "primary operation",
+            "--operation",
+            '{"kind":"replace_string","old_string":"Before","new_string":"After"}',
+            "--json",
+        ],
+        capsys,
+    )
+
+    assert code == 0, f"{err}\n{out}"
+    assert len(calls) == 1
+    assert calls[0].pop("idempotency_key") is None
+    assert calls == [
+        {
+            "path": _INSIGHT,
+            "why": "primary operation",
+            "operation": {
+                "kind": "replace_string",
+                "old_string": "Before",
+                "new_string": "After",
+                "replace_all": False,
+                "validate_only": False,
+            },
+        }
+    ]
+
+
+def test_edit_memory_cli_legacy_frontmatter_value_keeps_json_coercion(
+    vault: Path, capsys, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[dict] = []
+
+    def fake_invoke(command, *injected, **kwargs):  # noqa: ANN001, ARG001
+        calls.append(kwargs)
+        return {"ok": True, "status": "committed", "mutated": True, "paths": []}
+
+    monkeypatch.setattr(writer_lease, "invoke_command", fake_invoke)
+    with pytest.warns(DeprecationWarning):
+        code, out, err = _run(
+            [
+                "edit_memory",
+                _INSIGHT,
+                "--why",
+                "legacy frontmatter patch",
+                "--field",
+                "review_count",
+                "--value",
+                "5",
+                "--json",
+            ],
+            capsys,
+        )
+
+    assert code == 0, f"{err}\n{out}"
+    assert calls[0]["operation"] == {
+        "kind": "patch_frontmatter",
+        "field": "review_count",
+        "value": 5,
+        "allow_curated": False,
+        "validate_only": False,
+    }
+
+
+def test_edit_memory_cli_rejects_primary_and_hidden_legacy_flags_together(
+    vault: Path, capsys
+) -> None:
+    code, out, err = _run(
+        [
+            "edit_memory",
+            _INSIGHT,
+            "--why",
+            "ambiguous",
+            "--operation",
+            '{"kind":"replace_tags","tags":[]}',
+            "--field",
+            "status",
+            "--value",
+            "active",
+            "--json",
+        ],
+        capsys,
+    )
+
+    assert code == 1, err
+    assert json.loads(out)["error"]["code"] == "INVALID_EDIT"
 
 
 def test_malformed_field_exits_2(vault: Path, capsys) -> None:

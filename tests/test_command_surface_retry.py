@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import threading
 import time
@@ -9,6 +10,8 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from fastmcp.server.middleware.middleware import MiddlewareContext
+from mcp.types import CallToolRequest, CallToolRequestParams
 
 from exomem import command_surface, writer_lease
 from exomem import server as server_module
@@ -45,12 +48,149 @@ def test_edit_memory_validate_only_is_read_only() -> None:
     assert invocation_is_read_only(command, {}) is False
 
 
+def test_nested_edit_validate_only_is_read_only_only_for_supported_variants() -> None:
+    from exomem.commands import invocation_is_read_only, product_commands_for
+
+    command = next(
+        item for item in product_commands_for("mcp") if item.name == "edit_memory"
+    )
+
+    for kind, fields in (
+        ("replace_string", {"old_string": "a", "new_string": "b"}),
+        ("batch_replace", {"edits": [{"old_string": "a", "new_string": "b"}]}),
+        ("patch_frontmatter", {"field": "domain", "value": "memory"}),
+    ):
+        assert invocation_is_read_only(
+            command, {"operation": {"kind": kind, **fields, "validate_only": True}}
+        ) is True
+
+    assert invocation_is_read_only(
+        command,
+        {"operation": {"kind": "replace_string", "old_string": "a", "new_string": "b"}},
+    ) is False
+
+
+def test_call_trace_translates_legacy_edit_on_copied_context() -> None:
+    original_arguments = {
+        "path": "Knowledge Base/Notes/Insights/example.md",
+        "why": "legacy",
+        "old_string": "Before",
+        "new_string": "After",
+    }
+    context = MiddlewareContext(
+        message=CallToolRequest(
+            params=CallToolRequestParams(
+                name="edit_memory", arguments=dict(original_arguments)
+            )
+        )
+    )
+    seen: list[MiddlewareContext] = []
+
+    async def call_next(translated: MiddlewareContext) -> dict:
+        seen.append(translated)
+        return {"ok": True}
+
+    with pytest.warns(DeprecationWarning):
+        result = asyncio.run(
+            server_module.CallTraceMiddleware().on_call_tool(context, call_next)
+        )
+
+    assert result == {"ok": True}
+    assert context.message.params.arguments == original_arguments
+    assert seen[0] is not context
+    assert seen[0].message is not context.message
+    assert seen[0].message.params.arguments == {
+        "path": original_arguments["path"],
+        "why": "legacy",
+        "operation": {
+            "kind": "replace_string",
+            "old_string": "Before",
+            "new_string": "After",
+            "replace_all": False,
+            "validate_only": False,
+        },
+    }
+
+
+def test_equivalent_nested_and_legacy_calls_share_digest_and_execute_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[dict] = []
+
+    def leaf(vault: Path, **kwargs) -> dict:  # noqa: ANN003, ARG001
+        calls.append(kwargs)
+        return {"path": kwargs["path"]}
+
+    command = SimpleNamespace(name="edit_memory", leaf=leaf, read_only=False)
+    manager = writer_lease.LeaseManager(
+        writer_lease.LeaseConfig(state_dir=tmp_path / "state")
+    )
+    monkeypatch.setattr(writer_lease, "get_manager", lambda: manager)
+    common = {
+        "path": "Knowledge Base/Notes/Insights/example.md",
+        "why": "update",
+        "idempotency_key": "same-edit",
+    }
+    nested = writer_lease.invoke_command(
+        command,
+        tmp_path / "vault",
+        **common,
+        operation={
+            "kind": "batch_replace",
+            "edits": [json.dumps({"old_string": "Before", "new_string": "After"})],
+        },
+    )
+    with pytest.warns(DeprecationWarning):
+        legacy = writer_lease.invoke_command(
+            command,
+            tmp_path / "vault",
+            **common,
+            edits=[{"old_string": "Before", "new_string": "After"}],
+        )
+
+    assert nested == legacy
+    assert calls == [
+        {
+            "path": "Knowledge Base/Notes/Insights/example.md",
+            "why": "update",
+            "operation": {
+                "kind": "batch_replace",
+                "edits": [{"old_string": "Before", "new_string": "After"}],
+                "validate_only": False,
+            },
+        }
+    ]
+
+
+def test_invalid_edit_fails_before_manager_or_mutation_boundary(monkeypatch) -> None:
+    command = SimpleNamespace(name="edit_memory", leaf=lambda *_a, **_k: None, read_only=False)
+    monkeypatch.setattr(
+        writer_lease,
+        "get_manager",
+        lambda: pytest.fail("invalid edit reached the writer manager"),
+    )
+
+    with pytest.raises(ValueError, match=r"INVALID_EDIT.*fill_row.*expected_hash"):
+        writer_lease.invoke_command(
+            command,
+            Path("/unused"),
+            path="Knowledge Base/Notes/Insights/example.md",
+            why="invalid",
+            operation={
+                "kind": "fill_row",
+                "row_key": "Example",
+                "take": "A view",
+                "expected_hash": "not-supported",
+            },
+        )
+
+
 def test_validate_only_row_edit_refuses_instead_of_mutating(vault: Path) -> None:
     from exomem.commands import op_edit_memory
 
     path = _write_editable_note(vault, body="- Example [take: ]")
 
-    with pytest.raises(ValueError, match="validate_only is not supported"):
+    with pytest.raises(ValueError, match=r"INVALID_EDIT.*fill_row.*validate_only"):
         op_edit_memory(
             vault,
             path=path,
@@ -70,8 +210,12 @@ def test_bound_validate_only_edit_bypasses_live_mutation_boundary(
     entered = threading.Event()
     release = threading.Event()
 
-    def leaf(vault: Path, *, validate_only: bool = False) -> dict:  # noqa: ARG001
-        return {"validate_only": validate_only}
+    def leaf(
+        vault: Path,
+        *,
+        operation: dict,
+    ) -> dict:  # noqa: ARG001
+        return {"validate_only": operation["validate_only"]}
 
     command = SimpleNamespace(name="edit_memory", leaf=leaf, read_only=False)
     manager = writer_lease.LeaseManager(
@@ -91,7 +235,14 @@ def test_bound_validate_only_edit_bypasses_live_mutation_boundary(
     holder.start()
     assert entered.wait(1.0)
     try:
-        assert bound(validate_only=True) == {"validate_only": True}
+        assert bound(
+            operation={
+                "kind": "replace_string",
+                "old_string": "Before",
+                "new_string": "After",
+                "validate_only": True,
+            }
+        ) == {"validate_only": True}
     finally:
         release.set()
         holder.join(timeout=2.0)
@@ -170,12 +321,20 @@ def test_real_edit_semantic_preflight_failure_releases_mutation_boundary(
     kwargs = {
         "path": path,
         "why": "verify failed preflight releases writer boundary",
-        "old_string": "Before",
-        "new_string": "After",
+        "operation": {
+            "kind": "replace_string",
+            "old_string": "Before",
+            "new_string": "After",
+        },
     }
-    preview = bound(validate_only=True, **kwargs)
+    preview = bound(
+        **{
+            **kwargs,
+            "operation": {**kwargs["operation"], "validate_only": True},
+        }
+    )
     semantic = preview["semantic"]
-    kwargs.update(
+    kwargs["operation"].update(
         transition_token=semantic["transition_token"],
         relation_disposition="reviewed_none",
         relation_review_hash=semantic["transition_hash"],
@@ -231,12 +390,20 @@ def test_real_edit_replays_after_terminal_acknowledgement_loss(
     kwargs = {
         "path": path,
         "why": "verify edit acknowledgement replay",
-        "old_string": "Before",
-        "new_string": "After",
+        "operation": {
+            "kind": "replace_string",
+            "old_string": "Before",
+            "new_string": "After",
+        },
     }
-    preview = bound(validate_only=True, **kwargs)
+    preview = bound(
+        **{
+            **kwargs,
+            "operation": {**kwargs["operation"], "validate_only": True},
+        }
+    )
     semantic = preview["semantic"]
-    kwargs.update(
+    kwargs["operation"].update(
         transition_token=semantic["transition_token"],
         relation_disposition="reviewed_none",
         relation_review_hash=semantic["transition_hash"],
