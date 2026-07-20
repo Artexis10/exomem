@@ -25,11 +25,12 @@ import os
 import re
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
-from typing import Any, Literal, NotRequired
+from typing import Annotated, Any, Literal, NotRequired
 
 from fastmcp.tools import ToolResult
 from fastmcp.utilities.types import Image as FastMCPImage
 from mcp.types import TextContent
+from pydantic import Field, StrictInt
 from typing_extensions import TypedDict
 
 from . import add as add_module
@@ -116,6 +117,14 @@ from .vault import (
 _link_summary = link_summary_module.link_summary
 _CONNECT_MEMORY_DEFAULT_OPERATION = "suggest-links"
 _ADOPT_VAULT_DEFAULT_MODE = "scan-only"
+_AuditSampleLimit = Annotated[
+    StrictInt,
+    Field(
+        ge=0,
+        le=audit_module.MAX_LEGACY_SAMPLE_LIMIT,
+        description="Audit legacy-backlog sample count; integer from 0 to 50.",
+    ),
+]
 
 # Keep commands.py as the public command-surface facade for server, CLI, docs,
 # and tests while the implementation lives in command_surface.py.
@@ -1333,7 +1342,7 @@ def op_audit(
     vault_root: Path,
     categories: list[str] | None = None,
     detail: Literal["actionable", "full"] = "actionable",
-    legacy_sample_limit: int = audit_module.DEFAULT_LEGACY_SAMPLE_LIMIT,
+    legacy_sample_limit: _AuditSampleLimit = audit_module.DEFAULT_LEGACY_SAMPLE_LIMIT,
 ) -> dict:
     """Audit / lint / health-check the Knowledge Base: find orphans, broken wikilinks, supersession gaps, stale unprocessed sources, and stale-review candidates. Read-only.
 
@@ -3946,7 +3955,7 @@ def op_review_memory(
     state: str = "open",
     ref: str | None = None,
     detail: Literal["actionable", "full"] = "actionable",
-    legacy_sample_limit: int = audit_module.DEFAULT_LEGACY_SAMPLE_LIMIT,
+    legacy_sample_limit: _AuditSampleLimit = audit_module.DEFAULT_LEGACY_SAMPLE_LIMIT,
 ) -> dict:
     """Review memory health, provenance, drift, or source backlog.
 
@@ -4608,7 +4617,7 @@ def op_maintain_memory(
     dry_run: bool | None = None,
     rebuild_embeddings: bool = False,
     detail: Literal["actionable", "full"] = "actionable",
-    legacy_sample_limit: int = audit_module.DEFAULT_LEGACY_SAMPLE_LIMIT,
+    legacy_sample_limit: _AuditSampleLimit = audit_module.DEFAULT_LEGACY_SAMPLE_LIMIT,
 ) -> dict:
     """Maintain vault health with explicit write-capable modes.
 

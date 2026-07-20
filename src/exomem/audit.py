@@ -192,10 +192,12 @@ class AuditReport:
             (finding for finding in self.findings if not _is_legacy_backlog(finding)),
             key=_actionable_finding_sort_key,
         )
+        public_summary = dict(self.summary)
+        public_summary.update(upstream["category_summary"])
         value: dict[str, Any] = {
             "detail": "actionable",
             "findings": [finding.as_dict() for finding in actionable],
-            "summary": self.summary,
+            "summary": public_summary,
         }
         observed_count = upstream["summary"].get(
             _LEGACY_BACKLOG_CODE, len(legacy)
@@ -255,6 +257,7 @@ def _semantic_upstream_facts(metadata: dict | None) -> dict[str, Any]:
     omitted_count = int(omitted.get("semantic_contract_findings") or 0)
     return {
         "summary": dict(semantic.get("semantic_contract_summary") or {}),
+        "category_summary": dict(semantic.get("semantic_category_summary") or {}),
         "omitted_count": omitted_count,
         "observation_complete": bool(
             truncation.get("observation_complete", omitted_count == 0)
@@ -307,14 +310,17 @@ def _actionable_finding_sort_key(finding: AuditFinding) -> tuple[str | int, ...]
     if current and not grandfathered and finding.severity == "error":
         priority = 0
     elif finding.category in {
+        "relation_registry",
         "semantic_malformed_unit",
         "semantic_category_governance",
     }:
         priority = 1
     else:
         priority = 2
+    semantic_work_priority = 1 if finding.category == "relation_registry" else 0
     return (
         priority,
+        semantic_work_priority,
         finding.category,
         str(meta.get("code") or ""),
         finding.path,
@@ -420,12 +426,7 @@ def _check_semantic_contract_drift(
     out: list[AuditFinding] = []
     selected = set(categories or {"semantic_contract_drift"})
     for item in batch["semantic_contract_findings"]:
-        typed_category = semantic_finding_group(item)
-        projected_categories: list[str] = []
-        if "semantic_contract_drift" in selected:
-            projected_categories.append("semantic_contract_drift")
-        if typed_category is not None and typed_category in selected:
-            projected_categories.append(typed_category)
+        projected_categories = _selected_semantic_categories(item, selected)
         if not projected_categories:
             continue
         key = {
@@ -475,6 +476,9 @@ def _check_semantic_contract_drift(
     }
     if "semantic_contract_summary" in batch:
         metadata["semantic_contract_summary"] = batch["semantic_contract_summary"]
+    category_summary = _complete_semantic_category_summary(posthoc, selected)
+    if category_summary is not None:
+        metadata["semantic_category_summary"] = category_summary
     return out, metadata
 
 
@@ -495,6 +499,39 @@ def semantic_finding_group(item: dict) -> str | None:
     if code.startswith("CONTRACT_") and item.get("severity") == "error":
         return "semantic_strict_schema_drift"
     return None
+
+
+def _selected_semantic_categories(
+    item: dict,
+    selected: set[str],
+) -> tuple[str, ...]:
+    categories: list[str] = []
+    if "semantic_contract_drift" in selected:
+        categories.append("semantic_contract_drift")
+    typed_category = semantic_finding_group(item)
+    if typed_category is not None and typed_category in selected:
+        categories.append(typed_category)
+    return tuple(categories)
+
+
+def _complete_semantic_category_summary(
+    posthoc: Any,
+    selected: set[str],
+) -> dict[str, int] | None:
+    evaluations = getattr(posthoc, "evaluations", None)
+    if evaluations is None:
+        return None
+    summary: dict[str, int] = {}
+    for evaluation in evaluations:
+        for finding in evaluation.contract_result.findings:
+            item = {
+                "code": finding.code,
+                "severity": finding.severity,
+                "resolved_rule": list(finding.resolved_rule),
+            }
+            for category in _selected_semantic_categories(item, selected):
+                summary[category] = summary.get(category, 0) + 1
+    return summary
 
 
 # ---------------- vault walk ----------------

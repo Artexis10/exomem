@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -16,6 +17,9 @@ from exomem import (
 from exomem import (
     commands,
     semantic_writes,
+)
+from exomem import (
+    server as server_module,
 )
 
 TYPED_SEMANTIC_CATEGORIES = (
@@ -125,6 +129,13 @@ def test_action_first_projection_groups_legacy_backlog_without_mutating_raw_repo
         code="invalid_compact_category",
         severity="warn",
     )
+    unregistered_relation = audit_module.AuditFinding(
+        category="relation_registry",
+        severity="warning",
+        path="Knowledge Base/Notes/Insights/unregistered-relation.md",
+        detail="Relation type is not registered.",
+        meta={"code": "CONTRACT_UNKNOWN_RELATION"},
+    )
     ordinary = audit_module.AuditFinding(
         category="broken_wikilink",
         severity="warn",
@@ -132,9 +143,10 @@ def test_action_first_projection_groups_legacy_backlog_without_mutating_raw_repo
         detail="Broken link.",
     )
     report = audit_module.AuditReport(
-        findings=[ordinary, *legacy, malformed, blocker],
+        findings=[ordinary, *legacy, unregistered_relation, malformed, blocker],
         summary={
             "broken_wikilink": 1,
+            "relation_registry": 1,
             "semantic_malformed_unit": 1,
             "semantic_relation_disposition": 7,
             "semantic_strict_schema_drift": 1,
@@ -166,6 +178,7 @@ def test_action_first_projection_groups_legacy_backlog_without_mutating_raw_repo
     assert [item["path"] for item in public["findings"]] == [
         blocker.path,
         malformed.path,
+        unregistered_relation.path,
         ordinary.path,
     ]
     assert public["summary"] == report.summary
@@ -203,6 +216,94 @@ def test_action_first_projection_groups_legacy_backlog_without_mutating_raw_repo
         "upstream_findings_complete": False,
         "upstream_omitted_count": 3,
     }
+
+
+def _posthoc_evaluation(
+    path: str,
+    *,
+    code: str,
+    resolved_rule: tuple[str, str, str],
+    grandfathered: bool,
+) -> semantic_writes.PosthocPageEvaluation:
+    finding = SimpleNamespace(
+        code=code,
+        severity="error",
+        governed_element_identity=("semantic", path),
+        resolved_rule=resolved_rule,
+    )
+    result = SimpleNamespace(
+        relation_disposition=None,
+        findings=(finding,),
+        actions=("review_semantic_contract",),
+    )
+    return semantic_writes.PosthocPageEvaluation(
+        path,
+        result,
+        grandfathered,
+        "current",
+    )
+
+
+def test_public_summary_uses_complete_semantic_category_counts_without_changing_raw(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    legacy_count = semantic_writes._POSTHOC_FINDING_LIMIT + 8
+    evaluations = [
+        _posthoc_evaluation(
+            f"Knowledge Base/Notes/Insights/legacy-{index:04d}.md",
+            code="RELATION_DISPOSITION_MISSING",
+            resolved_rule=("relations", "*", "disposition"),
+            grandfathered=True,
+        )
+        for index in range(legacy_count)
+    ]
+    evaluations.append(
+        _posthoc_evaluation(
+            "Knowledge Base/Notes/Insights/current-blocker.md",
+            code="CONTRACT_REQUIRED_FIELD",
+            resolved_rule=("fields", "owner", "required"),
+            grandfathered=False,
+        )
+    )
+    posthoc = semantic_writes.PosthocBatch(
+        "audit", "current", tuple(evaluations)
+    )
+    monkeypatch.setattr(
+        semantic_writes,
+        "evaluate_posthoc_batch",
+        lambda *_args, **_kwargs: posthoc,
+    )
+    categories = [
+        "semantic_contract_drift",
+        "semantic_relation_disposition",
+        "semantic_strict_schema_drift",
+    ]
+
+    report = audit_module.audit(tmp_path, categories=categories)
+    raw_before = report.as_dict()
+    public = report.as_public_dict()
+
+    assert raw_before["summary"]["semantic_contract_drift"] < legacy_count + 1
+    assert public["summary"] == {
+        "semantic_contract_drift": legacy_count + 1,
+        "semantic_relation_disposition": legacy_count,
+        "semantic_strict_schema_drift": 1,
+    }
+    assert public["legacy_backlog"]["observed_count"] == legacy_count
+    assert report.as_dict() == raw_before
+
+    full_report = audit_module.audit(
+        tmp_path,
+        categories=categories,
+        semantic_detail="full",
+    )
+    full = full_report.as_public_dict(detail="full")
+
+    assert full["summary"] == public["summary"]
+    assert full["metadata"]["semantic_contract_drift"]["omitted_counts"][
+        "semantic_contract_findings"
+    ] == 0
 
 
 @pytest.mark.parametrize("route", ["audit", "review", "maintain"])
@@ -292,14 +393,70 @@ def test_public_audit_routes_reject_invalid_presentation_controls(
 
 
 def test_audit_command_surfaces_advertise_presentation_controls() -> None:
-    audit = next(item for item in commands.commands_for("mcp") if item.name == "audit")
-    products = {item.name: item for item in commands.product_commands_for("mcp")}
+    for surface in ("mcp", "rest", "cli"):
+        audit = next(
+            item for item in commands.commands_for(surface) if item.name == "audit"
+        )
+        products = {
+            item.name: item for item in commands.product_commands_for(surface)
+        }
 
-    for command in (audit, products["review_memory"], products["maintain_memory"]):
-        params = {item.name: item for item in command.params}
-        assert params["detail"].choices == ("actionable", "full")
-        assert params["legacy_sample_limit"].type == "int"
-        assert params["legacy_sample_limit"].required is False
+        for command in (
+            audit,
+            products["review_memory"],
+            products["maintain_memory"],
+        ):
+            params = {item.name: item for item in command.params}
+            assert params["detail"].choices == ("actionable", "full")
+            assert params["legacy_sample_limit"].type == "int"
+            assert params["legacy_sample_limit"].required is False
+
+
+def test_mcp_audit_routes_reject_boolean_sample_limits_before_leaf_execution(
+    vault: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[int] = []
+
+    def fake_audit(*_args, **_kwargs):
+        calls.append(1)
+        return audit_module.AuditReport(findings=[], summary={})
+
+    monkeypatch.setattr(audit_module, "audit", fake_audit)
+    monkeypatch.setenv("EXOMEM_MCP_LEGACY_COMPAT", "1")
+    mcp = server_module.build_server(require_auth=False)
+    schemas = {
+        tool.name: tool.to_mcp_tool().model_dump(mode="json")["inputSchema"]
+        for tool in asyncio.run(mcp.list_tools(run_middleware=False))
+    }
+    routes = (
+        ("audit", {"categories": ["broken_wikilink"]}),
+        (
+            "review_memory",
+            {"mode": "audit", "categories": ["broken_wikilink"]},
+        ),
+        (
+            "maintain_memory",
+            {"mode": "audit", "categories": ["broken_wikilink"]},
+        ),
+    )
+
+    for name, arguments in routes:
+        sample_schema = schemas[name]["properties"]["legacy_sample_limit"]
+        assert sample_schema["type"] == "integer"
+        assert sample_schema["minimum"] == 0
+        assert sample_schema["maximum"] == audit_module.MAX_LEGACY_SAMPLE_LIMIT
+        for invalid in (False, True):
+            with pytest.raises(Exception, match="legacy_sample_limit"):
+                asyncio.run(
+                    mcp.call_tool(
+                        name,
+                        {**arguments, "legacy_sample_limit": invalid},
+                        run_middleware=False,
+                    )
+                )
+
+    assert calls == []
 
 
 def test_posthoc_semantic_findings_have_typed_audit_routing(
