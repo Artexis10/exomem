@@ -354,6 +354,83 @@ def test_remember_field_escape(vault: Path, capsys) -> None:
     assert "Project Alpha" in payload["data"]["path"]
 
 
+@pytest.mark.parametrize("command_name", ["remember", "replace_memory"])
+def test_field_escape_command_help_exposes_response_detail(
+    command_name: str,
+    capsys,
+) -> None:
+    code, out, err = _run([command_name, "--help"], capsys)
+
+    assert code == 0, err
+    assert "--response-detail" in out
+    assert "{compact,full,legacy}" in out
+
+
+@pytest.mark.parametrize(
+    ("argv", "command_name"),
+    [
+        (
+            ["remember", "--content", "# Remember\n", "--title", "Remember"],
+            "remember",
+        ),
+        (
+            [
+                "replace_memory",
+                "Knowledge Base/Notes/Insights/old.md",
+                "--content",
+                "# Replace\n",
+                "--title",
+                "Replace",
+            ],
+            "replace_memory",
+        ),
+    ],
+)
+def test_field_escape_commands_forward_response_detail_through_real_parser(
+    vault: Path,
+    capsys,
+    monkeypatch: pytest.MonkeyPatch,
+    argv: list[str],
+    command_name: str,
+) -> None:
+    calls: list[tuple[str, dict]] = []
+
+    def fake_invoke(command, *injected, **kwargs):  # noqa: ANN001, ARG001
+        calls.append((command.name, kwargs))
+        return {"ok": True, "status": "committed", "mutated": True, "paths": []}
+
+    monkeypatch.setattr(writer_lease, "invoke_command", fake_invoke)
+
+    code, out, err = _run([*argv, "--response-detail", "full", "--json"], capsys)
+
+    assert code == 0, f"{err}\n{out}"
+    assert len(calls) == 1
+    assert calls[0][0] == command_name
+    assert calls[0][1]["response_detail"] == "full"
+
+
+def test_adopt_human_renderer_prints_compact_terminal_decisively(capsys) -> None:
+    from exomem.__main__ import _print_human
+
+    _print_human(
+        {
+            "ok": True,
+            "status": "committed",
+            "mutated": True,
+            "path": "Knowledge Base/_Adoption/manifest.md",
+            "request_id": "11111111-1111-4111-8111-111111111111",
+            "receipt_id": None,
+            "warnings_count": 0,
+        },
+        op="adopt_vault",
+    )
+    out = capsys.readouterr().out
+
+    assert '"status": "committed"' in out
+    assert "Adoption report" not in out
+    assert "Mode: scan-only" not in out
+
+
 def test_edit_memory_value_plain_string(vault: Path, capsys) -> None:
     code, out, err = _run(
         ["edit_memory", _INSIGHT, "--why", "set domain", "--field", "domain",

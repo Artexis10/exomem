@@ -777,6 +777,9 @@ def _command_digest(command: Any, kwargs: Mapping[str, Any]) -> str:
     ).hexdigest()
 
 
+_PUBLIC_IDEMPOTENCY_KEY_UNSET = object()
+
+
 def _effective_idempotency_key(
     manager: LeaseManager,
     *,
@@ -924,11 +927,19 @@ class LeaseManager:
         *,
         read_only: bool | None = None,
         idempotency_key: str | None = None,
+        public_idempotency_key: str | None | object = _PUBLIC_IDEMPOTENCY_KEY_UNSET,
         idempotency_principal_scope: str | None = None,
         implicit_idempotency_scope: str | None = None,
         mutation_request_id: str | None = None,
     ) -> Any:
         kwargs, response_detail = split_response_detail(kwargs)
+        if public_idempotency_key is _PUBLIC_IDEMPOTENCY_KEY_UNSET:
+            effective_public_idempotency_key = idempotency_key
+        else:
+            assert public_idempotency_key is None or isinstance(
+                public_idempotency_key, str
+            )
+            effective_public_idempotency_key = public_idempotency_key
         invocation_read_only = command.read_only if read_only is None else read_only
         if invocation_read_only:
             audit_without_consistency_lock = (
@@ -972,7 +983,7 @@ class LeaseManager:
                         leaf_result,
                         request_id=request_id,
                         receipt_id=receipt,
-                        idempotency_key=idempotency_key,
+                        idempotency_key=effective_public_idempotency_key,
                     )
                 return leaf_result
             except Exception as error:
@@ -1009,8 +1020,9 @@ class LeaseManager:
                 elif error.code == "MUTATION_ACKNOWLEDGEMENT_PENDING":
                     error.details.update(status="uncertain", committed=None)
                 error.details.update(request_id=request_id, receipt_id=receipt)
-                if idempotency_key is not None:
-                    error.details["idempotency_key"] = idempotency_key
+                error.details.pop("idempotency_key", None)
+                if effective_public_idempotency_key is not None:
+                    error.details["idempotency_key"] = effective_public_idempotency_key
             _log_mutation_event(
                 "interrupted",
                 level=logging.WARNING,
@@ -1185,6 +1197,7 @@ def invoke_command(
     command: Any,
     *injected: Any,
     idempotency_key: str | None = None,
+    public_idempotency_key: str | None | object = _PUBLIC_IDEMPOTENCY_KEY_UNSET,
     idempotency_principal_scope: str | None = None,
     implicit_idempotency_scope: str | None = None,
     mutation_request_id: str | None = None,
@@ -1198,6 +1211,7 @@ def invoke_command(
         kwargs,
         read_only=invocation_is_read_only(command, kwargs),
         idempotency_key=idempotency_key,
+        public_idempotency_key=public_idempotency_key,
         idempotency_principal_scope=idempotency_principal_scope,
         implicit_idempotency_scope=implicit_idempotency_scope,
         mutation_request_id=mutation_request_id,

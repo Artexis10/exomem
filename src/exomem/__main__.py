@@ -1540,6 +1540,7 @@ def _simple_maintain_main(argv: list[str]) -> int:
 # flags, their REQUIRED params stay flags and everything else is reachable via a
 # repeatable `--field key=value`, so the CLI stays clean.
 _FIELD_ESCAPE = frozenset({"remember", "replace_memory"})
+_FIELD_ESCAPE_VISIBLE_PARAMS = frozenset({"slug", "response_detail"})
 
 
 def _expose_tier2() -> bool:
@@ -1570,7 +1571,11 @@ def _flag(name: str) -> str:
 def _add_command_args(sp: argparse.ArgumentParser, cmd) -> None:
     field_escape = cmd.name in _FIELD_ESCAPE
     for p in cmd.params:
-        if field_escape and not p.required and p.name != "slug":
+        if (
+            field_escape
+            and not p.required
+            and p.name not in _FIELD_ESCAPE_VISIBLE_PARAMS
+        ):
             continue  # reachable via --field
         if p.cli_positional:
             sp.add_argument(
@@ -1622,7 +1627,11 @@ def _collect_raw_args(
     field_escape = cmd.name in _FIELD_ESCAPE
     raw: dict = {}
     for p in cmd.params:
-        if field_escape and not p.required and p.name != "slug":
+        if (
+            field_escape
+            and not p.required
+            and p.name not in _FIELD_ESCAPE_VISIBLE_PARAMS
+        ):
             continue
         val = getattr(args, p.name, None)
         if val is not None:
@@ -1704,6 +1713,20 @@ def _print_adopt_human(result: dict) -> None:
 
 
 def _print_human(result, *, op: str | None = None) -> None:
+    specialized_op = op in {"adopt", "adopt_vault", "review_memory", "triage_memory"}
+    if (
+        specialized_op
+        and isinstance(result, dict)
+        and result.get("ok") is True
+        and result.get("status") == "committed"
+        and result.get("mutated") is True
+    ):
+        diagnostics = result.get("diagnostics")
+        if isinstance(diagnostics, dict):
+            result = diagnostics
+        else:
+            print(json.dumps(result, indent=2, ensure_ascii=False, default=str))
+            return
     if op in {"adopt", "adopt_vault"} and isinstance(result, dict):
         _print_adopt_human(result)
         return

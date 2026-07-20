@@ -44,6 +44,20 @@ def _path_projection(result: Any) -> dict[str, Any]:
     source = result.get("source")
     if isinstance(source, Mapping) and isinstance(source.get("path"), str):
         return {"path": source["path"]}
+    manifest = result.get("manifest")
+    if isinstance(manifest, Mapping) and isinstance(manifest.get("path"), str):
+        return {"path": manifest["path"]}
+    copy = result.get("copy")
+    if isinstance(copy, Mapping):
+        copied_sources = copy.get("copied_sources")
+        if isinstance(copied_sources, (list, tuple)):
+            copied_paths = [
+                item["source_path"]
+                for item in copied_sources
+                if isinstance(item, Mapping)
+                and isinstance(item.get("source_path"), str)
+            ]
+            return {"paths": copied_paths}
     old_path = result.get("old_path")
     new_path = result.get("new_path")
     if isinstance(old_path, str) and isinstance(new_path, str):

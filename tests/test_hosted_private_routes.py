@@ -19,6 +19,7 @@ from fastmcp import FastMCP
 
 from exomem import (
     cli_ops,
+    commands as commands_module,
     find_corpus,
     hosted_portability,
     hosted_runtime,
@@ -27,6 +28,7 @@ from exomem import (
     schema,
     server,
     server_runtime,
+    writer_lease,
 )
 from exomem import hosted_gateway as gateway
 from exomem.hosted_runtime import (
@@ -114,6 +116,7 @@ class IsolatedInvoker:
         command,
         *injected,
         idempotency_key: str | None = None,
+        public_idempotency_key: str | None = None,
         implicit_idempotency_scope: str | None = None,
         mutation_request_id: str | None = None,
         **kwargs,
@@ -123,6 +126,7 @@ class IsolatedInvoker:
                 "command": command.name,
                 "vault": injected[0],
                 "idempotency_key": idempotency_key,
+                "public_idempotency_key": public_idempotency_key,
                 "implicit_scope": implicit_idempotency_scope,
                 "request_id": mutation_request_id,
             }
@@ -140,6 +144,41 @@ class IsolatedInvoker:
         if idempotency_key:
             self.completed[idempotency_key] = (digest, result)
         return result
+
+
+class WriterBackedInvoker:
+    def __init__(self, state_dir: Path) -> None:
+        self.manager = writer_lease.LeaseManager(
+            writer_lease.LeaseConfig(state_dir=state_dir)
+        )
+        self.calls: list[dict[str, Any]] = []
+
+    def __call__(
+        self,
+        command,
+        *injected,
+        idempotency_key: str | None = None,
+        public_idempotency_key: str | None = None,
+        implicit_idempotency_scope: str | None = None,
+        mutation_request_id: str | None = None,
+        **kwargs,
+    ) -> Any:
+        self.calls.append(
+            {
+                "idempotency_key": idempotency_key,
+                "public_idempotency_key": public_idempotency_key,
+            }
+        )
+        return self.manager.invoke(
+            command,
+            injected,
+            kwargs,
+            read_only=commands_module.invocation_is_read_only(command, kwargs),
+            idempotency_key=idempotency_key,
+            public_idempotency_key=public_idempotency_key,
+            implicit_idempotency_scope=implicit_idempotency_scope,
+            mutation_request_id=mutation_request_id,
+        )
 
 
 def _cell(
@@ -476,6 +515,8 @@ def test_two_cells_keep_identical_paths_and_idempotency_keys_isolated(tmp_path: 
     assert "BRAVO-ONLY-SENTINEL" in (bravo_config.vault_root / bravo_path).read_text()
     assert alpha_invoker.calls[0]["idempotency_key"] != bravo_invoker.calls[0]["idempotency_key"]
     assert public_key not in alpha_invoker.calls[0]["idempotency_key"]
+    assert alpha_invoker.calls[0]["public_idempotency_key"] == public_key
+    assert bravo_invoker.calls[0]["public_idempotency_key"] == public_key
 
     replay = alpha.post(
         "/private/exomem/v1/command/remember",
@@ -506,6 +547,51 @@ def test_two_cells_keep_identical_paths_and_idempotency_keys_isolated(tmp_path: 
     assert unavailable.json()["error"]["code"] == "HOSTED_MUTATION_NOT_ADMITTED"
     assert len(bravo_invoker.calls) == bravo_calls
     assert not list(bravo_config.vault_root.rglob("*MUST-NOT-FALL-BACK*"))
+
+
+def test_hosted_terminal_exposes_public_key_and_never_internal_scope(
+    tmp_path: Path,
+) -> None:
+    public_invoker = WriterBackedInvoker(tmp_path / "public-writer-state")
+    public, public_config, _lifecycle, _invoker = _cell(
+        tmp_path,
+        cell_id="cell-public-terminal",
+        credential="public-terminal-service-credential-0001",
+        invoker=public_invoker,
+    )
+    public_key = "visible-hosted-key"
+
+    with_key = public.post(
+        "/private/exomem/v1/command/remember",
+        headers=_headers(public_config, idempotency_key=public_key),
+        json=_remember_body("HOSTED-PUBLIC-TERMINAL"),
+    )
+
+    assert with_key.status_code == 200, with_key.text
+    terminal = with_key.json()["data"]
+    assert terminal["idempotency_key"] == public_key
+    assert "hosted:" not in with_key.text
+    assert public_invoker.calls[0]["idempotency_key"].startswith("hosted:")
+    assert public_invoker.calls[0]["public_idempotency_key"] == public_key
+
+    no_key_invoker = WriterBackedInvoker(tmp_path / "no-key-writer-state")
+    no_key, no_key_config, _lifecycle, _invoker = _cell(
+        tmp_path,
+        cell_id="cell-no-public-terminal",
+        credential="no-public-terminal-service-credential-0001",
+        invoker=no_key_invoker,
+    )
+    without_key = no_key.post(
+        "/private/exomem/v1/command/remember",
+        headers=_headers(no_key_config),
+        json=_remember_body("HOSTED-NO-PUBLIC-TERMINAL"),
+    )
+
+    assert without_key.status_code == 200, without_key.text
+    assert "idempotency_key" not in without_key.json()["data"]
+    assert "hosted:" not in without_key.text
+    assert no_key_invoker.calls[0]["idempotency_key"] is None
+    assert no_key_invoker.calls[0]["public_idempotency_key"] is None
 
 
 def test_lifecycle_routes_gate_reads_writes_and_sealing(tmp_path: Path) -> None:

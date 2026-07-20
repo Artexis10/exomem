@@ -164,6 +164,46 @@ def test_explicit_multi_path_restore_and_safe_fallback_adapters(raw, expected) -
     assert {key: projected[key] for key in expected} == expected
 
 
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        (
+            {"manifest": {"path": "Knowledge Base/_Adoption/manifest.md"}},
+            {"path": "Knowledge Base/_Adoption/manifest.md"},
+        ),
+        (
+            {
+                "copy": {
+                    "copied_sources": [
+                        {"source_path": "Knowledge Base/Sources/Imported/one.md"},
+                        {"source_path": "Knowledge Base/Sources/Imported/two.md"},
+                    ]
+                }
+            },
+            {
+                "paths": [
+                    "Knowledge Base/Sources/Imported/one.md",
+                    "Knowledge Base/Sources/Imported/two.md",
+                ]
+            },
+        ),
+    ],
+)
+def test_adopt_write_results_have_explicit_compact_paths(raw, expected) -> None:
+    mutation_terminal = _terminal_module()
+
+    projected = mutation_terminal.project_terminal(
+        mutation_terminal.committed_terminal(
+            raw,
+            request_id="11111111-1111-4111-8111-111111111111",
+            receipt_id=None,
+            idempotency_key=None,
+        )
+    )
+
+    assert {key: projected[key] for key in expected} == expected
+
+
 def test_one_committed_identity_projects_compact_full_and_legacy_without_rerun(
     tmp_path,
 ) -> None:
@@ -219,6 +259,77 @@ def test_one_committed_identity_projects_compact_full_and_legacy_without_rerun(
     assert legacy == raw
     assert "replayed" not in compact
     assert calls == 1
+
+
+@pytest.mark.parametrize(
+    ("public_key", "expected_key"),
+    [("visible-client-key", "visible-client-key"), (None, None)],
+)
+def test_internal_replay_key_is_separate_from_public_terminal_identity(
+    tmp_path,
+    public_key,
+    expected_key,
+) -> None:
+    from exomem import writer_lease
+
+    def leaf(vault):  # noqa: ANN001, ARG001
+        writer_lease.mark_active_mutation_committed()
+        return {"path": "Knowledge Base/hosted.md", "warnings": []}
+
+    command = SimpleNamespace(name="remember", leaf=leaf, read_only=False)
+    manager = writer_lease.LeaseManager(
+        writer_lease.LeaseConfig(state_dir=tmp_path / "state")
+    )
+    internal_key = "hosted:" + "a" * 64
+
+    terminal = manager.invoke(
+        command,
+        (tmp_path / "vault",),
+        {},
+        idempotency_key=internal_key,
+        public_idempotency_key=public_key,
+    )
+
+    assert terminal.get("idempotency_key") == expected_key
+    if expected_key is None:
+        assert "idempotency_key" not in terminal
+    assert internal_key not in repr(terminal)
+
+
+@pytest.mark.parametrize("public_key", ["visible-client-key", None])
+def test_structured_errors_use_only_the_public_idempotency_key(
+    tmp_path,
+    public_key,
+) -> None:
+    from exomem import writer_lease
+    from exomem.cli_ops import OpError, error_dict
+
+    command = SimpleNamespace(
+        name="remember",
+        leaf=lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            OpError("MUTATION_BUSY", "synthetic busy boundary")
+        ),
+        read_only=False,
+    )
+    manager = writer_lease.LeaseManager(
+        writer_lease.LeaseConfig(state_dir=tmp_path / "state")
+    )
+    internal_key = "hosted:" + "b" * 64
+
+    with pytest.raises(OpError) as caught:
+        manager.invoke(
+            command,
+            (tmp_path / "vault",),
+            {},
+            idempotency_key=internal_key,
+            public_idempotency_key=public_key,
+        )
+
+    payload = error_dict(caught.value)
+    assert payload.get("idempotency_key") == public_key
+    if public_key is None:
+        assert "idempotency_key" not in payload
+    assert internal_key not in repr(payload)
 
 
 def test_acknowledgement_loss_replays_the_persisted_original_terminal(
