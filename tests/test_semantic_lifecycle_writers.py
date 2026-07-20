@@ -2914,6 +2914,62 @@ def test_existing_feedback_byte_bounds_one_oversized_diagnostic(tmp_path: Path) 
     assert result.findings[0].governed_element_identity == (oversized,)
 
 
+def _blocking_finding(code: str, index: int = 0) -> semantic_contract.ContractFinding:
+    return semantic_contract.ContractFinding(
+        code=code,
+        severity="error",
+        path=_PAGE,
+        span=None,
+        detail=f"relation target {index} does not resolve",
+        remediation="link by the slug the write returned",
+        governed_element_identity=(f"rel-{index}",),
+        resolved_rule=("relations", "*", "target"),
+    )
+
+
+def test_blocked_write_names_what_blocked_it(tmp_path: Path) -> None:
+    """A blocked write must say what blocked it, not merely that something did.
+
+    Regression: SEMANTIC_CONTRACT_BLOCKED carried a generic sentence and threw
+    the findings away, so a writer had to issue a second `validate_only` call
+    purely to learn the reason. That round-trip was the single largest source of
+    write friction — 69 blocked writes in one day on 2026-07-20, none of them
+    self-describing.
+    """
+    preflight = _feedback_preflight(tmp_path)
+    finding = _blocking_finding("RELATION_TARGET_UNRESOLVED")
+    result = replace(preflight.contract_result, blocking_findings=(finding,))
+
+    reason = semantic_writes._blocking_reason(result)
+
+    assert "RELATION_TARGET_UNRESOLVED" in reason
+    assert "does not resolve" in reason
+    assert "link by the slug the write returned" in reason
+    assert _PAGE in reason
+
+
+def test_blocked_write_states_what_it_omitted(tmp_path: Path) -> None:
+    """A truncated finding list must never read as the complete set."""
+    preflight = _feedback_preflight(tmp_path)
+    findings = tuple(_blocking_finding(f"RULE_{i}", i) for i in range(7))
+    result = replace(preflight.contract_result, blocking_findings=findings)
+
+    reason = semantic_writes._blocking_reason(result)
+
+    assert "+4 more" in reason
+    assert "validate_only" in reason
+
+
+def test_blocked_write_with_no_findings_keeps_the_bare_prefix(tmp_path: Path) -> None:
+    """should_block without findings must not render an empty, dangling list."""
+    preflight = _feedback_preflight(tmp_path)
+    result = replace(preflight.contract_result, blocking_findings=())
+
+    assert semantic_writes._blocking_reason(result) == (
+        "semantic contract has blocking findings"
+    )
+
+
 def test_existing_feedback_byte_bounds_one_oversized_relation_fact(
     tmp_path: Path,
 ) -> None:
