@@ -60,9 +60,15 @@ class AddResult:
     path: str  # vault-relative
     ref: str
     warnings: list[str]
+    # The filename slug actually written, after truncation/normalisation.
+    # See NoteResult.slug — callers must link by this, not by re-slugging.
+    slug: str = ""
 
     def as_dict(self) -> dict:
-        return {"path": self.path, "ref": self.ref, "warnings": self.warnings}
+        out = {"path": self.path, "ref": self.ref, "warnings": self.warnings}
+        if self.slug:
+            out["slug"] = self.slug
+        return out
 
 
 @dataclass
@@ -243,6 +249,7 @@ def add(
         path=source_path.relative_to(vault_root).as_posix(),
         ref=memory_refs.memory_ref(exomem_id),
         warnings=warnings,
+        slug=filename_slug,
     )
 
 

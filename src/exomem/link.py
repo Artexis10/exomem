@@ -57,9 +57,15 @@ class LinkResult:
     ref: str
     warnings: list[str]
     creation: dict | None = None
+    # The filename slug actually written, after truncation/normalisation.
+    # See NoteResult.slug — callers must link by this, not by re-slugging.
+    # Declared last so the positional LinkResult(...) construction stays valid.
+    slug: str = ""
 
     def as_dict(self) -> dict:
         value = {"path": self.path, "ref": self.ref, "warnings": self.warnings}
+        if self.slug:
+            value["slug"] = self.slug
         if self.creation is not None:
             value["creation"] = self.creation
         return value
@@ -304,6 +310,7 @@ def _legacy_link(
         path=rel_entity,
         ref=memory_refs.memory_ref(exomem_id),
         warnings=warnings,
+        slug=filename_slug,
     )
 
 
@@ -768,4 +775,5 @@ def link(
         memory_refs.memory_ref(identity),
         warnings,
         committed.as_dict(),
+        slug=filename_slug,
     )

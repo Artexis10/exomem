@@ -66,6 +66,35 @@ def test_config_is_default_off_and_requires_identities() -> None:
         LeaseConfig.from_env({"EXOMEM_WRITER_LEASE_URL": "https://lease.example"})
 
 
+def test_mutation_timeout_stays_within_the_edge_budget_and_is_tunable() -> None:
+    """The boundary wait is a share of the edge budget, not a free parameter.
+
+    The HA edge worker abandons a mutation-capable request at
+    MCP_TOOL_TIMEOUT_MS (default 15s) and never replays it, because the origin
+    may commit after the edge stops waiting. Time spent queueing here is time
+    unavailable to the write. A default at or near the edge timeout would make
+    a 504-with-a-committed-write the *expected* outcome under contention
+    rather than the incident it is.
+    """
+    # The edge budget this must stay under: MCP_TOOL_TIMEOUT_MS default, in
+    # seconds. Mirrored from deploy/cloudflare-ha/src/worker.js.
+    edge_tool_budget_seconds = 15.0
+    default = LeaseConfig.from_env({}).mutation_timeout_seconds
+    assert default == 5.0
+    # The invariant that matters: waiting must leave the majority of the edge
+    # budget for the write itself.
+    assert default < edge_tool_budget_seconds / 2
+    tuned = LeaseConfig.from_env({"EXOMEM_MUTATION_TIMEOUT": "8"})
+    assert tuned.mutation_timeout_seconds == 8.0
+    # Misconfiguration fails loudly rather than silently reverting to a default,
+    # matching every other lease timeout. A silently-ignored value here would
+    # leave an operator believing they had widened the boundary when they had not.
+    with pytest.raises(ValueError, match="EXOMEM_MUTATION_TIMEOUT"):
+        LeaseConfig.from_env({"EXOMEM_MUTATION_TIMEOUT": "not-a-number"})
+    with pytest.raises(ValueError, match="EXOMEM_MUTATION_TIMEOUT"):
+        LeaseConfig.from_env({"EXOMEM_MUTATION_TIMEOUT": "0"})
+
+
 def test_config_loads_without_exposing_token_in_status(tmp_path: Path) -> None:
     config = LeaseConfig.from_env(
         {

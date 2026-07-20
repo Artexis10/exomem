@@ -200,9 +200,17 @@ class NoteResult:
     # checklist over the Markdown shape, not a semantic truth judgment.
     write_feedback: dict = field(default_factory=dict)
     creation: dict = field(default_factory=dict)
+    # The filename slug actually written, after truncation/normalisation. A
+    # caller linking to this note must use THIS value: re-deriving a slug from
+    # the title yields a different string whenever the title was truncated,
+    # and the resulting relation fails to resolve. Declared last so the
+    # positional NoteResult(...) construction below stays valid.
+    slug: str = ""
 
     def as_dict(self) -> dict:
         out: dict = {"path": self.path, "ref": self.ref, "warnings": self.warnings}
+        if self.slug:
+            out["slug"] = self.slug
         if self.suggestions:
             out["suggestions"] = self.suggestions
         if self.write_feedback:
@@ -735,6 +743,7 @@ def _legacy_note(
         warnings=warnings,
         suggestions=corpus_suggestions,
         write_feedback=write_feedback,
+        slug=filename_slug,
     )
 
 
@@ -1657,4 +1666,5 @@ def note(
         corpus_suggestions,
         feedback,
         committed.as_dict(),
+        slug=filename_slug,
     )
