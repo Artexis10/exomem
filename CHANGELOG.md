@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.25.5](https://github.com/Artexis10/exomem/compare/v0.25.4...v0.25.5) (2026-07-20)
+
+
+### Bug Fixes
+
+* keep a preferred replica reclaiming writer authority ([#271](https://github.com/Artexis10/exomem/issues/271)) ([eb07529](https://github.com/Artexis10/exomem/commit/eb075294220ff065b7055472b23ebc3d5808bc09))
+* return the written slug and widen the mutation boundary timeout ([#269](https://github.com/Artexis10/exomem/issues/269)) ([1059305](https://github.com/Artexis10/exomem/commit/1059305f92cf90ba797a3d41d2feac13c95ef7d3))
+
 ## [0.25.4](https://github.com/Artexis10/exomem/compare/v0.25.3...v0.25.4) (2026-07-19)
 
 
