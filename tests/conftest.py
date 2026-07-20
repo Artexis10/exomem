@@ -10,10 +10,26 @@ import pytest
 from exomem import embeddings as embeddings_module
 from exomem import find as find_module
 from exomem import schema as schema_module
+from exomem import semantic_contract as semantic_contract_module
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 FIXTURE_VAULT = REPO_ROOT / "tests" / "fixtures"
+
+
+@pytest.fixture(autouse=True)
+def _reset_corpus_context_cache():
+    """Every test starts with a cold corpus-context cache.
+
+    The cache invalidates on filesystem changes, which production writes
+    always make; tests additionally monkeypatch corpus-affecting internals
+    (access tiers, registries, walks), which no filesystem census can see.
+    A per-test reset keeps such patches from serving a context built under a
+    different test's (or an unpatched) environment.
+    """
+    semantic_contract_module.reset_corpus_context_cache()
+    yield
+    semantic_contract_module.reset_corpus_context_cache()
 
 
 @pytest.fixture(autouse=True)
@@ -55,6 +71,12 @@ def _disable_embeddings(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None
     # Don't spawn the mode-config watch daemon from build_server in the suite; mode-watch
     # tests drive it directly.
     monkeypatch.setenv("EXOMEM_DISABLE_MODE_WATCH", "1")
+    # The corpus-context cache invalidates on filesystem changes, which is
+    # complete for production inputs — but tests also monkeypatch
+    # corpus-affecting internals (access tiers, registries, walks), which no
+    # filesystem census can observe. Default it off in the suite;
+    # test_corpus_context_cache.py deletes this var to exercise it.
+    monkeypatch.setenv("EXOMEM_DISABLE_CORPUS_CACHE", "1")
 
 
 @pytest.fixture

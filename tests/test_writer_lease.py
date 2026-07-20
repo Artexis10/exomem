@@ -1370,7 +1370,7 @@ def test_implicit_committed_failure_expires_under_retry_ttl(tmp_path: Path) -> N
         assert failure.value.as_public_dict()["outcome"]["committed"] is True
     assert calls == 1
 
-    clock.value += 61
+    clock.value += writer_lease_module._IMPLICIT_RETRY_TTL_SECONDS + 1
     with pytest.raises(vault_module.BatchWriteError):
         manager.invoke(command, (), {}, implicit_idempotency_scope="alice")
     assert calls == 2
@@ -1604,7 +1604,7 @@ def test_expired_corrupt_implicit_committed_failure_payload_fails_closed_without
             (b"not-json",),
         )
 
-    clock.value += 61
+    clock.value += writer_lease_module._IMPLICIT_RETRY_TTL_SECONDS + 1
     with pytest.raises(OpError) as blocked:
         manager.invoke(command, (), {}, **marker)
     assert blocked.value.code == "IDEMPOTENCY_IN_PROGRESS"
@@ -1711,7 +1711,7 @@ def test_implicit_idempotency_is_bounded_and_principal_scoped(tmp_path: Path) ->
     }
     assert calls == [1, 1]
 
-    clock.value += 61
+    clock.value += writer_lease_module._IMPLICIT_RETRY_TTL_SECONDS + 1
     assert manager.invoke(command, (), {"value": 1}, implicit_idempotency_scope="alice") == {
         "value": 1
     }

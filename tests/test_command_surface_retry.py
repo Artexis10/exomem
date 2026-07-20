@@ -45,6 +45,26 @@ def test_edit_memory_validate_only_is_read_only() -> None:
     assert invocation_is_read_only(command, {}) is False
 
 
+def test_remember_validate_only_is_read_only() -> None:
+    from exomem.commands import invocation_is_read_only, product_commands_for
+
+    command = next(
+        item for item in product_commands_for("mcp") if item.name == "remember"
+    )
+
+    assert invocation_is_read_only(command, {"validate_only": True}) is True
+    assert invocation_is_read_only(command, {"validate_only": False}) is False
+    assert invocation_is_read_only(command, {}) is False
+    # A draft commit is a write even though it carries draft identity fields.
+    assert (
+        invocation_is_read_only(
+            command,
+            {"validate_only": False, "draft_id": "d", "draft_hash": "h"},
+        )
+        is False
+    )
+
+
 def test_validate_only_row_edit_refuses_instead_of_mutating(vault: Path) -> None:
     from exomem.commands import op_edit_memory
 

@@ -11,8 +11,11 @@ LAPTOP_ORIGIN = "https://exomem-laptop.example.com"
 ORIGIN_TIMEOUT_MS = "2500"
 # MCP tools can legitimately take longer than a connectivity probe. Keep this
 # independent from the short connectivity probe; ambiguous tool calls are
-# never cross-replica replayed regardless of timeout.
-MCP_TOOL_TIMEOUT_MS = "15000"
+# never cross-replica replayed regardless of timeout. Governed writes validate
+# against the full corpus (measured 12-45s warm at 2.4k pages), so this must
+# comfortably exceed a warm write and stay under Cloudflare's ~100s proxy cap.
+# An abandoned mutation is acknowledgement loss: the origin commits anyway.
+MCP_TOOL_TIMEOUT_MS = "60000"
 # Behavioral compatibility, not exact package versions. During an incompatible
 # rolling deployment, expand to "1,2", roll every replica, then contract to "2".
 SUPPORTED_RUNTIME_CONTRACTS = "1"
