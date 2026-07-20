@@ -171,6 +171,44 @@ def auto_rerank_allowed_by_policy() -> bool:
 _FIND_CACHE: OrderedDict[tuple, list[Hit]] = OrderedDict()
 _FIND_CACHE_LOCK = threading.Lock()
 _DEFAULT_FIND_CACHE_SIZE = 32
+MAX_RERANK_CANDIDATES = 300
+
+
+def _set_rerank_timing_profile(
+    timings: FindTimings | None,
+    *,
+    requested: int | None,
+    effective: int,
+    scorer_input_count: int,
+    unscored_tail_count: int,
+    decision: str,
+    reason: str,
+) -> None:
+    """Record bounded-reranker diagnostics only for timing-enabled requests."""
+    if timings is None:
+        return
+    timings.profile["rerank"] = {
+        "candidate_limit_requested": requested,
+        "candidate_limit_effective": effective,
+        "candidate_limit_hard_max": MAX_RERANK_CANDIDATES,
+        "scorer_input_count": scorer_input_count,
+        "unscored_tail_count": unscored_tail_count,
+        "decision": decision,
+        "reason": reason,
+    }
+
+
+def _order_reranked_prefix(hits: list[Any], *, prefix_count: int) -> list[Any]:
+    """Sort only the scored prefix, preserving the fused tail byte-for-byte."""
+    prefix = hits[:prefix_count]
+    prefix.sort(
+        key=lambda hit: -(
+            hit.rerank_score
+            if hit.rerank_score is not None
+            else float("-inf")
+        )
+    )
+    return prefix + hits[prefix_count:]
 
 
 def _find_cache_size() -> int:
@@ -324,6 +362,7 @@ def find(
     mode: str = "hybrid",
     graph: bool = True,
     rerank: bool | None = None,
+    rerank_max_candidates: int | None = None,
     auto_rerank: bool = False,
     temporal: bool = True,
     intent: str | None = None,
@@ -383,11 +422,16 @@ def find(
     BM25+vector hybrid without graph expansion.
 
     `rerank`: True/False forces the BAAI/bge-reranker-base CrossEncoder pass
-    on/off; `None` (default) defers to `auto_rerank`. When on, runs the top
-    `3 * limit` fused candidates through the reranker and re-sorts by reranker
-    score. Recovers ordering quality on ambiguous queries — the LLM-Wiki cases
-    where vector floats a topically-off doc to the top. ~50ms / candidate on
-    Blackwell. Off by default to keep the model out of the common path.
+    on/off; `None` (default) defers to `auto_rerank`. When on, runs a bounded
+    prefix of the top `3 * limit` fused candidates through the reranker and
+    re-sorts that prefix by reranker score. Off by default to keep the model
+    out of the common path.
+
+    `rerank_max_candidates`: optional caller-selected bound on the reranker
+    prefix. Must be an integer from the effective result `limit` through 300.
+    Omit it to preserve the existing `3 * limit` prefix. This bounds scorer
+    input count, not wall-clock time: the synchronous model call has no safe
+    cancellation boundary.
 
     `auto_rerank`: when True AND `rerank` is left unset (None), the reranker
     fires only when `should_rerank()` judges it worthwhile (top-3 vector/bm25
@@ -444,6 +488,42 @@ def find(
     if limit < 1:
         limit = 1
     limit = min(limit, 100)
+    if rerank_max_candidates is not None and (
+        isinstance(rerank_max_candidates, bool)
+        or not isinstance(rerank_max_candidates, int)
+    ):
+        raise ValueError(
+            "find: rerank_max_candidates must be an integer "
+            f"from {limit} to {MAX_RERANK_CANDIDATES}, got "
+            f"{rerank_max_candidates!r}"
+        )
+    if rerank_max_candidates is not None and not (
+        limit <= rerank_max_candidates <= MAX_RERANK_CANDIDATES
+    ):
+        raise ValueError(
+            "find: rerank_max_candidates must be an integer "
+            f"from {limit} to {MAX_RERANK_CANDIDATES}, got "
+            f"{rerank_max_candidates!r}"
+        )
+    effective_rerank_candidate_limit = min(
+        3 * limit,
+        rerank_max_candidates or MAX_RERANK_CANDIDATES,
+    )
+    _set_rerank_timing_profile(
+        timings,
+        requested=rerank_max_candidates,
+        effective=effective_rerank_candidate_limit,
+        scorer_input_count=0,
+        unscored_tail_count=0,
+        decision="skipped",
+        reason="not_reached",
+    )
+    if retrieval_trace is not None:
+        retrieval_trace.record_rerank_bound(
+            requested=rerank_max_candidates,
+            effective=effective_rerank_candidate_limit,
+            hard_max=MAX_RERANK_CANDIDATES,
+        )
     query_norm = (query or "").lower().strip()
 
     language_registry = None
@@ -531,6 +611,15 @@ def find(
     if effective_result_level == "unit":
         if timings is not None:
             timings.cache["enabled"] = False
+        _set_rerank_timing_profile(
+            timings,
+            requested=rerank_max_candidates,
+            effective=effective_rerank_candidate_limit,
+            scorer_input_count=0,
+            unscored_tail_count=0,
+            decision="skipped",
+            reason="result_level_unit",
+        )
         return _find_semantic_units(
             vault_root,
             query=query,
@@ -561,7 +650,7 @@ def find(
         request_key = (
             str(vault_root.resolve()), query, _t(types), _t(projects), _t(tags),
             _t(speakers), _t(file_types), _t(exclude_file_types), limit, scope,
-            mode, graph, rerank, auto_rerank, temporal, intent,
+            mode, graph, rerank, rerank_max_candidates, auto_rerank, temporal, intent,
             updated_after, updated_before, recency_days, filter_key,
             effective_result_level, prefer_compiled, prefer_active, resolved_config,
         )
@@ -580,6 +669,15 @@ def find(
         if cached is not None:
             if timings is not None:
                 timings.cache["hit"] = True
+            _set_rerank_timing_profile(
+                timings,
+                requested=rerank_max_candidates,
+                effective=effective_rerank_candidate_limit,
+                scorer_input_count=0,
+                unscored_tail_count=0,
+                decision="skipped",
+                reason="cache_hit",
+            )
             return copy.deepcopy(cached)
 
     # Track warm-window degradation even when the caller passed no list —
@@ -639,6 +737,7 @@ def find(
             types=types, projects=projects, tags=tags, speakers=speakers,
             file_types=file_types, exclude_file_types=exclude_file_types,
             limit=limit, scope=walk_scope, mode=mode, graph=graph, rerank=rerank,
+            rerank_max_candidates=rerank_max_candidates,
             auto_rerank=auto_rerank, temporal=temporal, intent=intent,
             prefer_compiled=prefer_compiled,
             prefer_active=prefer_active,
@@ -655,6 +754,16 @@ def find(
 
     if retrieval_trace is not None and (mode == "keyword" or not query_norm):
         retrieval_trace.record_keyword_hits(hits, filter_only=not query_norm)
+    if mode == "keyword" or not query_norm:
+        _set_rerank_timing_profile(
+            timings,
+            requested=rerank_max_candidates,
+            effective=effective_rerank_candidate_limit,
+            scorer_input_count=0,
+            unscored_tail_count=0,
+            decision="skipped",
+            reason="empty_query" if not query_norm else "requested_mode_keyword",
+        )
 
     # Auto-widen: reach into the wider vault (sibling folders like Tracking/,
     # Reference/, plus curated trees) so content outside Knowledge Base/ isn't
@@ -1564,6 +1673,7 @@ def _find_semantic(
     mode: str,
     graph: bool = True,
     rerank: bool | None = False,
+    rerank_max_candidates: int | None = None,
     auto_rerank: bool = False,
     temporal: bool = True,
     intent: str | None = None,
@@ -1645,6 +1755,18 @@ def _find_semantic(
                 fallback_hits,
                 lane_profiles=bundle.lane_statuses,
             )
+        _set_rerank_timing_profile(
+            timings,
+            requested=rerank_max_candidates,
+            effective=min(
+                3 * limit,
+                rerank_max_candidates or MAX_RERANK_CANDIDATES,
+            ),
+            scorer_input_count=0,
+            unscored_tail_count=0,
+            decision="skipped",
+            reason="no_hits" if not fallback_hits else "candidate_lanes_empty",
+        )
         return fallback_hits
 
     fused = bundle.fused
@@ -1684,6 +1806,10 @@ def _find_semantic(
     # whenever reranking is even possible.
     may_rerank = rerank is True or (rerank is None and auto_rerank)
     target_n = limit * 3 if may_rerank else limit
+    rerank_candidate_limit = min(
+        target_n if may_rerank else 3 * limit,
+        rerank_max_candidates or MAX_RERANK_CANDIDATES,
+    )
     hits: list[Hit] = []
     seen: set[str] = set()
     _filter_t0 = time.perf_counter()
@@ -1837,14 +1963,18 @@ def _find_semantic(
 
     if timings is not None and not (do_rerank and hits):
         timings.skipped("rerank")
+    scorer_input_count = 0
+    unscored_tail_count = max(0, len(hits) - rerank_candidate_limit)
     if do_rerank and hits:
         _rerank_t0 = time.perf_counter()
+        rerank_prefix = hits[:rerank_candidate_limit]
+        scorer_input_count = len(rerank_prefix)
         try:
             from . import embeddings as emb
             # Best passage for each hit: the matched chunk when we have one,
             # else the leading body slice.
             passages: list[str] = []
-            for h in hits:
+            for h in rerank_prefix:
                 ctext = chunk_text_by_path.get(h.path)
                 if ctext:
                     passages.append(ctext)
@@ -1853,16 +1983,24 @@ def _find_semantic(
                     body = (pg.body if pg else "") or h.excerpt
                     passages.append(body[:1500])  # CrossEncoder caps at 512 tokens
             scores = emb.rerank_pairs(query, passages)
-            if len(scores) != len(hits):
+            if len(scores) != len(rerank_prefix):
                 raise ValueError(
                     "reranker returned a score count that does not match its inputs"
                 )
+            score_updates: list[
+                tuple[
+                    Hit,
+                    int,
+                    float,
+                    float,
+                    list[dict[str, float | str]] | None,
+                ]
+            ] = []
             for input_rank, (h, s) in enumerate(
-                zip(hits, scores, strict=True), start=1
+                zip(rerank_prefix, scores, strict=True), start=1
             ):
-                h.rerank_input_rank = input_rank
-                h.rerank_raw_score = float(s)
-                adjusted = h.rerank_raw_score
+                raw_score = float(s)
+                adjusted = raw_score
                 chain: list[dict[str, float | str]] | None = (
                     [] if retrieval_trace is not None else None
                 )
@@ -1905,15 +2043,21 @@ def _find_semantic(
                                 "after": adjusted,
                             }
                         )
+                score_updates.append(
+                    (h, input_rank, raw_score, adjusted, chain)
+                )
+            # Commit annotations only after every returned score and multiplier
+            # has been validated. A late conversion/application failure must
+            # leave the fused fallback free of partial reranker evidence.
+            for h, input_rank, raw_score, adjusted, chain in score_updates:
+                h.rerank_input_rank = input_rank
+                h.rerank_raw_score = raw_score
                 h.rerank_score = adjusted
                 if chain is not None:
                     h.rerank_multiplier_chain = chain
-            hits.sort(
-                key=lambda h: -(
-                    h.rerank_score
-                    if h.rerank_score is not None
-                    else float("-inf")
-                )
+            hits = _order_reranked_prefix(
+                hits,
+                prefix_count=len(rerank_prefix),
             )
             rerank_outcome = {"decision": "ran", "reason": "ran"}
         except ImportError as e:
@@ -1924,7 +2068,7 @@ def _find_semantic(
                 "decision": "unavailable",
                 "reason": "dependency_unavailable",
             }
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - optional reranker must soft-fail.
             log.warning("rerank failed: %s; returning fused order", e)
             if timings is not None:
                 timings.error("rerank", e)
@@ -1935,6 +2079,16 @@ def _find_semantic(
                     (time.perf_counter() - _rerank_t0) * 1000.0, 3
                 )
 
+    _set_rerank_timing_profile(
+        timings,
+        requested=rerank_max_candidates,
+        effective=rerank_candidate_limit,
+        scorer_input_count=scorer_input_count,
+        unscored_tail_count=unscored_tail_count,
+        decision=rerank_outcome["decision"],
+        reason=rerank_outcome["reason"],
+    )
+
     final_hits = hits[:limit]
     if retrieval_trace is not None:
         retrieval_trace.record_page_candidates(
@@ -1942,6 +2096,8 @@ def _find_semantic(
             final_hits,
             reranker_model=embeddings.RERANKER_NAME,
             rerank_outcome=rerank_outcome,
+            scorer_input_count=scorer_input_count,
+            unscored_tail_count=unscored_tail_count,
         )
     return final_hits
 
@@ -2276,7 +2432,7 @@ def _outbound_wikilink_paths(
             canonical, warning = normalize_wikilink(
                 target, vault_root, resolver=resolver, strict=False
             )
-        except Exception:
+        except Exception:  # noqa: BLE001 - malformed links are skipped during ranking.
             continue
         if warning:
             continue  # unresolved — don't pollute the ranking

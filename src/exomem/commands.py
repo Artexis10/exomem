@@ -125,6 +125,17 @@ _AuditSampleLimit = Annotated[
         description="Audit legacy-backlog sample count; integer from 0 to 50.",
     ),
 ]
+_RerankCandidateLimit = Annotated[
+    StrictInt,
+    Field(
+        ge=1,
+        le=find_module.MAX_RERANK_CANDIDATES,
+        description=(
+            "Maximum fused candidates passed to the reranker; strict integer "
+            "from the effective result limit through 300."
+        ),
+    ),
+]
 
 # Keep commands.py as the public command-surface facade for server, CLI, docs,
 # and tests while the implementation lives in command_surface.py.
@@ -580,6 +591,7 @@ def op_find(
     mode: str = "hybrid",
     graph: bool = True,
     rerank: bool | None = None,
+    rerank_max_candidates: _RerankCandidateLimit | None = None,
     prefer_compiled: bool = True,
     prefer_active: bool = True,
     prefer_used: bool = False,
@@ -652,6 +664,11 @@ def op_find(
             disagree or the query is long. Pass true to force reranking
             for a high-value query, including on CPU; pass false to skip
             it entirely.
+        rerank_max_candidates: Bound the fused prefix sent to the reranker.
+            Must be an integer from the effective result limit through 300.
+            Omit to preserve the existing `3 * limit` prefix. This bounds
+            candidate count, not wall-clock latency: the synchronous model
+            call has no safe cancellation boundary.
         prefer_compiled: When true (default), applies a small boost to
             compiled types (insight, pattern, failure, research-note,
             entity) and a small penalty to raw `source` after fusion
@@ -775,6 +792,7 @@ def op_find(
             requested_result_level=result_level,
             rerank_requested=rerank,
             auto_rerank=auto_rerank,
+            rerank_candidate_limit_requested=rerank_max_candidates,
             compute_profile=compute_profile,
         )
         if explain
@@ -793,6 +811,7 @@ def op_find(
                 "graph_enrich": graph_enrich,
                 "graph": graph,
                 "rerank_requested": rerank,
+                "rerank_max_candidates": rerank_max_candidates,
                 "auto_rerank": auto_rerank,
                 "prefer_compiled": prefer_compiled,
                 "prefer_active": prefer_active,
@@ -821,6 +840,7 @@ def op_find(
         mode=mode,
         graph=graph,
         rerank=rerank,
+        rerank_max_candidates=rerank_max_candidates,
         # rerank=None uses the mode/device-gated auto policy. Explicit
         # true/false from the caller always wins over auto.
         auto_rerank=auto_rerank,
@@ -3142,6 +3162,7 @@ def op_ask_memory(
     deep: bool = False,
     graph: bool = True,
     rerank: bool | None = None,
+    rerank_max_candidates: _RerankCandidateLimit | None = None,
     prefer_compiled: bool = True,
     prefer_active: bool = True,
     prefer_used: bool = False,
@@ -3177,6 +3198,8 @@ def op_ask_memory(
         deep: Return a packed context for reasoning.
         graph: Include graph-neighbour ranking in hybrid/vector search.
         rerank: Force or suppress cross-encoder reranking; omit for mode-aware auto.
+        rerank_max_candidates: Bound scorer input to an integer from the effective
+            result limit through 300; omission preserves the existing prefix.
         prefer_compiled: Prefer compiled notes over raw sources by default.
         prefer_active: Prefer active conclusions over superseded ones.
         prefer_used: Apply usage boost when explicitly requested.
@@ -3202,6 +3225,7 @@ def op_ask_memory(
         mode=mode,
         graph=graph,
         rerank=rerank,
+        rerank_max_candidates=rerank_max_candidates,
         prefer_compiled=prefer_compiled,
         prefer_active=prefer_active,
         prefer_used=prefer_used,

@@ -704,8 +704,10 @@ def test_openapi_lists_real_product_params(vault, monkeypatch: pytest.MonkeyPatc
         "filters",
         "result_level",
         "explain",
+        "rerank_max_candidates",
     } <= set(props)
     assert props["limit"]["type"] == "integer"
+    assert props["rerank_max_candidates"]["type"] == "integer"
     assert props["graph"]["type"] == "boolean"
     assert props["tags"]["type"] == "array"
     connect_schema = doc["paths"]["/api/connect_memory"]["post"]["requestBody"][
