@@ -5,6 +5,7 @@ import inspect
 import json
 import sqlite3
 import threading
+import time
 from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import dataclass, replace
@@ -1770,6 +1771,122 @@ class Clock:
 
     def __call__(self) -> float:
         return self.value
+
+
+def _reclaim_replica(
+    store: SQLiteLeaseStore,
+    tmp_path: Path,
+    replica_id: str,
+    *,
+    preferred: bool,
+    ttl_seconds: float = 30.0,
+) -> LeaseManager:
+    return LeaseManager(
+        LeaseConfig(
+            url="https://lease.example",
+            vault_id="main",
+            replica_id=replica_id,
+            state_dir=tmp_path / f"{replica_id}-state",
+            preferred_writer=preferred,
+            ttl_seconds=ttl_seconds,
+        ),
+        client=StoreClient(store, replica_id),
+    )
+
+
+def test_preferred_follower_reclaims_once_the_previous_lease_expires(tmp_path: Path) -> None:
+    """A preferred replica must keep trying, not give up after one startup race.
+
+    Regression: `start_server_lifecycle()` attempted acquisition once and
+    swallowed the failure, reasoning that mutations would retry. The HA edge
+    routes mutations to the lease holder, so a follower never receives one. The
+    preferred replica lost a startup race on 2026-07-19 and stayed a follower
+    for 15 hours while reporting healthy.
+    """
+    clock = Clock()
+    store = SQLiteLeaseStore(tmp_path / "leases.sqlite", clock=clock)
+    laptop = _reclaim_replica(store, tmp_path, "laptop", preferred=False)
+    desktop = _reclaim_replica(store, tmp_path, "desktop", preferred=True)
+
+    assert laptop.ensure_writer().holder == "laptop"
+    # Desktop starts while the laptop holds a live lease: startup acquisition fails.
+    with pytest.raises(OpError, match="WRITER_LEASE_REQUIRED"):
+        desktop.ensure_writer()
+    assert desktop.status()["role"] == "follower"
+
+    # Retrying changes nothing while the holder is live.
+    desktop._attempt_preferred_reclaim()
+    assert desktop.status()["role"] == "follower"
+
+    # The laptop stops renewing and its lease lapses.
+    clock.value += 60
+    desktop._attempt_preferred_reclaim()
+    assert desktop.status()["role"] == "writer"
+
+
+def test_reclaim_never_preempts_a_live_holder(tmp_path: Path) -> None:
+    """Repeated reclaim must not displace a running writer or disturb its fencing token."""
+    clock = Clock()
+    store = SQLiteLeaseStore(tmp_path / "leases.sqlite", clock=clock)
+    laptop = _reclaim_replica(store, tmp_path, "laptop", preferred=False)
+    desktop = _reclaim_replica(store, tmp_path, "desktop", preferred=True)
+
+    granted = laptop.ensure_writer()
+    for _ in range(5):
+        desktop._attempt_preferred_reclaim()
+
+    held = store.status("main")
+    assert held["holder"] == "laptop"
+    # The holder's fencing token is untouched: no takeover was even half-applied.
+    assert held["fencing_token"] == granted.fencing_token
+    assert desktop.status()["role"] == "follower"
+
+
+def test_renew_loop_actually_drives_reclaim(tmp_path: Path) -> None:
+    """The renewer must invoke reclaim, not merely have a reclaim method available.
+
+    The defect was in the loop itself: it read `_fencing_token`, found None, and
+    `continue`d — renewing an existing lease but never acquiring one. Tests that
+    call the reclaim helper directly would all still pass with that `continue`
+    restored, so this asserts the wiring end to end.
+    """
+    clock = Clock()
+    store = SQLiteLeaseStore(tmp_path / "leases.sqlite", clock=clock)
+    laptop = _reclaim_replica(store, tmp_path, "laptop", preferred=False)
+    # ttl/3 floors at a 1s renew interval, keeping the test bounded.
+    desktop = _reclaim_replica(store, tmp_path, "desktop", preferred=True, ttl_seconds=1.0)
+
+    assert laptop.ensure_writer().holder == "laptop"
+    with pytest.raises(OpError, match="WRITER_LEASE_REQUIRED"):
+        desktop.ensure_writer()
+
+    clock.value += 60  # the laptop's lease lapses
+    desktop.start_renewer()
+    try:
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            if store.status("main")["holder"] == "desktop":
+                break
+            time.sleep(0.05)
+        assert store.status("main")["holder"] == "desktop", (
+            "renew loop never attempted reclaim while preferred and unleased"
+        )
+    finally:
+        desktop.close()
+
+
+def test_non_preferred_follower_does_not_self_promote(tmp_path: Path) -> None:
+    """Only a preferred replica reclaims in the background; others wait for a mutation."""
+    clock = Clock()
+    store = SQLiteLeaseStore(tmp_path / "leases.sqlite", clock=clock)
+    follower = _reclaim_replica(store, tmp_path, "laptop", preferred=False)
+
+    # Lease is entirely free — the only thing stopping acquisition is the policy.
+    assert store.status("main")["holder"] is None
+    follower._attempt_preferred_reclaim()
+
+    assert store.status("main")["holder"] is None
+    assert follower.status()["role"] == "follower"
 
 
 def test_sqlite_coordinator_exclusivity_expiry_takeover_and_fencing(tmp_path: Path) -> None:
