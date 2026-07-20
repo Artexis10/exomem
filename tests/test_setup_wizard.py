@@ -55,6 +55,9 @@ def _setup(vault: Path, home: Path, recorder: Recorder, **overrides):
         run_fn=recorder,
         which_fn=lambda name: f"C:/fake/{name}.CMD",
         home=home,
+        # Always sandboxed: without this the wizard would resolve the REAL
+        # ~/.codex and a test run could rewrite the developer's own config.toml.
+        codex_home=home.parent / "codex",
         print_fn=lines.append,
     )
     kwargs.update(overrides)
@@ -79,8 +82,8 @@ def test_fresh_vault_happy_path(tmp_path: Path) -> None:
     assert "Adoption: run `exomem adopt`" in out
     assert "compile planning" in out
     assert "writes only under 'Knowledge Base/'" in out
-    # registration argv shape
-    (reg,) = [c for c in recorder.calls if "add" in c]
+    # registration argv shape (Codex is registered too; pick the Claude call)
+    (reg,) = [c for c in recorder.calls if "add" in c and "claude" in c[0]]
     assert reg[0].endswith("claude.CMD")
     assert reg[1:4] == ["mcp", "add", "exomem"]
     assert ["--scope", "user"] == reg[4:6]
@@ -178,7 +181,9 @@ def test_setup_skips_registration_when_exomem_exists_in_another_scope(tmp_path: 
 
     assert code == 0
     assert "[skipped: already registered in local]" in out
-    assert not [c for c in recorder.calls if "add" in c]
+    # An existing Claude registration must be left alone. Codex is a separate
+    # client with its own registration, so it is still wired.
+    assert not [c for c in recorder.calls if "add" in c and "claude" in c[0]]
 
 
 
@@ -267,3 +272,64 @@ def test_server_command_falls_back_to_uvx_when_nothing_found(
     _no_repo_checkout(monkeypatch, tmp_path)
     cmd = setup_wizard._server_command(lambda name: None)
     assert cmd == ["uvx", "exomem", "--transport", "stdio"]
+
+
+# ---- Codex registration: symmetric with Claude Code ----
+#
+# Codex reads skills from disk and speaks MCP just like Claude Code, but the
+# wizard used to only ever print a snippet for it, so Codex users ended up with
+# tools and no working registration.
+
+
+def test_codex_is_registered_through_its_cli_when_available(tmp_path: Path) -> None:
+    vault, home = _messy_vault(tmp_path), tmp_path / "home"
+    recorder = Recorder()
+
+    code, out = _setup(vault, home, recorder)
+
+    assert code == 0
+    (reg,) = [c for c in recorder.calls if "add" in c and "codex" in c[0]]
+    assert reg[1:4] == ["mcp", "add", "exomem"]
+    assert f"EXOMEM_VAULT_PATH={vault}" in reg
+    # --transport stdio must be explicit: the server defaults to http.
+    assert "--transport" in reg and "stdio" in reg
+    assert "[done] registered with Codex" in out
+
+
+def test_codex_is_skipped_when_not_installed(tmp_path: Path) -> None:
+    vault, home = _messy_vault(tmp_path), tmp_path / "home"
+    recorder = Recorder()
+
+    code, out = _setup(
+        vault,
+        home,
+        recorder,
+        which_fn=lambda name: None if name == "codex" else f"C:/fake/{name}.CMD",
+    )
+
+    assert code == 0
+    assert "[skipped: Codex not detected on this machine]" in out
+    assert not [c for c in recorder.calls if "codex" in str(c[0])]
+
+
+def test_codex_falls_back_to_config_toml_when_its_cli_cannot_register(
+    tmp_path: Path,
+) -> None:
+    """Older Codex builds have no `mcp add`; the user must still end up wired."""
+    codex_home = tmp_path / "codex"
+    codex_home.mkdir()
+    (codex_home / "config.toml").write_text('model = "gpt-5"\n', encoding="utf-8")
+
+    vault, home = _messy_vault(tmp_path), tmp_path / "home"
+    # Key on the executable, not a bare "codex": Recorder matches substrings across
+    # the whole argv, and pytest's tmp_path is named after this test - so "codex"
+    # alone also matches the Claude call's vault path.
+    recorder = Recorder(results={"fake/codex.CMD": (1, "", "unknown subcommand 'mcp'")})
+
+    code, out = _setup(vault, home, recorder)
+
+    assert code == 0
+    written = (codex_home / "config.toml").read_text(encoding="utf-8")
+    assert "[mcp_servers.exomem]" in written
+    assert 'model = "gpt-5"' in written, "must not clobber the user's other settings"
+    assert "config.toml" in out

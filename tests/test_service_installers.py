@@ -374,10 +374,14 @@ def test_help_and_invalid_profile_are_non_mutating() -> None:
 
 def test_windows_installer_gates_remote_and_verifies_before_success() -> None:
     text = (ROOT / "scripts" / "install-service.ps1").read_text(encoding="utf-8")
+    # Package install and profile->extras mapping moved into the shared helper so
+    # upgrade.ps1 performs them identically instead of duplicating them.
+    common = (ROOT / "scripts" / "_service-common.ps1").read_text(encoding="utf-8")
 
-    assert '"pip", "install", "--upgrade", "--python", $venvPython, $pkg' in text
+    assert "Install-ExomemPackage" in text
     assert '[string]$Profile = "standard"' in text
-    assert '"exomem[embeddings,media]"' in text
+    assert '"uv", "pip", "install", "--upgrade", "--python", $Python, $pkg' in common
+    assert '"[embeddings,media]"' in common
     assert "Preflight: exomem doctor --profile remote" in text
     assert "function Test-McpEndpoint" in text
     assert "-SkipHttpErrorCheck" in text

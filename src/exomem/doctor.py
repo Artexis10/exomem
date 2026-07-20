@@ -496,6 +496,30 @@ def _check_torch_cuda() -> DoctorCheck:
                 "Apple Silicon MPS (Metal) backend available — bge/CLIP embeddings will "
                 "use the GPU. Note: faster-whisper (ASR) has no Metal path and stays on CPU.",
             )
+        # An NVIDIA host running CPU torch is a regression, not a configuration.
+        # `uv pip install` (unlike `uv sync`) ignores [tool.uv.sources], so any
+        # plain upgrade of the service venv silently swaps the CUDA wheel for the
+        # PyPI CPU one and moves embeddings/media onto the CPU with no other
+        # symptom. Warning was too quiet: DoctorReport.success is fail-driven, so
+        # every preflight kept passing while the GPU sat idle.
+        if shutil.which("nvidia-smi") and not os.environ.get("EXOMEM_ALLOW_CPU_TORCH"):
+            build = getattr(getattr(torch, "version", None), "cuda", None)
+            detail = (
+                "this is a CPU-only build"
+                if build is None
+                else f"the build targets CUDA {build} but sees no device"
+            )
+            return _check(
+                "torch.cuda",
+                "fail",
+                f"An NVIDIA driver is present (nvidia-smi found) but torch "
+                f"{getattr(torch, '__version__', '?')} cannot use CUDA — {detail}.",
+                "Reinstall the CUDA build of the SAME version from the pinned index, e.g. "
+                "`uv pip install --python <venv> --default-index "
+                "https://download.pytorch.org/whl/cu132 torch==<version>+cu132` — or run "
+                "scripts/upgrade.ps1, which repairs this automatically. Set "
+                "EXOMEM_ALLOW_CPU_TORCH=1 to accept CPU on this host deliberately.",
+            )
         return _check(
             "torch.cuda",
             "warn",

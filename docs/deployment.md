@@ -296,6 +296,8 @@ bash scripts/install-service.sh --release
 # The script self-elevates; approve the UAC prompt.
 pwsh -File scripts/install-service.ps1 -Release
 # The installer creates/updates the PyPI service venv and verifies /mcp -> 401.
+# It is idempotent: re-running against a registered service reconfigures it in
+# place and reuses the venv the service is already installed against.
 # Developer checkout mode is still available when .venv already exists:
 #   pwsh -File scripts/install-service.ps1
 # Uninstall:
@@ -304,6 +306,23 @@ pwsh -File scripts/install-service.ps1 -Release
 #   Start-Process -Verb RunAs -Wait sc.exe -ArgumentList 'stop','exomem'
 #   Start-Process -Verb RunAs -Wait sc.exe -ArgumentList 'start','exomem'
 ```
+
+**Upgrading after a release — run this, not a bare `uv pip install`:**
+
+```powershell
+pwsh -File scripts/upgrade.ps1
+```
+
+The service runs a PyPI-backed venv that is **not** the repo checkout, so `git pull`
+never touches it. `upgrade.ps1` locates that venv from the NSSM registry, upgrades
+it, repairs the CUDA torch build, gates on `doctor`, restarts, and then asserts the
+**live** `/health` version matches what it just installed. No elevation needed.
+
+Upgrading by hand is the trap this replaces: `uv pip install --upgrade exomem[...]`
+ignores `[tool.uv.sources]` (only `uv sync` reads it), so it silently pulls the PyPI
+**CPU** torch wheel over the CUDA build and moves embeddings/media onto the CPU with
+no other symptom. `doctor` now fails on that state when an NVIDIA driver is present
+(set `EXOMEM_ALLOW_CPU_TORCH=1` to accept CPU deliberately).
 
 ### Renaming an existing `kb-mcp` service
 
@@ -572,10 +591,16 @@ is now enforced independently. Before enabling the stable route—or after every
 release—check the repo, installed service environment, and readiness contract on
 **both** machines:
 
+On each machine, upgrade and self-verify in one step — it locates the service venv
+itself, so there is no path to get wrong and no version to eyeball:
+
 ```powershell
-git -C "$HOME\Desktop\projects\exomem" log -1 --oneline
-& "$HOME\Desktop\projects\exomem-service-ha\.venv\Scripts\python.exe" -c `
-  "import exomem; print(exomem.__version__)"
+pwsh -File scripts/upgrade.ps1
+```
+
+Then confirm the pair from either box:
+
+```powershell
 curl.exe -fsS https://exomem-desktop.example.com/health/ready
 curl.exe -fsS https://exomem-laptop.example.com/health/ready
 ```

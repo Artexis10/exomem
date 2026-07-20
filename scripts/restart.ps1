@@ -15,6 +15,8 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+. "$PSScriptRoot\_service-common.ps1"
+
 function Wait-ServiceState {
     param([string]$Name, [string]$Target, [int]$TimeoutSec = 30)
     $start = Get-Date
@@ -28,6 +30,36 @@ function Wait-ServiceState {
     }
 }
 
+$RepoRoot = Split-Path -Parent $PSScriptRoot
+
+# --- Resolve the service and the venv it ACTUALLY runs -------------------------
+# Back-compat with the kb-mcp -> exomem rename: boxes provisioned before the
+# rename still run the service under the OLD name, so fall back before doing
+# anything else (the venv lookup below is keyed on the resolved name). See
+# docs/deployment.md "Renaming an existing kb-mcp service".
+$resolved = Resolve-ExomemServiceName -ServiceName $ServiceName
+if (-not $resolved) {
+    throw "No exomem service is registered (looked for: $ServiceName, kb-mcp). Install one with scripts/install-service.ps1."
+}
+if ($resolved -ne $ServiceName) {
+    Write-Warning "Service '$ServiceName' not found; falling back to legacy '$resolved'. Re-register under the new name with scripts/install-service.ps1 (see docs/deployment.md)."
+}
+$ServiceName = $resolved
+
+# A -Release install points NSSM at a sibling PyPI-backed venv, not $RepoRoot\.venv.
+# This script used to hardcode the repo venv, so on a release box the doctor gate
+# below inspected an environment the service never loads -- passing or failing for
+# reasons unrelated to the thing being restarted. Ask NSSM instead.
+$ServicePy = Get-ExomemServicePython -ServiceName $ServiceName
+if ($ServicePy) {
+    $VenvPy = $ServicePy
+    Write-Host "Service venv: $VenvPy"
+} else {
+    $VenvPy = Join-Path $RepoRoot ".venv\Scripts\python.exe"
+    Write-Warning "Could not read the service interpreter from the registry; falling back to the repo venv ($VenvPy). The preflight may not reflect what the service runs."
+}
+$PyvenvCfg = Join-Path (Split-Path -Parent (Split-Path -Parent $VenvPy)) "pyvenv.cfg"
+
 # --- Self-heal the interpreter ------------------------------------------------
 # Kaspersky periodically quarantines the uv-managed python.exe as a false
 # positive. That leaves the venv (and this service) with no interpreter, so the
@@ -35,9 +67,6 @@ function Wait-ServiceState {
 # at the Tailscale funnel. If the venv interpreter won't run, reinstall it
 # before (re)starting. Add a Kaspersky exclusion for %APPDATA%\uv\python to stop
 # the quarantine at the source; this just makes recovery automatic.
-$RepoRoot  = Split-Path -Parent $PSScriptRoot
-$VenvPy    = Join-Path $RepoRoot ".venv\Scripts\python.exe"
-$PyvenvCfg = Join-Path $RepoRoot ".venv\pyvenv.cfg"
 
 function Get-DotenvValue {
     param([string]$Name)
@@ -89,18 +118,6 @@ if (-not (Test-VenvInterpreter)) {
 }
 
 Invoke-DoctorGate -Profile $Profile
-
-# Back-compat with the kb-mcp -> exomem rename: boxes provisioned before the
-# rename still run the service under the OLD name. If the requested service isn't
-# installed but the legacy 'kb-mcp' is, fall back so restart keeps working until
-# the box is re-registered under the new name (scripts/install-service.ps1). See
-# docs/deployment.md "Renaming an existing kb-mcp service".
-if (-not (Get-Service -Name $ServiceName -ErrorAction SilentlyContinue)) {
-    if (Get-Service -Name "kb-mcp" -ErrorAction SilentlyContinue) {
-        Write-Warning "Service '$ServiceName' not found; falling back to legacy 'kb-mcp'. Re-register under the new name with scripts/install-service.ps1 (see docs/deployment.md)."
-        $ServiceName = "kb-mcp"
-    }
-}
 
 Write-Host "Stopping $ServiceName..."
 sc.exe stop $ServiceName | Out-Null

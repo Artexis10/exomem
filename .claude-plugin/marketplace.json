@@ -1,0 +1,27 @@
+{
+  "name": "exomem",
+  "owner": {
+    "name": "Artexis10",
+    "url": "https://github.com/Artexis10"
+  },
+  "metadata": {
+    "description": "Governed long-term memory for AI agents, over a markdown vault you own.",
+    "version": "1.0.0"
+  },
+  "plugins": [
+    {
+      "name": "exomem",
+      "source": "./plugins/claude-code",
+      "description": "Exomem: MCP server, ten skills, and capture/retrieve hooks in one install. Raw sources stay immutable, conclusions carry provenance, nothing is deleted - it is superseded.",
+      "category": "knowledge",
+      "keywords": [
+        "memory",
+        "knowledge-base",
+        "markdown",
+        "obsidian",
+        "mcp",
+        "notes"
+      ]
+    }
+  ]
+}

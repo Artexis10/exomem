@@ -17,6 +17,23 @@ shell; the few Windows (PowerShell) differences are called out inline.
 
 If you're comfortable in Claude Code, this is ~20–30 minutes.
 
+> **Just want it working?** One command does all of it — and wires every agent
+> client on the machine (Claude Code *and* Codex: MCP server, all ten skills,
+> hooks):
+>
+> ```bash
+> curl -fsSL https://raw.githubusercontent.com/Artexis10/exomem/main/scripts/install.sh | sh
+> ```
+> ```powershell
+> irm https://raw.githubusercontent.com/Artexis10/exomem/main/scripts/install.ps1 | iex
+> ```
+>
+> Claude Code alone? `/plugin marketplace add Artexis10/exomem` then
+> `/plugin install exomem@exomem` — the MCP server registers itself.
+>
+> The manual walkthrough below exists so you can see what those do, and for when
+> you want to run the steps yourself.
+
 > **For Claude Code, exomem is two parts and you want both.** The **MCP server**
 > (steps 1-5) is the *hands* — product commands such as `ask_memory`,
 > `remember`, `capture_source`, `preserve_evidence`, and `review_memory`. The

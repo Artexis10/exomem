@@ -208,8 +208,11 @@ Agent behavior:
 
 ## Copyable instruction block
 
-Paste this into `AGENTS.md`, project instructions, or hosted chat custom
-instructions. Trim the tone line to your preference.
+For clients that support neither Skills nor hooks — claude.ai custom
+instructions, ChatGPT, generic MCP clients. **Claude Code and Codex do not need
+this**: both load the real skills from disk via `exomem setup`.
+
+Trim the tone line to your preference.
 
 ```text
 Use Exomem as my durable Knowledge Base.
@@ -238,17 +241,29 @@ when provenance matters. Use `edit_memory` for small corrections and
 
 ## Codex CLI
 
-Add the MCP server:
+`exomem setup` now wires Codex the same way it wires Claude Code — MCP
+registration, all ten skills, and hooks — so the usual answer is simply:
 
 ```bash
+exomem setup
+```
+
+It detects Codex from `codex` on PATH or a `~/.codex` directory, registers the
+server via `codex mcp add` (falling back to a backed-up, diffed merge into
+`~/.codex/config.toml`), and installs the skills into `~/.codex/skills/`.
+
+Codex **does** load Agent Skills from disk, so the instruction block above is no
+longer required there — it remains the fallback for clients that have neither
+skills nor hooks. To do the steps individually:
+
+```bash
+exomem install-skill --client codex
+exomem install-hook --client codex
 codex mcp add exomem --env EXOMEM_VAULT_PATH="/path/to/vault" -- exomem --transport stdio
 ```
 
-Install the same local hook scripts Claude Code uses:
-
-```bash
-exomem install-hook --client codex
-```
+`--transport stdio` is not optional: the server defaults to HTTP, so a config
+that omits it starts a web server on port 8765 instead of speaking MCP.
 
 Check deployed Claude Code and Codex hooks:
 

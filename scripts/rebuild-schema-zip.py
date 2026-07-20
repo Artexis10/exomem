@@ -1,73 +1,46 @@
 #!/usr/bin/env python3
-"""Rebuild the claude.ai `.skill` zip from the public scaffold.
+"""Rebuild the maintainer's claude.ai `.skill` zip from the public scaffold.
+
+Thin wrapper over `exomem package-skills` (src/exomem/package_skills.py) so there is
+exactly ONE implementation of the archive payload. This script used to carry its own
+copy, which is precisely the drift hazard the packaging module exists to remove.
 
 The public scaffold `src/exomem/_scaffold/_Schema/` is the single source of the skill.
-This assembles the maintainer's claude.ai `.skill` archive from it — SKILL.md +
-references verbatim — overlaying the maintainer's real `project-keys.yaml` when a vault
-is given (so the personal upload advertises real project scopes), otherwise shipping the
-scaffold's generic starter keys. SKILL.md lands at the archive root, mirroring the
-on-disk skill layout claude.ai expects.
+SKILL.md and references ship verbatim; the maintainer's real `project-keys.yaml` is
+overlaid when a vault is given, so the personal upload advertises real project scopes.
+SKILL.md lands at the archive root, mirroring the layout claude.ai expects.
 
-There is no longer a private marker-canonical: personal specifics live in the
-maintainer's own `project-keys.yaml` / `_access.yaml`, not a forked SKILL.md.
-
-Cross-platform (pure stdlib; no `zip` CLI / Compress-Archive).
+Prefer `exomem package-skills` directly: it builds ALL ten skills, not just the core
+one. This wrapper remains for the documented maintainer flow and single-file --out.
 
 Usage: python scripts/rebuild-schema-zip.py [--vault <root>] [--out <path>]
-  --vault  vault root containing "Knowledge Base/" — used only to overlay your real
-           project-keys.yaml and to default --out (default: $EXOMEM_VAULT_PATH)
-  --out    output zip path (default: <vault>/Knowledge Base/_Schema.zip when --vault is
-           given, else <repo>/dist/_Schema.zip)
+  --vault  vault root containing "Knowledge Base/" (default: $EXOMEM_VAULT_PATH)
+  --out    output zip path (default: <vault>/Knowledge Base/_Schema.zip when --vault
+           is given, else <repo>/dist/_Schema.zip)
 """
 
 from __future__ import annotations
 
 import argparse
 import os
-import re
+import shutil
 import sys
-import zipfile
+import tempfile
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
-SCAFFOLD = REPO / "src" / "exomem" / "_scaffold" / "_Schema"
+sys.path.insert(0, str(REPO / "src"))
+
+from exomem import package_skills as package_module  # noqa: E402
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(prog="rebuild-schema-zip")
-    ap.add_argument("--vault", help="vault root containing 'Knowledge Base/' (default: $EXOMEM_VAULT_PATH)")
-    ap.add_argument("--out", help="output zip path (default: <vault>/Knowledge Base/_Schema.zip, else <repo>/dist/_Schema.zip)")
+    ap.add_argument("--vault", help="vault root containing 'Knowledge Base/'")
+    ap.add_argument("--out", help="output zip path")
     args = ap.parse_args()
 
-    if not (SCAFFOLD / "SKILL.md").exists():
-        print(f"rebuild-schema-zip: {SCAFFOLD / 'SKILL.md'} not found.", file=sys.stderr)
-        return 2
-
     vault = args.vault or os.environ.get("EXOMEM_VAULT_PATH")
-
-    # SKILL.md + references come verbatim from the public scaffold.
-    files: dict[str, str] = {"SKILL.md": (SCAFFOLD / "SKILL.md").read_text(encoding="utf-8")}
-    for ref in sorted((SCAFFOLD / "references").glob("*.md")):
-        files[f"references/{ref.name}"] = ref.read_text(encoding="utf-8")
-
-    # project-keys.yaml: overlay the maintainer's real keys when a vault is given,
-    # else ship the scaffold's generic starter.
-    real_keys = (
-        Path(vault).expanduser() / "Knowledge Base" / "_Schema" / "project-keys.yaml"
-        if vault
-        else None
-    )
-    if real_keys is not None and real_keys.exists():
-        files["project-keys.yaml"] = real_keys.read_text(encoding="utf-8")
-        keys_source = str(real_keys)
-    else:
-        files["project-keys.yaml"] = (SCAFFOLD / "project-keys.yaml").read_text(encoding="utf-8")
-        keys_source = f"{SCAFFOLD / 'project-keys.yaml'} (generic)"
-
-    version = ""
-    m = re.search(r"(?m)^\s*version:\s*([0-9]+\.[0-9]+\.[0-9]+)", files["SKILL.md"])
-    if m:
-        version = m.group(1)
 
     if args.out:
         zip_path = Path(args.out).expanduser()
@@ -76,20 +49,22 @@ def main() -> int:
     else:
         zip_path = REPO / "dist" / "_Schema.zip"
 
-    print(f"scaffold:   {SCAFFOLD}")
-    print(f"keys:       {keys_source}")
+    with tempfile.TemporaryDirectory() as tmp:
+        try:
+            report = package_module.package_skills(
+                Path(tmp), vault=Path(vault) if vault else None
+            )
+        except FileNotFoundError as e:
+            print(f"rebuild-schema-zip: {e}", file=sys.stderr)
+            return 2
+        built = Path(tmp) / "exomem.zip"
+        zip_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(built, zip_path)
+
+    print(f"keys:       {'vault overlay' if vault else 'scaffold (generic)'}")
     print(f"zip target: {zip_path}")
-    print(f"version:    {version}" if version else "warning: could not parse version from SKILL.md frontmatter.")
-
-    zip_path.parent.mkdir(parents=True, exist_ok=True)
-    if zip_path.exists():
-        zip_path.unlink()
-    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as z:
-        for arcname, content in files.items():
-            z.writestr(arcname, content)
-
-    size_kb = zip_path.stat().st_size // 1024
-    print(f"wrote {zip_path} ({size_kb} KB, {len(files)} files) from the public scaffold.")
+    print(f"wrote {zip_path} ({zip_path.stat().st_size // 1024} KB) from the public scaffold.")
+    print(f"note: `exomem package-skills` builds all {report['count']} skills, not just this one.")
     return 0
 
 
