@@ -125,12 +125,22 @@ def test_edit_memory_discovery_is_one_discriminated_operation(
     fill = branches["fill_row"]
     frontmatter = branches["patch_frontmatter"]
     string = branches["replace_string"]
+    batch = branches["batch_replace"]
     assert fill["additionalProperties"] is False
     assert set(fill["properties"]) == {"kind", "row_key", "take", "overwrite"}
     assert "expected_hash" not in frontmatter["properties"]
     assert "validate_only" in frontmatter["properties"]
     assert {"old_string", "new_string", "replace_all", "tags", "expected_hash", "validate_only"} <= set(string["properties"])
     assert "field" not in string["properties"]
+    edits = batch["properties"]["edits"]
+    assert edits["minItems"] == 1
+    assert set(edits["items"]["required"]) == {"old_string", "new_string"}
+    assert edits["items"]["additionalProperties"] is False
+    assert set(edits["items"]["properties"]) == {
+        "old_string",
+        "new_string",
+        "replace_all",
+    }
 
 def test_edit_batch_mode_routes_to_multi_edit(vault: Path, monkeypatch) -> None:
     mcp = _build(monkeypatch)
@@ -199,14 +209,47 @@ def test_edit_batch_malformed_encoded_item_keeps_invalid_edit_error(
     mcp = _build(monkeypatch)
     rel = _make_page(vault, "# S\n\nalpha\n", name="malformed-encoded-edit.md")
 
-    with pytest.warns(DeprecationWarning):
-        with pytest.raises(Exception, match="INVALID_EDIT"):
-            _call(
-                mcp,
-                "edit_memory",
-                {"path": rel, "why": "invalid connector batch", "edits": ["[]"]},
-                run_middleware=True,
-            )
+    with pytest.raises(Exception, match="INVALID_EDIT"):
+        _call(
+            mcp,
+            "edit_memory",
+            {
+                "path": rel,
+                "why": "invalid connector batch",
+                "operation": {"kind": "batch_replace", "edits": ["[]"]},
+            },
+            run_middleware=True,
+        )
+
+
+@pytest.mark.parametrize(
+    "edits",
+    [
+        [],
+        [{"old_string": "alpha"}],
+        [{"old_string": "alpha", "new_string": "ALPHA", "ignored": True}],
+        [{"old_string": "alpha", "new_string": "alpha"}],
+    ],
+)
+def test_edit_batch_invalid_items_are_rejected_before_the_leaf(
+    vault: Path, monkeypatch, edits: list
+) -> None:
+    rel = _make_page(vault, "# S\n\nalpha\n", name="invalid-batch-edit.md")
+    before = (vault / rel).read_text(encoding="utf-8")
+
+    with pytest.raises(Exception, match="INVALID_EDIT"):
+        _call(
+            _build(monkeypatch),
+            "edit_memory",
+            {
+                "path": rel,
+                "why": "invalid batch",
+                "operation": {"kind": "batch_replace", "edits": edits},
+            },
+            run_middleware=True,
+        )
+
+    assert (vault / rel).read_text(encoding="utf-8") == before
 
 
 def test_edit_batch_encoded_blob_is_rejected_by_middleware(

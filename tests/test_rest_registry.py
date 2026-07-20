@@ -563,6 +563,10 @@ def test_edit_memory_rest_and_openapi_use_discriminated_primary_shape(
         "overwrite",
     }
     assert "expected_hash" not in branches["patch_frontmatter"]["properties"]
+    edits = branches["batch_replace"]["properties"]["edits"]
+    assert edits["minItems"] == 1
+    assert set(edits["items"]["required"]) == {"old_string", "new_string"}
+    assert edits["items"]["additionalProperties"] is False
 
 
 def test_edit_memory_rest_accepts_primary_and_legacy_runtime_shapes(
@@ -636,6 +640,45 @@ def test_invalid_rest_edit_fails_before_shared_invocation(
     assert response.status_code == 400
     assert response.json()["error"]["code"] == "INVALID_EDIT"
     assert "cannot combine" in response.json()["error"]["message"]
+
+
+@pytest.mark.parametrize(
+    ("edits", "guidance"),
+    [
+        ([], "at least 1 item"),
+        ([{"old_string": "Before"}], "new_string"),
+        (
+            [{"old_string": "Before", "new_string": "After", "ignored": True}],
+            "ignored",
+        ),
+    ],
+)
+def test_invalid_rest_batch_edit_fails_before_shared_invocation(
+    vault,
+    monkeypatch: pytest.MonkeyPatch,
+    edits: list,
+    guidance: str,
+) -> None:
+    monkeypatch.setattr(
+        writer_lease,
+        "invoke_command",
+        lambda *_args, **_kwargs: pytest.fail("invalid batch reached invocation"),
+    )
+    client = _client(vault, monkeypatch, EXOMEM_REST_API_KEY="sekret")
+
+    response = client.post(
+        "/api/edit_memory",
+        json={
+            "path": "Knowledge Base/Notes/Insights/example.md",
+            "why": "invalid batch",
+            "operation": {"kind": "batch_replace", "edits": edits},
+        },
+        headers=_auth(),
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "INVALID_EDIT"
+    assert guidance in response.json()["error"]["message"]
 
 
 def test_openapi_lists_real_product_params(vault, monkeypatch: pytest.MonkeyPatch) -> None:

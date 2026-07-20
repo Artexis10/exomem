@@ -169,6 +169,40 @@ def test_batch_connector_json_objects_normalize_like_objects() -> None:
 
 
 @pytest.mark.parametrize(
+    ("edits", "guidance"),
+    [
+        ([], "at least 1 item"),
+        ([{"old_string": "Before"}], "new_string"),
+        (
+            [
+                {
+                    "old_string": "Before",
+                    "new_string": "After",
+                    "comment": "not consumed by the leaf",
+                }
+            ],
+            "comment",
+        ),
+        ([{"old_string": "Same", "new_string": "Same"}], "must differ"),
+        (["[]"], "old_string"),
+    ],
+)
+def test_batch_items_fail_shared_validation_with_precise_guidance(
+    edits: list, guidance: str
+) -> None:
+    with pytest.raises(ValueError, match="INVALID_EDIT") as exc:
+        normalize_edit_arguments(
+            {
+                "path": "Knowledge Base/Notes/Insights/example.md",
+                "why": "update",
+                "operation": {"kind": "batch_replace", "edits": edits},
+            }
+        )
+
+    assert guidance in str(exc.value)
+
+
+@pytest.mark.parametrize(
     ("payload", "guidance"),
     [
         (

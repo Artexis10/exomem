@@ -185,6 +185,41 @@ def test_invalid_edit_fails_before_manager_or_mutation_boundary(monkeypatch) -> 
         )
 
 
+@pytest.mark.parametrize(
+    ("edits", "guidance"),
+    [
+        ([], "at least 1 item"),
+        ([{"old_string": "Before"}], "new_string"),
+        (
+            [{"old_string": "Before", "new_string": "After", "ignored": True}],
+            "ignored",
+        ),
+        ([{"old_string": "Same", "new_string": "Same"}], "must differ"),
+        (["not-json"], "old_string"),
+    ],
+)
+def test_invalid_batch_edit_fails_before_manager_or_mutation_boundary(
+    monkeypatch: pytest.MonkeyPatch, edits: list, guidance: str
+) -> None:
+    command = SimpleNamespace(name="edit_memory", leaf=lambda *_a, **_k: None, read_only=False)
+    monkeypatch.setattr(
+        writer_lease,
+        "get_manager",
+        lambda: pytest.fail("invalid batch edit reached the writer manager"),
+    )
+
+    with pytest.raises(ValueError, match="INVALID_EDIT") as exc:
+        writer_lease.invoke_command(
+            command,
+            Path("/unused"),
+            path="Knowledge Base/Notes/Insights/example.md",
+            why="invalid batch",
+            operation={"kind": "batch_replace", "edits": edits},
+        )
+
+    assert guidance in str(exc.value)
+
+
 def test_validate_only_row_edit_refuses_instead_of_mutating(vault: Path) -> None:
     from exomem.commands import op_edit_memory
 

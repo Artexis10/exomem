@@ -8,11 +8,19 @@ the existing edit leaf see one stable payload regardless of compatibility shape.
 from __future__ import annotations
 
 import warnings
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
+from pydantic import (
+    BaseModel,
+    BeforeValidator,
+    ConfigDict,
+    Field,
+    TypeAdapter,
+    ValidationError,
+    model_validator,
+)
 
-from .multi_edit import EditItem
+from .multi_edit import normalize_edit_item
 
 
 class _EditOperationModel(BaseModel):
@@ -50,9 +58,29 @@ class ReplaceStringOperation(_GuardedSemanticEditOperation):
     validate_only: bool = False
 
 
+class BatchReplaceItem(_EditOperationModel):
+    old_string: str
+    new_string: str
+    replace_all: bool = False
+
+    @model_validator(mode="after")
+    def reject_no_op(self) -> Self:
+        if self.old_string == self.new_string:
+            raise ValueError(
+                "new_string must differ from old_string; batch edit is a no-op"
+            )
+        return self
+
+
+ConnectorBatchReplaceItem = Annotated[
+    BatchReplaceItem,
+    BeforeValidator(normalize_edit_item),
+]
+
+
 class BatchReplaceOperation(_GuardedSemanticEditOperation):
     kind: Literal["batch_replace"]
-    edits: list[EditItem]
+    edits: Annotated[list[ConnectorBatchReplaceItem], Field(min_length=1)]
     validate_only: bool = False
 
 
@@ -120,14 +148,29 @@ LEGACY_EDIT_FIELDS = frozenset(
 _TOP_LEVEL_EDIT_FIELDS = frozenset({"path", "why", "operation", "response_detail"})
 
 
+def _inline_schema_references(value: Any, definitions: dict[str, Any]) -> Any:
+    if isinstance(value, list):
+        return [_inline_schema_references(item, definitions) for item in value]
+    if not isinstance(value, dict):
+        return value
+    if "$ref" in value:
+        name = value["$ref"].rsplit("/", 1)[-1]
+        siblings = {key: item for key, item in value.items() if key != "$ref"}
+        resolved = {**definitions[name], **siblings}
+        return _inline_schema_references(resolved, definitions)
+    return {
+        key: _inline_schema_references(item, definitions)
+        for key, item in value.items()
+    }
+
+
 def public_edit_operation_schema() -> dict[str, Any]:
     """Return a self-contained discriminator schema FastMCP can inline safely."""
     schema = EDIT_OPERATION_ADAPTER.json_schema()
     definitions = schema.pop("$defs")
-    branches = []
-    for branch in schema["oneOf"]:
-        reference = branch["$ref"]
-        branches.append(definitions[reference.rsplit("/", 1)[-1]])
+    branches = [
+        _inline_schema_references(branch, definitions) for branch in schema["oneOf"]
+    ]
     return {
         "oneOf": branches,
         "discriminator": {"propertyName": "kind"},
@@ -190,6 +233,10 @@ def _legacy_operation(legacy: dict[str, Any]) -> dict[str, Any]:
 def operation_to_leaf_payload(operation: _EditOperationModel) -> dict[str, Any]:
     """Return the stable existing-leaf kwargs for one validated operation."""
     payload = operation.model_dump(exclude={"kind"}, exclude_none=True)
+    if isinstance(operation, BatchReplaceOperation):
+        payload["edits"] = [
+            item.model_dump(exclude_defaults=True) for item in operation.edits
+        ]
     if isinstance(operation, PatchFrontmatterOperation):
         # `None` is a meaningful explicit frontmatter value, not omission.
         payload["value"] = operation.value
