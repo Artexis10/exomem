@@ -80,8 +80,20 @@ itself (no separate `claude mcp add`):
 /plugin install exomem@exomem
 ```
 
-Set `EXOMEM_VAULT_PATH` to your vault first, or run `exomem setup` afterwards to
-create and configure one.
+**Set `EXOMEM_VAULT_PATH` before installing** — a plugin cannot ask where your
+notes live, so without it the MCP server refuses to start:
+
+```powershell
+setx EXOMEM_VAULT_PATH "C:\path\to\your\Obsidian"   # Windows, then reopen the terminal
+```
+```bash
+export EXOMEM_VAULT_PATH="/path/to/your/Obsidian"   # macOS/Linux, add to your shell profile
+```
+
+Don't have a vault yet, or want the path baked into the registration instead of
+read from the environment? Use the one-line installer above — `exomem setup`
+passes the vault explicitly via `claude mcp add --env`, so it works regardless of
+your environment.
 
 ### claude.ai and ChatGPT
 
