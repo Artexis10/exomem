@@ -45,6 +45,7 @@ from exomem.server_hosted import register_hosted_routes
 SENSITIVE_QUERY = "sensitive-query-sentinel-7f3c"
 SENSITIVE_PATH = "Knowledge Base/private-path-sentinel-91d2.md"
 DEFAULT_REQUEST_ID = "11111111-1111-4111-8111-111111111111"
+_ACTION_VOCABULARY_MAPS = {"front_door_actions", "simple_actions"}
 
 
 def _principal(label: str) -> str:
@@ -480,6 +481,8 @@ def _hosted_bootstrap_tool_refs(payload: object) -> set[str]:
                                 if isinstance(item, str) and item in known_names
                             )
             for child_key, child in value.items():
+                if child_key in known_names and key not in _ACTION_VOCABULARY_MAPS:
+                    refs.add(child_key)
                 if (
                     child_key == "tool"
                     and isinstance(child, str)
@@ -519,6 +522,23 @@ def _hosted_bootstrap_tool_refs(payload: object) -> set[str]:
 
     walk(payload)
     return refs
+
+
+def test_hosted_bootstrap_extractor_distinguishes_tool_keys_from_actions() -> None:
+    payload = {
+        "nested_contract": {"read_media": {"description": "structured tool entry"}},
+        "simple_actions": {
+            "ask": {"route": {"tool": "ask_memory"}},
+        },
+        "front_door_actions": {"review": {"intent": "action label"}},
+        "knowledge_packs": {"available": [{"actions": ["ask", "review"]}]},
+    }
+
+    refs = _hosted_bootstrap_tool_refs(payload)
+
+    assert "read_media" in refs
+    assert "ask_memory" in refs
+    assert {"ask", "review"}.isdisjoint(refs)
 
 
 @pytest.mark.parametrize("tier2_enabled", [True, False])

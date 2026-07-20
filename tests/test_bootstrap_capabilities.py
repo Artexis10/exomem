@@ -35,6 +35,7 @@ _STRUCTURED_TOOL_LISTS = {
     "primary",
     "primary_tools",
 }
+_ACTION_VOCABULARY_MAPS = {"front_door_actions", "simple_actions"}
 
 
 def _call_mcp(mcp, profile: str) -> dict:
@@ -90,6 +91,8 @@ def _extract_advertised_tool_refs(
                                 if isinstance(item, str) and item in known
                             )
             for child_key, child in value.items():
+                if child_key in known and key not in _ACTION_VOCABULARY_MAPS:
+                    refs.add(child_key)
                 if child_key == "tool" and isinstance(child, str) and child in known:
                     refs.add(child)
                     continue
@@ -113,6 +116,27 @@ def _extract_advertised_tool_refs(
 
     walk(payload)
     return refs
+
+
+def test_conformance_extractor_distinguishes_tool_keys_from_action_vocabulary() -> None:
+    payload = {
+        "nested_contract": {"read_media": {"description": "structured tool entry"}},
+        "simple_actions": {
+            "ask": {"route": {"tool": "ask_memory"}},
+        },
+        "front_door_actions": {"review": {"intent": "action label"}},
+        "knowledge_packs": {"available": [{"actions": ["ask", "review"]}]},
+    }
+
+    refs = _extract_advertised_tool_refs(
+        payload,
+        product_names=set(commands.PRODUCT_PUBLIC_NAMES),
+        known_names=KNOWN_CALLABLE_NAMES,
+    )
+
+    assert "read_media" in refs
+    assert "ask_memory" in refs
+    assert {"ask", "review"}.isdisjoint(refs)
 
 
 def _assert_conforms(
