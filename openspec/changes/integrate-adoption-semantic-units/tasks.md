@@ -15,5 +15,5 @@
 
 ## Integration verification (orchestrator)
 
-- [ ] V.1 `openspec validate --all --strict`; full lean `pytest -q`; browser suite 100%; ruff on changed files; golden schema byte-identical (`git diff --exit-code tests/fixtures/mcp_tool_schemas.json`).
-- [ ] V.2 One unmocked journey: real vault, propose a compilation without typed relations via the engine, see findings in `review_memory(mode="adoption")`, approve via apply-proposal, confirm reviewed-none disposition + relation-debt resurfacing.
+- [x] V.1 `openspec validate --all --strict`; full lean `pytest -q`; browser suite 100%; ruff on changed files; golden schema byte-identical (`git diff --exit-code tests/fixtures/mcp_tool_schemas.json`).
+- [x] V.2 One unmocked journey: real vault, propose a compilation without typed relations via the engine, see findings in `review_memory(mode="adoption")`, approve via apply-proposal, confirm reviewed-none disposition + relation-debt resurfacing.
