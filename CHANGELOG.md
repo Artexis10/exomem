@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.26.0](https://github.com/Artexis10/exomem/compare/v0.25.5...v0.26.0) (2026-07-20)
+
+
+### Features
+
+* deploy in one command and make skills first-class in every client ([#272](https://github.com/Artexis10/exomem/issues/272)) ([3761ef8](https://github.com/Artexis10/exomem/commit/3761ef8a7d2e31a5783eca8cbc592c047f4b3b7e))
+
+
+### Bug Fixes
+
+* name the blocking findings in SEMANTIC_CONTRACT_BLOCKED ([#277](https://github.com/Artexis10/exomem/issues/277)) ([a74b8af](https://github.com/Artexis10/exomem/commit/a74b8af236e4a4da03a5150e5f2358d27395d006))
+* **plugin:** drop the manifest hooks key and state the vault prerequisite ([#276](https://github.com/Artexis10/exomem/issues/276)) ([2e965cc](https://github.com/Artexis10/exomem/commit/2e965cc156c1c8450936384977d3430e62896e8e))
+* **plugin:** nest hook events under the top-level hooks key ([#274](https://github.com/Artexis10/exomem/issues/274)) ([e3ca96f](https://github.com/Artexis10/exomem/commit/e3ca96f5e4af13f680703bba889d83d8001acb6f))
+
 ## [0.25.5](https://github.com/Artexis10/exomem/compare/v0.25.4...v0.25.5) (2026-07-20)
 
 
