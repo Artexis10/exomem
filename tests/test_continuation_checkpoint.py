@@ -1270,10 +1270,17 @@ def test_control_workspace_paths_are_omitted_or_hashed_before_round_trip(
     assert "dirty_path_unsafe" in built["structural"]["degradation"]
 
 
+# Built lazily: os.fsdecode of a non-UTF-8 byte name raises on Windows, and a
+# decorator argument is evaluated at import time, so the skipif below cannot
+# protect it. Keeping the surrogateescape case POSIX-only keeps this module
+# importable on Windows.
+_UNSAFE_TRANSCRIPT_NAMES = ["transcript\nunsafe.jsonl"]
+if os.name != "nt":
+    _UNSAFE_TRANSCRIPT_NAMES.append(os.fsdecode(b"transcript-\xff.jsonl"))
+
+
 @pytest.mark.skipif(os.name == "nt", reason="surrogateescape path is POSIX-specific")
-@pytest.mark.parametrize(
-    "name", ["transcript\nunsafe.jsonl", os.fsdecode(b"transcript-\xff.jsonl")]
-)
+@pytest.mark.parametrize("name", _UNSAFE_TRANSCRIPT_NAMES)
 def test_unsafe_transcript_relative_path_hashes_and_round_trips(
     tmp_path: Path,
     name: str,
