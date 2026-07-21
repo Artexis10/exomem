@@ -556,10 +556,23 @@ def _profile_workspace_with_root(
             truncation["dirty_path_unsafe"] = True
             degradation.append("dirty_path_unsafe")
             continue
+        # git marks a directory it will not descend into - a nested repository,
+        # such as a .claude/worktrees/ agent worktree - with a trailing slash.
+        # Keep the path and drop the marker so the entry satisfies the same
+        # relative-path contract the reader enforces.
+        value = value.rstrip("/")
         value, cut = _bounded_path(value)
         if cut:
             truncation["dirty_path_bytes"] = True
-        if value and value not in all_dirty:
+        if not value:
+            continue
+        # Never emit a path the validator would reject; bounding can also cut a
+        # path into a shape that no longer satisfies the contract.
+        if not _safe_relative_path(value):
+            truncation["dirty_path_unsafe"] = True
+            degradation.append("dirty_path_unsafe")
+            continue
+        if value not in all_dirty:
             all_dirty.append(value)
     all_dirty.sort()
     artifact_dirty = {value for value in all_dirty if _allowed_artifact_relative(value)}
