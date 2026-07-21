@@ -16,8 +16,20 @@ and the stable route, then deploy:
 ```powershell
 npx wrangler login
 npx wrangler secret put STATE_TOKEN
-npx wrangler deploy
+.\deploy.ps1
 ```
+
+```bash
+npx wrangler login
+npx wrangler secret put STATE_TOKEN
+./deploy.sh
+```
+
+`deploy.ps1` / `deploy.sh` wrap `wrangler deploy` with
+`--var WORKER_GIT_SHA:<short git SHA>`, so the authenticated `GET /__version`
+endpoint (gated by the same bearer as the coordinator endpoints) reports which
+commit is live instead of `"git_sha": "unlabeled"`. A bare `wrangler deploy`
+still works; it just leaves the deploy unlabeled.
 
 Configure both replicas with the same stable `EXOMEM_BASE_URL`, GitHub OAuth app,
 `EXOMEM_JWT_SIGNING_KEY`, state URL/token, vault ID, and lease token. Give each a

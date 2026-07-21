@@ -21,6 +21,7 @@ from starlette.middleware import Middleware as ASGIMiddleware
 
 from . import capabilities, edit_operations, guards, multi_edit
 from . import commands as commands_module
+from .edge_ingress import EdgeIngressMiddleware
 from .server_assets import (
     register_asset_routes,
     register_oauth_metadata_route,
@@ -501,7 +502,13 @@ def run(
             transport=transport,
             host=host,
             port=port,
-            middleware=[ASGIMiddleware(PrimeMcpSSEMiddleware)],
+            # Edge-ingress enforcement runs first so a Cloudflare-transited
+            # bypass is refused before SSE priming or MCP/REST routing ever
+            # see the request (design.md Decision 1).
+            middleware=[
+                ASGIMiddleware(EdgeIngressMiddleware),
+                ASGIMiddleware(PrimeMcpSSEMiddleware),
+            ],
             # Remote clients may be routed to another replica or outlive this
             # process.  A process-local Mcp-Session-Id turns either event into
             # a 404/reconnect cascade; each Exomem operation is already an

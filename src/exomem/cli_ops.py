@@ -67,6 +67,10 @@ _REMEDIATION: dict[str, str] = {
         "available."
     ),
     "WRITER_FENCED": "Retry the mutation on the current writer.",
+    "INGRESS_BYPASSED": (
+        "Public traffic must enter via the HA edge hostname; check DNS, tunnel ingress, "
+        "and worker route coverage, or set EXOMEM_EDGE_STAMP_ENFORCE=0 to break glass."
+    ),
     "MUTATION_BUSY": "Retry after the active vault mutation finishes.",
     "MUTATION_ACKNOWLEDGEMENT_PENDING": (
         "Retry with the same mutation identity; do not submit a revised payload."
@@ -208,6 +212,8 @@ def http_status_for(code: str) -> int:
         return 409
     if code in {"WRITER_COORDINATOR_UNAVAILABLE", "MUTATION_LOCK_UNAVAILABLE"}:
         return 503
+    if code == "INGRESS_BYPASSED":
+        return 403
     return 400
 
 
