@@ -50,9 +50,9 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from . import access, indexes
 from . import audit as audit_module
 from . import find as find_module
-from . import indexes
 from .vault import (
     PlannedWrite,
     WikilinkResolver,
@@ -63,7 +63,6 @@ from .vault import (
     parse_frontmatter,
     render_wikilink_target,
 )
-
 
 log = logging.getLogger(__name__)
 
@@ -91,6 +90,10 @@ class AuditFixReport:
     files_rewritten: int = 0
     summary: dict[str, int] = field(default_factory=dict)
     dry_run: bool = False
+    # Pages passed over because they sit in a `readonly` subtree. Reported
+    # rather than silently dropped: a caller comparing a dry run against the
+    # audit's finding count must be able to account for the difference.
+    skipped_readonly: int = 0
 
     def as_dict(self) -> dict:
         return {
@@ -107,6 +110,7 @@ class AuditFixReport:
             "files_rewritten": self.files_rewritten,
             "summary": self.summary,
             "dry_run": self.dry_run,
+            "skipped_readonly": self.skipped_readonly,
         }
 
 
@@ -304,6 +308,19 @@ def audit_fix(
     pending_paths: list[str] = []
 
     for md in _walk_compiled_pages(kb):
+        # A `readonly` subtree refuses every write with no override, so a
+        # canonicalisation planned for one can never be applied. Planning it
+        # anyway broke this pass twice: the dry run reported the page as
+        # fixed (disagreeing with what a real run could do), and the real run
+        # hit WRITE_REFUSED at the write layer and aborted the entire batch —
+        # so a handful of readonly pages blocked every writeable page beside
+        # them, leaving the fixer permanently unusable on any vault that
+        # marks a subtree readonly.
+        if access.access_tier(vault_root, md.relative_to(vault_root).as_posix()) != (
+            access.TIER_READ_WRITE
+        ):
+            report.skipped_readonly += 1
+            continue
         try:
             original = md.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):
