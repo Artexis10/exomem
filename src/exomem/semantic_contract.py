@@ -492,6 +492,48 @@ class SemanticContractResult:
         }
 
 
+ERROR_FINDING_LIMIT = 3
+
+
+def blocking_finding_text(finding: ContractFinding) -> str:
+    text = finding.code
+    if finding.path:
+        text += f" at {finding.path}"
+    if finding.detail:
+        text += f": {finding.detail}"
+    if finding.remediation:
+        text += f" (fix: {finding.remediation})"
+    return text
+
+
+def blocking_reason(
+    result: SemanticContractResult,
+    prefix: str = "semantic contract has blocking findings",
+) -> str:
+    """Name the blocking findings in the error the caller actually receives.
+
+    Only `code` and `reason` survive out to the MCP caller, so a bare prefix
+    tells a writer that something is wrong while withholding what — forcing a
+    second `validate_only` round-trip purely to learn it.
+
+    Lives here rather than in a writer module because every writer that can
+    block shares this contract; `semantic_writes` cannot own it without
+    `relation_review` importing it circularly.
+
+    Bounded, and the omitted count is stated rather than silently dropped, so a
+    truncated list never reads as complete.
+    """
+    findings = result.blocking_findings
+    if not findings:
+        return prefix
+    shown = findings[:ERROR_FINDING_LIMIT]
+    rendered = "; ".join(blocking_finding_text(item) for item in shown)
+    omitted = len(findings) - len(shown)
+    if omitted:
+        rendered += f"; +{omitted} more (validate_only returns the full set)"
+    return f"{prefix}: {rendered}"
+
+
 def _copy_definition(
     definition: relation_registry.RelationDefinition,
 ) -> relation_registry.RelationDefinition:

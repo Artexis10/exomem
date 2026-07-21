@@ -1193,6 +1193,11 @@ def test_prepared_bootstrap_invalidated_by_corpus_growth_reports_contract_failur
         )
 
     assert exc.value.code == "SEMANTIC_CONTRACT_BLOCKED"
+    # Only code and reason survive out to the MCP caller. A bare prefix forces a
+    # second validate_only round-trip purely to learn what blocked the write.
+    assert exc.value.reason != "semantic contract has blocking findings", (
+        "the blocked-commit error must name its blocking findings"
+    )
     assert artifact.read_bytes() == original_artifact
     assert not (tmp_path / _PAGE_B).exists()
     assert not activation_manifest.manifest_path(tmp_path).exists()

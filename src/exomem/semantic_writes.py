@@ -177,44 +177,13 @@ def _fit_feedback_byte_budget(value: dict[str, Any]) -> dict[str, Any]:
     return value
 
 
-_ERROR_FINDING_LIMIT = 3
+_ERROR_FINDING_LIMIT = semantic_contract.ERROR_FINDING_LIMIT
 
-
-def _blocking_finding_text(finding: semantic_contract.ContractFinding) -> str:
-    text = finding.code
-    if finding.path:
-        text += f" at {finding.path}"
-    if finding.detail:
-        text += f": {finding.detail}"
-    if finding.remediation:
-        text += f" (fix: {finding.remediation})"
-    return text
-
-
-def _blocking_reason(
-    result: semantic_contract.SemanticContractResult,
-    prefix: str = "semantic contract has blocking findings",
-) -> str:
-    """Name the blocking findings in the error the caller actually receives.
-
-    Only `code` and `reason` survive out to the MCP caller, so a bare prefix
-    tells a writer that something is wrong while withholding what — forcing a
-    second `validate_only` round-trip purely to learn it. That round-trip is the
-    dominant source of write friction: 69 blocked writes in one day on
-    2026-07-20, none of them self-describing.
-
-    Bounded like `_bounded_semantic_feedback`, and the omitted count is stated
-    rather than silently dropped, so a truncated list never reads as complete.
-    """
-    findings = result.blocking_findings
-    if not findings:
-        return prefix
-    shown = findings[:_ERROR_FINDING_LIMIT]
-    rendered = "; ".join(_blocking_finding_text(item) for item in shown)
-    omitted = len(findings) - len(shown)
-    if omitted:
-        rendered += f"; +{omitted} more (validate_only returns the full set)"
-    return f"{prefix}: {rendered}"
+# Single renderer, shared with relation_review via semantic_contract. Keeping a
+# second copy here would let the two blocking paths drift apart, which is the
+# whole failure this reporting was added to prevent.
+_blocking_finding_text = semantic_contract.blocking_finding_text
+_blocking_reason = semantic_contract.blocking_reason
 
 
 def _blocking_reason_for_evaluations(
