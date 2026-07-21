@@ -11,10 +11,12 @@
 
 import {ApiError, command} from "/studio/assets/api.v1.js";
 import {
+  contractFindingsView,
   countLine,
   failureGroups,
   folderState,
   initialSelection,
+  junkCount,
   legalStep,
   overrideFile,
   phaseScreen,
@@ -238,9 +240,10 @@ function inventoryTotals() {
 }
 
 function junkTotal() {
-  const counts = (run && run.scan_summary && run.scan_summary.junk_counts) || {};
-  return Object.values(counts).reduce((sum, value) => sum + Number(value || 0), 0)
-    || inventoryRows().filter((row) => row && row.junk).length;
+  return junkCount(
+    run && run.scan_summary,
+    inventoryRows().filter((row) => row && row.junk).length,
+  );
 }
 
 // Derive a depth-capped folder node list from inventory paths for tri-state.
@@ -930,6 +933,24 @@ function proposalSummary(context, item) {
   return rows;
 }
 
+// Render the proposal's semantic-write-contract findings (reusing the failure-
+// group styling) plus the reviewed-none consequence sentence. Returns the nodes
+// and whether approval must be suppressed (server-marked `invalid`).
+function contractFindingNodes(context) {
+  const view = contractFindingsView(context);
+  const nodes = [];
+  if (view.hasFindings) {
+    const block = el("div", "", "failure-group");
+    block.append(el("p", "The write contract flagged this before approval:", "reason"));
+    const list = el("ul", "", "record-list");
+    for (const finding of view.findings) list.append(el("li", finding.text));
+    block.append(list);
+    nodes.push(block);
+  }
+  if (view.consequence) nodes.push(el("p", view.consequence, "fine-print"));
+  return {nodes, approveDisabled: view.approveDisabled};
+}
+
 async function openProposalDetail(item) {
   const detail = byId("adopt-proposal-detail");
   if (!detail) return;
@@ -937,14 +958,21 @@ async function openProposalDetail(item) {
   try {
     const context = await adoptionApi.proposalContext(item.ref, item.fingerprint);
     replaceChildren(detail, [el("h3", "What it wants to do"), ...proposalSummary(context, item)]);
+    const findings = contractFindingNodes(context);
+    for (const node of findings.nodes) detail.append(node);
     const actions = el("div", "", "actions");
-    const approve = el("button", "Make this change");
-    approve.type = "button";
-    approve.addEventListener("click", () => approveProposal(item, context));
+    // An `invalid` proposal is refused server-side; suppress approval here so
+    // the Studio never offers an action that cannot succeed. Reject stays.
+    if (!findings.approveDisabled) {
+      const approve = el("button", "Make this change");
+      approve.type = "button";
+      approve.addEventListener("click", () => approveProposal(item, context));
+      actions.append(approve);
+    }
     const reject = el("button", "No thanks", "secondary");
     reject.type = "button";
     reject.addEventListener("click", () => rejectProposal(item));
-    actions.append(approve, reject);
+    actions.append(reject);
     detail.append(actions);
   } catch (error) {
     if (isDrift(error)) {

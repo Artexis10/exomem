@@ -367,6 +367,141 @@ def test_state_v2_roundtrips_adopt_params_and_keeps_legacy_urls_byte_identical()
     assert _node(adopt_default)["target"] == "/studio/?view=adopt"
 
 
+def test_contract_findings_view_lines_consequence_and_invalid_flag() -> None:
+    source = f"""
+      import {{contractFindingsView}} from {MODEL.as_uri()!r};
+      const reviewable = contractFindingsView({{
+        status: 'proposed',
+        reviewed_none_required: true,
+        contract_findings: [
+          {{code: 'RELATION_DISPOSITION_MISSING', severity: 'error',
+            detail: 'This note builds on others but names no typed relation yet.'}},
+        ],
+      }});
+      const invalid = contractFindingsView({{
+        status: 'invalid',
+        reviewed_none_required: false,
+        contract_findings: [
+          {{code: 'CONTRACT_BLOCKED', severity: 'error',
+            detail: 'The write contract blocks this content.'}},
+        ],
+      }});
+      const clean = contractFindingsView({{status: 'proposed', contract_findings: []}});
+      const empty = contractFindingsView(null);
+      console.log(JSON.stringify({{reviewable, invalid, clean, empty}}));
+    """
+
+    result = _node(source)
+
+    # A reviewable gap: findings show, the reviewed-none consequence is stated,
+    # and approval stays enabled (the server refuses only truly invalid ones).
+    assert result["reviewable"]["approveDisabled"] is False
+    assert result["reviewable"]["hasFindings"] is True
+    assert result["reviewable"]["findings"][0]["severity"] == "error"
+    assert result["reviewable"]["findings"][0]["text"] == (
+        "This note builds on others but names no typed relation yet."
+    )
+    assert result["reviewable"]["consequence"] == (
+        "Approving records this as reviewed with no typed relation yet — "
+        "it will come back for relation review."
+    )
+
+    # An invalid proposal: findings show, but approval is disabled and there is
+    # no reviewed-none consequence to state (nothing can be approved).
+    assert result["invalid"]["approveDisabled"] is True
+    assert result["invalid"]["hasFindings"] is True
+    assert result["invalid"]["findings"][0]["text"] == (
+        "The write contract blocks this content."
+    )
+    assert result["invalid"]["consequence"] == ""
+
+    # No findings → nothing to render; a missing context is inert.
+    assert result["clean"]["hasFindings"] is False
+    assert result["clean"]["consequence"] == ""
+    assert result["clean"]["approveDisabled"] is False
+    assert result["empty"]["findings"] == []
+    assert result["empty"]["hasFindings"] is False
+    assert result["empty"]["approveDisabled"] is False
+
+
+def test_contract_findings_view_invalid_fallback_to_generic_findings() -> None:
+    source = f"""
+      import {{contractFindingsView}} from {MODEL.as_uri()!r};
+      // Invalid + no contract_findings, but generic findings explain the block.
+      const withGeneric = contractFindingsView({{
+        status: 'invalid',
+        contract_findings: [],
+        findings: [
+          {{code: 'VALIDATION_FAILED', path: 'content',
+            detail: 'This proposal was blocked before it could be applied.'}},
+        ],
+      }});
+      // Invalid + nothing at all → one fixed generic explanation line.
+      const bothEmpty = contractFindingsView({{
+        status: 'invalid', contract_findings: [], findings: [],
+      }});
+      // A generic finding carrying only a code (no detail) shows the code text.
+      const codeOnly = contractFindingsView({{
+        status: 'invalid', contract_findings: [],
+        findings: [{{code: 'PROPOSAL_INVALID', path: 'x'}}],
+      }});
+      // A reviewable (non-invalid) proposal with empty contract_findings must NOT
+      // pull in generic findings — there is nothing to render.
+      const reviewableEmpty = contractFindingsView({{
+        status: 'proposed', contract_findings: [],
+        findings: [{{code: 'X', detail: 'should not show'}}],
+      }});
+      console.log(JSON.stringify({{withGeneric, bothEmpty, codeOnly, reviewableEmpty}}));
+    """
+
+    result = _node(source)
+
+    # Invalid with empty contract_findings falls back to the generic findings.
+    assert result["withGeneric"]["approveDisabled"] is True
+    assert result["withGeneric"]["hasFindings"] is True
+    assert result["withGeneric"]["findings"][0]["text"] == (
+        "This proposal was blocked before it could be applied."
+    )
+
+    # Both empty → one fixed generic explanation, approval still disabled.
+    assert result["bothEmpty"]["approveDisabled"] is True
+    assert result["bothEmpty"]["hasFindings"] is True
+    assert result["bothEmpty"]["findings"] == [
+        {"code": "", "severity": "", "text": "This suggestion can't be applied as written."}
+    ]
+
+    # detail-less generic finding falls back to its code as the line text.
+    assert result["codeOnly"]["findings"][0]["text"] == "PROPOSAL_INVALID"
+
+    # Non-invalid proposals never fall back to generic findings.
+    assert result["reviewableEmpty"]["hasFindings"] is False
+    assert result["reviewableEmpty"]["findings"] == []
+
+
+def test_junk_count_present_zero_map_is_authoritative() -> None:
+    source = f"""
+      import {{junkCount}} from {MODEL.as_uri()!r};
+      console.log(JSON.stringify({{
+        presentZero: junkCount({{junk_counts: {{conflict: 0}}}}, 5),
+        presentNonZero: junkCount({{junk_counts: {{conflict: 2, dot_trash: 1}}}}, 5),
+        emptyMap: junkCount({{junk_counts: {{}}}}, 5),
+        absentMap: junkCount({{}}, 4),
+        noSummary: junkCount(null, 3),
+      }}));
+    """
+
+    result = _node(source)
+
+    # A present junk_counts map is authoritative even when it sums to zero;
+    # the old `sum || fallback` wrongly fell back to the flagged-row count here.
+    assert result["presentZero"] == 0
+    assert result["presentNonZero"] == 3
+    assert result["emptyMap"] == 0
+    # Only an ABSENT map falls back to counting junk-flagged inventory rows.
+    assert result["absentMap"] == 4
+    assert result["noSummary"] == 3
+
+
 def test_selection_rules_round_trip_after_resume() -> None:
     source = f"""
       import {{initialSelection, toggleFolder, overrideFile, selectionPayload,

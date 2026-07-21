@@ -250,3 +250,68 @@ export function suggestionChips(packSuggestions, tree) {
   }
   return chips.slice(0, 4);
 }
+
+// Fixed, generic consequence stated before a reviewed-none approval: approving a
+// proposal whose content carries no typed relation records it as reviewed-with-
+// none, and the page resurfaces later for relation review (engine reviewed-none
+// flow). No vault strings, no URLs — honesty about what approval will record.
+const REVIEWED_NONE_CONSEQUENCE =
+  "Approving records this as reviewed with no typed relation yet — "
+  + "it will come back for relation review.";
+
+// Fixed, generic explanation for an invalid proposal that arrived with no
+// findings at all — the reviewer is still owed a reason approval is disabled.
+const GENERIC_INVALID_LINE = "This suggestion can't be applied as written.";
+
+function findingLine(f) {
+  if (!f) return null;
+  const text = String(f.detail || "").trim() || String(f.code || "").trim();
+  if (!text) return null;
+  return {code: f.code || "", severity: f.severity || "", text};
+}
+
+// Render-only model for a proposal's semantic-write-contract findings. Turns the
+// engine's compact `contract_findings` (code/severity/detail) into display lines,
+// states the reviewed-none consequence when the proposal needs a relation review,
+// and disables approval when the server already marked the proposal `invalid`
+// (this is honesty in the UI — the server refuses invalid applies regardless).
+export function contractFindingsView(context) {
+  const source = (context && context.contract_findings) || [];
+  const findings = [];
+  for (const f of source) {
+    const line = findingLine(f);
+    if (line) findings.push(line);
+  }
+  const invalid = !!(context && context.status === "invalid");
+  // Belt-and-braces: an `invalid` proposal with no contract findings still owes
+  // the reviewer an explanation. Fall back to the context's generic `findings`
+  // (assemble_context exposes them; `_item_view` does not, so read the context
+  // object only), then to one fixed generic line if those are empty too.
+  if (invalid && findings.length === 0) {
+    for (const f of (context && context.findings) || []) {
+      const line = findingLine(f);
+      if (line) findings.push(line);
+    }
+    if (findings.length === 0) {
+      findings.push({code: "", severity: "", text: GENERIC_INVALID_LINE});
+    }
+  }
+  return {
+    findings,
+    hasFindings: findings.length > 0,
+    consequence: context && context.reviewed_none_required ? REVIEWED_NONE_CONSEQUENCE : "",
+    approveDisabled: invalid,
+  };
+}
+
+// Total junk file count for a scan. A present `junk_counts` map is authoritative
+// even when it sums to zero; only an ABSENT map falls back to counting the junk-
+// flagged inventory rows. (The old `sum || fallback` mis-counted a present-but-
+// zero map by treating the falsy 0 as "no data".)
+export function junkCount(scanSummary, junkRowCount = 0) {
+  const counts = scanSummary && scanSummary.junk_counts;
+  if (counts && typeof counts === "object") {
+    return Object.values(counts).reduce((sum, value) => sum + Number(value || 0), 0);
+  }
+  return Number(junkRowCount) || 0;
+}
