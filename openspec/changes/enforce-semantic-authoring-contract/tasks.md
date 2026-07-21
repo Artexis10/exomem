@@ -6,12 +6,12 @@
 
 ## 2. Rich Parser Semantics
 
-- [ ] 2.1 Add failing parser-matrix tests for same-level and shallower boundaries, deeper unknown and recognized headings, unknown structural parents, fences, built-in aliases, and repeated byte-stable parsing.
-- [ ] 2.2 Add failing tests for whitespace-, metadata-, relation-, and descendant-heading-only rich blocks producing `empty_rich_unit` and no normalized/indexable unit.
-- [ ] 2.3 Add failing tests proving normalized spans do not overlap: compact-shaped bullets and recognized nested headings inside a rich block remain body content, while compact rows under a separate `## Observations` section remain independent units.
-- [ ] 2.4 Implement heading-hierarchy parsing, substantive-body validation, empty-unit exclusion, and non-overlapping compact/rich normalization in the shared parser.
-- [ ] 2.5 Increment parser/sidecar schema versions and add rebuild/reconcile tests proving derived lexical, vector, graph, pack, and count state refreshes without Markdown rewrites.
-- [ ] 2.6 Add stale anonymous reference/fingerprint and stable authored-anchor migration tests for units whose spans change under hierarchy parsing.
+- [x] 2.1 Add failing parser-matrix tests for same-level and shallower boundaries, deeper unknown and recognized headings, unknown structural parents, fences, built-in aliases, and repeated byte-stable parsing.
+- [x] 2.2 Add failing tests for whitespace-, metadata-, relation-, and descendant-heading-only rich blocks producing `empty_rich_unit` and no normalized/indexable unit.
+- [x] 2.3 Add failing tests proving normalized spans do not overlap: compact-shaped bullets and recognized nested headings inside a rich block remain body content, while compact rows under a separate `## Observations` section remain independent units.
+- [x] 2.4 Implement heading-hierarchy parsing, substantive-body validation, empty-unit exclusion, and non-overlapping compact/rich normalization in the shared parser.
+- [x] 2.5 Increment parser/sidecar schema versions and add rebuild/reconcile tests proving derived lexical, vector, graph, pack, and count state refreshes without Markdown rewrites.
+- [x] 2.6 Add stale anonymous reference/fingerprint and stable authored-anchor migration tests for units whose spans change under hierarchy parsing.
 
 ## 3. Minimum-Unit Applicability
 
