@@ -89,7 +89,7 @@ _BLOCK_TYPE_ALIASES: dict[str, str] = {
 RELATION_TYPES: frozenset[str] = relation_registry.core_registry().keys
 
 _HEADING_RE = re.compile(r"^(#{1,6})\s+(.*?)\s*#*\s*$")
-_FENCE_RE = re.compile(r"^\s*(?:```|~~~)")
+_FENCE_RE = re.compile(r"^ {0,3}(?P<fence>`{3,}|~{3,})(?P<info>.*)$")
 _METADATA_RE = re.compile(r"^\s*[-*+]\s+([A-Za-z0-9 _-]+):\s*(.*)$")
 _NORMALIZE_RE = re.compile(r"[\s-]+")
 
@@ -262,15 +262,18 @@ def parse_semantic_blocks(
     """Parse semantic blocks from Markdown.
 
     Unknown headings are treated as normal Markdown structure. A recognized
-    semantic heading starts a block and the block ends at the next non-fenced
-    ATX heading. Leading metadata bullets are removed from the block body.
+    semantic heading at level N starts a block and the block ends at the next
+    non-fenced ATX heading whose level is less than or equal to N. Deeper
+    headings remain part of the block body. Leading metadata bullets are
+    removed from the block body.
     """
     lines = (markdown or "").splitlines()
     blocks: list[SemanticBlock] = []
     errors: list[SemanticBlockValidationError] = []
     warnings: list[SemanticBlockValidationError] = []
     current: tuple[str, str, int, int, list[tuple[int, str]]] | None = None
-    in_fence = False
+    fence_char: str | None = None
+    fence_length = 0
 
     def flush(end_line: int) -> None:
         nonlocal current
@@ -286,20 +289,44 @@ def parse_semantic_blocks(
             lines=body_lines,
             registry=registry or relation_registry.core_registry(),
         )
-        blocks.append(block)
+        if _has_substantive_body(block.body):
+            blocks.append(block)
+        elif validate:
+            errors.append(
+                SemanticBlockValidationError(
+                    code="empty_rich_unit",
+                    message="rich semantic-unit body is empty",
+                    line=start_line,
+                    block_id=block.id,
+                )
+            )
         if validate:
             errors.extend(block_errors)
         current = None
 
     for line_number, line in enumerate(lines, start=1):
-        if _FENCE_RE.match(line):
+        fence = _FENCE_RE.match(line)
+        if fence_char is not None:
             if current is not None:
                 current[4].append((line_number, line))
-            in_fence = not in_fence
+            if _closes_fence(line, fence_char, fence_length):
+                fence_char = None
+                fence_length = 0
+            continue
+        if fence is not None:
+            if current is not None:
+                current[4].append((line_number, line))
+            marker = fence.group("fence")
+            fence_char = marker[0]
+            fence_length = len(marker)
             continue
 
         heading = _HEADING_RE.match(line)
-        if heading and not in_fence:
+        if heading:
+            level = len(heading.group(1))
+            if current is not None and level > current[2]:
+                current[4].append((line_number, line))
+                continue
             flush(line_number - 1)
             title = heading.group(2).strip()
             block_type, kind_findings = _resolve_block_type(
@@ -313,9 +340,9 @@ def parse_semantic_blocks(
                         line=line_number,
                     )
                     for finding in kind_findings
-                )
+            )
             if block_type is not None:
-                current = (block_type, title, len(heading.group(1)), line_number, [])
+                current = (block_type, title, level, line_number, [])
             continue
 
         if current is not None:
@@ -326,6 +353,28 @@ def parse_semantic_blocks(
     if validate:
         warnings.extend(_duplicate_id_warnings(blocks))
     return SemanticBlockDocument(blocks=blocks, errors=errors, warnings=warnings)
+
+
+def _closes_fence(line: str, fence_char: str, fence_length: int) -> bool:
+    match = _FENCE_RE.match(line)
+    if match is None:
+        return False
+    marker = match.group("fence")
+    return (
+        marker[0] == fence_char
+        and len(marker) >= fence_length
+        and not match.group("info").strip()
+    )
+
+
+def _has_substantive_body(body: str) -> bool:
+    """Return whether a metadata-stripped rich body contains authored content."""
+    return any(
+        line.strip()
+        and _HEADING_RE.match(line) is None
+        and _METADATA_RE.match(line) is None
+        for line in body.splitlines()
+    )
 
 
 def first_block_body(markdown: str, block_type: str) -> str | None:
