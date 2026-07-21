@@ -26,5 +26,5 @@
 ## 6. Contract, compatibility, and verification
 
 - [x] 6.1 Update generic skill/reference guidance, command docs, REST/OpenAPI coverage, CLI behavior, and migration/deprecation notes while keeping the scaffold generic.
-- [ ] 6.2 Regenerate and review the MCP schema fixture and packaged discovery fingerprint once; verify the census cache, 600-second implicit replay retention, 60-second single-origin edge budget, and read-only remember preview; then run OpenSpec validation, ruff, focused suites, scaffold leak guard, writer/semantic/reconcile/HA regressions, and the supported full test suite.
+- [x] 6.2 Regenerate and review the MCP schema fixture and packaged discovery fingerprint once; verify the census cache, 600-second implicit replay retention, 60-second single-origin edge budget, and read-only remember preview; then run OpenSpec validation, ruff, focused suites, scaffold leak guard, writer/semantic/reconcile/HA regressions, and the supported full test suite.
 - [ ] 6.3 Run an independent whole-branch adversarial review and verifier pass, fix all critical/important findings, create logical commits, push the branch, and open a draft PR with fresh-session connector verification called out if still external.
