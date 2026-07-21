@@ -409,8 +409,9 @@ def test_create_file_kind_dir_routes_to_mkdir(vault: Path, monkeypatch) -> None:
     out = _call(mcp, "manage_memory_file", {
         "operation": "create",
         "path": "Knowledge Base/Notes/Insights/new-folder", "kind": "dir",
+        "response_detail": "full",
     })
-    assert out.get("created") is True
+    assert out["diagnostics"].get("created") is True
     assert (vault / "Knowledge Base/Notes/Insights/new-folder").is_dir()
 
 
@@ -433,8 +434,9 @@ def test_delete_detects_file(vault: Path, monkeypatch) -> None:
         "operation": "delete",
         "path": rel,
         "confirm": True,
+        "response_detail": "full",
     })
-    assert "inbound_ignored_count" in out  # file-shaped result
+    assert "inbound_ignored_count" in out["diagnostics"]  # file-shaped result
     assert not (vault / rel).exists()
 
 
@@ -447,8 +449,9 @@ def test_delete_detects_directory(vault: Path, monkeypatch) -> None:
         "operation": "delete",
         "path": "Knowledge Base/Notes/Insights/doomed", "confirm": True,
         "recursive": True, "force_orphan": True,
+        "response_detail": "full",
     })
-    assert "file_count" in out  # directory-shaped result
+    assert "file_count" in out["diagnostics"]  # directory-shaped result
     assert not d.exists()
 
 
