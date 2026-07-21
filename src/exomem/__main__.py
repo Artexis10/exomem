@@ -92,7 +92,7 @@ def main(argv: list[str] | None = None) -> int:
     # short aliases when a name overlaps.
     if raw and not raw[0].startswith("-") and raw[0] in _core_op_names():
         return _core_op_main(raw)
-    if raw and raw[0] in _simple_cli_action_names():
+    if raw and not raw[0].startswith("-") and raw[0] in _simple_cli_action_names():
         return _simple_action_main(raw)
     # A real tier-2 op invoked while EXOMEM_DISABLE_TIER2 is set would otherwise fall
     # through to the serve parser and emit a confusing argparse error — name it instead.
@@ -1135,13 +1135,10 @@ def _install_hook_main(argv: list[str]) -> int:
 # --------------------------------------------------------------------------- #
 # Simple product actions (friendly CLI aliases over canonical registry commands)
 # --------------------------------------------------------------------------- #
-_SIMPLE_CLI_ACTIONS = frozenset(
-    {"ask", "remember", "capture", "review", "connect", "adopt", "maintain"}
-)
-
-
 def _simple_cli_action_names() -> frozenset[str]:
-    return _SIMPLE_CLI_ACTIONS
+    from . import commands as commands_module
+
+    return frozenset(commands_module.simple_action_names())
 
 
 def _with_json(argv: list[str], enabled: bool) -> list[str]:
@@ -1589,6 +1586,10 @@ def _simple_maintain_main(argv: list[str]) -> int:
 # flags, their REQUIRED params stay flags and everything else is reachable via a
 # repeatable `--field key=value`, so the CLI stays clean.
 _FIELD_ESCAPE = frozenset({"remember", "replace_memory"})
+_FIELD_ESCAPE_VISIBLE_PARAMS = frozenset({"slug", "response_detail"})
+_LEGACY_EDIT_BOOL_FIELDS = frozenset(
+    {"replace_all", "overwrite", "allow_curated", "validate_only"}
+)
 
 
 def _expose_tier2() -> bool:
@@ -1619,7 +1620,11 @@ def _flag(name: str) -> str:
 def _add_command_args(sp: argparse.ArgumentParser, cmd) -> None:
     field_escape = cmd.name in _FIELD_ESCAPE
     for p in cmd.params:
-        if field_escape and not p.required and p.name != "slug":
+        if (
+            field_escape
+            and not p.required
+            and p.name not in _FIELD_ESCAPE_VISIBLE_PARAMS
+        ):
             continue  # reachable via --field
         if p.cli_positional:
             sp.add_argument(
@@ -1651,7 +1656,11 @@ def _add_command_args(sp: argparse.ArgumentParser, cmd) -> None:
                 _flag(p.name),
                 dest=p.name,
                 default=None,
-                required=p.required and not p.cli_positional,
+                required=(
+                    p.required
+                    and not p.cli_positional
+                    and not (cmd.name == "edit_memory" and p.name == "operation")
+                ),
                 metavar="{" + ",".join(p.choices) + "}" if p.choices else None,
                 help=p.help or None,
             )
@@ -1663,6 +1672,33 @@ def _add_command_args(sp: argparse.ArgumentParser, cmd) -> None:
             metavar="KEY=VALUE",
             help="set any other parameter (repeatable), e.g. --field severity=critical",
         )
+    if cmd.name == "edit_memory":
+        from .edit_operations import LEGACY_EDIT_FIELDS
+
+        for name in sorted(LEGACY_EDIT_FIELDS):
+            if name in _LEGACY_EDIT_BOOL_FIELDS:
+                sp.add_argument(
+                    _flag(name),
+                    dest=name,
+                    action=argparse.BooleanOptionalAction,
+                    default=None,
+                    help=argparse.SUPPRESS,
+                )
+            elif name == "tags":
+                sp.add_argument(
+                    _flag(name),
+                    dest=name,
+                    action="append",
+                    default=None,
+                    help=argparse.SUPPRESS,
+                )
+            else:
+                sp.add_argument(
+                    _flag(name),
+                    dest=name,
+                    default=None,
+                    help=argparse.SUPPRESS,
+                )
 
 
 def _collect_raw_args(
@@ -1671,7 +1707,11 @@ def _collect_raw_args(
     field_escape = cmd.name in _FIELD_ESCAPE
     raw: dict = {}
     for p in cmd.params:
-        if field_escape and not p.required and p.name != "slug":
+        if (
+            field_escape
+            and not p.required
+            and p.name not in _FIELD_ESCAPE_VISIBLE_PARAMS
+        ):
             continue
         val = getattr(args, p.name, None)
         if val is not None:
@@ -1684,7 +1724,49 @@ def _collect_raw_args(
                 # every other usage error (a bare `raise SystemExit(str)` is exit 1).
                 parser.error(f"--field expects KEY=VALUE, got {item!r}")
             raw[key.strip()] = value
+    if cmd.name == "edit_memory":
+        from .edit_operations import LEGACY_EDIT_FIELDS
+
+        for name in LEGACY_EDIT_FIELDS:
+            value = getattr(args, name, None)
+            if value is not None:
+                raw[name] = value
     return raw
+
+
+def _normalize_cli_edit(cmd, raw: dict, cli_ops) -> dict:  # noqa: ANN001
+    from . import edit_operations
+
+    primary_names = {parameter.name for parameter in cmd.params}
+    primary_raw = {name: value for name, value in raw.items() if name in primary_names}
+    legacy = {name: value for name, value in raw.items() if name not in primary_names}
+    primary = cli_ops.coerce(
+        cmd.params,
+        primary_raw,
+        guarded_fields=cmd.guarded_fields,
+        tool=cmd.name,
+        cli=True,
+    )
+    if isinstance(legacy.get("edits"), str):
+        try:
+            legacy["edits"] = json.loads(legacy["edits"])
+        except json.JSONDecodeError as error:
+            raise cli_ops.OpError(
+                "BAD_JSON", f"`edits` must be valid JSON: {error}"
+            ) from None
+    if isinstance(legacy.get("value"), str):
+        try:
+            legacy["value"] = json.loads(legacy["value"])
+        except json.JSONDecodeError:
+            pass
+    normalized = edit_operations.normalize_edit_surface_arguments({**primary, **legacy})
+    return cli_ops.coerce(
+        cmd.params,
+        normalized,
+        guarded_fields=cmd.guarded_fields,
+        tool=cmd.name,
+        cli=True,
+    )
 
 
 def _print_adopt_human(result: dict) -> None:
@@ -1753,6 +1835,20 @@ def _print_adopt_human(result: dict) -> None:
 
 
 def _print_human(result, *, op: str | None = None) -> None:
+    specialized_op = op in {"adopt", "adopt_vault", "review_memory", "triage_memory"}
+    if (
+        specialized_op
+        and isinstance(result, dict)
+        and result.get("ok") is True
+        and result.get("status") == "committed"
+        and result.get("mutated") is True
+    ):
+        diagnostics = result.get("diagnostics")
+        if isinstance(diagnostics, dict):
+            result = diagnostics
+        else:
+            print(json.dumps(result, indent=2, ensure_ascii=False, default=str))
+            return
     if op in {"adopt", "adopt_vault"} and isinstance(result, dict):
         _print_adopt_human(result)
         return
@@ -1822,15 +1918,23 @@ def _print_triage_human(result: dict) -> None:
 
 
 def _core_op_main(argv: list[str]) -> int:
-    from . import cli_ops
+    from . import capabilities, cli_ops
     from . import commands as commands_module
     from . import schema as schema_module
     from .vault import resolve_vault
 
-    cmds = {
-        c.name: c
-        for c in commands_module.product_commands_for("cli", expose_tier2=_expose_tier2())
-    }
+    expose_tier2 = _expose_tier2()
+    registered_commands = commands_module.product_commands_for(
+        "cli", expose_tier2=expose_tier2
+    )
+    cmds = {command.name: command for command in registered_commands}
+    surface_descriptor = capabilities.ActiveSurfaceDescriptor(
+        surface="cli",
+        profile="product",
+        tier2_enabled=expose_tier2,
+        product_commands=tuple(command.name for command in registered_commands),
+        exported_aliases=commands_module.simple_action_names(),
+    )
 
     parser = _CLIParser(prog="kb", description=f"Query and write the local {kb_dirname()}.")
     sub = parser.add_subparsers(dest="op", required=True, parser_class=_CLIParser)
@@ -1851,9 +1955,12 @@ def _core_op_main(argv: list[str]) -> int:
 
     try:
         raw = _collect_raw_args(cmd, args, parser)
-        kwargs = cli_ops.coerce(
-            cmd.params, raw, guarded_fields=cmd.guarded_fields, tool=cmd.name, cli=True
-        )
+        if cmd.name == "edit_memory":
+            kwargs = _normalize_cli_edit(cmd, raw, cli_ops)
+        else:
+            kwargs = cli_ops.coerce(
+                cmd.params, raw, guarded_fields=cmd.guarded_fields, tool=cmd.name, cli=True
+            )
         vault_root = _resolve_core_op_vault(cmd.name, kwargs, resolve_vault)
         if cmd.needs_schema:
             injected = (vault_root, schema_module.load_source_schema(vault_root))
@@ -1861,12 +1968,13 @@ def _core_op_main(argv: list[str]) -> int:
             injected = (vault_root,)
         from .writer_lease import invoke_command
 
-        result = invoke_command(
-            cmd,
-            *injected,
-            idempotency_key=os.environ.get("EXOMEM_IDEMPOTENCY_KEY") or None,
-            **kwargs,
-        )
+        with capabilities.active_surface(surface_descriptor):
+            result = invoke_command(
+                cmd,
+                *injected,
+                idempotency_key=os.environ.get("EXOMEM_IDEMPOTENCY_KEY") or None,
+                **kwargs,
+            )
     except (cli_ops.OpError, ValueError, TypeError, RuntimeError) as e:
         err = cli_ops.error_dict(e)
         if as_json:

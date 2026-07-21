@@ -6,6 +6,7 @@ import hashlib
 import io
 import logging
 import os
+import re
 import zipfile
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -27,6 +28,10 @@ from exomem import (
     schema,
     server,
     server_runtime,
+    writer_lease,
+)
+from exomem import (
+    commands as commands_module,
 )
 from exomem import hosted_gateway as gateway
 from exomem.hosted_runtime import (
@@ -40,6 +45,7 @@ from exomem.server_hosted import register_hosted_routes
 SENSITIVE_QUERY = "sensitive-query-sentinel-7f3c"
 SENSITIVE_PATH = "Knowledge Base/private-path-sentinel-91d2.md"
 DEFAULT_REQUEST_ID = "11111111-1111-4111-8111-111111111111"
+_ACTION_VOCABULARY_MAPS = {"front_door_actions", "simple_actions"}
 
 
 def _principal(label: str) -> str:
@@ -114,6 +120,7 @@ class IsolatedInvoker:
         command,
         *injected,
         idempotency_key: str | None = None,
+        public_idempotency_key: str | None = None,
         implicit_idempotency_scope: str | None = None,
         mutation_request_id: str | None = None,
         **kwargs,
@@ -123,6 +130,7 @@ class IsolatedInvoker:
                 "command": command.name,
                 "vault": injected[0],
                 "idempotency_key": idempotency_key,
+                "public_idempotency_key": public_idempotency_key,
                 "implicit_scope": implicit_idempotency_scope,
                 "request_id": mutation_request_id,
             }
@@ -142,6 +150,87 @@ class IsolatedInvoker:
         return result
 
 
+class WriterBackedInvoker:
+    def __init__(self, state_dir: Path) -> None:
+        self.manager = writer_lease.LeaseManager(
+            writer_lease.LeaseConfig(state_dir=state_dir)
+        )
+        self.calls: list[dict[str, Any]] = []
+
+    def __call__(
+        self,
+        command,
+        *injected,
+        idempotency_key: str | None = None,
+        public_idempotency_key: str | None = None,
+        implicit_idempotency_scope: str | None = None,
+        mutation_request_id: str | None = None,
+        **kwargs,
+    ) -> Any:
+        self.calls.append(
+            {
+                "idempotency_key": idempotency_key,
+                "public_idempotency_key": public_idempotency_key,
+            }
+        )
+        return self.manager.invoke(
+            command,
+            injected,
+            kwargs,
+            read_only=commands_module.invocation_is_read_only(command, kwargs),
+            idempotency_key=idempotency_key,
+            public_idempotency_key=public_idempotency_key,
+            implicit_idempotency_scope=implicit_idempotency_scope,
+            mutation_request_id=mutation_request_id,
+        )
+
+
+class MutationErrorInvoker:
+    def __init__(
+        self,
+        code: str,
+        *,
+        status: str,
+        committed: bool | None,
+        retry_after_ms: int | None = None,
+    ) -> None:
+        self.code = code
+        self.status = status
+        self.committed = committed
+        self.retry_after_ms = retry_after_ms
+
+    def __call__(
+        self,
+        _command,
+        *_injected,
+        idempotency_key: str | None = None,
+        public_idempotency_key: str | None = None,
+        mutation_request_id: str | None = None,
+        **_kwargs,
+    ) -> Any:
+        details: dict[str, Any] = {
+            "status": self.status,
+            "committed": self.committed,
+            "request_id": mutation_request_id,
+            "receipt_id": "0123456789abcdef",
+            "idempotency_key": (
+                public_idempotency_key
+                if public_idempotency_key is not None
+                else "hosted:" + "f" * 64
+            ),
+            "internal_idempotency_key": idempotency_key,
+            "holder": "private-holder-sentinel",
+            "arbitrary_exception_detail": "private-detail-sentinel",
+        }
+        if self.retry_after_ms is not None:
+            details["retry_after_ms"] = self.retry_after_ms
+        raise cli_ops.OpError(
+            self.code,
+            "private mutation exception sentinel",
+            details=details,
+        )
+
+
 def _cell(
     tmp_path: Path,
     *,
@@ -150,6 +239,7 @@ def _cell(
     invoker: Any | None = None,
     guard_events: list[str] | None = None,
     private_authenticator: Any | None = None,
+    expose_tier2: bool = True,
 ) -> tuple[_ASGIClient, HostedCellConfig, HostedCellLifecycle, IsolatedInvoker]:
     vault_root = tmp_path / cell_id / "vault"
     from exomem.init import init_vault
@@ -197,6 +287,7 @@ def _cell(
         invoke_command_func=isolated,
         mutation_guard_factory=mutation_guard,
         private_authenticator=private_authenticator,
+        expose_tier2=expose_tier2,
     )
     return _ASGIClient(app.http_app()), config, lifecycle, isolated
 
@@ -251,6 +342,88 @@ def test_private_routes_use_the_injected_dynamic_authority_for_every_request(
     assert rejected.json()["error"]["code"] == "HOSTED_UNAUTHORIZED"
 
 
+def test_hosted_edit_normalizes_primary_and_legacy_before_invocation(
+    tmp_path: Path,
+) -> None:
+    calls: list[dict[str, Any]] = []
+
+    def capture(command, *injected, **kwargs):  # noqa: ANN001, ARG001
+        calls.append(kwargs)
+        return {"path": kwargs["path"]}
+
+    client, config, _lifecycle, _invoker = _cell(
+        tmp_path,
+        cell_id="cell-edit-normalization",
+        credential="edit-normalization-service-credential-0001",
+        invoker=capture,
+    )
+    headers = _headers(config)
+    common = {
+        "path": "Knowledge Base/Notes/Insights/example.md",
+        "why": "hosted edit",
+    }
+
+    primary = client.post(
+        "/private/exomem/v1/command/edit_memory",
+        headers=headers,
+        json={
+            **common,
+            "operation": {
+                "kind": "replace_string",
+                "old_string": "Before",
+                "new_string": "After",
+            },
+        },
+    )
+    with pytest.warns(DeprecationWarning):
+        legacy = client.post(
+            "/private/exomem/v1/command/edit_memory",
+            headers=headers,
+            json={**common, "old_string": "Before", "new_string": "After"},
+        )
+
+    assert primary.status_code == 200, primary.text
+    assert legacy.status_code == 200, legacy.text
+    for call in calls:
+        assert call["operation"] == {
+            "kind": "replace_string",
+            "old_string": "Before",
+            "new_string": "After",
+            "replace_all": False,
+            "validate_only": False,
+        }
+        assert not ({"old_string", "new_string"} & set(call))
+
+
+def test_invalid_hosted_edit_fails_before_invoker(tmp_path: Path) -> None:
+    calls: list[dict[str, Any]] = []
+
+    def capture(command, *injected, **kwargs):  # noqa: ANN001, ARG001
+        calls.append(kwargs)
+        return {}
+
+    client, config, _lifecycle, _invoker = _cell(
+        tmp_path,
+        cell_id="cell-invalid-edit",
+        credential="invalid-edit-service-credential-0001",
+        invoker=capture,
+    )
+    response = client.post(
+        "/private/exomem/v1/command/edit_memory",
+        headers=_headers(config),
+        json={
+            "path": "Knowledge Base/Notes/Insights/example.md",
+            "why": "invalid",
+            "operation": {"kind": "fill_row", "row_key": "x", "take": "y"},
+            "validate_only": True,
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "INVALID_EDIT"
+    assert calls == []
+
+
 def _headers(
     config: HostedCellConfig,
     *,
@@ -273,6 +446,146 @@ def _headers(
     if idempotency_key is not None:
         headers["Idempotency-Key"] = idempotency_key
     return headers
+
+
+def _hosted_bootstrap_tool_refs(payload: object) -> set[str]:
+    product_names = set(commands_module.PRODUCT_PUBLIC_NAMES)
+    known_names = (
+        product_names
+        | {command.name for command in commands_module.COMMANDS}
+        | set(commands_module.PRODUCT_ROUTE_HELPERS)
+        | set(commands_module.simple_action_names())
+    )
+    structured_lists = {
+        "advanced",
+        "advanced_tools",
+        "available_product_tools",
+        "common_tools",
+        "first_run_safe",
+        "primary",
+        "primary_tools",
+    }
+    refs: set[str] = set()
+
+    def walk(value: object, *, key: str | None = None) -> None:
+        if isinstance(value, dict):
+            if key in {"product_commands", "tool_catalog"}:
+                routes = value.get("routes")
+                if isinstance(routes, dict):
+                    refs.update(set(routes) & known_names)
+                    for route_names in routes.values():
+                        if isinstance(route_names, (list, tuple)):
+                            refs.update(
+                                item
+                                for item in route_names
+                                if isinstance(item, str) and item in known_names
+                            )
+            for child_key, child in value.items():
+                if child_key in known_names and key not in _ACTION_VOCABULARY_MAPS:
+                    refs.add(child_key)
+                if (
+                    child_key == "tool"
+                    and isinstance(child, str)
+                    and child in known_names
+                ):
+                    refs.add(child)
+                    continue
+                if (
+                    child_key == "route"
+                    and isinstance(child, str)
+                    and child in known_names
+                ):
+                    refs.add(child)
+                    continue
+                if child_key in structured_lists and isinstance(
+                    child, (list, tuple)
+                ):
+                    refs.update(
+                        item
+                        for item in child
+                        if isinstance(item, str) and item in known_names
+                    )
+                walk(child, key=str(child_key))
+            return
+        if isinstance(value, (list, tuple)):
+            for child in value:
+                walk(child, key=key)
+            return
+        if isinstance(value, str):
+            for name in known_names:
+                if ("_" in name or name in product_names) and re.search(
+                    rf"(?<!\w){re.escape(name)}(?!\w)", value
+                ):
+                    refs.add(name)
+                elif re.search(rf"(?<!\w){re.escape(name)}\s*\(", value):
+                    refs.add(name)
+
+    walk(payload)
+    return refs
+
+
+def test_hosted_bootstrap_extractor_distinguishes_tool_keys_from_actions() -> None:
+    payload = {
+        "nested_contract": {"read_media": {"description": "structured tool entry"}},
+        "simple_actions": {
+            "ask": {"route": {"tool": "ask_memory"}},
+        },
+        "front_door_actions": {"review": {"intent": "action label"}},
+        "knowledge_packs": {"available": [{"actions": ["ask", "review"]}]},
+    }
+
+    refs = _hosted_bootstrap_tool_refs(payload)
+
+    assert "read_media" in refs
+    assert "ask_memory" in refs
+    assert {"ask", "review"}.isdisjoint(refs)
+
+
+@pytest.mark.parametrize("tier2_enabled", [True, False])
+def test_hosted_bootstrap_profiles_match_private_command_contract(
+    tmp_path: Path,
+    tier2_enabled: bool,
+) -> None:
+    client, config, _lifecycle, _invoker = _cell(
+        tmp_path,
+        cell_id=f"cell-bootstrap-{tier2_enabled}",
+        credential="bootstrap-private-service-credential-0001",
+        expose_tier2=tier2_enabled,
+    )
+    headers = _headers(config)
+    contract_response = client.get("/private/exomem/v1/contract", headers=headers)
+    assert contract_response.status_code == 200
+    contract = contract_response.json()
+    exported_tuple = tuple(command["name"] for command in contract["commands"])
+    expected_tuple = tuple(
+        command.name
+        for command in commands_module.product_commands_for(
+            "rest", expose_tier2=tier2_enabled
+        )
+    )
+    assert exported_tuple == expected_tuple
+
+    for profile in ("compact", "full", "diagnostics"):
+        response = client.post(
+            "/private/exomem/v1/command/bootstrap",
+            headers=headers,
+            json={"profile": profile},
+        )
+        assert response.status_code == 200, response.text
+        payload = response.json()["data"]
+        active = payload["active_capabilities"]
+        assert active["surface"] == "hosted"
+        assert active["profile"] == "private-command-router"
+        assert active["tier2_policy"] == (
+            "enabled" if tier2_enabled else "disabled"
+        )
+        assert active["available_product_tools"] == sorted(exported_tuple)
+        assert _hosted_bootstrap_tool_refs(payload) <= set(exported_tuple)
+        assert "read_media" not in _hosted_bootstrap_tool_refs(payload)
+        if not tier2_enabled:
+            assert {"manage_memory_file", "query_dataset"}.isdisjoint(
+                _hosted_bootstrap_tool_refs(payload)
+            )
 
 
 def _remember_body(sentinel: str) -> dict[str, str]:
@@ -476,6 +789,8 @@ def test_two_cells_keep_identical_paths_and_idempotency_keys_isolated(tmp_path: 
     assert "BRAVO-ONLY-SENTINEL" in (bravo_config.vault_root / bravo_path).read_text()
     assert alpha_invoker.calls[0]["idempotency_key"] != bravo_invoker.calls[0]["idempotency_key"]
     assert public_key not in alpha_invoker.calls[0]["idempotency_key"]
+    assert alpha_invoker.calls[0]["public_idempotency_key"] == public_key
+    assert bravo_invoker.calls[0]["public_idempotency_key"] == public_key
 
     replay = alpha.post(
         "/private/exomem/v1/command/remember",
@@ -506,6 +821,126 @@ def test_two_cells_keep_identical_paths_and_idempotency_keys_isolated(tmp_path: 
     assert unavailable.json()["error"]["code"] == "HOSTED_MUTATION_NOT_ADMITTED"
     assert len(bravo_invoker.calls) == bravo_calls
     assert not list(bravo_config.vault_root.rglob("*MUST-NOT-FALL-BACK*"))
+
+
+def test_hosted_terminal_exposes_public_key_and_never_internal_scope(
+    tmp_path: Path,
+) -> None:
+    public_invoker = WriterBackedInvoker(tmp_path / "public-writer-state")
+    public, public_config, _lifecycle, _invoker = _cell(
+        tmp_path,
+        cell_id="cell-public-terminal",
+        credential="public-terminal-service-credential-0001",
+        invoker=public_invoker,
+    )
+    public_key = "visible-hosted-key"
+
+    with_key = public.post(
+        "/private/exomem/v1/command/remember",
+        headers=_headers(public_config, idempotency_key=public_key),
+        json=_remember_body("HOSTED-PUBLIC-TERMINAL"),
+    )
+
+    assert with_key.status_code == 200, with_key.text
+    terminal = with_key.json()["data"]
+    assert terminal["idempotency_key"] == public_key
+    assert "hosted:" not in with_key.text
+    assert public_invoker.calls[0]["idempotency_key"].startswith("hosted:")
+    assert public_invoker.calls[0]["public_idempotency_key"] == public_key
+
+    no_key_invoker = WriterBackedInvoker(tmp_path / "no-key-writer-state")
+    no_key, no_key_config, _lifecycle, _invoker = _cell(
+        tmp_path,
+        cell_id="cell-no-public-terminal",
+        credential="no-public-terminal-service-credential-0001",
+        invoker=no_key_invoker,
+    )
+    without_key = no_key.post(
+        "/private/exomem/v1/command/remember",
+        headers=_headers(no_key_config),
+        json=_remember_body("HOSTED-NO-PUBLIC-TERMINAL"),
+    )
+
+    assert without_key.status_code == 200, without_key.text
+    assert "idempotency_key" not in without_key.json()["data"]
+    assert "hosted:" not in without_key.text
+    assert no_key_invoker.calls[0]["idempotency_key"] is None
+    assert no_key_invoker.calls[0]["public_idempotency_key"] is None
+
+
+def test_hosted_busy_error_preserves_only_allowlisted_public_identity(
+    tmp_path: Path,
+) -> None:
+    public_key = "visible-hosted-busy-key"
+    client, config, _lifecycle, _invoker = _cell(
+        tmp_path,
+        cell_id="cell-public-busy-error",
+        credential="public-busy-service-credential-0001",
+        invoker=MutationErrorInvoker(
+            "MUTATION_BUSY",
+            status="retryable",
+            committed=False,
+            retry_after_ms=750,
+        ),
+    )
+
+    response = client.post(
+        "/private/exomem/v1/command/remember",
+        headers=_headers(config, idempotency_key=public_key),
+        json=_remember_body("HOSTED-BUSY-ERROR"),
+    )
+
+    assert response.status_code == 409, response.text
+    assert response.json()["error"] == {
+        "code": "MUTATION_BUSY",
+        "message": "hosted command failed",
+        "remediation": None,
+        "status": "retryable",
+        "committed": False,
+        "retry_after_ms": 750,
+        "request_id": DEFAULT_REQUEST_ID,
+        "receipt_id": "0123456789abcdef",
+        "idempotency_key": public_key,
+    }
+    assert "hosted:" not in response.text
+    assert "private-holder-sentinel" not in response.text
+    assert "private-detail-sentinel" not in response.text
+
+
+def test_hosted_pending_error_omits_absent_public_idempotency_key(
+    tmp_path: Path,
+) -> None:
+    client, config, _lifecycle, _invoker = _cell(
+        tmp_path,
+        cell_id="cell-no-public-pending-error",
+        credential="no-public-pending-service-credential-0001",
+        invoker=MutationErrorInvoker(
+            "MUTATION_ACKNOWLEDGEMENT_PENDING",
+            status="uncertain",
+            committed=None,
+        ),
+    )
+
+    response = client.post(
+        "/private/exomem/v1/command/remember",
+        headers=_headers(config),
+        json=_remember_body("HOSTED-PENDING-ERROR"),
+    )
+
+    assert response.status_code == 409, response.text
+    assert response.json()["error"] == {
+        "code": "MUTATION_ACKNOWLEDGEMENT_PENDING",
+        "message": "hosted command failed",
+        "remediation": None,
+        "status": "uncertain",
+        "committed": None,
+        "request_id": DEFAULT_REQUEST_ID,
+        "receipt_id": "0123456789abcdef",
+    }
+    assert "idempotency_key" not in response.json()["error"]
+    assert "hosted:" not in response.text
+    assert "private-holder-sentinel" not in response.text
+    assert "private-detail-sentinel" not in response.text
 
 
 def test_lifecycle_routes_gate_reads_writes_and_sealing(tmp_path: Path) -> None:

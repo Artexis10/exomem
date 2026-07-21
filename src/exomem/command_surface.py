@@ -8,12 +8,15 @@ import types
 import typing
 import uuid
 from collections.abc import Callable
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
 from dataclasses import dataclass
 
 from mcp.types import ToolAnnotations
-from pydantic import Field
+from pydantic import Field, WithJsonSchema
+
+from . import capabilities
+from .mutation_terminal import ResponseDetail
 
 # Text-write ops -> the argument field(s) whose value must not be a base64 binary
 # blob. The model pays for those characters as output tokens before the request
@@ -100,6 +103,7 @@ class Command:
     product_actions: tuple[str, ...] = ()
     first_run_safe: bool = False
     routes: tuple[str, ...] = ()
+    response_detail: bool = False
 
     @property
     def doc(self) -> str:
@@ -128,6 +132,7 @@ def bind_vault(
     name: str | None = None,
     description: str | None = None,
     command: Command | None = None,
+    surface_descriptor: capabilities.ActiveSurfaceDescriptor | None = None,
 ) -> Callable:
     """Return a callable FastMCP introspects exactly like a hand-written wrapper."""
     sig = inspect.signature(leaf)
@@ -148,24 +153,71 @@ def bind_vault(
         )
         for p in visible
     ]
+    if command is not None and command.name == "edit_memory":
+        from .edit_operations import EditOperation, public_edit_operation_schema
+
+        visible = [
+            parameter.replace(
+                default=inspect.Parameter.empty,
+                annotation=typing.Annotated[
+                    EditOperation,
+                    WithJsonSchema(public_edit_operation_schema()),
+                    Field(description=help_text.get("operation", "")),
+                ],
+            )
+            if parameter.name == "operation"
+            else parameter
+            for parameter in visible
+            if parameter.kind is not inspect.Parameter.VAR_KEYWORD
+        ]
+    if command is not None and getattr(command, "response_detail", False):
+        response_detail = inspect.Parameter(
+            "response_detail",
+            kind=inspect.Parameter.KEYWORD_ONLY,
+            default="compact",
+            annotation=typing.Annotated[
+                ResponseDetail,
+                Field(
+                    description=(
+                        "Successful committed mutation detail: compact (default), "
+                        "full diagnostics, or legacy raw leaf result."
+                    )
+                ),
+            ],
+        )
+        insert_at = next(
+            (
+                index
+                for index, parameter in enumerate(visible)
+                if parameter.kind is inspect.Parameter.VAR_KEYWORD
+            ),
+            len(visible),
+        )
+        visible.insert(insert_at, response_detail)
     new_sig = sig.replace(parameters=visible)
 
     def wrapper(**kwargs):
-        if command is None:
-            return leaf(*injected, **kwargs)
-        from .commands import invocation_is_read_only
-        from .writer_lease import invoke_command
-
-        invocation_read_only = invocation_is_read_only(command, kwargs)
-        return invoke_command(
-            command,
-            *injected,
-            mutation_request_id=mcp_request_id(),
-            implicit_idempotency_scope=(
-                None if invocation_read_only else mcp_retry_scope()
-            ),
-            **kwargs,
+        context = (
+            capabilities.active_surface(surface_descriptor)
+            if surface_descriptor is not None
+            else nullcontext()
         )
+        with context:
+            if command is None:
+                return leaf(*injected, **kwargs)
+            from .commands import invocation_is_read_only
+            from .writer_lease import invoke_command
+
+            invocation_read_only = invocation_is_read_only(command, kwargs)
+            return invoke_command(
+                command,
+                *injected,
+                mutation_request_id=mcp_request_id(),
+                implicit_idempotency_scope=(
+                    None if invocation_read_only else mcp_retry_scope()
+                ),
+                **kwargs,
+            )
 
     wrapper.__signature__ = new_sig  # type: ignore[attr-defined]
     wrapper.__name__ = name or leaf.__name__

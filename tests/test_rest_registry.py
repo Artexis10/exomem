@@ -157,12 +157,13 @@ def test_observe_memory_route_mutates_one_structured_unit(
             "operation": "add",
             "category": "config",
             "content": "REST structured unit",
+            "response_detail": "full",
         },
         headers=_auth(),
     )
 
     assert response.status_code == 200, response.text
-    result = response.json()["data"]
+    result = response.json()["data"]["diagnostics"]
     assert result["unit"]["category_key"] == "config"
     assert result["unit_ref"] == result["unit"]["unit_ref"]
 
@@ -513,12 +514,171 @@ def test_blob_guard_nested_edits_preserved(vault, monkeypatch: pytest.MonkeyPatc
         json={
             "path": "Knowledge Base/Notes/Insights/x.md",
             "why": "nested blob",
-            "edits": [{"old_string": "a", "new_string": blob}],
+            "operation": {
+                "kind": "batch_replace",
+                "edits": [{"old_string": "a", "new_string": blob}],
+            },
         },
         headers=_auth(),
     )
     assert r.status_code == 400, r.text
     assert r.json()["error"]["code"] == "BINARY_BLOB_REJECTED"
+
+
+def test_edit_memory_rest_and_openapi_use_discriminated_primary_shape(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client = _client(vault, monkeypatch, EXOMEM_REST_API_KEY="sekret")
+    schema = client.get("/api/openapi.json").json()["paths"]["/api/edit_memory"]["post"][
+        "requestBody"
+    ]["content"]["application/json"]["schema"]
+
+    assert set(schema["properties"]) == {
+        "path",
+        "why",
+        "operation",
+        "response_detail",
+    }
+    assert set(schema["required"]) == {"path", "why", "operation"}
+    assert schema["additionalProperties"] is False
+    operation = schema["properties"]["operation"]
+    assert operation["discriminator"]["propertyName"] == "kind"
+    branches = {
+        branch["properties"]["kind"]["const"]: branch
+        for branch in operation["oneOf"]
+    }
+    assert set(branches) == {
+        "replace_body",
+        "replace_tags",
+        "replace_string",
+        "batch_replace",
+        "edit_section",
+        "patch_frontmatter",
+        "fill_row",
+    }
+    assert set(branches["fill_row"]["properties"]) == {
+        "kind",
+        "row_key",
+        "take",
+        "overwrite",
+    }
+    assert "expected_hash" not in branches["patch_frontmatter"]["properties"]
+    edits = branches["batch_replace"]["properties"]["edits"]
+    assert edits["minItems"] == 1
+    assert set(edits["items"]["required"]) == {"old_string", "new_string"}
+    assert edits["items"]["additionalProperties"] is False
+
+
+def test_edit_memory_rest_accepts_primary_and_legacy_runtime_shapes(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    primary_relative = "Knowledge Base/Notes/Insights/rest-edit-primary.md"
+    legacy_relative = "Knowledge Base/Notes/Insights/rest-edit-legacy.md"
+    for relative in (primary_relative, legacy_relative):
+        (vault / relative).write_text(
+            "---\ntype: insight\nstatus: active\ncreated: 2026-07-20\nupdated: 2026-07-20\n---\n\nBefore\n",
+            encoding="utf-8",
+        )
+    client = _client(vault, monkeypatch, EXOMEM_REST_API_KEY="sekret")
+
+    primary = client.post(
+        "/api/edit_memory",
+        json={
+            "path": primary_relative,
+            "why": "primary nested edit",
+            "operation": {
+                "kind": "replace_string",
+                "old_string": "Before",
+                "new_string": "After",
+            },
+            "response_detail": "full",
+        },
+        headers=_auth(),
+    )
+    with pytest.warns(DeprecationWarning):
+        legacy = client.post(
+            "/api/edit_memory",
+            json={
+                "path": legacy_relative,
+                "why": "legacy flat edit",
+                "old_string": "Before",
+                "new_string": "After",
+                "response_detail": "full",
+            },
+            headers=_auth(),
+        )
+
+    assert primary.status_code == 200, primary.text
+    assert legacy.status_code == 200, legacy.text
+    assert primary.json()["data"]["diagnostics"]["path"] == primary_relative
+    assert legacy.json()["data"]["diagnostics"]["path"] == legacy_relative
+    assert "After" in (vault / primary_relative).read_text(encoding="utf-8")
+    assert "After" in (vault / legacy_relative).read_text(encoding="utf-8")
+
+
+def test_invalid_rest_edit_fails_before_shared_invocation(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        writer_lease,
+        "invoke_command",
+        lambda *_args, **_kwargs: pytest.fail("invalid edit reached invocation"),
+    )
+    client = _client(vault, monkeypatch, EXOMEM_REST_API_KEY="sekret")
+
+    response = client.post(
+        "/api/edit_memory",
+        json={
+            "path": "Knowledge Base/Notes/Insights/example.md",
+            "why": "invalid",
+            "operation": {"kind": "fill_row", "row_key": "x", "take": "y"},
+            "expected_hash": "not-supported",
+        },
+        headers=_auth(),
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "INVALID_EDIT"
+    assert "cannot combine" in response.json()["error"]["message"]
+
+
+@pytest.mark.parametrize(
+    ("edits", "guidance"),
+    [
+        ([], "at least 1 item"),
+        ([{"old_string": "Before"}], "new_string"),
+        (
+            [{"old_string": "Before", "new_string": "After", "ignored": True}],
+            "ignored",
+        ),
+    ],
+)
+def test_invalid_rest_batch_edit_fails_before_shared_invocation(
+    vault,
+    monkeypatch: pytest.MonkeyPatch,
+    edits: list,
+    guidance: str,
+) -> None:
+    monkeypatch.setattr(
+        writer_lease,
+        "invoke_command",
+        lambda *_args, **_kwargs: pytest.fail("invalid batch reached invocation"),
+    )
+    client = _client(vault, monkeypatch, EXOMEM_REST_API_KEY="sekret")
+
+    response = client.post(
+        "/api/edit_memory",
+        json={
+            "path": "Knowledge Base/Notes/Insights/example.md",
+            "why": "invalid batch",
+            "operation": {"kind": "batch_replace", "edits": edits},
+        },
+        headers=_auth(),
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "INVALID_EDIT"
+    assert guidance in response.json()["error"]["message"]
 
 
 def test_openapi_lists_real_product_params(vault, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -544,8 +704,10 @@ def test_openapi_lists_real_product_params(vault, monkeypatch: pytest.MonkeyPatc
         "filters",
         "result_level",
         "explain",
+        "rerank_max_candidates",
     } <= set(props)
     assert props["limit"]["type"] == "integer"
+    assert props["rerank_max_candidates"]["type"] == "integer"
     assert props["graph"]["type"] == "boolean"
     assert props["tags"]["type"] == "array"
     connect_schema = doc["paths"]["/api/connect_memory"]["post"]["requestBody"][
@@ -567,6 +729,29 @@ def test_openapi_lists_real_product_params(vault, monkeypatch: pytest.MonkeyPatc
     assert "ranking_explanation" in encoded_response
     assert "unit_ref" in encoded_response
     assert "parent_path" in encoded_response
+    rerank_schema = next(
+        schema
+        for schema in doc["components"]["schemas"].values()
+        if {"requested", "auto_allowed", "ran", "decision", "reason"}
+        <= set(schema.get("properties", {}))
+    )
+    rerank_candidate_fields = {
+        "candidate_limit_requested",
+        "candidate_limit_effective",
+        "candidate_limit_hard_max",
+        "scorer_input_count",
+        "unscored_tail_count",
+    }
+    assert rerank_candidate_fields <= set(rerank_schema["properties"])
+    assert rerank_candidate_fields <= set(rerank_schema["required"])
+    assert {
+        branch["type"]
+        for branch in rerank_schema["properties"]["candidate_limit_requested"][
+            "anyOf"
+        ]
+    } == {"integer", "null"}
+    for field in rerank_candidate_fields - {"candidate_limit_requested"}:
+        assert rerank_schema["properties"][field]["type"] == "integer"
     observe_schema = doc["paths"]["/api/observe_memory"]["post"]["requestBody"]["content"][
         "application/json"
     ]["schema"]
@@ -756,7 +941,12 @@ def test_process_media_has_one_generated_registry_rest_and_openapi_contract(
     schema = client.get("/api/openapi.json").json()["paths"]["/api/process_media"]["post"][
         "requestBody"
     ]["content"]["application/json"]["schema"]
-    assert set(schema["properties"]) == {"path", "operation"}
+    assert set(schema["properties"]) == {"path", "operation", "response_detail"}
+    assert schema["properties"]["response_detail"]["enum"] == [
+        "compact",
+        "full",
+        "legacy",
+    ]
     assert schema.get("required", []) == []
     assert schema["properties"]["operation"]["enum"] == list(operation_param.choices)
 

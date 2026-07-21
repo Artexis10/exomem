@@ -18,6 +18,11 @@ class RetrievalTrace:
     requested_result_level: str
     rerank_requested: bool | None
     auto_rerank: bool
+    rerank_candidate_limit_requested: int | None = None
+    rerank_candidate_limit_effective: int = 0
+    rerank_candidate_limit_hard_max: int = 0
+    rerank_scorer_input_count: int = 0
+    rerank_unscored_tail_count: int = 0
     intent: str = "conceptual"
     effective_mode: str = "hybrid"
     effective_result_level: str = "page"
@@ -30,6 +35,26 @@ class RetrievalTrace:
     rerank_profile: dict[str, Any] = field(default_factory=dict)
     result_fusion_profile: dict[str, Any] | None = None
     result_plans: dict[str, dict[str, Any]] = field(default_factory=dict)
+
+    def record_rerank_bound(
+        self,
+        *,
+        requested: int | None,
+        effective: int,
+        hard_max: int,
+    ) -> None:
+        self.rerank_candidate_limit_requested = requested
+        self.rerank_candidate_limit_effective = effective
+        self.rerank_candidate_limit_hard_max = hard_max
+
+    def _rerank_candidate_profile(self) -> dict[str, int | None]:
+        return {
+            "candidate_limit_requested": self.rerank_candidate_limit_requested,
+            "candidate_limit_effective": self.rerank_candidate_limit_effective,
+            "candidate_limit_hard_max": self.rerank_candidate_limit_hard_max,
+            "scorer_input_count": self.rerank_scorer_input_count,
+            "unscored_tail_count": self.rerank_unscored_tail_count,
+        }
 
     def record_plan(
         self,
@@ -74,6 +99,7 @@ class RetrievalTrace:
         self.rerank_profile = {
             "requested": self.rerank_requested,
             "auto_allowed": self.auto_rerank,
+            **self._rerank_candidate_profile(),
             "ran": False,
             "decision": "skipped",
             "reason": "empty_query" if filter_only else "requested_mode_keyword",
@@ -109,6 +135,8 @@ class RetrievalTrace:
         *,
         reranker_model: str,
         rerank_outcome: dict[str, Any],
+        scorer_input_count: int,
+        unscored_tail_count: int,
     ) -> None:
         self.effective_mode = self.requested_mode
         vector_status = bundle.lane_statuses.get("vector", {}).get("status")
@@ -131,6 +159,8 @@ class RetrievalTrace:
                     name: bundle.lane_weights[name] for name in active_lanes
                 },
             }
+        self.rerank_scorer_input_count = scorer_input_count
+        self.rerank_unscored_tail_count = unscored_tail_count
         rerank_ran = any(hit.rerank_raw_score is not None for hit in hits)
         self.final_ordering = (
             {
@@ -150,6 +180,7 @@ class RetrievalTrace:
         self.rerank_profile = {
             "requested": self.rerank_requested,
             "auto_allowed": self.auto_rerank,
+            **self._rerank_candidate_profile(),
             "ran": rerank_ran,
             **rerank_outcome,
         }
@@ -395,6 +426,7 @@ class RetrievalTrace:
         self.rerank_profile = {
             "requested": self.rerank_requested,
             "auto_allowed": self.auto_rerank,
+            **self._rerank_candidate_profile(),
             "ran": False,
             "decision": "skipped",
             "reason": "empty_query",
@@ -432,6 +464,7 @@ class RetrievalTrace:
         self.rerank_profile = {
             "requested": self.rerank_requested,
             "auto_allowed": self.auto_rerank,
+            **self._rerank_candidate_profile(),
             "ran": False,
             "decision": "skipped",
             "reason": "requested_mode_keyword",
@@ -493,6 +526,7 @@ class RetrievalTrace:
         self.rerank_profile = {
             "requested": self.rerank_requested,
             "auto_allowed": self.auto_rerank,
+            **self._rerank_candidate_profile(),
             "ran": False,
             "decision": "skipped",
             "reason": "result_level_unit",

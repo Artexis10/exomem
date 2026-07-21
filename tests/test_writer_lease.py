@@ -71,7 +71,7 @@ def test_mutation_timeout_stays_within_the_edge_budget_and_is_tunable() -> None:
     """The boundary wait is a share of the edge budget, not a free parameter.
 
     The HA edge worker abandons a mutation-capable request at
-    MCP_TOOL_TIMEOUT_MS (default 15s) and never replays it, because the origin
+    MCP_TOOL_TIMEOUT_MS (default 60s) and never replays it, because the origin
     may commit after the edge stops waiting. Time spent queueing here is time
     unavailable to the write. A default at or near the edge timeout would make
     a 504-with-a-committed-write the *expected* outcome under contention
@@ -79,7 +79,7 @@ def test_mutation_timeout_stays_within_the_edge_budget_and_is_tunable() -> None:
     """
     # The edge budget this must stay under: MCP_TOOL_TIMEOUT_MS default, in
     # seconds. Mirrored from deploy/cloudflare-ha/src/worker.js.
-    edge_tool_budget_seconds = 15.0
+    edge_tool_budget_seconds = 60.0
     default = LeaseConfig.from_env({}).mutation_timeout_seconds
     assert default == 5.0
     # The invariant that matters: waiting must leave the majority of the edge
@@ -1192,6 +1192,120 @@ def test_hosted_audit_does_not_hold_mutation_boundary(
     assert audit_outcome == ["audited"]
 
 
+@pytest.mark.parametrize(
+    ("command_name", "kwargs"),
+    [
+        ("audit", {"detail": "full"}),
+        ("review_memory", {"mode": "audit", "detail": "full"}),
+        ("maintain_memory", {"mode": "audit", "detail": "full"}),
+    ],
+)
+def test_hosted_public_audit_routes_bypass_boundary_held_by_other_manager(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    command_name: str,
+    kwargs: dict[str, str],
+) -> None:
+    state_dir = tmp_path / "shared-state"
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    holder = LeaseManager(
+        LeaseConfig(state_dir=state_dir), mutation_timeout_seconds=0.0
+    )
+    auditor = LeaseManager(
+        LeaseConfig(state_dir=state_dir), mutation_timeout_seconds=0.0
+    )
+    boundary_held = threading.Event()
+    release_boundary = threading.Event()
+
+    def hold_boundary() -> None:
+        with holder.mutation_guard(vault):
+            boundary_held.set()
+            assert release_boundary.wait(timeout=2)
+
+    worker = threading.Thread(target=hold_boundary, daemon=True)
+    worker.start()
+    assert boundary_held.wait(timeout=2)
+    monkeypatch.setattr(writer_lease_module, "content_private_logging_enabled", lambda: True)
+    command = SimpleNamespace(
+        name=command_name,
+        read_only=command_name != "maintain_memory",
+        leaf=lambda _vault, **_kwargs: "audited",
+    )
+
+    try:
+        assert auditor.invoke(command, (vault,), kwargs, read_only=True) == "audited"
+    finally:
+        release_boundary.set()
+        worker.join(timeout=2)
+
+    assert not worker.is_alive()
+
+
+@pytest.mark.parametrize(
+    ("command_name", "kwargs"),
+    [
+        ("remember", {"validate_only": True}),
+        (
+            "edit_memory",
+            {
+                "operation": {
+                    "kind": "replace_string",
+                    "old_string": "Before",
+                    "new_string": "After",
+                    "validate_only": True,
+                }
+            },
+        ),
+    ],
+)
+def test_hosted_mutation_previews_bypass_boundary_held_by_other_manager(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    command_name: str,
+    kwargs: dict[str, object],
+) -> None:
+    state_dir = tmp_path / "shared-state"
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    holder = LeaseManager(
+        LeaseConfig(state_dir=state_dir), mutation_timeout_seconds=0.0
+    )
+    previewer = LeaseManager(
+        LeaseConfig(state_dir=state_dir), mutation_timeout_seconds=0.0
+    )
+    boundary_held = threading.Event()
+    release_boundary = threading.Event()
+
+    def hold_boundary() -> None:
+        with holder.mutation_guard(vault):
+            boundary_held.set()
+            assert release_boundary.wait(timeout=2)
+
+    worker = threading.Thread(target=hold_boundary, daemon=True)
+    worker.start()
+    assert boundary_held.wait(timeout=2)
+    monkeypatch.setattr(
+        writer_lease_module, "content_private_logging_enabled", lambda: True
+    )
+    command = SimpleNamespace(
+        name=command_name,
+        read_only=False,
+        leaf=lambda _vault, **_kwargs: "previewed",
+    )
+
+    try:
+        assert (
+            previewer.invoke(command, (vault,), kwargs, read_only=True)
+            == "previewed"
+        )
+    finally:
+        release_boundary.set()
+        worker.join(timeout=2)
+
+    assert not worker.is_alive()
+
+
 def test_explicit_idempotency_receipts_have_bounded_retention(tmp_path: Path) -> None:
     clock = Clock()
     calls: list[int] = []
@@ -1370,7 +1484,7 @@ def test_implicit_committed_failure_expires_under_retry_ttl(tmp_path: Path) -> N
         assert failure.value.as_public_dict()["outcome"]["committed"] is True
     assert calls == 1
 
-    clock.value += 61
+    clock.value += writer_lease_module._IMPLICIT_RETRY_TTL_SECONDS + 1
     with pytest.raises(vault_module.BatchWriteError):
         manager.invoke(command, (), {}, implicit_idempotency_scope="alice")
     assert calls == 2
@@ -1604,7 +1718,7 @@ def test_expired_corrupt_implicit_committed_failure_payload_fails_closed_without
             (b"not-json",),
         )
 
-    clock.value += 61
+    clock.value += writer_lease_module._IMPLICIT_RETRY_TTL_SECONDS + 1
     with pytest.raises(OpError) as blocked:
         manager.invoke(command, (), {}, **marker)
     assert blocked.value.code == "IDEMPOTENCY_IN_PROGRESS"
@@ -1711,7 +1825,7 @@ def test_implicit_idempotency_is_bounded_and_principal_scoped(tmp_path: Path) ->
     }
     assert calls == [1, 1]
 
-    clock.value += 61
+    clock.value += writer_lease_module._IMPLICIT_RETRY_TTL_SECONDS + 1
     assert manager.invoke(command, (), {"value": 1}, implicit_idempotency_scope="alice") == {
         "value": 1
     }

@@ -377,6 +377,36 @@ class PosthocPageEvaluation:
     activation: Literal["current", "prospective"]
 
 
+def _posthoc_finding_sort_key(item: dict[str, Any]) -> tuple[Any, ...]:
+    code = str(item.get("code") or "")
+    resolved_rule = tuple(str(value) for value in item.get("resolved_rule") or ())
+    rule = resolved_rule[2] if len(resolved_rule) >= 3 else ""
+    namespace = resolved_rule[0] if resolved_rule else ""
+    legacy_backlog = bool(
+        code == "RELATION_DISPOSITION_MISSING" and item.get("grandfathered") is True
+    )
+    current = item.get("activation") == "current"
+    if not legacy_backlog and current and item.get("grandfathered") is not True and item.get(
+        "severity"
+    ) == "error":
+        priority = 0
+    elif rule == "syntax" or (
+        namespace in {"categories", "kinds"}
+        and (rule == "registry" or "REGISTRY" in code.upper())
+    ):
+        priority = 1
+    elif legacy_backlog:
+        priority = 3
+    else:
+        priority = 2
+    identity = json.dumps(
+        item.get("governed_element_identity") or (),
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    return priority, code, str(item.get("path") or ""), identity
+
+
 @dataclass(frozen=True, slots=True)
 class PosthocBatch:
     """Bounded non-content projection shared by watcher, audit, and reconcile."""
@@ -386,7 +416,16 @@ class PosthocBatch:
     evaluations: tuple[PosthocPageEvaluation, ...]
     corpus: semantic_contract.SemanticCorpusContext | None = None
 
-    def as_dict(self) -> dict[str, Any]:
+    def as_dict(
+        self, detail: Literal["actionable", "full"] = "actionable"
+    ) -> dict[str, Any]:
+        if detail not in {"actionable", "full"}:
+            raise SemanticWriteError(
+                "SEMANTIC_POSTHOC_INVALID_DETAIL",
+                "posthoc detail must be actionable or full",
+            )
+        full = detail == "full"
+        audit_projection = self.operation == "audit"
         findings: list[dict[str, Any]] = []
         summary: dict[str, int] = {}
         bounded = {
@@ -407,33 +446,43 @@ class PosthocBatch:
             )
             for finding in evaluation.contract_result.findings:
                 summary[finding.code] = summary.get(finding.code, 0) + 1
+                item = {
+                    "path": evaluation.path,
+                    "code": finding.code,
+                    "severity": finding.severity,
+                    "governed_element_identity": list(
+                        finding.governed_element_identity
+                    ),
+                    "resolved_rule": list(finding.resolved_rule),
+                    "relation_disposition": disposition_value,
+                    "actions": list(evaluation.contract_result.actions),
+                    "activation": evaluation.activation,
+                    "grandfathered": evaluation.grandfathered,
+                }
                 findings.append(
-                    _bounded_feedback_value(
-                        {
-                            "path": evaluation.path,
-                            "code": finding.code,
-                            "severity": finding.severity,
-                            "governed_element_identity": list(
-                                finding.governed_element_identity
-                            ),
-                            "resolved_rule": list(finding.resolved_rule),
-                            "relation_disposition": disposition_value,
-                            "actions": list(evaluation.contract_result.actions),
-                            "activation": evaluation.activation,
-                            "grandfathered": evaluation.grandfathered,
-                        },
-                        bounded,
-                    )
+                    item if full else _bounded_feedback_value(item, bounded)
                 )
         total = len(findings)
-        findings = findings[:_POSTHOC_FINDING_LIMIT]
+        ordered_for_bounds = False
+        if not full and audit_projection and total > _POSTHOC_FINDING_LIMIT:
+            findings.sort(key=_posthoc_finding_sort_key)
+            ordered_for_bounds = True
+        if not full:
+            findings = findings[:_POSTHOC_FINDING_LIMIT]
         omitted = total - len(findings)
-        evaluated_paths = [
-            _bounded_feedback_text(item.path, bounded)
-            for item in self.evaluations[:_POSTHOC_PATH_LIMIT]
-        ]
+        if full:
+            evaluated_paths = [item.path for item in self.evaluations]
+        else:
+            evaluated_paths = [
+                _bounded_feedback_text(item.path, bounded)
+                for item in self.evaluations[:_POSTHOC_PATH_LIMIT]
+            ]
         summary_items = sorted(summary.items())
-        retained_summary = dict(summary_items[:_POSTHOC_SUMMARY_LIMIT])
+        retained_summary = dict(
+            summary_items
+            if full or audit_projection
+            else summary_items[:_POSTHOC_SUMMARY_LIMIT]
+        )
         value: dict[str, Any] = {
             "operation": self.operation,
             "activation": self.activation,
@@ -443,22 +492,43 @@ class PosthocBatch:
             "omitted_counts": {
                 "evaluated_paths": len(self.evaluations) - len(evaluated_paths),
                 "semantic_contract_findings": omitted,
-                "semantic_contract_summary": len(summary_items) - len(retained_summary),
+                "semantic_contract_summary": len(summary_items)
+                - len(retained_summary),
             },
             "truncation": {
-                "byte_budget": _POSTHOC_BYTE_BUDGET,
-                "finding_limit": _POSTHOC_FINDING_LIMIT,
-                "path_limit": _POSTHOC_PATH_LIMIT,
-                "summary_limit": _POSTHOC_SUMMARY_LIMIT,
+                "byte_budget": None if full else _POSTHOC_BYTE_BUDGET,
+                "finding_limit": None if full else _POSTHOC_FINDING_LIMIT,
+                "path_limit": None if full else _POSTHOC_PATH_LIMIT,
+                "summary_limit": (
+                    None if full or audit_projection else _POSTHOC_SUMMARY_LIMIT
+                ),
                 **bounded,
                 "budget_items_omitted": 0,
             },
         }
-        variable_collections = (
+        if audit_projection or full:
+            value["truncation"].update(
+                {
+                    "observation_complete": True,
+                    "findings_complete": omitted == 0,
+                }
+            )
+        if full:
+            return value
+        if (
+            audit_projection
+            and _feedback_serialized_size(value) >= _POSTHOC_BYTE_BUDGET
+            and not ordered_for_bounds
+        ):
+            findings.sort(key=_posthoc_finding_sort_key)
+        variable_collections = [
             ("semantic_contract_findings", findings),
             ("evaluated_paths", evaluated_paths),
-            ("semantic_contract_summary", retained_summary),
-        )
+        ]
+        if not audit_projection:
+            variable_collections.append(
+                ("semantic_contract_summary", retained_summary)
+            )
         while _feedback_serialized_size(value) >= _POSTHOC_BYTE_BUDGET:
             removed_total = 0
             for name, collection in variable_collections:
@@ -479,6 +549,10 @@ class PosthocBatch:
             value["truncation"]["budget_items_omitted"] += removed_total
             if removed_total == 0:
                 break
+        if audit_projection:
+            value["truncation"]["findings_complete"] = (
+                value["omitted_counts"]["semantic_contract_findings"] == 0
+            )
         return value
 
 

@@ -463,23 +463,37 @@ continue locally. Check any replica with:
 uv run python -m exomem coordination_status --json
 ```
 
-REST callers can attach `Idempotency-Key`; CLI callers can set
-`EXOMEM_IDEMPOTENCY_KEY` for retry-safe mutations. Idempotency records and lease
-credentials stay in per-machine runtime state, outside the synced vault.
+REST callers should attach one stable `Idempotency-Key` to every mutation attempt;
+CLI callers can set `EXOMEM_IDEMPOTENCY_KEY`. Exact same-key/same-payload retries
+return the stored canonical terminal, including its original request and receipt
+identity; reusing a key with different input is rejected. Explicit completed and
+recognized committed-failure receipts are retained locally for 24 hours. The
+default successful product response is compact and decisive (`ok`,
+`status="committed"`, `mutated`, path(s), request/receipt identity, and warning
+count); `response_detail="full"` or `"legacy"` changes only presentation and is
+excluded from mutation identity.
 
-MCP clients do not currently provide a caller-controlled idempotency header. Exomem
-therefore replays a successful mutation when the same authenticated bearer repeats
-the exact command and arguments within 60 seconds. This bounded guard covers the
-common "commit succeeded but the acknowledgement was lost" retry without changing
-tool result shapes or suppressing later intentional calls. The credential is hashed
-before it contributes to the local cache key and is never stored or logged. Replay
-state is per replica: the lease prevents concurrent writers, but a retry routed to a
-different replica after the first replica disappears cannot be guaranteed exactly-once
-across the local-filesystem/remote-coordinator boundary.
+MCP does not expose the REST idempotency header through its tool schema. Exomem
+therefore derives a privacy-safe local replay identity from the verified
+principal, hashed bearer, or MCP session plus the exact command and arguments.
+Its completed-result window is 600 seconds (10 minutes). Each MCP call also gets
+a UUIDv4 `request_id` generated locally unless a valid `x-exomem-request-id`
+arrives; that ID is correlation, not a substitute for the replay key. Never
+change the payload or create a fresh explicit identity to recover a pending or
+committed-uncertain acknowledgement: retry only with the same identity as
+directed, or reconcile.
+
+Idempotency records and credentials stay in per-machine runtime state outside the
+synced vault. Both the 24-hour explicit window and the 600-second inferred window
+bound completed and recognized committed-failure receipts per replica. Pending or
+committed-uncertain markers fail closed until local reconciliation rather than
+silently expiring into another write. The lease prevents concurrent writers, but
+neither cache supplies cross-replica exactly-once durability if a retry reaches
+another replica after the original disappears.
 
 The reference Cloudflare edge therefore treats `tools/call` as an ambiguous
 side-effect boundary. `ORIGIN_TIMEOUT_MS` remains the short connectivity window
-for discovery/initialization traffic, while `MCP_TOOL_TIMEOUT_MS` defaults to 15
+for discovery/initialization traffic, while `MCP_TOOL_TIMEOUT_MS` defaults to 60
 seconds for actual tools. While a lease holder exists, a tool call is sent only
 to that replica and is never replayed to the passive origin after a timeout or
 5xx response. Once the lease expires, the edge probes both origins, chooses one

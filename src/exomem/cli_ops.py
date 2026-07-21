@@ -309,6 +309,19 @@ def coerce(
                 guards.guard_text_content(
                     item.get("new_string"), tool=tool, field="edits[].new_string"
                 )
+    if tool == "edit_memory" and isinstance(raw.get("operation"), dict):
+        operation = raw["operation"]
+        for field in ("new_body", "new_string"):
+            guards.guard_text_content(
+                operation.get(field), tool=tool, field=f"operation.{field}"
+            )
+        for item in operation.get("edits") or []:
+            if isinstance(item, dict):
+                guards.guard_text_content(
+                    item.get("new_string"),
+                    tool=tool,
+                    field="operation.edits[].new_string",
+                )
 
     kwargs: dict[str, Any] = {}
     for name, value in raw.items():

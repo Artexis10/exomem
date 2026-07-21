@@ -314,7 +314,12 @@ async function proxyMutationRequest(request, env, lease) {
   request = withMutationRequestId(request);
   const requestId = request.headers.get("x-exomem-request-id");
   const shortTimeout = Number(env.ORIGIN_TIMEOUT_MS || 2500);
-  const toolTimeout = Number(env.MCP_TOOL_TIMEOUT_MS || 15000);
+  // 60s, not 15s: a governed write validates the draft against the full corpus
+  // and re-validates under the creation lock, measured at 12-45s warm on the
+  // 2026-07 production corpus (2.4k pages). Abandoning at 15s guaranteed the
+  // origin kept committing after the edge stopped waiting — acknowledgement
+  // loss on nearly every write. 60s stays under Cloudflare's ~100s proxy cap.
+  const toolTimeout = Number(env.MCP_TOOL_TIMEOUT_MS || 60000);
   const holder = lease.holder;
   let candidate = candidateForHolder(env, holder);
 

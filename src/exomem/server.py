@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 import os
 import time
+from copy import copy
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -18,8 +19,8 @@ from fastmcp import FastMCP
 from fastmcp.server.middleware.middleware import Middleware, MiddlewareContext
 from starlette.middleware import Middleware as ASGIMiddleware
 
+from . import capabilities, edit_operations, guards, multi_edit
 from . import commands as commands_module
-from . import guards, multi_edit
 from .server_assets import (
     register_asset_routes,
     register_oauth_metadata_route,
@@ -82,6 +83,8 @@ class CallTraceMiddleware(Middleware):
         from .command_surface import mcp_request_context, mcp_request_id
 
         tool_name = _extract_tool_name(context.message)
+        if tool_name == "edit_memory":
+            context = _translated_edit_context(context)
         request_id = mcp_request_id()
         with mcp_request_context(request_id):
             guarded_fields = _GUARDED_WRITE_FIELDS.get(tool_name)
@@ -89,7 +92,21 @@ class CallTraceMiddleware(Middleware):
                 args = _extract_tool_args(context.message)
                 for field in guarded_fields:
                     guards.guard_text_content(args.get(field), tool=tool_name, field=field)
-                if tool_name in ("edit", "edit_memory"):
+                if tool_name == "edit_memory":
+                    operation = args.get("operation") or {}
+                    for field in ("new_body", "new_string"):
+                        guards.guard_text_content(
+                            operation.get(field), tool=tool_name, field=f"operation.{field}"
+                        )
+                    batch_items = operation.get("edits") or []
+                    for item in batch_items:
+                        normalized = multi_edit.normalize_edit_item(item)
+                        guards.guard_text_content(
+                            normalized.get("new_string"),
+                            tool=tool_name,
+                            field="operation.edits[].new_string",
+                        )
+                elif tool_name == "edit":
                     for item in args.get("edits") or []:
                         normalized = multi_edit.normalize_edit_item(item)
                         guards.guard_text_content(
@@ -125,6 +142,34 @@ class CallTraceMiddleware(Middleware):
                     f"err={type(exc).__name__}{extras}"
                 )
                 raise
+
+
+def _translated_edit_context(context: MiddlewareContext) -> MiddlewareContext:
+    """Copy one edit call with legacy arguments translated before validation."""
+    arguments = _extract_tool_args(context.message)
+    translated = edit_operations.normalize_edit_surface_arguments(arguments)
+    message = context.message
+    if isinstance(message, dict):
+        new_message = dict(message)
+        params = dict(new_message.get("params") or {})
+        params["arguments"] = translated
+        new_message["params"] = params
+    elif hasattr(message, "model_copy"):
+        if hasattr(message, "params"):
+            params = message.params.model_copy(update={"arguments": translated})
+            new_message = message.model_copy(update={"params": params})
+        else:
+            new_message = message.model_copy(update={"arguments": translated})
+    else:
+        new_message = copy(message)
+        params = copy(new_message.params)
+        params.arguments = translated
+        new_message.params = params
+    if hasattr(context, "copy"):
+        return context.copy(message=new_message)
+    new_context = copy(context)
+    new_context.message = new_message
+    return new_context
 
 
 def _extract_tool_name(message) -> str:
@@ -219,7 +264,27 @@ def build_server(*, require_auth: bool) -> FastMCP:
             source_schema=runtime.source_schema,
             transfer_config=transfer_config,
         )
-        for cmd in commands_module.product_commands_for("mcp", expose_tier2=expose_tier2):
+        product_commands = commands_module.product_commands_for(
+            "mcp", expose_tier2=expose_tier2
+        )
+        legacy_commands = (
+            _legacy_mcp_commands(expose_tier2=expose_tier2)
+            if _legacy_mcp_compat_enabled()
+            else ()
+        )
+        surface_descriptor = capabilities.ActiveSurfaceDescriptor(
+            surface="mcp",
+            profile=(
+                "product-with-legacy-aliases" if legacy_commands else "product"
+            ),
+            tier2_enabled=expose_tier2,
+            product_commands=tuple(command.name for command in product_commands),
+            exported_aliases=tuple(command.name for command in legacy_commands),
+            hand_registered_tools=tuple(
+                sorted(commands_module.HAND_REGISTERED_EXCEPTIONS)
+            ),
+        )
+        for cmd in product_commands:
             if cmd.name in commands_module.HAND_REGISTERED_EXCEPTIONS:
                 continue
             injected = (
@@ -235,16 +300,18 @@ def build_server(*, require_auth: bool) -> FastMCP:
                     name=cmd.name,
                     description=description,
                     command=cmd,
+                    surface_descriptor=surface_descriptor,
                 ),
                 annotations=cmd.mcp_annotations,
             )
 
-        if _legacy_mcp_compat_enabled():
+        if legacy_commands:
             _register_legacy_mcp_tools(
                 mcp,
                 vault_root=runtime.vault_root,
                 source_schema=runtime.source_schema,
-                expose_tier2=expose_tier2,
+                legacy_commands=legacy_commands,
+                surface_descriptor=surface_descriptor,
                 project_keys_hint=runtime.project_keys_hint,
             )
 
@@ -365,20 +432,11 @@ def _register_legacy_mcp_tools(
     *,
     vault_root: Path,
     source_schema: object,
-    expose_tier2: bool,
+    legacy_commands: tuple[commands_module.Command, ...],
+    surface_descriptor: capabilities.ActiveSurfaceDescriptor,
     project_keys_hint: str,
 ) -> None:
-    product_names = {
-        c.name for c in commands_module.product_commands_for("mcp", expose_tier2=expose_tier2)
-    }
-    legacy = list(commands_module.commands_for("mcp", expose_tier2=expose_tier2))
-    legacy += [c for c in commands_module.COMMANDS if c.name == "note"]
-
-    for cmd in legacy:
-        if cmd.name in product_names:
-            continue
-        if "mcp" not in cmd.surfaces and cmd.name != "note":
-            continue
+    for cmd in legacy_commands:
         injected = (vault_root, source_schema) if cmd.needs_schema else (vault_root,)
         description = cmd.doc
         mcp.tool(
@@ -389,9 +447,33 @@ def _register_legacy_mcp_tools(
                 description="[Deprecated compatibility alias; prefer product commands.] "
                 + description,
                 command=cmd,
+                surface_descriptor=surface_descriptor,
             ),
             annotations=cmd.mcp_annotations,
         )
+
+
+def _legacy_mcp_commands(
+    *, expose_tier2: bool
+) -> tuple[commands_module.Command, ...]:
+    """Return the exact deprecated aliases the MCP adapter will register."""
+
+    product_names = {
+        command.name
+        for command in commands_module.product_commands_for(
+            "mcp", expose_tier2=expose_tier2
+        )
+    }
+    candidates = [
+        *commands_module.commands_for("mcp", expose_tier2=expose_tier2),
+        *(command for command in commands_module.COMMANDS if command.name == "note"),
+    ]
+    return tuple(
+        command
+        for command in candidates
+        if command.name not in product_names
+        and ("mcp" in command.surfaces or command.name == "note")
+    )
 
 
 def run(

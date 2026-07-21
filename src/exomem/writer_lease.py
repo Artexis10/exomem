@@ -35,12 +35,23 @@ from .mutation_lock import (
     active_mutation_snapshot,
     canonical_mutation_identity,
 )
+from .mutation_terminal import (
+    committed_terminal,
+    project_terminal,
+    split_response_detail,
+)
 from .privacy_log import content_private_logging_enabled
 
 _COORDINATOR_USER_AGENT = (
     "Mozilla/5.0 (compatible; Exomem-Coordinator/1.0; +https://github.com/Artexis10/exomem)"
 )
-_IMPLICIT_RETRY_TTL_SECONDS = 60.0
+# The implicit replay window is the acknowledgement-loss recovery budget: when
+# the edge abandons a slow write that the origin then commits, retrying the
+# byte-identical call within this window replays the stored result (with the
+# written slug) instead of double-writing or failing on the existing page.
+# 60s was shorter than one abandoned-write investigation; 10 minutes covers a
+# human noticing the timeout, checking state, and retrying.
+_IMPLICIT_RETRY_TTL_SECONDS = 600.0
 _EXPLICIT_RETRY_TTL_SECONDS = 24 * 60 * 60.0
 _IDEMPOTENCY_WAIT_SECONDS = 5.0
 _IDEMPOTENCY_POLL_INTERVAL_SECONDS = 0.025
@@ -266,17 +277,20 @@ class LeaseConfig:
     #
     # This is a *share of the edge budget*, not a free parameter. The HA edge
     # worker abandons a mutation-capable request at MCP_TOOL_TIMEOUT_MS
-    # (default 15s, deploy/cloudflare-ha/src/worker.js) and deliberately does
+    # (default 60s, deploy/cloudflare-ha/src/worker.js) and deliberately does
     # not replay it, because the origin may commit after the edge stops
     # waiting. Queueing here spends that same budget: time spent waiting is
     # unavailable to the write itself. A value at or near the edge timeout
     # guarantees the caller sees a 504 while the write commits anyway — the
     # exact acknowledgement loss this system works hardest to avoid.
     #
-    # 5s leaves the majority of the 15s budget for the write. Raise this only
-    # in tandem with MCP_TOOL_TIMEOUT_MS, and never to meet or exceed it. The
-    # real headroom win is shortening the critical section — the corpus-aware
-    # embedding pass currently runs inside the boundary — not widening the wait.
+    # 5s leaves the large majority of the 60s budget for the write, whose own
+    # cost is dominated by full-corpus contract validation (measured 12-45s
+    # warm at 2.4k pages, 2026-07). Raise this only in tandem with
+    # MCP_TOOL_TIMEOUT_MS, and never to meet or exceed it. The real headroom
+    # win is shortening the critical section — the per-write corpus parse is
+    # uncached and the corpus-aware embedding pass runs inside the boundary —
+    # not widening the wait.
     mutation_timeout_seconds: float = 5.0
 
     @property
@@ -772,6 +786,32 @@ def _command_digest(command: Any, kwargs: Mapping[str, Any]) -> str:
     ).hexdigest()
 
 
+_PUBLIC_IDEMPOTENCY_KEY_UNSET = object()
+
+
+def _read_bypasses_consistency_guard(command: Any, kwargs: Mapping[str, Any]) -> bool:
+    """Return whether a read can tolerate a changing snapshot without contention."""
+    if command.name == "audit":
+        return True
+    if command.name == "review_memory":
+        return kwargs.get("mode") == "audit"
+    if command.name == "maintain_memory":
+        return kwargs.get("mode", "audit") == "audit"
+    if command.name == "remember":
+        return kwargs.get("validate_only") is True
+    if command.name == "edit_memory":
+        if kwargs.get("validate_only") is True:
+            return True
+        operation = kwargs.get("operation")
+        return (
+            isinstance(operation, Mapping)
+            and operation.get("kind")
+            in {"replace_string", "batch_replace", "patch_frontmatter"}
+            and operation.get("validate_only") is True
+        )
+    return False
+
+
 def _effective_idempotency_key(
     manager: LeaseManager,
     *,
@@ -919,15 +959,23 @@ class LeaseManager:
         *,
         read_only: bool | None = None,
         idempotency_key: str | None = None,
+        public_idempotency_key: str | None | object = _PUBLIC_IDEMPOTENCY_KEY_UNSET,
         idempotency_principal_scope: str | None = None,
         implicit_idempotency_scope: str | None = None,
         mutation_request_id: str | None = None,
     ) -> Any:
+        kwargs, response_detail = split_response_detail(kwargs)
+        if public_idempotency_key is _PUBLIC_IDEMPOTENCY_KEY_UNSET:
+            effective_public_idempotency_key = idempotency_key
+        else:
+            assert public_idempotency_key is None or isinstance(
+                public_idempotency_key, str
+            )
+            effective_public_idempotency_key = public_idempotency_key
         invocation_read_only = command.read_only if read_only is None else read_only
         if invocation_read_only:
-            audit_without_consistency_lock = (
-                command.name == "maintain_memory"
-                and kwargs.get("mode", "audit") == "audit"
+            audit_without_consistency_lock = _read_bypasses_consistency_guard(
+                command, kwargs
             )
             if content_private_logging_enabled() and not audit_without_consistency_lock:
                 with self.consistency_guard(self._mutation_subject(injected)):
@@ -960,7 +1008,15 @@ class LeaseManager:
             )
             commit_token = _ACTIVE_MUTATION_COMMITTED.set(False)
             try:
-                return command.leaf(*injected, **kwargs)
+                leaf_result = command.leaf(*injected, **kwargs)
+                if _ACTIVE_MUTATION_COMMITTED.get():
+                    return committed_terminal(
+                        leaf_result,
+                        request_id=request_id,
+                        receipt_id=receipt,
+                        idempotency_key=effective_public_idempotency_key,
+                    )
+                return leaf_result
             except Exception as error:
                 if (
                     _ACTIVE_MUTATION_COMMITTED.get()
@@ -995,8 +1051,9 @@ class LeaseManager:
                 elif error.code == "MUTATION_ACKNOWLEDGEMENT_PENDING":
                     error.details.update(status="uncertain", committed=None)
                 error.details.update(request_id=request_id, receipt_id=receipt)
-                if idempotency_key is not None:
-                    error.details["idempotency_key"] = idempotency_key
+                error.details.pop("idempotency_key", None)
+                if effective_public_idempotency_key is not None:
+                    error.details["idempotency_key"] = effective_public_idempotency_key
             _log_mutation_event(
                 "interrupted",
                 level=logging.WARNING,
@@ -1012,7 +1069,7 @@ class LeaseManager:
             command=command.name,
             receipt=receipt or "none",
         )
-        return result
+        return project_terminal(result, response_detail)
 
     def _mutation_subject(self, injected: tuple[Any, ...]) -> os.PathLike[str] | str:
         if injected and isinstance(injected[0], os.PathLike):
@@ -1171,6 +1228,7 @@ def invoke_command(
     command: Any,
     *injected: Any,
     idempotency_key: str | None = None,
+    public_idempotency_key: str | None | object = _PUBLIC_IDEMPOTENCY_KEY_UNSET,
     idempotency_principal_scope: str | None = None,
     implicit_idempotency_scope: str | None = None,
     mutation_request_id: str | None = None,
@@ -1178,12 +1236,18 @@ def invoke_command(
 ) -> Any:
     from .commands import invocation_is_read_only
 
+    if command.name == "edit_memory":
+        from .edit_operations import normalize_edit_surface_arguments
+
+        kwargs = normalize_edit_surface_arguments(kwargs)
+
     return get_manager().invoke(
         command,
         injected,
         kwargs,
         read_only=invocation_is_read_only(command, kwargs),
         idempotency_key=idempotency_key,
+        public_idempotency_key=public_idempotency_key,
         idempotency_principal_scope=idempotency_principal_scope,
         implicit_idempotency_scope=implicit_idempotency_scope,
         mutation_request_id=mutation_request_id,

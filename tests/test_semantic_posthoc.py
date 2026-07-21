@@ -209,6 +209,152 @@ def test_posthoc_projection_bounds_clean_large_batches_without_losing_internal_r
     assert payload["truncation"]["strings_truncated"] > 0
 
 
+def _posthoc_result(
+    code: str,
+    *,
+    severity: str = "error",
+    resolved_rule: tuple[str, str, str] = ("fields", "owner", "required"),
+) -> semantic_contract.SemanticContractResult:
+    finding = semantic_contract.ContractFinding(
+        code=code,
+        severity=severity,
+        path="Knowledge Base/Notes/Insights/example.md",
+        span=None,
+        detail="Requires review.",
+        remediation="Review the semantic contract.",
+        governed_element_identity=("semantic", code),
+        resolved_rule=resolved_rule,
+    )
+    return semantic_contract.SemanticContractResult(
+        mode="posthoc",
+        operation="audit",
+        findings=(finding,),
+        errors=(finding,) if severity == "error" else (),
+        warnings=(finding,) if severity != "error" else (),
+        blocking_findings=(finding,) if severity == "error" else (),
+        should_block=severity == "error",
+        semantic_unit_count=1,
+        kind_counts=(),
+        category_counts=(),
+        relation_disposition=None,
+        actions=("review_semantic_contract",),
+    )
+
+
+def test_posthoc_prioritizes_current_findings_before_bounds_and_full_is_unbounded() -> None:
+    legacy_count = semantic_writes._POSTHOC_FINDING_LIMIT + 8
+    evaluations = [
+        semantic_writes.PosthocPageEvaluation(
+            f"Knowledge Base/Notes/Insights/legacy-{index:04d}.md",
+            _posthoc_result(
+                "RELATION_DISPOSITION_MISSING",
+                resolved_rule=("relations", "*", "disposition"),
+            ),
+            True,
+            "current",
+        )
+        for index in range(legacy_count)
+    ]
+    evaluations.extend(
+        [
+            semantic_writes.PosthocPageEvaluation(
+                "Knowledge Base/Notes/Insights/current-b.md",
+                _posthoc_result("CONTRACT_CURRENT_B"),
+                False,
+                "current",
+            ),
+            semantic_writes.PosthocPageEvaluation(
+                "Knowledge Base/Notes/Insights/current-a.md",
+                _posthoc_result("CONTRACT_CURRENT_A"),
+                False,
+                "current",
+            ),
+            semantic_writes.PosthocPageEvaluation(
+                "Knowledge Base/Notes/Insights/current-malformed.md",
+                _posthoc_result(
+                    "invalid_compact_category",
+                    severity="warn",
+                    resolved_rule=("semantic_units", "*", "syntax"),
+                ),
+                False,
+                "current",
+            ),
+        ]
+    )
+    batch = semantic_writes.PosthocBatch(
+        "audit", "current", tuple(evaluations)
+    )
+
+    bounded = batch.as_dict()
+    retained_codes = [
+        item["code"] for item in bounded["semantic_contract_findings"]
+    ]
+
+    assert retained_codes[:3] == [
+        "CONTRACT_CURRENT_A",
+        "CONTRACT_CURRENT_B",
+        "invalid_compact_category",
+    ]
+    assert bounded["semantic_contract_summary"] == {
+        "CONTRACT_CURRENT_A": 1,
+        "CONTRACT_CURRENT_B": 1,
+        "RELATION_DISPOSITION_MISSING": legacy_count,
+        "invalid_compact_category": 1,
+    }
+    assert bounded["omitted_counts"]["semantic_contract_findings"] == (
+        legacy_count + 3 - len(bounded["semantic_contract_findings"])
+    )
+    assert bounded["truncation"]["observation_complete"] is True
+    assert bounded["truncation"]["findings_complete"] is False
+
+    full = batch.as_dict(detail="full")
+
+    assert len(full["semantic_contract_findings"]) == legacy_count + 3
+    assert full["omitted_counts"]["semantic_contract_findings"] == 0
+    assert full["truncation"]["finding_limit"] is None
+    assert full["truncation"]["byte_budget"] is None
+    assert full["truncation"]["observation_complete"] is True
+    assert full["truncation"]["findings_complete"] is True
+
+
+def test_non_audit_posthoc_keeps_legacy_bounded_projection_contract() -> None:
+    legacy_count = semantic_writes._POSTHOC_FINDING_LIMIT + 8
+    evaluations = [
+        semantic_writes.PosthocPageEvaluation(
+            f"Knowledge Base/Notes/Insights/legacy-{index:04d}.md",
+            _posthoc_result(f"LEGACY_{index:04d}"),
+            True,
+            "current",
+        )
+        for index in range(legacy_count)
+    ]
+    evaluations.append(
+        semantic_writes.PosthocPageEvaluation(
+            "Knowledge Base/Notes/Insights/current.md",
+            _posthoc_result("CONTRACT_CURRENT"),
+            False,
+            "current",
+        )
+    )
+
+    payload = semantic_writes.PosthocBatch(
+        "watcher", "current", tuple(evaluations)
+    ).as_dict()
+
+    assert payload["semantic_contract_findings"][0]["code"] == "LEGACY_0000"
+    assert len(payload["semantic_contract_summary"]) == (
+        semantic_writes._POSTHOC_SUMMARY_LIMIT
+    )
+    assert payload["omitted_counts"]["semantic_contract_summary"] == (
+        legacy_count + 1 - semantic_writes._POSTHOC_SUMMARY_LIMIT
+    )
+    assert payload["truncation"]["summary_limit"] == (
+        semantic_writes._POSTHOC_SUMMARY_LIMIT
+    )
+    assert "observation_complete" not in payload["truncation"]
+    assert "findings_complete" not in payload["truncation"]
+
+
 def test_watcher_reports_posthoc_before_one_index_fanout_and_preserves_bytes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

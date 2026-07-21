@@ -31,22 +31,33 @@ import {readRoute, routePatch, writeRoute} from "/studio/assets/state.v2.js";
 
 // --- The single backend adapter (design.md Decision 1 action names) --------- //
 
+async function adoptionMutation(body) {
+  const result = await command("adoption_studio", {
+    ...body,
+    response_detail: "full",
+  });
+  if (!result || typeof result.diagnostics !== "object") {
+    throw new ApiError("The adoption mutation returned no terminal diagnostics.");
+  }
+  return result.diagnostics;
+}
+
 const adoptionApi = {
   start: (path, {initializeKb = false} = {}) =>
-    command("adoption_studio", {action: "start", path, initialize_kb: initializeKb}),
+    adoptionMutation({action: "start", path, initialize_kb: initializeKb}),
   // No dedicated discovery action in the engine contract; resume rides a run id
   // already present in the URL. Returns null until such an action exists.
   latest: async () => null,
   status: (runId) => command("adoption_studio", {action: "status", run_id: runId}),
   select: (runId, payload) =>
-    command("adoption_studio", {action: "select", run_id: runId, ...payload}),
-  plan: (runId) => command("adoption_studio", {action: "plan", run_id: runId}),
+    adoptionMutation({action: "select", run_id: runId, ...payload}),
+  plan: (runId) => adoptionMutation({action: "plan", run_id: runId}),
   apply: (runId, planId) =>
-    command("adoption_studio", {action: "apply", run_id: runId, plan_id: planId}),
+    adoptionMutation({action: "apply", run_id: runId, plan_id: planId}),
   // apply always echoes plan_id (even on retry): the engine refuses a
   // mismatched/missing plan_id with PLAN_STALE regardless of retry_failed.
   retry: (runId, planId, onlyPaths) =>
-    command("adoption_studio", {
+    adoptionMutation({
       action: "apply",
       run_id: runId,
       plan_id: planId,
@@ -54,8 +65,8 @@ const adoptionApi = {
       only_paths: onlyPaths && onlyPaths.length ? onlyPaths : null,
     }),
   cancel: (runId, why) =>
-    command("adoption_studio", {action: "cancel", run_id: runId, why: why || null}),
-  finish: (runId) => command("adoption_studio", {action: "finish", run_id: runId}),
+    adoptionMutation({action: "cancel", run_id: runId, why: why || null}),
+  finish: (runId) => adoptionMutation({action: "finish", run_id: runId}),
   workItem: (runId) => command("adoption_studio", {action: "work-item", run_id: runId}),
   // Scoped by the run's ref so a run's review screen never shows (or acts on)
   // another run's proposals.
