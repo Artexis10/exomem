@@ -5248,6 +5248,13 @@ def invocation_is_read_only(command: Command, kwargs: dict[str, Any]) -> bool:
                 and operation.get("validate_only") is True
             )
         return False
+    if command.name == "remember":
+        # A validate-only remember builds and returns an immutable draft and
+        # writes nothing (note() returns its preflight before any commit), so
+        # it needs neither writer authority nor the mutation boundary. Any
+        # inconsistency from reading beside a concurrent write is caught by
+        # the fresh under-lock re-validation at commit time.
+        return kwargs.get("validate_only") is True
     return False
 
 

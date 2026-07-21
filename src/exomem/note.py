@@ -32,6 +32,7 @@ import datetime as dt
 import logging
 import os
 import re
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -1342,6 +1343,9 @@ def note(
     _predecessor_content_hash: str | None = None,
 ) -> NoteResult | semantic_writes.CreationPreflight | _PreparedNote:
     """Create or validate one compiled-note draft through the semantic boundary."""
+    # Coarse per-stage wall-clock timings, logged (never returned) so a slow
+    # write is attributable from service logs alone. Content-free by design.
+    write_started = time.perf_counter()
     root = Path(vault_root)
     try:
         filename_slug, slug_warnings = resolve_filename_slug(title, slug)
@@ -1491,6 +1495,7 @@ def note(
         )
     except (semantic_writes.SemanticWriteError, relation_review.RelationReviewError) as error:
         raise NoteError(error.code, [], error.reason) from error
+    preflight_ms = (time.perf_counter() - write_started) * 1000.0
     if draft_hash is not None and preflight.draft_hash != draft_hash:
         raise NoteError("DRAFT_HASH_MISMATCH", ["draft_hash"], "draft requires fresh validation")
     warnings = list(slug_warnings) + list(source_warnings) + list(body_warnings)
@@ -1583,6 +1588,11 @@ def note(
     if log_plan.rotation_note is not None:
         warnings.append(log_plan.rotation_note)
     if validate_only:
+        log.info(
+            "note write timings mode=validate note_type=%s preflight_ms=%.1f",
+            note_type,
+            preflight_ms,
+        )
         return preflight
     if _return_prepared:
         return _PreparedNote(
@@ -1593,6 +1603,7 @@ def note(
             destination,
             encoded_token,
         )
+    commit_started = time.perf_counter()
     try:
         committed = semantic_writes.commit_creation(
             root,
@@ -1605,10 +1616,17 @@ def note(
         )
     except (semantic_writes.SemanticWriteError, relation_review.RelationReviewError) as error:
         raise NoteError(error.code, [], error.reason) from error
+    commit_ms = (time.perf_counter() - commit_started) * 1000.0
 
+    advisory_started = time.perf_counter()
     corpus_suggestions: list[dict] = []
     duplicate_warnings: list[str] = []
     contradiction_warnings: list[str] = []
+    # suggestions=False gates ONLY the related-links query below; the near-dup
+    # /contradiction sweep is a dedupe guardrail and stays on in every mode
+    # (locked by tests/test_note_suggestions_knob.py). Its latency lives inside
+    # the widened edge budget; `note write timings ... advisory_ms` makes it
+    # attributable when it grows.
     if not os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
         try:
             if suggestions:
@@ -1650,6 +1668,16 @@ def note(
             log.debug("corpus-aware nudges failed (non-fatal)", exc_info=True)
     warnings.extend(duplicate_warnings)
     warnings.extend(contradiction_warnings)
+    log.info(
+        "note write timings mode=commit note_type=%s preflight_ms=%.1f "
+        "commit_ms=%.1f advisory_ms=%.1f total_ms=%.1f suggestions=%s",
+        note_type,
+        preflight_ms,
+        commit_ms,
+        (time.perf_counter() - advisory_started) * 1000.0,
+        (time.perf_counter() - write_started) * 1000.0,
+        suggestions,
+    )
     feedback = _build_write_feedback(
         note_type=note_type,
         sources_norm=sources_norm,

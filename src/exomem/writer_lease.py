@@ -45,7 +45,13 @@ from .privacy_log import content_private_logging_enabled
 _COORDINATOR_USER_AGENT = (
     "Mozilla/5.0 (compatible; Exomem-Coordinator/1.0; +https://github.com/Artexis10/exomem)"
 )
-_IMPLICIT_RETRY_TTL_SECONDS = 60.0
+# The implicit replay window is the acknowledgement-loss recovery budget: when
+# the edge abandons a slow write that the origin then commits, retrying the
+# byte-identical call within this window replays the stored result (with the
+# written slug) instead of double-writing or failing on the existing page.
+# 60s was shorter than one abandoned-write investigation; 10 minutes covers a
+# human noticing the timeout, checking state, and retrying.
+_IMPLICIT_RETRY_TTL_SECONDS = 600.0
 _EXPLICIT_RETRY_TTL_SECONDS = 24 * 60 * 60.0
 _IDEMPOTENCY_WAIT_SECONDS = 5.0
 _IDEMPOTENCY_POLL_INTERVAL_SECONDS = 0.025
@@ -271,17 +277,20 @@ class LeaseConfig:
     #
     # This is a *share of the edge budget*, not a free parameter. The HA edge
     # worker abandons a mutation-capable request at MCP_TOOL_TIMEOUT_MS
-    # (default 15s, deploy/cloudflare-ha/src/worker.js) and deliberately does
+    # (default 60s, deploy/cloudflare-ha/src/worker.js) and deliberately does
     # not replay it, because the origin may commit after the edge stops
     # waiting. Queueing here spends that same budget: time spent waiting is
     # unavailable to the write itself. A value at or near the edge timeout
     # guarantees the caller sees a 504 while the write commits anyway — the
     # exact acknowledgement loss this system works hardest to avoid.
     #
-    # 5s leaves the majority of the 15s budget for the write. Raise this only
-    # in tandem with MCP_TOOL_TIMEOUT_MS, and never to meet or exceed it. The
-    # real headroom win is shortening the critical section — the corpus-aware
-    # embedding pass currently runs inside the boundary — not widening the wait.
+    # 5s leaves the large majority of the 60s budget for the write, whose own
+    # cost is dominated by full-corpus contract validation (measured 12-45s
+    # warm at 2.4k pages, 2026-07). Raise this only in tandem with
+    # MCP_TOOL_TIMEOUT_MS, and never to meet or exceed it. The real headroom
+    # win is shortening the critical section — the per-write corpus parse is
+    # uncached and the corpus-aware embedding pass runs inside the boundary —
+    # not widening the wait.
     mutation_timeout_seconds: float = 5.0
 
     @property
