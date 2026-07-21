@@ -11,13 +11,67 @@ from pathlib import Path
 
 from exomem import audit_fix as audit_fix_module
 
-
 TODAY = dt.date(2026, 5, 28)
 
 
 def _seed(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
+
+
+def test_readonly_subtree_does_not_block_fixing_writeable_pages(vault: Path) -> None:
+    """One readonly page must not abort the whole pass.
+
+    Regression: `audit_fix` walked every compiled page without consulting
+    `_access.yaml`. A `readonly` subtree refuses every write with no override,
+    so the planned canonicalisation reached the write layer and raised
+    WRITE_REFUSED, aborting the entire batch. On a real vault three readonly
+    pages blocked seventeen perfectly writeable ones, leaving the fixer
+    permanently unusable for anyone who marks a subtree readonly.
+    """
+    (vault / "Knowledge Base" / "_access.yaml").write_text(
+        "readonly:\n  - Products\n", encoding="utf-8"
+    )
+    link = "See [[Notes/Insights/progressive-disclosure-without-mode-fragmentation]].\n"
+    header = (
+        "---\ntype: insight\nstatus: active\ncreated: 2026-05-28\n"
+        "updated: 2026-05-28\ntags: []\n---\n# Page\n\n"
+    )
+    writeable = vault / "Knowledge Base" / "Notes" / "Insights" / "writeable.md"
+    locked = vault / "Knowledge Base" / "Products" / "locked.md"
+    _seed(writeable, header + link)
+    _seed(locked, header + link)
+
+    report = audit_fix_module.audit_fix(vault, today=TODAY)
+
+    # The writeable page is canonicalised despite the readonly page beside it.
+    assert (
+        "[[Knowledge Base/Notes/Insights/progressive-disclosure-without-mode-fragmentation]]"
+        in writeable.read_text(encoding="utf-8")
+    )
+    # The readonly page is left exactly as authored.
+    assert locked.read_text(encoding="utf-8") == header + link
+    # And the skip is reported, not silently swallowed.
+    assert report.skipped_readonly >= 1
+    assert not any(f.path.startswith("Knowledge Base/Products/") for f in report.fixed)
+
+
+def test_dry_run_does_not_promise_fixes_it_cannot_apply(vault: Path) -> None:
+    """A dry run must match what a real run can do, or it is not a preview."""
+    (vault / "Knowledge Base" / "_access.yaml").write_text(
+        "readonly:\n  - Products\n", encoding="utf-8"
+    )
+    _seed(
+        vault / "Knowledge Base" / "Products" / "locked.md",
+        "---\ntype: insight\nstatus: active\ncreated: 2026-05-28\n"
+        "updated: 2026-05-28\ntags: []\n---\n# Page\n\n"
+        "See [[Notes/Insights/progressive-disclosure-without-mode-fragmentation]].\n",
+    )
+
+    preview = audit_fix_module.audit_fix(vault, dry_run=True, today=TODAY)
+
+    assert not any(f.path.startswith("Knowledge Base/Products/") for f in preview.fixed)
+    assert preview.skipped_readonly >= 1
 
 
 def test_audit_fix_canonicalizes_wikilinks_in_body(vault: Path) -> None:
