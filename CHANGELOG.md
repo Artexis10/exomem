@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.27.0](https://github.com/Artexis10/exomem/compare/v0.26.0...v0.27.0) (2026-07-21)
+
+
+### Features
+
+* close Exomem write-path and agent friction ([#285](https://github.com/Artexis10/exomem/issues/285)) ([8fb365b](https://github.com/Artexis10/exomem/commit/8fb365b2e76ce5ca201072971e91e814f909cbe7))
+* **deploy:** report install provenance and gate version deploys ([#279](https://github.com/Artexis10/exomem/issues/279)) ([ebf78d0](https://github.com/Artexis10/exomem/commit/ebf78d07bb5402e7e59eb6806276bd5b162f9331))
+* integrate Adoption Studio with semantic units (packs, propose-time contract findings, Studio surface) ([#280](https://github.com/Artexis10/exomem/issues/280)) ([27d7530](https://github.com/Artexis10/exomem/commit/27d753076dcf81159c3f4b56f85a10556f385efe))
+
 ## [0.26.0](https://github.com/Artexis10/exomem/compare/v0.25.5...v0.26.0) (2026-07-20)
 
 
