@@ -1114,6 +1114,27 @@ def test_empty_rich_units_are_diagnosed_and_excluded(body: str) -> None:
     assert document.errors[0].span.text == "## Finding"
 
 
+def test_descendant_ordinary_key_value_bullet_is_substantive_rich_body() -> None:
+    markdown = """\
+## Finding
+
+### Result
+
+- Outcome: The retry succeeded.
+"""
+
+    document = parse_semantic_units(markdown, parent_ref=STABLE_PARENT_REF)
+
+    assert document.errors == ()
+    assert [(unit.form, unit.kind, unit.body) for unit in document.units] == [
+        (
+            "rich",
+            "finding",
+            "### Result\n\n- Outcome: The retry succeeded.",
+        )
+    ]
+
+
 def test_nested_compact_and_rich_syntax_is_owned_by_one_rich_span() -> None:
     markdown = """\
 ## Finding

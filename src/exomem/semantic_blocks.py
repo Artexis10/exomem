@@ -92,6 +92,9 @@ _HEADING_RE = re.compile(r"^(#{1,6})\s+(.*?)\s*#*\s*$")
 _FENCE_RE = re.compile(r"^ {0,3}(?P<fence>`{3,}|~{3,})(?P<info>.*)$")
 _METADATA_RE = re.compile(r"^\s*[-*+]\s+([A-Za-z0-9 _-]+):\s*(.*)$")
 _NORMALIZE_RE = re.compile(r"[\s-]+")
+_RESERVED_METADATA_KEYS = frozenset(
+    {"category", "id", "tags", "context", "relations"}
+)
 
 
 @dataclass(frozen=True)
@@ -372,8 +375,15 @@ def _has_substantive_body(body: str) -> bool:
     return any(
         line.strip()
         and _HEADING_RE.match(line) is None
-        and _METADATA_RE.match(line) is None
+        and not _is_reserved_metadata_row(line)
         for line in body.splitlines()
+    )
+
+
+def _is_reserved_metadata_row(line: str) -> bool:
+    match = _METADATA_RE.match(line)
+    return bool(
+        match and normalize_label(match.group(1)) in _RESERVED_METADATA_KEYS
     )
 
 

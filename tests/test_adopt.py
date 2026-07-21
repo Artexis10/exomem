@@ -124,6 +124,48 @@ Rich semantic unit.
     }
 
 
+def test_hierarchy_migration_census_counts_current_units_without_source_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    vault = tmp_path / "synthetic-vault"
+    page = vault / "Focus" / "hierarchy.md"
+    page.parent.mkdir(parents=True)
+    page.write_bytes(
+        b"## Finding\n\n"
+        b"Parent conclusion.\n\n"
+        b"### Decision\n\n"
+        b"Nested recognized content.\n\n"
+        b"- [config] Compact-shaped body content.\n"
+    )
+    source = page.read_bytes()
+
+    if os.name == "nt":
+        # The repository's Windows descriptor identity baseline currently marks
+        # every semantic-census file unreadable. Keep this parser/count regression
+        # focused while the unchanged Windows boundary remains tracked separately.
+        def bounded_read(
+            _root: Path,
+            path: Path,
+            remaining: int,
+            **_kwargs: object,
+        ) -> tuple[str, bytes | None]:
+            raw = path.read_bytes()
+            return ("oversized", None) if len(raw) > remaining else ("ok", raw)
+
+        monkeypatch.setattr(
+            semantic_census,
+            "_read_regular_file_bounded",
+            bounded_read,
+        )
+
+    census = semantic_census.scan(vault, path="Focus")
+
+    assert page.read_bytes() == source
+    assert census["units"] == {"total": 1, "compact": 0, "rich": 1}
+    assert census["categories"]["raw_frequencies"] == {"Finding": 1}
+
+
 def test_adopt_scan_only_semantic_census_honors_subtree_hidden_and_resource_bounds(
     tmp_path: Path,
 ) -> None:
