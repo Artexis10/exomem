@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any
 
-AUTHORING_CONTRACT_VERSION = 1
+AUTHORING_CONTRACT_VERSION = 2
 AUTHORING_CONTRACT_ID = "exomem.semantic-authoring"
 
 
@@ -52,6 +52,7 @@ class SemanticAuthoringContract:
     content_digest: str
     compact: Mapping[str, Any]
     rich: Mapping[str, Any]
+    semantic_roles: Mapping[str, Any]
     minimum_semantic_unit: Mapping[str, Any]
     routes: Mapping[str, Any]
     findings: Mapping[str, Any]
@@ -60,6 +61,7 @@ class SemanticAuthoringContract:
         for name in (
             "compact",
             "rich",
+            "semantic_roles",
             "minimum_semantic_unit",
             "routes",
             "findings",
@@ -73,6 +75,7 @@ class SemanticAuthoringContract:
             "version": self.version,
             "compact": _thaw(self.compact),
             "rich": _thaw(self.rich),
+            "semantic_roles": _thaw(self.semantic_roles),
             "minimum_semantic_unit": _thaw(self.minimum_semantic_unit),
             "routes": _thaw(self.routes),
             "findings": _thaw(self.findings),
@@ -90,13 +93,81 @@ def build_semantic_authoring_contract() -> SemanticAuthoringContract:
     compact = {
         "canonical_section": "## Observations",
         "syntax": "- [category] content #tags (context) ^anchor",
+        "parser_compatibility": (
+            "Parse valid compact observations anywhere outside fenced code blocks."
+        ),
+        "canonical_authoring": (
+            "Exomem writers use `-` under the canonical `## Observations` section."
+        ),
+        "parser_bullet_markers": ["-", "*", "+"],
+        "canonical_bullet_marker": "-",
         "required_fields": ["category", "content"],
         "optional_suffix_order": ["tags", "context", "anchor"],
-        "kind": "observation",
-        "category_vocabulary": "open",
-        "category_rule": (
-            "Category is open vocabulary and does not infer or register a governed kind."
+        "suffix_parse_rule": (
+            "Parse from the end by taking anchor, then context, then trailing tags; "
+            "the authored display order remains tags, context, anchor."
         ),
+        "kind": "observation",
+        "category": {
+            "role": "the unit's one primary open-vocabulary subject or domain label",
+            "vocabulary": "open",
+            "lexical_rule": (
+                "After trimming, use 1-64 Unicode code points; begin with a Unicode "
+                "letter; then use only Unicode letters or digits, spaces, `_`, or `-`."
+            ),
+            "canonicalization": (
+                "Apply Unicode NFKC and casefold, then collapse runs of spaces, `_`, "
+                "and `-` to one `_`."
+            ),
+            "registry_rule": (
+                "Registry alias resolution is separate from authored canonicalization; "
+                "an unseen valid category needs no registry write."
+            ),
+        },
+        "content": {
+            "role": "the unit's substantive observation",
+            "rule": "Use non-empty content that remains on one Markdown line.",
+            "escaping_rule": (
+                "Escaped parentheses, embedded hashes, and non-trailing tag-like text "
+                "remain content."
+            ),
+        },
+        "tags": {
+            "role": (
+                "zero or more optional secondary retrieval labels; tags do not replace "
+                "the primary category or governed kind"
+            ),
+            "syntax": "#slug",
+            "lexical_rule": (
+                "Use 1-64 Unicode letters or digits, `_`, `-`, or `/`; begin with a "
+                "letter or digit; do not use empty path segments or a trailing `/`."
+            ),
+            "position_rule": (
+                "Use one contiguous trailing run after content and before optional "
+                "context and anchor."
+            ),
+        },
+        "context": {
+            "role": "one optional authored qualifier for the observation",
+            "syntax": "(<context>)",
+            "rule": (
+                "Use one balanced, unescaped parenthesized suffix preceded by whitespace."
+            ),
+        },
+        "anchor": {
+            "role": "one optional stable authored unit identifier",
+            "syntax": "^anchor",
+            "lexical_rule": (
+                "Use 1-64 ASCII letters, digits, or hyphens and begin and end "
+                "alphanumeric."
+            ),
+            "position_rule": "Place it at the end of the line.",
+        },
+        "exclusions": [
+            "observation-shaped rows inside fenced code blocks",
+            "task labels `[ ]`, `[x]`, `[X]`, and `[-]`",
+            "reserved or punctuation-bearing bracket labels outside category grammar",
+        ],
         "relation_rule": (
             "Compact units do not carry typed unit relations; use a canonical note-level "
             "relation or the rich form."
@@ -106,14 +177,24 @@ def build_semantic_authoring_contract() -> SemanticAuthoringContract:
         "heading_syntax": "## <Governed Kind>",
         "kind_vocabulary": "governed",
         "metadata_syntax": [
-            "- id: <stable-id>",
             "- category: <open category>",
+            "- id: <stable-id>",
             "- tags: <comma-separated tags>",
             "- context: <context>",
             "- relations: <relation-type>: [[Target]]",
         ],
+        "accepted_metadata_order": "flexible while rows remain leading",
+        "canonical_metadata_order": [
+            "category",
+            "id",
+            "tags",
+            "context",
+            "relations",
+        ],
         "metadata_rule": (
-            "Metadata rows are optional and leading; category defaults to the governed kind."
+            "Metadata rows are optional and leading; the canonical writer emits category, "
+            "id, tags, context, then relations; category defaults to the governed kind "
+            "when omitted."
         ),
         "body_rule": (
             "After optional leading metadata, add a blank line and a substantive Markdown body."
@@ -123,6 +204,20 @@ def build_semantic_authoring_contract() -> SemanticAuthoringContract:
             "N or shallower; deeper headings remain in its body."
         ),
         "relation_rule": "Typed unit relations require the rich form.",
+    }
+    semantic_roles = {
+        "category": (
+            "One primary open-vocabulary label describes what a unit is about; rich "
+            "category defaults to its governed kind unless explicitly overridden."
+        ),
+        "tag": (
+            "Zero or more optional secondary retrieval labels refine lookup and never "
+            "replace category or determine kind."
+        ),
+        "kind": (
+            "The governed semantic form: compact units always use `observation`; rich "
+            "units use their recognized heading kind."
+        ),
     }
     minimum_semantic_unit = {
         "minimum_count": 1,
@@ -223,6 +318,7 @@ def build_semantic_authoring_contract() -> SemanticAuthoringContract:
         "version": AUTHORING_CONTRACT_VERSION,
         "compact": compact,
         "rich": rich,
+        "semantic_roles": semantic_roles,
         "minimum_semantic_unit": minimum_semantic_unit,
         "routes": routes,
         "findings": findings,
@@ -248,11 +344,23 @@ def render_concise(
     """Render the complete minimum contract for schemas and compact skills."""
     compact = contract.compact
     rich = contract.rich
+    roles = contract.semantic_roles
     minimum = contract.minimum_semantic_unit
     routes = contract.routes
     findings = contract.findings
     applies = "; ".join(minimum["applies_when"])
     exemptions = ", ".join(minimum["exemptions"])
+    compact_exclusions = "; ".join(compact["exclusions"])
+    compiled_types = ", ".join(
+        f"`{page_type}`" for page_type in minimum["compiled_types"]
+    )
+    compiled_destinations = ", ".join(
+        f"`{page_type}` → `{path}`"
+        for page_type, path in minimum["compiled_destinations"].items()
+    )
+    inactive = ", ".join(
+        f"`{lifecycle}`" for lifecycle in minimum["inactive_lifecycles"]
+    )
     metadata = ", ".join(f"`{row}`" for row in rich["metadata_syntax"])
     return (
         f"<!-- exomem-semantic-authoring:v{contract.version} "
@@ -262,16 +370,42 @@ def render_concise(
         "valid, non-empty semantic unit. Either compact or rich form satisfies the "
         "minimum; compact is preferred, and a valid rich unit does not need a duplicate "
         "compact restatement.\n\n"
-        f"- Compact: under `{compact['canonical_section']}`, write "
-        f"`{compact['syntax']}`. Category is open vocabulary; compact kind is always "
-        f"`{compact['kind']}`. Optional suffixes stay in tags, context, anchor order. "
-        f"{compact['relation_rule']}\n"
+        "Semantic roles:\n\n"
+        f"- Category: {roles['category']}\n"
+        f"- Tag: {roles['tag']}\n"
+        f"- Kind: {roles['kind']}\n\n"
+        f"Compact grammar: `{compact['syntax']}`. {compact['parser_compatibility']} "
+        f"{compact['canonical_authoring']} Parser bullet markers are "
+        f"{', '.join(f'`{marker}`' for marker in compact['parser_bullet_markers'])}; "
+        f"the canonical marker is `{compact['canonical_bullet_marker']}`. "
+        f"{compact['suffix_parse_rule']} Category uses open vocabulary.\n\n"
+        f"- Compact category: {compact['category']['role']}. "
+        f"{compact['category']['lexical_rule']} "
+        f"{compact['category']['canonicalization']} "
+        f"{compact['category']['registry_rule']}\n"
+        f"- Compact content: {compact['content']['role']}. "
+        f"{compact['content']['rule']} {compact['content']['escaping_rule']}\n"
+        f"- Compact tags: {compact['tags']['role']}. Write "
+        f"`{compact['tags']['syntax']}`. {compact['tags']['lexical_rule']} "
+        f"{compact['tags']['position_rule']}\n"
+        f"- Compact context: {compact['context']['role']}. Write "
+        f"`{compact['context']['syntax']}`. {compact['context']['rule']}\n"
+        f"- Compact anchor: {compact['anchor']['role']}. Write "
+        f"`{compact['anchor']['syntax']}`. {compact['anchor']['lexical_rule']} "
+        f"{compact['anchor']['position_rule']}\n"
+        f"- Compact exclusions: {compact_exclusions}. {compact['relation_rule']}\n"
         f"- Rich: write `{rich['heading_syntax']}` with optional leading metadata "
-        f"{metadata}, then a blank line and a substantive body. Kind is governed; "
-        "category defaults to kind. Typed unit relations require rich form.\n"
+        f"{metadata}. {rich['metadata_rule']} Accepted metadata order is "
+        f"{rich['accepted_metadata_order']}. {rich['body_rule']} "
+        f"{rich['relation_rule']}\n"
         f"- Rich boundary: {rich['heading_boundary_rule']} Empty recognized blocks produce "
         "`empty_rich_unit` and do not count.\n"
-        f"- Applies when {applies}. {minimum['structural_rule']}\n"
+        f"- Exact applicability: `compiled_intent(after_state) = "
+        f"{minimum['compiled_intent']}`. `COMPILED_TYPES` contains exactly "
+        f"{compiled_types}, with canonical destinations {compiled_destinations}. "
+        f"{minimum['structural_rule']} The minimum predicate applies when "
+        f"{applies}. Inactive lifecycle values are {inactive}. "
+        f"{minimum['lifecycle_rule']}\n"
         f"- Exempt content: {exemptions}.\n"
         f"- Routes: use `{routes['new_compiled_note']}` for a new compiled note, "
         f"`{routes['replacement']}` for a replacement, `{routes['single_semantic_unit']}` "
@@ -279,7 +413,11 @@ def render_concise(
         f"activation. Tier 2 {routes['tier_2']}\n"
         f"- Findings: `missing_semantic_unit` means "
         f"{findings['missing_semantic_unit']['when']}; `empty_rich_unit` means "
-        f"{findings['empty_rich_unit']['when']}.\n"
+        f"{findings['empty_rich_unit']['when']}. "
+        f"{findings['empty_rich_unit']['remediation']}\n"
+        f"- Compact remediation: "
+        f"{findings['missing_semantic_unit']['compact_remediation']}\n"
+        f"- Rich remediation: {findings['missing_semantic_unit']['rich_remediation']}\n"
         f"- {minimum['independence_rule']}\n"
     )
 
