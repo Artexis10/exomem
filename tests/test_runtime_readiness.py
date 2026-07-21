@@ -36,6 +36,7 @@ def test_standalone_runtime_is_ready_without_multi_host_coordination() -> None:
             "coordinator_healthy": True,
             "mutation_boundary": {"state": "free"},
         },
+        "session_store": {"state": "ok", "stale_served_count": 0},
         "takeover_eligible": True,
         "reasons": [],
     }
