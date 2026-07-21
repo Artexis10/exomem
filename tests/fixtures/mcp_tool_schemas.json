@@ -2135,6 +2135,17 @@
           "default": null,
           "description": "Audit reason for a reviewed-none disposition."
         },
+        "promotion_reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
         "response_detail": {
           "default": "compact",
           "description": "Successful committed mutation detail: compact (default), full diagnostics, or legacy raw leaf result.",
