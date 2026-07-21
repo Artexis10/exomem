@@ -27,7 +27,9 @@ from starlette.responses import JSONResponse, Response, StreamingResponse
 
 from . import (
     __version__,
+    capabilities,
     cli_ops,
+    edit_operations,
     hosted_portability,
     hosted_runtime,
     hosted_runtime_temp,
@@ -52,6 +54,20 @@ _MAX_UPLOAD_FIELDS = 8
 _MAX_UPLOAD_METADATA_BYTES = 32 * 1024
 _MAX_UPLOAD_SHORT_FIELD_BYTES = 512
 _DOWNLOAD_CHUNK_BYTES = 64 * 1024
+_HOSTED_MUTATION_DETAIL_FIELDS = (
+    "status",
+    "committed",
+    "retry_after_ms",
+    "request_id",
+    "receipt_id",
+    "idempotency_key",
+)
+_HOSTED_MUTATION_ERROR_SHAPES = {
+    "MUTATION_BUSY": ("retryable", False),
+    "MUTATION_ACKNOWLEDGEMENT_PENDING": ("uncertain", None),
+    "MUTATION_COMMITTED_ACKNOWLEDGEMENT_UNCERTAIN": ("committed", True),
+}
+_RECEIPT_TAG = re.compile(r"[0-9a-f]{16}")
 
 _RESERVED_FIELDS = frozenset(
     {
@@ -230,6 +246,7 @@ def _error_response(
     started: float,
     request_id: str | None = None,
     status: int | None = None,
+    details: Mapping[str, Any] | None = None,
 ) -> HostedJSONResponse:
     _trace(
         config=config,
@@ -239,17 +256,59 @@ def _error_response(
         code=code,
         started=started,
     )
+    error = {
+        "code": code,
+        "message": _message_for(code),
+        "remediation": None,
+    }
+    if details is not None:
+        error.update(
+            {
+                field: details[field]
+                for field in _HOSTED_MUTATION_DETAIL_FIELDS
+                if field in details
+            }
+        )
     return HostedJSONResponse(
-        cli_ops.envelope(
-            False,
-            error={
-                "code": code,
-                "message": _message_for(code),
-                "remediation": None,
-            },
-        ),
+        cli_ops.envelope(False, error=error),
         status_code=_status_for(code) if status is None else status,
     )
+
+
+def _hosted_mutation_error_details(
+    error: Mapping[str, Any],
+    *,
+    context: gateway.TrustedGatewayContext,
+) -> dict[str, Any]:
+    expected_shape = _HOSTED_MUTATION_ERROR_SHAPES.get(error.get("code"))
+    if expected_shape is None:
+        return {}
+    expected_status, expected_committed = expected_shape
+    details: dict[str, Any] = {}
+    if error.get("status") == expected_status:
+        details["status"] = expected_status
+    if "committed" in error and error["committed"] is expected_committed:
+        details["committed"] = expected_committed
+    retry_after_ms = error.get("retry_after_ms")
+    if (
+        error.get("code") == "MUTATION_BUSY"
+        and type(retry_after_ms) is int
+        and retry_after_ms >= 0
+    ):
+        details["retry_after_ms"] = retry_after_ms
+    if error.get("request_id") == context.request_id:
+        details["request_id"] = context.request_id
+    receipt_id = error.get("receipt_id")
+    if receipt_id is None and "receipt_id" in error:
+        details["receipt_id"] = None
+    elif isinstance(receipt_id, str) and _RECEIPT_TAG.fullmatch(receipt_id):
+        details["receipt_id"] = receipt_id
+    if (
+        context.idempotency_key is not None
+        and error.get("idempotency_key") == context.idempotency_key
+    ):
+        details["idempotency_key"] = context.idempotency_key
+    return details
 
 
 def _success_response(
@@ -650,6 +709,12 @@ def register_hosted_routes(
 
     commands = commands_module.product_commands_for("rest", expose_tier2=expose_tier2)
     by_name = {command.name: command for command in commands}
+    surface_descriptor = capabilities.ActiveSurfaceDescriptor(
+        surface="hosted",
+        profile="private-command-router",
+        tier2_enabled=expose_tier2,
+        product_commands=tuple(command.name for command in commands),
+    )
     contract = gateway.build_gateway_contract(
         protocol_version=config.protocol_version,
         expose_tier2=expose_tier2,
@@ -788,6 +853,8 @@ def register_hosted_routes(
                     "hosted imports must use the gateway lifecycle flow",
                 )
             operation = command.name
+            if command.name == "edit_memory":
+                body = edit_operations.normalize_edit_surface_arguments(body)
             kwargs = cli_ops.coerce(
                 command.params,
                 body,
@@ -799,23 +866,32 @@ def register_hosted_routes(
             )
 
             def invoke_admitted() -> Any:
-                if commands_module.invocation_is_read_only(command, kwargs):
-                    with lifecycle.admit_read():
+                with capabilities.active_surface(surface_descriptor):
+                    if commands_module.invocation_is_read_only(command, kwargs):
+                        with lifecycle.admit_read():
+                            return invoke(
+                                command,
+                                *injected,
+                                idempotency_key=gateway.scoped_idempotency_key(context),
+                                public_idempotency_key=context.idempotency_key,
+                                implicit_idempotency_scope=gateway.implicit_retry_scope(
+                                    context
+                                ),
+                                mutation_request_id=context.request_id,
+                                **kwargs,
+                            )
+                    with lifecycle.admit_mutation():
                         return invoke(
                             command,
                             *injected,
                             idempotency_key=gateway.scoped_idempotency_key(context),
-                            implicit_idempotency_scope=gateway.implicit_retry_scope(context),
+                            public_idempotency_key=context.idempotency_key,
+                            implicit_idempotency_scope=gateway.implicit_retry_scope(
+                                context
+                            ),
+                            mutation_request_id=context.request_id,
                             **kwargs,
                         )
-                with lifecycle.admit_mutation():
-                    return invoke(
-                        command,
-                        *injected,
-                        idempotency_key=gateway.scoped_idempotency_key(context),
-                        implicit_idempotency_scope=gateway.implicit_retry_scope(context),
-                        **kwargs,
-                    )
 
             result = await run_in_threadpool(invoke_admitted)
         except gateway.HostedGatewayError as exc:
@@ -842,6 +918,11 @@ def register_hosted_routes(
                 operation=operation,
                 request_id=context.request_id if context else None,
                 started=started,
+                details=(
+                    _hosted_mutation_error_details(error, context=context)
+                    if context is not None
+                    else None
+                ),
             )
         assert context is not None
         return _success_response(

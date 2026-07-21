@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from functools import cache
 from pathlib import Path
 
+from .entity_types import ENTITY_TYPE_REGISTRY, ENTITY_TYPES_BY_FOLDER
 from .kbdir import kb_prefix
 from .vault import (
     PlannedWrite,
@@ -302,20 +303,11 @@ _NOTES_TOTAL_LINE = re.compile(r"^- Notes:\s*\d+\s*$", re.MULTILINE)
 _ENTITIES_TOTAL_LINE = re.compile(r"^- Entities:\s*\d+\s*$", re.MULTILINE)
 
 
-# Map Entities/<folder> → entity_type key used in the Counts section.
-_ENTITIES_FOLDER_TO_TYPE: dict[str, str] = {
-    "People": "person",
-    "Concepts": "concept",
-    "Libraries": "library",
-    "Decisions": "decision",
-}
-
-
 def _count_entities(entities_dir: Path) -> dict[str, int]:
     """Per-entity-type count, mirrors `_count_sources` shape.
 
-    Returns a dict keyed by entity_type token (person, concept, library,
-    decision). Excludes index.md and `_*` folders.
+    Returns a dict keyed by registered entity-type ID. Excludes index.md and
+    `_*` folders.
     """
     out: dict[str, int] = {}
     if not entities_dir.is_dir():
@@ -323,10 +315,10 @@ def _count_entities(entities_dir: Path) -> dict[str, int]:
     for sub in entities_dir.iterdir():
         if not sub.is_dir() or sub.name.startswith("_"):
             continue
-        key = _ENTITIES_FOLDER_TO_TYPE.get(sub.name)
-        if key is None:
+        definition = ENTITY_TYPES_BY_FOLDER.get(sub.name.casefold())
+        if definition is None:
             continue
-        out[key] = sum(
+        out[definition.id] = sum(
             1
             for f in sub.rglob("*.md")
             if f.name != "index.md"
@@ -448,9 +440,10 @@ def _notes_subfolder_bullet_re(kb_prefix_str: str) -> re.Pattern[str]:
 # `- [[<KB>/Entities/People/|People]] (12)` (optional description)
 @cache
 def _entities_bullet_re(kb_prefix_str: str) -> re.Pattern[str]:
+    folders = "|".join(re.escape(item.folder) for item in ENTITY_TYPE_REGISTRY)
     return re.compile(
         r"^(- \[\[(?:" + re.escape(kb_prefix_str) + r")?"
-        + r"Entities/(?P<folder>People|Concepts|Libraries|Decisions)/?(?:\|[^\]]+)?\]\])"
+        + rf"Entities/(?P<folder>{folders})/?(?:\|[^\]]+)?\]\])"
         r"( \((?P<count>\d+)\))?(?P<rest>(?:\s+—[^\n]*)?)\s*$",
         re.MULTILINE,
     )
@@ -549,26 +542,46 @@ def _refresh_notes_subindex_text(
 def _refresh_entities_subindex_text(
     text: str, *, counts_by_type: dict[str, int]
 ) -> str:
-    """Rewrite `- [[Knowledge Base/Entities/<Folder>/...]] (N)` in Entities/index.md."""
-    folder_to_type = {
-        "People": "person",
-        "Concepts": "concept",
-        "Libraries": "library",
-        "Decisions": "decision",
-    }
+    """Refresh registered entity rows while preserving hand-authored prose."""
+    pattern = _entities_bullet_re(kb_prefix())
 
     def _bullet(m: re.Match[str]) -> str:
         folder = m.group("folder")
-        type_key = folder_to_type.get(folder)
-        if type_key is None:
+        definition = ENTITY_TYPES_BY_FOLDER.get(folder.casefold())
+        if definition is None:
             return m.group(0)
-        actual = counts_by_type.get(type_key)
-        if actual is None:
-            return m.group(0)
+        actual = counts_by_type.get(definition.id, 0)
         rest = m.group("rest") or ""
         return f"{m.group(1)} ({actual}){rest}"
 
-    return _entities_bullet_re(kb_prefix()).sub(_bullet, text)
+    refreshed = pattern.sub(_bullet, text)
+    present = {match.group("folder").casefold() for match in pattern.finditer(refreshed)}
+    missing = [
+        definition
+        for definition in ENTITY_TYPE_REGISTRY
+        if definition.folder.casefold() not in present
+    ]
+    if not missing:
+        return refreshed
+
+    header = "## By type"
+    section_start = refreshed.find(header)
+    if section_start == -1:
+        return refreshed
+    section_end = refreshed.find("\n## ", section_start + len(header))
+    if section_end == -1:
+        section_end = len(refreshed)
+    rows = [
+        f"- [[{kb_prefix()}Entities/{definition.folder}/|{definition.folder}]] "
+        f"({counts_by_type.get(definition.id, 0)})"
+        for definition in missing
+    ]
+    prefix = refreshed[:section_end].rstrip()
+    suffix = refreshed[section_end:].lstrip("\n")
+    joined = f"{prefix}\n" + "\n".join(rows) + "\n"
+    if suffix:
+        joined += f"\n{suffix}"
+    return joined
 
 
 def compute_subindex_writes(
@@ -641,9 +654,9 @@ def compute_subindex_writes(
                 inner[""] = inner.get("", 0) + 1
         elif head == "Entities" and len(parts) >= 3:
             ent_folder = parts[1]
-            ent_key = _ENTITIES_FOLDER_TO_TYPE.get(ent_folder)
-            if ent_key:
-                entities_counts[ent_key] = entities_counts.get(ent_key, 0) + 1
+            definition = ENTITY_TYPES_BY_FOLDER.get(ent_folder.casefold())
+            if definition is not None:
+                entities_counts[definition.id] = entities_counts.get(definition.id, 0) + 1
 
     # Top index counts refresh (Sources + Notes + Entities rows).
     new_top_text: str | None = None

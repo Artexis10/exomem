@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import errno
 import hashlib
+import logging
 import os
+import re
 import threading
 import time
 from collections.abc import Iterator
@@ -30,6 +32,9 @@ else:
 _DEFAULT_TIMEOUT_SECONDS = 5.0
 _DEFAULT_POLL_INTERVAL_SECONDS = 0.025
 _BUSY_ERRNOS = frozenset({errno.EACCES, errno.EAGAIN, errno.EDEADLK})
+_SAFE_LABEL = re.compile(r"^[A-Za-z0-9._:-]{1,64}$")
+_DEFAULT_LONG_HOLDER_SECONDS = 30.0
+logger = logging.getLogger(__name__)
 
 
 def canonical_mutation_identity(vault_or_cell: os.PathLike[str] | str) -> str:
@@ -46,9 +51,16 @@ def canonical_mutation_identity(vault_or_cell: os.PathLike[str] | str) -> str:
 @dataclass
 class _LocalLockState:
     guard: threading.RLock = field(default_factory=threading.RLock)
+    metadata_guard: threading.Lock = field(default_factory=threading.Lock)
     owner_thread: int | None = None
     depth: int = 0
     handle: BinaryIO | None = None
+    request_id: str | None = None
+    operation: str | None = None
+    holder_kind: str | None = None
+    acquired_at: float | None = None
+    long_holder_seconds: float = _DEFAULT_LONG_HOLDER_SECONDS
+    long_warning_emitted: bool = False
 
 
 _LOCAL_STATES: dict[Path, _LocalLockState] = {}
@@ -96,20 +108,31 @@ class VaultMutationCoordinator:
         *,
         timeout_seconds: float = _DEFAULT_TIMEOUT_SECONDS,
         poll_interval_seconds: float = _DEFAULT_POLL_INTERVAL_SECONDS,
+        long_holder_seconds: float = _DEFAULT_LONG_HOLDER_SECONDS,
     ) -> None:
         if timeout_seconds < 0:
             raise ValueError("mutation lock timeout must be non-negative")
         if poll_interval_seconds <= 0:
             raise ValueError("mutation lock poll interval must be positive")
+        if long_holder_seconds <= 0:
+            raise ValueError("mutation long-holder threshold must be positive")
         self.state_root = Path(state_root).expanduser().resolve(strict=False)
         self.identity = canonical_mutation_identity(vault_or_cell)
         digest = hashlib.sha256(self.identity.encode("utf-8")).hexdigest()
         self.lock_path = self.state_root / "mutation-locks" / f"{digest}.lock"
         self.timeout_seconds = timeout_seconds
         self.poll_interval_seconds = poll_interval_seconds
+        self.long_holder_seconds = long_holder_seconds
 
     @contextmanager
-    def hold(self, *, timeout_seconds: float | None = None) -> Iterator[None]:
+    def hold(
+        self,
+        *,
+        timeout_seconds: float | None = None,
+        request_id: str | None = None,
+        operation: str | None = None,
+        holder_kind: str = "unknown",
+    ) -> Iterator[None]:
         """Hold both the local and OS mutation guards for the bounded interval."""
         timeout = self.timeout_seconds if timeout_seconds is None else timeout_seconds
         if timeout < 0:
@@ -118,7 +141,7 @@ class VaultMutationCoordinator:
         state = _state_for(self.lock_path)
         remaining = max(0.0, deadline - time.monotonic())
         if not state.guard.acquire(timeout=remaining):
-            raise _mutation_busy()
+            raise _mutation_busy(self.snapshot())
         try:
             thread_id = threading.get_ident()
             if state.owner_thread == thread_id:
@@ -138,9 +161,22 @@ class VaultMutationCoordinator:
             state.owner_thread = thread_id
             state.depth = 1
             state.handle = handle
+            with state.metadata_guard:
+                state.request_id = _safe_label(request_id, fallback="untracked")
+                state.operation = _safe_label(operation, fallback="unknown")
+                state.holder_kind = _safe_label(holder_kind, fallback="unknown")
+                state.acquired_at = time.monotonic()
+                state.long_holder_seconds = self.long_holder_seconds
+                state.long_warning_emitted = False
             try:
                 yield
             finally:
+                with state.metadata_guard:
+                    state.request_id = None
+                    state.operation = None
+                    state.holder_kind = None
+                    state.acquired_at = None
+                    state.long_warning_emitted = False
                 state.depth = 0
                 state.owner_thread = None
                 state.handle = None
@@ -155,6 +191,11 @@ class VaultMutationCoordinator:
                     handle.close()
         finally:
             state.guard.release()
+
+    def snapshot(self) -> dict[str, object]:
+        """Return bounded process-local holder metadata without vault identity/content."""
+        state = _state_for(self.lock_path)
+        return _snapshot_state(state, emit_warning=True)
 
     def _open_lock_file(self) -> BinaryIO:
         try:
@@ -214,9 +255,65 @@ def _release_os_lock(handle: BinaryIO) -> None:
         fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
-def _mutation_busy() -> OpError:
+def _safe_label(value: object, *, fallback: str) -> str:
+    candidate = str(value or "").strip()
+    return candidate if _SAFE_LABEL.fullmatch(candidate) else fallback
+
+
+def _snapshot_state(
+    state: _LocalLockState, *, emit_warning: bool
+) -> dict[str, object]:
+    with state.metadata_guard:
+        if state.owner_thread is None or state.acquired_at is None:
+            return {"state": "free"}
+        age = max(0.0, time.monotonic() - state.acquired_at)
+        overdue = age >= state.long_holder_seconds
+        snapshot: dict[str, object] = {
+            "state": "held",
+            "request_id": state.request_id or "untracked",
+            "operation": state.operation or "unknown",
+            "holder_kind": state.holder_kind or "unknown",
+            "age_seconds": round(age, 3),
+            "overdue": overdue,
+        }
+        if overdue and emit_warning and not state.long_warning_emitted:
+            state.long_warning_emitted = True
+            logger.warning(
+                "vault mutation boundary held too long request_id=%s operation=%s "
+                "holder_kind=%s age_seconds=%.3f",
+                snapshot["request_id"],
+                snapshot["operation"],
+                snapshot["holder_kind"],
+                age,
+            )
+        return snapshot
+
+
+def active_mutation_snapshot() -> dict[str, object]:
+    """Return the oldest process-local holder without exposing vault identity."""
+    with _LOCAL_STATES_GUARD:
+        states = tuple(_LOCAL_STATES.values())
+    held = [
+        snapshot
+        for state in states
+        if (snapshot := _snapshot_state(state, emit_warning=True))["state"] == "held"
+    ]
+    if not held:
+        return {"state": "free"}
+    return max(held, key=lambda item: float(item["age_seconds"]))
+
+
+def _mutation_busy(snapshot: dict[str, object] | None = None) -> OpError:
+    details: dict[str, object] = {
+        "status": "retryable",
+        "committed": False,
+        "retry_after_ms": 750,
+    }
+    if snapshot and snapshot.get("state") == "held":
+        details["holder"] = snapshot
     return OpError(
         "MUTATION_BUSY",
         "vault mutation boundary is busy",
         "Retry after the current mutation completes; inspect cell health if it remains busy.",
+        details=details,
     )

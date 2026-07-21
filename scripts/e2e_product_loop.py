@@ -114,6 +114,61 @@ async def _call(client, name: str, arguments: dict[str, Any], timeout: float) ->
     return _result_data(result)
 
 
+def _mutation_diagnostics(result: Any, *, operation: str) -> Any:
+    """Validate a full committed terminal and return its leaf diagnostics."""
+    if (
+        not isinstance(result, dict)
+        or result.get("ok") is not True
+        or result.get("status") != "committed"
+        or result.get("mutated") is not True
+        or "diagnostics" not in result
+    ):
+        raise RuntimeError(
+            f"{operation} mutation did not return a committed full terminal: {result!r}"
+        )
+    return result["diagnostics"]
+
+
+def _maintenance_diagnostics(result: Any, *, operation: str) -> Any:
+    """Unwrap a tracked commit while preserving a raw no-op maintenance report."""
+    terminal_fields = {"ok", "status", "mutated", "diagnostics"}
+    if isinstance(result, dict) and terminal_fields.intersection(result):
+        return _mutation_diagnostics(result, operation=operation)
+    return result
+
+
+async def _call_mutation(
+    client,
+    name: str,
+    arguments: dict[str, Any],
+    timeout: float,
+) -> Any:
+    """Call a mutation with full detail while proving its decisive envelope."""
+    result = await _call(
+        client,
+        name,
+        {**arguments, "response_detail": "full"},
+        timeout,
+    )
+    return _mutation_diagnostics(result, operation=name)
+
+
+async def _call_maintenance(
+    client,
+    name: str,
+    arguments: dict[str, Any],
+    timeout: float,
+) -> Any:
+    """Call maintenance with full detail across no-op and tracked-commit paths."""
+    result = await _call(
+        client,
+        name,
+        {**arguments, "response_detail": "full"},
+        timeout,
+    )
+    return _maintenance_diagnostics(result, operation=name)
+
+
 async def _assert_relation_contexts(
     client,
     *,
@@ -220,7 +275,7 @@ async def _stdio_session(
                     {"operation": "infer", "subject": "relations"},
                     timeout,
                 )
-                registry_result = await _call(
+                registry_result = await _call_mutation(
                     client,
                     "schema_memory",
                     {
@@ -239,7 +294,7 @@ async def _stdio_session(
                     raise RuntimeError(
                         "installed schema governance did not hash-guard relation registry"
                     )
-                source = await _call(
+                source = await _call_mutation(
                     client,
                     "capture_source",
                     {
@@ -254,7 +309,7 @@ async def _stdio_session(
                     source = source["source"]
                 if not isinstance(source, dict) or "path" not in source:
                     raise RuntimeError(f"capture_source returned unexpected data: {source!r}")
-                memory = await _call(
+                memory = await _call_mutation(
                     client,
                     "remember",
                     {
@@ -285,7 +340,7 @@ async def _stdio_session(
                 )
                 if read.get("ref") != memory["ref"]:
                     raise RuntimeError("canonical memory reference did not round-trip")
-                evidence = await _call(
+                evidence = await _call_mutation(
                     client,
                     "preserve_evidence",
                     {
@@ -297,7 +352,7 @@ async def _stdio_session(
                     },
                     timeout,
                 )
-                replacement = await _call(
+                replacement = await _call_mutation(
                     client,
                     "replace_memory",
                     {
@@ -316,14 +371,17 @@ async def _stdio_session(
                 new_ref = replacement.get("new_ref")
                 if not new_ref:
                     raise RuntimeError("replacement did not return a canonical new_ref")
-                await _call(
+                await _call_mutation(
                     client,
                     "edit_memory",
                     {
                         "path": new_ref,
                         "why": "attach proof to the active conclusion",
-                        "field": "evidence",
-                        "value": [f"[[{evidence['sidecar_path']}]]"],
+                        "operation": {
+                            "kind": "patch_frontmatter",
+                            "field": "evidence",
+                            "value": [f"[[{evidence['sidecar_path']}]]"],
+                        },
                     },
                     timeout,
                 )
@@ -333,7 +391,7 @@ async def _stdio_session(
                     ("record", "Lantern source record"),
                     ("event", "Lantern trigger event"),
                 ):
-                    targets[key] = await _call(
+                    targets[key] = await _call_mutation(
                         client,
                         "remember",
                         {
@@ -347,7 +405,7 @@ async def _stdio_session(
                         },
                         timeout,
                     )
-                relation_memory = await _call(
+                relation_memory = await _call_mutation(
                     client,
                     "remember",
                     {
@@ -381,7 +439,7 @@ async def _stdio_session(
                 )
                 if not evolution:
                     raise RuntimeError("evolution review returned no lifecycle data")
-                reconcile = await _call(
+                reconcile = await _call_maintenance(
                     client,
                     "maintain_memory",
                     {"mode": "reconcile", "dry_run": False},
@@ -406,7 +464,7 @@ async def _stdio_session(
                     }
                 )
             else:
-                reconcile = await _call(
+                reconcile = await _call_maintenance(
                     client,
                     "maintain_memory",
                     {"mode": "reconcile", "dry_run": False},

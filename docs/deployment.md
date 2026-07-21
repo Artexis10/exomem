@@ -296,6 +296,8 @@ bash scripts/install-service.sh --release
 # The script self-elevates; approve the UAC prompt.
 pwsh -File scripts/install-service.ps1 -Release
 # The installer creates/updates the PyPI service venv and verifies /mcp -> 401.
+# It is idempotent: re-running against a registered service reconfigures it in
+# place and reuses the venv the service is already installed against.
 # Developer checkout mode is still available when .venv already exists:
 #   pwsh -File scripts/install-service.ps1
 # Uninstall:
@@ -304,6 +306,23 @@ pwsh -File scripts/install-service.ps1 -Release
 #   Start-Process -Verb RunAs -Wait sc.exe -ArgumentList 'stop','exomem'
 #   Start-Process -Verb RunAs -Wait sc.exe -ArgumentList 'start','exomem'
 ```
+
+**Upgrading after a release — run this, not a bare `uv pip install`:**
+
+```powershell
+pwsh -File scripts/upgrade.ps1
+```
+
+The service runs a PyPI-backed venv that is **not** the repo checkout, so `git pull`
+never touches it. `upgrade.ps1` locates that venv from the NSSM registry, upgrades
+it, repairs the CUDA torch build, gates on `doctor`, restarts, and then asserts the
+**live** `/health` version matches what it just installed. No elevation needed.
+
+Upgrading by hand is the trap this replaces: `uv pip install --upgrade exomem[...]`
+ignores `[tool.uv.sources]` (only `uv sync` reads it), so it silently pulls the PyPI
+**CPU** torch wheel over the CUDA build and moves embeddings/media onto the CPU with
+no other symptom. `doctor` now fails on that state when an NVIDIA driver is present
+(set `EXOMEM_ALLOW_CPU_TORCH=1` to accept CPU deliberately).
 
 ### Renaming an existing `kb-mcp` service
 
@@ -444,23 +463,37 @@ continue locally. Check any replica with:
 uv run python -m exomem coordination_status --json
 ```
 
-REST callers can attach `Idempotency-Key`; CLI callers can set
-`EXOMEM_IDEMPOTENCY_KEY` for retry-safe mutations. Idempotency records and lease
-credentials stay in per-machine runtime state, outside the synced vault.
+REST callers should attach one stable `Idempotency-Key` to every mutation attempt;
+CLI callers can set `EXOMEM_IDEMPOTENCY_KEY`. Exact same-key/same-payload retries
+return the stored canonical terminal, including its original request and receipt
+identity; reusing a key with different input is rejected. Explicit completed and
+recognized committed-failure receipts are retained locally for 24 hours. The
+default successful product response is compact and decisive (`ok`,
+`status="committed"`, `mutated`, path(s), request/receipt identity, and warning
+count); `response_detail="full"` or `"legacy"` changes only presentation and is
+excluded from mutation identity.
 
-MCP clients do not currently provide a caller-controlled idempotency header. Exomem
-therefore replays a successful mutation when the same authenticated bearer repeats
-the exact command and arguments within 60 seconds. This bounded guard covers the
-common "commit succeeded but the acknowledgement was lost" retry without changing
-tool result shapes or suppressing later intentional calls. The credential is hashed
-before it contributes to the local cache key and is never stored or logged. Replay
-state is per replica: the lease prevents concurrent writers, but a retry routed to a
-different replica after the first replica disappears cannot be guaranteed exactly-once
-across the local-filesystem/remote-coordinator boundary.
+MCP does not expose the REST idempotency header through its tool schema. Exomem
+therefore derives a privacy-safe local replay identity from the verified
+principal, hashed bearer, or MCP session plus the exact command and arguments.
+Its completed-result window is 600 seconds (10 minutes). Each MCP call also gets
+a UUIDv4 `request_id` generated locally unless a valid `x-exomem-request-id`
+arrives; that ID is correlation, not a substitute for the replay key. Never
+change the payload or create a fresh explicit identity to recover a pending or
+committed-uncertain acknowledgement: retry only with the same identity as
+directed, or reconcile.
+
+Idempotency records and credentials stay in per-machine runtime state outside the
+synced vault. Both the 24-hour explicit window and the 600-second inferred window
+bound completed and recognized committed-failure receipts per replica. Pending or
+committed-uncertain markers fail closed until local reconciliation rather than
+silently expiring into another write. The lease prevents concurrent writers, but
+neither cache supplies cross-replica exactly-once durability if a retry reaches
+another replica after the original disappears.
 
 The reference Cloudflare edge therefore treats `tools/call` as an ambiguous
 side-effect boundary. `ORIGIN_TIMEOUT_MS` remains the short connectivity window
-for discovery/initialization traffic, while `MCP_TOOL_TIMEOUT_MS` defaults to 15
+for discovery/initialization traffic, while `MCP_TOOL_TIMEOUT_MS` defaults to 60
 seconds for actual tools. While a lease holder exists, a tool call is sent only
 to that replica and is never replayed to the passive origin after a timeout or
 5xx response. Once the lease expires, the edge probes both origins, chooses one
@@ -572,10 +605,16 @@ is now enforced independently. Before enabling the stable route—or after every
 release—check the repo, installed service environment, and readiness contract on
 **both** machines:
 
+On each machine, upgrade and self-verify in one step — it locates the service venv
+itself, so there is no path to get wrong and no version to eyeball:
+
 ```powershell
-git -C "$HOME\Desktop\projects\exomem" log -1 --oneline
-& "$HOME\Desktop\projects\exomem-service-ha\.venv\Scripts\python.exe" -c `
-  "import exomem; print(exomem.__version__)"
+pwsh -File scripts/upgrade.ps1
+```
+
+Then confirm the pair from either box:
+
+```powershell
 curl.exe -fsS https://exomem-desktop.example.com/health/ready
 curl.exe -fsS https://exomem-laptop.example.com/health/ready
 ```
@@ -729,6 +768,61 @@ Pick the strongest option that fits the situation:
 | Want to take the endpoint offline entirely | `tailscale funnel --https=443 off` (or stop the Cloudflare tunnel). The endpoint becomes unreachable from the public internet. |
 | Want to stop the service but leave the public URL configured | Stop the service (e.g. elevated `Start-Process -Verb RunAs -Wait sc.exe -ArgumentList 'stop','exomem'`). The tunnel stays up but proxies to nothing. |
 | Want a clean uninstall | Stop + remove service, turn off the tunnel/Funnel, delete the connector in claude.ai, delete the GitHub OAuth App. |
+
+## Deploying a new version
+
+**The service interpreter is the source of truth — not the checkout you are standing in.**
+A service can run from a standalone venv while its `AppDirectory` points at a checkout, so
+the checkout looks authoritative and is not. When that happens, `uv sync` in the checkout
+changes nothing the service runs and `/health` keeps reporting the old version through any
+number of clean restarts.
+
+Ask the running server where it came from:
+
+```bash
+curl -s http://127.0.0.1:8765/health
+```
+
+```json
+{"status": "ok", "service": "exomem", "version": "0.25.5",
+ "install_source": "wheel", "revision": null,
+ "torch": "2.13.0", "accelerated": false, "extras": ["embeddings", "media"]}
+```
+
+`install_source` is the field that matters. `wheel` with a null `revision` means the server
+is **not** running a local checkout — upgrade the venv directly. `editable` reports the git
+`revision` it is serving. For full detail including the interpreter path, run
+`exomem install-info` locally; `/health` withholds paths because it is unauthenticated and
+publicly reachable.
+
+The scripted path resolves the interpreter from NSSM, gates on `doctor` and accelerator
+capability, restarts, and verifies the running version:
+
+```powershell
+pwsh -File scripts/deploy.ps1 -Version 0.25.5
+```
+
+It fails rather than reporting success if the running server does not serve the requested
+version after restart.
+
+### The CUDA pin does not survive a PyPI upgrade
+
+`[tool.uv.sources]` pins torch to the `pytorch-cu132` index, but that is **repo
+configuration, not wheel metadata** — it does not travel with the published `exomem` wheel.
+Upgrading a PyPI-backed venv with `uv pip install` therefore resolves torch from default
+PyPI, which on Windows is CPU-only, silently replacing `2.12.0+cu132` with a bare `2.13.0`.
+
+`deploy.ps1` treats that as a hard failure. On a genuinely CPU-only host, pass
+`-AllowCpuTorch`. To restore the pinned wheel:
+
+```powershell
+uv pip install --python <service venv python> --index-url https://download.pytorch.org/whl/cu132 --upgrade torch
+```
+
+Note the difference in meaning between the two signals: `/health` reports **which wheel is
+installed** (a deploy property, read from metadata without importing torch), while `doctor`
+reports **whether a GPU is usable right now**. Conflating them is what let this regression
+hide as one advisory line among passing checks.
 
 ## Restarting the service
 

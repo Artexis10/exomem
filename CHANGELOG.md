@@ -5,6 +5,78 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.26.0](https://github.com/Artexis10/exomem/compare/v0.25.5...v0.26.0) (2026-07-20)
+
+
+### Features
+
+* deploy in one command and make skills first-class in every client ([#272](https://github.com/Artexis10/exomem/issues/272)) ([3761ef8](https://github.com/Artexis10/exomem/commit/3761ef8a7d2e31a5783eca8cbc592c047f4b3b7e))
+
+
+### Bug Fixes
+
+* name the blocking findings in SEMANTIC_CONTRACT_BLOCKED ([#277](https://github.com/Artexis10/exomem/issues/277)) ([a74b8af](https://github.com/Artexis10/exomem/commit/a74b8af236e4a4da03a5150e5f2358d27395d006))
+* **plugin:** drop the manifest hooks key and state the vault prerequisite ([#276](https://github.com/Artexis10/exomem/issues/276)) ([2e965cc](https://github.com/Artexis10/exomem/commit/2e965cc156c1c8450936384977d3430e62896e8e))
+* **plugin:** nest hook events under the top-level hooks key ([#274](https://github.com/Artexis10/exomem/issues/274)) ([e3ca96f](https://github.com/Artexis10/exomem/commit/e3ca96f5e4af13f680703bba889d83d8001acb6f))
+
+## [0.25.5](https://github.com/Artexis10/exomem/compare/v0.25.4...v0.25.5) (2026-07-20)
+
+
+### Bug Fixes
+
+* keep a preferred replica reclaiming writer authority ([#271](https://github.com/Artexis10/exomem/issues/271)) ([eb07529](https://github.com/Artexis10/exomem/commit/eb075294220ff065b7055472b23ebc3d5808bc09))
+* return the written slug and widen the mutation boundary timeout ([#269](https://github.com/Artexis10/exomem/issues/269)) ([1059305](https://github.com/Artexis10/exomem/commit/1059305f92cf90ba797a3d41d2feac13c95ef7d3))
+
+## [0.25.4](https://github.com/Artexis10/exomem/compare/v0.25.3...v0.25.4) (2026-07-19)
+
+
+### Bug Fixes
+
+* **ci:** disable unconfigured hosted black-box schedule ([6b49b9d](https://github.com/Artexis10/exomem/commit/6b49b9d07a3d6b8089191e1939144cca679ea733))
+
+## [0.25.3](https://github.com/Artexis10/exomem/compare/v0.25.2...v0.25.3) (2026-07-19)
+
+
+### Bug Fixes
+
+* harden Windows media, edits, and concurrent retrieval ([9911e13](https://github.com/Artexis10/exomem/commit/9911e13525a4faf08b1baf06671114e436b09413))
+
+## [0.25.2](https://github.com/Artexis10/exomem/compare/v0.25.1...v0.25.2) (2026-07-19)
+
+
+### Bug Fixes
+
+* accept CRLF frontmatter field edits ([#263](https://github.com/Artexis10/exomem/issues/263)) ([24df7f5](https://github.com/Artexis10/exomem/commit/24df7f561f542e8aa7368e2e277f52695bbaeb6f))
+* defer media work on follower replicas ([#261](https://github.com/Artexis10/exomem/issues/261)) ([25317cb](https://github.com/Artexis10/exomem/commit/25317cb0be7d13dda104624bf751fcb098c9c075))
+
+## [0.25.1](https://github.com/Artexis10/exomem/compare/v0.25.0...v0.25.1) (2026-07-19)
+
+
+### Bug Fixes
+
+* repair Windows hook atomic replacement ([#260](https://github.com/Artexis10/exomem/issues/260)) ([5960e6f](https://github.com/Artexis10/exomem/commit/5960e6f590be1e65330f19f1b7fcd5b7b001defa))
+
+## [0.25.0](https://github.com/Artexis10/exomem/compare/v0.24.2...v0.25.0) (2026-07-19)
+
+
+### Features
+
+* harden writes and proactive entity capture ([#258](https://github.com/Artexis10/exomem/issues/258)) ([9ef69ef](https://github.com/Artexis10/exomem/commit/9ef69ef0b5d2b7b2c6609b291cd03003a12d0850))
+
+## [0.24.2](https://github.com/Artexis10/exomem/compare/v0.24.1...v0.24.2) (2026-07-18)
+
+
+### Features
+
+* add durable OAuth refresh tokens ([#255](https://github.com/Artexis10/exomem/issues/255)) ([4298567](https://github.com/Artexis10/exomem/commit/4298567fceee1dc10d235cce487b2c8b97d6b953))
+
+## [0.24.1](https://github.com/Artexis10/exomem/compare/v0.24.0...v0.24.1) (2026-07-18)
+
+
+### Bug Fixes
+
+* prevent stale connector rollouts ([#253](https://github.com/Artexis10/exomem/issues/253)) ([87953b0](https://github.com/Artexis10/exomem/commit/87953b056713e9cbf840aefda2843b486a815c19))
+
 ## [0.24.0](https://github.com/Artexis10/exomem/compare/v0.23.0...v0.24.0) (2026-07-16)
 
 

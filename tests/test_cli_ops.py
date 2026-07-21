@@ -43,6 +43,7 @@ def test_http_status_mapping() -> None:
     assert cli_ops.http_status_for("NOT_FOUND") == 404
     assert cli_ops.http_status_for("OLD_NOT_FOUND") == 404
     assert cli_ops.http_status_for("ENTITY_EXISTS") == 409
+    assert cli_ops.http_status_for("ENTITY_AMBIGUOUS") == 409
     assert cli_ops.http_status_for("WRITER_FENCED") == 409
     assert cli_ops.http_status_for("MUTATION_BUSY") == 409
     assert cli_ops.http_status_for("MUTATION_LOCK_UNAVAILABLE") == 503

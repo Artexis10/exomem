@@ -30,8 +30,8 @@ def _build(monkeypatch: pytest.MonkeyPatch):
     return server_module.build_server(require_auth=False)
 
 
-def _call(mcp, name: str, args: dict) -> dict:
-    result = asyncio.run(mcp.call_tool(name, args, run_middleware=False))
+def _call(mcp, name: str, args: dict, *, run_middleware: bool = False) -> dict:
+    result = asyncio.run(mcp.call_tool(name, args, run_middleware=run_middleware))
     sc = getattr(result, "structured_content", None)
     if isinstance(sc, dict):
         return sc
@@ -90,20 +90,191 @@ def test_read_memory_exact_unit_matches_canonical_response(
 
 # ---------------- edit: mode routing ----------------
 
+def test_edit_memory_discovery_is_one_discriminated_operation(
+    vault: Path, monkeypatch
+) -> None:
+    tools = {
+        tool.name: tool.to_mcp_tool().model_dump(mode="json")
+        for tool in asyncio.run(_build(monkeypatch).list_tools())
+    }
+    schema = tools["edit_memory"]["inputSchema"]
+
+    assert set(schema["properties"]) == {
+        "path",
+        "why",
+        "operation",
+        "response_detail",
+    }
+    assert set(schema["required"]) == {"path", "why", "operation"}
+    operation = schema["properties"]["operation"]
+    assert operation["discriminator"]["propertyName"] == "kind"
+    branches = {
+        branch["properties"]["kind"]["const"]: branch
+        for branch in operation["oneOf"]
+    }
+    assert set(branches) == {
+        "replace_body",
+        "replace_tags",
+        "replace_string",
+        "batch_replace",
+        "edit_section",
+        "patch_frontmatter",
+        "fill_row",
+    }
+
+    fill = branches["fill_row"]
+    frontmatter = branches["patch_frontmatter"]
+    string = branches["replace_string"]
+    batch = branches["batch_replace"]
+    assert fill["additionalProperties"] is False
+    assert set(fill["properties"]) == {"kind", "row_key", "take", "overwrite"}
+    assert "expected_hash" not in frontmatter["properties"]
+    assert "validate_only" in frontmatter["properties"]
+    assert {"old_string", "new_string", "replace_all", "tags", "expected_hash", "validate_only"} <= set(string["properties"])
+    assert "field" not in string["properties"]
+    edits = batch["properties"]["edits"]
+    assert edits["minItems"] == 1
+    assert set(edits["items"]["required"]) == {"old_string", "new_string"}
+    assert edits["items"]["additionalProperties"] is False
+    assert set(edits["items"]["properties"]) == {
+        "old_string",
+        "new_string",
+        "replace_all",
+    }
+
 def test_edit_batch_mode_routes_to_multi_edit(vault: Path, monkeypatch) -> None:
     mcp = _build(monkeypatch)
     rel = _make_page(vault, "# S\n\nalpha\nbeta\n")
     out = _call(mcp, "edit_memory", {
         "path": rel,
         "why": "batch tweak",
-        "edits": [
-            {"old_string": "alpha", "new_string": "ALPHA"},
-            {"old_string": "beta", "new_string": "BETA"},
-        ],
+        "operation": {
+            "kind": "batch_replace",
+            "edits": [
+                {"old_string": "alpha", "new_string": "ALPHA"},
+                {"old_string": "beta", "new_string": "BETA"},
+            ],
+        },
+        "response_detail": "full",
     })
-    assert out.get("edits_applied") == 2
+    assert out["diagnostics"]["edits_applied"] == 2
     text = (vault / rel).read_text(encoding="utf-8")
     assert "ALPHA" in text and "BETA" in text
+
+
+def test_edit_batch_mode_accepts_connector_encoded_object_strings(
+    vault: Path, monkeypatch
+) -> None:
+    mcp = _build(monkeypatch)
+    rel = _make_page(vault, "# S\n\nalpha\nbeta\n")
+    tools = {
+        tool.name: tool.to_mcp_tool().model_dump(mode="json")
+        for tool in asyncio.run(mcp.list_tools())
+    }
+    operation_schema = tools["edit_memory"]["inputSchema"]["properties"]["operation"]
+    batch = next(
+        branch
+        for branch in operation_schema["oneOf"]
+        if branch["properties"]["kind"].get("const") == "batch_replace"
+    )
+    edits_schema = batch["properties"]["edits"]
+    assert edits_schema["items"]["type"] == "object"
+
+    out = _call(
+        mcp,
+        "edit_memory",
+        {
+            "path": rel,
+            "why": "connector-encoded batch",
+            "operation": {
+                "kind": "batch_replace",
+                "edits": [
+                    json.dumps({"old_string": "alpha", "new_string": "ALPHA"}),
+                    json.dumps({"old_string": "beta", "new_string": "BETA"}),
+                ],
+            },
+            "response_detail": "full",
+        },
+        run_middleware=True,
+    )
+
+    assert out["diagnostics"]["edits_applied"] == 2
+    text = (vault / rel).read_text(encoding="utf-8")
+    assert "ALPHA" in text and "BETA" in text
+
+
+def test_edit_batch_malformed_encoded_item_keeps_invalid_edit_error(
+    vault: Path, monkeypatch
+) -> None:
+    mcp = _build(monkeypatch)
+    rel = _make_page(vault, "# S\n\nalpha\n", name="malformed-encoded-edit.md")
+
+    with pytest.raises(Exception, match="INVALID_EDIT"):
+        _call(
+            mcp,
+            "edit_memory",
+            {
+                "path": rel,
+                "why": "invalid connector batch",
+                "operation": {"kind": "batch_replace", "edits": ["[]"]},
+            },
+            run_middleware=True,
+        )
+
+
+@pytest.mark.parametrize(
+    "edits",
+    [
+        [],
+        [{"old_string": "alpha"}],
+        [{"old_string": "alpha", "new_string": "ALPHA", "ignored": True}],
+        [{"old_string": "alpha", "new_string": "alpha"}],
+    ],
+)
+def test_edit_batch_invalid_items_are_rejected_before_the_leaf(
+    vault: Path, monkeypatch, edits: list
+) -> None:
+    rel = _make_page(vault, "# S\n\nalpha\n", name="invalid-batch-edit.md")
+    before = (vault / rel).read_text(encoding="utf-8")
+
+    with pytest.raises(Exception, match="INVALID_EDIT"):
+        _call(
+            _build(monkeypatch),
+            "edit_memory",
+            {
+                "path": rel,
+                "why": "invalid batch",
+                "operation": {"kind": "batch_replace", "edits": edits},
+            },
+            run_middleware=True,
+        )
+
+    assert (vault / rel).read_text(encoding="utf-8") == before
+
+
+def test_edit_batch_encoded_blob_is_rejected_by_middleware(
+    vault: Path, monkeypatch
+) -> None:
+    mcp = _build(monkeypatch)
+    rel = _make_page(vault, "# S\n\nalpha\n", name="encoded-blob.md")
+    before = (vault / rel).read_text(encoding="utf-8")
+    encoded = json.dumps(
+        {
+            "old_string": "alpha",
+            "new_string": "data:image/png;base64," + "A" * 40_000,
+        }
+    )
+
+    with pytest.warns(DeprecationWarning):
+        with pytest.raises(Exception, match="BINARY_BLOB_REJECTED"):
+            _call(
+                mcp,
+                "edit_memory",
+                {"path": rel, "why": "must be rejected", "edits": [encoded]},
+                run_middleware=True,
+            )
+
+    assert (vault / rel).read_text(encoding="utf-8") == before
 
 
 def test_edit_take_mode_routes_to_set_take(vault: Path, monkeypatch) -> None:
@@ -113,9 +284,16 @@ def test_edit_take_mode_routes_to_set_take(vault: Path, monkeypatch) -> None:
         "# S\n\n## Opinions\n\n- Whiplash (2014) — 10/10 — [take: ]  <!-- x -->\n",
     )
     out = _call(mcp, "edit_memory", {
-        "path": rel, "why": "fill", "row_key": "Whiplash (2014)", "take": "relentless",
+        "path": rel,
+        "why": "fill",
+        "operation": {
+            "kind": "fill_row",
+            "row_key": "Whiplash (2014)",
+            "take": "relentless",
+        },
+        "response_detail": "full",
     })
-    assert "relentless" in out.get("row", "")
+    assert "relentless" in out["diagnostics"]["row"]
     assert "[take: relentless]" in (vault / rel).read_text(encoding="utf-8")
 
 
@@ -123,10 +301,13 @@ def test_edit_frontmatter_mode_routes_to_set_fm(vault: Path, monkeypatch) -> Non
     mcp = _build(monkeypatch)
     rel = _make_page(vault, "# S\n\nbody\n")
     out = _call(mcp, "edit_memory", {
-        "path": rel, "why": "set status", "field": "status", "value": "active",
+        "path": rel,
+        "why": "set status",
+        "operation": {"kind": "patch_frontmatter", "field": "status", "value": "active"},
+        "response_detail": "full",
     })
-    assert out.get("field") == "status"
-    assert out.get("new_value") == "active"
+    assert out["diagnostics"]["field"] == "status"
+    assert out["diagnostics"]["new_value"] == "active"
     assert "status: active" in (vault / rel).read_text(encoding="utf-8")
 
 
@@ -134,7 +315,13 @@ def test_edit_default_surgical_still_works(vault: Path, monkeypatch) -> None:
     mcp = _build(monkeypatch)
     rel = _make_page(vault, "# S\n\nhello world\n")
     _call(mcp, "edit_memory", {
-        "path": rel, "why": "tweak", "old_string": "hello world", "new_string": "goodbye world",
+        "path": rel,
+        "why": "tweak",
+        "operation": {
+            "kind": "replace_string",
+            "old_string": "hello world",
+            "new_string": "goodbye world",
+        },
     })
     assert "goodbye world" in (vault / rel).read_text(encoding="utf-8")
 
@@ -143,11 +330,57 @@ def test_edit_rejects_two_modes_at_once(vault: Path, monkeypatch) -> None:
     mcp = _build(monkeypatch)
     rel = _make_page(vault, "# S\n\nx\n")
     with pytest.raises(Exception) as exc:
-        _call(mcp, "edit_memory", {
-            "path": rel, "why": "bad", "row_key": "x", "take": "y",
-            "field": "status", "value": "active",
-        })
-    assert "edit mode" in str(exc.value).lower()
+        _call(
+            mcp,
+            "edit_memory",
+            {
+                "path": rel,
+                "why": "bad",
+                "operation": {"kind": "fill_row", "row_key": "x", "take": "y"},
+                "field": "status",
+                "value": "active",
+            },
+            run_middleware=True,
+        )
+    assert "INVALID_EDIT" in str(exc.value)
+    assert "cannot combine" in str(exc.value)
+
+    with pytest.raises(Exception) as exc:
+        _call(
+            mcp,
+            "edit_memory",
+            {
+                "path": rel,
+                "why": "unknown operation",
+                "operation": {"kind": "nonsense"},
+            },
+            run_middleware=True,
+        )
+    assert "INVALID_EDIT" in str(exc.value)
+    assert "nonsense" in str(exc.value)
+
+
+def test_edit_legacy_flat_call_is_translated_before_fastmcp_validation(
+    vault: Path, monkeypatch
+) -> None:
+    rel = _make_page(vault, "# S\n\nBefore\n", name="legacy-flat-edit.md")
+
+    with pytest.warns(DeprecationWarning):
+        out = _call(
+            _build(monkeypatch),
+            "edit_memory",
+            {
+                "path": rel,
+                "why": "legacy compatibility",
+                "old_string": "Before",
+                "new_string": "After",
+                "response_detail": "full",
+            },
+            run_middleware=True,
+        )
+
+    assert out["diagnostics"]["path"] == rel
+    assert "After" in (vault / rel).read_text(encoding="utf-8")
 
 
 # ---------------- get: frontmatter_only routing ----------------
@@ -176,8 +409,9 @@ def test_create_file_kind_dir_routes_to_mkdir(vault: Path, monkeypatch) -> None:
     out = _call(mcp, "manage_memory_file", {
         "operation": "create",
         "path": "Knowledge Base/Notes/Insights/new-folder", "kind": "dir",
+        "response_detail": "full",
     })
-    assert out.get("created") is True
+    assert out["diagnostics"].get("created") is True
     assert (vault / "Knowledge Base/Notes/Insights/new-folder").is_dir()
 
 
@@ -200,8 +434,9 @@ def test_delete_detects_file(vault: Path, monkeypatch) -> None:
         "operation": "delete",
         "path": rel,
         "confirm": True,
+        "response_detail": "full",
     })
-    assert "inbound_ignored_count" in out  # file-shaped result
+    assert "inbound_ignored_count" in out["diagnostics"]  # file-shaped result
     assert not (vault / rel).exists()
 
 
@@ -214,20 +449,23 @@ def test_delete_detects_directory(vault: Path, monkeypatch) -> None:
         "operation": "delete",
         "path": "Knowledge Base/Notes/Insights/doomed", "confirm": True,
         "recursive": True, "force_orphan": True,
+        "response_detail": "full",
     })
-    assert "file_count" in out  # directory-shaped result
+    assert "file_count" in out["diagnostics"]  # directory-shaped result
     assert not d.exists()
 
 
-# ---------------- note: project key description is dynamic + open ----------------
+# ---------------- note: project key description is stable + open ----------------
 
-def test_remember_project_description_is_dynamic_and_open(vault: Path, monkeypatch) -> None:
-    """The `remember` tool schema must advertise the live project-key set + the
-    auto-register contract, not a frozen closed list.
+def test_remember_project_description_is_stable_and_open(vault: Path, monkeypatch) -> None:
+    """The `remember` schema must expose a stable open-set project contract.
 
     Regression: claude.ai burned reasoning cycles (and nearly misfiled a note)
     treating an unlisted scope like `home` as illegal, because the docstring
     listed a fixed `Valid: ...` enum with no hint that keys auto-register.
+
+    Hosted connector clients cache discovered schemas, so live project names
+    must not leak into the tool description and cause per-vault schema drift.
     """
     mcp = _build(monkeypatch)
     tool = asyncio.run(mcp.get_tool("remember"))
@@ -239,12 +477,11 @@ def test_remember_project_description_is_dynamic_and_open(vault: Path, monkeypat
     assert "__PROJECT_KEYS_HINT__" not in projects_desc
     # Open-set framing: the model must know unlisted keys are legal.
     assert "auto-register" in project_desc.lower()
-    assert "not exhaustive" in project_desc.lower()
+    assert "any slug" in project_desc.lower()
     assert "auto-register" in projects_desc.lower()
-    # The list is sourced from the live registry (fixture falls back to the
-    # built-in set, which includes these), not a hand-maintained string.
-    assert "project-alpha" in project_desc
-    assert "personal" in project_desc
+    # Live registry values must not alter the discovery surface.
+    assert "project-alpha" not in project_desc
+    assert "personal" not in project_desc
 
 
 def test_review_memory_attention_mode_composes_review_surface(vault: Path, monkeypatch) -> None:

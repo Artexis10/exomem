@@ -41,6 +41,7 @@ def test_init_scaffolds_a_fresh_vault(tmp_path: Path) -> None:
     assert (kb / "Sources").is_dir()
     assert (kb / "Notes" / "Insights").is_dir()
     assert (kb / "Entities" / "Concepts").is_dir()
+    assert (kb / "Entities" / "Organizations").is_dir()
     assert (kb / "Evidence").is_dir()
 
     # The report names what it created.
@@ -76,6 +77,31 @@ def test_force_init_snapshots_existing_compiled_pages_once_without_editing_them(
     init_module.init_vault(tmp_path, force=True)
     assert manifest_path.read_bytes() == first_bytes
     assert page.read_bytes() == before
+
+
+def test_force_init_reconciles_organizations_without_overwriting_entity_index(
+    tmp_path: Path,
+) -> None:
+    init_module.init_vault(tmp_path)
+    entity_index = tmp_path / "Knowledge Base" / "Entities" / "index.md"
+    entity_index.write_text(
+        "# Entity Catalog\n\n"
+        "Custom operator prose.\n\n"
+        "## By type\n\n"
+        "- [[Knowledge Base/Entities/People/|People]] (0) — curated\n\n"
+        "## Recent\n\n"
+        "Keep this section.\n",
+        encoding="utf-8",
+    )
+
+    init_module.init_vault(tmp_path, force=True)
+
+    text = entity_index.read_text(encoding="utf-8")
+    assert "# Entity Catalog" in text
+    assert "Custom operator prose." in text
+    assert "People]] (0) — curated" in text
+    assert "## Recent\n\nKeep this section." in text
+    assert "Entities/Organizations/|Organizations]] (0)" in text
 
 
 def test_init_refuses_existing_kb_without_force(tmp_path: Path) -> None:

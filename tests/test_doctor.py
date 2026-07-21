@@ -630,3 +630,63 @@ def test_mps_headroom_reports_policy_controls(monkeypatch: pytest.MonkeyPatch) -
     assert check.details["model_preload_allowed"] is False
     assert check.details["asr_prewarm_enabled"] is False
     assert check.details["watcher_max_embed_files"] == 32
+
+
+# ---- torch.cuda: an NVIDIA host running a CPU wheel is a regression, not a config ----
+#
+# `uv pip install` ignores [tool.uv.sources], so upgrading a service venv silently
+# swaps the CUDA build for the PyPI CPU one. That used to surface as a warn, which
+# DoctorReport.success ignores, so every preflight kept passing on a dead GPU.
+
+
+def _fake_cpu_torch() -> SimpleNamespace:
+    """A torch that imports fine but cannot reach any GPU."""
+    return SimpleNamespace(
+        __version__="2.13.0+cpu",
+        cuda=SimpleNamespace(is_available=lambda: False),
+        backends=SimpleNamespace(mps=None),
+        version=SimpleNamespace(cuda=None),
+    )
+
+
+@pytest.fixture
+def _cpu_torch(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(doctor_module, "_module_available", lambda name: True)
+    monkeypatch.setitem(sys.modules, "torch", _fake_cpu_torch())
+    monkeypatch.delenv("EXOMEM_ALLOW_CPU_TORCH", raising=False)
+
+
+def test_torch_cuda_fails_when_nvidia_present_but_torch_is_cpu_only(
+    _cpu_torch: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(doctor_module.shutil, "which", lambda name: "/usr/bin/nvidia-smi")
+
+    check = doctor_module._check_torch_cuda()
+
+    assert check.status == "fail"
+    assert "CPU-only build" in check.message
+    # The remediation must name the pinned index, since that is the non-obvious part.
+    assert "download.pytorch.org/whl/cu132" in (check.remediation or "")
+
+
+def test_torch_cuda_warns_on_a_host_with_no_gpu_at_all(
+    _cpu_torch: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A CPU-only box is a supported deployment and must stay non-fatal."""
+    monkeypatch.setattr(doctor_module.shutil, "which", lambda name: None)
+
+    check = doctor_module._check_torch_cuda()
+
+    assert check.status == "warn"
+
+
+def test_torch_cuda_escape_hatch_downgrades_the_failure_to_a_warning(
+    _cpu_torch: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Opting into CPU on a GPU host is legitimate; it just has to be deliberate."""
+    monkeypatch.setattr(doctor_module.shutil, "which", lambda name: "/usr/bin/nvidia-smi")
+    monkeypatch.setenv("EXOMEM_ALLOW_CPU_TORCH", "1")
+
+    check = doctor_module._check_torch_cuda()
+
+    assert check.status == "warn"

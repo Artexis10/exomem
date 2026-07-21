@@ -59,6 +59,42 @@ def test_health_endpoint_public_and_reports_version(vault, monkeypatch: pytest.M
     assert r2.status_code == 200, r2.text
 
 
+def test_health_reports_install_provenance(vault, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Answers "what is deployed, and from where" without inspecting the service
+    manager — the gap that let a wheel-backed service hide behind a checkout."""
+    body = _client(vault, monkeypatch).get("/health").json()
+    assert body["install_source"] in {"editable", "wheel", "unknown"}
+    for key in ("revision", "torch", "accelerated", "extras"):
+        assert key in body
+
+
+def test_health_omits_host_identifying_detail(vault, monkeypatch: pytest.MonkeyPatch) -> None:
+    """This route is unauthenticated and publicly reachable through the tunnel, so
+    absolute paths would leak the OS username and host layout."""
+    r = _client(vault, monkeypatch).get("/health")
+    body = r.json()
+    assert "interpreter" not in body
+    assert "package_path" not in body
+    assert "checkout" not in body
+    assert "C:\\Users" not in r.text
+    assert "/home/" not in r.text
+
+
+def test_health_survives_provenance_failure(vault, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Liveness must never depend on provenance resolution succeeding."""
+    from exomem import deploy_provenance
+
+    def _boom(**_kwargs):
+        raise RuntimeError("metadata unavailable")
+
+    monkeypatch.setattr(deploy_provenance, "provenance", _boom)
+    r = _client(vault, monkeypatch).get("/health")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["status"] == "ok"
+    assert body["version"] == "unknown"
+
+
 def test_readiness_endpoint_is_public_and_content_free(
     vault, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -67,7 +103,7 @@ def test_readiness_endpoint_is_public_and_content_free(
     monkeypatch.setattr(
         runtime_readiness,
         "runtime_readiness",
-        lambda: {
+        lambda **_kwargs: {
             "status": "ready",
             "service": "exomem",
             "release": "1.2.3",
@@ -101,7 +137,7 @@ def test_readiness_endpoint_returns_503_without_changing_liveness(
     monkeypatch.setattr(
         runtime_readiness,
         "runtime_readiness",
-        lambda: {
+        lambda **_kwargs: {
             "status": "not_ready",
             "service": "exomem",
             "release": "1.2.3",

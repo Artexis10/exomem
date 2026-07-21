@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Regenerate the MCP schema-fidelity baseline (`tests/fixtures/mcp_tool_schemas.json`).
+"""Regenerate the MCP schema baseline and packaged discovery fingerprint.
 
 `tests/test_mcp_schema_fidelity.py` pins every MCP tool's `description` + `inputSchema`
 byte-for-byte — that JSON IS what Claude sees. Adding, removing, or renaming a command,
@@ -13,6 +13,10 @@ It builds the server under the SAME env the test captures the fixture with
 (embeddings/media/CLIP off, tier-2 on, dotenv neutralized, vault = tests/fixtures) so the
 live schemas are deterministic, and writes them in the shape the test reads. It mirrors
 `tests/test_mcp_schema_fidelity.py::_build_server` / `_live_schemas` — keep them in sync.
+
+The ChatGPT Personal Plugin attestation is intentionally separate and is never updated
+here. A changed fingerprint must remain release-blocking until that external consumer is
+refreshed and verified explicitly.
 """
 
 from __future__ import annotations
@@ -27,10 +31,13 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 FIXTURE_PATH = REPO_ROOT / "tests" / "fixtures" / "mcp_tool_schemas.json"
+TOOL_SURFACE_CONTRACT_PATH = REPO_ROOT / "src" / "exomem" / "tool_surface_contract.json"
 FIXTURE_VAULT = REPO_ROOT / "tests" / "fixtures"
 SRC_PATH = REPO_ROOT / "src"
 if str(SRC_PATH) not in sys.path:
     sys.path.insert(0, str(SRC_PATH))
+
+from exomem import tool_surface  # noqa: E402 - src path is inserted above
 
 
 def _build_server(vault_root: Path, state_root: Path):
@@ -58,12 +65,21 @@ def _live_schemas(mcp) -> dict[str, dict]:
     return out
 
 
+def _discovery_contract(mcp) -> dict[str, object]:
+    """Hash every client-visible field that can affect connector routing/policy."""
+    tools = asyncio.run(mcp.list_tools())
+    wires = [tool.to_mcp_tool().model_dump(mode="json") for tool in tools]
+    return tool_surface.discovery_contract(wires)
+
+
 def main() -> None:
     with tempfile.TemporaryDirectory(prefix="exomem-schema-") as temp_dir:
         temp_root = Path(temp_dir)
         vault_root = temp_root / "schema_vault"
         shutil.copytree(FIXTURE_VAULT, vault_root)
-        schemas = _live_schemas(_build_server(vault_root, temp_root / "writer-lease"))
+        mcp = _build_server(vault_root, temp_root / "writer-lease")
+        schemas = _live_schemas(mcp)
+        discovery_contract = _discovery_contract(mcp)
     # Preserve the established coordination-first baseline, then store product tool
     # keys alphabetically. Nested inputSchema property order is signature-order and
     # load-bearing, so only the outer mapping is normalized.
@@ -76,7 +92,21 @@ def main() -> None:
         encoding="utf-8",
         newline="\n",  # keep the committed fixture LF even when run on Windows
     )
+    TOOL_SURFACE_CONTRACT_PATH.write_text(
+        json.dumps(discovery_contract, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+        newline="\n",
+    )
     print(f"wrote {len(schemas)} tool schemas to {FIXTURE_PATH.relative_to(REPO_ROOT)}")
+    print(
+        "wrote MCP discovery fingerprint "
+        f"{discovery_contract['sha256']} to "
+        f"{TOOL_SURFACE_CONTRACT_PATH.relative_to(REPO_ROOT)}"
+    )
+    print(
+        "connector attestation is intentionally NOT updated: refresh/recreate and "
+        "verify external connectors before updating deploy/chatgpt/personal-plugin-contract.json"
+    )
 
 
 if __name__ == "__main__":

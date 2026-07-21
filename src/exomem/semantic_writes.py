@@ -9,7 +9,7 @@ import hashlib
 import json
 import re
 import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
@@ -177,6 +177,71 @@ def _fit_feedback_byte_budget(value: dict[str, Any]) -> dict[str, Any]:
     return value
 
 
+_ERROR_FINDING_LIMIT = 3
+
+
+def _blocking_finding_text(finding: semantic_contract.ContractFinding) -> str:
+    text = finding.code
+    if finding.path:
+        text += f" at {finding.path}"
+    if finding.detail:
+        text += f": {finding.detail}"
+    if finding.remediation:
+        text += f" (fix: {finding.remediation})"
+    return text
+
+
+def _blocking_reason(
+    result: semantic_contract.SemanticContractResult,
+    prefix: str = "semantic contract has blocking findings",
+) -> str:
+    """Name the blocking findings in the error the caller actually receives.
+
+    Only `code` and `reason` survive out to the MCP caller, so a bare prefix
+    tells a writer that something is wrong while withholding what — forcing a
+    second `validate_only` round-trip purely to learn it. That round-trip is the
+    dominant source of write friction: 69 blocked writes in one day on
+    2026-07-20, none of them self-describing.
+
+    Bounded like `_bounded_semantic_feedback`, and the omitted count is stated
+    rather than silently dropped, so a truncated list never reads as complete.
+    """
+    findings = result.blocking_findings
+    if not findings:
+        return prefix
+    shown = findings[:_ERROR_FINDING_LIMIT]
+    rendered = "; ".join(_blocking_finding_text(item) for item in shown)
+    omitted = len(findings) - len(shown)
+    if omitted:
+        rendered += f"; +{omitted} more (validate_only returns the full set)"
+    return f"{prefix}: {rendered}"
+
+
+def _blocking_reason_for_evaluations(
+    evaluations: Sequence[Any],
+    prefix: str = "semantic contract has blocking findings",
+) -> str:
+    """Same as `_blocking_reason` for multi-page operations (move, recovery).
+
+    `should_block` on these preflights is an `any()` across evaluations, so the
+    blocking findings are spread over several pages. Naming the page each
+    finding came from is what makes a multi-page rejection actionable.
+    """
+    findings = tuple(
+        finding
+        for item in evaluations
+        for finding in item.contract_result.blocking_findings
+    )
+    if not findings:
+        return prefix
+    shown = findings[:_ERROR_FINDING_LIMIT]
+    rendered = "; ".join(_blocking_finding_text(item) for item in shown)
+    omitted = len(findings) - len(shown)
+    if omitted:
+        rendered += f"; +{omitted} more (validate_only returns the full set)"
+    return f"{prefix}: {rendered}"
+
+
 def _bounded_semantic_feedback(
     result: semantic_contract.SemanticContractResult,
 ) -> dict[str, Any]:
@@ -312,6 +377,36 @@ class PosthocPageEvaluation:
     activation: Literal["current", "prospective"]
 
 
+def _posthoc_finding_sort_key(item: dict[str, Any]) -> tuple[Any, ...]:
+    code = str(item.get("code") or "")
+    resolved_rule = tuple(str(value) for value in item.get("resolved_rule") or ())
+    rule = resolved_rule[2] if len(resolved_rule) >= 3 else ""
+    namespace = resolved_rule[0] if resolved_rule else ""
+    legacy_backlog = bool(
+        code == "RELATION_DISPOSITION_MISSING" and item.get("grandfathered") is True
+    )
+    current = item.get("activation") == "current"
+    if not legacy_backlog and current and item.get("grandfathered") is not True and item.get(
+        "severity"
+    ) == "error":
+        priority = 0
+    elif rule == "syntax" or (
+        namespace in {"categories", "kinds"}
+        and (rule == "registry" or "REGISTRY" in code.upper())
+    ):
+        priority = 1
+    elif legacy_backlog:
+        priority = 3
+    else:
+        priority = 2
+    identity = json.dumps(
+        item.get("governed_element_identity") or (),
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    return priority, code, str(item.get("path") or ""), identity
+
+
 @dataclass(frozen=True, slots=True)
 class PosthocBatch:
     """Bounded non-content projection shared by watcher, audit, and reconcile."""
@@ -321,7 +416,16 @@ class PosthocBatch:
     evaluations: tuple[PosthocPageEvaluation, ...]
     corpus: semantic_contract.SemanticCorpusContext | None = None
 
-    def as_dict(self) -> dict[str, Any]:
+    def as_dict(
+        self, detail: Literal["actionable", "full"] = "actionable"
+    ) -> dict[str, Any]:
+        if detail not in {"actionable", "full"}:
+            raise SemanticWriteError(
+                "SEMANTIC_POSTHOC_INVALID_DETAIL",
+                "posthoc detail must be actionable or full",
+            )
+        full = detail == "full"
+        audit_projection = self.operation == "audit"
         findings: list[dict[str, Any]] = []
         summary: dict[str, int] = {}
         bounded = {
@@ -342,33 +446,43 @@ class PosthocBatch:
             )
             for finding in evaluation.contract_result.findings:
                 summary[finding.code] = summary.get(finding.code, 0) + 1
+                item = {
+                    "path": evaluation.path,
+                    "code": finding.code,
+                    "severity": finding.severity,
+                    "governed_element_identity": list(
+                        finding.governed_element_identity
+                    ),
+                    "resolved_rule": list(finding.resolved_rule),
+                    "relation_disposition": disposition_value,
+                    "actions": list(evaluation.contract_result.actions),
+                    "activation": evaluation.activation,
+                    "grandfathered": evaluation.grandfathered,
+                }
                 findings.append(
-                    _bounded_feedback_value(
-                        {
-                            "path": evaluation.path,
-                            "code": finding.code,
-                            "severity": finding.severity,
-                            "governed_element_identity": list(
-                                finding.governed_element_identity
-                            ),
-                            "resolved_rule": list(finding.resolved_rule),
-                            "relation_disposition": disposition_value,
-                            "actions": list(evaluation.contract_result.actions),
-                            "activation": evaluation.activation,
-                            "grandfathered": evaluation.grandfathered,
-                        },
-                        bounded,
-                    )
+                    item if full else _bounded_feedback_value(item, bounded)
                 )
         total = len(findings)
-        findings = findings[:_POSTHOC_FINDING_LIMIT]
+        ordered_for_bounds = False
+        if not full and audit_projection and total > _POSTHOC_FINDING_LIMIT:
+            findings.sort(key=_posthoc_finding_sort_key)
+            ordered_for_bounds = True
+        if not full:
+            findings = findings[:_POSTHOC_FINDING_LIMIT]
         omitted = total - len(findings)
-        evaluated_paths = [
-            _bounded_feedback_text(item.path, bounded)
-            for item in self.evaluations[:_POSTHOC_PATH_LIMIT]
-        ]
+        if full:
+            evaluated_paths = [item.path for item in self.evaluations]
+        else:
+            evaluated_paths = [
+                _bounded_feedback_text(item.path, bounded)
+                for item in self.evaluations[:_POSTHOC_PATH_LIMIT]
+            ]
         summary_items = sorted(summary.items())
-        retained_summary = dict(summary_items[:_POSTHOC_SUMMARY_LIMIT])
+        retained_summary = dict(
+            summary_items
+            if full or audit_projection
+            else summary_items[:_POSTHOC_SUMMARY_LIMIT]
+        )
         value: dict[str, Any] = {
             "operation": self.operation,
             "activation": self.activation,
@@ -378,22 +492,43 @@ class PosthocBatch:
             "omitted_counts": {
                 "evaluated_paths": len(self.evaluations) - len(evaluated_paths),
                 "semantic_contract_findings": omitted,
-                "semantic_contract_summary": len(summary_items) - len(retained_summary),
+                "semantic_contract_summary": len(summary_items)
+                - len(retained_summary),
             },
             "truncation": {
-                "byte_budget": _POSTHOC_BYTE_BUDGET,
-                "finding_limit": _POSTHOC_FINDING_LIMIT,
-                "path_limit": _POSTHOC_PATH_LIMIT,
-                "summary_limit": _POSTHOC_SUMMARY_LIMIT,
+                "byte_budget": None if full else _POSTHOC_BYTE_BUDGET,
+                "finding_limit": None if full else _POSTHOC_FINDING_LIMIT,
+                "path_limit": None if full else _POSTHOC_PATH_LIMIT,
+                "summary_limit": (
+                    None if full or audit_projection else _POSTHOC_SUMMARY_LIMIT
+                ),
                 **bounded,
                 "budget_items_omitted": 0,
             },
         }
-        variable_collections = (
+        if audit_projection or full:
+            value["truncation"].update(
+                {
+                    "observation_complete": True,
+                    "findings_complete": omitted == 0,
+                }
+            )
+        if full:
+            return value
+        if (
+            audit_projection
+            and _feedback_serialized_size(value) >= _POSTHOC_BYTE_BUDGET
+            and not ordered_for_bounds
+        ):
+            findings.sort(key=_posthoc_finding_sort_key)
+        variable_collections = [
             ("semantic_contract_findings", findings),
             ("evaluated_paths", evaluated_paths),
-            ("semantic_contract_summary", retained_summary),
-        )
+        ]
+        if not audit_projection:
+            variable_collections.append(
+                ("semantic_contract_summary", retained_summary)
+            )
         while _feedback_serialized_size(value) >= _POSTHOC_BYTE_BUDGET:
             removed_total = 0
             for name, collection in variable_collections:
@@ -414,6 +549,10 @@ class PosthocBatch:
             value["truncation"]["budget_items_omitted"] += removed_total
             if removed_total == 0:
                 break
+        if audit_projection:
+            value["truncation"]["findings_complete"] = (
+                value["omitted_counts"]["semantic_contract_findings"] == 0
+            )
         return value
 
 
@@ -1137,8 +1276,16 @@ def preflight_existing(
         )
     root = Path(vault_root)
     before_source, primary_guard = vault.read_guarded_text(root, root / path)
+    raw_before_hash = vault.content_hash(before_source)
+    # The parser/corpus and public content-hash contract normalize platform
+    # newlines. Keep the raw-byte PathGuard, but evaluate the same logical text
+    # on Windows so CRLF alone never looks like concurrent semantic drift.
+    before_source = before_source.replace("\r\n", "\n").replace("\r", "\n")
     before_hash = vault.content_hash(before_source)
-    if expected_before_hash is not None and expected_before_hash != before_hash:
+    if expected_before_hash is not None and expected_before_hash not in {
+        raw_before_hash,
+        before_hash,
+    }:
         raise SemanticWriteError(
             "STALE_SEMANTIC_WRITE", "page changed before semantic preflight"
         )
@@ -1515,7 +1662,8 @@ def commit_existing(
     root = Path(vault_root)
     if preflight.contract_result.should_block:
         raise SemanticWriteError(
-            "SEMANTIC_CONTRACT_BLOCKED", "semantic contract has blocking findings"
+            "SEMANTIC_CONTRACT_BLOCKED",
+            _blocking_reason(preflight.contract_result),
         )
 
     result = preflight.contract_result
@@ -1528,7 +1676,10 @@ def commit_existing(
         if result.should_block:
             raise SemanticWriteError(
                 "SEMANTIC_CONTRACT_BLOCKED",
-                "semantic contract blocked against the activation boundary winner",
+                _blocking_reason(
+                    result,
+                    "semantic contract blocked against the activation boundary winner",
+                ),
             )
 
     try:
@@ -1782,7 +1933,15 @@ def preflight_move(
         root, registry=registry, language_registry=language
     )
     before_moved = before_corpus.pages.get(old_path)
-    if before_moved is None or before_moved.source_hash != vault.content_hash(source):
+    normalized_source = source.replace("\r\n", "\n").replace("\r", "\n")
+    if (
+        before_moved is None
+        or before_moved.source_hash
+        not in {
+            vault.content_hash(source),
+            vault.content_hash(normalized_source),
+        }
+    ):
         raise SemanticWriteError(
             "STALE_SEMANTIC_WRITE", "move source changed during semantic preflight"
         )
@@ -1790,21 +1949,29 @@ def preflight_move(
     for write in rewrite_tuple:
         rel = write.path.relative_to(root).as_posix()
         before_rewrite = before_corpus.pages.get(rel)
-        if (
-            before_rewrite is None
-            or before_rewrite.source_hash != write.guard.expected_content_hash
-        ):
-            raise SemanticWriteError(
-                "STALE_SEMANTIC_WRITE",
-                "inbound page changed during semantic move preflight",
-            )
         try:
-            before_source = write.path.read_text(encoding="utf-8")
+            before_source = write.path.read_bytes().decode("utf-8")
         except (OSError, UnicodeDecodeError) as error:
             raise SemanticWriteError(
                 "STALE_SEMANTIC_WRITE",
                 "inbound page changed during semantic move preflight",
             ) from error
+        normalized_before_source = before_source.replace("\r\n", "\n").replace(
+            "\r", "\n"
+        )
+        if (
+            before_rewrite is None
+            or before_rewrite.source_hash
+            not in {
+                vault.content_hash(before_source),
+                vault.content_hash(normalized_before_source),
+            }
+            or write.guard.expected_content_hash != vault.content_hash(before_source)
+        ):
+            raise SemanticWriteError(
+                "STALE_SEMANTIC_WRITE",
+                "inbound page changed during semantic move preflight",
+            )
         expected_source, changed_count = rewrite_wikilinks_for_move(
             before_source, old_path, new_path
         )
@@ -2049,7 +2216,8 @@ def commit_move(
     root = Path(vault_root)
     if preflight.should_block:
         raise SemanticWriteError(
-            "SEMANTIC_CONTRACT_BLOCKED", "semantic contract has blocking findings"
+            "SEMANTIC_CONTRACT_BLOCKED",
+            _blocking_reason_for_evaluations(preflight.evaluations),
         )
     if preflight.manifest_install_required:
         winner = activation_manifest.ensure_manifest(
@@ -2483,7 +2651,7 @@ def commit_recovery(
             if preflight.should_block:
                 raise SemanticWriteError(
                     "SEMANTIC_CONTRACT_BLOCKED",
-                    "semantic contract has blocking findings",
+                    _blocking_reason_for_evaluations(preflight.evaluations),
                 )
             destination_root_guard = (
                 preflight.destination_root_guard.prepare_and_bind_parents(root)
@@ -2617,7 +2785,7 @@ def preflight_creation(
         )
     ):
         raise SemanticWriteError(
-            "SEMANTIC_CONTRACT_BLOCKED", "semantic contract has blocking findings"
+            "SEMANTIC_CONTRACT_BLOCKED", _blocking_reason(result)
         )
     if page_type in _COMPILED_TYPES and state.eligible_compiled:
         if draft_id is None:

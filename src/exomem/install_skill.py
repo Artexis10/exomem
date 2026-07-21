@@ -1,19 +1,26 @@
-"""install-skill: copy the bundled Exomem skill into Claude Code.
+"""install-skill: copy the bundled Exomem skill into a filesystem-based agent client.
 
 The Exomem MCP server is only the *hands* — the `find`/`add`/`note`/`edit` tools. The
-*brain* that tells Claude when to capture, how to file a source, and how to
+*brain* that tells the agent when to capture, how to file a source, and how to
 compile a note under the schema is the **skill**: `_scaffold/_Schema/SKILL.md`
-plus its `references/`. Claude Code discovers skills at
-`~/.claude/skills/<name>/SKILL.md`, so until the skill is installed the tools
+plus its `references/`. Clients discover skills at
+`<client home>/skills/<name>/SKILL.md`, so until the skill is installed the tools
 just sit there and nothing captures on its own — the #1 "it does nothing" trap.
 
 This makes that install a first-class, one-command operation straight from the
 package (no Obsidian-vault round-trip), so a friend who only cloned the repo can
 install the skill without access to anyone's vault.
+
+Both Claude Code (`~/.claude/skills`) and Codex (`~/.codex/skills`) load skills
+from disk with the same SKILL.md format, so both are installed the same way —
+matching how install_hook.py already targets both clients. Web clients
+(claude.ai, ChatGPT) have no filesystem to install into; they take uploaded
+archives from `exomem package-skills` instead.
 """
 
 from __future__ import annotations
 
+import os
 import shutil
 from pathlib import Path
 
@@ -27,6 +34,73 @@ _SKILL_SRC = Path(__file__).parent / "_scaffold" / "_Schema"
 # Claude Code loads `~/.claude/skills/<name>/SKILL.md`; the folder name must match
 # the skill's `name:` frontmatter (`exomem`).
 DEFAULT_TARGET = Path.home() / ".claude" / "skills" / "exomem"
+
+DEFAULT_CLIENT = "claude"
+SUPPORTED_CLIENTS = ("claude", "codex")
+
+
+def normalize_client(client: str) -> str:
+    value = (client or DEFAULT_CLIENT).strip().lower()
+    if value not in SUPPORTED_CLIENTS:
+        raise ValueError(
+            f"unsupported skill client {client!r}; expected one of {SUPPORTED_CLIENTS}"
+        )
+    return value
+
+
+def client_home(client: str) -> Path:
+    """Config home for a client, honouring the same env overrides as install_hook."""
+    client = normalize_client(client)
+    if client == "codex":
+        return Path(os.environ.get("CODEX_HOME") or (Path.home() / ".codex")).expanduser()
+    return Path(os.environ.get("CLAUDE_CONFIG_DIR") or (Path.home() / ".claude")).expanduser()
+
+
+def client_skill_target(client: str) -> Path:
+    """Where the core `exomem` skill lands for a client."""
+    return client_home(client) / "skills" / "exomem"
+
+
+def detect_clients() -> tuple[str, ...]:
+    """Return the supported clients that appear to be installed on this machine.
+
+    Presence of the config home is the signal — it is what the client itself
+    creates on first run, and it is the directory we would install into.
+    """
+    return tuple(c for c in SUPPORTED_CLIENTS if client_home(c).is_dir())
+
+
+def resolve_clients(client: str | None) -> tuple[str, ...]:
+    """Map a --client value to concrete clients.
+
+    'auto' installs into every client detected on this machine, so the common
+    case needs no flag at all. 'all' installs into every supported client whether
+    or not it is present, which is what you want when provisioning ahead of time.
+    """
+    value = (client or "auto").strip().lower()
+    if value == "all":
+        return SUPPORTED_CLIENTS
+    if value == "auto":
+        return detect_clients() or (DEFAULT_CLIENT,)
+    return (normalize_client(value),)
+
+
+def install_skills(
+    *,
+    client: str | None = "auto",
+    force: bool = False,
+    link: bool = False,
+) -> dict:
+    """Install the skill set into one or more clients.
+
+    Returns {"clients": {name: <install_skill result>}, "installed": [names]}.
+    """
+    results: dict[str, dict] = {}
+    for name in resolve_clients(client):
+        results[name] = install_skill(
+            client_skill_target(name), force=force, link=link
+        )
+    return {"clients": results, "installed": sorted(results)}
 
 # Before the skill was renamed to `exomem` it installed here. Left behind after an
 # upgrade it loads as a stale duplicate, so `remove_legacy_skill` retires it — but

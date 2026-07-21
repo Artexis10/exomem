@@ -6,11 +6,17 @@ import hashlib
 import inspect
 import types
 import typing
+import uuid
 from collections.abc import Callable
+from contextlib import contextmanager, nullcontext
+from contextvars import ContextVar
 from dataclasses import dataclass
 
 from mcp.types import ToolAnnotations
-from pydantic import Field
+from pydantic import Field, WithJsonSchema
+
+from . import capabilities
+from .mutation_terminal import ResponseDetail
 
 # Text-write ops -> the argument field(s) whose value must not be a base64 binary
 # blob. The model pays for those characters as output tokens before the request
@@ -32,6 +38,11 @@ GUARDED_WRITE_FIELDS: dict[str, tuple[str, ...]] = {
     "replace_memory": ("content",),
     "manage_memory_file": ("content",),
 }
+
+
+_MCP_REQUEST_ID: ContextVar[str | None] = ContextVar(
+    "exomem_mcp_request_id", default=None
+)
 
 
 # Write ops whose mutation OVERWRITES or REMOVES existing vault content, as opposed
@@ -92,6 +103,7 @@ class Command:
     product_actions: tuple[str, ...] = ()
     first_run_safe: bool = False
     routes: tuple[str, ...] = ()
+    response_detail: bool = False
 
     @property
     def doc(self) -> str:
@@ -120,6 +132,7 @@ def bind_vault(
     name: str | None = None,
     description: str | None = None,
     command: Command | None = None,
+    surface_descriptor: capabilities.ActiveSurfaceDescriptor | None = None,
 ) -> Callable:
     """Return a callable FastMCP introspects exactly like a hand-written wrapper."""
     sig = inspect.signature(leaf)
@@ -127,7 +140,7 @@ def bind_vault(
     visible = params[len(injected):]
 
     try:
-        resolved = typing.get_type_hints(leaf)
+        resolved = typing.get_type_hints(leaf, include_extras=True)
     except Exception:  # noqa: BLE001 - fall back to inspect's annotations
         resolved = {}
 
@@ -140,23 +153,71 @@ def bind_vault(
         )
         for p in visible
     ]
+    if command is not None and command.name == "edit_memory":
+        from .edit_operations import EditOperation, public_edit_operation_schema
+
+        visible = [
+            parameter.replace(
+                default=inspect.Parameter.empty,
+                annotation=typing.Annotated[
+                    EditOperation,
+                    WithJsonSchema(public_edit_operation_schema()),
+                    Field(description=help_text.get("operation", "")),
+                ],
+            )
+            if parameter.name == "operation"
+            else parameter
+            for parameter in visible
+            if parameter.kind is not inspect.Parameter.VAR_KEYWORD
+        ]
+    if command is not None and getattr(command, "response_detail", False):
+        response_detail = inspect.Parameter(
+            "response_detail",
+            kind=inspect.Parameter.KEYWORD_ONLY,
+            default="compact",
+            annotation=typing.Annotated[
+                ResponseDetail,
+                Field(
+                    description=(
+                        "Successful committed mutation detail: compact (default), "
+                        "full diagnostics, or legacy raw leaf result."
+                    )
+                ),
+            ],
+        )
+        insert_at = next(
+            (
+                index
+                for index, parameter in enumerate(visible)
+                if parameter.kind is inspect.Parameter.VAR_KEYWORD
+            ),
+            len(visible),
+        )
+        visible.insert(insert_at, response_detail)
     new_sig = sig.replace(parameters=visible)
 
     def wrapper(**kwargs):
-        if command is None:
-            return leaf(*injected, **kwargs)
-        from .commands import invocation_is_read_only
-        from .writer_lease import invoke_command
-
-        invocation_read_only = invocation_is_read_only(command, kwargs)
-        return invoke_command(
-            command,
-            *injected,
-            implicit_idempotency_scope=(
-                None if invocation_read_only else mcp_retry_scope()
-            ),
-            **kwargs,
+        context = (
+            capabilities.active_surface(surface_descriptor)
+            if surface_descriptor is not None
+            else nullcontext()
         )
+        with context:
+            if command is None:
+                return leaf(*injected, **kwargs)
+            from .commands import invocation_is_read_only
+            from .writer_lease import invoke_command
+
+            invocation_read_only = invocation_is_read_only(command, kwargs)
+            return invoke_command(
+                command,
+                *injected,
+                mutation_request_id=mcp_request_id(),
+                implicit_idempotency_scope=(
+                    None if invocation_read_only else mcp_retry_scope()
+                ),
+                **kwargs,
+            )
 
     wrapper.__signature__ = new_sig  # type: ignore[attr-defined]
     wrapper.__name__ = name or leaf.__name__
@@ -174,9 +235,21 @@ def bind_vault(
 
 
 def mcp_retry_scope() -> str | None:
-    """Return a credential-safe caller scope for bounded MCP retry replay."""
+    """Return a stable, privacy-safe principal scope for bounded MCP replay."""
     try:
-        from fastmcp.server.dependencies import get_context, get_http_headers
+        from fastmcp.server.dependencies import (
+            get_access_token,
+            get_context,
+            get_http_headers,
+        )
+
+        access_token = get_access_token()
+        claims = getattr(access_token, "claims", None) or {}
+        subject = str(claims.get("sub") or "").strip()
+        if subject:
+            issuer = str(claims.get("iss") or "verified-principal").strip()
+            digest = hashlib.sha256(f"{issuer}\0{subject}".encode()).hexdigest()
+            return f"principal:{digest}"
 
         headers = get_http_headers(include={"authorization"})
         authorization = headers.get("authorization", "").strip()
@@ -187,6 +260,47 @@ def mcp_retry_scope() -> str | None:
         return f"session:{get_context().session_id}"
     except (LookupError, RuntimeError):
         return None
+
+
+def mcp_request_id() -> str:
+    """Return one canonical correlation ID for the active MCP tool call."""
+    active = _MCP_REQUEST_ID.get()
+    if active is not None:
+        return active
+    try:
+        from fastmcp.server.dependencies import get_http_headers
+
+        value = get_http_headers(include={"x-exomem-request-id"}).get(
+            "x-exomem-request-id", ""
+        )
+        canonical = canonical_request_id(value)
+        if canonical is not None:
+            return canonical
+    except (LookupError, RuntimeError):
+        pass
+    return str(uuid.uuid4())
+
+
+def canonical_request_id(value: object) -> str | None:
+    """Return a canonical UUIDv4 request ID or reject caller-controlled log text."""
+    clean = str(value or "").strip()
+    try:
+        parsed = uuid.UUID(clean)
+    except (AttributeError, ValueError):
+        return None
+    if parsed.version != 4 or parsed.variant != uuid.RFC_4122 or str(parsed) != clean:
+        return None
+    return clean
+
+
+@contextmanager
+def mcp_request_context(request_id: str):
+    """Bind the middleware correlation ID through the synchronous tool wrapper."""
+    token = _MCP_REQUEST_ID.set(request_id)
+    try:
+        yield
+    finally:
+        _MCP_REQUEST_ID.reset(token)
 
 
 def _annotate_description(annotation: object, description: str) -> object:
@@ -254,6 +368,19 @@ def type_tag(annotation: object) -> str:
     return "json"
 
 
+def _literal_string_values(annotation: object) -> tuple[str, ...]:
+    """Return registry-style string Literal values, including Optional aliases."""
+    origin = typing.get_origin(annotation)
+    if origin is typing.Literal:
+        values = typing.get_args(annotation)
+        return tuple(values) if all(isinstance(value, str) for value in values) else ()
+    if origin is typing.Union or origin is types.UnionType:
+        non_none = [item for item in typing.get_args(annotation) if item is not type(None)]
+        if len(non_none) == 1:
+            return _literal_string_values(non_none[0])
+    return ()
+
+
 def derive_params(
     leaf: Callable, *, skip: int, positional: str | None = None
 ) -> tuple[Param, ...]:
@@ -267,7 +394,7 @@ def derive_params(
     params: list[Param] = []
     for p in list(sig.parameters.values())[skip:]:
         ann = hints.get(p.name, p.annotation)
-        literal_values = typing.get_args(ann) if typing.get_origin(ann) is typing.Literal else ()
+        literal_values = _literal_string_values(ann)
         params.append(
             Param(
                 name=p.name,

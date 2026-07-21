@@ -64,9 +64,13 @@ def _post(client: TestClient, command: str, body: dict, *, expect_status: int = 
 
 
 def _ok(client: TestClient, command: str, body: dict) -> dict:
-    payload = _post(client, command, body)
+    request_body = dict(body)
+    if command == "adoption_studio":
+        request_body["response_detail"] = "full"
+    payload = _post(client, command, request_body)
     assert payload["success"] is True, payload
-    return payload["data"]
+    data = payload["data"]
+    return data.get("diagnostics", data)
 
 
 def _write(root: Path, rel: str, content: str) -> Path:

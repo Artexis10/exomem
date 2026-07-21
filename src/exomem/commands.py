@@ -22,13 +22,15 @@ from __future__ import annotations
 import inspect
 import json
 import os
+import re
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
-from typing import Any, Literal, NotRequired
+from typing import Annotated, Any, Literal, NotRequired
 
 from fastmcp.tools import ToolResult
 from fastmcp.utilities.types import Image as FastMCPImage
 from mcp.types import TextContent
+from pydantic import Field, StrictInt
 from typing_extensions import TypedDict
 
 from . import add as add_module
@@ -39,6 +41,7 @@ from . import append_to_file as append_to_file_module
 from . import attention as attention_module
 from . import audit as audit_module
 from . import audit_fix as audit_fix_module
+from . import capabilities as capabilities_module
 from . import compile_proposal as compile_proposal_module
 from . import context_pack as context_pack_module
 from . import corpus_aware as corpus_aware_module
@@ -47,6 +50,9 @@ from . import create_file as create_file_module
 from . import delete_directory as delete_directory_module
 from . import delete_file as delete_file_module
 from . import edit as edit_module
+from . import edit_operations as edit_operations_module
+from . import entity_candidates as entity_candidates_module
+from . import entity_types as entity_types_module
 from . import epistemic_graph as epistemic_graph_module
 from . import evolution as evolution_module
 from . import find as find_module
@@ -101,6 +107,7 @@ from .command_surface import (
 from .command_surface import (
     type_tag as _type_tag,  # noqa: F401 - re-exported for server.py
 )
+from .entity_types import EntityTypeId
 from .kbdir import kb_dirname
 from .vault import (
     VaultPathError,
@@ -110,6 +117,25 @@ from .vault import (
 _link_summary = link_summary_module.link_summary
 _CONNECT_MEMORY_DEFAULT_OPERATION = "suggest-links"
 _ADOPT_VAULT_DEFAULT_MODE = "scan-only"
+_AuditSampleLimit = Annotated[
+    StrictInt,
+    Field(
+        ge=0,
+        le=audit_module.MAX_LEGACY_SAMPLE_LIMIT,
+        description="Audit legacy-backlog sample count; integer from 0 to 50.",
+    ),
+]
+_RerankCandidateLimit = Annotated[
+    StrictInt,
+    Field(
+        ge=1,
+        le=find_module.MAX_RERANK_CANDIDATES,
+        description=(
+            "Maximum fused candidates passed to the reranker; strict integer "
+            "from the effective result limit through 300."
+        ),
+    ),
+]
 
 # Keep commands.py as the public command-surface facade for server, CLI, docs,
 # and tests while the implementation lives in command_surface.py.
@@ -216,12 +242,15 @@ def op_bootstrap(
         package_version = "0+unknown"
 
     from . import mode as mode_module
+    from . import tool_surface as tool_surface_module
 
     compute_policy = mode_module.resolved()
+    active_descriptor = _active_bootstrap_descriptor()
+    active_product_names = frozenset(active_descriptor.product_commands)
     requested_workflow = workflow.strip() if workflow and workflow.strip() else "general"
     selected_packs = knowledge_packs_module.selected_pack_state(vault_root)
     payload: dict = {
-        "contract_version": "2026-07-16.2",
+        "contract_version": "2026-07-19.1",
         "profile": profile,
         "server": {
             "name": "exomem",
@@ -229,8 +258,15 @@ def op_bootstrap(
             "kb_dir": kb_dirname(),
             "pure_substrate": True,
             "content_included": False,
+            "published_mcp_tool_surface_sha256": tool_surface_module.sha256(),
+            "published_mcp_tool_surface_scope": "packaged-full-mcp-discovery",
+            "canonical_mcp_tool_surface": {
+                "scope": "packaged-full-mcp-discovery",
+                "sha256": tool_surface_module.sha256(),
+            },
             "compute_policy": compute_policy,
         },
+        "active_capabilities": active_descriptor.as_metadata(),
         "memory_model": {
             "built_in_ai_memory": (
                 "Use as short-term or behavioural memory for user preferences, working "
@@ -249,6 +285,24 @@ def op_bootstrap(
                 "Packs are product guidance only. They help route simple user intent "
                 "into typed tools; they do not create folders, migrate files, or bypass governance."
             ),
+        },
+        "entity_registry": {
+            "types": [
+                {
+                    "id": definition.id,
+                    "label": definition.label,
+                    "folder": definition.folder,
+                    "aliases": list(definition.aliases),
+                    "capture_guidance": definition.capture_guidance,
+                }
+                for definition in entity_types_module.ENTITY_TYPE_REGISTRY
+            ],
+            "capture_rule": (
+                "After durable work, run one bounded exact-match-first entity pass. "
+                "Create only stable, recurring identities; update an existing entity only "
+                "with new durable facts or relations; skip incidental mentions."
+            ),
+            "candidate_route": "connect_memory(operation='resolve-entity')",
         },
         "workflow": {
             "requested": requested_workflow,
@@ -303,7 +357,7 @@ def op_bootstrap(
                 "small_correction": "edit_memory",
                 "semantic_unit_mutation": "observe_memory",
                 "substantial_rewrite": "replace_memory",
-                "named_person_concept_library_or_decision": "connect_memory(operation='entity')",
+                "stable_named_entity": "connect_memory(operation='create-entity')",
             },
             "preflight": {
                 "connect_memory": "standard read-only suggest-links/suggest-relations check before a compiled note write",
@@ -311,7 +365,7 @@ def op_bootstrap(
             },
             "post_write": {
                 "remember_suggestions": "non-binding related pages returned by remember(suggestions=true)",
-                "write_feedback": "structural feedback returned by note(): semantic blocks, typed note/block relations, generic/source links, relation debt, unresolved wikilinks, and next actions",
+                "write_feedback": "structural feedback returned by remember(): semantic blocks, typed note/block relations, generic/source links, relation debt, unresolved wikilinks, and next actions",
                 "accepted_links": "persist only through edit_memory/remember/replace_memory; never auto-write suggestions",
             },
             "note_type_recipes": {
@@ -347,7 +401,7 @@ def op_bootstrap(
                 ),
                 "adoption_handoff": (
                     "adopt_vault(mode='compile-selected') returns a proposal only; review "
-                    "it, then call note() so normal semantic precommit still applies"
+                    "it, then call remember() so normal semantic precommit still applies"
                 ),
             },
         },
@@ -452,11 +506,19 @@ def op_bootstrap(
                 "try ask_memory(deep=true) for synthesis instead of many read_memory calls",
             ],
         },
-        "simple_actions": simple_action_catalog(selected_packs),
+        "simple_actions": simple_action_catalog(
+            selected_packs, available_tools=active_product_names
+        ),
         "common_actions": list(simple_action_names()),
-        "front_door_actions": product_front_door_catalog(selected_packs),
-        "product_commands": product_tool_catalog(),
-        "tool_catalog": product_tool_catalog(),
+        "front_door_actions": product_front_door_catalog(
+            selected_packs, available_tools=active_product_names
+        ),
+        "product_commands": product_tool_catalog(
+            active_product_names, callable_tools=active_descriptor.callable_commands
+        ),
+        "tool_catalog": product_tool_catalog(
+            active_product_names, callable_tools=active_descriptor.callable_commands
+        ),
         "common_tools": [
             "adopt_vault",
             "browse_memory",
@@ -508,7 +570,7 @@ def op_bootstrap(
                 "so the agent can report stored artifacts exactly."
             ),
         }
-    return payload
+    return _filter_bootstrap_payload(payload, active_descriptor)
 
 
 def op_find(
@@ -529,6 +591,7 @@ def op_find(
     mode: str = "hybrid",
     graph: bool = True,
     rerank: bool | None = None,
+    rerank_max_candidates: _RerankCandidateLimit | None = None,
     prefer_compiled: bool = True,
     prefer_active: bool = True,
     prefer_used: bool = False,
@@ -601,6 +664,11 @@ def op_find(
             disagree or the query is long. Pass true to force reranking
             for a high-value query, including on CPU; pass false to skip
             it entirely.
+        rerank_max_candidates: Bound the fused prefix sent to the reranker.
+            Must be an integer from the effective result limit through 300.
+            Omit to preserve the existing `3 * limit` prefix. This bounds
+            candidate count, not wall-clock latency: the synchronous model
+            call has no safe cancellation boundary.
         prefer_compiled: When true (default), applies a small boost to
             compiled types (insight, pattern, failure, research-note,
             entity) and a small penalty to raw `source` after fusion
@@ -724,6 +792,7 @@ def op_find(
             requested_result_level=result_level,
             rerank_requested=rerank,
             auto_rerank=auto_rerank,
+            rerank_candidate_limit_requested=rerank_max_candidates,
             compute_profile=compute_profile,
         )
         if explain
@@ -742,6 +811,7 @@ def op_find(
                 "graph_enrich": graph_enrich,
                 "graph": graph,
                 "rerank_requested": rerank,
+                "rerank_max_candidates": rerank_max_candidates,
                 "auto_rerank": auto_rerank,
                 "prefer_compiled": prefer_compiled,
                 "prefer_active": prefer_active,
@@ -770,6 +840,7 @@ def op_find(
         mode=mode,
         graph=graph,
         rerank=rerank,
+        rerank_max_candidates=rerank_max_candidates,
         # rerank=None uses the mode/device-gated auto policy. Explicit
         # true/false from the caller always wins over auto.
         auto_rerank=auto_rerank,
@@ -1288,7 +1359,11 @@ def op_add(
 
 
 def op_audit(
-    vault_root: Path,categories: list[str] | None = None) -> dict:
+    vault_root: Path,
+    categories: list[str] | None = None,
+    detail: Literal["actionable", "full"] = "actionable",
+    legacy_sample_limit: _AuditSampleLimit = audit_module.DEFAULT_LEGACY_SAMPLE_LIMIT,
+) -> dict:
     """Audit / lint / health-check the Knowledge Base: find orphans, broken wikilinks, supersession gaps, stale unprocessed sources, and stale-review candidates. Read-only.
 
     Returns a structured report Claude can read to propose follow-up
@@ -1333,13 +1408,25 @@ def op_audit(
     Args:
         categories: Optional filter; only run these checks. Each must be
             one of the categories above. Omit to run all.
+        detail: `actionable` (default) groups grandfathered relation debt and
+            prioritizes current work; `full` returns every raw finding.
+        legacy_sample_limit: Number of deterministic legacy-backlog samples in
+            actionable output. Integer from 0 to 50; default 5.
 
     Returns:
-        {findings: [{category, severity, path, detail, proposed_fix}],
-         summary: {category: count}}.
+        Action-first findings, summary, grouped legacy backlog, and explicit
+        presentation/truncation facts. Full detail preserves raw findings.
     """
-    report = audit_module.audit(vault_root, categories=categories)
-    return report.as_dict()
+    audit_module.validate_presentation_controls(detail, legacy_sample_limit)
+    report = audit_module.audit(
+        vault_root,
+        categories=categories,
+        semantic_detail=detail,
+    )
+    return report.as_public_dict(
+        detail=detail,
+        legacy_sample_limit=legacy_sample_limit,
+    )
 
 
 def op_attention(
@@ -1740,7 +1827,7 @@ def op_edit(
     replace_all: bool = False,
     heading: str | None = None,
     section_position: str = "append",
-    edits: list[dict] | None = None,
+    edits: list[multi_edit_module.EditItem] | None = None,
     row_key: str | None = None,
     take: str | None = None,
     overwrite: bool = False,
@@ -1749,6 +1836,10 @@ def op_edit(
     allow_curated: bool = False,
     expected_hash: str | None = None,
     validate_only: bool = False,
+    transition_token: str | None = None,
+    relation_disposition: str | None = None,
+    relation_review_hash: str | None = None,
+    relation_review_reason: str | None = None,
 ) -> dict:
     """Lightweight in-place edit of a page (body, tags, a surgical snippet,
     a batch, an opinion row, or one frontmatter field).
@@ -1839,6 +1930,11 @@ def op_edit(
             `old_string`. Reports how many rows would be hit instead of
             committing — use it before a `replace_all` to avoid an
             ambiguous match silently touching more rows than intended.
+        transition_token: Exact semantic transition token returned by a
+            validate-only preflight.
+        relation_disposition: Reviewed relation outcome for the commit.
+        relation_review_hash: Transition hash covered by reviewed-none.
+        relation_review_reason: Audit reason for reviewed-none.
 
     Returns:
         Shape varies by mode (take-row -> {path, row, warnings};
@@ -1871,8 +1967,16 @@ def op_edit(
             result = multi_edit_module.multi_edit(
                 vault_root, path=path, why=why, edits=edits,
                 expected_hash=expected_hash, validate_only=validate_only,
+                semantic_transition_token=transition_token,
+                relation_disposition=relation_disposition,
+                relation_review_hash=relation_review_hash,
+                relation_review_reason=relation_review_reason,
             )
         elif row_key is not None:
+            if validate_only:
+                raise ValueError(
+                    "INVALID_EDIT: validate_only is not supported for row_key mode"
+                )
             if take is None:
                 raise ValueError("INVALID_EDIT: row_key mode requires `take`")
             result = set_take_module.set_take(
@@ -1882,7 +1986,11 @@ def op_edit(
         elif field is not None:
             result = set_frontmatter_field_module.set_frontmatter_field(
                 vault_root, path=path, field=field, value=value,
-                why=why, allow_curated=allow_curated,
+                why=why, allow_curated=allow_curated, validate_only=validate_only,
+                semantic_transition_token=transition_token,
+                relation_disposition=relation_disposition,
+                relation_review_hash=relation_review_hash,
+                relation_review_reason=relation_review_reason,
             )
         else:
             result = edit_module.edit(
@@ -1891,6 +1999,10 @@ def op_edit(
                 replace_all=replace_all, heading=heading,
                 section_position=section_position,
                 expected_hash=expected_hash, validate_only=validate_only,
+                semantic_transition_token=transition_token,
+                relation_disposition=relation_disposition,
+                relation_review_hash=relation_review_hash,
+                relation_review_reason=relation_review_reason,
             )
     except (
         edit_module.EditError,
@@ -2034,7 +2146,7 @@ def op_replace(
 
 def op_link(
     vault_root: Path,
-    entity_type: str,
+    entity_type: EntityTypeId,
     name: str,
     summary: str,
     slug: str | None = None,
@@ -2054,20 +2166,14 @@ def op_link(
 ) -> dict:
     """Create a typed entity under Entities/<Folder>/<Name>.md.
 
-    Entities are the typed nodes of the KB graph — people, concepts,
-    libraries, decisions. Name them after the thing they are (Title Case,
-    not slugified): `Ada Lovelace`, `Agentic RAG`, `pgvector`.
+    Entities are typed nodes of the KB graph. The stable entity registry returned
+    by `bootstrap` is authoritative for IDs, labels, folders, aliases, and capture
+    guidance. Name entities after the thing they are (Title Case, not slugified):
+    `Ada Lovelace`, `Agentic RAG`, `pgvector`.
 
-    Four entity types with conditional frontmatter:
-    - `person`   → Entities/People/. Optional: `affiliation`, `relationship`.
-    - `concept`  → Entities/Concepts/. Optional: `domain` (e.g.
-      "retrieval", "workflow", "infrastructure").
-    - `library`  → Entities/Libraries/. Optional: `language`, `repo`,
-      `license`, `used_in` (list of projects).
-    - `decision` → Entities/Decisions/. Optional: `decided` (YYYY-MM-DD),
-      `project` (project key — any slug; unknown keys auto-register on first
-      use, same as `note`), `decision_status` ∈ {proposed, accepted,
-      superseded}.
+    Conditional frontmatter is accepted only when the selected registry kind
+    supports it: `affiliation`/`relationship`, `domain`, software metadata, or
+    decision metadata. Unknown fields and unregistered kinds are refused.
 
     v1 is create-only. If the entity file already exists, returns
     ENTITY_EXISTS — use `replace` to supersede instead. Sub-folder index
@@ -2075,7 +2181,7 @@ def op_link(
     reconcile via desk audit.
 
     Args:
-        entity_type: One of person, concept, library, decision.
+        entity_type: Stable ID returned by bootstrap.entity_registry.
         name: Unicode display name stored in frontmatter and the H1.
         slug: Optional lowercase ASCII kebab-case filename component.
         summary: One-paragraph description for the `## Summary` section.
@@ -2092,7 +2198,8 @@ def op_link(
 
     Errors:
         INVALID_LINK (bad entity_type, decision_status, missing required);
-        ENTITY_EXISTS (use `replace` instead).
+        ENTITY_EXISTS (update/link the returned active entity instead);
+        ENTITY_AMBIGUOUS (reconcile the returned bounded candidates first).
     """
     try:
         result = link_module.link(
@@ -2116,9 +2223,10 @@ def op_link(
             decision_status=decision_status,
         )
     except link_module.LinkError as e:
-        raise ValueError(
-            f"{e.code}: {e.reason} (missing: {e.missing})"
-        ) from e
+        suffix = f" (missing: {e.missing})"
+        if e.candidates:
+            suffix += f" (candidates: {e.candidates})"
+        raise ValueError(f"{e.code}: {e.reason}{suffix}") from e
     return result.as_dict()
 
 
@@ -3054,6 +3162,7 @@ def op_ask_memory(
     deep: bool = False,
     graph: bool = True,
     rerank: bool | None = None,
+    rerank_max_candidates: _RerankCandidateLimit | None = None,
     prefer_compiled: bool = True,
     prefer_active: bool = True,
     prefer_used: bool = False,
@@ -3089,6 +3198,8 @@ def op_ask_memory(
         deep: Return a packed context for reasoning.
         graph: Include graph-neighbour ranking in hybrid/vector search.
         rerank: Force or suppress cross-encoder reranking; omit for mode-aware auto.
+        rerank_max_candidates: Bound scorer input to an integer from the effective
+            result limit through 300; omission preserves the existing prefix.
         prefer_compiled: Prefer compiled notes over raw sources by default.
         prefer_active: Prefer active conclusions over superseded ones.
         prefer_used: Apply usage boost when explicitly requested.
@@ -3114,6 +3225,7 @@ def op_ask_memory(
         mode=mode,
         graph=graph,
         rerank=rerank,
+        rerank_max_candidates=rerank_max_candidates,
         prefer_compiled=prefer_compiled,
         prefer_active=prefer_active,
         prefer_used=prefer_used,
@@ -3337,22 +3449,8 @@ def op_edit_memory(
     vault_root: Path,
     path: str,
     why: str,
-    new_body: str | None = None,
-    tags: list[str] | None = None,
-    old_string: str | None = None,
-    new_string: str | None = None,
-    replace_all: bool = False,
-    heading: str | None = None,
-    section_position: str = "append",
-    edits: list[dict] | None = None,
-    row_key: str | None = None,
-    take: str | None = None,
-    overwrite: bool = False,
-    field: str | None = None,
-    value: str | int | float | bool | list | dict | None = None,
-    allow_curated: bool = False,
-    expected_hash: str | None = None,
-    validate_only: bool = False,
+    operation: edit_operations_module.EditOperation = None,  # type: ignore[assignment]
+    **legacy: Any,
 ) -> dict:
     """Edit an existing memory page with an auditable reason.
 
@@ -3363,44 +3461,18 @@ def op_edit_memory(
     Args:
         path: Page to edit.
         why: One-line rationale recorded in the log.
-        new_body: Replace the whole markdown body.
-        tags: Replace tags.
-        old_string: Exact body snippet to replace.
-        new_string: Replacement text.
-        replace_all: Replace every occurrence of old_string.
-        heading: Section heading for section-targeted edits.
-        section_position: append, prepend, or replace.
-        edits: Batch edits, each with old_string/new_string/replace_all.
-        row_key: Opinion-row key to fill.
-        take: Opinion-row text.
-        overwrite: Allow replacing an existing take.
-        field: Frontmatter field to set.
-        value: New frontmatter value.
-        allow_curated: Permit frontmatter patch under curated trees.
-        expected_hash: Refuse write if content changed since read.
-        validate_only: Preview a surgical match without writing.
+        operation: Required nested edit selected by `kind`. The seven supported
+            kinds expose only fields their underlying edit leaf enforces.
+
+    The previous flat keyword arguments remain accepted by direct Python/runtime
+    callers for one compatibility release, but are deprecated and intentionally
+    absent from public discovery schemas.
     """
-    return op_edit(
-        vault_root,
-        path=path,
-        why=why,
-        new_body=new_body,
-        tags=tags,
-        old_string=old_string,
-        new_string=new_string,
-        replace_all=replace_all,
-        heading=heading,
-        section_position=section_position,
-        edits=edits,
-        row_key=row_key,
-        take=take,
-        overwrite=overwrite,
-        field=field,
-        value=value,
-        allow_curated=allow_curated,
-        expected_hash=expected_hash,
-        validate_only=validate_only,
-    )
+    arguments: dict[str, Any] = {"path": path, "why": why, **legacy}
+    if operation is not None:
+        arguments["operation"] = operation
+    normalized = edit_operations_module.normalize_edit_arguments(arguments)
+    return op_edit(vault_root, **normalized)
 
 
 def op_observe_memory(
@@ -3906,6 +3978,8 @@ def op_review_memory(
     path: str | None = None,
     state: str = "open",
     ref: str | None = None,
+    detail: Literal["actionable", "full"] = "actionable",
+    legacy_sample_limit: _AuditSampleLimit = audit_module.DEFAULT_LEGACY_SAMPLE_LIMIT,
 ) -> dict:
     """Review memory health, provenance, drift, or source backlog.
 
@@ -3936,6 +4010,8 @@ def op_review_memory(
         path: Restrict provenance scan to one path.
         state: For attention/activation, open (default), all, snoozed, or dismissed.
         ref: Stable `exomem://review/<id>` reference for item mode.
+        detail: Audit output detail: actionable (default) or full.
+        legacy_sample_limit: Audit legacy-backlog sample count, from 0 to 50.
     """
     if path:
         path = _resolve_memory_identifier(vault_root, path)
@@ -3953,7 +4029,12 @@ def op_review_memory(
             raise ValueError("INVALID_REVIEW: item mode requires `ref`")
         return attention_module.item_by_ref(vault_root, ref).as_dict()
     if mode == "audit":
-        return op_audit(vault_root, categories=categories)
+        return op_audit(
+            vault_root,
+            categories=categories,
+            detail=detail,
+            legacy_sample_limit=legacy_sample_limit,
+        )
     if mode == "stale":
         return op_attention(
             vault_root, categories=["stale_review"], limit=limit, state=state
@@ -4141,7 +4222,7 @@ def op_connect_memory(
     max_edges: int = 80,
     traversal_profile: str | None = None,
     max_body_chars: int = 3000,
-    entity_type: str | None = None,
+    entity_type: EntityTypeId | None = None,
     name: str | None = None,
     slug: str | None = None,
     summary: str | None = None,
@@ -4172,7 +4253,7 @@ def op_connect_memory(
 
     Args:
         operation: context, suggest-links, suggest-relations, graph-context,
-            inbound-links, create-entity, or accept-relation.
+            inbound-links, resolve-entity, create-entity, or accept-relation.
         path: Existing page path for link, graph, or relation context.
         target: Target path for inbound-links; defaults to path.
         query: Query seed for graph-context.
@@ -4293,6 +4374,12 @@ def op_connect_memory(
         if not target_path:
             raise ValueError("INVALID_TARGET: inbound-links requires `target` or `path`")
         return op_list_inbound_links(vault_root, target=target_path)
+    if operation == "resolve-entity":
+        if not name:
+            raise ValueError("INVALID_TARGET: resolve-entity requires `name`")
+        return entity_candidates_module.resolve_entity_candidate(
+            vault_root, name=name, entity_type=entity_type, limit=limit
+        )
     if operation == "create-entity":
         missing = [
             field
@@ -4323,7 +4410,7 @@ def op_connect_memory(
         )
     raise ValueError(
         "INVALID_MODE: connect_memory operation must be context, suggest-links, "
-        "suggest-relations, graph-context, inbound-links, create-entity, or "
+        "suggest-relations, graph-context, inbound-links, resolve-entity, create-entity, or "
         "accept-relation"
     )
 
@@ -4553,6 +4640,8 @@ def op_maintain_memory(
     categories: list[str] | None = None,
     dry_run: bool | None = None,
     rebuild_embeddings: bool = False,
+    detail: Literal["actionable", "full"] = "actionable",
+    legacy_sample_limit: _AuditSampleLimit = audit_module.DEFAULT_LEGACY_SAMPLE_LIMIT,
 ) -> dict:
     """Maintain vault health with explicit write-capable modes.
 
@@ -4570,9 +4659,16 @@ def op_maintain_memory(
             fix/backfill-ids (safety net) and false for reconcile (matches
             `op_reconcile`'s own default). Pass explicitly to override either way.
         rebuild_embeddings: For fix mode, rebuild embeddings when explicitly requested.
+        detail: Audit output detail: actionable (default) or full.
+        legacy_sample_limit: Audit legacy-backlog sample count, from 0 to 50.
     """
     if mode == "audit":
-        return op_audit(vault_root, categories=categories)
+        return op_audit(
+            vault_root,
+            categories=categories,
+            detail=detail,
+            legacy_sample_limit=legacy_sample_limit,
+        )
     if mode == "fix":
         return op_audit_fix(
             vault_root,
@@ -5075,7 +5171,14 @@ def note_description(project_keys_hint: str) -> str:
 # --------------------------------------------------------------------------- #
 # (name, leaf, tier, cli_writes, needs_schema, cli_positional, surfaces)
 _CONNECT_MEMORY_READ_ONLY_OPERATIONS = frozenset(
-    {"suggest-links", "suggest-relations", "context", "graph-context", "inbound-links"}
+    {
+        "suggest-links",
+        "suggest-relations",
+        "context",
+        "graph-context",
+        "inbound-links",
+        "resolve-entity",
+    }
 )
 _ADOPT_VAULT_READ_ONLY_MODES = frozenset({"scan-only"})
 _ADOPTION_STUDIO_READ_ONLY_ACTIONS = frozenset({"status", "work-item"})
@@ -5131,6 +5234,27 @@ def invocation_is_read_only(command: Command, kwargs: dict[str, Any]) -> bool:
             isinstance(operation, str)
             and operation in _OBSERVE_MEMORY_READ_ONLY_OPERATIONS
         )
+    if command.name == "maintain_memory":
+        mode = _resolved_invocation_selector(command, kwargs, "mode")
+        return mode == "audit"
+    if command.name == "edit_memory":
+        if kwargs.get("validate_only") is True:
+            return True
+        operation = kwargs.get("operation")
+        if isinstance(operation, dict):
+            return (
+                operation.get("kind")
+                in {"replace_string", "batch_replace", "patch_frontmatter"}
+                and operation.get("validate_only") is True
+            )
+        return False
+    if command.name == "remember":
+        # A validate-only remember builds and returns an immutable draft and
+        # writes nothing (note() returns its preflight before any commit), so
+        # it needs neither writer authority nor the mutation boundary. Any
+        # inconsistency from reading beside a concurrent write is caught by
+        # the fresh under-lock re-validation at commit time.
+        return kwargs.get("validate_only") is True
     return False
 
 
@@ -5622,6 +5746,32 @@ def _build_product_commands() -> tuple[Command, ...]:
         skip = 2 if needs_schema else 1
         desc = leaf.__doc__ or ""
         params = _derive_params(leaf, skip=skip, positional=positional)
+        if name == "edit_memory":
+            params = tuple(
+                Param(
+                    name=param.name,
+                    type=param.type,
+                    required=True if param.name == "operation" else param.required,
+                    help=param.help,
+                    cli_positional=param.cli_positional,
+                    choices=param.choices,
+                )
+                for param in params
+                if param.name in {"path", "why", "operation"}
+            )
+        if writes:
+            params = (
+                *params,
+                Param(
+                    name="response_detail",
+                    type="str",
+                    help=(
+                        "Successful committed mutation detail: compact (default), "
+                        "full diagnostics, or legacy raw leaf result."
+                    ),
+                    choices=("compact", "full", "legacy"),
+                ),
+            )
         if name == "remember":
             generic_hint = "(any slug; unknown keys auto-register on first use)"
             desc = desc.replace("__PROJECT_KEYS_HINT__", generic_hint)
@@ -5650,6 +5800,7 @@ def _build_product_commands() -> tuple[Command, ...]:
                 product_actions=tuple(meta.get("actions", ())),
                 first_run_safe=bool(meta.get("first_run_safe", False)),
                 routes=tuple(routes),
+                response_detail=writes,
             )
         )
     return tuple(cmds)
@@ -5702,16 +5853,138 @@ def validate_product_registry() -> dict:
 validate_product_registry()
 
 
-def product_tool_catalog() -> dict:
+def _active_bootstrap_descriptor() -> capabilities_module.ActiveSurfaceDescriptor:
+    """Resolve trusted adapter context or the direct-Python compatibility default."""
+
+    active = capabilities_module.current_active_surface()
+    if active is not None:
+        return active
+    return capabilities_module.ActiveSurfaceDescriptor(
+        surface="mcp",
+        profile="canonical-full-product",
+        tier2_enabled=True,
+        product_commands=tuple(
+            command.name
+            for command in product_commands_for("mcp", expose_tier2=True)
+        ),
+    )
+
+
+def product_tool_catalog(
+    available_tools: frozenset[str] | set[str] | None = None,
+    *,
+    callable_tools: frozenset[str] | set[str] | None = None,
+) -> dict:
     """Registry-derived product surface: primary tools first, advanced tools visible."""
-    primary = [c.name for c in PRODUCT_COMMANDS if c.product_surface == "primary"]
-    advanced = [c.name for c in PRODUCT_COMMANDS if c.product_surface != "primary"]
+    selected = tuple(
+        command
+        for command in PRODUCT_COMMANDS
+        if available_tools is None or command.name in available_tools
+    )
+    primary = [c.name for c in selected if c.product_surface == "primary"]
+    advanced = [c.name for c in selected if c.product_surface != "primary"]
     return {
         "primary": primary,
         "advanced": advanced,
-        "first_run_safe": [c.name for c in PRODUCT_COMMANDS if c.first_run_safe],
-        "routes": {c.name: list(c.routes) for c in PRODUCT_COMMANDS},
+        "first_run_safe": [c.name for c in selected if c.first_run_safe],
+        "routes": {
+            c.name: [
+                route
+                for route in c.routes
+                if callable_tools is None or route in callable_tools
+            ]
+            for c in selected
+        },
     }
+
+
+_DROP_BOOTSTRAP_VALUE = object()
+
+
+def _bootstrap_known_callable_names() -> frozenset[str]:
+    return frozenset(
+        {
+            *PRODUCT_PUBLIC_NAMES,
+            *(command.name for command in COMMANDS),
+            *PRODUCT_ROUTE_HELPERS,
+            *simple_action_names(),
+        }
+    )
+
+
+def _mentions_unavailable_callable(
+    value: str, unavailable: frozenset[str]
+) -> bool:
+    for name in unavailable:
+        escaped = re.escape(name)
+        if "_" in name or name in PRODUCT_PUBLIC_NAMES:
+            if re.search(rf"(?<!\w){escaped}(?!\w)", value):
+                return True
+        elif re.search(rf"(?<!\w){escaped}\s*\(", value):
+            return True
+    return False
+
+
+def _filter_bootstrap_payload(
+    payload: dict,
+    descriptor: capabilities_module.ActiveSurfaceDescriptor,
+) -> dict:
+    """Remove recommendations that the trusted active surface cannot execute."""
+
+    unavailable = _bootstrap_known_callable_names() - descriptor.callable_commands
+    unavailable_products = frozenset(PRODUCT_PUBLIC_NAMES) - frozenset(
+        descriptor.product_commands
+    )
+    if not unavailable and not unavailable_products:
+        return payload
+
+    def filter_value(value: object) -> object:
+        if isinstance(value, str):
+            if value in unavailable_products or _mentions_unavailable_callable(
+                value, unavailable
+            ):
+                return _DROP_BOOTSTRAP_VALUE
+            return value
+        if isinstance(value, (list, tuple)):
+            filtered = []
+            for item in value:
+                candidate = filter_value(item)
+                if candidate is not _DROP_BOOTSTRAP_VALUE:
+                    filtered.append(candidate)
+            return tuple(filtered) if isinstance(value, tuple) else filtered
+        if isinstance(value, dict):
+            advertised_tool = value.get("tool")
+            if isinstance(advertised_tool, str) and advertised_tool in unavailable:
+                return _DROP_BOOTSTRAP_VALUE
+            call = value.get("call")
+            if isinstance(call, str) and _mentions_unavailable_callable(
+                call, unavailable
+            ):
+                return _DROP_BOOTSTRAP_VALUE
+            route = value.get("route")
+            if isinstance(route, str) and route in unavailable:
+                return _DROP_BOOTSTRAP_VALUE
+
+            filtered_dict: dict = {}
+            for child_key, child in value.items():
+                if child_key in unavailable_products:
+                    continue
+                candidate = filter_value(child)
+                if candidate is _DROP_BOOTSTRAP_VALUE:
+                    if child_key == "route":
+                        filtered_dict["available"] = False
+                        filtered_dict["unavailable_reason"] = (
+                            "No route for this action is exported by the active surface."
+                        )
+                    continue
+                filtered_dict[child_key] = candidate
+            return filtered_dict
+        return value
+
+    filtered = filter_value(payload)
+    assert isinstance(filtered, dict)
+    return filtered
+
 
 def _catalog_route_tools(entry: dict) -> set[str]:
     tools: set[str] = set()
@@ -5729,7 +6002,11 @@ def simple_action_names() -> tuple[str, ...]:
     return _SIMPLE_ACTIONS
 
 
-def simple_action_catalog(selected_packs: dict | None = None) -> dict:
+def simple_action_catalog(
+    selected_packs: dict | None = None,
+    *,
+    available_tools: frozenset[str] | set[str] | None = None,
+) -> dict:
     """Product action map over product commands; no duplicate command logic."""
     known_commands = {command.name for command in PRODUCT_COMMANDS} | {"doctor"}
     out: dict[str, dict] = {}
@@ -5742,10 +6019,21 @@ def simple_action_catalog(selected_packs: dict | None = None) -> dict:
             )
         out[action] = {
             "intent": definition["intent"],
-            "route": definition["route"],
             "safety": definition["safety"],
-            "advanced": definition.get("advanced", []),
+            "advanced": [
+                tool
+                for tool in definition.get("advanced", [])
+                if available_tools is None or tool in available_tools
+            ],
         }
+        primary_route = definition["route"]
+        if available_tools is None or primary_route["tool"] in available_tools:
+            out[action]["route"] = primary_route
+        else:
+            out[action]["available"] = False
+            out[action]["unavailable_reason"] = (
+                "No route for this action is exported by the active surface."
+            )
         for key in (
             "deep_route",
             "evidence_route",
@@ -5754,7 +6042,10 @@ def simple_action_catalog(selected_packs: dict | None = None) -> dict:
             "fix_route",
             "reconcile_route",
         ):
-            if key in definition:
+            if key in definition and (
+                available_tools is None
+                or definition[key]["tool"] in available_tools
+            ):
                 out[action][key] = definition[key]
 
     packs = (selected_packs or {}).get("packs") or []
@@ -5778,13 +6069,19 @@ def simple_action_catalog(selected_packs: dict | None = None) -> dict:
     return out
 
 
-def product_front_door_catalog(selected_packs: dict | None = None) -> dict:
+def product_front_door_catalog(
+    selected_packs: dict | None = None,
+    *,
+    available_tools: frozenset[str] | set[str] | None = None,
+) -> dict:
     """Map simple product verbs to the typed tools that enforce governance."""
     out = {
         action: {"primary_tools": [], "advanced_tools": []}
         for action in _PRODUCT_ACTIONS
     }
     for command in PRODUCT_COMMANDS:
+        if available_tools is not None and command.name not in available_tools:
+            continue
         bucket = "primary_tools" if command.product_surface == "primary" else "advanced_tools"
         for action in command.product_actions:
             if action in out:

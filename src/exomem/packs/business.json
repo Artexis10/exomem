@@ -13,6 +13,7 @@
   ],
   "default_entity_types": [
     "person",
+    "organization",
     "concept",
     "decision"
   ],
@@ -29,6 +30,7 @@
     "Knowledge Base/Evidence/Business",
     "Knowledge Base/Notes/Research/Business",
     "Knowledge Base/Entities/People",
+    "Knowledge Base/Entities/Organizations",
     "Knowledge Base/Entities/Decisions"
   ],
   "suggested_workflows": [

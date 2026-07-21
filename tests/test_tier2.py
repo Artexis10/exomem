@@ -613,6 +613,25 @@ def test_set_frontmatter_field_changes_value_and_bumps_updated(vault: Path) -> N
     assert result.field == "status"
 
 
+def test_set_frontmatter_field_accepts_crlf_frontmatter(vault: Path) -> None:
+    path = "Knowledge Base/Notes/Insights/progressive-disclosure-without-mode-fragmentation.md"
+    absolute = vault / path
+    absolute.write_bytes(absolute.read_bytes().replace(b"\n", b"\r\n"))
+
+    result = set_fm_module.set_frontmatter_field(
+        vault,
+        path=path,
+        field="status",
+        value="active",
+        why="reaffirm active on a Windows-authored page",
+        today=TODAY,
+    )
+
+    assert result.field == "status"
+    assert "status: active" in absolute.read_text(encoding="utf-8")
+    assert "updated: 2026-05-24" in absolute.read_text(encoding="utf-8")
+
+
 def test_set_frontmatter_field_requires_why(vault: Path) -> None:
     path = "Knowledge Base/Notes/Insights/progressive-disclosure-without-mode-fragmentation.md"
     with pytest.raises(set_fm_module.SetFrontmatterError) as exc:

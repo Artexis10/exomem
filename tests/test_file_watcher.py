@@ -147,9 +147,11 @@ def test_supported_audio_event_reconciles_under_writer_authority(
 
     class Manager:
         @contextmanager
-        def mutation_guard(self, root: Path):
+        def mutation_guard(self, root: Path, **metadata):
             nonlocal depth
             assert root == vault
+            assert metadata["operation"] == "background_media_event"
+            assert metadata["holder_kind"] == "background"
             depth += 1
             try:
                 yield
@@ -707,7 +709,7 @@ def test_periodic_reconcile_discovers_missed_media_without_text_reembed(
 ) -> None:
     discovery_calls: list[tuple[Path, int]] = []
 
-    def reconcile_all_media(root: Path, *, limit: int) -> None:
+    def reconcile_all_media(root: Path, *, limit: int, reconcile_one=None) -> None:
         discovery_calls.append((root, limit))
 
     monkeypatch.setattr(
@@ -747,9 +749,11 @@ def test_periodic_media_reconcile_runs_under_writer_authority(
 
     class Manager:
         @contextmanager
-        def mutation_guard(self, root: Path):
+        def mutation_guard(self, root: Path, **metadata):
             nonlocal depth
             assert root == vault
+            assert metadata["operation"] == "background_media_reconcile"
+            assert metadata["holder_kind"] == "background"
             depth += 1
             try:
                 yield
@@ -757,9 +761,18 @@ def test_periodic_media_reconcile_runs_under_writer_authority(
                 depth -= 1
 
     monkeypatch.setattr(writer_lease, "get_manager", lambda: Manager())
+    def reconcile_all_media(_root: Path, *, limit: int, reconcile_one=None) -> int:
+        assert limit > 0
+        assert depth == 0
+        assert reconcile_one is not None
+        reconcile_one(vault / "periodic.m4a")
+        assert depth == 0
+        return 1
+
+    monkeypatch.setattr(media_processing, "reconcile_all_media", reconcile_all_media)
     monkeypatch.setattr(
         media_processing,
-        "reconcile_all_media",
+        "reconcile_media",
         lambda *_a, **_kw: depth == 1
         or pytest.fail("periodic media reconciliation escaped mutation guard"),
     )
@@ -770,6 +783,56 @@ def test_periodic_media_reconcile_runs_under_writer_authority(
 
     assert depth == 0
     assert calls["upsert"] == []
+
+
+def test_periodic_media_reconcile_yields_mutation_boundary_between_artifacts(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from contextlib import contextmanager
+
+    from exomem import writer_lease
+
+    depth = 0
+    guard_entries = 0
+
+    class Manager:
+        @contextmanager
+        def mutation_guard(self, root: Path, **metadata):
+            nonlocal depth, guard_entries
+            assert root == vault
+            assert metadata["operation"] == "background_media_reconcile"
+            assert metadata["holder_kind"] == "background"
+            guard_entries += 1
+            depth += 1
+            try:
+                yield
+            finally:
+                depth -= 1
+
+    monkeypatch.setattr(writer_lease, "get_manager", lambda: Manager())
+
+    def reconcile_all_media(root: Path, *, limit: int, reconcile_one=None) -> int:
+        assert root == vault
+        assert limit > 0
+        assert reconcile_one is not None
+        for index in range(3):
+            assert depth == 0
+            reconcile_one(root / f"artifact-{index}.m4a")
+            assert depth == 0
+        return 3
+
+    monkeypatch.setattr(media_processing, "reconcile_all_media", reconcile_all_media)
+    monkeypatch.setattr(
+        media_processing,
+        "reconcile_media",
+        lambda *_a, **_kw: depth == 1
+        or pytest.fail("artifact reconciliation escaped its mutation boundary"),
+    )
+    watcher = file_watcher.FileWatcher(vault)
+    watcher._reconcile_once(seed=False)
+
+    assert depth == 0
+    assert guard_entries == 3
 
 
 def test_reconcile_delete_routes_to_delete_after_remove(

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import secrets
@@ -15,8 +16,9 @@ from starlette.concurrency import run_in_threadpool
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
-from . import cf_access, cli_ops, upload_tokens
+from . import capabilities, cf_access, cli_ops, edit_operations, upload_tokens
 from . import commands as commands_module
+from .command_surface import canonical_request_id
 from .server_transfer import TransferConfig
 
 
@@ -62,6 +64,26 @@ _OPENAPI_OUTCOME_SCHEMA = {
     ],
     "additionalProperties": False,
 }
+_OPENAPI_MUTATION_HOLDER_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "state": {"const": "held"},
+        "request_id": {"type": "string"},
+        "operation": {"type": "string"},
+        "holder_kind": {"type": "string"},
+        "age_seconds": {"type": "number", "minimum": 0},
+        "overdue": {"type": "boolean"},
+    },
+    "required": [
+        "state",
+        "request_id",
+        "operation",
+        "holder_kind",
+        "age_seconds",
+        "overdue",
+    ],
+    "additionalProperties": False,
+}
 _OPENAPI_ERROR_SCHEMA = {
     "type": "object",
     "properties": {
@@ -69,6 +91,15 @@ _OPENAPI_ERROR_SCHEMA = {
         "message": {"type": "string"},
         "remediation": {"type": ["string", "null"]},
         "outcome": _OPENAPI_OUTCOME_SCHEMA,
+        "ok": {"type": "boolean"},
+        "error_code": {"type": "string"},
+        "status": {"type": "string"},
+        "committed": {"type": ["boolean", "null"]},
+        "retry_after_ms": {"type": "integer", "minimum": 0},
+        "holder": _OPENAPI_MUTATION_HOLDER_SCHEMA,
+        "request_id": {"type": "string", "format": "uuid"},
+        "receipt_id": {"type": ["string", "null"]},
+        "idempotency_key": {"type": "string"},
     },
     "required": ["code", "message", "remediation"],
     "additionalProperties": False,
@@ -83,7 +114,9 @@ _OPENAPI_ERROR_ENVELOPE_SCHEMA = {
     "additionalProperties": False,
 }
 _OPENAPI_ERROR_RESPONSE = {
-    "description": "{success: false, error: {code, message, remediation, outcome?}}",
+    "description": (
+        "{success: false, error: {code, message, remediation, terminal-state fields?}}"
+    ),
     "content": {
         "application/json": {"schema": {"$ref": "#/components/schemas/ErrorEnvelope"}}
     },
@@ -133,25 +166,36 @@ def register_rest_facade(
     rest_enabled = rest_api_key is not None
     expose_tier2 = not os.environ.get("EXOMEM_DISABLE_TIER2")
     rest_commands = commands_module.product_commands_for("rest", expose_tier2=expose_tier2)
+    surface_descriptor = capabilities.ActiveSurfaceDescriptor(
+        surface="rest",
+        profile="openapi",
+        tier2_enabled=expose_tier2,
+        product_commands=tuple(command.name for command in rest_commands),
+    )
 
-    def _rest_authorized(request: Request) -> bool:
+    def _rest_principal(request: Request) -> tuple[bool, str | None]:
         if rest_api_key is not None:
             header = request.headers.get("authorization", "")
             if header.startswith("Bearer "):
                 presented = header[len("Bearer ") :].strip()
                 if secrets.compare_digest(presented, rest_api_key):
-                    return True
+                    return True, None
                 if upload_tokens.verify(presented, rest_api_key, scope="rest"):
-                    return True
+                    return True, None
         if transfer_config.cf_jwks is not None:
-            if cf_access.verify(
+            claims = cf_access.verified_claims(
                 request.headers.get("cf-access-jwt-assertion"),
                 jwks_client=transfer_config.cf_jwks,
                 team_domain=transfer_config.cf_team,
                 audience=transfer_config.cf_aud,
-            ):
-                return True
-        return False
+            )
+            if claims is not None:
+                subject = str(claims.get("sub") or claims.get("email") or "").strip()
+                issuer = str(claims.get("iss") or "").strip()
+                if subject and issuer:
+                    digest = hashlib.sha256(f"{issuer}\0{subject}".encode()).hexdigest()
+                    return True, f"cf-access:{digest}"
+        return False, None
 
     def _rest_err(
         code: str, message: str, status: int, remediation: str | None = None
@@ -163,16 +207,23 @@ def register_rest_facade(
             status_code=status,
         )
 
-    def _rest_gate(request: Request) -> JSONResponse | None:
+    def _rest_gate(request: Request) -> tuple[JSONResponse | None, str | None]:
         if not rest_enabled:
-            return _rest_err(
-                "REST_DISABLED",
-                "REST API is off: set EXOMEM_REST_API_KEY to enable the /api/* facade",
-                503,
+            return (
+                _rest_err(
+                    "REST_DISABLED",
+                    "REST API is off: set EXOMEM_REST_API_KEY to enable the /api/* facade",
+                    503,
+                ),
+                None,
             )
-        if not _rest_authorized(request):
-            return _rest_err("UNAUTHORIZED", "missing or invalid REST API key", 401)
-        return None
+        authorized, principal_scope = _rest_principal(request)
+        if not authorized:
+            return (
+                _rest_err("UNAUTHORIZED", "missing or invalid REST API key", 401),
+                None,
+            )
+        return None, principal_scope
 
     async def _rest_body(request: Request) -> dict | None:
         try:
@@ -192,26 +243,35 @@ def register_rest_facade(
         async def _handler(
             request: Request, _cmd: commands_module.Command = cmd
         ) -> JSONResponse:
-            gate = _rest_gate(request)
+            gate, principal_scope = _rest_gate(request)
             if gate is not None:
                 return gate
             body = await _rest_body(request)
             if body is None:
                 return _rest_err("INVALID_BODY", "request body must be a JSON object", 400)
             try:
+                if _cmd.name == "edit_memory":
+                    body = edit_operations.normalize_edit_surface_arguments(body)
                 kwargs = cli_ops.coerce(
                     _cmd.params, body, guarded_fields=_cmd.guarded_fields, tool=_cmd.name
                 )
                 injected = (vault_root, source_schema) if _cmd.needs_schema else (vault_root,)
                 from .writer_lease import invoke_command
 
-                result = await run_in_threadpool(
-                    invoke_command,
-                    _cmd,
-                    *injected,
-                    idempotency_key=request.headers.get("idempotency-key"),
-                    **kwargs,
-                )
+                def invoke_bound() -> Any:
+                    with capabilities.active_surface(surface_descriptor):
+                        return invoke_command(
+                            _cmd,
+                            *injected,
+                            idempotency_key=request.headers.get("idempotency-key"),
+                            idempotency_principal_scope=principal_scope,
+                            mutation_request_id=canonical_request_id(
+                                request.headers.get("x-exomem-request-id")
+                            ),
+                            **kwargs,
+                        )
+
+                result = await run_in_threadpool(invoke_bound)
             except (cli_ops.OpError, ValueError, TypeError) as exc:
                 err = cli_ops.error_dict(exc)
                 return RestJSONResponse(
@@ -243,7 +303,11 @@ def register_rest_facade(
                 properties[prm.name] = schema_obj
                 if prm.required:
                     required.append(prm.name)
+            if cmd.name == "edit_memory":
+                properties["operation"] = edit_operations.public_edit_operation_schema()
             request_schema: dict = {"type": "object", "properties": properties}
+            if cmd.name == "edit_memory":
+                request_schema["additionalProperties"] = False
             if required:
                 request_schema["required"] = required
             summary = (cmd.description or cmd.name).strip().splitlines()[0]

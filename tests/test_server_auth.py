@@ -159,6 +159,11 @@ def test_build_oauth_constructs_durable_proxy_and_cache_disabled_verifier(
     assert isinstance(captured["session_authority"], SessionAuthority)
     assert captured["jwt_signing_key"] == "stable-signing-root"
     assert captured["upstream_revocation_endpoint"] is None
+    assert captured["valid_scopes"] == [
+        "offline_access",
+        "exomem:read",
+        "exomem:write",
+    ]
     verifier = captured["token_verifier"]
     assert isinstance(verifier, server_auth.SingleUserGitHubVerifier)
     assert verifier._allowed_login == "person"

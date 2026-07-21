@@ -155,6 +155,10 @@ def set_frontmatter_field(
         raise SetFrontmatterError(
             code="UNREADABLE", reason=f"could not safely read {rel_path}"
         ) from error
+    # Match the public read/edit contract: parse and render logical Markdown
+    # with LF newlines while semantic_writes retains the raw-byte PathGuard for
+    # the commit. Windows-authored CRLF must not make valid frontmatter unreadable.
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
     m = _FM_PATTERN.match(text)
     if not m:
         raise SetFrontmatterError(

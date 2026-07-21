@@ -23,17 +23,32 @@ no overlap and no silent gap).
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import shutil
 from pathlib import Path
 
 import pytest
+from starlette.testclient import TestClient
 
+from exomem import project_keys as project_keys_module
 from exomem import server as server_module
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 FIXTURE_PATH = REPO_ROOT / "tests" / "fixtures" / "mcp_tool_schemas.json"
+TOOL_SURFACE_CONTRACT_PATH = REPO_ROOT / "src" / "exomem" / "tool_surface_contract.json"
 FIXTURE_VAULT = REPO_ROOT / "tests" / "fixtures"
+DISCOVERY_FIELDS = (
+    "name",
+    "title",
+    "description",
+    "inputSchema",
+    "outputSchema",
+    "icons",
+    "annotations",
+    "meta",
+    "execution",
+)
 
 
 def _build_server(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
@@ -69,6 +84,25 @@ def _canonical(entry: dict) -> str:
     return json.dumps(entry, ensure_ascii=False, sort_keys=False, indent=2)
 
 
+def _tool_surface_sha256(mcp) -> tuple[str, int]:
+    tools = asyncio.run(mcp.list_tools())
+    surface = []
+    for tool in sorted(tools, key=lambda item: item.name):
+        wire = tool.to_mcp_tool().model_dump(mode="json")
+        assert tuple(wire) == DISCOVERY_FIELDS, (
+            "FastMCP discovery fields changed; deliberately review and fingerprint "
+            f"the new wire surface: {tuple(wire)}"
+        )
+        surface.append({field: wire[field] for field in DISCOVERY_FIELDS})
+    canonical = json.dumps(
+        surface,
+        ensure_ascii=False,
+        sort_keys=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest(), len(surface)
+
+
 def test_live_tools_match_committed_baseline(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -97,6 +131,59 @@ def test_live_tools_match_committed_baseline(
             "",
         )
     )
+
+
+def test_full_mcp_discovery_surface_matches_packaged_contract(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert TOOL_SURFACE_CONTRACT_PATH.is_file(), (
+        "missing packaged tool-surface contract; run scripts/dump-tool-schemas.py"
+    )
+    contract = json.loads(TOOL_SURFACE_CONTRACT_PATH.read_text(encoding="utf-8"))
+    digest, tool_count = _tool_surface_sha256(_build_server(monkeypatch, tmp_path))
+
+    assert contract["fields"] == list(DISCOVERY_FIELDS)
+    assert contract["tool_count"] == tool_count
+    assert contract["sha256"] == digest, (
+        "full MCP discovery surface drifted; run scripts/dump-tool-schemas.py, "
+        "then refresh and verify every registered external connector"
+    )
+
+
+def test_remember_discovery_schema_is_vault_invariant(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    mcp_before = _build_server(monkeypatch, tmp_path)
+    before = {
+        tool.name: tool.to_mcp_tool().model_dump(mode="json")
+        for tool in asyncio.run(mcp_before.list_tools())
+    }["remember"]
+
+    vault_root = tmp_path / "schema_vault"
+    project_keys_module.register_project_key(vault_root, "new-project-key")
+    mcp_after = server_module.build_server(require_auth=False)
+    after = {
+        tool.name: tool.to_mcp_tool().model_dump(mode="json")
+        for tool in asyncio.run(mcp_after.list_tools())
+    }["remember"]
+
+    assert after == before, (
+        "remember discovery changed when the vault gained a project key; dynamic "
+        "tool schemas silently invalidate hosted connector registrations"
+    )
+
+
+def test_readiness_fingerprint_matches_actual_registered_surface(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("EXOMEM_MCP_LEGACY_COMPAT", "1")
+    mcp = _build_server(monkeypatch, tmp_path)
+    actual_digest, _ = _tool_surface_sha256(mcp)
+
+    response = TestClient(mcp.http_app()).get("/health/ready")
+
+    assert response.status_code == 200
+    assert response.json()["mcp_tool_surface_sha256"] == actual_digest
 
 
 def test_hand_registered_exceptions_are_explicit(
@@ -146,9 +233,14 @@ def test_process_media_mcp_schema_annotations_and_leaf_result(
     schema = tool["inputSchema"]
     [command] = [cmd for cmd in commands_module.PRODUCT_COMMANDS if cmd.name == "process_media"]
     operation_param = next(param for param in command.params if param.name == "operation")
-    assert set(schema["properties"]) == {"path", "operation"}
+    assert set(schema["properties"]) == {"path", "operation", "response_detail"}
     assert schema.get("required", []) == []
     assert schema["properties"]["operation"]["enum"] == list(operation_param.choices)
+    assert schema["properties"]["response_detail"]["enum"] == [
+        "compact",
+        "full",
+        "legacy",
+    ]
     assert "governed" in schema["properties"]["path"]["description"].lower()
     assert "process" in schema["properties"]["operation"]["description"].lower()
     assert tool["annotations"] == {

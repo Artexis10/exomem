@@ -36,10 +36,23 @@ from key_value.aio.stores.filetree import FileTreeStore
 from .remote_oauth_storage import RemoteOAuthStorage
 
 _TOKEN_VERSION = "exo_s1"
+_ACCESS_TOKEN_VERSION = "exo_a2"
+_REFRESH_TOKEN_VERSION = "exo_r2"
 _SCHEMA_VERSION = 1
+_ACCESS_SCHEMA_VERSION = 2
+ACCESS_TOKEN_TTL_SECONDS = 3600
+REFRESH_RETRY_GRACE_SECONDS = 30
 _TOKEN_PATTERN = re.compile(
     rf"^{_TOKEN_VERSION}\.(?P<session_id>[A-Za-z0-9_-]{{16,64}})\."
     r"(?P<secret>[A-Za-z0-9_-]{43,128})$"
+)
+_ACCESS_TOKEN_PATTERN = re.compile(
+    rf"^{_ACCESS_TOKEN_VERSION}\.(?P<session_id>[A-Za-z0-9_-]{{16,64}})\."
+    r"(?P<secret>[A-Za-z0-9_-]{43,128})$"
+)
+_REFRESH_TOKEN_PATTERN = re.compile(
+    rf"^{_REFRESH_TOKEN_VERSION}\.(?P<family_id>[A-Za-z0-9_-]{{16,64}})\."
+    r"(?P<sequence>0|[1-9][0-9]{0,19})\.(?P<proof>[A-Za-z0-9_-]{43})$"
 )
 _GENERATION_KEY = "current"
 _MAX_ISSUANCE_ATTEMPTS = 8
@@ -49,9 +62,15 @@ class SessionStoreUnavailable(RuntimeError):
     """The authoritative session store or its cipher could not be used."""
 
 
+class InvalidRefreshToken(ValueError):
+    """A refresh token is malformed, inactive, mismatched, or replayed."""
+
+
 @dataclass(frozen=True)
 class SessionKeys:
     hmac_key: bytes = field(repr=False)
+    access_hmac_key: bytes = field(repr=False)
+    refresh_hmac_key: bytes = field(repr=False)
     storage_key: bytes = field(repr=False)
     fingerprint: str
 
@@ -70,6 +89,16 @@ def derive_session_keys(signing_root: str) -> SessionKeys:
         salt=b"exomem-session-proof-v1",
         info=b"opaque MCP bearer HMAC",
     )
+    access_hmac_key = _derive(
+        material,
+        salt=b"exomem-access-proof-v2",
+        info=b"opaque OAuth access bearer HMAC",
+    )
+    refresh_hmac_key = _derive(
+        material,
+        salt=b"exomem-refresh-proof-v2",
+        info=b"deterministic OAuth refresh rotation HMAC",
+    )
     storage_key = _derive(
         material,
         salt=b"exomem-session-storage-v1",
@@ -82,6 +111,8 @@ def derive_session_keys(signing_root: str) -> SessionKeys:
     )
     return SessionKeys(
         hmac_key=hmac_key,
+        access_hmac_key=access_hmac_key,
+        refresh_hmac_key=refresh_hmac_key,
         storage_key=storage_key,
         fingerprint=hashlib.sha256(fingerprint_key).hexdigest()[:16],
     )
@@ -127,6 +158,75 @@ class SessionTokenCodec:
         return hmac.compare_digest(calculated, expected_digest)
 
 
+class AccessTokenCodec(SessionTokenCodec):
+    """Issue and verify expiring v2 OAuth access tokens."""
+
+    def issue(self) -> tuple[str, str, str]:
+        session_id = secrets.token_urlsafe(18)
+        secret = secrets.token_urlsafe(32)
+        bearer = f"{_ACCESS_TOKEN_VERSION}.{session_id}.{secret}"
+        return bearer, session_id, self.digest(bearer)
+
+    @staticmethod
+    def parse(bearer: str) -> ParsedSessionToken | None:
+        if not isinstance(bearer, str):
+            return None
+        match = _ACCESS_TOKEN_PATTERN.fullmatch(bearer)
+        if match is None:
+            return None
+        return ParsedSessionToken(
+            session_id=match.group("session_id"),
+            secret=match.group("secret"),
+        )
+
+
+@dataclass(frozen=True)
+class ParsedRefreshToken:
+    family_id: str
+    sequence: int
+    proof: str = field(repr=False)
+
+
+class RefreshTokenCodec:
+    """Create deterministic, self-authenticating refresh descendants."""
+
+    def __init__(self, hmac_key: bytes):
+        if len(hmac_key) < 32:
+            raise ValueError("refresh HMAC key must contain at least 256 bits")
+        self._hmac_key = hmac_key
+
+    def issue(self) -> tuple[str, str]:
+        family_id = secrets.token_urlsafe(18)
+        return self.token_for(family_id, 0), family_id
+
+    def token_for(self, family_id: str, sequence: int) -> str:
+        if not re.fullmatch(r"[A-Za-z0-9_-]{16,64}", family_id) or sequence < 0:
+            raise ValueError("invalid refresh family or sequence")
+        prefix = f"{_REFRESH_TOKEN_VERSION}.{family_id}.{sequence}"
+        proof = base64.urlsafe_b64encode(
+            hmac.new(self._hmac_key, prefix.encode("ascii"), hashlib.sha256).digest()
+        ).decode("ascii").rstrip("=")
+        return f"{prefix}.{proof}"
+
+    def parse(self, bearer: str) -> ParsedRefreshToken | None:
+        if not isinstance(bearer, str):
+            return None
+        match = _REFRESH_TOKEN_PATTERN.fullmatch(bearer)
+        if match is None:
+            return None
+        family_id = match.group("family_id")
+        sequence = int(match.group("sequence"))
+        expected = self.token_for(family_id, sequence).rsplit(".", 1)[1]
+        proof = match.group("proof")
+        if not hmac.compare_digest(proof, expected):
+            return None
+        return ParsedRefreshToken(
+            family_id=family_id,
+            sequence=sequence,
+            proof=proof,
+        )
+
+
 @dataclass(frozen=True)
 class SessionIdentity:
     github_user_id: int
@@ -158,6 +258,8 @@ class SessionRecord:
     issued_at: float
     generation: str
     status: SessionStatus
+    expires_at: float | None = None
+    family_id: str | None = None
     revoked_at: float | None = None
     revocation_reason: str | None = None
 
@@ -182,6 +284,12 @@ class SessionRecord:
                 issued_at=float(value["issued_at"]),
                 generation=str(value["generation"]),
                 status=str(value["status"]),  # type: ignore[arg-type]
+                expires_at=(
+                    None if value.get("expires_at") is None else float(value["expires_at"])
+                ),
+                family_id=(
+                    None if value.get("family_id") is None else str(value["family_id"])
+                ),
                 revoked_at=(
                     None if value.get("revoked_at") is None else float(value["revoked_at"])
                 ),
@@ -198,7 +306,7 @@ class SessionRecord:
         return record
 
     def structurally_valid(self) -> bool:
-        if self.schema_version != _SCHEMA_VERSION:
+        if self.schema_version not in {_SCHEMA_VERSION, _ACCESS_SCHEMA_VERSION}:
             return False
         if SessionTokenCodec.parse(f"{_TOKEN_VERSION}.{self.session_id}.{'a' * 43}") is None:
             return False
@@ -212,6 +320,17 @@ class SessionRecord:
             return False
         if not self.github_login or not math.isfinite(self.issued_at) or self.issued_at <= 0:
             return False
+        if self.schema_version == _SCHEMA_VERSION:
+            if self.expires_at is not None or self.family_id is not None:
+                return False
+        elif (
+            self.expires_at is None
+            or not math.isfinite(self.expires_at)
+            or self.expires_at <= self.issued_at
+            or self.family_id is None
+            or not re.fullmatch(r"[A-Za-z0-9_-]{16,64}", self.family_id)
+        ):
+            return False
         if self.status == "active":
             return self.revoked_at is None and self.revocation_reason is None
         if self.status == "revoked":
@@ -221,6 +340,120 @@ class SessionRecord:
                 and bool(self.revocation_reason)
             )
         return False
+
+
+@dataclass(frozen=True)
+class RefreshFamilyRecord:
+    schema_version: int
+    family_id: str
+    client_id: str
+    scopes: tuple[str, ...]
+    issuer: str
+    audience: str
+    github_user_id: int
+    github_login: str
+    created_at: float
+    generation: str
+    status: SessionStatus
+    revoked_at: float | None = None
+    revocation_reason: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        value = asdict(self)
+        value["scopes"] = list(self.scopes)
+        return value
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> RefreshFamilyRecord:
+        try:
+            record = cls(
+                schema_version=int(value["schema_version"]),
+                family_id=str(value["family_id"]),
+                client_id=str(value["client_id"]),
+                scopes=tuple(str(scope) for scope in value["scopes"]),
+                issuer=str(value["issuer"]),
+                audience=str(value["audience"]),
+                github_user_id=int(value["github_user_id"]),
+                github_login=str(value["github_login"]),
+                created_at=float(value["created_at"]),
+                generation=str(value["generation"]),
+                status=str(value["status"]),  # type: ignore[arg-type]
+                revoked_at=(
+                    None if value.get("revoked_at") is None else float(value["revoked_at"])
+                ),
+                revocation_reason=(
+                    None
+                    if value.get("revocation_reason") is None
+                    else str(value["revocation_reason"])
+                ),
+            )
+        except (KeyError, TypeError, ValueError) as error:
+            raise ValueError("invalid refresh family record") from error
+        if not record.structurally_valid():
+            raise ValueError("invalid refresh family record")
+        return record
+
+    def structurally_valid(self) -> bool:
+        if self.schema_version != _ACCESS_SCHEMA_VERSION:
+            return False
+        if not re.fullmatch(r"[A-Za-z0-9_-]{16,64}", self.family_id):
+            return False
+        if not self.client_id or not self.issuer or not self.audience or not self.generation:
+            return False
+        if any(not scope for scope in self.scopes) or len(set(self.scopes)) != len(self.scopes):
+            return False
+        if self.github_user_id <= 0 or self.github_login != self.github_login.strip().casefold():
+            return False
+        if not self.github_login or not math.isfinite(self.created_at) or self.created_at <= 0:
+            return False
+        if self.status == "active":
+            return self.revoked_at is None and self.revocation_reason is None
+        if self.status == "revoked":
+            return (
+                self.revoked_at is not None
+                and math.isfinite(self.revoked_at)
+                and bool(self.revocation_reason)
+            )
+        return False
+
+
+@dataclass(frozen=True)
+class RefreshRedemptionRecord:
+    schema_version: int
+    family_id: str
+    sequence: int
+    claim_id: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> RefreshRedemptionRecord:
+        try:
+            record = cls(
+                schema_version=int(value["schema_version"]),
+                family_id=str(value["family_id"]),
+                sequence=int(value["sequence"]),
+                claim_id=str(value["claim_id"]),
+            )
+        except (KeyError, TypeError, ValueError) as error:
+            raise ValueError("invalid refresh redemption record") from error
+        if (
+            record.schema_version != _ACCESS_SCHEMA_VERSION
+            or not re.fullmatch(r"[A-Za-z0-9_-]{16,64}", record.family_id)
+            or record.sequence < 0
+            or not re.fullmatch(r"[A-Za-z0-9_-]{16,64}", record.claim_id)
+        ):
+            raise ValueError("invalid refresh redemption record")
+        return record
+
+
+@dataclass(frozen=True)
+class RefreshGrant:
+    family_id: str
+    sequence: int
+    client_id: str
+    scopes: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -299,7 +532,12 @@ class _EncryptedStorage:
             raise self._unavailable("write", error) from error
 
     async def put_if_absent(
-        self, key: str, value: Mapping[str, Any], *, collection: str
+        self,
+        key: str,
+        value: Mapping[str, Any],
+        *,
+        collection: str,
+        ttl: float | None = None,
     ) -> bool:
         encrypted = self._encrypt(value)
         try:
@@ -308,7 +546,14 @@ class _EncryptedStorage:
                 raise SessionStoreUnavailable(
                     "session store lacks atomic put-if-absent support"
                 )
-            return bool(await operation(key, encrypted, collection=collection))
+            return bool(
+                await operation(
+                    key,
+                    encrypted,
+                    collection=collection,
+                    ttl=ttl,
+                )
+            )
         except Exception as error:
             if isinstance(error, SessionStoreUnavailable):
                 raise
@@ -451,8 +696,19 @@ class SessionAuthority:
         self.audience = audience
         self.clock = clock
         self.codec = SessionTokenCodec(keys.hmac_key)
+        self.access_codec = AccessTokenCodec(keys.access_hmac_key)
+        self.refresh_codec = RefreshTokenCodec(keys.refresh_hmac_key)
         self.sessions_collection = f"exomem-auth-sessions-v1-{keys.fingerprint}"
         self.generations_collection = f"exomem-auth-generations-v1-{keys.fingerprint}"
+        self.refresh_families_collection = (
+            f"exomem-auth-refresh-families-v2-{keys.fingerprint}"
+        )
+        self.refresh_redemptions_collection = (
+            f"exomem-auth-refresh-redemptions-v2-{keys.fingerprint}"
+        )
+        self.refresh_grace_collection = (
+            f"exomem-auth-refresh-grace-v2-{keys.fingerprint}"
+        )
         self._storage = _EncryptedStorage(storage, keys.storage_key)
 
     @classmethod
@@ -551,9 +807,9 @@ class SessionAuthority:
 
     @staticmethod
     def _normalize_scopes(scopes: Sequence[str]) -> tuple[str, ...]:
-        normalized = tuple(str(scope) for scope in scopes)
-        if any(not scope for scope in normalized) or len(set(normalized)) != len(normalized):
-            raise ValueError("session scopes must be non-empty and unique")
+        normalized = tuple(dict.fromkeys(str(scope) for scope in scopes))
+        if any(not scope for scope in normalized):
+            raise ValueError("session scopes must be non-empty")
         return normalized
 
     async def issue(
@@ -599,8 +855,265 @@ class SessionAuthority:
             await self._write_tombstone(record, reason="generation-changed-during-issuance")
         raise SessionStoreUnavailable("could not issue a generation-stable session")
 
-    async def validate(self, bearer: str) -> SessionRecord | None:
+    async def _load_family(self, family_id: str) -> RefreshFamilyRecord | None:
+        raw = await self._storage.get(
+            family_id,
+            collection=self.refresh_families_collection,
+        )
+        if raw is None:
+            return None
+        try:
+            family = RefreshFamilyRecord.from_dict(raw)
+        except ValueError as error:
+            raise SessionStoreUnavailable("refresh family record is corrupt") from error
+        if family.family_id != family_id:
+            raise SessionStoreUnavailable(
+                "refresh family record does not match its authoritative storage key"
+            )
+        return family
+
+    async def _family_is_active(self, family: RefreshFamilyRecord) -> bool:
+        return (
+            family.status == "active"
+            and family.issuer == self.issuer
+            and family.audience == self.audience
+            and family.generation == await self.current_generation()
+        )
+
+    async def _issue_access_for_family(
+        self,
+        family: RefreshFamilyRecord,
+        *,
+        scopes: Sequence[str],
+    ) -> tuple[str, SessionRecord]:
+        normalized_scopes = self._normalize_scopes(scopes)
+        if any(scope not in family.scopes for scope in normalized_scopes):
+            raise InvalidRefreshToken("refresh scopes exceed the family grant")
+        for _ in range(_MAX_ISSUANCE_ATTEMPTS):
+            issued_at = float(self.clock())
+            bearer, session_id, digest = self.access_codec.issue()
+            record = SessionRecord(
+                schema_version=_ACCESS_SCHEMA_VERSION,
+                session_id=session_id,
+                token_digest=digest,
+                client_id=family.client_id,
+                scopes=normalized_scopes,
+                issuer=family.issuer,
+                audience=family.audience,
+                github_user_id=family.github_user_id,
+                github_login=family.github_login,
+                issued_at=issued_at,
+                generation=family.generation,
+                status="active",
+                expires_at=issued_at + ACCESS_TOKEN_TTL_SECONDS,
+                family_id=family.family_id,
+            )
+            created = await self._storage.put_if_absent(
+                session_id,
+                record.to_dict(),
+                collection=self.sessions_collection,
+            )
+            if not created:
+                continue
+            current_family = await self._load_family(family.family_id)
+            if current_family is not None and await self._family_is_active(current_family):
+                return bearer, record
+            await self._write_tombstone(record, reason="refresh-family-inactive")
+            raise InvalidRefreshToken("refresh family is inactive")
+        raise SessionStoreUnavailable("could not issue an OAuth access token")
+
+    async def issue_offline(
+        self,
+        *,
+        client_id: str,
+        scopes: Sequence[str],
+        identity: SessionIdentity,
+    ) -> tuple[str, SessionRecord, str]:
+        """Issue a one-hour access token and durable refresh family."""
+        if not client_id:
+            raise ValueError("session client ID is required")
+        normalized_scopes = self._normalize_scopes(scopes)
+        if "offline_access" not in normalized_scopes:
+            raise ValueError("offline issuance requires the offline_access scope")
+        if not isinstance(identity, SessionIdentity):
+            raise TypeError("session identity is required")
+
+        for _ in range(_MAX_ISSUANCE_ATTEMPTS):
+            generation = await self.current_generation()
+            refresh_token, family_id = self.refresh_codec.issue()
+            family = RefreshFamilyRecord(
+                schema_version=_ACCESS_SCHEMA_VERSION,
+                family_id=family_id,
+                client_id=client_id,
+                scopes=normalized_scopes,
+                issuer=self.issuer,
+                audience=self.audience,
+                github_user_id=identity.github_user_id,
+                github_login=identity.github_login,
+                created_at=float(self.clock()),
+                generation=generation,
+                status="active",
+            )
+            created = await self._storage.put_if_absent(
+                family_id,
+                family.to_dict(),
+                collection=self.refresh_families_collection,
+            )
+            if not created:
+                continue
+            if generation != await self.current_generation():
+                await self._revoke_family(family_id, reason="generation-changed-during-issuance")
+                continue
+            try:
+                access_token, access_record = await self._issue_access_for_family(
+                    family,
+                    scopes=normalized_scopes,
+                )
+            except InvalidRefreshToken:
+                continue
+            return access_token, access_record, refresh_token
+        raise SessionStoreUnavailable("could not issue a generation-stable refresh family")
+
+    async def validate_refresh(
+        self,
+        bearer: str,
+        *,
+        client_id: str,
+    ) -> RefreshGrant | None:
+        parsed = self.refresh_codec.parse(bearer)
+        if parsed is None:
+            return None
+        family = await self._load_family(parsed.family_id)
+        if (
+            family is None
+            or family.client_id != client_id
+            or not await self._family_is_active(family)
+        ):
+            return None
+        return RefreshGrant(
+            family_id=family.family_id,
+            sequence=parsed.sequence,
+            client_id=family.client_id,
+            scopes=family.scopes,
+        )
+
+    async def rotate_refresh(
+        self,
+        bearer: str,
+        *,
+        client_id: str,
+        scopes: Sequence[str],
+    ) -> tuple[str, SessionRecord, str]:
+        grant = await self.validate_refresh(bearer, client_id=client_id)
+        if grant is None:
+            raise InvalidRefreshToken("refresh token is invalid or inactive")
+        normalized_scopes = self._normalize_scopes(scopes)
+        if any(scope not in grant.scopes for scope in normalized_scopes):
+            raise InvalidRefreshToken("refresh scopes exceed the family grant")
+
+        receipt_key = f"{grant.family_id}.{grant.sequence}"
+
+        def parse_redemption(
+            raw: Mapping[str, Any],
+            *,
+            label: str,
+        ) -> RefreshRedemptionRecord:
+            try:
+                record = RefreshRedemptionRecord.from_dict(raw)
+            except ValueError as error:
+                raise SessionStoreUnavailable(f"refresh {label} record is corrupt") from error
+            if record.family_id != grant.family_id or record.sequence != grant.sequence:
+                raise SessionStoreUnavailable(
+                    f"refresh {label} does not match its authoritative storage key"
+                )
+            return record
+
+        raw_receipt = await self._storage.get(
+            receipt_key,
+            collection=self.refresh_redemptions_collection,
+        )
+        if raw_receipt is None:
+            proposed = RefreshRedemptionRecord(
+                schema_version=_ACCESS_SCHEMA_VERSION,
+                family_id=grant.family_id,
+                sequence=grant.sequence,
+                claim_id=secrets.token_urlsafe(18),
+            )
+            grace_created = await self._storage.put_if_absent(
+                receipt_key,
+                proposed.to_dict(),
+                collection=self.refresh_grace_collection,
+                ttl=REFRESH_RETRY_GRACE_SECONDS,
+            )
+            if grace_created:
+                grace = proposed
+            else:
+                raw_grace = await self._storage.get(
+                    receipt_key,
+                    collection=self.refresh_grace_collection,
+                )
+                if raw_grace is None:
+                    raise SessionStoreUnavailable(
+                        "refresh grace disappeared during an atomic claim"
+                    )
+                grace = parse_redemption(raw_grace, label="grace")
+            receipt_created = await self._storage.put_if_absent(
+                receipt_key,
+                grace.to_dict(),
+                collection=self.refresh_redemptions_collection,
+            )
+            if receipt_created:
+                receipt = grace
+            else:
+                raw_receipt = await self._storage.get(
+                    receipt_key,
+                    collection=self.refresh_redemptions_collection,
+                )
+                if raw_receipt is None:
+                    raise SessionStoreUnavailable(
+                        "refresh redemption disappeared after an atomic claim"
+                    )
+                receipt = parse_redemption(raw_receipt, label="redemption")
+        else:
+            receipt = parse_redemption(raw_receipt, label="redemption")
+
+        raw_grace = await self._storage.get(
+            receipt_key,
+            collection=self.refresh_grace_collection,
+        )
+        grace = (
+            None
+            if raw_grace is None
+            else parse_redemption(raw_grace, label="grace")
+        )
+        if grace is None or grace.claim_id != receipt.claim_id:
+            await self._revoke_family(
+                grant.family_id,
+                reason="refresh-token-reuse",
+            )
+            raise InvalidRefreshToken("refresh token reuse detected")
+
+        family = await self._load_family(grant.family_id)
+        if family is None or not await self._family_is_active(family):
+            raise InvalidRefreshToken("refresh family is inactive")
+        access_token, access_record = await self._issue_access_for_family(
+            family,
+            scopes=normalized_scopes,
+        )
+        next_refresh = self.refresh_codec.token_for(
+            grant.family_id,
+            grant.sequence + 1,
+        )
+        return access_token, access_record, next_refresh
+
+    async def _load_session_for_bearer(self, bearer: str) -> SessionRecord | None:
         parsed = self.codec.parse(bearer)
+        codec: SessionTokenCodec = self.codec
+        expected_schema = _SCHEMA_VERSION
+        if parsed is None:
+            parsed = self.access_codec.parse(bearer)
+            codec = self.access_codec
+            expected_schema = _ACCESS_SCHEMA_VERSION
         if parsed is None:
             return None
         raw = await self._storage.get(parsed.session_id, collection=self.sessions_collection)
@@ -614,7 +1127,15 @@ class SessionAuthority:
             raise SessionStoreUnavailable(
                 "session record does not match its authoritative storage key"
             )
-        if not self.codec.verify(bearer, record.token_digest):
+        if record.schema_version != expected_schema or not codec.verify(
+            bearer, record.token_digest
+        ):
+            return None
+        return record
+
+    async def validate(self, bearer: str) -> SessionRecord | None:
+        record = await self._load_session_for_bearer(bearer)
+        if record is None:
             return None
         if (
             record.status != "active"
@@ -624,6 +1145,14 @@ class SessionAuthority:
             return None
         if record.generation != await self.current_generation():
             return None
+        if record.schema_version == _ACCESS_SCHEMA_VERSION:
+            if record.expires_at is None or float(self.clock()) >= record.expires_at:
+                return None
+            if record.family_id is None:
+                return None
+            family = await self._load_family(record.family_id)
+            if family is None or not await self._family_is_active(family):
+                return None
         return record
 
     async def _write_tombstone(self, record: SessionRecord, *, reason: str) -> SessionRecord:
@@ -639,6 +1168,43 @@ class SessionAuthority:
             collection=self.sessions_collection,
         )
         return tombstone
+
+    async def _revoke_family(self, family_id: str, *, reason: str) -> bool:
+        if not family_id or not reason:
+            raise ValueError("refresh family ID and revocation reason are required")
+        family = await self._load_family(family_id)
+        if family is None:
+            return False
+        if family.status == "revoked":
+            return True
+        tombstone = replace(
+            family,
+            status="revoked",
+            revoked_at=float(self.clock()),
+            revocation_reason=reason,
+        )
+        await self._storage.put(
+            family.family_id,
+            tombstone.to_dict(),
+            collection=self.refresh_families_collection,
+        )
+        return True
+
+    async def revoke_bearer(self, bearer: str, *, reason: str) -> bool:
+        """Revoke a legacy session or an entire v2 access/refresh family."""
+        if not reason:
+            raise ValueError("revocation reason is required")
+        parsed_refresh = self.refresh_codec.parse(bearer)
+        if parsed_refresh is not None:
+            return await self._revoke_family(parsed_refresh.family_id, reason=reason)
+        record = await self._load_session_for_bearer(bearer)
+        if record is None:
+            return False
+        if record.family_id is not None:
+            await self._revoke_family(record.family_id, reason=reason)
+        if record.status != "revoked":
+            await self._write_tombstone(record, reason=reason)
+        return True
 
     async def tombstone(self, session_id: str, *, reason: str) -> bool:
         if not session_id or not reason:
@@ -656,6 +1222,8 @@ class SessionAuthority:
             )
         if record.status == "revoked":
             return True
+        if record.family_id is not None:
+            await self._revoke_family(record.family_id, reason=reason)
         await self._write_tombstone(record, reason=reason)
         return True
 

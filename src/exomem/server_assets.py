@@ -12,6 +12,8 @@ from starlette.requests import Request
 from starlette.responses import FileResponse, JSONResponse, RedirectResponse
 
 from . import runtime_readiness as runtime_readiness_module
+from . import tool_surface as tool_surface_module
+from .session_oauth import OAUTH_AUTHORIZATION_SCOPES, OAUTH_RESOURCE_SCOPES
 
 _STUDIO_SECURITY_HEADERS = {
     "Content-Security-Policy": (
@@ -88,23 +90,38 @@ def register_asset_routes(mcp_app: FastMCP) -> None:
 
     @mcp_app.custom_route("/health", methods=["GET"])
     async def _health(request: Request) -> JSONResponse:  # noqa: ARG001
-        """Unauthenticated liveness probe for tunnels/orchestrators. Reports only
-        that the process is up + its version — no vault data, no auth required."""
-        try:
-            from importlib.metadata import version
+        """Unauthenticated liveness probe for tunnels/orchestrators. Reports that
+        the process is up, its version, and where that code was installed from —
+        no vault data, no auth required.
 
-            ver = version("exomem")
-        except Exception:  # noqa: BLE001 — version lookup must never fail the probe
-            ver = "unknown"
-        return JSONResponse(
-            {"status": "ok", "service": "exomem", "version": ver},
-            headers={"Cache-Control": "no-store"},
-        )
+        Install provenance is included so an operator can tell a wheel-backed
+        service from one running a local checkout without inspecting the service
+        manager. Host-identifying detail (interpreter path, checkout location) is
+        deliberately withheld here because this route is publicly reachable; use
+        the local `provenance` command for that."""
+        payload: dict[str, object] = {"status": "ok", "service": "exomem"}
+        try:
+            from . import deploy_provenance
+
+            payload.update(deploy_provenance.provenance(include_local=False))
+        except Exception:  # noqa: BLE001 — provenance must never fail the probe
+            payload["version"] = "unknown"
+        return JSONResponse(payload, headers={"Cache-Control": "no-store"})
 
     @mcp_app.custom_route("/health/ready", methods=["GET"])
     async def _runtime_ready(request: Request) -> JSONResponse:  # noqa: ARG001
         """Content-free admission probe; liveness remains the separate /health route."""
-        snapshot = runtime_readiness_module.runtime_readiness()
+        digest = getattr(mcp_app, "_exomem_tool_surface_sha256", None)
+        if digest is None:
+            try:
+                live = await tool_surface_module.live_contract(mcp_app)
+                digest = live["sha256"]
+                mcp_app._exomem_tool_surface_sha256 = digest
+            except Exception:  # noqa: BLE001 - readiness must stay structured
+                digest = None
+        snapshot = runtime_readiness_module.runtime_readiness(
+            mcp_tool_surface_sha256=digest
+        )
         status_code = 200 if snapshot["status"] == "ready" else 503
         return JSONResponse(
             snapshot,
@@ -191,7 +208,7 @@ def register_oauth_metadata_route(
                 "authorization_endpoint": f"{base_url}/authorize",
                 "token_endpoint": f"{base_url}/token",
                 "registration_endpoint": f"{base_url}/register",
-                "scopes_supported": [],
+                "scopes_supported": list(OAUTH_AUTHORIZATION_SCOPES),
                 "response_types_supported": ["code"],
                 "grant_types_supported": ["authorization_code", "refresh_token"],
                 "token_endpoint_auth_methods_supported": [
@@ -212,7 +229,7 @@ def register_oauth_metadata_route(
             {
                 "resource": resource_url,
                 "authorization_servers": [issuer_url],
-                "scopes_supported": [],
+                "scopes_supported": list(OAUTH_RESOURCE_SCOPES),
                 "bearer_methods_supported": ["header"],
             },
             headers={"Cache-Control": "public, max-age=3600"},

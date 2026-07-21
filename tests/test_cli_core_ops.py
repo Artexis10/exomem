@@ -159,13 +159,15 @@ def test_observe_memory_adds_and_returns_exact_unit(vault: Path, capsys) -> None
             "cli",
             "--tags",
             "storage",
+            "--response-detail",
+            "full",
             "--json",
         ],
         capsys,
     )
 
     assert code == 0, f"{err}\n{out}"
-    data = json.loads(out.strip().splitlines()[-1])["data"]
+    data = json.loads(out.strip().splitlines()[-1])["data"]["diagnostics"]
     assert data["unit"]["category_key"] == "config_rule"
     assert data["unit"]["tags"] == ["cli", "storage"]
     assert data["unit_ref"].endswith(data["unit"]["anchor"])
@@ -352,17 +354,216 @@ def test_remember_field_escape(vault: Path, capsys) -> None:
     assert "Project Alpha" in payload["data"]["path"]
 
 
-def test_edit_memory_value_plain_string(vault: Path, capsys) -> None:
-    code, out, err = _run(
-        ["edit_memory", _INSIGHT, "--why", "set domain", "--field", "domain",
-         "--value", "retrieval", "--json"],
-        capsys,
+@pytest.mark.parametrize("command_name", ["remember", "replace_memory"])
+def test_field_escape_command_help_exposes_response_detail(
+    command_name: str,
+    capsys,
+) -> None:
+    code, out, err = _run([command_name, "--help"], capsys)
+
+    assert code == 0, err
+    assert "--response-detail" in out
+    assert "{compact,full,legacy}" in out
+
+
+@pytest.mark.parametrize(
+    ("argv", "command_name"),
+    [
+        (
+            ["remember", "--content", "# Remember\n", "--title", "Remember"],
+            "remember",
+        ),
+        (
+            [
+                "replace_memory",
+                "Knowledge Base/Notes/Insights/old.md",
+                "--content",
+                "# Replace\n",
+                "--title",
+                "Replace",
+            ],
+            "replace_memory",
+        ),
+    ],
+)
+def test_field_escape_commands_forward_response_detail_through_real_parser(
+    vault: Path,
+    capsys,
+    monkeypatch: pytest.MonkeyPatch,
+    argv: list[str],
+    command_name: str,
+) -> None:
+    calls: list[tuple[str, dict]] = []
+
+    def fake_invoke(command, *injected, **kwargs):  # noqa: ANN001, ARG001
+        calls.append((command.name, kwargs))
+        return {"ok": True, "status": "committed", "mutated": True, "paths": []}
+
+    monkeypatch.setattr(writer_lease, "invoke_command", fake_invoke)
+
+    code, out, err = _run([*argv, "--response-detail", "full", "--json"], capsys)
+
+    assert code == 0, f"{err}\n{out}"
+    assert len(calls) == 1
+    assert calls[0][0] == command_name
+    assert calls[0][1]["response_detail"] == "full"
+
+
+def test_adopt_human_renderer_prints_compact_terminal_decisively(capsys) -> None:
+    from exomem.__main__ import _print_human
+
+    _print_human(
+        {
+            "ok": True,
+            "status": "committed",
+            "mutated": True,
+            "path": "Knowledge Base/_Adoption/manifest.md",
+            "request_id": "11111111-1111-4111-8111-111111111111",
+            "receipt_id": None,
+            "warnings_count": 0,
+        },
+        op="adopt_vault",
     )
+    out = capsys.readouterr().out
+
+    assert '"status": "committed"' in out
+    assert "Adoption report" not in out
+    assert "Mode: scan-only" not in out
+
+
+def test_edit_memory_value_plain_string(vault: Path, capsys) -> None:
+    with pytest.warns(DeprecationWarning):
+        code, out, err = _run(
+            [
+                "edit_memory",
+                _INSIGHT,
+                "--why",
+                "set domain",
+                "--field",
+                "domain",
+                "--value",
+                "retrieval",
+                "--response-detail",
+                "full",
+                "--json",
+            ],
+            capsys,
+        )
     assert code == 0, err
     payload = json.loads(out.strip().splitlines()[-1])
     assert payload["success"] is True
-    assert payload["data"]["new_value"] == "retrieval"
+    assert payload["data"]["diagnostics"]["new_value"] == "retrieval"
     assert "domain: retrieval" in (vault / _INSIGHT).read_text(encoding="utf-8")
+
+
+def test_edit_memory_cli_help_advertises_operation_and_hides_legacy_flags(capsys) -> None:
+    code, out, err = _run(["edit_memory", "--help"], capsys)
+
+    assert code == 0, err
+    assert "--operation" in out
+    for legacy in ("--new-body", "--old-string", "--edits", "--row-key", "--field"):
+        assert legacy not in out
+
+
+def test_edit_memory_cli_primary_operation_is_normalized_before_invocation(
+    vault: Path, capsys, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[dict] = []
+
+    def fake_invoke(command, *injected, **kwargs):  # noqa: ANN001, ARG001
+        calls.append(kwargs)
+        return {"ok": True, "status": "committed", "mutated": True, "paths": []}
+
+    monkeypatch.setattr(writer_lease, "invoke_command", fake_invoke)
+    code, out, err = _run(
+        [
+            "edit_memory",
+            _INSIGHT,
+            "--why",
+            "primary operation",
+            "--operation",
+            '{"kind":"replace_string","old_string":"Before","new_string":"After"}',
+            "--json",
+        ],
+        capsys,
+    )
+
+    assert code == 0, f"{err}\n{out}"
+    assert len(calls) == 1
+    assert calls[0].pop("idempotency_key") is None
+    assert calls == [
+        {
+            "path": _INSIGHT,
+            "why": "primary operation",
+            "operation": {
+                "kind": "replace_string",
+                "old_string": "Before",
+                "new_string": "After",
+                "replace_all": False,
+                "validate_only": False,
+            },
+        }
+    ]
+
+
+def test_edit_memory_cli_legacy_frontmatter_value_keeps_json_coercion(
+    vault: Path, capsys, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[dict] = []
+
+    def fake_invoke(command, *injected, **kwargs):  # noqa: ANN001, ARG001
+        calls.append(kwargs)
+        return {"ok": True, "status": "committed", "mutated": True, "paths": []}
+
+    monkeypatch.setattr(writer_lease, "invoke_command", fake_invoke)
+    with pytest.warns(DeprecationWarning):
+        code, out, err = _run(
+            [
+                "edit_memory",
+                _INSIGHT,
+                "--why",
+                "legacy frontmatter patch",
+                "--field",
+                "review_count",
+                "--value",
+                "5",
+                "--json",
+            ],
+            capsys,
+        )
+
+    assert code == 0, f"{err}\n{out}"
+    assert calls[0]["operation"] == {
+        "kind": "patch_frontmatter",
+        "field": "review_count",
+        "value": 5,
+        "allow_curated": False,
+        "validate_only": False,
+    }
+
+
+def test_edit_memory_cli_rejects_primary_and_hidden_legacy_flags_together(
+    vault: Path, capsys
+) -> None:
+    code, out, err = _run(
+        [
+            "edit_memory",
+            _INSIGHT,
+            "--why",
+            "ambiguous",
+            "--operation",
+            '{"kind":"replace_tags","tags":[]}',
+            "--field",
+            "status",
+            "--value",
+            "active",
+            "--json",
+        ],
+        capsys,
+    )
+
+    assert code == 1, err
+    assert json.loads(out)["error"]["code"] == "INVALID_EDIT"
 
 
 def test_malformed_field_exits_2(vault: Path, capsys) -> None:
@@ -534,7 +735,7 @@ def test_simple_capture_alias_routes_to_source_and_evidence(vault: Path, capsys)
     assert code == 0, err
     source_payload = json.loads(out.strip().splitlines()[-1])
     assert source_payload["success"] is True
-    assert "/Sources/Other/" in source_payload["data"]["source"]["path"]
+    assert "/Sources/Other/" in source_payload["data"]["path"]
 
     code2, out2, err2 = _run(
         [

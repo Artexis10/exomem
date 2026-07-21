@@ -321,13 +321,19 @@ def _client(vault: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
 
 
 def _post(client: TestClient, name: str, body: dict) -> dict:
+    request_body = dict(body)
+    if name == "connect_memory" and body.get("operation") == "accept-relation":
+        request_body["response_detail"] = "full"
     response = client.post(
-        f"/api/{name}", json=body, headers={"Authorization": "Bearer queue-key"}
+        f"/api/{name}",
+        json=request_body,
+        headers={"Authorization": "Bearer queue-key"},
     )
     assert response.status_code == 200, response.text
     payload = response.json()
     assert payload["success"] is True, payload
-    return payload["data"]
+    data = payload["data"]
+    return data.get("diagnostics", data)
 
 
 def test_new_operations_exposed_on_all_registry_surfaces(

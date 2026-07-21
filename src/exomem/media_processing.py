@@ -12,6 +12,7 @@ import logging
 import os
 import re
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -224,6 +225,7 @@ def reconcile_all_media(
     vault_root: Path,
     *,
     limit: int = DEFAULT_RECONCILE_LIMIT,
+    reconcile_one: Callable[[Path], object] | None = None,
 ) -> int:
     """Reconcile a bounded, pruned pass of supported governed binaries.
 
@@ -233,6 +235,9 @@ def reconcile_all_media(
     if isinstance(limit, bool) or limit <= 0:
         raise ValueError("media reconciliation limit must be a positive integer")
     vault = Path(vault_root).resolve()
+    reconcile_one = reconcile_one or (
+        lambda binary: reconcile_media(vault, binary, explicit=False)
+    )
     kb = vault / kb_dirname()
     if not kb.is_dir():
         return 0
@@ -258,7 +263,7 @@ def reconcile_all_media(
         if _needs_reconciliation(vault, binary, store):
             attempted += 1
             try:
-                reconcile_media(vault, binary, explicit=False)
+                reconcile_one(binary)
             except Exception:  # noqa: BLE001 - one artifact must not abort discovery
                 log.warning("media reconciliation failed for %s", binary, exc_info=True)
     if last_examined is not None and store is not None:

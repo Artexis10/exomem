@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import re
 import stat
+import threading
+import time
 from collections import Counter
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field, replace
@@ -43,6 +46,8 @@ _GRANDFATHERED_OPERATIONS = frozenset(
     {"edit", "move", "observe", "recover", "tier2_overwrite", "tier2_append"}
 )
 _WIKILINK_RE = re.compile(r"\[\[([^\]\n]+)\]\]")
+
+log = logging.getLogger(__name__)
 _REVIEW_FINGERPRINT_UNSET = object()
 
 
@@ -682,7 +687,9 @@ def build_page_state(
     """Build detached semantic state from one already-read Markdown string."""
     root = Path(vault_root)
     rel_path = _normalize_path(root, path)
-    frontmatter, body, _ = vault.parse_frontmatter(source)
+    raw_source = source
+    logical_source = raw_source.replace("\r\n", "\n").replace("\r", "\n")
+    frontmatter, body, _ = vault.parse_frontmatter(logical_source)
     page_type_value = frontmatter.get("type")
     page_type = str(page_type_value) if page_type_value else None
     projects = _page_projects(frontmatter)
@@ -721,7 +728,7 @@ def build_page_state(
     resolved_review_fingerprint = review_fingerprint
     if review_fingerprint is _REVIEW_FINGERPRINT_UNSET:
         resolved_review_fingerprint = (
-            review_content_fingerprint(normalized_id, source)
+            review_content_fingerprint(normalized_id, logical_source)
             if normalized_id is not None
             else None
         )
@@ -731,7 +738,7 @@ def build_page_state(
         path=rel_path,
         identity_kind=identity_kind,
         identity=identity,
-        source_hash=vault.content_hash(source),
+        source_hash=vault.content_hash(raw_source),
         language_registry_hash=(
             f"{language.schema_version}:{language.content_hash}"
         ),
@@ -754,6 +761,158 @@ def build_page_state(
     )
 
 
+class _CensusUnsafe(Exception):
+    """The corpus tree cannot be fingerprinted safely; do not use the cache."""
+
+
+# Process cache for the fully-materialized corpus context: one bounded entry
+# per vault root, keyed on a stat-level census of every filesystem input the
+# build reads. Serving rule: the current census must equal the stored census,
+# and the stored census was confirmed identical before AND after the build it
+# captions, so a tree that changed mid-build is never stored. Invalidation
+# needs no TTL and no cooperation from writers: any input change that alters a
+# path, size, or mtime_ns is caught by the census taken on the next call.
+#
+# Why (path, size, mtime_ns) per file and not a max-mtime scan: Syncthing (and
+# any mtime-preserving sync) materializes remote edits with the SOURCE's
+# modification time, which can be older than every local timestamp — max-mtime
+# would silently serve a stale corpus. The full census still catches such an
+# edit because the synced file's mtime_ns (and normally size) differs from the
+# entry recorded for the previous content at that path. The residual
+# undetectable case — new content with byte-identical size and identical
+# 100ns-resolution mtime at the same path — is not producible by the engine's
+# own temp+rename writes nor by observed sync behavior.
+_CORPUS_CONTEXT_CACHE: dict[
+    tuple[str, str], tuple[tuple, SemanticCorpusContext]
+] = {}
+_CORPUS_CONTEXT_CACHE_LOCK = threading.Lock()
+_CORPUS_CONTEXT_CACHE_MAX_VAULTS = 2
+
+
+def corpus_context_cache_enabled() -> bool:
+    """Whether the corpus-context cache is active (EXOMEM_DISABLE_CORPUS_CACHE)."""
+    return not os.environ.get("EXOMEM_DISABLE_CORPUS_CACHE")
+
+
+def reset_corpus_context_cache() -> None:
+    """Drop every cached corpus context; intentionally public for tests."""
+    with _CORPUS_CONTEXT_CACHE_LOCK:
+        _CORPUS_CONTEXT_CACHE.clear()
+
+
+def _corpus_cache_key(root: Path) -> tuple[str, str]:
+    return (
+        os.path.normcase(str(root.resolve(strict=False))),
+        os.path.normcase(str(vault.kb_root(root).resolve(strict=False))),
+    )
+
+
+def _corpus_census(root: Path) -> tuple | None:
+    """Stat census of every filesystem input ``build_corpus_context`` reads.
+
+    Mirrors both production walks — ``_build_identity_census`` (every ``.md``
+    under the KB, refusing filesystem aliases) and ``vault.walk_vault_md``
+    (the full vault minus skip dirs and sync-conflict copies) — and appends
+    the non-Markdown inputs: ``_access.yaml`` (page eligibility via
+    ``access.access_tier``) and the two ``_Schema`` registry files. Returns
+    ``None`` when the tree cannot be fingerprinted safely; callers must then
+    build uncached so the build path surfaces its own safety errors.
+    """
+    entries: set[tuple[str, str, int, int]] = set()
+    kb = vault.kb_root(root)
+
+    def strict_walk(directory: Path) -> None:
+        # Mirror of _build_identity_census: every entry under KB, alias-free.
+        for child in os.scandir(directory):
+            path = Path(child.path)
+            info = child.stat(follow_symlinks=False)
+            if child.is_symlink() or vault._is_reparse(info):
+                raise _CensusUnsafe
+            if stat.S_ISDIR(info.st_mode):
+                strict_walk(path)
+                continue
+            if path.suffix.casefold() != ".md":
+                continue
+            if not stat.S_ISREG(info.st_mode):
+                raise _CensusUnsafe
+            entries.add(
+                (path.relative_to(root).as_posix(), "f", info.st_size, info.st_mtime_ns)
+            )
+
+    def loose_walk(directory: Path) -> None:
+        # Mirror of vault.walk_vault_md: skip dirs and sync-conflict copies,
+        # with the same is_dir()/is_file() semantics (which traverse links).
+        for child in os.scandir(directory):
+            path = Path(child.path)
+            if child.is_dir():
+                if child.name in vault.VAULT_SCAN_SKIP_DIRS:
+                    continue
+                loose_walk(path)
+            elif (
+                child.is_file()
+                and path.suffix.lower() == ".md"
+                and ".sync-conflict-" not in child.name
+            ):
+                info = child.stat()
+                entries.add(
+                    (path.relative_to(root).as_posix(), "f", info.st_size, info.st_mtime_ns)
+                )
+
+    try:
+        try:
+            kb_info = kb.lstat()
+        except FileNotFoundError:
+            kb_info = None
+        if kb_info is not None:
+            # A KB root that is an alias makes the identity census raise; the
+            # census must refuse to vouch for that tree rather than mask it.
+            if not stat.S_ISDIR(kb_info.st_mode) or vault._is_reparse(kb_info):
+                raise _CensusUnsafe
+            strict_walk(kb)
+        loose_walk(root)
+        for extra in (
+            access.access_config_path(root),
+            relation_registry.extension_registry_path(root),
+            semantic_language_registry.registry_path(root),
+        ):
+            marker = str(extra.relative_to(root).as_posix())
+            try:
+                info = extra.stat()
+            except FileNotFoundError:
+                entries.add((marker, "absent", -1, -1))
+            else:
+                entries.add((marker, "cfg", info.st_size, info.st_mtime_ns))
+    except (_CensusUnsafe, OSError, ValueError):
+        return None
+    return tuple(sorted(entries))
+
+
+def _registries_match_disk(
+    root: Path,
+    relation_definitions: relation_registry.RelationRegistry,
+    language: semantic_language_registry.SemanticLanguageRegistry,
+) -> bool:
+    """Whether the supplied registries are content-identical to the on-disk ones.
+
+    The cache stores contexts derived from on-disk registry state (the
+    registry files are census entries). A caller-supplied registry object is
+    only compatible with that stored state when its content fingerprint equals
+    a fresh disk load — synthetic/proposal registries fail this and bypass the
+    cache entirely.
+    """
+    try:
+        disk_registry = relation_registry.load_registry(root)
+        disk_language = semantic_language_registry.load_registry(root)
+    except Exception:  # noqa: BLE001 — unreadable registry state: never cache
+        return False
+    return (
+        (disk_registry.core_version, disk_registry.extension_hash)
+        == (relation_definitions.core_version, relation_definitions.extension_hash)
+        and (disk_language.schema_version, disk_language.content_hash)
+        == (language.schema_version, language.content_hash)
+    )
+
+
 def build_corpus_context(
     vault_root: Path,
     *,
@@ -761,10 +920,79 @@ def build_corpus_context(
     registry: relation_registry.RelationRegistry | None = None,
     language_registry: semantic_language_registry.SemanticLanguageRegistry | None = None,
 ) -> SemanticCorpusContext:
-    """Read and parse the corpus once, then resolve every fact in memory."""
+    """Read and parse the corpus once, then resolve every fact in memory.
+
+    Warm calls are served from a bounded process cache keyed on a stat census
+    of every filesystem input (see ``_corpus_census``). A cached context is
+    returned only when the census matches exactly and any caller-supplied
+    registries are content-identical to disk; candidate-bearing builds always
+    take the uncached path. ``EXOMEM_DISABLE_CORPUS_CACHE=1`` restores the
+    always-rebuild behavior.
+    """
     root = Path(vault_root)
     relation_definitions = registry or relation_registry.load_registry(root)
     language = language_registry or semantic_language_registry.load_registry(root)
+
+    census: tuple | None = None
+    cache_key: tuple[str, str] | None = None
+    if candidate is None and corpus_context_cache_enabled():
+        started = time.perf_counter()
+        census = _corpus_census(root)
+        census_ms = (time.perf_counter() - started) * 1000.0
+        if census is not None and _registries_match_disk(
+            root, relation_definitions, language
+        ):
+            cache_key = _corpus_cache_key(root)
+            with _CORPUS_CONTEXT_CACHE_LOCK:
+                entry = _CORPUS_CONTEXT_CACHE.get(cache_key)
+            if entry is not None and entry[0] == census:
+                log.info(
+                    "semantic corpus context reused pages=%d census_ms=%.1f",
+                    len(entry[1].pages),
+                    census_ms,
+                )
+                return entry[1]
+        else:
+            census = None
+
+    started = time.perf_counter()
+    context = _build_corpus_context_uncached(
+        root,
+        candidate=candidate,
+        relation_definitions=relation_definitions,
+        language=language,
+    )
+    build_ms = (time.perf_counter() - started) * 1000.0
+    stored = False
+    if census is not None and cache_key is not None:
+        confirmed = _corpus_census(root)
+        if confirmed == census:
+            with _CORPUS_CONTEXT_CACHE_LOCK:
+                _CORPUS_CONTEXT_CACHE[cache_key] = (census, context)
+                while len(_CORPUS_CONTEXT_CACHE) > _CORPUS_CONTEXT_CACHE_MAX_VAULTS:
+                    for stale_key in list(_CORPUS_CONTEXT_CACHE):
+                        if stale_key != cache_key:
+                            del _CORPUS_CONTEXT_CACHE[stale_key]
+                            break
+                    else:
+                        break
+            stored = True
+    log.info(
+        "semantic corpus context built pages=%d build_ms=%.1f cached=%s",
+        len(context.pages),
+        build_ms,
+        stored,
+    )
+    return context
+
+
+def _build_corpus_context_uncached(
+    root: Path,
+    *,
+    candidate: SemanticPageState | None,
+    relation_definitions: relation_registry.RelationRegistry,
+    language: semantic_language_registry.SemanticLanguageRegistry,
+) -> SemanticCorpusContext:
     identity_census, census_sources = _build_identity_census(root)
     states: dict[str, SemanticPageState] = {}
     candidate_path = candidate.path if candidate is not None else None

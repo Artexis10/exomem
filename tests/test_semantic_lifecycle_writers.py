@@ -198,6 +198,38 @@ def test_stable_id_move_prepares_exact_lifecycle_and_indexes_each_path_once(
     assert deletes == [[old_path]]
 
 
+def test_move_with_crlf_inbound_referrer_uses_logical_hash_for_semantic_preflight(
+    tmp_path: Path,
+) -> None:
+    new_path = "Knowledge Base/Notes/Insights/lifecycle-renamed.md"
+    target = _source("Target", page_id=_ID)
+    referrer = _source(
+        "See [[Knowledge Base/Notes/Insights/lifecycle]].", page_id=_OTHER_ID
+    )
+    old = tmp_path / _PAGE
+    inbound = tmp_path / _OTHER_PAGE
+    old.parent.mkdir(parents=True, exist_ok=True)
+    old.write_bytes(target.replace("\n", "\r\n").encode("utf-8"))
+    inbound.write_bytes(referrer.replace("\n", "\r\n").encode("utf-8"))
+    before_corpus = semantic_contract.build_corpus_context(tmp_path)
+    activation_manifest.ensure_manifest(
+        tmp_path, census=before_corpus.activation_census
+    )
+
+    result = move_module.move_file(
+        tmp_path,
+        old_path=_PAGE,
+        new_path=new_path,
+        update_wikilinks=True,
+    )
+
+    assert result.semantic is not None
+    assert not old.exists()
+    assert "[[Knowledge Base/Notes/Insights/lifecycle-renamed]]" in inbound.read_text(
+        encoding="utf-8"
+    )
+
+
 def test_move_without_wikilink_updates_blocks_unchanged_referrer_in_final_corpus(
     tmp_path: Path,
 ) -> None:
@@ -2880,6 +2912,62 @@ def test_existing_feedback_byte_bounds_one_oversized_diagnostic(tmp_path: Path) 
     assert result.findings[0].detail == oversized
     assert result.findings[0].remediation == oversized
     assert result.findings[0].governed_element_identity == (oversized,)
+
+
+def _blocking_finding(code: str, index: int = 0) -> semantic_contract.ContractFinding:
+    return semantic_contract.ContractFinding(
+        code=code,
+        severity="error",
+        path=_PAGE,
+        span=None,
+        detail=f"relation target {index} does not resolve",
+        remediation="link by the slug the write returned",
+        governed_element_identity=(f"rel-{index}",),
+        resolved_rule=("relations", "*", "target"),
+    )
+
+
+def test_blocked_write_names_what_blocked_it(tmp_path: Path) -> None:
+    """A blocked write must say what blocked it, not merely that something did.
+
+    Regression: SEMANTIC_CONTRACT_BLOCKED carried a generic sentence and threw
+    the findings away, so a writer had to issue a second `validate_only` call
+    purely to learn the reason. That round-trip was the single largest source of
+    write friction — 69 blocked writes in one day on 2026-07-20, none of them
+    self-describing.
+    """
+    preflight = _feedback_preflight(tmp_path)
+    finding = _blocking_finding("RELATION_TARGET_UNRESOLVED")
+    result = replace(preflight.contract_result, blocking_findings=(finding,))
+
+    reason = semantic_writes._blocking_reason(result)
+
+    assert "RELATION_TARGET_UNRESOLVED" in reason
+    assert "does not resolve" in reason
+    assert "link by the slug the write returned" in reason
+    assert _PAGE in reason
+
+
+def test_blocked_write_states_what_it_omitted(tmp_path: Path) -> None:
+    """A truncated finding list must never read as the complete set."""
+    preflight = _feedback_preflight(tmp_path)
+    findings = tuple(_blocking_finding(f"RULE_{i}", i) for i in range(7))
+    result = replace(preflight.contract_result, blocking_findings=findings)
+
+    reason = semantic_writes._blocking_reason(result)
+
+    assert "+4 more" in reason
+    assert "validate_only" in reason
+
+
+def test_blocked_write_with_no_findings_keeps_the_bare_prefix(tmp_path: Path) -> None:
+    """should_block without findings must not render an empty, dangling list."""
+    preflight = _feedback_preflight(tmp_path)
+    result = replace(preflight.contract_result, blocking_findings=())
+
+    assert semantic_writes._blocking_reason(result) == (
+        "semantic contract has blocking findings"
+    )
 
 
 def test_existing_feedback_byte_bounds_one_oversized_relation_fact(

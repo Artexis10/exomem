@@ -83,6 +83,16 @@
           "default": 12,
           "description": "Maximum bounded semantic examples per grouping.",
           "type": "integer"
+        },
+        "response_detail": {
+          "default": "compact",
+          "description": "Successful committed mutation detail: compact (default), full diagnostics, or legacy raw leaf result.",
+          "enum": [
+            "compact",
+            "full",
+            "legacy"
+          ],
+          "type": "string"
         }
       },
       "type": "object"
@@ -299,6 +309,16 @@
           ],
           "default": null,
           "description": "For `apply-proposal`, the target page hash for relation and reconciliation-relate approvals."
+        },
+        "response_detail": {
+          "default": "compact",
+          "description": "Successful committed mutation detail: compact (default), full diagnostics, or legacy raw leaf result.",
+          "enum": [
+            "compact",
+            "full",
+            "legacy"
+          ],
+          "type": "string"
         }
       },
       "required": [
@@ -497,6 +517,21 @@
           "default": null,
           "description": "Force or suppress cross-encoder reranking; omit for mode-aware auto."
         },
+        "rerank_max_candidates": {
+          "anyOf": [
+            {
+              "description": "Maximum fused candidates passed to the reranker; strict integer from the effective result limit through 300.",
+              "maximum": 300,
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Bound scorer input to an integer from the effective result limit through 300; omission preserves the existing prefix."
+        },
         "prefer_compiled": {
           "default": true,
           "description": "Prefer compiled notes over raw sources by default.",
@@ -681,6 +716,16 @@
           ],
           "default": null,
           "description": "Optional title hint for the compilation proposal."
+        },
+        "response_detail": {
+          "default": "compact",
+          "description": "Successful committed mutation detail: compact (default), full diagnostics, or legacy raw leaf result.",
+          "enum": [
+            "compact",
+            "full",
+            "legacy"
+          ],
+          "type": "string"
         }
       },
       "required": [
@@ -728,7 +773,7 @@
       "properties": {
         "operation": {
           "default": "suggest-links",
-          "description": "context, suggest-links, suggest-relations, graph-context, inbound-links, create-entity, or accept-relation.",
+          "description": "context, suggest-links, suggest-relations, graph-context, inbound-links, resolve-entity, create-entity, or accept-relation.",
           "type": "string"
         },
         "path": {
@@ -913,6 +958,13 @@
         "entity_type": {
           "anyOf": [
             {
+              "enum": [
+                "person",
+                "organization",
+                "concept",
+                "library",
+                "decision"
+              ],
               "type": "string"
             },
             {
@@ -1170,6 +1222,16 @@
           ],
           "default": null,
           "description": "Reviewed candidate fingerprint for accept-relation. Required for accept-relation (not optional — a mismatch, or an omitted value, refuses the write); accept re-validates live eligibility too, so a candidate that stopped being open between the queue read and this call also refuses."
+        },
+        "response_detail": {
+          "default": "compact",
+          "description": "Successful committed mutation detail: compact (default), full diagnostics, or legacy raw leaf result.",
+          "enum": [
+            "compact",
+            "full",
+            "legacy"
+          ],
+          "type": "string"
         }
       },
       "type": "object"
@@ -1188,191 +1250,580 @@
           "description": "One-line rationale recorded in the log.",
           "type": "string"
         },
-        "new_body": {
-          "anyOf": [
+        "operation": {
+          "discriminator": {
+            "propertyName": "kind"
+          },
+          "oneOf": [
             {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Replace the whole markdown body."
-        },
-        "tags": {
-          "anyOf": [
-            {
-              "items": {
-                "type": "string"
+              "additionalProperties": false,
+              "properties": {
+                "transition_token": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null
+                },
+                "relation_disposition": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null
+                },
+                "relation_review_hash": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null
+                },
+                "relation_review_reason": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null
+                },
+                "expected_hash": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null
+                },
+                "kind": {
+                  "const": "replace_body",
+                  "type": "string"
+                },
+                "new_body": {
+                  "type": "string"
+                },
+                "tags": {
+                  "anyOf": [
+                    {
+                      "items": {
+                        "type": "string"
+                      },
+                      "type": "array"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null
+                }
               },
-              "type": "array"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Replace tags."
-        },
-        "old_string": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Exact body snippet to replace."
-        },
-        "new_string": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Replacement text."
-        },
-        "replace_all": {
-          "default": false,
-          "description": "Replace every occurrence of old_string.",
-          "type": "boolean"
-        },
-        "heading": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Section heading for section-targeted edits."
-        },
-        "section_position": {
-          "default": "append",
-          "description": "append, prepend, or replace.",
-          "type": "string"
-        },
-        "edits": {
-          "anyOf": [
-            {
-              "items": {
-                "additionalProperties": true,
-                "type": "object"
-              },
-              "type": "array"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Batch edits, each with old_string/new_string/replace_all."
-        },
-        "row_key": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Opinion-row key to fill."
-        },
-        "take": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Opinion-row text."
-        },
-        "overwrite": {
-          "default": false,
-          "description": "Allow replacing an existing take.",
-          "type": "boolean"
-        },
-        "field": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Frontmatter field to set."
-        },
-        "value": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "integer"
-            },
-            {
-              "type": "number"
-            },
-            {
-              "type": "boolean"
-            },
-            {
-              "items": {},
-              "type": "array"
-            },
-            {
-              "additionalProperties": true,
+              "required": [
+                "kind",
+                "new_body"
+              ],
               "type": "object"
             },
             {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "New frontmatter value."
-        },
-        "allow_curated": {
-          "default": false,
-          "description": "Permit frontmatter patch under curated trees.",
-          "type": "boolean"
-        },
-        "expected_hash": {
-          "anyOf": [
-            {
-              "type": "string"
+              "additionalProperties": false,
+              "properties": {
+                "transition_token": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null
+                },
+                "relation_disposition": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null
+                },
+                "relation_review_hash": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null
+                },
+                "relation_review_reason": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null
+                },
+                "expected_hash": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null
+                },
+                "kind": {
+                  "const": "replace_tags",
+                  "type": "string"
+                },
+                "tags": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                }
+              },
+              "required": [
+                "kind",
+                "tags"
+              ],
+              "type": "object"
             },
             {
-              "type": "null"
+              "additionalProperties": false,
+              "properties": {
+                "transition_token": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null
+                },
+                "relation_disposition": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null
+                },
+                "relation_review_hash": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null
+                },
+                "relation_review_reason": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null
+                },
+                "expected_hash": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null
+                },
+                "kind": {
+                  "const": "replace_string",
+                  "type": "string"
+                },
+                "old_string": {
+                  "type": "string"
+                },
+                "new_string": {
+                  "type": "string"
+                },
+                "replace_all": {
+                  "default": false,
+                  "type": "boolean"
+                },
+                "tags": {
+                  "anyOf": [
+                    {
+                      "items": {
+                        "type": "string"
+                      },
+                      "type": "array"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null
+                },
+                "validate_only": {
+                  "default": false,
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "kind",
+                "old_string",
+                "new_string"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "transition_token": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null
+                },
+                "relation_disposition": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null
+                },
+                "relation_review_hash": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null
+                },
+                "relation_review_reason": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null
+                },
+                "expected_hash": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null
+                },
+                "kind": {
+                  "const": "batch_replace",
+                  "type": "string"
+                },
+                "edits": {
+                  "items": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "old_string": {
+                        "type": "string"
+                      },
+                      "new_string": {
+                        "type": "string"
+                      },
+                      "replace_all": {
+                        "default": false,
+                        "type": "boolean"
+                      }
+                    },
+                    "required": [
+                      "old_string",
+                      "new_string"
+                    ],
+                    "type": "object"
+                  },
+                  "minItems": 1,
+                  "type": "array"
+                },
+                "validate_only": {
+                  "default": false,
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "kind",
+                "edits"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "transition_token": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null
+                },
+                "relation_disposition": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null
+                },
+                "relation_review_hash": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null
+                },
+                "relation_review_reason": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null
+                },
+                "expected_hash": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null
+                },
+                "kind": {
+                  "const": "edit_section",
+                  "type": "string"
+                },
+                "heading": {
+                  "type": "string"
+                },
+                "new_string": {
+                  "type": "string"
+                },
+                "section_position": {
+                  "default": "append",
+                  "enum": [
+                    "append",
+                    "prepend",
+                    "replace"
+                  ],
+                  "type": "string"
+                },
+                "tags": {
+                  "anyOf": [
+                    {
+                      "items": {
+                        "type": "string"
+                      },
+                      "type": "array"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null
+                }
+              },
+              "required": [
+                "kind",
+                "heading",
+                "new_string"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "transition_token": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null
+                },
+                "relation_disposition": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null
+                },
+                "relation_review_hash": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null
+                },
+                "relation_review_reason": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null
+                },
+                "kind": {
+                  "const": "patch_frontmatter",
+                  "type": "string"
+                },
+                "field": {
+                  "type": "string"
+                },
+                "value": {},
+                "allow_curated": {
+                  "default": false,
+                  "type": "boolean"
+                },
+                "validate_only": {
+                  "default": false,
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "kind",
+                "field",
+                "value"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "kind": {
+                  "const": "fill_row",
+                  "type": "string"
+                },
+                "row_key": {
+                  "type": "string"
+                },
+                "take": {
+                  "type": "string"
+                },
+                "overwrite": {
+                  "default": false,
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "kind",
+                "row_key",
+                "take"
+              ],
+              "type": "object"
             }
           ],
-          "default": null,
-          "description": "Refuse write if content changed since read."
+          "description": "Required nested edit selected by `kind`. The seven supported\nkinds expose only fields their underlying edit leaf enforces."
         },
-        "validate_only": {
-          "default": false,
-          "description": "Preview a surgical match without writing.",
-          "type": "boolean"
+        "response_detail": {
+          "default": "compact",
+          "description": "Successful committed mutation detail: compact (default), full diagnostics, or legacy raw leaf result.",
+          "enum": [
+            "compact",
+            "full",
+            "legacy"
+          ],
+          "type": "string"
         }
       },
       "required": [
         "path",
-        "why"
+        "why",
+        "operation"
       ],
       "type": "object"
     }
@@ -1418,6 +1869,32 @@
           "default": false,
           "description": "For fix mode, rebuild embeddings when explicitly requested.",
           "type": "boolean"
+        },
+        "detail": {
+          "default": "actionable",
+          "description": "Audit output detail: actionable (default) or full.",
+          "enum": [
+            "actionable",
+            "full"
+          ],
+          "type": "string"
+        },
+        "legacy_sample_limit": {
+          "default": 5,
+          "description": "Audit legacy-backlog sample count; integer from 0 to 50.",
+          "maximum": 50,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "response_detail": {
+          "default": "compact",
+          "description": "Successful committed mutation detail: compact (default), full diagnostics, or legacy raw leaf result.",
+          "enum": [
+            "compact",
+            "full",
+            "legacy"
+          ],
+          "type": "string"
         }
       },
       "type": "object"
@@ -1657,6 +2134,16 @@
           ],
           "default": null,
           "description": "Audit reason for a reviewed-none disposition."
+        },
+        "response_detail": {
+          "default": "compact",
+          "description": "Successful committed mutation detail: compact (default), full diagnostics, or legacy raw leaf result.",
+          "enum": [
+            "compact",
+            "full",
+            "legacy"
+          ],
+          "type": "string"
         }
       },
       "type": "object"
@@ -1838,6 +2325,16 @@
           ],
           "default": null,
           "description": "Audit reason for reviewed-none."
+        },
+        "response_detail": {
+          "default": "compact",
+          "description": "Successful committed mutation detail: compact (default), full diagnostics, or legacy raw leaf result.",
+          "enum": [
+            "compact",
+            "full",
+            "legacy"
+          ],
+          "type": "string"
         }
       },
       "required": [
@@ -1878,6 +2375,16 @@
           ],
           "default": null,
           "description": "Optional sidecar description."
+        },
+        "response_detail": {
+          "default": "compact",
+          "description": "Successful committed mutation detail: compact (default), full diagnostics, or legacy raw leaf result.",
+          "enum": [
+            "compact",
+            "full",
+            "legacy"
+          ],
+          "type": "string"
         }
       },
       "required": [
@@ -1913,6 +2420,16 @@
             "process",
             "status",
             "retry"
+          ],
+          "type": "string"
+        },
+        "response_detail": {
+          "default": "compact",
+          "description": "Successful committed mutation detail: compact (default), full diagnostics, or legacy raw leaf result.",
+          "enum": [
+            "compact",
+            "full",
+            "legacy"
           ],
           "type": "string"
         }
@@ -2187,7 +2704,7 @@
             }
           ],
           "default": null,
-          "description": "Required for research-note. Any slug-shaped key is accepted; unknown keys auto-register on first use (a typo guard rejects near-misses within edit distance 2 of an existing key) and create the matching Notes/Research/<Folder>/. Pass project_category to bucket a new key. Current keys (not exhaustive): personal, project-alpha, project-beta, work."
+          "description": "Required for research-note. (any slug; unknown keys auto-register on first use)"
         },
         "projects": {
           "anyOf": [
@@ -2202,7 +2719,7 @@
             }
           ],
           "default": null,
-          "description": "Optional project keys for cross-project notes. Any slug-shaped key is accepted; unknown keys auto-register on first use (a typo guard rejects near-misses within edit distance 2 of an existing key) and create the matching Notes/Research/<Folder>/. Pass project_category to bucket a new key. Current keys (not exhaustive): personal, project-alpha, project-beta, work."
+          "description": "Optional project keys for cross-project notes. (any slug; unknown keys auto-register on first use)"
         },
         "sources": {
           "anyOf": [
@@ -2495,6 +3012,16 @@
           ],
           "default": null,
           "description": "Audit reason for a reviewed-none disposition."
+        },
+        "response_detail": {
+          "default": "compact",
+          "description": "Successful committed mutation detail: compact (default), full diagnostics, or legacy raw leaf result.",
+          "enum": [
+            "compact",
+            "full",
+            "legacy"
+          ],
+          "type": "string"
         }
       },
       "required": [
@@ -2863,6 +3390,16 @@
           ],
           "default": null,
           "description": "Audit reason for a reviewed-none disposition."
+        },
+        "response_detail": {
+          "default": "compact",
+          "description": "Successful committed mutation detail: compact (default), full diagnostics, or legacy raw leaf result.",
+          "enum": [
+            "compact",
+            "full",
+            "legacy"
+          ],
+          "type": "string"
         }
       },
       "required": [
@@ -3057,6 +3594,22 @@
           ],
           "default": null,
           "description": "Stable `exomem://review/<id>` reference for item mode."
+        },
+        "detail": {
+          "default": "actionable",
+          "description": "Audit output detail: actionable (default) or full.",
+          "enum": [
+            "actionable",
+            "full"
+          ],
+          "type": "string"
+        },
+        "legacy_sample_limit": {
+          "default": 5,
+          "description": "Audit legacy-backlog sample count; integer from 0 to 50.",
+          "maximum": 50,
+          "minimum": 0,
+          "type": "integer"
         }
       },
       "type": "object"
@@ -3163,6 +3716,16 @@
           "default": false,
           "description": "Request response-only optional relation suggestions.",
           "type": "boolean"
+        },
+        "response_detail": {
+          "default": "compact",
+          "description": "Successful committed mutation detail: compact (default), full diagnostics, or legacy raw leaf result.",
+          "enum": [
+            "compact",
+            "full",
+            "legacy"
+          ],
+          "type": "string"
         }
       },
       "required": [
@@ -3179,6 +3742,16 @@
         "operation": {
           "default": "upload",
           "description": "upload or download.",
+          "type": "string"
+        },
+        "response_detail": {
+          "default": "compact",
+          "description": "Successful committed mutation detail: compact (default), full diagnostics, or legacy raw leaf result.",
+          "enum": [
+            "compact",
+            "full",
+            "legacy"
+          ],
           "type": "string"
         }
       },
@@ -3233,6 +3806,16 @@
           ],
           "default": null,
           "description": "Optional reviewed fingerprint; a mismatch refuses the write and asks the caller to refresh."
+        },
+        "response_detail": {
+          "default": "compact",
+          "description": "Successful committed mutation detail: compact (default), full diagnostics, or legacy raw leaf result.",
+          "enum": [
+            "compact",
+            "full",
+            "legacy"
+          ],
+          "type": "string"
         }
       },
       "required": [

@@ -1,0 +1,19 @@
+{
+  "contract_version": 1,
+  "mcp_url": "https://exomem.substratesystems.io/mcp",
+  "authentication": "oauth",
+  "client_registration": "cimd",
+  "oidc_enabled": false,
+  "default_scopes": [],
+  "base_scopes": [
+    "offline_access"
+  ],
+  "registered_tool_surface_sha256": "3fb189ee7d9e48183c404d5b5d36df3c36d5e8df995b7e4cd78ad8c763672ae6",
+  "pending_tool_surface_sha256": "f10ed06d7433ca0bb387694588e9185004d60624128dc5df03c9f68f615ff5a5",
+  "refresh_required": true,
+  "rollout_state": "awaiting-post-deploy-refresh",
+  "last_verified_release": "0.25.5",
+  "last_verified_at": "2026-07-20",
+  "verification": "Connector recreated against 0.25.5 and confirmed returning note content in a fresh ChatGPT conversation, which is the check that matters: the active failure note chatgpt-app-blocks-exomem-content-returning-mcp-reads-despite-safe-annotations records that bootstrap and frontmatter-only reads can succeed while content-bearing reads stay blocked, so connectivity alone is not evidence. bootstrap and ask_memory were additionally verified over the live connector, with bootstrap reporting published_mcp_tool_surface_sha256 equal to the promoted digest. Re-verify content reads, not just connection, after any tool-surface change.",
+  "last_verified_tool_surface_sha256": "3fb189ee7d9e48183c404d5b5d36df3c36d5e8df995b7e4cd78ad8c763672ae6"
+}

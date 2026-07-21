@@ -26,8 +26,10 @@ def make_jwks_client(team_domain: str):
     return jwt.PyJWKClient(f"https://{team_domain}/cdn-cgi/access/certs")
 
 
-def verify(token: str | None, *, jwks_client, team_domain: str, audience: str) -> bool:
-    """True iff `token` is a valid Cloudflare Access JWT for this application.
+def verified_claims(
+    token: str | None, *, jwks_client, team_domain: str, audience: str
+) -> dict | None:
+    """Return verified Access claims, or ``None`` when validation fails.
 
     Checks: RS256 signature against the team JWKS, `aud` == the configured AUD
     tag, `iss` == https://<team_domain>, and a live `exp`. Any failure → False
@@ -35,12 +37,12 @@ def verify(token: str | None, *, jwks_client, team_domain: str, audience: str) -
     minted for any other Access app in the same team would otherwise pass.
     """
     if not token:
-        return False
+        return None
     import jwt
 
     try:
         signing_key = jwks_client.get_signing_key_from_jwt(token).key
-        jwt.decode(
+        claims = jwt.decode(
             token,
             signing_key,
             algorithms=["RS256"],
@@ -48,7 +50,20 @@ def verify(token: str | None, *, jwks_client, team_domain: str, audience: str) -
             issuer=f"https://{team_domain}",
             options={"require": ["exp", "iss", "aud"]},
         )
-        return True
+        return claims if isinstance(claims, dict) else None
     except Exception as e:  # noqa: BLE001 — any verification failure must deny
         log.info("CF Access JWT rejected: %s", type(e).__name__)
-        return False
+        return None
+
+
+def verify(token: str | None, *, jwks_client, team_domain: str, audience: str) -> bool:
+    """True iff `token` is a valid Cloudflare Access JWT for this application."""
+    return (
+        verified_claims(
+            token,
+            jwks_client=jwks_client,
+            team_domain=team_domain,
+            audience=audience,
+        )
+        is not None
+    )

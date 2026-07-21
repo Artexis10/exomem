@@ -64,6 +64,8 @@ if (-not $isAdmin) {
     exit
 }
 
+. "$PSScriptRoot\_service-common.ps1"
+
 $repoRoot = (Resolve-Path "$PSScriptRoot\..").Path
 $logDir = Join-Path $repoRoot "logs"
 
@@ -123,13 +125,6 @@ function Set-NssmEnvironment {
     & $NssmPath @args
 }
 
-function Invoke-LoggedNative {
-    param([string[]]$CommandArgs)
-    $out = & $CommandArgs[0] @($CommandArgs[1..($CommandArgs.Count - 1)]) 2>&1
-    foreach ($line in $out) { Write-Host $line }
-    return $LASTEXITCODE
-}
-
 function Test-McpEndpoint {
     param(
         [string]$HostName,
@@ -160,8 +155,17 @@ function Test-McpEndpoint {
 }
 
 function Install-ReleaseVenv {
+    # Prefer the venv this box is ALREADY installed against. Re-running the
+    # installer to upgrade must land in the same place, and the directory name is
+    # whatever the original -ServiceRoot said -- 'exomem-service-ha' on this box,
+    # not the 'exomem-service-release' default. Guessing wrong silently provisions
+    # a second venv and leaves the service running the old one.
+    $existingRoot = Get-ExomemServiceRoot -PythonPath (Get-ExomemServicePython -ServiceName $ServiceName)
     $root = if ($ServiceRoot) {
         $ServiceRoot
+    } elseif ($existingRoot) {
+        Write-Host "Reusing the venv '$ServiceName' is already installed against: $existingRoot"
+        $existingRoot
     } else {
         Join-Path (Split-Path -Parent $repoRoot) "exomem-service-release"
     }
@@ -173,39 +177,8 @@ function Install-ReleaseVenv {
         if ($code -ne 0) { throw "uv venv failed" }
     }
 
-    $pkg = if ($PackageVersion) { "exomem==$PackageVersion" } else { "exomem" }
-    if ($Profile -eq "hybrid") {
-        $pkg = if ($PackageVersion) { "exomem[embeddings]==$PackageVersion" } else { "exomem[embeddings]" }
-    } elseif ($Profile -eq "standard") {
-        $pkg = if ($PackageVersion) { "exomem[embeddings,media]==$PackageVersion" } else { "exomem[embeddings,media]" }
-    } elseif ($Profile -eq "media") {
-        $pkg = if ($PackageVersion) { "exomem[embeddings,media,vision,diarization]==$PackageVersion" } else { "exomem[embeddings,media,vision,diarization]" }
-    }
-
-    Write-Host "Installing $pkg into release service venv..."
-    $code = Invoke-LoggedNative @("uv", "pip", "install", "--upgrade", "--python", $venvPython, $pkg)
-    if ($code -ne 0) { throw "uv pip install failed for $pkg" }
-
-    $shouldCuda = $false
-    if ($CudaTorch -eq "always") {
-        $shouldCuda = $true
-    } elseif ($CudaTorch -eq "auto" -and (Get-Command nvidia-smi -ErrorAction SilentlyContinue)) {
-        $shouldCuda = $true
-    }
-    if ($shouldCuda -and $Profile -ne "lean") {
-        Write-Host "Installing CUDA 13.2 Torch for Windows NVIDIA GPU support..."
-        $code = Invoke-LoggedNative @(
-            "uv",
-            "pip",
-            "install",
-            "--python",
-            $venvPython,
-            "--default-index",
-            "https://download.pytorch.org/whl/cu132",
-            "torch==2.12.0+cu132"
-        )
-        if ($code -ne 0) { throw "CUDA Torch install failed" }
-    }
+    Install-ExomemPackage -Python $venvPython -Profile $Profile -PackageVersion $PackageVersion
+    Repair-TorchCuda -Python $venvPython -Profile $Profile -CudaTorch $CudaTorch
     return $venvPython
 }
 
@@ -238,8 +211,22 @@ if ($LASTEXITCODE -ne 0) {
     throw "Remote doctor preflight failed. Fix the vault and OAuth environment before installing the service."
 }
 
-# Install
-& $NssmPath install $ServiceName $python "-m" "exomem" "--transport" "streamable-http" "--host" $BindHost "--port" $Port
+# Install, or reconfigure in place when already registered. `nssm install` against
+# an existing service fails, which made re-running this script -- the documented
+# way to upgrade -- unsafe, so nobody re-ran it and the service drifted 5 releases
+# behind. Every `set` below is idempotent, so the two paths converge.
+$existingService = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
+if ($existingService) {
+    Write-Host "Service '$ServiceName' is already registered; reconfiguring in place."
+    if ($existingService.Status -ne 'Stopped') {
+        Write-Host "  stopping it first so the new interpreter is picked up..."
+        & $NssmPath stop $ServiceName | Out-Null
+    }
+    & $NssmPath set $ServiceName Application $python
+    & $NssmPath set $ServiceName AppParameters "-m exomem --transport streamable-http --host $BindHost --port $Port"
+} else {
+    & $NssmPath install $ServiceName $python "-m" "exomem" "--transport" "streamable-http" "--host" $BindHost "--port" $Port
+}
 & $NssmPath set $ServiceName AppDirectory $repoRoot
 & $NssmPath set $ServiceName AppStdout (Join-Path $logDir "service.out.log")
 & $NssmPath set $ServiceName AppStderr (Join-Path $logDir "service.err.log")
@@ -296,5 +283,24 @@ try {
     Write-Warning "Service is still installed and running; you can grant manually later."
 }
 
-Write-Host "Installed and started service '$ServiceName' bound to ${BindHost}:${Port}."
+$connectorPending = $false
+$connectorContractPath = Join-Path $repoRoot "deploy\chatgpt\personal-plugin-contract.json"
+if (Test-Path $connectorContractPath) {
+    try {
+        $connectorContract = Get-Content -Raw $connectorContractPath | ConvertFrom-Json
+        $connectorPending = $connectorContract.refresh_required -eq $true
+    } catch {
+        Write-Warning "Could not read ChatGPT connector rollout contract: $_"
+    }
+}
+
+if ($connectorPending) {
+    Write-Warning "CHATGPT_PLUGIN_REFRESH_REQUIRED: service is running, but connector rollout is incomplete."
+    Write-Host "  Confirm /health/ready.mcp_tool_surface_sha256 matches pending_tool_surface_sha256."
+    Write-Host "  Refresh or recreate the ChatGPT Personal Plugin, then invoke bootstrap and ask_memory from a fresh conversation."
+    Write-Host "  Promote the pending digest to registered_tool_surface_sha256 only after that smoke test passes."
+    Write-Host "Installed and started service '$ServiceName' bound to ${BindHost}:${Port}; connector promotion remains pending."
+} else {
+    Write-Host "Installed, started, and connector-cleared service '$ServiceName' bound to ${BindHost}:${Port}."
+}
 Write-Host "Logs: $logDir\service.out.log (stdout), service.err.log (stderr), exomem.log (app)"

@@ -51,6 +51,8 @@ def main(argv: list[str] | None = None) -> int:
         return _init_main(raw[1:])
     if raw and raw[0] == "install-skill":
         return _install_skill_main(raw[1:])
+    if raw and raw[0] == "package-skills":
+        return _package_skills_main(raw[1:])
     if raw and raw[0] == "personalize":
         from .personalize import personalize_main
 
@@ -65,6 +67,8 @@ def main(argv: list[str] | None = None) -> int:
         return _studio_main(raw[1:])
     if raw and raw[0] == "doctor":
         return _doctor_main(raw[1:])
+    if raw and raw[0] == "install-info":
+        return _install_info_main(raw[1:])
     if raw and raw[0] == "auth":
         return _auth_main(raw[1:])
     if raw and raw[0] == "status":
@@ -88,7 +92,7 @@ def main(argv: list[str] | None = None) -> int:
     # short aliases when a name overlaps.
     if raw and not raw[0].startswith("-") and raw[0] in _core_op_names():
         return _core_op_main(raw)
-    if raw and raw[0] in _simple_cli_action_names():
+    if raw and not raw[0].startswith("-") and raw[0] in _simple_cli_action_names():
         return _simple_action_main(raw)
     # A real tier-2 op invoked while EXOMEM_DISABLE_TIER2 is set would otherwise fall
     # through to the serve parser and emit a confusing argparse error — name it instead.
@@ -546,6 +550,53 @@ def _status_main(argv: list[str]) -> int:
         print(f"  cuda: {status['cuda']}")
     return 0
 
+def _install_info_main(argv: list[str]) -> int:
+    """Report where this install came from.
+
+    Answers "what version is deployed, and from which environment" without
+    inspecting service-manager config. Unlike the `/health` route, this runs
+    locally and so may include the interpreter path — the detail that identifies
+    the real deploy target when a service venv sits apart from the checkout.
+
+    Named `install-info` rather than `provenance` deliberately: in this codebase
+    provenance already means note/source provenance (see `provenance.py`), and
+    reusing the word for install origin would be genuinely ambiguous.
+    """
+    parser = argparse.ArgumentParser(
+        prog="exomem install-info",
+        description="Report install origin: version, source, revision, torch build, extras.",
+    )
+    parser.add_argument("--json", action="store_true", help="emit stable JSON")
+    args = parser.parse_args(argv)
+
+    from . import deploy_provenance
+
+    report = deploy_provenance.provenance(include_local=True)
+
+    if args.json:
+        print(json.dumps(report, ensure_ascii=False, default=str))
+        return 0
+
+    print(f"version:        {report['version']}")
+    print(f"install source: {report['install_source']}")
+    if report.get("revision"):
+        print(f"revision:       {report['revision']}")
+    print(f"interpreter:    {report.get('interpreter')}")
+    if report.get("checkout"):
+        print(f"checkout:       {report['checkout']}")
+    torch_build = report.get("torch") or "not installed"
+    accel = "accelerated" if report.get("accelerated") else "CPU-only"
+    print(f"torch:          {torch_build} ({accel})")
+    print(f"extras:         {', '.join(report['extras']) or 'none'}")
+    if report["install_source"] == "wheel":
+        print(
+            "\nThis is a wheel install: it does NOT run a local checkout. "
+            "Upgrade it with `uv pip install --python <this interpreter> ...`; "
+            "`uv sync` in a checkout will not affect it."
+        )
+    return 0
+
+
 def _doctor_main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
         prog="exomem doctor",
@@ -848,14 +899,21 @@ def _install_skill_main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
         prog="exomem install-skill",
         description=(
-            "Install the Exomem skill into Claude Code's skills folder. "
-            "The MCP server is the hands; the skill is the brain that tells Claude "
-            "when to capture and how to file — without it, the tools sit unused."
+            "Install the Exomem skills into every agent client on this machine. "
+            "The MCP server is the hands; the skills are the brain that tells the agent "
+            "when to capture and how to file — without them, the tools sit unused."
         ),
     )
     parser.add_argument(
+        "--client",
+        default="auto",
+        help="Which client(s) to install into: auto (every client detected here), "
+        "all (every supported client), claude, or codex. Default: auto.",
+    )
+    parser.add_argument(
         "--target",
-        help="Skill folder to install into (default: ~/.claude/skills/exomem).",
+        help="Install into one explicit folder instead (default: ~/.claude/skills/exomem). "
+        "Overrides --client.",
     )
     parser.add_argument(
         "--force",
@@ -874,26 +932,88 @@ def _install_skill_main(argv: list[str]) -> int:
 
     target = Path(args.target) if args.target else None
     try:
-        report = install_module.install_skill(target, force=args.force, link=args.link)
-    except (FileExistsError, FileNotFoundError) as e:
+        if target is not None:
+            reports = {"claude": install_module.install_skill(target, force=args.force, link=args.link)}
+        else:
+            reports = install_module.install_skills(
+                client=args.client, force=args.force, link=args.link
+            )["clients"]
+    except (FileExistsError, FileNotFoundError, ValueError) as e:
         print(f"exomem install-skill: {e}", file=sys.stderr)
         return 1
-    print(
-        f"Installed the Exomem skill ({report['mode']}, "
-        f"{report['files']} files):"
-    )
-    print(f"  {report['target']}")
-    if report.get("workflow_skills"):
-        names = ", ".join(s["name"] for s in report["workflow_skills"])
-        print(f"  Workflow skills: {names}")
+
+    for client, report in reports.items():
+        print(
+            f"Installed the Exomem skills for {client} "
+            f"({report['mode']}, {report['files']} files):"
+        )
+        print(f"  {report['target']}")
+        if report.get("workflow_skills"):
+            names = ", ".join(s["name"] for s in report["workflow_skills"])
+            print(f"  Workflow skills: {names}")
     # Installing to the default location supersedes any pre-rename `knowledge-base`
     # skill; retire it so Claude Code doesn't load both.
     if target is None:
         removed = install_module.remove_legacy_skill()
         if removed is not None:
             print(f"  Removed the pre-rename skill at {removed}.")
-    print("Restart Claude Code to load it. Then just talk - it captures at")
+    clients = ", ".join(reports)
+    print(f"Restart {clients} to load them. Then just talk - it captures at")
     print('natural stopping points, or say "find my notes on X".')
+    return 0
+
+
+def _package_skills_main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(
+        prog="exomem package-skills",
+        description=(
+            "Build one uploadable .zip per skill for clients that have no filesystem "
+            "install path (claude.ai, ChatGPT). Claude Code and Codex should use "
+            "`exomem install-skill` instead."
+        ),
+    )
+    parser.add_argument(
+        "--out",
+        help="Output directory for the archives (default: ./dist/skills).",
+    )
+    parser.add_argument(
+        "--vault",
+        help="Vault root whose real project-keys.yaml to overlay into the core skill. "
+        "Omit for a generic, shareable archive.",
+    )
+    parser.add_argument(
+        "--plugin-root",
+        help="Instead of archives, regenerate the Claude Code plugin tree at this path "
+        "(maintainer task; the committed tree must mirror the packaged sources).",
+    )
+    args = parser.parse_args(argv)
+
+    from . import package_skills as package_module
+
+    if args.plugin_root:
+        report = package_module.sync_plugin(Path(args.plugin_root))
+        print(f"Synced plugin v{report['version']} at {report['plugin_root']}")
+        print(f"  skills: {', '.join(report['skills'])}")
+        return 0
+
+    vault = args.vault or os.environ.get("EXOMEM_VAULT_PATH")
+    try:
+        report = package_module.package_skills(
+            Path(args.out) if args.out else None,
+            vault=Path(vault) if vault else None,
+        )
+    except (FileNotFoundError, OSError) as e:
+        print(f"exomem package-skills: {e}", file=sys.stderr)
+        return 1
+
+    print(f"Wrote {report['count']} skill archives to {report['out_dir']}:")
+    for archive in report["archives"]:
+        print(f"  {Path(archive['path']).name} ({archive['bytes'] // 1024} KB)")
+    print()
+    print("Upload these in the client's settings:")
+    print("  claude.ai  -> Settings > Capabilities > Skills > upload")
+    print("  ChatGPT    -> Settings > Skills > upload")
+    print("Claude Code and Codex do not need these - run `exomem install-skill`.")
     return 0
 
 
@@ -1015,13 +1135,10 @@ def _install_hook_main(argv: list[str]) -> int:
 # --------------------------------------------------------------------------- #
 # Simple product actions (friendly CLI aliases over canonical registry commands)
 # --------------------------------------------------------------------------- #
-_SIMPLE_CLI_ACTIONS = frozenset(
-    {"ask", "remember", "capture", "review", "connect", "adopt", "maintain"}
-)
-
-
 def _simple_cli_action_names() -> frozenset[str]:
-    return _SIMPLE_CLI_ACTIONS
+    from . import commands as commands_module
+
+    return frozenset(commands_module.simple_action_names())
 
 
 def _with_json(argv: list[str], enabled: bool) -> list[str]:
@@ -1469,6 +1586,10 @@ def _simple_maintain_main(argv: list[str]) -> int:
 # flags, their REQUIRED params stay flags and everything else is reachable via a
 # repeatable `--field key=value`, so the CLI stays clean.
 _FIELD_ESCAPE = frozenset({"remember", "replace_memory"})
+_FIELD_ESCAPE_VISIBLE_PARAMS = frozenset({"slug", "response_detail"})
+_LEGACY_EDIT_BOOL_FIELDS = frozenset(
+    {"replace_all", "overwrite", "allow_curated", "validate_only"}
+)
 
 
 def _expose_tier2() -> bool:
@@ -1499,13 +1620,18 @@ def _flag(name: str) -> str:
 def _add_command_args(sp: argparse.ArgumentParser, cmd) -> None:
     field_escape = cmd.name in _FIELD_ESCAPE
     for p in cmd.params:
-        if field_escape and not p.required and p.name != "slug":
+        if (
+            field_escape
+            and not p.required
+            and p.name not in _FIELD_ESCAPE_VISIBLE_PARAMS
+        ):
             continue  # reachable via --field
         if p.cli_positional:
             sp.add_argument(
                 p.name,
                 nargs=None if p.required else "?",
                 default=None,
+                metavar="{" + ",".join(p.choices) + "}" if p.choices else None,
                 help=p.help or None,
             )
         elif p.type == "bool":
@@ -1530,7 +1656,12 @@ def _add_command_args(sp: argparse.ArgumentParser, cmd) -> None:
                 _flag(p.name),
                 dest=p.name,
                 default=None,
-                required=p.required and not p.cli_positional,
+                required=(
+                    p.required
+                    and not p.cli_positional
+                    and not (cmd.name == "edit_memory" and p.name == "operation")
+                ),
+                metavar="{" + ",".join(p.choices) + "}" if p.choices else None,
                 help=p.help or None,
             )
     if field_escape:
@@ -1541,6 +1672,33 @@ def _add_command_args(sp: argparse.ArgumentParser, cmd) -> None:
             metavar="KEY=VALUE",
             help="set any other parameter (repeatable), e.g. --field severity=critical",
         )
+    if cmd.name == "edit_memory":
+        from .edit_operations import LEGACY_EDIT_FIELDS
+
+        for name in sorted(LEGACY_EDIT_FIELDS):
+            if name in _LEGACY_EDIT_BOOL_FIELDS:
+                sp.add_argument(
+                    _flag(name),
+                    dest=name,
+                    action=argparse.BooleanOptionalAction,
+                    default=None,
+                    help=argparse.SUPPRESS,
+                )
+            elif name == "tags":
+                sp.add_argument(
+                    _flag(name),
+                    dest=name,
+                    action="append",
+                    default=None,
+                    help=argparse.SUPPRESS,
+                )
+            else:
+                sp.add_argument(
+                    _flag(name),
+                    dest=name,
+                    default=None,
+                    help=argparse.SUPPRESS,
+                )
 
 
 def _collect_raw_args(
@@ -1549,7 +1707,11 @@ def _collect_raw_args(
     field_escape = cmd.name in _FIELD_ESCAPE
     raw: dict = {}
     for p in cmd.params:
-        if field_escape and not p.required and p.name != "slug":
+        if (
+            field_escape
+            and not p.required
+            and p.name not in _FIELD_ESCAPE_VISIBLE_PARAMS
+        ):
             continue
         val = getattr(args, p.name, None)
         if val is not None:
@@ -1562,7 +1724,49 @@ def _collect_raw_args(
                 # every other usage error (a bare `raise SystemExit(str)` is exit 1).
                 parser.error(f"--field expects KEY=VALUE, got {item!r}")
             raw[key.strip()] = value
+    if cmd.name == "edit_memory":
+        from .edit_operations import LEGACY_EDIT_FIELDS
+
+        for name in LEGACY_EDIT_FIELDS:
+            value = getattr(args, name, None)
+            if value is not None:
+                raw[name] = value
     return raw
+
+
+def _normalize_cli_edit(cmd, raw: dict, cli_ops) -> dict:  # noqa: ANN001
+    from . import edit_operations
+
+    primary_names = {parameter.name for parameter in cmd.params}
+    primary_raw = {name: value for name, value in raw.items() if name in primary_names}
+    legacy = {name: value for name, value in raw.items() if name not in primary_names}
+    primary = cli_ops.coerce(
+        cmd.params,
+        primary_raw,
+        guarded_fields=cmd.guarded_fields,
+        tool=cmd.name,
+        cli=True,
+    )
+    if isinstance(legacy.get("edits"), str):
+        try:
+            legacy["edits"] = json.loads(legacy["edits"])
+        except json.JSONDecodeError as error:
+            raise cli_ops.OpError(
+                "BAD_JSON", f"`edits` must be valid JSON: {error}"
+            ) from None
+    if isinstance(legacy.get("value"), str):
+        try:
+            legacy["value"] = json.loads(legacy["value"])
+        except json.JSONDecodeError:
+            pass
+    normalized = edit_operations.normalize_edit_surface_arguments({**primary, **legacy})
+    return cli_ops.coerce(
+        cmd.params,
+        normalized,
+        guarded_fields=cmd.guarded_fields,
+        tool=cmd.name,
+        cli=True,
+    )
 
 
 def _print_adopt_human(result: dict) -> None:
@@ -1631,6 +1835,20 @@ def _print_adopt_human(result: dict) -> None:
 
 
 def _print_human(result, *, op: str | None = None) -> None:
+    specialized_op = op in {"adopt", "adopt_vault", "review_memory", "triage_memory"}
+    if (
+        specialized_op
+        and isinstance(result, dict)
+        and result.get("ok") is True
+        and result.get("status") == "committed"
+        and result.get("mutated") is True
+    ):
+        diagnostics = result.get("diagnostics")
+        if isinstance(diagnostics, dict):
+            result = diagnostics
+        else:
+            print(json.dumps(result, indent=2, ensure_ascii=False, default=str))
+            return
     if op in {"adopt", "adopt_vault"} and isinstance(result, dict):
         _print_adopt_human(result)
         return
@@ -1700,15 +1918,23 @@ def _print_triage_human(result: dict) -> None:
 
 
 def _core_op_main(argv: list[str]) -> int:
-    from . import cli_ops
+    from . import capabilities, cli_ops
     from . import commands as commands_module
     from . import schema as schema_module
     from .vault import resolve_vault
 
-    cmds = {
-        c.name: c
-        for c in commands_module.product_commands_for("cli", expose_tier2=_expose_tier2())
-    }
+    expose_tier2 = _expose_tier2()
+    registered_commands = commands_module.product_commands_for(
+        "cli", expose_tier2=expose_tier2
+    )
+    cmds = {command.name: command for command in registered_commands}
+    surface_descriptor = capabilities.ActiveSurfaceDescriptor(
+        surface="cli",
+        profile="product",
+        tier2_enabled=expose_tier2,
+        product_commands=tuple(command.name for command in registered_commands),
+        exported_aliases=commands_module.simple_action_names(),
+    )
 
     parser = _CLIParser(prog="kb", description=f"Query and write the local {kb_dirname()}.")
     sub = parser.add_subparsers(dest="op", required=True, parser_class=_CLIParser)
@@ -1729,9 +1955,12 @@ def _core_op_main(argv: list[str]) -> int:
 
     try:
         raw = _collect_raw_args(cmd, args, parser)
-        kwargs = cli_ops.coerce(
-            cmd.params, raw, guarded_fields=cmd.guarded_fields, tool=cmd.name, cli=True
-        )
+        if cmd.name == "edit_memory":
+            kwargs = _normalize_cli_edit(cmd, raw, cli_ops)
+        else:
+            kwargs = cli_ops.coerce(
+                cmd.params, raw, guarded_fields=cmd.guarded_fields, tool=cmd.name, cli=True
+            )
         vault_root = _resolve_core_op_vault(cmd.name, kwargs, resolve_vault)
         if cmd.needs_schema:
             injected = (vault_root, schema_module.load_source_schema(vault_root))
@@ -1739,12 +1968,13 @@ def _core_op_main(argv: list[str]) -> int:
             injected = (vault_root,)
         from .writer_lease import invoke_command
 
-        result = invoke_command(
-            cmd,
-            *injected,
-            idempotency_key=os.environ.get("EXOMEM_IDEMPOTENCY_KEY") or None,
-            **kwargs,
-        )
+        with capabilities.active_surface(surface_descriptor):
+            result = invoke_command(
+                cmd,
+                *injected,
+                idempotency_key=os.environ.get("EXOMEM_IDEMPOTENCY_KEY") or None,
+                **kwargs,
+            )
     except (cli_ops.OpError, ValueError, TypeError, RuntimeError) as e:
         err = cli_ops.error_dict(e)
         if as_json:
