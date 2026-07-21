@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.29.0](https://github.com/Artexis10/exomem/compare/v0.28.0...v0.29.0) (2026-07-21)
+
+
+### Features
+
+* survive session-store outages with stale-while-revalidate validation ([#292](https://github.com/Artexis10/exomem/issues/292)) ([a2dc541](https://github.com/Artexis10/exomem/commit/a2dc5414bc11366063c376acac7fa8458db20a34))
+
 ## [0.28.0](https://github.com/Artexis10/exomem/compare/v0.27.1...v0.28.0) (2026-07-21)
 
 
