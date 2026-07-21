@@ -47,7 +47,21 @@ def test_http_status_mapping() -> None:
     assert cli_ops.http_status_for("WRITER_FENCED") == 409
     assert cli_ops.http_status_for("MUTATION_BUSY") == 409
     assert cli_ops.http_status_for("MUTATION_LOCK_UNAVAILABLE") == 503
+    assert cli_ops.http_status_for("INGRESS_BYPASSED") == 403
     assert cli_ops.http_status_for("INVALID_NOTE") == 400
+
+
+def test_ingress_bypassed_is_a_terminal_refusal_with_actionable_remediation() -> None:
+    # Registered alongside WRITER_LEASE_REQUIRED (design.md Decision 1): a
+    # deliberate refusal — not a retryable/transient status — surfaced as 403
+    # with its own canned remediation.
+    op_error = cli_ops.OpError(
+        "INGRESS_BYPASSED", "request reached the origin without transiting the HA edge"
+    )
+    error = cli_ops.error_dict(op_error)
+    assert error["code"] == "INGRESS_BYPASSED"
+    assert cli_ops.http_status_for(error["code"]) == 403
+    assert "EXOMEM_EDGE_STAMP_ENFORCE=0" in error["remediation"]
 
 
 @pytest.mark.parametrize(
