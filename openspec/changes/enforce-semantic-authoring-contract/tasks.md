@@ -1,8 +1,8 @@
 ## 1. Dependency And Contract Baseline
 
-- [ ] 1.1 Confirm `add-first-class-semantic-language` implementation and delta specs are present on the target branch; land or sync that parent before archiving this follow-on.
-- [ ] 1.2 Add failing contract tests that pin one vault-independent semantic-authoring object with exact compact/rich grammar, applicability/exemptions, stable findings, version, and deterministic content digest.
-- [ ] 1.3 Implement the canonical semantic-authoring contract and concise/expanded deterministic renderers without reading a vault or invoking a model.
+- [x] 1.1 Confirm `add-first-class-semantic-language` implementation and delta specs are present on the target branch; land or sync that parent before archiving this follow-on.
+- [x] 1.2 Add failing contract tests that pin one vault-independent semantic-authoring object with exact compact/rich grammar, applicability/exemptions, stable findings, version, and deterministic content digest.
+- [x] 1.3 Implement the canonical semantic-authoring contract and concise/expanded deterministic renderers without reading a vault or invoking a model.
 
 ## 2. Rich Parser Semantics
 
