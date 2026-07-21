@@ -71,6 +71,13 @@ function proposalItem(id, title) {
   return {ref: `exomem://review/adoption/adr-test-1/${id}`, fingerprint: `fp-${id}`, title, state: "open"};
 }
 
+// Mutation-capable adoption actions (#285): the client sends response_detail:
+// "full" and reads only `.diagnostics` off the mutation terminal. Read actions
+// (status, work-item) are unchanged.
+const ADOPTION_MUTATION_ACTIONS = new Set([
+  "start", "select", "plan", "apply", "cancel", "finish",
+]);
+
 // handlers: {"<command>" | "adoption_studio:<action>": data | (body) => data}.
 // Return {__error: {status, code, message}} to produce a REST error envelope.
 async function mockApi(page, calls, handlers) {
@@ -93,8 +100,14 @@ async function mockApi(page, calls, handlers) {
         body: JSON.stringify({success: false, error: {code, message}})});
       return;
     }
+    // Wrap mutation-action results in the real mutation-terminal envelope
+    // (mutation_terminal.project_terminal, detail="full"): the merged client
+    // reads `.diagnostics`. Read actions and other commands stay unwrapped.
+    const data = name === "adoption_studio" && ADOPTION_MUTATION_ACTIONS.has(body.action)
+      ? {ok: true, mutated: true, warnings_count: 0, diagnostics: result}
+      : result;
     await route.fulfill({status: 200, contentType: "application/json",
-      body: JSON.stringify({success: true, data: result})});
+      body: JSON.stringify({success: true, data})});
   });
 }
 
