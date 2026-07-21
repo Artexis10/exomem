@@ -1,8 +1,8 @@
 ## Context
 
-The acknowledgement-loss incident is already fixed on `main`: the idempotency store reserves a receipt before the leaf, persists terminal state before acknowledgement, and replays identical completed results. The remaining failures sit above that boundary. Product writers return heterogeneous raw dictionaries; `edit_memory` advertises every optional argument at once; bootstrap renders the global registry rather than the active surface; semantic audit findings are capped before action-oriented ordering; and reranking scores a fixed `3 * limit` prefix whenever it runs.
+The acknowledgement-loss incident is already fixed on `main`: the idempotency store reserves a receipt before the leaf, persists terminal state before acknowledgement, and replays identical completed results. Subsequent production profiling in PR #282 found that uncached corpus-context construction could run up to three times in one governed write and exceed the 15-second edge budget even though the origin kept committing. The remaining agent failures sit above that boundary. Product writers return heterogeneous raw dictionaries; `edit_memory` advertises every optional argument at once; bootstrap renders the global registry rather than the active surface; semantic audit findings are capped before action-oriented ordering; and reranking scores a fixed `3 * limit` prefix whenever it runs.
 
-The change crosses MCP, REST, CLI, FastMCP discovery, replay persistence, audit presentation, and retrieval. The shared command leaves remain the source of behavior. Existing writer-lease, transactional write, semantic precommit, and optional-model soft-fail guarantees are constraints.
+The change crosses MCP, REST, CLI, FastMCP discovery, replay persistence, corpus-context construction, Cloudflare HA delivery, audit presentation, and retrieval. The shared command leaves remain the source of behavior. Existing writer-lease, transactional write, semantic precommit, edge no-replay, and optional-model soft-fail guarantees are constraints.
 
 ## Goals / Non-Goals
 
@@ -14,6 +14,7 @@ The change crosses MCP, REST, CLI, FastMCP discovery, replay persistence, audit 
 - Make bootstrap incapable of recommending a tool missing from the invoking surface/profile.
 - Make default audit output actionable beside a large grandfathered backlog, with explicit full enumeration.
 - Let callers reduce reranker work deterministically without changing default ranking policy.
+- Keep measured warm writes inside a 60-second single-origin edge budget and preserve identical acknowledgement recovery for 600 seconds without weakening cache invalidation or edge no-replay semantics.
 
 **Non-Goals:**
 
@@ -22,6 +23,8 @@ The change crosses MCP, REST, CLI, FastMCP discovery, replay persistence, audit 
 - Infer idempotency from similar titles or content.
 - Hide or delete audit truth, change precommit semantic enforcement, or auto-remediate findings.
 - Promise a hard millisecond deadline around one synchronous CrossEncoder invocation.
+- Promise that every cold model/index path completes within the 60-second edge budget.
+- Add cross-replica terminal-receipt storage or infer idempotency from similar titles.
 - Add a reasoning model. The existing frozen reranker remains an optional measurement lane under the pure-substrate rule.
 
 ## Decisions
@@ -33,6 +36,14 @@ The change crosses MCP, REST, CLI, FastMCP discovery, replay persistence, audit 
 `response_detail` is presentation-only: adapters expose it, the invocation boundary removes it before canonical digesting and leaf execution, and changing it never reruns a mutation or causes key reuse. Replay returns the same stored terminal fields and original request identity. Attempt-relative replay disposition stays in structured logs, not the terminal payload, because an exact replay and a dynamically changing `replayed` field are mutually exclusive. Busy, pending, committed-failure, and committed-uncertain remain structured errors.
 
 Old completed receipt rows containing a raw result remain replayable as their legacy shape until normal bounded retention removes them; the rollout will not fabricate missing terminal identity.
+
+### Pair measured write cost with a longer, still bounded recovery window
+
+The corpus-aware semantic context is cached per vault only when a stat-level census covers every filesystem input the build reads and matches before and after construction. Candidate-bearing builds and caller-supplied registries that do not fingerprint-identically to disk bypass the cache. Cached contexts are immutable, and the cache remains bounded. A max-mtime key is rejected because Syncthing can materialize a changed file with an older source timestamp; the per-path `(path, size, mtime_ns)` census detects the observed sync case.
+
+The Cloudflare HA worker's mutation-capable tool budget becomes 60 seconds, below Cloudflare's approximate 100-second ceiling, while every mutation-capable request still reaches at most one origin and is never replayed after timeout or 5xx. The timeout increase is operational headroom, not the correctness fix: the cache removes the measured repeated O(corpus) parse, and terminal receipts remain authoritative when acknowledgement delivery is lost.
+
+Implicit same-principal, same-operation, canonical-payload terminal receipts remain per-replica and now retain completed results for 600 seconds. Explicit caller keys retain their 24-hour contract. Reuse of a key with a different payload still fails, pending/uncertain receipts remain fail-closed, and a retry after the implicit window is outside the exactly-once guarantee rather than evidence that a similar title should be collapsed.
 
 ### Normalize edit operations before digesting
 
@@ -67,6 +78,9 @@ Default `None` preserves current behavior. Reranking remains explicit or acceler
 - **Canonical edit normalization can accidentally change replay identity** → table-test every legacy/new equivalent pair and assert one digest/one leaf execution.
 - **Audit grouping can conceal unknown totals after an upstream bound** → order before bounding, carry observed/omitted/complete fields, and never label a partial count exact.
 - **A small rerank cap can reduce precision** → caller opt-in only, minimum cap equals output limit, and report requested/effective counts.
+- **The corpus changes during context construction** → store a cached context only when pre-build and post-build censuses match exactly; otherwise rebuild without publishing the raced result.
+- **A mutation still exceeds 60 seconds** → the edge returns acknowledgement-delivery failure without replaying to another origin; same-identity recovery consults the per-replica receipt for 600 seconds.
+- **A retry lands on a different replica after failover** → keep the local-receipt limitation explicit; do not claim cross-replica exactly-once behavior.
 - **One PR spans independent concerns** → keep implementation in reviewable commits and run per-area focused tests before the combined suite; schema fixture and fingerprint are refreshed once at the end to avoid conflicting generated artifacts.
 
 ## Migration Plan
@@ -75,7 +89,8 @@ Default `None` preserves current behavior. Reranking remains explicit or acceler
 2. Ship discriminated `edit_memory` discovery with the flat runtime shim and deprecation text. Verify a fresh ChatGPT session before promoting the new connector contract.
 3. Ship surface-filtered bootstrap and conformance tests.
 4. Ship action-first audit and rerank cap.
-5. In the next compatibility release, measure use of `response_detail="legacy"` and flat edit calls before removing either shim through a separate OpenSpec change.
+5. Deploy the 60-second edge worker setting (including any live variable that overrides the code default), deploy both replicas with the census cache and 600-second implicit receipt retention, and verify single-origin slow-write recovery.
+6. In the next compatibility release, measure use of `response_detail="legacy"` and flat edit calls before removing either shim through a separate OpenSpec change.
 
 Rollback restores the previous presentation/schema layer. Stored versioned terminals remain decodable and canonical Markdown writes require no migration.
 

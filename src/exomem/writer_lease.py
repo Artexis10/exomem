@@ -790,13 +790,25 @@ _PUBLIC_IDEMPOTENCY_KEY_UNSET = object()
 
 
 def _read_bypasses_consistency_guard(command: Any, kwargs: Mapping[str, Any]) -> bool:
-    """Return whether an audit route must never contend with the writer boundary."""
+    """Return whether a read can tolerate a changing snapshot without contention."""
     if command.name == "audit":
         return True
     if command.name == "review_memory":
         return kwargs.get("mode") == "audit"
     if command.name == "maintain_memory":
         return kwargs.get("mode", "audit") == "audit"
+    if command.name == "remember":
+        return kwargs.get("validate_only") is True
+    if command.name == "edit_memory":
+        if kwargs.get("validate_only") is True:
+            return True
+        operation = kwargs.get("operation")
+        return (
+            isinstance(operation, Mapping)
+            and operation.get("kind")
+            in {"replace_string", "batch_replace", "patch_frontmatter"}
+            and operation.get("validate_only") is True
+        )
     return False
 
 

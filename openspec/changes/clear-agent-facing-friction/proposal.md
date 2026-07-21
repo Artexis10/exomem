@@ -9,6 +9,7 @@ The July 17 ChatGPT incident exposed a second layer of failures after write ackn
 - Filter bootstrap tool references and catalogs against the actual invoking surface, and prove every advertised tool exists on MCP, REST, and CLI.
 - Make audit output action-first: current blockers lead, malformed and unregistered semantic relations follow, and grandfathered missing-disposition debt is downgraded and grouped with counts plus bounded samples. Full enumeration becomes explicit.
 - Keep reranking optional and soft-failing. Add a caller-controlled candidate cap; do not claim a hard wall-clock budget around the synchronous CrossEncoder call.
+- Integrate the measured write-path resilience work from PR #282: cache corpus context only behind an exact filesystem-input census, extend same-principal identical implicit replay retention to 600 seconds, and give single-origin mutation delivery a 60-second edge budget without permitting edge replay.
 - Refresh the intentional MCP schema fixture and published discovery fingerprint. No additional top-level tools are introduced.
 
 ## Capabilities
@@ -17,6 +18,7 @@ The July 17 ChatGPT incident exposed a second layer of failures after write ackn
 
 - `mutation-terminal-contract`: Compact committed/replayed mutation results, full diagnostics on request, and replay-stable terminal identity.
 - `action-first-audit`: Actionable-first audit projection with grouped grandfathered backlog and explicit full enumeration.
+- `write-path-resilience`: Sync-safe corpus-context reuse, a measured 60-second single-origin edge budget, and a 600-second same-replica implicit acknowledgement-recovery window.
 
 ### Modified Capabilities
 
@@ -26,4 +28,4 @@ The July 17 ChatGPT incident exposed a second layer of failures after write ackn
 
 ## Impact
 
-Affected areas include the shared command registry and adapters, writer-lease/idempotency result persistence, FastMCP discovery generation, audit serialization, hybrid reranking, OpenAPI/CLI coercion, the generic skill contract, and schema/golden tests. Default mutation and audit response shapes intentionally change; legacy edit calls remain accepted during the compatibility window. No new model or dependency is added: the existing frozen reranker remains a pure measurement lane and runs only when explicitly selected or allowed by the existing accelerated auto policy.
+Affected areas include the shared command registry and adapters, writer-lease/idempotency result persistence, corpus-context construction, the Cloudflare HA worker, FastMCP discovery generation, audit serialization, hybrid reranking, OpenAPI/CLI coercion, the generic skill contract, and schema/golden tests. Default mutation and audit response shapes intentionally change; legacy edit calls remain accepted during the compatibility window. No new model or dependency is added: the existing frozen reranker remains a pure measurement lane and runs only when explicitly selected or allowed by the existing accelerated auto policy.

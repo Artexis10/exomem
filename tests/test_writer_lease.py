@@ -1242,6 +1242,70 @@ def test_hosted_public_audit_routes_bypass_boundary_held_by_other_manager(
     assert not worker.is_alive()
 
 
+@pytest.mark.parametrize(
+    ("command_name", "kwargs"),
+    [
+        ("remember", {"validate_only": True}),
+        (
+            "edit_memory",
+            {
+                "operation": {
+                    "kind": "replace_string",
+                    "old_string": "Before",
+                    "new_string": "After",
+                    "validate_only": True,
+                }
+            },
+        ),
+    ],
+)
+def test_hosted_mutation_previews_bypass_boundary_held_by_other_manager(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    command_name: str,
+    kwargs: dict[str, object],
+) -> None:
+    state_dir = tmp_path / "shared-state"
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    holder = LeaseManager(
+        LeaseConfig(state_dir=state_dir), mutation_timeout_seconds=0.0
+    )
+    previewer = LeaseManager(
+        LeaseConfig(state_dir=state_dir), mutation_timeout_seconds=0.0
+    )
+    boundary_held = threading.Event()
+    release_boundary = threading.Event()
+
+    def hold_boundary() -> None:
+        with holder.mutation_guard(vault):
+            boundary_held.set()
+            assert release_boundary.wait(timeout=2)
+
+    worker = threading.Thread(target=hold_boundary, daemon=True)
+    worker.start()
+    assert boundary_held.wait(timeout=2)
+    monkeypatch.setattr(
+        writer_lease_module, "content_private_logging_enabled", lambda: True
+    )
+    command = SimpleNamespace(
+        name=command_name,
+        read_only=False,
+        leaf=lambda _vault, **_kwargs: "previewed",
+    )
+
+    try:
+        assert (
+            previewer.invoke(command, (vault,), kwargs, read_only=True)
+            == "previewed"
+        )
+    finally:
+        release_boundary.set()
+        worker.join(timeout=2)
+
+    assert not worker.is_alive()
+
+
 def test_explicit_idempotency_receipts_have_bounded_retention(tmp_path: Path) -> None:
     clock = Clock()
     calls: list[int] = []
