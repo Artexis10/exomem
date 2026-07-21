@@ -93,6 +93,16 @@ def test_shell_is_inert_and_client_keeps_key_session_scoped(
     assert "https://" not in all_assets and "http://" not in all_assets
 
 
+def test_adoption_mutations_request_full_terminal_diagnostics(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client = _client(vault, monkeypatch)
+    adoption = client.get("/studio/assets/adoption.v1.js").text
+
+    assert 'response_detail: "full"' in adoption
+    assert "return result.diagnostics" in adoption
+
+
 def test_asset_allowlist_rejects_unknown_nested_and_shell_aliases(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

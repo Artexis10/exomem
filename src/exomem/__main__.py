@@ -92,7 +92,7 @@ def main(argv: list[str] | None = None) -> int:
     # short aliases when a name overlaps.
     if raw and not raw[0].startswith("-") and raw[0] in _core_op_names():
         return _core_op_main(raw)
-    if raw and raw[0] in _simple_cli_action_names():
+    if raw and not raw[0].startswith("-") and raw[0] in _simple_cli_action_names():
         return _simple_action_main(raw)
     # A real tier-2 op invoked while EXOMEM_DISABLE_TIER2 is set would otherwise fall
     # through to the serve parser and emit a confusing argparse error — name it instead.

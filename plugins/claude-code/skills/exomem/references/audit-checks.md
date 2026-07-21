@@ -6,6 +6,15 @@ the check names; read this when running or acting on an audit. Audit is
 read-mostly: the output is a proposal report you review; nothing is rewritten
 without explicit confirmation per item or batch.
 
+The audit call itself is always read-only. Its default `detail="actionable"`
+orders current blockers first, malformed/unregistered relation work next, and
+ordinary findings after that. Grandfathered relation-disposition findings are
+grouped into one deterministic `legacy_backlog` carrying exact observed,
+available, omitted, and upstream-truncation counts plus bounded samples. Use
+`detail="full"` for raw finding enumeration. `legacy_sample_limit` accepts only
+integers from 0 through 50 and changes actionable sampling, never the checks or
+stored knowledge.
+
 - **Orphans** — compiled pages with zero inbound links and zero outbound links beyond their `sources` block. Propose: link or archive.
 - **Broken wikilinks** — `[[X]]` where `X` does not resolve. The audit skips wikilinks inside fenced code blocks and inline code spans. Bare names resolve against filename stems AND frontmatter `title:` (so date-prefixed sources with a title match are not flagged); a link carrying an explicit non-`.md` extension (`[[…/scan.pdf]]`) resolves if that file exists on disk, matching Obsidian's attachment links. Findings inside append-only trees (`Sources/`, `Evidence/`) — which can't be repaired in place — are surfaced at `info` severity, keeping them out of the actionable `warn` set. Propose: fix path or create stub entity.
 - **Supersession integrity** — pages marked `superseded` must have `superseded_by` pointing to a real page; pages marked `active` must not appear as the target of any `superseded_by`.

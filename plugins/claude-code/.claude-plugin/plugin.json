@@ -1,7 +1,7 @@
 {
   "name": "exomem",
   "description": "Governed long-term memory over a markdown vault: raw sources stay immutable, conclusions are compiled with provenance, and nothing is deleted - it is superseded. Requires EXOMEM_VAULT_PATH to point at your vault; run `exomem setup` if you do not have one yet.",
-  "version": "0.25.5",
+  "version": "0.26.0",
   "skills": "./skills/",
   "mcpServers": {
     "exomem": {

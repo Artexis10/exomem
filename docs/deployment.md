@@ -476,14 +476,15 @@ excluded from mutation identity.
 MCP does not expose the REST idempotency header through its tool schema. Exomem
 therefore derives a privacy-safe local replay identity from the verified
 principal, hashed bearer, or MCP session plus the exact command and arguments.
-Its completed-result window is 60 seconds. Each MCP call also gets a UUIDv4
-`request_id` generated locally unless a valid `x-exomem-request-id` arrives; that
-ID is correlation, not a substitute for the replay key. Never change the payload
-or create a fresh explicit identity to recover a pending or committed-uncertain
-acknowledgement: retry only with the same identity as directed, or reconcile.
+Its completed-result window is 600 seconds (10 minutes). Each MCP call also gets
+a UUIDv4 `request_id` generated locally unless a valid `x-exomem-request-id`
+arrives; that ID is correlation, not a substitute for the replay key. Never
+change the payload or create a fresh explicit identity to recover a pending or
+committed-uncertain acknowledgement: retry only with the same identity as
+directed, or reconcile.
 
 Idempotency records and credentials stay in per-machine runtime state outside the
-synced vault. Both the 24-hour explicit window and the 60-second inferred window
+synced vault. Both the 24-hour explicit window and the 600-second inferred window
 bound completed and recognized committed-failure receipts per replica. Pending or
 committed-uncertain markers fail closed until local reconciliation rather than
 silently expiring into another write. The lease prevents concurrent writers, but
@@ -492,7 +493,7 @@ another replica after the original disappears.
 
 The reference Cloudflare edge therefore treats `tools/call` as an ambiguous
 side-effect boundary. `ORIGIN_TIMEOUT_MS` remains the short connectivity window
-for discovery/initialization traffic, while `MCP_TOOL_TIMEOUT_MS` defaults to 15
+for discovery/initialization traffic, while `MCP_TOOL_TIMEOUT_MS` defaults to 60
 seconds for actual tools. While a lease holder exists, a tool call is sent only
 to that replica and is never replayed to the passive origin after a timeout or
 5xx response. Once the lease expires, the edge probes both origins, chooses one

@@ -789,6 +789,17 @@ def _command_digest(command: Any, kwargs: Mapping[str, Any]) -> str:
 _PUBLIC_IDEMPOTENCY_KEY_UNSET = object()
 
 
+def _read_bypasses_consistency_guard(command: Any, kwargs: Mapping[str, Any]) -> bool:
+    """Return whether an audit route must never contend with the writer boundary."""
+    if command.name == "audit":
+        return True
+    if command.name == "review_memory":
+        return kwargs.get("mode") == "audit"
+    if command.name == "maintain_memory":
+        return kwargs.get("mode", "audit") == "audit"
+    return False
+
+
 def _effective_idempotency_key(
     manager: LeaseManager,
     *,
@@ -951,9 +962,8 @@ class LeaseManager:
             effective_public_idempotency_key = public_idempotency_key
         invocation_read_only = command.read_only if read_only is None else read_only
         if invocation_read_only:
-            audit_without_consistency_lock = (
-                command.name == "maintain_memory"
-                and kwargs.get("mode", "audit") == "audit"
+            audit_without_consistency_lock = _read_bypasses_consistency_guard(
+                command, kwargs
             )
             if content_private_logging_enabled() and not audit_without_consistency_lock:
                 with self.consistency_guard(self._mutation_subject(injected)):

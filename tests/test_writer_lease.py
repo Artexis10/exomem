@@ -71,7 +71,7 @@ def test_mutation_timeout_stays_within_the_edge_budget_and_is_tunable() -> None:
     """The boundary wait is a share of the edge budget, not a free parameter.
 
     The HA edge worker abandons a mutation-capable request at
-    MCP_TOOL_TIMEOUT_MS (default 15s) and never replays it, because the origin
+    MCP_TOOL_TIMEOUT_MS (default 60s) and never replays it, because the origin
     may commit after the edge stops waiting. Time spent queueing here is time
     unavailable to the write. A default at or near the edge timeout would make
     a 504-with-a-committed-write the *expected* outcome under contention
@@ -79,7 +79,7 @@ def test_mutation_timeout_stays_within_the_edge_budget_and_is_tunable() -> None:
     """
     # The edge budget this must stay under: MCP_TOOL_TIMEOUT_MS default, in
     # seconds. Mirrored from deploy/cloudflare-ha/src/worker.js.
-    edge_tool_budget_seconds = 15.0
+    edge_tool_budget_seconds = 60.0
     default = LeaseConfig.from_env({}).mutation_timeout_seconds
     assert default == 5.0
     # The invariant that matters: waiting must leave the majority of the edge
@@ -1190,6 +1190,56 @@ def test_hosted_audit_does_not_hold_mutation_boundary(
     worker.join(timeout=2)
 
     assert audit_outcome == ["audited"]
+
+
+@pytest.mark.parametrize(
+    ("command_name", "kwargs"),
+    [
+        ("audit", {"detail": "full"}),
+        ("review_memory", {"mode": "audit", "detail": "full"}),
+        ("maintain_memory", {"mode": "audit", "detail": "full"}),
+    ],
+)
+def test_hosted_public_audit_routes_bypass_boundary_held_by_other_manager(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    command_name: str,
+    kwargs: dict[str, str],
+) -> None:
+    state_dir = tmp_path / "shared-state"
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    holder = LeaseManager(
+        LeaseConfig(state_dir=state_dir), mutation_timeout_seconds=0.0
+    )
+    auditor = LeaseManager(
+        LeaseConfig(state_dir=state_dir), mutation_timeout_seconds=0.0
+    )
+    boundary_held = threading.Event()
+    release_boundary = threading.Event()
+
+    def hold_boundary() -> None:
+        with holder.mutation_guard(vault):
+            boundary_held.set()
+            assert release_boundary.wait(timeout=2)
+
+    worker = threading.Thread(target=hold_boundary, daemon=True)
+    worker.start()
+    assert boundary_held.wait(timeout=2)
+    monkeypatch.setattr(writer_lease_module, "content_private_logging_enabled", lambda: True)
+    command = SimpleNamespace(
+        name=command_name,
+        read_only=command_name != "maintain_memory",
+        leaf=lambda _vault, **_kwargs: "audited",
+    )
+
+    try:
+        assert auditor.invoke(command, (vault,), kwargs, read_only=True) == "audited"
+    finally:
+        release_boundary.set()
+        worker.join(timeout=2)
+
+    assert not worker.is_alive()
 
 
 def test_explicit_idempotency_receipts_have_bounded_retention(tmp_path: Path) -> None:

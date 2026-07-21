@@ -31,7 +31,7 @@ Use two edge timeouts:
 
 - `ORIGIN_TIMEOUT_MS` (default `2500`) is the short connectivity/fallback window
   for OAuth, discovery, initialization, tool listing, and GET/SSE traffic.
-- `MCP_TOOL_TIMEOUT_MS` (default `15000`) is the execution window for
+- `MCP_TOOL_TIMEOUT_MS` (default `60000`) is the execution window for
   `tools/call` and other unsafe non-`/mcp` methods, including personal REST and
   lifecycle POSTs plus public transfer PUT uploads. Correctness comes from
   single-origin routing, not from ordering this timeout against the writer-lease

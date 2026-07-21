@@ -41,15 +41,19 @@ def _client(vault: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
 
 
 def _post(client: TestClient, command: str, body: dict) -> dict:
+    request_body = dict(body)
+    if command == "adoption_studio":
+        request_body["response_detail"] = "full"
     response = client.post(
         f"/api/{command}",
-        json=body,
+        json=request_body,
         headers={"Authorization": "Bearer studio-key"},
     )
     assert response.status_code == 200, response.text
     payload = response.json()
     assert payload["success"] is True, response.text
-    return payload["data"]
+    data = payload["data"]
+    return data.get("diagnostics", data)
 
 
 def _post_error(client: TestClient, command: str, body: dict) -> tuple[int, dict]:

@@ -19,15 +19,23 @@ def _client(vault: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
 
 
 def _post(client: TestClient, command: str, body: dict) -> dict:
+    request_body = dict(body)
+    needs_leaf_result = command in {"edit_memory", "remember", "replace_memory"} or (
+        command == "connect_memory"
+        and body.get("operation") in {"accept-relation", "create-entity"}
+    )
+    if needs_leaf_result:
+        request_body["response_detail"] = "full"
     response = client.post(
         f"/api/{command}",
-        json=body,
+        json=request_body,
         headers={"Authorization": "Bearer studio-key"},
     )
     assert response.status_code == 200, response.text
     payload = response.json()
     assert payload["success"] is True
-    return payload["data"]
+    data = payload["data"]
+    return data.get("diagnostics", data)
 
 
 def _write(vault: Path, rel: str, content: str) -> Path:

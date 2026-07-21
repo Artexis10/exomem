@@ -187,6 +187,13 @@ start to get the portable operating contract. Skill-aware agents may still use
 `bootstrap(profile="diagnostics")` when interpreting retrieval speed, compute
 mode, reranking, `pack`, or `include_timings`.
 
+Bootstrap describes the commands exported by the **active adapter surface**. Its
+`active_capabilities.active_capability_sha256` identifies that filtered command
+set and may differ across MCP, REST, CLI, tier-2 policy, or compatibility
+profiles. The separately reported canonical MCP tool-surface fingerprint covers
+the packaged full MCP discovery contract. Do not treat either identity as the
+other, and never recommend a command absent from `available_product_tools`.
+
 ## Workflow skills
 
 Named workflow skills live under `_Schema/workflow-skills/` and are installed as
@@ -267,6 +274,26 @@ proposed files, and write only after explicit confirmation with `dry_run=false`.
 Duplicate or malformed IDs are audit findings; do not guess which duplicate a
 reference means.
 
+## Mutation results and safe retries
+
+Successful product mutations return a compact decisive terminal by default:
+`ok: true`, `status: committed`, `mutated: true`, `path` or `paths`,
+`request_id`, `receipt_id`, and `warnings_count` (plus a caller-supplied
+`idempotency_key` when the surface supports one). A null receipt means that the
+surface supplied no replay identity; it does not weaken the committed status.
+Use `response_detail="full"` when existing leaf diagnostics are needed under
+`diagnostics`. Use `response_detail="legacy"` only for temporary compatibility
+with the former raw result. Response detail is presentation-only: changing it
+does not change mutation identity, execute the leaf again, or alter a replayed
+terminal.
+
+`MUTATION_BUSY`, `MUTATION_ACKNOWLEDGEMENT_PENDING`, and
+`MUTATION_COMMITTED_ACKNOWLEDGEMENT_UNCERTAIN` remain errors, not successful
+terminals. Preserve the same mutation identity and unchanged payload when
+following their remediation: wait before retrying a busy call; retry a pending
+call only with the same identity; do not submit a new identity after a
+committed-uncertain result—reconcile and retry only as instructed.
+
 ## Canonical Operations
 Product commands are the public interface. The operations below are canonical
 implementation leaves: product commands route here so filenames, folders,
@@ -292,7 +319,7 @@ and index updates are determined by the operation, not the caller.
 | **note** | Compile a structured note from raw input or thinking | `Notes/<type>/` |
 | **link** | Create or update an entity, wire backlinks | `Entities/<type>/` |
 | **preserve** | Capture a **text** factual artifact for an incident scope. Binaries (PDF / image / any file) go out-of-band via upload (see below), not this tool | `Evidence/<scope>/` |
-| **edit** | In-place edit of a compiled page. One mode per call: whole `body` / `tags` / surgical `old_string`→`new_string`; `edits=[…]` several surgical pairs in one atomic batch; `row_key`+`take` fill a `[take: ]` row by its leading text; `field`+`value` patch ONE frontmatter field (requires `why:`). Bumps `updated:`. Optional `expected_hash` (drift guard) + `validate_only` | the page |
+| **edit** | In-place edit through one `edit_memory` tool. New clients send required nested `operation` with one `kind`: `replace_body`, `replace_tags`, `replace_string`, `batch_replace`, `edit_section`, `patch_frontmatter`, or `fill_row`. See `references/operations.md` for fields. Bumps `updated:` | the page |
 | **observe_memory** | Add, update, remove, or validate one compact observation or rich semantic unit. Update/remove require the current parent `expected_hash` and unit `expected_fingerprint`. Compact is `- [category] content #tags (context) ^anchor`; typed unit relations require an explicit governed rich `kind` | the compiled page |
 | **find** | Type-aware search across the KB (read-only). Supports compact lookups, packed reasoning context, and diagnostics via `include_timings` / `rerank` when needed | — |
 | **suggest_links** | Surface existing pages a draft or page should link to, hub-aware (read-only) | — |
@@ -488,6 +515,14 @@ to plain wikilink expansion, unannotated),
 `speakers:` frontmatter names a given person). Leaving `rerank` unset is
 mode-aware auto: CPU steady-state modes keep it off; accelerated/performance
 mode may auto-rerank when lanes strongly disagree or the query is long.
+
+When reranking is enabled or selected automatically,
+`rerank_max_candidates` optionally bounds only the fused prefix sent to the
+reranker. It must be an integer from the effective normalized result `limit` up
+to 300. The retrieval profile reports `candidate_limit_requested`,
+`candidate_limit_effective`, `scorer_input_count`, and `unscored_tail_count`.
+The tail keeps fused order. A candidate count bounds scorer work, not wall-clock
+time; model warm-up, hardware, and text length still affect latency.
 
 Performance presets:
 - Normal lookup: `ask_memory(detail="compact", rerank=false)`.
@@ -768,7 +803,14 @@ file inventories, command lines copied verbatim). Mirroring guarantees drift.
 ## Audit (lint) checks
 
 The **review_memory(mode="audit")** operation runs read-only checks and proposes fixes (never
-auto-fixes); the report is reviewed before anything is written. It covers:
+auto-fixes); every audit presentation remains read-only. The default
+`detail="actionable"` puts current blockers first, then malformed semantic units
+and unregistered relation work, then ordinary findings. Grandfathered relation-
+disposition debt is grouped into one deterministic `legacy_backlog` with exact
+counts and bounded samples instead of flooding the action list. Use
+`detail="full"` to enumerate the raw findings; `legacy_sample_limit` is an
+integer from 0 through 50 and controls samples in actionable output only. The
+checks cover:
 orphans, broken wikilinks, supersession integrity, stale frontmatter,
 `index.md`/`log.md` drift, aged unprocessed sources (oldest-first — pair with
 `propose_compilation`), status/location mismatch, unfinished experiments, stalled
