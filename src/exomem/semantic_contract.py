@@ -783,7 +783,7 @@ class _CensusUnsafe(Exception):
 # 100ns-resolution mtime at the same path — is not producible by the engine's
 # own temp+rename writes nor by observed sync behavior.
 _CORPUS_CONTEXT_CACHE: dict[
-    tuple[str, str], tuple[tuple, "SemanticCorpusContext"]
+    tuple[str, str], tuple[tuple, SemanticCorpusContext]
 ] = {}
 _CORPUS_CONTEXT_CACHE_LOCK = threading.Lock()
 _CORPUS_CONTEXT_CACHE_MAX_VAULTS = 2

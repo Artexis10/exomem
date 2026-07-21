@@ -12,7 +12,6 @@ from exomem import find as find_module
 from exomem import schema as schema_module
 from exomem import semantic_contract as semantic_contract_module
 
-
 REPO_ROOT = Path(__file__).resolve().parents[1]
 FIXTURE_VAULT = REPO_ROOT / "tests" / "fixtures"
 
