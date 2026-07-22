@@ -318,12 +318,33 @@ pwsh -File scripts/install-service.ps1 -Release
 
 ```powershell
 pwsh -File scripts/upgrade.ps1
+# Explicit policy: -CliSync auto|always|never (default: auto)
 ```
 
 The service runs a PyPI-backed venv that is **not** the repo checkout, so `git pull`
 never touches it. `upgrade.ps1` locates that venv from the NSSM registry, upgrades
 it, repairs the CUDA torch build, gates on `doctor`, restarts, and then asserts the
-**live** `/health` version matches what it just installed. No elevation needed.
+**live** `/health` version matches what it just installed. It then records a
+non-secret managed-install manifest and, in the default `auto` mode, aligns an
+existing uv-managed `exomem`/`kb` command to that exact verified release. `auto`
+never installs a command that was absent; `always` may install it; `never` leaves
+CLI management alone. `-SkipRestart` stages only the service venv and deliberately
+defers CLI alignment until a later run verifies the live release. No elevation is
+needed.
+
+The CLI and service need release parity, not dependency parity. The uv-tool CLI
+stays lean while a `standard` or `media` service keeps its embedding/media extras;
+duplicating Torch and model dependencies into the command environment is wasteful.
+Check the resolved command and its paired service identity without loading those
+optional stacks:
+
+```powershell
+exomem --version --json
+kb --version
+```
+
+On macOS/Linux, `bash scripts/upgrade.sh` provides the same behavior with
+`--cli-sync auto|always|never`.
 
 Releases carrying semantic parser changes bump the parser generation used by the
 lexical, vector, graph, pack, and count sidecars. Canonical Markdown is not
@@ -509,7 +530,7 @@ change the payload or create a fresh explicit identity to recover a pending or
 committed-uncertain acknowledgement: retry only with the same identity as
 directed, or reconcile.
 
-Expected MCP operation refusals such as `MUTATION_BUSY` are normal tool content:
+Expected MCP operation refusals such as `MUTATION_WARMING` and `MUTATION_BUSY` are normal tool content:
 inspect top-level `success: false` and the structured `error` object, then follow
 its retry fields. They are not transport failures. A `receipt_id` is diagnostic,
 not a caller-supplied cross-session replay key; effective retry identity remains
@@ -824,9 +845,11 @@ curl -s http://127.0.0.1:8765/health
 
 `install_source` is the field that matters. `wheel` with a null `revision` means the server
 is **not** running a local checkout — upgrade the venv directly. `editable` reports the git
-`revision` it is serving. For full detail including the interpreter path, run
-`exomem install-info` locally; `/health` withholds paths because it is unauthenticated and
-publicly reachable.
+`revision` it is serving. For local CLI/service release, profile, route, and
+interpreter identity, run `exomem --version --json` (or `exomem install-info`);
+`/health` withholds local paths because it is unauthenticated and publicly
+reachable. A false `version_match` means the shell command and managed service
+are split and should be reconciled before treating the upgrade as complete.
 
 The scripted path resolves the interpreter from NSSM, gates on `doctor` and accelerator
 capability, restarts, and verifies the running version:

@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "service_version": "99.1.0",
+  "service_profile": "media",
+  "service_target": "http://127.0.0.1:8765",
+  "cli_profile": "lean",
+  "cli_route": "direct",
+  "vault_path": "TOP SECRET",
+  "credential": "also secret"
+}

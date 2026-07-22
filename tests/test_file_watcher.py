@@ -27,15 +27,11 @@ def _stub_embeddings(monkeypatch: pytest.MonkeyPatch):
 
     def upsert_status(root, paths):
         ups.append(list(paths))
-        return embeddings.EmbeddingSyncStatus(
-            "completed", "embedding_upsert_completed", len(paths)
-        )
+        return embeddings.EmbeddingSyncStatus("completed", "embedding_upsert_completed", len(paths))
 
     def delete_status(root, rels):
         dels.append(list(rels))
-        return embeddings.EmbeddingSyncStatus(
-            "completed", "embedding_delete_completed", len(rels)
-        )
+        return embeddings.EmbeddingSyncStatus("completed", "embedding_delete_completed", len(rels))
 
     monkeypatch.setattr(embeddings, "upsert_after_write_status", upsert_status)
     monkeypatch.setattr(embeddings, "delete_after_remove_status", delete_status)
@@ -101,9 +97,7 @@ def _spy_media_and_text_dispatch(monkeypatch: pytest.MonkeyPatch) -> dict[str, l
     monkeypatch.setattr(
         file_watcher.index_sync,
         "upsert_after_write",
-        lambda root, paths, **kwargs: calls["upsert"].append(
-            (root, list(paths), dict(kwargs))
-        ),
+        lambda root, paths, **kwargs: calls["upsert"].append((root, list(paths), dict(kwargs))),
     )
     monkeypatch.setattr(
         file_watcher.index_sync,
@@ -112,15 +106,11 @@ def _spy_media_and_text_dispatch(monkeypatch: pytest.MonkeyPatch) -> dict[str, l
     )
     monkeypatch.setattr(
         "exomem.vault.on_inbound_files_changed",
-        lambda root, up, deleted: calls["inbound"].append(
-            (root, list(up), list(deleted))
-        ),
+        lambda root, up, deleted: calls["inbound"].append((root, list(up), list(deleted))),
     )
     monkeypatch.setattr(
         "exomem.find.on_resolver_files_changed",
-        lambda root, up, deleted: calls["resolver"].append(
-            (root, list(up), list(deleted))
-        ),
+        lambda root, up, deleted: calls["resolver"].append((root, list(up), list(deleted))),
     )
     return calls
 
@@ -165,6 +155,7 @@ def test_supported_audio_event_reconciles_under_writer_authority(
                 depth -= 1
 
     monkeypatch.setattr(writer_lease, "get_manager", lambda: Manager())
+
     def reconcile_media(*_args, commit_guard=None, **_kwargs):  # noqa: ANN001
         assert depth == 0
         assert commit_guard is not None
@@ -413,7 +404,6 @@ def test_live_import_burst_defers_semantic_indexing(
     assert "live import/sync burst" in caplog.text
 
 
-
 def test_dispatch_thread_uses_quiet_policy_for_burst_coalescing(
     vault, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -523,6 +513,46 @@ def test_self_write_upsert_suppressed(vault, monkeypatch: pytest.MonkeyPatch) ->
     assert ups == [] and dels == []
 
 
+def test_self_write_publishes_semantic_corpus_delta(vault, monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[tuple[list[Path], list[str]]] = []
+    monkeypatch.setattr(file_watcher.freshness, "event_indexes_enabled", lambda: True)
+    monkeypatch.setattr(
+        "exomem.semantic_contract.publish_corpus_files_changed",
+        lambda root, *, changed=(), deleted=(): calls.append(
+            (list(changed), [str(path) for path in deleted])
+        ),
+    )
+    path = vault / "Knowledge Base" / "Notes" / "semantic-cache-write.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("# cache patch\n", encoding="utf-8")
+
+    file_watcher.register_self_write(vault, [path])
+
+    assert calls == [([path], [])]
+
+
+def test_external_batch_publishes_semantic_corpus_delta(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _stub_embeddings(monkeypatch)
+    calls: list[tuple[list[Path], list[str]]] = []
+    monkeypatch.setattr(
+        "exomem.semantic_contract.publish_corpus_files_changed",
+        lambda root, *, changed=(), deleted=(): calls.append(
+            (list(changed), [str(path) for path in deleted])
+        ),
+    )
+    watcher = file_watcher.FileWatcher(vault)
+    path = vault / "Knowledge Base" / "Notes" / "semantic-cache-external.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("# external cache patch\n", encoding="utf-8")
+    watcher._record(path, deleted=False)
+
+    watcher._flush()
+
+    assert calls == [([path], [])]
+
+
 def test_external_edit_after_self_write_dispatches(vault, monkeypatch: pytest.MonkeyPatch) -> None:
     ups, _dels = _stub_embeddings(monkeypatch)
     file_watcher.clear_self_write_registry()
@@ -622,7 +652,11 @@ def _spy_reconcile_fanout(monkeypatch: pytest.MonkeyPatch) -> dict[str, list]:
     """Capture the reconcile dispatch seams: inbound + resolver publishes, the
     KB-filtered embed heal (index_sync), and the bm25 pre-warm."""
     calls: dict[str, list] = {
-        "inbound": [], "resolver": [], "upsert": [], "delete": [], "warm": [],
+        "inbound": [],
+        "resolver": [],
+        "upsert": [],
+        "delete": [],
+        "warm": [],
     }
     monkeypatch.setattr(
         "exomem.vault.on_inbound_files_changed",
@@ -633,11 +667,13 @@ def _spy_reconcile_fanout(monkeypatch: pytest.MonkeyPatch) -> dict[str, list]:
         lambda root, up, dl: calls["resolver"].append((list(up), list(dl))),
     )
     monkeypatch.setattr(
-        file_watcher.index_sync, "upsert_after_write",
+        file_watcher.index_sync,
+        "upsert_after_write",
         lambda root, paths, **_kw: calls["upsert"].append(list(paths)),
     )
     monkeypatch.setattr(
-        file_watcher.index_sync, "delete_after_remove",
+        file_watcher.index_sync,
+        "delete_after_remove",
         lambda root, rels: calls["delete"].append(list(rels)),
     )
     monkeypatch.setattr("exomem.bm25.warm", lambda root, scope: calls["warm"].append(scope))
@@ -827,6 +863,7 @@ def test_periodic_media_reconcile_runs_under_writer_authority(
                 depth -= 1
 
     monkeypatch.setattr(writer_lease, "get_manager", lambda: Manager())
+
     def reconcile_all_media(_root: Path, *, limit: int, reconcile_one=None) -> int:
         assert limit > 0
         assert depth == 0
@@ -836,6 +873,7 @@ def test_periodic_media_reconcile_runs_under_writer_authority(
         return 1
 
     monkeypatch.setattr(media_processing, "reconcile_all_media", reconcile_all_media)
+
     def reconcile_media(*_args, commit_guard=None, **_kwargs):  # noqa: ANN001
         assert depth == 0
         assert commit_guard is not None
@@ -889,6 +927,7 @@ def test_periodic_media_reconcile_yields_mutation_boundary_between_artifacts(
         return 3
 
     monkeypatch.setattr(media_processing, "reconcile_all_media", reconcile_all_media)
+
     def reconcile_media(*_args, commit_guard=None, **_kwargs):  # noqa: ANN001
         assert depth == 0
         assert commit_guard is not None

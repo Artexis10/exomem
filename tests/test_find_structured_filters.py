@@ -137,12 +137,7 @@ def test_generic_filter_and_shortcuts_intersect_in_filter_only_order(
 
 
 def test_category_alias_is_resolved_before_candidate_work(filter_vault: Path) -> None:
-    registry = (
-        filter_vault
-        / "Knowledge Base"
-        / "_Schema"
-        / "semantic-language-registry.yaml"
-    )
+    registry = filter_vault / "Knowledge Base" / "_Schema" / "semantic-language-registry.yaml"
     registry.parent.mkdir(parents=True, exist_ok=True)
     registry.write_text(
         "schema_version: 1\n"
@@ -180,12 +175,7 @@ def test_hot_cache_tracks_registry_changes_for_unit_filters(
         priority=99,
         observations="- [configuration] Registry-sensitive unit ^registry-cache",
     )
-    registry = (
-        filter_vault
-        / "Knowledge Base"
-        / "_Schema"
-        / "semantic-language-registry.yaml"
-    )
+    registry = filter_vault / "Knowledge Base" / "_Schema" / "semantic-language-registry.yaml"
 
     def write_registry(*, configuration_target: str) -> None:
         other = "rule" if configuration_target == "config" else "config"
@@ -213,9 +203,7 @@ def test_hot_cache_tracks_registry_changes_for_unit_filters(
         filters={"page.frontmatter:/metadata/priority": {"$eq": 99}},
         limit=20,
     )
-    assert [hit.path for hit in first] == [
-        "Knowledge Base/Notes/registry-cache-target.md"
-    ]
+    assert [hit.path for hit in first] == ["Knowledge Base/Notes/registry-cache-target.md"]
 
     # Same request, no explicit cache clear: registry content is answer
     # freshness whenever unit predicates participate in eligibility.
@@ -302,9 +290,7 @@ def test_python_lexical_backend_preserves_unit_filter_eligibility(
         limit=20,
     )
 
-    assert [hit.as_dict()["parent_path"] for hit in hits] == [
-        "Knowledge Base/Notes/split-units.md"
-    ]
+    assert [hit.as_dict()["parent_path"] for hit in hits] == ["Knowledge Base/Notes/split-units.md"]
 
 
 def test_page_matched_units_are_bounded_and_report_truncation(
@@ -317,8 +303,7 @@ def test_page_matched_units_are_bounded_and_report_truncation(
         updated="2026-01-06",
         priority=77,
         observations="\n".join(
-            f"- [config] Matching unit {index} #auth ^cap-{index}"
-            for index in range(7)
+            f"- [config] Matching unit {index} #auth ^cap-{index}" for index in range(7)
         ),
     )
     hits = find_module.find(
@@ -401,12 +386,7 @@ def test_text_unit_recall_falls_back_when_registry_makes_fts_rows_stale(
         priority=90,
         observations="- [configuration] registry needle ^registry-text",
     )
-    registry = (
-        filter_vault
-        / "Knowledge Base"
-        / "_Schema"
-        / "semantic-language-registry.yaml"
-    )
+    registry = filter_vault / "Knowledge Base" / "_Schema" / "semantic-language-registry.yaml"
 
     def write_registry(description: str) -> None:
         registry.parent.mkdir(parents=True, exist_ok=True)
@@ -440,9 +420,7 @@ def test_text_unit_recall_falls_back_when_registry_makes_fts_rows_stale(
         filters={"page.frontmatter:/metadata/priority": {"$eq": 90}},
         limit=20,
     )
-    assert [hit.as_dict()["unit_ref"] for hit in second] == [
-        first[0].as_dict()["unit_ref"]
-    ]
+    assert [hit.as_dict()["unit_ref"] for hit in second] == [first[0].as_dict()["unit_ref"]]
 
 
 def test_python_unit_ranking_breaks_zero_score_ties_toward_active_parent(
@@ -498,9 +476,7 @@ def test_python_unit_ranking_breaks_zero_score_ties_toward_active_parent(
         prefer_active=False,
         limit=20,
     )
-    assert path_order[0].as_dict()["parent_path"] == (
-        "Knowledge Base/Notes/a-superseded.md"
-    )
+    assert path_order[0].as_dict()["parent_path"] == ("Knowledge Base/Notes/a-superseded.md")
 
 
 def test_invalid_filter_fails_before_candidate_search(
@@ -537,9 +513,7 @@ def test_real_vector_lane_ranks_only_filter_eligible_parents(
         value /= np.linalg.norm(value)
         return value
 
-    index.upsert_file(
-        "Knowledge Base/Notes/draft.md", ["draft"], np.stack([vector(1.0)]), 1.0
-    )
+    index.upsert_file("Knowledge Base/Notes/draft.md", ["draft"], np.stack([vector(1.0)]), 1.0)
     index.upsert_file(
         "Knowledge Base/Notes/matching.md",
         ["matching"],
@@ -581,13 +555,7 @@ def test_scene_frame_candidate_inherits_its_emitted_parent_eligibility(
     filter_vault: Path,
 ) -> None:
     parent = filter_vault / "Knowledge Base" / "Evidence" / "video.mp4.md"
-    child = (
-        filter_vault
-        / "Knowledge Base"
-        / "Evidence"
-        / "video.mp4.frames"
-        / "frame.jpg.md"
-    )
+    child = filter_vault / "Knowledge Base" / "Evidence" / "video.mp4.frames" / "frame.jpg.md"
     parent.parent.mkdir(parents=True, exist_ok=True)
     child.parent.mkdir(parents=True, exist_ok=True)
     parent.write_text(
@@ -611,7 +579,7 @@ def test_scene_frame_candidate_inherits_its_emitted_parent_eligibility(
     assert "Knowledge Base/Evidence/video.mp4.frames/frame.jpg.md" in eligible
 
 
-def test_auto_widen_pushes_exact_outside_eligibility_into_bm25(
+def test_auto_widen_pushes_exact_outside_eligibility_into_lexstore(
     filter_vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     active = filter_vault / "Projects" / "active.md"
@@ -627,7 +595,7 @@ def test_auto_widen_pushes_exact_outside_eligibility_into_bm25(
     )
     captured: dict[str, object] = {}
 
-    def fake_bm25_search(
+    def fake_lexstore_search(
         _root: Path,
         _query: str,
         k: int,
@@ -637,9 +605,9 @@ def test_auto_widen_pushes_exact_outside_eligibility_into_bm25(
         captured["allowed_paths"] = kwargs.get("allowed_paths")
         return [("Projects/active.md", 1.0)]
 
-    from exomem import bm25
+    from exomem import lexstore
 
-    monkeypatch.setattr(bm25, "search", fake_bm25_search)
+    monkeypatch.setattr(lexstore, "search_bm25", fake_lexstore_search)
     hits = find_module._find_outside_kb(
         filter_vault,
         query="outside-marker",

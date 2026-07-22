@@ -55,12 +55,15 @@ def _rich(
     content: str,
     tags: str | None = None,
     context: str | None = None,
+    relations: str | None = None,
 ) -> str:
     metadata = [f"- category: {category}", f"- id: {anchor}"]
     if tags is not None:
         metadata.append(f"- tags: {tags}")
     if context is not None:
         metadata.append(f"- context: {context}")
+    if relations is not None:
+        metadata.append(f"- relations: {relations}")
     metadata_text = "\n".join(metadata)
     return f"## {kind.title()}\n{metadata_text}\n\n{content}\n"
 
@@ -252,7 +255,7 @@ def test_unit_keyword_mode_requires_every_literal_query_token(tmp_path: Path) ->
     assert [hit.as_dict()["source_anchor"] for hit in hits] == ["all-keywords"]
 
 
-def test_unit_vector_lane_filters_exact_refs_before_ranking(
+def test_unit_vector_lane_filters_exact_parents_after_bounded_ranking(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -287,11 +290,12 @@ def test_unit_vector_lane_filters_exact_refs_before_ranking(
         lambda _texts, *, is_query: np.stack([_vector(1.0)]),
     )
 
-    observed: list[set[str]] = []
+    observed: list[tuple[set[str] | None, bool]] = []
     original_search = index.search_semantic_units
 
     def observed_search(*args: Any, **kwargs: Any) -> Any:
-        observed.append(set(kwargs["allowed_unit_refs"]))
+        allowed = kwargs["allowed_unit_refs"]
+        observed.append((set(allowed) if allowed is not None else None, kwargs["validate"]))
         return original_search(*args, **kwargs)
 
     monkeypatch.setattr(index, "search_semantic_units", observed_search)
@@ -306,11 +310,7 @@ def test_unit_vector_lane_filters_exact_refs_before_ranking(
         limit=10,
     )
 
-    expected_refs = {
-        states[0].document.units[0].unit_ref,
-        states[1].document.units[0].unit_ref,
-    }
-    assert observed == [expected_refs]
+    assert observed == [(None, False)]
     payloads = [hit.as_dict() for hit in hits]
     assert [payload["source_anchor"] for payload in payloads] == [
         "active-vector",
@@ -318,6 +318,87 @@ def test_unit_vector_lane_filters_exact_refs_before_ranking(
     ]
     assert [payload["signals"]["vector_rank"] for payload in payloads] == [1, 2]
     assert all("bm25_rank" not in payload["signals"] for payload in payloads)
+
+
+def test_unit_vector_category_filter_is_pushed_down_before_candidate_window(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    index = embeddings.get_embedding_index(tmp_path)
+    for rank in range(20):
+        page = _write_page(
+            tmp_path,
+            f"architecture-{rank:02d}",
+            body=f"- [architecture] higher vector candidate {rank} ^architecture-{rank}",
+        )
+        state = semantic_index.build_parent_index_state(tmp_path, page)
+        index.upsert_semantic_units(
+            state,
+            np.stack([_vector(1.0, rank / 100.0)]),
+            1.0,
+        )
+    target = _write_page(
+        tmp_path,
+        "reliability-target",
+        body="- [reliability] exact category target ^reliability-target",
+    )
+    target_state = semantic_index.build_parent_index_state(tmp_path, target)
+    index.upsert_semantic_units(target_state, np.stack([_vector(0.1, 1.0)]), 1.0)
+    monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
+    monkeypatch.setattr(
+        embeddings,
+        "embed_texts",
+        lambda _texts, *, is_query: np.stack([_vector(1.0)]),
+    )
+
+    failed: list[str] = []
+    hits = find_module.find(
+        tmp_path,
+        query="vector-only-no-literal",
+        scope="kb-only",
+        mode="vector",
+        graph=False,
+        result_level="unit",
+        categories=["reliability"],
+        failed_out=failed,
+        limit=1,
+    )
+
+    assert [hit.as_dict()["source_anchor"] for hit in hits] == ["reliability-target"]
+    assert failed == []
+
+
+def test_rich_unit_recall_preserves_typed_relations(tmp_path: Path) -> None:
+    _write_page(
+        tmp_path,
+        "rich-relations",
+        body=_rich(
+            kind="decision",
+            category="architecture",
+            anchor="bounded-sidecar",
+            content="Use the bounded lexical sidecar for foreground recall.",
+            relations="evidenced_by: [[Knowledge Base/Sources/Latency benchmark]]",
+        ),
+    )
+
+    hits = find_module.find(
+        tmp_path,
+        query="bounded lexical sidecar",
+        scope="kb-only",
+        mode="keyword",
+        graph=False,
+        result_level="unit",
+        limit=5,
+    )
+
+    assert hits[0].as_dict()["relations"] == [
+        {
+            "kind": "evidenced_by",
+            "target": "[[Knowledge Base/Sources/Latency benchmark]]",
+            "raw": "evidenced_by: [[Knowledge Base/Sources/Latency benchmark]]",
+            "line": 6,
+        }
+    ]
 
 
 def test_unit_vector_lane_rejects_stale_rows_before_top_k(tmp_path: Path) -> None:

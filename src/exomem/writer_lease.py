@@ -92,9 +92,7 @@ _ACTIVE_LEASE_MANAGER: ContextVar[Any | None] = ContextVar(
 
 def _log_mutation_event(phase: str, *, level: int = logging.INFO, **fields: Any) -> None:
     prefix = (
-        "event=hosted_call kind=mutation"
-        if content_private_logging_enabled()
-        else "event=mutation"
+        "event=hosted_call kind=mutation" if content_private_logging_enabled() else "event=mutation"
     )
     suffix = " ".join(f"{name}={value}" for name, value in fields.items())
     _mutation_logger.log(level, f"{prefix} phase={phase} {suffix}".rstrip())
@@ -314,9 +312,7 @@ class LeaseConfig:
             timeout_seconds=_positive_float(values, "EXOMEM_WRITER_LEASE_TIMEOUT", 3.0),
             preferred_writer=_truthy(values.get("EXOMEM_WRITER_LEASE_PREFERRED", "")),
             state_dir=Path(state_raw).expanduser() if state_raw else cls.state_dir,
-            mutation_timeout_seconds=_positive_float(
-                values, "EXOMEM_MUTATION_TIMEOUT", 5.0
-            ),
+            mutation_timeout_seconds=_positive_float(values, "EXOMEM_MUTATION_TIMEOUT", 5.0),
         )
         if config.enabled and (not config.vault_id or not config.replica_id):
             raise ValueError(
@@ -581,8 +577,7 @@ class IdempotencyStore:
             if row is not None:
                 return self._decode_disposition(row, digest)
             conn.execute(
-                "INSERT INTO mutations(key, digest, state, updated_at) "
-                "VALUES (?, ?, 'pending', ?)",
+                "INSERT INTO mutations(key, digest, state, updated_at) VALUES (?, ?, 'pending', ?)",
                 (key, digest, now),
             )
         _log_mutation_event("reserved", receipt=_receipt_tag(key))
@@ -623,9 +618,7 @@ class IdempotencyStore:
                 (expired_key,),
             )
 
-    def _expired_row(
-        self, row: tuple[Any, ...], now: float, expires_after: float | None
-    ) -> bool:
+    def _expired_row(self, row: tuple[Any, ...], now: float, expires_after: float | None) -> bool:
         if expires_after is None or row[1] not in {"completed", "committed_failure"}:
             return False
         updated_at = row[3]
@@ -634,11 +627,7 @@ class IdempotencyStore:
                 _deserialize_committed_failure_payload(row[2])
             except Exception:  # noqa: BLE001 - corrupt state blocks mutation
                 raise self._reconciliation_error("cached committed mutation state") from None
-        if (
-            type(updated_at) not in {int, float}
-            or not math.isfinite(updated_at)
-            or updated_at < 0
-        ):
+        if type(updated_at) not in {int, float} or not math.isfinite(updated_at) or updated_at < 0:
             raise self._reconciliation_error("cached mutation state")
         return updated_at <= now - expires_after
 
@@ -653,9 +642,7 @@ class IdempotencyStore:
             return "completed", pickle.loads(row[2])  # noqa: S301 - trusted runtime state
         if state == "committed_failure":
             try:
-                failure = _CachedCommittedFailure(
-                    _deserialize_committed_failure_payload(row[2])
-                )
+                failure = _CachedCommittedFailure(_deserialize_committed_failure_payload(row[2]))
             except Exception:  # noqa: BLE001 - corrupt state blocks mutation
                 raise self._reconciliation_error("cached committed mutation state") from None
             return "committed_failure", failure
@@ -668,7 +655,11 @@ class IdempotencyStore:
         raise self._reconciliation_error("cached mutation state")
 
     def _wait_for_terminal(
-        self, key: str, digest: str, *, on_replay=None  # noqa: ANN001
+        self,
+        key: str,
+        digest: str,
+        *,
+        on_replay=None,  # noqa: ANN001
     ) -> Any:
         _log_mutation_event("pending", receipt=_receipt_tag(key))
         deadline = self.monotonic() + self.wait_seconds
@@ -808,8 +799,7 @@ def _read_bypasses_consistency_guard(command: Any, kwargs: Mapping[str, Any]) ->
         operation = kwargs.get("operation")
         return (
             isinstance(operation, Mapping)
-            and operation.get("kind")
-            in {"replace_string", "batch_replace", "patch_frontmatter"}
+            and operation.get("kind") in {"replace_string", "batch_replace", "patch_frontmatter"}
             and operation.get("validate_only") is True
         )
     return False
@@ -981,15 +971,11 @@ class LeaseManager:
         if public_idempotency_key is _PUBLIC_IDEMPOTENCY_KEY_UNSET:
             effective_public_idempotency_key = idempotency_key
         else:
-            assert public_idempotency_key is None or isinstance(
-                public_idempotency_key, str
-            )
+            assert public_idempotency_key is None or isinstance(public_idempotency_key, str)
             effective_public_idempotency_key = public_idempotency_key
         invocation_read_only = command.read_only if read_only is None else read_only
         if invocation_read_only:
-            audit_without_consistency_lock = _read_bypasses_consistency_guard(
-                command, kwargs
-            )
+            audit_without_consistency_lock = _read_bypasses_consistency_guard(command, kwargs)
             if content_private_logging_enabled() and not audit_without_consistency_lock:
                 with self.consistency_guard(self._mutation_subject(injected)):
                     return command.leaf(*injected, **kwargs)
@@ -1014,11 +1000,35 @@ class LeaseManager:
             command=command.name,
             receipt=receipt or "none",
         )
+        from . import readiness
+
+        if readiness.should_defer("semantic_corpus"):
+            details: dict[str, Any] = {
+                "status": "retryable",
+                "committed": False,
+                "retry_after_ms": 750,
+                "request_id": request_id,
+                "receipt_id": receipt,
+            }
+            if effective_public_idempotency_key is not None:
+                details["idempotency_key"] = effective_public_idempotency_key
+            _log_mutation_event(
+                "interrupted",
+                level=logging.INFO,
+                request_id=request_id,
+                command=command.name,
+                receipt=receipt or "none",
+                error="MUTATION_WARMING",
+            )
+            raise OpError(
+                "MUTATION_WARMING",
+                "semantic corpus warm-up is still in progress",
+                "Retry the same mutation after warm-up completes.",
+                details=details,
+            )
 
         def invoke_leaf() -> Any:
-            trace_token = _ACTIVE_MUTATION_TRACE.set(
-                (request_id, command.name, receipt or "none")
-            )
+            trace_token = _ACTIVE_MUTATION_TRACE.set((request_id, command.name, receipt or "none"))
             commit_token = _ACTIVE_MUTATION_COMMITTED.set(False)
             manager_token = _ACTIVE_LEASE_MANAGER.set(self)
             try:
@@ -1044,10 +1054,9 @@ class LeaseManager:
                 _ACTIVE_MUTATION_COMMITTED.reset(commit_token)
                 _ACTIVE_MUTATION_TRACE.reset(trace_token)
 
-        narrow_media_commit = (
-            command.name == "process_media"
-            and kwargs.get("operation", "process") in {"process", "retry"}
-        )
+        narrow_media_commit = command.name == "process_media" and kwargs.get(
+            "operation", "process"
+        ) in {"process", "retry"}
         try:
             result = self.idempotency.run(
                 key,
@@ -1111,8 +1120,7 @@ class LeaseManager:
         with self._lock:
             still_current = self._fencing_token == fencing_token
             coordinator_current = (
-                record.holder == self.config.replica_id
-                and record.fencing_token == fencing_token
+                record.holder == self.config.replica_id and record.fencing_token == fencing_token
             )
             if still_current and coordinator_current:
                 return
@@ -1129,9 +1137,7 @@ class LeaseManager:
             "Retry the mutation on the current writer.",
         )
 
-    def status(
-        self, vault_or_cell: os.PathLike[str] | str | None = None
-    ) -> dict[str, Any]:
+    def status(self, vault_or_cell: os.PathLike[str] | str | None = None) -> dict[str, Any]:
         mutation_boundary = (
             VaultMutationCoordinator(
                 self.config.state_dir,

@@ -109,9 +109,16 @@ fi
 # 2. exomem
 # ---------------------------------------------------------------------------
 info "Installing exomem (first time may take a minute)..."
-if ! uv tool install exomem; then
-    die "'uv tool install exomem' failed." \
-        "Check your internet connection, then try running that command by hand to see the full error."
+if uv tool list 2>/dev/null | grep -Eq '^exomem([[:space:]]|$)'; then
+    if ! uv tool upgrade exomem; then
+        die "'uv tool upgrade exomem' failed." \
+            "Check your internet connection, then try running that command by hand to see the full error."
+    fi
+else
+    if ! uv tool install exomem; then
+        die "'uv tool install exomem' failed." \
+            "Check your internet connection, then try running that command by hand to see the full error."
+    fi
 fi
 ok "exomem is installed."
 

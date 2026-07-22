@@ -7,7 +7,10 @@ independent from rebuildable indexes and review decisions.
 
 from __future__ import annotations
 
+import hashlib
+import os
 import re
+import threading
 from collections import Counter
 from collections.abc import Iterable, Iterator, Mapping
 from contextlib import contextmanager
@@ -35,12 +38,13 @@ from .vault import (
 SCHEMA_VERSION = 1
 CONTRACT_VERSION = 1
 _MANIFEST_NAME = "semantic-activation.yaml"
-_PAGE_KEYS = frozenset(
-    {"identity_kind", "identity", "path_at_activation", "source_hash"}
-)
+_PAGE_KEYS = frozenset({"identity_kind", "identity", "path_at_activation", "source_hash"})
 _ROOT_KEYS = frozenset({"schema_version", "contract_version", "pages"})
 _HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 _UNSET = object()
+_MANIFEST_CACHE: dict[str, tuple[str | None, ActivationManifest | None]] = {}
+_MANIFEST_CACHE_LOCK = threading.Lock()
+_MANIFEST_CACHE_MAX = 8
 
 
 @dataclass
@@ -105,23 +109,17 @@ class ActivationCensus:
                 )
             by_path[candidate.rel_path] = candidate
             if candidate.normalized_id is not None:
-                id_paths.setdefault(candidate.normalized_id, []).append(
-                    candidate.rel_path
-                )
+                id_paths.setdefault(candidate.normalized_id, []).append(candidate.rel_path)
         object.__setattr__(self, "candidates", ordered)
         object.__setattr__(self, "by_path", MappingProxyType(by_path))
         object.__setattr__(
             self,
             "paths_by_id",
-            MappingProxyType(
-                {key: tuple(paths) for key, paths in sorted(id_paths.items())}
-            ),
+            MappingProxyType({key: tuple(paths) for key, paths in sorted(id_paths.items())}),
         )
 
     @classmethod
-    def from_candidates(
-        cls, candidates: Iterable[ActivationCandidate]
-    ) -> ActivationCensus:
+    def from_candidates(cls, candidates: Iterable[ActivationCandidate]) -> ActivationCensus:
         return cls(tuple(candidates))
 
     def unique_path_for_id(self, normalized_id: str) -> str | None:
@@ -146,9 +144,7 @@ def _validate_candidate(candidate: ActivationCandidate, *, index: int) -> None:
             "ACTIVATION_CENSUS_INVALID",
             f"invalid activation census candidate {index}: {error.reason}",
         ) from error
-    if not isinstance(candidate.source_hash, str) or not _HASH_RE.fullmatch(
-        candidate.source_hash
-    ):
+    if not isinstance(candidate.source_hash, str) or not _HASH_RE.fullmatch(candidate.source_hash):
         raise ActivationManifestError(
             "ACTIVATION_CENSUS_INVALID",
             f"activation census candidate {index} source_hash must be a lowercase full SHA-256",
@@ -168,26 +164,94 @@ def manifest_path(vault_root: Path) -> Path:
     return Path(vault_root) / kb_dirname() / "_Schema" / _MANIFEST_NAME
 
 
+def reset_manifest_cache() -> None:
+    """Drop immutable-manifest parse memoization; public for tests/repair."""
+    with _MANIFEST_CACHE_LOCK:
+        _MANIFEST_CACHE.clear()
+
+
+def _manifest_cache_key(path: Path) -> str:
+    return os.path.normcase(str(path.resolve(strict=False)))
+
+
+def _manifest_signature(path: Path) -> tuple[int, int, int] | None:
+    try:
+        info = path.stat()
+    except FileNotFoundError:
+        return None
+    return (info.st_mtime_ns, info.st_ctime_ns, info.st_size)
+
+
+def _cache_manifest(
+    key: str,
+    digest: str | None,
+    manifest: ActivationManifest | None,
+) -> None:
+    with _MANIFEST_CACHE_LOCK:
+        _MANIFEST_CACHE[key] = (digest, manifest)
+        while len(_MANIFEST_CACHE) > _MANIFEST_CACHE_MAX:
+            del _MANIFEST_CACHE[next(iter(_MANIFEST_CACHE))]
+
+
 def load_manifest(vault_root: Path) -> ActivationManifest | None:
     """Load and validate an existing manifest without changing its bytes."""
     path = manifest_path(vault_root)
-    try:
-        raw = path.read_text(encoding="utf-8")
-    except FileNotFoundError:
-        return None
-    except (OSError, UnicodeDecodeError) as error:
-        raise ActivationManifestError(
-            "ACTIVATION_MANIFEST_UNREADABLE",
-            f"could not read {path}: {error}",
-        ) from error
-    try:
-        value = yaml.safe_load(raw)
-    except yaml.YAMLError as error:
-        raise ActivationManifestError(
-            "ACTIVATION_MANIFEST_INVALID_YAML",
-            f"{path} is not valid YAML: {error}",
-        ) from error
-    return _validate_manifest(value, path=path)
+    key = _manifest_cache_key(path)
+    for _ in range(2):
+        try:
+            signature = _manifest_signature(path)
+        except OSError as error:
+            raise ActivationManifestError(
+                "ACTIVATION_MANIFEST_UNREADABLE",
+                f"could not inspect {path}: {error}",
+            ) from error
+        if signature is None:
+            _cache_manifest(key, None, None)
+            return None
+        try:
+            raw_bytes = path.read_bytes()
+        except FileNotFoundError:
+            continue
+        except OSError as error:
+            raise ActivationManifestError(
+                "ACTIVATION_MANIFEST_UNREADABLE",
+                f"could not read {path}: {error}",
+            ) from error
+        try:
+            confirmed = _manifest_signature(path)
+        except OSError as error:
+            raise ActivationManifestError(
+                "ACTIVATION_MANIFEST_UNREADABLE",
+                f"could not re-inspect {path}: {error}",
+            ) from error
+        if confirmed != signature:
+            continue
+        digest = hashlib.sha256(raw_bytes).hexdigest()
+        with _MANIFEST_CACHE_LOCK:
+            cached = _MANIFEST_CACHE.get(key)
+        if cached is not None and cached[0] == digest:
+            return cached[1]
+        try:
+            raw = raw_bytes.decode("utf-8")
+        except UnicodeDecodeError as error:
+            raise ActivationManifestError(
+                "ACTIVATION_MANIFEST_UNREADABLE",
+                f"could not read {path}: {error}",
+            ) from error
+        try:
+            value = yaml.safe_load(raw)
+        except yaml.YAMLError as error:
+            raise ActivationManifestError(
+                "ACTIVATION_MANIFEST_INVALID_YAML",
+                f"{path} is not valid YAML: {error}",
+            ) from error
+        manifest = _validate_manifest(value, path=path)
+        _cache_manifest(key, digest, manifest)
+        return manifest
+    raise ActivationManifestError(
+        "ACTIVATION_MANIFEST_UNSTABLE",
+        f"{path} changed repeatedly while it was being read",
+    )
 
 
 def ensure_manifest(
@@ -199,11 +263,7 @@ def ensure_manifest(
     if existing is not None:
         return existing
 
-    candidate = (
-        _snapshot(vault_root)
-        if census is None
-        else _snapshot(vault_root, census=census)
-    )
+    candidate = _snapshot(vault_root) if census is None else _snapshot(vault_root, census=census)
     path = manifest_path(vault_root)
     with _creation_lock(path):
         winner = load_manifest(vault_root)
@@ -295,22 +355,15 @@ def snapshot_from_census(census: ActivationCensus) -> ActivationManifest:
         )
     candidates = census.candidates
     counts = Counter(
-        candidate.normalized_id
-        for candidate in candidates
-        if candidate.normalized_id is not None
+        candidate.normalized_id for candidate in candidates if candidate.normalized_id is not None
     )
     pages = []
     for candidate in candidates:
-        stable = (
-            candidate.normalized_id is not None
-            and counts[candidate.normalized_id] == 1
-        )
+        stable = candidate.normalized_id is not None and counts[candidate.normalized_id] == 1
         pages.append(
             ActivationPage(
                 identity_kind="exomem_id" if stable else "path_source_hash",
-                identity=(
-                    candidate.normalized_id if stable else candidate.rel_path
-                ),
+                identity=(candidate.normalized_id if stable else candidate.rel_path),
                 path_at_activation=candidate.rel_path,
                 source_hash=candidate.source_hash,
             )
@@ -333,9 +386,7 @@ def plan_activation_boundary(
     return ActivationBoundaryPlan(snapshot_from_census(census), True)
 
 
-def _snapshot(
-    vault_root: Path, *, census: ActivationCensus | None = None
-) -> ActivationManifest:
+def _snapshot(vault_root: Path, *, census: ActivationCensus | None = None) -> ActivationManifest:
     observed = census if census is not None else build_census(vault_root)
     return snapshot_from_census(observed)
 

@@ -47,16 +47,59 @@ def _write_page(
 
 
 def _markdown_snapshot(root: Path) -> dict[str, bytes]:
-    return {
-        path.relative_to(root).as_posix(): path.read_bytes()
-        for path in root.rglob("*.md")
-    }
+    return {path.relative_to(root).as_posix(): path.read_bytes() for path in root.rglob("*.md")}
 
 
 def _ensure_worker(root: str, gate, output) -> None:  # noqa: ANN001
     gate.wait()
     manifest = activation_manifest.ensure_manifest(Path(root))
     output.put(manifest)
+
+
+def test_unchanged_manifest_is_parsed_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _write_page(tmp_path, "Knowledge Base/Notes/Insights/one.md")
+    expected = activation_manifest.snapshot_from_census(activation_manifest.build_census(tmp_path))
+    path = activation_manifest.manifest_path(tmp_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(activation_manifest._serialize(expected), encoding="utf-8")
+    activation_manifest.reset_manifest_cache()
+    first = activation_manifest.load_manifest(tmp_path)
+
+    def fail_reparse(*args, **kwargs):
+        raise AssertionError("unchanged immutable activation manifest was reparsed")
+
+    monkeypatch.setattr(activation_manifest.yaml, "safe_load", fail_reparse)
+    second = activation_manifest.load_manifest(tmp_path)
+
+    assert first == expected
+    assert second is first
+
+
+def test_manifest_cache_detects_same_stat_signature_content_change(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    page = _write_page(tmp_path, "Knowledge Base/Notes/Insights/one.md")
+    manifest = activation_manifest.snapshot_from_census(activation_manifest.build_census(tmp_path))
+    path = activation_manifest.manifest_path(tmp_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    original = activation_manifest._serialize(manifest)
+    changed = original.replace("one.md", "two.md")
+    assert len(changed.encode("utf-8")) == len(original.encode("utf-8"))
+    path.write_text(original, encoding="utf-8")
+    activation_manifest.reset_manifest_cache()
+    monkeypatch.setattr(
+        activation_manifest,
+        "_manifest_signature",
+        lambda _path: (1, 1, len(original.encode("utf-8"))),
+    )
+
+    first = activation_manifest.load_manifest(tmp_path)
+    path.write_text(changed, encoding="utf-8")
+    second = activation_manifest.load_manifest(tmp_path)
+
+    assert first is not None and second is not None
+    assert first.pages[0].path_at_activation == page.relative_to(tmp_path).as_posix()
+    assert second.pages[0].path_at_activation == "Knowledge Base/Notes/Insights/two.md"
 
 
 def test_nonempty_baseline_captures_only_active_writable_compiled_pages(
@@ -118,9 +161,10 @@ def test_nonempty_baseline_captures_only_active_writable_compiled_pages(
     assert by_path[stable.relative_to(tmp_path).as_posix()].identity_kind == "exomem_id"
     assert by_path[stable.relative_to(tmp_path).as_posix()].identity == _ID_A
     assert by_path[legacy.relative_to(tmp_path).as_posix()].identity_kind == "path_source_hash"
-    assert by_path[legacy.relative_to(tmp_path).as_posix()].identity == legacy.relative_to(
-        tmp_path
-    ).as_posix()
+    assert (
+        by_path[legacy.relative_to(tmp_path).as_posix()].identity
+        == legacy.relative_to(tmp_path).as_posix()
+    )
     assert by_path[stable.relative_to(tmp_path).as_posix()].source_hash == vault.content_hash(
         stable.read_text(encoding="utf-8")
     )
@@ -130,9 +174,7 @@ def test_nonempty_baseline_captures_only_active_writable_compiled_pages(
     )
     assert _markdown_snapshot(tmp_path) == before_md
     after_files = {p.relative_to(tmp_path).as_posix() for p in tmp_path.rglob("*") if p.is_file()}
-    assert after_files - before_files == {
-        "Knowledge Base/_Schema/semantic-activation.yaml"
-    }
+    assert after_files - before_files == {"Knowledge Base/_Schema/semantic-activation.yaml"}
 
 
 def test_manifest_is_deterministic_create_once_and_does_not_append_later_pages(
@@ -228,12 +270,8 @@ def test_stable_id_survives_move_but_legacy_membership_requires_original_path_an
         encoding="utf-8",
     )
 
-    assert activation_manifest.is_grandfathered(
-        tmp_path, moved_stable, manifest=manifest
-    )
-    assert not activation_manifest.is_grandfathered(
-        tmp_path, moved_legacy, manifest=manifest
-    )
+    assert activation_manifest.is_grandfathered(tmp_path, moved_stable, manifest=manifest)
+    assert not activation_manifest.is_grandfathered(tmp_path, moved_legacy, manifest=manifest)
     moved_legacy.rename(legacy)
     legacy.write_text(
         legacy.read_text(encoding="utf-8") + "\nChanged after activation.\n",
@@ -304,8 +342,7 @@ def test_concurrent_first_activation_has_one_valid_immutable_winner(tmp_path: Pa
     gate = context.Event()
     output = context.Queue()
     processes = [
-        context.Process(target=_ensure_worker, args=(str(tmp_path), gate, output))
-        for _ in range(3)
+        context.Process(target=_ensure_worker, args=(str(tmp_path), gate, output)) for _ in range(3)
     ]
     for process in processes:
         process.start()
@@ -399,9 +436,7 @@ def test_rebuildable_indexes_and_registry_creation_do_not_move_the_boundary(
     refs.path.unlink()
     refs.rebuild_all()
     relation_registry.save_registry(tmp_path, relation_registry.empty_proposal())
-    semantic_language_registry.save_registry(
-        tmp_path, semantic_language_registry.empty_proposal()
-    )
+    semantic_language_registry.save_registry(tmp_path, semantic_language_registry.empty_proposal())
 
     assert activation_manifest.ensure_manifest(tmp_path) == manifest
     assert path.read_bytes() == before
@@ -442,9 +477,7 @@ def test_pure_activation_census_is_sorted_indexed_and_duplicate_ids_fail_closed(
 @pytest.mark.parametrize(
     "candidate",
     [
-        activation_manifest.ActivationCandidate(
-            "../escape.md", "a" * 64, None
-        ),
+        activation_manifest.ActivationCandidate("../escape.md", "a" * 64, None),
         activation_manifest.ActivationCandidate(
             "Knowledge Base/Notes/Insights/page.md", "not-a-hash", None
         ),
@@ -480,14 +513,7 @@ def test_unreadable_governed_markdown_fails_census_and_semantic_context(
     unreadable = tmp_path / "Knowledge Base/Notes/Insights/unreadable.md"
     unreadable.parent.mkdir(parents=True)
     unreadable.write_bytes(b"\xff\xfe")
-    candidate_source = (
-        "---\n"
-        "title: Candidate\n"
-        "type: insight\n"
-        "status: active\n"
-        "---\n\n"
-        "## Relations\n"
-    )
+    candidate_source = "---\ntitle: Candidate\ntype: insight\nstatus: active\n---\n\n## Relations\n"
     candidate = semantic_contract.build_page_state(
         tmp_path,
         "Knowledge Base/Notes/Insights/candidate.md",

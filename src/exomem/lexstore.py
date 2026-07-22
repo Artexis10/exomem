@@ -74,6 +74,8 @@ _PROBE_LOCK = threading.Lock()
 
 _STORES: dict[Path, LexicalStore] = {}
 _STORES_LOCK = threading.Lock()
+_REPAIRS_IN_FLIGHT: set[Path] = set()
+_REPAIRS_LOCK = threading.Lock()
 
 
 @dataclass(frozen=True, slots=True)
@@ -172,6 +174,41 @@ def clear_stores() -> None:
         _STORES.clear()
 
 
+def _schedule_repair(vault_root: Path) -> None:
+    """Start at most one best-effort lexical repair per vault.
+
+    Foreground retrieval uses this seam after declining stale or missing
+    sidecar work. The worker owns all corpus reconciliation; callers return
+    immediately and may retry on a later request.
+    """
+    key = vault_root.resolve()
+    with _REPAIRS_LOCK:
+        if key in _REPAIRS_IN_FLIGHT:
+            return
+        _REPAIRS_IN_FLIGHT.add(key)
+
+    def _run() -> None:
+        try:
+            get_store(vault_root).ensure_fresh()
+        except Exception as e:  # noqa: BLE001 - daemon must not escape into stderr
+            log.warning("lexical background repair skipped (%s)", e)
+        finally:
+            with _REPAIRS_LOCK:
+                _REPAIRS_IN_FLIGHT.discard(key)
+
+    thread = threading.Thread(
+        target=_run,
+        name=f"exomem-lexical-repair-{key.name}",
+        daemon=True,
+    )
+    try:
+        thread.start()
+    except RuntimeError:
+        with _REPAIRS_LOCK:
+            _REPAIRS_IN_FLIGHT.discard(key)
+        log.warning("lexical background repair could not start for %s", key)
+
+
 # ------------------------------------------------------------------ policy
 
 
@@ -187,6 +224,7 @@ def search_bm25(
     scope: str = "kb",
     freshness: tuple | None = None,
     allowed_paths: set[str] | None = None,
+    repair: bool = True,
 ) -> list[tuple[str, float]] | None:
     """Top-k `(rel_path, score)` from the FTS5 index, or None → use the
     in-process rung. Matches the python rung's shape: OR membership,
@@ -202,7 +240,7 @@ def search_bm25(
     if not tokens:
         return []
     store = get_store(vault_root)
-    return store.search_bm25(tokens, k, scope, freshness, allowed_paths)
+    return store.search_bm25(tokens, k, scope, freshness, allowed_paths, repair)
 
 
 def search_substring(
@@ -211,6 +249,7 @@ def search_substring(
     *,
     scope: str = "kb",
     freshness: tuple | None = None,
+    repair: bool = True,
 ) -> list[str] | None:
     """The keyword lane's match set (every whitespace token a substring of
     title or body), ordered `updated` desc then path desc, navigation files
@@ -224,7 +263,7 @@ def search_substring(
     if not tokens:
         return []
     store = get_store(vault_root)
-    return store.search_substring(tokens, scope, freshness)
+    return store.search_substring(tokens, scope, freshness, repair)
 
 
 def search_semantic_units(
@@ -237,6 +276,10 @@ def search_semantic_units(
     scope: str = "kb",
     freshness: tuple | None = None,
     allowed_unit_refs: set[str] | None = None,
+    literal_all: bool = False,
+    _repair_stale: bool = False,
+    _validate_current: bool = True,
+    repair: bool = True,
 ) -> list[SemanticUnitLexicalHit] | None:
     """Return exact-metadata semantic-unit candidates from the lexical sidecar."""
     if not _usable():
@@ -245,7 +288,8 @@ def search_semantic_units(
     from .semantic_units import canonicalize_category
 
     tokens = bm25_module.tokenize(query) if query.strip() else []
-    if query.strip() and not tokens:
+    literal_tokens = tuple(query.lower().split()) if literal_all else ()
+    if query.strip() and not tokens and not literal_tokens:
         return []
     category_keys = tuple(sorted({canonicalize_category(value) for value in categories or ()}))
     kind_keys = tuple(sorted({canonicalize_category(value) for value in kinds or ()}))
@@ -257,12 +301,17 @@ def search_semantic_units(
         scope,
         freshness,
         allowed_unit_refs,
+        literal_tokens,
+        repair,
     )
     if hits is None:
         return None
+    if not _validate_current:
+        return hits
     from .semantic_index import validate_parent_record
 
     current: list[SemanticUnitLexicalHit] = []
+    stale_paths: set[str] = set()
     freshness_by_stamp: dict[tuple[str, str, str, int], bool] = {}
     for hit in hits:
         stamp = (
@@ -283,6 +332,29 @@ def search_semantic_units(
             freshness_by_stamp[stamp] = accepted
         if accepted:
             current.append(hit)
+        else:
+            stale_paths.add(hit.parent_path)
+    if stale_paths and _repair_stale and repair:
+        # Registry edits and missed watcher events can invalidate a parent
+        # generation without changing the FTS match itself. Repair only the
+        # indexed candidate parents and retry once; never parse the corpus.
+        store = get_store(vault_root)
+        store.upsert_paths([vault_root / path for path in sorted(stale_paths)])
+        return search_semantic_units(
+            vault_root,
+            query,
+            k,
+            categories=categories,
+            kinds=kinds,
+            scope=scope,
+            freshness=freshness,
+            allowed_unit_refs=allowed_unit_refs,
+            literal_all=literal_all,
+            _repair_stale=False,
+            repair=repair,
+        )
+    if stale_paths and _repair_stale:
+        _schedule_repair(vault_root)
     return current
 
 
@@ -479,7 +551,14 @@ class LexicalStore:
         conn.commit()
         self._synced[scope] = triple
 
-    def _ensure_synced(self, conn: sqlite3.Connection, scope: str, freshness: tuple | None) -> None:
+    def _ensure_synced(
+        self,
+        conn: sqlite3.Connection,
+        scope: str,
+        freshness: tuple | None,
+        *,
+        repair: bool = True,
+    ) -> bool:
         """Reconcile against the walk ONCE per observed corpus change.
 
         `freshness` is the scope's `(count, max_mtime_ns, digest)` walk triple
@@ -488,26 +567,38 @@ class LexicalStore:
         this implements.
         """
         if freshness is None:
+            if not repair:
+                return False
             freshness = self._scope_triple(scope)
         if self._synced.get(scope) == freshness:
-            return
+            return True
         with self._lock:
             if self._synced.get(scope) == freshness:
-                return
+                return True
             if not self._ensure_schema(conn):
+                if not repair:
+                    return False
                 self._rebuild(conn)
-                return
+                return True
             if self._stored_count_max(conn, scope) != (freshness[0], freshness[1]):
+                if not repair:
+                    return False
                 self._heal_delta(conn)  # incremental: patch only the drifted rows
-                return
+                return True
             witnessed = self._witnessed.pop(scope, None)
             if witnessed == freshness:
                 # The hook updated the sidecar for exactly this registry state.
                 self._bless(conn, scope, freshness)
-                return
+                return True
             if self._meta_triple(conn, scope) == freshness:
                 self._synced[scope] = freshness  # verified before; unchanged
-                return
+                return True
+            if not repair:
+                # Establishing whether an unknown digest is a cheap path-only
+                # drift or a preserved-mtime content replacement requires an
+                # exact corpus comparison. Leave that work to the repair
+                # worker rather than putting it on this request.
+                return False
             # Unwitnessed change with matching count/mtime. A path/mtime drift
             # can be healed incrementally. If those legacy row fields still
             # match while the full corpus signature changed, bytes were
@@ -517,6 +608,7 @@ class LexicalStore:
                 self._rebuild(conn)
             else:
                 self._heal_delta(conn)
+            return True
 
     def _walk_entries(self):
         """One pass over both walks: membership flags + file signatures."""
@@ -787,10 +879,7 @@ class LexicalStore:
         ).fetchall()
         for (parent_path,) in orphan_parents:
             self._delete_semantic_units(conn, str(parent_path))
-        conn.execute(
-            "DELETE FROM unit_fts WHERE rowid NOT IN "
-            "(SELECT rowid FROM semantic_units)"
-        )
+        conn.execute("DELETE FROM unit_fts WHERE rowid NOT IN (SELECT rowid FROM semantic_units)")
         conn.execute("DELETE FROM fts WHERE rowid NOT IN (SELECT rowid FROM pages)")
         conn.execute("DELETE FROM tri WHERE rowid NOT IN (SELECT rowid FROM pages)")
 
@@ -924,16 +1013,20 @@ class LexicalStore:
         scope: str,
         freshness: tuple | None,
         allowed_paths: set[str] | None = None,
+        repair: bool = True,
     ) -> list[tuple[str, float]] | None:
         if self._failed:
+            return None
+        if not repair and not self.path.exists():
+            _schedule_repair(self.vault_root)
             return None
         try:
             conn = self._connect()
             try:
-                self._ensure_synced(conn, scope, freshness)
-                return self._bm25_query(
-                    conn, stemmed_tokens, k, scope, allowed_paths
-                )
+                if not self._ensure_synced(conn, scope, freshness, repair=repair):
+                    _schedule_repair(self.vault_root)
+                    return None
+                return self._bm25_query(conn, stemmed_tokens, k, scope, allowed_paths)
             finally:
                 conn.close()
         except sqlite3.Error as e:
@@ -965,9 +1058,7 @@ class LexicalStore:
         rows = conn.execute(
             "SELECT p.path, -bm25(fts) AS score "
             "FROM fts JOIN pages p ON p.rowid = fts.rowid "
-            f"WHERE fts MATCH ? AND p.{col} = 1"
-            + allowed_clause
-            + " "
+            f"WHERE fts MATCH ? AND p.{col} = 1" + allowed_clause + " "
             "ORDER BY bm25(fts), p.path LIMIT ?",
             params,
         ).fetchall()
@@ -982,13 +1073,20 @@ class LexicalStore:
         scope: str,
         freshness: tuple | None,
         allowed_unit_refs: set[str] | None = None,
+        literal_tokens: tuple[str, ...] = (),
+        repair: bool = True,
     ) -> list[SemanticUnitLexicalHit] | None:
         if self._failed:
+            return None
+        if not repair and not self.path.exists():
+            _schedule_repair(self.vault_root)
             return None
         try:
             conn = self._connect()
             try:
-                self._ensure_synced(conn, scope, freshness)
+                if not self._ensure_synced(conn, scope, freshness, repair=repair):
+                    _schedule_repair(self.vault_root)
+                    return None
                 return self._semantic_unit_query(
                     conn,
                     stemmed_tokens,
@@ -997,6 +1095,7 @@ class LexicalStore:
                     kinds,
                     scope,
                     allowed_unit_refs,
+                    literal_tokens,
                 )
             finally:
                 conn.close()
@@ -1017,6 +1116,7 @@ class LexicalStore:
         kinds: tuple[str, ...],
         scope: str,
         allowed_unit_refs: set[str] | None = None,
+        literal_tokens: tuple[str, ...] = (),
     ) -> list[SemanticUnitLexicalHit]:
         col = "in_vault" if scope == "vault" else "in_kb"
         clauses = [f"u.{col} = 1"]
@@ -1031,9 +1131,7 @@ class LexicalStore:
             params.extend(kinds)
         if allowed_unit_refs is not None:
             clauses.append("u.unit_ref IN (SELECT value FROM json_each(?))")
-            params.append(
-                json.dumps(sorted(allowed_unit_refs), ensure_ascii=False)
-            )
+            params.append(json.dumps(sorted(allowed_unit_refs), ensure_ascii=False))
         columns = (
             "u.record_type, u.unit_ref, u.parent_path, u.parent_ref, "
             "u.parent_generation, u.parent_source_hash, u.parser_version, u.form, "
@@ -1041,7 +1139,15 @@ class LexicalStore:
             "u.tags_json, u.context, u.unit_source_hash, u.anchor, u.line, "
             "u.end_line, u.fingerprint, u.source_order"
         )
-        if tokens:
+        if literal_tokens:
+            literal_clauses = ["instr(lower(u.content), ?) > 0" for _ in literal_tokens]
+            rows = conn.execute(
+                f"SELECT {columns}, NULL AS lexical_score FROM semantic_units u WHERE "
+                + " AND ".join([*clauses, *literal_clauses])
+                + " ORDER BY u.updated DESC, u.parent_path DESC, u.source_order LIMIT ?",
+                [*params, *literal_tokens, k],
+            ).fetchall()
+        elif tokens:
             match = " OR ".join(f'"{token}"' for token in tokens)
             rows = conn.execute(
                 f"SELECT {columns}, -bm25(unit_fts) AS lexical_score "
@@ -1089,14 +1195,23 @@ class LexicalStore:
         )
 
     def search_substring(
-        self, tokens: list[str], scope: str, freshness: tuple | None
+        self,
+        tokens: list[str],
+        scope: str,
+        freshness: tuple | None,
+        repair: bool = True,
     ) -> list[str] | None:
         if self._failed:
+            return None
+        if not repair and not self.path.exists():
+            _schedule_repair(self.vault_root)
             return None
         try:
             conn = self._connect()
             try:
-                self._ensure_synced(conn, scope, freshness)
+                if not self._ensure_synced(conn, scope, freshness, repair=repair):
+                    _schedule_repair(self.vault_root)
+                    return None
                 return self._substring_query(conn, tokens, scope)
             finally:
                 conn.close()

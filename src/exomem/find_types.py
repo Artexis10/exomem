@@ -341,6 +341,7 @@ class SemanticUnitHit:
     parent_status: str | None
     parent_updated: str
     parent_superseded_by: list[str] = field(default_factory=list)
+    relations: list[dict[str, Any]] = field(default_factory=list)
     bm25_rank: int | None = None
     bm25_score: float | None = None
     vector_rank: int | None = None
@@ -360,6 +361,7 @@ class SemanticUnitHit:
             "excerpt": self.excerpt,
             "tags": self.tags,
             "context": self.context,
+            "relations": self.relations,
             "source_anchor": self.source_anchor,
             "source_span": self.source_span,
             "source_hash": self.source_hash,

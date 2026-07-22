@@ -79,6 +79,11 @@ jobs:
         # so it ALSO runs in the lean matrix; pinned here as the benchmark gate's
         # home next to the golden quality gate.
         run: uv run --frozen python -m pytest tests/test_latency_gate.py -q
+      - name: Semantic validate and commit latency scaling gate (2k and 8k)
+        # Aggregate timings only: the foreground semantic path must stay bounded
+        # after startup warm-up and must not regress to corpus-wide parse/resolver
+        # work when the corpus grows 4x.
+        run: uv run --frozen python scripts/semantic_write_latency.py --check
 
   onboarding:
     name: onboarding (wheel path)

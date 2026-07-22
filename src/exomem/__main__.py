@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import importlib.util
 import json
 import os
 import sys
@@ -37,8 +38,46 @@ from pathlib import Path
 from .kbdir import kb_dirname, kb_prefix
 
 
+def _module_available(name: str) -> bool:
+    """Cheaply detect an optional local capability without importing it."""
+    try:
+        return importlib.util.find_spec(name) is not None
+    except (ImportError, ValueError):
+        return False
+
+
+def _configure_local_search_capabilities(action: str | None) -> None:
+    """Keep lean direct CLI retrieval on its intentionally installed lanes.
+
+    The managed service can carry model/media extras while PATH-visible uv-tool
+    commands stay lean. A local ``ask``/legacy ``find`` must not import missing
+    model stacks merely to discover that BM25 is its available backend.
+    """
+    if action not in {"ask", "ask_memory"}:
+        return
+    model_stack_available = _module_available("torch") and _module_available(
+        "sentence_transformers"
+    )
+    if not model_stack_available:
+        os.environ.setdefault("EXOMEM_DISABLE_EMBEDDINGS", "1")
+        os.environ.setdefault("EXOMEM_DISABLE_RANKING", "1")
+        os.environ.setdefault("EXOMEM_DISABLE_CLIP", "1")
+
+
 def main(argv: list[str] | None = None) -> int:
     raw = list(sys.argv[1:] if argv is None else argv)
+    if raw in (["--version"], ["--version", "--json"]):
+        # Keep this before command-registry and optional capability imports.  A
+        # lean uv-tool command must always be able to identify itself and the
+        # separately managed service it is paired with.
+        from .install_info import print_version
+
+        return print_version(as_json="--json" in raw)
+    if raw and raw[0] == "find":
+        # `find` was the original friendly retrieval command.  Keep existing
+        # scripts useful while the current product language calls it `ask`.
+        raw[0] = "ask"
+    _configure_local_search_capabilities(raw[0] if raw else None)
     if raw and raw[0] == "hosted":
         from .hosted_operator import main as hosted_operator_main
 
@@ -193,8 +232,7 @@ def _auth_main(argv: list[str]) -> int:
                 ]
             }
         reason = (
-            args.reason
-            or ("operator-revoke-all" if args.revoke_all else "operator-revocation")
+            args.reason or ("operator-revoke-all" if args.revoke_all else "operator-revocation")
         ).strip()
         if args.revoke_all:
             await authority.replace_generation()
@@ -314,7 +352,8 @@ def _backfill_media_main(argv: list[str]) -> int:
         "missing, extract text (OCR/ASR/PDF), and CLIP-embed images. Idempotent; CPU or GPU.",
     )
     parser.add_argument(
-        "--vault", default=os.environ.get("EXOMEM_VAULT_PATH"),
+        "--vault",
+        default=os.environ.get("EXOMEM_VAULT_PATH"),
         help=f"vault root containing '{kb_prefix()}' (default: $EXOMEM_VAULT_PATH)",
     )
     parser.add_argument(
@@ -329,13 +368,15 @@ def _backfill_media_main(argv: list[str]) -> int:
     )
     parser.add_argument("--no-clip", action="store_true", help="skip CLIP image embedding")
     parser.add_argument(
-        "--rediarize", action="store_true",
+        "--rediarize",
+        action="store_true",
         help="re-extract audio/video transcribed before diarization (extracted_by without "
         "'+diarized') so they gain speaker turns + a speakers: frontmatter list. Requires "
         "EXOMEM_DIARIZE set in this shell (the CLI does not read .env).",
     )
     parser.add_argument(
-        "--retime", action="store_true",
+        "--retime",
+        action="store_true",
         help="re-extract audio/video transcribed before timed transcripts (extracted_by "
         "without '+timed') so they gain per-segment [m:ss] lines — the substrate for "
         "semantic segments. Requires EXOMEM_SEMANTIC_SEGMENTS set in this shell (the CLI "
@@ -376,27 +417,35 @@ def _index_main(argv: list[str]) -> int:
         "become semantically searchable).",
     )
     parser.add_argument(
-        "--vault", default=os.environ.get("EXOMEM_VAULT_PATH"),
+        "--vault",
+        default=os.environ.get("EXOMEM_VAULT_PATH"),
         help=f"vault root containing '{kb_prefix()}' (default: $EXOMEM_VAULT_PATH)",
     )
     parser.add_argument(
-        "--scope", choices=("kb", "vault"), default=None,
+        "--scope",
+        choices=("kb", "vault"),
+        default=None,
         help="index scope override; default reads EXOMEM_INDEX_SCOPE (else 'kb'). "
         f"'vault' indexes the whole vault, not just {kb_prefix()}.",
     )
     parser.add_argument(
-        "--batch-size", type=int, default=256,
+        "--batch-size",
+        type=int,
+        default=256,
         help="chunks per embedding batch (default: 256)",
     )
     parser.add_argument(
-        "--device", choices=("auto", "cpu", "gpu"), default=None,
+        "--device",
+        choices=("auto", "cpu", "gpu"),
+        default=None,
         help="embedding device for this run. Default: GPU when a capable one is present "
         "and the mode isn't 'quiet' (this is a short-lived process, so it frees the CUDA "
         "context on exit — safe even on a CPU-default server). 'cpu' forces CPU; 'gpu'/"
         "'auto' opt in with the marginal-VRAM guard.",
     )
     parser.add_argument(
-        "--dry-run", action="store_true",
+        "--dry-run",
+        action="store_true",
         help="report what would be (re)embedded and pruned; write nothing",
     )
     args = parser.parse_args(argv)
@@ -473,10 +522,16 @@ def _mode_main(argv: list[str]) -> int:
         "~/.exomem/config.json, read by BOTH the server and CLI ops.",
     )
     parser.add_argument(
-        "mode", nargs="?",
+        "mode",
+        nargs="?",
         choices=(
-            "quiet", "normal", "performance", "gpu", "turbo",
-            "resource-saver", "low-resource",
+            "quiet",
+            "normal",
+            "performance",
+            "gpu",
+            "turbo",
+            "resource-saver",
+            "low-resource",
         ),
         help="mode to set; omit to show the current one",
     )
@@ -485,9 +540,12 @@ def _mode_main(argv: list[str]) -> int:
 
     if args.mode is None:
         source = (
-            "env" if os.environ.get("EXOMEM_MODE")
-            else "config" if mode_mod.read_config().get("mode")
-            else "quiet-alias" if os.environ.get("EXOMEM_QUIET_MODE")
+            "env"
+            if os.environ.get("EXOMEM_MODE")
+            else "config"
+            if mode_mod.read_config().get("mode")
+            else "quiet-alias"
+            if os.environ.get("EXOMEM_QUIET_MODE")
             else "default"
         )
         policy = mode_mod.resolved()
@@ -550,6 +608,7 @@ def _status_main(argv: list[str]) -> int:
         print(f"  cuda: {status['cuda']}")
     return 0
 
+
 def _install_info_main(argv: list[str]) -> int:
     """Report where this install came from.
 
@@ -569,31 +628,25 @@ def _install_info_main(argv: list[str]) -> int:
     parser.add_argument("--json", action="store_true", help="emit stable JSON")
     args = parser.parse_args(argv)
 
-    from . import deploy_provenance
+    from . import install_info
 
-    report = deploy_provenance.provenance(include_local=True)
+    report = install_info.report()
 
     if args.json:
         print(json.dumps(report, ensure_ascii=False, default=str))
         return 0
 
-    print(f"version:        {report['version']}")
-    print(f"install source: {report['install_source']}")
-    if report.get("revision"):
-        print(f"revision:       {report['revision']}")
-    print(f"interpreter:    {report.get('interpreter')}")
-    if report.get("checkout"):
-        print(f"checkout:       {report['checkout']}")
-    torch_build = report.get("torch") or "not installed"
-    accel = "accelerated" if report.get("accelerated") else "CPU-only"
-    print(f"torch:          {torch_build} ({accel})")
-    print(f"extras:         {', '.join(report['extras']) or 'none'}")
-    if report["install_source"] == "wheel":
-        print(
-            "\nThis is a wheel install: it does NOT run a local checkout. "
-            "Upgrade it with `uv pip install --python <this interpreter> ...`; "
-            "`uv sync` in a checkout will not affect it."
-        )
+    print(f"version:          {report['version']}")
+    print(f"install source:   {report['install_source']}")
+    print(f"interpreter:      {report['python_executable']}")
+    print(f"local profile:    {report['local_profile']}")
+    print(f"effective route:  {report['effective_route']}")
+    if report["managed_service_version"]:
+        print(f"service version:  {report['managed_service_version']}")
+        print(f"service profile:  {report['managed_service_profile']}")
+        print(f"version match:    {str(report['version_match']).lower()}")
+    else:
+        print(f"managed manifest: {report['manifest_status']}")
     return 0
 
 
@@ -767,21 +820,26 @@ def _enroll_speaker_main(argv: list[str]) -> int:
             "diarization. The sample is embedded into a 192-dim ECAPA voiceprint and stored in "
             "the per-machine profile store beside the embedding sidecar — desk-side admin, never "
             "an MCP tool. Re-enrolling the same name running-averages the centroid over samples. "
-            'Example: exomem enroll-speaker --name Alice --self alice-sample.wav'
+            "Example: exomem enroll-speaker --name Alice --self alice-sample.wav"
         ),
     )
     parser.add_argument("audio", help="path to an audio sample of the speaker's voice")
     parser.add_argument("--name", required=True, help="speaker name to attach to matched clusters")
     parser.add_argument(
-        "--self", dest="is_self", action="store_true",
+        "--self",
+        dest="is_self",
+        action="store_true",
         help="mark this profile as the vault owner's own voice (is_self).",
     )
     parser.add_argument(
-        "--threshold", type=float, default=None,
+        "--threshold",
+        type=float,
+        default=None,
         help="per-profile cosine match threshold (default 0.40). Raise for confusable voices.",
     )
     parser.add_argument(
-        "--vault", default=os.environ.get("EXOMEM_VAULT_PATH"),
+        "--vault",
+        default=os.environ.get("EXOMEM_VAULT_PATH"),
         help=f"vault root containing '{kb_prefix()}' (default: $EXOMEM_VAULT_PATH)",
     )
     args = parser.parse_args(argv)
@@ -791,7 +849,9 @@ def _enroll_speaker_main(argv: list[str]) -> int:
 
     try:
         rec = enroll_module.enroll_speaker(
-            args.audio, args.name, is_self=args.is_self,
+            args.audio,
+            args.name,
+            is_self=args.is_self,
             threshold=args.threshold if args.threshold is not None else DEFAULT_THRESHOLD,
             vault_root=_speaker_vault(args),
         )
@@ -811,7 +871,8 @@ def _list_speakers_main(argv: list[str]) -> int:
         description="List the enrolled voice profiles used for named diarization.",
     )
     parser.add_argument(
-        "--vault", default=os.environ.get("EXOMEM_VAULT_PATH"),
+        "--vault",
+        default=os.environ.get("EXOMEM_VAULT_PATH"),
         help=f"vault root containing '{kb_prefix()}' (default: $EXOMEM_VAULT_PATH)",
     )
     args = parser.parse_args(argv)
@@ -839,7 +900,8 @@ def _remove_speaker_main(argv: list[str]) -> int:
     )
     parser.add_argument("--name", required=True, help="profile name to remove")
     parser.add_argument(
-        "--vault", default=os.environ.get("EXOMEM_VAULT_PATH"),
+        "--vault",
+        default=os.environ.get("EXOMEM_VAULT_PATH"),
         help=f"vault root containing '{kb_prefix()}' (default: $EXOMEM_VAULT_PATH)",
     )
     args = parser.parse_args(argv)
@@ -933,7 +995,9 @@ def _install_skill_main(argv: list[str]) -> int:
     target = Path(args.target) if args.target else None
     try:
         if target is not None:
-            reports = {"claude": install_module.install_skill(target, force=args.force, link=args.link)}
+            reports = {
+                "claude": install_module.install_skill(target, force=args.force, link=args.link)
+            }
         else:
             reports = install_module.install_skills(
                 client=args.client, force=args.force, link=args.link
@@ -944,8 +1008,7 @@ def _install_skill_main(argv: list[str]) -> int:
 
     for client, report in reports.items():
         print(
-            f"Installed the Exomem skills for {client} "
-            f"({report['mode']}, {report['files']} files):"
+            f"Installed the Exomem skills for {client} ({report['mode']}, {report['files']} files):"
         )
         print(f"  {report['target']}")
         if report.get("workflow_skills"):
@@ -1188,8 +1251,7 @@ def _simple_ask_main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
         prog="exomem ask",
         description=(
-            "Ask Exomem what it knows. Thin alias over ask_memory with compact "
-            "recall defaults."
+            "Ask Exomem what it knows. Thin alias over ask_memory with compact recall defaults."
         ),
     )
     parser.add_argument("query", help="question or search phrase")
@@ -1396,9 +1458,7 @@ def _simple_review_main(argv: list[str]) -> int:
         )
         parser.add_argument("ref", help="stable exomem://review/<id> reference")
         if action == "snooze":
-            parser.add_argument(
-                "--until", required=True, help="snooze through YYYY-MM-DD"
-            )
+            parser.add_argument("--until", required=True, help="snooze through YYYY-MM-DD")
         parser.add_argument("--why", help="optional review rationale")
         parser.add_argument("--json", action="store_true", help="emit the shared JSON envelope")
         args = parser.parse_args(argv[1:])
@@ -1435,15 +1495,19 @@ def _simple_review_main(argv: list[str]) -> int:
     parser.add_argument("--json", action="store_true", help="emit the shared JSON envelope")
     args = parser.parse_args(argv)
 
-    core = ["review_memory", "--mode", "audit"] if args.audit else [
-        "review_memory",
-        "--mode",
-        "attention",
-        "--limit",
-        str(args.limit),
-        "--state",
-        args.state,
-    ]
+    core = (
+        ["review_memory", "--mode", "audit"]
+        if args.audit
+        else [
+            "review_memory",
+            "--mode",
+            "attention",
+            "--limit",
+            str(args.limit),
+            "--state",
+            args.state,
+        ]
+    )
     _append_repeated(core, "--categories", args.categories)
     return _core_op_main(_with_json(core, args.json))
 
@@ -1531,6 +1595,7 @@ def _simple_adopt_main(argv: list[str]) -> int:
     _append_repeated(core, "--selected-paths", args.selected_paths)
     return _core_op_main(_with_json(core, args.json))
 
+
 def _simple_maintain_main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
         prog="exomem maintain",
@@ -1583,6 +1648,7 @@ def _simple_maintain_main(argv: list[str]) -> int:
         _append_repeated(core, "--categories", args.categories)
     return _core_op_main(_with_json(core, args.json))
 
+
 # --------------------------------------------------------------------------- #
 # Registry-driven core operations (reads + writes)
 # --------------------------------------------------------------------------- #
@@ -1591,9 +1657,7 @@ def _simple_maintain_main(argv: list[str]) -> int:
 # repeatable `--field key=value`, so the CLI stays clean.
 _FIELD_ESCAPE = frozenset({"remember", "replace_memory"})
 _FIELD_ESCAPE_VISIBLE_PARAMS = frozenset({"slug", "response_detail"})
-_LEGACY_EDIT_BOOL_FIELDS = frozenset(
-    {"replace_all", "overwrite", "allow_curated", "validate_only"}
-)
+_LEGACY_EDIT_BOOL_FIELDS = frozenset({"replace_all", "overwrite", "allow_curated", "validate_only"})
 
 
 def _expose_tier2() -> bool:
@@ -1624,11 +1688,7 @@ def _flag(name: str) -> str:
 def _add_command_args(sp: argparse.ArgumentParser, cmd) -> None:
     field_escape = cmd.name in _FIELD_ESCAPE
     for p in cmd.params:
-        if (
-            field_escape
-            and not p.required
-            and p.name not in _FIELD_ESCAPE_VISIBLE_PARAMS
-        ):
+        if field_escape and not p.required and p.name not in _FIELD_ESCAPE_VISIBLE_PARAMS:
             continue  # reachable via --field
         if p.cli_positional:
             sp.add_argument(
@@ -1705,17 +1765,11 @@ def _add_command_args(sp: argparse.ArgumentParser, cmd) -> None:
                 )
 
 
-def _collect_raw_args(
-    cmd, args: argparse.Namespace, parser: argparse.ArgumentParser
-) -> dict:
+def _collect_raw_args(cmd, args: argparse.Namespace, parser: argparse.ArgumentParser) -> dict:
     field_escape = cmd.name in _FIELD_ESCAPE
     raw: dict = {}
     for p in cmd.params:
-        if (
-            field_escape
-            and not p.required
-            and p.name not in _FIELD_ESCAPE_VISIBLE_PARAMS
-        ):
+        if field_escape and not p.required and p.name not in _FIELD_ESCAPE_VISIBLE_PARAMS:
             continue
         val = getattr(args, p.name, None)
         if val is not None:
@@ -1755,9 +1809,7 @@ def _normalize_cli_edit(cmd, raw: dict, cli_ops) -> dict:  # noqa: ANN001
         try:
             legacy["edits"] = json.loads(legacy["edits"])
         except json.JSONDecodeError as error:
-            raise cli_ops.OpError(
-                "BAD_JSON", f"`edits` must be valid JSON: {error}"
-            ) from None
+            raise cli_ops.OpError("BAD_JSON", f"`edits` must be valid JSON: {error}") from None
     if isinstance(legacy.get("value"), str):
         try:
             legacy["value"] = json.loads(legacy["value"])
@@ -1807,10 +1859,7 @@ def _print_adopt_human(result: dict) -> None:
     actions = result.get("next_actions") or []
     print("\nSafe next actions")
     for action in actions:
-        print(
-            f"  - {action.get('action')} [{action.get('status')}]: "
-            f"{action.get('description')}"
-        )
+        print(f"  - {action.get('action')} [{action.get('status')}]: {action.get('description')}")
 
     if manifest := result.get("manifest"):
         print(f"\nSaved manifest: {manifest.get('path')}")
@@ -1825,10 +1874,7 @@ def _print_adopt_human(result: dict) -> None:
         sources = plan.get("sources") or []
         skipped = plan.get("skipped") or []
         status = plan.get("status", "unknown")
-        print(
-            f"\nCompile plan: {status} "
-            f"({len(sources)} source(s), {len(skipped)} skipped)"
-        )
+        print(f"\nCompile plan: {status} ({len(sources)} source(s), {len(skipped)} skipped)")
         proposal = plan.get("proposal") or {}
         if proposal.get("suggested_title"):
             print(f"  Suggested title: {proposal.get('suggested_title')}")
@@ -1928,9 +1974,7 @@ def _core_op_main(argv: list[str]) -> int:
     from .vault import resolve_vault
 
     expose_tier2 = _expose_tier2()
-    registered_commands = commands_module.product_commands_for(
-        "cli", expose_tier2=expose_tier2
-    )
+    registered_commands = commands_module.product_commands_for("cli", expose_tier2=expose_tier2)
     cmds = {command.name: command for command in registered_commands}
     surface_descriptor = capabilities.ActiveSurfaceDescriptor(
         surface="cli",
