@@ -58,6 +58,6 @@
 ## 8. Verification And Delivery
 
 - [x] 8.1 Run focused parser, semantic-unit, semantic-contract, lifecycle-writer, Tier-2, adoption, bootstrap, command-fidelity, template, package-sync, built-artifact, and privacy tests with embeddings disabled.
-- [ ] 8.2 Run Ruff on changed Python, generated-surface checks, plugin sync, scaffold/privacy leak gates, strict OpenSpec validation, and the complete lean test suite; record any unrelated platform baseline separately.
+- [x] 8.2 Run Ruff on changed Python, generated-surface checks, plugin sync, scaffold/privacy leak gates, strict OpenSpec validation, and the complete lean test suite; record any unrelated platform baseline separately.
 - [x] 8.3 Have an independent reviewer verify every scenario, with special attention to compact/rich non-duplication, exact predicate exemptions, legacy/move safety, standalone distribution, archive inspection, and private-data isolation.
 - [x] 8.4 Update public authoring/deployment/release documentation from the canonical contract and record the parser/index rebuild plus behavior-tightening migration notes without making product-superiority claims beyond evidence.
