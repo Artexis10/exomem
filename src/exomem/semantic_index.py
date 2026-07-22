@@ -13,8 +13,8 @@ from typing import Any
 
 from . import memory_refs, relation_registry, semantic_language_registry, semantic_units, vault
 
-PARSER_VERSION = 3
-_GENERATION_SCHEMA = "exomem.semantic-unit.parent-generation.v3"
+PARSER_VERSION = 4
+_GENERATION_SCHEMA = "exomem.semantic-unit.parent-generation.v4"
 _ACTIVE_PARENT_STATES: ContextVar[Mapping[str, SemanticParentIndexState] | None] = (
     ContextVar("exomem_semantic_parent_states", default=None)
 )

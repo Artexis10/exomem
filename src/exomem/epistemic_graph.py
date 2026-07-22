@@ -32,7 +32,7 @@ from .cli_ops import OpError
 from .kbdir import kb_dirname, kb_prefix
 from .markdown_relations import MarkdownRelation
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 UNIT_SEED_MAX_BATCHES = 4
 UNIT_PARENT_REF_MAX_CANDIDATES = 16
 EDGE_INSPECTION_MULTIPLIER = 4
@@ -1230,6 +1230,8 @@ def _unit_generation_metadata(
         "category_key": unit.category_key,
         "category": unit.category,
         "kind": unit.kind,
+        "tags": list(unit.tags),
+        "context": unit.context,
         "parent_generation": state.parent_generation,
         "parent_source_hash": state.parent_source_hash,
         "parser_version": state.parser_version,

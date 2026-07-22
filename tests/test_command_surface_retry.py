@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import threading
@@ -11,12 +12,15 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from fastmcp import FastMCP
+from fastmcp.exceptions import ToolError
 from fastmcp.server.middleware.middleware import MiddlewareContext
 from mcp.types import CallToolRequest, CallToolRequestParams
 
 from exomem import command_surface, writer_lease
 from exomem import server as server_module
 from exomem import vault as vault_module
+from exomem.cli_ops import OpError
 
 
 def _write_editable_note(vault: Path, *, body: str = "Before") -> str:
@@ -239,6 +243,182 @@ def test_remember_validate_only_is_read_only() -> None:
         )
         is False
     )
+
+
+def test_replace_memory_validate_only_is_read_only() -> None:
+    from exomem.commands import invocation_is_read_only, product_commands_for
+
+    command = next(
+        item for item in product_commands_for("mcp") if item.name == "replace_memory"
+    )
+
+    assert invocation_is_read_only(command, {"validate_only": True}) is True
+    assert invocation_is_read_only(command, {"validate_only": False}) is False
+    assert invocation_is_read_only(command, {}) is False
+
+
+def test_replace_preview_is_advisory_and_bound_to_predecessor_without_writes(
+    vault: Path,
+) -> None:
+    from exomem.commands import op_replace_memory
+
+    old_path = _write_editable_note(vault)
+    before = {
+        path.relative_to(vault).as_posix(): path.read_bytes()
+        for path in vault.rglob("*")
+        if path.is_file()
+    }
+
+    preview = op_replace_memory(
+        vault,
+        old_path=old_path,
+        content=(
+            "# Retry-safe edit v2\n\n"
+            "## Observations\n\n"
+            "- [runtime reliability] Keep retries bounded #retry\n"
+        ),
+        title="Retry-safe edit v2",
+        validate_only=True,
+    )
+
+    assert preview["validate_only"] is True
+    assert preview["advisory"] is True
+    assert preview["committed"] is False
+    assert preview["mutated"] is False
+    assert preview["predecessor"] == {
+        "path": old_path,
+        "content_hash": hashlib.sha256((vault / old_path).read_bytes()).hexdigest(),
+    }
+    assert preview["draft_hash"]
+    assert "receipt_id" not in preview
+    after = {
+        path.relative_to(vault).as_posix(): path.read_bytes()
+        for path in vault.rglob("*")
+        if path.is_file()
+    }
+    assert after == before
+
+
+def test_replace_commit_rejects_when_predecessor_changed_after_preview(
+    vault: Path,
+) -> None:
+    from exomem.commands import op_replace_memory
+
+    old_path = _write_editable_note(vault)
+    kwargs = {
+        "old_path": old_path,
+        "content": (
+            "# Retry-safe edit v2\n\n"
+            "## Observations\n\n"
+            "- [runtime reliability] Keep retries bounded #retry\n"
+        ),
+        "title": "Retry-safe edit v2",
+    }
+    preview = op_replace_memory(vault, validate_only=True, **kwargs)
+    old = vault / old_path
+    old.write_text(old.read_text(encoding="utf-8") + "\nConcurrent edit.\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="DRAFT_HASH_MISMATCH"):
+        op_replace_memory(
+            vault,
+            draft_id=preview["draft_id"],
+            draft_hash=preview["draft_hash"],
+            draft_token=preview["draft_token"],
+            **kwargs,
+        )
+
+    assert "status: superseded" not in old.read_text(encoding="utf-8")
+
+
+def test_replace_commit_accepts_the_bound_preview_after_fresh_revalidation(
+    vault: Path,
+) -> None:
+    from exomem.commands import op_replace_memory
+
+    old_path = _write_editable_note(vault)
+    old = vault / old_path
+    old.write_bytes(old.read_bytes().replace(b"\r\n", b"\n"))
+    kwargs = {
+        "old_path": old_path,
+        "content": (
+            "# Retry-safe edit v2\n\n"
+            "## Observations\n\n"
+            "- [runtime reliability] Keep retries bounded #retry\n"
+        ),
+        "title": "Retry-safe edit v2",
+    }
+    preview = op_replace_memory(vault, validate_only=True, **kwargs)
+
+    committed = op_replace_memory(
+        vault,
+        draft_id=preview["draft_id"],
+        draft_hash=preview["draft_hash"],
+        draft_token=preview["draft_token"],
+        **kwargs,
+    )
+
+    assert committed["old_path"] == old_path
+    assert (vault / committed["new_path"]).is_file()
+    assert "status: superseded" in old.read_text(encoding="utf-8")
+
+
+def test_bound_replace_preview_bypasses_writer_authority_boundary_and_receipts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem.commands import product_commands_for
+    from exomem.mutation_lock import VaultMutationCoordinator
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    state_dir = tmp_path / "state"
+    entered = threading.Event()
+    release = threading.Event()
+    command = next(
+        item for item in product_commands_for("mcp") if item.name == "replace_memory"
+    )
+
+    def leaf(_vault: Path, *, validate_only: bool = False) -> dict:
+        assert validate_only is True
+        return {
+            "validate_only": True,
+            "advisory": True,
+            "committed": False,
+            "mutated": False,
+        }
+
+    command = replace(command, leaf=leaf)
+    manager = writer_lease.LeaseManager(
+        writer_lease.LeaseConfig(state_dir=state_dir),
+        mutation_timeout_seconds=0.05,
+    )
+    monkeypatch.setattr(
+        manager,
+        "ensure_writer",
+        lambda: pytest.fail("replacement preview requested writer authority"),
+    )
+    monkeypatch.setattr(writer_lease, "get_manager", lambda: manager)
+    monkeypatch.setattr(command_surface, "mcp_retry_scope", lambda: "session:test")
+    bound = command_surface.bind_vault(leaf, vault, command=command)
+    coordinator = VaultMutationCoordinator(state_dir, vault)
+
+    def hold_live_mutation() -> None:
+        with coordinator.hold(timeout_seconds=2.0):
+            entered.set()
+            assert release.wait(2.0)
+
+    holder = threading.Thread(target=hold_live_mutation)
+    holder.start()
+    assert entered.wait(1.0)
+    try:
+        preview = bound(validate_only=True)
+    finally:
+        release.set()
+        holder.join(timeout=2.0)
+
+    assert preview["advisory"] is True
+    assert "receipt_id" not in preview
+    assert not holder.is_alive()
 
 
 @pytest.mark.parametrize("operation", ("create", "append"))
@@ -646,6 +826,104 @@ def test_bound_mcp_tool_passes_retry_scope(monkeypatch) -> None:
         "implicit_idempotency_scope": "bearer:abc",
         "mutation_request_id": "11111111-1111-4111-8111-111111111111",
     }
+
+
+def test_bound_mcp_tool_returns_public_operation_error_as_failure_content(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def leaf(vault):  # noqa: ANN001, ARG001
+        raise AssertionError("invoke seam should replace the leaf")
+
+    command = SimpleNamespace(name="mutate", leaf=leaf, read_only=False)
+    bound = command_surface.bind_vault(leaf, object(), command=command)
+    public_error = OpError(
+        "MUTATION_BUSY",
+        "vault mutation boundary is busy",
+        details={
+            "status": "retryable",
+            "committed": False,
+            "retry_after_ms": 750,
+            "request_id": "req-public",
+            "receipt_id": "receipt-public",
+        },
+    )
+    monkeypatch.setattr(
+        "exomem.writer_lease.invoke_command",
+        lambda *args, **kwargs: (_ for _ in ()).throw(public_error),
+    )
+
+    result = bound()
+
+    assert result["success"] is False
+    assert result["error"] == public_error.as_public_dict()
+
+
+def test_bound_mcp_tool_does_not_flatten_unexpected_exception(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def leaf(vault):  # noqa: ANN001, ARG001
+        raise AssertionError("invoke seam should replace the leaf")
+
+    command = SimpleNamespace(name="mutate", leaf=leaf, read_only=False)
+    bound = command_surface.bind_vault(leaf, object(), command=command)
+    monkeypatch.setattr(
+        "exomem.writer_lease.invoke_command",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("unexpected boom")),
+    )
+
+    with pytest.raises(RuntimeError, match="unexpected boom"):
+        bound()
+
+
+def test_fastmcp_busy_is_normal_tool_content_but_unexpected_fault_is_native(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def leaf(vault):  # noqa: ANN001, ARG001
+        raise AssertionError("invoke seam should replace the leaf")
+
+    command = SimpleNamespace(name="mutate", leaf=leaf, read_only=False)
+    bound = command_surface.bind_vault(
+        leaf, object(), name="mutate", command=command
+    )
+    read_command = SimpleNamespace(name="inspect", leaf=leaf, read_only=True)
+    read_bound = command_surface.bind_vault(
+        leaf, object(), name="inspect", command=read_command
+    )
+    mcp = FastMCP("application-error-contract")
+    mcp.tool(bound)
+    mcp.tool(read_bound)
+    public_error = OpError(
+        "MUTATION_BUSY",
+        "vault mutation boundary is busy",
+        details={
+            "status": "retryable",
+            "committed": False,
+            "retry_after_ms": 750,
+            "request_id": "req-fastmcp",
+            "receipt_id": "receipt-fastmcp",
+        },
+    )
+    failures: list[Exception] = [public_error, public_error, RuntimeError("boom")]
+
+    def fail_in_order(*args, **kwargs):  # noqa: ANN002, ANN003
+        if args[0].name == "inspect":
+            return {"available": True}
+        raise failures.pop(0)
+
+    monkeypatch.setattr("exomem.writer_lease.invoke_command", fail_in_order)
+
+    for _ in range(2):
+        result = asyncio.run(mcp.call_tool("mutate", {}, run_middleware=False))
+        assert result.structured_content["success"] is False
+        assert result.structured_content["error"]["code"] == "MUTATION_BUSY"
+        assert result.structured_content["error"]["request_id"] == "req-fastmcp"
+        assert result.structured_content["error"]["receipt_id"] == "receipt-fastmcp"
+
+    read = asyncio.run(mcp.call_tool("inspect", {}, run_middleware=False))
+    assert read.structured_content == {"available": True}
+
+    with pytest.raises(ToolError, match="boom"):
+        asyncio.run(mcp.call_tool("mutate", {}, run_middleware=False))
 
 
 def test_mcp_request_id_prefers_edge_correlation_header(monkeypatch) -> None:

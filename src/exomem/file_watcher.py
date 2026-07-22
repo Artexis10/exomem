@@ -58,9 +58,13 @@ def _media_mutation_guard(
 
 
 def _reconcile_background_media(vault_root: Path, binary: Path) -> object:
-    """Reconcile one artifact, yielding the global mutation boundary afterward."""
-    with _media_mutation_guard(vault_root):
-        return media_processing.reconcile_media(vault_root, binary, explicit=False)
+    """Plan one artifact before taking authority for its bounded commit."""
+    return media_processing.reconcile_media(
+        vault_root,
+        binary,
+        explicit=False,
+        commit_guard=lambda: _media_mutation_guard(vault_root),
+    )
 
 DEBOUNCE_SECONDS = 0.5
 # How often the watcher re-walks and reconciles the freshness registry against
@@ -356,10 +360,14 @@ class FileWatcher:
 
         for path in media:
             try:
-                with _media_mutation_guard(
-                    self._vault_root, operation="background_media_event"
-                ):
-                    media_processing.reconcile_media(self._vault_root, path, explicit=False)
+                media_processing.reconcile_media(
+                    self._vault_root,
+                    path,
+                    explicit=False,
+                    commit_guard=lambda: _media_mutation_guard(
+                        self._vault_root, operation="background_media_event"
+                    ),
+                )
             except Exception:  # noqa: BLE001 - a bad artifact must never kill the watcher
                 log.exception("file watcher: media reconciliation failed for %s", path)
         if not (ups or del_rels):

@@ -13,10 +13,12 @@ import os
 import re
 import threading
 from collections.abc import Callable
+from contextlib import AbstractContextManager, contextmanager, nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 
 from . import access, media_jobs, media_types, memory_refs
+from .cli_ops import OpError
 from .kbdir import kb_dirname
 from .vault import (
     MISSING_CONTENT_HASH,
@@ -25,6 +27,7 @@ from .vault import (
     batch_atomic_write,
     content_hash,
     parse_frontmatter,
+    post_commit_batch_fanout,
     yaml_scalar,
 )
 
@@ -32,6 +35,15 @@ log = logging.getLogger(__name__)
 DEFAULT_RECONCILE_LIMIT = 100
 _RUNTIME_LOCK = threading.Lock()
 _RUNTIME_UNAVAILABLE: dict[str, tuple[str, str]] = {}
+_TRANSIENT_COORDINATION_CODES = frozenset(
+    {
+        "MUTATION_BUSY",
+        "MUTATION_LOCK_UNAVAILABLE",
+        "WRITER_COORDINATOR_UNAVAILABLE",
+        "WRITER_FENCED",
+        "WRITER_LEASE_REQUIRED",
+    }
+)
 
 
 class MediaProcessingError(Exception):
@@ -113,6 +125,7 @@ def reconcile_media(
     binary_path: str | Path,
     *,
     explicit: bool = True,
+    commit_guard: Callable[[], AbstractContextManager[object]] | None = None,
 ) -> ReconcileResult | None:
     """Converge one governed media artifact to a sidecar and durable job.
 
@@ -154,71 +167,141 @@ def reconcile_media(
     completed = original is not None and _completed_provenance_state(
         original, media_type=media_type, provenance=provenance
     )
-    if completed in {"valid", "repairable"}:
-        if completed == "repairable":
-            repaired = _backfill_completed_provenance(original, provenance)
-            _verify_binary_identity(binary, resolved_binary, provenance)
-            batch_atomic_write(
-                [
+    repaired = (
+        _backfill_completed_provenance(original, provenance)
+        if completed == "repairable" and original is not None
+        else None
+    )
+    pending = (
+        None
+        if completed in {"valid", "repairable"}
+        else _render_pending_sidecar(
+            binary=binary,
+            media_type=media_type,
+            provenance=provenance,
+            original=original,
+        )
+    )
+
+    deferred_fanout: list[Path] = []
+
+    def _write_sidecar(write: PlannedWrite) -> None:
+        written = batch_atomic_write(
+            [write],
+            vault_root=vault,
+            post_commit_fanout=commit_guard is None,
+        )
+        if commit_guard is not None:
+            deferred_fanout.extend(written)
+
+    result: ReconcileResult | None = None
+    boundary = commit_guard() if commit_guard is not None else nullcontext()
+
+    @contextmanager
+    def _commit_scope():
+        try:
+            with boundary:
+                yield
+        finally:
+            if deferred_fanout:
+                post_commit_batch_fanout(
+                    vault,
+                    list(dict.fromkeys(deferred_fanout)),
+                    None,
+                    None,
+                )
+
+    with _commit_scope():
+        commit_tier = access.access_tier(vault, rel_binary)
+        if commit_tier in {access.TIER_EXCLUDED, access.TIER_READONLY}:
+            if not explicit:
+                return None
+            raise MediaProcessingError(
+                "MEDIA_PATH_ACCESS_DENIED",
+                f"media path is {commit_tier} under _access.yaml: {rel_binary}",
+            )
+        _confine_sidecar(vault, sidecar)
+        _verify_binary_identity(binary, resolved_binary, provenance)
+        current = sidecar.read_text(encoding="utf-8") if sidecar.exists() else None
+        if current != original:
+            raise MediaProcessingError(
+                "MEDIA_CHANGED_DURING_RECONCILIATION",
+                f"media sidecar changed while reconciliation was being planned: {sidecar}",
+            )
+
+        if completed in {"valid", "repairable"}:
+            if repaired is not None:
+                assert original is not None
+                _write_sidecar(
                     PlannedWrite(
                         path=sidecar,
                         content=repaired,
                         expected_hash=content_hash(original),
                     )
-                ],
-                vault_root=vault,
-            )
-        _verify_binary_identity(binary, resolved_binary, provenance)
-        _discard_stale_job(vault, binary, sidecar, media_type)
-        return ReconcileResult(media_type, "completed", sidecar, None)
+                )
+            _verify_binary_identity(binary, resolved_binary, provenance)
+            _discard_stale_job(vault, binary, sidecar, media_type)
+            result = ReconcileResult(media_type, "completed", sidecar, None)
+        else:
+            assert pending is not None
+            if original != pending:
+                expected = (
+                    content_hash(original)
+                    if original is not None
+                    else MISSING_CONTENT_HASH
+                )
+                _write_sidecar(
+                    PlannedWrite(
+                        path=sidecar,
+                        content=pending,
+                        expected_hash=expected,
+                    )
+                )
 
-    pending = _render_pending_sidecar(
-        binary=binary,
-        media_type=media_type,
-        provenance=provenance,
-        original=original,
-    )
-    if original != pending:
-        _verify_binary_identity(binary, resolved_binary, provenance)
-        expected = content_hash(original) if original is not None else MISSING_CONTENT_HASH
-        batch_atomic_write(
-            [PlannedWrite(path=sidecar, content=pending, expected_hash=expected)],
-            vault_root=vault,
-        )
-
-    _verify_binary_identity(binary, resolved_binary, provenance)
-    store = media_jobs.MediaJobStore(vault)
-    job_id = store.enqueue(
-        media_jobs.MediaJob(
-            binary_path=binary,
-            sidecar_path=sidecar,
-            media_type=media_type,
-            do_ocr=True,
-            do_clip=media_type in {"image", "video"}
-            and not os.environ.get("EXOMEM_DISABLE_CLIP"),
-        )
-    )
-    durable_job = store.get(job_id)
-    state = durable_job.state if durable_job is not None else media_jobs.PENDING
-    unavailable = _runtime_unavailable(vault)
-    if unavailable is not None:
-        reason, next_action = unavailable
-        store.mark(job_id, media_jobs.BLOCKED, reason)
-        current_sidecar = sidecar.read_text(encoding="utf-8")
-        if not _has_runtime_unavailable_state(
-            current_sidecar, reason=reason, next_action=next_action
-        ):
-            _preserve_module().update_sidecar_processing_failure(
-                vault,
-                sidecar,
-                state=media_jobs.BLOCKED,
-                attempts=durable_job.attempts if durable_job is not None else 0,
-                error=reason,
-                retryable=True,
-                next_action=next_action,
+            _verify_binary_identity(binary, resolved_binary, provenance)
+            store = media_jobs.MediaJobStore(vault)
+            job_id = store.enqueue(
+                media_jobs.MediaJob(
+                    binary_path=binary,
+                    sidecar_path=sidecar,
+                    media_type=media_type,
+                    do_ocr=True,
+                    do_clip=media_type in {"image", "video"}
+                    and not os.environ.get("EXOMEM_DISABLE_CLIP"),
+                )
             )
-        state = media_jobs.BLOCKED
-    return ReconcileResult(media_type, state, sidecar, job_id)
+            durable_job = store.get(job_id)
+            state = durable_job.state if durable_job is not None else media_jobs.PENDING
+            unavailable = _runtime_unavailable(vault)
+            if unavailable is not None:
+                reason, next_action = unavailable
+                store.mark(job_id, media_jobs.BLOCKED, reason)
+                current_sidecar = sidecar.read_text(encoding="utf-8")
+                if not _has_runtime_unavailable_state(
+                    current_sidecar, reason=reason, next_action=next_action
+                ):
+                    blocked_sidecar = _preserve_module().render_sidecar_processing_failure(
+                        current_sidecar,
+                        state=media_jobs.BLOCKED,
+                        attempts=(
+                            durable_job.attempts if durable_job is not None else 0
+                        ),
+                        error=reason,
+                        retryable=True,
+                        next_action=next_action,
+                    )
+                    _write_sidecar(
+                        PlannedWrite(
+                            path=sidecar,
+                            content=blocked_sidecar,
+                            expected_hash=content_hash(current_sidecar),
+                        )
+                    )
+                state = media_jobs.BLOCKED
+            result = ReconcileResult(media_type, state, sidecar, job_id)
+
+    assert result is not None
+    return result
 
 
 def reconcile_all_media(
@@ -226,6 +309,7 @@ def reconcile_all_media(
     *,
     limit: int = DEFAULT_RECONCILE_LIMIT,
     reconcile_one: Callable[[Path], object] | None = None,
+    propagate_transient_errors: bool = False,
 ) -> int:
     """Reconcile a bounded, pruned pass of supported governed binaries.
 
@@ -264,6 +348,17 @@ def reconcile_all_media(
             attempted += 1
             try:
                 reconcile_one(binary)
+            except OpError as error:
+                if (
+                    propagate_transient_errors
+                    and error.code in _TRANSIENT_COORDINATION_CODES
+                ):
+                    raise
+                log.warning(
+                    "media reconciliation failed for %s",
+                    binary,
+                    exc_info=True,
+                )
             except Exception:  # noqa: BLE001 - one artifact must not abort discovery
                 log.warning("media reconciliation failed for %s", binary, exc_info=True)
     if last_examined is not None and store is not None:
@@ -454,7 +549,12 @@ def _is_nonnegative_int(value: object) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and value >= 0
 
 
-def retry_media(vault_root: Path, binary_path: str | Path) -> ReconcileResult:
+def retry_media(
+    vault_root: Path,
+    binary_path: str | Path,
+    *,
+    commit_guard: Callable[[], AbstractContextManager[object]] | None = None,
+) -> ReconcileResult:
     """Explicitly retry one blocked/failed artifact without replacing valid output."""
     vault = Path(vault_root).resolve()
     binary = Path(binary_path)
@@ -462,18 +562,20 @@ def retry_media(vault_root: Path, binary_path: str | Path) -> ReconcileResult:
         binary = vault / binary
     binary = Path(os.path.abspath(binary))
 
-    result = reconcile_media(vault, binary)
+    result = reconcile_media(vault, binary, commit_guard=commit_guard)
     if result.state == "completed" or result.job_id is None:
         return result
     if _runtime_unavailable(vault) is not None:
         return result
 
-    store = media_jobs.MediaJobStore(vault)
-    requeued = store.retry(binary_path=binary, include_failed=True)
-    if requeued == 0:
-        return result
-    durable_job = store.get(result.job_id)
-    state = durable_job.state if durable_job is not None else media_jobs.PENDING
+    boundary = commit_guard() if commit_guard is not None else nullcontext()
+    with boundary:
+        store = media_jobs.MediaJobStore(vault)
+        requeued = store.retry(binary_path=binary, include_failed=True)
+        if requeued == 0:
+            return result
+        durable_job = store.get(result.job_id)
+        state = durable_job.state if durable_job is not None else media_jobs.PENDING
     return ReconcileResult(
         result.media_type,
         state,
@@ -487,6 +589,8 @@ def retry_all_media(
     vault_root: Path,
     *,
     limit: int = media_jobs.STATUS_JOB_LIMIT,
+    commit_guard: Callable[[], AbstractContextManager[object]] | None = None,
+    propagate_transient_errors: bool = False,
 ) -> int:
     """Reconcile then retry a bounded snapshot of actionable terminal work."""
     if isinstance(limit, bool) or limit <= 0:
@@ -498,7 +602,23 @@ def retry_all_media(
     requeued = 0
     for job in store.retryable_jobs(limit=limit):
         try:
-            result = retry_media(vault, job.binary_path)
+            result = retry_media(
+                vault,
+                job.binary_path,
+                commit_guard=commit_guard,
+            )
+        except OpError as error:
+            if (
+                propagate_transient_errors
+                and error.code in _TRANSIENT_COORDINATION_CODES
+            ):
+                raise
+            log.warning(
+                "media retry reconciliation failed for %s",
+                job.binary_path,
+                exc_info=True,
+            )
+            continue
         except Exception:  # noqa: BLE001 - one stale artifact must not abort the pass
             log.warning("media retry reconciliation failed for %s", job.binary_path, exc_info=True)
             continue
@@ -775,6 +895,7 @@ def mark_processing_unavailable(
     *,
     reason: str,
     next_action: str,
+    commit_guard: Callable[[], AbstractContextManager[object]] | None = None,
 ) -> int:
     """Make queued automatic work actionable when no runtime can consume it."""
     vault = Path(vault_root).resolve()
@@ -788,16 +909,48 @@ def mark_processing_unavailable(
     for job in jobs:
         if job.id is None:
             continue
-        store.mark(job.id, media_jobs.BLOCKED, reason)
-        if job.sidecar_path.exists():
-            preserve.update_sidecar_processing_failure(
-                vault,
-                job.sidecar_path,
-                state=media_jobs.BLOCKED,
-                attempts=job.attempts,
-                error=reason,
-                retryable=True,
-                next_action=next_action,
+        written: list[Path] = []
+        boundary = commit_guard() if commit_guard is not None else nullcontext()
+        try:
+            with boundary:
+                current_job = store.get(job.id)
+                if current_job is None or current_job.state != media_jobs.PENDING:
+                    continue
+                if job.sidecar_path.exists():
+                    _confine_sidecar(vault, job.sidecar_path)
+                    rel_binary = job.binary_path.relative_to(vault).as_posix()
+                    tier = access.access_tier(vault, rel_binary)
+                    if tier in {access.TIER_EXCLUDED, access.TIER_READONLY}:
+                        continue
+                    content = job.sidecar_path.read_text(encoding="utf-8")
+                    blocked = preserve.render_sidecar_processing_failure(
+                        content,
+                        state=media_jobs.BLOCKED,
+                        attempts=current_job.attempts,
+                        error=reason,
+                        retryable=True,
+                        next_action=next_action,
+                    )
+                    written = batch_atomic_write(
+                        [
+                            PlannedWrite(
+                                path=job.sidecar_path,
+                                content=blocked,
+                                expected_hash=content_hash(content),
+                            )
+                        ],
+                        vault_root=vault,
+                        post_commit_fanout=commit_guard is None,
+                    )
+                store.mark(job.id, media_jobs.BLOCKED, reason)
+                changed += 1
+        except Exception:  # noqa: BLE001 - one stale job must not abort startup
+            log.warning(
+                "media unavailable-state commit failed for %s",
+                job.binary_path,
+                exc_info=True,
             )
-        changed += 1
+            continue
+        if written and commit_guard is not None:
+            post_commit_batch_fanout(vault, written, None, None)
     return changed

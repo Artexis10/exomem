@@ -136,6 +136,13 @@ It writes a sidecar if missing, extracts text (OCR/ASR/PDF), and CLIP-embeds
 images. Idempotent. Flags: `--no-ocr` (sidecar + CLIP only), `--no-clip`,
 `--vault <root>`.
 
+Media discovery, binary hashing, extraction compute, and the usual
+sidecar/transcript/failure index fanout run outside the global vault mutation
+boundary; only the revalidated per-artifact canonical commit is fenced. Lock
+telemetry can still show short named `background_media_clip_commit` and
+`background_media_scene_frame_commit` holders while CLIP vectors or persisted
+scene frames commit. Those are the measured residual paths, not a stuck scan.
+
 ## 2. Set up a public HTTPS URL
 
 You need a hostname for step 3. Pick **one**:
@@ -320,8 +327,9 @@ it, repairs the CUDA torch build, gates on `doctor`, restarts, and then asserts 
 
 Releases carrying semantic parser changes bump the parser generation used by the
 lexical, vector, graph, pack, and count sidecars. Canonical Markdown is not
-rewritten. After upgrading, run `exomem maintain --reconcile` (or call
-`maintain_memory(mode="reconcile")`) to refresh stale derived rows. Anonymous
+rewritten. After upgrading, quiesce vault mutations and explicitly run
+`exomem maintain --reconcile` (or call `maintain_memory(mode="reconcile")`) to
+refresh stale derived rows; service restart alone does not promise this rebuild. Anonymous
 unit references whose normalized content changed become explicitly stale rather
 than resolving to a nearby unit; authored `^anchors` remain the stable reference
 mechanism. A full `maintain_memory(mode="fix", rebuild_embeddings=true)` rebuild
@@ -472,6 +480,15 @@ continue locally. Check any replica with:
 uv run python -m exomem coordination_status --json
 ```
 
+That command probes the configured vault's local process-safe OS boundary, not
+just the calling process's memory. A held boundary includes only bounded holder
+diagnostics and `verified: true` when the runtime-state sidecar is bound to the
+current lock generation. `verified: false` means an external holder is real but
+its identity could not be safely attributed. Vault paths, content, credentials,
+and tenant identifiers are never included. This local boundary coordinates
+service and worker processes on one host; it does not replace the remote writer
+lease between replicas.
+
 REST callers should attach one stable `Idempotency-Key` to every mutation attempt;
 CLI callers can set `EXOMEM_IDEMPOTENCY_KEY`. Exact same-key/same-payload retries
 return the stored canonical terminal, including its original request and receipt
@@ -491,6 +508,13 @@ arrives; that ID is correlation, not a substitute for the replay key. Never
 change the payload or create a fresh explicit identity to recover a pending or
 committed-uncertain acknowledgement: retry only with the same identity as
 directed, or reconcile.
+
+Expected MCP operation refusals such as `MUTATION_BUSY` are normal tool content:
+inspect top-level `success: false` and the structured `error` object, then follow
+its retry fields. They are not transport failures. A `receipt_id` is diagnostic,
+not a caller-supplied cross-session replay key; effective retry identity remains
+the explicit idempotency identity where supported or the same bounded
+principal/bearer/session scope plus unchanged command payload.
 
 Idempotency records and credentials stay in per-machine runtime state outside the
 synced vault. Both the 24-hour explicit window and the 600-second inferred window

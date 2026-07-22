@@ -37,6 +37,13 @@ Compact grammar: `- [category] content #tags (context) ^anchor`. Parse valid com
 - Semantic-unit coverage and relation-review disposition are independent obligations.
 <!-- END GENERATED SEMANTIC AUTHORING CONTRACT -->
 
+For rich units without explicit `- category:`, the heading supplies the raw and
+normalized category identities before reviewed category-alias resolution; the
+resolved public category falls back to the governed kind when no category alias
+applies. Rich `tags` and `context` are first-class retrieval fields, not merely
+generic metadata. Category, kind, tags, context, and authored relations remain
+independent axes.
+
 Use `observe_memory(operation="add"|"update"|"remove"|"validate")` for one
 unit. Update and remove operations must carry both the current parent
 `content_hash` and the unit fingerprint. Compact observations cannot author

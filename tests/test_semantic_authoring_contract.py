@@ -577,6 +577,8 @@ def test_rich_contract_matches_canonical_writer_metadata_order_and_parser() -> N
     assert unit.category_raw == "Operating Constraint"
     assert unit.category_key == "operating_constraint"
     assert unit.anchor == "retry-decision"
+    assert unit.tags == ("reliability", "runtime")
+    assert unit.context == "synthetic load test"
     assert unit.metadata["tags"] == "reliability, runtime"
     assert unit.metadata["context"] == "synthetic load test"
     assert [(relation.kind, relation.target) for relation in unit.relations] == [

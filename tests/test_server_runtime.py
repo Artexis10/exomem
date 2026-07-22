@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -58,9 +59,10 @@ def test_media_worker_startup_reconciles_media_missed_while_service_was_stopped(
 
     worker = Worker()
 
-    def reconcile_all_media(root, *, limit: int) -> None:
+    def reconcile_all_media(root, *, limit: int, reconcile_one) -> None:
         assert calls and calls[0][0] == "start"
         assert recording.is_file()
+        assert callable(reconcile_one)
         calls.append(("reconcile_all_media", (root, limit)))
 
     monkeypatch.setattr(server_runtime, "_create_media_worker", lambda _vault: worker)
@@ -91,7 +93,7 @@ def test_media_startup_reconciles_when_worker_is_disabled(
     monkeypatch.setattr(
         media_processing,
         "reconcile_all_media",
-        lambda root, *, limit: calls.append((root, limit)),
+        lambda root, *, limit, reconcile_one: calls.append((root, limit)),
     )
 
     result = server_runtime._start_media_worker(vault)
@@ -124,7 +126,9 @@ def test_media_startup_reconciles_after_worker_start_failure(
     monkeypatch.setattr(
         media_processing,
         "reconcile_all_media",
-        lambda root, *, limit: events.append(f"reconcile:{root}:{limit}"),
+        lambda root, *, limit, reconcile_one: events.append(
+            f"reconcile:{root}:{limit}"
+        ),
     )
 
     result = server_runtime._start_media_worker(vault)
@@ -147,9 +151,11 @@ def test_media_startup_reconciliation_uses_writer_authority(
 
     class Manager:
         @contextmanager
-        def mutation_guard(self, root):
+        def mutation_guard(self, root, **metadata):
             nonlocal depth
             assert root == vault
+            assert metadata["operation"] == "startup_media_reconcile_commit"
+            assert metadata["holder_kind"] == "background"
             depth += 1
             try:
                 yield
@@ -158,15 +164,91 @@ def test_media_startup_reconciliation_uses_writer_authority(
 
     monkeypatch.setattr(writer_lease, "get_manager", lambda: Manager())
     monkeypatch.setattr(server_runtime, "_create_media_worker", lambda _root: None)
+
+    def reconcile_media(*_args, commit_guard=None, **_kwargs):  # noqa: ANN001
+        assert depth == 0
+        assert commit_guard is not None
+        with commit_guard():
+            assert depth == 1
+
+    monkeypatch.setattr(media_processing, "reconcile_media", reconcile_media)
     monkeypatch.setattr(
         media_processing,
         "reconcile_all_media",
-        lambda *_a, **_kw: depth == 1
-        or pytest.fail("startup media reconciliation escaped mutation guard"),
+        lambda _root, *, limit, reconcile_one: reconcile_one(
+            vault / "Knowledge Base" / "Evidence" / "Audio" / "startup.m4a"
+        ),
     )
 
     assert server_runtime._start_media_worker(vault) is None
     assert depth == 0
+
+
+def test_media_startup_hashing_yields_foreground_guard_then_commits_guarded(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import writer_lease
+
+    vault = tmp_path / "vault"
+    binary = vault / "Knowledge Base" / "Evidence" / "Audio" / "startup-large.m4a"
+    binary.parent.mkdir(parents=True)
+    binary.write_bytes(b"large-enough-for-blocked-startup-provenance")
+    state_dir = tmp_path / "state"
+    manager = writer_lease.LeaseManager(
+        writer_lease.LeaseConfig(state_dir=state_dir),
+        mutation_timeout_seconds=1.0,
+    )
+    contender = writer_lease.LeaseManager(
+        writer_lease.LeaseConfig(state_dir=state_dir),
+        mutation_timeout_seconds=0.05,
+    )
+    monkeypatch.setattr(writer_lease, "get_manager", lambda: manager)
+    monkeypatch.setattr(server_runtime, "_create_media_worker", lambda _root: None)
+    hash_started = threading.Event()
+    continue_hash = threading.Event()
+    commit_seen = threading.Event()
+    errors: list[BaseException] = []
+    original_read = media_processing._read_provenance
+    original_batch = media_processing.batch_atomic_write
+
+    def blocked_read(*args, **kwargs):  # noqa: ANN002, ANN003
+        hash_started.set()
+        assert continue_hash.wait(2.0)
+        return original_read(*args, **kwargs)
+
+    def guarded_batch(*args, **kwargs):  # noqa: ANN002, ANN003
+        boundary = manager.status(vault)["mutation_boundary"]
+        assert boundary["state"] == "held"
+        assert boundary["operation"] == "startup_media_reconcile_commit"
+        commit_seen.set()
+        return original_batch(*args, **kwargs)
+
+    monkeypatch.setattr(media_processing, "_read_provenance", blocked_read)
+    monkeypatch.setattr(media_processing, "batch_atomic_write", guarded_batch)
+
+    def start() -> None:
+        try:
+            server_runtime._start_media_worker(vault)
+        except BaseException as error:  # noqa: BLE001 - inspect thread outcome
+            errors.append(error)
+
+    startup = threading.Thread(target=start)
+    startup.start()
+    assert hash_started.wait(1.0)
+    try:
+        with contender.mutation_guard(
+            vault,
+            request_id="foreground-during-startup-hash",
+            operation="remember",
+        ):
+            pass
+    finally:
+        continue_hash.set()
+        startup.join(timeout=3.0)
+
+    assert not startup.is_alive()
+    assert errors == []
+    assert commit_seen.is_set()
 
 
 def test_disabled_media_runtime_persists_actionable_blocked_state(

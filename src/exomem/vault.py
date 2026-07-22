@@ -2520,7 +2520,7 @@ def _create_missing_guard_parents(
         os.close(root_descriptor)
 
 
-def _post_commit_batch_fanout(
+def post_commit_batch_fanout(
     vault_root: Path | None,
     replaced: list[Path],
     index_reports: list[Any] | None,
@@ -2631,6 +2631,7 @@ def batch_atomic_write(
     required_guards: Iterable[PathGuard | DirectoryCensusGuard] = (),
     index_reports: list[Any] | None = None,
     semantic_states: Mapping[str, Any] | None = None,
+    post_commit_fanout: bool = True,
 ) -> list[Path]:
     """Commit one batch while serializing all in-process vault writers.
 
@@ -2646,6 +2647,7 @@ def batch_atomic_write(
             required_guards=required_guards,
             index_reports=index_reports,
             semantic_states=semantic_states,
+            post_commit_fanout=post_commit_fanout,
         )
 
 
@@ -2656,6 +2658,7 @@ def _batch_atomic_write_locked(
     required_guards: Iterable[PathGuard | DirectoryCensusGuard] = (),
     index_reports: list[Any] | None = None,
     semantic_states: Mapping[str, Any] | None = None,
+    post_commit_fanout: bool = True,
 ) -> list[Path]:
     """Stage writes in private workspaces, then replace destinations in order.
 
@@ -2715,28 +2718,11 @@ def _batch_atomic_write_locked(
         for guard in all_required_guards
         if isinstance(guard, DirectoryCensusGuard)
     )
-    # Access-tier backstop: when the caller knows the vault root, refuse any
-    # write that lands in a `readonly`/`excluded` tree (_access.yaml). Central
-    # here so every content writer inherits it without per-tool wiring. No
-    # `_access.yaml` → writable_reason() is always None → no-op (Sources/Evidence
-    # are append-only, not readonly, so add/preserve still write fine).
+    # Access-tier backstop: check before staging and again immediately before
+    # every destination replace so a live `_access.yaml` change cannot race a
+    # long staging interval.
     if vault_root is not None:
-        from . import access
-
-        vault_resolved = vault_root.resolve()
-        for w in writes:
-            for target in (w.path, *w.ensure_directories):
-                try:
-                    rel = target.resolve().relative_to(vault_resolved).as_posix()
-                except (ValueError, OSError) as e:
-                    # Fail CLOSED: a staged write or planned directory outside the
-                    # vault must never proceed.
-                    raise ValueError(
-                        f"WRITE_REFUSED: {target} resolves outside the vault root"
-                    ) from e
-                reason = access.writable_reason(vault_root, rel)
-                if reason is not None:
-                    raise ValueError(f"WRITE_REFUSED: {rel}: {reason}")
+        _validate_batch_write_access(Path(vault_root), writes)
     target_summary = _summarize_batch_targets(writes, vault_root)
     if (
         read_only_guards
@@ -2874,6 +2860,7 @@ def _batch_atomic_write_locked(
                 guard.recheck()
             if vault_root is not None:
                 root = Path(vault_root)
+                _validate_batch_write_access(root, writes[index:])
                 for guard in read_only_guards:
                     guard.recheck(root)
                 for guard in bound_guards[index:]:
@@ -2996,12 +2983,13 @@ def _batch_atomic_write_locked(
     else:
         cleanup_retained = _cleanup_batch_workspaces(workspace_by_parent.values())
 
-    _post_commit_batch_fanout(
-        vault_root,
-        replaced,
-        index_reports,
-        semantic_states,
-    )
+    if post_commit_fanout:
+        post_commit_batch_fanout(
+            vault_root,
+            replaced,
+            index_reports,
+            semantic_states,
+        )
     if cleanup_retained:
         raise BatchWriteError(
             "BATCH_CLEANUP_INCOMPLETE",
@@ -3009,6 +2997,27 @@ def _batch_atomic_write_locked(
             True,
         )
     return replaced
+
+
+def _validate_batch_write_access(
+    vault_root: Path,
+    writes: Iterable[PlannedWrite],
+) -> None:
+    """Fail closed when any planned target is outside or newly write-protected."""
+    from . import access
+
+    vault_resolved = vault_root.resolve()
+    for write in writes:
+        for target in (write.path, *write.ensure_directories):
+            try:
+                rel = target.resolve().relative_to(vault_resolved).as_posix()
+            except (ValueError, OSError) as error:
+                raise ValueError(
+                    f"WRITE_REFUSED: {target} resolves outside the vault root"
+                ) from error
+            reason = access.writable_reason(vault_root, rel)
+            if reason is not None:
+                raise ValueError(f"WRITE_REFUSED: {rel}: {reason}")
 
 
 @contextmanager

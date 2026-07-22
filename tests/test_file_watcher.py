@@ -81,7 +81,13 @@ def _spy_media_and_text_dispatch(monkeypatch: pytest.MonkeyPatch) -> dict[str, l
         "delete": [],
     }
 
-    def reconcile_media(root: Path, path: Path, *, explicit: bool = True) -> None:
+    def reconcile_media(
+        root: Path,
+        path: Path,
+        *,
+        explicit: bool = True,
+        commit_guard=None,  # noqa: ANN001, ARG001
+    ) -> None:
         calls["media"].append((root, path, explicit))
 
     monkeypatch.setattr(media_processing, "reconcile_media", reconcile_media)
@@ -159,12 +165,13 @@ def test_supported_audio_event_reconciles_under_writer_authority(
                 depth -= 1
 
     monkeypatch.setattr(writer_lease, "get_manager", lambda: Manager())
-    monkeypatch.setattr(
-        media_processing,
-        "reconcile_media",
-        lambda *_a, **_kw: depth == 1
-        or pytest.fail("watcher media reconciliation escaped mutation guard"),
-    )
+    def reconcile_media(*_args, commit_guard=None, **_kwargs):  # noqa: ANN001
+        assert depth == 0
+        assert commit_guard is not None
+        with commit_guard():
+            assert depth == 1
+
+    monkeypatch.setattr(media_processing, "reconcile_media", reconcile_media)
     recording = vault / "Knowledge Base" / "Evidence" / "Audio" / "guarded.m4a"
     recording.parent.mkdir(parents=True, exist_ok=True)
     recording.write_bytes(b"audio")
@@ -174,6 +181,65 @@ def test_supported_audio_event_reconciles_under_writer_authority(
     watcher._flush()
 
     assert depth == 0
+
+
+def test_background_media_hashing_yields_foreground_guard_then_commits_guarded(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import writer_lease
+
+    binary = vault / "Knowledge Base" / "Evidence" / "Audio" / "large.m4a"
+    binary.parent.mkdir(parents=True, exist_ok=True)
+    binary.write_bytes(b"large-enough-for-a-blocked-provenance-read")
+    manager = writer_lease.LeaseManager(
+        writer_lease.LeaseConfig(state_dir=vault.parent / "state"),
+        mutation_timeout_seconds=0.05,
+    )
+    monkeypatch.setattr(writer_lease, "get_manager", lambda: manager)
+    hash_started = threading.Event()
+    continue_hash = threading.Event()
+    commit_seen = threading.Event()
+    errors: list[BaseException] = []
+    original_read = media_processing._read_provenance
+    original_batch = media_processing.batch_atomic_write
+
+    def blocked_read(*args, **kwargs):  # noqa: ANN002, ANN003
+        hash_started.set()
+        assert continue_hash.wait(2.0)
+        return original_read(*args, **kwargs)
+
+    def guarded_batch(*args, **kwargs):  # noqa: ANN002, ANN003
+        boundary = manager.status(vault)["mutation_boundary"]
+        assert boundary["state"] == "held"
+        assert boundary["operation"] == "background_media_reconcile"
+        commit_seen.set()
+        return original_batch(*args, **kwargs)
+
+    monkeypatch.setattr(media_processing, "_read_provenance", blocked_read)
+    monkeypatch.setattr(media_processing, "batch_atomic_write", guarded_batch)
+
+    def reconcile() -> None:
+        try:
+            file_watcher._reconcile_background_media(vault, binary)
+        except BaseException as error:  # noqa: BLE001 - inspect thread outcome
+            errors.append(error)
+
+    background = threading.Thread(target=reconcile)
+    background.start()
+    assert hash_started.wait(1.0)
+    with manager.mutation_guard(
+        vault,
+        request_id="req-foreground",
+        operation="remember",
+        holder_kind="command",
+    ):
+        assert manager.status(vault)["mutation_boundary"]["request_id"] == "req-foreground"
+    continue_hash.set()
+    background.join(timeout=3.0)
+
+    assert not background.is_alive()
+    assert errors == []
+    assert commit_seen.is_set()
 
 
 def test_supported_audio_never_enters_markdown_freshness_or_embedding(
@@ -770,12 +836,13 @@ def test_periodic_media_reconcile_runs_under_writer_authority(
         return 1
 
     monkeypatch.setattr(media_processing, "reconcile_all_media", reconcile_all_media)
-    monkeypatch.setattr(
-        media_processing,
-        "reconcile_media",
-        lambda *_a, **_kw: depth == 1
-        or pytest.fail("periodic media reconciliation escaped mutation guard"),
-    )
+    def reconcile_media(*_args, commit_guard=None, **_kwargs):  # noqa: ANN001
+        assert depth == 0
+        assert commit_guard is not None
+        with commit_guard():
+            assert depth == 1
+
+    monkeypatch.setattr(media_processing, "reconcile_media", reconcile_media)
     calls = _spy_reconcile_fanout(monkeypatch)
     watcher = file_watcher.FileWatcher(vault)
     watcher._reconcile_once(seed=True)
@@ -822,12 +889,13 @@ def test_periodic_media_reconcile_yields_mutation_boundary_between_artifacts(
         return 3
 
     monkeypatch.setattr(media_processing, "reconcile_all_media", reconcile_all_media)
-    monkeypatch.setattr(
-        media_processing,
-        "reconcile_media",
-        lambda *_a, **_kw: depth == 1
-        or pytest.fail("artifact reconciliation escaped its mutation boundary"),
-    )
+    def reconcile_media(*_args, commit_guard=None, **_kwargs):  # noqa: ANN001
+        assert depth == 0
+        assert commit_guard is not None
+        with commit_guard():
+            assert depth == 1
+
+    monkeypatch.setattr(media_processing, "reconcile_media", reconcile_media)
     watcher = file_watcher.FileWatcher(vault)
     watcher._reconcile_once(seed=False)
 

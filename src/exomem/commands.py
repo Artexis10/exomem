@@ -19,6 +19,7 @@ named in `HAND_REGISTERED_EXCEPTIONS`.
 
 from __future__ import annotations
 
+import hashlib
 import inspect
 import json
 import os
@@ -2111,41 +2112,105 @@ def op_replace(
         (old page is already marked superseded).
     """
     old_path = _resolve_memory_identifier(vault_root, old_path)
+    replace_kwargs = {
+        "old_path": old_path,
+        "reason": reason,
+        "content": content,
+        "note_type": note_type,
+        "title": title,
+        "slug": slug,
+        "project": project,
+        "projects": projects,
+        "sources": sources,
+        "tags": tags,
+        "status": status,
+        "severity": severity,
+        "pattern_type": pattern_type,
+        "domain": domain,
+        "started": started,
+        "duration": duration,
+        "hypothesis": hypothesis,
+        "n": n,
+        "concluded": concluded,
+        "medium": medium,
+        "recorded": recorded,
+        "published": published,
+        "host": host,
+        "editor": editor,
+        "project_category": project_category,
+        "draft_id": draft_id,
+        "draft_token": draft_token,
+        "relation_disposition": relation_disposition,
+        "relation_review_reason": relation_review_reason,
+    }
     try:
+        predecessor_hash = _replacement_predecessor_hash(vault_root, old_path)
+        if validate_only:
+            result = replace_module.replace(
+                vault_root,
+                **replace_kwargs,
+                validate_only=True,
+                draft_hash=None,
+                relation_review_hash=None,
+            )
+            if _replacement_predecessor_hash(vault_root, old_path) != predecessor_hash:
+                raise ValueError(
+                    "REPLACEMENT_PREVIEW_UNSTABLE: predecessor changed during advisory preview"
+                )
+            value = result.as_dict()
+            base_hash = str(value["draft_hash"])
+            value.update(
+                validate_only=True,
+                advisory=True,
+                committed=False,
+                status="preview",
+                predecessor={"path": old_path, "content_hash": predecessor_hash},
+                draft_hash=_replacement_review_hash(
+                    base_hash,
+                    predecessor_path=old_path,
+                    predecessor_hash=predecessor_hash,
+                ),
+            )
+            return value
+
+        effective_draft_hash = draft_hash
+        effective_relation_review_hash = relation_review_hash
+        if draft_hash is not None:
+            fresh = replace_module.replace(
+                vault_root,
+                **replace_kwargs,
+                validate_only=True,
+                draft_hash=None,
+                relation_review_hash=None,
+            )
+            if _replacement_predecessor_hash(vault_root, old_path) != predecessor_hash:
+                raise ValueError(
+                    "DRAFT_HASH_MISMATCH: predecessor changed during fresh replacement validation"
+                )
+            base_hash = fresh.draft_hash
+            expected_hash = _replacement_review_hash(
+                str(base_hash),
+                predecessor_path=old_path,
+                predecessor_hash=predecessor_hash,
+            )
+            if draft_hash != expected_hash:
+                raise ValueError(
+                    "DRAFT_HASH_MISMATCH: replacement predecessor or draft requires fresh validation"
+                )
+            effective_draft_hash = base_hash
+            if relation_review_hash is not None:
+                if relation_review_hash != draft_hash:
+                    raise ValueError(
+                        "DRAFT_HASH_MISMATCH: relation review does not match replacement preview"
+                    )
+                effective_relation_review_hash = base_hash
+
         result = replace_module.replace(
             vault_root,
-            old_path=old_path,
-            reason=reason,
-            content=content,
-            note_type=note_type,
-            title=title,
-            slug=slug,
-            project=project,
-            projects=projects,
-            sources=sources,
-            tags=tags,
-            status=status,
-            severity=severity,
-            pattern_type=pattern_type,
-            domain=domain,
-            started=started,
-            duration=duration,
-            hypothesis=hypothesis,
-            n=n,
-            concluded=concluded,
-            medium=medium,
-            recorded=recorded,
-            published=published,
-            host=host,
-            editor=editor,
-            project_category=project_category,
-            validate_only=validate_only,
-            draft_id=draft_id,
-            draft_hash=draft_hash,
-            draft_token=draft_token,
-            relation_disposition=relation_disposition,
-            relation_review_hash=relation_review_hash,
-            relation_review_reason=relation_review_reason,
+            **replace_kwargs,
+            validate_only=False,
+            draft_hash=effective_draft_hash,
+            relation_review_hash=effective_relation_review_hash,
         )
     except replace_module.ReplaceError as e:
         raise ValueError(
@@ -2161,6 +2226,32 @@ def op_replace(
             tool="replace", written_path=written_path, cited_sources=sources
         )
     return result.as_dict()
+
+
+def _replacement_predecessor_hash(vault_root: Path, old_path: str) -> str:
+    try:
+        return hashlib.sha256((Path(vault_root) / old_path).read_bytes()).hexdigest()
+    except OSError as error:
+        raise ValueError(f"OLD_NOT_FOUND: replacement predecessor is unavailable: {old_path}") from error
+
+
+def _replacement_review_hash(
+    draft_hash: str,
+    *,
+    predecessor_path: str,
+    predecessor_hash: str,
+) -> str:
+    payload = json.dumps(
+        {
+            "schema": "exomem.replacement-preview.v1",
+            "draft_hash": draft_hash,
+            "predecessor_path": predecessor_path,
+            "predecessor_content_hash": predecessor_hash,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def op_link(
@@ -3868,6 +3959,7 @@ def op_process_media(
     """
     from . import index_sync, media_jobs
     from .cli_ops import OpError
+    from .writer_lease import active_manager, active_mutation_request_id
 
     if operation not in {"process", "status", "retry"}:
         raise OpError(
@@ -3876,6 +3968,15 @@ def op_process_media(
         )
 
     vault_root = Path(vault_root).resolve()
+    manager = active_manager()
+
+    def _commit_guard():
+        return manager.mutation_guard(
+            vault_root,
+            request_id=active_mutation_request_id(),
+            operation=f"process_media_{operation}_commit",
+            holder_kind="command",
+        )
 
     def _drain_index_refresh(paths: list[Path] | list[str] | None = None) -> tuple[int, int]:
         current = index_sync.deferred_work_status(vault_root)["full_upserts"]
@@ -3904,6 +4005,8 @@ def op_process_media(
             requeued = media_processing.retry_all_media(
                 vault_root,
                 limit=media_jobs.STATUS_JOB_LIMIT,
+                commit_guard=_commit_guard,
+                propagate_transient_errors=True,
             )
             refreshed, remaining = _drain_index_refresh()
             return {
@@ -3918,6 +4021,13 @@ def op_process_media(
             reconciled = media_processing.reconcile_all_media(
                 vault_root,
                 limit=media_processing.DEFAULT_RECONCILE_LIMIT,
+                reconcile_one=lambda binary: media_processing.reconcile_media(
+                    vault_root,
+                    binary,
+                    explicit=False,
+                    commit_guard=_commit_guard,
+                ),
+                propagate_transient_errors=True,
             )
             refreshed, remaining = _drain_index_refresh()
             return {
@@ -3947,9 +4057,18 @@ def op_process_media(
 
     try:
         if operation == "process":
-            result = media_processing.reconcile_media(vault_root, binary, explicit=True)
+            result = media_processing.reconcile_media(
+                vault_root,
+                binary,
+                explicit=True,
+                commit_guard=_commit_guard,
+            )
         else:
-            result = media_processing.retry_media(vault_root, binary)
+            result = media_processing.retry_media(
+                vault_root,
+                binary,
+                commit_guard=_commit_guard,
+            )
     except media_processing.MediaProcessingError as exc:
         raise OpError(exc.code, exc.reason) from exc
 
@@ -5212,7 +5331,7 @@ def remember_description(project_keys_hint: str) -> str:
     return (op_remember.__doc__ or "").replace("__PROJECT_KEYS_HINT__", project_keys_hint)
 
 
-def op_coordination_status(vault_root: Path) -> dict:  # noqa: ARG001
+def op_coordination_status(vault_root: Path) -> dict:
     """Report this replica's writer-lease role and coordinator health.
 
     Read-only and safe during coordinator outages. Credentials and vault content
@@ -5220,7 +5339,7 @@ def op_coordination_status(vault_root: Path) -> dict:  # noqa: ARG001
     """
     from .writer_lease import coordination_status
 
-    return coordination_status()
+    return coordination_status(vault_root)
 
 def note_description(project_keys_hint: str) -> str:
     """The `note` MCP description with the live project-key hint substituted in.
@@ -5314,7 +5433,7 @@ def invocation_is_read_only(command: Command, kwargs: dict[str, Any]) -> bool:
                 and operation.get("validate_only") is True
             )
         return False
-    if command.name == "remember":
+    if command.name in {"remember", "replace_memory"}:
         # A validate-only remember builds and returns an immutable draft and
         # writes nothing (note() returns its preflight before any commit), so
         # it needs neither writer authority nor the mutation boundary. Any

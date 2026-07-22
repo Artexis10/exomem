@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 from collections.abc import Mapping
 from importlib.metadata import PackageNotFoundError, version
+from pathlib import Path
 from typing import Any
 
 RUNTIME_CONTRACT = 1
@@ -21,6 +22,7 @@ def _public_mutation_boundary(value: object) -> dict[str, Any]:
         "holder_kind": str(value.get("holder_kind") or "unknown"),
         "age_seconds": float(value.get("age_seconds") or 0.0),
         "overdue": bool(value.get("overdue")),
+        "verified": bool(value.get("verified")),
     }
 
 
@@ -102,7 +104,9 @@ def runtime_readiness(*, mcp_tool_surface_sha256: str | None) -> dict[str, Any]:
     from .writer_lease import coordination_status
 
     try:
-        coordination = coordination_status()
+        configured_raw = os.environ.get("EXOMEM_VAULT_PATH", "").strip()
+        configured_vault = Path(configured_raw) if configured_raw else None
+        coordination = coordination_status(configured_vault)
     except Exception:  # noqa: BLE001 - readiness must return structured 503 state
         coordination = {
             "enabled": bool(os.environ.get("EXOMEM_WRITER_LEASE_URL", "").strip()),
