@@ -7,7 +7,6 @@ script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 infra_dir="$(cd -- "${script_dir}/.." && pwd -P)"
 terraform_bin="${TERRAFORM_BIN:-terraform}"
 python_bin="${PYTHON_BIN:-python3}"
-backend_config="${TF_BACKEND_CONFIG_FILE:-}"
 
 usage() {
   echo "usage: $0 <foundation|durability> <saved-plan-path> [--allow-destructive ADDRESS ...]" >&2
@@ -25,18 +24,17 @@ case "${root_name}" in
 esac
 
 root="${infra_dir}/terraform/${root_name}"
-if [[ -z "${backend_config}" || ! -f "${backend_config}" ]]; then
-  echo "TF_BACKEND_CONFIG_FILE must name an existing backend config" >&2
+if [[ -z "${TF_CLOUD_ORGANIZATION:-}" ]]; then
+  echo "TF_CLOUD_ORGANIZATION must name the approved HCP Terraform organization" >&2
   exit 2
 fi
-if [[ "$(stat -c "%a" -- "${backend_config}")" != "600" ]]; then
-  echo "backend config must have mode 0600" >&2
+if [[ -z "${TF_TOKEN_app_terraform_io:-}" ]]; then
+  echo "TF_TOKEN_app_terraform_io must contain the HCP Terraform user or team token" >&2
   exit 2
 fi
-if [[ -z "${AWS_ACCESS_KEY_ID:-}" || -z "${AWS_SECRET_ACCESS_KEY:-}" ]]; then
-  echo "AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY must contain the prefix-scoped B2 backend identity" >&2
-  exit 2
-fi
+workspace="exomem-hosted-${root_name}"
+unset TF_WORKSPACE
+"${python_bin}" "${script_dir}/verify_hcp_backend.py" preflight --workspace "${workspace}"
 
 plan_path="$(cd -- "$(dirname -- "${plan_path}")" && pwd -P)/$(basename -- "${plan_path}")"
 [[ -f "${plan_path}" ]] || usage
@@ -58,7 +56,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-"${terraform_bin}" -chdir="${root}" init -input=false -backend-config="${backend_config}"
+"${terraform_bin}" -chdir="${root}" init -input=false
 "${terraform_bin}" -chdir="${root}" show -json "${plan_path}" >"${json_path}"
 chmod 0600 -- "${json_path}"
 "${python_bin}" "${script_dir}/inspect_terraform_plan.py" "${json_path}" "${inspector_args[@]}"

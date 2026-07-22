@@ -11,8 +11,11 @@ The lifecycle domains are deliberately split:
 - `terraform/durability`: private B2 recovery, short-lived user-export, and
   complete-database backup storage with least-privilege identities. It cannot
   manage the node, ingress, Kubernetes objects, or tenant application records.
-- `terraform/bootstrap`: one-time creation of the versioned remote-state bucket
-  and identities; never run from the normal apply path.
+- `terraform/bootstrap`: already-applied legacy B2 state bucket and identities;
+  quarantined until a separately reviewed post-HCP cleanup.
+- `terraform/hcp-bootstrap`: one-time HCP project plus explicit local/state-only
+  foundation, durability, and disposable proof workspaces; never run from the
+  normal apply path.
 - `ansible`: idempotent host hardening and pinned K3s bootstrap.
 - `helm/platform`: cluster-wide CSI, Tunnel, policy, scheduler, and provisioner.
 - `helm/cell`: the fixed one-vault StatefulSet/PVC/Secret/Service contract.
@@ -29,24 +32,26 @@ Install the exact versions from `tool-versions.env`, then run:
 
 ```bash
 infra/scripts/validate.sh
-SOPS_AGE_RECIPIENTS=age1... \
-  infra/scripts/bootstrap_backend.sh plan \
-  /run/user/$UID/exomem-bootstrap.tfplan \
-  /secure/operator/exomem-bootstrap-state.sops.json
-SOPS_AGE_RECIPIENTS=age1... \
-  infra/scripts/bootstrap_backend.sh apply \
-  /run/user/$UID/exomem-bootstrap.tfplan \
-  /secure/operator/exomem-bootstrap-state.sops.json
-TF_BACKEND_CONFIG_FILE=/run/user/$UID/exomem-foundation.tfbackend \
-  infra/scripts/plan.sh foundation infra/terraform/foundation/foundation.tfplan
-TF_BACKEND_CONFIG_FILE=/run/user/$UID/exomem-durability.tfbackend \
-  infra/scripts/plan.sh durability infra/terraform/durability/durability.tfplan
+export SOPS_AGE_RECIPIENTS=age1...
+export TF_CLOUD_ORGANIZATION=replace-with-approved-org
+export TFE_TOKEN=read-from-secret-manager
+export TF_TOKEN_app_terraform_io="$TFE_TOKEN"
+infra/scripts/bootstrap_hcp_backend.sh plan \
+  /run/user/$UID/exomem-hcp-bootstrap.tfplan \
+  /secure/operator/exomem-hcp-bootstrap-state.sops.json
+infra/scripts/bootstrap_hcp_backend.sh apply \
+  /run/user/$UID/exomem-hcp-bootstrap.tfplan \
+  /secure/operator/exomem-hcp-bootstrap-state.sops.json
+infra/scripts/plan.sh foundation infra/terraform/foundation/foundation.tfplan
+infra/scripts/plan.sh durability infra/terraform/durability/durability.tfplan
 infra/scripts/apply_saved_plan.sh foundation infra/terraform/foundation/foundation.tfplan
 ```
 
-The backend config must be mode `0600` and contains only the B2 state bucket
-and S3 endpoint. Supply its prefix-scoped key through `AWS_ACCESS_KEY_ID` and
-`AWS_SECRET_ACCESS_KEY`; do not write those secrets into the backend config.
+The fixed workspace names are committed in each root. Supply only the approved
+organization and HCP user/team token through the environment; never write the
+token into Terraform configuration, variables, plans, or HCP workspace
+variables. The wrappers verify explicit local execution and the complete
+state-only workspace contract before `terraform init`.
 
 Destruction or replacement is rejected unless the apply command receives one
 `--allow-destructive <exact Terraform address>` flag for every affected
