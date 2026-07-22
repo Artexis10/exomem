@@ -48,7 +48,7 @@ trap cleanup EXIT
 
 (cd "${repo_root}" && uv lock --check)
 
-for root in foundation durability bootstrap; do
+for root in foundation durability bootstrap hcp-bootstrap; do
   "${terraform_bin}" -chdir="${infra_dir}/terraform/${root}" fmt -check -recursive
   "${terraform_bin}" -chdir="${infra_dir}/terraform/${root}" init -backend=false -input=false
   "${terraform_bin}" -chdir="${infra_dir}/terraform/${root}" validate

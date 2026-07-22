@@ -43,7 +43,9 @@ Alternative considered: declare the three frequent jobs in Vercel cron configura
 
 ### Split infrastructure by reconciliation speed and blast radius
 
-Terraform has separate `foundation` and `durability` roots/states. Foundation owns Hetzner compute/network/firewall and Cloudflare Tunnel/DNS/Access. Durability owns B2 buckets, retention/Object Lock, and scoped keys. Both use one versioned B2 S3-compatible backend with separate state keys and lockfiles; deployment is blocked until real-account locking and recovery tests pass. Every production apply uses a reviewed saved plan and a destroy/replacement guard.
+Terraform has separate `foundation` and `durability` roots/states. Foundation owns Hetzner compute/network/firewall and Cloudflare Tunnel/DNS/Access. Durability owns B2 buckets, retention/Object Lock, and scoped keys. The roots bind fixed HCP Terraform workspaces `exomem-hosted-foundation` and `exomem-hosted-durability`. Each workspace explicitly uses local/state-only execution, disables VCS, auto-apply, assessments, and remote-state sharing, and pins Terraform 1.15.8. Plans and applies still execute only through the reviewed local/CI wrappers; HCP owns state, history, and mutual exclusion. The wrappers verify the exact workspace contract through the HCP API before `terraform init`, so Terraform cannot implicitly create a missing workspace in its default remote-execution mode. Every production apply uses a reviewed saved plan and a destroy/replacement guard.
+
+The HCP project, the two production workspaces, and disposable `exomem-hosted-backend-proof` workspace are created from a new local-state `hcp-bootstrap` root whose state is separately sealed with SOPS/age. The already-applied B2 bootstrap remains intact and quarantined until HCP state, locking, history, and recovery are proven and a later cleanup plan is independently reviewed. It is never repurposed, because replacing its configuration would put the live B2 state bucket and scoped keys at deletion risk.
 
 Ansible hardens the host and installs pinned K3s `v1.35.6+k3s1` with embedded etcd, secrets encryption, metadata-safe audit, `cryptsetup`, and off-host snapshots. Helm/Kubernetes reconciles the static platform and dynamic cell release. Signup invokes only the durable provisioner.
 
@@ -103,7 +105,7 @@ Targets are RPO 0/RTO 5 minutes for pod failure, RPO 0/RTO 60 minutes for node r
 - **Retain protects data but defeats namespace-only deletion** -> record HCloud IDs/labels, isolate the provider credential in a privileged worker, verify provider absence, and test static-PV rebind to the original handle.
 - **Long operations exceed Substrate retry ceilings** -> land the pending/final action union and non-attempt-consuming waiting checkpoint before infrastructure integration.
 - **Cloudflare's 100 MB request cap bounds uploads** -> set 90 MiB payload plus measured multipart headroom and test the real edge path.
-- **B2 S3 lockfile compatibility is not yet proven** -> fail the deployment bootstrap until concurrent-lock and version-recovery tests pass; do not fall back to local state.
+- **HCP state authority can be unavailable or misconfigured** -> fail before `terraform init` unless the exact fixed workspace exists with explicit local execution and least-sharing settings; block infrastructure mutation during an outage and never fall back to unlocked B2 or local production state.
 - **Hetzner CSI may expose only a StorageClass-level LUKS secret** -> prove the pinned driver behavior and describe any cluster-shared volume key honestly; retain distinct per-cell application/archive keys.
 - **Object Lock delays final deletion** -> revoke service and destroy online data immediately, expose the maximum seven-day retention delay, and emit `deleted` only after final proof.
 - **EUR 5 has weak margin after Paddle/tax** -> hard-cap seats and require live fixed/marginal cost evidence before each cap increase.
@@ -113,7 +115,7 @@ Targets are RPO 0/RTO 5 minutes for pod failure, RPO 0/RTO 60 minutes for node r
 1. Land the independent current-main cache fix so the baseline suite is deterministic.
 2. Refresh Exomem PR #227, resolve current-main conflicts, add init/restore/rotation/direct-transfer runtime contracts with TDD, and build the immutable image.
 3. Refresh Substrate PR #32, update the exact fixture/release, add Access headers, direct-transfer tickets, and pending/final action waiting, fix deployment CI, and verify migrations/Paddle webhooks plus the versioned external K3s scheduler contract for the three authenticated Vercel routes.
-4. Apply foundation/durability Terraform from reviewed saved plans, bootstrap K3s with Ansible, and install pinned platform charts from an empty environment.
+4. Bootstrap the HCP state-only workspaces from separately escrowed local state, prove real concurrent exclusion and historical-version rollback in the disposable proof workspace, then apply foundation/durability Terraform from reviewed saved plans, bootstrap K3s with Ansible, and install pinned platform charts from an empty environment.
 5. Deploy the provisioner and canary cell; pass protocol, fence/idempotency, route, network, backup/restore, and deletion drills.
 6. Provision and soak the owner's account through the real product path; record cost/resource/latency evidence.
 7. Invite the first non-technical account only after the owner, clean restore, and no-shell onboarding gates pass.
@@ -122,4 +124,4 @@ Rollback keeps the Substrate hosted feature/invites disabled, stops new reconcil
 
 ## Open Questions
 
-No product decision remains open. Three deployment validation gates remain: prove B2 S3 lockfile behavior in the real account, pin the exact CSI release/key behavior compatible with K3s 1.35, and record the live Paddle account fee/tax choice. Failure of any gate blocks deployment and reopens only that technical decision.
+No product decision remains open. Three deployment validation gates remain: create and prove the HCP Terraform state-only workspaces in the real account, prove the exact CSI release/key behavior against the live Hetzner cluster, and record the live Paddle account fee/tax choice. Failure of any gate blocks deployment and reopens only that technical decision.

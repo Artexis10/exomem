@@ -7,13 +7,9 @@ registry, external database, static SOPS set, and latest verified backups are
 available. The exact replacement address requires `--allow-destructive`.
 
 ```bash
-terraform -chdir=infra/terraform/foundation init -input=false -backend-config="$TF_BACKEND_CONFIG_FILE"
-terraform -chdir=infra/terraform/foundation plan -input=false -out=/run/user/$UID/foundation-replacement.tfplan
-chmod 0600 /run/user/$UID/foundation-replacement.tfplan
-terraform -chdir=infra/terraform/foundation show -json /run/user/$UID/foundation-replacement.tfplan > /run/user/$UID/foundation-replacement.plan.json
-chmod 0600 /run/user/$UID/foundation-replacement.plan.json
-infra/scripts/inspect_terraform_plan.py /run/user/$UID/foundation-replacement.plan.json \
-  --allow-destructive hcloud_server.alpha
+export TF_CLOUD_ORGANIZATION=replace-with-approved-org
+export TF_TOKEN_app_terraform_io=read-from-secret-manager
+infra/scripts/plan.sh foundation /run/user/$UID/foundation-replacement.tfplan
 infra/scripts/apply_saved_plan.sh foundation /run/user/$UID/foundation-replacement.tfplan \
   --allow-destructive hcloud_server.alpha
 ```
