@@ -453,7 +453,11 @@ def test_remember_route_completes_creation_review_round_trip(
     base = {
         "title": "REST review round trip",
         "slug": "rest-review-round-trip",
-        "content": "# REST review round trip\n\nA disconnected conclusion.\n",
+        "content": (
+            "# REST review round trip\n\n"
+            "## Observations\n\n"
+            "- [operating constraint] Keep retries bounded #reliability\n"
+        ),
         "suggestions": False,
     }
     validation_response = client.post(

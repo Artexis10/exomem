@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 
 from exomem import compile_proposal as cp
-from exomem import corpus_aware
+from exomem import corpus_aware, note
 from exomem import find as find_module
 
 _ARTICLE = "Knowledge Base/Sources/Articles/2026-05-04-best-egcg-supplements"
@@ -27,9 +27,32 @@ def test_proposal_structure_and_no_write(vault: Path, monkeypatch) -> None:
     out = res["outline_markdown"]
     assert out.startswith("# ")
     assert "## Relations" in out
+    assert "## Observations" in out
+    assert "- [ ] Replace this row" in out
+    assert "valid non-empty rich unit" in out
     # It must not have written anything — the source's ingested_into stays empty.
     src = (vault / f"{_ARTICLE}.md").read_text(encoding="utf-8")
     assert "ingested_into: []" in src
+
+
+def test_untouched_proposal_fails_the_semantic_minimum(vault: Path, monkeypatch) -> None:
+    monkeypatch.setattr(corpus_aware, "suggest_related", lambda *a, **k: [])
+    proposal = cp.propose_compilation(vault, sources=[_ARTICLE])
+
+    validation = note.note(
+        vault,
+        content=proposal["outline_markdown"],
+        note_type="insight",
+        title=proposal["suggested_title"],
+        suggestions=False,
+        validate_only=True,
+    )
+
+    assert validation.mutated is False
+    assert validation.contract_result.semantic_unit_count == 0
+    assert "missing_semantic_unit" in {
+        finding.code for finding in validation.contract_result.blocking_findings
+    }
 
 
 def test_proposal_filters_source_connections(vault: Path, monkeypatch) -> None:

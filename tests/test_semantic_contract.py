@@ -17,17 +17,29 @@ from exomem import (
 _ID_A = "00000000-0000-0000-0000-000000000001"
 _ID_B = "00000000-0000-0000-0000-000000000002"
 
+_COMPILED_DESTINATIONS = {
+    "research-note": "Knowledge Base/Notes/Research/Atlas/page.md",
+    "insight": "Knowledge Base/Notes/Insights/page.md",
+    "failure": "Knowledge Base/Notes/Failures/page.md",
+    "pattern": "Knowledge Base/Notes/Patterns/page.md",
+    "experiment": "Knowledge Base/Notes/Experiments/Workflow/page.md",
+    "production-log": "Knowledge Base/Notes/Productions/Articles/page.md",
+}
+
 
 def _source(
     *,
     title: str = "Page",
-    page_type: str = "insight",
+    page_type: str | None = "insight",
     project: str | None = "atlas",
     exomem_id: str | None = None,
+    status: str = "active",
     extra: str = "",
     body: str = "Body.\n",
 ) -> str:
-    fields = [f"title: {title}", f"type: {page_type}", "status: active"]
+    fields = [f"title: {title}", f"status: {status}"]
+    if page_type is not None:
+        fields.insert(1, f"type: {page_type}")
     if project is not None:
         fields.append(f"project: {project}")
     if exomem_id is not None:
@@ -140,6 +152,348 @@ def _evaluate(
         after_review=after_review,
         grandfathered=grandfathered,
     )
+
+
+@pytest.mark.parametrize(
+    ("page_type", "path"), tuple(_COMPILED_DESTINATIONS.items())
+)
+@pytest.mark.parametrize(
+    ("status", "expected"),
+    (("active", True), ("draft", False), ("planned", False), ("dropped", False),
+     ("archived", False), ("superseded", False)),
+)
+def test_compiled_intent_and_minimum_unit_predicate_are_exact_for_all_types(
+    tmp_path: Path,
+    page_type: str,
+    path: str,
+    status: str,
+    expected: bool,
+) -> None:
+    source = _source(
+        page_type=page_type,
+        status=status,
+        body="## Observations\n\n- [constraint] Keep the boundary explicit.\n",
+    )
+    state = _state(tmp_path, path, source)
+
+    assert semantic_contract.compiled_intent(state) is True
+    assert semantic_contract.compiled_structure_finding(state) is None
+    assert semantic_contract.requires_semantic_unit(state) is expected
+
+
+@pytest.mark.parametrize(
+    ("page_type", "path"), tuple(_COMPILED_DESTINATIONS.items())
+)
+def test_compiled_type_normalization_drives_eligibility_for_all_types(
+    tmp_path: Path,
+    page_type: str,
+    path: str,
+) -> None:
+    authored_type = page_type.upper()
+    state = _state(
+        tmp_path,
+        path,
+        _source(
+            page_type=authored_type,
+            body="## Observations\n\n- [constraint] Preserve the invariant.\n",
+        ),
+    )
+
+    assert state.page_type == authored_type
+    assert state.eligible_compiled is True
+    assert semantic_contract.compiled_intent(state) is True
+    assert semantic_contract.compiled_structure_finding(state) is None
+    assert semantic_contract.requires_semantic_unit(state) is True
+
+
+@pytest.mark.parametrize(
+    ("path", "page_type", "code"),
+    (
+        ("Knowledge Base/Notes/Insights/missing.md", "memo", "COMPILED_TYPE_MISMATCH"),
+        ("Knowledge Base/Notes/Failures/wrong.md", "insight", "COMPILED_TYPE_MISMATCH"),
+        ("Knowledge Base/Notes/Misc/wrong-place.md", "insight", "COMPILED_DESTINATION_MISMATCH"),
+    ),
+)
+def test_compiled_path_type_mismatches_are_structural_findings(
+    tmp_path: Path, path: str, page_type: str, code: str
+) -> None:
+    state = _state(tmp_path, path, _source(page_type=page_type))
+
+    assert semantic_contract.compiled_intent(state) is True
+    finding = semantic_contract.compiled_structure_finding(state)
+    assert finding is not None
+    assert finding.code == code
+    assert finding.resolved_rule == ("semantic_authoring", "compiled_intent", "structure")
+    assert semantic_contract.requires_semantic_unit(state) is False
+
+
+@pytest.mark.parametrize(
+    ("path", "page_type", "extra"),
+    (
+        ("Knowledge Base/Notes/Insights/index.md", "index", ""),
+        ("Knowledge Base/Notes/Insights/system-snapshot.md", "snapshot", ""),
+        ("Knowledge Base/Notes/Insights/hub.md", "hub", "tags: [hub]"),
+        ("Knowledge Base/Sources/Articles/source.md", "source", ""),
+        ("Knowledge Base/Evidence/checks/evidence.md", "evidence", ""),
+        ("Knowledge Base/_trash/Insights/deleted.md", None, ""),
+        ("Knowledge Base/Templates/insight.md", "template", ""),
+        ("Knowledge Base/Data/catalog.md", "dataset-card", ""),
+        ("Knowledge Base/Notes/Misc/arbitrary.md", "memo", ""),
+    ),
+)
+def test_minimum_unit_predicate_preserves_explicit_exemptions(
+    tmp_path: Path, path: str, page_type: str | None, extra: str
+) -> None:
+    state = _state(tmp_path, path, _source(page_type=page_type, extra=extra))
+
+    assert semantic_contract.compiled_intent(state) is False
+    assert semantic_contract.requires_semantic_unit(state) is False
+    assert semantic_contract.compiled_structure_finding(state) is None
+
+
+@pytest.mark.parametrize(
+    "path",
+    (
+        "Knowledge Base/Sources/Articles/typed.md",
+        "Knowledge Base/Evidence/checks/typed.md",
+        "Knowledge Base/_trash/Insights/typed.md",
+        "Knowledge Base/Notes/Insights/index.md",
+        "Knowledge Base/Notes/Insights/hub.md",
+        "Knowledge Base/Notes/Insights/data/typed.md",
+        "Knowledge Base/Notes/Insights/templates/typed.md",
+        "Knowledge Base/Elsewhere/Knowledge Base/Notes/Insights/typed.md",
+    ),
+)
+def test_compiled_type_cannot_hide_behind_excluded_or_noncanonical_path(
+    tmp_path: Path,
+    path: str,
+) -> None:
+    state = _state(tmp_path, path, _source(page_type="insight"))
+
+    assert semantic_contract.compiled_intent(state) is True
+    finding = semantic_contract.compiled_structure_finding(state)
+    assert finding is not None
+    assert finding.code == "COMPILED_DESTINATION_MISMATCH"
+    assert semantic_contract.requires_semantic_unit(state) is False
+
+    corpus = _corpus(tmp_path, state)
+    result = _evaluate(
+        before=None,
+        after=state,
+        before_corpus=_corpus(tmp_path),
+        after_corpus=corpus,
+        operation="create",
+    )
+    assert finding.key in {item.key for item in result.blocking_findings}
+
+
+def test_minimum_unit_predicate_respects_readonly_access(tmp_path: Path) -> None:
+    policy = tmp_path / "Knowledge Base" / "_access.yaml"
+    policy.parent.mkdir(parents=True)
+    policy.write_text("readonly:\n  - Notes/Insights\n", encoding="utf-8")
+    state = _state(
+        tmp_path,
+        "Knowledge Base/Notes/Insights/readonly.md",
+        _source(page_type="insight"),
+    )
+
+    assert semantic_contract.compiled_intent(state) is True
+    assert semantic_contract.compiled_structure_finding(state) is None
+    assert semantic_contract.requires_semantic_unit(state) is False
+
+
+@pytest.mark.parametrize(
+    ("body", "missing", "compact_count", "rich_count"),
+    (
+        ("Ordinary structural prose.\n", True, 0, 0),
+        ("## Observations\n\n- [operating constraint] Keep retries bounded #reliability\n", False, 1, 0),
+        ("## Decision\n\nKeep retry windows bounded.\n", False, 0, 1),
+    ),
+)
+def test_evaluator_enforces_one_valid_compact_or_rich_unit(
+    tmp_path: Path,
+    body: str,
+    missing: bool,
+    compact_count: int,
+    rich_count: int,
+) -> None:
+    after = _state(
+        tmp_path,
+        "Knowledge Base/Notes/Insights/minimum.md",
+        _source(exomem_id=_ID_A, body=body),
+    )
+    empty = _corpus(tmp_path)
+    result = _evaluate(
+        before=None,
+        after=after,
+        before_corpus=empty,
+        after_corpus=_corpus(tmp_path, after),
+        operation="create",
+    )
+
+    missing_findings = [item for item in result.findings if item.code == "missing_semantic_unit"]
+    assert bool(missing_findings) is missing
+    assert result.compact_unit_count == compact_count
+    assert result.rich_unit_count == rich_count
+    if missing:
+        finding = missing_findings[0]
+        assert finding.severity == "error"
+        assert finding.span is None
+        assert finding.key == (
+            "missing_semantic_unit",
+            ("semantic_units", "minimum"),
+            ("semantic_authoring", "semantic_unit", "minimum"),
+        )
+        assert "## Observations" in finding.remediation
+        assert "## Decision" in finding.remediation
+        assert result.should_block is True
+
+
+def test_evaluator_reports_empty_rich_span_and_missing_minimum(
+    tmp_path: Path,
+) -> None:
+    after = _state(
+        tmp_path,
+        "Knowledge Base/Notes/Insights/empty-rich.md",
+        _source(
+            exomem_id=_ID_A,
+            body="## Decision\n\n- id: empty\n\n## Summary\n\nOrdinary prose.\n",
+        ),
+    )
+    result = _evaluate(
+        before=None,
+        after=after,
+        before_corpus=_corpus(tmp_path),
+        after_corpus=_corpus(tmp_path, after),
+        operation="create",
+    )
+
+    by_code = {finding.code: finding for finding in result.blocking_findings}
+    assert {"empty_rich_unit", "missing_semantic_unit"} <= set(by_code)
+    assert by_code["empty_rich_unit"].span is not None
+    assert by_code["empty_rich_unit"].span.text == "## Decision"
+    assert "substantive body content" in by_code["empty_rich_unit"].remediation
+    assert by_code["missing_semantic_unit"].span is None
+
+
+def test_evaluator_reports_empty_fenced_rich_span_and_missing_minimum(
+    tmp_path: Path,
+) -> None:
+    after = _state(
+        tmp_path,
+        "Knowledge Base/Notes/Insights/empty-fenced-rich.md",
+        _source(
+            exomem_id=_ID_A,
+            body="## Decision\n\n```python\n   \n```\n",
+        ),
+    )
+    result = _evaluate(
+        before=None,
+        after=after,
+        before_corpus=_corpus(tmp_path),
+        after_corpus=_corpus(tmp_path, after),
+        operation="create",
+    )
+
+    by_code = {finding.code: finding for finding in result.blocking_findings}
+    assert {"empty_rich_unit", "missing_semantic_unit"} <= set(by_code)
+    assert by_code["empty_rich_unit"].span is not None
+    assert by_code["empty_rich_unit"].span.text == "## Decision"
+    assert by_code["missing_semantic_unit"].span is None
+    assert result.rich_unit_count == 0
+
+
+def test_inactive_missing_unit_is_visible_warning_until_activation(tmp_path: Path) -> None:
+    source = _source(
+        exomem_id=_ID_A,
+        status="draft",
+        body="Ordinary draft prose.\n",
+    )
+    after = _state(
+        tmp_path,
+        "Knowledge Base/Notes/Insights/draft.md",
+        source,
+    )
+    result = _evaluate(
+        before=None,
+        after=after,
+        before_corpus=_corpus(tmp_path),
+        after_corpus=_corpus(tmp_path, after),
+        operation="create",
+    )
+
+    finding = next(item for item in result.findings if item.code == "missing_semantic_unit")
+    assert finding.severity == "warning"
+    assert result.should_block is False
+
+
+def test_unit_coverage_and_relation_disposition_are_independent(tmp_path: Path) -> None:
+    after = _state(
+        tmp_path,
+        "Knowledge Base/Notes/Insights/independent.md",
+        _source(exomem_id=_ID_A, body="Ordinary prose.\n"),
+    )
+    result = _evaluate(
+        before=None,
+        after=after,
+        before_corpus=_corpus(tmp_path),
+        after_corpus=_corpus(tmp_path, after),
+        operation="edit",
+    )
+
+    codes = {item.code for item in result.blocking_findings}
+    assert "missing_semantic_unit" in codes
+    assert "RELATION_DISPOSITION_MISSING" in codes
+
+
+def test_valid_unit_does_not_satisfy_missing_relation_review(tmp_path: Path) -> None:
+    after = _state(
+        tmp_path,
+        "Knowledge Base/Notes/Insights/unit-only.md",
+        _source(
+            exomem_id=_ID_A,
+            body="## Observations\n\n- [constraint] Preserve the invariant.\n",
+        ),
+    )
+    result = _evaluate(
+        before=after,
+        after=after,
+        before_corpus=_corpus(tmp_path, after),
+        after_corpus=_corpus(tmp_path, after),
+    )
+
+    codes = {item.code for item in result.blocking_findings}
+    assert "RELATION_DISPOSITION_MISSING" in codes
+    assert "missing_semantic_unit" not in codes
+
+
+def test_qualifying_relation_does_not_satisfy_missing_unit(tmp_path: Path) -> None:
+    target = _state(
+        tmp_path,
+        "Knowledge Base/Entities/target.md",
+        _source(title="Target", page_type="entity", exomem_id=_ID_B),
+    )
+    after = _state(
+        tmp_path,
+        "Knowledge Base/Notes/Insights/relation-only.md",
+        _source(
+            exomem_id=_ID_A,
+            body="## Relations\n\n- supports [[Target]]\n",
+        ),
+    )
+    corpus = _corpus(tmp_path, after, target)
+    result = _evaluate(
+        before=after,
+        after=after,
+        before_corpus=corpus,
+        after_corpus=corpus,
+    )
+
+    codes = {item.code for item in result.blocking_findings}
+    assert result.relation_disposition is not None
+    assert result.relation_disposition.kind == "qualifying_relation"
+    assert "missing_semantic_unit" in codes
+    assert "RELATION_DISPOSITION_MISSING" not in codes
 
 
 def test_page_state_is_immutable_detached_and_deterministic(tmp_path: Path) -> None:

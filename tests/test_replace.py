@@ -27,10 +27,23 @@ def _fm(p: Path) -> dict:
     return yaml.safe_load(fm)
 
 
+def _compact_content(title: str, *, body: str | None = None) -> str:
+    parts = [f"# {title}"]
+    if body is not None:
+        parts.append(body)
+    parts.extend(
+        (
+            "## Observations",
+            "- [operating constraint] Keep retries bounded #reliability",
+        )
+    )
+    return "\n\n".join(parts) + "\n"
+
+
 def _make_insight(vault: Path, title: str) -> str:
     """Create a fresh insight via note() so the supersession chain has a real target."""
     kwargs = {
-        "content": f"# {title}\n\nbody.\n",
+        "content": _compact_content(title, body="body."),
         "note_type": "insight",
         "title": title,
         "today": TODAY,
@@ -88,7 +101,7 @@ def test_replace_writes_new_and_flips_old(vault: Path) -> None:
     result = replace_module.replace(
         vault,
         old_path=old_rel,
-        content="# Old Insight v2\n\nrevised body.\n",
+        content=_compact_content("Old Insight v2", body="revised body."),
         note_type="insight",
         title="Old Insight v2",
         today=TODAY,
@@ -117,7 +130,7 @@ def test_replace_renders_supersession_links_for_kb_rooted_obsidian(vault: Path) 
     result = replace_module.replace(
         vault,
         old_path=old_rel,
-        content="# Nested Root New\n\nrevised.\n",
+        content=_compact_content("Nested Root New", body="revised."),
         note_type="insight",
         title="Nested Root New",
         today=TODAY,
@@ -136,7 +149,7 @@ def test_replace_bumps_old_updated_date(vault: Path) -> None:
     replace_module.replace(
         vault,
         old_path=old_rel,
-        content="# Bumped v2\n\nbody.\n",
+        content=_compact_content("Bumped v2", body="body."),
         note_type="insight",
         title="Bumped v2",
         today=later,
@@ -165,7 +178,7 @@ def test_replace_refuses_when_old_already_superseded(vault: Path) -> None:
     replace_module.replace(
         vault,
         old_path=old_rel,
-        content="# v2\n",
+        content=_compact_content("v2"),
         note_type="insight",
         title="Double Superseded v2",
         today=TODAY,
@@ -200,7 +213,7 @@ def test_replace_logs_with_reason(vault: Path) -> None:
     replace_module.replace(
         vault,
         old_path=old_rel,
-        content="# v2\n",
+        content=_compact_content("v2"),
         note_type="insight",
         title="Reasoned Replace v2",
         reason="Old framing was too narrow; broader scope here.",
@@ -224,7 +237,7 @@ def test_replace_does_not_retarget_inbound_wikilinks(vault: Path) -> None:
     replace_module.replace(
         vault,
         old_path=old_rel,
-        content="# v2\n",
+        content=_compact_content("v2"),
         note_type="insight",
         title="Linked Insight v2",
         today=TODAY,
@@ -254,7 +267,7 @@ def test_replace_accepts_novel_type(vault: Path) -> None:
     )
     kwargs = {
         "old_path": rel,
-        "content": "# Products v2\n\nupdated facts.\n",
+        "content": _compact_content("Products v2", body="updated facts."),
         "note_type": "insight",  # new page goes to Notes/Insights/
         "title": "Identity Products v2",
         "today": TODAY,
@@ -308,7 +321,9 @@ def test_concurrent_replace_has_exactly_one_winner(
         label: _preflight_replace(
             vault,
             old_path=old_rel,
-            content=f"# Concurrent Successor {label}\n\nrevised by {label}.\n",
+            content=_compact_content(
+                f"Concurrent Successor {label}", body=f"revised by {label}."
+            ),
             note_type="insight",
             title=f"Concurrent Successor {label}",
             today=TODAY,
@@ -395,7 +410,7 @@ def test_replace_rolls_back_entire_note_plan_on_mid_commit_failure(
         _commit_replace(
             vault,
             old_path=old_rel,
-            content="# Atomic Successor\n\nreplacement body.\n",
+            content=_compact_content("Atomic Successor", body="replacement body."),
             note_type="insight",
             title="Atomic Successor",
             sources=[
@@ -454,7 +469,9 @@ def test_replace_failure_does_not_leave_project_registration_or_folder(
         _commit_replace(
             vault,
             old_path=old_rel,
-            content="# Atomic Project Successor\n\nreplacement body.\n",
+            content=_compact_content(
+                "Atomic Project Successor", body="replacement body."
+            ),
             note_type="research-note",
             title="Atomic Project Successor",
             project="atomic-deferred-project",
@@ -498,7 +515,9 @@ def test_replace_staging_failure_cleans_temp_registry_and_project_folder(
         _commit_replace(
             vault,
             old_path=old_rel,
-            content="# Staging Failure Successor\n\nreplacement body.\n",
+            content=_compact_content(
+                "Staging Failure Successor", body="replacement body."
+            ),
             note_type="research-note",
             title="Staging Failure Successor",
             project="staging-failure-project",
@@ -544,7 +563,9 @@ def test_plural_project_registration_creates_folder_only_on_success(
             _commit_replace(
                 vault,
                 old_path=old_rel,
-                content="# Failed Plural Successor\n\nreplacement body.\n",
+                content=_compact_content(
+                    "Failed Plural Successor", body="replacement body."
+                ),
                 note_type="insight",
                 title="Failed Plural Successor",
                 projects=["failed-plural-project"],
@@ -559,7 +580,9 @@ def test_plural_project_registration_creates_folder_only_on_success(
     _commit_replace(
         vault,
         old_path=old_rel,
-        content="# Successful Plural Successor\n\nreplacement body.\n",
+        content=_compact_content(
+            "Successful Plural Successor", body="replacement body."
+        ),
         note_type="insight",
         title="Successful Plural Successor",
         projects=["successful-plural-project"],

@@ -156,7 +156,10 @@ def test_renamed_product_commands_forward_explicit_slugs(
     remembered = commands.op_remember(
         vault,
         content=(
-            "本文。\n\n## Relations\n"
+            "本文。\n\n"
+            "## Observations\n\n"
+            "- [operating constraint] Keep retries bounded #reliability\n\n"
+            "## Relations\n"
             "- relates_to [[Knowledge Base/Notes/Insights/"
             "progressive-disclosure-without-mode-fragmentation]]\n"
         ),

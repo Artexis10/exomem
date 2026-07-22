@@ -80,6 +80,107 @@ def _seed_sidecars(
     return state
 
 
+def test_hierarchy_parser_and_sidecar_versions_are_incremented() -> None:
+    assert semantic_index.PARSER_VERSION == 3
+    assert embedding_index.SEMANTIC_UNIT_SCHEMA_VERSION == 2
+    assert lexstore.SCHEMA_VERSION == 3
+    assert epistemic_graph.SCHEMA_VERSION == 5
+
+
+def test_hierarchy_reconcile_refreshes_derived_state_without_rewriting_markdown(
+    tmp_path: Path, monkeypatch
+) -> None:
+    path = _write(
+        tmp_path,
+        """\
+## Finding
+
+Parent conclusion.
+
+### Mechanism
+
+- [config] This compact-shaped row belongs to the rich body.
+""",
+    )
+    source = path.read_bytes()
+    state = semantic_index.build_parent_index_state(tmp_path, path)
+    assert [(unit.form, unit.kind) for unit in state.document.units] == [
+        ("rich", "finding")
+    ]
+
+    assert lexstore.search_semantic_units(
+        tmp_path, "Parent conclusion", k=10, scope="kb"
+    )
+    epistemic_graph.EpistemicGraphIndex(tmp_path).rebuild_all()
+
+    conn = sqlite3.connect(lexstore.lexical_path(tmp_path))
+    try:
+        conn.execute(
+            "UPDATE semantic_units SET parser_version = ?, "
+            "parent_generation = 'pre-hierarchy', unit_ref = 'old-overlap-ref' "
+            "WHERE parent_path = ?",
+            (semantic_index.PARSER_VERSION - 1, _REL),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    conn = sqlite3.connect(epistemic_graph.sidecar_path(tmp_path))
+    try:
+        rows = conn.execute(
+            "SELECT node_key, metadata FROM graph_nodes WHERE path = ?", (_REL,)
+        ).fetchall()
+        for node_key, raw_metadata in rows:
+            metadata = json.loads(raw_metadata)
+            if metadata.get("record_type") != "semantic_unit":
+                continue
+            metadata.update(
+                {
+                    "unit_ref": "old-overlap-ref",
+                    "parent_generation": "pre-hierarchy",
+                    "parser_version": semantic_index.PARSER_VERSION - 1,
+                }
+            )
+            conn.execute(
+                "UPDATE graph_nodes SET metadata = ? WHERE node_key = ?",
+                (json.dumps(metadata, sort_keys=True), node_key),
+            )
+        edge_rows = conn.execute(
+            "SELECT edge_key, metadata FROM graph_edges "
+            "WHERE source_path = ? AND relation_type = 'derived_from'",
+            (_REL,),
+        ).fetchall()
+        for edge_key, raw_metadata in edge_rows:
+            metadata = json.loads(raw_metadata)
+            if metadata.get("record_type") != "semantic_unit":
+                continue
+            metadata["unit_ref"] = "old-overlap-ref"
+            conn.execute(
+                "UPDATE graph_edges SET metadata = ? WHERE edge_key = ?",
+                (json.dumps(metadata, sort_keys=True), edge_key),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+    monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")
+    repaired = reconcile.reconcile(tmp_path)
+    current = semantic_index.build_parent_index_state(tmp_path, path)
+
+    assert path.read_bytes() == source
+    assert repaired.semantic_unit_indexes_status == "repaired"
+    assert repaired.semantic_unit_parents_refreshed == 1
+    assert semantic_index.audit_semantic_unit_sidecars(
+        tmp_path,
+        {_REL: current},
+        include_vectors=False,
+        include_graph=True,
+    ) == ()
+    assert [unit.unit_ref for unit in current.document.units] == [
+        state.document.units[0].unit_ref
+    ]
+
+
 def test_sidecar_parity_classifies_missing_mixed_moved_and_graph_edge_drift(
     tmp_path: Path,
 ) -> None:
@@ -209,14 +310,14 @@ def test_reconcile_repairs_unit_drift_without_markdown_changes_and_is_idempotent
 def test_move_trash_and_recovery_keep_all_unit_sidecars_on_the_live_parent(
     tmp_path: Path, monkeypatch
 ) -> None:
-    live_rel = "Knowledge Base/Scratch/reconcile-units.md"
+    live_rel = "Knowledge Base/Notes/Insights/reconcile-units.md"
     state = _seed_sidecars(
         tmp_path,
         rel=live_rel,
         page_type="insight",
         status="draft",
     )
-    moved_rel = "Knowledge Base/Scratch/moved-reconcile-units.md"
+    moved_rel = "Knowledge Base/Notes/Insights/moved-reconcile-units.md"
     monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
     monkeypatch.setattr(embeddings, "_IMPORT_FAILED", False)
     monkeypatch.setattr(embeddings, "get_model", lambda: object())

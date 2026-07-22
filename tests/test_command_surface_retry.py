@@ -241,6 +241,24 @@ def test_remember_validate_only_is_read_only() -> None:
     )
 
 
+@pytest.mark.parametrize("operation", ("create", "append"))
+def test_manage_memory_file_validate_only_is_read_only(operation: str) -> None:
+    from exomem.commands import invocation_is_read_only, product_commands_for
+
+    command = next(
+        item
+        for item in product_commands_for("mcp")
+        if item.name == "manage_memory_file"
+    )
+
+    assert invocation_is_read_only(
+        command, {"operation": operation, "validate_only": True}
+    ) is True
+    assert invocation_is_read_only(
+        command, {"operation": operation, "validate_only": False}
+    ) is False
+
+
 def test_validate_only_row_edit_refuses_instead_of_mutating(vault: Path) -> None:
     from exomem.commands import op_edit_memory
 
@@ -757,7 +775,11 @@ def test_bound_remember_replays_after_terminal_acknowledgement_loss(
     from exomem.commands import op_remember, product_commands_for
 
     kwargs = {
-        "content": "# Acknowledgement-safe save\n\nOne deterministic conclusion.\n",
+        "content": (
+            "# Acknowledgement-safe save\n\n"
+            "## Observations\n\n"
+            "- [retry guarantee] A terminal receipt makes replay deterministic.\n"
+        ),
         "title": "Acknowledgement-safe save",
         "slug": "acknowledgement-safe-save",
         "suggestions": False,

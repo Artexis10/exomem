@@ -75,6 +75,24 @@ Two release-time hazards it exists to catch:
   venv silently swaps the pinned `+cu132` torch for the default CPU wheel. The deploy fails
   on that regression; pass `-AllowCpuTorch` on hosts that are intentionally CPU-only.
 
+### Semantic-authoring migration note
+
+This release tightens new in-process writes of active compiled notes. New active
+creates, replacement successors, and inactive-to-active transitions now need at
+least one valid, non-empty compact or rich semantic unit. Inactive drafts remain
+allowed, existing pages are grandfathered for unrelated edits, moves retain that
+status, and direct-editor changes are preserved and reported as debt. Tier-2
+create, overwrite, and append operations evaluate the complete resulting
+Markdown under the same rule. Call the intended writer with `validate_only=true`
+to receive `missing_semantic_unit` or `empty_rich_unit` remediation without
+mutation. See [first-class semantic language](semantic-language.md) for the exact
+versioned grammar, applicability predicate, exemptions, and remediation.
+
+The richer heading parser now keeps deeper headings inside their parent rich
+unit and excludes recognized blocks with no substantive body. Its parser/index
+version bump invalidates stale derived rows; it does not rewrite Markdown. After
+an upgrade, follow the [derived-state rebuild guidance](deployment.md#deploying-a-new-version).
+
 ## Commit convention
 
 Release Please reads Conventional Commit messages after the latest release tag:

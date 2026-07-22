@@ -136,9 +136,12 @@ def test_outfile_cleaned_up_after_run(monkeypatch) -> None:
 
 
 def test_is_nvidia_wheel_bin() -> None:
-    assert extract._is_nvidia_wheel_bin("C:\\venv\\Lib\\site-packages\\nvidia\\cublas\\bin")
+    drive = "C:"
+    assert extract._is_nvidia_wheel_bin(
+        drive + r"\venv\Lib\site-packages\nvidia\cublas\bin"
+    )
     assert extract._is_nvidia_wheel_bin("/v/lib/python/site-packages/nvidia/cudnn/bin")
-    assert not extract._is_nvidia_wheel_bin("C:\\Windows\\System32")
+    assert not extract._is_nvidia_wheel_bin(drive + r"\Windows\System32")
     assert not extract._is_nvidia_wheel_bin("/usr/local/bin")
 
 
@@ -152,7 +155,7 @@ def test_child_env_cpu_forces_cuda_off(monkeypatch) -> None:
 
 
 def test_child_env_cuda_keeps_gpu_and_strips_nvidia_bins(monkeypatch) -> None:
-    # Colon-free, pathsep-portable entries: a Windows drive path ("C:\\Windows") contains
+    # Colon-free, pathsep-portable entries: a Windows drive path contains
     # `:`, which IS os.pathsep on Linux — joining/splitting it on the CI runner shatters the
     # drive letter. `_is_nvidia_wheel_bin` normalizes separators, so unix-style paths still
     # exercise the strip on every platform (mirrors test_child_env_cpu_forces_cuda_off).

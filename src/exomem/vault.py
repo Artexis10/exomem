@@ -141,7 +141,7 @@ def resolve_vault(env_var: str = "EXOMEM_VAULT_PATH") -> Path:
             f"{env_var} is not set. Point it at your vault root — the folder "
             f"that contains '{kb_prefix()}'. For example:\n"
             f'  macOS/Linux:  export {env_var}="/path/to/your/Obsidian"\n'
-            f'  Windows:      setx {env_var} "C:\\path\\to\\your\\Obsidian"'
+            f'  Windows:      setx {env_var} "C:/path/to/your/Obsidian"'
         )
     path = Path(override)
     if not _is_vault(path):

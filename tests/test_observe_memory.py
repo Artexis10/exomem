@@ -524,21 +524,32 @@ def test_validate_refuses_access_policy_boundaries(tmp_path: Path, tier: str) ->
 
 
 @pytest.mark.parametrize(
-    ("rel", "status"),
+    ("rel", "status", "page_type", "applicability"),
     [
-        (PAGE, "draft"),
-        ("Knowledge Base/Notes/Research/alpha/system-architecture.md", "active"),
+        (PAGE, "draft", "insight", "structural"),
+        (
+            "Knowledge Base/Notes/Research/alpha/system-overview.md",
+            "active",
+            "research-note",
+            "full",
+        ),
     ],
 )
-def test_inactive_and_hub_compiled_pages_remain_structurally_writable(
+def test_inactive_and_active_compiled_pages_remain_writable(
     tmp_path: Path,
     rel: str,
     status: str,
+    page_type: str,
+    applicability: str,
 ) -> None:
     page = _write_page(
         tmp_path,
         rel=rel,
-        source=_page_source().replace("status: active", f"status: {status}"),
+        source=(
+            _page_source()
+            .replace("status: active", f"status: {status}")
+            .replace("type: insight", f"type: {page_type}")
+        ),
     )
 
     result = commands.op_observe_memory(
@@ -550,7 +561,7 @@ def test_inactive_and_hub_compiled_pages_remain_structurally_writable(
     )
 
     assert "Structured units remain writable" in page.read_text(encoding="utf-8")
-    assert result["semantic"]["applicability"] == "structural"
+    assert result["semantic"]["applicability"] == applicability
 
 
 def test_index_dispatch_failure_preserves_markdown_and_reports_reconcile(

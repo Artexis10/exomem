@@ -979,7 +979,9 @@ def _package_skills_main(argv: list[str]) -> int:
     parser.add_argument(
         "--vault",
         help="Vault root whose real project-keys.yaml to overlay into the core skill. "
-        "Omit for a generic, shareable archive.",
+        "This is an explicit personalized build; omit for a generic, shareable archive. "
+        "Personalized output defaults inside the supplied vault and cannot target public "
+        "repository or release paths.",
     )
     parser.add_argument(
         "--plugin-root",
@@ -996,13 +998,15 @@ def _package_skills_main(argv: list[str]) -> int:
         print(f"  skills: {', '.join(report['skills'])}")
         return 0
 
-    vault = args.vault or os.environ.get("EXOMEM_VAULT_PATH")
+    # Personalized packaging is explicit.  A configured runtime vault must never
+    # silently turn the default public package command into a private build.
+    vault = Path(args.vault) if args.vault else None
     try:
         report = package_module.package_skills(
             Path(args.out) if args.out else None,
-            vault=Path(vault) if vault else None,
+            vault=vault,
         )
-    except (FileNotFoundError, OSError) as e:
+    except (FileNotFoundError, OSError, ValueError) as e:
         print(f"exomem package-skills: {e}", file=sys.stderr)
         return 1
 

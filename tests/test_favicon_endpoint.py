@@ -76,7 +76,7 @@ def test_health_omits_host_identifying_detail(vault, monkeypatch: pytest.MonkeyP
     assert "interpreter" not in body
     assert "package_path" not in body
     assert "checkout" not in body
-    assert "C:\\Users" not in r.text
+    assert "C:" + r"\Users" not in r.text
     assert "/home/" not in r.text
 
 

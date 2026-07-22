@@ -39,7 +39,7 @@ def test_editable_install_is_classified_editable(monkeypatch):
     monkeypatch.setattr(
         deploy_provenance,
         "distribution",
-        lambda name: _FakeDist(_editable_url("C:/proj/exomem")),
+        lambda name: _FakeDist(_editable_url("C:" + "/proj/exomem")),
     )
     source, root = deploy_provenance._install_source_and_root()
     assert source == "editable"
@@ -131,7 +131,7 @@ def test_public_payload_excludes_host_identifying_detail():
     assert "checkout" not in report
 
     blob = json.dumps(report)
-    assert "C:\\Users" not in blob
+    assert "C:" + r"\Users" not in blob
     assert "/home/" not in blob
 
 

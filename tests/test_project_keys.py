@@ -13,12 +13,23 @@ import pytest
 
 from exomem import note as note_module
 from exomem import project_keys as project_keys_module
+from exomem import semantic_units
 
 TODAY = dt.date(2026, 5, 28)
 
 
 def _reviewed_note(vault: Path, **kwargs):
     """Create an intentionally disconnected active fixture via the current protocol."""
+    content = kwargs["content"]
+    if not semantic_units.parse_semantic_units(content).units:
+        kwargs = {
+            **kwargs,
+            "content": (
+                content.rstrip()
+                + "\n\n## Observations\n\n"
+                "- [operating constraint] Keep retries bounded #reliability\n"
+            ),
+        }
     validation = note_module.note(vault, validate_only=True, **kwargs)
     return note_module.note(
         vault,

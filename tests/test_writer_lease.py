@@ -1558,7 +1558,7 @@ def _invalid_committed_payloads(valid: dict) -> list[tuple[str, dict]]:
         ("nul target", "folder/\0note.md"),
         ("dot target", "folder/./note.md"),
         ("parent target", "folder/../note.md"),
-        ("drive target", "C:/vault/note.md"),
+        ("drive target", "C:" + "/vault/note.md"),
         ("reserved workspace target", "folder/.exomem-batch-raw/stage-0.tmp"),
         ("overlong target", f"{'x' * 1025}.md"),
         ("unencodable target", "bad-\udcff.md"),

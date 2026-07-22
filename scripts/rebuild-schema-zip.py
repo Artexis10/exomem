@@ -14,7 +14,7 @@ Prefer `exomem package-skills` directly: it builds ALL ten skills, not just the 
 one. This wrapper remains for the documented maintainer flow and single-file --out.
 
 Usage: python scripts/rebuild-schema-zip.py [--vault <root>] [--out <path>]
-  --vault  vault root containing "Knowledge Base/" (default: $EXOMEM_VAULT_PATH)
+  --vault  explicit vault root containing "Knowledge Base/"
   --out    output zip path (default: <vault>/Knowledge Base/_Schema.zip when --vault
            is given, else <repo>/dist/_Schema.zip)
 """
@@ -22,11 +22,10 @@ Usage: python scripts/rebuild-schema-zip.py [--vault <root>] [--out <path>]
 from __future__ import annotations
 
 import argparse
-import os
 import shutil
 import sys
-import tempfile
 from pathlib import Path
+from uuid import uuid4
 
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "src"))
@@ -40,7 +39,7 @@ def main() -> int:
     ap.add_argument("--out", help="output zip path")
     args = ap.parse_args()
 
-    vault = args.vault or os.environ.get("EXOMEM_VAULT_PATH")
+    vault = args.vault
 
     if args.out:
         zip_path = Path(args.out).expanduser()
@@ -49,17 +48,28 @@ def main() -> int:
     else:
         zip_path = REPO / "dist" / "_Schema.zip"
 
-    with tempfile.TemporaryDirectory() as tmp:
+    if vault:
+        try:
+            package_module.ensure_personalized_output(zip_path, vault=Path(vault))
+        except ValueError as e:
+            print(f"rebuild-schema-zip: {e}", file=sys.stderr)
+            return 2
+
+    zip_path.parent.mkdir(parents=True, exist_ok=True)
+    scratch = zip_path.parent / f".exomem-package-build-{uuid4().hex}"
+    scratch.mkdir()
+    try:
         try:
             report = package_module.package_skills(
-                Path(tmp), vault=Path(vault) if vault else None
+                scratch, vault=Path(vault) if vault else None
             )
         except FileNotFoundError as e:
             print(f"rebuild-schema-zip: {e}", file=sys.stderr)
             return 2
-        built = Path(tmp) / "exomem.zip"
-        zip_path.parent.mkdir(parents=True, exist_ok=True)
+        built = scratch / "exomem.zip"
         shutil.copyfile(built, zip_path)
+    finally:
+        shutil.rmtree(scratch)
 
     print(f"keys:       {'vault overlay' if vault else 'scaffold (generic)'}")
     print(f"zip target: {zip_path}")

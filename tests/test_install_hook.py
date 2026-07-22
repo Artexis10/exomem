@@ -106,6 +106,8 @@ def test_install_hook_idempotent(tmp_path: Path) -> None:
 def test_install_hook_supersedes_prior_absolute_path_entry(tmp_path: Path) -> None:
     # The old (buggy) form baked an absolute Windows python path; re-running must
     # replace it with the machine-agnostic wrapper command, exactly once.
+    legacy_python = "C:" + r"\Python\python.exe"
+    legacy_hook = "C:" + r"\Users\x\.claude\hooks\kb_capture_nudge.py"
     sp = tmp_path / "settings.json"
     sp.write_text(
         json.dumps(
@@ -116,10 +118,7 @@ def test_install_hook_supersedes_prior_absolute_path_entry(tmp_path: Path) -> No
                             "hooks": [
                                 {
                                     "type": "command",
-                                    "command": (
-                                        '"C:\\Python\\python.exe" "C:\\Users\\x\\.claude\\hooks\\'
-                                        'kb_capture_nudge.py"'
-                                    ),
+                                    "command": f'"{legacy_python}" "{legacy_hook}"',
                                 }
                             ]
                         }

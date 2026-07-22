@@ -1049,3 +1049,183 @@ Body.
     assert json.dumps(first.to_dict(), ensure_ascii=False, sort_keys=True) == json.dumps(
         second.to_dict(), ensure_ascii=False, sort_keys=True
     )
+
+
+@pytest.mark.parametrize(
+    ("markdown", "expected"),
+    [
+        (
+            "## Finding\n\nParent.\n\n### Mechanism\n\nNested.\n\n## Risk\n\nSibling.\n",
+            [("finding", "Parent.\n\n### Mechanism\n\nNested."), ("risk", "Sibling.")],
+        ),
+        (
+            "### Decision\n\nNested level.\n\n## Risk\n\nShallower sibling.\n",
+            [("decision", "Nested level."), ("risk", "Shallower sibling.")],
+        ),
+        (
+            "## Finding\n\nParent.\n\n### Decision\n\nRecognized child.\n\n## Risk\n\nSibling.\n",
+            [
+                ("finding", "Parent.\n\n### Decision\n\nRecognized child."),
+                ("risk", "Sibling."),
+            ],
+        ),
+        (
+            "## Analysis\n\n### Findings\n\nAlias child.\n\n## Summary\n\nDone.\n",
+            [("finding", "Alias child.")],
+        ),
+        (
+            "## Finding\n\n```markdown\n## Risk\n\nfenced content\n```\n\nAfter.\n",
+            [("finding", "```markdown\n## Risk\n\nfenced content\n```\n\nAfter.")],
+        ),
+    ],
+)
+def test_rich_parser_follows_heading_hierarchy(
+    markdown: str,
+    expected: list[tuple[str, str]],
+) -> None:
+    document = parse_semantic_units(markdown, parent_ref=STABLE_PARENT_REF)
+
+    assert [(unit.kind, unit.body) for unit in document.rich_units] == expected
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "\n\n",
+        "\n- id: empty\n- category: operational rule\n- tags: parser\n- context: test\n\n",
+        "\n- relations: supports: [[Target]]\n\n",
+        "\n### Mechanism\n\n#### Detail\n\n",
+        "\n### Decision\n- id: nested-only\n- relations: supports: [[Target]]\n\n",
+    ],
+)
+def test_empty_rich_units_are_diagnosed_and_excluded(body: str) -> None:
+    document = parse_semantic_units(
+        f"## Finding{body}## Summary\n\nOrdinary prose.\n",
+        path="Knowledge Base/Notes/empty-rich.md",
+        parent_ref=STABLE_PARENT_REF,
+    )
+
+    assert document.units == ()
+    assert document.rich_blocks == ()
+    assert [(finding.code, finding.line) for finding in document.errors] == [
+        ("empty_rich_unit", 1)
+    ]
+    assert document.errors[0].span is not None
+    assert document.errors[0].span.text == "## Finding"
+
+
+def test_descendant_ordinary_key_value_bullet_is_substantive_rich_body() -> None:
+    markdown = """\
+## Finding
+
+### Result
+
+- Outcome: The retry succeeded.
+"""
+
+    document = parse_semantic_units(markdown, parent_ref=STABLE_PARENT_REF)
+
+    assert document.errors == ()
+    assert [(unit.form, unit.kind, unit.body) for unit in document.units] == [
+        (
+            "rich",
+            "finding",
+            "### Result\n\n- Outcome: The retry succeeded.",
+        )
+    ]
+
+
+def test_nested_compact_and_rich_syntax_is_owned_by_one_rich_span() -> None:
+    markdown = """\
+## Finding
+
+Parent body.
+
+### Decision
+
+Nested recognized content.
+
+- [config] compact-shaped rich body
+
+## Observations
+
+- [config] independent compact observation ^outside
+"""
+
+    document = parse_semantic_units(markdown, parent_ref=STABLE_PARENT_REF)
+
+    assert [(unit.form, unit.content) for unit in document.units] == [
+        (
+            "rich",
+            "Parent body.\n\n### Decision\n\nNested recognized content.\n\n"
+            "- [config] compact-shaped rich body",
+        ),
+        ("compact", "independent compact observation"),
+    ]
+    assert all(
+        left.span.end_offset <= right.span.start_offset
+        for left, right in zip(document.units, document.units[1:], strict=False)
+    )
+
+
+def test_hierarchy_parse_is_byte_stable_across_repeated_runs() -> None:
+    markdown = """\
+## Finding
+- id: hierarchy
+
+Parent.
+
+### Mechanism
+
+- [config] body syntax
+
+## Observations
+
+- [rule] independent ^independent
+"""
+
+    first = parse_semantic_units(markdown, parent_ref=STABLE_PARENT_REF)
+    second = parse_semantic_units(markdown, parent_ref=STABLE_PARENT_REF)
+
+    assert json.dumps(first.to_dict(), ensure_ascii=False, sort_keys=True) == json.dumps(
+        second.to_dict(), ensure_ascii=False, sort_keys=True
+    )
+
+
+def test_hierarchy_migration_makes_anonymous_ref_stale_without_substitution() -> None:
+    former = parse_semantic_units(
+        "## Finding\n\nParent.\n",
+        parent_ref=STABLE_PARENT_REF,
+    ).units[0]
+    migrated = parse_semantic_units(
+        "## Finding\n\nParent.\n\n### Mechanism\n\nNested.\n",
+        parent_ref=STABLE_PARENT_REF,
+    )
+
+    resolution = migrated.resolve_unit(former.unit_ref or "")
+
+    assert resolution.status == "stale"
+    assert resolution.unit is None
+    assert resolution.expected_fingerprint == former.fingerprint
+
+
+def test_hierarchy_migration_keeps_authored_anchor_but_requires_current_fingerprint() -> None:
+    former = parse_semantic_units(
+        "## Finding\n- id: stable\n\nParent.\n",
+        parent_ref=STABLE_PARENT_REF,
+    ).units[0]
+    migrated = parse_semantic_units(
+        "## Finding\n- id: stable\n\nParent.\n\n### Mechanism\n\nNested.\n",
+        parent_ref=STABLE_PARENT_REF,
+    )
+    current = migrated.units[0]
+
+    assert current.unit_ref == former.unit_ref
+    assert current.fingerprint != former.fingerprint
+    assert migrated.resolve_unit(current.unit_ref or "").status == "found"
+    stale = migrated.resolve_unit(
+        current.unit_ref or "",
+        expected_fingerprint=former.fingerprint,
+    )
+    assert stale.status == "stale"
+    assert stale.unit is None

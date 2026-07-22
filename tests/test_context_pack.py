@@ -493,6 +493,41 @@ def test_pack_includes_bounded_citable_compact_and_rich_semantic_units(
     assert pack["semantic_blocks"][UNIT_CONTEXT_P] == expected_legacy
 
 
+def test_hierarchy_migration_pack_uses_current_non_overlapping_units_without_source_write(
+    tmp_path: Path,
+) -> None:
+    rel = "Knowledge Base/Notes/Hierarchy.md"
+    page = tmp_path / rel
+    page.parent.mkdir(parents=True)
+    page.write_bytes(
+        b"---\n"
+        b"type: insight\n"
+        b"exomem_id: 33333333-3333-4333-8333-333333333333\n"
+        b"---\n"
+        b"# Hierarchy\n\n"
+        b"## Finding\n\n"
+        b"Parent conclusion.\n\n"
+        b"### Decision\n\n"
+        b"Nested recognized content.\n\n"
+        b"- [config] Compact-shaped body content.\n"
+    )
+    source = page.read_bytes()
+    find_module.clear_cache()
+
+    pack = context_pack.assemble_pack(tmp_path, [_hit(rel)])
+
+    assert page.read_bytes() == source
+    units = pack["semantic_units"][rel]["units"]
+    assert [(unit["form"], unit["kind"]) for unit in units] == [
+        ("rich", "finding")
+    ]
+    assert "### Decision" in units[0]["excerpt"]
+    assert "Compact-shaped body content" in units[0]["excerpt"]
+    assert [block["type"] for block in pack["semantic_blocks"][rel]] == [
+        "finding"
+    ]
+
+
 def test_semantic_unit_caps_are_explicit_and_bound_legacy_projection(
     cluster: Path,
 ) -> None:

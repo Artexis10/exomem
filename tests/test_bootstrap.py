@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 from starlette.testclient import TestClient
 
-from exomem import commands, entity_types, server
+from exomem import commands, entity_types, semantic_authoring, server
 from exomem.__main__ import main
 
 
@@ -138,6 +138,50 @@ def test_bootstrap_compact_contract_is_public_safe(vault: Path) -> None:
     serialized = json.dumps(out)
     assert str(vault) not in serialized
     assert "Progressive disclosure" not in serialized
+
+
+def test_every_bootstrap_profile_projects_the_same_semantic_authoring_contract(
+    vault: Path,
+) -> None:
+    expected = semantic_authoring.get_semantic_authoring_contract().as_dict()
+
+    projections = [
+        commands.op_bootstrap(vault, profile=profile)["semantic_authoring"]
+        for profile in ("compact", "full", "diagnostics")
+    ]
+
+    assert projections == [expected, expected, expected]
+    serialized = json.dumps(expected, ensure_ascii=False)
+    for required in (
+        "## Observations",
+        "- [category] content #tags (context) ^anchor",
+        "open",
+        "missing_semantic_unit",
+        "empty_rich_unit",
+        "remember",
+        "replace_memory",
+        "manage_memory_file create, overwrite, and append",
+    ):
+        assert required in serialized
+
+
+def test_bootstrap_semantic_authoring_projection_is_vault_blind(tmp_path: Path) -> None:
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    for root, sentinel in ((first, "Synthetic Alpha"), (second, "Synthetic Beta")):
+        note = root / "Knowledge Base" / "Notes" / "Research" / "private-note.md"
+        note.parent.mkdir(parents=True)
+        note.write_text(f"# {sentinel}\n\nDo not project this body.\n", encoding="utf-8")
+
+    left = commands.op_bootstrap(first)["semantic_authoring"]
+    right = commands.op_bootstrap(second)["semantic_authoring"]
+
+    assert left == right
+    serialized = json.dumps(left, ensure_ascii=False)
+    assert "Synthetic Alpha" not in serialized
+    assert "Synthetic Beta" not in serialized
+    assert str(first) not in serialized
+    assert str(second) not in serialized
 
 
 def test_bootstrap_teaches_human_readable_memory_citations(vault: Path) -> None:

@@ -18,7 +18,7 @@
 param(
     [Parameter(Mandatory = $true)][string]$Hostname,
     [int]$Port = 8765,
-    [string]$ConfigPath = "C:\Windows\System32\config\systemprofile\.cloudflared\config.yml",
+    [string]$ConfigPath = (Join-Path $env:SystemRoot "System32\config\systemprofile\.cloudflared\config.yml"),
     [string]$ServiceName = "cloudflared"
 )
 

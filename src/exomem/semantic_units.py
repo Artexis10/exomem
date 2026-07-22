@@ -448,14 +448,6 @@ def parse_semantic_units(
             )
             (warnings if diagnostic.severity == "warning" else errors).append(diagnostic)
 
-    _parse_compact_units(
-        lines,
-        path=source_path,
-        validate=validate,
-        units=units,
-        errors=errors,
-    )
-
     kind_resolver = None
     if language_registry is not None:
 
@@ -496,6 +488,16 @@ def parse_semantic_units(
         validate=validate,
         registry=relation_registry,
         kind_resolver=kind_resolver,
+    )
+    _parse_compact_units(
+        lines,
+        path=source_path,
+        validate=validate,
+        units=units,
+        errors=errors,
+        excluded_line_ranges=tuple(
+            (block.line, block.end_line) for block in rich_document.blocks
+        ),
     )
     note_relation_document = markdown_relations.parse_markdown_relations(
         source,
@@ -829,9 +831,11 @@ def _parse_compact_units(
     validate: bool,
     units: list[SemanticUnit],
     errors: list[SemanticUnitDiagnostic],
+    excluded_line_ranges: tuple[tuple[int, int], ...] = (),
 ) -> None:
     fence_char: str | None = None
     fence_length = 0
+    range_index = 0
     for line in lines:
         fence = _FENCE_RE.match(line.text)
         if fence_char is not None:
@@ -843,6 +847,19 @@ def _parse_compact_units(
             marker = fence.group("fence")
             fence_char = marker[0]
             fence_length = len(marker)
+            continue
+
+        while (
+            range_index < len(excluded_line_ranges)
+            and line.number > excluded_line_ranges[range_index][1]
+        ):
+            range_index += 1
+        if (
+            range_index < len(excluded_line_ranges)
+            and excluded_line_ranges[range_index][0]
+            <= line.number
+            <= excluded_line_ranges[range_index][1]
+        ):
             continue
 
         match = _COMPACT_RE.match(line.text)
@@ -1093,6 +1110,8 @@ def _rich_remediation(code: str) -> str:
         return "Write relation metadata as `relation_kind: target` entries."
     if code == "duplicate_id":
         return "Give each rich semantic block a unique `id` metadata value."
+    if code == "empty_rich_unit":
+        return "Add substantive body content or remove the empty rich heading."
     return "Review the rich semantic block metadata at this source location."
 
 

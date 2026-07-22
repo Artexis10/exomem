@@ -24,6 +24,7 @@ from . import (
     memory_refs,
     memory_schema,
     relation_registry,
+    semantic_authoring,
     semantic_language_registry,
     semantic_units,
     vault,
@@ -44,6 +45,33 @@ _AUTHORED_SCHEMA_ORIGINS = frozenset({"markdown_relation", "semantic_relation"})
 _CREATE_LIKE = frozenset({"create", "replacement", "adoption_compile", "tier2_create"})
 _GRANDFATHERED_OPERATIONS = frozenset(
     {"edit", "move", "observe", "recover", "tier2_overwrite", "tier2_append"}
+)
+COMPILED_DESTINATIONS = MappingProxyType(
+    {
+        "experiment": "Notes/Experiments",
+        "failure": "Notes/Failures",
+        "insight": "Notes/Insights",
+        "pattern": "Notes/Patterns",
+        "production-log": "Notes/Productions",
+        "research-note": "Notes/Research",
+    }
+)
+COMPILED_TYPES = frozenset(COMPILED_DESTINATIONS)
+_COMPILED_ROOT_TYPES = MappingProxyType(
+    {destination.rsplit("/", 1)[-1].casefold(): page_type
+     for page_type, destination in COMPILED_DESTINATIONS.items()}
+)
+_INACTIVE_STATUSES = frozenset(
+    {"archived", "draft", "dropped", "planned", "superseded"}
+)
+_SEMANTIC_UNIT_EXEMPT_PARTS = frozenset(
+    {"sources", "evidence", "_trash", "trash", "_schema", "templates", "data"}
+)
+_SEMANTIC_UNIT_EXEMPT_TAGS = frozenset({"hub", "snapshot"})
+_SEMANTIC_UNIT_EXEMPT_SUFFIXES = (
+    "-architecture",
+    "-snapshot",
+    "-catalog-snapshot",
 )
 _WIKILINK_RE = re.compile(r"\[\[([^\]\n]+)\]\]")
 
@@ -458,6 +486,8 @@ class SemanticContractResult:
     category_counts: tuple[tuple[str, int], ...]
     relation_disposition: RelationDisposition | None
     actions: tuple[str, ...]
+    compact_unit_count: int = 0
+    rich_unit_count: int = 0
 
     def __post_init__(self) -> None:
         for name in (
@@ -481,6 +511,8 @@ class SemanticContractResult:
             "blocking_findings": [finding.as_dict() for finding in self.blocking_findings],
             "should_block": self.should_block,
             "semantic_unit_count": self.semantic_unit_count,
+            "compact_unit_count": self.compact_unit_count,
+            "rich_unit_count": self.rich_unit_count,
             "kind_counts": dict(self.kind_counts),
             "category_counts": dict(self.category_counts),
             "relation_disposition": (
@@ -490,6 +522,139 @@ class SemanticContractResult:
             ),
             "actions": list(self.actions),
         }
+
+
+def normalized_compiled_type(value: object) -> str | None:
+    """Normalize an authored page type for exact compiled-intent checks."""
+    return activation.normalized_page_type(value)
+
+
+def _path_parts(path: str) -> tuple[str, ...]:
+    return tuple(part.casefold() for part in PurePosixPath(path.replace("\\", "/")).parts)
+
+
+def _path_excluded_from_semantic_minimum(path: str) -> bool:
+    parts = _path_parts(path)
+    if any(part in _SEMANTIC_UNIT_EXEMPT_PARTS for part in parts):
+        return True
+    name = parts[-1] if parts else ""
+    if name in {"hub.md", "index.md", "log.md"}:
+        return True
+    stem = PurePosixPath(name).stem
+    return any(stem.endswith(suffix) for suffix in _SEMANTIC_UNIT_EXEMPT_SUFFIXES)
+
+
+def canonical_compiled_destination(path: str) -> str | None:
+    """Return the compiled type selected by one canonical destination, if any."""
+    if _path_excluded_from_semantic_minimum(path):
+        return None
+    parts = _path_parts(path)
+    if len(parts) < 3 or parts[:2] != ("knowledge base", "notes"):
+        return None
+    return _COMPILED_ROOT_TYPES.get(parts[2])
+
+
+def _frontmatter_tags(page: SemanticPageState) -> frozenset[str]:
+    value = page.frontmatter.get("tags")
+    if isinstance(value, str):
+        values = (value,)
+    elif isinstance(value, (list, tuple, set, frozenset)):
+        values = value
+    else:
+        values = ()
+    return frozenset(str(item).strip().casefold().lstrip("#") for item in values)
+
+
+def _semantic_unit_explicitly_exempt(page: SemanticPageState) -> bool:
+    return bool(
+        _path_excluded_from_semantic_minimum(page.path)
+        or (_frontmatter_tags(page) & _SEMANTIC_UNIT_EXEMPT_TAGS)
+    )
+
+
+def compiled_intent(page: SemanticPageState) -> bool:
+    """Apply the exact route-or-type compiled-intent definition."""
+    return bool(
+        canonical_compiled_destination(page.path) is not None
+        or normalized_compiled_type(page.page_type) in COMPILED_TYPES
+    )
+
+
+def compiled_structure_finding(page: SemanticPageState) -> ContractFinding | None:
+    """Return a deterministic path/type mismatch before semantic applicability."""
+    destination_type = canonical_compiled_destination(page.path)
+    page_type = normalized_compiled_type(page.page_type)
+    if destination_type is not None and page_type != destination_type:
+        return ContractFinding(
+            code="COMPILED_TYPE_MISMATCH",
+            severity="error",
+            path=page.path,
+            span=None,
+            detail=(
+                f"canonical {COMPILED_DESTINATIONS[destination_type]} content requires "
+                f"frontmatter type {destination_type!r}"
+            ),
+            remediation=(
+                f"Set `type: {destination_type}` or move the document outside that "
+                "canonical compiled destination."
+            ),
+            governed_element_identity=("compiled_intent", "type"),
+            resolved_rule=("semantic_authoring", "compiled_intent", "structure"),
+        )
+    if page_type in COMPILED_TYPES and destination_type != page_type:
+        return ContractFinding(
+            code="COMPILED_DESTINATION_MISMATCH",
+            severity="error",
+            path=page.path,
+            span=None,
+            detail=(
+                f"compiled frontmatter type {page_type!r} is outside its canonical "
+                f"{COMPILED_DESTINATIONS[page_type]} destination"
+            ),
+            remediation=(
+                f"Move the document under `{COMPILED_DESTINATIONS[page_type]}` or use "
+                "a non-compiled type appropriate to this destination."
+            ),
+            governed_element_identity=("compiled_intent", "destination"),
+            resolved_rule=("semantic_authoring", "compiled_intent", "structure"),
+        )
+    return None
+
+
+def compiled_structure_matches(page: SemanticPageState) -> bool:
+    """Return whether compiled intent exists and path/type structure is applicable."""
+    return bool(
+        compiled_intent(page)
+        and not _semantic_unit_explicitly_exempt(page)
+        and compiled_structure_finding(page) is None
+    )
+
+
+def requires_semantic_unit(page: SemanticPageState) -> bool:
+    """Return the exact active, writable compiled minimum-unit predicate."""
+    return bool(compiled_structure_matches(page) and page.eligible_compiled)
+
+
+def _missing_semantic_unit_finding(page: SemanticPageState) -> ContractFinding | None:
+    if page.document.units or not compiled_structure_matches(page):
+        return None
+    active_required = requires_semantic_unit(page)
+    inactive = normalized_compiled_type(page.status) in _INACTIVE_STATUSES
+    if not active_required and not inactive:
+        return None
+    finding = semantic_authoring.AUTHORING_CONTRACT.findings["missing_semantic_unit"]
+    return ContractFinding(
+        code="missing_semantic_unit",
+        severity="error" if active_required else "warning",
+        path=page.path,
+        span=None,
+        detail=str(finding["when"]),
+        remediation=(
+            f"{finding['compact_remediation']} {finding['rich_remediation']}"
+        ),
+        governed_element_identity=("semantic_units", "minimum"),
+        resolved_rule=("semantic_authoring", "semantic_unit", "minimum"),
+    )
 
 
 def _copy_definition(
@@ -2033,7 +2198,14 @@ def _raw_findings(
             before_corpus=before_corpus,
             mode=mode,
         )
-    findings = _diagnostic_findings(page)
+    findings: list[ContractFinding] = []
+    structure_finding = compiled_structure_finding(page)
+    if structure_finding is not None:
+        findings.append(structure_finding)
+    findings.extend(_diagnostic_findings(page))
+    minimum_finding = _missing_semantic_unit_finding(page)
+    if minimum_finding is not None:
+        findings.append(minimum_finding)
     if (
         page.identity_kind == "exomem_id"
         and corpus.identity_census.paths_by_identity.get(page.identity)
@@ -2212,6 +2384,8 @@ def evaluate(
     should_block = bool(blocking) and mode == "precommit"
     kind_counts = tuple(sorted(Counter(unit.kind for unit in after.document.units).items()))
     category_counts = tuple(sorted(Counter(unit.category for unit in after.document.units).items()))
+    compact_unit_count = sum(unit.form == "compact" for unit in after.document.units)
+    rich_unit_count = sum(unit.form == "rich" for unit in after.document.units)
     return SemanticContractResult(
         mode=mode,
         operation=operation,
@@ -2225,4 +2399,6 @@ def evaluate(
         category_counts=category_counts,
         relation_disposition=disposition,
         actions=disposition.actions if disposition is not None else (),
+        compact_unit_count=compact_unit_count,
+        rich_unit_count=rich_unit_count,
     )

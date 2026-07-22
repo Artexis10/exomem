@@ -156,8 +156,14 @@ jobs:
         uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
+      - name: Validate public build inputs before packaging
+        run: python scripts/validate-public-artifacts.py --repository
       - name: Build package
         run: uv build
+      - name: Build generic standalone skill archives
+        run: uv run --frozen exomem package-skills --out dist/skills
+      - name: Validate unpacked build artifacts
+        run: python scripts/validate-public-artifacts.py dist
 
   capabilities:
     name: capabilities doc
