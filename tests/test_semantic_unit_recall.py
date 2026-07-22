@@ -7,7 +7,14 @@ from typing import Any
 import numpy as np
 import pytest
 
-from exomem import embedding_index, embeddings, semantic_index
+from exomem import (
+    commands,
+    context_pack,
+    embedding_index,
+    embeddings,
+    lexstore,
+    semantic_index,
+)
 from exomem import find as find_module
 
 
@@ -40,8 +47,22 @@ def _write_page(
     return path
 
 
-def _rich(*, kind: str, category: str, anchor: str, content: str) -> str:
-    return f"## {kind.title()}\n- category: {category}\n- id: {anchor}\n\n{content}\n"
+def _rich(
+    *,
+    kind: str,
+    category: str,
+    anchor: str,
+    content: str,
+    tags: str | None = None,
+    context: str | None = None,
+) -> str:
+    metadata = [f"- category: {category}", f"- id: {anchor}"]
+    if tags is not None:
+        metadata.append(f"- tags: {tags}")
+    if context is not None:
+        metadata.append(f"- context: {context}")
+    metadata_text = "\n".join(metadata)
+    return f"## {kind.title()}\n{metadata_text}\n\n{content}\n"
 
 
 def _vector(first: float, second: float = 0.0) -> np.ndarray:
@@ -122,6 +143,69 @@ def test_auto_unit_recall_intersects_text_category_kind_and_page_filter_axes(
     }
     assert {payload["category"] for payload in payloads} == {"config", "rule"}
     assert {payload["kind"] for payload in payloads} == {"decision"}
+
+
+def test_rich_tags_and_context_survive_filters_hits_reads_lexical_and_packs(
+    tmp_path: Path,
+) -> None:
+    path = _write_page(
+        tmp_path,
+        "rich-projection",
+        body=_rich(
+            kind="decision",
+            category="runtime reliability",
+            anchor="rich-projection",
+            content="Keep the retry window bounded",
+            tags="Reliability, runtime/retry, reliability",
+            context="Edge path",
+        ),
+    )
+
+    hits = find_module.find(
+        tmp_path,
+        query="",
+        scope="kb-only",
+        mode="keyword",
+        result_level="unit",
+        filters={
+            "$and": [
+                {"unit.tags": {"$contains": "runtime/retry"}},
+                {"unit.context": {"$eq": "Edge path"}},
+            ]
+        },
+        limit=10,
+    )
+
+    assert len(hits) == 1
+    hit = hits[0]
+    payload = hit.as_dict()
+    assert payload["tags"] == ["reliability", "runtime/retry"]
+    assert payload["context"] == "Edge path"
+
+    exact = commands.op_read_memory(
+        tmp_path,
+        path.relative_to(tmp_path).as_posix(),
+        unit_ref=payload["unit_ref"],
+    )
+    assert exact["status"] == "found"
+    assert exact["unit"]["tags"] == ["reliability", "runtime/retry"]
+    assert exact["unit"]["context"] == "Edge path"
+
+    lexical = lexstore.search_semantic_units(
+        tmp_path,
+        "retry window",
+        k=10,
+        scope="kb",
+    )
+    assert lexical is not None
+    record = next(item for item in lexical if item.unit_ref == payload["unit_ref"])
+    assert record.tags == ("reliability", "runtime/retry")
+    assert record.context == "Edge path"
+
+    pack = context_pack.assemble_pack(tmp_path, [hit])
+    packed = pack["semantic_units"][payload["parent_path"]]["units"][0]
+    assert packed["tags"] == ["reliability", "runtime/retry"]
+    assert packed["context"] == "Edge path"
 
 
 def test_empty_query_category_lookup_returns_independent_units(tmp_path: Path) -> None:

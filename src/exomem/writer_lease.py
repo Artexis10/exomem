@@ -85,6 +85,9 @@ _ACTIVE_MUTATION_TRACE: ContextVar[tuple[str, str, str] | None] = ContextVar(
 _ACTIVE_MUTATION_COMMITTED: ContextVar[bool] = ContextVar(
     "exomem_active_mutation_committed", default=False
 )
+_ACTIVE_LEASE_MANAGER: ContextVar[Any | None] = ContextVar(
+    "exomem_active_lease_manager", default=None
+)
 
 
 def _log_mutation_event(phase: str, *, level: int = logging.INFO, **fields: Any) -> None:
@@ -797,7 +800,7 @@ def _read_bypasses_consistency_guard(command: Any, kwargs: Mapping[str, Any]) ->
         return kwargs.get("mode") == "audit"
     if command.name == "maintain_memory":
         return kwargs.get("mode", "audit") == "audit"
-    if command.name == "remember":
+    if command.name in {"remember", "replace_memory"}:
         return kwargs.get("validate_only") is True
     if command.name == "edit_memory":
         if kwargs.get("validate_only") is True:
@@ -858,7 +861,7 @@ class LeaseManager:
         *,
         client: LeaseCoordinatorClient | None = None,
         clock=time.time,  # noqa: ANN001
-        mutation_timeout_seconds: float = 5.0,
+        mutation_timeout_seconds: float | None = None,
         mutation_poll_interval_seconds: float = 0.025,
         idempotency_wait_seconds: float = _IDEMPOTENCY_WAIT_SECONDS,
         after_terminal_persisted=None,  # noqa: ANN001
@@ -883,7 +886,11 @@ class LeaseManager:
         self._lock = threading.RLock()
         self._stop = threading.Event()
         self._renewer: threading.Thread | None = None
-        self._mutation_timeout_seconds = mutation_timeout_seconds
+        self._mutation_timeout_seconds = (
+            config.mutation_timeout_seconds
+            if mutation_timeout_seconds is None
+            else mutation_timeout_seconds
+        )
         self._mutation_poll_interval_seconds = mutation_poll_interval_seconds
 
     def ensure_writer(self) -> LeaseRecord:
@@ -941,15 +948,21 @@ class LeaseManager:
             operation=operation,
             holder_kind=holder_kind,
         ) as mutation:
-            fence_context: Token[tuple[Any, int] | None] | None = None
-            if self.config.enabled:
-                lease = self.ensure_writer()
-                fence_context = _ACTIVE_WRITE_FENCE.set((self, lease.fencing_token))
-            try:
+            with self.writer_authority_guard():
                 yield mutation
-            finally:
-                if fence_context is not None:
-                    _ACTIVE_WRITE_FENCE.reset(fence_context)
+
+    @contextmanager
+    def writer_authority_guard(self) -> Iterator[None]:
+        """Revalidate writer authority without holding the vault mutation lock."""
+        fence_context: Token[tuple[Any, int] | None] | None = None
+        if self.config.enabled:
+            lease = self.ensure_writer()
+            fence_context = _ACTIVE_WRITE_FENCE.set((self, lease.fencing_token))
+        try:
+            yield
+        finally:
+            if fence_context is not None:
+                _ACTIVE_WRITE_FENCE.reset(fence_context)
 
     def invoke(
         self,
@@ -1007,6 +1020,7 @@ class LeaseManager:
                 (request_id, command.name, receipt or "none")
             )
             commit_token = _ACTIVE_MUTATION_COMMITTED.set(False)
+            manager_token = _ACTIVE_LEASE_MANAGER.set(self)
             try:
                 leaf_result = command.leaf(*injected, **kwargs)
                 if _ACTIVE_MUTATION_COMMITTED.get():
@@ -1026,9 +1040,14 @@ class LeaseManager:
                 raise
             finally:
                 commit_state["observed"] = _ACTIVE_MUTATION_COMMITTED.get()
+                _ACTIVE_LEASE_MANAGER.reset(manager_token)
                 _ACTIVE_MUTATION_COMMITTED.reset(commit_token)
                 _ACTIVE_MUTATION_TRACE.reset(trace_token)
 
+        narrow_media_commit = (
+            command.name == "process_media"
+            and kwargs.get("operation", "process") in {"process", "retry"}
+        )
         try:
             result = self.idempotency.run(
                 key,
@@ -1036,11 +1055,15 @@ class LeaseManager:
                 invoke_leaf,
                 expires_after=expires_after,
                 on_replay=on_replay,
-                operation_guard=lambda: self.mutation_guard(
-                    mutation_subject,
-                    request_id=request_id,
-                    operation=command.name,
-                    holder_kind="command",
+                operation_guard=(
+                    self.writer_authority_guard
+                    if narrow_media_commit
+                    else lambda: self.mutation_guard(
+                        mutation_subject,
+                        request_id=request_id,
+                        operation=command.name,
+                        holder_kind="command",
+                    )
                 ),
                 commit_observed=lambda: commit_state["observed"],
             )
@@ -1106,17 +1129,28 @@ class LeaseManager:
             "Retry the mutation on the current writer.",
         )
 
-    def status(self) -> dict[str, Any]:
+    def status(
+        self, vault_or_cell: os.PathLike[str] | str | None = None
+    ) -> dict[str, Any]:
+        mutation_boundary = (
+            VaultMutationCoordinator(
+                self.config.state_dir,
+                vault_or_cell,
+                timeout_seconds=self._mutation_timeout_seconds,
+                poll_interval_seconds=self._mutation_poll_interval_seconds,
+            ).snapshot()
+            if vault_or_cell is not None
+            else active_mutation_snapshot()
+        )
         base = {
             "enabled": self.config.enabled,
             "role": "standalone" if not self.config.enabled else "unknown",
-            "vault_id": self.config.vault_id,
             "replica_id": self.config.replica_id,
             "holder": None,
             "expires_at": None,
             "fencing_token": None,
             "coordinator_healthy": True if not self.config.enabled else False,
-            "mutation_boundary": active_mutation_snapshot(),
+            "mutation_boundary": mutation_boundary,
         }
         if not self.config.enabled:
             return base
@@ -1224,6 +1258,18 @@ def get_manager() -> LeaseManager:
         return manager
 
 
+def active_manager() -> LeaseManager:
+    """Return the manager owning this invocation, or the configured default."""
+    manager = _ACTIVE_LEASE_MANAGER.get()
+    return manager if manager is not None else get_manager()
+
+
+def active_mutation_request_id() -> str | None:
+    """Return the current content-free request identity for commit attribution."""
+    trace = _ACTIVE_MUTATION_TRACE.get()
+    return trace[0] if trace is not None else None
+
+
 def invoke_command(
     command: Any,
     *injected: Any,
@@ -1254,8 +1300,10 @@ def invoke_command(
     )
 
 
-def coordination_status() -> dict[str, Any]:
-    return get_manager().status()
+def coordination_status(
+    vault_or_cell: os.PathLike[str] | str | None = None,
+) -> dict[str, Any]:
+    return get_manager().status(vault_or_cell)
 
 
 def start_server_lifecycle() -> LeaseManager:

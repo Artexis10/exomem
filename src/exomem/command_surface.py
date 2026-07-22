@@ -234,6 +234,8 @@ def bind_vault(
             except Exception as error:
                 from . import cli_ops
 
+                if isinstance(error, cli_ops.OpError):
+                    return cli_ops.envelope(False, error=error.as_public_dict())
                 semantic_error = cli_ops.semantic_validation_error_dict(error)
                 if semantic_error is None:
                     raise

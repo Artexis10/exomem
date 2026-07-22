@@ -264,6 +264,280 @@ def test_revalidates_binary_before_no_write_terminal_paths(
     assert _job_count(vault) == jobs_before
 
 
+def test_passed_commit_guard_revalidates_planned_binary_before_mutation(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from contextlib import contextmanager
+
+    media_processing = _media_processing()
+    binary = _drop_media(vault, "guarded-plan-drift.m4a")
+    sidecar = binary.with_name(binary.name + ".md")
+    entered = False
+
+    @contextmanager
+    def commit_guard():
+        nonlocal entered
+        entered = True
+        binary.write_bytes(b"replacement after provenance planning")
+        yield
+
+    with pytest.raises(media_processing.MediaProcessingError) as raised:
+        media_processing.reconcile_media(
+            vault,
+            binary,
+            commit_guard=commit_guard,
+        )
+
+    assert entered is True
+    assert raised.value.code == "MEDIA_CHANGED_DURING_RECONCILIATION"
+    assert not sidecar.exists()
+    assert not media_jobs.job_store_path(vault).exists()
+
+
+def test_passed_commit_guard_revalidates_access_policy_before_mutation(
+    vault: Path,
+) -> None:
+    from contextlib import contextmanager
+
+    media_processing = _media_processing()
+    binary = _drop_media(vault, "guarded-policy-drift.m4a")
+    sidecar = binary.with_name(binary.name + ".md")
+
+    @contextmanager
+    def commit_guard():
+        (vault / "Knowledge Base" / "_access.yaml").write_text(
+            "readonly:\n  - Evidence/Audio\n",
+            encoding="utf-8",
+        )
+        yield
+
+    with pytest.raises(media_processing.MediaProcessingError) as raised:
+        media_processing.reconcile_media(
+            vault,
+            binary,
+            commit_guard=commit_guard,
+        )
+
+    assert raised.value.code == "MEDIA_PATH_ACCESS_DENIED"
+    assert not sidecar.exists()
+    assert not media_jobs.job_store_path(vault).exists()
+
+
+def test_background_commit_fans_out_derived_indexes_after_guard_release(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from contextlib import contextmanager
+
+    from exomem import index_sync
+
+    media_processing = _media_processing()
+    binary = _drop_media(vault, "guarded-fanout.m4a")
+    depth = 0
+    fanout_depths: list[int] = []
+
+    @contextmanager
+    def commit_guard():
+        nonlocal depth
+        depth += 1
+        try:
+            yield
+        finally:
+            depth -= 1
+
+    def observe_fanout(*_args, **_kwargs):
+        fanout_depths.append(depth)
+        return True
+
+    monkeypatch.setattr(index_sync, "upsert_after_write", observe_fanout)
+
+    result = media_processing.reconcile_media(
+        vault,
+        binary,
+        commit_guard=commit_guard,
+    )
+
+    assert result is not None
+    assert fanout_depths == [0]
+
+
+def test_runtime_unavailable_background_commit_fans_out_once_after_guard_release(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from contextlib import contextmanager
+
+    from exomem import index_sync
+
+    media_processing = _media_processing()
+    binary = _drop_media(vault, "guarded-unavailable-fanout.m4a")
+    media_processing.set_media_runtime_unavailable(
+        vault,
+        reason="ExtractionUnavailable: runtime absent",
+        next_action="install the media runtime",
+    )
+    depth = 0
+    fanout_depths: list[int] = []
+
+    @contextmanager
+    def commit_guard():
+        nonlocal depth
+        depth += 1
+        try:
+            yield
+        finally:
+            depth -= 1
+
+    def observe_fanout(*_args, **_kwargs):
+        fanout_depths.append(depth)
+        return True
+
+    monkeypatch.setattr(index_sync, "upsert_after_write", observe_fanout)
+
+    result = media_processing.reconcile_media(
+        vault,
+        binary,
+        explicit=False,
+        commit_guard=commit_guard,
+    )
+
+    assert result is not None
+    assert result.state == media_jobs.BLOCKED
+    assert fanout_depths == [0]
+
+
+def test_post_write_enqueue_failure_still_fans_out_after_guard_release(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from contextlib import contextmanager
+
+    from exomem import index_sync
+
+    media_processing = _media_processing()
+    binary = _drop_media(vault, "guarded-enqueue-failure.m4a")
+    sidecar = binary.with_name(binary.name + ".md")
+    depth = 0
+    fanout_depths: list[int] = []
+
+    @contextmanager
+    def commit_guard():
+        nonlocal depth
+        depth += 1
+        try:
+            yield
+        finally:
+            depth -= 1
+
+    monkeypatch.setattr(
+        index_sync,
+        "upsert_after_write",
+        lambda *_args, **_kwargs: fanout_depths.append(depth) or True,
+    )
+    monkeypatch.setattr(
+        media_jobs.MediaJobStore,
+        "enqueue",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("ledger down")),
+    )
+
+    with pytest.raises(RuntimeError, match="ledger down"):
+        media_processing.reconcile_media(
+            vault,
+            binary,
+            explicit=False,
+            commit_guard=commit_guard,
+        )
+
+    assert sidecar.exists()
+    assert fanout_depths == [0]
+
+
+def test_mark_processing_unavailable_commits_each_sidecar_before_fanout(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from contextlib import contextmanager
+
+    from exomem import index_sync
+
+    media_processing = _media_processing()
+    binary = _drop_media(vault, "startup-pending.m4a")
+    initial = media_processing.reconcile_media(vault, binary)
+    depth = 0
+    fanout_depths: list[int] = []
+
+    @contextmanager
+    def commit_guard():
+        nonlocal depth
+        depth += 1
+        try:
+            yield
+        finally:
+            depth -= 1
+
+    monkeypatch.setattr(
+        index_sync,
+        "upsert_after_write",
+        lambda *_args, **_kwargs: fanout_depths.append(depth) or True,
+    )
+
+    changed = media_processing.mark_processing_unavailable(
+        vault,
+        reason="MediaRuntimeUnavailable: startup failed",
+        next_action="fix the runtime and restart",
+        commit_guard=commit_guard,
+    )
+
+    assert changed == 1
+    assert fanout_depths == [0]
+    assert "processing_state: blocked" in initial.sidecar_path.read_text(
+        encoding="utf-8"
+    )
+
+
+def test_background_batch_rechecks_access_policy_changed_during_staging(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from contextlib import contextmanager
+
+    from exomem import vault as vault_module
+
+    media_processing = _media_processing()
+    binary = _drop_media(vault, "staging-policy-race.m4a")
+    sidecar = binary.with_name(binary.name + ".md")
+    original_create = vault_module._BatchWorkspace.create_artifact
+    changed = False
+
+    def create_then_protect(self, name, content):  # noqa: ANN001
+        nonlocal changed
+        artifact = original_create(self, name, content)
+        if not changed and name.startswith("stage-"):
+            changed = True
+            (vault / "Knowledge Base" / "_access.yaml").write_text(
+                "readonly:\n  - Evidence/Audio\n",
+                encoding="utf-8",
+            )
+        return artifact
+
+    @contextmanager
+    def commit_guard():
+        yield
+
+    monkeypatch.setattr(
+        vault_module._BatchWorkspace,
+        "create_artifact",
+        create_then_protect,
+    )
+
+    with pytest.raises(ValueError, match="WRITE_REFUSED"):
+        media_processing.reconcile_media(
+            vault,
+            binary,
+            explicit=False,
+            commit_guard=commit_guard,
+        )
+
+    assert changed is True
+    assert not sidecar.exists()
+    assert not media_jobs.job_store_path(vault).exists()
+
+
 def test_binary_verification_uses_open_handle_identity_on_windows_like_stat_disagreement(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -955,12 +1229,23 @@ def test_process_media_product_leaf_reconciles_and_retries_all_without_asr_wait(
     monkeypatch.setattr(
         media_processing,
         "reconcile_all_media",
-        lambda vault_root, *, limit: calls.append(("reconcile", limit)) or 3,
+        lambda vault_root, *, limit, reconcile_one, propagate_transient_errors: calls.append(
+            (
+                "reconcile",
+                limit,
+                callable(reconcile_one),
+                propagate_transient_errors,
+            )
+        )
+        or 3,
     )
     monkeypatch.setattr(
         media_processing,
         "retry_all_media",
-        lambda vault_root, *, limit: calls.append(("retry", limit)) or 2,
+        lambda vault_root, *, limit, commit_guard, propagate_transient_errors: calls.append(
+            ("retry", limit, callable(commit_guard), propagate_transient_errors)
+        )
+        or 2,
     )
 
     processed = commands_module.op_process_media(vault, operation="process")
@@ -979,8 +1264,8 @@ def test_process_media_product_leaf_reconciles_and_retries_all_without_asr_wait(
         "index_refresh_remaining": 0,
     }
     assert calls == [
-        ("reconcile", media_processing.DEFAULT_RECONCILE_LIMIT),
-        ("retry", media_jobs.STATUS_JOB_LIMIT),
+        ("reconcile", media_processing.DEFAULT_RECONCILE_LIMIT, True, True),
+        ("retry", media_jobs.STATUS_JOB_LIMIT, True, True),
     ]
 
 

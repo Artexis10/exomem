@@ -294,6 +294,14 @@ following their remediation: wait before retrying a busy call; retry a pending
 call only with the same identity; do not submit a new identity after a
 committed-uncertain result—reconcile and retry only as instructed.
 
+On MCP these expected refusals arrive as normal tool content with top-level
+`success: false`; inspect the structured `error` rather than treating it as a
+transport failure. A `receipt_id` is diagnostic and is not a transferable
+cross-session replay key. `coordination_status` probes this vault's local OS
+mutation boundary: `verified: true` binds the safe holder fields to the current
+lock generation, while `verified: false` means the external holder is real but
+cannot be safely attributed. Never infer vault content or identity from status.
+
 ## Canonical Operations
 Product commands are the public interface. The operations below are canonical
 implementation leaves: product commands route here so filenames, folders,
@@ -543,6 +551,13 @@ instead of brittle whole-page string surgery. Update/remove must echo the parent
 `content_hash` and current unit fingerprint. Compact units cannot carry typed unit
 relations: select rich form or author one reviewed note-level relation under
 `## Relations`.
+
+For a rich unit without explicit `- category:`, the heading supplies
+`category_raw` and the normalized `category_key` before reviewed category-alias
+resolution; without an applicable alias, the resolved category falls back to
+the governed kind. Rich comma-separated `tags` (without `#`) and single-line
+`context` are first-class retrieval fields. Category, kind, tags, context, and
+authored relations remain separate axes.
 
 Recall semantic language through `result_level="page"|"unit"|"mixed"`.
 `categories` and `kinds` are convenience filters; use bounded `filters` for

@@ -67,7 +67,7 @@ from .kbdir import kb_dirname
 log = logging.getLogger(__name__)
 
 _NAV_BASENAMES = frozenset({"index.md", "log.md"})
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 _PROBE_RESULT: bool | None = None
 _PROBE_LOCK = threading.Lock()

@@ -278,6 +278,80 @@ Override category.
     ]
 
 
+def test_rich_tags_and_context_are_normalized_first_class_fields() -> None:
+    markdown = (
+        "## Decision\n"
+        "- category: Runtime Reliability\n"
+        "- tags: Reliability, ＲＵＮＴＩＭＥ/Retry, reliability\n"
+        "- context:   Edge path   \n"
+        "- relations: mitigates: [[Retry Storm]]\n\n"
+        "Keep retry windows bounded.\n"
+    )
+
+    document = parse_semantic_units(markdown, path="decision.md")
+
+    assert document.errors == ()
+    unit = document.units[0]
+    assert unit.kind == "decision"
+    assert (unit.category_raw, unit.category_key, unit.category) == (
+        "Runtime Reliability",
+        "runtime_reliability",
+        "runtime_reliability",
+    )
+    assert unit.tags == ("reliability", "runtime/retry")
+    assert unit.context == "Edge path"
+    assert dict(unit.metadata) == {
+        "category": "Runtime Reliability",
+        "tags": "Reliability, ＲＵＮＴＩＭＥ/Retry, reliability",
+        "context": "Edge path",
+        "relations": "mitigates: [[Retry Storm]]",
+    }
+    assert [(relation.kind, relation.target) for relation in unit.relations] == [
+        ("mitigates", "[[Retry Storm]]")
+    ]
+
+
+@pytest.mark.parametrize(
+    ("metadata", "code", "tags", "context"),
+    [
+        ("- tags: valid, , later", "invalid_rich_tags", (), "Valid context"),
+        ("- tags: #prefixed", "invalid_rich_tags", (), "Valid context"),
+        (f"- tags: {'x' * 65}", "invalid_rich_tags", (), "Valid context"),
+        ("- tags: trailing/", "invalid_rich_tags", (), "Valid context"),
+        ("- tags: doubled//path", "invalid_rich_tags", (), "Valid context"),
+        ("- tags: bad!tag", "invalid_rich_tags", (), "Valid context"),
+        ("- context:   ", "invalid_rich_context", ("valid",), None),
+    ],
+)
+def test_invalid_rich_tag_or_context_field_is_not_partially_projected(
+    metadata: str,
+    code: str,
+    tags: tuple[str, ...],
+    context: str | None,
+) -> None:
+    valid_other_field = (
+        "- context: Valid context"
+        if code == "invalid_rich_tags"
+        else "- tags: valid"
+    )
+    markdown = (
+        f"## Finding\n{metadata}\n{valid_other_field}\n- status: active\n\n"
+        "Keep the finding.\n"
+    )
+
+    document = parse_semantic_units(markdown, path="finding.md")
+
+    assert len(document.units) == 1
+    unit = document.units[0]
+    assert unit.tags == tags
+    assert unit.context == context
+    metadata_key = "tags" if code == "invalid_rich_tags" else "context"
+    assert metadata_key in unit.metadata
+    assert [(error.code, error.line, error.raw) for error in document.errors] == [
+        (code, 2, metadata)
+    ]
+
+
 def test_invalid_rich_category_reports_without_losing_legacy_block() -> None:
     markdown = "## Decision\n- category: invalid/category\n\nKeep the decision.\n"
 

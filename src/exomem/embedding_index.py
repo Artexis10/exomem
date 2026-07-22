@@ -23,7 +23,7 @@ from .vector_index_common import vec_gate
 log = logging.getLogger(__name__)
 
 VECTOR_DIM = 768
-SEMANTIC_UNIT_SCHEMA_VERSION = 2
+SEMANTIC_UNIT_SCHEMA_VERSION = 3
 
 # --------------------------------------------------------------- generation meta
 #
