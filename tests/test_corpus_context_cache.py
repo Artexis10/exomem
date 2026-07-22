@@ -154,6 +154,30 @@ def test_live_event_patch_makes_hot_reads_census_free(
     assert second.pages[_PAGE_REL].title == "Event patched"
 
 
+def test_non_markdown_event_does_not_evict_or_corrupt_warm_context(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    first = semantic_contract.build_corpus_context(vault)
+    freshness.seed(
+        vault,
+        "vault",
+        ((str(path), freshness.stat_signature(path)) for path in vault.rglob("*.md")),
+    )
+    assert semantic_contract.build_corpus_context(vault) is first
+    schema = vault / "Knowledge Base" / "_Schema"
+    schema.mkdir(parents=True, exist_ok=True)
+    manifest = schema / "semantic-activation.yaml"
+    manifest.write_text("schema_version: 1\ncontract_version: 1\npages: []\n", encoding="utf-8")
+
+    semantic_contract.publish_corpus_files_changed(vault, changed=(manifest,))
+
+    def fail_census(*args, **kwargs):
+        raise AssertionError("an unrelated non-Markdown event must keep the context warm")
+
+    monkeypatch.setattr(semantic_contract, "_corpus_census", fail_census)
+    assert semantic_contract.build_corpus_context(vault) is first
+
+
 def test_writer_preflight_self_heals_exact_page_before_delayed_event(vault: Path) -> None:
     semantic_contract.build_corpus_context(vault)
     freshness.seed(

@@ -1395,10 +1395,24 @@ def _patch_corpus_files_changed_locked(
             return None
 
     changed_paths = tuple(
-        sorted({rel for value in changed if (rel := relative(value)) is not None})
+        sorted(
+            {
+                rel
+                for value in changed
+                if (rel := relative(value)) is not None
+                and PurePosixPath(rel).suffix.casefold() == ".md"
+            }
+        )
     )
     deleted_paths = tuple(
-        sorted({rel for value in deleted if (rel := relative(value)) is not None})
+        sorted(
+            {
+                rel
+                for value in deleted
+                if (rel := relative(value)) is not None
+                and PurePosixPath(rel).suffix.casefold() == ".md"
+            }
+        )
     )
     reconcile_paths = tuple(sorted(set(changed_paths) | set(deleted_paths)))
     if not reconcile_paths:
