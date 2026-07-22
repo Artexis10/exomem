@@ -46,22 +46,32 @@ def _module_available(name: str) -> bool:
         return False
 
 
-def _configure_local_search_capabilities(action: str | None) -> None:
+def _configure_local_search_capabilities(action: str | None) -> tuple[str, ...]:
     """Keep lean direct CLI retrieval on its intentionally installed lanes.
 
     The managed service can carry model/media extras while PATH-visible uv-tool
     commands stay lean. A local ``ask``/legacy ``find`` must not import missing
-    model stacks merely to discover that BM25 is its available backend.
+    model stacks merely to discover that BM25 is its available backend. Return
+    only the fallback variables introduced for this invocation so callers can
+    restore the surrounding process environment without touching explicit user
+    configuration.
     """
     if action not in {"ask", "ask_memory"}:
-        return
+        return ()
     model_stack_available = _module_available("torch") and _module_available(
         "sentence_transformers"
     )
+    introduced: list[str] = []
     if not model_stack_available:
-        os.environ.setdefault("EXOMEM_DISABLE_EMBEDDINGS", "1")
-        os.environ.setdefault("EXOMEM_DISABLE_RANKING", "1")
-        os.environ.setdefault("EXOMEM_DISABLE_CLIP", "1")
+        for name in (
+            "EXOMEM_DISABLE_EMBEDDINGS",
+            "EXOMEM_DISABLE_RANKING",
+            "EXOMEM_DISABLE_CLIP",
+        ):
+            if name not in os.environ:
+                os.environ[name] = "1"
+                introduced.append(name)
+    return tuple(introduced)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -77,7 +87,15 @@ def main(argv: list[str] | None = None) -> int:
         # `find` was the original friendly retrieval command.  Keep existing
         # scripts useful while the current product language calls it `ask`.
         raw[0] = "ask"
-    _configure_local_search_capabilities(raw[0] if raw else None)
+    introduced = _configure_local_search_capabilities(raw[0] if raw else None)
+    try:
+        return _dispatch_main(raw)
+    finally:
+        for name in introduced:
+            os.environ.pop(name, None)
+
+
+def _dispatch_main(raw: list[str]) -> int:
     if raw and raw[0] == "hosted":
         from .hosted_operator import main as hosted_operator_main
 

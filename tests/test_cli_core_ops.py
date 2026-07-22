@@ -739,9 +739,9 @@ def test_legacy_find_lean_cli_skips_missing_model_lanes_without_warnings(
 
     assert code == 0, err
     assert json.loads(out.strip().splitlines()[-1])["data"]
-    assert os.environ["EXOMEM_DISABLE_EMBEDDINGS"] == "1"
-    assert os.environ["EXOMEM_DISABLE_RANKING"] == "1"
-    assert os.environ["EXOMEM_DISABLE_CLIP"] == "1"
+    assert "EXOMEM_DISABLE_EMBEDDINGS" not in os.environ
+    assert "EXOMEM_DISABLE_RANKING" not in os.environ
+    assert "EXOMEM_DISABLE_CLIP" not in os.environ
     diagnostics = "\n".join(record.getMessage() for record in caplog.records)
     assert "No module named 'torch'" not in diagnostics
     assert "sentence-transformers not installed" not in diagnostics
