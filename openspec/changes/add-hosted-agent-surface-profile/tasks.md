@@ -13,4 +13,9 @@
 - [x] 3.1 Add failing tests that extract callable references from compact, full, and diagnostics bootstrap payloads and require every reference to belong to the active profile.
 - [x] 3.2 Add failing authenticated ASGI tests for the profile contract/command routes, allowed dispatch, excluded-command rejection before invocation, exact bootstrap descriptor binding, and unchanged legacy routes.
 - [x] 3.3 Implement the additive private agent routes by sharing existing auth, coercion, admission, idempotency, and error-envelope behavior; preserve useful filtered bootstrap guidance.
-- [ ] 3.4 Run focused tests, the platform-neutral lean suite, Ruff, strict OpenSpec validation, and an independent review; document the pre-existing Windows-only hosted-route baseline separately.
+- [x] 3.4 Run focused tests, the platform-neutral lean suite, Ruff, strict OpenSpec validation, and an independent review; document the pre-existing Windows-only hosted-route baseline separately.
+  - Focused Hosted/registry/bootstrap/MCP suite: 71 passed on the rebased branch; frozen route/security regression: 10 passed.
+  - Linux-native frozen lean run: 4,721 passed and 62 skipped. Its three unrelated failures were qualified against untouched `origin/main`: two transfer tests pass in isolation on both revisions and expire only after the suite exceeds their module-level five-minute grant fixture; one macOS installer test fails identically under WSL's injected Windows `PATH` and passes with a native Linux `PATH`.
+  - Changed-file Ruff, compileall, diff check, lock check, and strict OpenSpec validation passed.
+  - Independent verifier reported no remaining code findings after the broad-mutation denial regression covered both `edit_memory` and `replace_memory` while active and quiesced.
+  - The broader Windows baseline remains unsuitable as a green gate because pre-existing POSIX ownership/mode assumptions, invalid-byte filename collection, and missing `fcntl` fail outside this diff.
