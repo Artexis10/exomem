@@ -28,6 +28,7 @@ class ExportWorkflow:
         self.repository = repository
         self.calls = 0
         self.delay = 0.0
+        self.release: asyncio.Event | None = None
         self.error: Exception | None = None
         self.last_run_id = ""
 
@@ -35,7 +36,10 @@ class ExportWorkflow:
         assert expires_at is not None
         self.last_run_id = run.id
         self.calls += 1
-        await asyncio.sleep(self.delay)
+        if self.release is None:
+            await asyncio.sleep(self.delay)
+        else:
+            await self.release.wait()
         if self.error is not None:
             raise self.error
         result = ExportBackupResult(
@@ -147,7 +151,7 @@ async def driver_context(tmp_path: Path):
     repository = DurabilityRepository(
         database.session_factory,
         codec=AesGcmEnvelopeCodec.from_secret(settings.envelope_key.get_secret_value()),
-        lease_seconds=0.15,
+        lease_seconds=3,
     )
     export = ExportWorkflow(repository)
     restore = RestoreWorkflow(repository)
@@ -197,11 +201,39 @@ async def test_completed_export_replays_encrypted_result_without_a_second_effect
 
 
 @pytest.mark.asyncio
-async def test_driver_renews_durability_claim_during_long_workflow(driver_context) -> None:
+async def test_driver_renews_durability_claim_during_long_workflow(
+    driver_context,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     driver, export, _ = driver_context
-    export.delay = 0.25
+    renewed_repeatedly = asyncio.Event()
+    release = asyncio.Event()
+    real_renew_claim = export.repository.renew_claim
+    renewal_count = 0
 
-    result = await driver.execute("export", _export_request(), _context())
+    async def observed_renew_claim(*args, **kwargs):
+        nonlocal renewal_count
+        snapshot = await real_renew_claim(*args, **kwargs)
+        renewal_count += 1
+        if renewal_count >= 4:
+            renewed_repeatedly.set()
+        return snapshot
+
+    monkeypatch.setattr(export.repository, "renew_claim", observed_renew_claim)
+    export.release = release
+
+    running = asyncio.create_task(driver.execute("export", _export_request(), _context()))
+    try:
+        # Four one-second heartbeat intervals carry the workflow beyond its
+        # original three-second lease and prove renewal remains continuous.
+        await asyncio.wait_for(renewed_repeatedly.wait(), timeout=15)
+        release.set()
+        result = await asyncio.wait_for(running, timeout=10)
+    finally:
+        release.set()
+        if not running.done():
+            running.cancel()
+        await asyncio.gather(running, return_exceptions=True)
 
     assert isinstance(result, DriverFinal)
     assert export.calls == 1
