@@ -719,6 +719,14 @@ def register_hosted_routes(
         protocol_version=config.protocol_version,
         expose_tier2=expose_tier2,
     )
+    agent_profile = commands_module.HOSTED_ALPHA_AGENT_PROFILE
+    agent_commands = commands_module.product_commands_for_profile(agent_profile, "rest")
+    agent_commands_by_name = {command.name: command for command in agent_commands}
+    agent_surface_descriptor = gateway.hosted_agent_surface_descriptor(agent_profile)
+    agent_contract = gateway.build_agent_gateway_contract(
+        profile=agent_profile,
+        protocol_version=config.protocol_version,
+    )
     invoke = invoke_command_func
     if invoke is None:
         from .writer_lease import invoke_command
@@ -771,6 +779,43 @@ def register_hosted_routes(
         )
         return Response(
             gateway.canonical_contract_json(contract),
+            media_type="application/json",
+        )
+
+    @mcp_app.custom_route(
+        "/private/exomem/v1/agent/{surface_profile}/contract",
+        methods=["GET"],
+    )
+    async def _agent_contract(request: Request) -> Response:
+        started = time.perf_counter()
+        context: gateway.TrustedGatewayContext | None = None
+        try:
+            context = _trusted_context(request, config, private_authenticator)
+            surface_profile = str(request.path_params.get("surface_profile", ""))
+            if surface_profile != agent_profile:
+                raise gateway.HostedGatewayError(
+                    "HOSTED_SURFACE_PROFILE_UNSUPPORTED",
+                    "hosted agent surface profile is not supported",
+                )
+        except gateway.HostedGatewayError as exc:
+            return _error_response(
+                exc.code,
+                config=config,
+                operation="agent-contract",
+                request_id=context.request_id if context else None,
+                started=started,
+            )
+        assert context is not None
+        _trace(
+            config=config,
+            operation="agent-contract",
+            request_id=context.request_id,
+            outcome="success",
+            code="OK",
+            started=started,
+        )
+        return Response(
+            gateway.canonical_contract_json(agent_contract),
             media_type="application/json",
         )
 
@@ -830,8 +875,12 @@ def register_hosted_routes(
             started=started,
         )
 
-    @mcp_app.custom_route("/private/exomem/v1/command/{command_name}", methods=["POST"])
-    async def _command(request: Request) -> HostedJSONResponse:
+    async def _execute_command(
+        request: Request,
+        *,
+        command_map: Mapping[str, commands_module.Command],
+        descriptor: capabilities.ActiveSurfaceDescriptor,
+    ) -> HostedJSONResponse:
         started = time.perf_counter()
         operation = "command"
         context: gateway.TrustedGatewayContext | None = None
@@ -839,7 +888,7 @@ def register_hosted_routes(
             context = _trusted_context(request, config, private_authenticator)
             body = await _json_body(request)
             command_name = str(request.path_params.get("command_name", ""))
-            command = by_name.get(command_name)
+            command = command_map.get(command_name)
             if command is None:
                 raise cli_ops.OpError("COMMAND_NOT_FOUND", "command is not exposed")
             if command.leaf is commands_module.op_transfer_artifact:
@@ -866,7 +915,7 @@ def register_hosted_routes(
             )
 
             def invoke_admitted() -> Any:
-                with capabilities.active_surface(surface_descriptor):
+                with capabilities.active_surface(descriptor):
                     if commands_module.invocation_is_read_only(command, kwargs):
                         with lifecycle.admit_read():
                             return invoke(
@@ -931,6 +980,45 @@ def register_hosted_routes(
             operation=operation,
             request_id=context.request_id,
             started=started,
+        )
+
+    @mcp_app.custom_route("/private/exomem/v1/command/{command_name}", methods=["POST"])
+    async def _command(request: Request) -> HostedJSONResponse:
+        return await _execute_command(
+            request,
+            command_map=by_name,
+            descriptor=surface_descriptor,
+        )
+
+    @mcp_app.custom_route(
+        "/private/exomem/v1/agent/{surface_profile}/command/{command_name}",
+        methods=["POST"],
+    )
+    async def _agent_command(request: Request) -> HostedJSONResponse:
+        surface_profile = str(request.path_params.get("surface_profile", ""))
+        if surface_profile != agent_profile:
+            started = time.perf_counter()
+            context: gateway.TrustedGatewayContext | None = None
+            try:
+                context = _trusted_context(request, config, private_authenticator)
+            except gateway.HostedGatewayError as exc:
+                return _error_response(
+                    exc.code,
+                    config=config,
+                    operation="agent-command",
+                    started=started,
+                )
+            return _error_response(
+                "HOSTED_SURFACE_PROFILE_UNSUPPORTED",
+                config=config,
+                operation="agent-command",
+                request_id=context.request_id,
+                started=started,
+            )
+        return await _execute_command(
+            request,
+            command_map=agent_commands_by_name,
+            descriptor=agent_surface_descriptor,
         )
 
     async def lifecycle_context(

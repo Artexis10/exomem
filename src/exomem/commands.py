@@ -23,8 +23,10 @@ import inspect
 import json
 import os
 import re
+from dataclasses import dataclass
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
+from types import MappingProxyType
 from typing import Annotated, Any, Literal, NotRequired
 
 from fastmcp.tools import ToolResult
@@ -5911,6 +5913,50 @@ PRODUCT_PUBLIC_NAMES: tuple[str, ...] = tuple(c.name for c in PRODUCT_COMMANDS)
 PRODUCT_ROUTE_HELPERS: frozenset[str] = frozenset({"transfer_token"})
 HAND_REGISTERED_EXCEPTIONS: frozenset[str] = frozenset()
 
+HOSTED_ALPHA_AGENT_PROFILE = "hosted-alpha-agent-v1"
+
+
+@dataclass(frozen=True, slots=True)
+class ProductSurfaceProfile:
+    """One immutable, ordered exposure policy over canonical product commands."""
+
+    name: str
+    command_names: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        names = tuple(self.command_names)
+        if not self.name:
+            raise ValueError("product surface profile name must be non-empty")
+        if not names or any(not isinstance(name, str) or not name for name in names):
+            raise ValueError("product surface profile commands must be non-empty strings")
+        if len(names) != len(set(names)):
+            raise ValueError("product surface profile contains duplicate commands")
+        object.__setattr__(self, "command_names", names)
+
+
+PRODUCT_SURFACE_PROFILES = MappingProxyType(
+    {
+        HOSTED_ALPHA_AGENT_PROFILE: ProductSurfaceProfile(
+            name=HOSTED_ALPHA_AGENT_PROFILE,
+            command_names=(
+                "bootstrap",
+                "ask_memory",
+                "read_memory",
+                "browse_memory",
+                "remember",
+                "observe_memory",
+                "capture_source",
+                "compile_source",
+                "preserve_evidence",
+                "review_memory",
+                "review_item_context",
+                "triage_memory",
+                "connect_memory",
+            ),
+        )
+    }
+)
+
 
 def commands_for(surface: str, *, expose_tier2: bool = True) -> tuple[Command, ...]:
     """Canonical implementation commands exposed by the old primitive registry."""
@@ -5926,6 +5972,32 @@ def product_commands_for(surface: str, *, expose_tier2: bool = True) -> tuple[Co
         for c in PRODUCT_COMMANDS
         if surface in c.surfaces and (expose_tier2 or c.tier == 1)
     )
+
+
+def product_commands_for_profile(
+    profile: str,
+    surface: str,
+) -> tuple[Command, ...]:
+    """Resolve a pinned surface profile to its canonical command objects."""
+
+    definition = PRODUCT_SURFACE_PROFILES.get(profile)
+    if definition is None:
+        raise ValueError(f"unsupported product surface profile: {profile!r}")
+
+    canonical = {command.name: command for command in PRODUCT_COMMANDS}
+    selected: list[Command] = []
+    for name in definition.command_names:
+        command = canonical.get(name)
+        if command is None:
+            raise RuntimeError(
+                f"product surface profile {profile!r} references missing command {name!r}"
+            )
+        if command.tier != 1 or surface not in command.surfaces:
+            raise RuntimeError(
+                f"product surface profile {profile!r} cannot expose {name!r} on {surface!r}"
+            )
+        selected.append(command)
+    return tuple(selected)
 
 
 def validate_product_registry() -> dict:

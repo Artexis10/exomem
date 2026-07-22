@@ -23,6 +23,7 @@ from exomem import (
     find_corpus,
     hosted_portability,
     hosted_runtime,
+    hosted_runtime_temp,
     preserve,
     privacy_log,
     schema,
@@ -586,6 +587,172 @@ def test_hosted_bootstrap_profiles_match_private_command_contract(
             assert {"manage_memory_file", "query_dataset"}.isdisjoint(
                 _hosted_bootstrap_tool_refs(payload)
             )
+
+
+def test_hosted_agent_profile_routes_enforce_contract_and_bootstrap(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        hosted_runtime_temp,
+        "ensure_hosted_runtime_temp",
+        lambda *_args, **_kwargs: tmp_path / "runtime-temp",
+    )
+    monkeypatch.setattr(
+        hosted_runtime_temp,
+        "HostedRuntimeTempAuthority",
+        lambda *_args, **_kwargs: object(),
+    )
+    client, config, lifecycle, invoker = _cell(
+        tmp_path,
+        cell_id="cell-agent-alpha",
+        credential="agent-alpha-private-service-credential-0001",
+    )
+    headers = _headers(config)
+    profile = commands_module.HOSTED_ALPHA_AGENT_PROFILE
+    contract_path = f"/private/exomem/v1/agent/{profile}/contract"
+    command_path = f"/private/exomem/v1/agent/{profile}/command"
+
+    assert client.get(contract_path).status_code == 401
+    assert client.post(f"{command_path}/remember", json=_remember_body("no auth")).status_code == 401
+    contract_response = client.get(contract_path, headers=headers)
+    assert contract_response.status_code == 200, contract_response.text
+    contract = contract_response.json()
+    command_names = tuple(command["name"] for command in contract["commands"])
+    expected = tuple(
+        command.name
+        for command in commands_module.product_commands_for_profile(profile, "rest")
+    )
+    assert command_names == expected
+    assert contract["agent_profile"]["profile"] == profile
+    assert "transfer_grant" not in contract
+
+    legacy = client.get("/private/exomem/v1/contract", headers=headers).json()
+    legacy_names = {command["name"] for command in legacy["commands"]}
+    assert set(expected) < legacy_names
+    assert {"maintain_memory", "adoption_studio", "transfer_artifact"} <= legacy_names
+    assert "agent_profile" not in legacy
+
+    for bootstrap_profile in ("compact", "full", "diagnostics"):
+        response = client.post(
+            f"{command_path}/bootstrap",
+            headers=headers,
+            json={"profile": bootstrap_profile},
+        )
+        assert response.status_code == 200, response.text
+        payload = response.json()["data"]
+        active = payload["active_capabilities"]
+        assert active["profile"] == profile
+        assert active["surface"] == "hosted-agent"
+        assert active["tier2_policy"] == "disabled"
+        assert active["available_product_tools"] == sorted(expected)
+        assert active["active_capability_sha256"] == contract["agent_profile"][
+            "active_capability_sha256"
+        ]
+        assert _hosted_bootstrap_tool_refs(payload) <= set(expected)
+
+    mutation_headers = _headers(
+        config,
+        request_id="de305d54-75b4-431b-adb2-eb6b9e546051",
+        idempotency_key="agent-profile-remember-0001",
+    )
+    remembered = client.post(
+        f"{command_path}/remember",
+        headers=mutation_headers,
+        json=_remember_body("agent profile mutation sentinel"),
+    )
+    replayed = client.post(
+        f"{command_path}/remember",
+        headers=mutation_headers,
+        json=_remember_body("agent profile mutation sentinel"),
+    )
+    assert remembered.status_code == 200, remembered.text
+    assert replayed.status_code == 200, replayed.text
+    assert replayed.json()["data"] == remembered.json()["data"]
+    mutation_calls = [call for call in invoker.calls if call["command"] == "remember"]
+    assert len(mutation_calls) == 2
+    assert all(
+        call["public_idempotency_key"] == "agent-profile-remember-0001"
+        and call["idempotency_key"]
+        and call["request_id"] == "de305d54-75b4-431b-adb2-eb6b9e546051"
+        for call in mutation_calls
+    )
+
+    broad_mutation_bodies = {
+        "edit_memory": {
+            "path": "_Schema/SKILL.md",
+            "why": "must never reach the hosted agent invoker",
+            "operation": {
+                "kind": "replace_text",
+                "old": "governed",
+                "new": "rewritten",
+            },
+        },
+        "replace_memory": {
+            "old_path": "Knowledge Base/_Schema/SKILL.md",
+            "title": "Rewritten governance",
+            "content": "# Rewritten governance\n",
+        },
+    }
+    calls_before_exclusion = len(invoker.calls)
+    for command_name, body in broad_mutation_bodies.items():
+        excluded = client.post(
+            f"{command_path}/{command_name}",
+            headers=headers,
+            json=body,
+        )
+        assert excluded.status_code == 404
+        assert excluded.json()["error"]["code"] == "COMMAND_NOT_FOUND"
+        assert len(invoker.calls) == calls_before_exclusion
+
+    lifecycle.quiesce(timeout=0.1)
+    for command_name, body in broad_mutation_bodies.items():
+        excluded_while_quiesced = client.post(
+            f"{command_path}/{command_name}",
+            headers=headers,
+            json=body,
+        )
+        assert excluded_while_quiesced.status_code == 404
+        assert (
+            excluded_while_quiesced.json()["error"]["code"]
+            == "COMMAND_NOT_FOUND"
+        )
+        assert len(invoker.calls) == calls_before_exclusion
+
+    rejected_while_quiesced = client.post(
+        f"{command_path}/remember",
+        headers=_headers(
+            config,
+            request_id="de305d54-75b4-431b-adb2-eb6b9e546052",
+            idempotency_key="agent-profile-quiesced-0001",
+        ),
+        json=_remember_body("must not pass mutation admission"),
+    )
+    assert rejected_while_quiesced.status_code == 503
+    assert (
+        rejected_while_quiesced.json()["error"]["code"]
+        == "HOSTED_MUTATION_NOT_ADMITTED"
+    )
+    assert len(invoker.calls) == calls_before_exclusion
+
+    unknown = client.get(
+        "/private/exomem/v1/agent/hosted-alpha-agent-v999/contract",
+        headers=headers,
+    )
+    assert unknown.status_code == 400
+    assert unknown.json()["error"]["code"] == "HOSTED_SURFACE_PROFILE_UNSUPPORTED"
+
+    unknown_command = client.post(
+        "/private/exomem/v1/agent/hosted-alpha-agent-v999/command/remember",
+        headers=headers,
+        json=_remember_body("unknown profile"),
+    )
+    assert unknown_command.status_code == 400
+    assert (
+        unknown_command.json()["error"]["code"]
+        == "HOSTED_SURFACE_PROFILE_UNSUPPORTED"
+    )
+    assert len(invoker.calls) == calls_before_exclusion
 
 
 def _remember_body(sentinel: str) -> dict[str, str]:
