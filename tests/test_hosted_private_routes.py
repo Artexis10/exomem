@@ -678,11 +678,8 @@ def test_hosted_agent_profile_routes_enforce_contract_and_bootstrap(
         for call in mutation_calls
     )
 
-    calls_before_exclusion = len(invoker.calls)
-    excluded = client.post(
-        f"{command_path}/edit_memory",
-        headers=headers,
-        json={
+    broad_mutation_bodies = {
+        "edit_memory": {
             "path": "_Schema/SKILL.md",
             "why": "must never reach the hosted agent invoker",
             "operation": {
@@ -691,12 +688,37 @@ def test_hosted_agent_profile_routes_enforce_contract_and_bootstrap(
                 "new": "rewritten",
             },
         },
-    )
-    assert excluded.status_code == 404
-    assert excluded.json()["error"]["code"] == "COMMAND_NOT_FOUND"
-    assert len(invoker.calls) == calls_before_exclusion
+        "replace_memory": {
+            "old_path": "Knowledge Base/_Schema/SKILL.md",
+            "title": "Rewritten governance",
+            "content": "# Rewritten governance\n",
+        },
+    }
+    calls_before_exclusion = len(invoker.calls)
+    for command_name, body in broad_mutation_bodies.items():
+        excluded = client.post(
+            f"{command_path}/{command_name}",
+            headers=headers,
+            json=body,
+        )
+        assert excluded.status_code == 404
+        assert excluded.json()["error"]["code"] == "COMMAND_NOT_FOUND"
+        assert len(invoker.calls) == calls_before_exclusion
 
     lifecycle.quiesce(timeout=0.1)
+    for command_name, body in broad_mutation_bodies.items():
+        excluded_while_quiesced = client.post(
+            f"{command_path}/{command_name}",
+            headers=headers,
+            json=body,
+        )
+        assert excluded_while_quiesced.status_code == 404
+        assert (
+            excluded_while_quiesced.json()["error"]["code"]
+            == "COMMAND_NOT_FOUND"
+        )
+        assert len(invoker.calls) == calls_before_exclusion
+
     rejected_while_quiesced = client.post(
         f"{command_path}/remember",
         headers=_headers(
