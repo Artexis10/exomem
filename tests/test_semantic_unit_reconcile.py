@@ -310,14 +310,14 @@ def test_reconcile_repairs_unit_drift_without_markdown_changes_and_is_idempotent
 def test_move_trash_and_recovery_keep_all_unit_sidecars_on_the_live_parent(
     tmp_path: Path, monkeypatch
 ) -> None:
-    live_rel = "Knowledge Base/Scratch/reconcile-units.md"
+    live_rel = "Knowledge Base/Notes/Insights/reconcile-units.md"
     state = _seed_sidecars(
         tmp_path,
         rel=live_rel,
         page_type="insight",
         status="draft",
     )
-    moved_rel = "Knowledge Base/Scratch/moved-reconcile-units.md"
+    moved_rel = "Knowledge Base/Notes/Insights/moved-reconcile-units.md"
     monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
     monkeypatch.setattr(embeddings, "_IMPORT_FAILED", False)
     monkeypatch.setattr(embeddings, "get_model", lambda: object())

@@ -90,6 +90,9 @@ _OPENAPI_ERROR_SCHEMA = {
         "code": {"type": "string"},
         "message": {"type": "string"},
         "remediation": {"type": ["string", "null"]},
+        "compact_remediation": {"type": "string"},
+        "rich_remediation": {"type": "string"},
+        "findings": {"type": "array", "items": {"type": "object"}},
         "outcome": _OPENAPI_OUTCOME_SCHEMA,
         "ok": {"type": "boolean"},
         "error_code": {"type": "string"},
@@ -109,6 +112,8 @@ _OPENAPI_ERROR_ENVELOPE_SCHEMA = {
     "properties": {
         "success": {"const": False},
         "error": {"$ref": "#/components/schemas/Error"},
+        "validation_state": {"const": "rejected"},
+        "mutated": {"const": False},
     },
     "required": ["success", "error"],
     "additionalProperties": False,
@@ -304,7 +309,21 @@ def register_rest_facade(
                 if prm.required:
                     required.append(prm.name)
             if cmd.name == "edit_memory":
-                properties["operation"] = edit_operations.public_edit_operation_schema()
+                operation_schema = edit_operations.public_edit_operation_schema()
+                operation_help = next(
+                    (
+                        parameter.help
+                        for parameter in cmd.params
+                        if parameter.name == "operation"
+                    ),
+                    "",
+                )
+                if operation_help:
+                    operation_schema = {
+                        **operation_schema,
+                        "description": operation_help,
+                    }
+                properties["operation"] = operation_schema
             request_schema: dict = {"type": "object", "properties": properties}
             if cmd.name == "edit_memory":
                 request_schema["additionalProperties"] = False

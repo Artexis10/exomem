@@ -150,6 +150,27 @@ def test_full_mcp_discovery_surface_matches_packaged_contract(
     )
 
 
+def test_manage_memory_file_schema_exposes_append_review_protocol(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    live = _live_schemas(_build_server(monkeypatch, tmp_path))
+    properties = live["manage_memory_file"]["inputSchema"]["properties"]
+    required = {
+        "validate_only",
+        "semantic_transition_token",
+        "relation_disposition",
+        "relation_review_hash",
+        "relation_review_reason",
+    }
+
+    assert required <= set(properties)
+    assert "create or append" in properties["validate_only"]["description"]
+    assert "append transition token" in properties["semantic_transition_token"][
+        "description"
+    ]
+
+
 def test_remember_discovery_schema_is_vault_invariant(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

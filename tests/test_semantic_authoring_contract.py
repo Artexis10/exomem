@@ -22,7 +22,7 @@ COMPILED_DESTINATIONS = {
 }
 EXPECTED_NORMATIVE_IDENTITY = (
     2,
-    "sha256:75ad5371755db3ebd586f916f6531d030e839be26e44525bf187eba16879ff45",
+    "sha256:b5fd73be05d4d07cf37c941625f8fe5e09a1ae2bc6f9e2db43392583e9eb2d5f",
 )
 
 
@@ -170,6 +170,17 @@ def test_contract_pins_exact_language_applicability_and_findings() -> None:
 
     applicability = contract["minimum_semantic_unit"]
     assert applicability == {
+        "rule": (
+            "Every new, replaced, or activated active compiled note needs at least one "
+            "valid, non-empty semantic unit."
+        ),
+        "form_rule": (
+            "Either compact or rich form satisfies the minimum; compact is preferred, "
+            "and a valid rich unit does not need a duplicate compact restatement."
+        ),
+        "final_unit_rule": (
+            "A post-activation compliant page cannot lose its final valid semantic unit."
+        ),
         "minimum_count": 1,
         "accepted_forms": ["compact", "rich"],
         "compact_preferred": True,
@@ -233,8 +244,9 @@ def test_contract_pins_exact_language_applicability_and_findings() -> None:
         "single_semantic_unit": "observe_memory",
         "small_edit_or_activation": "edit_memory",
         "tier_2": (
-            "manage_memory_file create, overwrite, and append evaluate the complete resulting "
-            "compiled Markdown; prefer remember or replace_memory when their typed route fits."
+            "manage_memory_file create, overwrite, and append receive the same semantic "
+            "precommit contract on the complete resulting compiled Markdown; prefer remember "
+            "or replace_memory when their typed route fits."
         ),
     }
     assert contract["findings"] == {
@@ -410,6 +422,19 @@ def test_concise_and_expanded_renderers_are_byte_stable_and_complete() -> None:
     assert "### Remediation examples" in expanded
     assert "[operating constraint]" in expanded
     assert "## Decision" in expanded
+
+
+def test_public_semantic_language_doc_projects_the_canonical_contract() -> None:
+    source = (
+        Path(__file__).parents[1] / "docs" / "semantic-language.md"
+    ).read_text(encoding="utf-8")
+    start = "<!-- BEGIN GENERATED SEMANTIC AUTHORING CONTRACT -->\n"
+    end = "<!-- END GENERATED SEMANTIC AUTHORING CONTRACT -->"
+
+    assert source.count(start) == 1
+    assert source.count(end) == 1
+    projection = source.split(start, 1)[1].split(end, 1)[0].rstrip()
+    assert projection == semantic_authoring.render_concise().rstrip()
 
 
 def test_contract_is_deeply_immutable_and_as_dict_is_detached() -> None:

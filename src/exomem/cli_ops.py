@@ -10,8 +10,8 @@ door it knocks on:
 `coerce` turns a raw arg mapping (a REST JSON body or CLI strings) into the leaf's
 kwargs using the registry `Param` specs — rejecting unknown params and re-running
 the base64 binary-blob guard on text fields, the same boundary the MCP middleware
-enforces. MCP keeps its own native error path (a raised `ValueError`); this module
-is only for REST + CLI.
+enforces. MCP also uses this envelope for structured semantic-authoring refusals;
+unrelated MCP errors retain FastMCP's native error path.
 """
 
 from __future__ import annotations
@@ -175,7 +175,30 @@ def envelope(success: bool, data: Any = None, error: dict | None = None) -> dict
     """Build the shared envelope. Success carries `data`; failure carries `error`."""
     if success:
         return {"success": True, "data": data}
-    return {"success": False, "error": error or {}}
+    error_payload = dict(error or {})
+    payload = {"success": False, "error": error_payload}
+    for field in ("validation_state", "mutated"):
+        if field in error_payload:
+            payload[field] = error_payload.pop(field)
+    return payload
+
+
+def semantic_validation_error_dict(exc: Exception) -> dict[str, Any] | None:
+    """Find a structured semantic refusal without changing unrelated errors."""
+    current: BaseException | None = exc
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        projector = getattr(current, "as_semantic_validation_error", None)
+        if callable(projector):
+            try:
+                payload = projector()
+            except Exception:  # noqa: BLE001 - keep the original error path intact
+                payload = None
+            if isinstance(payload, dict):
+                return payload
+        current = current.__cause__ or current.__context__
+    return None
 
 
 def error_dict(exc: Exception) -> dict:
@@ -184,6 +207,9 @@ def error_dict(exc: Exception) -> dict:
     `OpError` carries its fields directly; a leaf-contract `ValueError`
     ("CODE: reason") is parsed into {code, message}; anything else is `INTERNAL`.
     """
+    semantic_payload = semantic_validation_error_dict(exc)
+    if semantic_payload is not None:
+        return semantic_payload
     public_dict = getattr(exc, "as_public_dict", None)
     if callable(public_dict):
         try:

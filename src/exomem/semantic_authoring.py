@@ -88,6 +88,32 @@ class SemanticAuthoringContract:
         return out
 
 
+def contract_from_normative(
+    normative: Mapping[str, Any],
+) -> SemanticAuthoringContract:
+    """Build a content-addressed contract from detached normative fields."""
+    required = {
+        "contract_id",
+        "version",
+        "compact",
+        "rich",
+        "semantic_roles",
+        "minimum_semantic_unit",
+        "routes",
+        "findings",
+    }
+    unknown = set(normative) - required
+    missing = required - set(normative)
+    if missing or unknown:
+        raise ValueError(
+            "semantic authoring normative fields mismatch: "
+            f"missing={sorted(missing)} unknown={sorted(unknown)}"
+        )
+    detached = {key: _thaw(normative[key]) for key in sorted(required)}
+    digest = f"sha256:{hashlib.sha256(_canonical_bytes(detached)).hexdigest()}"
+    return SemanticAuthoringContract(content_digest=digest, **detached)
+
+
 def build_semantic_authoring_contract() -> SemanticAuthoringContract:
     """Construct the canonical contract without consulting a vault or model."""
     compact = {
@@ -220,6 +246,17 @@ def build_semantic_authoring_contract() -> SemanticAuthoringContract:
         ),
     }
     minimum_semantic_unit = {
+        "rule": (
+            "Every new, replaced, or activated active compiled note needs at least one "
+            "valid, non-empty semantic unit."
+        ),
+        "form_rule": (
+            "Either compact or rich form satisfies the minimum; compact is preferred, "
+            "and a valid rich unit does not need a duplicate compact restatement."
+        ),
+        "final_unit_rule": (
+            "A post-activation compliant page cannot lose its final valid semantic unit."
+        ),
         "minimum_count": 1,
         "accepted_forms": ["compact", "rich"],
         "compact_preferred": True,
@@ -289,8 +326,9 @@ def build_semantic_authoring_contract() -> SemanticAuthoringContract:
         "single_semantic_unit": "observe_memory",
         "small_edit_or_activation": "edit_memory",
         "tier_2": (
-            "manage_memory_file create, overwrite, and append evaluate the complete resulting "
-            "compiled Markdown; prefer remember or replace_memory when their typed route fits."
+            "manage_memory_file create, overwrite, and append receive the same semantic "
+            "precommit contract on the complete resulting compiled Markdown; prefer remember "
+            "or replace_memory when their typed route fits."
         ),
     }
     findings = {
@@ -323,11 +361,7 @@ def build_semantic_authoring_contract() -> SemanticAuthoringContract:
         "routes": routes,
         "findings": findings,
     }
-    digest = f"sha256:{hashlib.sha256(_canonical_bytes(normative)).hexdigest()}"
-    return SemanticAuthoringContract(
-        content_digest=digest,
-        **normative,
-    )
+    return contract_from_normative(normative)
 
 
 AUTHORING_CONTRACT = build_semantic_authoring_contract()
@@ -336,6 +370,110 @@ AUTHORING_CONTRACT = build_semantic_authoring_contract()
 def get_semantic_authoring_contract() -> SemanticAuthoringContract:
     """Return the immutable process-wide canonical authoring contract."""
     return AUTHORING_CONTRACT
+
+
+def bootstrap_projection(
+    contract: SemanticAuthoringContract = AUTHORING_CONTRACT,
+) -> dict[str, Any]:
+    """Return the complete vault-independent object embedded in every profile."""
+    return contract.as_dict()
+
+
+def contract_identity(
+    contract: SemanticAuthoringContract = AUTHORING_CONTRACT,
+) -> str:
+    """Return the stable identity marker used by deterministic projections."""
+    return f"{contract.contract_id}:v{contract.version} {contract.content_digest}"
+
+
+def render_tool_guidance(
+    tool: str,
+    contract: SemanticAuthoringContract = AUTHORING_CONTRACT,
+) -> str:
+    """Render concise tool-specific guidance from the canonical contract fields."""
+    compact = contract.compact
+    rich = contract.rich
+    roles = contract.semantic_roles
+    minimum = contract.minimum_semantic_unit
+    routes = contract.routes
+    findings = contract.findings
+    identity = contract_identity(contract)
+    compact_form = (
+        f"Under `{compact['canonical_section']}`, write "
+        f"`{compact['syntax']}` with an {compact['category']['vocabulary']}-vocabulary "
+        f"category: {compact['category']['role']}. Category: {roles['category']} "
+        f"Tag: {roles['tag']} Kind: {roles['kind']}"
+    )
+    rich_form = (
+        f"Rich form uses `{rich['heading_syntax']}`. {rich['body_rule']} "
+        f"{rich['heading_boundary_rule']}"
+    )
+    refusal = (
+        f"`missing_semantic_unit` means {findings['missing_semantic_unit']['when']}. "
+        f"Compact remediation: {findings['missing_semantic_unit']['compact_remediation']} "
+        f"Rich remediation: {findings['missing_semantic_unit']['rich_remediation']} "
+        f"`empty_rich_unit` means {findings['empty_rich_unit']['when']}. "
+        f"{findings['empty_rich_unit']['remediation']}"
+    )
+    common = " ".join(
+        (
+            minimum["rule"],
+            minimum["form_rule"],
+            minimum["lifecycle_rule"],
+            minimum["final_unit_rule"],
+            compact_form,
+            rich_form,
+            refusal,
+        )
+    )
+
+    if tool in {"remember", "replace_memory", "observe_memory", "edit_memory"}:
+        guidance = common
+    elif tool == "manage_memory_file":
+        guidance = (
+            f"{routes['tier_2']} {common}"
+        )
+    else:
+        raise ValueError(f"no semantic-authoring projection for tool {tool!r}")
+    return f"Semantic authoring [{identity}]: {guidance}"
+
+
+def render_parameter_guidance(
+    tool: str,
+    parameter: str,
+    contract: SemanticAuthoringContract = AUTHORING_CONTRACT,
+) -> str:
+    """Return canonical guidance for a tool parameter, or an empty string."""
+    if (tool, parameter) == ("observe_memory", "content"):
+        content = contract.compact["content"]
+        return (
+            f"Provide only {content['role']}; {content['rule']} Pass the category and "
+            "optional suffix values through the sibling `category`, `tags`, and `context` "
+            "fields. Do not include the Markdown row wrapper in `content`."
+        )
+    if (tool, parameter) in {
+        ("remember", "content"),
+        ("replace_memory", "content"),
+        ("edit_memory", "operation"),
+        ("manage_memory_file", "operation"),
+        ("manage_memory_file", "content"),
+    }:
+        return render_tool_guidance(tool, contract)
+    return ""
+
+
+def project_tool_description(
+    tool: str,
+    description: str,
+    contract: SemanticAuthoringContract = AUTHORING_CONTRACT,
+) -> str:
+    """Insert canonical guidance where doc parsers preserve tool prose."""
+    guidance = render_tool_guidance(tool, contract)
+    args_marker = "\nArgs:"
+    if args_marker in description:
+        preamble, remainder = description.split(args_marker, 1)
+        return f"{preamble.rstrip()}\n\n{guidance}\n{args_marker}{remainder}"
+    return f"{description.rstrip()}\n\n{guidance}\n"
 
 
 def render_concise(
@@ -366,10 +504,7 @@ def render_concise(
         f"<!-- exomem-semantic-authoring:v{contract.version} "
         f"{contract.content_digest} -->\n"
         "## Semantic authoring contract\n\n"
-        "Every new, replaced, or activated active compiled note needs at least one "
-        "valid, non-empty semantic unit. Either compact or rich form satisfies the "
-        "minimum; compact is preferred, and a valid rich unit does not need a duplicate "
-        "compact restatement.\n\n"
+        f"{minimum['rule']} {minimum['form_rule']}\n\n"
         "Semantic roles:\n\n"
         f"- Category: {roles['category']}\n"
         f"- Tag: {roles['tag']}\n"
@@ -398,14 +533,16 @@ def render_concise(
         f"{metadata}. {rich['metadata_rule']} Accepted metadata order is "
         f"{rich['accepted_metadata_order']}. {rich['body_rule']} "
         f"{rich['relation_rule']}\n"
-        f"- Rich boundary: {rich['heading_boundary_rule']} Empty recognized blocks produce "
-        "`empty_rich_unit` and do not count.\n"
+        f"- Rich boundary: {rich['heading_boundary_rule']} `empty_rich_unit` means "
+        f"{findings['empty_rich_unit']['when']}; "
+        f"{findings['empty_rich_unit']['remediation']}\n"
         f"- Exact applicability: `compiled_intent(after_state) = "
         f"{minimum['compiled_intent']}`. `COMPILED_TYPES` contains exactly "
         f"{compiled_types}, with canonical destinations {compiled_destinations}. "
         f"{minimum['structural_rule']} The minimum predicate applies when "
         f"{applies}. Inactive lifecycle values are {inactive}. "
         f"{minimum['lifecycle_rule']}\n"
+        f"- Existing active pages: {minimum['final_unit_rule']}\n"
         f"- Exempt content: {exemptions}.\n"
         f"- Routes: use `{routes['new_compiled_note']}` for a new compiled note, "
         f"`{routes['replacement']}` for a replacement, `{routes['single_semantic_unit']}` "

@@ -1020,7 +1020,7 @@ def test_contract_validation_covers_new_and_legacy_unknown_policies_once(
     page = _seed_semantic_contract_pages(vault, count=1)[0]
     page.write_text(
         page.read_text(encoding="utf-8")
-        + "\n- [mystery] Unknown category\n\n"
+        + "\n## Observations\n\n- [mystery] Unknown category\n\n"
         "## Relations\n\n- supports [[Knowledge Base/Notes/target]]\n",
         encoding="utf-8",
     )

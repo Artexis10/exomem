@@ -16,6 +16,14 @@ from exomem import adoption_proposals, adoption_run, commands, find, get_page, r
 TODAY = dt.date(2026, 7, 14)
 
 
+def _semantic_content(title: str, statement: str) -> str:
+    return (
+        f"# {title}\n\n"
+        "## Observations\n\n"
+        f"- [adoption finding] {statement} #adoption\n"
+    )
+
+
 def _snapshot_md(root: Path) -> dict[str, bytes]:
     """Full-tree byte snapshot of every markdown file (propose must touch none)."""
     return {
@@ -77,7 +85,11 @@ def _imported_paths(applied: dict) -> list[str]:
 def _write_page(vault: Path, rel: str, *, title: str = "Target", body: str = "Body text.\n") -> str:
     path = vault / rel
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(f"---\ntype: insight\ntitle: {title}\n---\n\n# {title}\n\n{body}", encoding="utf-8")
+    path.write_text(
+        f"---\ntype: insight\ntitle: {title}\n---\n\n# {title}\n\n{body}",
+        encoding="utf-8",
+        newline="\n",
+    )
     return path.read_text(encoding="utf-8")
 
 
@@ -144,7 +156,9 @@ def test_propose_validates_each_kind(tmp_path: Path) -> None:
                     "sources": imported,
                     "title": "Combined summary",
                     "note_type": "insight",
-                    "content": "# Combined\n\nBoth notes are related.\n",
+                    "content": _semantic_content(
+                        "Combined", "The imported notes describe related behavior."
+                    ),
                 },
                 "bindings": {"run_fingerprint": run_fp},
             },
@@ -179,7 +193,9 @@ def test_propose_binds_run_fingerprint_and_source_hashes(tmp_path: Path) -> None
             "sources": imported,
             "title": "Combined",
             "note_type": "insight",
-            "content": "# Combined\n\nBoth notes.\n",
+            "content": _semantic_content(
+                "Combined", "The imported notes support one combined conclusion."
+            ),
         },
         "bindings": {"run_fingerprint": run_fp},
     }
@@ -226,7 +242,9 @@ def test_propose_never_touches_markdown(tmp_path: Path) -> None:
                     "sources": imported,
                     "title": "Combined",
                     "note_type": "insight",
-                    "content": "# Combined\n\nBoth notes.\n",
+                    "content": _semantic_content(
+                        "Combined", "The imported notes support one combined conclusion."
+                    ),
                 },
                 "bindings": {"run_fingerprint": run_fp},
             }
@@ -260,7 +278,9 @@ def test_review_memory_adoption_mode_lists_open_items(tmp_path: Path) -> None:
                     "sources": imported,
                     "title": "Combined",
                     "note_type": "insight",
-                    "content": "# Combined\n\nBoth notes.\n",
+                    "content": _semantic_content(
+                        "Combined", "The imported notes support one combined conclusion."
+                    ),
                 },
                 "bindings": {"run_fingerprint": run_fp},
             },
@@ -301,7 +321,9 @@ def test_triage_adoption_ref_round_trip_and_resurfacing(tmp_path: Path) -> None:
                     "sources": imported,
                     "title": "Combined",
                     "note_type": "insight",
-                    "content": "# Combined\n\nBoth notes.\n",
+                    "content": _semantic_content(
+                        "Combined", "The imported notes support one combined conclusion."
+                    ),
                 },
                 "bindings": {"run_fingerprint": run_fp},
             }
@@ -350,7 +372,9 @@ def test_review_item_context_adoption_dispatch(tmp_path: Path) -> None:
                     "sources": imported,
                     "title": "Combined",
                     "note_type": "insight",
-                    "content": "# Combined\n\nBoth notes.\n",
+                    "content": _semantic_content(
+                        "Combined", "The imported notes support one combined conclusion."
+                    ),
                 },
                 "bindings": {"run_fingerprint": run_fp},
             }
@@ -385,7 +409,9 @@ def test_apply_proposal_compilation_routes_through_remember(tmp_path: Path) -> N
                     "sources": imported,
                     "title": "Combined summary",
                     "note_type": "insight",
-                    "content": "# Combined summary\n\nBoth notes are related.\n",
+                    "content": _semantic_content(
+                        "Combined summary", "The imported notes describe related behavior."
+                    ),
                 },
                 "bindings": {"run_fingerprint": run_fp},
             }
@@ -485,7 +511,9 @@ def test_apply_proposal_supersession_uses_replace_cas(tmp_path: Path) -> None:
                     "old_path": old_rel,
                     "title": "New Take",
                     "note_type": "insight",
-                    "content": "# New Take\n\nA corrected conclusion.\n",
+                    "content": _semantic_content(
+                        "New Take", "The corrected evidence changes the earlier conclusion."
+                    ),
                 },
                 "bindings": {"run_fingerprint": run_fp},
             }
@@ -522,7 +550,9 @@ def test_apply_proposal_supersession_refuses_on_mid_flight_edit(tmp_path: Path) 
                     "old_path": old_rel,
                     "title": "New Take Two",
                     "note_type": "insight",
-                    "content": "# New Take Two\n\nA corrected conclusion.\n",
+                    "content": _semantic_content(
+                        "New Take Two", "The corrected evidence changes the earlier conclusion."
+                    ),
                 },
                 "bindings": {"run_fingerprint": run_fp},
             }
@@ -566,7 +596,9 @@ def test_apply_proposal_stale_binding_refuses(tmp_path: Path) -> None:
                     "sources": imported,
                     "title": "Combined",
                     "note_type": "insight",
-                    "content": "# Combined\n\nBoth notes.\n",
+                    "content": _semantic_content(
+                        "Combined", "The imported notes support one combined conclusion."
+                    ),
                 },
                 "bindings": {"run_fingerprint": run_fp},
             }
@@ -613,7 +645,9 @@ def test_apply_proposal_requires_fingerprint_and_why(tmp_path: Path) -> None:
                     "sources": imported,
                     "title": "Combined",
                     "note_type": "insight",
-                    "content": "# Combined\n\nBoth notes.\n",
+                    "content": _semantic_content(
+                        "Combined", "The imported notes support one combined conclusion."
+                    ),
                 },
                 "bindings": {"run_fingerprint": run_fp},
             }
@@ -648,7 +682,9 @@ def _submit_compilation(vault: Path, run_id: str, run_fp: str, imported: list[st
                     "sources": imported,
                     "title": title,
                     "note_type": "insight",
-                    "content": f"# {title}\n\nBoth notes are related.\n",
+                    "content": _semantic_content(
+                        title, "The imported notes describe related behavior."
+                    ),
                 },
                 "bindings": bindings,
             }
@@ -745,7 +781,9 @@ def _seed_governed_insight(vault: Path, imported: list[str], *, title: str = "Se
     """
     result = commands.op_remember(
         vault,
-        content=f"# {title}\n\nA seeded governed conclusion.\n",
+        content=_semantic_content(
+            title, "The imported notes establish a governed seed conclusion."
+        ),
         title=title,
         note_type="insight",
         sources=imported,
@@ -822,7 +860,9 @@ def test_propose_records_contract_findings_for_reviewable_gaps(tmp_path: Path) -
                     "sources": imported,
                     "title": "Widget synthesis",
                     "note_type": "insight",
-                    "content": "# Widget synthesis\n\nA fresh disconnected conclusion.\n",
+                    "content": _semantic_content(
+                        "Widget synthesis", "The widget notes support a fresh conclusion."
+                    ),
                 },
                 "bindings": {"run_fingerprint": run_fp},
             }
@@ -886,6 +926,55 @@ def test_propose_invalidates_on_non_review_blockers(tmp_path: Path) -> None:
             vault, ref=row["ref"], expected_fingerprint=row["fingerprint"], why="approve"
         )
     assert excinfo.value.code == "PROPOSAL_INVALID"
+
+
+def test_adoption_missing_unit_is_refused_without_mutating_sources_or_proposal(
+    tmp_path: Path,
+) -> None:
+    vault = _legacy_vault(tmp_path)
+    applied = _applied_run(vault)
+    run_id = applied["run_id"]
+    imported = _imported_paths(applied)
+
+    result = adoption_proposals.propose(
+        vault,
+        run_id=run_id,
+        proposals=[
+            {
+                "kind": "compilation",
+                "why": "combine without authoring a semantic unit",
+                "payload": {
+                    "sources": imported,
+                    "title": "Prose-only synthesis",
+                    "note_type": "insight",
+                    "content": "# Prose-only synthesis\n\nOrdinary structural prose.\n",
+                },
+                "bindings": {"run_fingerprint": applied["inventory_fingerprint"]},
+            }
+        ],
+    )
+    row = result["proposals"][0]
+    assert row["status"] == "invalid"
+    assert "missing_semantic_unit" in {
+        finding["code"] for finding in row["contract_findings"]
+    }
+
+    store = adoption_run.AdoptionRunStore(vault)
+    proposal_path = store.run_dir(run_id) / "proposals.json"
+    before_markdown = _snapshot_md(vault)
+    before_proposal = proposal_path.read_bytes()
+
+    with pytest.raises(adoption_proposals.AdoptionProposalError) as excinfo:
+        adoption_proposals.apply_proposal(
+            vault,
+            ref=row["ref"],
+            expected_fingerprint=row["fingerprint"],
+            why="approve invalid prose",
+        )
+
+    assert excinfo.value.code == "PROPOSAL_INVALID"
+    assert _snapshot_md(vault) == before_markdown
+    assert proposal_path.read_bytes() == before_proposal
 
 
 def test_propose_labels_non_contract_validation_errors_distinctly(tmp_path: Path) -> None:
@@ -952,7 +1041,9 @@ def test_queue_and_context_carry_contract_findings(tmp_path: Path) -> None:
                     "sources": imported,
                     "title": "Synthesis two",
                     "note_type": "insight",
-                    "content": "# Synthesis two\n\nAnother disconnected conclusion.\n",
+                    "content": _semantic_content(
+                        "Synthesis two", "The widget notes support another conclusion."
+                    ),
                 },
                 "bindings": {"run_fingerprint": run_fp},
             }

@@ -1928,7 +1928,10 @@ def run_exomem_local_core_fixture(manifest: dict[str, Any], root: Path) -> dict[
         corpus = _fresh_fixture_corpus(manifest, root, "authoring-read-update")
         kwargs = {
             "content": (
-                "# Created\n\nBenchmark public write.\n\n## Relations\n"
+                "# Created\n\nBenchmark public write.\n\n"
+                "## Observations\n\n"
+                "- [operating constraint] Keep retries bounded #reliability\n\n"
+                "## Relations\n"
                 f"- relates_to [[{corpus.id_to_path['common-target']}]]\n"
             ),
             "note_type": "insight",

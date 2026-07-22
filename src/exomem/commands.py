@@ -84,6 +84,7 @@ from . import replace as replace_module
 from . import retrieval_explain as retrieval_explain_module
 from . import review_context as review_context_module
 from . import review_state as review_state_module
+from . import semantic_authoring as semantic_authoring_module
 from . import semantic_language_registry as semantic_language_registry_module
 from . import semantic_unit_read as semantic_unit_read_module
 from . import set_frontmatter_field as set_frontmatter_field_module
@@ -267,6 +268,7 @@ def op_bootstrap(
             "compute_policy": compute_policy,
         },
         "active_capabilities": active_descriptor.as_metadata(),
+        "semantic_authoring": semantic_authoring_module.bootstrap_projection(),
         "memory_model": {
             "built_in_ai_memory": (
                 "Use as short-term or behavioural memory for user preferences, working "
@@ -377,13 +379,28 @@ def op_bootstrap(
                 "production-log": "Creative artifact record with Frame, Artifact, Outcomes, Reflection, and typed Relations.",
             },
             "semantic_units": {
-                "compact_syntax": "- [category] content #tags (context) ^anchor",
-                "compact_kind": "observation",
-                "category_rule": "category is open vocabulary; kind is governed independently",
-                "rich_form": "select an explicit governed non-observation kind",
-                "rich_relation_rule": "typed unit relations require rich form; compact units use a canonical note-level relation instead",
-                "mutation_rule": "use observe_memory add/update/remove/validate instead of whole-page string surgery for one unit",
-                "drift_guards": "update/remove require the current parent content hash and unit fingerprint",
+                "contract": semantic_authoring_module.bootstrap_projection(),
+                "compact_syntax": semantic_authoring_module.AUTHORING_CONTRACT.compact[
+                    "syntax"
+                ],
+                "compact_kind": semantic_authoring_module.AUTHORING_CONTRACT.compact[
+                    "kind"
+                ],
+                "category_rule": semantic_authoring_module.AUTHORING_CONTRACT.semantic_roles[
+                    "category"
+                ],
+                "rich_form": semantic_authoring_module.AUTHORING_CONTRACT.rich[
+                    "heading_syntax"
+                ],
+                "rich_relation_rule": semantic_authoring_module.AUTHORING_CONTRACT.rich[
+                    "relation_rule"
+                ],
+                "mutation_rule": semantic_authoring_module.AUTHORING_CONTRACT.routes[
+                    "single_semantic_unit"
+                ],
+                "drift_guards": (
+                    "update/remove require the current parent content hash and unit fingerprint"
+                ),
             },
             "reviewed_creation": {
                 "validate_only": (
@@ -2941,6 +2958,11 @@ def op_append_to_file(
     path: str,
     content: str,
     allow_curated: bool = False,
+    validate_only: bool = False,
+    semantic_transition_token: str | None = None,
+    relation_disposition: str | None = None,
+    relation_review_hash: str | None = None,
+    relation_review_reason: str | None = None,
 ) -> dict:
     """Tier 2: append text to an existing file.
 
@@ -2953,6 +2975,11 @@ def op_append_to_file(
         path: Vault-relative.
         content: Text to append (text only; binaries go via /upload).
         allow_curated: Required under curated trees.
+        validate_only: Validate the complete Markdown result without writing.
+        semantic_transition_token: Opaque transition token returned by validate_only.
+        relation_disposition: Reviewed relation outcome for a semantic append.
+        relation_review_hash: Transition hash covered by the relation review.
+        relation_review_reason: Audit reason for a reviewed-none disposition.
 
     Returns: {path, bytes_appended, warnings}.
     Errors: INVALID_APPEND; INVALID_PATH; NOT_FOUND; NOT_A_FILE;
@@ -2964,6 +2991,11 @@ def op_append_to_file(
             path=path,
             content=content,
             allow_curated=allow_curated,
+            validate_only=validate_only,
+            semantic_transition_token=semantic_transition_token,
+            relation_disposition=relation_disposition,
+            relation_review_hash=relation_review_hash,
+            relation_review_reason=relation_review_reason,
         )
     except append_to_file_module.AppendError as e:
         raise ValueError(f"{e.code}: {e.reason}") from e
@@ -3521,7 +3553,7 @@ def op_observe_memory(
         semantic-contract feedback, and derived-index outcome.
     """
     raw_path = str(path or "").strip()
-    if Path(raw_path).is_absolute() or (
+    if raw_path.startswith(("/", "\\")) or Path(raw_path).is_absolute() or (
         len(raw_path) >= 3
         and raw_path[0].isalpha()
         and raw_path[1] == ":"
@@ -4976,6 +5008,7 @@ def op_manage_memory_file(
     draft_id: str | None = None,
     draft_hash: str | None = None,
     draft_token: str | None = None,
+    semantic_transition_token: str | None = None,
     relation_disposition: str | None = None,
     relation_review_hash: str | None = None,
     relation_review_reason: str | None = None,
@@ -5007,28 +5040,49 @@ def op_manage_memory_file(
         trash_path: Trash entry to recover.
         restore_path: Optional recovery destination.
         date: YYYY-MM-DD filter for trash-list.
-        validate_only: Validate a Markdown create-file operation without writing.
+        validate_only: Validate a Markdown create or append operation without writing.
         draft_id: Draft identity returned by validate_only.
         draft_hash: Exact reviewed draft hash returned by validate_only.
         draft_token: Opaque destination/date token returned by validate_only.
-        relation_disposition: Reviewed relation outcome for semantic file creation.
-        relation_review_hash: Draft hash covered by the relation review.
+        semantic_transition_token: Opaque append transition token from validate_only.
+        relation_disposition: Reviewed relation outcome for semantic create or append.
+        relation_review_hash: Draft or transition hash covered by the relation review.
         relation_review_reason: Audit reason for a reviewed-none disposition.
     """
-    review_requested = validate_only or any(
+    creation_review_requested = any(
         value is not None
         for value in (
             draft_id,
             draft_hash,
             draft_token,
+        )
+    )
+    append_review_requested = semantic_transition_token is not None
+    shared_review_requested = validate_only or any(
+        value is not None
+        for value in (
             relation_disposition,
             relation_review_hash,
             relation_review_reason,
         )
     )
-    if operation != "create" and review_requested:
+    if operation not in {"create", "append"} and (
+        creation_review_requested
+        or append_review_requested
+        or shared_review_requested
+    ):
+        raise ValueError(
+            "INVALID_FILE_OPERATION: validation and review fields require "
+            "operation='create' or operation='append'"
+        )
+    if operation != "create" and creation_review_requested:
         raise ValueError(
             "INVALID_FILE_OPERATION: creation review fields require operation='create'"
+        )
+    if operation != "append" and append_review_requested:
+        raise ValueError(
+            "INVALID_FILE_OPERATION: semantic_transition_token requires "
+            "operation='append'"
         )
     if operation == "list":
         return op_list_directory(vault_root, path=path, recursive=recursive, include_hidden=include_hidden)
@@ -5051,7 +5105,17 @@ def op_manage_memory_file(
             relation_review_reason=relation_review_reason,
         )
     if operation == "append":
-        return op_append_to_file(vault_root, path=path, content=content, allow_curated=allow_curated)
+        return op_append_to_file(
+            vault_root,
+            path=path,
+            content=content,
+            allow_curated=allow_curated,
+            validate_only=validate_only,
+            semantic_transition_token=semantic_transition_token,
+            relation_disposition=relation_disposition,
+            relation_review_hash=relation_review_hash,
+            relation_review_reason=relation_review_reason,
+        )
     if operation == "move":
         if not old_path or not new_path:
             raise ValueError("INVALID_MOVE: move requires `old_path` and `new_path`")
@@ -5255,6 +5319,12 @@ def invocation_is_read_only(command: Command, kwargs: dict[str, Any]) -> bool:
         # inconsistency from reading beside a concurrent write is caught by
         # the fresh under-lock re-validation at commit time.
         return kwargs.get("validate_only") is True
+    if command.name == "manage_memory_file":
+        operation = _resolved_invocation_selector(command, kwargs, "operation")
+        return (
+            operation in {"create", "append"}
+            and kwargs.get("validate_only") is True
+        )
     return False
 
 
@@ -5785,6 +5855,36 @@ def _build_product_commands() -> tuple[Command, ...]:
                     choices=p.choices,
                 )
                 for p in params
+            )
+        if name in {
+            "remember",
+            "replace_memory",
+            "observe_memory",
+            "edit_memory",
+            "manage_memory_file",
+        }:
+            desc = semantic_authoring_module.project_tool_description(name, desc)
+            params = tuple(
+                Param(
+                    name=param.name,
+                    type=param.type,
+                    required=param.required,
+                    help=(
+                        " ".join(
+                            part
+                            for part in (
+                                param.help.strip(),
+                                semantic_authoring_module.render_parameter_guidance(
+                                    name, param.name
+                                ),
+                            )
+                            if part
+                        )
+                    ),
+                    cli_positional=param.cli_positional,
+                    choices=param.choices,
+                )
+                for param in params
             )
         cmds.append(
             Command(

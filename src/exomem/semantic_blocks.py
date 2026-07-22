@@ -372,12 +372,30 @@ def _closes_fence(line: str, fence_char: str, fence_length: int) -> bool:
 
 def _has_substantive_body(body: str) -> bool:
     """Return whether a metadata-stripped rich body contains authored content."""
-    return any(
-        line.strip()
-        and _HEADING_RE.match(line) is None
-        and not _is_reserved_metadata_row(line)
-        for line in body.splitlines()
-    )
+    fence_char: str | None = None
+    fence_length = 0
+    for line in body.splitlines():
+        fence = _FENCE_RE.match(line)
+        if fence_char is not None:
+            if _closes_fence(line, fence_char, fence_length):
+                fence_char = None
+                fence_length = 0
+                continue
+            if line.strip():
+                return True
+            continue
+        if fence is not None:
+            marker = fence.group("fence")
+            fence_char = marker[0]
+            fence_length = len(marker)
+            continue
+        if (
+            line.strip()
+            and _HEADING_RE.match(line) is None
+            and not _is_reserved_metadata_row(line)
+        ):
+            return True
+    return False
 
 
 def _is_reserved_metadata_row(line: str) -> bool:

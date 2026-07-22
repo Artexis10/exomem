@@ -72,7 +72,7 @@ def _install_source_and_root() -> tuple[str, Path | None]:
                 url = info.get("url", "")
                 root = None
                 if url.startswith("file://"):
-                    # Windows file URLs arrive as file:///C:/... — lstrip the
+                    # Windows file URLs carry a drive-rooted path — lstrip the
                     # leading slash so Path() gets a drive-rooted path.
                     candidate = url[len("file://") :]
                     if len(candidate) > 2 and candidate[0] == "/" and candidate[2] == ":":

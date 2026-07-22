@@ -101,7 +101,11 @@ def test_existing_creation_review_protocol_is_public(leaf_name: str) -> None:
 
 def test_remember_active_disconnected_note_can_validate_then_commit(vault: Path) -> None:
     kwargs = {
-        "content": "# Public review round trip\n\nA deliberately disconnected conclusion.\n",
+        "content": (
+            "# Public review round trip\n\n"
+            "## Observations\n\n"
+            "- [review state] This conclusion is deliberately disconnected.\n"
+        ),
         "title": "Public review round trip",
         "slug": "public-review-round-trip",
         "suggestions": False,

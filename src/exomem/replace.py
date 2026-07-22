@@ -638,7 +638,10 @@ def replace(
             predecessor_path=rel_old_with_ext,
             predecessor_content_hash=predecessor_hash,
         )
-    except relation_review.RelationReviewError as error:
+    except (
+        relation_review.RelationReviewError,
+        semantic_writes.SemanticWriteError,
+    ) as error:
         raise ReplaceError(error.code, [], error.reason) from error
     return ReplaceResult(
         rel_old_with_ext,

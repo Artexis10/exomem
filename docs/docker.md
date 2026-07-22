@@ -173,7 +173,7 @@ your host's volume ownership.
 
 If you're on Windows, prefer the native install
 ([../QUICKSTART.md](../QUICKSTART.md)) over Docker for day-to-day editing.
-Docker Desktop bind-mounts a `C:\` path through WSL2, and that path does
+Docker Desktop bind-mounts a `<drive>:\` path through WSL2, and that path does
 **not** propagate `inotify` events — exomem's live file-watcher (which
 re-embeds out-of-band `.md` edits) will silently miss changes made outside the
 container. NTFS-backed WSL2 mounts are also noticeably slower than a native

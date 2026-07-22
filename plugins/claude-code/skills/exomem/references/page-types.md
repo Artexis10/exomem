@@ -3,6 +3,12 @@
 Eight page types in the Knowledge Base. Each has a required location, naming
 convention, and content shape. See `frontmatter.md` for the YAML spec per type.
 
+For every active compiled-note type below, the fenced content shape includes a
+canonical `## Observations` example. The fence keeps documentation examples from
+becoming indexable units. Observation category is open vocabulary, page `tags`
+remain secondary retrieval labels, and a valid non-empty block headed by a
+governed rich kind is the alternative when richer semantics are intended.
+
 ## source
 
 **Location:** `Sources/Articles/`, `Sources/Sessions/`, or `Sources/Books/` (also `Sources/Papers/`, `Sources/Videos/`, `Sources/Other/`)
@@ -72,6 +78,10 @@ What problem or topic this note addresses.
 
 The substance. Multiple subsections OK.
 
+## Observations
+
+- [operating constraint] Keep retries bounded #reliability
+
 ## Relations
 
 - relates_to [[Knowledge Base/Entities/Concepts/Agentic RAG]]
@@ -121,6 +131,10 @@ Concrete domains, projects, decisions this should influence.
 
 What could weaken or invalidate this insight.
 
+## Observations
+
+- [operating constraint] Keep retries bounded #reliability
+
 ## Relations
 
 - relates_to [[...]]
@@ -164,6 +178,10 @@ How it was noticed (or how it would be noticed earlier next time).
 
 What changed (or should change) to prevent recurrence.
 
+## Observations
+
+- [operating constraint] Keep retries bounded #reliability
+
 ## Relations
 
 - relates_to [[...]]
@@ -206,6 +224,10 @@ Conditions where it fits.
 ## When NOT to use
 
 Conditions where it's a regression.
+
+## Observations
+
+- [operating constraint] Keep retries bounded #reliability
 
 ## Relations
 
@@ -264,6 +286,10 @@ What happened. Updated as the experiment runs; finalized at conclusion.
 ## Conclusion
 
 What you learned. May be inconclusive — that's a valid result.
+
+## Observations
+
+- [operating constraint] Keep retries bounded #reliability
 
 ## Relations
 
@@ -341,6 +367,10 @@ To be filled across the lifecycle. Engagement metrics, post-publish observations
 ## Reflection
 
 Filled once outcomes have settled. What worked, what to keep / change / drop next time.
+
+## Observations
+
+- [operating constraint] Keep retries bounded #reliability
 
 ## Relations
 

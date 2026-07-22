@@ -112,7 +112,7 @@ Media extraction needs two **system** tools (not pip-installable):
 
 - **Tesseract OCR** (images): `winget install --id UB-Mannheim.TesseractOCR -e`.
   The installer doesn't add it to PATH; the server auto-discovers it at
-  `C:\Program Files\Tesseract-OCR\`, or set `EXOMEM_TESSERACT_CMD`.
+  `%ProgramFiles%\Tesseract-OCR\`, or set `EXOMEM_TESSERACT_CMD`.
 - **ffmpeg** is bundled by PyAV (pulled via faster-whisper), so audio/video decode
   works without a separate install.
 
@@ -318,6 +318,15 @@ never touches it. `upgrade.ps1` locates that venv from the NSSM registry, upgrad
 it, repairs the CUDA torch build, gates on `doctor`, restarts, and then asserts the
 **live** `/health` version matches what it just installed. No elevation needed.
 
+Releases carrying semantic parser changes bump the parser generation used by the
+lexical, vector, graph, pack, and count sidecars. Canonical Markdown is not
+rewritten. After upgrading, run `exomem maintain --reconcile` (or call
+`maintain_memory(mode="reconcile")`) to refresh stale derived rows. Anonymous
+unit references whose normalized content changed become explicitly stale rather
+than resolving to a nearby unit; authored `^anchors` remain the stable reference
+mechanism. A full `maintain_memory(mode="fix", rebuild_embeddings=true)` rebuild
+is optional when exact vector regeneration is required.
+
 Upgrading by hand is the trap this replaces: `uv pip install --upgrade exomem[...]`
 ignores `[tool.uv.sources]` (only `uv sync` reads it), so it silently pulls the PyPI
 **CPU** torch wheel over the CUDA build and moves embeddings/media onto the CPU with
@@ -413,7 +422,7 @@ transactional SQLite database on one always-on node:
 ```powershell
 $env:EXOMEM_LEASE_COORDINATOR_TOKEN = '<long-random-secret>'
 uv run python -m exomem.lease_coordinator --host 0.0.0.0 --port 8770 `
-  --database C:\exomem-state\writer-leases.sqlite
+  --database C:\path\to\writer-leases.sqlite
 ```
 
 Expose that service over private TLS or a protected tunnel. SQLite is consistent

@@ -24,7 +24,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import access, indexes, memory_refs, relation_review, semantic_writes
+from . import (
+    access,
+    indexes,
+    memory_refs,
+    relation_review,
+    semantic_contract,
+    semantic_writes,
+)
 from . import vault as vault_module
 from .vault import (
     PlannedWrite,
@@ -227,9 +234,10 @@ def create_file(
             raise CreateFileError(
                 "INVALID_FRONTMATTER", "Markdown frontmatter is invalid"
             ) from error
-        if fm.get("type") in {
-            "research-note", "insight", "failure", "pattern", "experiment", "production-log"
-        }:
+        if (
+            semantic_contract.normalized_compiled_type(fm.get("type"))
+            in semantic_contract.COMPILED_TYPES
+        ):
             try:
                 full_text, identity = memory_refs.add_id_to_markdown(
                     full_text, identity or memory_refs.new_id()

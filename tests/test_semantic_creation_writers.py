@@ -9,6 +9,9 @@ from pathlib import Path
 import pytest
 
 from exomem import (
+    activation_manifest,
+    append_to_file,
+    commands,
     create_file,
     find,
     indexes,
@@ -26,12 +29,504 @@ from exomem import (
 TODAY = dt.date(2026, 7, 14)
 
 
+def _compact_content(title: str = "Semantic fixture") -> str:
+    return (
+        f"# {title}\n\n"
+        "## Observations\n\n"
+        "- [operating constraint] Keep retries bounded #reliability\n"
+    )
+
+
 def _tree_bytes(root: Path) -> dict[str, bytes]:
     return {
         path.relative_to(root).as_posix(): path.read_bytes()
         for path in root.rglob("*")
         if path.is_file()
     }
+
+
+def test_typed_create_validate_only_reports_missing_unit_without_mutation(
+    vault: Path,
+) -> None:
+    before = _tree_bytes(vault)
+    validation = note.note(
+        vault,
+        content="# Prose only\n\nOrdinary structural prose.\n",
+        note_type="insight",
+        title="Prose only",
+        today=TODAY,
+        validate_only=True,
+    )
+
+    assert _tree_bytes(vault) == before
+    assert validation.mutated is False
+    assert validation.creation_validation is not None
+    assert validation.creation_validation.has_non_review_blockers is True
+    assert validation.creation_validation.committable_without_review is False
+    assert validation.creation_validation.committable_after_review is False
+    finding = next(
+        item
+        for item in validation.contract_result.findings
+        if item.code == "missing_semantic_unit"
+    )
+    assert "## Observations" in finding.remediation
+    assert "## Decision" in finding.remediation
+    assert validation.contract_result.compact_unit_count == 0
+    assert validation.contract_result.rich_unit_count == 0
+
+    with pytest.raises(note.NoteError) as blocked:
+        note.note(
+            vault,
+            content="# Prose only\n\nOrdinary structural prose.\n",
+            note_type="insight",
+            title="Prose only",
+            today=TODAY,
+            draft_id=validation.draft_id,
+            draft_hash=validation.draft_hash,
+            draft_token=validation.draft_token,
+            relation_disposition="reviewed_none",
+            relation_review_hash=validation.draft_hash,
+            relation_review_reason="No honest relation exists in this fixture corpus.",
+        )
+    assert blocked.value.code == "SEMANTIC_CONTRACT_BLOCKED"
+    assert "missing_semantic_unit" in blocked.value.reason
+    assert _tree_bytes(vault) == before
+
+
+def test_bounded_writer_feedback_keeps_empty_rich_span_and_remediation(
+    vault: Path,
+) -> None:
+    before = _tree_bytes(vault)
+    validation = commands.op_manage_memory_file(
+        vault,
+        operation="create",
+        path="Knowledge Base/Notes/Insights/empty-rich-feedback.md",
+        content="# Empty rich\n\n## Decision\n\n- id: empty\n",
+        frontmatter={"type": "insight", "status": "active"},
+        validate_only=True,
+    )
+
+    findings = {
+        finding["code"]: finding
+        for finding in validation["contract_result"]["blocking_findings"]
+    }
+    assert {"empty_rich_unit", "missing_semantic_unit"} <= set(findings)
+    assert findings["empty_rich_unit"]["span"]["text"] == "## Decision"
+    assert "substantive body content" in findings["empty_rich_unit"]["remediation"]
+    assert "## Observations" in findings["missing_semantic_unit"]["remediation"]
+    assert "## Decision" in findings["missing_semantic_unit"]["remediation"]
+    assert _tree_bytes(vault) == before
+
+
+def test_empty_fenced_rich_writer_feedback_uses_shared_evaluator_without_mutation(
+    vault: Path,
+) -> None:
+    before = _tree_bytes(vault)
+    validation = commands.op_manage_memory_file(
+        vault,
+        operation="create",
+        path="Knowledge Base/Notes/Insights/empty-fenced-rich-feedback.md",
+        content="# Empty fenced rich\n\n## Decision\n\n~~~text\n   \n~~~\n",
+        frontmatter={"type": "insight", "status": "active"},
+        validate_only=True,
+    )
+
+    findings = {
+        finding["code"]: finding
+        for finding in validation["contract_result"]["blocking_findings"]
+    }
+    assert {"empty_rich_unit", "missing_semantic_unit"} <= set(findings)
+    assert findings["empty_rich_unit"]["span"]["text"] == "## Decision"
+    assert findings["missing_semantic_unit"]["span"] is None
+    assert validation["contract_result"]["rich_unit_count"] == 0
+    assert _tree_bytes(vault) == before
+
+
+def test_compact_and_rich_typed_creates_each_satisfy_the_minimum(vault: Path) -> None:
+    compact = note.note(
+        vault,
+        content=_compact_content("Compact minimum"),
+        note_type="insight",
+        title="Compact minimum",
+        today=TODAY,
+        validate_only=True,
+    )
+    rich = note.note(
+        vault,
+        content="# Rich minimum\n\n## Decision\n\nKeep retry windows bounded.\n",
+        note_type="insight",
+        title="Rich minimum",
+        today=TODAY,
+        validate_only=True,
+    )
+
+    assert compact.contract_result.compact_unit_count == 1
+    assert compact.contract_result.rich_unit_count == 0
+    assert rich.contract_result.compact_unit_count == 0
+    assert rich.contract_result.rich_unit_count == 1
+    assert all(
+        finding.code != "missing_semantic_unit"
+        for validation in (compact, rich)
+        for finding in validation.contract_result.findings
+    )
+
+
+@pytest.mark.parametrize(
+    ("frontmatter", "code"),
+    (
+        ({"status": "active"}, "COMPILED_TYPE_MISMATCH"),
+        ({"type": "failure", "status": "active"}, "COMPILED_TYPE_MISMATCH"),
+    ),
+)
+def test_tier2_canonical_compiled_path_cannot_bypass_with_frontmatter(
+    vault: Path, frontmatter: dict[str, str], code: str
+) -> None:
+    before = _tree_bytes(vault)
+    validation = create_file.create_file(
+        vault,
+        path="Knowledge Base/Notes/Insights/tier2-structural-bypass.md",
+        content=_compact_content("Tier 2 bypass"),
+        frontmatter=frontmatter,
+        today=TODAY,
+        validate_only=True,
+    )
+
+    assert validation.applicability == "structural"
+    assert code in {item.code for item in validation.contract_result.blocking_findings}
+    assert _tree_bytes(vault) == before
+
+
+def test_tier2_mixed_case_compiled_type_cannot_disable_minimum(
+    vault: Path,
+) -> None:
+    before = _tree_bytes(vault)
+    kwargs = {
+        "path": "Knowledge Base/Notes/Insights/mixed-case.md",
+        "content": "# Mixed case\n\nOnly prose.\n",
+        "frontmatter": {"type": "Insight", "status": "active"},
+        "today": TODAY,
+    }
+
+    validation = create_file.create_file(vault, validate_only=True, **kwargs)
+    codes = {item.code for item in validation.contract_result.blocking_findings}
+    assert validation.applicability == "full"
+    assert "missing_semantic_unit" in codes
+    assert "COMPILED_TYPE_MISMATCH" not in codes
+    assert "COMPILED_DESTINATION_MISMATCH" not in codes
+    assert _tree_bytes(vault) == before
+
+    with pytest.raises(create_file.CreateFileError, match="missing_semantic_unit"):
+        create_file.create_file(vault, **kwargs)
+    assert _tree_bytes(vault) == before
+
+
+def test_tier2_create_overwrite_and_append_evaluate_complete_compiled_result(
+    vault: Path,
+) -> None:
+    create_before = _tree_bytes(vault)
+    create_validation = create_file.create_file(
+        vault,
+        path="Knowledge Base/Notes/Insights/tier2-missing.md",
+        content="# Tier 2 missing\n\nOnly prose.\n",
+        frontmatter={"type": "insight", "status": "active"},
+        today=TODAY,
+        validate_only=True,
+    )
+    assert "missing_semantic_unit" in {
+        item.code for item in create_validation.contract_result.blocking_findings
+    }
+    assert _tree_bytes(vault) == create_before
+
+    overwrite_kwargs = {
+        "content": _compact_content("Overwrite source"),
+        "note_type": "insight",
+        "title": "Overwrite source",
+        "today": TODAY,
+    }
+    overwrite_draft = note.note(
+        vault,
+        validate_only=True,
+        **overwrite_kwargs,
+    )
+    created = note.note(
+        vault,
+        draft_id=overwrite_draft.draft_id,
+        draft_hash=overwrite_draft.draft_hash,
+        draft_token=overwrite_draft.draft_token,
+        relation_disposition="reviewed_none",
+        relation_review_hash=overwrite_draft.draft_hash,
+        relation_review_reason="No honest relation exists in this fixture corpus.",
+        **overwrite_kwargs,
+    )
+    existing = (vault / created.path).read_text(encoding="utf-8")
+    _, frontmatter_block, _ = existing.split("---", 2)
+    overwrite_validation = create_file.create_file(
+        vault,
+        path=created.path,
+        content=f"---{frontmatter_block}---\n\n# Overwritten\n\nOnly prose.\n",
+        overwrite=True,
+        today=TODAY,
+        validate_only=True,
+    )
+    assert "missing_semantic_unit" in {
+        item.code for item in overwrite_validation.contract_result.blocking_findings
+    }
+    assert (vault / created.path).read_text(encoding="utf-8") == existing
+
+    activation_manifest.ensure_manifest(vault)
+    append_rel = "Knowledge Base/Notes/Insights/post-activation-direct.md"
+    append_path = vault / append_rel
+    append_path.write_text(
+        "---\ntitle: Direct\ntype: insight\nstatus: active\n"
+        "exomem_id: 00000000-0000-4000-8000-0000000000d1\n---\n\nOnly prose.\n",
+        encoding="utf-8",
+    )
+    append_before = append_path.read_bytes()
+    append_validation = append_to_file.append_to_file(
+        vault,
+        path=append_rel,
+        content="More prose.\n",
+        today=TODAY,
+        validate_only=True,
+    )
+    assert "missing_semantic_unit" in {
+        item.code for item in append_validation.contract_result.blocking_findings
+    }
+    assert append_path.read_bytes() == append_before
+
+
+def test_manage_memory_file_preserves_tier2_missing_unit_refusals(
+    vault: Path,
+) -> None:
+    before = _tree_bytes(vault)
+    validation = commands.op_manage_memory_file(
+        vault,
+        operation="create",
+        path="Knowledge Base/Notes/Insights/manage-missing.md",
+        content="# Manage missing\n\nOnly prose.\n",
+        frontmatter={"type": "insight", "status": "active"},
+        validate_only=True,
+    )
+    assert "missing_semantic_unit" in {
+        finding["code"]
+        for finding in validation["contract_result"]["blocking_findings"]
+    }
+    assert _tree_bytes(vault) == before
+
+    activation_manifest.ensure_manifest(vault)
+    append_rel = "Knowledge Base/Notes/Insights/manage-append-missing.md"
+    append_path = vault / append_rel
+    append_path.write_text(
+        "---\n"
+        "title: Manage append\n"
+        "type: insight\n"
+        "status: active\n"
+        "exomem_id: 00000000-0000-4000-8000-0000000000d2\n"
+        "---\n\n"
+        "Only prose.\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    append_before = append_path.read_bytes()
+    append_validation = commands.op_manage_memory_file(
+        vault,
+        operation="append",
+        path=append_rel,
+        content="More prose.\n",
+        validate_only=True,
+    )
+    assert "missing_semantic_unit" in {
+        finding["code"]
+        for finding in append_validation["contract_result"]["blocking_findings"]
+    }
+    assert append_validation["mutated"] is False
+    assert append_path.read_bytes() == append_before
+
+    with pytest.raises(ValueError, match="missing_semantic_unit"):
+        commands.op_manage_memory_file(
+            vault,
+            operation="append",
+            path=append_rel,
+            content="More prose.\n",
+            semantic_transition_token=append_validation["transition_token"],
+            relation_disposition="reviewed_none",
+            relation_review_hash=append_validation["transition_hash"],
+            relation_review_reason="No honest relation exists in this fixture corpus.",
+        )
+    assert append_path.read_bytes() == append_before
+
+
+def test_public_append_facades_validate_and_commit_reviewed_transition(
+    vault: Path,
+) -> None:
+    create_kwargs = {
+        "content": _compact_content("Public append"),
+        "note_type": "insight",
+        "title": "Public append",
+        "today": TODAY,
+    }
+    draft = note.note(vault, validate_only=True, **create_kwargs)
+    created = note.note(
+        vault,
+        draft_id=draft.draft_id,
+        draft_hash=draft.draft_hash,
+        draft_token=draft.draft_token,
+        relation_disposition="reviewed_none",
+        relation_review_hash=draft.draft_hash,
+        relation_review_reason="No honest relation exists in this fixture corpus.",
+        **create_kwargs,
+    )
+    before = _tree_bytes(vault)
+    append_content = "Additional reviewed context.\n"
+
+    direct_validation = commands.op_append_to_file(
+        vault,
+        path=created.path,
+        content=append_content,
+        validate_only=True,
+    )
+    manage_validation = commands.op_manage_memory_file(
+        vault,
+        operation="append",
+        path=created.path,
+        content=append_content,
+        validate_only=True,
+    )
+
+    for validation in (direct_validation, manage_validation):
+        assert validation["operation"] == "tier2_append"
+        assert validation["mutated"] is False
+        assert validation["transition_token"]
+        assert validation["transition_hash"]
+        assert "RELATION_DISPOSITION_STALE" in {
+            finding["code"]
+            for finding in validation["contract_result"]["blocking_findings"]
+        }
+    assert _tree_bytes(vault) == before
+
+    committed = commands.op_manage_memory_file(
+        vault,
+        operation="append",
+        path=created.path,
+        content=append_content,
+        semantic_transition_token=manage_validation["transition_token"],
+        relation_disposition="reviewed_none",
+        relation_review_hash=manage_validation["transition_hash"],
+        relation_review_reason="No honest relation exists after this append.",
+    )
+
+    assert committed["semantic"]["mutated"] is True
+    assert (vault / created.path).read_text(encoding="utf-8").endswith(append_content)
+
+
+@pytest.mark.parametrize("facade", ("direct", "manage"))
+@pytest.mark.parametrize(
+    "target_rel",
+    (
+        "Knowledge Base/Evidence/checks/append-preview.md",
+        "Knowledge Base/Attachments/append-preview.txt",
+    ),
+)
+def test_public_append_validate_only_rejects_unsupported_targets_without_mutation(
+    vault: Path,
+    facade: str,
+    target_rel: str,
+) -> None:
+    target = vault / target_rel
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("original bytes\n", encoding="utf-8", newline="\n")
+    primary_before = target.read_bytes()
+    tree_before = _tree_bytes(vault)
+
+    with pytest.raises(ValueError, match="INVALID_APPEND_REVIEW_TARGET"):
+        if facade == "direct":
+            commands.op_append_to_file(
+                vault,
+                path=target_rel,
+                content="must not be appended\n",
+                validate_only=True,
+            )
+        else:
+            commands.op_manage_memory_file(
+                vault,
+                operation="append",
+                path=target_rel,
+                content="must not be appended\n",
+                validate_only=True,
+            )
+
+    assert target.read_bytes() == primary_before
+    assert _tree_bytes(vault) == tree_before
+
+
+def test_append_review_arguments_are_present_in_both_command_registries() -> None:
+    required = {
+        "validate_only",
+        "semantic_transition_token",
+        "relation_disposition",
+        "relation_review_hash",
+        "relation_review_reason",
+    }
+    append_command = next(
+        command for command in commands.COMMANDS if command.name == "append_to_file"
+    )
+    manage_command = next(
+        command
+        for command in commands.PRODUCT_COMMANDS
+        if command.name == "manage_memory_file"
+    )
+
+    assert required <= {parameter.name for parameter in append_command.params}
+    assert required <= {parameter.name for parameter in manage_command.params}
+
+
+def test_replacement_successor_without_a_unit_is_refused_without_mutation(
+    vault: Path,
+) -> None:
+    predecessor_kwargs = {
+        "content": _compact_content("Replacement predecessor"),
+        "note_type": "insight",
+        "title": "Replacement predecessor",
+        "today": TODAY,
+    }
+    predecessor_draft = note.note(vault, validate_only=True, **predecessor_kwargs)
+    predecessor = note.note(
+        vault,
+        draft_id=predecessor_draft.draft_id,
+        draft_hash=predecessor_draft.draft_hash,
+        draft_token=predecessor_draft.draft_token,
+        relation_disposition="reviewed_none",
+        relation_review_hash=predecessor_draft.draft_hash,
+        relation_review_reason="No honest relation exists in this fixture corpus.",
+        **predecessor_kwargs,
+    )
+    before = _tree_bytes(vault)
+    replacement_kwargs = {
+        "old_path": predecessor.path,
+        "content": "# Replacement successor\n\nOnly prose.\n",
+        "note_type": "insight",
+        "title": "Replacement successor",
+        "today": TODAY,
+    }
+    validation = replace.replace(vault, validate_only=True, **replacement_kwargs)
+    assert "missing_semantic_unit" in {
+        finding.code for finding in validation.contract_result.blocking_findings
+    }
+    assert _tree_bytes(vault) == before
+
+    with pytest.raises(replace.ReplaceError, match="missing_semantic_unit") as blocked:
+        replace.replace(
+            vault,
+            draft_id=validation.draft_id,
+            draft_hash=validation.draft_hash,
+            draft_token=validation.draft_token,
+            relation_disposition="reviewed_none",
+            relation_review_hash=validation.draft_hash,
+            relation_review_reason="No honest relation exists in this fixture corpus.",
+            **replacement_kwargs,
+        )
+    assert blocked.value.code == "SEMANTIC_CONTRACT_BLOCKED"
+    assert _tree_bytes(vault) == before
 
 
 def test_writer_resolver_snapshot_forks_without_mutating_shared_cache(vault: Path) -> None:
@@ -101,7 +596,7 @@ def test_project_key_replay_includes_exact_already_applied_registry(vault: Path)
 
 def test_concurrent_project_registry_update_is_not_overwritten(vault: Path) -> None:
     kwargs = {
-        "content": "# Guarded registry\n\nA reviewed project conclusion.\n",
+        "content": _compact_content("Guarded registry"),
         "note_type": "research-note",
         "title": "Guarded project registration",
         "project": "guarded-project-key",
@@ -152,7 +647,7 @@ def test_prepared_note_rejects_auxiliary_drift_from_exact_read_snapshot(
 ) -> None:
     source_rel = "Knowledge Base/Sources/Articles/2026-06-02-postgres-autovacuum-tuning.md"
     kwargs = {
-        "content": "# Guard every auxiliary\n\nA conclusion with governed evidence.\n",
+        "content": _compact_content("Guard every auxiliary"),
         "note_type": "research-note",
         "title": f"Guard every auxiliary {target_name}",
         "project": "guard-matrix-project",
@@ -240,7 +735,9 @@ def test_log_rotation_rejects_concurrent_creation_of_absent_archive(
         f"## [2026-07-14] note | item-{index}\n\nbody\n\n"
         for index in range(vault_module.LOG_ROTATE_KEEP_ENTRIES + 5)
     )
-    log_path.write_text(f"# Log\n\n---\n{entries}", encoding="utf-8")
+    log_path.write_text(
+        f"# Log\n\n---\n{entries}", encoding="utf-8", newline="\n"
+    )
     plan = vault_module.plan_log_writes(
         vault,
         date_iso=TODAY.isoformat(),
@@ -303,7 +800,7 @@ def test_note_validate_across_midnight_commits_frozen_date_and_destination(
     vault: Path,
 ) -> None:
     kwargs = {
-        "content": "# Frozen note\n\nA disconnected but reviewed conclusion.\n",
+        "content": _compact_content("Frozen note"),
         "note_type": "insight",
         "title": "Frozen midnight destination",
     }
@@ -379,7 +876,7 @@ def test_note_partial_commit_after_registry_replacement_recovers_exactly(
         pass
 
     kwargs = {
-        "content": "# Recoverable note\n\nA reviewed project conclusion.\n",
+        "content": _compact_content("Recoverable note"),
         "note_type": "research-note",
         "title": "Recoverable semantic note",
         "project": "semantic-recovery-project",
@@ -538,7 +1035,7 @@ def test_replace_rejects_predecessor_drift_before_coordinator_commit(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     predecessor_kwargs = {
-        "content": "# Guarded predecessor\n\nThe earlier conclusion.\n",
+        "content": _compact_content("Guarded predecessor"),
         "note_type": "insight",
         "title": "Guarded replacement predecessor",
         "today": TODAY,
@@ -558,7 +1055,7 @@ def test_replace_rejects_predecessor_drift_before_coordinator_commit(
     )
     replacement_kwargs = {
         "old_path": predecessor.path,
-        "content": "# Guarded successor\n\nThe replacement conclusion.\n",
+        "content": _compact_content("Guarded successor"),
         "note_type": "insight",
         "title": "Guarded replacement successor",
         "today": TODAY,
@@ -670,7 +1167,7 @@ def test_replace_partial_after_predecessor_patch_recovers_exact_batch(
         pass
 
     predecessor_kwargs = {
-        "content": "# Recovery predecessor\n\nThe earlier conclusion.\n",
+        "content": _compact_content("Recovery predecessor"),
         "note_type": "insight",
         "title": "Replacement recovery predecessor",
         "today": TODAY,
@@ -690,7 +1187,7 @@ def test_replace_partial_after_predecessor_patch_recovers_exact_batch(
     )
     replacement_kwargs = {
         "old_path": predecessor.path,
-        "content": "# Recovery successor\n\nThe replacement conclusion.\n",
+        "content": _compact_content("Recovery successor"),
         "note_type": "insight",
         "title": "Replacement recovery successor",
         "today": TODAY,
@@ -749,7 +1246,7 @@ def test_replace_partial_after_predecessor_patch_recovers_exact_batch(
     assert (vault / result.new_path).exists()
 
 
-def test_tier2_semantic_overwrite_uses_structural_contract_on_either_side(
+def test_tier2_semantic_overwrite_rejects_path_type_mismatch_on_either_side(
     vault: Path,
 ) -> None:
     arbitrary = "Knowledge Base/Identity/arbitrary-before.md"
@@ -764,28 +1261,38 @@ def test_tier2_semantic_overwrite_uses_structural_contract_on_either_side(
         "---\n"
         "# Semantic after\n"
     )
+    arbitrary_before = (vault / arbitrary).read_bytes()
     after_result = create_file.create_file(
-        vault, path=arbitrary, content=semantic, overwrite=True, today=TODAY
+        vault,
+        path=arbitrary,
+        content=semantic,
+        overwrite=True,
+        today=TODAY,
+        validate_only=True,
     )
-    assert after_result.semantic is not None
-    assert after_result.semantic["applicability"] == "structural"
-    assert after_result.semantic["operation"] == "tier2_overwrite"
-    assert (vault / arbitrary).read_text(encoding="utf-8") == semantic
+    assert after_result.applicability == "structural"
+    assert "COMPILED_DESTINATION_MISMATCH" in {
+        item.code for item in after_result.contract_result.blocking_findings
+    }
+    assert (vault / arbitrary).read_bytes() == arbitrary_before
 
     before_path = vault / "Knowledge Base/Notes/Insights/semantic-before.md"
     before_path.parent.mkdir(parents=True, exist_ok=True)
     before_path.write_text(semantic, encoding="utf-8")
+    before_bytes = before_path.read_bytes()
     before_result = create_file.create_file(
         vault,
         path=before_path.relative_to(vault).as_posix(),
         content="# Arbitrary after\n",
         overwrite=True,
         today=TODAY,
+        validate_only=True,
     )
-    assert before_result.semantic is not None
-    assert before_result.semantic["applicability"] == "structural"
-    assert before_result.semantic["operation"] == "tier2_overwrite"
-    assert before_path.read_text(encoding="utf-8") == "# Arbitrary after\n"
+    assert before_result.applicability == "structural"
+    assert "COMPILED_TYPE_MISMATCH" in {
+        item.code for item in before_result.contract_result.blocking_findings
+    }
+    assert before_path.read_bytes() == before_bytes
 
 
 def test_tier2_draft_token_freezes_validation_date_across_commit_day(
@@ -859,7 +1366,7 @@ def test_note_exact_reviewed_none_retry_survives_later_inbound_relation(
     vault: Path,
 ) -> None:
     kwargs = {
-        "content": "# Stable reviewed retry\n\nThe original disconnected conclusion.\n",
+        "content": _compact_content("Stable reviewed retry"),
         "note_type": "insight",
         "title": "Stable reviewed retry",
         "today": TODAY,

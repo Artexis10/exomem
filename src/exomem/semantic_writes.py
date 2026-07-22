@@ -19,6 +19,7 @@ from . import (
     memory_schema,
     relation_registry,
     relation_review,
+    semantic_authoring,
     semantic_contract,
     semantic_index,
     semantic_language_registry,
@@ -333,6 +334,8 @@ def _bounded_semantic_feedback(
         ),
         "should_block": result.should_block,
         "semantic_unit_count": result.semantic_unit_count,
+        "compact_unit_count": result.compact_unit_count,
+        "rich_unit_count": result.rich_unit_count,
         "kind_counts": _bounded_feedback_value(dict(kind_counts), truncation),
         "category_counts": _bounded_feedback_value(
             dict(category_counts), truncation
@@ -362,9 +365,45 @@ def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
 class SemanticWriteError(ValueError):
     code: str
     reason: str
+    validation_findings: tuple[semantic_contract.ContractFinding, ...] = ()
 
     def __post_init__(self) -> None:
         ValueError.__init__(self, f"{self.code}: {self.reason}")
+
+    def as_semantic_validation_error(self) -> dict[str, Any] | None:
+        """Project only canonical semantic-authoring refusals for public facades."""
+        canonical = semantic_authoring.AUTHORING_CONTRACT.findings
+        authored = tuple(
+            finding
+            for finding in self.validation_findings
+            if finding.code in canonical
+        )
+        if not authored:
+            return None
+        by_code = {finding.code: finding for finding in authored}
+        primary = by_code.get("missing_semantic_unit", authored[0])
+        definition = canonical[primary.code]
+        if primary.code == "missing_semantic_unit":
+            compact = definition["compact_remediation"]
+            rich = definition["rich_remediation"]
+            remediation = f"{compact} {rich}"
+        else:
+            compact = None
+            rich = None
+            remediation = definition["remediation"]
+        payload: dict[str, Any] = {
+            "code": primary.code,
+            "message": primary.detail or definition["when"],
+            "remediation": remediation,
+            "findings": [finding.as_dict() for finding in self.validation_findings],
+            "validation_state": "rejected",
+            "mutated": False,
+        }
+        if compact is not None:
+            payload["compact_remediation"] = compact
+        if rich is not None:
+            payload["rich_remediation"] = rich
+        return payload
 
 
 @dataclass(frozen=True, slots=True)
@@ -634,7 +673,7 @@ def evaluate_posthoc_batch(
             contracts_by_scope[scope] = contracts
         review = (
             relation_review.load_relation_review(root, state, corpus=corpus)
-            if state.eligible_compiled
+            if semantic_contract.requires_semantic_unit(state)
             else None
         )
         grandfathered = bool(
@@ -662,7 +701,7 @@ def evaluate_posthoc_batch(
             before_review=None,
             after_review=review,
             grandfathered=False,
-            include_relation_disposition=state.eligible_compiled,
+            include_relation_disposition=semantic_contract.requires_semantic_unit(state),
         )
         evaluations.append(
             PosthocPageEvaluation(
@@ -1237,7 +1276,7 @@ def _existing_applicability(
     before: semantic_contract.SemanticPageState,
     after: semantic_contract.SemanticPageState,
 ) -> Literal["full", "structural", "not_semantic"]:
-    if after.eligible_compiled:
+    if semantic_contract.requires_semantic_unit(after):
         return "full"
     if (
         before.page_type in _COMPILED_TYPES
@@ -1664,6 +1703,7 @@ def commit_existing(
         raise SemanticWriteError(
             "SEMANTIC_CONTRACT_BLOCKED",
             _blocking_reason(preflight.contract_result),
+            preflight.contract_result.blocking_findings,
         )
 
     result = preflight.contract_result
@@ -1680,6 +1720,7 @@ def commit_existing(
                     result,
                     "semantic contract blocked against the activation boundary winner",
                 ),
+                result.blocking_findings,
             )
 
     try:
@@ -2218,6 +2259,11 @@ def commit_move(
         raise SemanticWriteError(
             "SEMANTIC_CONTRACT_BLOCKED",
             _blocking_reason_for_evaluations(preflight.evaluations),
+            tuple(
+                finding
+                for item in preflight.evaluations
+                for finding in item.contract_result.blocking_findings
+            ),
         )
     if preflight.manifest_install_required:
         winner = activation_manifest.ensure_manifest(
@@ -2652,6 +2698,11 @@ def commit_recovery(
                 raise SemanticWriteError(
                     "SEMANTIC_CONTRACT_BLOCKED",
                     _blocking_reason_for_evaluations(preflight.evaluations),
+                    tuple(
+                        finding
+                        for item in preflight.evaluations
+                        for finding in item.contract_result.blocking_findings
+                    ),
                 )
             destination_root_guard = (
                 preflight.destination_root_guard.prepare_and_bind_parents(root)
@@ -2734,6 +2785,9 @@ def _evaluate_structural(
             after_contracts=resolved,
             before_corpus=before,
             after_corpus=before.with_candidate(candidate),
+            include_relation_disposition=semantic_contract.requires_semantic_unit(
+                candidate
+            ),
         ),
         candidate,
     )
@@ -2769,25 +2823,13 @@ def preflight_creation(
             "INVALID_DRAFT_TOKEN", "draft token does not match this creation"
         )
     try:
-        frontmatter, _, _ = vault.parse_frontmatter(source, strict=True)
+        vault.parse_frontmatter(source, strict=True)
     except vault.FrontmatterError as error:
         raise SemanticWriteError(error.code, "draft frontmatter is invalid") from error
-    page_type = frontmatter.get("type")
     result, state = _evaluate_structural(
         root, destination=path, source=source, operation=operation
     )
-    if result.should_block and not (
-        page_type in _COMPILED_TYPES
-        and result.relation_disposition.kind in {"missing", "stale"}
-        and all(
-            item.resolved_rule == ("relations", "*", "disposition")
-            for item in result.blocking_findings
-        )
-    ):
-        raise SemanticWriteError(
-            "SEMANTIC_CONTRACT_BLOCKED", _blocking_reason(result)
-        )
-    if page_type in _COMPILED_TYPES and state.eligible_compiled:
+    if semantic_contract.requires_semantic_unit(state):
         if draft_id is None:
             raise SemanticWriteError("DRAFT_IDENTITY_MISMATCH", "active draft requires identity")
         validation = relation_review.revalidate_prepared_creation_draft(
@@ -2806,7 +2848,9 @@ def preflight_creation(
             validation.contract_result, validation, state,
         )
     applicability: Literal["structural", "not_semantic"] = (
-        "structural" if page_type is not None else "not_semantic"
+        "structural"
+        if state.page_type is not None or semantic_contract.compiled_intent(state)
+        else "not_semantic"
     )
     return CreationPreflight(
         applicability, path, source, draft_id, draft_token, False, result, None, state
@@ -2826,6 +2870,20 @@ def commit_creation(
     predecessor_content_hash: str | None = None,
 ) -> CreationCommit:
     root = Path(vault_root)
+    non_review_blockers = tuple(
+        finding
+        for finding in preflight.contract_result.blocking_findings
+        if finding.resolved_rule != ("relations", "*", "disposition")
+    )
+    if non_review_blockers or (
+        preflight.applicability != "full"
+        and preflight.contract_result.should_block
+    ):
+        raise SemanticWriteError(
+            "SEMANTIC_CONTRACT_BLOCKED",
+            _blocking_reason(preflight.contract_result),
+            preflight.contract_result.blocking_findings,
+        )
     if preflight.applicability == "full":
         assert preflight.draft_id is not None
         committed = relation_review.commit_creation_draft(
