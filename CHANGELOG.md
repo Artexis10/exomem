@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.29.1](https://github.com/Artexis10/exomem/compare/v0.29.0...v0.29.1) (2026-07-22)
+
+
+### Bug Fixes
+
+* **release:** enforce parseable squash titles ([#300](https://github.com/Artexis10/exomem/issues/300)) ([3e18da3](https://github.com/Artexis10/exomem/commit/3e18da378420f5599c47976dad40eaeb3f707454))
+
 ## [0.29.0](https://github.com/Artexis10/exomem/compare/v0.28.0...v0.29.0) (2026-07-21)
 
 
