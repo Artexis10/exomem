@@ -106,6 +106,28 @@ Use scopes when helpful, for example `feat(doctor): ...` or
 changelog by default and do not drive releases unless they include a breaking
 marker.
 
+GitHub squash merges use the pull-request title as the resulting commit header,
+so the `Conventional Commit title` PR check validates this exact shape:
+
+```text
+<lowercase-type>[optional scope][!]: <non-empty description>
+```
+
+For example, `fix(release): preserve parsed squash commits` and
+`feat(api)!: replace the response contract` pass; `Fix the release pipeline`
+does not. Any lowercase Conventional Commit type is parseable, but only the
+non-breaking types configured in `release-please-config.json` drive a normal
+version bump or receive a named changelog section. A breaking `!` on any
+parseable type can drive the configured breaking-release bump.
+
+The `main` branch ruleset must require the `Conventional Commit title` status
+check. Without that repository setting, the workflow reports an invalid title
+but GitHub does not block the merge. To check a title locally, run:
+
+```bash
+python scripts/check_pr_title.py "fix(release): preserve parsed squash commits"
+```
+
 ## Release flow
 
 1. Merge feature/fix PRs to `main` using Conventional Commit titles.
