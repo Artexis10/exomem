@@ -1277,7 +1277,11 @@ def test_local_two_cell_alpha_lifecycle_drill_preserves_isolation(tmp_path: Path
         json={
             "note_type": "insight",
             "title": "Bravo remains available",
-            "content": "# Bravo remains available\n\nBRAVO-STILL-AVAILABLE\n",
+            "content": (
+                "# Bravo remains available\n\n"
+                "## Observations\n\n"
+                "- [availability] BRAVO-STILL-AVAILABLE\n"
+            ),
         },
     )
     assert bravo_still_available.status_code == 200, bravo_still_available.text

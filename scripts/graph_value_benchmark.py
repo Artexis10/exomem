@@ -1901,6 +1901,14 @@ def _hit_paths(payload: Any) -> list[str]:
     return paths
 
 
+def _has_semantic_census(payload: Any) -> bool:
+    """Check the adoption contract structurally, independent of prose or spelling."""
+    if not isinstance(payload, dict):
+        return False
+    census = payload.get("semantic_census")
+    return isinstance(census, dict) and isinstance(census.get("categories"), dict)
+
+
 def _fresh_fixture_corpus(manifest: dict[str, Any], root: Path, probe_id: str) -> RenderedCorpus:
     return render_exomem(manifest, root / "mutating" / _artifact_slug(probe_id))
 
@@ -2361,10 +2369,9 @@ def run_exomem_local_core_fixture(manifest: dict[str, Any], root: Path) -> dict[
         audit = commands.op_audit(base.root)
         attention = commands.op_attention(base.root, limit=5)
         after = corpus_hash(base.root)
-        encoded = json.dumps(adoption, sort_keys=True).lower()
         return (
             {
-                "semantic_census": "semantic" in encoded and "category" in encoded,
+                "semantic_census": _has_semantic_census(adoption),
                 "scan_read_only": before == after,
                 "audit_typed": isinstance(audit.get("findings", []), list),
                 "attention_bounded": len(attention.get("items", [])) <= 5,
@@ -3881,8 +3888,7 @@ async def run_exomem_direct_probes(
         after = corpus_hash(corpus.root)
         return (
             {
-                "semantic_census": "semantic" in _payload_text(adoption)
-                and "category" in _payload_text(adoption),
+                "semantic_census": _has_semantic_census(adoption),
                 "scan_read_only": before == after,
                 "audit_typed": isinstance(audit.get("findings", []), list),
                 "attention_bounded": len(attention.get("items", [])) <= 5,

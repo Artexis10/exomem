@@ -424,6 +424,29 @@ def test_concise_and_expanded_renderers_are_byte_stable_and_complete() -> None:
     assert "## Decision" in expanded
 
 
+def test_tool_description_projection_is_independent_of_docstring_parsers() -> None:
+    description = """Write a governed page.
+
+    Keep the public preamble concise.
+
+    Args:
+        content: Full Markdown body.
+
+    Returns:
+        The committed page.
+    """
+
+    projected = semantic_authoring.project_tool_description("remember", description)
+
+    assert projected.startswith(
+        "Write a governed page.\n\nKeep the public preamble concise.\n\n"
+    )
+    assert "Args:" not in projected
+    assert "Returns:" not in projected
+    assert "Full Markdown body" not in projected
+    assert projected.count(semantic_authoring.contract_identity()) == 1
+
+
 def test_public_semantic_language_doc_projects_the_canonical_contract() -> None:
     source = (
         Path(__file__).parents[1] / "docs" / "semantic-language.md"

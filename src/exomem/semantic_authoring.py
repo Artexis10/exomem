@@ -8,6 +8,7 @@ the same versioned object without reading Markdown or invoking a model.
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -467,13 +468,12 @@ def project_tool_description(
     description: str,
     contract: SemanticAuthoringContract = AUTHORING_CONTRACT,
 ) -> str:
-    """Insert canonical guidance where doc parsers preserve tool prose."""
+    """Return parser-independent public prose plus canonical authoring guidance."""
     guidance = render_tool_guidance(tool, contract)
+    normalized = inspect.cleandoc(description)
     args_marker = "\nArgs:"
-    if args_marker in description:
-        preamble, remainder = description.split(args_marker, 1)
-        return f"{preamble.rstrip()}\n\n{guidance}\n{args_marker}{remainder}"
-    return f"{description.rstrip()}\n\n{guidance}\n"
+    preamble = normalized.split(args_marker, 1)[0]
+    return f"{preamble.rstrip()}\n\n{guidance}\n"
 
 
 def render_concise(
