@@ -49,22 +49,18 @@ _REMEDIATION: dict[str, str] = {
     "STALE_UNIT_REFERENCE": (
         "Re-read the exact unit and retry with its current reference/fingerprint."
     ),
-    "AMBIGUOUS_UNIT_REFERENCE": (
-        "Re-read the parent and select one exact current unit reference."
-    ),
+    "AMBIGUOUS_UNIT_REFERENCE": ("Re-read the parent and select one exact current unit reference."),
     "COMPACT_RELATIONS_REQUIRE_RICH_KIND": (
         "Select an explicit governed rich kind or author a canonical note-level relation."
     ),
     "DRIFT_GUARDS_REQUIRED": (
-        "Re-read the parent and exact unit, then pass both expected_hash and "
-        "expected_fingerprint."
+        "Re-read the parent and exact unit, then pass both expected_hash and expected_fingerprint."
     ),
     "WRITER_LEASE_REQUIRED": (
         "Send the mutation to the current writer or retry after its lease expires."
     ),
     "WRITER_COORDINATOR_UNAVAILABLE": (
-        "Check the coordinator URL, credentials, and service health; reads remain "
-        "available."
+        "Check the coordinator URL, credentials, and service health; reads remain available."
     ),
     "WRITER_FENCED": "Retry the mutation on the current writer.",
     "INGRESS_BYPASSED": (
@@ -72,6 +68,7 @@ _REMEDIATION: dict[str, str] = {
         "and worker route coverage, or set EXOMEM_EDGE_STAMP_ENFORCE=0 to break glass."
     ),
     "MUTATION_BUSY": "Retry after the active vault mutation finishes.",
+    "MUTATION_WARMING": "Retry after semantic corpus warm-up completes.",
     "MUTATION_ACKNOWLEDGEMENT_PENDING": (
         "Retry with the same mutation identity; do not submit a revised payload."
     ),
@@ -86,13 +83,13 @@ _REMEDIATION: dict[str, str] = {
     "UNSUPPORTED_MEDIA": "Use a supported audio, video, image, document, or text-media extension.",
     "MEDIA_NOT_FOUND": "Check the governed Knowledge Base path and original filename.",
     "MEDIA_PATH_OUTSIDE_KB": "Choose a media artifact inside the governed Knowledge Base.",
-    "MEDIA_PATH_ACCESS_DENIED": "Move the artifact to a writable governed subtree or update _access.yaml policy.",
+    "MEDIA_PATH_ACCESS_DENIED": (
+        "Move the artifact to a writable governed subtree or update _access.yaml policy."
+    ),
 }
 
 # Error codes whose HTTP status is NOT the default 400.
-_NOT_FOUND_CODES = frozenset(
-    {"NOT_FOUND", "OLD_NOT_FOUND", "SOURCES_NOT_FOUND", "NOT_IN_TRASH"}
-)
+_NOT_FOUND_CODES = frozenset({"NOT_FOUND", "OLD_NOT_FOUND", "SOURCES_NOT_FOUND", "NOT_IN_TRASH"})
 _CONFLICT_CODES = frozenset(
     {
         "ARTIFACT_EXISTS",
@@ -115,6 +112,7 @@ _CONFLICT_CODES = frozenset(
         "BATCH_ROLLBACK_INCOMPLETE",
         "BATCH_CLEANUP_INCOMPLETE",
         "MUTATION_BUSY",
+        "MUTATION_WARMING",
         "MUTATION_ACKNOWLEDGEMENT_PENDING",
         "MUTATION_COMMITTED_ACKNOWLEDGEMENT_UNCERTAIN",
         # Adoption Studio drift codes (add-adoption-studio): a stale plan/apply or a
@@ -344,9 +342,7 @@ def coerce(
     if tool == "edit_memory" and isinstance(raw.get("operation"), dict):
         operation = raw["operation"]
         for field in ("new_body", "new_string"):
-            guards.guard_text_content(
-                operation.get(field), tool=tool, field=f"operation.{field}"
-            )
+            guards.guard_text_content(operation.get(field), tool=tool, field=f"operation.{field}")
         for item in operation.get("edits") or []:
             if isinstance(item, dict):
                 guards.guard_text_content(

@@ -31,7 +31,7 @@ from __future__ import annotations
 import threading
 import time
 
-COMPONENTS = ("lexical", "embeddings", "reranker", "clip")
+COMPONENTS = ("lexical", "semantic_corpus", "embeddings", "reranker", "clip")
 
 _lock = threading.Lock()
 _events: dict[str, threading.Event] = {c: threading.Event() for c in COMPONENTS}

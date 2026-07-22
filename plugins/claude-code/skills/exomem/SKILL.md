@@ -287,10 +287,10 @@ with the former raw result. Response detail is presentation-only: changing it
 does not change mutation identity, execute the leaf again, or alter a replayed
 terminal.
 
-`MUTATION_BUSY`, `MUTATION_ACKNOWLEDGEMENT_PENDING`, and
+`MUTATION_WARMING`, `MUTATION_BUSY`, `MUTATION_ACKNOWLEDGEMENT_PENDING`, and
 `MUTATION_COMMITTED_ACKNOWLEDGEMENT_UNCERTAIN` remain errors, not successful
 terminals. Preserve the same mutation identity and unchanged payload when
-following their remediation: wait before retrying a busy call; retry a pending
+following their remediation: wait before retrying a warming or busy call; retry a pending
 call only with the same identity; do not submit a new identity after a
 committed-uncertain result—reconcile and retry only as instructed.
 

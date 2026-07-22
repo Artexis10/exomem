@@ -8,6 +8,9 @@ pytest-cache-files-*/
 .pytest-tmp/
 .review-basetemp-*/
 .tmp-product-benchmark/
+.bench-*/
+.benchmark-*/
+.semantic-latency-*/
 .codex-manual-cache/
 .python-write-probe/
 .surface-probe/
@@ -71,3 +74,4 @@ infra/provisioner/.ruff_cache/
 infra/provisioner/.pytest_cache/
 infra/provisioner/*.sqlite*
 .refs.sqlite
+.lexical.sqlite*

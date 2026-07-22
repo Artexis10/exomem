@@ -15,10 +15,12 @@ from exomem import (
     epistemic_graph,
     find_candidates,
     readiness,
+    semantic_index,
 )
 from exomem import (
     find as find_module,
 )
+from exomem.embedding_index import SemanticUnitVectorHit
 from exomem.ranking_config import RankingConfig
 from exomem.retrieval_explain import RetrievalTrace, attach_hit_explanations
 
@@ -585,19 +587,30 @@ def test_unit_vector_success_marks_lexical_non_applicable(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _write_unit_page(tmp_path)
-
-    class UnitVectorHit:
-        def __init__(self, unit_ref: str, cosine: float) -> None:
-            self.unit_ref = unit_ref
-            self.cosine = cosine
+    rel = _write_unit_page(tmp_path)
+    state = semantic_index.current_parent_index_state(tmp_path, rel)
 
     class FakeUnitIndex:
         def search_semantic_units(
-            self, _query_vector, *, k: int, allowed_unit_refs: set[str]
+            self,
+            _query_vector,
+            *,
+            k: int,
+            allowed_unit_refs: set[str],
+            validate: bool,
         ):
+            assert validate is False
             unit_ref = sorted(allowed_unit_refs)[0]
-            return [UnitVectorHit(unit_ref, 0.876543219)]
+            return [
+                SemanticUnitVectorHit(
+                    unit_ref,
+                    rel,
+                    state.parent_generation,
+                    state.parent_source_hash,
+                    state.parser_version,
+                    0.876543219,
+                )
+            ]
 
     monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
     monkeypatch.setattr(
@@ -637,19 +650,30 @@ def test_unit_hybrid_vector_only_is_single_lane_without_fabricated_fusion(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _write_unit_page(tmp_path)
-
-    class UnitVectorHit:
-        def __init__(self, unit_ref: str, cosine: float) -> None:
-            self.unit_ref = unit_ref
-            self.cosine = cosine
+    rel = _write_unit_page(tmp_path)
+    state = semantic_index.current_parent_index_state(tmp_path, rel)
 
     class FakeUnitIndex:
         def search_semantic_units(
-            self, _query_vector, *, k: int, allowed_unit_refs: set[str]
+            self,
+            _query_vector,
+            *,
+            k: int,
+            allowed_unit_refs: set[str],
+            validate: bool,
         ):
+            assert validate is False
             unit_ref = sorted(allowed_unit_refs)[0]
-            return [UnitVectorHit(unit_ref, 0.7654321)]
+            return [
+                SemanticUnitVectorHit(
+                    unit_ref,
+                    rel,
+                    state.parent_generation,
+                    state.parent_source_hash,
+                    state.parser_version,
+                    0.7654321,
+                )
+            ]
 
     monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
     monkeypatch.setattr(

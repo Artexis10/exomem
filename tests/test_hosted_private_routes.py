@@ -153,9 +153,7 @@ class IsolatedInvoker:
 
 class WriterBackedInvoker:
     def __init__(self, state_dir: Path) -> None:
-        self.manager = writer_lease.LeaseManager(
-            writer_lease.LeaseConfig(state_dir=state_dir)
-        )
+        self.manager = writer_lease.LeaseManager(writer_lease.LeaseConfig(state_dir=state_dir))
         self.calls: list[dict[str, Any]] = []
 
     def __call__(
@@ -484,27 +482,15 @@ def _hosted_bootstrap_tool_refs(payload: object) -> set[str]:
             for child_key, child in value.items():
                 if child_key in known_names and key not in _ACTION_VOCABULARY_MAPS:
                     refs.add(child_key)
-                if (
-                    child_key == "tool"
-                    and isinstance(child, str)
-                    and child in known_names
-                ):
+                if child_key == "tool" and isinstance(child, str) and child in known_names:
                     refs.add(child)
                     continue
-                if (
-                    child_key == "route"
-                    and isinstance(child, str)
-                    and child in known_names
-                ):
+                if child_key == "route" and isinstance(child, str) and child in known_names:
                     refs.add(child)
                     continue
-                if child_key in structured_lists and isinstance(
-                    child, (list, tuple)
-                ):
+                if child_key in structured_lists and isinstance(child, (list, tuple)):
                     refs.update(
-                        item
-                        for item in child
-                        if isinstance(item, str) and item in known_names
+                        item for item in child if isinstance(item, str) and item in known_names
                     )
                 walk(child, key=str(child_key))
             return
@@ -560,9 +546,7 @@ def test_hosted_bootstrap_profiles_match_private_command_contract(
     exported_tuple = tuple(command["name"] for command in contract["commands"])
     expected_tuple = tuple(
         command.name
-        for command in commands_module.product_commands_for(
-            "rest", expose_tier2=tier2_enabled
-        )
+        for command in commands_module.product_commands_for("rest", expose_tier2=tier2_enabled)
     )
     assert exported_tuple == expected_tuple
 
@@ -577,9 +561,7 @@ def test_hosted_bootstrap_profiles_match_private_command_contract(
         active = payload["active_capabilities"]
         assert active["surface"] == "hosted"
         assert active["profile"] == "private-command-router"
-        assert active["tier2_policy"] == (
-            "enabled" if tier2_enabled else "disabled"
-        )
+        assert active["tier2_policy"] == ("enabled" if tier2_enabled else "disabled")
         assert active["available_product_tools"] == sorted(exported_tuple)
         assert _hosted_bootstrap_tool_refs(payload) <= set(exported_tuple)
         assert "read_media" not in _hosted_bootstrap_tool_refs(payload)
@@ -614,14 +596,15 @@ def test_hosted_agent_profile_routes_enforce_contract_and_bootstrap(
     command_path = f"/private/exomem/v1/agent/{profile}/command"
 
     assert client.get(contract_path).status_code == 401
-    assert client.post(f"{command_path}/remember", json=_remember_body("no auth")).status_code == 401
+    assert (
+        client.post(f"{command_path}/remember", json=_remember_body("no auth")).status_code == 401
+    )
     contract_response = client.get(contract_path, headers=headers)
     assert contract_response.status_code == 200, contract_response.text
     contract = contract_response.json()
     command_names = tuple(command["name"] for command in contract["commands"])
     expected = tuple(
-        command.name
-        for command in commands_module.product_commands_for_profile(profile, "rest")
+        command.name for command in commands_module.product_commands_for_profile(profile, "rest")
     )
     assert command_names == expected
     assert contract["agent_profile"]["profile"] == profile
@@ -646,9 +629,10 @@ def test_hosted_agent_profile_routes_enforce_contract_and_bootstrap(
         assert active["surface"] == "hosted-agent"
         assert active["tier2_policy"] == "disabled"
         assert active["available_product_tools"] == sorted(expected)
-        assert active["active_capability_sha256"] == contract["agent_profile"][
-            "active_capability_sha256"
-        ]
+        assert (
+            active["active_capability_sha256"]
+            == contract["agent_profile"]["active_capability_sha256"]
+        )
         assert _hosted_bootstrap_tool_refs(payload) <= set(expected)
 
     mutation_headers = _headers(
@@ -713,10 +697,7 @@ def test_hosted_agent_profile_routes_enforce_contract_and_bootstrap(
             json=body,
         )
         assert excluded_while_quiesced.status_code == 404
-        assert (
-            excluded_while_quiesced.json()["error"]["code"]
-            == "COMMAND_NOT_FOUND"
-        )
+        assert excluded_while_quiesced.json()["error"]["code"] == "COMMAND_NOT_FOUND"
         assert len(invoker.calls) == calls_before_exclusion
 
     rejected_while_quiesced = client.post(
@@ -729,10 +710,7 @@ def test_hosted_agent_profile_routes_enforce_contract_and_bootstrap(
         json=_remember_body("must not pass mutation admission"),
     )
     assert rejected_while_quiesced.status_code == 503
-    assert (
-        rejected_while_quiesced.json()["error"]["code"]
-        == "HOSTED_MUTATION_NOT_ADMITTED"
-    )
+    assert rejected_while_quiesced.json()["error"]["code"] == "HOSTED_MUTATION_NOT_ADMITTED"
     assert len(invoker.calls) == calls_before_exclusion
 
     unknown = client.get(
@@ -748,10 +726,7 @@ def test_hosted_agent_profile_routes_enforce_contract_and_bootstrap(
         json=_remember_body("unknown profile"),
     )
     assert unknown_command.status_code == 400
-    assert (
-        unknown_command.json()["error"]["code"]
-        == "HOSTED_SURFACE_PROFILE_UNSUPPORTED"
-    )
+    assert unknown_command.json()["error"]["code"] == "HOSTED_SURFACE_PROFILE_UNSUPPORTED"
     assert len(invoker.calls) == calls_before_exclusion
 
 
@@ -1074,6 +1049,38 @@ def test_hosted_busy_error_preserves_only_allowlisted_public_identity(
     assert "private-detail-sentinel" not in response.text
 
 
+def test_hosted_warming_error_preserves_retry_contract(tmp_path: Path) -> None:
+    client, config, _lifecycle, _invoker = _cell(
+        tmp_path,
+        cell_id="cell-public-warming-error",
+        credential="public-warming-service-credential-0001",
+        invoker=MutationErrorInvoker(
+            "MUTATION_WARMING",
+            status="retryable",
+            committed=False,
+            retry_after_ms=750,
+        ),
+    )
+
+    response = client.post(
+        "/private/exomem/v1/command/remember",
+        headers=_headers(config),
+        json=_remember_body("HOSTED-WARMING-ERROR"),
+    )
+
+    assert response.status_code == 409, response.text
+    assert response.json()["error"] == {
+        "code": "MUTATION_WARMING",
+        "message": "hosted command failed",
+        "remediation": None,
+        "status": "retryable",
+        "committed": False,
+        "retry_after_ms": 750,
+        "request_id": DEFAULT_REQUEST_ID,
+        "receipt_id": "0123456789abcdef",
+    }
+
+
 def test_hosted_pending_error_omits_absent_public_idempotency_key(
     tmp_path: Path,
 ) -> None:
@@ -1171,9 +1178,7 @@ def test_mixed_command_route_admits_only_resolved_read_operations(
     )
     headers = _headers(config)
     if admission_state == "authority-down":
-        lifecycle.set_mutation_authority(
-            False, reason_code="HOSTED_MUTATION_AUTHORITY_UNAVAILABLE"
-        )
+        lifecycle.set_mutation_authority(False, reason_code="HOSTED_MUTATION_AUTHORITY_UNAVAILABLE")
     else:
         lifecycle.quiesce(timeout=1)
 

@@ -64,6 +64,7 @@ _HOSTED_MUTATION_DETAIL_FIELDS = (
 )
 _HOSTED_MUTATION_ERROR_SHAPES = {
     "MUTATION_BUSY": ("retryable", False),
+    "MUTATION_WARMING": ("retryable", False),
     "MUTATION_ACKNOWLEDGEMENT_PENDING": ("uncertain", None),
     "MUTATION_COMMITTED_ACKNOWLEDGEMENT_UNCERTAIN": ("committed", True),
 }
@@ -263,11 +264,7 @@ def _error_response(
     }
     if details is not None:
         error.update(
-            {
-                field: details[field]
-                for field in _HOSTED_MUTATION_DETAIL_FIELDS
-                if field in details
-            }
+            {field: details[field] for field in _HOSTED_MUTATION_DETAIL_FIELDS if field in details}
         )
     return HostedJSONResponse(
         cli_ops.envelope(False, error=error),
@@ -291,7 +288,7 @@ def _hosted_mutation_error_details(
         details["committed"] = expected_committed
     retry_after_ms = error.get("retry_after_ms")
     if (
-        error.get("code") == "MUTATION_BUSY"
+        error.get("code") in {"MUTATION_BUSY", "MUTATION_WARMING"}
         and type(retry_after_ms) is int
         and retry_after_ms >= 0
     ):
@@ -402,9 +399,7 @@ def _trusted_context(
             authentication = None
         authenticated = authentication is not None
         if authentication is not None:
-            authenticated_credential_version = getattr(
-                authentication, "credential_version", None
-            )
+            authenticated_credential_version = getattr(authentication, "credential_version", None)
             security_revision = getattr(authentication, "security_revision", None)
             if (
                 not isinstance(authenticated_credential_version, str)
@@ -852,14 +847,10 @@ def register_hosted_routes(
                 "vault_id": config.vault_id,
                 "exomem_release": __version__,
                 "hosted_protocol": config.protocol_version,
-                "authenticated_credential_version": (
-                    context.authenticated_credential_version
-                ),
+                "authenticated_credential_version": (context.authenticated_credential_version),
                 "security_revision": context.security_revision,
                 "service_authenticated": True,
-                "mutation_authority": lifecycle.control_plane_readiness()[
-                    "mutationAuthority"
-                ],
+                "mutation_authority": lifecycle.control_plane_readiness()["mutationAuthority"],
                 "admission_phase": readiness.phase,
                 "read_admission": readiness.read_admitted,
                 "write_admission": readiness.write_admitted,
@@ -923,9 +914,7 @@ def register_hosted_routes(
                                 *injected,
                                 idempotency_key=gateway.scoped_idempotency_key(context),
                                 public_idempotency_key=context.idempotency_key,
-                                implicit_idempotency_scope=gateway.implicit_retry_scope(
-                                    context
-                                ),
+                                implicit_idempotency_scope=gateway.implicit_retry_scope(context),
                                 mutation_request_id=context.request_id,
                                 **kwargs,
                             )
@@ -935,9 +924,7 @@ def register_hosted_routes(
                             *injected,
                             idempotency_key=gateway.scoped_idempotency_key(context),
                             public_idempotency_key=context.idempotency_key,
-                            implicit_idempotency_scope=gateway.implicit_retry_scope(
-                                context
-                            ),
+                            implicit_idempotency_scope=gateway.implicit_retry_scope(context),
                             mutation_request_id=context.request_id,
                             **kwargs,
                         )

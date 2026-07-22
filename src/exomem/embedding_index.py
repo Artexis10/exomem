@@ -45,7 +45,6 @@ SEMANTIC_UNIT_SCHEMA_VERSION = 3
 # single-machine-per-sidecar deployment; would need re-litigating for multi-writer.
 
 
-
 class _EmbCache(NamedTuple):
     """EmbeddingIndex's in-memory matrix cache. `(epoch, generation, instance)` is
     the write token (F1-F3); `mtime` is retained only for the gen==0 legacy
@@ -170,8 +169,7 @@ class EmbeddingIndex:
         """Replace all rows for `rel_path` in a single transaction."""
         if len(chunks) != len(vectors):
             raise ValueError(
-                f"chunks/vectors length mismatch for {rel_path}: "
-                f"{len(chunks)} vs {len(vectors)}"
+                f"chunks/vectors length mismatch for {rel_path}: {len(chunks)} vs {len(vectors)}"
             )
         conn = self._connect()
         try:
@@ -400,7 +398,9 @@ class EmbeddingIndex:
             log.info(
                 "embedding matrix full load: reason=%s rows=%d gen=%d epoch=%d",
                 sidecar_store.reload_reason(c, loaded.epoch, loaded.generation),
-                len(loaded.metadata), loaded.generation, loaded.epoch,
+                len(loaded.metadata),
+                loaded.generation,
+                loaded.epoch,
             )
             self._cache = loaded
             return loaded.metadata, loaded.matrix
@@ -443,8 +443,7 @@ class EmbeddingIndex:
             try:
                 epoch, gen, instance = sidecar_store.read_meta_token(conn)
                 rows = conn.execute(
-                    "SELECT file_path, chunk_idx, vector FROM chunks "
-                    "ORDER BY file_path, chunk_idx"
+                    "SELECT file_path, chunk_idx, vector FROM chunks ORDER BY file_path, chunk_idx"
                 ).fetchall()
             finally:
                 conn.rollback()  # read-only txn — release the snapshot
@@ -515,14 +514,15 @@ class EmbeddingIndex:
         k: int,
         *,
         allowed_unit_refs: set[str] | None = None,
+        validate: bool = True,
     ) -> list[SemanticUnitVectorHit]:
-        """Return current unit rows ranked by cosine after exact eligibility.
+        """Score unit rows first, then validate only a bounded winner window.
 
-        Semantic-unit rows deliberately use the exact numpy rung even when the
-        optional vec0 page backend is enabled. The allowlist and parent
-        generation/source/parser validation are applied before scoring and
-        top-k, so stale or ineligible high-cosine rows cannot consume the
-        bounded candidate window.
+        Vector scoring is an in-memory/numpy scan of rebuildable blobs. Markdown
+        freshness validation is the expensive part, so an unfiltered query
+        overfetches a bounded ranked window instead of reopening every parent.
+        An explicit allowlist retains its exact validation contract for audit
+        and repair callers.
         """
         if k <= 0 or not self.path.exists():
             return []
@@ -548,66 +548,79 @@ class EmbeddingIndex:
         finally:
             conn.close()
 
-        current_rows: list[tuple[str, str, str, str, int, np.ndarray]] = []
-        freshness_by_stamp: dict[tuple[str, str, str, int], bool] = {}
+        candidates: list[tuple[str, str, str, str, int, np.ndarray]] = []
         for unit_ref, parent_path, generation, source_hash, parser_version, blob in rows:
-            stamp = (
-                str(parent_path),
-                str(generation),
-                str(source_hash),
-                int(parser_version),
+            vector = np.frombuffer(blob, dtype=np.float32)
+            if vector.shape != (VECTOR_DIM,):
+                continue
+            candidates.append(
+                (
+                    str(unit_ref),
+                    str(parent_path),
+                    str(generation),
+                    str(source_hash),
+                    int(parser_version),
+                    vector,
+                )
             )
+        if not candidates:
+            return []
+
+        query = query_vec.astype(np.float32, copy=False)
+        matrix = np.stack([candidate[5] for candidate in candidates])
+        scores = matrix @ query
+        order = sorted(
+            range(len(candidates)),
+            key=lambda index: (-float(scores[index]), candidates[index][0]),
+        )
+        validation_limit = (
+            len(order) if allowed_unit_refs is not None else min(len(order), max(k * 4, k + 32))
+        )
+        if not validate:
+            return [
+                SemanticUnitVectorHit(
+                    candidates[index][0],
+                    candidates[index][1],
+                    candidates[index][2],
+                    candidates[index][3],
+                    candidates[index][4],
+                    float(scores[index]),
+                )
+                for index in order[:k]
+            ]
+
+        freshness_by_stamp: dict[tuple[str, str, str, int], bool] = {}
+        ranked: list[SemanticUnitVectorHit] = []
+        for index in order[:validation_limit]:
+            unit_ref, parent_path, generation, source_hash, parser_version, _vector = candidates[
+                index
+            ]
+            stamp = (parent_path, generation, source_hash, parser_version)
             accepted = freshness_by_stamp.get(stamp)
             if accepted is None:
                 accepted = semantic_index.validate_parent_record(
                     self.vault_root,
-                    parent_path=stamp[0],
-                    parent_generation_value=stamp[1],
-                    parent_source_hash=stamp[2],
-                    parser_version=stamp[3],
+                    parent_path=parent_path,
+                    parent_generation_value=generation,
+                    parent_source_hash=source_hash,
+                    parser_version=parser_version,
                 ).current
                 freshness_by_stamp[stamp] = accepted
             if not accepted:
                 continue
-            vector = np.frombuffer(blob, dtype=np.float32)
-            if vector.shape != (VECTOR_DIM,):
-                continue
-            current_rows.append(
-                (
-                    str(unit_ref),
-                    stamp[0],
-                    stamp[1],
-                    stamp[2],
-                    stamp[3],
-                    vector,
-                )
-            )
-        if not current_rows:
-            return []
-
-        query = query_vec.astype(np.float32, copy=False)
-        ranked = sorted(
-            (
+            ranked.append(
                 SemanticUnitVectorHit(
                     unit_ref,
                     parent_path,
                     generation,
                     source_hash,
                     parser_version,
-                    float(vector @ query),
+                    float(scores[index]),
                 )
-                for (
-                    unit_ref,
-                    parent_path,
-                    generation,
-                    source_hash,
-                    parser_version,
-                    vector,
-                ) in current_rows
-            ),
-            key=lambda hit: (-hit.cosine, hit.unit_ref),
-        )
-        return ranked[:k]
+            )
+            if len(ranked) == k:
+                break
+        return ranked
 
     def _texts_for(self, pairs: list[tuple[str, int]]) -> dict[tuple[str, int], str]:
         """chunk_text for `(file_path, chunk_idx)` pairs — search's top-k only.
@@ -624,10 +637,8 @@ class EmbeddingIndex:
         try:
             batch_size = 150  # 2 bound params per pair
             for s in range(0, len(pairs), batch_size):
-                batch = pairs[s:s + batch_size]
-                where = " OR ".join(
-                    "(file_path = ? AND chunk_idx = ?)" for _ in batch
-                )
+                batch = pairs[s : s + batch_size]
+                where = " OR ".join("(file_path = ? AND chunk_idx = ?)" for _ in batch)
                 params: list = []
                 for fp, ci in batch:
                     params.extend((fp, ci))
@@ -681,7 +692,8 @@ class EmbeddingIndex:
         except Exception as e:  # noqa: BLE001 — vec failure must never break search
             log.warning(
                 "vec search failed for %s (%s); falling back to the in-memory scan",
-                self.path, e,
+                self.path,
+                e,
             )
             self._vec_failed = True
             return None
@@ -713,16 +725,13 @@ class EmbeddingIndex:
         conn = self._connect()
         try:
             rows = conn.execute(
-                "SELECT parent_path, parent_generation, unit_ref "
-                "FROM semantic_unit_vectors"
+                "SELECT parent_path, parent_generation, unit_ref FROM semantic_unit_vectors"
             ).fetchall()
         finally:
             conn.close()
         grouped: dict[str, tuple[set[str], set[str]]] = {}
         for parent_path, generation, unit_ref in rows:
-            generations, unit_refs = grouped.setdefault(
-                str(parent_path), (set(), set())
-            )
+            generations, unit_refs = grouped.setdefault(str(parent_path), (set(), set()))
             generations.add(str(generation))
             unit_refs.add(str(unit_ref))
         return {

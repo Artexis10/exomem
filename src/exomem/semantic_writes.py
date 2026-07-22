@@ -16,6 +16,7 @@ from typing import Any, Literal
 
 from . import (
     activation_manifest,
+    freshness,
     memory_schema,
     relation_registry,
     relation_review,
@@ -24,6 +25,9 @@ from . import (
     semantic_index,
     semantic_language_registry,
     vault,
+)
+from . import (
+    find as find_module,
 )
 from .kbdir import kb_prefix
 
@@ -39,9 +43,7 @@ _COMPILED_TYPES = frozenset(
         "production-log",
     }
 )
-_EXISTING_OPERATIONS = frozenset(
-    {"edit", "observe", "tier2_overwrite", "tier2_append"}
-)
+_EXISTING_OPERATIONS = frozenset({"edit", "observe", "tier2_overwrite", "tier2_append"})
 _FEEDBACK_FINDING_LIMIT = 32
 _FEEDBACK_RELATION_FACT_LIMIT = 16
 _FEEDBACK_ITEM_LIMIT = 32
@@ -58,9 +60,7 @@ _POSTHOC_BYTE_BUDGET = 120 * 1024
 _MOVE_WIKILINK_PATTERN = re.compile(r"\[\[([^\]\|\n]+?)(\|[^\]\n]*)?\]\]")
 
 
-def rewrite_wikilinks_for_move(
-    text: str, old_rel: str, new_rel: str
-) -> tuple[str, int]:
+def rewrite_wikilinks_for_move(text: str, old_rel: str, new_rel: str) -> tuple[str, int]:
     """Pure canonical path-only rewrite shared by move staging and review carry."""
     old_no_ext = old_rel.removesuffix(".md")
     new_no_ext = new_rel.removesuffix(".md")
@@ -129,9 +129,7 @@ def _bounded_feedback_value(value: Any, truncation: dict[str, int]) -> Any:
 
 
 def _feedback_serialized_size(value: dict[str, Any]) -> int:
-    return len(
-        json.dumps(value, ensure_ascii=True, sort_keys=True).encode("utf-8")
-    )
+    return len(json.dumps(value, ensure_ascii=True, sort_keys=True).encode("utf-8"))
 
 
 def _fit_feedback_byte_budget(value: dict[str, Any]) -> dict[str, Any]:
@@ -172,9 +170,7 @@ def _fit_feedback_byte_budget(value: dict[str, Any]) -> dict[str, Any]:
         value["truncation"]["budget_items_omitted"] += removed_total
     value["omitted_counts"] = dict(sorted(top_omitted.items()))
     if isinstance(relation, dict):
-        relation["omitted_counts"] = dict(
-            sorted(relation["omitted_counts"].items())
-        )
+        relation["omitted_counts"] = dict(sorted(relation["omitted_counts"].items()))
     return value
 
 
@@ -229,9 +225,7 @@ def _blocking_reason_for_evaluations(
     finding came from is what makes a multi-page rejection actionable.
     """
     findings = tuple(
-        finding
-        for item in evaluations
-        for finding in item.contract_result.blocking_findings
+        finding for item in evaluations for finding in item.contract_result.blocking_findings
     )
     if not findings:
         return prefix
@@ -267,19 +261,14 @@ def _bounded_semantic_feedback(
     def items(name: str, values: tuple[str, ...]) -> list[str]:
         if len(values) > _FEEDBACK_ITEM_LIMIT:
             omitted[name] = len(values) - _FEEDBACK_ITEM_LIMIT
-        return [
-            _bounded_feedback_text(item, truncation)
-            for item in values[:_FEEDBACK_ITEM_LIMIT]
-        ]
+        return [_bounded_feedback_text(item, truncation) for item in values[:_FEEDBACK_ITEM_LIMIT]]
 
     kind_counts = result.kind_counts[:_FEEDBACK_COUNT_LIMIT]
     category_counts = result.category_counts[:_FEEDBACK_COUNT_LIMIT]
     if len(result.kind_counts) > _FEEDBACK_COUNT_LIMIT:
         omitted["kind_counts"] = len(result.kind_counts) - _FEEDBACK_COUNT_LIMIT
     if len(result.category_counts) > _FEEDBACK_COUNT_LIMIT:
-        omitted["category_counts"] = (
-            len(result.category_counts) - _FEEDBACK_COUNT_LIMIT
-        )
+        omitted["category_counts"] = len(result.category_counts) - _FEEDBACK_COUNT_LIMIT
 
     relation_value: dict[str, Any] | None = None
     disposition = result.relation_disposition
@@ -290,8 +279,7 @@ def _bounded_semantic_feedback(
             if len(values) > _FEEDBACK_ITEM_LIMIT:
                 relation_omitted[name] = len(values) - _FEEDBACK_ITEM_LIMIT
             return [
-                _bounded_feedback_text(item, truncation)
-                for item in values[:_FEEDBACK_ITEM_LIMIT]
+                _bounded_feedback_text(item, truncation) for item in values[:_FEEDBACK_ITEM_LIMIT]
             ]
 
         if len(disposition.qualifying_facts) > _FEEDBACK_RELATION_FACT_LIMIT:
@@ -311,9 +299,7 @@ def _bounded_semantic_feedback(
             ),
             "qualifying_facts": [
                 _bounded_feedback_value(fact.as_dict(), truncation)
-                for fact in disposition.qualifying_facts[
-                    :_FEEDBACK_RELATION_FACT_LIMIT
-                ]
+                for fact in disposition.qualifying_facts[:_FEEDBACK_RELATION_FACT_LIMIT]
             ],
             "rejected_facts": [
                 _bounded_feedback_value(item.as_dict(), truncation)
@@ -329,17 +315,13 @@ def _bounded_semantic_feedback(
         "findings": findings("findings", result.findings),
         "errors": findings("errors", result.errors),
         "warnings": findings("warnings", result.warnings),
-        "blocking_findings": findings(
-            "blocking_findings", result.blocking_findings
-        ),
+        "blocking_findings": findings("blocking_findings", result.blocking_findings),
         "should_block": result.should_block,
         "semantic_unit_count": result.semantic_unit_count,
         "compact_unit_count": result.compact_unit_count,
         "rich_unit_count": result.rich_unit_count,
         "kind_counts": _bounded_feedback_value(dict(kind_counts), truncation),
-        "category_counts": _bounded_feedback_value(
-            dict(category_counts), truncation
-        ),
+        "category_counts": _bounded_feedback_value(dict(category_counts), truncation),
         "relation_disposition": relation_value,
         "actions": items("actions", result.actions),
         "omitted_counts": dict(sorted(omitted.items())),
@@ -374,9 +356,7 @@ class SemanticWriteError(ValueError):
         """Project only canonical semantic-authoring refusals for public facades."""
         canonical = semantic_authoring.AUTHORING_CONTRACT.findings
         authored = tuple(
-            finding
-            for finding in self.validation_findings
-            if finding.code in canonical
+            finding for finding in self.validation_findings if finding.code in canonical
         )
         if not authored:
             return None
@@ -425,13 +405,15 @@ def _posthoc_finding_sort_key(item: dict[str, Any]) -> tuple[Any, ...]:
         code == "RELATION_DISPOSITION_MISSING" and item.get("grandfathered") is True
     )
     current = item.get("activation") == "current"
-    if not legacy_backlog and current and item.get("grandfathered") is not True and item.get(
-        "severity"
-    ) == "error":
+    if (
+        not legacy_backlog
+        and current
+        and item.get("grandfathered") is not True
+        and item.get("severity") == "error"
+    ):
         priority = 0
     elif rule == "syntax" or (
-        namespace in {"categories", "kinds"}
-        and (rule == "registry" or "REGISTRY" in code.upper())
+        namespace in {"categories", "kinds"} and (rule == "registry" or "REGISTRY" in code.upper())
     ):
         priority = 1
     elif legacy_backlog:
@@ -455,9 +437,7 @@ class PosthocBatch:
     evaluations: tuple[PosthocPageEvaluation, ...]
     corpus: semantic_contract.SemanticCorpusContext | None = None
 
-    def as_dict(
-        self, detail: Literal["actionable", "full"] = "actionable"
-    ) -> dict[str, Any]:
+    def as_dict(self, detail: Literal["actionable", "full"] = "actionable") -> dict[str, Any]:
         if detail not in {"actionable", "full"}:
             raise SemanticWriteError(
                 "SEMANTIC_POSTHOC_INVALID_DETAIL",
@@ -489,18 +469,14 @@ class PosthocBatch:
                     "path": evaluation.path,
                     "code": finding.code,
                     "severity": finding.severity,
-                    "governed_element_identity": list(
-                        finding.governed_element_identity
-                    ),
+                    "governed_element_identity": list(finding.governed_element_identity),
                     "resolved_rule": list(finding.resolved_rule),
                     "relation_disposition": disposition_value,
                     "actions": list(evaluation.contract_result.actions),
                     "activation": evaluation.activation,
                     "grandfathered": evaluation.grandfathered,
                 }
-                findings.append(
-                    item if full else _bounded_feedback_value(item, bounded)
-                )
+                findings.append(item if full else _bounded_feedback_value(item, bounded))
         total = len(findings)
         ordered_for_bounds = False
         if not full and audit_projection and total > _POSTHOC_FINDING_LIMIT:
@@ -518,9 +494,7 @@ class PosthocBatch:
             ]
         summary_items = sorted(summary.items())
         retained_summary = dict(
-            summary_items
-            if full or audit_projection
-            else summary_items[:_POSTHOC_SUMMARY_LIMIT]
+            summary_items if full or audit_projection else summary_items[:_POSTHOC_SUMMARY_LIMIT]
         )
         value: dict[str, Any] = {
             "operation": self.operation,
@@ -531,16 +505,13 @@ class PosthocBatch:
             "omitted_counts": {
                 "evaluated_paths": len(self.evaluations) - len(evaluated_paths),
                 "semantic_contract_findings": omitted,
-                "semantic_contract_summary": len(summary_items)
-                - len(retained_summary),
+                "semantic_contract_summary": len(summary_items) - len(retained_summary),
             },
             "truncation": {
                 "byte_budget": None if full else _POSTHOC_BYTE_BUDGET,
                 "finding_limit": None if full else _POSTHOC_FINDING_LIMIT,
                 "path_limit": None if full else _POSTHOC_PATH_LIMIT,
-                "summary_limit": (
-                    None if full or audit_projection else _POSTHOC_SUMMARY_LIMIT
-                ),
+                "summary_limit": (None if full or audit_projection else _POSTHOC_SUMMARY_LIMIT),
                 **bounded,
                 "budget_items_omitted": 0,
             },
@@ -565,9 +536,7 @@ class PosthocBatch:
             ("evaluated_paths", evaluated_paths),
         ]
         if not audit_projection:
-            variable_collections.append(
-                ("semantic_contract_summary", retained_summary)
-            )
+            variable_collections.append(("semantic_contract_summary", retained_summary))
         while _feedback_serialized_size(value) >= _POSTHOC_BYTE_BUDGET:
             removed_total = 0
             for name, collection in variable_collections:
@@ -646,11 +615,7 @@ def evaluate_posthoc_batch(
         selected = sorted(corpus.pages)
     else:
         selected = sorted(
-            {
-                rel
-                for path in paths
-                if (rel := _posthoc_relative_path(root, path)) is not None
-            }
+            {rel for path in paths if (rel := _posthoc_relative_path(root, path)) is not None}
         )
 
     contracts_by_scope: dict[
@@ -682,9 +647,7 @@ def evaluate_posthoc_batch(
                 root,
                 state.path,
                 source_hash=state.source_hash,
-                exomem_id=(
-                    state.identity if state.identity_kind == "exomem_id" else None
-                ),
+                exomem_id=(state.identity if state.identity_kind == "exomem_id" else None),
                 manifest=manifest,
                 census=corpus.activation_census,
             )
@@ -741,9 +704,9 @@ class DraftToken:
             "render_date": self.render_date,
             "registrations": [item.as_dict() for item in self.registrations],
         }
-        raw = json.dumps(
-            value, ensure_ascii=False, sort_keys=True, separators=(",", ":")
-        ).encode("utf-8")
+        raw = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode(
+            "utf-8"
+        )
         if len(raw) > _MAX_TOKEN_BYTES:
             raise SemanticWriteError("DRAFT_TOKEN_TOO_LARGE", "draft token exceeds its bound")
         encoded = base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
@@ -756,8 +719,7 @@ class DraftToken:
         if (
             type(token) is not str
             or not token
-            or len(token.encode("utf-8"))
-            > relation_review.MAX_DRAFT_TOKEN_ENCODED_BYTES
+            or len(token.encode("utf-8")) > relation_review.MAX_DRAFT_TOKEN_ENCODED_BYTES
         ):
             raise SemanticWriteError("INVALID_DRAFT_TOKEN", "draft token is invalid")
         try:
@@ -765,9 +727,7 @@ class DraftToken:
             raw = base64.b64decode(padded, altchars=b"-_", validate=True)
             if len(raw) > _MAX_TOKEN_BYTES:
                 raise ValueError
-            value = json.loads(
-                raw.decode("utf-8"), object_pairs_hook=_unique_json_object
-            )
+            value = json.loads(raw.decode("utf-8"), object_pairs_hook=_unique_json_object)
         except (
             binascii.Error,
             ValueError,
@@ -807,8 +767,10 @@ class DraftToken:
             raise SemanticWriteError("INVALID_DRAFT_TOKEN", "draft token has invalid registrations")
         registrations: list[DraftRegistration] = []
         for item in registrations_raw:
-            if type(item) is not dict or set(item) != {"key", "category", "folder"} or any(
-                type(item[key]) is not str for key in ("key", "category", "folder")
+            if (
+                type(item) is not dict
+                or set(item) != {"key", "category", "folder"}
+                or any(type(item[key]) is not str for key in ("key", "category", "folder"))
             ):
                 raise SemanticWriteError(
                     "INVALID_DRAFT_TOKEN", "draft token has invalid registrations"
@@ -840,11 +802,7 @@ class CreationPreflight:
 
     @property
     def draft_hash(self) -> str | None:
-        return (
-            self.creation_validation.draft_hash
-            if self.creation_validation is not None
-            else None
-        )
+        return self.creation_validation.draft_hash if self.creation_validation is not None else None
 
     @property
     def relation_candidates(self) -> tuple[relation_review.RelationCandidate, ...]:
@@ -921,6 +879,7 @@ class ExistingPreflight:
     activation_census: activation_manifest.ActivationCensus
     prospective_manifest: activation_manifest.ActivationManifest
     manifest_install_required: bool
+    resolver_freshness: tuple[int, int, str] | None
     primary_guard: vault.PathGuard
     committed_replay: bool
 
@@ -1116,9 +1075,7 @@ def _recovery_feedback(
         {
             "page_identity": item.after.identity,
             "transition_token": item.transition_token,
-            "transition_hash": hashlib.sha256(
-                item.transition_token.encode("utf-8")
-            ).hexdigest(),
+            "transition_hash": hashlib.sha256(item.transition_token.encode("utf-8")).hexdigest(),
         }
         for item in preflight.evaluations
         if item.after.eligible_compiled
@@ -1126,9 +1083,7 @@ def _recovery_feedback(
         and item.after_review is None
         and item.requested_decision is None
         and _recovery_result_reviewable(item.contract_result)
-        and preflight.after_corpus.identity_census.paths_by_identity.get(
-            item.after.identity
-        )
+        and preflight.after_corpus.identity_census.paths_by_identity.get(item.after.identity)
         == (item.after.path,)
     ]
     retained_entries = preflight.entries[:_RECOVERY_FEEDBACK_ENTRY_LIMIT]
@@ -1205,9 +1160,9 @@ def _existing_transition_token(
         "before_hash": before_hash,
         "after_hash": after_hash,
     }
-    raw = json.dumps(
-        payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
-    ).encode("utf-8")
+    raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode(
+        "utf-8"
+    )
     return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
 
 
@@ -1223,8 +1178,7 @@ def _decode_existing_transition_token(token: str) -> dict[str, Any]:
     if (
         type(token) is not str
         or not token
-        or len(token.encode("utf-8"))
-        > relation_review.MAX_DRAFT_TOKEN_ENCODED_BYTES
+        or len(token.encode("utf-8")) > relation_review.MAX_DRAFT_TOKEN_ENCODED_BYTES
     ):
         raise SemanticWriteError(
             "LIFECYCLE_TRANSITION_INVALID_TOKEN", "transition token is invalid"
@@ -1310,9 +1264,7 @@ def preflight_existing(
             "existing semantic write operation is unsupported",
         )
     if relation_disposition not in {None, "reviewed_none"}:
-        raise SemanticWriteError(
-            "INVALID_RELATION_REVIEW", "relation disposition is invalid"
-        )
+        raise SemanticWriteError("INVALID_RELATION_REVIEW", "relation disposition is invalid")
     root = Path(vault_root)
     before_source, primary_guard = vault.read_guarded_text(root, root / path)
     raw_before_hash = vault.content_hash(before_source)
@@ -1325,15 +1277,18 @@ def preflight_existing(
         raw_before_hash,
         before_hash,
     }:
-        raise SemanticWriteError(
-            "STALE_SEMANTIC_WRITE", "page changed before semantic preflight"
-        )
+        raise SemanticWriteError("STALE_SEMANTIC_WRITE", "page changed before semantic preflight")
 
     registry = relation_registry.load_registry(root)
     language = semantic_language_registry.load_registry(root)
     loaded_contracts = memory_schema.load_saved_contracts(root)
+    resolver_freshness_before = freshness.triple(root, "vault")
     before_corpus = semantic_contract.build_corpus_context(
         root, registry=registry, language_registry=language
+    )
+    resolver_freshness_after = freshness.triple(root, "vault")
+    resolver_freshness = (
+        resolver_freshness_before if resolver_freshness_before == resolver_freshness_after else None
     )
     before = semantic_contract.build_page_state(
         root,
@@ -1342,6 +1297,12 @@ def preflight_existing(
         relation_registry=registry,
         language_registry=language,
     )
+    if before_corpus.pages.get(path) != before:
+        # The guarded read can observe a canonical or external replacement in
+        # the short window before its freshness event is published. Repair the
+        # exact evaluated page from those authoritative bytes so a lagging
+        # process cache never turns a valid write into a corpus-state refusal.
+        before_corpus = before_corpus.with_candidate(before)
     after = semantic_contract.build_page_state(
         root,
         path,
@@ -1366,12 +1327,8 @@ def preflight_existing(
     before_review: semantic_contract.RelationReviewState | None = None
     after_review: semantic_contract.RelationReviewState | None = None
     if applicability == "full":
-        before_review = relation_review.load_relation_review(
-            root, before, corpus=before_corpus
-        )
-        after_review = relation_review.load_relation_review(
-            root, after, corpus=after_corpus
-        )
+        before_review = relation_review.load_relation_review(root, before, corpus=before_corpus)
+        after_review = relation_review.load_relation_review(root, after, corpus=after_corpus)
 
     token = transition_token or _existing_transition_token(
         operation=operation,
@@ -1391,10 +1348,7 @@ def preflight_existing(
         token_value["operation"] != operation
         or token_value["path"] != path
         or token_value["after_hash"] != after.source_hash
-        or (
-            token_value["before_hash"] != before.source_hash
-            and not committed_replay
-        )
+        or (token_value["before_hash"] != before.source_hash and not committed_replay)
     ):
         raise SemanticWriteError(
             "LIFECYCLE_TRANSITION_MISMATCH",
@@ -1416,8 +1370,7 @@ def preflight_existing(
         if (
             after.identity_kind != "exomem_id"
             or after.review_fingerprint is None
-            or after_corpus.identity_census.paths_by_identity.get(after.identity)
-            != (after.path,)
+            or after_corpus.identity_census.paths_by_identity.get(after.identity) != (after.path,)
         ):
             raise SemanticWriteError(
                 "RELATION_REVIEW_STABLE_ID_REQUIRED",
@@ -1488,6 +1441,7 @@ def preflight_existing(
         before_corpus.activation_census,
         boundary.manifest,
         boundary.install_required,
+        resolver_freshness,
         primary_guard,
         committed_replay,
     )
@@ -1503,9 +1457,7 @@ def _reevaluate_existing(
         preflight.path,
         source_hash=preflight.before.source_hash,
         exomem_id=(
-            preflight.before.identity
-            if preflight.before.identity_kind == "exomem_id"
-            else None
+            preflight.before.identity if preflight.before.identity_kind == "exomem_id" else None
         ),
         manifest=manifest,
         census=preflight.activation_census,
@@ -1557,9 +1509,7 @@ def _commit_existing_locked(
                 "committed replay requires the exact stable resulting identity",
             )
         try:
-            prepared = relation_review.load_lifecycle_prepared(
-                root, preflight.after.identity
-            )
+            prepared = relation_review.load_lifecycle_prepared(root, preflight.after.identity)
         except relation_review.RelationReviewError as error:
             raise SemanticWriteError(error.code, error.reason) from error
         token_value = _decode_existing_transition_token(preflight.transition_token)
@@ -1608,9 +1558,7 @@ def _commit_existing_locked(
         preflight.applicability == "full"
         and preflight.after.identity_kind == "exomem_id"
         and preflight.after.review_fingerprint is not None
-        and preflight.after_corpus.identity_census.paths_by_identity.get(
-            preflight.after.identity
-        )
+        and preflight.after_corpus.identity_census.paths_by_identity.get(preflight.after.identity)
         == (preflight.path,)
     )
     if stable_active:
@@ -1626,9 +1574,7 @@ def _commit_existing_locked(
                 after_fingerprint=preflight.after.review_fingerprint,
                 decision=preflight.requested_decision,
                 transition_token=preflight.transition_token,
-                auxiliary_hash=relation_review.lifecycle_auxiliary_hash(
-                    auxiliaries, root
-                ),
+                auxiliary_hash=relation_review.lifecycle_auxiliary_hash(auxiliaries, root),
             )
             current = relation_review.LifecyclePrimaryBinding(
                 preflight.before.path,
@@ -1673,9 +1619,7 @@ def _commit_existing_locked(
         vault_root=root,
         required_guards=required_guards,
         index_reports=reports,
-        semantic_states={
-            preflight.path: semantic_index.from_semantic_page_state(preflight.after)
-        },
+        semantic_states={preflight.path: semantic_index.from_semantic_page_state(preflight.after)},
     )
     report = reports[0] if reports else None
     return ExistingCommit(
@@ -1709,9 +1653,7 @@ def commit_existing(
     result = preflight.contract_result
     auxiliaries = tuple(auxiliary_writes)
     if preflight.manifest_install_required:
-        winner = activation_manifest.ensure_manifest(
-            root, census=preflight.activation_census
-        )
+        winner = activation_manifest.ensure_manifest(root, census=preflight.activation_census)
         result, _ = _reevaluate_existing(preflight, manifest=winner)
         if result.should_block:
             raise SemanticWriteError(
@@ -1722,6 +1664,16 @@ def commit_existing(
                 ),
                 result.blocking_findings,
             )
+
+    if preflight.resolver_freshness is not None:
+        try:
+            find_module.prime_resolver_from_entries(
+                root,
+                preflight.before_corpus.resolver_entries,
+                expected_freshness=preflight.resolver_freshness,
+            )
+        except Exception:  # noqa: BLE001 — rebuildable graph cache never blocks commit
+            pass
 
     try:
         with vault.vault_creation_lock(root, "semantic-creation"):
@@ -1917,9 +1869,9 @@ def _move_evaluation_pairs(
         for path in sorted(after_corpus.eligible_compiled_paths):
             if path in pairs or path not in before_corpus.pages:
                 continue
-            if _move_dependency_signature(
-                before_corpus, path
-            ) != _move_dependency_signature(after_corpus, path):
+            if _move_dependency_signature(before_corpus, path) != _move_dependency_signature(
+                after_corpus, path
+            ):
                 pairs[path] = path
                 added = True
         if not added:
@@ -1952,9 +1904,7 @@ def preflight_move(
             "LIFECYCLE_TRANSITION_MISMATCH",
             "move guards do not bind the exact source and destination",
         )
-    expected_moved_source, _ = rewrite_wikilinks_for_move(
-        source, old_path, new_path
-    )
+    expected_moved_source, _ = rewrite_wikilinks_for_move(source, old_path, new_path)
     if moved_source not in {source, expected_moved_source}:
         raise SemanticWriteError(
             "LIFECYCLE_TRANSITION_MISMATCH",
@@ -1975,14 +1925,10 @@ def preflight_move(
     )
     before_moved = before_corpus.pages.get(old_path)
     normalized_source = source.replace("\r\n", "\n").replace("\r", "\n")
-    if (
-        before_moved is None
-        or before_moved.source_hash
-        not in {
-            vault.content_hash(source),
-            vault.content_hash(normalized_source),
-        }
-    ):
+    if before_moved is None or before_moved.source_hash not in {
+        vault.content_hash(source),
+        vault.content_hash(normalized_source),
+    }:
         raise SemanticWriteError(
             "STALE_SEMANTIC_WRITE", "move source changed during semantic preflight"
         )
@@ -1997,9 +1943,7 @@ def preflight_move(
                 "STALE_SEMANTIC_WRITE",
                 "inbound page changed during semantic move preflight",
             ) from error
-        normalized_before_source = before_source.replace("\r\n", "\n").replace(
-            "\r", "\n"
-        )
+        normalized_before_source = before_source.replace("\r\n", "\n").replace("\r", "\n")
         if (
             before_rewrite is None
             or before_rewrite.source_hash
@@ -2095,10 +2039,7 @@ def preflight_move(
                     carried_from = relation_review.load_lifecycle_decision(
                         root, before.identity, before.review_fingerprint
                     )
-                    if (
-                        carried_from is None
-                        or carried_from.reference != before_review.reference
-                    ):
+                    if carried_from is None or carried_from.reference != before_review.reference:
                         carried_from = None
                     else:
                         requested_decision = relation_review.build_lifecycle_decision(
@@ -2192,9 +2133,7 @@ def _plan_move_lifecycle(
     states: list[tuple[str, str]] = []
     auxiliaries = list(preflight.rewrites)
     if preflight.moved_source != preflight.source:
-        auxiliaries.append(
-            vault.PlannedWrite(root / preflight.new_path, preflight.moved_source)
-        )
+        auxiliaries.append(vault.PlannedWrite(root / preflight.new_path, preflight.moved_source))
     auxiliary_hash = relation_review.lifecycle_auxiliary_hash(auxiliaries, root)
     for item in preflight.evaluations:
         if (
@@ -2207,9 +2146,7 @@ def _plan_move_lifecycle(
             item.after.eligible_compiled
             and item.after.identity_kind == "exomem_id"
             and item.after.review_fingerprint is not None
-            and preflight.after_corpus.identity_census.paths_by_identity.get(
-                item.after.identity
-            )
+            and preflight.after_corpus.identity_census.paths_by_identity.get(item.after.identity)
             == (item.after.path,)
         )
         if not stable_active:
@@ -2266,9 +2203,7 @@ def commit_move(
             ),
         )
     if preflight.manifest_install_required:
-        winner = activation_manifest.ensure_manifest(
-            root, census=preflight.activation_census
-        )
+        winner = activation_manifest.ensure_manifest(root, census=preflight.activation_census)
         if winner != preflight.prospective_manifest:
             raise SemanticWriteError(
                 "SEMANTIC_CONTRACT_BLOCKED",
@@ -2277,12 +2212,10 @@ def commit_move(
     try:
         with vault.vault_creation_lock(root, "semantic-creation"):
             preflight.source_guard.recheck(root)
-            destination_guard = preflight.destination_guard.prepare_and_bind_parents(
-                root
-            )
+            destination_guard = preflight.destination_guard.prepare_and_bind_parents(root)
             preflight.source_guard.recheck(root)
-            lifecycle_writes, required_guards, lifecycle_states = (
-                _plan_move_lifecycle(root, preflight)
+            lifecycle_writes, required_guards, lifecycle_states = _plan_move_lifecycle(
+                root, preflight
             )
             mutate(lifecycle_writes, required_guards, destination_guard)
     except vault.VaultLockTimeout as error:
@@ -2305,11 +2238,7 @@ def _corpus_with_recovery_states(
 ) -> semantic_contract.SemanticCorpusContext:
     pages = dict(base.pages)
     identity_census = semantic_contract.StableIdentityCensus(
-        tuple(
-            entry
-            for entry in base.identity_census.entries
-            if entry.path not in removed_paths
-        )
+        tuple(entry for entry in base.identity_census.entries if entry.path not in removed_paths)
     )
     for state in states:
         pages[state.path] = state
@@ -2334,10 +2263,7 @@ def preflight_recovery(
     """Evaluate exact trashed Markdown bytes at all final restore paths."""
     root = Path(vault_root)
     review_mapping = relation_reviews or {}
-    if (
-        not isinstance(review_mapping, Mapping)
-        or len(review_mapping) > _RECOVERY_REVIEW_LIMIT
-    ):
+    if not isinstance(review_mapping, Mapping) or len(review_mapping) > _RECOVERY_REVIEW_LIMIT:
         raise SemanticWriteError(
             "INVALID_RELATION_REVIEW",
             "recovery relation reviews must be a bounded identity mapping",
@@ -2365,14 +2291,10 @@ def preflight_recovery(
         if (
             item.source_guard.target != item.trash_path
             or item.source_guard.leaf_policy != "content"
-            or item.source_guard.expected_content_hash
-            != vault.content_hash(item.source)
+            or item.source_guard.expected_content_hash != vault.content_hash(item.source)
             or item.destination_guard.target != item.restore_path
             or item.destination_guard.leaf_policy != "absent"
-            or (
-                item.sidecar_guard is not None
-                and item.sidecar_guard.leaf_policy != "content"
-            )
+            or (item.sidecar_guard is not None and item.sidecar_guard.leaf_policy != "content")
             or (item.sidecar_guard is None) != (item.sidecar_source is None)
             or (
                 item.restore_path != root_destination.target
@@ -2427,9 +2349,7 @@ def preflight_recovery(
     )
     manifest = activation_manifest.load_manifest(root)
     evaluations: list[RecoveryPageEvaluation] = []
-    for entry, before, after in zip(
-        bound_entries, prior_states, after_states, strict=True
-    ):
+    for entry, before, after in zip(bound_entries, prior_states, after_states, strict=True):
         before_contracts = memory_schema.resolve_contracts(
             loaded_contracts,
             projects=before.projects,
@@ -2506,11 +2426,9 @@ def preflight_recovery(
                 or after_corpus.identity_census.paths_by_identity.get(after.identity)
                 != (after.path,)
                 or not isinstance(requested_review, Mapping)
-                or set(requested_review)
-                != {"transition_token", "transition_hash", "reason"}
+                or set(requested_review) != {"transition_token", "transition_hash", "reason"}
                 or token_value["operation"] != "recover"
-                or token_value["path"]
-                != _recovery_token_path(entry.trash_path, entry.restore_path)
+                or token_value["path"] != _recovery_token_path(entry.trash_path, entry.restore_path)
                 or token_value["before_hash"] != before.source_hash
                 or token_value["after_hash"] != after.source_hash
                 or requested_review.get("transition_hash") != expected_hash
@@ -2572,8 +2490,7 @@ def preflight_recovery(
             "recovery review mapping contains an unvalidated page identity",
         )
     reviewable_count = sum(
-        item.requested_decision is None
-        and _recovery_result_reviewable(item.contract_result)
+        item.requested_decision is None and _recovery_result_reviewable(item.contract_result)
         for item in evaluations
     )
     if reviewable_count > _RECOVERY_REVIEW_LIMIT:
@@ -2611,9 +2528,7 @@ def _plan_recovery_lifecycle(
             item.after.eligible_compiled
             and item.after.identity_kind == "exomem_id"
             and item.after.review_fingerprint is not None
-            and preflight.after_corpus.identity_census.paths_by_identity.get(
-                item.after.identity
-            )
+            and preflight.after_corpus.identity_census.paths_by_identity.get(item.after.identity)
             == (item.after.path,)
         )
         if not stable_active:
@@ -2691,8 +2606,8 @@ def commit_recovery(
                 if item.sidecar_guard is not None:
                     item.sidecar_guard.recheck(root)
                 item.destination_guard.recheck(root)
-            lifecycle_writes, required_guards, lifecycle_states = (
-                _plan_recovery_lifecycle(root, preflight)
+            lifecycle_writes, required_guards, lifecycle_states = _plan_recovery_lifecycle(
+                root, preflight
             )
             if preflight.should_block:
                 raise SemanticWriteError(
@@ -2704,20 +2619,14 @@ def commit_recovery(
                         for finding in item.contract_result.blocking_findings
                     ),
                 )
-            destination_root_guard = (
-                preflight.destination_root_guard.prepare_and_bind_parents(root)
-            )
+            destination_root_guard = preflight.destination_root_guard.prepare_and_bind_parents(root)
             destination_root_guard.recheck(root)
             destination_guards = tuple(
-                vault.PathGuard.capture(
-                    root, item.restore_path, leaf_policy="absent"
-                )
+                vault.PathGuard.capture(root, item.restore_path, leaf_policy="absent")
                 for item in preflight.entries
             )
             destination_root_guard.recheck(root)
-            for item, destination_guard in zip(
-                preflight.entries, destination_guards, strict=True
-            ):
+            for item, destination_guard in zip(preflight.entries, destination_guards, strict=True):
                 item.source_guard.recheck(root)
                 destination_guard.recheck(root)
                 if item.sidecar_guard is not None:
@@ -2785,9 +2694,7 @@ def _evaluate_structural(
             after_contracts=resolved,
             before_corpus=before,
             after_corpus=before.with_candidate(candidate),
-            include_relation_disposition=semantic_contract.requires_semantic_unit(
-                candidate
-            ),
+            include_relation_disposition=semantic_contract.requires_semantic_unit(candidate),
         ),
         candidate,
     )
@@ -2809,9 +2716,7 @@ def preflight_creation(
 ) -> CreationPreflight:
     root = Path(vault_root)
     if relation_disposition not in {None, "reviewed_none"}:
-        raise SemanticWriteError(
-            "INVALID_RELATION_REVIEW", "relation disposition is invalid"
-        )
+        raise SemanticWriteError("INVALID_RELATION_REVIEW", "relation disposition is invalid")
     token = DraftToken.decode(draft_token)
     if (
         token.writer != writer
@@ -2819,16 +2724,12 @@ def preflight_creation(
         or token.destination != path
         or token.registrations != registrations
     ):
-        raise SemanticWriteError(
-            "INVALID_DRAFT_TOKEN", "draft token does not match this creation"
-        )
+        raise SemanticWriteError("INVALID_DRAFT_TOKEN", "draft token does not match this creation")
     try:
         vault.parse_frontmatter(source, strict=True)
     except vault.FrontmatterError as error:
         raise SemanticWriteError(error.code, "draft frontmatter is invalid") from error
-    result, state = _evaluate_structural(
-        root, destination=path, source=source, operation=operation
-    )
+    result, state = _evaluate_structural(root, destination=path, source=source, operation=operation)
     if semantic_contract.requires_semantic_unit(state):
         if draft_id is None:
             raise SemanticWriteError("DRAFT_IDENTITY_MISMATCH", "active draft requires identity")
@@ -2844,8 +2745,15 @@ def preflight_creation(
             predecessor_content_hash=predecessor_content_hash,
         )
         return CreationPreflight(
-            "full", path, source, draft_id, draft_token, False,
-            validation.contract_result, validation, state,
+            "full",
+            path,
+            source,
+            draft_id,
+            draft_token,
+            False,
+            validation.contract_result,
+            validation,
+            state,
         )
     applicability: Literal["structural", "not_semantic"] = (
         "structural"
@@ -2876,8 +2784,7 @@ def commit_creation(
         if finding.resolved_rule != ("relations", "*", "disposition")
     )
     if non_review_blockers or (
-        preflight.applicability != "full"
-        and preflight.contract_result.should_block
+        preflight.applicability != "full" and preflight.contract_result.should_block
     ):
         raise SemanticWriteError(
             "SEMANTIC_CONTRACT_BLOCKED",
@@ -2899,9 +2806,7 @@ def commit_creation(
             draft_token=preflight.draft_token,
             predecessor_path=predecessor_path,
             predecessor_content_hash=predecessor_content_hash,
-            semantic_state=semantic_index.from_semantic_page_state(
-                preflight.semantic_state
-            ),
+            semantic_state=semantic_index.from_semantic_page_state(preflight.semantic_state),
         )
         return CreationCommit(
             "full", True, committed.written_paths, committed.contract_result, committed
@@ -2912,17 +2817,11 @@ def commit_creation(
             root / preflight.destination,
             preflight.source,
             create_only=True,
-            guard=vault.PathGuard.capture(
-                root, preflight.destination, leaf_policy="absent"
-            ),
+            guard=vault.PathGuard.capture(root, preflight.destination, leaf_policy="absent"),
         )
     )
     token = semantic_index.set_parent_states(
-        {
-            preflight.destination: semantic_index.from_semantic_page_state(
-                preflight.semantic_state
-            )
-        }
+        {preflight.destination: semantic_index.from_semantic_page_state(preflight.semantic_state)}
     )
     try:
         written = vault.batch_atomic_write(writes, vault_root=root)

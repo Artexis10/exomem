@@ -6,7 +6,10 @@ asserting the human vs `--json` envelope output and the 0/1/2 exit-code contract
 
 from __future__ import annotations
 
+import importlib
 import json
+import logging
+import os
 from pathlib import Path
 
 import pytest
@@ -20,9 +23,7 @@ _INSIGHT = "Knowledge Base/Notes/Insights/progressive-disclosure-without-mode-fr
 
 @pytest.fixture(autouse=True)
 def _isolated_writer_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setenv(
-        "EXOMEM_WRITER_LEASE_STATE_DIR", str(tmp_path / "writer-lease-state")
-    )
+    monkeypatch.setenv("EXOMEM_WRITER_LEASE_STATE_DIR", str(tmp_path / "writer-lease-state"))
     writer_lease.reset_managers_for_tests()
     yield
     writer_lease.reset_managers_for_tests()
@@ -122,7 +123,11 @@ def test_ask_memory_semantic_unit_filters(vault: Path, capsys) -> None:
 
 def test_read_memory_reads_a_page(vault: Path, capsys) -> None:
     code, out, _ = _run(
-        ["read_memory", "Notes/Insights/progressive-disclosure-without-mode-fragmentation", "--json"],
+        [
+            "read_memory",
+            "Notes/Insights/progressive-disclosure-without-mode-fragmentation",
+            "--json",
+        ],
         capsys,
     )
     assert code == 0
@@ -274,9 +279,12 @@ def test_remember_write(vault: Path, capsys) -> None:
     code, out, _ = _run(
         [
             "remember",
-            "--title", "CLI can write",
-            "--content", "# CLI can write\n\n## Claim\n\nThe kb CLI writes notes.\n",
-            "--field", "status=draft",
+            "--title",
+            "CLI can write",
+            "--content",
+            "# CLI can write\n\n## Claim\n\nThe kb CLI writes notes.\n",
+            "--field",
+            "status=draft",
             "--json",
         ],
         capsys,
@@ -319,10 +327,14 @@ def test_remember_unicode_title_with_explicit_slug(vault: Path, capsys) -> None:
     code, out, err = _run(
         [
             "remember",
-            "--title", "睡眠",
-            "--slug", "sleep",
-            "--content", "## 要約\n\n本文。\n",
-            "--field", "status=draft",
+            "--title",
+            "睡眠",
+            "--slug",
+            "sleep",
+            "--content",
+            "## 要約\n\n本文。\n",
+            "--field",
+            "status=draft",
             "--json",
         ],
         capsys,
@@ -339,11 +351,16 @@ def test_remember_field_escape(vault: Path, capsys) -> None:
     code, out, _ = _run(
         [
             "remember",
-            "--title", "Field escape works",
-            "--content", "# Field escape works\n\n## Question\n\nq\n",
-            "--field", "note_type=research-note",
-            "--field", "project=project-alpha",
-            "--field", "status=draft",
+            "--title",
+            "Field escape works",
+            "--content",
+            "# Field escape works\n\n## Question\n\nq\n",
+            "--field",
+            "note_type=research-note",
+            "--field",
+            "project=project-alpha",
+            "--field",
+            "status=draft",
             "--json",
         ],
         capsys,
@@ -570,9 +587,12 @@ def test_malformed_field_exits_2(vault: Path, capsys) -> None:
     code, _out, err = _run(
         [
             "remember",
-            "--title", "x",
-            "--content", "# x\n\n## Claim\n\ny\n",
-            "--field", "bogus",
+            "--title",
+            "x",
+            "--content",
+            "# x\n\n## Claim\n\ny\n",
+            "--field",
+            "bogus",
         ],
         capsys,
     )
@@ -629,9 +649,7 @@ def test_process_media_cli_process_status_and_retry(vault: Path, capsys) -> None
     assert claimed is not None
     store.mark(claimed.id, media_jobs.BLOCKED, "ExtractionUnavailable: engine absent")
 
-    code, out, err = _run(
-        ["process_media", "--operation", "status", "--json"], capsys
-    )
+    code, out, err = _run(["process_media", "--operation", "status", "--json"], capsys)
     assert code == 0, err
     status = json.loads(out.strip().splitlines()[-1])["data"]
     assert status["counts"][media_jobs.BLOCKED] == 1
@@ -669,9 +687,12 @@ def test_unknown_field_key_rejected(vault: Path, capsys) -> None:
     code, _out, err = _run(
         [
             "remember",
-            "--title", "x",
-            "--content", "# x\n\n## Claim\n\ny\n",
-            "--field", "bogus=1",
+            "--title",
+            "x",
+            "--content",
+            "# x\n\n## Claim\n\ny\n",
+            "--field",
+            "bogus=1",
         ],
         capsys,
     )
@@ -687,6 +708,44 @@ def test_simple_ask_alias_uses_compact_product_defaults(vault: Path, capsys) -> 
     assert isinstance(payload["data"], list)
     assert payload["data"], "ask should surface fixture notes"
     assert "excerpt" not in payload["data"][0]
+
+
+def test_legacy_find_alias_matches_simple_ask(vault: Path, capsys) -> None:
+    code, out, err = _run(["find", "metabolism", "--json"], capsys)
+    assert code == 0, err
+    payload = json.loads(out.strip().splitlines()[-1])
+    assert payload["success"] is True
+    assert payload["data"], "find should remain a compatibility alias for ask"
+    assert "excerpt" not in payload["data"][0]
+
+
+def test_legacy_find_lean_cli_skips_missing_model_lanes_without_warnings(
+    vault: Path,
+    capsys,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    main_module = importlib.import_module("exomem.__main__")
+    for name in (
+        "EXOMEM_DISABLE_EMBEDDINGS",
+        "EXOMEM_DISABLE_RANKING",
+        "EXOMEM_DISABLE_CLIP",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(main_module, "_module_available", lambda _name: False)
+    caplog.set_level(logging.DEBUG)
+
+    code, out, err = _run(["find", "metabolism", "--json"], capsys)
+
+    assert code == 0, err
+    assert json.loads(out.strip().splitlines()[-1])["data"]
+    assert "EXOMEM_DISABLE_EMBEDDINGS" not in os.environ
+    assert "EXOMEM_DISABLE_RANKING" not in os.environ
+    assert "EXOMEM_DISABLE_CLIP" not in os.environ
+    diagnostics = "\n".join(record.getMessage() for record in caplog.records)
+    assert "No module named 'torch'" not in diagnostics
+    assert "sentence-transformers not installed" not in diagnostics
+    assert "search unavailable" not in diagnostics
 
 
 def test_simple_ask_alias_can_request_deep_context(vault: Path, capsys) -> None:
@@ -807,8 +866,6 @@ def test_simple_review_human_output_and_triage(vault: Path, capsys) -> None:
     assert triage["state"] == "dismissed"
     assert (vault / "Knowledge Base/.review-state.json").exists()
 
-    code4, out4, err4 = _run(
-        ["review", "reopen", item["ref"], "--json"], capsys
-    )
+    code4, out4, err4 = _run(["review", "reopen", item["ref"], "--json"], capsys)
     assert code4 == 0, err4
     assert json.loads(out4.strip().splitlines()[-1])["data"]["state"] == "open"

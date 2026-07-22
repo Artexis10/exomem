@@ -113,6 +113,7 @@ class BM25Index:
 
         if scope == "vault":
             from .vault import walk_vault_md
+
             walk = walk_vault_md(vault_root)
         else:
             kb = vault_root / kb_dirname()
@@ -174,6 +175,7 @@ class BM25Index:
         scope: str = "kb",
         freshness: tuple | None = None,
         allowed_paths: set[str] | None = None,
+        repair: bool = True,
     ) -> list[tuple[str, float]]:
         """Return top-k `(rel_path, bm25_score)` for `query`. Empty query → [].
 
@@ -195,6 +197,7 @@ class BM25Index:
             scope=scope,
             freshness=freshness,
             allowed_paths=allowed_paths,
+            repair=repair,
         )
         if indexed is not None:
             return indexed
@@ -262,6 +265,7 @@ def corpus_key(vault_root: Path, scope: str) -> tuple:
     """Digest-strength corpus freshness key for a scope (one stat walk)."""
     if scope == "vault":
         from .vault import walk_vault_md
+
         walk = walk_vault_md(vault_root)
     else:
         kb = vault_root / kb_dirname()
@@ -282,6 +286,7 @@ def search(
     scope: str = "kb",
     freshness: tuple | None = None,
     allowed_paths: set[str] | None = None,
+    repair: bool = True,
 ) -> list[tuple[str, float]]:
     """Module-level convenience using the per-process singleton."""
     return _INDEX.search(
@@ -291,6 +296,7 @@ def search(
         scope=scope,
         freshness=freshness,
         allowed_paths=allowed_paths,
+        repair=repair,
     )
 
 

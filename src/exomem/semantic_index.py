@@ -15,8 +15,8 @@ from . import memory_refs, relation_registry, semantic_language_registry, semant
 
 PARSER_VERSION = 4
 _GENERATION_SCHEMA = "exomem.semantic-unit.parent-generation.v4"
-_ACTIVE_PARENT_STATES: ContextVar[Mapping[str, SemanticParentIndexState] | None] = (
-    ContextVar("exomem_semantic_parent_states", default=None)
+_ACTIVE_PARENT_STATES: ContextVar[Mapping[str, SemanticParentIndexState] | None] = ContextVar(
+    "exomem_semantic_parent_states", default=None
 )
 
 
@@ -84,9 +84,7 @@ def reset_parent_states(
     _ACTIVE_PARENT_STATES.reset(token)
 
 
-def parent_state_for_path(
-    vault_root: Path, path: Path | str
-) -> SemanticParentIndexState | None:
+def parent_state_for_path(vault_root: Path, path: Path | str) -> SemanticParentIndexState | None:
     states = _ACTIVE_PARENT_STATES.get()
     if not states:
         return None
@@ -198,6 +196,12 @@ def build_parent_index_state(
         source_path = root / rel_path
     if source is None:
         source = source_path.read_text(encoding="utf-8")
+    else:
+        # ``Path.read_text`` uses universal-newline translation, while callers
+        # that share an exact byte snapshot may pass decoded CRLF content.
+        # Normalize both routes before frontmatter/ref parsing so Windows deep
+        # packs retain the same stable memory identity as indexed retrieval.
+        source = source.replace("\r\n", "\n").replace("\r", "\n")
     frontmatter, body, _ = vault.parse_frontmatter(source)
     parent_ref = memory_refs.ref_from_markdown(source)
     page_type = str(frontmatter["type"]) if frontmatter.get("type") else None
@@ -210,9 +214,7 @@ def build_parent_index_state(
         path=rel_path,
         parent_ref=parent_ref,
         validate=True,
-        language_registry=semantic_language_registry.for_attached_projects(
-            language, projects
-        ),
+        language_registry=semantic_language_registry.for_attached_projects(language, projects),
         relation_registry=relations,
         include_legacy_relations=True,
         retain_unknown_relations=True,
@@ -270,9 +272,7 @@ def from_semantic_page_state(state: Any) -> SemanticParentIndexState:
     path = str(state.path)
     source_hash = str(state.source_hash)
     parent_ref = (
-        memory_refs.memory_ref(str(state.identity))
-        if state.identity_kind == "exomem_id"
-        else None
+        memory_refs.memory_ref(str(state.identity)) if state.identity_kind == "exomem_id" else None
     )
     return SemanticParentIndexState(
         path=path,
@@ -327,9 +327,7 @@ def _rows_by_parent(
         values["unit_refs"].add(str(unit_ref))
         if parent_ref:
             values["parent_refs"].add(str(parent_ref))
-        values["stamps"].add(
-            (str(generation), str(source_hash), int(parser_version))
-        )
+        values["stamps"].add((str(generation), str(source_hash), int(parser_version)))
     return {
         path: _SidecarParentRows(
             frozenset(values["unit_refs"]),
@@ -363,12 +361,9 @@ def _graph_unit_rows(path: Path) -> dict[str, _SidecarParentRows]:
     try:
         conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
         try:
-            node_rows = conn.execute(
-                "SELECT path, metadata FROM graph_nodes"
-            ).fetchall()
+            node_rows = conn.execute("SELECT path, metadata FROM graph_nodes").fetchall()
             edge_rows = conn.execute(
-                "SELECT source_path, metadata FROM graph_edges "
-                "WHERE relation_type = 'derived_from'"
+                "SELECT source_path, metadata FROM graph_edges WHERE relation_type = 'derived_from'"
             ).fetchall()
         finally:
             conn.close()
@@ -380,9 +375,7 @@ def _graph_unit_rows(path: Path) -> dict[str, _SidecarParentRows]:
             metadata = json.loads(raw_metadata)
         except (TypeError, ValueError):
             continue
-        if metadata.get("record_type") != "semantic_unit" or not metadata.get(
-            "unit_ref"
-        ):
+        if metadata.get("record_type") != "semantic_unit" or not metadata.get("unit_ref"):
             continue
         values = grouped.setdefault(
             str(parent_path),
@@ -406,9 +399,7 @@ def _graph_unit_rows(path: Path) -> dict[str, _SidecarParentRows]:
             metadata = json.loads(raw_metadata)
         except (TypeError, ValueError):
             continue
-        if metadata.get("record_type") != "semantic_unit" or not metadata.get(
-            "unit_ref"
-        ):
+        if metadata.get("record_type") != "semantic_unit" or not metadata.get("unit_ref"):
             continue
         values = grouped.setdefault(
             str(parent_path),
@@ -460,33 +451,25 @@ def audit_semantic_unit_sidecars(
 
     expected = dict(expected_states)
     expected_by_ref = {
-        state.parent_ref: path
-        for path, state in expected.items()
-        if state.parent_ref is not None
+        state.parent_ref: path for path, state in expected.items() if state.parent_ref is not None
     }
     sidecars: list[tuple[str, dict[str, _SidecarParentRows]]] = []
     if include_lexical:
         sidecars.append(
             (
                 "lexical",
-                _sqlite_unit_rows(
-                    lexstore.lexical_path(vault_root), "semantic_units"
-                ),
+                _sqlite_unit_rows(lexstore.lexical_path(vault_root), "semantic_units"),
             )
         )
     if include_vectors:
         sidecars.append(
             (
                 "vector",
-                _sqlite_unit_rows(
-                    index_paths.sidecar_path(vault_root), "semantic_unit_vectors"
-                ),
+                _sqlite_unit_rows(index_paths.sidecar_path(vault_root), "semantic_unit_vectors"),
             )
         )
     if include_graph:
-        sidecars.append(
-            ("graph", _graph_unit_rows(epistemic_graph.sidecar_path(vault_root)))
-        )
+        sidecars.append(("graph", _graph_unit_rows(epistemic_graph.sidecar_path(vault_root))))
     trashed = _trash_original_paths(vault_root)
     drift: list[SemanticUnitSidecarDrift] = []
     generations_by_parent: dict[str, dict[str, frozenset[str]]] = {}
@@ -516,16 +499,12 @@ def audit_semantic_unit_sidecars(
                         sidecar,
                         parent_path,
                         tuple(sorted(orphan_reasons)),
-                        actual_generations=tuple(
-                            sorted(stamp[0] for stamp in actual.stamps)
-                        ),
+                        actual_generations=tuple(sorted(stamp[0] for stamp in actual.stamps)),
                     )
                 )
                 continue
             expected_refs = frozenset(
-                unit.unit_ref
-                for unit in state.document.units
-                if unit.unit_ref is not None
+                unit.unit_ref for unit in state.document.units if unit.unit_ref is not None
             )
             if actual is None:
                 if expected_refs:
@@ -539,9 +518,7 @@ def audit_semantic_unit_sidecars(
                     )
                 continue
             actual_generations = frozenset(stamp[0] for stamp in actual.stamps)
-            generations_by_parent.setdefault(parent_path, {})[sidecar] = (
-                actual_generations
-            )
+            generations_by_parent.setdefault(parent_path, {})[sidecar] = actual_generations
             reasons: set[str] = set()
             if actual.unit_refs != expected_refs:
                 reasons.add("unit_set_mismatch")

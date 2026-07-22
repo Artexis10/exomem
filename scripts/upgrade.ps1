@@ -23,6 +23,8 @@ param(
     [string]$PackageVersion = "",
     [ValidateSet("auto", "always", "never")]
     [string]$CudaTorch = "auto",
+    [ValidateSet("auto", "always", "never")]
+    [string]$CliSync = "auto",
     [string]$Vault = "",
     [switch]$SkipRestart
 )
@@ -89,7 +91,7 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 if ($SkipRestart) {
-    Write-Host "-SkipRestart given: the new version is installed but the service is still running the old one."
+    Write-Host "-SkipRestart given: the new version is staged, but the running service and user-facing CLI are unchanged. CLI sync is deferred until the live release is verified."
     exit 0
 }
 
@@ -132,6 +134,16 @@ if ($after -and $served -ne $after) {
 }
 if ($repoVersion -and $served -ne $repoVersion) {
     Write-Warning "Live service is on $served but this checkout is $repoVersion. Expected when the checkout is mid-release (repo ahead of PyPI) or on an older branch (repo behind); investigate if neither applies."
+}
+
+# The live process is the release authority.  Only now may a separately managed
+# lean uv-tool command be aligned; -SkipRestart deliberately exits before this
+# point so it can never move the CLI ahead of the running service.
+$serviceTarget = "http://$($endpoint.Host):$($endpoint.Port)"
+Write-ExomemManagedManifest -ServiceVersion $served -ServiceProfile $Profile -ServiceTarget $serviceTarget
+$cliSynced = Sync-ExomemUvCli -Mode $CliSync -ServiceVersion $served
+if ($CliSync -ne "never") {
+    Assert-ExomemVisibleCliVersions -ExpectedVersion $served -RequireOne ([bool]$cliSynced -or $CliSync -eq "always")
 }
 
 $readyUrl = "http://$($endpoint.Host):$($endpoint.Port)/health/ready"

@@ -67,9 +67,10 @@ Release Please handles the version bump and PyPI publish. Around it:
    images.
 2. `exomem package-skills --plugin-root plugins/claude-code` if the scaffold
    changed, and commit the result. CI catches you if you forget.
-3. On each self-hosted box: `pwsh -File scripts/upgrade.ps1` (Windows) or re-run
-   `scripts/install-service.sh --release`. It asserts the live `/health` version
-   matches what it installed.
+3. On each self-hosted box: `pwsh -File scripts/upgrade.ps1` (Windows) or
+   `bash scripts/upgrade.sh` (macOS/Linux). It asserts the live `/health` version,
+   records the managed profile, and reconciles any existing uv-tool CLI to that
+   exact release without copying the service's heavy extras.
 4. Re-upload the web-client archives only when `SKILL.md` itself changed — the MCP
    surface upgrades with the server, so most releases need no re-upload.
 
