@@ -31,4 +31,4 @@
 
 - [x] 6.1 Run focused red-green suites for semantic projection, command classification, writer lease, mutation locking, coordination status, runtime readiness, media concurrency, and FastMCP transport.
 - [x] 6.2 Run the OpenSpec validator, scaffold leak gate, schema-fidelity gate, lint/type checks, and the proportionate non-embedding regression suite.
-- [ ] 6.3 Obtain independent concurrency/contract review, fix all blocking or important findings, then commit, integrate current `origin/main`, push, and open a ready PR with verification evidence.
+- [x] 6.3 Obtain independent concurrency/contract review, fix all blocking or important findings, then commit, integrate current `origin/main`, push, and open a ready PR with verification evidence.
