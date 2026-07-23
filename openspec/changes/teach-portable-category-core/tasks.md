@@ -23,11 +23,11 @@
 - [x] 4.1 Update the hand-authored generic scaffold, workflow skills, public semantic-language reference, and checked generated projections.
 - [x] 4.2 Regenerate only intentional bounded schema-description fixtures and document why the full vocabulary stays out of generated schemas.
 - [x] 4.3 Run focused registry compatibility, authoring, bootstrap, write, surface-parity, indexed retrieval, and no-private-leak tests.
-- [ ] 4.4 Run Ruff and the full lean test suite, then record verification evidence.
+- [x] 4.4 Run Ruff and the full lean test suite, then record verification evidence.
 
 ## Verification evidence (2026-07-23)
 
 - Focused retrieval, teaching, surface-parity, registry, bootstrap, write-feedback, workflow-skill, and no-private-leak suite: 259 passed.
 - Ruff: all changed/new Python files passed the repository lint selection.
 - Canonical semantic authoring contract: `exomem.semantic-authoring:v3` / `sha256:2a754bb2da87cf062876878bfb908a9c8a2bd6ded218443890aa89977057d8d6c`.
-- Full Linux lean suite remains delegated to the required GitHub Python 3.11/3.13 matrix because the managed Windows sandbox denies WSL, named pipes, and POSIX-only collection paths.
+- Required GitHub Linux lean matrix (run `30007981648`): Python 3.11 and 3.13 each passed 5,052 tests with 62 skipped; all CI jobs passed, including Ruff/targeted types, OpenSpec, package, Docker, product E2E, and embedding retrieval gates.

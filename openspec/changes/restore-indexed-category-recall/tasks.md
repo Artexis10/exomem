@@ -30,7 +30,7 @@
 - [x] 5.1 Extend the latency harness with the specified 30-sample cold/hot page and unit lanes and anonymized bucketed output.
 - [x] 5.2 Run focused filter, lexical fallback, freshness, bounded-retrieval, and latency-curve tests.
 - [x] 5.3 Measure the real-vault cold and hot category lanes on a quiescent service against the specified gates.
-- [ ] 5.4 Run Ruff and the full lean test suite, then record verification evidence.
+- [x] 5.4 Run Ruff and the full lean test suite, then record verification evidence.
 
 ## Verification evidence (2026-07-23)
 
@@ -40,4 +40,4 @@
 - Ruff: all 37 changed/new Python files passed the repository lint selection.
 - 2,500-page synthetic gate (30 samples/lane): page cold/hot total p95 10.89/3.139 ms; unit cold/hot 8.304/2.08 ms; all gates passed.
 - Aggregate real-vault Markdown mirror gate (30 samples/lane; no identities or content retained): page cold/hot total p95 15.227/3.44 ms; unit cold/hot 10.493/1.905 ms; all gates passed. The temporary mirror was moved to the Windows Recycle Bin after measurement.
-- Full Linux lean suite remains delegated to the required GitHub Python 3.11/3.13 matrix because the managed Windows sandbox denies WSL, named pipes, and POSIX-only collection paths.
+- Required GitHub Linux lean matrix (run `30007981648`): Python 3.11 and 3.13 each passed 5,052 tests with 62 skipped; all CI jobs passed, including Ruff/targeted types, OpenSpec, package, Docker, product E2E, and embedding retrieval gates.
