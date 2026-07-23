@@ -69,6 +69,13 @@ _REPEAT = 3  # passes over the query set → ~9 samples per lane for a stable me
 # CI-speed variance over the warm baseline does not.
 CEIL_GRAPH_MS = 1000.0  # warm ~222ms; a per-query resolver rebuild → ~1.9s trips this
 CEIL_TOTAL_MS = 5000.0  # warm ~805ms; catastrophic-blowup backstop, CI-robust
+# Relation-filtered recall adds one indexed sidecar lookup (two indexed edge
+# queries + graph_nodes joins) to find(); it must not turn into an O(corpus)
+# walk. This is a generous catastrophic-blowup backstop, not a tight bound —
+# a full-scan regression would blow well past it. (Native-Windows dev machines
+# cannot complete the bulk-corpus reads this fixture needs; the Linux CI matrix
+# is the calibration authority, matching the graph ceilings above.)
+CEIL_RELATION_FILTER_MS = 5000.0
 
 # --- Warm-graph scaling bound (the anti-O(N) gate from the FTS5 change).
 # MEASURED BASIS (2026-07-04, same box as the module baseline, registry LIVE):
@@ -193,6 +200,40 @@ def test_no_lane_exceeds_ceiling_at_scale(dense_vault_2k: Path) -> None:
         f"total find() median {total_ms:.0f}ms >= ceiling {CEIL_TOTAL_MS:.0f}ms at "
         f"{N_NOTES} notes (warm baseline ~805ms). Dominant lane: {worst[0]} "
         f"({worst[1]:.0f}ms). all medians: {rounded}"
+    )
+
+
+def test_relation_filtered_recall_stays_bounded(dense_vault_2k: Path) -> None:
+    """A relation filter resolves participants from the indexed sidecar, not an
+    O(corpus) walk — end-to-end find() with `relations=[...]` stays under the
+    catastrophic-blowup backstop at 2000 notes.
+
+    The dense fixture leaves the graph lane in wikilink-fallback (no sidecar), so
+    the sidecar is built once here; `links_to` is the broadest relation (every
+    wikilink), exercising the largest participant set the corpus can produce.
+    """
+    from exomem import epistemic_graph
+
+    epistemic_graph.EpistemicGraphIndex(dense_vault_2k).rebuild_all()
+    samples: list[float] = []
+    for _ in range(_REPEAT):
+        for q in _QUERIES:
+            t = find_module.FindTimings()
+            find_module.find(
+                dense_vault_2k,
+                query=q,
+                limit=10,
+                mode="hybrid",
+                graph=True,
+                relations=["links_to"],
+                timings=t,
+            )
+            samples.append(t.as_dict()["total_ms"])
+    total_ms = statistics.median(samples)
+    assert total_ms < CEIL_RELATION_FILTER_MS, (
+        f"relation-filtered find() median {total_ms:.0f}ms >= ceiling "
+        f"{CEIL_RELATION_FILTER_MS:.0f}ms at {N_NOTES} notes — the participant "
+        f"lookup is likely walking the corpus instead of the indexed sidecar."
     )
 
 
