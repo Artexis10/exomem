@@ -419,10 +419,10 @@ def test_create_file_default_writes_file(vault: Path, monkeypatch) -> None:
     mcp = _build(monkeypatch)
     out = _call(mcp, "manage_memory_file", {
         "operation": "create",
-        "path": "Knowledge Base/Notes/Insights/plain.md", "content": "hi\n",
+        "path": "Knowledge Base/Notes/plain.md", "content": "hi\n",
     })
     assert out.get("path", "").endswith("plain.md")
-    assert (vault / "Knowledge Base/Notes/Insights/plain.md").read_text(encoding="utf-8") == "hi\n"
+    assert (vault / "Knowledge Base/Notes/plain.md").read_text(encoding="utf-8") == "hi\n"
 
 
 # ---------------- delete: file vs dir auto-detection ----------------

@@ -397,6 +397,66 @@ def test_watcher_reports_posthoc_before_one_index_fanout_and_preserves_bytes(
     assert "RELATION_DISPOSITION_MISSING" in caplog.text
 
 
+def test_direct_unit_removal_is_non_destructive_and_repair_clears_debt(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "Knowledge Base").mkdir(parents=True)
+    activation_manifest.ensure_manifest(tmp_path)
+    path = _write(
+        tmp_path,
+        "Knowledge Base/Notes/Insights/direct-unit-removal.md",
+        _page(
+            "00000000-0000-4000-8000-000000000107",
+            title="Direct unit removal",
+            body="## Observations\n\n- [operating constraint] Keep retries bounded #reliability",
+        ),
+    )
+    prose_only = _page(
+        "00000000-0000-4000-8000-000000000107",
+        title="Direct unit removal",
+        body="Ordinary structural prose.",
+    )
+    path.write_text(prose_only, encoding="utf-8", newline="\n")
+    authored = path.read_bytes()
+
+    observed = semantic_writes.evaluate_posthoc_batch(
+        tmp_path, paths=[path], operation="watcher"
+    )
+    result = observed.evaluations[0].contract_result
+    missing = next(
+        finding for finding in result.findings
+        if finding.code == "missing_semantic_unit"
+    )
+    assert result.should_block is False
+    assert result.semantic_unit_count == 0
+    assert missing.severity == "error"
+    assert path.read_bytes() == authored
+
+    repaired = prose_only.replace(
+        "Ordinary structural prose.",
+        "## Decision\n\nKeep retry windows bounded.",
+    )
+    path.write_text(repaired, encoding="utf-8", newline="\n")
+    repaired_bytes = path.read_bytes()
+    first = semantic_writes.evaluate_posthoc_batch(
+        tmp_path, paths=[path], operation="reconcile"
+    )
+    second = semantic_writes.evaluate_posthoc_batch(
+        tmp_path, paths=[path], operation="reconcile"
+    )
+
+    assert first.as_dict() == second.as_dict()
+    repaired_result = first.evaluations[0].contract_result
+    assert repaired_result.semantic_unit_count == 1
+    assert repaired_result.compact_unit_count == 0
+    assert repaired_result.rich_unit_count == 1
+    assert all(
+        finding.code != "missing_semantic_unit"
+        for finding in repaired_result.findings
+    )
+    assert path.read_bytes() == repaired_bytes
+
+
 def test_watcher_delete_skips_posthoc_parsing_and_keeps_cleanup(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

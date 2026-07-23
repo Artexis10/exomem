@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from exomem import find as find_module
-from exomem import lexstore, vault
+from exomem import freshness, lexstore, vault
 
 pytestmark = pytest.mark.skipif(
     not lexstore.fts5_available(), reason="this SQLite build lacks FTS5"
@@ -44,13 +44,21 @@ def _rows(root: Path) -> list[sqlite3.Row]:
         conn.close()
 
 
+def _seed(root: Path, paths: list[Path]) -> None:
+    entries = [(str(path), freshness.stat_signature(path)) for path in paths]
+    freshness.seed(root, "kb", entries)
+    freshness.seed(root, "vault", entries)
+
+
 @pytest.fixture(autouse=True)
 def _fresh_state(monkeypatch: pytest.MonkeyPatch):
+    freshness.clear()
     lexstore.reset_memo()
     lexstore.clear_stores()
     find_module.clear_cache()
     monkeypatch.delenv("EXOMEM_LEXICAL_BACKEND", raising=False)
     yield
+    freshness.clear()
     lexstore.reset_memo()
     lexstore.clear_stores()
     find_module.clear_cache()
@@ -71,9 +79,12 @@ def test_unit_rows_share_parent_generation_and_filter_exact_metadata(tmp_path: P
 Use SQLite for the index.
 """,
     )
+    _seed(tmp_path, [page])
+    lexstore.ensure_fresh(tmp_path)
+    current_triple = freshness.triple(tmp_path, "kb")
 
     category_hits = lexstore.search_semantic_units(
-        tmp_path, "", k=10, categories=["config"], scope="kb"
+        tmp_path, "", k=10, categories=["config"], scope="kb", freshness=current_triple
     )
     assert category_hits is not None
     assert [(hit.form, hit.category, hit.kind) for hit in category_hits] == [
@@ -82,7 +93,9 @@ Use SQLite for the index.
     ]
 
     # Kind is governed semantic kind, not an open category or a content mention.
-    kind_hits = lexstore.search_semantic_units(tmp_path, "", k=10, kinds=["decision"], scope="kb")
+    kind_hits = lexstore.search_semantic_units(
+        tmp_path, "", k=10, kinds=["decision"], scope="kb", freshness=current_triple
+    )
     assert kind_hits is not None
     assert [(hit.form, hit.category, hit.kind) for hit in kind_hits] == [
         ("rich", "config", "decision")
@@ -135,7 +148,9 @@ def test_allowed_unit_refs_are_applied_before_top_k(tmp_path: Path) -> None:
     assert [hit.unit_ref for hit in filtered] == [allowed_ref]
 
 
-def test_parent_update_replaces_all_unit_rows_in_one_transaction(tmp_path: Path) -> None:
+def test_parent_update_replaces_all_unit_rows_in_one_transaction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     page = _write_page(
         tmp_path,
         """\
@@ -143,16 +158,28 @@ def test_parent_update_replaces_all_unit_rows_in_one_transaction(tmp_path: Path)
 - [rule] survivor ^survivor
 """,
     )
+    _seed(tmp_path, [page])
+    lexstore.ensure_fresh(tmp_path)
     assert lexstore.search_semantic_units(tmp_path, "oldtoken", k=10, scope="kb")
     before = _rows(tmp_path)
     before_generation = before[0]["parent_generation"]
 
     page = _write_page(tmp_path, "- [rule] newtoken ^new\n")
+    freshness.on_files_changed(tmp_path, changed=[page])
     lexstore.upsert_after_write(tmp_path, [page])
+    current_triple = freshness.triple(tmp_path, "kb")
 
     assert lexstore.search_semantic_units(tmp_path, "oldtoken", k=10, scope="kb") == []
     assert (
-        lexstore.search_semantic_units(tmp_path, "", k=10, categories=["config"], scope="kb") == []
+        lexstore.search_semantic_units(
+            tmp_path,
+            "",
+            k=10,
+            categories=["config"],
+            scope="kb",
+            freshness=current_triple,
+        )
+        == []
     )
     current = lexstore.search_semantic_units(tmp_path, "newtoken", k=10, scope="kb")
     assert current is not None and [hit.category for hit in current] == ["rule"]
@@ -174,19 +201,31 @@ def test_parent_update_replaces_all_unit_rows_in_one_transaction(tmp_path: Path)
         conn.close()
     page = _write_page(tmp_path, "- [rule] broken generation ^broken\n")
     find_module.clear_cache()
-    with pytest.raises(sqlite3.IntegrityError, match="forced unit insert failure"):
-        lexstore.get_store(tmp_path).upsert_paths([page])
+    monkeypatch.setattr(lexstore, "_schedule_repair", lambda _root: None)
+    assert lexstore.get_store(tmp_path).upsert_paths([page]) is False
     assert [row["content"] for row in _rows(tmp_path)] == ["newtoken"]
 
 
 def test_parent_delete_removes_every_lexical_unit_row(tmp_path: Path) -> None:
     page = _write_page(tmp_path, "- [config] remove me ^gone\n")
+    _seed(tmp_path, [page])
+    lexstore.ensure_fresh(tmp_path)
     assert lexstore.search_semantic_units(tmp_path, "remove", k=10, scope="kb")
 
     page.unlink()
+    freshness.on_files_changed(tmp_path, deleted=[page])
     lexstore.delete_after_remove(tmp_path, ["Knowledge Base/Notes/units.md"])
+    current_triple = freshness.triple(tmp_path, "kb")
 
     assert _rows(tmp_path) == []
     assert (
-        lexstore.search_semantic_units(tmp_path, "", k=10, categories=["config"], scope="kb") == []
+        lexstore.search_semantic_units(
+            tmp_path,
+            "",
+            k=10,
+            categories=["config"],
+            scope="kb",
+            freshness=current_triple,
+        )
+        == []
     )

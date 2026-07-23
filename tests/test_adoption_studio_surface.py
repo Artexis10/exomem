@@ -160,7 +160,12 @@ def test_rest_facade_round_trip(vault: Path, monkeypatch: pytest.MonkeyPatch) ->
                         "sources": [imported_path],
                         "title": "Quarterly planning summary",
                         "note_type": "insight",
-                        "content": "# Quarterly planning summary\n\nShip the studio.\n",
+                        "content": (
+                            "# Quarterly planning summary\n\n"
+                            "Ship the studio.\n\n"
+                            "## Observations\n\n"
+                            "- [operating constraint] Keep retries bounded #reliability\n"
+                        ),
                     },
                     "bindings": {"run_fingerprint": started.get("inventory_fingerprint", "")},
                 }

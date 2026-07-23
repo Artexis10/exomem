@@ -102,6 +102,28 @@ def append_to_file(
             ),
         )
 
+    semantic_append_target = bool(
+        rel_path.casefold().endswith(".md")
+        and in_append_only_tree(rel_path) != "Evidence"
+    )
+    semantic_review_requested = validate_only or any(
+        value is not None
+        for value in (
+            semantic_transition_token,
+            relation_disposition,
+            relation_review_hash,
+            relation_review_reason,
+        )
+    )
+    if semantic_review_requested and not semantic_append_target:
+        raise AppendError(
+            code="INVALID_APPEND_REVIEW_TARGET",
+            reason=(
+                "append validation and semantic review fields are supported only "
+                "for governed Markdown outside Evidence/"
+            ),
+        )
+
     try:
         existing, primary_guard = read_guarded_text(vault_root, abs_path)
     except (OSError, UnicodeError) as error:
@@ -187,9 +209,8 @@ def append_to_file(
     if log_plan.rotation_note is not None:
         warnings.append(log_plan.rotation_note)
 
-    is_markdown = rel_path.casefold().endswith(".md")
     semantic: dict | None = None
-    if is_markdown and in_append_only_tree(rel_path) != "Evidence":
+    if semantic_append_target:
         try:
             preflight = semantic_writes.preflight_existing(
                 vault_root,

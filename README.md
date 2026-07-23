@@ -115,6 +115,11 @@ uv tool install exomem   # or: pip install exomem
 exomem setup --vault "/path/to/your/Obsidian"
 ```
 
+Re-running the one-line installer upgrades an existing uv-tool install instead
+of leaving an older `exomem` command on PATH. `exomem --version --json` is a
+model-free provenance check, so it also works in the intentional lean CLI paired
+with a fuller managed service.
+
 One command does the whole local setup: the wizard scans your vault and shows
 what's already there, initializes `Knowledge Base/`, runs the `doctor`
 preflight, registers the server with every client it detects (Claude Code and

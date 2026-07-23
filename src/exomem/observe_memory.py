@@ -270,12 +270,6 @@ def observe_memory(
             semantic=preflight.as_dict(),
         )
 
-    if preflight.contract_result.should_block:
-        raise ObserveMemoryError(
-            "SEMANTIC_CONTRACT_BLOCKED",
-            "semantic contract has blocking findings; validate first and supply "
-            "the returned transition review fields when remediation requires them",
-        )
     try:
         log_plan = vault.plan_log_writes(
             vault_root,

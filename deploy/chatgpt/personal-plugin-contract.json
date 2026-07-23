@@ -9,7 +9,7 @@
     "offline_access"
   ],
   "registered_tool_surface_sha256": "3fb189ee7d9e48183c404d5b5d36df3c36d5e8df995b7e4cd78ad8c763672ae6",
-  "pending_tool_surface_sha256": "f10ed06d7433ca0bb387694588e9185004d60624128dc5df03c9f68f615ff5a5",
+  "pending_tool_surface_sha256": "7dbf9395c34258323254d10145d36fb3a5c7ba4194057ab9a474e1cb9544dc70",
   "refresh_required": true,
   "rollout_state": "awaiting-post-deploy-refresh",
   "last_verified_release": "0.25.5",

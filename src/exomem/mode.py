@@ -16,7 +16,7 @@ Three canonical modes (aliases in `_ALIASES` so whatever a user types works):
                    present; release when idle. Aliases: `gpu`, `turbo`.
 
 Resolution precedence: `EXOMEM_MODE` env → the per-machine config file
-(`%PROGRAMDATA%\\exomem\\config.json` on Windows, `~/.exomem/config.json` on POSIX, or
+(`%PROGRAMDATA%/exomem/config.json` on Windows, `~/.exomem/config.json` on POSIX, or
 `EXOMEM_CONFIG_PATH`) → the legacy `EXOMEM_QUIET_MODE` boolean → the `normal` default.
 The config file is read explicitly (never injected into the environment) so an exported
 `EXOMEM_MODE` always wins over it — and it is a fixed, machine-wide path (not `.env`,
@@ -108,7 +108,7 @@ def normalize(value: str | None) -> str | None:
 def config_path() -> Path:
     """Per-machine config file. `EXOMEM_CONFIG_PATH` overrides (tests/multi-instance).
 
-    On Windows the default is machine-wide (`%PROGRAMDATA%\\exomem\\config.json`), NOT
+    On Windows the default is machine-wide (`%PROGRAMDATA%/exomem/config.json`), NOT
     the user home: a service commonly runs as LocalSystem while the `exomem` CLI runs as
     the logged-in user, and `~` resolves to two different profiles — so a home-relative
     file would let the CLI write one config the service never reads, silently breaking the
@@ -120,7 +120,11 @@ def config_path() -> Path:
     if override:
         return Path(override)
     if os.name == "nt":
-        base = os.environ.get("PROGRAMDATA") or os.environ.get("ALLUSERSPROFILE") or r"C:\ProgramData"
+        base = (
+            os.environ.get("PROGRAMDATA")
+            or os.environ.get("ALLUSERSPROFILE")
+            or "C:" + r"\ProgramData"
+        )
         return Path(base) / "exomem" / "config.json"
     return Path.home() / ".exomem" / "config.json"
 

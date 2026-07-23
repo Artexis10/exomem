@@ -11,6 +11,7 @@
 #   bash scripts/upgrade.sh
 #   bash scripts/upgrade.sh --profile media
 #   bash scripts/upgrade.sh --package-version 0.25.4   # pin instead of latest
+#   bash scripts/upgrade.sh --cli-sync always          # install CLI if absent
 #   bash scripts/upgrade.sh --skip-restart             # stage it, restart later
 
 set -euo pipefail
@@ -26,6 +27,7 @@ PROFILE="standard"
 PACKAGE_VERSION=""
 VAULT=""
 SKIP_RESTART=0
+CLI_SYNC="auto"
 
 die() { echo "upgrade: $*" >&2; exit 1; }
 
@@ -34,6 +36,7 @@ while [[ $# -gt 0 ]]; do
         --profile)         PROFILE="${2:?}"; shift 2 ;;
         --package-version) PACKAGE_VERSION="${2:?}"; shift 2 ;;
         --vault)           VAULT="${2:?}"; shift 2 ;;
+        --cli-sync)        CLI_SYNC="${2:?}"; shift 2 ;;
         --skip-restart)    SKIP_RESTART=1; shift ;;
         -h|--help)         sed -n '2,14p' "$0"; exit 0 ;;
         *)                 die "unknown option: $1" ;;
@@ -43,6 +46,10 @@ done
 case "$PROFILE" in
     lean|hybrid|standard|media) ;;
     *) die "profile must be lean, hybrid, standard, or media (got: $PROFILE)" ;;
+esac
+case "$CLI_SYNC" in
+    auto|always|never) ;;
+    *) die "cli sync must be auto, always, or never (got: $CLI_SYNC)" ;;
 esac
 
 OS="$(uname -s)"
@@ -109,7 +116,7 @@ if ! "$VENV_PYTHON" "${DOCTOR_ARGS[@]}"; then
 fi
 
 if [[ "$SKIP_RESTART" -eq 1 ]]; then
-    echo "--skip-restart given: the new version is installed but the service is still running the old one."
+    echo "--skip-restart given: the new version is staged, but the running service and user-facing CLI are unchanged. CLI sync is deferred until the live release is verified."
     exit 0
 fi
 
@@ -141,6 +148,18 @@ done
 echo "Serving version: $SERVED (from $HEALTH)"
 if [[ -n "$AFTER" && "$SERVED" != "$AFTER" ]]; then
     die "version mismatch: installed '$AFTER' but the live service reports '$SERVED'. Something else is bound to $PORT, or the restart did not take."
+fi
+
+# The verified live process is the release authority.  Keep the daily CLI lean:
+# align its Exomem release, not the service's optional ML/media dependency set.
+CLI_REQUIRED=0
+if [[ "$CLI_SYNC" == "always" ]] || { [[ "$CLI_SYNC" == "auto" ]] && exomem_uv_tool_has_exomem; }; then
+    CLI_REQUIRED=1
+fi
+exomem_write_managed_manifest "$VENV_PYTHON" "$SERVED" "$PROFILE" "http://127.0.0.1:$PORT"
+exomem_sync_uv_cli "$CLI_SYNC" "$SERVED"
+if [[ "$CLI_SYNC" != "never" ]]; then
+    exomem_verify_visible_clis "$SERVED" "$VENV_PYTHON" "$CLI_REQUIRED"
 fi
 
 READY="$(curl -fsS --max-time 10 "http://127.0.0.1:$PORT/health/ready" 2>/dev/null || true)"

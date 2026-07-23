@@ -112,7 +112,7 @@ Media extraction needs two **system** tools (not pip-installable):
 
 - **Tesseract OCR** (images): `winget install --id UB-Mannheim.TesseractOCR -e`.
   The installer doesn't add it to PATH; the server auto-discovers it at
-  `C:\Program Files\Tesseract-OCR\`, or set `EXOMEM_TESSERACT_CMD`.
+  `%ProgramFiles%\Tesseract-OCR\`, or set `EXOMEM_TESSERACT_CMD`.
 - **ffmpeg** is bundled by PyAV (pulled via faster-whisper), so audio/video decode
   works without a separate install.
 
@@ -135,6 +135,13 @@ uv run python -m exomem backfill-media             # do it (CPU or GPU)
 It writes a sidecar if missing, extracts text (OCR/ASR/PDF), and CLIP-embeds
 images. Idempotent. Flags: `--no-ocr` (sidecar + CLIP only), `--no-clip`,
 `--vault <root>`.
+
+Media discovery, binary hashing, extraction compute, and the usual
+sidecar/transcript/failure index fanout run outside the global vault mutation
+boundary; only the revalidated per-artifact canonical commit is fenced. Lock
+telemetry can still show short named `background_media_clip_commit` and
+`background_media_scene_frame_commit` holders while CLIP vectors or persisted
+scene frames commit. Those are the measured residual paths, not a stuck scan.
 
 ## 2. Set up a public HTTPS URL
 
@@ -311,12 +318,43 @@ pwsh -File scripts/install-service.ps1 -Release
 
 ```powershell
 pwsh -File scripts/upgrade.ps1
+# Explicit policy: -CliSync auto|always|never (default: auto)
 ```
 
 The service runs a PyPI-backed venv that is **not** the repo checkout, so `git pull`
 never touches it. `upgrade.ps1` locates that venv from the NSSM registry, upgrades
 it, repairs the CUDA torch build, gates on `doctor`, restarts, and then asserts the
-**live** `/health` version matches what it just installed. No elevation needed.
+**live** `/health` version matches what it just installed. It then records a
+non-secret managed-install manifest and, in the default `auto` mode, aligns an
+existing uv-managed `exomem`/`kb` command to that exact verified release. `auto`
+never installs a command that was absent; `always` may install it; `never` leaves
+CLI management alone. `-SkipRestart` stages only the service venv and deliberately
+defers CLI alignment until a later run verifies the live release. No elevation is
+needed.
+
+The CLI and service need release parity, not dependency parity. The uv-tool CLI
+stays lean while a `standard` or `media` service keeps its embedding/media extras;
+duplicating Torch and model dependencies into the command environment is wasteful.
+Check the resolved command and its paired service identity without loading those
+optional stacks:
+
+```powershell
+exomem --version --json
+kb --version
+```
+
+On macOS/Linux, `bash scripts/upgrade.sh` provides the same behavior with
+`--cli-sync auto|always|never`.
+
+Releases carrying semantic parser changes bump the parser generation used by the
+lexical, vector, graph, pack, and count sidecars. Canonical Markdown is not
+rewritten. After upgrading, quiesce vault mutations and explicitly run
+`exomem maintain --reconcile` (or call `maintain_memory(mode="reconcile")`) to
+refresh stale derived rows; service restart alone does not promise this rebuild. Anonymous
+unit references whose normalized content changed become explicitly stale rather
+than resolving to a nearby unit; authored `^anchors` remain the stable reference
+mechanism. A full `maintain_memory(mode="fix", rebuild_embeddings=true)` rebuild
+is optional when exact vector regeneration is required.
 
 Upgrading by hand is the trap this replaces: `uv pip install --upgrade exomem[...]`
 ignores `[tool.uv.sources]` (only `uv sync` reads it), so it silently pulls the PyPI
@@ -413,7 +451,7 @@ transactional SQLite database on one always-on node:
 ```powershell
 $env:EXOMEM_LEASE_COORDINATOR_TOKEN = '<long-random-secret>'
 uv run python -m exomem.lease_coordinator --host 0.0.0.0 --port 8770 `
-  --database C:\exomem-state\writer-leases.sqlite
+  --database C:\path\to\writer-leases.sqlite
 ```
 
 Expose that service over private TLS or a protected tunnel. SQLite is consistent
@@ -463,6 +501,15 @@ continue locally. Check any replica with:
 uv run python -m exomem coordination_status --json
 ```
 
+That command probes the configured vault's local process-safe OS boundary, not
+just the calling process's memory. A held boundary includes only bounded holder
+diagnostics and `verified: true` when the runtime-state sidecar is bound to the
+current lock generation. `verified: false` means an external holder is real but
+its identity could not be safely attributed. Vault paths, content, credentials,
+and tenant identifiers are never included. This local boundary coordinates
+service and worker processes on one host; it does not replace the remote writer
+lease between replicas.
+
 REST callers should attach one stable `Idempotency-Key` to every mutation attempt;
 CLI callers can set `EXOMEM_IDEMPOTENCY_KEY`. Exact same-key/same-payload retries
 return the stored canonical terminal, including its original request and receipt
@@ -482,6 +529,13 @@ arrives; that ID is correlation, not a substitute for the replay key. Never
 change the payload or create a fresh explicit identity to recover a pending or
 committed-uncertain acknowledgement: retry only with the same identity as
 directed, or reconcile.
+
+Expected MCP operation refusals such as `MUTATION_WARMING` and `MUTATION_BUSY` are normal tool content:
+inspect top-level `success: false` and the structured `error` object, then follow
+its retry fields. They are not transport failures. A `receipt_id` is diagnostic,
+not a caller-supplied cross-session replay key; effective retry identity remains
+the explicit idempotency identity where supported or the same bounded
+principal/bearer/session scope plus unchanged command payload.
 
 Idempotency records and credentials stay in per-machine runtime state outside the
 synced vault. Both the 24-hour explicit window and the 600-second inferred window
@@ -791,9 +845,11 @@ curl -s http://127.0.0.1:8765/health
 
 `install_source` is the field that matters. `wheel` with a null `revision` means the server
 is **not** running a local checkout — upgrade the venv directly. `editable` reports the git
-`revision` it is serving. For full detail including the interpreter path, run
-`exomem install-info` locally; `/health` withholds paths because it is unauthenticated and
-publicly reachable.
+`revision` it is serving. For local CLI/service release, profile, route, and
+interpreter identity, run `exomem --version --json` (or `exomem install-info`);
+`/health` withholds local paths because it is unauthenticated and publicly
+reachable. A false `version_match` means the shell command and managed service
+are split and should be reconciled before treating the upgrade as complete.
 
 The scripted path resolves the interpreter from NSSM, gates on `doctor` and accelerator
 capability, restarts, and verifies the running version:

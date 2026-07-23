@@ -52,8 +52,8 @@
 - [x] 6.2 Implement foundation resources for the dedicated Hetzner network/CX33/primary IP/firewall/SSH key and Cloudflare Tunnel/DNS/Access/service token.
 - [x] 6.3 Add failing plan tests proving a durability-only change cannot touch foundation resources.
 - [x] 6.4 Implement durability resources for B2 state/backup/database-backup buckets, Object Lock/lifecycle, and least-privilege upload/restore/delete identities.
-- [x] 6.5 Implement the one-time versioned B2 backend bootstrap plus separate foundation/durability keys and lockfiles.
-- [ ] 6.6 Prove real-account concurrent locking and prior-version state recovery or block deployment and reopen the backend decision.
+- [x] 6.5 Implement the original one-time versioned B2 backend bootstrap plus separate foundation/durability keys and lockfiles; retain its already-applied state/resources unchanged after the real compatibility proof reopens the backend decision.
+- [ ] 6.6 Add the separate HCP Terraform state-only bootstrap, fixed production workspaces, fail-closed preflight, and disposable proof workspace; prove real-account concurrent locking and prior-version recovery before any production apply.
 - [x] 6.7 Add saved-plan/approval/apply wrappers, cost output, 0600 artifact handling, and destroy/replacement guard tests.
 
 ## 7. Implement idempotent Ansible and K3s bootstrap

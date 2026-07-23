@@ -19,12 +19,15 @@ named in `HAND_REGISTERED_EXCEPTIONS`.
 
 from __future__ import annotations
 
+import hashlib
 import inspect
 import json
 import os
 import re
+from dataclasses import dataclass
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
+from types import MappingProxyType
 from typing import Annotated, Any, Literal, NotRequired
 
 from fastmcp.tools import ToolResult
@@ -84,6 +87,7 @@ from . import replace as replace_module
 from . import retrieval_explain as retrieval_explain_module
 from . import review_context as review_context_module
 from . import review_state as review_state_module
+from . import semantic_authoring as semantic_authoring_module
 from . import semantic_language_registry as semantic_language_registry_module
 from . import semantic_unit_read as semantic_unit_read_module
 from . import set_frontmatter_field as set_frontmatter_field_module
@@ -249,6 +253,13 @@ def op_bootstrap(
     active_product_names = frozenset(active_descriptor.product_commands)
     requested_workflow = workflow.strip() if workflow and workflow.strip() else "general"
     selected_packs = knowledge_packs_module.selected_pack_state(vault_root)
+    # Project the semantic authoring contract ONCE at the selected profile and
+    # reuse it everywhere in the payload. A compact bootstrap must stay compact
+    # through the whole payload, so the nested authoring_contract projection can
+    # never fall back to the full profile and leak the rich example.
+    semantic_authoring_projection = semantic_authoring_module.bootstrap_projection(
+        profile=profile
+    )
     payload: dict = {
         "contract_version": "2026-07-19.1",
         "profile": profile,
@@ -267,6 +278,7 @@ def op_bootstrap(
             "compute_policy": compute_policy,
         },
         "active_capabilities": active_descriptor.as_metadata(),
+        "semantic_authoring": semantic_authoring_projection,
         "memory_model": {
             "built_in_ai_memory": (
                 "Use as short-term or behavioural memory for user preferences, working "
@@ -377,13 +389,28 @@ def op_bootstrap(
                 "production-log": "Creative artifact record with Frame, Artifact, Outcomes, Reflection, and typed Relations.",
             },
             "semantic_units": {
-                "compact_syntax": "- [category] content #tags (context) ^anchor",
-                "compact_kind": "observation",
-                "category_rule": "category is open vocabulary; kind is governed independently",
-                "rich_form": "select an explicit governed non-observation kind",
-                "rich_relation_rule": "typed unit relations require rich form; compact units use a canonical note-level relation instead",
-                "mutation_rule": "use observe_memory add/update/remove/validate instead of whole-page string surgery for one unit",
-                "drift_guards": "update/remove require the current parent content hash and unit fingerprint",
+                "contract": semantic_authoring_projection,
+                "compact_syntax": semantic_authoring_module.AUTHORING_CONTRACT.compact[
+                    "syntax"
+                ],
+                "compact_kind": semantic_authoring_module.AUTHORING_CONTRACT.compact[
+                    "kind"
+                ],
+                "category_rule": semantic_authoring_module.AUTHORING_CONTRACT.semantic_roles[
+                    "category"
+                ],
+                "rich_form": semantic_authoring_module.AUTHORING_CONTRACT.rich[
+                    "heading_syntax"
+                ],
+                "rich_relation_rule": semantic_authoring_module.AUTHORING_CONTRACT.rich[
+                    "relation_rule"
+                ],
+                "mutation_rule": semantic_authoring_module.AUTHORING_CONTRACT.routes[
+                    "single_semantic_unit"
+                ],
+                "drift_guards": (
+                    "update/remove require the current parent content hash and unit fingerprint"
+                ),
             },
             "reviewed_creation": {
                 "validate_only": (
@@ -2092,41 +2119,105 @@ def op_replace(
         (old page is already marked superseded).
     """
     old_path = _resolve_memory_identifier(vault_root, old_path)
+    replace_kwargs = {
+        "old_path": old_path,
+        "reason": reason,
+        "content": content,
+        "note_type": note_type,
+        "title": title,
+        "slug": slug,
+        "project": project,
+        "projects": projects,
+        "sources": sources,
+        "tags": tags,
+        "status": status,
+        "severity": severity,
+        "pattern_type": pattern_type,
+        "domain": domain,
+        "started": started,
+        "duration": duration,
+        "hypothesis": hypothesis,
+        "n": n,
+        "concluded": concluded,
+        "medium": medium,
+        "recorded": recorded,
+        "published": published,
+        "host": host,
+        "editor": editor,
+        "project_category": project_category,
+        "draft_id": draft_id,
+        "draft_token": draft_token,
+        "relation_disposition": relation_disposition,
+        "relation_review_reason": relation_review_reason,
+    }
     try:
+        predecessor_hash = _replacement_predecessor_hash(vault_root, old_path)
+        if validate_only:
+            result = replace_module.replace(
+                vault_root,
+                **replace_kwargs,
+                validate_only=True,
+                draft_hash=None,
+                relation_review_hash=None,
+            )
+            if _replacement_predecessor_hash(vault_root, old_path) != predecessor_hash:
+                raise ValueError(
+                    "REPLACEMENT_PREVIEW_UNSTABLE: predecessor changed during advisory preview"
+                )
+            value = result.as_dict()
+            base_hash = str(value["draft_hash"])
+            value.update(
+                validate_only=True,
+                advisory=True,
+                committed=False,
+                status="preview",
+                predecessor={"path": old_path, "content_hash": predecessor_hash},
+                draft_hash=_replacement_review_hash(
+                    base_hash,
+                    predecessor_path=old_path,
+                    predecessor_hash=predecessor_hash,
+                ),
+            )
+            return value
+
+        effective_draft_hash = draft_hash
+        effective_relation_review_hash = relation_review_hash
+        if draft_hash is not None:
+            fresh = replace_module.replace(
+                vault_root,
+                **replace_kwargs,
+                validate_only=True,
+                draft_hash=None,
+                relation_review_hash=None,
+            )
+            if _replacement_predecessor_hash(vault_root, old_path) != predecessor_hash:
+                raise ValueError(
+                    "DRAFT_HASH_MISMATCH: predecessor changed during fresh replacement validation"
+                )
+            base_hash = fresh.draft_hash
+            expected_hash = _replacement_review_hash(
+                str(base_hash),
+                predecessor_path=old_path,
+                predecessor_hash=predecessor_hash,
+            )
+            if draft_hash != expected_hash:
+                raise ValueError(
+                    "DRAFT_HASH_MISMATCH: replacement predecessor or draft requires fresh validation"
+                )
+            effective_draft_hash = base_hash
+            if relation_review_hash is not None:
+                if relation_review_hash != draft_hash:
+                    raise ValueError(
+                        "DRAFT_HASH_MISMATCH: relation review does not match replacement preview"
+                    )
+                effective_relation_review_hash = base_hash
+
         result = replace_module.replace(
             vault_root,
-            old_path=old_path,
-            reason=reason,
-            content=content,
-            note_type=note_type,
-            title=title,
-            slug=slug,
-            project=project,
-            projects=projects,
-            sources=sources,
-            tags=tags,
-            status=status,
-            severity=severity,
-            pattern_type=pattern_type,
-            domain=domain,
-            started=started,
-            duration=duration,
-            hypothesis=hypothesis,
-            n=n,
-            concluded=concluded,
-            medium=medium,
-            recorded=recorded,
-            published=published,
-            host=host,
-            editor=editor,
-            project_category=project_category,
-            validate_only=validate_only,
-            draft_id=draft_id,
-            draft_hash=draft_hash,
-            draft_token=draft_token,
-            relation_disposition=relation_disposition,
-            relation_review_hash=relation_review_hash,
-            relation_review_reason=relation_review_reason,
+            **replace_kwargs,
+            validate_only=False,
+            draft_hash=effective_draft_hash,
+            relation_review_hash=effective_relation_review_hash,
         )
     except replace_module.ReplaceError as e:
         raise ValueError(
@@ -2142,6 +2233,32 @@ def op_replace(
             tool="replace", written_path=written_path, cited_sources=sources
         )
     return result.as_dict()
+
+
+def _replacement_predecessor_hash(vault_root: Path, old_path: str) -> str:
+    try:
+        return hashlib.sha256((Path(vault_root) / old_path).read_bytes()).hexdigest()
+    except OSError as error:
+        raise ValueError(f"OLD_NOT_FOUND: replacement predecessor is unavailable: {old_path}") from error
+
+
+def _replacement_review_hash(
+    draft_hash: str,
+    *,
+    predecessor_path: str,
+    predecessor_hash: str,
+) -> str:
+    payload = json.dumps(
+        {
+            "schema": "exomem.replacement-preview.v1",
+            "draft_hash": draft_hash,
+            "predecessor_path": predecessor_path,
+            "predecessor_content_hash": predecessor_hash,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def op_link(
@@ -2941,6 +3058,11 @@ def op_append_to_file(
     path: str,
     content: str,
     allow_curated: bool = False,
+    validate_only: bool = False,
+    semantic_transition_token: str | None = None,
+    relation_disposition: str | None = None,
+    relation_review_hash: str | None = None,
+    relation_review_reason: str | None = None,
 ) -> dict:
     """Tier 2: append text to an existing file.
 
@@ -2953,6 +3075,11 @@ def op_append_to_file(
         path: Vault-relative.
         content: Text to append (text only; binaries go via /upload).
         allow_curated: Required under curated trees.
+        validate_only: Validate the complete Markdown result without writing.
+        semantic_transition_token: Opaque transition token returned by validate_only.
+        relation_disposition: Reviewed relation outcome for a semantic append.
+        relation_review_hash: Transition hash covered by the relation review.
+        relation_review_reason: Audit reason for a reviewed-none disposition.
 
     Returns: {path, bytes_appended, warnings}.
     Errors: INVALID_APPEND; INVALID_PATH; NOT_FOUND; NOT_A_FILE;
@@ -2964,6 +3091,11 @@ def op_append_to_file(
             path=path,
             content=content,
             allow_curated=allow_curated,
+            validate_only=validate_only,
+            semantic_transition_token=semantic_transition_token,
+            relation_disposition=relation_disposition,
+            relation_review_hash=relation_review_hash,
+            relation_review_reason=relation_review_reason,
         )
     except append_to_file_module.AppendError as e:
         raise ValueError(f"{e.code}: {e.reason}") from e
@@ -3521,7 +3653,7 @@ def op_observe_memory(
         semantic-contract feedback, and derived-index outcome.
     """
     raw_path = str(path or "").strip()
-    if Path(raw_path).is_absolute() or (
+    if raw_path.startswith(("/", "\\")) or Path(raw_path).is_absolute() or (
         len(raw_path) >= 3
         and raw_path[0].isalpha()
         and raw_path[1] == ":"
@@ -3834,6 +3966,7 @@ def op_process_media(
     """
     from . import index_sync, media_jobs
     from .cli_ops import OpError
+    from .writer_lease import active_manager, active_mutation_request_id
 
     if operation not in {"process", "status", "retry"}:
         raise OpError(
@@ -3842,6 +3975,15 @@ def op_process_media(
         )
 
     vault_root = Path(vault_root).resolve()
+    manager = active_manager()
+
+    def _commit_guard():
+        return manager.mutation_guard(
+            vault_root,
+            request_id=active_mutation_request_id(),
+            operation=f"process_media_{operation}_commit",
+            holder_kind="command",
+        )
 
     def _drain_index_refresh(paths: list[Path] | list[str] | None = None) -> tuple[int, int]:
         current = index_sync.deferred_work_status(vault_root)["full_upserts"]
@@ -3870,6 +4012,8 @@ def op_process_media(
             requeued = media_processing.retry_all_media(
                 vault_root,
                 limit=media_jobs.STATUS_JOB_LIMIT,
+                commit_guard=_commit_guard,
+                propagate_transient_errors=True,
             )
             refreshed, remaining = _drain_index_refresh()
             return {
@@ -3884,6 +4028,13 @@ def op_process_media(
             reconciled = media_processing.reconcile_all_media(
                 vault_root,
                 limit=media_processing.DEFAULT_RECONCILE_LIMIT,
+                reconcile_one=lambda binary: media_processing.reconcile_media(
+                    vault_root,
+                    binary,
+                    explicit=False,
+                    commit_guard=_commit_guard,
+                ),
+                propagate_transient_errors=True,
             )
             refreshed, remaining = _drain_index_refresh()
             return {
@@ -3913,9 +4064,18 @@ def op_process_media(
 
     try:
         if operation == "process":
-            result = media_processing.reconcile_media(vault_root, binary, explicit=True)
+            result = media_processing.reconcile_media(
+                vault_root,
+                binary,
+                explicit=True,
+                commit_guard=_commit_guard,
+            )
         else:
-            result = media_processing.retry_media(vault_root, binary)
+            result = media_processing.retry_media(
+                vault_root,
+                binary,
+                commit_guard=_commit_guard,
+            )
     except media_processing.MediaProcessingError as exc:
         raise OpError(exc.code, exc.reason) from exc
 
@@ -4976,6 +5136,7 @@ def op_manage_memory_file(
     draft_id: str | None = None,
     draft_hash: str | None = None,
     draft_token: str | None = None,
+    semantic_transition_token: str | None = None,
     relation_disposition: str | None = None,
     relation_review_hash: str | None = None,
     relation_review_reason: str | None = None,
@@ -5007,28 +5168,49 @@ def op_manage_memory_file(
         trash_path: Trash entry to recover.
         restore_path: Optional recovery destination.
         date: YYYY-MM-DD filter for trash-list.
-        validate_only: Validate a Markdown create-file operation without writing.
+        validate_only: Validate a Markdown create or append operation without writing.
         draft_id: Draft identity returned by validate_only.
         draft_hash: Exact reviewed draft hash returned by validate_only.
         draft_token: Opaque destination/date token returned by validate_only.
-        relation_disposition: Reviewed relation outcome for semantic file creation.
-        relation_review_hash: Draft hash covered by the relation review.
+        semantic_transition_token: Opaque append transition token from validate_only.
+        relation_disposition: Reviewed relation outcome for semantic create or append.
+        relation_review_hash: Draft or transition hash covered by the relation review.
         relation_review_reason: Audit reason for a reviewed-none disposition.
     """
-    review_requested = validate_only or any(
+    creation_review_requested = any(
         value is not None
         for value in (
             draft_id,
             draft_hash,
             draft_token,
+        )
+    )
+    append_review_requested = semantic_transition_token is not None
+    shared_review_requested = validate_only or any(
+        value is not None
+        for value in (
             relation_disposition,
             relation_review_hash,
             relation_review_reason,
         )
     )
-    if operation != "create" and review_requested:
+    if operation not in {"create", "append"} and (
+        creation_review_requested
+        or append_review_requested
+        or shared_review_requested
+    ):
+        raise ValueError(
+            "INVALID_FILE_OPERATION: validation and review fields require "
+            "operation='create' or operation='append'"
+        )
+    if operation != "create" and creation_review_requested:
         raise ValueError(
             "INVALID_FILE_OPERATION: creation review fields require operation='create'"
+        )
+    if operation != "append" and append_review_requested:
+        raise ValueError(
+            "INVALID_FILE_OPERATION: semantic_transition_token requires "
+            "operation='append'"
         )
     if operation == "list":
         return op_list_directory(vault_root, path=path, recursive=recursive, include_hidden=include_hidden)
@@ -5051,7 +5233,17 @@ def op_manage_memory_file(
             relation_review_reason=relation_review_reason,
         )
     if operation == "append":
-        return op_append_to_file(vault_root, path=path, content=content, allow_curated=allow_curated)
+        return op_append_to_file(
+            vault_root,
+            path=path,
+            content=content,
+            allow_curated=allow_curated,
+            validate_only=validate_only,
+            semantic_transition_token=semantic_transition_token,
+            relation_disposition=relation_disposition,
+            relation_review_hash=relation_review_hash,
+            relation_review_reason=relation_review_reason,
+        )
     if operation == "move":
         if not old_path or not new_path:
             raise ValueError("INVALID_MOVE: move requires `old_path` and `new_path`")
@@ -5146,7 +5338,7 @@ def remember_description(project_keys_hint: str) -> str:
     return (op_remember.__doc__ or "").replace("__PROJECT_KEYS_HINT__", project_keys_hint)
 
 
-def op_coordination_status(vault_root: Path) -> dict:  # noqa: ARG001
+def op_coordination_status(vault_root: Path) -> dict:
     """Report this replica's writer-lease role and coordinator health.
 
     Read-only and safe during coordinator outages. Credentials and vault content
@@ -5154,7 +5346,7 @@ def op_coordination_status(vault_root: Path) -> dict:  # noqa: ARG001
     """
     from .writer_lease import coordination_status
 
-    return coordination_status()
+    return coordination_status(vault_root)
 
 def note_description(project_keys_hint: str) -> str:
     """The `note` MCP description with the live project-key hint substituted in.
@@ -5248,13 +5440,19 @@ def invocation_is_read_only(command: Command, kwargs: dict[str, Any]) -> bool:
                 and operation.get("validate_only") is True
             )
         return False
-    if command.name == "remember":
+    if command.name in {"remember", "replace_memory"}:
         # A validate-only remember builds and returns an immutable draft and
         # writes nothing (note() returns its preflight before any commit), so
         # it needs neither writer authority nor the mutation boundary. Any
         # inconsistency from reading beside a concurrent write is caught by
         # the fresh under-lock re-validation at commit time.
         return kwargs.get("validate_only") is True
+    if command.name == "manage_memory_file":
+        operation = _resolved_invocation_selector(command, kwargs, "operation")
+        return (
+            operation in {"create", "append"}
+            and kwargs.get("validate_only") is True
+        )
     return False
 
 
@@ -5786,6 +5984,36 @@ def _build_product_commands() -> tuple[Command, ...]:
                 )
                 for p in params
             )
+        if name in {
+            "remember",
+            "replace_memory",
+            "observe_memory",
+            "edit_memory",
+            "manage_memory_file",
+        }:
+            desc = semantic_authoring_module.project_tool_description(name, desc)
+            params = tuple(
+                Param(
+                    name=param.name,
+                    type=param.type,
+                    required=param.required,
+                    help=(
+                        " ".join(
+                            part
+                            for part in (
+                                param.help.strip(),
+                                semantic_authoring_module.render_parameter_guidance(
+                                    name, param.name
+                                ),
+                            )
+                            if part
+                        )
+                    ),
+                    cli_positional=param.cli_positional,
+                    choices=param.choices,
+                )
+                for param in params
+            )
         cmds.append(
             Command(
                 name=name,
@@ -5811,6 +6039,50 @@ PRODUCT_PUBLIC_NAMES: tuple[str, ...] = tuple(c.name for c in PRODUCT_COMMANDS)
 PRODUCT_ROUTE_HELPERS: frozenset[str] = frozenset({"transfer_token"})
 HAND_REGISTERED_EXCEPTIONS: frozenset[str] = frozenset()
 
+HOSTED_ALPHA_AGENT_PROFILE = "hosted-alpha-agent-v1"
+
+
+@dataclass(frozen=True, slots=True)
+class ProductSurfaceProfile:
+    """One immutable, ordered exposure policy over canonical product commands."""
+
+    name: str
+    command_names: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        names = tuple(self.command_names)
+        if not self.name:
+            raise ValueError("product surface profile name must be non-empty")
+        if not names or any(not isinstance(name, str) or not name for name in names):
+            raise ValueError("product surface profile commands must be non-empty strings")
+        if len(names) != len(set(names)):
+            raise ValueError("product surface profile contains duplicate commands")
+        object.__setattr__(self, "command_names", names)
+
+
+PRODUCT_SURFACE_PROFILES = MappingProxyType(
+    {
+        HOSTED_ALPHA_AGENT_PROFILE: ProductSurfaceProfile(
+            name=HOSTED_ALPHA_AGENT_PROFILE,
+            command_names=(
+                "bootstrap",
+                "ask_memory",
+                "read_memory",
+                "browse_memory",
+                "remember",
+                "observe_memory",
+                "capture_source",
+                "compile_source",
+                "preserve_evidence",
+                "review_memory",
+                "review_item_context",
+                "triage_memory",
+                "connect_memory",
+            ),
+        )
+    }
+)
+
 
 def commands_for(surface: str, *, expose_tier2: bool = True) -> tuple[Command, ...]:
     """Canonical implementation commands exposed by the old primitive registry."""
@@ -5826,6 +6098,32 @@ def product_commands_for(surface: str, *, expose_tier2: bool = True) -> tuple[Co
         for c in PRODUCT_COMMANDS
         if surface in c.surfaces and (expose_tier2 or c.tier == 1)
     )
+
+
+def product_commands_for_profile(
+    profile: str,
+    surface: str,
+) -> tuple[Command, ...]:
+    """Resolve a pinned surface profile to its canonical command objects."""
+
+    definition = PRODUCT_SURFACE_PROFILES.get(profile)
+    if definition is None:
+        raise ValueError(f"unsupported product surface profile: {profile!r}")
+
+    canonical = {command.name: command for command in PRODUCT_COMMANDS}
+    selected: list[Command] = []
+    for name in definition.command_names:
+        command = canonical.get(name)
+        if command is None:
+            raise RuntimeError(
+                f"product surface profile {profile!r} references missing command {name!r}"
+            )
+        if command.tier != 1 or surface not in command.surfaces:
+            raise RuntimeError(
+                f"product surface profile {profile!r} cannot expose {name!r} on {surface!r}"
+            )
+        selected.append(command)
+    return tuple(selected)
 
 
 def validate_product_registry() -> dict:

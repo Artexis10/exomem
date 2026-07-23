@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -12,6 +13,8 @@ ROOT = Path(__file__).resolve().parents[1]
 FOUNDATION = ROOT / "infra/terraform/foundation"
 DURABILITY = ROOT / "infra/terraform/durability"
 BOOTSTRAP = ROOT / "infra/terraform/bootstrap"
+HCP_BOOTSTRAP = ROOT / "infra/terraform/hcp-bootstrap"
+HOSTED_CHANGE = ROOT / "openspec/changes/add-hosted-private-alpha-infrastructure"
 TERRAFORM = Path(os.environ["TERRAFORM_BIN"]) if "TERRAFORM_BIN" in os.environ else None
 
 
@@ -29,10 +32,20 @@ def test_foundation_and_durability_are_disjoint_lifecycle_domains() -> None:
     assert "hcloud_" not in durability
     assert "cloudflare_" not in durability
 
-    assert re.search(r'key\s*=\s*"foundation/terraform\.tfstate"', foundation)
-    assert re.search(r'key\s*=\s*"durability/terraform\.tfstate"', durability)
-    assert re.search(r"use_lockfile\s*=\s*true", foundation)
-    assert re.search(r"use_lockfile\s*=\s*true", durability)
+    assert re.search(
+        r'cloud\s*{.*workspaces\s*{\s*name\s*=\s*"exomem-hosted-foundation"',
+        foundation,
+        re.S,
+    )
+    assert re.search(
+        r'cloud\s*{.*workspaces\s*{\s*name\s*=\s*"exomem-hosted-durability"',
+        durability,
+        re.S,
+    )
+    assert 'backend "s3"' not in foundation
+    assert 'backend "s3"' not in durability
+    assert "use_lockfile" not in foundation
+    assert "use_lockfile" not in durability
     assert 'backend "s3"' not in _all_tf(BOOTSTRAP)
 
 
@@ -178,55 +191,63 @@ def test_durability_bucket_outputs_have_one_exact_platform_configmap_contract() 
         assert "sensitive" not in block
 
 
-def test_bootstrap_versions_remote_state_and_splits_backend_identities() -> None:
+def test_existing_b2_bootstrap_stays_quarantined_until_separate_cleanup() -> None:
     bootstrap = _all_tf(BOOTSTRAP)
 
     assert 'resource "b2_bucket" "terraform_state"' in bootstrap
-    assert 'bucket_type = "allPrivate"' in bootstrap
-    assert 'mode      = "SSE-B2"' in bootstrap
-    assert 'algorithm = "AES256"' in bootstrap
-    assert "days_from_hiding_to_deleting = 30" in bootstrap
-    assert "days_from_uploading_to_hiding" not in bootstrap
-    assert "prevent_destroy = true" in bootstrap
-
     assert bootstrap.count('resource "b2_application_key"') == 2
-    assert 'key_name     = "exomem-terraform-foundation"' in bootstrap
-    assert 'name_prefix  = "foundation/"' in bootstrap
-    assert 'key_name     = "exomem-terraform-durability"' in bootstrap
-    assert 'name_prefix  = "durability/"' in bootstrap
-    assert (
-        bootstrap.count(
-            'capabilities = ["deleteFiles", "listBuckets", "listFiles", "readFiles", "writeFiles"]'
-        )
-        == 1
-    )
-    assert bootstrap.count("capabilities = local.state_capabilities") == 2
+    assert "prevent_destroy = true" in bootstrap
+    assert 'resource "tfe_workspace"' not in bootstrap
 
-    outputs = (BOOTSTRAP / "outputs.tf").read_text(encoding="utf-8")
-    for secret_output in (
-        "foundation_backend_application_key",
-        "durability_backend_application_key",
+
+def test_hcp_bootstrap_manages_exact_state_only_workspaces() -> None:
+    bootstrap = _all_tf(HCP_BOOTSTRAP)
+
+    assert 'source  = "hashicorp/tfe"' in bootstrap
+    assert 'version = "= 0.78.0"' in bootstrap
+    assert 'resource "tfe_project" "hosted"' in bootstrap
+    assert bootstrap.count('resource "tfe_workspace"') == 3
+    assert '"foundation"' in bootstrap
+    assert '"durability"' in bootstrap
+    assert '"backend_proof"' in bootstrap
+    assert bootstrap.count('resource "tfe_workspace_settings"') == 3
+    assert len(re.findall(r'execution_mode\s*=\s*"local"', bootstrap)) == 3
+    assert len(re.findall(r"global_remote_state\s*=\s*false", bootstrap)) == 3
+    assert len(re.findall(r"project_remote_state\s*=\s*false", bootstrap)) == 3
+    assert len(re.findall(r"auto_apply\s*=\s*false", bootstrap)) == 3
+    assert len(re.findall(r"assessments_enabled\s*=\s*false", bootstrap)) == 3
+    assert "var.terraform_version" in bootstrap
+    assert 'resource "b2_bucket" "terraform_state"' not in bootstrap
+    assert 'resource "b2_application_key"' not in bootstrap
+
+    outputs = (HCP_BOOTSTRAP / "outputs.tf").read_text(encoding="utf-8")
+    for output_name in (
+        "hcp_project_id",
+        "foundation_workspace_id",
+        "durability_workspace_id",
+        "backend_proof_workspace_id",
     ):
-        block = outputs.split(f'output "{secret_output}"', 1)[1].split("}", 1)[0]
-        assert re.search(r"sensitive\s*=\s*true", block)
+        assert f'output "{output_name}"' in outputs
+    assert "application_key" not in outputs
 
 
-def test_plan_wrapper_requires_private_backend_config() -> None:
-    gitignore = (ROOT / ".gitignore").read_text(encoding="utf-8")
-
+def test_plan_wrapper_binds_exact_hcp_workspace_and_environment_only_token() -> None:
     for script_name in ("plan.sh", "apply_saved_plan.sh"):
         script = (ROOT / f"infra/scripts/{script_name}").read_text(encoding="utf-8")
-        assert 'backend_config="${TF_BACKEND_CONFIG_FILE:-}"' in script
-        assert 'stat -c "%a"' in script
-        assert "backend config must have mode 0600" in script
-        assert '-backend-config="${backend_config}"' in script
-        assert "AWS_ACCESS_KEY_ID" in script
-        assert "AWS_SECRET_ACCESS_KEY" in script
-    assert "*.tfbackend" in gitignore
+        assert "TF_CLOUD_ORGANIZATION" in script
+        assert "TF_TOKEN_app_terraform_io" in script
+        assert 'workspace="exomem-hosted-${root_name}"' in script
+        assert "unset TF_WORKSPACE" in script
+        assert "verify_hcp_backend.py" in script
+        assert script.index("verify_hcp_backend.py") < script.index(' init -input=false')
+        assert "TF_BACKEND_CONFIG_FILE" not in script
+        assert "AWS_ACCESS_KEY_ID" not in script
+        assert "AWS_SECRET_ACCESS_KEY" not in script
+        assert "-backend-config" not in script
 
 
 def test_backend_bootstrap_seals_local_state_and_uses_saved_plans() -> None:
-    script = (ROOT / "infra/scripts/bootstrap_backend.sh").read_text(encoding="utf-8")
+    script = (ROOT / "infra/scripts/bootstrap_hcp_backend.sh").read_text(encoding="utf-8")
 
     assert 'case "${action}" in' in script
     assert "plan|apply" in script
@@ -237,13 +258,102 @@ def test_backend_bootstrap_seals_local_state_and_uses_saved_plans() -> None:
     assert '"${sops_bin}" encrypt' in script
     assert '"${sops_bin}" decrypt "${encrypted_tmp}" >/dev/null' in script
     assert 'mv -f -- "${encrypted_tmp}" "${escrow_path}"' in script
+    assert "TFE_TOKEN" in script
+    assert "TF_CLOUD_ORGANIZATION" in script
+
+
+def test_hcp_bootstrap_refuses_to_overwrite_retained_state_with_old_escrow(
+    tmp_path: Path,
+) -> None:
+    infra = tmp_path / "infra"
+    scripts = infra / "scripts"
+    root = infra / "terraform/hcp-bootstrap"
+    scripts.mkdir(parents=True)
+    root.mkdir(parents=True)
+    script = scripts / "bootstrap_hcp_backend.sh"
+    shutil.copy2(ROOT / "infra/scripts/bootstrap_hcp_backend.sh", script)
+
+    state = root / "terraform.tfstate"
+    state.write_text("newer interrupted state", encoding="utf-8")
+    escrow = tmp_path / "old-state.sops.json"
+    escrow.write_text("old encrypted state", encoding="utf-8")
+    escrow.chmod(0o600)
+    plan = tmp_path / "bootstrap.tfplan"
+    fake_sops_marker = tmp_path / "sops-was-called"
+    fake_sops = tmp_path / "sops"
+    fake_sops.write_text(
+        f"#!/usr/bin/env bash\n: > {fake_sops_marker}\nexit 99\n",
+        encoding="utf-8",
+    )
+    fake_sops.chmod(0o700)
+
+    result = subprocess.run(
+        [str(script), "plan", str(plan), str(escrow)],
+        env={
+            **os.environ,
+            "TF_CLOUD_ORGANIZATION": "example",
+            "TFE_TOKEN": "not-a-real-token",
+            "SOPS_BIN": str(fake_sops),
+        },
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 2
+    assert "seal it before continuing" in result.stderr
+    assert state.read_text(encoding="utf-8") == "newer interrupted state"
+    assert not fake_sops_marker.exists()
+
+
+def test_hcp_backend_proof_exercises_real_lock_and_state_version_rollback() -> None:
+    script = (ROOT / "infra/scripts/verify_hcp_backend.py").read_text(encoding="utf-8")
+
+    assert '"exomem-hosted-backend-proof"' in script
+    assert '"execution-mode"' in script
+    assert '"local"' in script
+    assert "-lock-timeout=0s" in script
+    assert '"rollback-state-version"' in script
+    assert "/actions/lock" in script
+    assert "/actions/unlock" in script
+    assert '"-refresh-only"' in script
+    assert '"-lock=false"' in script
+    assert "start_new_session=True" in script
+    assert "_stop_process_group(first)" in script
+    assert script.index('"-refresh-only"') < script.index(
+        "_unlock_with_retry(client, workspace.workspace_id)"
+    )
+    assert "terraform state pull" not in script
+
+
+def test_openspec_records_hcp_state_only_and_quarantines_legacy_b2_state() -> None:
+    design = (HOSTED_CHANGE / "design.md").read_text(encoding="utf-8")
+    foundation_spec = (
+        HOSTED_CHANGE / "specs/hosted-infrastructure-foundation/spec.md"
+    ).read_text(encoding="utf-8")
+
+    for document in (design, foundation_spec):
+        assert "HCP Terraform" in document
+        assert "state-only" in document
+        assert "exomem-hosted-foundation" in document
+        assert "exomem-hosted-durability" in document
+    assert "already-applied B2 bootstrap" in design
+    assert "B2 S3 lockfile compatibility is not yet proven" not in design
+    assert "one process holds the disposable proof workspace state lock" in foundation_spec
+
+
+def test_hcp_provider_lock_covers_amd64_and_arm64() -> None:
+    lock = (HCP_BOOTSTRAP / ".terraform.lock.hcl").read_text(encoding="utf-8")
+
+    assert "h1:G1hH2nmuFT7rXMxBhz+s32Xv0BSUNblRqr30FXQIpQc=" in lock
+    assert "h1:qAb6Iv9bMxtRev5gv3EPgyybQvNQcx1pVNc6fIFDmSE=" in lock
 
 
 def test_terraform_roots_format_and_validate_offline() -> None:
     if TERRAFORM is None:
         pytest.skip("set TERRAFORM_BIN to run the pinned-provider validation")
     assert TERRAFORM.is_file(), "TERRAFORM_BIN must name the pinned Terraform binary"
-    for root in (FOUNDATION, DURABILITY, BOOTSTRAP):
+    for root in (FOUNDATION, DURABILITY, BOOTSTRAP, HCP_BOOTSTRAP):
         formatted = subprocess.run(
             [str(TERRAFORM), "fmt", "-check", "-recursive"],
             cwd=root,

@@ -284,3 +284,104 @@ function Get-ExomemRepoVersion {
     }
     return $null
 }
+
+function Test-ExomemUvToolInstall {
+    if (-not (Get-Command uv -ErrorAction SilentlyContinue)) { return $false }
+    $listing = & uv tool list 2>$null
+    if ($LASTEXITCODE -ne 0) { return $false }
+    return [bool]($listing | Where-Object { $_ -match '^exomem(?:\s|$)' } | Select-Object -First 1)
+}
+
+function Sync-ExomemUvCli {
+    <# Align only the lean uv-tool command; the service keeps its selected extras. #>
+    param(
+        [ValidateSet("auto", "always", "never")]
+        [string]$Mode,
+        [string]$ServiceVersion
+    )
+
+    if ($Mode -eq "never") {
+        Write-Host "CLI sync disabled (-CliSync never)."
+        return $false
+    }
+    if ($Mode -eq "auto" -and -not (Test-ExomemUvToolInstall)) {
+        Write-Host "No existing uv-managed Exomem CLI; auto mode will not install one."
+        return $false
+    }
+    if (-not (Get-Command uv -ErrorAction SilentlyContinue)) {
+        throw "uv is required for CLI sync. Install uv or pass -CliSync never."
+    }
+    if (-not $ServiceVersion) {
+        throw "Cannot sync the CLI without a verified live service version."
+    }
+    Write-Host "Aligning lean uv-tool CLI to exomem==$ServiceVersion..."
+    $code = Invoke-LoggedNative @("uv", "tool", "install", "--force", "exomem==$ServiceVersion")
+    if ($code -ne 0) { throw "uv tool CLI sync failed for exomem==$ServiceVersion" }
+    return $true
+}
+
+function Get-ExomemManagedManifestPath {
+    if ($env:EXOMEM_MANAGED_INSTALL_MANIFEST) {
+        return $env:EXOMEM_MANAGED_INSTALL_MANIFEST
+    }
+    $root = if ($env:LOCALAPPDATA) {
+        Join-Path $env:LOCALAPPDATA "Exomem"
+    } else {
+        Join-Path ([Environment]::GetFolderPath("LocalApplicationData")) "Exomem"
+    }
+    return Join-Path $root "managed-install.json"
+}
+
+function Write-ExomemManagedManifest {
+    param(
+        [string]$ServiceVersion,
+        [string]$ServiceProfile,
+        [string]$ServiceTarget
+    )
+
+    $path = Get-ExomemManagedManifestPath
+    $parent = Split-Path -Parent $path
+    if (-not (Test-Path $parent)) { New-Item -ItemType Directory -Path $parent -Force | Out-Null }
+    $payload = [ordered]@{
+        schema_version = 1
+        service_version = $ServiceVersion
+        service_profile = $ServiceProfile
+        service_target = $ServiceTarget
+        cli_profile = "lean"
+        cli_route = "direct"
+    }
+    $temporary = "$path.$PID.tmp"
+    $payload | ConvertTo-Json | Set-Content -Path $temporary -Encoding utf8
+    Move-Item -LiteralPath $temporary -Destination $path -Force
+    Write-Host "Managed install manifest: $path"
+}
+
+function Assert-ExomemVisibleCliVersions {
+    param(
+        [string]$ExpectedVersion,
+        [bool]$RequireOne = $false
+    )
+
+    $commands = @(
+        Get-Command exomem, kb -All -CommandType Application -ErrorAction SilentlyContinue |
+            Select-Object -ExpandProperty Source -Unique
+    )
+    if ($RequireOne -and $commands.Count -eq 0) {
+        throw "CLI sync completed but neither exomem nor kb is visible on PATH. Run 'uv tool update-shell', open a new shell, and retry."
+    }
+    foreach ($executable in $commands) {
+        $raw = & $executable --version --json 2>$null
+        if ($LASTEXITCODE -ne 0 -or -not $raw) {
+            throw "CLI verification failed: '$executable' does not support --version --json. Repair with: uv tool install --force exomem==$ExpectedVersion"
+        }
+        try {
+            $identity = ($raw -join "`n") | ConvertFrom-Json -ErrorAction Stop
+        } catch {
+            throw "CLI verification failed: '$executable' returned invalid version JSON. Repair with: uv tool install --force exomem==$ExpectedVersion"
+        }
+        if ($identity.version -ne $ExpectedVersion) {
+            throw "CLI/service split: '$executable' reports '$($identity.version)' while the live service reports '$ExpectedVersion'. Repair with: uv tool install --force exomem==$ExpectedVersion"
+        }
+        Write-Host "Verified $executable -> exomem $($identity.version)"
+    }
+}

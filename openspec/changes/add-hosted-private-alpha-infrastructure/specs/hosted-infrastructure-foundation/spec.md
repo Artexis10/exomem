@@ -12,15 +12,21 @@ The hosted infrastructure SHALL use separate Terraform roots and remote state fo
 - **THEN** the plan guard fails before apply and emits the affected resource addresses without sensitive values
 
 ### Requirement: Terraform state is remote, locked, versioned, and recoverable
-Both Terraform roots SHALL use separate keys in a versioned B2 S3-compatible backend with lockfiles. Deployment MUST remain blocked until the real account proves mutual exclusion for concurrent writers and recovery of a prior state version. State credentials, state files, and sensitive backend configuration MUST NOT be committed or printed.
+The Terraform roots SHALL bind fixed HCP Terraform workspaces `exomem-hosted-foundation` and `exomem-hosted-durability`. Each workspace SHALL explicitly use local/state-only execution with Terraform 1.15.8, no VCS attachment, no auto-apply or assessments, and no global/project remote-state sharing. HCP Terraform SHALL store state/history and enforce mutual exclusion while reviewed local or CI wrappers execute plans and saved-plan applies. Those wrappers MUST verify the exact existing workspace contract through the HCP API before `terraform init`; missing or unsafe workspaces SHALL fail closed rather than be implicitly created with remote execution. Deployment MUST remain blocked until the real account proves mutual exclusion for concurrent writers and recovery of a prior state version in the disposable `exomem-hosted-backend-proof` workspace. State credentials and state files MUST NOT be committed or printed.
+
+The HCP project/workspaces SHALL be created from a separately escrowed local-state `hcp-bootstrap` root. The already-applied B2 bootstrap and its tracked bucket/keys SHALL remain quarantined and unchanged until HCP proof and a separately reviewed cleanup plan; HCP migration MUST NOT repurpose that state or plan those resources for destruction.
 
 #### Scenario: Concurrent writer is rejected
-- **WHEN** one process holds the foundation state lock and a second process attempts a mutating operation
+- **WHEN** one process holds the disposable proof workspace state lock and a second process attempts a mutating operation
 - **THEN** the second process fails without writing state or cloud resources
 
 #### Scenario: Prior state version is recovered
 - **WHEN** the latest test state object is deliberately made unusable
-- **THEN** the documented procedure restores a prior version and a refresh-only plan matches the expected resources
+- **THEN** the HCP workspace is operator-locked, the documented API procedure duplicates a selected prior version as current, and the workspace remains blocked until a refresh-only review matches the expected resources
+
+#### Scenario: Missing workspace would default to remote execution
+- **WHEN** a wrapper cannot verify the fixed workspace or its explicit local execution override before initialization
+- **THEN** it exits without running `terraform init`, planning, applying, writing state, or creating cloud resources
 
 ### Requirement: Host bootstrap is pinned, hardened, and idempotent
 Ansible SHALL configure a declared Linux image with security updates, unattended upgrades, hardened key-only SSH, host firewall, fail2ban, time sync, log/disk hygiene, `cryptsetup`, and verified installation artifacts. It SHALL install pinned K3s `v1.35.6+k3s1` with embedded etcd, secrets encryption, metadata-safe audit policy, bounded logs/images, and off-host encrypted snapshots. Normal administration SHALL use a restricted credential and SHALL keep cluster-admin as offline break glass.

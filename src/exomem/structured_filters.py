@@ -315,6 +315,256 @@ def resolve_result_level(requested: str, plan: FilterPlan) -> str:
     return requested
 
 
+@dataclass(frozen=True, slots=True)
+class IndexCandidateClause:
+    """One conjunctive candidate constraint over the category/kind axes.
+
+    Each axis is ``None`` when unconstrained or a (possibly empty) frozenset of
+    canonical positive values the index can serve directly.
+    """
+
+    category_seeds: frozenset[str] | None
+    kind_seeds: frozenset[str] | None
+
+
+@dataclass(frozen=True, slots=True)
+class IndexCandidateAlgebra:
+    """Candidate-first classification of a compiled plan.
+
+    ``status`` is ``complete`` when the positive category/kind seeds fully
+    describe the candidate set the index can serve (post-evaluation may still
+    narrow via page / NOT / unsupported predicates), or ``unsupported`` when no
+    positive complete seed exists and recall must fall back to the ordinary
+    keyword path.  A ``complete`` result may carry an empty seed set: two exact
+    positive equals that intersect to nothing prove ``definitely_empty`` without
+    a scope walk.
+    """
+
+    status: Literal["complete", "unsupported"]
+    definitely_empty: bool
+    clauses: tuple[IndexCandidateClause, ...]
+    category_seeds: frozenset[str] | None
+    kind_seeds: frozenset[str] | None
+    post_filter_required: bool
+
+    @property
+    def state(self) -> str:
+        return self.status
+
+    @property
+    def seed_groups(self) -> tuple[tuple[str, frozenset[str]], ...]:
+        groups: list[tuple[str, frozenset[str]]] = []
+        if self.category_seeds is not None:
+            groups.append(("unit.category", self.category_seeds))
+        if self.kind_seeds is not None:
+            groups.append(("unit.kind", self.kind_seeds))
+        return tuple(groups)
+
+
+@dataclass(frozen=True, slots=True)
+class _Seed:
+    """Intermediate per-subtree candidate constraint.
+
+    ``clauses`` is the deduplicated disjunction of conjunctive candidate clauses
+    the subtree can serve.  ``has_seed`` marks whether the subtree contributes at
+    least one positive complete seed; an empty ``clauses`` with ``has_seed`` set
+    records a proven contradiction.  ``post`` marks whether the subtree also
+    carries predicates left for post-evaluation.
+    """
+
+    clauses: tuple[IndexCandidateClause, ...]
+    has_seed: bool
+    post: bool
+
+
+_SEEDLESS = _Seed((), False, True)
+_EMPTY_SUBTREE = _Seed((), False, False)
+
+
+def plan_index_candidates(plan: FilterPlan) -> IndexCandidateAlgebra:
+    """Classify a compiled plan as a complete or unsupported candidate seed set.
+
+    Exact positive ``unit.category`` / ``unit.kind`` ``$eq`` and ``$in`` provide
+    complete seed clauses.  AND takes the Cartesian product of the branch clauses
+    and intersects each shared axis, leaving page / NOT / unsupported predicates
+    for canonical post-evaluation; OR is complete only when every branch carries
+    a complete seed and unions the branch clauses.  A top-level NOT, a page-only
+    expression, and an empty plan are unsupported.
+    """
+    seed = _analyze_index_node(plan.root)
+    if not seed.has_seed:
+        return IndexCandidateAlgebra(
+            status="unsupported",
+            definitely_empty=False,
+            clauses=(),
+            category_seeds=None,
+            kind_seeds=None,
+            post_filter_required=False,
+        )
+    category_seeds, kind_seeds, post_multi = _clause_compatibility(seed.clauses)
+    return IndexCandidateAlgebra(
+        status="complete",
+        definitely_empty=not seed.clauses,
+        clauses=seed.clauses,
+        category_seeds=category_seeds,
+        kind_seeds=kind_seeds,
+        post_filter_required=seed.post or post_multi,
+    )
+
+
+def _analyze_index_node(node: FilterNode | None) -> _Seed:
+    if node is None:
+        return _EMPTY_SUBTREE
+    if isinstance(node, Predicate):
+        return _predicate_seed(node)
+    if isinstance(node, AllOf):
+        clauses: tuple[IndexCandidateClause, ...] | None = None
+        has_seed = False
+        post = False
+        for child in node.children:
+            child_seed = _analyze_index_node(child)
+            if not child_seed.has_seed:
+                # Page / NOT / unsupported children only post-filter.
+                post = True
+                continue
+            has_seed = True
+            post = post or child_seed.post
+            if clauses is None:
+                clauses = child_seed.clauses
+            else:
+                clauses = _merge_clause_sets(clauses, child_seed.clauses)
+        # Keep ``has_seed`` even when contradiction dropped every clause.
+        return _Seed(clauses or (), has_seed, post)
+    if isinstance(node, AnyOf):
+        collected: list[IndexCandidateClause] = []
+        post = False
+        for child in node.children:
+            child_seed = _analyze_index_node(child)
+            if not child_seed.has_seed:
+                # A branch without a complete seed makes the whole OR unsupported.
+                return _SEEDLESS
+            # A seedful empty branch is valid and contributes no clauses.
+            collected.extend(child_seed.clauses)
+            post = post or child_seed.post
+        return _Seed(_dedupe_clauses(collected), True, post)
+    # Top-level or nested NOT contributes no positive seed; post-evaluate it.
+    return _SEEDLESS
+
+
+def _predicate_seed(predicate: Predicate) -> _Seed:
+    field = predicate.field.name
+    if field not in {"unit.category", "unit.kind"}:
+        return _SEEDLESS
+    positive: frozenset[str] | None = None
+    extra = False
+    for operator, operand in predicate.operators:
+        if operator == "$eq" and isinstance(operand, TypedScalar) and operand.kind == "string":
+            assert isinstance(operand.value, str)
+            values: frozenset[str] = frozenset({operand.value})
+        elif operator == "$in" and isinstance(operand, tuple):
+            values = frozenset(
+                item.value
+                for item in operand
+                if isinstance(item, TypedScalar)
+                and item.kind == "string"
+                and isinstance(item.value, str)
+            )
+        else:
+            # $ne / $contains / $exists on the seed field post-evaluate.
+            extra = True
+            continue
+        positive = values if positive is None else (positive & values)
+    if positive is None:
+        return _SEEDLESS
+    if field == "unit.category":
+        clause = IndexCandidateClause(positive, None)
+    else:
+        clause = IndexCandidateClause(None, positive)
+    return _Seed((clause,), True, extra)
+
+
+def _merge_clause_sets(
+    left: tuple[IndexCandidateClause, ...],
+    right: tuple[IndexCandidateClause, ...],
+) -> tuple[IndexCandidateClause, ...]:
+    merged: list[IndexCandidateClause] = []
+    for first in left:
+        for second in right:
+            clause = _merge_clause(first, second)
+            if clause is not None:
+                merged.append(clause)
+    return _dedupe_clauses(merged)
+
+
+def _merge_clause(
+    left: IndexCandidateClause, right: IndexCandidateClause
+) -> IndexCandidateClause | None:
+    category, category_empty = _merge_axis(left.category_seeds, right.category_seeds)
+    kind, kind_empty = _merge_axis(left.kind_seeds, right.kind_seeds)
+    if category_empty or kind_empty:
+        # A dropped clause is a proven per-clause contradiction.
+        return None
+    return IndexCandidateClause(category, kind)
+
+
+def _merge_axis(
+    left: frozenset[str] | None, right: frozenset[str] | None
+) -> tuple[frozenset[str] | None, bool]:
+    if left is None:
+        return right, False
+    if right is None:
+        return left, False
+    intersection = left & right
+    return intersection, not intersection
+
+
+def _dedupe_clauses(
+    clauses: Sequence[IndexCandidateClause],
+) -> tuple[IndexCandidateClause, ...]:
+    unique: dict[_ClauseKey, IndexCandidateClause] = {}
+    for clause in clauses:
+        unique[_clause_sort_key(clause)] = clause
+    return tuple(unique[key] for key in sorted(unique))
+
+
+_AxisKey = tuple[int, tuple[str, ...]]
+_ClauseKey = tuple[_AxisKey, _AxisKey]
+
+
+def _clause_sort_key(clause: IndexCandidateClause) -> _ClauseKey:
+    return (_axis_sort_key(clause.category_seeds), _axis_sort_key(clause.kind_seeds))
+
+
+def _axis_sort_key(axis: frozenset[str] | None) -> _AxisKey:
+    # ``None`` sorts distinctly from an empty (contradiction) constraint.
+    if axis is None:
+        return (0, ())
+    return (1, tuple(sorted(axis)))
+
+
+def _clause_compatibility(
+    clauses: tuple[IndexCandidateClause, ...],
+) -> tuple[frozenset[str] | None, frozenset[str] | None, bool]:
+    if len(clauses) == 1:
+        clause = clauses[0]
+        return clause.category_seeds, clause.kind_seeds, False
+    if not clauses:
+        return None, None, False
+    category = _union_axis([clause.category_seeds for clause in clauses])
+    kind = _union_axis([clause.kind_seeds for clause in clauses])
+    return category, kind, True
+
+
+def _union_axis(axes: Sequence[frozenset[str] | None]) -> frozenset[str] | None:
+    result: frozenset[str] = frozenset()
+    for axis in axes:
+        if axis is None:
+            # An unconstrained clause means the axis cannot be narrowed by union.
+            return None
+        result = result | axis
+    return result
+
+
 def matching_units(
     plan: FilterPlan,
     *,

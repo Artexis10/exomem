@@ -177,23 +177,38 @@ def is_managed_governed_path(vault_root: Path, path: Path | str) -> bool:
     return True
 
 
+def normalized_page_type(value: object) -> str | None:
+    """Normalize one authored page type for shared eligibility decisions."""
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip().casefold()
+    return normalized or None
+
+
 def _eligible_for_types(
     vault_root: Path, page: Any, *, page_types: frozenset[str]
 ) -> bool:
     if not is_managed_governed_path(vault_root, page.path):
         return False
-    if page.page_type not in page_types:
+    normalized_type = normalized_page_type(page.page_type)
+    if normalized_type not in page_types:
         return False
-    if page.path.name in {"index.md", "log.md"}:
+    if page.path.name.casefold() in {"index.md", "log.md"}:
         return False
-    if page.status in _INACTIVE_STATUSES:
+    normalized_status = (
+        page.status.strip().casefold() if isinstance(page.status, str) else None
+    )
+    if normalized_status in _INACTIVE_STATUSES:
         return False
     if access.access_tier(vault_root, page.rel_path) != access.TIER_READ_WRITE:
         return False
     stem = page.path.stem.lower()
     if any(stem.endswith(suffix) for suffix in _SKIP_SLUG_SUFFIXES):
         return False
-    return not bool(_SKIP_TAGS & set(page.tags))
+    normalized_tags = {
+        str(tag).strip().casefold().lstrip("#") for tag in page.tags
+    }
+    return not bool(_SKIP_TAGS & normalized_tags)
 
 
 def _measure_page(

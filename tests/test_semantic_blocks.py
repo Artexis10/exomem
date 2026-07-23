@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from exomem import claims, context_pack, semantic_blocks
 from exomem import find as find_module
 from exomem.find import Hit
@@ -238,6 +240,37 @@ Use the parser.
     assert document.is_valid
     assert [block.type for block in document.blocks] == ["decision"]
     assert document.blocks[0].body == "Use the parser."
+
+
+@pytest.mark.parametrize(
+    ("marker", "info"),
+    (("```", ""), ("```", "python"), ("~~~", ""), ("~~~", " text")),
+)
+def test_empty_fenced_rich_body_is_diagnosed_and_excluded(
+    marker: str,
+    info: str,
+) -> None:
+    markdown = f"## Decision\n\n{marker}{info}\n   \n{marker}\n"
+
+    document = semantic_blocks.parse_semantic_blocks(markdown)
+
+    assert document.blocks == []
+    assert [(error.code, error.line) for error in document.errors] == [
+        ("empty_rich_unit", 1)
+    ]
+
+
+@pytest.mark.parametrize("marker", ("```", "~~~"))
+def test_non_whitespace_fenced_content_makes_rich_body_substantive(
+    marker: str,
+) -> None:
+    markdown = f"## Decision\n\n{marker}text\nreturn true\n{marker}\n"
+
+    document = semantic_blocks.parse_semantic_blocks(markdown)
+
+    assert document.errors == []
+    assert len(document.blocks) == 1
+    assert "return true" in document.blocks[0].body
 
 
 def test_first_block_body_returns_metadata_stripped_body() -> None:

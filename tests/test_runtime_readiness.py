@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+from pathlib import Path
+
+import pytest
+
 from exomem.runtime_readiness import (
     HTTP_TRANSPORT,
     RUNTIME_CONTRACT,
@@ -36,6 +40,7 @@ def test_standalone_runtime_is_ready_without_multi_host_coordination() -> None:
             "coordinator_healthy": True,
             "mutation_boundary": {"state": "free"},
         },
+        "session_store": {"state": "ok", "stale_served_count": 0},
         "takeover_eligible": True,
         "reasons": [],
     }
@@ -118,7 +123,10 @@ def test_readiness_exposes_only_bounded_mutation_holder_metadata() -> None:
                 "holder_kind": "command",
                 "age_seconds": 31.2,
                 "overdue": True,
+                "verified": True,
                 "vault_path": "must-not-leak",
+                "credential": "must-not-leak-either",
+                "tenant_id": "tenant-must-not-leak",
             },
         },
         release="1.2.3",
@@ -132,5 +140,62 @@ def test_readiness_exposes_only_bounded_mutation_holder_metadata() -> None:
         "holder_kind": "command",
         "age_seconds": 31.2,
         "overdue": True,
+        "verified": True,
     }
     assert "must-not-leak" not in repr(snapshot)
+
+
+def test_runtime_readiness_measures_the_configured_vault(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import runtime_readiness as readiness_module
+    from exomem import writer_lease
+
+    vault = tmp_path / "configured-vault"
+    observed: list[Path | None] = []
+
+    def fake_coordination_status(vault_root=None):  # noqa: ANN001
+        observed.append(Path(vault_root) if vault_root is not None else None)
+        return {
+            "enabled": False,
+            "role": "standalone",
+            "replica_id": None,
+            "coordinator_healthy": True,
+            "mutation_boundary": {"state": "free"},
+        }
+
+    monkeypatch.setenv("EXOMEM_VAULT_PATH", str(vault))
+    monkeypatch.setattr(writer_lease, "coordination_status", fake_coordination_status)
+    readiness_module.runtime_readiness(mcp_tool_surface_sha256="f" * 64)
+
+    assert observed == [vault]
+
+
+def test_runtime_readiness_uses_vault_path_identity_for_a_real_held_boundary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import runtime_readiness as readiness_module
+    from exomem import writer_lease
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    manager = writer_lease.LeaseManager(
+        writer_lease.LeaseConfig(state_dir=tmp_path / "state")
+    )
+    monkeypatch.setenv("EXOMEM_VAULT_PATH", str(vault))
+    monkeypatch.setattr(writer_lease, "get_manager", lambda: manager)
+
+    with manager.mutation_guard(
+        vault,
+        request_id="req-readiness-held",
+        operation="remember",
+        holder_kind="command",
+    ):
+        snapshot = readiness_module.runtime_readiness(
+            mcp_tool_surface_sha256="a" * 64
+        )
+
+    boundary = snapshot["coordination"]["mutation_boundary"]
+    assert boundary["state"] == "held"
+    assert boundary["verified"] is True
+    assert boundary["request_id"] == "req-readiness-held"

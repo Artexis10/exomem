@@ -246,6 +246,19 @@ def test_auto_widen_relaxed_gate_partial_token_match(vault: Path) -> None:
     assert any(h.path == rel for h in hits)
 
 
+def test_auto_widen_python_backend_honors_nonrepairing_contract(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The Python rollback rung accepts the sidecar repair policy unchanged."""
+    monkeypatch.setenv("EXOMEM_LEXICAL_BACKEND", "python")
+    monkeypatch.setattr(find_module, "_bounded_lexical_repair_allowed", lambda _key: False)
+    rel = _make_x3_tracker(vault)
+
+    hits = find_module.find(vault, query="X3 rep progression tracking")
+
+    assert any(h.path == rel for h in hits)
+
+
 def test_kb_only_scope_does_not_widen_to_tracker(vault: Path) -> None:
     rel = _make_x3_tracker(vault)
     hits = find_module.find(vault, query="X3", scope="kb-only")

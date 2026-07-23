@@ -11,7 +11,7 @@
 #
 # Usage:
 #   pwsh -File scripts/install-service.ps1 -Release
-#   pwsh -File scripts/install-service.ps1 -NssmPath "C:\nssm\nssm.exe"
+#   pwsh -File scripts/install-service.ps1 -NssmPath "C:\path\to\nssm.exe"
 #   pwsh -File scripts/install-service.ps1 -Release -Profile lean    # lexical-only service
 #   pwsh -File scripts/install-service.ps1 -Release -Profile media
 #

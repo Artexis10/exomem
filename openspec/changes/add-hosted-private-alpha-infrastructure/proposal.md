@@ -4,7 +4,7 @@ Exomem's hosted tenant runtime and Substrate control plane are substantial but c
 
 ## What Changes
 
-- Add split-state Terraform for a dedicated Hetzner/Cloudflare foundation and B2 durability resources, with remote locking, saved-plan enforcement, and destruction guards.
+- Add split-state Terraform for a dedicated Hetzner/Cloudflare foundation and B2 durability resources, with HCP Terraform state-only locking/history, saved-plan enforcement, and destruction guards.
 - Add idempotent Ansible host hardening and a pinned single-node K3s bootstrap designed for declarative recovery.
 - Add pinned platform and cell Helm releases with encrypted Hetzner volumes, fixed private mount contracts, quotas, Pod Security, admission checks, RBAC, and default-deny tenant networking.
 - Add the exact durable `exomem-cell-provisioner.v1` service expected by Substrate, including idempotency, tenant fencing, restart-safe asynchronous work, lifecycle actions, and proof-bearing destruction.
@@ -31,6 +31,6 @@ None. The hosted runtime capabilities are currently carried by Exomem PR #227 an
 
 - New `infra/terraform`, `infra/ansible`, `infra/helm`, `infra/provisioner`, validation, and runbook surfaces in Exomem.
 - Targeted prerequisite changes to Exomem PR #227 and Substrate PR #32.
-- New dependencies on Terraform, Ansible, K3s/Kubernetes, Helm, Hetzner Cloud CSI, Cloudflare Access/Tunnel, B2, SOPS/age, FastAPI, SQLAlchemy/Alembic, and a dedicated Neon role/schema.
+- New dependencies on Terraform, HCP Terraform state-only workspaces, Ansible, K3s/Kubernetes, Helm, Hetzner Cloud CSI, Cloudflare Access/Tunnel, B2, SOPS/age, FastAPI, SQLAlchemy/Alembic, and a dedicated Neon role/schema.
 - New operational credentials and recovery material, all outside the open-source runtime's personal-vault path.
 - No server-side reasoning model, GPU path, or shared canonical-knowledge database is introduced; hosted cells remain the same pure-substrate, single-vault runtime boundary.

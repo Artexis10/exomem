@@ -423,6 +423,7 @@ class _Attempt:
     artifact: RelationReviewRecord | None
     artifact_bytes_hash: str | None
     lifecycle_guard: vault.DirectoryCensusGuard | None
+    language_registry: semantic_language_registry.SemanticLanguageRegistry
 
 
 class _DuplicateJsonKey(ValueError):
@@ -2910,6 +2911,7 @@ def _evaluate(
     contracts: memory_schema.ResolvedMemoryContracts,
     operation: str,
     review: semantic_contract.RelationReviewState | None,
+    language_registry: semantic_language_registry.SemanticLanguageRegistry,
 ) -> semantic_contract.SemanticContractResult:
     return semantic_contract.evaluate(
         before=None,
@@ -2921,6 +2923,7 @@ def _evaluate(
         before_corpus=before,
         after_corpus=after,
         after_review=review,
+        language_registry=language_registry,
     )
 
 
@@ -3036,7 +3039,7 @@ def _attempt(
             reason=artifact.reason,
             reference=artifact.reference,
         )
-    result = _evaluate(candidate, before, after, contracts, operation, review)
+    result = _evaluate(candidate, before, after, contracts, operation, review, language)
     validation = _validation(
         identity,
         destination,
@@ -3126,6 +3129,7 @@ def _attempt(
         artifact,
         artifact_hash,
         lifecycle_guard,
+        language,
     )
 
 
@@ -3408,6 +3412,7 @@ def _commit_plan(
                 attempt.contracts,
                 operation,
                 review_state,
+                attempt.language_registry,
             )
         if result.should_block or result.relation_disposition.kind != "reviewed_none":
             raise RelationReviewError(

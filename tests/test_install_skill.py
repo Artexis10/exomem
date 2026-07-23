@@ -13,6 +13,8 @@ from pathlib import Path
 import pytest
 
 from exomem import install_skill as install_module
+from exomem import semantic_authoring
+from exomem.public_artifact_privacy import assert_public_artifacts_clean
 
 EXPECTED_WORKFLOW_SKILLS = [
     "exomem-continue",
@@ -176,3 +178,26 @@ def test_install_skills_lands_the_full_set_in_both_clients(
         assert (skills / "exomem" / "SKILL.md").is_file()
         for name in EXPECTED_WORKFLOW_SKILLS:
             assert (skills / name / "SKILL.md").is_file(), f"{name} missing for {client}"
+
+
+def test_clean_filesystem_install_is_self_sufficient_without_personal_skills(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "empty-client" / "skills" / "exomem"
+    install_module.install_skill(target)
+    concise = semantic_authoring.render_concise()
+
+    core = (target / "SKILL.md").read_text(encoding="utf-8")
+    assert concise in core
+    assert (target / "references" / "page-types.md").is_file()
+    for name in EXPECTED_WORKFLOW_SKILLS:
+        standalone = target.parent / name / "SKILL.md"
+        assert concise in standalone.read_text(encoding="utf-8")
+    installed_files = [path for path in target.parent.rglob("*") if path.is_file()]
+    assert_public_artifacts_clean(
+        installed_files,
+        labels={
+            path: f"filesystem-install/{path.relative_to(target.parent).as_posix()}"
+            for path in installed_files
+        },
+    )

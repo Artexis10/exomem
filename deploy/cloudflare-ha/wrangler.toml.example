@@ -35,3 +35,7 @@ new_sqlite_classes = ["ExomemState"]
 
 # Add the coordinator bearer token separately; never commit it:
 #   npx wrangler secret put STATE_TOKEN
+
+# WORKER_GIT_SHA is not set here. deploy.ps1 / deploy.sh pass it at deploy time
+# (--var WORKER_GIT_SHA:<short sha>) so GET /__version reports deploy identity.
+# A bare `wrangler deploy` leaves it at the "unlabeled" fallback.

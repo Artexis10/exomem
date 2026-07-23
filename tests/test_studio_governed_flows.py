@@ -117,13 +117,18 @@ def test_compilation_proposal_preserves_source_until_confirmed_remember(
 
     assert proposal["outline_markdown"]
     assert source.read_bytes() == before
+    authored = proposal["outline_markdown"].replace(
+        "## Claim\n\n",
+        "## Claim\n\nRecorded source material supports the compiled conclusion.\n\n",
+        1,
+    )
     created = _post(
         client,
         "remember",
         {
             "title": "Studio confirmed compilation",
             "note_type": "insight",
-            "content": proposal["outline_markdown"],
+            "content": authored,
             "sources": [source_rel],
             "status": "draft",
             "suggestions": False,
@@ -155,7 +160,12 @@ def test_supersession_confirmation_records_successor_reason_and_pointer(
             "old_path": old_rel,
             "title": "Studio successor conclusion",
             "note_type": "insight",
-            "content": "# Studio successor conclusion\n\nRevised measured claim.\n",
+            "content": (
+                "# Studio successor conclusion\n\n"
+                "## Observations\n\n"
+                "- [revised conclusion] The recorded evidence changes the earlier "
+                "conclusion. #supersession\n"
+            ),
             "reason": "New recorded evidence changed the conclusion",
         },
     )

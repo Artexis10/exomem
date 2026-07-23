@@ -1993,10 +1993,10 @@ def test_directory_census_guard_enforces_its_raw_entry_bound(tmp_path: Path) -> 
 def test_move_file_rolls_back_rename_when_link_batch_fails(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    old = vault / "Knowledge Base" / "Notes" / "Insights" / "old.md"
-    inbound = vault / "Knowledge Base" / "Notes" / "Insights" / "inbound.md"
+    old = vault / "Knowledge Base" / "Notes" / "old.md"
+    inbound = vault / "Knowledge Base" / "Notes" / "inbound.md"
     old.write_text("# Old\n", encoding="utf-8")
-    inbound.write_text("See [[Knowledge Base/Notes/Insights/old]].\n", encoding="utf-8")
+    inbound.write_text("See [[Knowledge Base/Notes/old]].\n", encoding="utf-8")
 
     def fail_batch(*args, **kwargs):
         raise OSError("injected link batch failure")
@@ -2005,10 +2005,10 @@ def test_move_file_rolls_back_rename_when_link_batch_fails(
     with pytest.raises(OSError, match="link batch failure"):
         move_module.move_file(
             vault,
-            old_path="Knowledge Base/Notes/Insights/old.md",
-            new_path="Knowledge Base/Notes/Insights/new.md",
+            old_path="Knowledge Base/Notes/old.md",
+            new_path="Knowledge Base/Notes/new.md",
         )
 
     assert old.exists()
     assert not (old.parent / "new.md").exists()
-    assert "[[Knowledge Base/Notes/Insights/old]]" in inbound.read_text(encoding="utf-8")
+    assert "[[Knowledge Base/Notes/old]]" in inbound.read_text(encoding="utf-8")

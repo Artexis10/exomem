@@ -278,6 +278,80 @@ Override category.
     ]
 
 
+def test_rich_tags_and_context_are_normalized_first_class_fields() -> None:
+    markdown = (
+        "## Decision\n"
+        "- category: Runtime Reliability\n"
+        "- tags: Reliability, ＲＵＮＴＩＭＥ/Retry, reliability\n"
+        "- context:   Edge path   \n"
+        "- relations: mitigates: [[Retry Storm]]\n\n"
+        "Keep retry windows bounded.\n"
+    )
+
+    document = parse_semantic_units(markdown, path="decision.md")
+
+    assert document.errors == ()
+    unit = document.units[0]
+    assert unit.kind == "decision"
+    assert (unit.category_raw, unit.category_key, unit.category) == (
+        "Runtime Reliability",
+        "runtime_reliability",
+        "runtime_reliability",
+    )
+    assert unit.tags == ("reliability", "runtime/retry")
+    assert unit.context == "Edge path"
+    assert dict(unit.metadata) == {
+        "category": "Runtime Reliability",
+        "tags": "Reliability, ＲＵＮＴＩＭＥ/Retry, reliability",
+        "context": "Edge path",
+        "relations": "mitigates: [[Retry Storm]]",
+    }
+    assert [(relation.kind, relation.target) for relation in unit.relations] == [
+        ("mitigates", "[[Retry Storm]]")
+    ]
+
+
+@pytest.mark.parametrize(
+    ("metadata", "code", "tags", "context"),
+    [
+        ("- tags: valid, , later", "invalid_rich_tags", (), "Valid context"),
+        ("- tags: #prefixed", "invalid_rich_tags", (), "Valid context"),
+        (f"- tags: {'x' * 65}", "invalid_rich_tags", (), "Valid context"),
+        ("- tags: trailing/", "invalid_rich_tags", (), "Valid context"),
+        ("- tags: doubled//path", "invalid_rich_tags", (), "Valid context"),
+        ("- tags: bad!tag", "invalid_rich_tags", (), "Valid context"),
+        ("- context:   ", "invalid_rich_context", ("valid",), None),
+    ],
+)
+def test_invalid_rich_tag_or_context_field_is_not_partially_projected(
+    metadata: str,
+    code: str,
+    tags: tuple[str, ...],
+    context: str | None,
+) -> None:
+    valid_other_field = (
+        "- context: Valid context"
+        if code == "invalid_rich_tags"
+        else "- tags: valid"
+    )
+    markdown = (
+        f"## Finding\n{metadata}\n{valid_other_field}\n- status: active\n\n"
+        "Keep the finding.\n"
+    )
+
+    document = parse_semantic_units(markdown, path="finding.md")
+
+    assert len(document.units) == 1
+    unit = document.units[0]
+    assert unit.tags == tags
+    assert unit.context == context
+    metadata_key = "tags" if code == "invalid_rich_tags" else "context"
+    assert metadata_key in unit.metadata
+    assert [(error.code, error.line, error.raw) for error in document.errors] == [
+        (code, 2, metadata)
+    ]
+
+
 def test_invalid_rich_category_reports_without_losing_legacy_block() -> None:
     markdown = "## Decision\n- category: invalid/category\n\nKeep the decision.\n"
 
@@ -910,9 +984,9 @@ def test_registry_scope_finding_falls_back_to_authored_category() -> None:
         proposal={
             "schema_version": 1,
             "categories": {
-                "config": {
-                    "description": "Configuration",
-                    "aliases": ["configuration"],
+                "deployment_setting": {
+                    "description": "Deployment setting",
+                    "aliases": ["runtime_configuration"],
                     "scope": {"page_types": ["runbook"]},
                 }
             },
@@ -921,13 +995,13 @@ def test_registry_scope_finding_falls_back_to_authored_category() -> None:
     )
 
     document = parse_semantic_units(
-        "- [configuration] Value\n",
+        "- [runtime_configuration] Value\n",
         path="note.md",
         language_registry=registry,
         page_type="note",
     )
 
-    assert document.units[0].category == "configuration"
+    assert document.units[0].category == "runtime_configuration"
     assert [(warning.code, warning.severity) for warning in document.warnings] == [
         ("scope_violation", "warning")
     ]
@@ -1049,3 +1123,183 @@ Body.
     assert json.dumps(first.to_dict(), ensure_ascii=False, sort_keys=True) == json.dumps(
         second.to_dict(), ensure_ascii=False, sort_keys=True
     )
+
+
+@pytest.mark.parametrize(
+    ("markdown", "expected"),
+    [
+        (
+            "## Finding\n\nParent.\n\n### Mechanism\n\nNested.\n\n## Risk\n\nSibling.\n",
+            [("finding", "Parent.\n\n### Mechanism\n\nNested."), ("risk", "Sibling.")],
+        ),
+        (
+            "### Decision\n\nNested level.\n\n## Risk\n\nShallower sibling.\n",
+            [("decision", "Nested level."), ("risk", "Shallower sibling.")],
+        ),
+        (
+            "## Finding\n\nParent.\n\n### Decision\n\nRecognized child.\n\n## Risk\n\nSibling.\n",
+            [
+                ("finding", "Parent.\n\n### Decision\n\nRecognized child."),
+                ("risk", "Sibling."),
+            ],
+        ),
+        (
+            "## Analysis\n\n### Findings\n\nAlias child.\n\n## Summary\n\nDone.\n",
+            [("finding", "Alias child.")],
+        ),
+        (
+            "## Finding\n\n```markdown\n## Risk\n\nfenced content\n```\n\nAfter.\n",
+            [("finding", "```markdown\n## Risk\n\nfenced content\n```\n\nAfter.")],
+        ),
+    ],
+)
+def test_rich_parser_follows_heading_hierarchy(
+    markdown: str,
+    expected: list[tuple[str, str]],
+) -> None:
+    document = parse_semantic_units(markdown, parent_ref=STABLE_PARENT_REF)
+
+    assert [(unit.kind, unit.body) for unit in document.rich_units] == expected
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "\n\n",
+        "\n- id: empty\n- category: operational rule\n- tags: parser\n- context: test\n\n",
+        "\n- relations: supports: [[Target]]\n\n",
+        "\n### Mechanism\n\n#### Detail\n\n",
+        "\n### Decision\n- id: nested-only\n- relations: supports: [[Target]]\n\n",
+    ],
+)
+def test_empty_rich_units_are_diagnosed_and_excluded(body: str) -> None:
+    document = parse_semantic_units(
+        f"## Finding{body}## Summary\n\nOrdinary prose.\n",
+        path="Knowledge Base/Notes/empty-rich.md",
+        parent_ref=STABLE_PARENT_REF,
+    )
+
+    assert document.units == ()
+    assert document.rich_blocks == ()
+    assert [(finding.code, finding.line) for finding in document.errors] == [
+        ("empty_rich_unit", 1)
+    ]
+    assert document.errors[0].span is not None
+    assert document.errors[0].span.text == "## Finding"
+
+
+def test_descendant_ordinary_key_value_bullet_is_substantive_rich_body() -> None:
+    markdown = """\
+## Finding
+
+### Result
+
+- Outcome: The retry succeeded.
+"""
+
+    document = parse_semantic_units(markdown, parent_ref=STABLE_PARENT_REF)
+
+    assert document.errors == ()
+    assert [(unit.form, unit.kind, unit.body) for unit in document.units] == [
+        (
+            "rich",
+            "finding",
+            "### Result\n\n- Outcome: The retry succeeded.",
+        )
+    ]
+
+
+def test_nested_compact_and_rich_syntax_is_owned_by_one_rich_span() -> None:
+    markdown = """\
+## Finding
+
+Parent body.
+
+### Decision
+
+Nested recognized content.
+
+- [config] compact-shaped rich body
+
+## Observations
+
+- [config] independent compact observation ^outside
+"""
+
+    document = parse_semantic_units(markdown, parent_ref=STABLE_PARENT_REF)
+
+    assert [(unit.form, unit.content) for unit in document.units] == [
+        (
+            "rich",
+            "Parent body.\n\n### Decision\n\nNested recognized content.\n\n"
+            "- [config] compact-shaped rich body",
+        ),
+        ("compact", "independent compact observation"),
+    ]
+    assert all(
+        left.span.end_offset <= right.span.start_offset
+        for left, right in zip(document.units, document.units[1:], strict=False)
+    )
+
+
+def test_hierarchy_parse_is_byte_stable_across_repeated_runs() -> None:
+    markdown = """\
+## Finding
+- id: hierarchy
+
+Parent.
+
+### Mechanism
+
+- [config] body syntax
+
+## Observations
+
+- [rule] independent ^independent
+"""
+
+    first = parse_semantic_units(markdown, parent_ref=STABLE_PARENT_REF)
+    second = parse_semantic_units(markdown, parent_ref=STABLE_PARENT_REF)
+
+    assert json.dumps(first.to_dict(), ensure_ascii=False, sort_keys=True) == json.dumps(
+        second.to_dict(), ensure_ascii=False, sort_keys=True
+    )
+
+
+def test_hierarchy_migration_makes_anonymous_ref_stale_without_substitution() -> None:
+    former = parse_semantic_units(
+        "## Finding\n\nParent.\n",
+        parent_ref=STABLE_PARENT_REF,
+    ).units[0]
+    migrated = parse_semantic_units(
+        "## Finding\n\nParent.\n\n### Mechanism\n\nNested.\n",
+        parent_ref=STABLE_PARENT_REF,
+    )
+
+    resolution = migrated.resolve_unit(former.unit_ref or "")
+
+    assert resolution.status == "stale"
+    assert resolution.unit is None
+    assert resolution.expected_fingerprint == former.fingerprint
+
+
+def test_hierarchy_migration_keeps_authored_anchor_but_requires_current_fingerprint() -> None:
+    former = parse_semantic_units(
+        "## Finding\n- id: stable\n\nParent.\n",
+        parent_ref=STABLE_PARENT_REF,
+    ).units[0]
+    migrated = parse_semantic_units(
+        "## Finding\n- id: stable\n\nParent.\n\n### Mechanism\n\nNested.\n",
+        parent_ref=STABLE_PARENT_REF,
+    )
+    current = migrated.units[0]
+
+    assert current.unit_ref == former.unit_ref
+    assert current.fingerprint != former.fingerprint
+    assert migrated.resolve_unit(current.unit_ref or "").status == "found"
+    stale = migrated.resolve_unit(
+        current.unit_ref or "",
+        expected_fingerprint=former.fingerprint,
+    )
+    assert stale.status == "stale"
+    assert stale.unit is None

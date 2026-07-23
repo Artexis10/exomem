@@ -14,6 +14,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from exomem import readiness
 from exomem import vault as vault_module
 from exomem import writer_lease as writer_lease_module
 from exomem.cli_ops import OpError, error_dict, http_status_for
@@ -30,9 +31,7 @@ from exomem.writer_lease import (
 
 
 def _committed_error(tmp_path: Path, *, targets: tuple[str, ...] = ("note.md",)):
-    raw = PermissionError(
-        f"{tmp_path}/.exomem-batch-{'a' * 32}/stage-0.tmp: raw storage detail"
-    )
+    raw = PermissionError(f"{tmp_path}/.exomem-batch-{'a' * 32}/stage-0.tmp: raw storage detail")
     error = vault_module.BatchWriteError(
         "BATCH_CLEANUP_INCOMPLETE",
         vault_module.BatchTargetSummary(len(targets), targets, 0),
@@ -96,6 +95,21 @@ def test_mutation_timeout_stays_within_the_edge_budget_and_is_tunable() -> None:
         LeaseConfig.from_env({"EXOMEM_MUTATION_TIMEOUT": "0"})
 
 
+def test_default_manager_uses_configured_mutation_timeout(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reset_managers_for_tests()
+    monkeypatch.setenv("EXOMEM_MUTATION_TIMEOUT", "8")
+    monkeypatch.setenv("EXOMEM_WRITER_LEASE_STATE_DIR", str(tmp_path))
+    try:
+        manager = writer_lease_module.get_manager()
+        assert manager.config.mutation_timeout_seconds == 8.0
+        assert manager._mutation_timeout_seconds == 8.0
+    finally:
+        reset_managers_for_tests()
+
+
 def test_config_loads_without_exposing_token_in_status(tmp_path: Path) -> None:
     config = LeaseConfig.from_env(
         {
@@ -111,6 +125,7 @@ def test_config_loads_without_exposing_token_in_status(tmp_path: Path) -> None:
     assert status["role"] == "writer"
     assert "secret" not in repr(status)
     assert "url" not in status
+    assert "vault_id" not in status
 
 
 def test_coordinator_requests_use_cloudflare_compatible_user_agent(monkeypatch) -> None:
@@ -182,9 +197,7 @@ class StoreClient:
         return LeaseRecord.from_json(self.store.status("main"))
 
     def renew(self, fencing_token: int) -> LeaseRecord:
-        return LeaseRecord.from_json(
-            self.store.renew("main", self.replica_id, fencing_token, 10)
-        )
+        return LeaseRecord.from_json(self.store.renew("main", self.replica_id, fencing_token, 10))
 
     def release(self, fencing_token: int) -> LeaseRecord:
         return LeaseRecord.from_json(self.store.release("main", self.replica_id, fencing_token))
@@ -296,11 +309,14 @@ def test_read_only_invocation_bypasses_held_mutation_boundary(tmp_path: Path) ->
     assert entered.wait(1.0)
     manager = LeaseManager(LeaseConfig(state_dir=state_root))
     try:
-        assert manager.invoke(
-            _command(writes=False, leaf=lambda _vault: "read"),
-            (vault,),
-            {},
-        ) == "read"
+        assert (
+            manager.invoke(
+                _command(writes=False, leaf=lambda _vault: "read"),
+                (vault,),
+                {},
+            )
+            == "read"
+        )
     finally:
         release.set()
         thread.join(timeout=2.0)
@@ -493,26 +509,18 @@ def _recording_product_command(command, calls: list[dict], result: str):  # noqa
     ("command_name", "kwargs"),
     [
         pytest.param("connect_memory", {}, id="connect-default-suggest-links"),
-        pytest.param(
-            "connect_memory", {"operation": "suggest-links"}, id="connect-suggest-links"
-        ),
+        pytest.param("connect_memory", {"operation": "suggest-links"}, id="connect-suggest-links"),
         pytest.param(
             "connect_memory",
             {"operation": "suggest-relations"},
             id="connect-suggest-relations",
         ),
         pytest.param("connect_memory", {"operation": "context"}, id="connect-context"),
-        pytest.param(
-            "connect_memory", {"operation": "graph-context"}, id="connect-graph-context"
-        ),
-        pytest.param(
-            "connect_memory", {"operation": "inbound-links"}, id="connect-inbound-links"
-        ),
+        pytest.param("connect_memory", {"operation": "graph-context"}, id="connect-graph-context"),
+        pytest.param("connect_memory", {"operation": "inbound-links"}, id="connect-inbound-links"),
         pytest.param("adopt_vault", {}, id="adopt-default-scan-only"),
         pytest.param("adopt_vault", {"mode": "scan-only"}, id="adopt-scan-only"),
-        pytest.param(
-            "observe_memory", {"operation": "validate"}, id="observe-validate"
-        ),
+        pytest.param("observe_memory", {"operation": "validate"}, id="observe-validate"),
     ],
 )
 def test_read_only_product_operations_bypass_unreachable_coordinator(
@@ -560,6 +568,162 @@ def test_process_media_status_bypasses_writer_but_mutations_fail_closed(
         assert calls == [{"operation": "status"}]
     finally:
         reset_managers_for_tests()
+
+
+def test_explicit_process_media_hash_yields_global_guard_and_replays_idempotently(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from exomem import media_processing
+    from exomem.commands import product_commands_for
+
+    vault = tmp_path / "vault"
+    binary = vault / "Knowledge Base" / "Evidence" / "Audio" / "large.m4a"
+    binary.parent.mkdir(parents=True)
+    binary.write_bytes(b"large-enough-for-a-blocked-explicit-provenance-read")
+    state_dir = tmp_path / "state"
+    manager = LeaseManager(
+        LeaseConfig(state_dir=state_dir),
+        mutation_timeout_seconds=1.0,
+    )
+    contender = LeaseManager(
+        LeaseConfig(state_dir=state_dir),
+        mutation_timeout_seconds=0.05,
+    )
+    command = next(
+        command for command in product_commands_for("mcp") if command.name == "process_media"
+    )
+    monkeypatch.setattr(writer_lease_module, "get_manager", lambda: manager)
+    hash_started = threading.Event()
+    continue_hash = threading.Event()
+    commit_seen = threading.Event()
+    errors: list[BaseException] = []
+    results: list[object] = []
+    provenance_calls = 0
+    original_read = media_processing._read_provenance
+    original_batch = media_processing.batch_atomic_write
+
+    def blocked_read(*args, **kwargs):  # noqa: ANN002, ANN003
+        nonlocal provenance_calls
+        provenance_calls += 1
+        hash_started.set()
+        assert continue_hash.wait(2.0)
+        return original_read(*args, **kwargs)
+
+    def guarded_batch(*args, **kwargs):  # noqa: ANN002, ANN003
+        boundary = manager.status(vault)["mutation_boundary"]
+        assert boundary["state"] == "held"
+        assert boundary["operation"] == "process_media_process_commit"
+        commit_seen.set()
+        return original_batch(*args, **kwargs)
+
+    monkeypatch.setattr(media_processing, "_read_provenance", blocked_read)
+    monkeypatch.setattr(media_processing, "batch_atomic_write", guarded_batch)
+    kwargs = {
+        "operation": "process",
+        "path": binary.relative_to(vault).as_posix(),
+    }
+
+    def process() -> None:
+        try:
+            results.append(
+                manager.invoke(
+                    command,
+                    (vault,),
+                    kwargs,
+                    implicit_idempotency_scope="principal:test",
+                )
+            )
+        except BaseException as error:  # noqa: BLE001 - inspect thread outcome
+            errors.append(error)
+
+    worker = threading.Thread(target=process)
+    worker.start()
+    assert hash_started.wait(1.0)
+    try:
+        with contender.mutation_guard(
+            vault,
+            request_id="foreground-during-hash",
+            operation="remember",
+        ):
+            assert contender.status(vault)["mutation_boundary"]["request_id"] == (
+                "foreground-during-hash"
+            )
+    finally:
+        continue_hash.set()
+        worker.join(timeout=3.0)
+
+    assert not worker.is_alive()
+    assert errors == []
+    assert commit_seen.is_set()
+    assert provenance_calls == 1
+    replay = manager.invoke(
+        command,
+        (vault,),
+        kwargs,
+        implicit_idempotency_scope="principal:test",
+    )
+    assert replay == results[0]
+    assert provenance_calls == 1
+
+
+@pytest.mark.parametrize("operation", ["process", "retry"])
+def test_pathless_process_media_propagates_per_artifact_mutation_busy(
+    operation: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from exomem import media_jobs, media_processing
+    from exomem.commands import product_commands_for
+
+    vault = tmp_path / "vault"
+    binary = vault / "Knowledge Base" / "Evidence" / "Audio" / f"{operation}.m4a"
+    binary.parent.mkdir(parents=True)
+    binary.write_bytes(b"pathless media")
+    if operation == "retry":
+        reconciled = media_processing.reconcile_media(vault, binary)
+        store = media_jobs.MediaJobStore(vault)
+        claimed = store.claim_next()
+        assert claimed is not None and claimed.id == reconciled.job_id
+        store.mark(claimed.id, media_jobs.FAILED, "InvalidDataError: retry me")
+
+    state_dir = tmp_path / "state"
+    manager = LeaseManager(
+        LeaseConfig(state_dir=state_dir),
+        mutation_timeout_seconds=0.05,
+    )
+    holder = LeaseManager(
+        LeaseConfig(state_dir=state_dir),
+        mutation_timeout_seconds=1.0,
+    )
+    monkeypatch.setattr(writer_lease_module, "get_manager", lambda: manager)
+    command = next(
+        command for command in product_commands_for("mcp") if command.name == "process_media"
+    )
+    held = threading.Event()
+    release = threading.Event()
+
+    def hold() -> None:
+        with holder.mutation_guard(vault, operation="foreground-holder"):
+            held.set()
+            assert release.wait(2.0)
+
+    thread = threading.Thread(target=hold)
+    thread.start()
+    assert held.wait(1.0)
+    try:
+        with pytest.raises(OpError) as raised:
+            manager.invoke(
+                command,
+                (vault,),
+                {"operation": operation},
+                implicit_idempotency_scope="principal:pathless",
+            )
+    finally:
+        release.set()
+        thread.join(timeout=2.0)
+
+    assert raised.value.code == "MUTATION_BUSY"
+    assert raised.value.details["status"] == "retryable"
+    assert raised.value.details["receipt_id"] is not None
+    assert raised.value.details["request_id"]
 
 
 def test_default_connect_and_adopt_calls_run_during_coordinator_outage(
@@ -636,25 +800,17 @@ def test_omitted_selector_fails_closed_when_leaf_default_is_not_known_read_only(
 @pytest.mark.parametrize(
     ("command_name", "kwargs"),
     [
-        pytest.param(
-            "connect_memory", {"operation": "create-entity"}, id="connect-create-entity"
-        ),
+        pytest.param("connect_memory", {"operation": "create-entity"}, id="connect-create-entity"),
         pytest.param(
             "connect_memory", {"operation": "accept-relation"}, id="connect-accept-relation"
         ),
         pytest.param("connect_memory", {"operation": ""}, id="connect-empty"),
         pytest.param("connect_memory", {"operation": None}, id="connect-explicit-none"),
         pytest.param("connect_memory", {"operation": "entity"}, id="connect-nonexistent-entity"),
-        pytest.param(
-            "connect_memory", {"operation": "future-read-mode"}, id="connect-future-mode"
-        ),
+        pytest.param("connect_memory", {"operation": "future-read-mode"}, id="connect-future-mode"),
         pytest.param("adopt_vault", {"mode": "save-manifest"}, id="adopt-save-manifest"),
-        pytest.param(
-            "adopt_vault", {"mode": "copy-as-sources"}, id="adopt-copy-as-sources"
-        ),
-        pytest.param(
-            "adopt_vault", {"mode": "compile-selected"}, id="adopt-compile-selected"
-        ),
+        pytest.param("adopt_vault", {"mode": "copy-as-sources"}, id="adopt-copy-as-sources"),
+        pytest.param("adopt_vault", {"mode": "compile-selected"}, id="adopt-compile-selected"),
         pytest.param("adopt_vault", {"mode": ""}, id="adopt-empty"),
         pytest.param("adopt_vault", {"mode": None}, id="adopt-explicit-none"),
         pytest.param("adopt_vault", {"mode": "future-mode"}, id="adopt-future-mode"),
@@ -662,9 +818,7 @@ def test_omitted_selector_fails_closed_when_leaf_default_is_not_known_read_only(
         pytest.param("observe_memory", {"operation": "add"}, id="observe-add"),
         pytest.param("observe_memory", {"operation": "update"}, id="observe-update"),
         pytest.param("observe_memory", {"operation": "remove"}, id="observe-remove"),
-        pytest.param(
-            "observe_memory", {"operation": "future-mode"}, id="observe-future-mode"
-        ),
+        pytest.param("observe_memory", {"operation": "future-mode"}, id="observe-future-mode"),
         pytest.param("remember", {}, id="generic-write-capable-command"),
     ],
 )
@@ -923,8 +1077,7 @@ def test_identical_orphaned_pending_reports_acknowledgement_uncertain(
     )[0]
     with sqlite3.connect(manager.idempotency.path) as connection:
         connection.execute(
-            "INSERT INTO mutations(key, digest, state, updated_at) "
-            "VALUES (?, ?, 'pending', ?)",
+            "INSERT INTO mutations(key, digest, state, updated_at) VALUES (?, ?, 'pending', ?)",
             (key, digest, 100.0),
         )
 
@@ -1011,6 +1164,30 @@ def test_different_identity_busy_is_precommit(tmp_path: Path) -> None:
     worker.join(timeout=2)
     assert outcome == ["committed"]
     assert first_calls == ["first"]
+
+
+def test_mutation_during_semantic_warm_returns_without_holding_boundary(
+    tmp_path: Path,
+) -> None:
+    manager = LeaseManager(LeaseConfig(state_dir=tmp_path))
+    calls: list[str] = []
+    command = _command(writes=True, leaf=lambda: calls.append("called"))
+    readiness.begin_warm()
+    readiness.mark_ready("lexical")
+    try:
+        with pytest.raises(OpError) as warming:
+            manager.invoke(command, (), {}, mutation_request_id="warm-request")
+    finally:
+        readiness.reset()
+
+    assert warming.value.code == "MUTATION_WARMING"
+    payload = error_dict(warming.value)
+    assert payload["status"] == "retryable"
+    assert payload["committed"] is False
+    assert payload["retry_after_ms"] == 750
+    assert payload["request_id"] == "warm-request"
+    assert calls == []
+    assert writer_lease_module.active_mutation_snapshot()["state"] == "free"
 
 
 def test_postcommit_error_cannot_escape_as_precommit_retryable(tmp_path: Path) -> None:
@@ -1105,9 +1282,7 @@ def test_uncommitted_result_receipt_failure_does_not_claim_commit(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     calls = 0
-    manager = LeaseManager(
-        LeaseConfig(state_dir=tmp_path / "state"), idempotency_wait_seconds=0
-    )
+    manager = LeaseManager(LeaseConfig(state_dir=tmp_path / "state"), idempotency_wait_seconds=0)
 
     def validate_only() -> dict[str, bool]:
         nonlocal calls
@@ -1169,9 +1344,7 @@ def test_hosted_audit_does_not_hold_mutation_boundary(
         return "audited"
 
     audit = SimpleNamespace(name="maintain_memory", read_only=False, leaf=audit_leaf)
-    mutation = SimpleNamespace(
-        name="remember", read_only=False, leaf=lambda _vault: "committed"
-    )
+    mutation = SimpleNamespace(name="remember", read_only=False, leaf=lambda _vault: "committed")
     monkeypatch.setattr(writer_lease_module, "content_private_logging_enabled", lambda: True)
 
     def run_audit() -> None:
@@ -1209,12 +1382,8 @@ def test_hosted_public_audit_routes_bypass_boundary_held_by_other_manager(
     state_dir = tmp_path / "shared-state"
     vault = tmp_path / "vault"
     vault.mkdir()
-    holder = LeaseManager(
-        LeaseConfig(state_dir=state_dir), mutation_timeout_seconds=0.0
-    )
-    auditor = LeaseManager(
-        LeaseConfig(state_dir=state_dir), mutation_timeout_seconds=0.0
-    )
+    holder = LeaseManager(LeaseConfig(state_dir=state_dir), mutation_timeout_seconds=0.0)
+    auditor = LeaseManager(LeaseConfig(state_dir=state_dir), mutation_timeout_seconds=0.0)
     boundary_held = threading.Event()
     release_boundary = threading.Event()
 
@@ -1268,12 +1437,8 @@ def test_hosted_mutation_previews_bypass_boundary_held_by_other_manager(
     state_dir = tmp_path / "shared-state"
     vault = tmp_path / "vault"
     vault.mkdir()
-    holder = LeaseManager(
-        LeaseConfig(state_dir=state_dir), mutation_timeout_seconds=0.0
-    )
-    previewer = LeaseManager(
-        LeaseConfig(state_dir=state_dir), mutation_timeout_seconds=0.0
-    )
+    holder = LeaseManager(LeaseConfig(state_dir=state_dir), mutation_timeout_seconds=0.0)
+    previewer = LeaseManager(LeaseConfig(state_dir=state_dir), mutation_timeout_seconds=0.0)
     boundary_held = threading.Event()
     release_boundary = threading.Event()
 
@@ -1285,9 +1450,7 @@ def test_hosted_mutation_previews_bypass_boundary_held_by_other_manager(
     worker = threading.Thread(target=hold_boundary, daemon=True)
     worker.start()
     assert boundary_held.wait(timeout=2)
-    monkeypatch.setattr(
-        writer_lease_module, "content_private_logging_enabled", lambda: True
-    )
+    monkeypatch.setattr(writer_lease_module, "content_private_logging_enabled", lambda: True)
     command = SimpleNamespace(
         name=command_name,
         read_only=False,
@@ -1295,10 +1458,7 @@ def test_hosted_mutation_previews_bypass_boundary_held_by_other_manager(
     )
 
     try:
-        assert (
-            previewer.invoke(command, (vault,), kwargs, read_only=True)
-            == "previewed"
-        )
+        assert previewer.invoke(command, (vault,), kwargs, read_only=True) == "previewed"
     finally:
         release_boundary.set()
         worker.join(timeout=2)
@@ -1324,27 +1484,36 @@ def test_explicit_idempotency_is_isolated_by_principal(tmp_path: Path) -> None:
     manager = LeaseManager(LeaseConfig(state_dir=tmp_path))
     command = _command(writes=True, leaf=lambda: calls.append("write") or len(calls))
 
-    assert manager.invoke(
-        command,
-        (),
-        {},
-        idempotency_key="same-public-key",
-        idempotency_principal_scope="principal:alice",
-    ) == 1
-    assert manager.invoke(
-        command,
-        (),
-        {},
-        idempotency_key="same-public-key",
-        idempotency_principal_scope="principal:bob",
-    ) == 2
-    assert manager.invoke(
-        command,
-        (),
-        {},
-        idempotency_key="same-public-key",
-        idempotency_principal_scope="principal:alice",
-    ) == 1
+    assert (
+        manager.invoke(
+            command,
+            (),
+            {},
+            idempotency_key="same-public-key",
+            idempotency_principal_scope="principal:alice",
+        )
+        == 1
+    )
+    assert (
+        manager.invoke(
+            command,
+            (),
+            {},
+            idempotency_key="same-public-key",
+            idempotency_principal_scope="principal:bob",
+        )
+        == 2
+    )
+    assert (
+        manager.invoke(
+            command,
+            (),
+            {},
+            idempotency_key="same-public-key",
+            idempotency_principal_scope="principal:alice",
+        )
+        == 1
+    )
     assert calls == ["write", "write"]
 
 
@@ -1546,11 +1715,14 @@ def _invalid_committed_payloads(valid: dict) -> list[tuple[str, dict]]:
     add("boolean omitted", lambda value: value["outcome"].update(omitted_target_count=False))
     add("mismatched omitted", lambda value: value["outcome"].update(omitted_target_count=1))
     add("targets not list", lambda value: value["outcome"].update(targets=("note.md",)))
-    add("too many targets", lambda value: value["outcome"].update(
-        affected_count=17,
-        targets=[f"note-{index}.md" for index in range(17)],
-        omitted_target_count=0,
-    ))
+    add(
+        "too many targets",
+        lambda value: value["outcome"].update(
+            affected_count=17,
+            targets=[f"note-{index}.md" for index in range(17)],
+            omitted_target_count=0,
+        ),
+    )
     for name, target in (
         ("empty target", ""),
         ("absolute target", "/vault/note.md"),
@@ -1558,7 +1730,7 @@ def _invalid_committed_payloads(valid: dict) -> list[tuple[str, dict]]:
         ("nul target", "folder/\0note.md"),
         ("dot target", "folder/./note.md"),
         ("parent target", "folder/../note.md"),
-        ("drive target", "C:/vault/note.md"),
+        ("drive target", "C:" + "/vault/note.md"),
         ("reserved workspace target", "folder/.exomem-batch-raw/stage-0.tmp"),
         ("overlong target", f"{'x' * 1025}.md"),
         ("unencodable target", "bad-\udcff.md"),
@@ -1675,8 +1847,7 @@ def test_corrupt_implicit_committed_failure_timestamp_fails_closed_without_reinv
         manager.invoke(command, (), {}, **marker)
     with sqlite3.connect(manager.idempotency.path) as connection:
         connection.execute(
-            "UPDATE mutations SET updated_at = 'corrupt' "
-            "WHERE state = 'committed_failure'"
+            "UPDATE mutations SET updated_at = 'corrupt' WHERE state = 'committed_failure'"
         )
 
     with pytest.raises(OpError) as blocked:
@@ -2039,15 +2210,52 @@ def test_coordination_status_includes_content_free_mutation_boundary(tmp_path: P
     vault = tmp_path / "private-vault"
     vault.mkdir()
 
-    assert manager.status()["mutation_boundary"] == {"state": "free"}
+    assert manager.status(vault)["mutation_boundary"] == {"state": "free"}
     with manager.mutation_guard(
         vault,
         request_id="req-health",
         operation="edit_memory",
         holder_kind="command",
     ):
-        boundary = manager.status()["mutation_boundary"]
+        boundary = manager.status(vault)["mutation_boundary"]
         assert boundary["state"] == "held"
+        assert boundary["verified"] is True
         assert boundary["request_id"] == "req-health"
         assert boundary["operation"] == "edit_memory"
         assert str(vault) not in str(boundary)
+
+
+def test_coordination_status_measures_only_the_requested_vault(tmp_path: Path) -> None:
+    manager = LeaseManager(LeaseConfig(state_dir=tmp_path / "state"))
+    vault_a = tmp_path / "vault-a"
+    vault_b = tmp_path / "vault-b"
+    vault_a.mkdir()
+    vault_b.mkdir()
+
+    with manager.mutation_guard(
+        vault_a,
+        request_id="req-vault-a",
+        operation="remember",
+        holder_kind="command",
+    ):
+        assert manager.status(vault_b)["mutation_boundary"] == {"state": "free"}
+        boundary = manager.status(vault_a)["mutation_boundary"]
+        assert boundary["state"] == "held"
+        assert boundary["request_id"] == "req-vault-a"
+
+
+def test_public_coordination_command_forwards_its_injected_vault(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import commands, writer_lease
+
+    vault = tmp_path / "vault"
+    observed: list[Path] = []
+
+    def fake_status(vault_root=None):  # noqa: ANN001
+        observed.append(Path(vault_root))
+        return {"mutation_boundary": {"state": "free"}}
+
+    monkeypatch.setattr(writer_lease, "coordination_status", fake_status)
+    assert commands.op_coordination_status(vault) == {"mutation_boundary": {"state": "free"}}
+    assert observed == [vault]

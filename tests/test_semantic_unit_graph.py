@@ -60,6 +60,8 @@ exomem_id: {_PAGE_ID}
 ## Decision
 - category: config
 - id: rich-1
+- tags: Reliability, runtime/retry
+- context: Edge path
 - relations: supports: [[Knowledge Base/Notes/Insights/unit-target]]
 
 Use the indexed semantic language.
@@ -665,6 +667,8 @@ exomem_id: 33333333-3333-4333-8333-333333333333
 ## Decision
 - category: config
 - id: rich-1
+- tags: Reliability, runtime/retry
+- context: Edge path
 - relations: supports: [[Knowledge Base/Notes/Insights/unit-target]]
 
 Use the indexed semantic language.
@@ -687,6 +691,11 @@ Use the indexed semantic language.
     assert by_ref[compact.unit_ref]["kind"] == "observation"
     assert by_ref[compact.unit_ref]["metadata"]["category"] == "config"
     assert by_ref[rich.unit_ref]["node_key"] == epistemic_graph._block_key(page, rich)
+    assert by_ref[rich.unit_ref]["metadata"]["tags"] == [
+        "reliability",
+        "runtime/retry",
+    ]
+    assert by_ref[rich.unit_ref]["metadata"]["context"] == "Edge path"
     assert (
         len([node for node in nodes if node["node_key"] == epistemic_graph._block_key(page, rich)])
         == 1

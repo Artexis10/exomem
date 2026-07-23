@@ -58,9 +58,14 @@ def _media_mutation_guard(
 
 
 def _reconcile_background_media(vault_root: Path, binary: Path) -> object:
-    """Reconcile one artifact, yielding the global mutation boundary afterward."""
-    with _media_mutation_guard(vault_root):
-        return media_processing.reconcile_media(vault_root, binary, explicit=False)
+    """Plan one artifact before taking authority for its bounded commit."""
+    return media_processing.reconcile_media(
+        vault_root,
+        binary,
+        explicit=False,
+        commit_guard=lambda: _media_mutation_guard(vault_root),
+    )
+
 
 DEBOUNCE_SECONDS = 0.5
 # How often the watcher re-walks and reconciles the freshness registry against
@@ -135,10 +140,15 @@ def _publish_registry_change(
         # Kill switch on: don't even pay the resolve() syscalls in _rel_posix.
         return
     try:
-        deleted_paths = [vault_root / r for r in deleted_rels]
-        freshness.on_files_changed(vault_root, changed=changed, deleted=deleted_paths)
-    except Exception:  # noqa: BLE001 — bookkeeping must never break a write
-        log.debug("self-write freshness publish failed", exc_info=True)
+        from . import semantic_contract
+
+        semantic_contract.publish_corpus_files_changed(
+            vault_root,
+            changed=changed,
+            deleted=deleted_rels,
+        )
+    except Exception:  # noqa: BLE001 — rebuildable state never breaks a write
+        log.debug("self-write freshness/semantic publish failed", exc_info=True)
     changed_rels = [r for r in (_rel_posix(vault_root, p) for p in changed) if r]
     try:
         from . import vault as vault_module
@@ -356,21 +366,30 @@ class FileWatcher:
 
         for path in media:
             try:
-                with _media_mutation_guard(
-                    self._vault_root, operation="background_media_event"
-                ):
-                    media_processing.reconcile_media(self._vault_root, path, explicit=False)
+                media_processing.reconcile_media(
+                    self._vault_root,
+                    path,
+                    explicit=False,
+                    commit_guard=lambda: _media_mutation_guard(
+                        self._vault_root, operation="background_media_event"
+                    ),
+                )
             except Exception:  # noqa: BLE001 - a bad artifact must never kill the watcher
                 log.exception("file watcher: media reconciliation failed for %s", path)
         if not (ups or del_rels):
             return
 
         # Freshness: the whole vault, since both index sibling folders too.
-        deleted_paths = [self._vault_root / r for r in del_rels]
         try:
-            freshness.on_files_changed(self._vault_root, changed=ups, deleted=deleted_paths)
-        except Exception:  # noqa: BLE001 — a bad batch must never kill the watcher
-            log.exception("file watcher: freshness publish failed")
+            from . import semantic_contract
+
+            semantic_contract.publish_corpus_files_changed(
+                self._vault_root,
+                changed=ups,
+                deleted=del_rels,
+            )
+        except Exception:  # noqa: BLE001 — sidecar repair retries from its census
+            log.exception("file watcher: freshness/semantic publish failed")
         up_rels = [r for r in (self._rel(p) for p in ups) if r]
         self._dispatch_batch(ups, up_rels, del_rels, cap=False)
 
@@ -575,11 +594,7 @@ class FileWatcher:
                     operation="watcher",
                 )
                 summary = posthoc.as_dict()
-                logger = (
-                    log.warning
-                    if summary["semantic_contract_findings"]
-                    else log.info
-                )
+                logger = log.warning if summary["semantic_contract_findings"] else log.info
                 logger(
                     "file watcher: semantic posthoc batch %s",
                     json.dumps(summary, ensure_ascii=True, sort_keys=True),

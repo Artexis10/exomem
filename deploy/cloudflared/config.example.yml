@@ -1,7 +1,7 @@
 # cloudflared ingress config for exomem — REFERENCE TEMPLATE.
 #
 # The live copy must live where the Windows service (running as SYSTEM) reads it:
-#   C:\Windows\System32\config\systemprofile\.cloudflared\config.yml
+#   <Windows>\System32\config\systemprofile\.cloudflared\config.yml
 # `scripts/setup-cloudflared.ps1` generates it there with the real tunnel UUID and
 # copies the credentials + cert alongside. This file is just a committed reference.
 #
@@ -9,7 +9,7 @@
 # <HOST>  = kb.example.com (desktop) / kb-laptop.example.com (laptop)
 
 tunnel: <UUID>
-credentials-file: C:\Windows\System32\config\systemprofile\.cloudflared\<UUID>.json
+credentials-file: <Windows>\System32\config\systemprofile\.cloudflared\<UUID>.json
 
 # Route the public hostname to the local exomem service; everything else 404s.
 ingress:

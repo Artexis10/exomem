@@ -10,9 +10,12 @@ import re
 import time
 import uuid
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
-from . import __version__
+from fastmcp.tools import FunctionTool
+
+from . import __version__, capabilities
 from . import commands as commands_module
 from .hosted_runtime import (
     HOSTED_PROTOCOL_VERSION,
@@ -113,6 +116,55 @@ def _command_contract(command: commands_module.Command) -> dict[str, Any]:
     }
 
 
+def _mcp_tool_contract(
+    command: commands_module.Command,
+    *,
+    descriptor: capabilities.ActiveSurfaceDescriptor,
+) -> dict[str, Any]:
+    injected: tuple[object, ...] = (
+        (Path("."), object()) if command.needs_schema else (Path("."),)
+    )
+    bound = commands_module.bind_vault(
+        command.leaf,
+        *injected,
+        name=command.name,
+        description=command.doc,
+        command=command,
+        surface_descriptor=descriptor,
+    )
+    tool = FunctionTool.from_function(
+        bound,
+        name=command.name,
+        annotations=command.mcp_annotations,
+    )
+    return tool.to_mcp_tool().model_dump(mode="json", by_alias=True)
+
+
+def hosted_agent_surface_descriptor(
+    profile: str = commands_module.HOSTED_ALPHA_AGENT_PROFILE,
+) -> capabilities.ActiveSurfaceDescriptor:
+    """Return the immutable descriptor for one supported Hosted agent profile."""
+
+    if profile != commands_module.HOSTED_ALPHA_AGENT_PROFILE:
+        raise HostedGatewayError(
+            "HOSTED_SURFACE_PROFILE_UNSUPPORTED",
+            "hosted agent surface profile is not supported",
+        )
+    try:
+        registry = commands_module.product_commands_for_profile(profile, "rest")
+    except ValueError as exc:
+        raise HostedGatewayError(
+            "HOSTED_SURFACE_PROFILE_UNSUPPORTED",
+            "hosted agent surface profile is not supported",
+        ) from exc
+    return capabilities.ActiveSurfaceDescriptor(
+        surface="hosted-agent",
+        profile=profile,
+        tier2_enabled=False,
+        product_commands=tuple(command.name for command in registry),
+    )
+
+
 def build_gateway_contract(
     *,
     protocol_version: str = HOSTED_PROTOCOL_VERSION,
@@ -175,6 +227,44 @@ def build_gateway_contract(
         },
         "commands": [_command_contract(command) for command in registry],
     }
+    return {
+        **base,
+        "digest": {
+            "algorithm": "sha256",
+            "value": hashlib.sha256(canonical_json(base)).hexdigest(),
+        },
+    }
+
+
+def build_agent_gateway_contract(
+    *,
+    profile: str = commands_module.HOSTED_ALPHA_AGENT_PROFILE,
+    protocol_version: str = HOSTED_PROTOCOL_VERSION,
+) -> dict[str, Any]:
+    """Build an MCP-ready, least-privilege contract for a Hosted agent surface."""
+
+    descriptor = hosted_agent_surface_descriptor(profile)
+    registry = commands_module.product_commands_for_profile(profile, "rest")
+    legacy = build_gateway_contract(
+        protocol_version=protocol_version,
+        expose_tier2=False,
+    )
+    base = {
+        key: value
+        for key, value in legacy.items()
+        if key not in {"commands", "digest", "transfer_grant"}
+    }
+    base["agent_profile"] = {
+        **descriptor.as_metadata(),
+        "immutable": True,
+    }
+    base["commands"] = [
+        {
+            **_command_contract(command),
+            "mcp_tool": _mcp_tool_contract(command, descriptor=descriptor),
+        }
+        for command in registry
+    ]
     return {
         **base,
         "digest": {
@@ -507,10 +597,12 @@ __all__ = [
     "HostedGatewayError",
     "TransferGrant",
     "TrustedGatewayContext",
+    "build_agent_gateway_contract",
     "build_gateway_contract",
     "canonical_contract_json",
     "canonical_json",
     "implicit_retry_scope",
+    "hosted_agent_surface_descriptor",
     "mint_transfer_grant",
     "scoped_idempotency_key",
     "validate_opaque_scope",

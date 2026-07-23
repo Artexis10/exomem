@@ -596,6 +596,144 @@ test("cached active-holder admission preserves the steady-state single-fetch pat
   }
 });
 
+async function expectedEdgeAuth(token, requestId) {
+  const key = await crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(token),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  const signature = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(requestId));
+  return [...new Uint8Array(signature)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+// Golden cross-implementation vector: tests/test_edge_ingress.py asserts the
+// identical constant for compute_edge_auth, so a unilateral change to
+// key/message encoding or hex casing in either implementation fails one of
+// the two suites instead of 403ing every proxied request in production.
+test("edge-auth HMAC matches the origin implementation's golden vector", async () => {
+  assert.equal(
+    await expectedEdgeAuth("secret-token", "11111111-1111-4111-8111-111111111111"),
+    "1d489d84d7a8dcec3ddef522064e6ee09269bb80fd3dc91cd62c4ebf1ab220b4",
+  );
+});
+
+test("read fan-out stamps a request-id and a valid HMAC edge-auth header on every attempt", async () => {
+  const forwarded = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (request) => {
+    forwarded.push({
+      origin: new URL(request.url).origin,
+      requestId: request.headers.get("x-exomem-request-id"),
+      edgeAuth: request.headers.get("x-exomem-edge-auth"),
+    });
+    return new Response("down", { status: 503 });
+  };
+  try {
+    const env = edgeEnv(null);
+    env.STATE_TOKEN = "coordinator-secret";
+    const request = new Request("https://exomem.example.com/health/ready");
+    await worker.fetch(request, env);
+
+    assert.equal(forwarded.length, 2);
+    const requestId = forwarded[0].requestId;
+    assert.match(requestId, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+    const expected = await expectedEdgeAuth("coordinator-secret", requestId);
+    for (const attempt of forwarded) {
+      assert.equal(attempt.requestId, requestId);
+      assert.equal(attempt.edgeAuth, expected);
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("mutation proxy stamps a valid HMAC edge-auth header alongside the request-id", async () => {
+  const forwarded = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (request) => {
+    forwarded.push({
+      requestId: request.headers.get("x-exomem-request-id"),
+      edgeAuth: request.headers.get("x-exomem-edge-auth"),
+    });
+    return new Response("ok", { status: 200 });
+  };
+  try {
+    const env = edgeEnv("desktop");
+    env.STATE_TOKEN = "coordinator-secret";
+    const response = await worker.fetch(toolCall(), env);
+    assert.equal(response.status, 200);
+    assert.equal(forwarded.length, 1);
+    const expected = await expectedEdgeAuth("coordinator-secret", forwarded[0].requestId);
+    assert.equal(forwarded[0].edgeAuth, expected);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("edge-auth header is omitted (not thrown) when STATE_TOKEN is unset", async () => {
+  const forwarded = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (request) => {
+    forwarded.push(request.headers.get("x-exomem-edge-auth"));
+    return new Response("ok", { status: 200 });
+  };
+  try {
+    const env = edgeEnv("desktop");
+    delete env.STATE_TOKEN;
+    const response = await worker.fetch(toolCall(), env);
+    assert.equal(response.status, 200);
+    assert.deepEqual(forwarded, [null]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("GET /__version rejects requests without the coordinator bearer token", async () => {
+  const env = edgeEnv("desktop");
+  env.STATE_TOKEN = "secret";
+  const response = await worker.fetch(new Request("https://exomem.example.com/__version"), env);
+  assert.equal(response.status, 401);
+  assert.deepEqual(await body(response), { error: "unauthorized" });
+});
+
+test("GET /__version returns deploy identity and effective vars without leaking the secret", async () => {
+  const env = edgeEnv("desktop");
+  env.STATE_TOKEN = "secret";
+  env.WORKER_GIT_SHA = "abc1234";
+  const request = new Request("https://exomem.example.com/__version");
+  request.headers.set("authorization", "Bearer secret");
+  const response = await worker.fetch(request, env);
+  assert.equal(response.status, 200);
+  const payload = await body(response);
+  assert.deepEqual(payload, {
+    service: "exomem-ha-edge",
+    git_sha: "abc1234",
+    deployed_vars: {
+      MCP_TOOL_TIMEOUT_MS: 15000,
+      ORIGIN_TIMEOUT_MS: 2500,
+      REQUIRE_COORDINATION: true,
+      SUPPORTED_RUNTIME_CONTRACTS: "1",
+      DESKTOP_REPLICA_ID: "desktop",
+      LAPTOP_REPLICA_ID: "laptop",
+      DESKTOP_ORIGIN: "https://desktop.example.com",
+      LAPTOP_ORIGIN: "https://laptop.example.com",
+    },
+  });
+  assert.equal(JSON.stringify(payload).includes("secret"), false);
+});
+
+test("GET /__version reports an unlabeled deploy when WORKER_GIT_SHA is not set", async () => {
+  const env = edgeEnv("desktop");
+  env.STATE_TOKEN = "secret";
+  const request = new Request("https://exomem.example.com/__version");
+  request.headers.set("authorization", "Bearer secret");
+  const response = await worker.fetch(request, env);
+  assert.equal(response.status, 200);
+  assert.equal((await body(response)).git_sha, "unlabeled");
+});
+
 test("safe MCP initialization retains short-timeout fallback", async () => {
   const calls = [];
   const timeouts = [];

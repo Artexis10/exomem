@@ -121,11 +121,44 @@ def _content_blocks(msg: dict) -> list[dict]:
         out: list[dict] = []
         for b in c:
             if isinstance(b, dict):
-                out.append(b)
+                if b.get("type") in {"input_text", "output_text"}:
+                    out.append({**b, "type": "text"})
+                else:
+                    out.append(b)
             elif isinstance(b, str):
                 out.append({"type": "text", "text": b})
         return out
     return []
+
+
+def _codex_call_output_succeeded(output: object) -> bool:
+    """Confirm a Codex function call completed without an MCP error.
+
+    Codex 0.144.x stores connector output as a timing prelude followed by an
+    ``Output:`` JSON object. There is no positive status field, so malformed or
+    missing output stays unconfirmed and must not suppress the capture check.
+    """
+    if not isinstance(output, str):
+        return False
+    match = re.search(r"(?:^|\n)Output:\s*", output)
+    if not match:
+        return False
+    try:
+        result = json.loads(output[match.end() :].strip())
+    except (json.JSONDecodeError, TypeError):
+        return False
+    if not isinstance(result, dict):
+        return False
+    if result.get("error") or result.get("error_code"):
+        return False
+    error_data = result.get("error_data")
+    if isinstance(error_data, dict):
+        if error_data.get("type") == "mcp_tool_execution_error":
+            return False
+        nested = error_data.get("result")
+        if isinstance(nested, dict) and nested.get("isError") is True:
+            return False
+    return True
 
 
 def _latest_turn(path: str, max_bytes: int = 262_144) -> tuple[str, list[dict]]:
@@ -144,15 +177,53 @@ def _latest_turn(path: str, max_bytes: int = 262_144) -> tuple[str, list[dict]]:
     chunks: list[str] = []
     tools: list[dict] = []
     failed_tool_ids: set[str] = set()
+    completed_codex_tool_ids: set[str] = set()
     for line in reversed([ln for ln in raw.splitlines() if ln.strip()]):
         try:
             obj = json.loads(line)
         except Exception:
             continue
-        msg = obj.get("message") if isinstance(obj.get("message"), dict) else obj
+        payload = obj.get("payload")
+        record = (
+            payload
+            if obj.get("type") == "response_item" and isinstance(payload, dict)
+            else obj
+        )
+        msg = (
+            record.get("message")
+            if isinstance(record.get("message"), dict)
+            else record
+        )
         role = msg.get("role") if isinstance(msg, dict) else None
-        typ = obj.get("type")
-        if role == "assistant" or typ in {"assistant", "agent_message"}:
+        typ = record.get("type") if isinstance(record, dict) else None
+        if typ == "function_call_output":
+            call_id = str(record.get("call_id") or "")
+            if call_id and _codex_call_output_succeeded(record.get("output")):
+                completed_codex_tool_ids.add(call_id)
+            elif call_id:
+                failed_tool_ids.add(call_id)
+        elif typ == "function_call":
+            arguments = record.get("arguments")
+            if isinstance(arguments, str):
+                try:
+                    arguments = json.loads(arguments)
+                except (json.JSONDecodeError, TypeError):
+                    arguments = {}
+            if not isinstance(arguments, dict):
+                arguments = {}
+            namespace = str(record.get("namespace") or "")
+            name = str(record.get("name") or "")
+            operation = str(arguments.get("operation") or "")
+            tools.append(
+                {
+                    "id": str(record.get("call_id") or ""),
+                    "name": f"{namespace}{name}",
+                    "operation": operation,
+                    "input": arguments,
+                    "requires_confirmed_output": True,
+                }
+            )
+        elif role == "assistant" or typ in {"assistant", "agent_message"}:
             for b in _content_blocks(msg):
                 if b.get("type") == "text":
                     chunks.append(b.get("text", ""))
@@ -182,7 +253,17 @@ def _latest_turn(path: str, max_bytes: int = 262_144) -> tuple[str, list[dict]]:
             ):
                 break  # reached the human prompt that began this turn
     for tool in tools:
-        tool["failed"] = bool(tool["id"] and tool["id"] in failed_tool_ids)
+        tool_id = tool["id"]
+        tool["failed"] = bool(
+            tool_id
+            and (
+                tool_id in failed_tool_ids
+                or (
+                    tool.get("requires_confirmed_output")
+                    and tool_id not in completed_codex_tool_ids
+                )
+            )
+        )
     return "".join(reversed(chunks)), tools
 
 
@@ -250,13 +331,22 @@ def main() -> int:
     if data.get("stop_hook_active") or data.get("stopHookActive"):  # already blocked once
         return 0
     tpath = data.get("transcript_path") or data.get("transcriptPath")
-    if not tpath:
+    event_assistant_text = data.get("last_assistant_message") or data.get(
+        "lastAssistantMessage"
+    )
+    if not isinstance(event_assistant_text, str):
+        event_assistant_text = ""
+    if not tpath and not event_assistant_text:
         return 0
 
     min_chars = _env_int("EXOMEM_CAPTURE_NUDGE_MIN_CHARS", 300)
     cooldown = _env_int("EXOMEM_CAPTURE_NUDGE_COOLDOWN_SEC", 300)
 
-    assistant_text, tools = _latest_turn(tpath)
+    # Codex exposes the final text directly because its transcript format is not
+    # a stable hook API. Keep transcript parsing as the Claude/older-client
+    # fallback and to retain best-effort successful-write detection.
+    transcript_text, tools = _latest_turn(tpath) if tpath else ("", [])
+    assistant_text = event_assistant_text or transcript_text
     if any(_successful_kb_write(tool) for tool in tools):  # already captured this turn
         return 0
     if re.search(r"Saved\s*(?:->|→|:)", assistant_text):

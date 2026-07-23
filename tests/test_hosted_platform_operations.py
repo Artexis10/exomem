@@ -118,10 +118,19 @@ def test_hosted_ci_wires_every_static_security_gate() -> None:
         "bbb64b9695866ce4a7a8f5c9592002c5961cab378577fa3f8a040df362b9b2ea"
     ) in tool_versions
     parsed = yaml.safe_load(workflow)
+    triggers = parsed.get("on", parsed.get(True))
+    blackbox_input = triggers["workflow_dispatch"]["inputs"]["external_blackbox"]
+    assert blackbox_input["default"] is False
+    assert blackbox_input["type"] == "boolean"
     assert parsed["jobs"]["static"]["name"] == "Offline static validation (not release proof)"
     release_job = parsed["jobs"]["release-proof"]
     assert release_job["needs"] == "static"
     assert "inputs.release_proof" in release_job["if"]
+    blackbox_job = parsed["jobs"]["external-blackbox"]
+    assert blackbox_job["if"] == (
+        "github.event_name == 'schedule' || "
+        "(github.event_name == 'workflow_dispatch' && inputs.external_blackbox)"
+    )
     assert "--fetch-substrate-fixture" in workflow
     assert "--probe-image" in workflow
     assert "--require-published" in workflow

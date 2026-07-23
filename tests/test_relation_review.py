@@ -16,6 +16,11 @@ _ID_A = "00000000-0000-4000-8000-000000000001"
 _ID_B = "00000000-0000-4000-8000-000000000002"
 _PAGE_A = "Knowledge Base/Notes/Insights/existing.md"
 _PAGE_B = "Knowledge Base/Notes/Insights/candidate.md"
+_COMPACT_UNIT = (
+    "## Observations\n\n"
+    "- [operating constraint] Keep retries bounded #reliability\n\n"
+)
+_DEFAULT_BODY = f"Body.\n\n{_COMPACT_UNIT}## Relations\n"
 
 
 def _source(
@@ -23,7 +28,7 @@ def _source(
     *,
     title: str = "Candidate",
     page_type: str = "insight",
-    body: str = "Body.\n\n## Relations\n",
+    body: str = _DEFAULT_BODY,
     newline: str = "\n",
 ) -> str:
     source = (
@@ -389,7 +394,10 @@ def test_qualifying_relation_rejects_unnecessary_review_and_needs_no_artifact(
         "Knowledge Base/Entities/target.md",
         _source(_ID_A, title="Target", page_type="entity"),
     )
-    source = _source(_ID_B, body="Body.\n\n## Relations\n- supports [[Target]]\n")
+    source = _source(
+        _ID_B,
+        body=f"Body.\n\n{_COMPACT_UNIT}## Relations\n- supports [[Target]]\n",
+    )
     validation = relation_review.validate_creation_draft(
         tmp_path,
         path=_PAGE_B,
@@ -760,7 +768,10 @@ def test_exact_v2_reviewed_none_retry_ignores_later_inbound_relation(
         _source(
             inbound_id,
             title="Inbound",
-            body="Body.\n\n## Relations\n- supports [[Candidate]]\n",
+            body=(
+                f"Body.\n\n{_COMPACT_UNIT}"
+                "## Relations\n- supports [[Candidate]]\n"
+            ),
         ),
     )
 

@@ -9,6 +9,7 @@ lanes this backend serves.
 from __future__ import annotations
 
 import sqlite3
+import threading
 from pathlib import Path
 
 import pytest
@@ -103,10 +104,14 @@ def test_kill_switch_forces_python_rung(tmp_path, monkeypatch):
     assert not lexstore.lexical_path(tmp_path).exists()
 
 
-def test_unavailable_fts5_serves_python_rung_without_degradation(tmp_path, monkeypatch):
+def test_unavailable_fts5_keeps_primary_python_rung_but_marks_widening_unavailable(
+    tmp_path, monkeypatch
+):
     """Forced FTS5-unavailable (the custom-build shape): bm25.search answers
-    from rank-bm25, find() records NO lane degradation for the fallback, and
-    the keyword lane still works. Runs on every install."""
+    from rank-bm25 and the keyword lane still works. The optional outside-KB
+    lane reports its maintained index as unavailable instead of launching a
+    second whole-vault Python build. Runs on every install."""
+
     def _boom(conn):
         raise sqlite3.OperationalError("no such module: fts5")
 
@@ -122,12 +127,17 @@ def test_unavailable_fts5_serves_python_rung_without_degradation(tmp_path, monke
     degraded: list[str] = []
     failed: list[str] = []
     out = find_module.find(
-        tmp_path, query="terraform locking", mode="hybrid", limit=5,
-        degraded_out=degraded, failed_out=failed,
+        tmp_path,
+        query="terraform locking",
+        mode="hybrid",
+        limit=5,
+        degraded_out=degraded,
+        failed_out=failed,
     )
     assert out and out[0].path == "Knowledge Base/doc.md"
-    assert find_module.degradation_counts() == before  # fallback is silent
-    assert "bm25" not in failed and "keyword" not in failed
+    after = find_module.degradation_counts()
+    assert after.get("outside_kb_lexical", 0) == before.get("outside_kb_lexical", 0) + 1
+    assert failed == ["outside_kb_lexical"]
     assert not lexstore.lexical_path(tmp_path).exists()
 
 
@@ -141,8 +151,13 @@ def test_hybrid_find_end_to_end_under_fts5(tmp_path):
     degraded: list[str] = []
     failed: list[str] = []
     out = find_module.find(
-        tmp_path, query="distributed tracing", mode="hybrid", limit=5,
-        timings=t, degraded_out=degraded, failed_out=failed,
+        tmp_path,
+        query="distributed tracing",
+        mode="hybrid",
+        limit=5,
+        timings=t,
+        degraded_out=degraded,
+        failed_out=failed,
     )
     assert out and out[0].path == "Knowledge Base/hit.md"
     assert out[0].bm25_rank == 1
@@ -191,9 +206,7 @@ def test_bm25_match_sets_agree_between_backends(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("backend", ["python", "fts5"])
-def test_bm25_allowed_paths_are_applied_before_top_k(
-    tmp_path, monkeypatch, backend
-):
+def test_bm25_allowed_paths_are_applied_before_top_k(tmp_path, monkeypatch, backend):
     """An eligible lower-ranked page must not be buried by excluded hits."""
     if backend == "fts5" and not _HAS_FTS5:
         pytest.skip("SQLite build lacks FTS5")
@@ -227,34 +240,53 @@ def test_bm25_allowed_paths_are_applied_before_top_k(
 def _parity_corpus(root: Path) -> None:
     """Pages engineered to stress every clause of the substring contract."""
     _write_page(root, "Knowledge Base/plain.md", "employment contract terms", updated="2026-03-01")
-    _write_page(root, "Knowledge Base/midword.md", "the xylophones sang loudly", updated="2026-02-01")
-    _write_page(root, "Knowledge Base/title-only.md", "unrelated body", title="Budget Overview", updated="2026-04-01")
+    _write_page(
+        root, "Knowledge Base/midword.md", "the xylophones sang loudly", updated="2026-02-01"
+    )
+    _write_page(
+        root,
+        "Knowledge Base/title-only.md",
+        "unrelated body",
+        title="Budget Overview",
+        updated="2026-04-01",
+    )
     _write_page(root, "Knowledge Base/short.md", "xq marks the spot", updated="2026-01-15")
-    _write_page(root, "Knowledge Base/meta.md", "growth was 42% in snake_case", updated="2026-01-10")
-    _write_page(root, "Knowledge Base/uni.md", "tere tulemast Tallinnasse sõbrad", updated="2026-01-05")
-    _write_page(root, "Knowledge Base/sub/nested.md", "employment law contract precedent", updated="2026-05-01")
-    _write_page(root, "Knowledge Base/index.md", "employment xylophones budget xq", updated="2026-06-01")
+    _write_page(
+        root, "Knowledge Base/meta.md", "growth was 42% in snake_case", updated="2026-01-10"
+    )
+    _write_page(
+        root, "Knowledge Base/uni.md", "tere tulemast Tallinnasse sõbrad", updated="2026-01-05"
+    )
+    _write_page(
+        root,
+        "Knowledge Base/sub/nested.md",
+        "employment law contract precedent",
+        updated="2026-05-01",
+    )
+    _write_page(
+        root, "Knowledge Base/index.md", "employment xylophones budget xq", updated="2026-06-01"
+    )
     _write_page(root, "Knowledge Base/punct.md", "+++ ~~~ !!!", updated="2026-01-02")
     _write_page(root, "Knowledge Base/same-date-b.md", "twin content marker", updated="2026-02-02")
     _write_page(root, "Knowledge Base/same-date-a.md", "twin content marker", updated="2026-02-02")
 
 
 _PARITY_QUERIES = [
-    "contract employment",     # multi-token, order-free
-    "ylophon",                 # mid-word
-    "budget",                  # title-only match
-    "xq",                      # 2-char needle
-    "q",                       # 1-char needle
-    "42%",                     # LIKE metachar %
-    "e_c",                     # LIKE metachar _
-    "sõbra",                   # non-ASCII
-    "tallinnasse",             # case-folding
-    "~~~",                     # punctuation-only page
-    "twin marker",             # tie on updated → path tie-break
-    "xq spot",                 # short + indexable token mix
-    "employment",              # multiple matches, ordering
-    "zzz-no-such-token",       # empty result
-    "",                        # empty query → empty lane
+    "contract employment",  # multi-token, order-free
+    "ylophon",  # mid-word
+    "budget",  # title-only match
+    "xq",  # 2-char needle
+    "q",  # 1-char needle
+    "42%",  # LIKE metachar %
+    "e_c",  # LIKE metachar _
+    "sõbra",  # non-ASCII
+    "tallinnasse",  # case-folding
+    "~~~",  # punctuation-only page
+    "twin marker",  # tie on updated → path tie-break
+    "xq spot",  # short + indexable token mix
+    "employment",  # multiple matches, ordering
+    "zzz-no-such-token",  # empty result
+    "",  # empty query → empty lane
 ]
 
 
@@ -309,3 +341,106 @@ def test_keyword_parity_after_edit_and_delete(tmp_path, monkeypatch):
     assert indexed == reference
     assert "Knowledge Base/late.md" in indexed
     assert "Knowledge Base/plain.md" not in indexed
+
+
+# ------------------------------------------------ foreground repair boundary
+
+
+@needs_fts5
+def test_nonrepairing_searches_return_none_and_schedule_one_background_repair(
+    tmp_path, monkeypatch
+):
+    """A missing sidecar never turns a foreground request into a corpus build.
+
+    All three search APIs share one per-vault repair flight, so a burst of
+    callers remains cheap while the maintained sidecar catches up once.
+    """
+    _write_page(tmp_path, "Knowledge Base/a.md", "one searchable decision")
+    store = lexstore.get_store(tmp_path)
+    started = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+    calls = 0
+
+    def _background_repair():
+        nonlocal calls
+        calls += 1
+        started.set()
+        release.wait(timeout=5)
+        finished.set()
+
+    monkeypatch.setattr(store, "rebuild_atomic", _background_repair)
+
+    assert lexstore.search_bm25(tmp_path, "searchable", 5, repair=False) is None
+    assert started.wait(timeout=2)
+    assert lexstore.search_substring(tmp_path, "searchable", repair=False) is None
+    assert lexstore.search_semantic_units(tmp_path, "decision", 5, repair=False) is None
+    assert calls == 1
+    assert not lexstore.lexical_path(tmp_path).exists()
+
+    release.set()
+    assert finished.wait(timeout=2)
+
+
+@needs_fts5
+def test_nonrepairing_search_does_not_heal_a_stale_sidecar(tmp_path, monkeypatch):
+    """Detected drift is handed to the repair worker, never healed inline."""
+    _write_page(tmp_path, "Knowledge Base/a.md", "stable searchable payload")
+    assert lexstore.search_bm25(tmp_path, "searchable", 5)
+    store = lexstore.get_store(tmp_path)
+
+    _write_page(tmp_path, "Knowledge Base/b.md", "new drifted payload")
+    current = bm25.corpus_key(tmp_path, "kb")
+    repairs: list[str] = []
+    repair_started = threading.Event()
+    repair_release = threading.Event()
+    repair_finished = threading.Event()
+
+    def _forbidden_rebuild(*_args, **_kwargs):
+        repairs.append("rebuild")
+        raise AssertionError("foreground search rebuilt the lexical sidecar")
+
+    def _forbidden_heal(*_args, **_kwargs):
+        repairs.append("heal")
+        raise AssertionError("foreground search healed the lexical sidecar")
+
+    def _background_repair():
+        repair_started.set()
+        repair_release.wait(timeout=5)
+        repair_finished.set()
+
+    monkeypatch.setattr(store, "_rebuild", _forbidden_rebuild)
+    monkeypatch.setattr(store, "_heal_delta", _forbidden_heal)
+    monkeypatch.setattr(store, "rebuild_atomic", _background_repair)
+
+    assert (
+        lexstore.search_bm25(
+            tmp_path,
+            "drifted",
+            5,
+            freshness=current,
+            repair=False,
+        )
+        is None
+    )
+    assert repairs == []
+    assert repair_started.wait(timeout=2)
+    repair_release.set()
+    assert repair_finished.wait(timeout=2)
+
+
+@needs_fts5
+def test_nonrepairing_search_serves_an_already_fresh_sidecar(tmp_path):
+    _write_page(tmp_path, "Knowledge Base/a.md", "stable searchable payload")
+    assert lexstore.search_bm25(tmp_path, "searchable", 5)
+    current = bm25.corpus_key(tmp_path, "kb")
+
+    hits = lexstore.search_bm25(
+        tmp_path,
+        "searchable",
+        5,
+        freshness=current,
+        repair=False,
+    )
+
+    assert hits and hits[0][0] == "Knowledge Base/a.md"

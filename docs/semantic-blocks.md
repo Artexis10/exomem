@@ -26,6 +26,20 @@ Metadata is optional. Leading bullets of the form `- key: value` are parsed as
 metadata and removed from the block body. Any other body content stays Markdown:
 paragraphs, bullets, wikilinks, tables, and code blocks.
 
+The first-class rich metadata fields are `category`, `tags`, and `context`.
+`tags` is a comma-separated list of plain tokens (no `#` prefix); tokens are
+trimmed, Unicode-normalized, case-folded, and de-duplicated in first-authored
+order. `context` is trimmed, non-empty, single-line Unicode. Invalid values stay
+visible in generic parsed metadata for diagnosis but do not partially populate
+the first-class field.
+
+When `category` is omitted, the heading supplies the authored category identity:
+the exact heading is `category_raw` and its normalized key is `category_key`.
+Reviewed category aliases may resolve that key; otherwise the public category
+falls back to the governed heading kind. An explicit `- category:` overrides the
+heading-derived category identity. Category, governed kind, tags, context, and
+typed relations are separate dimensions.
+
 Headings inside fenced code blocks are ignored by the parser.
 
 ## Block types
@@ -136,6 +150,9 @@ references become ambiguous.
 ```markdown
 ## Evidence
 - id: receipt-photo
+- category: purchase records
+- tags: warranty, hardware/receipts
+- context: replacement request
 - relations: supports: [[Case#Laptop warranty]]
 
 Photo of the purchase receipt preserved for the warranty claim.

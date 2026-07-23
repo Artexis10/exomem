@@ -59,13 +59,15 @@ _PAGE = "Knowledge Base/Notes/Insights/lifecycle.md"
 _OTHER_PAGE = "Knowledge Base/Notes/Insights/lifecycle-moved.md"
 
 
-def _source(body: str, *, page_id: str | None = _ID) -> str:
+def _source(
+    body: str, *, page_id: str | None = _ID, status: str = "active"
+) -> str:
     identity = f"exomem_id: {page_id}\n" if page_id is not None else ""
     return (
         "---\n"
         "title: Lifecycle\n"
         "type: insight\n"
-        "status: active\n"
+        f"status: {status}\n"
         f"{identity}"
         "---\n\n"
         f"{body}\n\n"
@@ -73,10 +75,93 @@ def _source(body: str, *, page_id: str | None = _ID) -> str:
     )
 
 
+def _semantic_body(statement: str) -> str:
+    return (
+        "## Observations\n\n"
+        f"- [lifecycle check] {statement} #lifecycle"
+    )
+
+
+def test_inactive_compiled_page_warns_then_activation_requires_a_unit(
+    tmp_path: Path,
+) -> None:
+    draft = _source("Ordinary draft prose.", status="draft")
+    active = draft.replace("status: draft", "status: active")
+    path = _write(tmp_path, _PAGE, draft)
+    before_bytes = path.read_bytes()
+
+    preflight = semantic_writes.preflight_existing(
+        tmp_path,
+        path=_PAGE,
+        after_source=active,
+        operation="edit",
+    )
+
+    assert "missing_semantic_unit" in {
+        item.code for item in preflight.contract_result.blocking_findings
+    }
+    with pytest.raises(semantic_writes.SemanticWriteError) as blocked:
+        semantic_writes.commit_existing(tmp_path, preflight=preflight)
+    assert blocked.value.code == "SEMANTIC_CONTRACT_BLOCKED"
+    assert "missing_semantic_unit" in blocked.value.reason
+    assert path.read_bytes() == before_bytes
+
+
+def test_grandfathered_missing_unit_allows_nonworsening_edit_with_visible_debt(
+    tmp_path: Path,
+) -> None:
+    before = _source("Legacy prose without semantic units.")
+    after = before.replace("Legacy prose", "Updated legacy prose")
+    path = _write(tmp_path, _PAGE, before)
+    activation_manifest.ensure_manifest(tmp_path)
+
+    preflight = semantic_writes.preflight_existing(
+        tmp_path,
+        path=_PAGE,
+        after_source=after,
+        operation="edit",
+    )
+
+    debt = next(
+        item
+        for item in preflight.contract_result.warnings
+        if item.code == "missing_semantic_unit"
+    )
+    assert debt.detail.startswith("Pre-existing semantic debt retained:")
+    assert preflight.contract_result.should_block is False
+    committed = semantic_writes.commit_existing(tmp_path, preflight=preflight)
+    assert committed.mutated is True
+    assert path.read_text(encoding="utf-8") == after
+
+
+def test_compliant_page_cannot_remove_its_final_unit(tmp_path: Path) -> None:
+    activation_manifest.ensure_manifest(tmp_path)
+    before = _source(
+        "## Observations\n\n- [operating constraint] Keep retries bounded #reliability"
+    )
+    after = _source("Only structural prose remains.")
+    path = _write(tmp_path, _PAGE, before)
+    before_bytes = path.read_bytes()
+
+    preflight = semantic_writes.preflight_existing(
+        tmp_path,
+        path=_PAGE,
+        after_source=after,
+        operation="edit",
+    )
+
+    assert "missing_semantic_unit" in {
+        item.code for item in preflight.contract_result.blocking_findings
+    }
+    with pytest.raises(semantic_writes.SemanticWriteError):
+        semantic_writes.commit_existing(tmp_path, preflight=preflight)
+    assert path.read_bytes() == before_bytes
+
+
 def _write(root: Path, rel: str, source: str) -> Path:
     path = root / rel
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(source, encoding="utf-8")
+    path.write_text(source, encoding="utf-8", newline="\n")
     return path
 
 
@@ -632,6 +717,41 @@ def test_move_returns_structured_index_degradation_and_attempts_both_leaves(
     assert result.index["delete_report"]["reconcile_required"] is False
 
 
+def test_move_preserves_grandfathered_missing_unit_debt(tmp_path: Path) -> None:
+    source = _source("Legacy prose without semantic units.")
+    page = _write(tmp_path, _PAGE, source)
+    corpus = semantic_contract.build_corpus_context(tmp_path)
+    activation_manifest.ensure_manifest(
+        tmp_path, census=corpus.activation_census
+    )
+    original = page.read_bytes()
+
+    result = move_module.move_file(
+        tmp_path,
+        old_path=_PAGE,
+        new_path=_OTHER_PAGE,
+        update_wikilinks=False,
+    )
+
+    assert not page.exists()
+    assert (tmp_path / _OTHER_PAGE).read_bytes() == original
+    assert result.semantic is not None
+    contract = result.semantic["contract_results"][_ID]
+    finding = next(
+        item for item in contract["warnings"]
+        if item["code"] == "missing_semantic_unit"
+    )
+    assert finding["severity"] == "warning"
+    assert finding["governed_element_identity"] == ["semantic_units", "minimum"]
+    assert finding["resolved_rule"] == [
+        "semantic_authoring", "semantic_unit", "minimum"
+    ]
+    assert contract["should_block"] is False
+    assert contract["semantic_unit_count"] == 0
+    assert contract["compact_unit_count"] == 0
+    assert contract["rich_unit_count"] == 0
+
+
 def test_trash_indebted_page_preserves_review_history_and_returns_exact_cleanup(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1085,7 +1205,7 @@ def test_recovery_replaces_committed_review_with_exact_trash_proof(
             current=_binding(_PAGE, before),
         ),
     )
-    page.write_text(source, encoding="utf-8")
+    page.write_text(source, encoding="utf-8", newline="\n")
     corpus = semantic_contract.build_corpus_context(tmp_path)
     activation_manifest.ensure_manifest(
         tmp_path, census=corpus.activation_census
@@ -1143,7 +1263,7 @@ def test_recovery_rejects_inexact_committed_trash_proof_before_restore(
             current=_binding(_PAGE, before),
         ),
     )
-    page.write_text(source, encoding="utf-8")
+    page.write_text(source, encoding="utf-8", newline="\n")
     corpus = semantic_contract.build_corpus_context(tmp_path)
     activation_manifest.ensure_manifest(
         tmp_path, census=corpus.activation_census
@@ -1253,11 +1373,15 @@ def test_directory_recovery_accepts_exact_identity_keyed_review_mapping(
     directory = "Knowledge Base/Notes/Insights/review-tree"
     first = f"{directory}/a.md"
     second = f"{directory}/b.md"
-    _write(tmp_path, first, _source("A has no honest relation", page_id=_ID))
+    _write(
+        tmp_path,
+        first,
+        _source(_semantic_body("Page A has no honest relation."), page_id=_ID),
+    )
     _write(
         tmp_path,
         second,
-        _source("B has no honest relation", page_id=_OTHER_ID),
+        _source(_semantic_body("Page B has no honest relation."), page_id=_OTHER_ID),
     )
     trashed = delete_directory_module.delete_directory(
         tmp_path,
@@ -1419,7 +1543,7 @@ def test_directory_recovery_uses_root_sidecar_proof_for_committed_page(
             ),
         ),
     )
-    page.write_text(source, encoding="utf-8")
+    page.write_text(source, encoding="utf-8", newline="\n")
     corpus = semantic_contract.build_corpus_context(tmp_path)
     activation_manifest.ensure_manifest(
         tmp_path, census=corpus.activation_census
@@ -1455,7 +1579,10 @@ def test_directory_review_validation_does_not_truncate_actionable_pages(
         _write(
             tmp_path,
             f"{directory}/{index:02d}.md",
-            _source(f"Page {index}", page_id=page_id),
+            _source(
+                _semantic_body(f"Page {index} has no honest relation."),
+                page_id=page_id,
+            ),
         )
     trashed = delete_directory_module.delete_directory(
         tmp_path,
@@ -1486,7 +1613,7 @@ def test_recovery_review_token_cannot_replay_at_another_destination(
     activation_manifest.ensure_manifest(
         tmp_path, census=empty.activation_census
     )
-    source = _source("No honest relation exists")
+    source = _source(_semantic_body("No honest relation exists."))
     _write(tmp_path, _PAGE, source)
     trashed = delete_file_module.delete_file(
         tmp_path,
@@ -1612,7 +1739,12 @@ def test_recovery_structural_and_non_markdown_matrix(
     source: str,
     expects_semantic: bool,
 ) -> None:
-    path = f"Knowledge Base/Notes/Insights/{suffix}"
+    if suffix == "entity.md":
+        path = "Knowledge Base/Entities/Concepts/entity.md"
+    elif suffix == "arbitrary.md":
+        path = "Knowledge Base/Identity/arbitrary.md"
+    else:
+        path = f"Knowledge Base/Notes/Insights/{suffix}"
     _write(tmp_path, path, source)
     trashed = delete_file_module.delete_file(
         tmp_path,
@@ -1660,7 +1792,10 @@ def test_legacy_recovery_requires_current_contract_and_cannot_request_review(
     tmp_path: Path,
 ) -> None:
     anchor = "Knowledge Base/Notes/Insights/legacy-anchor.md"
-    qualifying = _source("Legacy qualifying", page_id=None).replace(
+    qualifying = _source(
+        _semantic_body("The legacy page has a qualifying relation."),
+        page_id=None,
+    ).replace(
         "## Relations\n",
         "## Relations\n"
         "- supports [[Knowledge Base/Notes/Insights/legacy-anchor]]\n",
@@ -1683,7 +1818,14 @@ def test_legacy_recovery_requires_current_contract_and_cannot_request_review(
     assert relation_review.load_lifecycle_prepared(tmp_path, _ID) is None
 
     indebted_path = "Knowledge Base/Notes/Insights/legacy-indebted.md"
-    _write(tmp_path, indebted_path, _source("Legacy debt", page_id=None))
+    _write(
+        tmp_path,
+        indebted_path,
+        _source(
+            _semantic_body("The legacy page still has relation debt."),
+            page_id=None,
+        ),
+    )
     indebted = delete_file_module.delete_file(
         tmp_path,
         path=indebted_path,
@@ -2008,6 +2150,7 @@ def test_material_edit_requires_and_commits_exact_reviewed_none_transition(
     decision_path.write_text(
         relation_review.serialize_lifecycle_decision(current_decision),
         encoding="utf-8",
+        newline="\n",
     )
     after = before.replace("A\n\n## Relations", "B\n\n## Relations")
 
@@ -2252,7 +2395,7 @@ def test_real_edit_honors_saved_contract_validation_mode(
                 tmp_path,
                 path=_PAGE,
                 why="remove required block",
-                new_body="No structured block remains.",
+                new_body="## Decision\n\nNo structured finding remains.",
                 today=dt.date(2026, 7, 14),
             )
         assert exc.value.code == "SEMANTIC_CONTRACT_BLOCKED"
@@ -2263,7 +2406,7 @@ def test_real_edit_honors_saved_contract_validation_mode(
         tmp_path,
         path=_PAGE,
         why="remove required block",
-        new_body="No structured block remains.",
+        new_body="## Decision\n\nNo structured finding remains.",
         today=dt.date(2026, 7, 14),
     )
     assert result.semantic is not None
@@ -2374,7 +2517,9 @@ def test_set_frontmatter_preliminary_block_does_not_register_project(
 def test_set_frontmatter_draft_to_active_commits_exact_reviewed_none(
     tmp_path: Path,
 ) -> None:
-    draft = _source("Draft").replace("status: active", "status: draft")
+    draft = _source(
+        "## Observations\n\n- [constraint] Activation needs explicit review."
+    ).replace("status: active", "status: draft")
     page = _write(tmp_path, _PAGE, draft)
     _write(tmp_path, _OTHER_PAGE, _source("Existing", page_id=_OTHER_ID))
 
@@ -2677,10 +2822,14 @@ def test_non_full_exact_committed_replay_needs_no_lifecycle_prepared_slot(
     else:
         before = "# Arbitrary\n\nA\n"
         after = "# Arbitrary\n\nB\n"
-    _write(tmp_path, _PAGE, before)
+    path = {
+        "entity": "Knowledge Base/Entities/Concepts/lifecycle.md",
+        "arbitrary": "Knowledge Base/Identity/lifecycle.md",
+    }.get(transition, _PAGE)
+    _write(tmp_path, path, before)
     preflight = semantic_writes.preflight_existing(
         tmp_path,
-        path=_PAGE,
+        path=path,
         after_source=after,
         operation="tier2_overwrite",
     )
@@ -2696,7 +2845,7 @@ def test_non_full_exact_committed_replay_needs_no_lifecycle_prepared_slot(
 
     replay_preflight = semantic_writes.preflight_existing(
         tmp_path,
-        path=_PAGE,
+        path=path,
         after_source=after,
         operation="tier2_overwrite",
         transition_token=first.transition_token,
@@ -3567,7 +3716,9 @@ def test_lifecycle_residue_policy_accepts_only_three_atomic_batch_files(
     )
     path.parent.mkdir(parents=True)
     path.write_text(
-        relation_review.serialize_lifecycle_decision(decision), encoding="utf-8"
+        relation_review.serialize_lifecycle_decision(decision),
+        encoding="utf-8",
+        newline="\n",
     )
     supported = (
         f".{path.name}.abcdefgh.tmp",
@@ -3832,7 +3983,9 @@ def test_lifecycle_loader_prefers_decision_then_current_creation_receipt_and_nev
     )
     decision_path.parent.mkdir(parents=True)
     decision_path.write_text(
-        relation_review.serialize_lifecycle_decision(decision), encoding="utf-8"
+        relation_review.serialize_lifecycle_decision(decision),
+        encoding="utf-8",
+        newline="\n",
     )
     legacy_receipt = relation_review.review_artifact_path(tmp_path, _ID)
     legacy_receipt.parent.mkdir(parents=True, exist_ok=True)
@@ -3919,7 +4072,9 @@ def test_lifecycle_state_reserves_uuid_against_new_6d_creation(
 def test_malformed_lifecycle_state_does_not_break_exact_existing_6d_replay(
     tmp_path: Path,
 ) -> None:
-    source = _source("Committed creation")
+    source = _source(
+        "## Observations\n\n- [constraint] Exact replay preserves the committed unit."
+    )
     committed = relation_review.commit_creation_draft(
         tmp_path,
         path=_PAGE,
