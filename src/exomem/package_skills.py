@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import subprocess
 import zipfile
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
@@ -30,10 +31,77 @@ _HOOKS_SRC = Path(__file__).parent / "_hooks"
 # reference material; the web clients cannot reach the repo to resolve links.
 _CORE_EXTRAS = ("references",)
 _CORE_FILES = ("project-keys.yaml",)
+PRIVATE_OUTPUT_MARKER = ".exomem-private-output.json"
+
+_LOCAL_PRIVATE_ROOT = ".exomem-private"
+
+
+def _nearest_existing_directory(path: Path) -> Path | None:
+    candidate = path
+    while not candidate.exists() and candidate != candidate.parent:
+        candidate = candidate.parent
+    if not candidate.exists():
+        return None
+    return candidate if candidate.is_dir() else candidate.parent
+
+
+def _exomem_checkout_containing(path: Path) -> Path | None:
+    existing = _nearest_existing_directory(path)
+    if existing is None:
+        return None
+    try:
+        completed = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            cwd=existing,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except OSError:
+        return None
+    if completed.returncode != 0:
+        return None
+    checkout = Path(completed.stdout.strip()).resolve()
+    if not (
+        (checkout / "pyproject.toml").is_file()
+        and (checkout / "src" / "exomem" / "package_skills.py").is_file()
+    ):
+        return None
+    return checkout
+
+
+def ensure_personalized_output(path: Path, *, vault: Path) -> Path:
+    """Require personalized output inside its explicit vault.
+
+    The sole checkout exception is the known git-ignored ``.exomem-private/``
+    root in the active Exomem checkout. Checkout public/release paths are
+    rejected even when this module is imported from an installed wheel.
+    """
+
+    target = Path(path).expanduser().resolve()
+    explicit_vault = Path(vault).expanduser().resolve()
+    containing_checkout = _exomem_checkout_containing(target)
+    active_checkout = _exomem_checkout_containing(Path.cwd().resolve())
+    if containing_checkout is not None:
+        relative = target.relative_to(containing_checkout)
+        first = relative.parts[0] if relative.parts else ""
+        if containing_checkout == active_checkout and first == _LOCAL_PRIVATE_ROOT:
+            return target
+        raise ValueError(
+            "personalized output cannot target checkout public/release paths; "
+            f"use the explicit vault or the active checkout's {_LOCAL_PRIVATE_ROOT}/ root"
+        )
+
+    if target != explicit_vault and explicit_vault not in target.parents:
+        raise ValueError(
+            "personalized output must stay inside the explicitly supplied vault"
+        )
+    return target
 
 
 def _core_payload(vault: Path | None) -> dict[str, str]:
     """Files for the core `exomem` skill archive, keyed by archive-relative path."""
+    workflow_skills.validate_contract_projection("exomem", _SKILL_SRC, core=True)
     payload: dict[str, str] = {"SKILL.md": (_SKILL_SRC / "SKILL.md").read_text(encoding="utf-8")}
 
     for folder in _CORE_EXTRAS:
@@ -48,11 +116,24 @@ def _core_payload(vault: Path | None) -> dict[str, str]:
         if source.is_file():
             payload[name] = source.read_text(encoding="utf-8")
 
+    if vault is not None:
+        # Static provenance marker: it contains no vault path or project data,
+        # but makes a copied personalized archive fail the public artifact gate.
+        payload[PRIVATE_OUTPUT_MARKER] = json.dumps(
+            {
+                "artifact": "exomem-personalized-skill",
+                "public_build_input": False,
+            },
+            indent=2,
+        ) + "\n"
+
     return payload
 
 
 def _workflow_payload(name: str) -> dict[str, str]:
-    return {"SKILL.md": (workflow_skills.source_dir(name) / "SKILL.md").read_text(encoding="utf-8")}
+    source = workflow_skills.source_dir(name)
+    workflow_skills.validate_contract_projection(name, source)
+    return {"SKILL.md": (source / "SKILL.md").read_text(encoding="utf-8")}
 
 
 def _write_zip(path: Path, payload: dict[str, str]) -> int:
@@ -177,6 +258,13 @@ def sync_plugin(plugin_root: Path) -> dict:
     hooks_dir = plugin_root / "hooks"
     manifest_dir = plugin_root / ".claude-plugin"
 
+    workflow_skills.validate_contract_projection("exomem", _SKILL_SRC, core=True)
+    for skill in workflow_skills.list_skills():
+        name = str(skill["name"])
+        workflow_skills.validate_contract_projection(
+            name, workflow_skills.source_dir(name)
+        )
+
     for stale in (skills_dir, hooks_dir):
         if stale.exists():
             shutil.rmtree(stale)
@@ -214,7 +302,9 @@ def package_skills(out_dir: Path | None = None, *, vault: Path | None = None) ->
     """Write one archive per skill into ``out_dir``.
 
     Args:
-        out_dir: Destination directory (default: ``<cwd>/dist/skills``).
+        out_dir: Destination directory. Generic builds default to
+            ``<cwd>/dist/skills``; personalized builds default to a private
+            directory inside the explicitly supplied vault.
         vault: Vault root whose real ``project-keys.yaml`` should be overlaid into
             the core skill. Omit for the generic, shareable archive.
 
@@ -230,8 +320,17 @@ def package_skills(out_dir: Path | None = None, *, vault: Path | None = None) ->
             "is the exomem install intact?"
         )
 
-    out_dir = Path(out_dir).expanduser() if out_dir is not None else Path.cwd() / "dist" / "skills"
     vault = Path(vault).expanduser() if vault is not None else None
+    if out_dir is None:
+        out_dir = (
+            vault / "Knowledge Base" / "_Schema" / "private-skills"
+            if vault is not None
+            else Path.cwd() / "dist" / "skills"
+        )
+    else:
+        out_dir = Path(out_dir).expanduser()
+    if vault is not None:
+        out_dir = ensure_personalized_output(out_dir, vault=vault)
 
     builds: list[tuple[str, dict[str, str]]] = [("exomem", _core_payload(vault))]
     for skill in workflow_skills.list_skills():
@@ -244,4 +343,9 @@ def package_skills(out_dir: Path | None = None, *, vault: Path | None = None) ->
         size = _write_zip(target, payload)
         archives.append({"name": name, "path": str(target), "bytes": size})
 
-    return {"out_dir": str(out_dir), "archives": archives, "count": len(archives)}
+    return {
+        "out_dir": str(out_dir),
+        "archives": archives,
+        "count": len(archives),
+        "personalized": vault is not None,
+    }

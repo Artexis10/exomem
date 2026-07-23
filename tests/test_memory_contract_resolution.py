@@ -357,8 +357,8 @@ def test_registry_scope_failure_is_a_resolution_conflict() -> None:
         proposal={
             "schema_version": 1,
             "categories": {
-                "config": {
-                    "description": "Configuration",
+                "deployment_setting": {
+                    "description": "Deployment setting",
                     "scope": {"projects": ["other"]},
                 }
             },
@@ -367,7 +367,11 @@ def test_registry_scope_failure_is_a_resolution_conflict() -> None:
     )
 
     resolved = memory_schema.resolve_contracts(
-        (_contract("scoped", categories={"config": {"required": True}}),),
+        (
+            _contract(
+                "scoped", categories={"deployment_setting": {"required": True}}
+            ),
+        ),
         projects=("atlas", "companion"),
         page_type="insight",
         language_registry=registry,
@@ -376,7 +380,7 @@ def test_registry_scope_failure_is_a_resolution_conflict() -> None:
     assert resolved.conflicts[0].code == "CONTRACT_RULE_CONFLICT"
     assert resolved.conflicts[0].resolved_rule == (
         "categories",
-        "config",
+        "deployment_setting",
         "required",
     )
     assert "scope" in resolved.conflicts[0].detail
@@ -387,8 +391,8 @@ def test_registry_scope_failure_is_reported_for_an_empty_element_rule() -> None:
         proposal={
             "schema_version": 1,
             "categories": {
-                "config": {
-                    "description": "Configuration",
+                "deployment_setting": {
+                    "description": "Deployment setting",
                     "scope": {"projects": ["other"]},
                 }
             },
@@ -397,7 +401,7 @@ def test_registry_scope_failure_is_reported_for_an_empty_element_rule() -> None:
     )
 
     resolved = memory_schema.resolve_contracts(
-        (_contract("scoped", categories={"config": {}}),),
+        (_contract("scoped", categories={"deployment_setting": {}}),),
         projects=("atlas",),
         page_type="insight",
         language_registry=registry,
@@ -406,7 +410,7 @@ def test_registry_scope_failure_is_reported_for_an_empty_element_rule() -> None:
     assert resolved.conflicts[0].code == "CONTRACT_RULE_CONFLICT"
     assert resolved.conflicts[0].resolved_rule == (
         "categories",
-        "config",
+        "deployment_setting",
         "declaration",
     )
     assert "scope" in resolved.conflicts[0].detail

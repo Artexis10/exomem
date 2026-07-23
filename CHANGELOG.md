@@ -5,6 +5,42 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.29.3](https://github.com/Artexis10/exomem/compare/v0.29.2...v0.29.3) (2026-07-22)
+
+
+### Bug Fixes
+
+* **hooks:** parse Codex stop events ([#305](https://github.com/Artexis10/exomem/issues/305)) ([b3849b6](https://github.com/Artexis10/exomem/commit/b3849b694035065463b4c37ce827301239796f25))
+* **plugin:** sync Codex capture hook ([#307](https://github.com/Artexis10/exomem/issues/307)) ([24fecae](https://github.com/Artexis10/exomem/commit/24fecae9d3d012f3829d7c30f20cde97b2793121))
+
+## [0.29.2](https://github.com/Artexis10/exomem/compare/v0.29.1...v0.29.2) (2026-07-22)
+
+
+### Bug Fixes
+
+* restore fast reliable recall and writes ([#303](https://github.com/Artexis10/exomem/issues/303)) ([9e3b477](https://github.com/Artexis10/exomem/commit/9e3b477b1798a12c8a595791c8973563b7ca41ce))
+
+## [0.29.1](https://github.com/Artexis10/exomem/compare/v0.29.0...v0.29.1) (2026-07-22)
+
+
+### Bug Fixes
+
+* **release:** enforce parseable squash titles ([#300](https://github.com/Artexis10/exomem/issues/300)) ([3e18da3](https://github.com/Artexis10/exomem/commit/3e18da378420f5599c47976dad40eaeb3f707454))
+
+## [0.29.0](https://github.com/Artexis10/exomem/compare/v0.28.0...v0.29.0) (2026-07-21)
+
+
+### Features
+
+* survive session-store outages with stale-while-revalidate validation ([#292](https://github.com/Artexis10/exomem/issues/292)) ([a2dc541](https://github.com/Artexis10/exomem/commit/a2dc5414bc11366063c376acac7fa8458db20a34))
+
+## [0.28.0](https://github.com/Artexis10/exomem/compare/v0.27.1...v0.28.0) (2026-07-21)
+
+
+### Features
+
+* make edge ingress deterministic and self-verifying ([#290](https://github.com/Artexis10/exomem/issues/290)) ([d5736af](https://github.com/Artexis10/exomem/commit/d5736afaa2c608b8f074e718a06b4d6783bdc2f6))
+
 ## [0.27.1](https://github.com/Artexis10/exomem/compare/v0.27.0...v0.27.1) (2026-07-21)
 
 

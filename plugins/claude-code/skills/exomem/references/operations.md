@@ -79,11 +79,15 @@ is retained for at least one compatibility release. The response-detail choice
 is removed before mutation identity is calculated, so it cannot create a second
 write or change which stored terminal a replay receives.
 
-Busy, acknowledgement-pending, and committed-acknowledgement-uncertain outcomes
+Warming, busy, acknowledgement-pending, and committed-acknowledgement-uncertain outcomes
 remain structured errors. Retrying must retain the same identity and payload:
-wait before retrying `MUTATION_BUSY`; never revise a pending payload; and after
+wait before retrying `MUTATION_WARMING` or `MUTATION_BUSY`; never revise a pending payload; and after
 `MUTATION_COMMITTED_ACKNOWLEDGEMENT_UNCERTAIN`, reconcile and retry only with the
 same identity rather than creating a new write.
+
+`MUTATION_WARMING` means the restart-time semantic corpus is still being built.
+It never holds the mutation boundary and never means the Exomem tool is disabled;
+retry the unchanged call after `retry_after_ms`.
 
 `edit_memory` is one tool. New calls supply `path`, `why`, and one nested
 `operation` selected by `kind`:

@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from exomem import activation_manifest as activation_manifest_module
 from exomem import embeddings as embeddings_module
 from exomem import find as find_module
 from exomem import schema as schema_module
@@ -27,8 +28,10 @@ def _reset_corpus_context_cache():
     different test's (or an unpatched) environment.
     """
     semantic_contract_module.reset_corpus_context_cache()
+    activation_manifest_module.reset_manifest_cache()
     yield
     semantic_contract_module.reset_corpus_context_cache()
+    activation_manifest_module.reset_manifest_cache()
 
 
 @pytest.fixture(autouse=True)

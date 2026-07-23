@@ -831,7 +831,7 @@ def chunk_text(title: str, body: str) -> list[str]:
     - Split on blank-line paragraph boundaries.
     - Drop empty/whitespace-only chunks.
     - Truncate overlong chunks at word boundary so the tokenizer doesn't lop.
-    - Always prepend `<title>\\n\\n` so embeddings of orphan paragraphs still
+    - Always prepend the title and a blank line so embeddings of orphan paragraphs still
       carry the document's topic.
     """
     title = (title or "").strip()

@@ -255,6 +255,10 @@ def test_ha_probe_accepts_compatible_release_drift(
         "https://laptop.example.com/health/ready": (200, _ready("laptop", "0.20.2")),
     }
     monkeypatch.setattr(doctor_module, "_probe_get", lambda url: responses[url])
+    # This test is about ha.replica.*/ha.compatibility/ha.release_drift, not the
+    # separate edge-ingress section (also lease-gated); silence it like the
+    # sibling probe tests above silence `_check_ha_probes`.
+    monkeypatch.setattr(doctor_module, "_check_edge_ingress", lambda **_kwargs: [])
 
     report = doctor_module.doctor(
         vault=str(vault),

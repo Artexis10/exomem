@@ -343,17 +343,40 @@ def _start_media_worker(vault_root: Path) -> Any | None:
     try:
         from .writer_lease import get_manager
 
-        with get_manager().mutation_guard(vault_root):
-            media_processing.reconcile_all_media(
+        manager = get_manager()
+
+        def reconcile_commit_guard():
+            return manager.mutation_guard(
                 vault_root,
-                limit=media_processing.DEFAULT_RECONCILE_LIMIT,
+                operation="startup_media_reconcile_commit",
+                holder_kind="background",
             )
-            if unavailable_reason is not None and unavailable_action is not None:
-                media_processing.mark_processing_unavailable(
+
+        media_processing.reconcile_all_media(
+            vault_root,
+            limit=media_processing.DEFAULT_RECONCILE_LIMIT,
+            reconcile_one=lambda binary: media_processing.reconcile_media(
+                vault_root,
+                binary,
+                explicit=False,
+                commit_guard=reconcile_commit_guard,
+            ),
+        )
+        if unavailable_reason is not None and unavailable_action is not None:
+
+            def unavailable_commit_guard():
+                return manager.mutation_guard(
                     vault_root,
-                    reason=unavailable_reason,
-                    next_action=unavailable_action,
+                    operation="startup_media_unavailable_commit",
+                    holder_kind="background",
                 )
+
+            media_processing.mark_processing_unavailable(
+                vault_root,
+                reason=unavailable_reason,
+                next_action=unavailable_action,
+                commit_guard=unavailable_commit_guard,
+            )
     except Exception as exc:  # noqa: BLE001 - startup discovery is best-effort
         log.warning("media worker startup discovery failed: %s", exc)
     if worker is None:

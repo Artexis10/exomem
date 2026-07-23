@@ -37,7 +37,9 @@ _ANCHOR_RE = re.compile(
     r"(?:^|[ \t])\^(?P<anchor>[A-Za-z0-9](?:[A-Za-z0-9-]{0,62}[A-Za-z0-9])?)$"
 )
 _TRAILING_TAG_RE = re.compile(r"(?:^|[ \t])#(?P<tag>[^\s#]+)$")
-_RICH_CATEGORY_RE = re.compile(r"^\s*[-*+]\s+category\s*:", re.IGNORECASE)
+_RICH_METADATA_RE = re.compile(
+    r"^\s*[-*+]\s+(?P<key>[A-Za-z0-9 _-]+)\s*:", re.IGNORECASE
+)
 _TASK_LABELS = frozenset({"", " ", "x", "X", "-"})
 _IDENTITY_SCHEMA = "exomem.semantic-unit.identity.v1"
 
@@ -448,14 +450,6 @@ def parse_semantic_units(
             )
             (warnings if diagnostic.severity == "warning" else errors).append(diagnostic)
 
-    _parse_compact_units(
-        lines,
-        path=source_path,
-        validate=validate,
-        units=units,
-        errors=errors,
-    )
-
     kind_resolver = None
     if language_registry is not None:
 
@@ -497,6 +491,16 @@ def parse_semantic_units(
         registry=relation_registry,
         kind_resolver=kind_resolver,
     )
+    _parse_compact_units(
+        lines,
+        path=source_path,
+        validate=validate,
+        units=units,
+        errors=errors,
+        excluded_line_ranges=tuple(
+            (block.line, block.end_line) for block in rich_document.blocks
+        ),
+    )
     note_relation_document = markdown_relations.parse_markdown_relations(
         source,
         include_legacy=include_legacy_relations,
@@ -516,6 +520,20 @@ def parse_semantic_units(
         )
         if validate and category_error is not None:
             errors.append(category_error)
+        rich_tags, tags_error = _rich_tags(
+            block,
+            path=source_path,
+            line_by_number=line_by_number,
+        )
+        rich_context, context_error = _rich_context(
+            block,
+            path=source_path,
+            line_by_number=line_by_number,
+        )
+        if validate:
+            errors.extend(
+                error for error in (tags_error, context_error) if error is not None
+            )
         units.append(
             SemanticUnit(
                 form="rich",
@@ -530,8 +548,8 @@ def parse_semantic_units(
                     else block.type
                 ),
                 content=block.body,
-                tags=(),
-                context=None,
+                tags=rich_tags,
+                context=rich_context,
                 relations=tuple(block.relations),
                 metadata=block.metadata,
                 anchor=block.id,
@@ -829,9 +847,11 @@ def _parse_compact_units(
     validate: bool,
     units: list[SemanticUnit],
     errors: list[SemanticUnitDiagnostic],
+    excluded_line_ranges: tuple[tuple[int, int], ...] = (),
 ) -> None:
     fence_char: str | None = None
     fence_length = 0
+    range_index = 0
     for line in lines:
         fence = _FENCE_RE.match(line.text)
         if fence_char is not None:
@@ -843,6 +863,19 @@ def _parse_compact_units(
             marker = fence.group("fence")
             fence_char = marker[0]
             fence_length = len(marker)
+            continue
+
+        while (
+            range_index < len(excluded_line_ranges)
+            and line.number > excluded_line_ranges[range_index][1]
+        ):
+            range_index += 1
+        if (
+            range_index < len(excluded_line_ranges)
+            and excluded_line_ranges[range_index][0]
+            <= line.number
+            <= excluded_line_ranges[range_index][1]
+        ):
             continue
 
         match = _COMPACT_RE.match(line.text)
@@ -1046,16 +1079,103 @@ def _rich_category(
                 ),
                 severity="error",
             ),
+    )
+
+
+def _rich_tags(
+    block: semantic_blocks.SemanticBlock,
+    *,
+    path: str,
+    line_by_number: dict[int, _SourceLine],
+) -> tuple[tuple[str, ...], SemanticUnitDiagnostic | None]:
+    raw = block.metadata.get("tags")
+    if raw is None:
+        return (), None
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for entry in raw.split(","):
+        tag = unicodedata.normalize("NFKC", entry.strip()).casefold()
+        if not _is_valid_tag(tag):
+            return (), _invalid_rich_metadata(
+                block,
+                key="tags",
+                path=path,
+                line_by_number=line_by_number,
+                message="invalid rich semantic-unit tags",
+                remediation=(
+                    "Use comma-separated 1-64 character tags beginning with a letter "
+                    "or digit and containing only letters, digits, `_`, `-`, or `/`; "
+                    "do not use `#`, empty path segments, or a trailing `/`."
+                ),
+            )
+        if tag not in seen:
+            seen.add(tag)
+            normalized.append(tag)
+    return tuple(normalized), None
+
+
+def _rich_context(
+    block: semantic_blocks.SemanticBlock,
+    *,
+    path: str,
+    line_by_number: dict[int, _SourceLine],
+) -> tuple[str | None, SemanticUnitDiagnostic | None]:
+    raw = block.metadata.get("context")
+    if raw is None:
+        return None, None
+    context = raw.strip()
+    if not context or any(char in context for char in ("\r", "\n", "\v", "\f")):
+        return None, _invalid_rich_metadata(
+            block,
+            key="context",
+            path=path,
+            line_by_number=line_by_number,
+            message="invalid rich semantic-unit context",
+            remediation="Use non-empty single-line Unicode context.",
         )
+    return context, None
+
+
+def _invalid_rich_metadata(
+    block: semantic_blocks.SemanticBlock,
+    *,
+    key: str,
+    path: str,
+    line_by_number: dict[int, _SourceLine],
+    message: str,
+    remediation: str,
+) -> SemanticUnitDiagnostic:
+    source_line = _find_rich_metadata_line(block, key, line_by_number)
+    return SemanticUnitDiagnostic(
+        code=f"invalid_rich_{key}",
+        message=message,
+        path=path,
+        span=_span_for_source_line(source_line) if source_line is not None else None,
+        line=source_line.number if source_line is not None else block.line,
+        raw=(source_line.text if source_line is not None else block.metadata.get(key, "")),
+        remediation=remediation,
+        severity="error",
+    )
 
 
 def _find_rich_category_line(
     block: semantic_blocks.SemanticBlock,
     line_by_number: dict[int, _SourceLine],
 ) -> _SourceLine | None:
+    return _find_rich_metadata_line(block, "category", line_by_number)
+
+
+def _find_rich_metadata_line(
+    block: semantic_blocks.SemanticBlock,
+    key: str,
+    line_by_number: dict[int, _SourceLine],
+) -> _SourceLine | None:
     for number in range(block.line + 1, block.end_line + 1):
         line = line_by_number.get(number)
-        if line is not None and _RICH_CATEGORY_RE.match(line.text):
+        if line is None:
+            continue
+        match = _RICH_METADATA_RE.match(line.text)
+        if match is not None and semantic_blocks.normalize_label(match.group("key")) == key:
             return line
     return None
 
@@ -1093,6 +1213,8 @@ def _rich_remediation(code: str) -> str:
         return "Write relation metadata as `relation_kind: target` entries."
     if code == "duplicate_id":
         return "Give each rich semantic block a unique `id` metadata value."
+    if code == "empty_rich_unit":
+        return "Add substantive body content or remove the empty rich heading."
     return "Review the rich semantic block metadata at this source location."
 
 

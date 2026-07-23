@@ -77,17 +77,17 @@ def test_adopt_scan_only_reports_bounded_semantic_census_without_fabrication(
 
 - [Config] Compact observation. ^config-one
 
-## Finding
-- category: Rule
-
-Rich semantic unit.
-
 - [bad/category] malformed candidate
 - [x] ordinary task box
 
 ```markdown
 - [hidden] fenced example
 ```
+
+## Finding
+- category: Rule
+
+Rich semantic unit.
 """,
         encoding="utf-8",
     )
@@ -109,7 +109,7 @@ Rich semantic unit.
     [example] = census["diagnostics"]["examples"]
     assert example["path"] == "Legacy Notes/semantic.md"
     assert example["code"] == "invalid_compact_category"
-    assert example["span"]["start_line"] == 10
+    assert example["span"]["start_line"] == 5
     encoded = json.dumps(census, sort_keys=True)
     assert "ordinary task box" not in encoded
     assert "fenced example" not in encoded
@@ -122,6 +122,48 @@ Rich semantic unit.
         "review-malformed-candidates",
         "initialize-kb",
     }
+
+
+def test_hierarchy_migration_census_counts_current_units_without_source_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    vault = tmp_path / "synthetic-vault"
+    page = vault / "Focus" / "hierarchy.md"
+    page.parent.mkdir(parents=True)
+    page.write_bytes(
+        b"## Finding\n\n"
+        b"Parent conclusion.\n\n"
+        b"### Decision\n\n"
+        b"Nested recognized content.\n\n"
+        b"- [config] Compact-shaped body content.\n"
+    )
+    source = page.read_bytes()
+
+    if os.name == "nt":
+        # The repository's Windows descriptor identity baseline currently marks
+        # every semantic-census file unreadable. Keep this parser/count regression
+        # focused while the unchanged Windows boundary remains tracked separately.
+        def bounded_read(
+            _root: Path,
+            path: Path,
+            remaining: int,
+            **_kwargs: object,
+        ) -> tuple[str, bytes | None]:
+            raw = path.read_bytes()
+            return ("oversized", None) if len(raw) > remaining else ("ok", raw)
+
+        monkeypatch.setattr(
+            semantic_census,
+            "_read_regular_file_bounded",
+            bounded_read,
+        )
+
+    census = semantic_census.scan(vault, path="Focus")
+
+    assert page.read_bytes() == source
+    assert census["units"] == {"total": 1, "compact": 0, "rich": 1}
+    assert census["categories"]["raw_frequencies"] == {"Finding": 1}
 
 
 def test_adopt_scan_only_semantic_census_honors_subtree_hidden_and_resource_bounds(
@@ -449,7 +491,8 @@ def test_adopt_scan_only_semantic_census_reports_saved_governance_read_only(
         ),
         encoding="utf-8",
     )
-    page = vault / "Knowledge Base" / "Notes" / "semantic.md"
+    page = vault / "Knowledge Base" / "Notes" / "Insights" / "semantic.md"
+    page.parent.mkdir()
     page.write_text(
         """---
 type: insight
@@ -510,7 +553,8 @@ def test_adopt_semantic_census_parses_each_markdown_page_once_and_reports_metada
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     vault = _legacy_vault(tmp_path, kb=True)
-    page = vault / "Knowledge Base" / "Notes" / "semantic.md"
+    page = vault / "Knowledge Base" / "Notes" / "Insights" / "semantic.md"
+    page.parent.mkdir()
     page.write_text(
         """---
 type: insight
@@ -575,7 +619,8 @@ def test_adopt_semantic_census_governance_uses_exact_scanned_page_state(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     vault = _legacy_vault(tmp_path, kb=True)
-    page = vault / "Knowledge Base" / "Notes" / "semantic.md"
+    page = vault / "Knowledge Base" / "Notes" / "Insights" / "semantic.md"
+    page.parent.mkdir()
     original = """---
 type: insight
 exomem_id: 00000000-0000-4000-8000-000000000312

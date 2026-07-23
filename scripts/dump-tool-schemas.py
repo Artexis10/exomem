@@ -49,6 +49,11 @@ def _build_server(vault_root: Path, state_root: Path):
     os.environ["EXOMEM_DISABLE_RELEVANCE_CHECK"] = "1"
     os.environ["EXOMEM_DISABLE_MEDIA_EXTRACTION"] = "1"
     os.environ["EXOMEM_DISABLE_CLIP"] = "1"
+    # Tool discovery is independent of lexical serving. Keep the fixture
+    # capture free of background sidecar repair so its temporary vault can be
+    # closed deterministically on Windows.
+    os.environ["EXOMEM_LEXICAL_BACKEND"] = "python"
+    os.environ["EXOMEM_DISABLE_FILE_WATCHER"] = "1"
     os.environ.pop("EXOMEM_DISABLE_TIER2", None)  # tier-2 ON
     os.environ["EXOMEM_WRITER_LEASE_STATE_DIR"] = str(state_root)
     os.environ["EXOMEM_VAULT_PATH"] = str(vault_root)
@@ -73,13 +78,27 @@ def _discovery_contract(mcp) -> dict[str, object]:
 
 
 def main() -> None:
-    with tempfile.TemporaryDirectory(prefix="exomem-schema-") as temp_dir:
+    # Windows can retain a short-lived SQLite/file handle after lifecycle
+    # shutdown. The fixture capture is already complete at that point, so a
+    # delayed best-effort cleanup must not prevent writing deterministic output.
+    with tempfile.TemporaryDirectory(
+        prefix="exomem-schema-", ignore_cleanup_errors=True
+    ) as temp_dir:
         temp_root = Path(temp_dir)
         vault_root = temp_root / "schema_vault"
         shutil.copytree(FIXTURE_VAULT, vault_root)
-        mcp = _build_server(vault_root, temp_root / "writer-lease")
-        schemas = _live_schemas(mcp)
-        discovery_contract = _discovery_contract(mcp)
+        try:
+            mcp = _build_server(vault_root, temp_root / "writer-lease")
+            schemas = _live_schemas(mcp)
+            discovery_contract = _discovery_contract(mcp)
+        finally:
+            # Building discovery starts the normal lease lifecycle. Close its
+            # SQLite handle before TemporaryDirectory removes the fixture on
+            # Windows; otherwise schema generation can fail after a successful
+            # capture with a sharing violation.
+            from exomem import writer_lease
+
+            writer_lease.reset_managers_for_tests()
     # Preserve the established coordination-first baseline, then store product tool
     # keys alphabetically. Nested inputSchema property order is signature-order and
     # load-bearing, so only the outer mapping is normalized.

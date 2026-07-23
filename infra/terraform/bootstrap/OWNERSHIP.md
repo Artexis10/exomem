@@ -1,7 +1,9 @@
-# Backend bootstrap ownership
+# Legacy B2 backend bootstrap ownership
 
-One-time bootstrap for the versioned B2 Terraform-state bucket and its scoped
-state identities. It uses local state only during bootstrap, produces an
-encrypted escrow artifact, and is not part of normal foundation/durability
-planning. Re-running against an existing bucket must converge without replacing
-or deleting it.
+This is the already-applied bootstrap for the versioned B2 Terraform-state
+bucket and its scoped state identities. It remains unchanged only so Terraform
+continues to track the live bucket and keys until a separately reviewed cleanup.
+
+Do not use this root for new state, do not repurpose its state for HCP resources,
+and do not run it as part of normal foundation or durability work. The active
+state authority is bootstrapped separately by `../hcp-bootstrap`.

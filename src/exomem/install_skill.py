@@ -156,6 +156,9 @@ def install_skill(
                 f"bundled skill missing at {src} (SKILL.md not found) — "
                 "is the exomem install intact?"
             )
+        workflow_skills.validate_contract_projection(
+            item["name"], src, core=item["kind"] == "core"
+        )
         dest = item["target"]
         if dest.exists() and not force and not _empty_dir(dest):
             raise FileExistsError(

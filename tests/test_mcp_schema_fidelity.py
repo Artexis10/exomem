@@ -60,6 +60,8 @@ def _build_server(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     monkeypatch.setenv("EXOMEM_DISABLE_RELEVANCE_CHECK", "1")
     monkeypatch.setenv("EXOMEM_DISABLE_MEDIA_EXTRACTION", "1")
     monkeypatch.setenv("EXOMEM_DISABLE_CLIP", "1")
+    monkeypatch.setenv("EXOMEM_LEXICAL_BACKEND", "python")
+    monkeypatch.setenv("EXOMEM_DISABLE_FILE_WATCHER", "1")
     monkeypatch.delenv("EXOMEM_DISABLE_TIER2", raising=False)
     monkeypatch.setenv(
         "EXOMEM_WRITER_LEASE_STATE_DIR", str(tmp_path / "writer-lease")
@@ -148,6 +150,27 @@ def test_full_mcp_discovery_surface_matches_packaged_contract(
         "full MCP discovery surface drifted; run scripts/dump-tool-schemas.py, "
         "then refresh and verify every registered external connector"
     )
+
+
+def test_manage_memory_file_schema_exposes_append_review_protocol(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    live = _live_schemas(_build_server(monkeypatch, tmp_path))
+    properties = live["manage_memory_file"]["inputSchema"]["properties"]
+    required = {
+        "validate_only",
+        "semantic_transition_token",
+        "relation_disposition",
+        "relation_review_hash",
+        "relation_review_reason",
+    }
+
+    assert required <= set(properties)
+    assert "create or append" in properties["validate_only"]["description"]
+    assert "append transition token" in properties["semantic_transition_token"][
+        "description"
+    ]
 
 
 def test_remember_discovery_schema_is_vault_invariant(

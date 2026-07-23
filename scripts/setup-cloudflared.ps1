@@ -5,7 +5,7 @@
 #   - creates the named tunnel (or reuses it), resolves its UUID
 #   - routes the DNS CNAME for <Hostname> to the tunnel
 #   - writes config.yml + copies cert.pem/creds into the SYSTEM service location
-#     (C:\Windows\System32\config\systemprofile\.cloudflared) — the gotcha that
+#     ($env:SystemRoot\System32\config\systemprofile\.cloudflared) — the gotcha that
 #     bites everyone: the service runs as SYSTEM and reads config from there, NOT
 #     from your %USERPROFILE%\.cloudflared where `tunnel login/create` write.
 #   - installs + starts the cloudflared Windows service (auto-start)
@@ -84,7 +84,7 @@ try { & $CloudflaredExe tunnel route dns $TunnelName $Hostname | Write-Host }
 catch { Write-Warning "route dns returned: $_  (usually 'record already exists' - safe to ignore)" }
 
 # --- 3. Stage config + creds where the SYSTEM service reads them ----------------------
-$SysCfDir = "C:\Windows\System32\config\systemprofile\.cloudflared"
+$SysCfDir = Join-Path $env:SystemRoot "System32\config\systemprofile\.cloudflared"
 New-Item -ItemType Directory -Path $SysCfDir -Force | Out-Null
 Copy-Item $CertPem  (Join-Path $SysCfDir "cert.pem")     -Force
 Copy-Item $CredsSrc (Join-Path $SysCfDir "$Uuid.json")   -Force

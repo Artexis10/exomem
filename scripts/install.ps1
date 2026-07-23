@@ -6,7 +6,7 @@
 # setup wizard (vault, MCP registration, skills, hooks).
 #
 # Run as a file to pass options through to the wizard:
-#   pwsh -File scripts/install.ps1 -Vault "C:\Users\you\Obsidian" -Yes
+#   pwsh -File scripts/install.ps1 -Vault "C:\Users\<user>\Obsidian" -Yes
 #
 # Deliberately NOT a service install. This gets you a working local exomem in
 # Claude Code and Codex; scripts/install-service.ps1 is the always-on/remote path.

@@ -410,7 +410,12 @@ def test_proposals_arrive_reject_removes_approve_writes_log_and_drift_leaves_fil
                         "sources": copied_paths,
                         "title": "Imported notes summary",
                         "note_type": "insight",
-                        "content": "# Imported notes summary\n\nCombined summary.\n",
+                        "content": (
+                            "# Imported notes summary\n\n"
+                            "## Observations\n\n"
+                            "- [adoption finding] The imported notes support one "
+                            "combined conclusion. #adoption\n"
+                        ),
                     },
                     "bindings": {"run_fingerprint": started.get("inventory_fingerprint", "")},
                 }

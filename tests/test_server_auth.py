@@ -93,12 +93,15 @@ def test_build_session_authority_uses_encrypted_local_store(
 
 def test_build_session_authority_uses_authenticated_uncached_remote_store(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
+    monkeypatch.delenv("EXOMEM_SESSION_STALE_GRACE_SECONDS", raising=False)
     _set_oauth_env(
         monkeypatch,
         EXOMEM_OAUTH_STORAGE_URL="https://coordinator.example",
         EXOMEM_OAUTH_STORAGE_NAMESPACE="vault",
         EXOMEM_OAUTH_STORAGE_TOKEN="coordinator-secret",
+        EXOMEM_WRITER_LEASE_STATE_DIR=str(tmp_path),
     )
 
     authority = server_auth.build_session_authority(base_url="https://memory.example")
@@ -107,6 +110,7 @@ def test_build_session_authority_uses_authenticated_uncached_remote_store(
     assert isinstance(raw_store, RemoteOAuthStorage)
     assert raw_store.token == "coordinator-secret"
     assert raw_store.cache_ttl == 0
+    assert authority._stale_grace_seconds == 86_400.0
 
 
 def test_shared_session_authority_refuses_missing_storage_bearer(

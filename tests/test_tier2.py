@@ -176,9 +176,9 @@ def test_create_file_refuses_escape_out_of_knowledge_base(vault: Path) -> None:
     assert not (vault / "escape-deep.md").exists()
     assert not (vault / "out.md").exists()
     # A bare KB-relative path is rooted UNDER Knowledge Base/, not the vault root.
-    create_file_module.create_file(vault, path="Notes/Insights/bare.md", content="x", today=TODAY)
-    assert (vault / "Knowledge Base" / "Notes" / "Insights" / "bare.md").exists()
-    assert not (vault / "Notes" / "Insights" / "bare.md").exists()
+    create_file_module.create_file(vault, path="Identity/bare.md", content="x", today=TODAY)
+    assert (vault / "Knowledge Base" / "Identity" / "bare.md").exists()
+    assert not (vault / "Identity" / "bare.md").exists()
 
 
 def test_create_file_logs_to_log_md(vault: Path) -> None:
@@ -664,11 +664,11 @@ def test_delete_file_expected_dead_inbound_ignores_listed_referrers(vault: Path)
 
 
 def test_append_to_file_adds_content(vault: Path) -> None:
-    target = vault / "Knowledge Base" / "Notes" / "Insights" / "appendable.md"
+    target = vault / "Knowledge Base" / "Notes" / "appendable.md"
     target.write_text("existing line\n", encoding="utf-8")
     result = append_module.append_to_file(
         vault,
-        path="Knowledge Base/Notes/Insights/appendable.md",
+        path="Knowledge Base/Notes/appendable.md",
         content="new line\n",
         today=TODAY,
     )

@@ -30,9 +30,13 @@ import sys
 import urllib.parse
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
+from .cli_ops import OpError
 from .kbdir import kb_dirname, kb_prefix
+
+if TYPE_CHECKING:
+    from .writer_lease import LeaseConfig
 
 Status = Literal["pass", "warn", "fail"]
 Profile = Literal["lean", "hybrid", "standard", "media", "remote", "ha"]
@@ -1199,6 +1203,22 @@ def _probe_get(url: str) -> tuple[int, object]:
     return resp.status_code, body
 
 
+def _probe_get_authorized(url: str, token: str) -> tuple[int, object]:
+    """Authenticated GET with a short timeout; returns (status, parsed-JSON-or-text).
+
+    Module-level seam so tests fake the transport, mirroring `_probe_get`.
+    """
+    import httpx
+
+    headers = {"Accept": "application/json", "Authorization": f"Bearer {token}"}
+    resp = httpx.get(url, headers=headers, timeout=5.0, follow_redirects=False)
+    try:
+        body: object = resp.json()
+    except Exception:  # noqa: BLE001 — non-JSON bodies are fine for probes
+        body = resp.text
+    return resp.status_code, body
+
+
 def _probe_state(url: str, namespace: str, token: str | None) -> tuple[int, object]:
     """Read a deliberately absent coordinator key, optionally authenticated."""
     import httpx
@@ -1425,6 +1445,206 @@ def _check_remote_probes() -> list[DoctorCheck]:
     return checks
 
 
+_REPLICA_ORIGIN_VARS = {
+    "DESKTOP_REPLICA_ID": "DESKTOP_ORIGIN",
+    "LAPTOP_REPLICA_ID": "LAPTOP_ORIGIN",
+}
+
+
+def _check_edge_ingress_worker_fronting(base_url: str, vault_id: str) -> DoctorCheck:
+    """Unauthenticated GET on a coordinator path must return the worker's 401
+    shape — proves the worker (not a tunnel-direct origin) fronts the apex for
+    coordinator paths (design.md Decision 3, check 1)."""
+    url = f"{base_url}/v1/vaults/{urllib.parse.quote(vault_id, safe='')}/lease"
+    try:
+        status, body = _probe_get(url)
+    except Exception as e:  # noqa: BLE001 - network diagnostic boundary
+        return _check(
+            "edge_ingress.worker_fronting",
+            "fail",
+            f"Could not reach {url}: {e}",
+            "Check DNS binding, tunnel ingress hostname, and worker route coverage for "
+            "the public apex.",
+        )
+    if status == 401 and isinstance(body, dict) and body.get("error") == "unauthorized":
+        return _check(
+            "edge_ingress.worker_fronting",
+            "pass",
+            "Public apex answers the worker's unauthenticated 401 shape on the "
+            "coordinator path.",
+        )
+    return _check(
+        "edge_ingress.worker_fronting",
+        "fail",
+        f"{url} answered status={status} body={body!r}, expected the worker's "
+        "401 {'error': 'unauthorized'} shape.",
+        "The public apex may be served tunnel-direct instead of by the HA worker. Check "
+        "DNS binding, tunnel ingress hostname, and worker route coverage.",
+    )
+
+
+def _check_edge_ingress_provenance(base_url: str, config: LeaseConfig) -> DoctorCheck:
+    """Authenticated GET /__version must succeed and its `deployed_vars` must not
+    have drifted from this origin's expectations (design.md Decision 3, check 2)."""
+    url = f"{base_url}/__version"
+    try:
+        status, body = _probe_get_authorized(url, config.token or "")
+    except Exception as e:  # noqa: BLE001 - network diagnostic boundary
+        return _check(
+            "edge_ingress.provenance",
+            "fail",
+            f"Could not reach {url}: {e}",
+            "Check DNS binding, tunnel ingress hostname, and worker route coverage for "
+            "the public apex.",
+        )
+    if status != 200 or not isinstance(body, dict) or not isinstance(body.get("deployed_vars"), dict):
+        return _check(
+            "edge_ingress.provenance",
+            "fail",
+            f"{url} answered status={status}, expected an authenticated 200 with a "
+            "deployed_vars payload.",
+            "The public apex may not be served by the HA worker beyond /v1/*. Check "
+            "DNS binding, tunnel ingress hostname, and worker route coverage.",
+        )
+    deployed_vars = body["deployed_vars"]
+    drift: list[str] = []
+    timeout_ms = deployed_vars.get("MCP_TOOL_TIMEOUT_MS")
+    if not isinstance(timeout_ms, (int, float)) or isinstance(timeout_ms, bool) or timeout_ms < 60000:
+        drift.append(f"MCP_TOOL_TIMEOUT_MS={timeout_ms!r} is below the 60000ms floor")
+    if not deployed_vars.get("REQUIRE_COORDINATION"):
+        drift.append("REQUIRE_COORDINATION is not truthy")
+    replica_id = config.replica_id or ""
+    replica_configured = any(
+        deployed_vars.get(replica_var) == replica_id and deployed_vars.get(origin_var)
+        for replica_var, origin_var in _REPLICA_ORIGIN_VARS.items()
+    )
+    if not replica_configured:
+        drift.append(
+            f"this origin's replica id {replica_id!r} is not present among the worker's "
+            "replica-id vars with an origin configured"
+        )
+    git_sha = body.get("git_sha")
+    if git_sha == "unlabeled":
+        drift.append("worker was deployed without a labeled git_sha")
+    if drift:
+        return _check(
+            "edge_ingress.provenance",
+            "warn",
+            f"Worker deploy provenance drift: {'; '.join(drift)}.",
+            "Redeploy the worker with the deploy helper and verify MCP_TOOL_TIMEOUT_MS, "
+            "REQUIRE_COORDINATION, and the replica-id/origin vars.",
+            details={"git_sha": git_sha, "deployed_vars": deployed_vars},
+        )
+    return _check(
+        "edge_ingress.provenance",
+        "pass",
+        f"Worker deploy provenance is current (git_sha={git_sha!r}).",
+        details={"git_sha": git_sha},
+    )
+
+
+def _check_edge_ingress_read_routing(base_url: str, config: LeaseConfig) -> DoctorCheck:
+    """Public /health/ready must agree with the coordinator's current lease holder —
+    proves holder-first read routing is intact (design.md Decision 3, check 3)."""
+    from .writer_lease import LeaseCoordinatorClient
+
+    url = f"{base_url}/health/ready"
+    try:
+        status, body = _probe_get(url)
+    except Exception as e:  # noqa: BLE001 - network diagnostic boundary
+        return _check(
+            "edge_ingress.read_routing",
+            "fail",
+            f"Could not reach {url}: {e}",
+            "Check DNS binding, tunnel ingress hostname, and worker route coverage for "
+            "the public apex.",
+        )
+    if not isinstance(body, dict):
+        return _check(
+            "edge_ingress.read_routing",
+            "fail",
+            f"{url} answered status={status} with a non-JSON body.",
+        )
+    reported_replica = body.get("replica_id")
+    try:
+        record = LeaseCoordinatorClient(config).status()
+    except OpError as e:
+        return _check(
+            "edge_ingress.read_routing",
+            "fail",
+            f"Could not confirm the coordinator's current lease holder: {e}",
+            "Check the writer-lease coordinator URL, credentials, and health.",
+        )
+    if reported_replica == record.holder:
+        return _check(
+            "edge_ingress.read_routing",
+            "pass",
+            f"Public /health/ready replica ({reported_replica!r}) matches the "
+            "coordinator's current lease holder.",
+        )
+    return _check(
+        "edge_ingress.read_routing",
+        "fail",
+        f"Public /health/ready reports replica {reported_replica!r}, but the "
+        f"coordinator's current lease holder is {record.holder!r}.",
+        "Investigate holder-first read routing at the HA edge worker.",
+        details={"reported_replica": reported_replica, "lease_holder": record.holder},
+    )
+
+
+def _check_edge_ingress(*, probe: bool) -> list[DoctorCheck]:
+    """Doctor's `edge-ingress` section (design.md Decision 3): verifies the public
+    apex is fronted by the HA edge worker rather than tunnel-direct. Skipped
+    entirely when writer-lease coordination is disabled."""
+    if not os.environ.get("EXOMEM_WRITER_LEASE_URL", "").strip():
+        return []
+    from .writer_lease import LeaseConfig
+
+    try:
+        config = LeaseConfig.from_env()
+    except ValueError as e:
+        return [_check(
+            "edge_ingress.config",
+            "fail",
+            str(e),
+            "Fix the writer-lease environment configuration.",
+        )]
+
+    checks: list[DoctorCheck] = []
+    if config.ttl_seconds < 30:
+        checks.append(_check(
+            "edge_ingress.lease_ttl",
+            "warn",
+            f"EXOMEM_WRITER_LEASE_TTL is {config.ttl_seconds:g}s, below the supported "
+            "floor of 30s.",
+            "Raise EXOMEM_WRITER_LEASE_TTL to at least 30 seconds.",
+        ))
+    else:
+        checks.append(_check(
+            "edge_ingress.lease_ttl",
+            "pass",
+            f"EXOMEM_WRITER_LEASE_TTL is {config.ttl_seconds:g}s (>= 30s floor).",
+        ))
+
+    if not probe:
+        return checks
+
+    base_url = os.environ.get("EXOMEM_BASE_URL", "").strip().rstrip("/")
+    if not base_url:
+        checks.append(_check(
+            "edge_ingress.base_url",
+            "fail",
+            "EXOMEM_BASE_URL is not set; cannot probe the public ingress.",
+            "Set EXOMEM_BASE_URL to the public HTTPS origin.",
+        ))
+        return checks
+
+    checks.append(_check_edge_ingress_worker_fronting(base_url, config.vault_id or ""))
+    checks.append(_check_edge_ingress_provenance(base_url, config))
+    checks.append(_check_edge_ingress_read_routing(base_url, config))
+    return checks
+
+
 def doctor(
     *,
     vault: str | None = None,
@@ -1512,6 +1732,10 @@ def doctor(
                 ))
             else:
                 checks.extend(_check_ha_probes(urls))
+
+    # Not profile-gated: any profile can run with writer-lease coordination
+    # enabled, and the section self-skips when it is not (design.md Decision 3).
+    checks.extend(_check_edge_ingress(probe=probe))
 
     return DoctorReport(profile=profile, checks=checks)
 

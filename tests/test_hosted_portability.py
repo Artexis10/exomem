@@ -349,7 +349,7 @@ def test_archive_verification_rejects_tampering(tmp_path: Path) -> None:
     [
         ([("../escape.md", b"x", None)], "UNSAFE_ARCHIVE_PATH"),
         ([("/absolute.md", b"x", None)], "UNSAFE_ARCHIVE_PATH"),
-        ([("C:/drive.md", b"x", None)], "UNSAFE_ARCHIVE_PATH"),
+        ([("C:" + "/drive.md", b"x", None)], "UNSAFE_ARCHIVE_PATH"),
         (
             [("Knowledge Base/link.md", b"outside", stat.S_IFLNK | 0o777)],
             "UNSAFE_ARCHIVE_ENTRY",

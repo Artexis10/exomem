@@ -60,8 +60,14 @@ def _reset_readiness(monkeypatch: pytest.MonkeyPatch):
 
 
 def test_components_tuple_and_initial_state() -> None:
-    """The four coordinated components, and the never-warmed default state."""
-    assert readiness.COMPONENTS == ("lexical", "embeddings", "reranker", "clip")
+    """The coordinated components, and the never-warmed default state."""
+    assert readiness.COMPONENTS == (
+        "lexical",
+        "semantic_corpus",
+        "embeddings",
+        "reranker",
+        "clip",
+    )
     assert readiness.is_warming() is False
     assert readiness.warming_info() is None
     for c in readiness.COMPONENTS:
@@ -151,7 +157,12 @@ def test_warming_info_shape_and_transitions() -> None:
 
     readiness.mark_ready("lexical")
     info2 = readiness.warming_info()
-    assert set(info2["components"]) == {"embeddings", "reranker", "clip"}
+    assert set(info2["components"]) == {
+        "semantic_corpus",
+        "embeddings",
+        "reranker",
+        "clip",
+    }
 
     readiness.finish_warm()
     assert readiness.warming_info() is None
@@ -240,7 +251,6 @@ def test_model_preload_allowed_defaults_lazy_in_normal_mode(
     assert warmup.model_preload_allowed("normal") is True
 
 
-
 def test_warm_all_marks_components_ready_in_lexical_embeddings_reranker_clip_order(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -264,6 +274,36 @@ def test_warm_all_marks_components_ready_in_lexical_embeddings_reranker_clip_ord
     assert call_order == ["lexical", "embeddings", "reranker", "clip"]
     for c in readiness.COMPONENTS:
         assert readiness.is_ready(c) is True
+
+
+def test_warm_all_marks_lexical_ready_before_semantic_corpus_build(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The rebuildable semantic corpus can be slow on a large vault, so it must
+    not sit in front of restart retrieval.  Lexical caches and their readiness
+    signal land first; semantic warming remains background follow-up work."""
+    monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")
+    call_order: list[str] = []
+
+    monkeypatch.setattr(
+        warmup,
+        "warm_caches",
+        lambda vr, **_kw: call_order.append("lexical") or {},
+    )
+
+    def _semantic_warm(_vault_root: Path) -> None:
+        assert readiness.is_ready("lexical") is True
+        call_order.append("semantic")
+
+    monkeypatch.setattr(
+        "exomem.semantic_contract.build_corpus_context",
+        _semantic_warm,
+    )
+
+    warmup.warm_all(tmp_path)
+
+    assert call_order == ["lexical", "semantic"]
+    assert readiness.is_ready("semantic_corpus") is True
 
 
 def test_warm_all_skips_model_preloads_when_embeddings_disabled(
@@ -290,6 +330,24 @@ def test_warm_all_skips_model_preloads_when_embeddings_disabled(
     assert readiness.is_ready("embeddings") is True
     assert readiness.is_ready("reranker") is True
     assert readiness.is_ready("clip") is True
+
+
+def test_warm_all_primes_semantic_corpus_even_when_cpu_preload_is_quiet(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("EXOMEM_MODE", "quiet")
+    monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")
+    warmed: list[Path] = []
+    monkeypatch.setattr(warmup, "warm_caches", lambda vr, **_kw: {})
+    monkeypatch.setattr(
+        "exomem.semantic_contract.build_corpus_context",
+        lambda root: warmed.append(Path(root)),
+    )
+
+    durations = warmup.warm_all(tmp_path)
+
+    assert warmed == [tmp_path]
+    assert "semantic_corpus" in durations
 
 
 def test_warm_all_quiet_mode_skips_preloads_but_marks_ready(
@@ -336,9 +394,7 @@ def test_warm_all_quiet_mode_replays_deferred_write_embeds(
         drained_calls.append((vr, list(paths)))
         return embeddings.EmbeddingSyncStatus("completed", "test", len(paths))
 
-    monkeypatch.setattr(
-        embeddings, "upsert_after_write_status", completed
-    )
+    monkeypatch.setattr(embeddings, "upsert_after_write_status", completed)
 
     readiness.begin_warm()
     some_paths = (tmp_path / "a.md", tmp_path / "b.md")
@@ -374,9 +430,7 @@ def test_warm_caches_gates_matrix_warm_on_preload_models(
     assert "clip_matrix" not in d_quiet
     assert calls == []
 
-    d_default = warmup.warm_caches(
-        tmp_path, preload_models=True, preload_cpu_caches=True
-    )
+    d_default = warmup.warm_caches(tmp_path, preload_models=True, preload_cpu_caches=True)
     assert "embedding_matrix" in d_default
     assert "clip_matrix" in d_default
     assert calls == [1, 1]
@@ -398,6 +452,7 @@ def test_warm_caches_quiet_skips_cpu_and_vector_warmup(
         def inner(*_args, **_kwargs):
             forbidden.append(name)
             raise AssertionError(f"{name} should not warm in quiet mode")
+
         return inner
 
     monkeypatch.setattr(bm25, "warm", _forbid("bm25"))
@@ -456,9 +511,7 @@ def test_warm_all_drains_deferred_write_embeds_after_embeddings_ready(
         drained_calls.append((vr, list(paths)))
         return embeddings.EmbeddingSyncStatus("completed", "test", len(paths))
 
-    monkeypatch.setattr(
-        embeddings, "upsert_after_write_status", completed
-    )
+    monkeypatch.setattr(embeddings, "upsert_after_write_status", completed)
 
     readiness.begin_warm()  # so the manual defer() below actually records
     some_paths = (tmp_path / "a.md", tmp_path / "b.md")
@@ -495,9 +548,7 @@ def test_warm_all_drains_deferred_write_embeds_even_when_bge_preload_fails(
         drained_calls.append((vr, list(paths)))
         return embeddings.EmbeddingSyncStatus("completed", "test", len(paths))
 
-    monkeypatch.setattr(
-        embeddings, "upsert_after_write_status", completed
-    )
+    monkeypatch.setattr(embeddings, "upsert_after_write_status", completed)
 
     readiness.begin_warm()  # so the manual defer() below actually records
     some_paths = (tmp_path / "a.md", tmp_path / "b.md")
@@ -796,9 +847,7 @@ def test_op_find_warming_envelope_mid_warm_then_bare_list_after_finish(
 # ============================================================================
 
 
-def test_bm25_build_lock_serializes_concurrent_cold_builds(
-    vault: Path, monkeypatch
-) -> None:
+def test_bm25_build_lock_serializes_concurrent_cold_builds(vault: Path, monkeypatch) -> None:
     """Two threads racing .search() on a cold BM25Index must produce exactly
     ONE _build() call — the loser waits on the build lock and reuses the
     winner's freshly-cached corpus instead of rebuilding.
@@ -869,9 +918,7 @@ def test_upsert_after_write_defers_during_warm_without_loading_model(
     drained_vault, drained_paths, receipts = drained[0]
     assert drained_vault == tmp_path
     assert list(drained_paths) == [md_path]
-    assert [receipt.rel_path for receipt in receipts] == [
-        "Knowledge Base/Notes/probe.md"
-    ]
+    assert [receipt.rel_path for receipt in receipts] == ["Knowledge Base/Notes/probe.md"]
     assert readiness.mark_ready("embeddings") == []  # drained exactly once
 
 
@@ -954,9 +1001,7 @@ def test_uppercase_markdown_warm_defer_has_durable_receipt(
     assert item_vault == tmp_path
     assert list(item_paths) == [path]
     assert list(receipts) == deferred_index.snapshot(tmp_path)
-    assert [receipt.rel_path for receipt in receipts] == [
-        "Knowledge Base/Notes/uppercase.MD"
-    ]
+    assert [receipt.rel_path for receipt in receipts] == ["Knowledge Base/Notes/uppercase.MD"]
 
 
 @pytest.mark.parametrize(
@@ -984,9 +1029,7 @@ def test_warm_replay_receipt_outcomes_and_no_second_defer(
     rel = path.relative_to(tmp_path).as_posix()
     [receipt] = deferred_index.add_receipts(tmp_path, [rel])
     readiness.begin_warm()
-    assert readiness.defer(
-        "embeddings", (tmp_path, (path,), (receipt,))
-    ) is True
+    assert readiness.defer("embeddings", (tmp_path, (path,), (receipt,))) is True
 
     if preload_succeeds:
         monkeypatch.setattr(embeddings, "get_model", lambda: object())
@@ -1027,13 +1070,9 @@ def test_disabled_warm_drains_memory_but_preserves_durable_receipt(
     path = tmp_path / "Knowledge Base" / "Notes" / "disabled.md"
     path.parent.mkdir(parents=True)
     path.write_text("# disabled\n", encoding="utf-8")
-    [receipt] = deferred_index.add_receipts(
-        tmp_path, [path.relative_to(tmp_path).as_posix()]
-    )
+    [receipt] = deferred_index.add_receipts(tmp_path, [path.relative_to(tmp_path).as_posix()])
     readiness.begin_warm()
-    assert readiness.defer(
-        "embeddings", (tmp_path, (path,), (receipt,))
-    ) is True
+    assert readiness.defer("embeddings", (tmp_path, (path,), (receipt,))) is True
     monkeypatch.setattr(
         embeddings,
         "upsert_after_write_status",

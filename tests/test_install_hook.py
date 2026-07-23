@@ -106,6 +106,8 @@ def test_install_hook_idempotent(tmp_path: Path) -> None:
 def test_install_hook_supersedes_prior_absolute_path_entry(tmp_path: Path) -> None:
     # The old (buggy) form baked an absolute Windows python path; re-running must
     # replace it with the machine-agnostic wrapper command, exactly once.
+    legacy_python = "C:" + r"\Python\python.exe"
+    legacy_hook = "C:" + r"\Users\x\.claude\hooks\kb_capture_nudge.py"
     sp = tmp_path / "settings.json"
     sp.write_text(
         json.dumps(
@@ -116,10 +118,7 @@ def test_install_hook_supersedes_prior_absolute_path_entry(tmp_path: Path) -> No
                             "hooks": [
                                 {
                                     "type": "command",
-                                    "command": (
-                                        '"C:\\Python\\python.exe" "C:\\Users\\x\\.claude\\hooks\\'
-                                        'kb_capture_nudge.py"'
-                                    ),
+                                    "command": f'"{legacy_python}" "{legacy_hook}"',
                                 }
                             ]
                         }
@@ -1681,6 +1680,90 @@ def _transcript(
     return p
 
 
+def _codex_rollout_transcript(
+    tmp_path: Path,
+    user_text: str,
+    assistant_text: str,
+) -> Path:
+    """Write the response_item envelope emitted by Codex CLI 0.144.x."""
+    lines = [
+        {
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": user_text}],
+            },
+        },
+        {
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": assistant_text}],
+            },
+        },
+    ]
+    path = tmp_path / "codex-rollout.jsonl"
+    path.write_text("\n".join(json.dumps(line) for line in lines), encoding="utf-8")
+    return path
+
+
+def _codex_rollout_with_exomem_call(
+    tmp_path: Path,
+    *,
+    assistant_text: str,
+    tool_output: str,
+) -> Path:
+    """Write Codex 0.144.x function-call records around an Exomem note call."""
+    call_id = "call-exomem-note"
+    lines = [
+        {
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "Save the conclusion."}],
+            },
+        },
+        {
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "namespace": "mcp__codex_apps__exomem",
+                "name": "_note",
+                "arguments": json.dumps(
+                    {
+                        "note_type": "research-note",
+                        "title": "Durable conclusion",
+                        "content": "A durable conclusion.",
+                    }
+                ),
+                "call_id": call_id,
+            },
+        },
+        {
+            "type": "response_item",
+            "payload": {
+                "type": "function_call_output",
+                "call_id": call_id,
+                "output": tool_output,
+            },
+        },
+        {
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": assistant_text}],
+            },
+        },
+    ]
+    path = tmp_path / "codex-rollout-with-tool.jsonl"
+    path.write_text("\n".join(json.dumps(line) for line in lines), encoding="utf-8")
+    return path
+
+
 # --- capture (Stop) gate --------------------------------------------------------
 
 
@@ -1699,6 +1782,114 @@ def test_capture_fires_language_agnostic_japanese(tmp_path: Path) -> None:
     t = _transcript(tmp_path, "質問", jp)
     r = _run(CAPTURE_SCRIPT, {"transcript_path": str(t), "session_id": "jp"}, home)
     assert '"decision": "block"' in r.stdout
+
+
+def test_capture_reads_codex_0144_rollout_transcript(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    transcript = _codex_rollout_transcript(
+        tmp_path,
+        "What durable conclusion did we reach?",
+        "We reached a durable conclusion. " + "x" * 450,
+    )
+
+    result = _run(
+        CAPTURE_SCRIPT,
+        {"transcript_path": str(transcript), "session_id": "codex-rollout"},
+        home,
+        {"EXOMEM_HOOK_CLIENT": "codex"},
+    )
+
+    payload = json.loads(result.stdout)
+    assert payload["decision"] == "block"
+    assert payload["reason"].startswith("[Exomem capture check]")
+
+
+def test_capture_codex_uses_last_message_without_transcript(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+
+    result = _run(
+        CAPTURE_SCRIPT,
+        {
+            "last_assistant_message": "We reached a durable conclusion. " + "x" * 450,
+            "session_id": "codex-last-message",
+        },
+        home,
+        {"EXOMEM_HOOK_CLIENT": "codex"},
+    )
+
+    payload = json.loads(result.stdout)
+    assert payload["decision"] == "block"
+    assert payload["reason"].startswith("[Exomem capture check]")
+
+
+def test_capture_codex_silent_after_successful_exomem_function_call(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    transcript = _codex_rollout_with_exomem_call(
+        tmp_path,
+        assistant_text="The durable conclusion was captured. " + "x" * 450,
+        tool_output=(
+            "Wall time: 0.25 seconds\nOutput: "
+            '{"path":"Notes/durable-conclusion.md","warnings":[]}'
+        ),
+    )
+
+    result = _run(
+        CAPTURE_SCRIPT,
+        {
+            "transcript_path": str(transcript),
+            "last_assistant_message": "The durable conclusion was captured. " + "x" * 450,
+            "session_id": "codex-write-success",
+        },
+        home,
+        {"EXOMEM_HOOK_CLIENT": "codex"},
+    )
+
+    assert result.stdout.strip() == ""
+
+
+def test_capture_codex_still_fires_after_failed_exomem_function_call(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    transcript = _codex_rollout_with_exomem_call(
+        tmp_path,
+        assistant_text="The write failed, but the conclusion is durable. " + "x" * 450,
+        tool_output=(
+            "Wall time: 0.25 seconds\nOutput:\n"
+            + json.dumps(
+                {
+                    "error": "RuntimeException: Error calling MCP tool",
+                    "error_code": "INVALID_ARGUMENT",
+                    "error_data": {
+                        "type": "mcp_tool_execution_error",
+                        "result": {"isError": True},
+                    },
+                }
+            )
+        ),
+    )
+
+    result = _run(
+        CAPTURE_SCRIPT,
+        {
+            "transcript_path": str(transcript),
+            "last_assistant_message": "The write failed, but the conclusion is durable. "
+            + "x" * 450,
+            "session_id": "codex-write-failed",
+        },
+        home,
+        {"EXOMEM_HOOK_CLIENT": "codex"},
+    )
+
+    payload = json.loads(result.stdout)
+    assert payload["decision"] == "block"
+    assert payload["reason"].startswith("[Exomem capture check]")
 
 
 def test_capture_silent_on_trivial_turn(tmp_path: Path) -> None:
@@ -1818,7 +2009,9 @@ def test_capture_codex_client_accepts_camel_case_and_uses_codex_state(tmp_path: 
         home,
         {"EXOMEM_HOOK_CLIENT": "codex"},
     )
-    assert '"decision": "block"' in r.stdout
+    payload = json.loads(r.stdout)
+    assert payload["decision"] == "block"
+    assert payload["reason"].startswith("[Exomem capture check]")
     assert (home / ".codex" / ".cache" / "exomem-nudge" / "codex-cap").exists()
     assert (home / ".codex" / "exomem-capture-nudge.log").exists()
     assert not (home / ".claude" / "exomem-capture-nudge.log").exists()

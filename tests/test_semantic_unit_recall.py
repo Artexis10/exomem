@@ -7,7 +7,15 @@ from typing import Any
 import numpy as np
 import pytest
 
-from exomem import embedding_index, embeddings, semantic_index
+from exomem import (
+    commands,
+    context_pack,
+    embedding_index,
+    embeddings,
+    freshness,
+    lexstore,
+    semantic_index,
+)
 from exomem import find as find_module
 
 
@@ -40,8 +48,25 @@ def _write_page(
     return path
 
 
-def _rich(*, kind: str, category: str, anchor: str, content: str) -> str:
-    return f"## {kind.title()}\n- category: {category}\n- id: {anchor}\n\n{content}\n"
+def _rich(
+    *,
+    kind: str,
+    category: str,
+    anchor: str,
+    content: str,
+    tags: str | None = None,
+    context: str | None = None,
+    relations: str | None = None,
+) -> str:
+    metadata = [f"- category: {category}", f"- id: {anchor}"]
+    if tags is not None:
+        metadata.append(f"- tags: {tags}")
+    if context is not None:
+        metadata.append(f"- context: {context}")
+    if relations is not None:
+        metadata.append(f"- relations: {relations}")
+    metadata_text = "\n".join(metadata)
+    return f"## {kind.title()}\n{metadata_text}\n\n{content}\n"
 
 
 def _vector(first: float, second: float = 0.0) -> np.ndarray:
@@ -50,6 +75,13 @@ def _vector(first: float, second: float = 0.0) -> np.ndarray:
     value[1] = second
     value /= np.linalg.norm(value)
     return value
+
+
+def _prepare_semantic_catalog(root: Path, paths: list[Path]) -> None:
+    entries = [(str(path), freshness.stat_signature(path)) for path in paths]
+    freshness.seed(root, "kb", entries)
+    freshness.seed(root, "vault", entries)
+    lexstore.ensure_fresh(root)
 
 
 def test_default_auto_page_recall_is_byte_compatible_with_explicit_page(
@@ -92,7 +124,7 @@ def test_auto_unit_recall_intersects_text_category_kind_and_page_filter_axes(
         ("config-claim", "claim", "config", "SQLite is mentioned in a claim"),
         ("config-postgres", "decision", "config", "Use PostgreSQL instead"),
     )
-    for name, kind, category, content in fixtures:
+    pages = [
         _write_page(
             tmp_path,
             name,
@@ -103,6 +135,9 @@ def test_auto_unit_recall_intersects_text_category_kind_and_page_filter_axes(
                 content=content,
             ),
         )
+        for name, kind, category, content in fixtures
+    ]
+    _prepare_semantic_catalog(tmp_path, pages)
 
     hits = find_module.find(
         tmp_path,
@@ -124,12 +159,76 @@ def test_auto_unit_recall_intersects_text_category_kind_and_page_filter_axes(
     assert {payload["kind"] for payload in payloads} == {"decision"}
 
 
+def test_rich_tags_and_context_survive_filters_hits_reads_lexical_and_packs(
+    tmp_path: Path,
+) -> None:
+    path = _write_page(
+        tmp_path,
+        "rich-projection",
+        body=_rich(
+            kind="decision",
+            category="runtime reliability",
+            anchor="rich-projection",
+            content="Keep the retry window bounded",
+            tags="Reliability, runtime/retry, reliability",
+            context="Edge path",
+        ),
+    )
+
+    hits = find_module.find(
+        tmp_path,
+        query="",
+        scope="kb-only",
+        mode="keyword",
+        result_level="unit",
+        filters={
+            "$and": [
+                {"unit.tags": {"$contains": "runtime/retry"}},
+                {"unit.context": {"$eq": "Edge path"}},
+            ]
+        },
+        limit=10,
+    )
+
+    assert len(hits) == 1
+    hit = hits[0]
+    payload = hit.as_dict()
+    assert payload["tags"] == ["reliability", "runtime/retry"]
+    assert payload["context"] == "Edge path"
+
+    exact = commands.op_read_memory(
+        tmp_path,
+        path.relative_to(tmp_path).as_posix(),
+        unit_ref=payload["unit_ref"],
+    )
+    assert exact["status"] == "found"
+    assert exact["unit"]["tags"] == ["reliability", "runtime/retry"]
+    assert exact["unit"]["context"] == "Edge path"
+
+    lexical = lexstore.search_semantic_units(
+        tmp_path,
+        "retry window",
+        k=10,
+        scope="kb",
+    )
+    assert lexical is not None
+    record = next(item for item in lexical if item.unit_ref == payload["unit_ref"])
+    assert record.tags == ("reliability", "runtime/retry")
+    assert record.context == "Edge path"
+
+    pack = context_pack.assemble_pack(tmp_path, [hit])
+    packed = pack["semantic_units"][payload["parent_path"]]["units"][0]
+    assert packed["tags"] == ["reliability", "runtime/retry"]
+    assert packed["context"] == "Edge path"
+
+
 def test_empty_query_category_lookup_returns_independent_units(tmp_path: Path) -> None:
-    _write_page(
+    page = _write_page(
         tmp_path,
         "filter-only",
         body="- [config] filter-only semantic unit ^filter-only",
     )
+    _prepare_semantic_catalog(tmp_path, [page])
 
     hits = find_module.find(
         tmp_path,
@@ -168,7 +267,7 @@ def test_unit_keyword_mode_requires_every_literal_query_token(tmp_path: Path) ->
     assert [hit.as_dict()["source_anchor"] for hit in hits] == ["all-keywords"]
 
 
-def test_unit_vector_lane_filters_exact_refs_before_ranking(
+def test_unit_vector_lane_filters_exact_parents_after_bounded_ranking(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -203,11 +302,12 @@ def test_unit_vector_lane_filters_exact_refs_before_ranking(
         lambda _texts, *, is_query: np.stack([_vector(1.0)]),
     )
 
-    observed: list[set[str]] = []
+    observed: list[tuple[set[str] | None, bool]] = []
     original_search = index.search_semantic_units
 
     def observed_search(*args: Any, **kwargs: Any) -> Any:
-        observed.append(set(kwargs["allowed_unit_refs"]))
+        allowed = kwargs["allowed_unit_refs"]
+        observed.append((set(allowed) if allowed is not None else None, kwargs["validate"]))
         return original_search(*args, **kwargs)
 
     monkeypatch.setattr(index, "search_semantic_units", observed_search)
@@ -222,11 +322,7 @@ def test_unit_vector_lane_filters_exact_refs_before_ranking(
         limit=10,
     )
 
-    expected_refs = {
-        states[0].document.units[0].unit_ref,
-        states[1].document.units[0].unit_ref,
-    }
-    assert observed == [expected_refs]
+    assert observed == [(None, False)]
     payloads = [hit.as_dict() for hit in hits]
     assert [payload["source_anchor"] for payload in payloads] == [
         "active-vector",
@@ -234,6 +330,91 @@ def test_unit_vector_lane_filters_exact_refs_before_ranking(
     ]
     assert [payload["signals"]["vector_rank"] for payload in payloads] == [1, 2]
     assert all("bm25_rank" not in payload["signals"] for payload in payloads)
+
+
+def test_unit_vector_category_filter_is_pushed_down_before_candidate_window(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    index = embeddings.get_embedding_index(tmp_path)
+    pages: list[Path] = []
+    for rank in range(20):
+        page = _write_page(
+            tmp_path,
+            f"architecture-{rank:02d}",
+            body=f"- [architecture] higher vector candidate {rank} ^architecture-{rank}",
+        )
+        pages.append(page)
+        state = semantic_index.build_parent_index_state(tmp_path, page)
+        index.upsert_semantic_units(
+            state,
+            np.stack([_vector(1.0, rank / 100.0)]),
+            1.0,
+        )
+    target = _write_page(
+        tmp_path,
+        "reliability-target",
+        body="- [reliability] exact category target ^reliability-target",
+    )
+    pages.append(target)
+    target_state = semantic_index.build_parent_index_state(tmp_path, target)
+    index.upsert_semantic_units(target_state, np.stack([_vector(0.1, 1.0)]), 1.0)
+    _prepare_semantic_catalog(tmp_path, pages)
+    monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
+    monkeypatch.setattr(
+        embeddings,
+        "embed_texts",
+        lambda _texts, *, is_query: np.stack([_vector(1.0)]),
+    )
+
+    failed: list[str] = []
+    hits = find_module.find(
+        tmp_path,
+        query="vector-only-no-literal",
+        scope="kb-only",
+        mode="vector",
+        graph=False,
+        result_level="unit",
+        categories=["reliability"],
+        failed_out=failed,
+        limit=1,
+    )
+
+    assert [hit.as_dict()["source_anchor"] for hit in hits] == ["reliability-target"]
+    assert failed == []
+
+
+def test_rich_unit_recall_preserves_typed_relations(tmp_path: Path) -> None:
+    _write_page(
+        tmp_path,
+        "rich-relations",
+        body=_rich(
+            kind="decision",
+            category="architecture",
+            anchor="bounded-sidecar",
+            content="Use the bounded lexical sidecar for foreground recall.",
+            relations="evidenced_by: [[Knowledge Base/Sources/Latency benchmark]]",
+        ),
+    )
+
+    hits = find_module.find(
+        tmp_path,
+        query="bounded lexical sidecar",
+        scope="kb-only",
+        mode="keyword",
+        graph=False,
+        result_level="unit",
+        limit=5,
+    )
+
+    assert hits[0].as_dict()["relations"] == [
+        {
+            "kind": "evidenced_by",
+            "target": "[[Knowledge Base/Sources/Latency benchmark]]",
+            "raw": "evidenced_by: [[Knowledge Base/Sources/Latency benchmark]]",
+            "line": 6,
+        }
+    ]
 
 
 def test_unit_vector_lane_rejects_stale_rows_before_top_k(tmp_path: Path) -> None:
@@ -441,18 +622,19 @@ def test_embeddings_disabled_unit_recall_never_loads_vector_backend(
 def test_mixed_recall_caps_units_per_parent_and_reports_truncation(
     tmp_path: Path,
 ) -> None:
-    _write_page(
+    many_units = _write_page(
         tmp_path,
         "many-units",
         body="\n".join(
             f"- [config] shared mixed needle {index} ^many-{index}" for index in range(7)
         ),
     )
-    _write_page(
+    one_unit = _write_page(
         tmp_path,
         "one-unit",
         body="- [config] shared mixed needle other ^one-unit",
     )
+    _prepare_semantic_catalog(tmp_path, [many_units, one_unit])
 
     hits = find_module.find(
         tmp_path,

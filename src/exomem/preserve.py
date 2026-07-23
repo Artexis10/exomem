@@ -646,7 +646,8 @@ def update_sidecar_extraction(
     speakers: list[dict] | None = None,
     speaker_verification: str | None = None,
     attempts: int | None = None,
-) -> None:
+    defer_index_fanout: bool = False,
+) -> list[Path]:
     """Fill a pending media sidecar with extracted text + engine, and re-embed.
 
     Called by the extraction worker once ASR/OCR/PDF text is ready: sets
@@ -685,7 +686,11 @@ def update_sidecar_extraction(
         if labels:
             content = _set_frontmatter_field(content, "speakers", f"[{', '.join(labels)}]")
     content = _set_extracted_text(content, _cap_extracted_text(text))
-    batch_atomic_write([PlannedWrite(path=sidecar_path, content=content)], vault_root=vault_root)
+    return batch_atomic_write(
+        [PlannedWrite(path=sidecar_path, content=content)],
+        vault_root=vault_root,
+        post_commit_fanout=not defer_index_fanout,
+    )
 
 
 def update_sidecar_processing_failure(
@@ -697,9 +702,35 @@ def update_sidecar_processing_failure(
     error: str,
     retryable: bool,
     next_action: str,
-) -> None:
+    defer_index_fanout: bool = False,
+) -> list[Path]:
     """Persist actionable worker state without replacing a pending transcript."""
     content = sidecar_path.read_text(encoding="utf-8")
+    content = render_sidecar_processing_failure(
+        content,
+        state=state,
+        attempts=attempts,
+        error=error,
+        retryable=retryable,
+        next_action=next_action,
+    )
+    return batch_atomic_write(
+        [PlannedWrite(path=sidecar_path, content=content)],
+        vault_root=vault_root,
+        post_commit_fanout=not defer_index_fanout,
+    )
+
+
+def render_sidecar_processing_failure(
+    content: str,
+    *,
+    state: str,
+    attempts: int,
+    error: str,
+    retryable: bool,
+    next_action: str,
+) -> str:
+    """Render actionable worker state without performing canonical or derived I/O."""
     fields = (
         ("processing_state", state),
         ("processing_attempts", str(attempts)),
@@ -712,7 +743,7 @@ def update_sidecar_processing_failure(
         content = _set_frontmatter_field(content, "extracted_by", f"failed:{error_type}")
     for field, value in fields:
         content = _set_frontmatter_field(content, field, value)
-    batch_atomic_write([PlannedWrite(path=sidecar_path, content=content)], vault_root=vault_root)
+    return content
 
 
 def update_sidecar_processing_pending(

@@ -144,6 +144,7 @@ class SemanticUnitHit(TypedDict):
     content: NotRequired[str]
     tags: NotRequired[list[str]]
     context: NotRequired[str | None]
+    relations: NotRequired[list[dict[str, Any]]]
     source_span: NotRequired[dict[str, int]]
     source_hash: NotRequired[str]
     parent_superseded_by: NotRequired[list[str]]

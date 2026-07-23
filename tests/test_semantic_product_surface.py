@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from exomem import commands
+from exomem import commands, freshness, lexstore
 
 REVIEW_FIELDS = {
     "validate_only",
@@ -19,7 +19,7 @@ REVIEW_FIELDS = {
 }
 
 
-def _write_semantic_page(root: Path) -> None:
+def _write_semantic_page(root: Path) -> Path:
     path = root / "Knowledge Base" / "Notes" / "semantic-surface.md"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
@@ -39,10 +39,19 @@ def _write_semantic_page(root: Path) -> None:
         "Use SQLite WAL mode for public recall.\n",
         encoding="utf-8",
     )
+    return path
+
+
+def _prepare_semantic_catalog(root: Path, paths: list[Path]) -> None:
+    entries = [(str(path), freshness.stat_signature(path)) for path in paths]
+    freshness.seed(root, "kb", entries)
+    freshness.seed(root, "vault", entries)
+    lexstore.ensure_fresh(root)
 
 
 def test_ask_memory_returns_filtered_semantic_units(tmp_path: Path) -> None:
-    _write_semantic_page(tmp_path)
+    page = _write_semantic_page(tmp_path)
+    _prepare_semantic_catalog(tmp_path, [page])
 
     hits = commands.op_ask_memory(
         tmp_path,
@@ -64,7 +73,8 @@ def test_ask_memory_returns_filtered_semantic_units(tmp_path: Path) -> None:
 
 
 def test_deep_semantic_unit_recall_returns_a_citable_context_pack(tmp_path: Path) -> None:
-    _write_semantic_page(tmp_path)
+    page = _write_semantic_page(tmp_path)
+    _prepare_semantic_catalog(tmp_path, [page])
 
     result = commands.op_ask_memory(
         tmp_path,
@@ -101,7 +111,11 @@ def test_existing_creation_review_protocol_is_public(leaf_name: str) -> None:
 
 def test_remember_active_disconnected_note_can_validate_then_commit(vault: Path) -> None:
     kwargs = {
-        "content": "# Public review round trip\n\nA deliberately disconnected conclusion.\n",
+        "content": (
+            "# Public review round trip\n\n"
+            "## Observations\n\n"
+            "- [review state] This conclusion is deliberately disconnected.\n"
+        ),
         "title": "Public review round trip",
         "slug": "public-review-round-trip",
         "suggestions": False,

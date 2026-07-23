@@ -3,10 +3,20 @@
 __pycache__/
 *.py[cod]
 .pytest_cache/
+.pytest-*/
 pytest-cache-files-*/
 .pytest-tmp/
+.review-basetemp-*/
 .tmp-product-benchmark/
+.bench-*/
+.benchmark-*/
+.semantic-latency-*/
 .codex-manual-cache/
+.python-write-probe/
+.surface-probe/
+.superpowers/
+.task/
+.uv-cache-*/
 .og-previews/
 .push-clone-test/
 .pypi-*-test-*/
@@ -18,6 +28,7 @@ analysis/
 *.tmp
 dist/
 build/
+.exomem-private/
 *.egg-info/
 
 # Local-only maintainer scratch that may hold real personal tokens — never commit.
@@ -63,3 +74,4 @@ infra/provisioner/.ruff_cache/
 infra/provisioner/.pytest_cache/
 infra/provisioner/*.sqlite*
 .refs.sqlite
+.lexical.sqlite*

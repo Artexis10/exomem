@@ -12,6 +12,7 @@ from typing import Any
 
 import yaml
 
+from . import semantic_authoring
 from .kbdir import kb_dirname
 
 WORKFLOW_SKILLS_DIR = Path(__file__).parent / "_scaffold" / "_Schema" / "workflow-skills"
@@ -40,6 +41,33 @@ def list_skills() -> list[dict[str, Any]]:
 def source_dir(name: str) -> Path:
     """Return the packaged source directory for one workflow skill."""
     return WORKFLOW_SKILLS_DIR / name
+
+
+def is_standalone_authoring(name: str) -> bool:
+    """Return whether a workflow can author or change an active compiled note."""
+    return any(
+        str(skill["name"]) == name and skill.get("standalone_authoring") is True
+        for skill in list_skills()
+    )
+
+
+def validate_contract_projection(
+    name: str,
+    skill_dir: Path,
+    *,
+    core: bool = False,
+) -> None:
+    """Reject a standalone authoring boundary whose canonical contract drifted."""
+    if not core and not is_standalone_authoring(name):
+        return
+    skill_md = Path(skill_dir) / "SKILL.md"
+    text = skill_md.read_text(encoding="utf-8")
+    concise = semantic_authoring.render_concise()
+    if text.count(concise) != 1:
+        raise ValueError(
+            f"{name} must embed the complete canonical semantic authoring contract "
+            "exactly once; a reference to the core skill is not sufficient"
+        )
 
 
 def bootstrap_entries() -> list[dict[str, Any]]:

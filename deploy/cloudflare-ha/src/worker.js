@@ -240,6 +240,10 @@ export class ExomemState {
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
+    if (url.pathname === "/__version") {
+      if (!authorized(request, env.STATE_TOKEN)) return json({ error: "unauthorized" }, 401);
+      return json(versionPayload(env));
+    }
     const leaseMatch = url.pathname.match(/^\/v1\/vaults\/([^/]+)\/lease(?:\/([^/]+))?$/);
     const stateMatch = url.pathname.match(/^\/v1\/state\/([^/]+)\/([^/]+)$/);
     if (leaseMatch || stateMatch) {
@@ -263,6 +267,7 @@ export default {
       return proxyMutationRequest(request, env, lease);
     }
 
+    const stamped = await stampEdgeTransit(request, env);
     const replicas = holder === env.LAPTOP_REPLICA_ID
       ? [env.LAPTOP_ORIGIN, env.DESKTOP_ORIGIN]
       : [env.DESKTOP_ORIGIN, env.LAPTOP_ORIGIN];
@@ -271,7 +276,7 @@ export default {
       if (!origin) continue;
       try {
         const target = new URL(url.pathname + url.search, origin);
-        const response = await fetch(new Request(target, request.clone()), {
+        const response = await fetch(new Request(target, stamped.clone()), {
           signal: AbortSignal.timeout(Number(env.ORIGIN_TIMEOUT_MS || 2500)),
           redirect: "manual",
         });
@@ -311,7 +316,7 @@ export async function isMutationCapableRequest(request) {
 }
 
 async function proxyMutationRequest(request, env, lease) {
-  request = withMutationRequestId(request);
+  request = await stampEdgeTransit(request, env);
   const requestId = request.headers.get("x-exomem-request-id");
   const shortTimeout = Number(env.ORIGIN_TIMEOUT_MS || 2500);
   // 60s, not 15s: a governed write validates the draft against the full corpus
@@ -363,14 +368,55 @@ async function proxyMutationRequest(request, env, lease) {
   }
 }
 
-function withMutationRequestId(request) {
+// Stamps every request the worker proxies to an origin (read fan-out and
+// mutation path alike) with a request-id and an HMAC transit proof over that
+// id, keyed by STATE_TOKEN. An origin with the writer lease enabled refuses
+// Cloudflare-transited POSTs lacking a valid proof; the raw token never
+// travels on proxied requests, only the per-request HMAC does.
+async function stampEdgeTransit(request, env) {
   const headers = new Headers(request.headers);
   const presented = String(headers.get("x-exomem-request-id") || "").trim();
   const requestId = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(presented)
     ? presented
     : crypto.randomUUID();
   headers.set("x-exomem-request-id", requestId);
+  const auth = await edgeAuthHmac(env.STATE_TOKEN, requestId);
+  if (auth) headers.set("x-exomem-edge-auth", auth);
+  else headers.delete("x-exomem-edge-auth");
   return new Request(request, { headers });
+}
+
+// Unset STATE_TOKEN omits the header rather than throwing: standalone
+// deployments with no coordinator secret are unaffected by the stamp.
+async function edgeAuthHmac(token, requestId) {
+  const secret = String(token || "").trim();
+  if (!secret) return null;
+  const key = await crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(secret),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  const signature = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(requestId));
+  return [...new Uint8Array(signature)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+function versionPayload(env) {
+  return {
+    service: "exomem-ha-edge",
+    git_sha: env.WORKER_GIT_SHA || "unlabeled",
+    deployed_vars: {
+      MCP_TOOL_TIMEOUT_MS: Number(env.MCP_TOOL_TIMEOUT_MS || 60000),
+      ORIGIN_TIMEOUT_MS: Number(env.ORIGIN_TIMEOUT_MS || 2500),
+      REQUIRE_COORDINATION: requireCoordination(env),
+      SUPPORTED_RUNTIME_CONTRACTS: env.SUPPORTED_RUNTIME_CONTRACTS,
+      DESKTOP_REPLICA_ID: env.DESKTOP_REPLICA_ID,
+      LAPTOP_REPLICA_ID: env.LAPTOP_REPLICA_ID,
+      DESKTOP_ORIGIN: env.DESKTOP_ORIGIN,
+      LAPTOP_ORIGIN: env.LAPTOP_ORIGIN,
+    },
+  };
 }
 
 function candidateForHolder(env, holder) {

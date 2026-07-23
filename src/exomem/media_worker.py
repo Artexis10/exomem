@@ -42,7 +42,7 @@ from .media_jobs import (
 from .media_jobs import (
     MediaJob as _Job,
 )
-from .vault import content_hash
+from .vault import content_hash, post_commit_batch_fanout
 from .writer_lease import get_manager
 
 log = logging.getLogger(__name__)
@@ -269,8 +269,7 @@ class MediaWorker:
         earlier embed (transcript+speaker signals only) remains valid.
         """
         try:
-            with get_manager().mutation_guard(self._vault_root):
-                index_sync.upsert_after_write(self._vault_root, [job.sidecar_path])
+            index_sync.upsert_after_write(self._vault_root, [job.sidecar_path])
             log.info("re-embedded %s (post-frame-OCR segmentation)", job.sidecar_path.name)
         except OpError as exc:
             if exc.code in _TRANSIENT_OPERATION_CODES:
@@ -397,39 +396,49 @@ class MediaWorker:
         speakers: list[dict] | None = None,
         speaker_verification: str | None = None,
     ) -> bool:
-        with get_manager().mutation_guard(self._vault_root):
-            try:
-                current_content = job.sidecar_path.read_text(encoding="utf-8")
-            except (OSError, UnicodeError):
-                current_content = ""
-            from . import media_processing
-
-            current_sidecar = _content_digest(job.sidecar_path)
-            current_binary = _binary_identity(job.binary_path)
-            if current_sidecar != expected_sidecar or current_binary != expected_binary:
-                log.warning(
-                    "extraction result stale for %s; newer canonical input preserved",
-                    job.sidecar_path.name,
-                )
-                return False
-            if media_processing.has_completed_transcript(
-                current_content, media_type=job.media_type
-            ):
-                log.info(
-                    "completed transcript appeared before commit for %s; preserving it",
-                    job.sidecar_path.name,
-                )
-                return False
-            preserve.update_sidecar_extraction(
+        written: list[Path] = []
+        try:
+            with get_manager().mutation_guard(
                 self._vault_root,
-                job.sidecar_path,
-                text=text,
-                engine=engine,
-                speakers=speakers,
-                speaker_verification=speaker_verification,
-                attempts=max(1, job.attempts),
-            )
-            return True
+                operation="background_media_extraction_commit",
+                holder_kind="background",
+            ):
+                try:
+                    current_content = job.sidecar_path.read_text(encoding="utf-8")
+                except (OSError, UnicodeError):
+                    current_content = ""
+                from . import media_processing
+
+                current_sidecar = _content_digest(job.sidecar_path)
+                current_binary = _binary_identity(job.binary_path)
+                if current_sidecar != expected_sidecar or current_binary != expected_binary:
+                    log.warning(
+                        "extraction result stale for %s; newer canonical input preserved",
+                        job.sidecar_path.name,
+                    )
+                    return False
+                if media_processing.has_completed_transcript(
+                    current_content, media_type=job.media_type
+                ):
+                    log.info(
+                        "completed transcript appeared before commit for %s; preserving it",
+                        job.sidecar_path.name,
+                    )
+                    return False
+                written = preserve.update_sidecar_extraction(
+                    self._vault_root,
+                    job.sidecar_path,
+                    text=text,
+                    engine=engine,
+                    speakers=speakers,
+                    speaker_verification=speaker_verification,
+                    attempts=max(1, job.attempts),
+                    defer_index_fanout=True,
+                )
+                return True
+        finally:
+            if written:
+                post_commit_batch_fanout(self._vault_root, written, None, None)
 
     def _commit_processing_failure(
         self,
@@ -441,39 +450,49 @@ class MediaWorker:
         error: str,
         next_action: str,
     ) -> bool:
-        with get_manager().mutation_guard(self._vault_root):
-            current_sidecar = _content_digest(job.sidecar_path)
-            current_binary = _binary_identity(job.binary_path)
-            if current_sidecar != expected_sidecar or current_binary != expected_binary:
-                log.warning(
-                    "processing failure stale for %s; newer canonical input preserved",
-                    job.sidecar_path.name,
-                )
-                return False
-            try:
-                current_content = job.sidecar_path.read_text(encoding="utf-8")
-            except (OSError, UnicodeError):
-                current_content = ""
-            from . import media_processing
-
-            if media_processing.has_completed_transcript(
-                current_content, media_type=job.media_type
-            ):
-                log.info(
-                    "completed transcript appeared before failure commit for %s; preserving it",
-                    job.sidecar_path.name,
-                )
-                return False
-            preserve.update_sidecar_processing_failure(
+        written: list[Path] = []
+        try:
+            with get_manager().mutation_guard(
                 self._vault_root,
-                job.sidecar_path,
-                state=state,
-                attempts=max(1, job.attempts),
-                error=error,
-                retryable=True,
-                next_action=next_action,
-            )
-            return True
+                operation="background_media_failure_commit",
+                holder_kind="background",
+            ):
+                current_sidecar = _content_digest(job.sidecar_path)
+                current_binary = _binary_identity(job.binary_path)
+                if current_sidecar != expected_sidecar or current_binary != expected_binary:
+                    log.warning(
+                        "processing failure stale for %s; newer canonical input preserved",
+                        job.sidecar_path.name,
+                    )
+                    return False
+                try:
+                    current_content = job.sidecar_path.read_text(encoding="utf-8")
+                except (OSError, UnicodeError):
+                    current_content = ""
+                from . import media_processing
+
+                if media_processing.has_completed_transcript(
+                    current_content, media_type=job.media_type
+                ):
+                    log.info(
+                        "completed transcript appeared before failure commit for %s; preserving it",
+                        job.sidecar_path.name,
+                    )
+                    return False
+                written = preserve.update_sidecar_processing_failure(
+                    self._vault_root,
+                    job.sidecar_path,
+                    state=state,
+                    attempts=max(1, job.attempts),
+                    error=error,
+                    retryable=True,
+                    next_action=next_action,
+                    defer_index_fanout=True,
+                )
+                return True
+        finally:
+            if written:
+                post_commit_batch_fanout(self._vault_root, written, None, None)
 
     def _run_clip(self, job: _Job) -> None:
         """CLIP-embed an image (one vector) or a video (per-keyframe vectors) so it's
@@ -499,7 +518,11 @@ class MediaWorker:
         except Exception:  # noqa: BLE001 — a bad image must not kill the worker
             log.exception("CLIP embedding failed for %s", job.binary_path.name)
             return
-        with get_manager().mutation_guard(self._vault_root):
+        with get_manager().mutation_guard(
+            self._vault_root,
+            operation="background_media_clip_commit",
+            holder_kind="background",
+        ):
             if _binary_identity(job.binary_path) != expected_binary:
                 log.warning(
                     "CLIP result stale for %s; changed media was not indexed",
@@ -535,7 +558,11 @@ class MediaWorker:
         OCR jobs go through the normal queue (`do_clip=False` — frame children never
         get their own ClipIndex rows; the parent video's vectors own visual search).
         """
-        with get_manager().mutation_guard(self._vault_root):
+        with get_manager().mutation_guard(
+            self._vault_root,
+            operation="background_media_scene_frame_commit",
+            holder_kind="background",
+        ):
             if expected_binary is not None and _binary_identity(job.binary_path) != expected_binary:
                 log.warning(
                     "scene-frame result stale for %s; changed media was not persisted",

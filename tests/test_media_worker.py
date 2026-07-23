@@ -5,6 +5,7 @@ import os
 import threading
 import time
 from contextlib import contextmanager
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -25,10 +26,12 @@ class _RecordingMutationManager:
         self.vault = vault
         self.depth = 0
         self.events: list[str] = []
+        self.guard_metadata: list[dict[str, str]] = []
 
     @contextmanager
-    def mutation_guard(self, vault):
+    def mutation_guard(self, vault, **metadata):
         assert vault == self.vault
+        self.guard_metadata.append(metadata)
         self.events.append("guard-enter")
         self.depth += 1
         try:
@@ -115,6 +118,7 @@ def test_extraction_compute_stays_outside_guard_and_sidecar_commit_is_inside(
     sidecar = vault / result.sidecar_path
     manager = _RecordingMutationManager(vault)
     original_update = preserve.update_sidecar_extraction
+    fanout_depths: list[int] = []
 
     def extract_outside(*_args, **_kwargs):
         assert manager.depth == 0
@@ -129,6 +133,11 @@ def test_extraction_compute_stays_outside_guard_and_sidecar_commit_is_inside(
     monkeypatch.setattr(media_worker, "get_manager", lambda: manager, raising=False)
     monkeypatch.setattr(extract, "extract_text", extract_outside)
     monkeypatch.setattr(preserve, "update_sidecar_extraction", update_inside)
+    monkeypatch.setattr(
+        media_worker.index_sync,
+        "upsert_after_write",
+        lambda *_args, **_kwargs: fanout_depths.append(manager.depth) or True,
+    )
 
     worker = media_worker.MediaWorker(vault, execution_mode="inline")
     worker._process(
@@ -141,7 +150,51 @@ def test_extraction_compute_stays_outside_guard_and_sidecar_commit_is_inside(
 
     assert manager.events.index("extract") < manager.events.index("guard-enter")
     assert manager.events.index("guard-enter") < manager.events.index("sidecar-commit")
+    assert manager.guard_metadata == [
+        {
+            "operation": "background_media_extraction_commit",
+            "holder_kind": "background",
+        }
+    ]
+    assert fanout_depths == [0]
     assert manager.depth == 0
+
+
+def test_processing_failure_sidecar_fans_out_after_commit_guard_release(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    result = _preserve_media_stub(vault, filename="guarded-failure.mp3")
+    manager = _RecordingMutationManager(vault)
+    fanout_depths: list[int] = []
+
+    def unavailable(*_args, **_kwargs):
+        raise extract.ExtractionUnavailable("engine absent")
+
+    monkeypatch.setattr(media_worker, "get_manager", lambda: manager)
+    monkeypatch.setattr(extract, "extract_text", unavailable)
+    monkeypatch.setattr(
+        media_worker.index_sync,
+        "upsert_after_write",
+        lambda *_args, **_kwargs: fanout_depths.append(manager.depth) or True,
+    )
+    worker = media_worker.MediaWorker(vault, execution_mode="inline")
+
+    outcome = worker._process(
+        media_worker._Job(
+            binary_path=vault / result.path,
+            sidecar_path=vault / result.sidecar_path,
+            media_type="audio",
+        )
+    )
+
+    assert outcome.state == media_jobs.BLOCKED
+    assert fanout_depths == [0]
+    assert manager.guard_metadata == [
+        {
+            "operation": "background_media_failure_commit",
+            "holder_kind": "background",
+        }
+    ]
 
 
 def test_sidecar_edit_during_extraction_makes_result_stale(
@@ -493,7 +546,7 @@ def test_clip_compute_stays_outside_guard_and_index_commit_is_inside(
     assert manager.depth == 0
 
 
-def test_scene_artifacts_and_reembed_index_commit_use_guard(
+def test_scene_artifacts_use_guard_and_reembed_runs_outside_guard(
     vault, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.delenv("EXOMEM_DISABLE_CLIP", raising=False)
@@ -524,16 +577,16 @@ def test_scene_artifacts_and_reembed_index_commit_use_guard(
         manager.events.append("scene-commit")
         return []
 
-    def reembed_inside(*_args, **_kwargs):
-        assert manager.depth > 0
-        manager.events.append("reembed-commit")
+    def reembed_outside(*_args, **_kwargs):
+        assert manager.depth == 0
+        manager.events.append("reembed-derived")
 
     monkeypatch.setattr(media_worker, "get_manager", lambda: manager, raising=False)
     monkeypatch.setattr(media_worker.scene_frames, "scene_frames_enabled", lambda: True)
     monkeypatch.setattr(embeddings, "embed_video_scenes", embed_scenes_outside)
     monkeypatch.setattr(worker._clip_index, "upsert_frames", clip_commit_inside)
     monkeypatch.setattr(media_worker.scene_frames, "write_scene_frames", scene_commit_inside)
-    monkeypatch.setattr(media_worker.index_sync, "upsert_after_write", reembed_inside)
+    monkeypatch.setattr(media_worker.index_sync, "upsert_after_write", reembed_outside)
 
     clip_job = media_worker._Job(
         binary_path=vault / result.path,
@@ -557,25 +610,36 @@ def test_scene_artifacts_and_reembed_index_commit_use_guard(
     assert manager.events.index("scene-embed") < manager.events.index("guard-enter")
     assert "clip-commit" in manager.events
     assert "scene-commit" in manager.events
-    assert "reembed-commit" in manager.events
+    assert "reembed-derived" in manager.events
+    assert {
+        "operation": "background_media_clip_commit",
+        "holder_kind": "background",
+    } in manager.guard_metadata
+    assert {
+        "operation": "background_media_scene_frame_commit",
+        "holder_kind": "background",
+    } in manager.guard_metadata
     assert manager.depth == 0
 
 
-def test_reembed_propagates_transient_writer_refusal(
+def test_reembed_does_not_consult_canonical_mutation_guard(
     vault, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     result = _preserve_media_stub(vault, filename="reembed-lease-race.mp3")
 
     class _DeniedManager:
         @contextmanager
-        def mutation_guard(self, _vault):
-            raise media_worker.OpError(
-                "WRITER_LEASE_REQUIRED",
-                "replica is read-only; current writer is desktop",
-            )
+        def mutation_guard(self, _vault, **_metadata):
+            pytest.fail("pure derived re-embed requested canonical mutation authority")
             yield
 
     monkeypatch.setattr(media_worker, "get_manager", lambda: _DeniedManager())
+    reembedded: list[Path] = []
+    monkeypatch.setattr(
+        media_worker.index_sync,
+        "upsert_after_write",
+        lambda _vault, paths: reembedded.extend(paths),
+    )
     worker = media_worker.MediaWorker(vault, execution_mode="inline")
     job = media_worker._Job(
         binary_path=vault / result.path,
@@ -585,8 +649,9 @@ def test_reembed_propagates_transient_writer_refusal(
         do_reembed=True,
     )
 
-    with pytest.raises(media_worker.OpError, match="WRITER_LEASE_REQUIRED"):
-        worker._process(job)
+    worker._process(job)
+
+    assert reembedded == [job.sidecar_path]
 
 
 def test_parent_media_change_during_clip_compute_skips_stale_index_and_scenes(

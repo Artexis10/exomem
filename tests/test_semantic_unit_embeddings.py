@@ -144,6 +144,94 @@ def test_unit_vector_rebuild_uses_current_markdown_generation(
     assert rows[0]["parent_generation"] == state.parent_generation
 
 
+def test_hierarchy_migration_rebuilds_current_vector_unit_set_without_source_write(
+    tmp_path: Path, monkeypatch
+) -> None:
+    page = _write_page(
+        tmp_path,
+        """\
+## Finding
+
+Parent conclusion.
+
+### Decision
+
+Nested recognized content.
+
+- [config] Compact-shaped body content.
+""",
+    )
+    source = page.read_bytes()
+    current = semantic_index.build_parent_index_state(tmp_path, page)
+    assert [(unit.form, unit.kind) for unit in current.document.units] == [
+        ("rich", "finding")
+    ]
+    index = embedding_index.EmbeddingIndex(tmp_path)
+    index.upsert_semantic_units(current, _vectors(1), page.stat().st_mtime)
+
+    conn = sqlite3.connect(embedding_index.index_paths.sidecar_path(tmp_path))
+    try:
+        columns = [
+            str(row[1])
+            for row in conn.execute("PRAGMA table_info(semantic_unit_vectors)")
+        ]
+        existing = conn.execute(
+            "SELECT * FROM semantic_unit_vectors WHERE parent_path = ?",
+            (current.path,),
+        ).fetchone()
+        assert existing is not None
+        old_parent = dict(zip(columns, existing, strict=True))
+        old_parent.update(
+            {
+                "unit_key": "old-parent-ref",
+                "unit_ref": "old-parent-ref",
+                "parent_generation": "pre-hierarchy",
+                "parser_version": semantic_index.PARSER_VERSION - 1,
+            }
+        )
+        old_nested = {
+            **old_parent,
+            "unit_key": "old-nested-ref",
+            "unit_ref": "old-nested-ref",
+            "content": "Nested recognized content.",
+            "source_order": 1,
+        }
+        conn.execute(
+            "DELETE FROM semantic_unit_vectors WHERE parent_path = ?",
+            (current.path,),
+        )
+        placeholders = ", ".join("?" for _ in columns)
+        conn.executemany(
+            f"INSERT INTO semantic_unit_vectors({', '.join(columns)}) "
+            f"VALUES({placeholders})",
+            [
+                tuple(old_parent[column] for column in columns),
+                tuple(old_nested[column] for column in columns),
+            ],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    monkeypatch.setattr(
+        embeddings, "_chunks_for_page", lambda _root, _page: ["page chunk"]
+    )
+    monkeypatch.setattr(
+        embeddings,
+        "embed_texts",
+        lambda texts, *, is_query: _vectors(len(texts), 6.0),
+    )
+
+    assert index.rebuild_all() == 1
+
+    rows = _unit_rows(tmp_path)
+    assert page.read_bytes() == source
+    assert len(rows) == 1
+    assert rows[0]["unit_key"] == current.document.units[0].unit_ref
+    assert rows[0]["parent_generation"] == current.parent_generation
+    assert rows[0]["parser_version"] == semantic_index.PARSER_VERSION
+
+
 def test_incremental_index_repairs_unit_rows_even_when_page_chunks_are_current(
     tmp_path: Path, monkeypatch
 ) -> None:

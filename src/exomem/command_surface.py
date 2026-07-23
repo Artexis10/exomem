@@ -145,6 +145,14 @@ def bind_vault(
         resolved = {}
 
     help_text = parse_args_help(description if description is not None else leaf.__doc__)
+    if command is not None:
+        help_text.update(
+            {
+                param.name: param.help
+                for param in getattr(command, "params", ())
+                if param.help
+            }
+        )
     visible = [
         p.replace(
             annotation=_annotate_description(
@@ -156,13 +164,17 @@ def bind_vault(
     if command is not None and command.name == "edit_memory":
         from .edit_operations import EditOperation, public_edit_operation_schema
 
+        operation_schema = public_edit_operation_schema()
+        operation_help = help_text.get("operation", "")
+        if operation_help:
+            operation_schema = {**operation_schema, "description": operation_help}
         visible = [
             parameter.replace(
                 default=inspect.Parameter.empty,
                 annotation=typing.Annotated[
                     EditOperation,
-                    WithJsonSchema(public_edit_operation_schema()),
-                    Field(description=help_text.get("operation", "")),
+                    WithJsonSchema(operation_schema),
+                    Field(description=operation_help),
                 ],
             )
             if parameter.name == "operation"
@@ -209,15 +221,25 @@ def bind_vault(
             from .writer_lease import invoke_command
 
             invocation_read_only = invocation_is_read_only(command, kwargs)
-            return invoke_command(
-                command,
-                *injected,
-                mutation_request_id=mcp_request_id(),
-                implicit_idempotency_scope=(
-                    None if invocation_read_only else mcp_retry_scope()
-                ),
-                **kwargs,
-            )
+            try:
+                return invoke_command(
+                    command,
+                    *injected,
+                    mutation_request_id=mcp_request_id(),
+                    implicit_idempotency_scope=(
+                        None if invocation_read_only else mcp_retry_scope()
+                    ),
+                    **kwargs,
+                )
+            except Exception as error:
+                from . import cli_ops
+
+                if isinstance(error, cli_ops.OpError):
+                    return cli_ops.envelope(False, error=error.as_public_dict())
+                semantic_error = cli_ops.semantic_validation_error_dict(error)
+                if semantic_error is None:
+                    raise
+                return cli_ops.envelope(False, error=semantic_error)
 
     wrapper.__signature__ = new_sig  # type: ignore[attr-defined]
     wrapper.__name__ = name or leaf.__name__

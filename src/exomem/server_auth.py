@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import math
 import os
 from contextlib import nullcontext
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import httpx
@@ -25,6 +27,7 @@ from key_value.aio.wrappers.encryption import FernetEncryptionWrapper
 from .auth_sessions import SessionAuthority
 from .remote_oauth_storage import ReadThroughMirrorStorage, RemoteOAuthStorage
 from .session_oauth import OAUTH_AUTHORIZATION_SCOPES, ExomemSessionOAuthProxy
+from .session_validation_cache import SessionValidationCache
 
 if TYPE_CHECKING:
     from .hosted_runtime import HostedCellConfig
@@ -200,6 +203,24 @@ def build_session_authority(*, base_url: str) -> SessionAuthority:
     shared = _shared_storage_settings()
     if shared is not None:
         storage_url, namespace, storage_token, timeout = shared
+        stale_grace_seconds = _session_stale_grace_seconds()
+        state_raw = os.environ.get("EXOMEM_WRITER_LEASE_STATE_DIR", "").strip()
+        state_dir = (
+            Path(state_raw).expanduser()
+            if state_raw
+            else Path.home() / ".cache" / "exomem"
+        )
+        replica = os.environ.get("EXOMEM_WRITER_LEASE_REPLICA_ID", "").strip() or "standalone"
+        vault = os.environ.get("EXOMEM_WRITER_LEASE_VAULT_ID", "").strip() or namespace
+        safe_name = hashlib.sha256(f"{vault}\0{replica}".encode()).hexdigest()[:20]
+        cache = (
+            None
+            if stale_grace_seconds == 0
+            else SessionValidationCache(
+                state_dir / f"session-validations-{safe_name}.sqlite",
+                encryption_key=_oauth_storage_encryption_key(signing_root),
+            )
+        )
         return SessionAuthority.remote(
             url=storage_url,
             namespace=namespace,
@@ -208,6 +229,8 @@ def build_session_authority(*, base_url: str) -> SessionAuthority:
             issuer=issuer,
             audience=audience,
             timeout=timeout,
+            validation_cache=cache,
+            stale_grace_seconds=stale_grace_seconds,
         )
 
     from fastmcp import settings
@@ -220,20 +243,37 @@ def build_session_authority(*, base_url: str) -> SessionAuthority:
     )
 
 
+def _oauth_storage_encryption_key(signing_root: str) -> bytes:
+    signing_key = derive_jwt_key(
+        low_entropy_material=signing_root,
+        salt="fastmcp-jwt-signing-key",
+    )
+    return derive_jwt_key(
+        high_entropy_material=signing_key.decode(),
+        salt="fastmcp-storage-encryption-key",
+    )
+
+
+def _session_stale_grace_seconds() -> float:
+    raw = os.environ.get("EXOMEM_SESSION_STALE_GRACE_SECONDS", "86400").strip()
+    try:
+        value = float(raw)
+    except ValueError:
+        raise RuntimeError("EXOMEM_SESSION_STALE_GRACE_SECONDS must be a number") from None
+    if not math.isfinite(value) or value < 0:
+        raise RuntimeError(
+            "EXOMEM_SESSION_STALE_GRACE_SECONDS must be a non-negative finite number"
+        )
+    return value
+
+
 def _build_oauth_client_storage(*, signing_root: str) -> Any | None:
     """Preserve FastMCP's DCR/transaction/code storage behavior in HA mode."""
     shared = _shared_storage_settings()
     if shared is None:
         return None
     storage_url, namespace, storage_token, timeout = shared
-    signing_key = derive_jwt_key(
-        low_entropy_material=signing_root,
-        salt="fastmcp-jwt-signing-key",
-    )
-    storage_key = derive_jwt_key(
-        high_entropy_material=signing_key.decode(),
-        salt="fastmcp-storage-encryption-key",
-    )
+    storage_key = _oauth_storage_encryption_key(signing_root)
     remote = RemoteOAuthStorage(
         url=storage_url,
         namespace=namespace,

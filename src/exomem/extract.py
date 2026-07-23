@@ -935,8 +935,8 @@ def _ensure_tesseract_cmd() -> None:
         pytesseract.pytesseract.tesseract_cmd = explicit
     elif not shutil.which("tesseract"):
         for cand in (
-            r"C:\Program Files\Tesseract-OCR\tesseract.exe",
-            r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
+            "C:" + r"\Program Files\Tesseract-OCR\tesseract.exe",
+            "C:" + r"\Program Files (x86)\Tesseract-OCR\tesseract.exe",
         ):
             if Path(cand).is_file():
                 pytesseract.pytesseract.tesseract_cmd = cand

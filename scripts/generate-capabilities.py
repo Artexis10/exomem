@@ -135,6 +135,53 @@ def build_capabilities_markdown() -> str:
             + " |"
         )
 
+    semantic_authoring = commands.semantic_authoring_module
+    authoring_contract = semantic_authoring.get_semantic_authoring_contract()
+    authoring_commands = {
+        command.name: command
+        for command in registry
+        if command.name
+        in {
+            "remember",
+            "replace_memory",
+            "observe_memory",
+            "edit_memory",
+            "manage_memory_file",
+        }
+    }
+    lines.extend(
+        [
+            "",
+            "## Semantic Authoring Command Contract",
+            "",
+            "These registry descriptions are projected into MCP, REST/OpenAPI, and CLI parameter help.",
+            "",
+            f"Contract identity: `{semantic_authoring.contract_identity(authoring_contract)}`",
+            "",
+        ]
+    )
+    for name in (
+        "remember",
+        "replace_memory",
+        "observe_memory",
+        "edit_memory",
+        "manage_memory_file",
+    ):
+        command = authoring_commands[name]
+        guidance = semantic_authoring.render_tool_guidance(name)
+        if guidance not in command.description:
+            raise RuntimeError(
+                f"{name} registry description is missing canonical authoring guidance"
+            )
+        lines.extend(
+            [
+                f"### `{name}`",
+                "",
+                guidance,
+                "",
+            ]
+        )
+
     lines.extend(
         [
             "",

@@ -130,16 +130,26 @@ def _render_outline(note_type: str, title: str, connections: list[str]) -> str:
     if note_type == "research-note":
         lines += [
             "> Draft scaffold from propose_compilation. research-note requires a "
-            "`project:` — pass it to note(). Fill the prose, then call note() with "
-            "the suggested_sources/connections.",
+            "`project:` — pass it to note(). Replace every unresolved placeholder "
+            "before calling note(); untouched placeholders cannot be committed.",
+            "> Satisfy semantic authoring by replacing the observation fill-in row, "
+            "or by filling a governed rich section with a valid non-empty rich unit.",
             "",
         ]
     else:
         lines += [
-            "> Draft scaffold from propose_compilation. Fill the prose, then call "
-            "note() with the suggested_sources + connections.",
+            "> Draft scaffold from propose_compilation. Replace every unresolved "
+            "placeholder before calling note(); untouched placeholders cannot be committed.",
+            "> Satisfy semantic authoring by replacing the observation fill-in row, "
+            "or by filling a governed rich section with a valid non-empty rich unit.",
             "",
         ]
+    lines += [
+        "## Observations",
+        "",
+        "- [ ] Replace this row with `- [category] content #tags (context) ^anchor`.",
+        "",
+    ]
     for sec in sections:
         lines.append(f"## {sec}")
         lines.append("")
@@ -147,7 +157,5 @@ def _render_outline(note_type: str, title: str, connections: list[str]) -> str:
             lines.append("<!-- Proposed relations: review before writing. -->")
             for c in connections:
                 lines.append(f"- relates_to [[{c}]]")
-        else:
-            lines.append(f"<!-- {sec.lower()}: distilled from the cited source(s) -->")
         lines.append("")
     return "\n".join(lines).rstrip() + "\n"

@@ -2,7 +2,7 @@
 
 ## Preconditions
 
-The complete application release manifest, real B2 locking proof, static-secret
+The complete application release manifest, real HCP state locking/recovery proof, static-secret
 ciphertexts, and owner-only invitation gate must be green. Production mutation
 always uses a saved plan; a second plan is never computed during apply. The
 release manifest is the reviewed artifact path exported by the release pipeline

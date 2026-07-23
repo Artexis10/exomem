@@ -30,6 +30,11 @@ on:
         description: Exact published ghcr.io/artexis10/exomem-provisioner@sha256 digest
         required: false
         type: string
+      external_blackbox:
+        description: Run the deployed availability, backup-freshness, and scheduler probes
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -132,7 +137,7 @@ jobs:
             --require-published
 
   external-blackbox:
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.external_blackbox)
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:

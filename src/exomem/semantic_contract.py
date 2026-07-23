@@ -21,9 +21,11 @@ from . import (
     access,
     activation,
     activation_manifest,
+    freshness,
     memory_refs,
     memory_schema,
     relation_registry,
+    semantic_authoring,
     semantic_language_registry,
     semantic_units,
     vault,
@@ -44,6 +46,33 @@ _AUTHORED_SCHEMA_ORIGINS = frozenset({"markdown_relation", "semantic_relation"})
 _CREATE_LIKE = frozenset({"create", "replacement", "adoption_compile", "tier2_create"})
 _GRANDFATHERED_OPERATIONS = frozenset(
     {"edit", "move", "observe", "recover", "tier2_overwrite", "tier2_append"}
+)
+COMPILED_DESTINATIONS = MappingProxyType(
+    {
+        "experiment": "Notes/Experiments",
+        "failure": "Notes/Failures",
+        "insight": "Notes/Insights",
+        "pattern": "Notes/Patterns",
+        "production-log": "Notes/Productions",
+        "research-note": "Notes/Research",
+    }
+)
+COMPILED_TYPES = frozenset(COMPILED_DESTINATIONS)
+_COMPILED_ROOT_TYPES = MappingProxyType(
+    {
+        destination.rsplit("/", 1)[-1].casefold(): page_type
+        for page_type, destination in COMPILED_DESTINATIONS.items()
+    }
+)
+_INACTIVE_STATUSES = frozenset({"archived", "draft", "dropped", "planned", "superseded"})
+_SEMANTIC_UNIT_EXEMPT_PARTS = frozenset(
+    {"sources", "evidence", "_trash", "trash", "_schema", "templates", "data"}
+)
+_SEMANTIC_UNIT_EXEMPT_TAGS = frozenset({"hub", "snapshot"})
+_SEMANTIC_UNIT_EXEMPT_SUFFIXES = (
+    "-architecture",
+    "-snapshot",
+    "-catalog-snapshot",
 )
 _WIKILINK_RE = re.compile(r"\[\[([^\]\n]+)\]\]")
 
@@ -70,9 +99,7 @@ def review_content_fingerprint(page_identity: str, source: str) -> str:
         {
             "schema_version": 1,
             "page_identity": page_identity,
-            "normalized_source_hash": hashlib.sha256(
-                normalized.encode("utf-8")
-            ).hexdigest(),
+            "normalized_source_hash": hashlib.sha256(normalized.encode("utf-8")).hexdigest(),
         }
     )
 
@@ -87,9 +114,7 @@ def _freeze(value: Any) -> Any:
         return MappingProxyType(
             {
                 key: _freeze(child)
-                for key, child in sorted(
-                    value.items(), key=lambda item: _stable_value_key(item[0])
-                )
+                for key, child in sorted(value.items(), key=lambda item: _stable_value_key(item[0]))
             }
         )
     if isinstance(value, (list, tuple)):
@@ -105,19 +130,14 @@ def _thaw(value: Any) -> Any:
     if isinstance(value, (tuple, list)):
         return [_thaw(child) for child in value]
     if isinstance(value, frozenset):
-        return [
-            _thaw(child)
-            for child in sorted(value, key=_stable_value_key)
-        ]
+        return [_thaw(child) for child in sorted(value, key=_stable_value_key)]
     return value
 
 
 def _mapping_of_tuples(
     values: Mapping[str, Iterable[Any]],
 ) -> Mapping[str, tuple[Any, ...]]:
-    return MappingProxyType(
-        {key: tuple(values[key]) for key in sorted(values)}
-    )
+    return MappingProxyType({key: tuple(values[key]) for key in sorted(values)})
 
 
 @dataclass(frozen=True, slots=True)
@@ -234,9 +254,7 @@ class StableIdentityCensus:
             identity: str | None = None
             if raw_identity is not None:
                 if not isinstance(raw_identity, str) or normalize_id(raw_identity) is None:
-                    raise ValueError(
-                        f"stable identity is invalid at {state.path}"
-                    )
+                    raise ValueError(f"stable identity is invalid at {state.path}")
                 identity = normalize_id(raw_identity)
             entries.append(StableIdentityEntry(state.path, identity))
         return cls(tuple(entries))
@@ -246,12 +264,10 @@ class StableIdentityCensus:
             "entry_count": len(self.entries),
             "identity_count": len(self.paths_by_identity),
             "entries": [
-                {"path": entry.path, "page_identity": entry.page_identity}
-                for entry in self.entries
+                {"path": entry.path, "page_identity": entry.page_identity} for entry in self.entries
             ],
             "paths_by_identity": {
-                identity: list(paths)
-                for identity, paths in self.paths_by_identity.items()
+                identity: list(paths) for identity, paths in self.paths_by_identity.items()
             },
         }
 
@@ -444,6 +460,82 @@ class ContractFinding:
         }
 
 
+# Bounded advisory category feedback. Public statuses are exactly these four;
+# ordinary canonical/core categories produce no entry and are never rewritten.
+_CATEGORY_FEEDBACK_LIMIT = 8
+_CATEGORY_FEEDBACK_STATUSES = MappingProxyType(
+    {
+        "alias": "alias",
+        "deprecated": "deprecated",
+        "scope_violation": "scope_violation",
+        "unregistered": "open",
+    }
+)
+
+
+@dataclass(frozen=True, slots=True)
+class CategoryFeedback:
+    """One deterministic advisory entry for an authored semantic-unit category."""
+
+    unit_ref: str | None
+    authored: str
+    normalized: str
+    canonical: str
+    status: str
+    replacement: str | None
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "unit_ref": self.unit_ref,
+            "authored": self.authored,
+            "normalized": self.normalized,
+            "canonical": self.canonical,
+            "status": self.status,
+            "replacement": self.replacement,
+        }
+
+
+def _derive_category_feedback(
+    page: SemanticPageState,
+    language_registry: semantic_language_registry.SemanticLanguageRegistry | None,
+) -> tuple[tuple[CategoryFeedback, ...], int]:
+    """Resolve every authored category once with exact page-scoped resolution.
+
+    Uses the same attached-project + page-type resolution the parser applied, so
+    MCP/REST/CLI serialized results inherit byte-equivalent data. Rich units that
+    default their category to the governed kind carry no authored category and
+    therefore never produce an entry.
+    """
+    if language_registry is None:
+        return (), 0
+    view = semantic_language_registry.for_attached_projects(language_registry, page.projects)
+    entries: list[CategoryFeedback] = []
+    for unit in page.document.units:
+        if unit.form == "rich" and "category" not in unit.metadata:
+            continue
+        resolution = view.resolve_category(unit.category_raw, page_type=page.page_type)
+        public_status = _CATEGORY_FEEDBACK_STATUSES.get(resolution.status)
+        if public_status is None:
+            continue
+        canonical = (
+            resolution.definition.key
+            if resolution.definition is not None
+            else (resolution.resolved or unit.category_key)
+        )
+        entries.append(
+            CategoryFeedback(
+                unit_ref=unit.unit_ref,
+                authored=unit.category_raw,
+                normalized=unit.category_key,
+                canonical=canonical,
+                status=public_status,
+                replacement=resolution.replacement,
+            )
+        )
+    retained = tuple(entries[:_CATEGORY_FEEDBACK_LIMIT])
+    return retained, len(entries) - len(retained)
+
+
 @dataclass(frozen=True, slots=True)
 class SemanticContractResult:
     mode: str
@@ -458,6 +550,10 @@ class SemanticContractResult:
     category_counts: tuple[tuple[str, int], ...]
     relation_disposition: RelationDisposition | None
     actions: tuple[str, ...]
+    compact_unit_count: int = 0
+    rich_unit_count: int = 0
+    category_feedback: tuple[CategoryFeedback, ...] = ()
+    category_feedback_omitted: int = 0
 
     def __post_init__(self) -> None:
         for name in (
@@ -468,6 +564,7 @@ class SemanticContractResult:
             "kind_counts",
             "category_counts",
             "actions",
+            "category_feedback",
         ):
             object.__setattr__(self, name, tuple(getattr(self, name)))
 
@@ -481,6 +578,8 @@ class SemanticContractResult:
             "blocking_findings": [finding.as_dict() for finding in self.blocking_findings],
             "should_block": self.should_block,
             "semantic_unit_count": self.semantic_unit_count,
+            "compact_unit_count": self.compact_unit_count,
+            "rich_unit_count": self.rich_unit_count,
             "kind_counts": dict(self.kind_counts),
             "category_counts": dict(self.category_counts),
             "relation_disposition": (
@@ -489,7 +588,140 @@ class SemanticContractResult:
                 else None
             ),
             "actions": list(self.actions),
+            "category_feedback": [entry.as_dict() for entry in self.category_feedback],
+            "category_feedback_omitted": self.category_feedback_omitted,
         }
+
+
+def normalized_compiled_type(value: object) -> str | None:
+    """Normalize an authored page type for exact compiled-intent checks."""
+    return activation.normalized_page_type(value)
+
+
+def _path_parts(path: str) -> tuple[str, ...]:
+    return tuple(part.casefold() for part in PurePosixPath(path.replace("\\", "/")).parts)
+
+
+def _path_excluded_from_semantic_minimum(path: str) -> bool:
+    parts = _path_parts(path)
+    if any(part in _SEMANTIC_UNIT_EXEMPT_PARTS for part in parts):
+        return True
+    name = parts[-1] if parts else ""
+    if name in {"hub.md", "index.md", "log.md"}:
+        return True
+    stem = PurePosixPath(name).stem
+    return any(stem.endswith(suffix) for suffix in _SEMANTIC_UNIT_EXEMPT_SUFFIXES)
+
+
+def canonical_compiled_destination(path: str) -> str | None:
+    """Return the compiled type selected by one canonical destination, if any."""
+    if _path_excluded_from_semantic_minimum(path):
+        return None
+    parts = _path_parts(path)
+    if len(parts) < 3 or parts[:2] != ("knowledge base", "notes"):
+        return None
+    return _COMPILED_ROOT_TYPES.get(parts[2])
+
+
+def _frontmatter_tags(page: SemanticPageState) -> frozenset[str]:
+    value = page.frontmatter.get("tags")
+    if isinstance(value, str):
+        values = (value,)
+    elif isinstance(value, (list, tuple, set, frozenset)):
+        values = value
+    else:
+        values = ()
+    return frozenset(str(item).strip().casefold().lstrip("#") for item in values)
+
+
+def _semantic_unit_explicitly_exempt(page: SemanticPageState) -> bool:
+    return bool(
+        _path_excluded_from_semantic_minimum(page.path)
+        or (_frontmatter_tags(page) & _SEMANTIC_UNIT_EXEMPT_TAGS)
+    )
+
+
+def compiled_intent(page: SemanticPageState) -> bool:
+    """Apply the exact route-or-type compiled-intent definition."""
+    return bool(
+        canonical_compiled_destination(page.path) is not None
+        or normalized_compiled_type(page.page_type) in COMPILED_TYPES
+    )
+
+
+def compiled_structure_finding(page: SemanticPageState) -> ContractFinding | None:
+    """Return a deterministic path/type mismatch before semantic applicability."""
+    destination_type = canonical_compiled_destination(page.path)
+    page_type = normalized_compiled_type(page.page_type)
+    if destination_type is not None and page_type != destination_type:
+        return ContractFinding(
+            code="COMPILED_TYPE_MISMATCH",
+            severity="error",
+            path=page.path,
+            span=None,
+            detail=(
+                f"canonical {COMPILED_DESTINATIONS[destination_type]} content requires "
+                f"frontmatter type {destination_type!r}"
+            ),
+            remediation=(
+                f"Set `type: {destination_type}` or move the document outside that "
+                "canonical compiled destination."
+            ),
+            governed_element_identity=("compiled_intent", "type"),
+            resolved_rule=("semantic_authoring", "compiled_intent", "structure"),
+        )
+    if page_type in COMPILED_TYPES and destination_type != page_type:
+        return ContractFinding(
+            code="COMPILED_DESTINATION_MISMATCH",
+            severity="error",
+            path=page.path,
+            span=None,
+            detail=(
+                f"compiled frontmatter type {page_type!r} is outside its canonical "
+                f"{COMPILED_DESTINATIONS[page_type]} destination"
+            ),
+            remediation=(
+                f"Move the document under `{COMPILED_DESTINATIONS[page_type]}` or use "
+                "a non-compiled type appropriate to this destination."
+            ),
+            governed_element_identity=("compiled_intent", "destination"),
+            resolved_rule=("semantic_authoring", "compiled_intent", "structure"),
+        )
+    return None
+
+
+def compiled_structure_matches(page: SemanticPageState) -> bool:
+    """Return whether compiled intent exists and path/type structure is applicable."""
+    return bool(
+        compiled_intent(page)
+        and not _semantic_unit_explicitly_exempt(page)
+        and compiled_structure_finding(page) is None
+    )
+
+
+def requires_semantic_unit(page: SemanticPageState) -> bool:
+    """Return the exact active, writable compiled minimum-unit predicate."""
+    return bool(compiled_structure_matches(page) and page.eligible_compiled)
+
+
+def _missing_semantic_unit_finding(page: SemanticPageState) -> ContractFinding | None:
+    if page.document.units or not compiled_structure_matches(page):
+        return None
+    active_required = requires_semantic_unit(page)
+    inactive = normalized_compiled_type(page.status) in _INACTIVE_STATUSES
+    if not active_required and not inactive:
+        return None
+    finding = semantic_authoring.AUTHORING_CONTRACT.findings["missing_semantic_unit"]
+    return ContractFinding(
+        code="missing_semantic_unit",
+        severity="error" if active_required else "warning",
+        path=page.path,
+        span=None,
+        detail=str(finding["when"]),
+        remediation=(f"{finding['compact_remediation']} {finding['rich_remediation']}"),
+        governed_element_identity=("semantic_units", "minimum"),
+        resolved_rule=("semantic_authoring", "semantic_unit", "minimum"),
+    )
 
 
 def _copy_definition(
@@ -520,14 +752,9 @@ def _copy_registry(
     return relation_registry.RelationRegistry(
         registry.core_version,
         registry.extension_hash,
+        MappingProxyType({key: _copy_definition(value) for key, value in registry.core.items()}),
         MappingProxyType(
-            {key: _copy_definition(value) for key, value in registry.core.items()}
-        ),
-        MappingProxyType(
-            {
-                key: _copy_definition(value)
-                for key, value in registry.extensions.items()
-            }
+            {key: _copy_definition(value) for key, value in registry.extensions.items()}
         ),
         MappingProxyType(dict(registry.aliases)),
         tuple(MappingProxyType(dict(finding)) for finding in registry.findings),
@@ -561,9 +788,7 @@ class SemanticCorpusContext:
         )
         object.__setattr__(self, "resolver_entries", tuple(self.resolver_entries))
         object.__setattr__(self, "resolver_full_paths", frozenset(self.resolver_full_paths))
-        object.__setattr__(
-            self, "resolver_kb_stripped", frozenset(self.resolver_kb_stripped)
-        )
+        object.__setattr__(self, "resolver_kb_stripped", frozenset(self.resolver_kb_stripped))
         object.__setattr__(
             self,
             "resolver_stems",
@@ -616,6 +841,25 @@ class SemanticCorpusContext:
         )
 
     def with_candidate(self, state: SemanticPageState) -> SemanticCorpusContext:
+        current = self.pages.get(state.path)
+        if current is not None and (
+            current.title,
+            current.identity_kind,
+            current.identity,
+            current.page_type,
+            current.projects,
+            current.language_registry_hash,
+            current.relation_registry_hash,
+        ) == (
+            state.title,
+            state.identity_kind,
+            state.identity,
+            state.page_type,
+            state.projects,
+            state.language_registry_hash,
+            state.relation_registry_hash,
+        ):
+            return _context_with_stable_topology_candidate(self, state)
         pages = dict(self.pages)
         pages[state.path] = state
         return _context_from_state_map(
@@ -699,15 +943,9 @@ def build_page_state(
     document = semantic_units.parse_semantic_units(
         body,
         path=rel_path,
-        parent_ref=(
-            memory_refs.memory_ref(normalized_id)
-            if normalized_id is not None
-            else None
-        ),
+        parent_ref=(memory_refs.memory_ref(normalized_id) if normalized_id is not None else None),
         validate=True,
-        language_registry=semantic_language_registry.for_attached_projects(
-            language, projects
-        ),
+        language_registry=semantic_language_registry.for_attached_projects(language, projects),
         relation_registry=registry,
         include_legacy_relations=True,
         retain_unknown_relations=True,
@@ -739,16 +977,10 @@ def build_page_state(
         identity_kind=identity_kind,
         identity=identity,
         source_hash=vault.content_hash(raw_source),
-        language_registry_hash=(
-            f"{language.schema_version}:{language.content_hash}"
-        ),
-        relation_registry_hash=(
-            f"{registry.core_version}:{registry.extension_hash}"
-        ),
+        language_registry_hash=(f"{language.schema_version}:{language.content_hash}"),
+        relation_registry_hash=(f"{registry.core_version}:{registry.extension_hash}"),
         review_fingerprint=(
-            str(resolved_review_fingerprint)
-            if resolved_review_fingerprint is not None
-            else None
+            str(resolved_review_fingerprint) if resolved_review_fingerprint is not None else None
         ),
         frontmatter=frontmatter,
         page_type=page_type,
@@ -766,12 +998,11 @@ class _CensusUnsafe(Exception):
 
 
 # Process cache for the fully-materialized corpus context: one bounded entry
-# per vault root, keyed on a stat-level census of every filesystem input the
-# build reads. Serving rule: the current census must equal the stored census,
-# and the stored census was confirmed identical before AND after the build it
-# captions, so a tree that changed mid-build is never stored. Invalidation
-# needs no TTL and no cooperation from writers: any input change that alters a
-# path, size, or mtime_ns is caught by the census taken on the next call.
+# per vault root, captioned by a stat-level census of every filesystem input the
+# build reads. Exact census matches are returned directly. Markdown-only census
+# deltas are reconciled by reparsing just the changed parents and rebuilding the
+# cheap derived maps from the retained page states. Configuration/registry
+# changes still take the full-build oracle path.
 #
 # Why (path, size, mtime_ns) per file and not a max-mtime scan: Syncthing (and
 # any mtime-preserving sync) materializes remote edits with the SOURCE's
@@ -782,11 +1013,25 @@ class _CensusUnsafe(Exception):
 # undetectable case — new content with byte-identical size and identical
 # 100ns-resolution mtime at the same path — is not producible by the engine's
 # own temp+rename writes nor by observed sync behavior.
-_CORPUS_CONTEXT_CACHE: dict[
-    tuple[str, str], tuple[tuple, SemanticCorpusContext]
-] = {}
+_CORPUS_CONTEXT_CACHE: dict[tuple[str, str], tuple[tuple, SemanticCorpusContext]] = {}
+_CORPUS_CONTEXT_EVENT_TOKENS: dict[tuple[str, str], tuple[int, int, str]] = {}
+_CORPUS_CONTEXT_LANGUAGE_HASHES: dict[tuple[str, str], str] = {}
 _CORPUS_CONTEXT_CACHE_LOCK = threading.Lock()
+_CORPUS_CONTEXT_UPDATE_LOCK = threading.RLock()
 _CORPUS_CONTEXT_CACHE_MAX_VAULTS = 2
+
+
+@dataclass(slots=True)
+class _CorpusContextFlight:
+    census: tuple
+    registry_identity: tuple[Any, ...]
+    language_identity: tuple[Any, ...]
+    done: threading.Event = field(default_factory=threading.Event)
+    result: SemanticCorpusContext | None = None
+    error: BaseException | None = None
+
+
+_CORPUS_CONTEXT_FLIGHTS: dict[tuple[str, str], _CorpusContextFlight] = {}
 
 
 def corpus_context_cache_enabled() -> bool:
@@ -798,6 +1043,8 @@ def reset_corpus_context_cache() -> None:
     """Drop every cached corpus context; intentionally public for tests."""
     with _CORPUS_CONTEXT_CACHE_LOCK:
         _CORPUS_CONTEXT_CACHE.clear()
+        _CORPUS_CONTEXT_EVENT_TOKENS.clear()
+        _CORPUS_CONTEXT_LANGUAGE_HASHES.clear()
 
 
 def _corpus_cache_key(root: Path) -> tuple[str, str]:
@@ -835,9 +1082,7 @@ def _corpus_census(root: Path) -> tuple | None:
                 continue
             if not stat.S_ISREG(info.st_mode):
                 raise _CensusUnsafe
-            entries.add(
-                (path.relative_to(root).as_posix(), "f", info.st_size, info.st_mtime_ns)
-            )
+            entries.add((path.relative_to(root).as_posix(), "f", info.st_size, info.st_mtime_ns))
 
     def loose_walk(directory: Path) -> None:
         # Mirror of vault.walk_vault_md: skip dirs and sync-conflict copies,
@@ -887,6 +1132,52 @@ def _corpus_census(root: Path) -> tuple | None:
     return tuple(sorted(entries))
 
 
+def _config_census(root: Path) -> tuple[tuple[str, str, int, int], ...] | None:
+    """O(1) freshness stamp for non-Markdown semantic inputs."""
+    entries: list[tuple[str, str, int, int]] = []
+    try:
+        for extra in (
+            access.access_config_path(root),
+            relation_registry.extension_registry_path(root),
+            semantic_language_registry.registry_path(root),
+        ):
+            marker = extra.relative_to(root).as_posix()
+            try:
+                info = extra.stat()
+            except FileNotFoundError:
+                entries.append((marker, "absent", -1, -1))
+            else:
+                entries.append((marker, "cfg", info.st_size, info.st_mtime_ns))
+    except (OSError, ValueError):
+        return None
+    return tuple(sorted(entries))
+
+
+def _stored_config_census(census: tuple) -> tuple:
+    return tuple(entry for entry in census if entry[1] != "f")
+
+
+def _patch_markdown_census(
+    root: Path,
+    census: tuple,
+    *,
+    changed_paths: tuple[str, ...],
+    deleted_paths: tuple[str, ...],
+) -> tuple:
+    entries = {str(entry[0]): entry for entry in census}
+    for rel_path in deleted_paths:
+        entries.pop(rel_path, None)
+    for rel_path in changed_paths:
+        path = root / rel_path
+        try:
+            info = path.stat()
+        except FileNotFoundError:
+            entries.pop(rel_path, None)
+        else:
+            entries[rel_path] = (rel_path, "f", info.st_size, info.st_mtime_ns)
+    return tuple(sorted(entries.values()))
+
+
 def _registries_match_disk(
     root: Path,
     relation_definitions: relation_registry.RelationRegistry,
@@ -905,12 +1196,333 @@ def _registries_match_disk(
         disk_language = semantic_language_registry.load_registry(root)
     except Exception:  # noqa: BLE001 — unreadable registry state: never cache
         return False
-    return (
-        (disk_registry.core_version, disk_registry.extension_hash)
-        == (relation_definitions.core_version, relation_definitions.extension_hash)
-        and (disk_language.schema_version, disk_language.content_hash)
-        == (language.schema_version, language.content_hash)
+    return (disk_registry.core_version, disk_registry.extension_hash) == (
+        relation_definitions.core_version,
+        relation_definitions.extension_hash,
+    ) and (disk_language.schema_version, disk_language.content_hash) == (
+        language.schema_version,
+        language.content_hash,
     )
+
+
+def _markdown_census_delta(before: tuple, after: tuple) -> tuple[str, ...] | None:
+    """Return changed Markdown paths, or ``None`` for a non-page delta.
+
+    Census entries are ``(path, kind, size, mtime_ns)``. A removed path only
+    exists in ``before`` and an added path only in ``after``; both remain safe
+    incremental page changes when their surviving entry kind is ``f``.
+    """
+    before_by_path = {str(entry[0]): entry for entry in before}
+    after_by_path = {str(entry[0]): entry for entry in after}
+    changed = tuple(
+        sorted(
+            path
+            for path in before_by_path.keys() | after_by_path.keys()
+            if before_by_path.get(path) != after_by_path.get(path)
+        )
+    )
+    for path in changed:
+        old = before_by_path.get(path)
+        new = after_by_path.get(path)
+        if (old is not None and old[1] != "f") or (new is not None and new[1] != "f"):
+            return None
+    return changed
+
+
+def _identity_guarded_delta_source(root: Path, rel_path: str) -> str | None:
+    """Read one KB Markdown delta under the full census' alias policy."""
+    kb = vault.kb_root(root)
+    try:
+        kb_info = kb.lstat()
+    except FileNotFoundError:
+        return None
+    except OSError as error:
+        raise activation_manifest.ActivationManifestError(
+            "IDENTITY_CENSUS_ROOT_UNREADABLE",
+            "Knowledge Base root is unavailable for identity census",
+        ) from error
+    if (
+        not stat.S_ISDIR(kb_info.st_mode)
+        or stat.S_ISLNK(kb_info.st_mode)
+        or vault._is_reparse(kb_info)
+    ):
+        raise activation_manifest.ActivationManifestError(
+            "IDENTITY_CENSUS_UNSAFE_ROOT",
+            "Knowledge Base root is unsafe for identity census",
+        )
+
+    source_path = root / rel_path
+    try:
+        leaf_info = source_path.lstat()
+    except FileNotFoundError:
+        try:
+            vault.PathGuard.capture(root, rel_path, leaf_policy="absent")
+        except vault.PathGuardError as error:
+            code = (
+                "IDENTITY_CENSUS_UNSAFE_ENTRY"
+                if error.code in {"PATH_GUARD_ROOT", "PATH_GUARD_UNSAFE"}
+                else "IDENTITY_CENSUS_ENTRY_UNREADABLE"
+            )
+            raise activation_manifest.ActivationManifestError(
+                code,
+                f"could not safely inspect stable identity at {rel_path}",
+            ) from error
+        return None
+    except OSError as error:
+        raise activation_manifest.ActivationManifestError(
+            "IDENTITY_CENSUS_ENTRY_UNREADABLE",
+            "could not inspect a stable-identity census entry",
+        ) from error
+    if stat.S_ISLNK(leaf_info.st_mode) or vault._is_reparse(leaf_info):
+        raise activation_manifest.ActivationManifestError(
+            "IDENTITY_CENSUS_UNSAFE_ENTRY",
+            "stable-identity census contains a filesystem alias",
+        )
+    if not stat.S_ISREG(leaf_info.st_mode):
+        raise activation_manifest.ActivationManifestError(
+            "IDENTITY_CENSUS_NONREGULAR_MARKDOWN",
+            "stable-identity census contains nonregular Markdown",
+        )
+    try:
+        guard = vault.PathGuard.capture(root, rel_path, leaf_policy="stable")
+    except vault.PathGuardError as error:
+        code = (
+            "IDENTITY_CENSUS_UNSAFE_ENTRY"
+            if error.code in {"PATH_GUARD_ROOT", "PATH_GUARD_UNSAFE"}
+            else "IDENTITY_CENSUS_ENTRY_UNREADABLE"
+        )
+        raise activation_manifest.ActivationManifestError(
+            code,
+            f"could not safely inspect stable identity at {rel_path}",
+        ) from error
+    try:
+        source = source_path.read_text(encoding="utf-8")
+        guard.recheck(root)
+    except (OSError, UnicodeDecodeError, vault.PathGuardError) as error:
+        governed_writable = (
+            activation.is_managed_governed_path(root, source_path)
+            and access.access_tier(root, rel_path) == access.TIER_READ_WRITE
+        )
+        code = (
+            "ACTIVATION_MANIFEST_PAGE_UNREADABLE"
+            if governed_writable
+            else "IDENTITY_CENSUS_PAGE_UNREADABLE"
+        )
+        raise activation_manifest.ActivationManifestError(
+            code,
+            f"could not safely inspect stable identity at {rel_path}",
+        ) from error
+    return source
+
+
+def _reconcile_markdown_delta(
+    root: Path,
+    context: SemanticCorpusContext,
+    changed_paths: tuple[str, ...],
+    *,
+    relation_definitions: relation_registry.RelationRegistry,
+    language: semantic_language_registry.SemanticLanguageRegistry,
+) -> SemanticCorpusContext:
+    """Apply current Markdown bytes to an already-materialized context.
+
+    The stable-identity census intentionally covers every Markdown file under
+    the KB, including scan-excluded paths. The semantic page map mirrors
+    ``vault.walk_vault_md`` and therefore excludes trash/schema/sync-conflict
+    paths. Any read or identity ambiguity raises through the same full-build
+    validation types instead of blessing partial state.
+    """
+    states = dict(context.pages)
+    identities = {entry.path: entry for entry in context.identity_census.entries}
+    kb_rel = vault.kb_root(root).relative_to(root).as_posix().rstrip("/")
+    for rel_path in changed_paths:
+        source_path = root / rel_path
+        in_kb = rel_path == kb_rel or rel_path.startswith(kb_rel + "/")
+        included = not vault.in_excluded_scan_dir(rel_path) and (
+            ".sync-conflict-" not in PurePosixPath(rel_path).name
+        )
+        if in_kb:
+            source = _identity_guarded_delta_source(root, rel_path)
+        else:
+            try:
+                source = source_path.read_text(encoding="utf-8")
+            except FileNotFoundError:
+                source = None
+        if source is None:
+            states.pop(rel_path, None)
+            identities.pop(rel_path, None)
+            continue
+
+        state = build_page_state(
+            root,
+            rel_path,
+            source,
+            relation_registry=relation_definitions,
+            language_registry=language,
+        )
+        if included:
+            states[rel_path] = state
+        else:
+            states.pop(rel_path, None)
+        if in_kb:
+            # ``from_states`` preserves the strict invalid-ID failure that the
+            # full stable-identity census would raise for governed Markdown.
+            identities[rel_path] = StableIdentityCensus.from_states((state,)).entries[0]
+        else:
+            identities.pop(rel_path, None)
+
+    return _context_from_state_map(
+        root,
+        states,
+        _copy_registry(relation_definitions),
+        StableIdentityCensus(tuple(identities.values())),
+    )
+
+
+def on_corpus_files_changed(
+    vault_root: Path,
+    *,
+    changed: Iterable[Path] = (),
+    deleted: Iterable[Path | str] = (),
+) -> None:
+    """Patch a warm semantic corpus after a watcher or canonical write event.
+
+    Callers that also publish freshness MUST use
+    :func:`publish_corpus_files_changed` so both derived states advance under
+    one boundary. This lower-level hook remains useful for tests and repair.
+    """
+    with _CORPUS_CONTEXT_UPDATE_LOCK:
+        _patch_corpus_files_changed_locked(
+            vault_root,
+            changed=changed,
+            deleted=deleted,
+            event_token=freshness.triple(Path(vault_root), "vault"),
+        )
+
+
+def publish_corpus_files_changed(
+    vault_root: Path,
+    *,
+    changed: Iterable[Path] = (),
+    deleted: Iterable[Path | str] = (),
+) -> None:
+    """Atomically advance freshness and the warm semantic corpus context.
+
+    Serializing these two derived-state publications prevents concurrent file
+    events from stamping a context that contains only one event with a
+    freshness token that already represents both.
+    """
+    root = Path(vault_root)
+    changed_values = tuple(Path(value) for value in changed)
+    deleted_values = tuple(Path(value) for value in deleted)
+    changed_paths = tuple(
+        value if value.is_absolute() else root / value for value in changed_values
+    )
+    deleted_paths = tuple(
+        value if value.is_absolute() else root / value for value in deleted_values
+    )
+    with _CORPUS_CONTEXT_UPDATE_LOCK:
+        freshness.on_files_changed(root, changed=changed_paths, deleted=deleted_paths)
+        try:
+            _patch_corpus_files_changed_locked(
+                root,
+                changed=changed_values,
+                deleted=deleted_values,
+                event_token=freshness.triple(root, "vault"),
+            )
+        except BaseException:
+            # Freshness already advanced, so the previous context can no
+            # longer prove continuity. Evict every caption before propagating
+            # the safety/parse failure; a later good event must not leapfrog
+            # this missed delta and stamp stale state as current.
+            cache_key = _corpus_cache_key(root)
+            with _CORPUS_CONTEXT_CACHE_LOCK:
+                _CORPUS_CONTEXT_CACHE.pop(cache_key, None)
+                _CORPUS_CONTEXT_EVENT_TOKENS.pop(cache_key, None)
+                _CORPUS_CONTEXT_LANGUAGE_HASHES.pop(cache_key, None)
+            raise
+
+
+def _patch_corpus_files_changed_locked(
+    vault_root: Path,
+    *,
+    changed: Iterable[Path],
+    deleted: Iterable[Path | str],
+    event_token: tuple[int, int, str] | None,
+) -> None:
+    """Patch one cache entry while ``_CORPUS_CONTEXT_UPDATE_LOCK`` is held."""
+    root = Path(vault_root)
+    cache_key = _corpus_cache_key(root)
+    with _CORPUS_CONTEXT_CACHE_LOCK:
+        entry = _CORPUS_CONTEXT_CACHE.get(cache_key)
+    if entry is None:
+        return
+    if _config_census(root) != _stored_config_census(entry[0]):
+        with _CORPUS_CONTEXT_CACHE_LOCK:
+            if _CORPUS_CONTEXT_CACHE.get(cache_key) is entry:
+                _CORPUS_CONTEXT_CACHE.pop(cache_key, None)
+                _CORPUS_CONTEXT_EVENT_TOKENS.pop(cache_key, None)
+                _CORPUS_CONTEXT_LANGUAGE_HASHES.pop(cache_key, None)
+        return
+
+    def relative(value: Path | str) -> str | None:
+        path = Path(value)
+        try:
+            return (
+                path.resolve().relative_to(root.resolve()).as_posix()
+                if path.is_absolute()
+                else _normalize_path(root, path)
+            )
+        except (OSError, ValueError):
+            return None
+
+    changed_paths = tuple(
+        sorted(
+            {
+                rel
+                for value in changed
+                if (rel := relative(value)) is not None
+                and PurePosixPath(rel).suffix.casefold() == ".md"
+            }
+        )
+    )
+    deleted_paths = tuple(
+        sorted(
+            {
+                rel
+                for value in deleted
+                if (rel := relative(value)) is not None
+                and PurePosixPath(rel).suffix.casefold() == ".md"
+            }
+        )
+    )
+    reconcile_paths = tuple(sorted(set(changed_paths) | set(deleted_paths)))
+    if not reconcile_paths:
+        return
+    relation_definitions = relation_registry.load_registry(root)
+    language = semantic_language_registry.load_registry(root)
+    context = _reconcile_markdown_delta(
+        root,
+        entry[1],
+        reconcile_paths,
+        relation_definitions=relation_definitions,
+        language=language,
+    )
+    census = _patch_markdown_census(
+        root,
+        entry[0],
+        changed_paths=changed_paths,
+        deleted_paths=deleted_paths,
+    )
+    with _CORPUS_CONTEXT_CACHE_LOCK:
+        if _CORPUS_CONTEXT_CACHE.get(cache_key) is entry:
+            _CORPUS_CONTEXT_CACHE[cache_key] = (census, context)
+            _CORPUS_CONTEXT_LANGUAGE_HASHES[cache_key] = (
+                f"{language.schema_version}:{language.content_hash}"
+            )
+            if event_token is None:
+                _CORPUS_CONTEXT_EVENT_TOKENS.pop(cache_key, None)
+            else:
+                _CORPUS_CONTEXT_EVENT_TOKENS[cache_key] = event_token
 
 
 def build_corpus_context(
@@ -922,12 +1534,11 @@ def build_corpus_context(
 ) -> SemanticCorpusContext:
     """Read and parse the corpus once, then resolve every fact in memory.
 
-    Warm calls are served from a bounded process cache keyed on a stat census
-    of every filesystem input (see ``_corpus_census``). A cached context is
-    returned only when the census matches exactly and any caller-supplied
-    registries are content-identical to disk; candidate-bearing builds always
-    take the uncached path. ``EXOMEM_DISABLE_CORPUS_CACHE=1`` restores the
-    always-rebuild behavior.
+    Warm calls are served from a bounded process cache captioned by a stat
+    census of every filesystem input (see ``_corpus_census``). Exact matches
+    return directly; Markdown-only changes reparse only the changed parents.
+    Candidate-bearing builds always take the uncached path.
+    ``EXOMEM_DISABLE_CORPUS_CACHE=1`` restores the always-rebuild behavior.
     """
     root = Path(vault_root)
     relation_definitions = registry or relation_registry.load_registry(root)
@@ -936,53 +1547,212 @@ def build_corpus_context(
     census: tuple | None = None
     cache_key: tuple[str, str] | None = None
     if candidate is None and corpus_context_cache_enabled():
+        cache_key = _corpus_cache_key(root)
+        event_token = freshness.triple(root, "vault")
+        if event_token is not None:
+            with _CORPUS_CONTEXT_CACHE_LOCK:
+                event_entry = _CORPUS_CONTEXT_CACHE.get(cache_key)
+                cached_token = _CORPUS_CONTEXT_EVENT_TOKENS.get(cache_key)
+                cached_language_hash = _CORPUS_CONTEXT_LANGUAGE_HASHES.get(cache_key)
+            if (
+                event_entry is not None
+                and cached_token == event_token
+                and cached_language_hash == f"{language.schema_version}:{language.content_hash}"
+                and _config_census(root) == _stored_config_census(event_entry[0])
+                and (
+                    event_entry[1].registry.core_version,
+                    event_entry[1].registry.extension_hash,
+                )
+                == (
+                    relation_definitions.core_version,
+                    relation_definitions.extension_hash,
+                )
+            ):
+                log.info(
+                    "semantic corpus context event-hit pages=%d",
+                    len(event_entry[1].pages),
+                )
+                return event_entry[1]
         started = time.perf_counter()
         census = _corpus_census(root)
         census_ms = (time.perf_counter() - started) * 1000.0
-        if census is not None and _registries_match_disk(
-            root, relation_definitions, language
-        ):
-            cache_key = _corpus_cache_key(root)
+        if census is not None and _registries_match_disk(root, relation_definitions, language):
             with _CORPUS_CONTEXT_CACHE_LOCK:
                 entry = _CORPUS_CONTEXT_CACHE.get(cache_key)
             if entry is not None and entry[0] == census:
-                log.info(
-                    "semantic corpus context reused pages=%d census_ms=%.1f",
-                    len(entry[1].pages),
-                    census_ms,
-                )
-                return entry[1]
+                with _CORPUS_CONTEXT_UPDATE_LOCK, _CORPUS_CONTEXT_CACHE_LOCK:
+                    current = _CORPUS_CONTEXT_CACHE.get(cache_key)
+                    if current is not entry:
+                        entry = current
+                    elif entry[0] == census:
+                        current_token = freshness.triple(root, "vault")
+                        if current_token is not None:
+                            _CORPUS_CONTEXT_EVENT_TOKENS[cache_key] = current_token
+                        log.info(
+                            "semantic corpus context reused pages=%d census_ms=%.1f",
+                            len(entry[1].pages),
+                            census_ms,
+                        )
+                        return entry[1]
+                if entry is not None and entry[0] == census:
+                    with _CORPUS_CONTEXT_CACHE_LOCK:
+                        if _CORPUS_CONTEXT_CACHE.get(cache_key) is entry:
+                            return entry[1]
+            if entry is not None:
+                changed_paths = _markdown_census_delta(entry[0], census)
+                if changed_paths is not None:
+                    started = time.perf_counter()
+                    context = _reconcile_markdown_delta(
+                        root,
+                        entry[1],
+                        changed_paths,
+                        relation_definitions=relation_definitions,
+                        language=language,
+                    )
+                    with _CORPUS_CONTEXT_UPDATE_LOCK:
+                        confirmed = _corpus_census(root)
+                        with _CORPUS_CONTEXT_CACHE_LOCK:
+                            current = _CORPUS_CONTEXT_CACHE.get(cache_key)
+                            if confirmed == census and current is entry:
+                                _CORPUS_CONTEXT_CACHE[cache_key] = (census, context)
+                                _CORPUS_CONTEXT_LANGUAGE_HASHES[cache_key] = (
+                                    f"{language.schema_version}:{language.content_hash}"
+                                )
+                                current_token = freshness.triple(root, "vault")
+                                if current_token is not None:
+                                    _CORPUS_CONTEXT_EVENT_TOKENS[cache_key] = current_token
+                                log.info(
+                                    "semantic corpus context reconciled pages=%d "
+                                    "changed=%d reconcile_ms=%.1f census_ms=%.1f",
+                                    len(context.pages),
+                                    len(changed_paths),
+                                    (time.perf_counter() - started) * 1000.0,
+                                    census_ms,
+                                )
+                                return context
+                            if current is not None and current is not entry:
+                                return current[1]
         else:
             census = None
 
-    started = time.perf_counter()
-    context = _build_corpus_context_uncached(
-        root,
-        candidate=candidate,
-        relation_definitions=relation_definitions,
-        language=language,
-    )
-    build_ms = (time.perf_counter() - started) * 1000.0
-    stored = False
+    flight: _CorpusContextFlight | None = None
     if census is not None and cache_key is not None:
-        confirmed = _corpus_census(root)
-        if confirmed == census:
-            with _CORPUS_CONTEXT_CACHE_LOCK:
-                _CORPUS_CONTEXT_CACHE[cache_key] = (census, context)
-                while len(_CORPUS_CONTEXT_CACHE) > _CORPUS_CONTEXT_CACHE_MAX_VAULTS:
-                    for stale_key in list(_CORPUS_CONTEXT_CACHE):
-                        if stale_key != cache_key:
-                            del _CORPUS_CONTEXT_CACHE[stale_key]
-                            break
-                    else:
+        registry_identity = (
+            relation_definitions.core_version,
+            relation_definitions.extension_hash,
+        )
+        language_identity = (language.schema_version, language.content_hash)
+        with _CORPUS_CONTEXT_CACHE_LOCK:
+            flight = _CORPUS_CONTEXT_FLIGHTS.get(cache_key)
+            if flight is None:
+                flight = _CorpusContextFlight(
+                    census,
+                    registry_identity,
+                    language_identity,
+                )
+                _CORPUS_CONTEXT_FLIGHTS[cache_key] = flight
+                owns_flight = True
+            else:
+                owns_flight = False
+        if not owns_flight:
+            same_inputs = (
+                flight.census == census
+                and flight.registry_identity == registry_identity
+                and flight.language_identity == language_identity
+            )
+            flight.done.wait()
+            if not same_inputs:
+                return build_corpus_context(
+                    root,
+                    candidate=candidate,
+                    registry=registry,
+                    language_registry=language_registry,
+                )
+            if flight.error is not None:
+                raise flight.error
+            assert flight.result is not None
+            return flight.result
+
+    try:
+        started = time.perf_counter()
+        context = _build_corpus_context_uncached(
+            root,
+            candidate=candidate,
+            relation_definitions=relation_definitions,
+            language=language,
+        )
+        build_ms = (time.perf_counter() - started) * 1000.0
+        stored = False
+        if census is not None and cache_key is not None:
+            with _CORPUS_CONTEXT_UPDATE_LOCK:
+                stable_census = census
+                # A busy watcher/media worker can change Markdown while the cold
+                # build runs. Once publication begins, serialize with event
+                # freshness+cache updates, absorb exact deltas, then stamp the same
+                # state atomically so a newer event context cannot be overwritten.
+                for _ in range(3):
+                    confirmed = _corpus_census(root)
+                    if confirmed == stable_census:
                         break
-            stored = True
-    log.info(
-        "semantic corpus context built pages=%d build_ms=%.1f cached=%s",
-        len(context.pages),
-        build_ms,
-        stored,
-    )
+                    if confirmed is None:
+                        stable_census = None
+                        break
+                    changed_paths = _markdown_census_delta(stable_census, confirmed)
+                    if changed_paths is None:
+                        stable_census = None
+                        break
+                    context = _reconcile_markdown_delta(
+                        root,
+                        context,
+                        changed_paths,
+                        relation_definitions=relation_definitions,
+                        language=language,
+                    )
+                    stable_census = confirmed
+                else:
+                    confirmed = None
+                if confirmed == stable_census and stable_census is not None:
+                    census = stable_census
+                    with _CORPUS_CONTEXT_CACHE_LOCK:
+                        _CORPUS_CONTEXT_CACHE[cache_key] = (census, context)
+                        _CORPUS_CONTEXT_LANGUAGE_HASHES[cache_key] = (
+                            f"{language.schema_version}:{language.content_hash}"
+                        )
+                        current_token = freshness.triple(root, "vault")
+                        if current_token is None:
+                            _CORPUS_CONTEXT_EVENT_TOKENS.pop(cache_key, None)
+                        else:
+                            _CORPUS_CONTEXT_EVENT_TOKENS[cache_key] = current_token
+                        while len(_CORPUS_CONTEXT_CACHE) > _CORPUS_CONTEXT_CACHE_MAX_VAULTS:
+                            for stale_key in list(_CORPUS_CONTEXT_CACHE):
+                                if stale_key != cache_key:
+                                    del _CORPUS_CONTEXT_CACHE[stale_key]
+                                    _CORPUS_CONTEXT_EVENT_TOKENS.pop(stale_key, None)
+                                    _CORPUS_CONTEXT_LANGUAGE_HASHES.pop(stale_key, None)
+                                    break
+                            else:
+                                break
+                    stored = True
+        log.info(
+            "semantic corpus context built pages=%d build_ms=%.1f cached=%s",
+            len(context.pages),
+            build_ms,
+            stored,
+        )
+    except BaseException as error:
+        if flight is not None:
+            flight.error = error
+            with _CORPUS_CONTEXT_CACHE_LOCK:
+                if _CORPUS_CONTEXT_FLIGHTS.get(cache_key) is flight:
+                    del _CORPUS_CONTEXT_FLIGHTS[cache_key]
+            flight.done.set()
+        raise
+    if flight is not None:
+        flight.result = context
+        with _CORPUS_CONTEXT_CACHE_LOCK:
+            if _CORPUS_CONTEXT_FLIGHTS.get(cache_key) is flight:
+                del _CORPUS_CONTEXT_FLIGHTS[cache_key]
+        flight.done.set()
     return context
 
 
@@ -1162,6 +1932,55 @@ def _context_from_state_map(
     entries = tuple((path, ordered_pages[path].title) for path in ordered_pages)
     resolver = vault.WikilinkResolver.from_entries(root, entries)
     facts = _derive_relation_facts(root, ordered_pages, resolver, registry)
+    return _context_from_resolved_state(
+        root,
+        ordered_pages,
+        registry,
+        identity_census,
+        entries=entries,
+        resolver=resolver,
+        facts=facts,
+    )
+
+
+def _context_with_stable_topology_candidate(
+    context: SemanticCorpusContext,
+    state: SemanticPageState,
+) -> SemanticCorpusContext:
+    """Replace one page without re-resolving every authored corpus fact."""
+    pages = dict(context.pages)
+    pages[state.path] = state
+    resolver = vault.WikilinkResolver.from_entries(context.vault_root, context.resolver_entries)
+    candidate_facts = _derive_relation_facts(
+        context.vault_root,
+        {state.path: state},
+        resolver,
+        context.registry,
+        target_states=pages,
+    )
+    retained_facts = (fact for fact in context.relation_facts if fact.authored_path != state.path)
+    facts = tuple(sorted((*retained_facts, *candidate_facts), key=lambda item: item.identity))
+    return _context_from_resolved_state(
+        context.vault_root,
+        pages,
+        context.registry,
+        context.identity_census,
+        entries=context.resolver_entries,
+        resolver=resolver,
+        facts=facts,
+    )
+
+
+def _context_from_resolved_state(
+    root: Path,
+    ordered_pages: Mapping[str, SemanticPageState],
+    registry: relation_registry.RelationRegistry,
+    identity_census: StableIdentityCensus,
+    *,
+    entries: tuple[tuple[str, str], ...],
+    resolver: vault.WikilinkResolver,
+    facts: tuple[RelationFact, ...],
+) -> SemanticCorpusContext:
     inbound: dict[str, list[RelationFact]] = {}
     outbound: dict[str, list[RelationFact]] = {}
     dependencies: dict[str, list[str]] = {}
@@ -1266,9 +2085,7 @@ def _resolve_target(
 ) -> tuple[str, str | None, str | None, str | None]:
     _, authored_anchor, alias = _target_parts(raw_target)
     try:
-        normalized, _ = vault.normalize_wikilink(
-            raw_target, root, resolver=resolver, strict=True
-        )
+        normalized, _ = vault.normalize_wikilink(raw_target, root, resolver=resolver, strict=True)
     except vault.AmbiguousWikilinkError:
         return "ambiguous", None, authored_anchor, alias
     except vault.UnresolvedWikilinkError:
@@ -1312,11 +2129,7 @@ def _registry_resolution(
         ),
         resolutions[0],
     )
-    if (
-        selected.definition is not None
-        and selected.definition.projects
-        and not projects
-    ):
+    if selected.definition is not None and selected.definition.projects and not projects:
         return replace(
             selected,
             status="scope_violation",
@@ -1342,16 +2155,17 @@ def _derive_relation_facts(
     states: Mapping[str, SemanticPageState],
     resolver: vault.WikilinkResolver,
     registry: relation_registry.RelationRegistry,
+    *,
+    target_states: Mapping[str, SemanticPageState] | None = None,
 ) -> tuple[RelationFact, ...]:
+    resolved_states = target_states if target_states is not None else states
     raw_facts: list[dict[str, Any]] = []
     for state in states.values():
         for relation in state.document.note_relations:
             raw_facts.append(
                 {
                     "authored": state,
-                    "raw_relation": _raw_note_relation(
-                        relation.raw, relation.kind
-                    ),
+                    "raw_relation": _raw_note_relation(relation.raw, relation.kind),
                     "raw_target": _raw_note_target(relation.raw, relation.target),
                     "line": relation.line,
                     "anchor": None,
@@ -1366,9 +2180,7 @@ def _derive_relation_facts(
                 raw_facts.append(
                     {
                         "authored": state,
-                        "raw_relation": _raw_rich_relation(
-                            relation.raw, relation.kind
-                        ),
+                        "raw_relation": _raw_rich_relation(relation.raw, relation.kind),
                         "raw_target": relation.target,
                         "line": relation.line,
                         "anchor": unit.anchor,
@@ -1411,7 +2223,7 @@ def _derive_relation_facts(
             root, raw["raw_target"], resolver
         )
         resolved_base = resolved_target.split("#", 1)[0] if resolved_target else None
-        target_state = states.get(resolved_base or "")
+        target_state = resolved_states.get(resolved_base or "")
         target_kind = "file" if target_state is not None else "unresolved"
         resolution = _registry_resolution(
             registry,
@@ -1538,8 +2350,7 @@ def qualify_relation(
             source_kind=fact.source_kind,
             target_kind=(
                 "file"
-                if fact.target_status == "resolved"
-                and resolved_base in corpus.pages
+                if fact.target_status == "resolved" and resolved_base in corpus.pages
                 else "unresolved"
             ),
             origin=fact.origin,
@@ -1593,9 +2404,7 @@ def _relation_disposition(
             qualifying.append((direction, fact))
         else:
             rejected.append(RejectedRelationFact(fact, result.reasons))
-    review_is_current = review is not None and is_relation_review_current(
-        review, page, corpus
-    )
+    review_is_current = review is not None and is_relation_review_current(review, page, corpus)
     stale_review = review is not None and not review_is_current
     other_governed = corpus.eligible_governed_paths - {page.path}
     if qualifying:
@@ -1615,9 +2424,7 @@ def _relation_disposition(
             actions=actions,
         )
     if review_is_current and review is not None and review.kind == "reviewed_none":
-        return RelationDisposition(
-            "reviewed_none", True, True, rejected_facts=tuple(rejected)
-        )
+        return RelationDisposition("reviewed_none", True, True, rejected_facts=tuple(rejected))
     if (
         review_is_current
         and review is not None
@@ -1662,16 +2469,12 @@ def _diagnostic_findings(page: SemanticPageState) -> list[ContractFinding]:
     occurrences: Counter[tuple[str, str]] = Counter()
     diagnostics = tuple(page.document.errors) + tuple(page.document.warnings)
     for diagnostic in diagnostics:
-        if (
-            diagnostic.code == "unsupported_relation"
-            and diagnostic.registry_namespace is None
-        ):
+        if diagnostic.code == "unsupported_relation" and diagnostic.registry_namespace is None:
             continue
         raw_key = " ".join(diagnostic.raw.casefold().split())
         occurrences[(diagnostic.code, raw_key)] += 1
         registry_diagnostic = (
-            diagnostic.registry_namespace is not None
-            and diagnostic.registry_key is not None
+            diagnostic.registry_namespace is not None and diagnostic.registry_key is not None
         )
         findings.append(
             ContractFinding(
@@ -1944,9 +2747,7 @@ def _page_rule_findings(
                 )
         elif rule == "allowed" and constraint.value is not None:
             values = observed.get(namespace, set())
-            for unknown in sorted(
-                values - set(constraint.value), key=_stable_value_key
-            ):
+            for unknown in sorted(values - set(constraint.value), key=_stable_value_key):
                 findings.append(
                     _rule_finding(
                         page,
@@ -1976,23 +2777,17 @@ def _disposition_finding(
         span=None,
         detail=_disposition_detail(page, disposition),
         remediation=(
-            "Add a qualifying typed relation or record a current reviewed-none "
-            "disposition."
+            "Add a qualifying typed relation or record a current reviewed-none disposition."
         ),
         governed_element_identity=("relations", "disposition"),
         resolved_rule=("relations", "*", "disposition"),
     )
 
 
-def _disposition_detail(
-    page: SemanticPageState, disposition: RelationDisposition
-) -> str:
+def _disposition_detail(page: SemanticPageState, disposition: RelationDisposition) -> str:
     if disposition.kind == "stale":
         return "the saved non-edge relation disposition is no longer current"
-    if (
-        page.document.canonical_section_present
-        and page.document.canonical_bullet_count == 0
-    ):
+    if page.document.canonical_section_present and page.document.canonical_bullet_count == 0:
         return (
             "the empty canonical Relations section requires a current "
             "reviewed-none or bootstrap disposition"
@@ -2033,12 +2828,17 @@ def _raw_findings(
             before_corpus=before_corpus,
             mode=mode,
         )
-    findings = _diagnostic_findings(page)
-    if (
-        page.identity_kind == "exomem_id"
-        and corpus.identity_census.paths_by_identity.get(page.identity)
-        != (page.path,)
-    ):
+    findings: list[ContractFinding] = []
+    structure_finding = compiled_structure_finding(page)
+    if structure_finding is not None:
+        findings.append(structure_finding)
+    findings.extend(_diagnostic_findings(page))
+    minimum_finding = _missing_semantic_unit_finding(page)
+    if minimum_finding is not None:
+        findings.append(minimum_finding)
+    if page.identity_kind == "exomem_id" and corpus.identity_census.paths_by_identity.get(
+        page.identity
+    ) != (page.path,):
         findings.append(
             ContractFinding(
                 code="SEMANTIC_IDENTITY_DUPLICATE",
@@ -2071,10 +2871,7 @@ def _corpus_mismatch_finding(
         severity="error",
         path=page.path,
         span=None,
-        detail=(
-            f"the supplied {phase}-corpus snapshot does not contain the evaluated "
-            "page state"
-        ),
+        detail=(f"the supplied {phase}-corpus snapshot does not contain the evaluated page state"),
         remediation="Rebuild the immutable corpus context with the exact pending candidate.",
         governed_element_identity=(
             "corpus",
@@ -2108,13 +2905,12 @@ def evaluate(
     after_review: RelationReviewState | None = None,
     grandfathered: bool = False,
     include_relation_disposition: bool = True,
+    language_registry: semantic_language_registry.SemanticLanguageRegistry | None = None,
 ) -> SemanticContractResult:
     """Evaluate supplied immutable state without crossing any adapter boundary."""
     if mode not in {"precommit", "posthoc"}:
         raise ValueError("mode must be precommit or posthoc")
-    before_context_matches = (
-        before is None or before_corpus.pages.get(before.path) == before
-    )
+    before_context_matches = before is None or before_corpus.pages.get(before.path) == before
     effective_before_corpus = (
         before_corpus
         if before_context_matches or before is None
@@ -2161,9 +2957,7 @@ def evaluate(
         finding.key for finding in after_findings if finding.severity == "error"
     }
     use_subset_exception = (
-        grandfathered
-        and operation in _GRANDFATHERED_OPERATIONS
-        and before is not None
+        grandfathered and operation in _GRANDFATHERED_OPERATIONS and before is not None
     )
     normalized: list[ContractFinding] = []
     for finding in after_findings:
@@ -2202,9 +2996,7 @@ def evaluate(
         blocking = tuple(item for item in errors if item.key in new_error_keys)
     if invalidated_disposition:
         disposition_errors = tuple(
-            item
-            for item in errors
-            if item.resolved_rule == ("relations", "*", "disposition")
+            item for item in errors if item.resolved_rule == ("relations", "*", "disposition")
         )
         blocking = tuple(sorted({*blocking, *disposition_errors}, key=_finding_sort_key))
     if mode == "posthoc":
@@ -2212,6 +3004,11 @@ def evaluate(
     should_block = bool(blocking) and mode == "precommit"
     kind_counts = tuple(sorted(Counter(unit.kind for unit in after.document.units).items()))
     category_counts = tuple(sorted(Counter(unit.category for unit in after.document.units).items()))
+    compact_unit_count = sum(unit.form == "compact" for unit in after.document.units)
+    rich_unit_count = sum(unit.form == "rich" for unit in after.document.units)
+    category_feedback, category_feedback_omitted = _derive_category_feedback(
+        after, language_registry
+    )
     return SemanticContractResult(
         mode=mode,
         operation=operation,
@@ -2225,4 +3022,8 @@ def evaluate(
         category_counts=category_counts,
         relation_disposition=disposition,
         actions=disposition.actions if disposition is not None else (),
+        compact_unit_count=compact_unit_count,
+        rich_unit_count=rich_unit_count,
+        category_feedback=category_feedback,
+        category_feedback_omitted=category_feedback_omitted,
     )

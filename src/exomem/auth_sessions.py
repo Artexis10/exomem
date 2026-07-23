@@ -12,10 +12,12 @@ import errno
 import hashlib
 import hmac
 import json
+import logging
 import math
 import os
 import re
 import secrets
+import sqlite3
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field, replace
@@ -34,6 +36,15 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from key_value.aio.stores.filetree import FileTreeStore
 
 from .remote_oauth_storage import RemoteOAuthStorage
+from .session_validation_cache import (
+    SessionStoreTelemetry,
+    SessionValidationCache,
+)
+from .session_validation_cache import (
+    session_store_telemetry as _default_session_store_telemetry,
+)
+
+logger = logging.getLogger(__name__)
 
 _TOKEN_VERSION = "exo_s1"
 _ACCESS_TOKEN_VERSION = "exo_a2"
@@ -687,9 +698,14 @@ class SessionAuthority:
         issuer: str,
         audience: str,
         clock: Callable[[], float] = time.time,
+        validation_cache: SessionValidationCache | None = None,
+        stale_grace_seconds: float = 0.0,
+        session_store_telemetry: SessionStoreTelemetry | None = None,
     ):
         if not issuer or not audience:
             raise ValueError("session issuer and audience are required")
+        if not math.isfinite(stale_grace_seconds) or stale_grace_seconds < 0:
+            raise ValueError("session stale grace must be a non-negative finite number")
         keys = derive_session_keys(signing_root)
         self.fingerprint = keys.fingerprint
         self.issuer = issuer
@@ -710,6 +726,11 @@ class SessionAuthority:
             f"exomem-auth-refresh-grace-v2-{keys.fingerprint}"
         )
         self._storage = _EncryptedStorage(storage, keys.storage_key)
+        self._validation_cache = validation_cache
+        self._stale_grace_seconds = float(stale_grace_seconds)
+        self._session_store_telemetry = (
+            session_store_telemetry or _default_session_store_telemetry
+        )
 
     @classmethod
     def local(
@@ -742,6 +763,9 @@ class SessionAuthority:
         timeout: float = 5.0,
         transport: httpx.AsyncBaseTransport | None = None,
         clock: Callable[[], float] = time.time,
+        validation_cache: SessionValidationCache | None = None,
+        stale_grace_seconds: float = 0.0,
+        session_store_telemetry: SessionStoreTelemetry | None = None,
     ) -> SessionAuthority:
         if not storage_token or not storage_token.strip():
             raise ValueError("a non-empty OAuth storage token is required for HA sessions")
@@ -759,6 +783,9 @@ class SessionAuthority:
             issuer=issuer,
             audience=audience,
             clock=clock,
+            validation_cache=validation_cache,
+            stale_grace_seconds=stale_grace_seconds,
+            session_store_telemetry=session_store_telemetry,
         )
 
     def _new_generation(self) -> GenerationRecord:
@@ -803,6 +830,8 @@ class SessionAuthority:
             replacement.to_dict(),
             collection=self.generations_collection,
         )
+        if self._validation_cache is not None:
+            self._validation_cache.clear()
         return replacement.generation
 
     @staticmethod
@@ -1133,7 +1162,7 @@ class SessionAuthority:
             return None
         return record
 
-    async def validate(self, bearer: str) -> SessionRecord | None:
+    async def _validate_authoritatively(self, bearer: str) -> SessionRecord | None:
         record = await self._load_session_for_bearer(bearer)
         if record is None:
             return None
@@ -1155,6 +1184,89 @@ class SessionAuthority:
                 return None
         return record
 
+    @staticmethod
+    def _remote_failure_allows_stale(error: SessionStoreUnavailable) -> bool:
+        cause: BaseException | None = error
+        while cause is not None:
+            if isinstance(cause, httpx.HTTPStatusError):
+                return cause.response.status_code >= 500
+            if isinstance(
+                cause,
+                (
+                    httpx.TimeoutException,
+                    httpx.NetworkError,
+                    ConnectionError,
+                    TimeoutError,
+                ),
+            ):
+                return True
+            cause = cause.__cause__
+        return False
+
+    def _cached_record_is_eligible(self, bearer: str, record: SessionRecord) -> bool:
+        if (
+            record.status != "active"
+            or record.issuer != self.issuer
+            or record.audience != self.audience
+        ):
+            return False
+        codec: SessionTokenCodec = self.codec
+        if record.schema_version == _ACCESS_SCHEMA_VERSION:
+            codec = self.access_codec
+            if record.expires_at is None or float(self.clock()) >= record.expires_at:
+                return False
+            if record.family_id is None:
+                return False
+        return codec.verify(bearer, record.token_digest)
+
+    async def validate(self, bearer: str) -> SessionRecord | None:
+        if self._validation_cache is None:
+            return await self._validate_authoritatively(bearer)
+        bearer_is_parseable = (
+            self.codec.parse(bearer) is not None
+            or self.access_codec.parse(bearer) is not None
+        )
+        try:
+            record = await self._validate_authoritatively(bearer)
+        except SessionStoreUnavailable as error:
+            if not self._remote_failure_allows_stale(error):
+                raise
+            stale_active = self._stale_grace_seconds > 0
+            self._session_store_telemetry.remote_unavailable(stale_active=stale_active)
+            if not stale_active:
+                raise
+            cached = self._validation_cache.get(bearer)
+            if cached is None:
+                raise
+            age = float(self.clock()) - cached.validated_at
+            if age < 0 or age > self._stale_grace_seconds:
+                raise
+            try:
+                record = SessionRecord.from_dict(cached.claims)
+            except ValueError:
+                raise error from None
+            if not self._cached_record_is_eligible(bearer, record):
+                self._validation_cache.delete(bearer)
+                raise error
+            count = self._session_store_telemetry.stale_served()
+            logger.warning("event=session_stale_served count=%d", count)
+            return record
+
+        if bearer_is_parseable:
+            self._session_store_telemetry.remote_ok()
+        if record is None:
+            self._validation_cache.delete(bearer)
+        else:
+            try:
+                self._validation_cache.upsert(
+                    bearer,
+                    record.to_dict(),
+                    validated_at=float(self.clock()),
+                )
+            except (OSError, sqlite3.Error, ValueError):
+                logger.warning("event=session_validation_cache_write_failed")
+        return record
+
     async def _write_tombstone(self, record: SessionRecord, *, reason: str) -> SessionRecord:
         tombstone = replace(
             record,
@@ -1167,6 +1279,8 @@ class SessionAuthority:
             tombstone.to_dict(),
             collection=self.sessions_collection,
         )
+        if self._validation_cache is not None:
+            self._validation_cache.delete_session(record.session_id)
         return tombstone
 
     async def _revoke_family(self, family_id: str, *, reason: str) -> bool:
@@ -1176,6 +1290,8 @@ class SessionAuthority:
         if family is None:
             return False
         if family.status == "revoked":
+            if self._validation_cache is not None:
+                self._validation_cache.delete_family(family_id)
             return True
         tombstone = replace(
             family,
@@ -1188,6 +1304,8 @@ class SessionAuthority:
             tombstone.to_dict(),
             collection=self.refresh_families_collection,
         )
+        if self._validation_cache is not None:
+            self._validation_cache.delete_family(family_id)
         return True
 
     async def revoke_bearer(self, bearer: str, *, reason: str) -> bool:
@@ -1196,14 +1314,21 @@ class SessionAuthority:
             raise ValueError("revocation reason is required")
         parsed_refresh = self.refresh_codec.parse(bearer)
         if parsed_refresh is not None:
-            return await self._revoke_family(parsed_refresh.family_id, reason=reason)
+            revoked = await self._revoke_family(parsed_refresh.family_id, reason=reason)
+            if self._validation_cache is not None:
+                self._validation_cache.delete_family(parsed_refresh.family_id)
+            return revoked
         record = await self._load_session_for_bearer(bearer)
         if record is None:
+            if self._validation_cache is not None:
+                self._validation_cache.delete(bearer)
             return False
         if record.family_id is not None:
             await self._revoke_family(record.family_id, reason=reason)
         if record.status != "revoked":
             await self._write_tombstone(record, reason=reason)
+        if self._validation_cache is not None:
+            self._validation_cache.delete(bearer)
         return True
 
     async def tombstone(self, session_id: str, *, reason: str) -> bool:
@@ -1221,6 +1346,8 @@ class SessionAuthority:
                 "session record does not match its authoritative storage key"
             )
         if record.status == "revoked":
+            if self._validation_cache is not None:
+                self._validation_cache.delete_session(session_id)
             return True
         if record.family_id is not None:
             await self._revoke_family(record.family_id, reason=reason)

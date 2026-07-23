@@ -2,7 +2,7 @@
 
 `warm_all` runs everything the first user-facing calls would otherwise pay
 inline: the parsed-page cache, the BM25 corpora for BOTH scopes (auto-widen
-runs a vault-scope BM25 on every kb query), the wikilink resolver, the
+runs a vault-scope BM25 on every kb query), the wikilink resolver, the semantic corpus, the
 embedding/CLIP matrices, and then the model preloads (bge, reranker, CLIP)
 that used to block `build_server` for ~30s (minutes on a first-ever
 download).
@@ -117,7 +117,7 @@ def warm_caches(
 
             q = np.full(
                 embeddings.VECTOR_DIM,
-                1.0 / (embeddings.VECTOR_DIM ** 0.5),
+                1.0 / (embeddings.VECTOR_DIM**0.5),
                 dtype=np.float32,
             )
             embeddings.get_embedding_index(vault_root).search(q, k=1)
@@ -130,7 +130,7 @@ def warm_caches(
             if embeddings.clip_enabled():
                 q = np.full(
                     embeddings.CLIP_DIM,
-                    1.0 / (embeddings.CLIP_DIM ** 0.5),
+                    1.0 / (embeddings.CLIP_DIM**0.5),
                     dtype=np.float32,
                 )
                 embeddings.get_clip_index(vault_root).search(q, k=1)
@@ -154,12 +154,28 @@ def warm_all(vault_root: Path) -> dict[str, float]:
 
     mode_name = mode.resolve_mode()
     preload = model_preload_allowed(mode_name)
-    durations = warm_caches(
-        vault_root,
-        preload_models=preload,
-        preload_cpu_caches=mode.preload_cpu_caches(),
+    durations: dict[str, float] = {}
+    durations.update(
+        warm_caches(
+            vault_root,
+            preload_models=preload,
+            preload_cpu_caches=mode.preload_cpu_caches(),
+        )
     )
     readiness.mark_ready("lexical")
+    semantic_started = time.perf_counter()
+    try:
+        from . import semantic_contract
+
+        semantic_contract.build_corpus_context(vault_root)
+        readiness.mark_ready("semantic_corpus")
+    except Exception:  # noqa: BLE001 — semantic warm-up remains rebuildable
+        log.warning("semantic corpus warm-up failed", exc_info=True)
+    finally:
+        durations["semantic_corpus"] = round(
+            (time.perf_counter() - semantic_started) * 1000.0,
+            1,
+        )
 
     def _model_step(name: str, fn) -> bool:
         t0 = time.perf_counter()
@@ -197,9 +213,7 @@ def warm_all(vault_root: Path) -> dict[str, float]:
             item_vault, paths, *receipt_payload = item
             receipts = receipt_payload[0] if receipt_payload else None
             try:
-                index_sync.replay_deferred_embedding(
-                    item_vault, list(paths), receipts
-                )
+                index_sync.replay_deferred_embedding(item_vault, list(paths), receipts)
             except Exception:  # noqa: BLE001 — durable receipt survives retry
                 log.warning("deferred embed drain failed", exc_info=True)
 
@@ -246,7 +260,9 @@ def warm_all(vault_root: Path) -> dict[str, float]:
 
         if embeddings.ranking_enabled():
             log.info("preloading reranker %s", embeddings.RERANKER_NAME)
-            if _preload("model_reranker", embeddings.get_reranker, lambda m: m.predict([("warm", "warm")])):
+            if _preload(
+                "model_reranker", embeddings.get_reranker, lambda m: m.predict([("warm", "warm")])
+            ):
                 log.info("reranker model ready")
                 readiness.mark_ready("reranker")
         else:

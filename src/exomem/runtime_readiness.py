@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 from collections.abc import Mapping
 from importlib.metadata import PackageNotFoundError, version
+from pathlib import Path
 from typing import Any
 
 RUNTIME_CONTRACT = 1
@@ -21,6 +22,7 @@ def _public_mutation_boundary(value: object) -> dict[str, Any]:
         "holder_kind": str(value.get("holder_kind") or "unknown"),
         "age_seconds": float(value.get("age_seconds") or 0.0),
         "overdue": bool(value.get("overdue")),
+        "verified": bool(value.get("verified")),
     }
 
 
@@ -39,6 +41,7 @@ def build_runtime_readiness(
     coordination: Mapping[str, Any],
     release: str,
     mcp_tool_surface_sha256: str | None,
+    session_store: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build the public readiness payload from already-measured coordination state."""
     enabled = bool(coordination.get("enabled"))
@@ -59,6 +62,17 @@ def build_runtime_readiness(
             reasons.append("replica_identity_missing")
 
     takeover_eligible = not reasons
+    session_store_state = (
+        "degraded"
+        if session_store and session_store.get("state") == "degraded"
+        else "ok"
+    )
+    raw_stale_count = session_store.get("stale_served_count", 0) if session_store else 0
+    stale_served_count = (
+        raw_stale_count
+        if isinstance(raw_stale_count, int) and raw_stale_count >= 0
+        else 0
+    )
     return {
         "status": "ready" if takeover_eligible else "not_ready",
         "service": "exomem",
@@ -75,6 +89,10 @@ def build_runtime_readiness(
                 coordination.get("mutation_boundary")
             ),
         },
+        "session_store": {
+            "state": session_store_state,
+            "stale_served_count": stale_served_count,
+        },
         "takeover_eligible": takeover_eligible,
         "reasons": reasons,
     }
@@ -82,10 +100,13 @@ def build_runtime_readiness(
 
 def runtime_readiness(*, mcp_tool_surface_sha256: str | None) -> dict[str, Any]:
     """Measure this process's eligibility without exposing vault or credential state."""
+    from .session_validation_cache import session_store_readiness
     from .writer_lease import coordination_status
 
     try:
-        coordination = coordination_status()
+        configured_raw = os.environ.get("EXOMEM_VAULT_PATH", "").strip()
+        configured_vault = Path(configured_raw) if configured_raw else None
+        coordination = coordination_status(configured_vault)
     except Exception:  # noqa: BLE001 - readiness must return structured 503 state
         coordination = {
             "enabled": bool(os.environ.get("EXOMEM_WRITER_LEASE_URL", "").strip()),
@@ -97,4 +118,5 @@ def runtime_readiness(*, mcp_tool_surface_sha256: str | None) -> dict[str, Any]:
         coordination=coordination,
         release=package_release(),
         mcp_tool_surface_sha256=mcp_tool_surface_sha256,
+        session_store=session_store_readiness(),
     )

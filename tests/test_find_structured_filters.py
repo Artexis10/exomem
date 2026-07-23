@@ -5,7 +5,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from exomem import embeddings
+from exomem import embeddings, freshness, lexstore
 from exomem import find as find_module
 from exomem.structured_filters import FilterError, compile_filter
 
@@ -38,6 +38,15 @@ def _write_page(
     return path
 
 
+def _prepare_semantic_catalog(vault: Path) -> None:
+    entries = [
+        (str(path), freshness.stat_signature(path)) for path in vault.rglob("*.md")
+    ]
+    freshness.seed(vault, "kb", entries)
+    freshness.seed(vault, "vault", entries)
+    lexstore.ensure_fresh(vault)
+
+
 @pytest.fixture
 def filter_vault(vault: Path) -> Path:
     _write_page(
@@ -68,6 +77,7 @@ def filter_vault(vault: Path) -> Path:
         observations="- [config] Draft unit #auth ^draft",
     )
     find_module.clear_cache()
+    _prepare_semantic_catalog(vault)
     return vault
 
 
@@ -137,12 +147,7 @@ def test_generic_filter_and_shortcuts_intersect_in_filter_only_order(
 
 
 def test_category_alias_is_resolved_before_candidate_work(filter_vault: Path) -> None:
-    registry = (
-        filter_vault
-        / "Knowledge Base"
-        / "_Schema"
-        / "semantic-language-registry.yaml"
-    )
+    registry = filter_vault / "Knowledge Base" / "_Schema" / "semantic-language-registry.yaml"
     registry.parent.mkdir(parents=True, exist_ok=True)
     registry.write_text(
         "schema_version: 1\n"
@@ -154,6 +159,7 @@ def test_category_alias_is_resolved_before_candidate_work(filter_vault: Path) ->
         encoding="utf-8",
     )
     find_module.clear_cache()
+    _prepare_semantic_catalog(filter_vault)
     hits = find_module.find(
         filter_vault,
         query="",
@@ -178,54 +184,53 @@ def test_hot_cache_tracks_registry_changes_for_unit_filters(
         status="active",
         updated="2026-01-05",
         priority=99,
-        observations="- [configuration] Registry-sensitive unit ^registry-cache",
+        observations="- [runtime_configuration] Registry-sensitive unit ^registry-cache",
     )
-    registry = (
-        filter_vault
-        / "Knowledge Base"
-        / "_Schema"
-        / "semantic-language-registry.yaml"
-    )
+    registry = filter_vault / "Knowledge Base" / "_Schema" / "semantic-language-registry.yaml"
 
     def write_registry(*, configuration_target: str) -> None:
-        other = "rule" if configuration_target == "config" else "config"
+        other = (
+            "runtime_setting"
+            if configuration_target == "deployment_setting"
+            else "deployment_setting"
+        )
         registry.parent.mkdir(parents=True, exist_ok=True)
         registry.write_text(
             "schema_version: 1\n"
             "categories:\n"
             f"  {configuration_target}:\n"
             f"    description: {configuration_target} facts\n"
-            "    aliases: [configuration]\n"
+            "    aliases: [runtime_configuration]\n"
             f"  {other}:\n"
             f"    description: {other} facts\n"
             "kinds: {}\n",
             encoding="utf-8",
         )
 
-    write_registry(configuration_target="config")
+    write_registry(configuration_target="deployment_setting")
     find_module.clear_cache()
+    _prepare_semantic_catalog(filter_vault)
     first = find_module.find(
         filter_vault,
         query="",
         scope="kb-only",
         result_level="page",
-        categories=["config"],
+        categories=["deployment_setting"],
         filters={"page.frontmatter:/metadata/priority": {"$eq": 99}},
         limit=20,
     )
-    assert [hit.path for hit in first] == [
-        "Knowledge Base/Notes/registry-cache-target.md"
-    ]
+    assert [hit.path for hit in first] == ["Knowledge Base/Notes/registry-cache-target.md"]
 
     # Same request, no explicit cache clear: registry content is answer
     # freshness whenever unit predicates participate in eligibility.
-    write_registry(configuration_target="rule")
+    write_registry(configuration_target="runtime_setting")
+    _prepare_semantic_catalog(filter_vault)
     second = find_module.find(
         filter_vault,
         query="",
         scope="kb-only",
         result_level="page",
-        categories=["config"],
+        categories=["deployment_setting"],
         filters={"page.frontmatter:/metadata/priority": {"$eq": 99}},
         limit=20,
     )
@@ -288,10 +293,10 @@ def test_explicit_page_mode_annotates_the_same_matching_unit(
     assert "text" not in payload["matched_units"][0]["span"]
 
 
-def test_python_lexical_backend_preserves_unit_filter_eligibility(
+def test_no_fts_preserves_unit_filter_eligibility(
     filter_vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("EXOMEM_LEXICAL_BACKEND", "python")
+    monkeypatch.setattr(lexstore, "fts5_available", lambda: False)
     hits = find_module.find(
         filter_vault,
         query="Category",
@@ -302,9 +307,7 @@ def test_python_lexical_backend_preserves_unit_filter_eligibility(
         limit=20,
     )
 
-    assert [hit.as_dict()["parent_path"] for hit in hits] == [
-        "Knowledge Base/Notes/split-units.md"
-    ]
+    assert [hit.as_dict()["parent_path"] for hit in hits] == ["Knowledge Base/Notes/split-units.md"]
 
 
 def test_page_matched_units_are_bounded_and_report_truncation(
@@ -317,10 +320,10 @@ def test_page_matched_units_are_bounded_and_report_truncation(
         updated="2026-01-06",
         priority=77,
         observations="\n".join(
-            f"- [config] Matching unit {index} #auth ^cap-{index}"
-            for index in range(7)
+            f"- [config] Matching unit {index} #auth ^cap-{index}" for index in range(7)
         ),
     )
+    _prepare_semantic_catalog(filter_vault)
     hits = find_module.find(
         filter_vault,
         query="",
@@ -351,6 +354,7 @@ def test_category_word_in_content_cannot_spoof_exact_unit_metadata(
         priority=88,
         observations="- [decision] This mentions requirement repeatedly ^spoof",
     )
+    _prepare_semantic_catalog(filter_vault)
     hits = find_module.find(
         filter_vault,
         query="requirement",
@@ -376,6 +380,7 @@ def test_identical_unit_content_keeps_distinct_category_identities(
             "- [rule] Identical semantic payload ^same-rule"
         ),
     )
+    _prepare_semantic_catalog(filter_vault)
     hits = find_module.find(
         filter_vault,
         query="Identical semantic payload",
@@ -401,12 +406,7 @@ def test_text_unit_recall_falls_back_when_registry_makes_fts_rows_stale(
         priority=90,
         observations="- [configuration] registry needle ^registry-text",
     )
-    registry = (
-        filter_vault
-        / "Knowledge Base"
-        / "_Schema"
-        / "semantic-language-registry.yaml"
-    )
+    registry = filter_vault / "Knowledge Base" / "_Schema" / "semantic-language-registry.yaml"
 
     def write_registry(description: str) -> None:
         registry.parent.mkdir(parents=True, exist_ok=True)
@@ -421,6 +421,7 @@ def test_text_unit_recall_falls_back_when_registry_makes_fts_rows_stale(
         )
 
     write_registry("Initial configuration facts")
+    _prepare_semantic_catalog(filter_vault)
     first = find_module.find(
         filter_vault,
         query="registry needle",
@@ -440,9 +441,7 @@ def test_text_unit_recall_falls_back_when_registry_makes_fts_rows_stale(
         filters={"page.frontmatter:/metadata/priority": {"$eq": 90}},
         limit=20,
     )
-    assert [hit.as_dict()["unit_ref"] for hit in second] == [
-        first[0].as_dict()["unit_ref"]
-    ]
+    assert [hit.as_dict()["unit_ref"] for hit in second] == [first[0].as_dict()["unit_ref"]]
 
 
 def test_python_unit_ranking_breaks_zero_score_ties_toward_active_parent(
@@ -498,9 +497,7 @@ def test_python_unit_ranking_breaks_zero_score_ties_toward_active_parent(
         prefer_active=False,
         limit=20,
     )
-    assert path_order[0].as_dict()["parent_path"] == (
-        "Knowledge Base/Notes/a-superseded.md"
-    )
+    assert path_order[0].as_dict()["parent_path"] == ("Knowledge Base/Notes/a-superseded.md")
 
 
 def test_invalid_filter_fails_before_candidate_search(
@@ -537,9 +534,7 @@ def test_real_vector_lane_ranks_only_filter_eligible_parents(
         value /= np.linalg.norm(value)
         return value
 
-    index.upsert_file(
-        "Knowledge Base/Notes/draft.md", ["draft"], np.stack([vector(1.0)]), 1.0
-    )
+    index.upsert_file("Knowledge Base/Notes/draft.md", ["draft"], np.stack([vector(1.0)]), 1.0)
     index.upsert_file(
         "Knowledge Base/Notes/matching.md",
         ["matching"],
@@ -581,13 +576,7 @@ def test_scene_frame_candidate_inherits_its_emitted_parent_eligibility(
     filter_vault: Path,
 ) -> None:
     parent = filter_vault / "Knowledge Base" / "Evidence" / "video.mp4.md"
-    child = (
-        filter_vault
-        / "Knowledge Base"
-        / "Evidence"
-        / "video.mp4.frames"
-        / "frame.jpg.md"
-    )
+    child = filter_vault / "Knowledge Base" / "Evidence" / "video.mp4.frames" / "frame.jpg.md"
     parent.parent.mkdir(parents=True, exist_ok=True)
     child.parent.mkdir(parents=True, exist_ok=True)
     parent.write_text(
@@ -611,7 +600,7 @@ def test_scene_frame_candidate_inherits_its_emitted_parent_eligibility(
     assert "Knowledge Base/Evidence/video.mp4.frames/frame.jpg.md" in eligible
 
 
-def test_auto_widen_pushes_exact_outside_eligibility_into_bm25(
+def test_auto_widen_pushes_exact_outside_eligibility_into_lexstore(
     filter_vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     active = filter_vault / "Projects" / "active.md"
@@ -627,7 +616,7 @@ def test_auto_widen_pushes_exact_outside_eligibility_into_bm25(
     )
     captured: dict[str, object] = {}
 
-    def fake_bm25_search(
+    def fake_lexstore_search(
         _root: Path,
         _query: str,
         k: int,
@@ -637,9 +626,9 @@ def test_auto_widen_pushes_exact_outside_eligibility_into_bm25(
         captured["allowed_paths"] = kwargs.get("allowed_paths")
         return [("Projects/active.md", 1.0)]
 
-    from exomem import bm25
+    from exomem import lexstore
 
-    monkeypatch.setattr(bm25, "search", fake_bm25_search)
+    monkeypatch.setattr(lexstore, "search_bm25", fake_lexstore_search)
     hits = find_module._find_outside_kb(
         filter_vault,
         query="outside-marker",

@@ -10,8 +10,8 @@ door it knocks on:
 `coerce` turns a raw arg mapping (a REST JSON body or CLI strings) into the leaf's
 kwargs using the registry `Param` specs — rejecting unknown params and re-running
 the base64 binary-blob guard on text fields, the same boundary the MCP middleware
-enforces. MCP keeps its own native error path (a raised `ValueError`); this module
-is only for REST + CLI.
+enforces. MCP also uses this envelope for structured semantic-authoring refusals;
+unrelated MCP errors retain FastMCP's native error path.
 """
 
 from __future__ import annotations
@@ -49,25 +49,29 @@ _REMEDIATION: dict[str, str] = {
     "STALE_UNIT_REFERENCE": (
         "Re-read the exact unit and retry with its current reference/fingerprint."
     ),
-    "AMBIGUOUS_UNIT_REFERENCE": (
-        "Re-read the parent and select one exact current unit reference."
-    ),
+    "AMBIGUOUS_UNIT_REFERENCE": ("Re-read the parent and select one exact current unit reference."),
     "COMPACT_RELATIONS_REQUIRE_RICH_KIND": (
         "Select an explicit governed rich kind or author a canonical note-level relation."
     ),
     "DRIFT_GUARDS_REQUIRED": (
-        "Re-read the parent and exact unit, then pass both expected_hash and "
-        "expected_fingerprint."
+        "Re-read the parent and exact unit, then pass both expected_hash and expected_fingerprint."
     ),
     "WRITER_LEASE_REQUIRED": (
         "Send the mutation to the current writer or retry after its lease expires."
     ),
     "WRITER_COORDINATOR_UNAVAILABLE": (
-        "Check the coordinator URL, credentials, and service health; reads remain "
-        "available."
+        "Check the coordinator URL, credentials, and service health; reads remain available."
     ),
     "WRITER_FENCED": "Retry the mutation on the current writer.",
+    "INGRESS_BYPASSED": (
+        "Public traffic must enter via the HA edge hostname; check DNS, tunnel ingress, "
+        "and worker route coverage, or set EXOMEM_EDGE_STAMP_ENFORCE=0 to break glass."
+    ),
     "MUTATION_BUSY": "Retry after the active vault mutation finishes.",
+    "MUTATION_WARMING": "Retry after semantic corpus warm-up completes.",
+    "RETRIEVAL_INDEX_WARMING": (
+        "Retry the exact recall after the maintained semantic index finishes warming."
+    ),
     "MUTATION_ACKNOWLEDGEMENT_PENDING": (
         "Retry with the same mutation identity; do not submit a revised payload."
     ),
@@ -82,13 +86,24 @@ _REMEDIATION: dict[str, str] = {
     "UNSUPPORTED_MEDIA": "Use a supported audio, video, image, document, or text-media extension.",
     "MEDIA_NOT_FOUND": "Check the governed Knowledge Base path and original filename.",
     "MEDIA_PATH_OUTSIDE_KB": "Choose a media artifact inside the governed Knowledge Base.",
-    "MEDIA_PATH_ACCESS_DENIED": "Move the artifact to a writable governed subtree or update _access.yaml policy.",
+    "MEDIA_PATH_ACCESS_DENIED": (
+        "Move the artifact to a writable governed subtree or update _access.yaml policy."
+    ),
 }
 
 # Error codes whose HTTP status is NOT the default 400.
-_NOT_FOUND_CODES = frozenset(
-    {"NOT_FOUND", "OLD_NOT_FOUND", "SOURCES_NOT_FOUND", "NOT_IN_TRASH"}
+_SERVICE_UNAVAILABLE_CODES = frozenset(
+    {
+        "WRITER_COORDINATOR_UNAVAILABLE",
+        "MUTATION_LOCK_UNAVAILABLE",
+        # Retrieval-index-reliability (restore-indexed-category-recall): a safe
+        # exact category/kind plan whose maintained semantic catalog cannot yet
+        # prove completeness — retryable with bounded `retry_after_ms`, never a
+        # client-fault 400.
+        "RETRIEVAL_INDEX_WARMING",
+    }
 )
+_NOT_FOUND_CODES = frozenset({"NOT_FOUND", "OLD_NOT_FOUND", "SOURCES_NOT_FOUND", "NOT_IN_TRASH"})
 _CONFLICT_CODES = frozenset(
     {
         "ARTIFACT_EXISTS",
@@ -111,6 +126,7 @@ _CONFLICT_CODES = frozenset(
         "BATCH_ROLLBACK_INCOMPLETE",
         "BATCH_CLEANUP_INCOMPLETE",
         "MUTATION_BUSY",
+        "MUTATION_WARMING",
         "MUTATION_ACKNOWLEDGEMENT_PENDING",
         "MUTATION_COMMITTED_ACKNOWLEDGEMENT_UNCERTAIN",
         # Adoption Studio drift codes (add-adoption-studio): a stale plan/apply or a
@@ -171,7 +187,30 @@ def envelope(success: bool, data: Any = None, error: dict | None = None) -> dict
     """Build the shared envelope. Success carries `data`; failure carries `error`."""
     if success:
         return {"success": True, "data": data}
-    return {"success": False, "error": error or {}}
+    error_payload = dict(error or {})
+    payload = {"success": False, "error": error_payload}
+    for field in ("validation_state", "mutated"):
+        if field in error_payload:
+            payload[field] = error_payload.pop(field)
+    return payload
+
+
+def semantic_validation_error_dict(exc: Exception) -> dict[str, Any] | None:
+    """Find a structured semantic refusal without changing unrelated errors."""
+    current: BaseException | None = exc
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        projector = getattr(current, "as_semantic_validation_error", None)
+        if callable(projector):
+            try:
+                payload = projector()
+            except Exception:  # noqa: BLE001 - keep the original error path intact
+                payload = None
+            if isinstance(payload, dict):
+                return payload
+        current = current.__cause__ or current.__context__
+    return None
 
 
 def error_dict(exc: Exception) -> dict:
@@ -180,6 +219,9 @@ def error_dict(exc: Exception) -> dict:
     `OpError` carries its fields directly; a leaf-contract `ValueError`
     ("CODE: reason") is parsed into {code, message}; anything else is `INTERNAL`.
     """
+    semantic_payload = semantic_validation_error_dict(exc)
+    if semantic_payload is not None:
+        return semantic_payload
     public_dict = getattr(exc, "as_public_dict", None)
     if callable(public_dict):
         try:
@@ -206,8 +248,10 @@ def http_status_for(code: str) -> int:
         return 404
     if code in _CONFLICT_CODES or code.endswith("_EXISTS"):
         return 409
-    if code in {"WRITER_COORDINATOR_UNAVAILABLE", "MUTATION_LOCK_UNAVAILABLE"}:
+    if code in _SERVICE_UNAVAILABLE_CODES:
         return 503
+    if code == "INGRESS_BYPASSED":
+        return 403
     return 400
 
 
@@ -312,9 +356,7 @@ def coerce(
     if tool == "edit_memory" and isinstance(raw.get("operation"), dict):
         operation = raw["operation"]
         for field in ("new_body", "new_string"):
-            guards.guard_text_content(
-                operation.get(field), tool=tool, field=f"operation.{field}"
-            )
+            guards.guard_text_content(operation.get(field), tool=tool, field=f"operation.{field}")
         for item in operation.get("edits") or []:
             if isinstance(item, dict):
                 guards.guard_text_content(

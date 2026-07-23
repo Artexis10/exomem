@@ -10,6 +10,7 @@ from pathlib import Path
 import numpy as np
 
 from exomem import (
+    commands,
     delete_file,
     embedding_index,
     embeddings,
@@ -78,6 +79,246 @@ def _seed_sidecars(
     )
     epistemic_graph.EpistemicGraphIndex(root).rebuild_all()
     return state
+
+
+def test_hierarchy_parser_and_sidecar_versions_are_incremented() -> None:
+    assert semantic_index.PARSER_VERSION == 4
+    assert embedding_index.SEMANTIC_UNIT_SCHEMA_VERSION == 3
+    assert lexstore.SCHEMA_VERSION == 5
+    assert epistemic_graph.SCHEMA_VERSION == 6
+
+
+def test_explicit_upgrade_reconcile_reprojects_unchanged_rich_units_everywhere(
+    tmp_path: Path, monkeypatch
+) -> None:
+    path = _write(
+        tmp_path,
+        """\
+## Decision
+- category: runtime reliability
+- id: projection-upgrade
+- tags: Reliability, runtime/retry
+- context: Edge path
+
+Keep retry windows bounded.
+""",
+    )
+    original_bytes = path.read_bytes()
+    original_mtime_ns = path.stat().st_mtime_ns
+    assert lexstore.search_semantic_units(
+        tmp_path, "retry windows", k=10, scope="kb"
+    )
+    state = semantic_index.build_parent_index_state(tmp_path, path)
+    embedding_index.EmbeddingIndex(tmp_path).upsert_semantic_units(
+        state,
+        np.zeros((1, embedding_index.VECTOR_DIM), dtype=np.float32),
+        path.stat().st_mtime,
+    )
+    epistemic_graph.EpistemicGraphIndex(tmp_path).rebuild_all()
+
+    conn = sqlite3.connect(lexstore.lexical_path(tmp_path))
+    try:
+        conn.execute(
+            "UPDATE semantic_units SET tags_json = '[]', context = NULL, "
+            "parser_version = ?, parent_generation = 'pre-projection' "
+            "WHERE parent_path = ?",
+            (semantic_index.PARSER_VERSION - 1, _REL),
+        )
+        conn.execute(
+            "UPDATE meta SET value = ? WHERE key = 'schema_version'",
+            (str(lexstore.SCHEMA_VERSION - 1),),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    conn = sqlite3.connect(embedding_index.index_paths.sidecar_path(tmp_path))
+    try:
+        conn.execute(
+            "UPDATE semantic_unit_vectors SET parser_version = ?, "
+            "parent_generation = 'pre-projection' WHERE parent_path = ?",
+            (semantic_index.PARSER_VERSION - 1, _REL),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    conn = sqlite3.connect(epistemic_graph.sidecar_path(tmp_path))
+    try:
+        rows = conn.execute(
+            "SELECT node_key, metadata FROM graph_nodes WHERE path = ?",
+            (_REL,),
+        ).fetchall()
+        for node_key, raw_metadata in rows:
+            metadata = json.loads(raw_metadata)
+            if metadata.get("record_type") != "semantic_unit":
+                continue
+            metadata.update(
+                tags=[],
+                context=None,
+                parser_version=semantic_index.PARSER_VERSION - 1,
+                parent_generation="pre-projection",
+            )
+            conn.execute(
+                "UPDATE graph_nodes SET metadata = ? WHERE node_key = ?",
+                (json.dumps(metadata, sort_keys=True), node_key),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+    monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
+    monkeypatch.setattr(embeddings, "_IMPORT_FAILED", False)
+    monkeypatch.setattr(embeddings, "get_model", lambda: object())
+    monkeypatch.setattr(readiness, "should_defer", lambda *_args: False)
+    monkeypatch.setattr(
+        embeddings,
+        "_embed_live_chunks",
+        lambda texts: np.zeros(
+            (len(texts), embedding_index.VECTOR_DIM), dtype=np.float32
+        ),
+    )
+    monkeypatch.setattr(
+        embeddings,
+        "embed_texts",
+        lambda texts, *, is_query=False: np.zeros(
+            (len(texts), embedding_index.VECTOR_DIM), dtype=np.float32
+        ),
+    )
+
+    repaired = commands.op_maintain_memory(tmp_path, mode="reconcile")
+
+    rows = lexstore.search_semantic_units(
+        tmp_path, "retry windows", k=10, scope="kb"
+    )
+
+    assert rows is not None
+    assert [(row.tags, row.context) for row in rows] == [
+        (("reliability", "runtime/retry"), "Edge path")
+    ]
+    graph_rows = sqlite3.connect(epistemic_graph.sidecar_path(tmp_path)).execute(
+        "SELECT metadata FROM graph_nodes WHERE path = ?",
+        (_REL,),
+    ).fetchall()
+    graph_units = [
+        json.loads(raw_metadata)
+        for (raw_metadata,) in graph_rows
+        if json.loads(raw_metadata).get("record_type") == "semantic_unit"
+    ]
+    assert [(row["tags"], row["context"]) for row in graph_units] == [
+        (["reliability", "runtime/retry"], "Edge path")
+    ]
+    vector_hits = find_module.find(
+        tmp_path,
+        query="vector projection probe",
+        scope="kb-only",
+        mode="vector",
+        graph=False,
+        result_level="unit",
+        limit=10,
+    )
+    assert [
+        (hit.as_dict()["tags"], hit.as_dict()["context"])
+        for hit in vector_hits
+    ] == [(["reliability", "runtime/retry"], "Edge path")]
+    assert vector_hits[0].as_dict()["signals"]["vector_rank"] == 1
+    assert repaired["semantic_unit_indexes_status"] == "repaired"
+    assert path.read_bytes() == original_bytes
+    assert path.stat().st_mtime_ns == original_mtime_ns
+
+
+def test_hierarchy_reconcile_refreshes_derived_state_without_rewriting_markdown(
+    tmp_path: Path, monkeypatch
+) -> None:
+    path = _write(
+        tmp_path,
+        """\
+## Finding
+
+Parent conclusion.
+
+### Mechanism
+
+- [config] This compact-shaped row belongs to the rich body.
+""",
+    )
+    source = path.read_bytes()
+    state = semantic_index.build_parent_index_state(tmp_path, path)
+    assert [(unit.form, unit.kind) for unit in state.document.units] == [
+        ("rich", "finding")
+    ]
+
+    assert lexstore.search_semantic_units(
+        tmp_path, "Parent conclusion", k=10, scope="kb"
+    )
+    epistemic_graph.EpistemicGraphIndex(tmp_path).rebuild_all()
+
+    conn = sqlite3.connect(lexstore.lexical_path(tmp_path))
+    try:
+        conn.execute(
+            "UPDATE semantic_units SET parser_version = ?, "
+            "parent_generation = 'pre-hierarchy', unit_ref = 'old-overlap-ref' "
+            "WHERE parent_path = ?",
+            (semantic_index.PARSER_VERSION - 1, _REL),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    conn = sqlite3.connect(epistemic_graph.sidecar_path(tmp_path))
+    try:
+        rows = conn.execute(
+            "SELECT node_key, metadata FROM graph_nodes WHERE path = ?", (_REL,)
+        ).fetchall()
+        for node_key, raw_metadata in rows:
+            metadata = json.loads(raw_metadata)
+            if metadata.get("record_type") != "semantic_unit":
+                continue
+            metadata.update(
+                {
+                    "unit_ref": "old-overlap-ref",
+                    "parent_generation": "pre-hierarchy",
+                    "parser_version": semantic_index.PARSER_VERSION - 1,
+                }
+            )
+            conn.execute(
+                "UPDATE graph_nodes SET metadata = ? WHERE node_key = ?",
+                (json.dumps(metadata, sort_keys=True), node_key),
+            )
+        edge_rows = conn.execute(
+            "SELECT edge_key, metadata FROM graph_edges "
+            "WHERE source_path = ? AND relation_type = 'derived_from'",
+            (_REL,),
+        ).fetchall()
+        for edge_key, raw_metadata in edge_rows:
+            metadata = json.loads(raw_metadata)
+            if metadata.get("record_type") != "semantic_unit":
+                continue
+            metadata["unit_ref"] = "old-overlap-ref"
+            conn.execute(
+                "UPDATE graph_edges SET metadata = ? WHERE edge_key = ?",
+                (json.dumps(metadata, sort_keys=True), edge_key),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+    monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")
+    repaired = reconcile.reconcile(tmp_path)
+    current = semantic_index.build_parent_index_state(tmp_path, path)
+
+    assert path.read_bytes() == source
+    assert repaired.semantic_unit_indexes_status == "repaired"
+    assert repaired.semantic_unit_parents_refreshed == 1
+    assert semantic_index.audit_semantic_unit_sidecars(
+        tmp_path,
+        {_REL: current},
+        include_vectors=False,
+        include_graph=True,
+    ) == ()
+    assert [unit.unit_ref for unit in current.document.units] == [
+        state.document.units[0].unit_ref
+    ]
 
 
 def test_sidecar_parity_classifies_missing_mixed_moved_and_graph_edge_drift(
@@ -209,14 +450,14 @@ def test_reconcile_repairs_unit_drift_without_markdown_changes_and_is_idempotent
 def test_move_trash_and_recovery_keep_all_unit_sidecars_on_the_live_parent(
     tmp_path: Path, monkeypatch
 ) -> None:
-    live_rel = "Knowledge Base/Scratch/reconcile-units.md"
+    live_rel = "Knowledge Base/Notes/Insights/reconcile-units.md"
     state = _seed_sidecars(
         tmp_path,
         rel=live_rel,
         page_type="insight",
         status="draft",
     )
-    moved_rel = "Knowledge Base/Scratch/moved-reconcile-units.md"
+    moved_rel = "Knowledge Base/Notes/Insights/moved-reconcile-units.md"
     monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
     monkeypatch.setattr(embeddings, "_IMPORT_FAILED", False)
     monkeypatch.setattr(embeddings, "get_model", lambda: object())

@@ -1,54 +1,63 @@
 version: 1
 skills:
   - name: exomem-continue
+    standalone_authoring: true
     purpose: Resume prior project or session context from Exomem.
     triggers:
       - continue where we left off
       - what was I doing on X?
       - pick this back up
   - name: exomem-capture
+    standalone_authoring: true
     purpose: Save a durable conclusion from a conversation or session.
     triggers:
       - save this
       - file this to KB
       - remember this decision
   - name: exomem-ingest
+    standalone_authoring: true
     purpose: Add an external artifact to Exomem and compile what matters.
     triggers:
       - ingest this
       - add this to Exomem
       - process this source
   - name: exomem-research
+    standalone_authoring: true
     purpose: Run a focused research loop and save attributed findings.
     triggers:
       - research X and save what matters
       - compare A and B
       - investigate this
   - name: exomem-reflect
+    standalone_authoring: true
     purpose: Turn a session or project episode into reusable memory.
     triggers:
       - reflect on this
       - what did we learn?
       - turn this into patterns
   - name: exomem-curate
+    standalone_authoring: true
     purpose: Improve links, structure, and compiled note quality.
     triggers:
       - clean this up
       - organize these notes
       - link this better
   - name: exomem-defrag
+    standalone_authoring: true
     purpose: Reconcile duplicate, stale, or conflicting memory.
     triggers:
       - defrag this topic
       - reconcile these notes
       - what's stale?
   - name: exomem-review
+    standalone_authoring: true
     purpose: Drain Exomem review and audit queues safely.
     triggers:
       - review my KB
       - what needs attention?
       - drain the backlog
   - name: exomem-media
+    standalone_authoring: true
     purpose: Retrieve and reason over Exomem media artifacts.
     triggers:
       - find the video where

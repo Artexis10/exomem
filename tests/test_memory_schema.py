@@ -488,9 +488,9 @@ def _seed_category_pages(vault: Path) -> list[Path]:
         "- [Äri Reegel] " + "A" * 190 + " ^long-example\n\n"
         + "".join(f"- [Äri Reegel] Extra example {index}\n" for index in range(5))
         + "\n"
-        "## Decision\n- category: configuration\n- id: rich-config\n\nUse SQLite.\n",
+        "## Decision\n- category: runtime_configuration\n- id: rich-config\n\nUse SQLite.\n",
         "- [äri-reegel] Keep evidence attached\n"
-        "- [configuration] Session lifetime is 30 days\n",
+        "- [runtime_configuration] Session lifetime is 30 days\n",
     )
     for index, body in enumerate(bodies):
         path = vault / "Knowledge Base" / "Notes" / f"categories-{index}.md"
@@ -518,9 +518,9 @@ def test_category_inference_profiles_authored_keys_forms_scopes_and_examples(
     reviewed = {
         "schema_version": 1,
         "categories": {
-            "config": {
-                "description": "Configuration facts",
-                "aliases": ["configuration"],
+            "runtime_setting": {
+                "description": "Runtime setting facts",
+                "aliases": ["runtime_configuration"],
                 "scope": {"projects": ["companion"], "page_types": ["insight"]},
             }
         },
@@ -572,13 +572,15 @@ def test_category_inference_profiles_authored_keys_forms_scopes_and_examples(
     aliased = next(
         item
         for item in first["categories"]
-        if item["category_key"] == "configuration"
+        if item["category_key"] == "runtime_configuration"
     )
-    assert aliased["resolved_category"] == "config"
+    assert aliased["resolved_category"] == "runtime_setting"
     assert aliased["registry_status"] == "alias"
     assert aliased["unit_count"] == 2
     assert aliased["forms"] == {"compact": 1, "rich": 1}
-    assert all(item["category_key"] != "config" for item in first["categories"])
+    assert all(
+        item["category_key"] != "runtime_setting" for item in first["categories"]
+    )
     assert first["normalization_candidates"][0]["basis"] == "shared_authored_normalization"
 
 
@@ -590,13 +592,13 @@ def test_category_validation_keeps_unknown_open_and_reports_deprecation_and_scop
     proposal = {
         "schema_version": 1,
         "categories": {
-            "configuration": {
-                "description": "Retired configuration facts",
+            "runtime_configuration": {
+                "description": "Retired runtime setting facts",
                 "status": "deprecated",
-                "replaced_by": "config",
+                "replaced_by": "runtime_setting",
             },
-            "config": {
-                "description": "Configuration facts",
+            "runtime_setting": {
+                "description": "Runtime setting facts",
                 "scope": {"projects": ["other"]},
             },
         },
@@ -622,8 +624,8 @@ def test_category_validation_keeps_unknown_open_and_reports_deprecation_and_scop
         **proposal,
         "categories": {
             **proposal["categories"],
-            "configuration": {
-                "description": "Configuration facts",
+            "runtime_configuration": {
+                "description": "Runtime setting facts",
                 "scope": {"projects": ["other"]},
             },
         },
@@ -638,8 +640,8 @@ def test_category_validation_keeps_unknown_open_and_reports_deprecation_and_scop
     invalid = {
         "schema_version": 1,
         "categories": {
-            "config": {"description": 42, "aliases": ["shared"]},
-            "rule": {"description": "Rules", "aliases": ["shared"]},
+            "runtime_setting": {"description": 42, "aliases": ["shared"]},
+            "business_rule": {"description": "Rules", "aliases": ["shared"]},
         },
         "kinds": {},
     }
@@ -673,14 +675,16 @@ def test_category_command_diff_and_reviewed_save_preserve_custom_kinds(
     created = semantic_language_registry.save_registry(vault, current)
     reviewed = {
         **current,
-        "categories": {"config": {"description": "Configuration facts"}},
+        "categories": {
+            "runtime_setting": {"description": "Runtime setting facts"}
+        },
     }
 
     diff = commands.op_schema_memory(
         vault, operation="diff", subject="categories", proposal=reviewed
     )
     assert diff["comparison"] == "proposal"
-    assert diff["changes"]["categories"]["added"] == ["config"]
+    assert diff["changes"]["categories"]["added"] == ["runtime_setting"]
     assert diff["changes"]["kinds"] == {"added": [], "removed": [], "modified": {}}
 
     inferred = commands.op_schema_memory(vault, operation="infer", subject="categories")
@@ -723,7 +727,7 @@ def test_category_command_diff_and_reviewed_save_preserve_custom_kinds(
     assert saved["created"] is False
     loaded = semantic_language_registry.load_registry(vault)
     assert "protocol" in loaded.kinds
-    assert "config" in loaded.categories
+    assert "runtime_setting" in loaded.categories
 
     kind_change = {
         **reviewed,
@@ -1020,7 +1024,7 @@ def test_contract_validation_covers_new_and_legacy_unknown_policies_once(
     page = _seed_semantic_contract_pages(vault, count=1)[0]
     page.write_text(
         page.read_text(encoding="utf-8")
-        + "\n- [mystery] Unknown category\n\n"
+        + "\n## Observations\n\n- [mystery] Unknown category\n\n"
         "## Relations\n\n- supports [[Knowledge Base/Notes/target]]\n",
         encoding="utf-8",
     )
@@ -1159,8 +1163,8 @@ def test_empty_category_rule_registry_conflict_uses_a_real_rule_identity(
         {
             "schema_version": 1,
             "categories": {
-                "config": {
-                    "description": "Configuration",
+                "deployment_setting": {
+                    "description": "Deployment setting",
                     "scope": {"projects": ["other"]},
                 }
             },
@@ -1176,14 +1180,18 @@ def test_empty_category_rule_registry_conflict_uses_a_real_rule_identity(
         {
             **_contract_data("empty-rule"),
             "validation": "off",
-            "categories": {"config": {}},
+            "categories": {"deployment_setting": {}},
         }
     )
 
     findings = memory_schema.validate_contract(vault, contract)["findings"]
 
     assert len(findings) == 1
-    assert findings[0]["resolved_rule"] == ["categories", "config", "declaration"]
+    assert findings[0]["resolved_rule"] == [
+        "categories",
+        "deployment_setting",
+        "declaration",
+    ]
 
 
 @pytest.mark.parametrize(

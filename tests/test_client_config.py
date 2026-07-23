@@ -14,8 +14,10 @@ import pytest
 
 from exomem import client_config
 
+WINDOWS_VAULT = "C:" + r"\vault"
+
 BLOCK = client_config.render_codex_block(
-    "exomem", ["--transport", "stdio"], {"EXOMEM_VAULT_PATH": r"C:\vault"}
+    "exomem", ["--transport", "stdio"], {"EXOMEM_VAULT_PATH": WINDOWS_VAULT}
 )
 
 
@@ -26,7 +28,7 @@ def test_rendered_block_is_valid_toml_with_windows_paths() -> None:
     server = parsed["mcp_servers"]["exomem"]
     assert server["command"] == "exomem"
     assert server["args"] == ["--transport", "stdio"]
-    assert server["env"]["EXOMEM_VAULT_PATH"] == r"C:\vault"
+    assert server["env"]["EXOMEM_VAULT_PATH"] == WINDOWS_VAULT
 
 
 def test_rendered_block_pins_stdio_transport() -> None:

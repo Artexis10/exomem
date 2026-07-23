@@ -78,7 +78,7 @@ Substitute throughout:
   `"<exe>" --config "<config.yml>" tunnel run`. Diagnose: `sc.exe qc cloudflared`
   (bare path) + `sc.exe query cloudflared` (1067).
 - **SYSTEM service config location.** The service (LocalSystem) reads
-  `C:\Windows\System32\config\systemprofile\.cloudflared\` — not `%USERPROFILE%\.cloudflared\`
+  `%SystemRoot%\System32\config\systemprofile\.cloudflared\` — not `%USERPROFILE%\.cloudflared\`
   where `tunnel login/create` write `cert.pem` + creds. The script copies them across.
 - **Cutover ordering** — the CRITICAL note above; verify the live base URL before retrying.
 - **Cloudflare edge ~100s request cap** — run heavy ops (embedding rebuild, large audit)

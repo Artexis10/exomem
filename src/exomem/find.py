@@ -16,11 +16,13 @@ import os
 import threading
 import time
 from collections import OrderedDict
+from collections.abc import Iterable
 from datetime import date
 from pathlib import Path
 from typing import Any
 
 from . import (
+    cli_ops,
     find_candidates,
     find_corpus,
     find_policy,
@@ -151,9 +153,7 @@ def auto_rerank_allowed_by_policy() -> bool:
     try:
         from . import accel
 
-        return _accelerated_device(
-            accel.select_device(override_env="EXOMEM_EMBED_DEVICE")
-        )
+        return _accelerated_device(accel.select_device(override_env="EXOMEM_EMBED_DEVICE"))
     except Exception:  # noqa: BLE001 - auto-rerank must fail closed to cheap find.
         return False
 
@@ -172,6 +172,16 @@ _FIND_CACHE: OrderedDict[tuple, list[Hit]] = OrderedDict()
 _FIND_CACHE_LOCK = threading.Lock()
 _DEFAULT_FIND_CACHE_SIZE = 32
 MAX_RERANK_CANDIDATES = 300
+_FOREGROUND_LEXICAL_REPAIR_PAGE_CAP = 64
+
+
+def _bounded_lexical_repair_allowed(freshness_key: tuple | None) -> bool:
+    """Permit a cold inline sidecar build only for a provably small corpus."""
+    return bool(
+        freshness_key
+        and isinstance(freshness_key[0], int)
+        and freshness_key[0] <= _FOREGROUND_LEXICAL_REPAIR_PAGE_CAP
+    )
 
 
 def _set_rerank_timing_profile(
@@ -198,15 +208,33 @@ def _set_rerank_timing_profile(
     }
 
 
+def _set_catalog_timing_profile(
+    timings: FindTimings | None,
+    readiness: object | None = None,
+    *,
+    cache_hit: bool = False,
+) -> None:
+    if timings is None:
+        return
+    from . import lexstore
+
+    timings.profile["catalog"] = lexstore.catalog_timing_profile(
+        readiness, cache_hit=cache_hit
+    )
+
+
+def _record_filter_eligibility_cache_hit(timings: FindTimings | None) -> None:
+    """Record a measurable exact-catalog hot lane without timing clock noise."""
+    if timings is None:
+        return
+    timings.stages["filter_eligibility"] = {"ms": 0.0, "cache_hit": True}
+
+
 def _order_reranked_prefix(hits: list[Any], *, prefix_count: int) -> list[Any]:
     """Sort only the scored prefix, preserving the fused tail byte-for-byte."""
     prefix = hits[:prefix_count]
     prefix.sort(
-        key=lambda hit: -(
-            hit.rerank_score
-            if hit.rerank_score is not None
-            else float("-inf")
-        )
+        key=lambda hit: -(hit.rerank_score if hit.rerank_score is not None else float("-inf"))
     )
     return prefix + hits[prefix_count:]
 
@@ -220,7 +248,6 @@ def _find_cache_size() -> int:
     except ValueError:
         log.warning("EXOMEM_FIND_CACHE_SIZE=%r is not an int; using default", raw)
         return _DEFAULT_FIND_CACHE_SIZE
-
 
 
 class FreshnessSnapshot:
@@ -273,6 +300,7 @@ def _freshness_key(
     graph: bool,
     snapshot: FreshnessSnapshot,
     unit_filters: bool = False,
+    metadata_only_catalog: bool = False,
 ) -> tuple:
     """Freshness inputs that can change this request's answer.
 
@@ -339,7 +367,12 @@ def _freshness_key(
         # is deliberately not used here.
         from . import lexstore
 
-        parts.append(("lexical", lexstore.cache_token(vault_root)))
+        token = (
+            lexstore.catalog_cache_token(vault_root)
+            if metadata_only_catalog
+            else lexstore.cache_token(vault_root)
+        )
+        parts.append(("lexical", token))
     return tuple(parts)
 
 
@@ -478,19 +511,14 @@ def find(
     `EXOMEM_DISABLE_USAGE_BOOST`. Bypasses the hot find cache.
     """
     if scope not in ("kb", "vault", "kb-only"):
-        raise ValueError(
-            f"find: scope must be 'kb', 'vault', or 'kb-only', got {scope!r}"
-        )
+        raise ValueError(f"find: scope must be 'kb', 'vault', or 'kb-only', got {scope!r}")
     if mode not in ("hybrid", "keyword", "vector"):
-        raise ValueError(
-            f"find: mode must be 'hybrid', 'keyword', or 'vector', got {mode!r}"
-        )
+        raise ValueError(f"find: mode must be 'hybrid', 'keyword', or 'vector', got {mode!r}")
     if limit < 1:
         limit = 1
     limit = min(limit, 100)
     if rerank_max_candidates is not None and (
-        isinstance(rerank_max_candidates, bool)
-        or not isinstance(rerank_max_candidates, int)
+        isinstance(rerank_max_candidates, bool) or not isinstance(rerank_max_candidates, int)
     ):
         raise ValueError(
             "find: rerank_max_candidates must be an integer "
@@ -564,9 +592,7 @@ def find(
             updated_before=updated_before,
             recency_days=recency_days,
         ),
-        resolve_category=lambda value: _resolve_language_value(
-            value, namespace="category"
-        ),
+        resolve_category=lambda value: _resolve_language_value(value, namespace="category"),
         resolve_kind=lambda value: _resolve_language_value(value, namespace="kind"),
     )
     filter_key = json.dumps(
@@ -609,8 +635,10 @@ def find(
     degraded = degraded_out if degraded_out is not None else []
     failed = failed_out if failed_out is not None else []
     if effective_result_level == "unit":
+        unit_algebra = structured_filters.plan_index_candidates(filter_plan)
+        cache_size = 0 if retrieval_trace is not None else _find_cache_size()
         if timings is not None:
-            timings.cache["enabled"] = False
+            timings.cache["enabled"] = cache_size > 0
         _set_rerank_timing_profile(
             timings,
             requested=rerank_max_candidates,
@@ -620,7 +648,44 @@ def find(
             decision="skipped",
             reason="result_level_unit",
         )
-        return _find_semantic_units(
+        unit_cache_key: tuple | None = None
+        if cache_size > 0:
+            with _span(timings, "freshness"):
+                unit_fresh = _freshness_key(
+                    vault_root,
+                    scope=scope,
+                    query_norm=query_norm,
+                    mode=mode,
+                    graph=False,
+                snapshot=snapshot,
+                unit_filters=True,
+                metadata_only_catalog=unit_algebra.status == "complete",
+                )
+            unit_request_key = (
+                "unit",
+                str(vault_root.resolve()),
+                query,
+                limit,
+                scope,
+                mode,
+                filter_key,
+                prefer_active,
+                resolved_config,
+            )
+            unit_cache_key = (unit_request_key, unit_fresh)
+            with _span(timings, "cache_lookup"):
+                with _FIND_CACHE_LOCK:
+                    cached_units = _FIND_CACHE.get(unit_cache_key)
+                    if cached_units is not None:
+                        _FIND_CACHE.move_to_end(unit_cache_key)
+            if cached_units is not None:
+                if timings is not None:
+                    timings.cache["hit"] = True
+                if unit_algebra.status == "complete":
+                    _record_filter_eligibility_cache_hit(timings)
+                    _set_catalog_timing_profile(timings, cache_hit=True)
+                return copy.deepcopy(cached_units)
+        unit_hits = _find_semantic_units(
             vault_root,
             query=query,
             limit=limit,
@@ -633,7 +698,15 @@ def find(
             degraded_out=degraded,
             failed_out=failed,
             retrieval_trace=retrieval_trace,
+            timings=timings,
         )
+        if unit_cache_key is not None and not degraded and not failed:
+            with _FIND_CACHE_LOCK:
+                _FIND_CACHE[unit_cache_key] = copy.deepcopy(unit_hits)
+                _FIND_CACHE.move_to_end(unit_cache_key)
+                while len(_FIND_CACHE) > cache_size:
+                    _FIND_CACHE.popitem(last=False)
+        return unit_hits
     mixed = effective_result_level == "mixed"
 
     # ---- Hot cache lookup (freshness-keyed; see _freshness_key above) ----
@@ -644,21 +717,51 @@ def find(
     if timings is not None:
         timings.cache["enabled"] = cache_size > 0
     if cache_size > 0:
+
         def _t(v: list | None) -> tuple | None:
             return tuple(v) if v is not None else None
 
         request_key = (
-            str(vault_root.resolve()), query, _t(types), _t(projects), _t(tags),
-            _t(speakers), _t(file_types), _t(exclude_file_types), limit, scope,
-            mode, graph, rerank, rerank_max_candidates, auto_rerank, temporal, intent,
-            updated_after, updated_before, recency_days, filter_key,
-            effective_result_level, prefer_compiled, prefer_active, resolved_config,
+            str(vault_root.resolve()),
+            query,
+            _t(types),
+            _t(projects),
+            _t(tags),
+            _t(speakers),
+            _t(file_types),
+            _t(exclude_file_types),
+            limit,
+            scope,
+            mode,
+            graph,
+            rerank,
+            rerank_max_candidates,
+            auto_rerank,
+            temporal,
+            intent,
+            updated_after,
+            updated_before,
+            recency_days,
+            filter_key,
+            effective_result_level,
+            prefer_compiled,
+            prefer_active,
+            resolved_config,
         )
         with _span(timings, "freshness"):
             fresh = _freshness_key(
-                vault_root, scope=scope, query_norm=query_norm, mode=mode,
-                graph=graph, snapshot=snapshot,
+                vault_root,
+                scope=scope,
+                query_norm=query_norm,
+                mode=mode,
+                graph=graph,
+                snapshot=snapshot,
                 unit_filters=filter_plan.has_unit_predicate,
+                metadata_only_catalog=(
+                    not query_norm
+                    and structured_filters.plan_index_candidates(filter_plan).status
+                    == "complete"
+                ),
             )
         cache_key = (request_key, fresh)
         with _span(timings, "cache_lookup"):
@@ -678,6 +781,13 @@ def find(
                 decision="skipped",
                 reason="cache_hit",
             )
+            if (
+                filter_plan.root is not None
+                and structured_filters.plan_index_candidates(filter_plan).status
+                == "complete"
+            ):
+                _record_filter_eligibility_cache_hit(timings)
+                _set_catalog_timing_profile(timings, cache_hit=True)
             return copy.deepcopy(cached)
 
     # Track warm-window degradation even when the caller passed no list —
@@ -712,10 +822,12 @@ def find(
     eligible_paths: set[str] | None = None
     if filter_plan.root is not None:
         with _span(timings, "filter_eligibility"):
-            eligible_paths = _eligible_filter_paths(
+            eligible_paths = _resolve_eligible_filter_paths(
                 vault_root,
                 scope=walk_scope,
                 plan=filter_plan,
+                snapshot=snapshot,
+                timings=timings,
             )
 
     # Empty queries always degrade to keyword behavior — there's no signal
@@ -726,19 +838,38 @@ def find(
             hits = _find_keyword(
                 vault_root,
                 query_norm=query_norm,
-                types=types, projects=projects, tags=tags, speakers=speakers,
-                file_types=file_types, exclude_file_types=exclude_file_types,
-                limit=limit, scope=walk_scope, eligible_paths=eligible_paths,
+                types=types,
+                projects=projects,
+                tags=tags,
+                speakers=speakers,
+                file_types=file_types,
+                exclude_file_types=exclude_file_types,
+                limit=limit,
+                scope=walk_scope,
+                eligible_paths=eligible_paths,
+                freshness_key=snapshot.for_scope(walk_scope),
+                failed_out=failed,
             )
     else:
         hits = _find_semantic(
             vault_root,
-            query=query, query_norm=query_norm,
-            types=types, projects=projects, tags=tags, speakers=speakers,
-            file_types=file_types, exclude_file_types=exclude_file_types,
-            limit=limit, scope=walk_scope, mode=mode, graph=graph, rerank=rerank,
+            query=query,
+            query_norm=query_norm,
+            types=types,
+            projects=projects,
+            tags=tags,
+            speakers=speakers,
+            file_types=file_types,
+            exclude_file_types=exclude_file_types,
+            limit=limit,
+            scope=walk_scope,
+            mode=mode,
+            graph=graph,
+            rerank=rerank,
             rerank_max_candidates=rerank_max_candidates,
-            auto_rerank=auto_rerank, temporal=temporal, intent=intent,
+            auto_rerank=auto_rerank,
+            temporal=temporal,
+            intent=intent,
             prefer_compiled=prefer_compiled,
             prefer_active=prefer_active,
             prefer_used=prefer_used,
@@ -783,15 +914,22 @@ def find(
         with _span(timings, "outside_kb"):
             seen = {h.path for h in hits}
             outside = [
-                h for h in _find_outside_kb(
+                h
+                for h in _find_outside_kb(
                     vault_root,
                     query=query,
                     query_norm=query_norm,
-                    types=types, projects=projects, tags=tags, speakers=speakers,
-                    file_types=file_types, exclude_file_types=exclude_file_types,
-                    limit=limit, snapshot=snapshot,
+                    types=types,
+                    projects=projects,
+                    tags=tags,
+                    speakers=speakers,
+                    file_types=file_types,
+                    exclude_file_types=exclude_file_types,
+                    limit=limit,
+                    snapshot=snapshot,
                     filter_plan=filter_plan if filter_plan.root is not None else None,
                     exclude_paths=seen,
+                    failed_out=failed,
                     retrieval_trace=retrieval_trace,
                 )
                 if h.path not in seen
@@ -815,10 +953,7 @@ def find(
                     retrieval_trace.record_auto_widen(
                         hits,
                         strong_paths=[hit.path for hit in strong[:kb_keep]],
-                        weak_paths=[
-                            hit.path
-                            for hit in weak[: max(0, kb_keep - len(strong))]
-                        ],
+                        weak_paths=[hit.path for hit in weak[: max(0, kb_keep - len(strong))]],
                         outside_paths=[hit.path for hit in outside],
                         reserve=reserve,
                         kb_keep=kb_keep,
@@ -869,7 +1004,6 @@ def find(
             while len(_FIND_CACHE) > cache_size:
                 _FIND_CACHE.popitem(last=False)
     return hits
-
 
 
 def _collapse_frame_children(
@@ -969,6 +1103,118 @@ def _eligible_unit_records(
     return eligible
 
 
+def _indexed_unit_constraints(
+    plan: structured_filters.FilterPlan,
+) -> tuple[list[str] | None, list[str] | None]:
+    """Extract safe conjunctive category/kind constraints for SQL pushdown."""
+    values: dict[str, set[str] | None] = {"unit.category": None, "unit.kind": None}
+
+    def visit(node: structured_filters.FilterNode | None) -> None:
+        if node is None:
+            return
+        if isinstance(node, structured_filters.AllOf):
+            for child in node.children:
+                visit(child)
+            return
+        if not isinstance(node, structured_filters.Predicate):
+            return
+        field = node.field.name
+        if field not in values:
+            return
+        for operator, operand in node.operators:
+            if operator == "$eq":
+                candidates = {str(operand.value)}
+            elif operator == "$in":
+                candidates = {str(item.value) for item in operand}
+            else:
+                continue
+            current = values[field]
+            values[field] = candidates if current is None else current & candidates
+
+    visit(plan.root)
+    categories = values["unit.category"]
+    kinds = values["unit.kind"]
+    return (
+        sorted(categories) if categories else None,
+        sorted(kinds) if kinds else None,
+    )
+
+
+def _hydrate_indexed_unit_records(
+    vault_root: Path,
+    indexed: list[Any],
+    *,
+    plan: structured_filters.FilterPlan,
+    stale_out: list[str] | None = None,
+) -> dict[str, tuple[ParsedPage, Any, int]]:
+    """Hydrate only sidecar-selected parents, rejecting any generation race."""
+    from . import semantic_index
+
+    parents: dict[str, tuple[ParsedPage, Any] | None] = {}
+    records: dict[str, tuple[ParsedPage, Any, int]] = {}
+    for hit in indexed:
+        parent = parents.get(hit.parent_path)
+        if hit.parent_path not in parents:
+            page = _CACHE.get(vault_root / hit.parent_path, vault_root)
+            if page is None or not _passes_filters(
+                page,
+                vault_root=vault_root,
+                types=None,
+                projects=None,
+                tags=None,
+                speakers=None,
+                file_types=None,
+                exclude_file_types=None,
+            ):
+                if page is None and stale_out is not None:
+                    stale_out.append(hit.unit_ref)
+                parents[hit.parent_path] = None
+                continue
+            try:
+                state = semantic_index.current_parent_index_state(vault_root, hit.parent_path)
+            except (OSError, UnicodeError, ValueError) as error:
+                log.warning(
+                    "semantic-unit candidate hydration failed for %s: %s",
+                    hit.parent_path,
+                    error,
+                )
+                if stale_out is not None:
+                    stale_out.append(hit.unit_ref)
+                parents[hit.parent_path] = None
+                continue
+            if state.parent_generation != hit.parent_generation:
+                if stale_out is not None:
+                    stale_out.append(hit.unit_ref)
+                parents[hit.parent_path] = None
+                continue
+            parent = (page, state)
+            parents[hit.parent_path] = parent
+        if parent is None:
+            continue
+        page, state = parent
+        located = next(
+            (
+                (source_order, candidate)
+                for source_order, candidate in enumerate(state.document.units)
+                if candidate.unit_ref == hit.unit_ref
+            ),
+            None,
+        )
+        if located is None:
+            if stale_out is not None:
+                stale_out.append(hit.unit_ref)
+            continue
+        source_order, unit = located
+        if not structured_filters.evaluate_filter(
+            plan,
+            page=structured_filters.page_view(page),
+            unit=structured_filters.unit_view(unit),
+        ):
+            continue
+        records[hit.unit_ref] = (page, unit, getattr(hit, "source_order", source_order))
+    return records
+
+
 def _python_unit_scores(
     records: dict[str, tuple[ParsedPage, Any, int]],
     query: str,
@@ -1044,6 +1290,7 @@ def _semantic_unit_hit(
         excerpt=_unit_excerpt(unit.content),
         tags=list(unit.tags),
         context=unit.context,
+        relations=[relation.to_dict() for relation in unit.relations],
         source_anchor=unit.anchor,
         source_span=_unit_span(unit),
         source_hash=unit.source_hash,
@@ -1061,6 +1308,68 @@ def _semantic_unit_hit(
     )
 
 
+def _vector_unit_candidates(
+    vault_root: Path,
+    *,
+    query: str,
+    candidate_limit: int,
+    allowed_unit_refs: set[str] | None,
+    degraded_out: list[str] | None,
+    failed_out: list[str] | None,
+) -> tuple[list[Any], dict[str, Any], str]:
+    """Return bounded vector candidates without opening every Markdown parent."""
+    model_name = "BAAI/bge-base-en-v1.5"
+    if os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
+        return (
+            [],
+            {"status": "disabled", "reason": "embeddings_disabled", "model": model_name},
+            "kb",
+        )
+
+    from . import readiness
+
+    if readiness.should_defer("embeddings"):
+        if degraded_out is not None:
+            degraded_out.append("embeddings")
+        return [], {"status": "warming", "reason": "model_warming", "model": model_name}, "kb"
+    try:
+        from . import embeddings
+
+        index = embeddings.get_embedding_index(vault_root)
+        query_vector = embeddings.embed_texts([query], is_query=True)[0]
+        hits = index.search_semantic_units(
+            query_vector,
+            k=candidate_limit,
+            allowed_unit_refs=allowed_unit_refs,
+            validate=False,
+        )
+        profile = {
+            "status": "participated" if hits else "available_nonmatching",
+            "backend": type(index).__name__,
+            "model": embeddings.MODEL_NAME,
+            "metric": {
+                "name": "cosine_similarity",
+                "direction": "higher",
+                "range": [-1.0, 1.0],
+                "rounding": 6,
+            },
+        }
+        return hits, profile, embeddings.index_scope()
+    except ImportError as error:
+        log.info("semantic-unit vector search unavailable (%s); using lexical ranking", error)
+        return (
+            [],
+            {"status": "unavailable", "reason": "dependency_unavailable", "model": model_name},
+            "kb",
+        )
+    except Exception as error:  # noqa: BLE001 - vector lane soft-falls back
+        log.warning("semantic-unit vector search failed: %s; using lexical ranking", error)
+        _record_degradation("vector")
+        if failed_out is not None:
+            failed_out.append("vector")
+        return [], {"status": "failed", "reason": "search_failed", "model": model_name}, "kb"
+
+
 def _find_semantic_units(
     vault_root: Path,
     *,
@@ -1075,13 +1384,107 @@ def _find_semantic_units(
     degraded_out: list[str] | None,
     failed_out: list[str] | None,
     retrieval_trace: Any | None = None,
+    timings: FindTimings | None = None,
 ) -> list[SemanticUnitHit]:
     """Rank current, exactly eligible units through lexical and vector lanes."""
-    records = _eligible_unit_records(vault_root, scope=scope, plan=plan)
-    if not records:
+    from . import lexstore
+
+    # Empty queries carry no vector signal. Match the page lane's contract and
+    # treat them as filter-only keyword recall before deciding whether exact
+    # catalog rows can stay cold for vector ranking.
+    if not query.strip():
+        mode = "keyword"
+
+    indexed: list[Any] | None = None
+    candidate_window_exhausted = False
+    # The unit lane consumes the same branch-preserving DNF the page lane uses:
+    # an exact category/kind plan seeds candidates through `algebra.clauses`
+    # (same-row `(category... AND kind...) OR ...`), never the flattened
+    # category/kind cross-product. An unsupported plan carries no clauses and
+    # keeps the existing scan/fallback behavior.
+    algebra = structured_filters.plan_index_candidates(plan)
+    if algebra.status == "complete" and algebra.definitely_empty:
+        # Contradictory positive seeds prove a finitely empty candidate set:
+        # return no units WITHOUT any catalog query or corpus walk, matching the
+        # page lane's definitely-empty guarantee.
+        _record_filter_eligibility_cache_hit(timings)
+        _set_catalog_timing_profile(timings, cache_hit=True)
         return []
+    dnf_clauses = algebra.clauses if algebra.status == "complete" else None
+    requested_limit = 20 if limit is None else max(1, limit)
+    candidate_limit = max(20, min(200, requested_limit * 8))
+    if mode in {"keyword", "hybrid", "vector"}:
+        if dnf_clauses is not None:
+            # Exact eligibility is normal-table metadata only. Hybrid/vector
+            # content ranking consumes this finite candidate set independently,
+            # so FTS absence cannot change the catalog outcome.
+            # Category/kind rows are only the exact seed. Page predicates and
+            # other canonical filters run after hydration, so limiting this
+            # seed before post-evaluation can false-empty when the first window
+            # is ineligible. Fetch the complete finite catalog match set, then
+            # apply the caller's result limit to the eligible/ranked records.
+            exact_limit = 2_147_483_647
+            with _span(timings, "filter_eligibility"):
+                catalog_result = lexstore.search_semantic_units_result(
+                    vault_root,
+                    query,
+                    k=exact_limit,
+                    clauses=dnf_clauses,
+                    scope=scope,
+                    freshness=snapshot.for_scope(scope),
+                    literal_all=mode == "keyword" and bool(query.strip()),
+                    _repair_stale=True,
+                    repair=_bounded_lexical_repair_allowed(snapshot.for_scope(scope)),
+                )
+                _set_catalog_timing_profile(timings, catalog_result.readiness)
+                if not catalog_result.readiness.complete:
+                    _raise_catalog_outcome(catalog_result.readiness)
+                indexed = list(catalog_result.value or [])
+                records = (
+                    {}
+                    if mode == "vector"
+                    else _hydrate_indexed_unit_records(vault_root, indexed, plan=plan)
+                )
+        else:
+            indexed = lexstore.search_semantic_units(
+                vault_root,
+                query,
+                k=candidate_limit + 1,
+                scope=scope,
+                freshness=snapshot.for_scope(scope),
+                literal_all=mode == "keyword" and bool(query.strip()),
+                _repair_stale=True,
+                repair=_bounded_lexical_repair_allowed(snapshot.for_scope(scope)),
+            )
+        if indexed is None:
+            if lexstore.backend() != "python":
+                # A safe exact plan the maintained index cannot yet answer must
+                # not degrade to an empty result: the lexical layer already
+                # scheduled the single-flight repair, so raise the typed,
+                # non-cacheable warming outcome (page-level eligibility parity).
+                if algebra.status == "complete":
+                    raise RetrievalIndexWarming()
+                if failed_out is not None:
+                    failed_out.append("semantic_units_lexical")
+                _record_degradation("semantic_units_lexical")
+                records = {}
+            else:
+                records = _eligible_unit_records(vault_root, scope=scope, plan=plan)
+        elif dnf_clauses is None:
+            if len(indexed) > candidate_limit:
+                candidate_window_exhausted = True
+                indexed = indexed[:candidate_limit]
+            records = (
+                {}
+                if mode == "vector"
+                else _hydrate_indexed_unit_records(vault_root, indexed, plan=plan)
+            )
+    else:
+        records = _eligible_unit_records(vault_root, scope=scope, plan=plan)
 
     if not query.strip():
+        if not records:
+            return []
         ordered = sorted(
             records.values(),
             key=lambda record: (
@@ -1101,6 +1504,8 @@ def _find_semantic_units(
         return ordered_hits
 
     if mode == "keyword":
+        if not records:
+            return []
         tokens = query.lower().split()
         ordered = sorted(
             (
@@ -1126,16 +1531,94 @@ def _find_semantic_units(
             retrieval_trace.record_unit_keyword(selected)
         return hits
 
-    from . import lexstore
+    vector_hits: list[Any] = []
+    vector_profile: dict[str, Any] = {
+        "status": "non_applicable",
+        "reason": "requested_mode_keyword",
+    }
+    if mode in {"hybrid", "vector"}:
+        vector_allowed_refs: set[str] | None = None
+        if dnf_clauses is not None:
+            # The allow-set is branch-correlated and bounded: it pushes the same
+            # DNF clauses down so only rows satisfying a real `(category AND
+            # kind)` branch are admitted — never the giant all-unit query under a
+            # flattened cross-product filter.
+            vector_allowed_refs = {row.unit_ref for row in indexed or ()}
+        vector_candidate_limit = (
+            len(vector_allowed_refs)
+            if vector_allowed_refs is not None
+            else candidate_limit + 1
+        )
+        vector_hits, vector_profile, _indexed_scope = _vector_unit_candidates(
+            vault_root,
+            query=query,
+            candidate_limit=vector_candidate_limit,
+            allowed_unit_refs=vector_allowed_refs,
+            degraded_out=degraded_out,
+            failed_out=failed_out,
+        )
+        if vector_allowed_refs is not None and {
+            hit.unit_ref for hit in vector_hits
+        } != vector_allowed_refs:
+            # A partial embedding window cannot prove an exact filtered miss:
+            # an omitted exact ref may be the first one to survive canonical
+            # page/unit post-filters. Fall back to the complete catalog seed.
+            vector_hits = []
+            vector_profile = {
+                "status": "failed",
+                "reason": "incomplete_exact_candidates",
+                "model": vector_profile.get("model", "BAAI/bge-base-en-v1.5"),
+            }
+            _record_degradation("vector")
+            if failed_out is not None and "vector" not in failed_out:
+                failed_out.append("vector")
+        elif vector_allowed_refs is None and len(vector_hits) > candidate_limit:
+            candidate_window_exhausted = True
+            vector_hits = vector_hits[:candidate_limit]
+    if vector_hits:
+        stale_vector_refs: list[str] = []
+        records.update(
+            _hydrate_indexed_unit_records(
+                vault_root,
+                vector_hits,
+                plan=plan,
+                stale_out=stale_vector_refs,
+            )
+        )
+        if stale_vector_refs:
+            vector_hits = []
+            vector_profile = {
+                "status": "failed",
+                "reason": "stale_candidates",
+                "model": vector_profile.get("model", "BAAI/bge-base-en-v1.5"),
+            }
+            _record_degradation("vector")
+            if failed_out is not None and "vector" not in failed_out:
+                failed_out.append("vector")
 
-    indexed = lexstore.search_semantic_units(
-        vault_root,
-        query,
-        k=len(records),
-        scope=scope,
-        freshness=snapshot.for_scope(scope),
-        allowed_unit_refs=set(records),
-    )
+    # Pure vector mode keeps lexical rows cold unless the vector lane could not
+    # produce a trustworthy ranking. This avoids reparsing the same candidate
+    # parents twice while preserving the deterministic lexical fallback.
+    if mode == "vector" and not vector_hits and indexed:
+        records.update(_hydrate_indexed_unit_records(vault_root, indexed, plan=plan))
+
+    if not records:
+        if candidate_window_exhausted and failed_out is not None:
+            failed_out.append("semantic_units_candidate_window")
+            _record_degradation("semantic_units_candidate_window")
+        return []
+
+    if indexed is None:
+        indexed = lexstore.search_semantic_units(
+            vault_root,
+            query,
+            k=len(records),
+            scope=scope,
+            freshness=snapshot.for_scope(scope),
+            allowed_unit_refs=set(records),
+            _repair_stale=True,
+            repair=_bounded_lexical_repair_allowed(snapshot.for_scope(scope)),
+        )
     if indexed is None:
         scores = _python_unit_scores(records, query)
     else:
@@ -1186,118 +1669,7 @@ def _find_semantic_units(
     lexical_ranking = _raw_ranking(scores)
     lexical_rank = {unit_ref: rank for rank, unit_ref in enumerate(lexical_ranking, 1)}
 
-    vector_scores: dict[str, float] = {}
-    vector_profile: dict[str, Any]
-    if mode not in ("hybrid", "vector"):
-        vector_profile = {
-            "status": "non_applicable",
-            "reason": "requested_mode_keyword",
-        }
-    elif os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
-        vector_profile = {
-            "status": "disabled",
-            "reason": "embeddings_disabled",
-            "model": "BAAI/bge-base-en-v1.5",
-        }
-    else:
-        vector_profile = {
-            "status": "unavailable",
-            "reason": "not_attempted",
-            "model": "BAAI/bge-base-en-v1.5",
-        }
-    if mode in ("hybrid", "vector") and not os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
-        from . import readiness
-
-        if readiness.should_defer("embeddings"):
-            vector_profile = {
-                "status": "warming",
-                "reason": "model_warming",
-                "model": "BAAI/bge-base-en-v1.5",
-            }
-            if degraded_out is not None:
-                degraded_out.append("embeddings")
-        else:
-            try:
-                from . import embeddings
-
-                index = embeddings.get_embedding_index(vault_root)
-                query_vector = embeddings.embed_texts([query], is_query=True)[0]
-                vector_eligible_refs = set(records)
-                if embeddings.index_scope() == "kb":
-                    vector_eligible_refs = {
-                        unit_ref
-                        for unit_ref, (page, _unit, _source_order) in records.items()
-                        if page.rel_path.startswith(kb_prefix())
-                    }
-                vector_hits = (
-                    index.search_semantic_units(
-                        query_vector,
-                        k=len(vector_eligible_refs),
-                        allowed_unit_refs=vector_eligible_refs,
-                    )
-                    if vector_eligible_refs
-                    else []
-                )
-                vector_scores = {
-                    hit.unit_ref: hit.cosine for hit in vector_hits if hit.unit_ref in records
-                }
-                vector_profile = {
-                    "status": (
-                        "participated" if vector_scores else "available_nonmatching"
-                    ),
-                    "backend": type(index).__name__,
-                    "model": embeddings.MODEL_NAME,
-                    "metric": {
-                        "name": "cosine_similarity",
-                        "direction": "higher",
-                        "range": [-1.0, 1.0],
-                        "rounding": 6,
-                    },
-                }
-                index_path = getattr(index, "path", None)
-                if (
-                    index_path is not None
-                    and index_path.exists()
-                    and set(vector_scores) != vector_eligible_refs
-                ):
-                    log.warning(
-                        "semantic-unit vector coverage is stale/incomplete "
-                        "(%d/%d current rows); using lexical ranking",
-                        len(vector_scores),
-                        len(vector_eligible_refs),
-                    )
-                    _record_degradation("vector")
-                    if failed_out is not None:
-                        failed_out.append("vector")
-                    vector_scores = {}
-                    vector_profile = {
-                        "status": "failed",
-                        "reason": "stale_or_incomplete_index",
-                        "model": embeddings.MODEL_NAME,
-                    }
-            except ImportError as error:
-                vector_profile = {
-                    "status": "unavailable",
-                    "reason": "dependency_unavailable",
-                    "model": "BAAI/bge-base-en-v1.5",
-                }
-                log.info(
-                    "semantic-unit vector search unavailable (%s); using lexical ranking",
-                    error,
-                )
-            except Exception as error:  # noqa: BLE001 - vector lane soft-falls back
-                vector_profile = {
-                    "status": "failed",
-                    "reason": "search_failed",
-                    "model": "BAAI/bge-base-en-v1.5",
-                }
-                log.warning(
-                    "semantic-unit vector search failed: %s; using lexical ranking",
-                    error,
-                )
-                _record_degradation("vector")
-                if failed_out is not None:
-                    failed_out.append("vector")
+    vector_scores = {hit.unit_ref: hit.cosine for hit in vector_hits if hit.unit_ref in records}
 
     vector_ranking = _raw_ranking(vector_scores)
     vector_rank = {unit_ref: rank for rank, unit_ref in enumerate(vector_ranking, 1)}
@@ -1338,6 +1710,10 @@ def _find_semantic_units(
 
     if limit is not None:
         final_ranking = final_ranking[:limit]
+    if candidate_window_exhausted and (limit is None or len(final_ranking) < limit):
+        if failed_out is not None:
+            failed_out.append("semantic_units_candidate_window")
+        _record_degradation("semantic_units_candidate_window")
     vector_succeeded = bool(vector_ranking)
     if retrieval_trace is not None:
         intent_weights = config.intent_weights(find_policy.classify_intent(query))
@@ -1456,7 +1832,7 @@ def _annotate_matched_units(
             hit.matched_units = []
             continue
         try:
-            state = semantic_index.current_parent_index_state(vault_root, page.path)
+            state = semantic_index.current_parent_index_state(vault_root, page.rel_path)
         except (OSError, UnicodeError, ValueError) as error:
             log.warning("matched-unit parse failed for %s: %s", hit.path, error)
             hit.matched_units = []
@@ -1529,11 +1905,7 @@ def _eligible_filter_paths(
         # scene-frame child whose match is emitted as its parent video.
         if not _indexable(page):
             continue
-        emitted = (
-            pages.get(page.parent_media + ".md", page)
-            if page.parent_media
-            else page
-        )
+        emitted = pages.get(page.parent_media + ".md", page) if page.parent_media else page
         if not _indexable(emitted):
             continue
         matches = eligibility_by_emitted_path.get(emitted.rel_path)
@@ -1543,12 +1915,207 @@ def _eligible_filter_paths(
                 try:
                     from . import semantic_index
 
+                    state = semantic_index.current_parent_index_state(vault_root, emitted.path)
+                    units = tuple(
+                        structured_filters.unit_view(unit) for unit in state.document.units
+                    )
+                except (OSError, UnicodeError, ValueError) as error:
+                    log.warning(
+                        "semantic-unit filter parse failed for %s: %s",
+                        emitted.rel_path,
+                        error,
+                    )
+            matches = structured_filters.page_matches(
+                plan,
+                page=structured_filters.page_view(emitted),
+                units=units,
+            )
+            eligibility_by_emitted_path[emitted.rel_path] = matches
+        if matches:
+            # Candidate lanes address the child before frame collapsing, while
+            # final hits address the emitted parent. Both identities therefore
+            # belong to the exact same eligibility set.
+            eligible.add(page.rel_path)
+            eligible.add(emitted.rel_path)
+    return eligible
+
+
+_RETRIEVAL_WARMING_RETRY_MS = 250
+
+
+class RetrievalIndexWarming(cli_ops.OpError):
+    """Typed, non-cacheable outcome for a safe exact recall plan the maintained
+    semantic index cannot yet answer completely.
+
+    Carries the warming fields both as direct attributes (``complete``,
+    ``status``, ``retry_after_ms``) and inside ``OpError.details`` so the shared
+    envelope projects them unchanged.
+    """
+
+    def __init__(
+        self,
+        *,
+        status: str = "warming",
+        retry_after_ms: int = _RETRIEVAL_WARMING_RETRY_MS,
+        message: str = (
+            "the maintained semantic recall index is still warming; "
+            "retry the exact recall shortly"
+        ),
+    ) -> None:
+        self.complete = False
+        self.status = status
+        self.retry_after_ms = retry_after_ms
+        super().__init__(
+            "RETRIEVAL_INDEX_WARMING",
+            message,
+            details={
+                "complete": False,
+                "status": status,
+                "retry_after_ms": retry_after_ms,
+            },
+        )
+
+
+def _raise_catalog_outcome(readiness: object) -> None:
+    outcome = str(getattr(readiness, "status", "stale"))
+    public_status = (
+        "temporarily_unavailable"
+        if outcome in {"transient_failure", "unsupported"}
+        else "warming"
+    )
+    raise RetrievalIndexWarming(status=public_status)
+
+
+def _resolve_eligible_filter_paths(
+    vault_root: Path,
+    *,
+    scope: str,
+    plan: structured_filters.FilterPlan,
+    snapshot: FreshnessSnapshot,
+    timings: FindTimings | None = None,
+) -> set[str]:
+    """Resolve eligible parents, preferring the maintained semantic index.
+
+    A ``complete`` category/kind plan (per ``plan_index_candidates``) seeds its
+    candidate parents from the sidecar's semantic-unit metadata and evaluates
+    only those, never walking the Markdown scope. A ``complete`` plan whose
+    positive seeds intersect to nothing is finitely empty. A ``complete`` plan
+    with no live index to seed from raises the typed ``RetrievalIndexWarming``
+    outcome (the lower lexical path already scheduled the single-flight repair)
+    rather than regressing to the scan oracle. Only an unsupported plan keeps
+    the canonical full-scan oracle.
+    """
+    algebra = structured_filters.plan_index_candidates(plan)
+    if algebra.status != "complete":
+        return _eligible_filter_paths(vault_root, scope=scope, plan=plan)
+    if algebra.definitely_empty:
+        _set_catalog_timing_profile(timings, cache_hit=True)
+        return set()
+    candidate_parents = _indexed_candidate_parent_paths(
+        vault_root,
+        scope=scope,
+        algebra=algebra,
+        freshness=snapshot.for_scope(scope),
+        timings=timings,
+    )
+    if candidate_parents is None:
+        # A ``complete`` plan must never silently regress to the scan oracle:
+        # the sidecar could not answer the safe seed and the lower lexical path
+        # has already scheduled the single-flight repair, so the honest outcome
+        # is a typed, non-cacheable warming signal — not a false empty or a
+        # divergent full-scan ranking.
+        raise RetrievalIndexWarming()
+    return _indexed_eligible_filter_paths(
+        vault_root,
+        plan=plan,
+        candidate_parent_paths=candidate_parents,
+    )
+
+
+def _indexed_candidate_parent_paths(
+    vault_root: Path,
+    *,
+    scope: str,
+    algebra: structured_filters.IndexCandidateAlgebra,
+    freshness: tuple[int, int, str] | None,
+    timings: FindTimings | None = None,
+) -> set[str] | None:
+    """Distinct candidate parent paths from the maintained semantic metadata.
+
+    The positive category/kind seeds push down into the sidecar so only parents
+    that carry a matching unit are returned; this seeds candidates only, so the
+    caller still runs canonical access policy and full filter evaluation. None
+    signals no usable index (the caller falls back to the walk oracle).
+    """
+    from . import lexstore
+
+    result = lexstore.search_semantic_parent_paths_result(
+        vault_root,
+        algebra.clauses,
+        scope=scope,
+        freshness=freshness,
+    )
+    _set_catalog_timing_profile(timings, result.readiness)
+    if not result.readiness.complete:
+        # Preserve None as "incomplete" so the caller raises the typed warming
+        # boundary rather than regressing to the scan oracle or a false empty.
+        _raise_catalog_outcome(result.readiness)
+    return set(result.value or [])
+
+
+def _indexed_eligible_filter_paths(
+    vault_root: Path,
+    *,
+    plan: structured_filters.FilterPlan,
+    candidate_parent_paths: set[str],
+) -> set[str]:
+    """Evaluate eligibility for indexed candidate parents only — no scope walk.
+
+    Mirrors ``_eligible_filter_paths``' per-parent rules (navigation exclusion,
+    access policy on both the candidate and its emitted parent, same-unit
+    ``page_matches`` evaluation, emitted-parent collapsing) but sources its
+    parents from the maintained index instead of a Markdown walk.
+    """
+    from . import semantic_index
+
+    def _indexable(page: ParsedPage) -> bool:
+        return _passes_filters(
+            page,
+            vault_root=vault_root,
+            types=None,
+            projects=None,
+            tags=None,
+            speakers=None,
+            file_types=None,
+            exclude_file_types=None,
+        )
+
+    eligibility_by_emitted_path: dict[str, bool] = {}
+    eligible: set[str] = set()
+    for rel_path in candidate_parent_paths:
+        if rel_path.rsplit("/", 1)[-1].lower() in _NAVIGATION_BASENAMES:
+            continue
+        page = _CACHE.get(vault_root / rel_path, vault_root)
+        # Access policy always runs before caller filters, including for a
+        # scene-frame child whose match is emitted as its parent video.
+        if page is None or not _indexable(page):
+            continue
+        if page.parent_media:
+            emitted = _CACHE.get(vault_root / (page.parent_media + ".md"), vault_root) or page
+        else:
+            emitted = page
+        if not _indexable(emitted):
+            continue
+        matches = eligibility_by_emitted_path.get(emitted.rel_path)
+        if matches is None:
+            units: tuple[dict[str, Any], ...] = ()
+            if plan.has_unit_predicate:
+                try:
                     state = semantic_index.current_parent_index_state(
-                        vault_root, emitted.path
+                        vault_root, emitted.rel_path
                     )
                     units = tuple(
-                        structured_filters.unit_view(unit)
-                        for unit in state.document.units
+                        structured_filters.unit_view(unit) for unit in state.document.units
                     )
                 except (OSError, UnicodeError, ValueError) as error:
                     log.warning(
@@ -1584,9 +2151,32 @@ def _find_keyword(
     limit: int,
     scope: str,
     eligible_paths: set[str] | None = None,
+    freshness_key: tuple[int, int, str] | None = None,
+    failed_out: list[str] | None = None,
 ) -> list[Hit]:
-    """Original keyword-mode find. Preserved for backward compat."""
-    if scope == "kb":
+    """Keyword-mode recall, hydrating only maintained-index matches."""
+    if query_norm:
+        candidate_paths = _keyword_match_paths(
+            vault_root,
+            query_norm,
+            scope,
+            freshness=freshness_key,
+            failed_out=failed_out,
+            repair=_bounded_lexical_repair_allowed(freshness_key),
+        )
+        if eligible_paths is not None:
+            # A finite eligible set (a complete category/kind plan resolved
+            # through the maintained index) prunes the keyword candidates before
+            # any path construction or parse, so the scan never hydrates a page
+            # the structured filter already excludes.
+            candidate_paths = [rel for rel in candidate_paths if rel in eligible_paths]
+        walk: Iterable[Path] = (vault_root / rel_path for rel_path in candidate_paths)
+    elif eligible_paths is not None:
+        # An empty query with a finite eligible set (a complete category/kind
+        # plan resolved through the maintained index) iterates those parents
+        # directly rather than walking the scope to rediscover them.
+        walk = (vault_root / rel_path for rel_path in eligible_paths)
+    elif scope == "kb":
         kb = vault_root / kb_dirname()
         if not kb.is_dir():
             log.error("KB directory missing: %s", kb)
@@ -1594,6 +2184,7 @@ def _find_keyword(
         walk = _walk_md(kb)
     else:
         from .vault import walk_vault_md
+
         walk = walk_vault_md(vault_root)
 
     hits: list[tuple[str, Hit]] = []
@@ -1627,8 +2218,16 @@ def _find_keyword(
                 page = parent_page
         if page.rel_path in by_path:
             continue
-        if not _passes_filters(page, vault_root=vault_root, types=types, projects=projects, tags=tags, speakers=speakers,
-                               file_types=file_types, exclude_file_types=exclude_file_types):
+        if not _passes_filters(
+            page,
+            vault_root=vault_root,
+            types=types,
+            projects=projects,
+            tags=tags,
+            speakers=speakers,
+            file_types=file_types,
+            exclude_file_types=exclude_file_types,
+        ):
             continue
         hit = Hit(
             path=page.rel_path,
@@ -1645,8 +2244,14 @@ def _find_keyword(
             scene_frame_ts=scene_frame_ts,
         )
         hit.transcript_ts = _transcript_ts_for_hit(page, None, query_norm)
-        if hit.scene_frame is None and page.media_type == "video" and page.media_file and hit.transcript_ts is not None:
+        if (
+            hit.scene_frame is None
+            and page.media_type == "video"
+            and page.media_file
+            and hit.transcript_ts is not None
+        ):
             from . import scene_frames  # lazy: keyword mode stays import-light
+
             nf = scene_frames.nearest_frame(vault_root, page.media_file, hit.transcript_ts)
             if nf is not None:
                 hit.scene_frame, hit.scene_frame_ts = nf
@@ -1746,9 +2351,17 @@ def _find_semantic(
         fallback_hits = _find_keyword(
             vault_root,
             query_norm=query_norm,
-            types=types, projects=projects, tags=tags, speakers=speakers,
-            file_types=file_types, exclude_file_types=exclude_file_types,
-            limit=limit, scope=scope, eligible_paths=eligible_paths,
+            types=types,
+            projects=projects,
+            tags=tags,
+            speakers=speakers,
+            file_types=file_types,
+            exclude_file_types=exclude_file_types,
+            limit=limit,
+            scope=scope,
+            eligible_paths=eligible_paths,
+            freshness_key=snapshot.for_scope(scope),
+            failed_out=failed_out,
         )
         if retrieval_trace is not None:
             retrieval_trace.record_keyword_fallback(
@@ -1824,8 +2437,16 @@ def _find_semantic(
             continue
         if eligible_paths is not None and rel_path not in eligible_paths:
             continue
-        if not _passes_filters(page, vault_root=vault_root, types=types, projects=projects, tags=tags, speakers=speakers,
-                               file_types=file_types, exclude_file_types=exclude_file_types):
+        if not _passes_filters(
+            page,
+            vault_root=vault_root,
+            types=types,
+            projects=projects,
+            tags=tags,
+            speakers=speakers,
+            file_types=file_types,
+            exclude_file_types=exclude_file_types,
+        ):
             continue
         keyword_excerpt = _make_excerpt(page, query_norm)
         if (
@@ -1843,9 +2464,7 @@ def _find_semantic(
                 continue
             keyword_excerpt = _stem_anchored_excerpt(page, query_norm)
         elif (
-            rel_path in graph_set
-            or rel_path in clip_set
-            or rel_path in frame_attribution
+            rel_path in graph_set or rel_path in clip_set or rel_path in frame_attribution
         ) and keyword_excerpt is None:
             # Graph-hop neighbour, CLIP visual match, or frame-collapsed parent:
             # no all-tokens-present requirement (the reason for surfacing is
@@ -1871,11 +2490,10 @@ def _find_semantic(
         hit_usage_mult: float | None = None
         if usage_map:
             from . import usage as usage_module
+
             hit_activation = usage_map.get(usage_module.canon(rel_path))
             if hit_activation is not None:
-                hit_usage_mult = usage_module.usage_multiplier(
-                    hit_activation, config
-                )
+                hit_usage_mult = usage_module.usage_multiplier(hit_activation, config)
         attr = frame_attribution.get(rel_path)
         hit = Hit(
             path=page.rel_path,
@@ -1971,6 +2589,7 @@ def _find_semantic(
         scorer_input_count = len(rerank_prefix)
         try:
             from . import embeddings as emb
+
             # Best passage for each hit: the matched chunk when we have one,
             # else the leading body slice.
             passages: list[str] = []
@@ -1984,9 +2603,7 @@ def _find_semantic(
                     passages.append(body[:1500])  # CrossEncoder caps at 512 tokens
             scores = emb.rerank_pairs(query, passages)
             if len(scores) != len(rerank_prefix):
-                raise ValueError(
-                    "reranker returned a score count that does not match its inputs"
-                )
+                raise ValueError("reranker returned a score count that does not match its inputs")
             score_updates: list[
                 tuple[
                     Hit,
@@ -1996,9 +2613,7 @@ def _find_semantic(
                     list[dict[str, float | str]] | None,
                 ]
             ] = []
-            for input_rank, (h, s) in enumerate(
-                zip(rerank_prefix, scores, strict=True), start=1
-            ):
+            for input_rank, (h, s) in enumerate(zip(rerank_prefix, scores, strict=True), start=1):
                 raw_score = float(s)
                 adjusted = raw_score
                 chain: list[dict[str, float | str]] | None = (
@@ -2043,9 +2658,7 @@ def _find_semantic(
                                 "after": adjusted,
                             }
                         )
-                score_updates.append(
-                    (h, input_rank, raw_score, adjusted, chain)
-                )
+                score_updates.append((h, input_rank, raw_score, adjusted, chain))
             # Commit annotations only after every returned score and multiplier
             # has been validated. A late conversion/application failure must
             # leave the fused fallback free of partial reranker evidence.
@@ -2117,6 +2730,7 @@ def _find_outside_kb(
     snapshot: FreshnessSnapshot | None = None,
     filter_plan: structured_filters.FilterPlan | None = None,
     exclude_paths: set[str] | None = None,
+    failed_out: list[str] | None = None,
     retrieval_trace: Any | None = None,
 ) -> list[Hit]:
     """BM25/keyword recall over the vault, RESTRICTED to paths outside
@@ -2133,20 +2747,21 @@ def _find_outside_kb(
     """
     if not query_norm or limit < 1:
         return []
-    from . import bm25
+    from . import bm25, lexstore
 
     eligible_paths = (
-        _eligible_filter_paths(vault_root, scope="vault", plan=filter_plan)
+        _resolve_eligible_filter_paths(
+            vault_root,
+            scope="vault",
+            plan=filter_plan,
+            snapshot=snapshot or FreshnessSnapshot(vault_root),
+        )
         if filter_plan is not None
         else None
     )
 
     allowed_outside = (
-        {
-            path
-            for path in eligible_paths or ()
-            if not path.startswith(kb_prefix())
-        }
+        {path for path in eligible_paths or () if not path.startswith(kb_prefix())}
         if eligible_paths is not None
         else None
     )
@@ -2154,44 +2769,45 @@ def _find_outside_kb(
     # vault corpus. A structured filter instead ranks the exact outside-KB
     # eligible set, so no eligible page can be buried below that over-fetch cap.
     bm25_k = (
-        max(limit, len(allowed_outside))
-        if allowed_outside is not None
-        else max(limit * 5, 100)
+        max(limit, len(allowed_outside)) if allowed_outside is not None else max(limit * 5, 100)
     )
     candidates: list[str] = []
     score_by_path: dict[str, float] = {}
-    lexical_backend = "keyword_fallback"
+    lexical_backend = lexstore.cache_token(vault_root)
     try:
-        bm25_hits = (
-            bm25.search(
-                vault_root,
-                query,
-                k=bm25_k,
-                scope="vault",
-                freshness=snapshot.vault() if snapshot is not None else None,
-            )
-            if allowed_outside is None
-            else bm25.search(
-                vault_root,
-                query,
-                k=bm25_k,
-                scope="vault",
-                freshness=snapshot.vault() if snapshot is not None else None,
-                allowed_paths=allowed_outside,
-            )
+        search_kwargs = {
+            "scope": "vault",
+            "freshness": snapshot.vault() if snapshot is not None else None,
+            "allowed_paths": allowed_outside,
+        }
+        search_kwargs["repair"] = _bounded_lexical_repair_allowed(search_kwargs["freshness"])
+        bm25_hits = lexstore.search_bm25(
+            vault_root,
+            query,
+            bm25_k,
+            **search_kwargs,
         )
+        if bm25_hits is None:
+            if lexstore.backend() == "python":
+                # An explicit operator rollback is allowed to use the old
+                # in-process corpus. Automatic sidecar failure is not.
+                bm25_hits = bm25.search(vault_root, query, k=bm25_k, **search_kwargs)
+                lexical_backend = "keyword_fallback"
+            else:
+                if failed_out is not None:
+                    failed_out.append("outside_kb_lexical")
+                _record_degradation("outside_kb_lexical")
+                return []
         for path, _score in bm25_hits:
             if not path.startswith(kb_prefix()):
                 candidates.append(path)
                 score_by_path[path] = float(_score)
-        from . import lexstore
-
-        lexical_backend = lexstore.cache_token(vault_root)
-    except ImportError:
-        candidates = _outside_kb_keyword_paths(vault_root, query_norm)
     except Exception as e:  # noqa: BLE001 — widening must never break find
-        log.warning("auto-widen BM25 failed: %s; falling back to keyword", e)
-        candidates = _outside_kb_keyword_paths(vault_root, query_norm)
+        log.warning("auto-widen lexical sidecar failed: %s", e)
+        if failed_out is not None:
+            failed_out.append("outside_kb_lexical")
+        _record_degradation("outside_kb_lexical")
+        return []
 
     hits: list[Hit] = []
     seen: set[str] = set()
@@ -2206,27 +2822,37 @@ def _find_outside_kb(
             continue
         if eligible_paths is not None and rel_path not in eligible_paths:
             continue
-        if not _passes_filters(page, vault_root=vault_root, types=types, projects=projects, tags=tags, speakers=speakers,
-                               file_types=file_types, exclude_file_types=exclude_file_types):
+        if not _passes_filters(
+            page,
+            vault_root=vault_root,
+            types=types,
+            projects=projects,
+            tags=tags,
+            speakers=speakers,
+            file_types=file_types,
+            exclude_file_types=exclude_file_types,
+        ):
             continue
         # Relaxed gate: BM25 score>0 already implies a token match, but the
         # keyword fallback path needs this explicit check.
         if not _any_stem_present(page, query_norm):
             continue
         excerpt = _stem_anchored_excerpt(page, query_norm)
-        hits.append(Hit(
-            path=page.rel_path,
-            type=page.page_type,
-            scope=page.scope,
-            title=page.title,
-            updated=page.updated,
-            excerpt=excerpt or "",
-            media_type=page.media_type,
-            media_file=page.media_file,
-            status=page.status,
-            superseded_by=page.superseded_by,
-            outside_kb=True,
-        ))
+        hits.append(
+            Hit(
+                path=page.rel_path,
+                type=page.page_type,
+                scope=page.scope,
+                title=page.title,
+                updated=page.updated,
+                excerpt=excerpt or "",
+                media_type=page.media_type,
+                media_file=page.media_file,
+                status=page.status,
+                superseded_by=page.superseded_by,
+                outside_kb=True,
+            )
+        )
         if len(hits) >= limit:
             break
     if retrieval_trace is not None:
@@ -2249,6 +2875,7 @@ def _any_stem_present(page: ParsedPage, query_norm: str) -> bool:
     if not query_norm:
         return False
     from . import bm25 as bm25_module
+
     return any(qs in page.stem_set for qs in bm25_module.tokenize(query_norm))
 
 
@@ -2256,6 +2883,7 @@ def _outside_kb_keyword_paths(vault_root: Path, query_norm: str) -> list[str]:
     """BM25-unavailable fallback: walk vault .md outside Knowledge Base/, keep
     files where >=1 query stem is present, ordered most-recent first."""
     from .vault import walk_vault_md
+
     vault_resolved = vault_root.resolve()
     matches: list[tuple[str, str]] = []
     for path in walk_vault_md(vault_root):
@@ -2342,21 +2970,20 @@ def _apply_temporal_boost(
     query: str,
     config: RankingConfig = DEFAULT_RANKING,
 ) -> list[tuple[str, float]]:
-    return find_policy.apply_temporal_boost(
-        fused, query, _page_of(vault_root), config
-    )
+    return find_policy.apply_temporal_boost(fused, query, _page_of(vault_root), config)
 
 
-def _recency_ranking(
-    candidate_paths: list[str], vault_root: Path, cap: int
-) -> list[str]:
-    return find_policy.recency_ranking(
-        candidate_paths, _page_of(vault_root), cap
-    )
+def _recency_ranking(candidate_paths: list[str], vault_root: Path, cap: int) -> list[str]:
+    return find_policy.recency_ranking(candidate_paths, _page_of(vault_root), cap)
 
 
 def _keyword_match_paths(
-    vault_root: Path, query_norm: str, scope: str, freshness: tuple | None = None
+    vault_root: Path,
+    query_norm: str,
+    scope: str,
+    freshness: tuple | None = None,
+    failed_out: list[str] | None = None,
+    repair: bool = True,
 ) -> list[str]:
     """Return paths that satisfy keyword mode's all-tokens-present gate.
 
@@ -2376,10 +3003,19 @@ def _keyword_match_paths(
     from . import lexstore
 
     indexed = lexstore.search_substring(
-        vault_root, query_norm, scope=scope, freshness=freshness
+        vault_root,
+        query_norm,
+        scope=scope,
+        freshness=freshness,
+        repair=repair,
     )
     if indexed is not None:
         return indexed
+    if lexstore.backend() != "python":
+        if failed_out is not None:
+            failed_out.append("keyword_lexical")
+        _record_degradation("keyword_lexical")
+        return []
     if scope == "kb":
         kb = vault_root / kb_dirname()
         if not kb.is_dir():
@@ -2387,6 +3023,7 @@ def _keyword_match_paths(
         walk = _walk_md(kb)
     else:
         from .vault import walk_vault_md
+
         walk = walk_vault_md(vault_root)
     matches: list[tuple[str, str]] = []  # (updated, rel_path)
     for path in walk:
@@ -2402,9 +3039,7 @@ def _keyword_match_paths(
     return [p for _, p in matches]
 
 
-def _outbound_wikilink_paths(
-    page: ParsedPage, vault_root: Path, resolver=None
-) -> list[str]:
+def _outbound_wikilink_paths(page: ParsedPage, vault_root: Path, resolver=None) -> list[str]:
     """Vault-relative POSIX paths (no .md) that this page's body links to.
 
     Skips matches inside fenced code blocks and inline code (delegates to
@@ -2419,6 +3054,7 @@ def _outbound_wikilink_paths(
         find_body_wikilinks,
         normalize_wikilink,
     )
+
     if resolver is None:
         resolver = _get_query_resolver(vault_root)
     out: list[str] = []
@@ -2473,6 +3109,7 @@ def _get_query_resolver(vault_root: Path, freshness: tuple | None = None):
     vault (every edit moved the freshness digest and invalidated this cache).
     """
     from .vault import WikilinkResolver
+
     if freshness is None:
         freshness = FreshnessSnapshot(vault_root).vault()
     cached = _RESOLVER_CACHE.get(vault_root)
@@ -2508,6 +3145,36 @@ def shared_resolver(vault_root: Path):
     return _get_query_resolver(vault_root)
 
 
+def prime_resolver_from_entries(
+    vault_root: Path,
+    entries,
+    *,
+    freshness_key: tuple[int, int, str] | None = None,
+    expected_freshness: tuple[int, int, str] | None = None,
+):
+    """Install a current shared resolver from already-parsed corpus entries.
+
+    Semantic preflight already owns exact path/title state. Reusing it avoids a
+    full vault read/YAML parse when post-commit graph fanout is the first caller
+    to need the resolver.
+    """
+    from .vault import WikilinkResolver
+
+    root = Path(vault_root)
+    current_freshness = (
+        freshness_key if freshness_key is not None else FreshnessSnapshot(root).vault()
+    )
+    if expected_freshness is not None and current_freshness != expected_freshness:
+        return None
+    with _RESOLVER_LOCK:
+        cached = _RESOLVER_CACHE.get(root)
+        if cached and cached[0] == current_freshness:
+            return cached[1]
+        resolver = WikilinkResolver.from_entries(root, entries)
+        _RESOLVER_CACHE[root] = (current_freshness, resolver)
+        return resolver
+
+
 def writer_resolver_snapshot(
     vault_root: Path,
     *,
@@ -2524,9 +3191,7 @@ def writer_resolver_snapshot(
 
     root = Path(vault_root)
     current_freshness = (
-        freshness_key
-        if freshness_key is not None
-        else FreshnessSnapshot(root).vault()
+        freshness_key if freshness_key is not None else FreshnessSnapshot(root).vault()
     )
     with _RESOLVER_LOCK:
         cached = _RESOLVER_CACHE.get(root)
@@ -2577,7 +3242,6 @@ def on_resolver_files_changed(
         _RESOLVER_CACHE[vault_root] = (FreshnessSnapshot(vault_root).vault(), resolver)
 
 
-
 def unload_ram_caches() -> dict[str, int]:
     """Evict rebuildable find RAM caches without clearing freshness/inbound metadata."""
     page_entries = len(_CACHE.entries)
@@ -2589,6 +3253,16 @@ def unload_ram_caches() -> dict[str, int]:
         hot_entries = len(_FIND_CACHE)
         _FIND_CACHE.clear()
     return {"pages": page_entries, "resolvers": resolver_entries, "hot_find": hot_entries}
+
+
+def reset_page_and_result_caches() -> dict[str, int]:
+    """Narrow latency-harness reset: keep resolver/freshness/catalog state warm."""
+    page_entries = len(_CACHE.entries)
+    _CACHE.clear()
+    with _FIND_CACHE_LOCK:
+        hot_entries = len(_FIND_CACHE)
+        _FIND_CACHE.clear()
+    return {"pages": page_entries, "hot_find": hot_entries}
 
 
 def cache_status() -> dict:
@@ -2616,4 +3290,5 @@ def clear_cache() -> None:
     unload_ram_caches()
     freshness.clear()
     from . import vault as vault_module
+
     vault_module.clear_inbound_index()
