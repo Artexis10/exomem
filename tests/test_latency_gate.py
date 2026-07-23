@@ -203,6 +203,12 @@ def test_no_lane_exceeds_ceiling_at_scale(dense_vault_2k: Path) -> None:
     )
 
 
+# This case builds the 2000-note fixture AND a full graph sidecar rebuild on top
+# (the fixture leaves the graph lane in wikilink-fallback), so it lands near the
+# repo's global 60s timeout; give it explicit headroom so CI is deterministic. The
+# assertion it guards (relation-filtered find() < CEIL_RELATION_FILTER_MS) is what
+# matters, not the one-time fixture+rebuild setup cost.
+@pytest.mark.timeout(300)
 def test_relation_filtered_recall_stays_bounded(dense_vault_2k: Path) -> None:
     """A relation filter resolves participants from the indexed sidecar, not an
     O(corpus) walk — end-to-end find() with `relations=[...]` stays under the

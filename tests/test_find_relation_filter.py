@@ -86,10 +86,23 @@ def test_mixed_result_level_applies_relation_filter_to_units(tmp_path: Path) -> 
         vault, query="", relations=["supports"], result_level="mixed", limit=15
     )
     parents = set()
+    unit_hits = []
     for h in hits:
-        parents.add(getattr(h, "parent_path", None) or getattr(h, "path", None))
-    # Only A and B participate in a supports edge; C must not appear via any unit.
+        pp = getattr(h, "parent_path", None)
+        if pp is not None:  # a SemanticUnitHit
+            unit_hits.append(h)
+            parents.add(pp)
+        else:
+            parents.add(getattr(h, "path", None))
+    # Non-participant excluded...
     assert C not in parents
+    # ...and the inclusion half: a participating parent's unit survives and is
+    # annotated (matched via its parent page).
+    if unit_hits:
+        assert all(u.parent_path in {A, B} for u in unit_hits)
+        annotated = [u for u in unit_hits if u.relation_match is not None]
+        assert annotated, "surviving mixed units must carry the relation_match annotation"
+        assert all(u.relation_match["matched"] == "parent" for u in annotated)
 
 
 def test_filter_still_applies_with_graph_disabled_lane(tmp_path: Path) -> None:
