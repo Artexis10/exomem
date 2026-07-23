@@ -12,6 +12,7 @@ from exomem import (
     context_pack,
     embedding_index,
     embeddings,
+    freshness,
     lexstore,
     semantic_index,
 )
@@ -76,6 +77,13 @@ def _vector(first: float, second: float = 0.0) -> np.ndarray:
     return value
 
 
+def _prepare_semantic_catalog(root: Path, paths: list[Path]) -> None:
+    entries = [(str(path), freshness.stat_signature(path)) for path in paths]
+    freshness.seed(root, "kb", entries)
+    freshness.seed(root, "vault", entries)
+    lexstore.ensure_fresh(root)
+
+
 def test_default_auto_page_recall_is_byte_compatible_with_explicit_page(
     tmp_path: Path,
 ) -> None:
@@ -116,7 +124,7 @@ def test_auto_unit_recall_intersects_text_category_kind_and_page_filter_axes(
         ("config-claim", "claim", "config", "SQLite is mentioned in a claim"),
         ("config-postgres", "decision", "config", "Use PostgreSQL instead"),
     )
-    for name, kind, category, content in fixtures:
+    pages = [
         _write_page(
             tmp_path,
             name,
@@ -127,6 +135,9 @@ def test_auto_unit_recall_intersects_text_category_kind_and_page_filter_axes(
                 content=content,
             ),
         )
+        for name, kind, category, content in fixtures
+    ]
+    _prepare_semantic_catalog(tmp_path, pages)
 
     hits = find_module.find(
         tmp_path,
@@ -212,11 +223,12 @@ def test_rich_tags_and_context_survive_filters_hits_reads_lexical_and_packs(
 
 
 def test_empty_query_category_lookup_returns_independent_units(tmp_path: Path) -> None:
-    _write_page(
+    page = _write_page(
         tmp_path,
         "filter-only",
         body="- [config] filter-only semantic unit ^filter-only",
     )
+    _prepare_semantic_catalog(tmp_path, [page])
 
     hits = find_module.find(
         tmp_path,
@@ -325,12 +337,14 @@ def test_unit_vector_category_filter_is_pushed_down_before_candidate_window(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     index = embeddings.get_embedding_index(tmp_path)
+    pages: list[Path] = []
     for rank in range(20):
         page = _write_page(
             tmp_path,
             f"architecture-{rank:02d}",
             body=f"- [architecture] higher vector candidate {rank} ^architecture-{rank}",
         )
+        pages.append(page)
         state = semantic_index.build_parent_index_state(tmp_path, page)
         index.upsert_semantic_units(
             state,
@@ -342,8 +356,10 @@ def test_unit_vector_category_filter_is_pushed_down_before_candidate_window(
         "reliability-target",
         body="- [reliability] exact category target ^reliability-target",
     )
+    pages.append(target)
     target_state = semantic_index.build_parent_index_state(tmp_path, target)
     index.upsert_semantic_units(target_state, np.stack([_vector(0.1, 1.0)]), 1.0)
+    _prepare_semantic_catalog(tmp_path, pages)
     monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
     monkeypatch.setattr(
         embeddings,
@@ -606,18 +622,19 @@ def test_embeddings_disabled_unit_recall_never_loads_vector_backend(
 def test_mixed_recall_caps_units_per_parent_and_reports_truncation(
     tmp_path: Path,
 ) -> None:
-    _write_page(
+    many_units = _write_page(
         tmp_path,
         "many-units",
         body="\n".join(
             f"- [config] shared mixed needle {index} ^many-{index}" for index in range(7)
         ),
     )
-    _write_page(
+    one_unit = _write_page(
         tmp_path,
         "one-unit",
         body="- [config] shared mixed needle other ^one-unit",
     )
+    _prepare_semantic_catalog(tmp_path, [many_units, one_unit])
 
     hits = find_module.find(
         tmp_path,

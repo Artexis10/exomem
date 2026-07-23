@@ -15,7 +15,14 @@ from pathlib import Path
 import pytest
 import yaml
 
-from exomem import commands, media_jobs, semantic_index, writer_lease
+from exomem import (
+    commands,
+    freshness,
+    lexstore,
+    media_jobs,
+    semantic_index,
+    writer_lease,
+)
 from exomem.__main__ import main
 
 _INSIGHT = "Knowledge Base/Notes/Insights/progressive-disclosure-without-mode-fragmentation.md"
@@ -90,6 +97,12 @@ def test_ask_memory_semantic_unit_filters(vault: Path, capsys) -> None:
         "CLI semantic needle.\n",
         encoding="utf-8",
     )
+    entries = [
+        (str(path), freshness.stat_signature(path)) for path in vault.rglob("*.md")
+    ]
+    freshness.seed(vault, "kb", entries)
+    freshness.seed(vault, "vault", entries)
+    lexstore.ensure_fresh(vault)
 
     code, out, err = _run(
         [

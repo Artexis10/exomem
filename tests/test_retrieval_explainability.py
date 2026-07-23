@@ -14,6 +14,8 @@ from exomem import (
     embeddings,
     epistemic_graph,
     find_candidates,
+    freshness,
+    lexstore,
     readiness,
     semantic_index,
 )
@@ -71,6 +73,13 @@ def _write_unit_page(root: Path) -> str:
         encoding="utf-8",
     )
     return rel
+
+
+def _prepare_semantic_catalog(root: Path, paths: list[Path]) -> None:
+    entries = [(str(path), freshness.stat_signature(path)) for path in paths]
+    freshness.seed(root, "kb", entries)
+    freshness.seed(root, "vault", entries)
+    lexstore.ensure_fresh(root)
 
 
 def test_explain_is_opt_in_and_filter_only_profile_is_truthful(tmp_path: Path) -> None:
@@ -588,6 +597,7 @@ def test_unit_vector_success_marks_lexical_non_applicable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     rel = _write_unit_page(tmp_path)
+    _prepare_semantic_catalog(tmp_path, [tmp_path / rel])
     state = semantic_index.current_parent_index_state(tmp_path, rel)
 
     class FakeUnitIndex:
@@ -600,7 +610,6 @@ def test_unit_vector_success_marks_lexical_non_applicable(
             validate: bool,
         ):
             assert validate is False
-            unit_ref = sorted(allowed_unit_refs)[0]
             return [
                 SemanticUnitVectorHit(
                     unit_ref,
@@ -608,8 +617,9 @@ def test_unit_vector_success_marks_lexical_non_applicable(
                     state.parent_generation,
                     state.parent_source_hash,
                     state.parser_version,
-                    0.876543219,
+                    0.876543219 - rank / 100.0,
                 )
+                for rank, unit_ref in enumerate(sorted(allowed_unit_refs))
             ]
 
     monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
@@ -651,6 +661,7 @@ def test_unit_hybrid_vector_only_is_single_lane_without_fabricated_fusion(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     rel = _write_unit_page(tmp_path)
+    _prepare_semantic_catalog(tmp_path, [tmp_path / rel])
     state = semantic_index.current_parent_index_state(tmp_path, rel)
 
     class FakeUnitIndex:
@@ -663,7 +674,6 @@ def test_unit_hybrid_vector_only_is_single_lane_without_fabricated_fusion(
             validate: bool,
         ):
             assert validate is False
-            unit_ref = sorted(allowed_unit_refs)[0]
             return [
                 SemanticUnitVectorHit(
                     unit_ref,
@@ -671,8 +681,9 @@ def test_unit_hybrid_vector_only_is_single_lane_without_fabricated_fusion(
                     state.parent_generation,
                     state.parent_source_hash,
                     state.parser_version,
-                    0.7654321,
+                    0.7654321 - rank / 100.0,
                 )
+                for rank, unit_ref in enumerate(sorted(allowed_unit_refs))
             ]
 
     monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
@@ -708,7 +719,8 @@ def test_unit_vector_failure_reports_lexical_fallback_truth(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _write_unit_page(tmp_path)
+    rel = _write_unit_page(tmp_path)
+    _prepare_semantic_catalog(tmp_path, [tmp_path / rel])
 
     class FailingUnitIndex:
         def search_semantic_units(self, *_args, **_kwargs):
@@ -725,7 +737,6 @@ def test_unit_vector_failure_reports_lexical_fallback_truth(
     explained = commands.op_ask_memory(
         tmp_path,
         query="session lifetime",
-        categories=["config"],
         result_level="unit",
         mode="vector",
         scope="kb-only",
@@ -1045,6 +1056,7 @@ def test_unit_filter_only_explanation_uses_parent_date_and_source_order(
     tmp_path: Path,
 ) -> None:
     parent_path = _write_unit_page(tmp_path)
+    _prepare_semantic_catalog(tmp_path, [tmp_path / parent_path])
 
     explained = commands.op_ask_memory(
         tmp_path,
@@ -1080,13 +1092,13 @@ def test_unit_lexical_fallback_has_raw_score_without_invented_fusion(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _write_unit_page(tmp_path)
+    rel = _write_unit_page(tmp_path)
+    _prepare_semantic_catalog(tmp_path, [tmp_path / rel])
     monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")
 
     explained = commands.op_ask_memory(
         tmp_path,
         query="session lifetime",
-        categories=["config"],
         result_level="unit",
         mode="hybrid",
         scope="kb-only",
@@ -1213,7 +1225,8 @@ def test_mixed_explanation_reports_the_actual_page_unit_result_fusion(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _write_unit_page(tmp_path)
+    rel = _write_unit_page(tmp_path)
+    _prepare_semantic_catalog(tmp_path, [tmp_path / rel])
     monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")
 
     explained = commands.op_ask_memory(
@@ -1261,11 +1274,12 @@ def test_mixed_explanation_preserves_divergent_page_and_unit_plans(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     page_path = _write_unit_page(tmp_path)
+    _prepare_semantic_catalog(tmp_path, [tmp_path / page_path])
 
     class FakeIndex:
         def search(self, _query_vector, *, k: int, allowed_paths=None):
             assert k > 0
-            assert allowed_paths == {page_path}
+            assert allowed_paths is None
             return [(page_path, 0, "Session lifetime is thirty days", 0.82)]
 
         def search_semantic_units(self, *_args, **_kwargs):
@@ -1281,7 +1295,6 @@ def test_mixed_explanation_preserves_divergent_page_and_unit_plans(
     explained = commands.op_ask_memory(
         tmp_path,
         query="session lifetime",
-        categories=["config"],
         result_level="mixed",
         mode="hybrid",
         graph=False,

@@ -1579,9 +1579,9 @@ def test_registry_diagnostics_keep_structured_category_and_relation_identities(
         proposal={
             "schema_version": 1,
             "categories": {
-                "config": {
-                    "description": "Configuration",
-                    "aliases": ["configuration"],
+                "deployment_setting": {
+                    "description": "Deployment setting",
+                    "aliases": ["runtime_configuration"],
                     "scope": {"projects": ["alpha"]},
                 }
             },
@@ -1594,7 +1594,7 @@ def test_registry_diagnostics_keep_structured_category_and_relation_identities(
         _source(
             project="beta",
             body=(
-                "- [configuration] Value\n\n"
+                "- [runtime_configuration] Value\n\n"
                 "## Finding\n"
                 "- relations: custom.rel: [[Target]]\n\n"
                 "Finding body.\n"
@@ -1622,7 +1622,7 @@ def test_registry_diagnostics_keep_structured_category_and_relation_identities(
         finding for finding in result.findings if finding.code == "scope_violation"
     ]
     assert [finding.resolved_rule for finding in category_scope] == [
-        ("categories", "config", "registry")
+        ("categories", "deployment_setting", "registry")
     ]
     relation_registry_findings = [
         finding

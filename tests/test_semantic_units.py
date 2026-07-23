@@ -984,9 +984,9 @@ def test_registry_scope_finding_falls_back_to_authored_category() -> None:
         proposal={
             "schema_version": 1,
             "categories": {
-                "config": {
-                    "description": "Configuration",
-                    "aliases": ["configuration"],
+                "deployment_setting": {
+                    "description": "Deployment setting",
+                    "aliases": ["runtime_configuration"],
                     "scope": {"page_types": ["runbook"]},
                 }
             },
@@ -995,13 +995,13 @@ def test_registry_scope_finding_falls_back_to_authored_category() -> None:
     )
 
     document = parse_semantic_units(
-        "- [configuration] Value\n",
+        "- [runtime_configuration] Value\n",
         path="note.md",
         language_registry=registry,
         page_type="note",
     )
 
-    assert document.units[0].category == "configuration"
+    assert document.units[0].category == "runtime_configuration"
     assert [(warning.code, warning.severity) for warning in document.warnings] == [
         ("scope_violation", "warning")
     ]

@@ -5,7 +5,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from exomem import embeddings
+from exomem import embeddings, freshness, lexstore
 from exomem import find as find_module
 from exomem.structured_filters import FilterError, compile_filter
 
@@ -38,6 +38,15 @@ def _write_page(
     return path
 
 
+def _prepare_semantic_catalog(vault: Path) -> None:
+    entries = [
+        (str(path), freshness.stat_signature(path)) for path in vault.rglob("*.md")
+    ]
+    freshness.seed(vault, "kb", entries)
+    freshness.seed(vault, "vault", entries)
+    lexstore.ensure_fresh(vault)
+
+
 @pytest.fixture
 def filter_vault(vault: Path) -> Path:
     _write_page(
@@ -68,6 +77,7 @@ def filter_vault(vault: Path) -> Path:
         observations="- [config] Draft unit #auth ^draft",
     )
     find_module.clear_cache()
+    _prepare_semantic_catalog(vault)
     return vault
 
 
@@ -149,6 +159,7 @@ def test_category_alias_is_resolved_before_candidate_work(filter_vault: Path) ->
         encoding="utf-8",
     )
     find_module.clear_cache()
+    _prepare_semantic_catalog(filter_vault)
     hits = find_module.find(
         filter_vault,
         query="",
@@ -173,33 +184,38 @@ def test_hot_cache_tracks_registry_changes_for_unit_filters(
         status="active",
         updated="2026-01-05",
         priority=99,
-        observations="- [configuration] Registry-sensitive unit ^registry-cache",
+        observations="- [runtime_configuration] Registry-sensitive unit ^registry-cache",
     )
     registry = filter_vault / "Knowledge Base" / "_Schema" / "semantic-language-registry.yaml"
 
     def write_registry(*, configuration_target: str) -> None:
-        other = "rule" if configuration_target == "config" else "config"
+        other = (
+            "runtime_setting"
+            if configuration_target == "deployment_setting"
+            else "deployment_setting"
+        )
         registry.parent.mkdir(parents=True, exist_ok=True)
         registry.write_text(
             "schema_version: 1\n"
             "categories:\n"
             f"  {configuration_target}:\n"
             f"    description: {configuration_target} facts\n"
-            "    aliases: [configuration]\n"
+            "    aliases: [runtime_configuration]\n"
             f"  {other}:\n"
             f"    description: {other} facts\n"
             "kinds: {}\n",
             encoding="utf-8",
         )
 
-    write_registry(configuration_target="config")
+    write_registry(configuration_target="deployment_setting")
     find_module.clear_cache()
+    _prepare_semantic_catalog(filter_vault)
     first = find_module.find(
         filter_vault,
         query="",
         scope="kb-only",
         result_level="page",
-        categories=["config"],
+        categories=["deployment_setting"],
         filters={"page.frontmatter:/metadata/priority": {"$eq": 99}},
         limit=20,
     )
@@ -207,13 +223,14 @@ def test_hot_cache_tracks_registry_changes_for_unit_filters(
 
     # Same request, no explicit cache clear: registry content is answer
     # freshness whenever unit predicates participate in eligibility.
-    write_registry(configuration_target="rule")
+    write_registry(configuration_target="runtime_setting")
+    _prepare_semantic_catalog(filter_vault)
     second = find_module.find(
         filter_vault,
         query="",
         scope="kb-only",
         result_level="page",
-        categories=["config"],
+        categories=["deployment_setting"],
         filters={"page.frontmatter:/metadata/priority": {"$eq": 99}},
         limit=20,
     )
@@ -276,10 +293,10 @@ def test_explicit_page_mode_annotates_the_same_matching_unit(
     assert "text" not in payload["matched_units"][0]["span"]
 
 
-def test_python_lexical_backend_preserves_unit_filter_eligibility(
+def test_no_fts_preserves_unit_filter_eligibility(
     filter_vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("EXOMEM_LEXICAL_BACKEND", "python")
+    monkeypatch.setattr(lexstore, "fts5_available", lambda: False)
     hits = find_module.find(
         filter_vault,
         query="Category",
@@ -306,6 +323,7 @@ def test_page_matched_units_are_bounded_and_report_truncation(
             f"- [config] Matching unit {index} #auth ^cap-{index}" for index in range(7)
         ),
     )
+    _prepare_semantic_catalog(filter_vault)
     hits = find_module.find(
         filter_vault,
         query="",
@@ -336,6 +354,7 @@ def test_category_word_in_content_cannot_spoof_exact_unit_metadata(
         priority=88,
         observations="- [decision] This mentions requirement repeatedly ^spoof",
     )
+    _prepare_semantic_catalog(filter_vault)
     hits = find_module.find(
         filter_vault,
         query="requirement",
@@ -361,6 +380,7 @@ def test_identical_unit_content_keeps_distinct_category_identities(
             "- [rule] Identical semantic payload ^same-rule"
         ),
     )
+    _prepare_semantic_catalog(filter_vault)
     hits = find_module.find(
         filter_vault,
         query="Identical semantic payload",
@@ -401,6 +421,7 @@ def test_text_unit_recall_falls_back_when_registry_makes_fts_rows_stale(
         )
 
     write_registry("Initial configuration facts")
+    _prepare_semantic_catalog(filter_vault)
     first = find_module.find(
         filter_vault,
         query="registry needle",

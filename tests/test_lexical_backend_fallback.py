@@ -369,7 +369,7 @@ def test_nonrepairing_searches_return_none_and_schedule_one_background_repair(
         release.wait(timeout=5)
         finished.set()
 
-    monkeypatch.setattr(store, "ensure_fresh", _background_repair)
+    monkeypatch.setattr(store, "rebuild_atomic", _background_repair)
 
     assert lexstore.search_bm25(tmp_path, "searchable", 5, repair=False) is None
     assert started.wait(timeout=2)
@@ -411,7 +411,7 @@ def test_nonrepairing_search_does_not_heal_a_stale_sidecar(tmp_path, monkeypatch
 
     monkeypatch.setattr(store, "_rebuild", _forbidden_rebuild)
     monkeypatch.setattr(store, "_heal_delta", _forbidden_heal)
-    monkeypatch.setattr(store, "ensure_fresh", _background_repair)
+    monkeypatch.setattr(store, "rebuild_atomic", _background_repair)
 
     assert (
         lexstore.search_bm25(

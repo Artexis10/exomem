@@ -1910,16 +1910,33 @@ def _has_semantic_census(payload: Any) -> bool:
 
 
 def _fresh_fixture_corpus(manifest: dict[str, Any], root: Path, probe_id: str) -> RenderedCorpus:
-    return render_exomem(manifest, root / "mutating" / _artifact_slug(probe_id))
+    from exomem import freshness, lexstore
+
+    corpus = render_exomem(manifest, root / "mutating" / _artifact_slug(probe_id))
+    entries = [
+        (str(path), freshness.stat_signature(path))
+        for path in corpus.root.rglob("*.md")
+    ]
+    freshness.seed(corpus.root, "kb", entries)
+    freshness.seed(corpus.root, "vault", entries)
+    lexstore.ensure_fresh(corpus.root)
+    return corpus
 
 
 def run_exomem_local_core_fixture(manifest: dict[str, Any], root: Path) -> dict[str, ProbeResult]:
     """Fast model-free Exomem gate. Direct mode repeats agent-facing cases over MCP."""
-    from exomem import commands, memory_refs, semantic_index
+    from exomem import commands, freshness, lexstore, memory_refs, semantic_index
     from exomem import vault as vault_module
 
     root = Path(root)
     base = render_exomem(manifest, root / "base")
+    entries = [
+        (str(path), freshness.stat_signature(path))
+        for path in base.root.rglob("*.md")
+    ]
+    freshness.seed(base.root, "kb", entries)
+    freshness.seed(base.root, "vault", entries)
+    lexstore.ensure_fresh(base.root)
     graph_run = run_exomem_fixture(manifest, base, revision="fixture")
     graph_scores = score_run(manifest, graph_run)
     probes = {
