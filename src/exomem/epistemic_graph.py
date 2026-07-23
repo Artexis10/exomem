@@ -12,7 +12,9 @@ import json
 import os
 import re
 import sqlite3
+from collections.abc import Iterable
 from dataclasses import dataclass
+from dataclasses import field as dataclass_field
 from pathlib import Path
 from typing import Any
 
@@ -32,7 +34,7 @@ from .cli_ops import OpError
 from .kbdir import kb_dirname, kb_prefix
 from .markdown_relations import MarkdownRelation
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 UNIT_SEED_MAX_BATCHES = 4
 UNIT_PARENT_REF_MAX_CANDIDATES = 16
 EDGE_INSPECTION_MULTIPLIER = 4
@@ -118,6 +120,40 @@ class GraphNeighbor:
     relation_type: str | None
     direction: str
     family: str
+
+
+@dataclass(frozen=True)
+class RelationMatch:
+    """Why a page qualified for a relation filter — an additive find-hit annotation.
+
+    `direction` is relative to the qualifying page ("outbound" when the page owns
+    the edge source, "inbound" when it owns the destination). `counterpart` is the
+    page on the other end of the qualifying edge. `matched_via` is "relation_type"
+    when the edge's canonical relation matched a requested key, or "parent_relation"
+    when it matched through extension parent roll-up.
+    """
+
+    relation_type: str | None
+    direction: str
+    counterpart: str
+    matched_via: str
+
+
+@dataclass(frozen=True)
+class RelationFilterResult:
+    """Outcome of a relation-participant lookup.
+
+    `status` is one of "available" (authoritative — an empty `paths` is a real
+    "no such edges"), "warming" (sidecar missing or stale — the caller raises the
+    typed warming outcome and schedules a rebuild), or "temporarily_unavailable"
+    (graph index disabled). `provenance` maps each participant path to its best
+    (lowest source-order) qualifying match.
+    """
+
+    status: str
+    paths: frozenset[str] = frozenset()
+    provenance: dict[str, RelationMatch] = dataclass_field(default_factory=dict)
+    reason: str | None = None
 
 
 def graph_enabled() -> bool:
@@ -219,6 +255,17 @@ class EpistemicGraphIndex:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_graph_edges_dst ON graph_edges(dst_key)")
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_graph_edges_source_path ON graph_edges(source_path)"
+        )
+        # Relation-type indexes back the relation-filtered-recall lookups; the two
+        # columns are queried by separate UNIONed branches (an OR across them would
+        # defeat both indexes).
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_graph_edges_relation_type "
+            "ON graph_edges(relation_type, src_key, dst_key)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_graph_edges_parent_relation "
+            "ON graph_edges(parent_relation, src_key, dst_key)"
         )
         return conn
 
@@ -644,6 +691,104 @@ class EpistemicGraphIndex:
         finally:
             conn.close()
         return {row[0] for row in rows}
+
+    def relation_participants(
+        self,
+        keys: Iterable[str],
+        *,
+        anchor: str | None = None,
+        direction: str = "any",
+    ) -> RelationFilterResult:
+        """Pages participating in a typed edge whose canonical `relation_type` or
+        `parent_relation` is in `keys` (extension parent roll-up).
+
+        `keys` MUST already be canonical registry keys — find.py canonicalizes and
+        rejects unknowns before calling, so an unknown key never reaches here. When
+        `anchor` is given, only pages connected to that page qualify and `direction`
+        ("outbound" | "inbound" | "any") is relative to the anchor; without an
+        anchor `direction` is relative to the candidate page. Direction is a no-op
+        for symmetric relations. The anchor is excluded from results. Block-level
+        endpoints resolve to their owning page (INNER JOIN drops unresolved
+        placeholders); self-edges (a block to its owning file) drop out.
+
+        Status mirrors the exact-recall reliability contract: "available" is
+        authoritative (an empty set means no such edges); "warming" means the
+        sidecar is missing or stale; "temporarily_unavailable" means the graph
+        index is disabled. It never scans the corpus and never false-empties.
+        """
+        key_set = {str(k) for k in keys if k}
+        if not key_set:
+            return RelationFilterResult(status="available")
+        if not graph_enabled():
+            return RelationFilterResult(
+                status="temporarily_unavailable", reason="graph_index_disabled"
+            )
+        if not self.path.exists():
+            return RelationFilterResult(status="warming")
+        conn = self._open_read_snapshot()
+        if conn is None:
+            return RelationFilterResult(status="warming")
+        anchor_rel = _with_md(anchor) if anchor else None
+        try:
+            placeholders = ",".join("?" for _ in key_set)
+            params = list(key_set)
+            select = (
+                "SELECT s.path, d.path, e.relation_type, e.rowid "
+                "FROM graph_edges e "
+                "JOIN graph_nodes s ON s.node_key = e.src_key "
+                "JOIN graph_nodes d ON d.node_key = e.dst_key "
+            )
+            rows = conn.execute(
+                f"{select} WHERE e.relation_type IN ({placeholders}) "
+                f"UNION {select} WHERE e.parent_relation IN ({placeholders}) "
+                "ORDER BY 4",
+                params + params,
+            ).fetchall()
+        except sqlite3.Error:
+            return RelationFilterResult(status="warming")
+        finally:
+            conn.close()
+
+        paths: set[str] = set()
+        provenance: dict[str, RelationMatch] = {}
+
+        def _add(page: str, counterpart: str, relation_type: str | None, cand_dir: str) -> None:
+            if anchor_rel is not None and page == anchor_rel:
+                return
+            matched_via = "relation_type" if relation_type in key_set else "parent_relation"
+            paths.add(page)
+            provenance.setdefault(
+                page, RelationMatch(relation_type, cand_dir, counterpart, matched_via)
+            )
+
+        for src_path, dst_path, relation_type, _rowid in rows:
+            if src_path == dst_path:
+                continue
+            edge_def = self.registry.definition(str(relation_type or ""))
+            is_symmetric = edge_def is not None and edge_def.direction == "symmetric"
+            if anchor_rel is not None:
+                if src_path == anchor_rel:
+                    candidate, counterpart, cand_dir, anchor_dir = (
+                        dst_path, src_path, "inbound", "outbound",
+                    )
+                elif dst_path == anchor_rel:
+                    candidate, counterpart, cand_dir, anchor_dir = (
+                        src_path, dst_path, "outbound", "inbound",
+                    )
+                else:
+                    continue
+                if not is_symmetric and direction != "any" and direction != anchor_dir:
+                    continue
+                _add(candidate, counterpart, relation_type, cand_dir)
+            else:
+                if is_symmetric or direction in ("any", "outbound"):
+                    _add(src_path, dst_path, relation_type, "outbound")
+                if is_symmetric or direction in ("any", "inbound"):
+                    _add(dst_path, src_path, relation_type, "inbound")
+
+        return RelationFilterResult(
+            status="available", paths=frozenset(paths), provenance=provenance
+        )
 
 
 def graph_context(
