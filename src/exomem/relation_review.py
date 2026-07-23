@@ -3383,7 +3383,8 @@ def _commit_plan(
         raise RelationReviewError("DRAFT_HASH_MISMATCH", "draft hash requires fresh validation")
     if validation.has_non_review_blockers:
         raise RelationReviewError(
-            "SEMANTIC_CONTRACT_BLOCKED", "semantic contract has blocking findings"
+            "SEMANTIC_CONTRACT_BLOCKED",
+            semantic_contract.blocking_reason(validation.contract_result),
         )
     result = attempt.result
     record: RelationReviewRecord | None = None
@@ -3466,7 +3467,7 @@ def _commit_plan(
         )
     elif result.should_block:
         raise RelationReviewError(
-            "SEMANTIC_CONTRACT_BLOCKED", "semantic contract has blocking findings"
+            "SEMANTIC_CONTRACT_BLOCKED", semantic_contract.blocking_reason(result)
         )
     elif attempt.artifact is not None:
         raise RelationReviewError("DRAFT_ID_IN_USE", "draft identity is already reserved")

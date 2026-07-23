@@ -1270,10 +1270,17 @@ def test_control_workspace_paths_are_omitted_or_hashed_before_round_trip(
     assert "dirty_path_unsafe" in built["structural"]["degradation"]
 
 
+# Built lazily: os.fsdecode of a non-UTF-8 byte name raises on Windows, and a
+# decorator argument is evaluated at import time, so the skipif below cannot
+# protect it. Keeping the surrogateescape case POSIX-only keeps this module
+# importable on Windows.
+_UNSAFE_TRANSCRIPT_NAMES = ["transcript\nunsafe.jsonl"]
+if os.name != "nt":
+    _UNSAFE_TRANSCRIPT_NAMES.append(os.fsdecode(b"transcript-\xff.jsonl"))
+
+
 @pytest.mark.skipif(os.name == "nt", reason="surrogateescape path is POSIX-specific")
-@pytest.mark.parametrize(
-    "name", ["transcript\nunsafe.jsonl", os.fsdecode(b"transcript-\xff.jsonl")]
-)
+@pytest.mark.parametrize("name", _UNSAFE_TRANSCRIPT_NAMES)
 def test_unsafe_transcript_relative_path_hashes_and_round_trips(
     tmp_path: Path,
     name: str,
@@ -3720,3 +3727,33 @@ def test_boolean_session_and_pending_manifest_versions_are_rejected(
 
     assert loaded_session == (None, "corrupt")
     assert loaded_pending == (None, "corrupt")
+
+
+def test_nested_repository_dirty_paths_survive_the_validator_round_trip(
+    tmp_path: Path,
+) -> None:
+    """git reports a nested repository as ``dir/`` and will not descend into it.
+
+    ``--untracked-files=all`` expands ordinary directories into individual files,
+    but a nested repository (such as a ``.claude/worktrees/`` agent worktree)
+    stays a single entry with a trailing slash. The writer must not emit a dirty
+    path that its own validator rejects, or the checkpoint is written and then
+    permanently unreadable.
+    """
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    nested = repo / "worktrees" / "agent-a1f2fcf8"
+    nested.mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", str(nested)], check=True)
+    (nested / "scratch.txt").write_text("untracked\n", encoding="utf-8")
+
+    workspace, _, _, _ = checkpoint.profile_workspace(str(repo))
+
+    assert workspace["dirty_paths"], "expected the untracked directory to be reported"
+    rejected = [
+        value
+        for value in workspace["dirty_paths"]
+        if not checkpoint._safe_relative_path(value)
+    ]
+    assert rejected == [], f"writer emitted paths its validator rejects: {rejected}"
+    assert checkpoint._valid_workspace(workspace)
