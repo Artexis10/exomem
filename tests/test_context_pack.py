@@ -183,6 +183,8 @@ UNIT_CONTEXT_P = "Knowledge Base/Notes/CachePolicy.md"
 
 @pytest.fixture
 def cluster(tmp_path: Path) -> Path:
+    from exomem import freshness, lexstore
+
     vault = tmp_path / "vault"
     _write(vault, ALPHA_P, ALPHA)
     _write(vault, BETA_P, BETA)
@@ -193,6 +195,12 @@ def cluster(tmp_path: Path) -> Path:
     _write(vault, NEW_P, NEW)
     _write(vault, UNIT_CONTEXT_P, UNIT_CONTEXT)
     find_module.clear_cache()
+    entries = [
+        (str(path), freshness.stat_signature(path)) for path in vault.rglob("*.md")
+    ]
+    freshness.seed(vault, "kb", entries)
+    freshness.seed(vault, "vault", entries)
+    lexstore.ensure_fresh(vault)
     return vault
 
 

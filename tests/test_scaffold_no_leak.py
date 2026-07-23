@@ -11,6 +11,7 @@ import re
 from pathlib import Path
 
 import exomem
+from exomem import semantic_authoring, workflow_skills
 from exomem.public_artifact_privacy import (
     assert_public_artifacts_clean,
     repository_input_paths,
@@ -61,6 +62,37 @@ def test_complete_public_inventory_ships_no_private_context() -> None:
     report = scan_repository_inputs(REPO_ROOT)
     assert report.scanned_files > len(_files(SOURCE))
     assert report.findings == ()
+
+
+def test_shipped_contract_embeddings_are_canonical_and_public_safe() -> None:
+    """The scaffold's shipped contract embeddings must be exactly the canonical
+    projection — public-safe, generic, and free of any private vault context."""
+
+    concise = semantic_authoring.render_concise()
+    core = workflow_skills.WORKFLOW_SKILLS_DIR.parent / "SKILL.md"
+    carriers = [core]
+    carriers.extend(
+        workflow_skills.source_dir(str(skill["name"])) / "SKILL.md"
+        for skill in workflow_skills.list_skills()
+        if skill.get("standalone_authoring") is True
+    )
+
+    # Core scaffold SKILL + 9 standalone authoring workflows = 10 embeddings.
+    assert len(carriers) == 10
+
+    for path in carriers:
+        assert path.is_file(), f"missing shipped contract carrier {path}"
+        text = path.read_text(encoding="utf-8")
+        assert text.count(concise) == 1, f"{path} lost the canonical contract"
+
+    # The embedded contract carries only invented, generic examples: the canonical
+    # v3 identity and a governed-relative wikilink target, never a vault path.
+    assert "<!-- exomem-semantic-authoring:v3 " in concise
+    assert "[[Knowledge Base/Notes/Design/Public adapter]]" in concise
+
+    # The authoritative, provenance-based gate proves public safety without
+    # encoding any maintainer name, vault, or private-token denylist here.
+    assert_public_artifacts_clean(carriers, labels={p: p.name for p in carriers})
 
 
 def test_source_ships_no_competitor_tokens() -> None:

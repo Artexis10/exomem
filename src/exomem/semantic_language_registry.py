@@ -147,6 +147,8 @@ class SemanticLanguageRegistry:
     kind_aliases: Mapping[str, str] = field(default_factory=dict)
     heading_aliases: Mapping[str, str] = field(default_factory=dict)
     findings: tuple[RegistryFinding, ...] = ()
+    core_categories: Mapping[str, CategoryDefinition] = field(default_factory=dict)
+    core_category_aliases: Mapping[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         for name in (
@@ -156,9 +158,14 @@ class SemanticLanguageRegistry:
             "category_aliases",
             "kind_aliases",
             "heading_aliases",
+            "core_categories",
+            "core_category_aliases",
         ):
             object.__setattr__(self, name, MappingProxyType(dict(getattr(self, name))))
         object.__setattr__(self, "findings", tuple(self.findings))
+
+    def _has_error_findings(self) -> bool:
+        return any(finding["severity"] == "error" for finding in self.findings)
 
     def as_dict(self) -> dict[str, Any]:
         """Return deterministic semantic content (the byte hash is transport metadata)."""
@@ -166,6 +173,10 @@ class SemanticLanguageRegistry:
             "schema_version": self.schema_version,
             "core_kinds": {
                 key: self.core_kinds[key].as_dict() for key in sorted(self.core_kinds)
+            },
+            "core_categories": {
+                key: self.core_categories[key].as_dict()
+                for key in sorted(self.core_categories)
             },
             "categories": {
                 key: self.categories[key].as_dict() for key in sorted(self.categories)
@@ -185,7 +196,7 @@ class SemanticLanguageRegistry:
         page_type: str | None = None,
     ) -> LabelResolution:
         key = normalize_label(raw)
-        if self.findings:
+        if self._has_error_findings():
             return LabelResolution(
                 raw=str(raw),
                 key=key,
@@ -193,6 +204,13 @@ class SemanticLanguageRegistry:
                 status="registry_invalid",
                 definition=None,
                 findings=self.findings,
+            )
+        core_canonical = self.core_category_aliases.get(key, key)
+        core_definition = self.core_categories.get(core_canonical)
+        if core_definition is not None:
+            status = "alias" if core_canonical != key else "core"
+            return LabelResolution(
+                str(raw), key, core_canonical, status, core_definition
             )
         canonical = self.category_aliases.get(key, key)
         definition = self.categories.get(canonical)
@@ -232,7 +250,7 @@ class SemanticLanguageRegistry:
             return LabelResolution(
                 str(raw), key, core_canonical, status, core_definition
             )
-        if self.findings:
+        if self._has_error_findings():
             return LabelResolution(
                 str(raw), key, None, "registry_invalid", None, findings=self.findings
             )
@@ -257,7 +275,7 @@ class SemanticLanguageRegistry:
             return LabelResolution(
                 str(raw), key, core_canonical, status, core_definition
             )
-        if self.findings:
+        if self._has_error_findings():
             return LabelResolution(
                 str(raw), key, None, "registry_invalid", None, findings=self.findings
             )
@@ -388,7 +406,13 @@ def core_registry() -> SemanticLanguageRegistry:
         )
         for key in sorted((*semantic_blocks.BLOCK_TYPES, "observation"))
     }
-    return SemanticLanguageRegistry(SCHEMA_VERSION, "none", core_kinds)
+    return SemanticLanguageRegistry(
+        SCHEMA_VERSION,
+        "none",
+        core_kinds,
+        core_categories=_core_categories(),
+        core_category_aliases=_core_category_aliases(),
+    )
 
 
 _CACHE: dict[Path, tuple[str, SemanticLanguageRegistry]] = {}
@@ -422,6 +446,8 @@ def load_registry(
             digest,
             core.core_kinds,
             findings=(_finding("invalid_yaml", "registry", str(exc)),),
+            core_categories=core.core_categories,
+            core_category_aliases=core.core_category_aliases,
         )
     else:
         registry = _parse_registry_data(data, digest, core)
@@ -467,10 +493,11 @@ def save_registry(
             "save requires categories and kinds in one reviewed document"
         )
     registry = load_registry(proposal=proposal)
-    if registry.findings:
+    errors = [item for item in registry.findings if item["severity"] == "error"]
+    if errors:
         raise ValueError(
             "INVALID_SEMANTIC_LANGUAGE_REGISTRY: "
-            f"{[item.as_dict() for item in registry.findings]!r}"
+            f"{[item.as_dict() for item in errors]!r}"
         )
 
     path = registry_path(vault_root)
@@ -522,6 +549,8 @@ def _parse_registry_data(
             digest,
             core.core_kinds,
             findings=(_finding("invalid_registry", "registry", "must be an object"),),
+            core_categories=core.core_categories,
+            core_category_aliases=core.core_category_aliases,
         )
     unknown_root_fields = set(data) - {"schema_version", "categories", "kinds"}
     for key in sorted(unknown_root_fields, key=str):
@@ -560,10 +589,16 @@ def _parse_registry_data(
         kinds, core_labels=core_labels, kind_aliases=kind_aliases, findings=findings
     )
 
-    _validate_replacements(categories, "categories", findings)
+    _validate_replacements(
+        categories,
+        "categories",
+        findings,
+        external_active=frozenset(core.core_categories),
+    )
     _validate_replacements(kinds, "kinds", findings)
     findings.extend(_replacement_cycle_findings(categories, "categories"))
     findings.extend(_replacement_cycle_findings(kinds, "kinds"))
+    _core_category_shadow_findings(categories, findings)
     sorted_findings = tuple(
         sorted(findings, key=lambda item: (item["path"], item["code"], item["detail"]))
     )
@@ -577,6 +612,8 @@ def _parse_registry_data(
         kind_aliases,
         heading_aliases,
         sorted_findings,
+        core_categories=core.core_categories,
+        core_category_aliases=core.core_category_aliases,
     )
 
 
@@ -788,6 +825,8 @@ def _validate_replacements(
     definitions: Mapping[str, CategoryDefinition | KindDefinition],
     namespace: str,
     findings: list[RegistryFinding],
+    *,
+    external_active: frozenset[str] = frozenset(),
 ) -> None:
     for key in sorted(definitions):
         definition = definitions[key]
@@ -810,7 +849,18 @@ def _validate_replacements(
             )
         if not replacement:
             continue
-        if replacement != normalize_label(replacement) or replacement not in definitions:
+        if replacement != normalize_label(replacement):
+            findings.append(
+                _finding(
+                    "invalid_replacement",
+                    span,
+                    "must name an active canonical key in the same namespace",
+                )
+            )
+            continue
+        if replacement in external_active:
+            continue
+        if replacement not in definitions:
             findings.append(
                 _finding(
                     "invalid_replacement",
@@ -943,6 +993,92 @@ def _valid_label(label: str) -> bool:
     if not label or len(label) > 64 or not label[0].isalpha():
         return False
     return all(char.isalpha() or char.isdigit() or char == "_" for char in label)
+
+
+# The sixteen code-owned core categories and their exact built-in alias table.
+# Descriptions are deliberately generic and public-safe; no vault identifiers.
+_CORE_CATEGORY_DEFINITIONS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
+    ("decision", "A choice that was made together with its rationale.", ("decisions",)),
+    ("fact", "A verified statement taken to be true.", ("facts",)),
+    ("finding", "Something learned from investigation or observation.", ("findings",)),
+    ("insight", "A non-obvious realization or interpretation.", ("insights",)),
+    ("constraint", "A limit or boundary that must be respected.", ("constraints",)),
+    ("requirement", "Something that must be satisfied.", ("requirements",)),
+    ("assumption", "Something taken as given without proof.", ("assumptions",)),
+    ("risk", "A possible future problem and its potential impact.", ("risks",)),
+    ("problem", "A described issue that needs resolution.", ("problems",)),
+    (
+        "question",
+        "An open question awaiting an answer.",
+        ("questions", "open_question", "open_questions"),
+    ),
+    ("action", "A task or next step to carry out.", ("actions",)),
+    ("technique", "A reusable method or approach.", ("techniques",)),
+    ("preference", "A stated inclination or choice of style.", ("preferences",)),
+    ("code", "A code snippet or code-level detail.", ()),
+    ("design", "A design description, plan, or approach.", ("designs",)),
+    (
+        "config",
+        "A configuration value or setting.",
+        ("configs", "configuration", "configurations"),
+    ),
+)
+
+
+@lru_cache(maxsize=1)
+def _core_categories() -> dict[str, CategoryDefinition]:
+    return {
+        key: CategoryDefinition(key=key, description=description, aliases=aliases)
+        for key, description, aliases in _CORE_CATEGORY_DEFINITIONS
+    }
+
+
+@lru_cache(maxsize=1)
+def _core_category_aliases() -> dict[str, str]:
+    aliases: dict[str, str] = {}
+    for key, definition in _core_categories().items():
+        for alias in definition.aliases:
+            aliases[alias] = key
+    return aliases
+
+
+@lru_cache(maxsize=1)
+def _all_core_category_labels() -> frozenset[str]:
+    return frozenset((*_core_categories(), *_core_category_aliases()))
+
+
+def _core_category_shadow_findings(
+    categories: Mapping[str, CategoryDefinition],
+    findings: list[RegistryFinding],
+) -> None:
+    """Warn (never error) when an extension category shadows a core key/alias.
+
+    The colliding entry is byte-preserved in ``categories`` for serialization but
+    core resolution wins, so the extension entry is inert. The advisory warning
+    guides migration without invalidating the registry.
+    """
+    core_labels = _all_core_category_labels()
+    for key in sorted(categories):
+        definition = categories[key]
+        if key in core_labels:
+            findings.append(
+                _finding(
+                    "core_category_shadowed",
+                    f"categories.{key}",
+                    f"category {key!r} shadows a built-in core category and is ignored",
+                    severity="warning",
+                )
+            )
+        for alias in sorted(set(definition.aliases)):
+            if alias in core_labels:
+                findings.append(
+                    _finding(
+                        "core_category_shadowed",
+                        f"categories.{key}.aliases",
+                        f"alias {alias!r} shadows a built-in core category and is ignored",
+                        severity="warning",
+                    )
+                )
 
 
 @lru_cache(maxsize=1)

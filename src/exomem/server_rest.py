@@ -97,6 +97,7 @@ _OPENAPI_ERROR_SCHEMA = {
         "ok": {"type": "boolean"},
         "error_code": {"type": "string"},
         "status": {"type": "string"},
+        "complete": {"type": "boolean"},
         "committed": {"type": ["boolean", "null"]},
         "retry_after_ms": {"type": "integer", "minimum": 0},
         "holder": _OPENAPI_MUTATION_HOLDER_SCHEMA,
@@ -350,7 +351,13 @@ def register_rest_facade(
                         "400": _OPENAPI_ERROR_RESPONSE,
                         "409": _OPENAPI_ERROR_RESPONSE,
                         "401": {"description": "missing/invalid API key"},
-                        "503": {"description": "REST API disabled"},
+                        "503": {
+                            **_OPENAPI_ERROR_RESPONSE,
+                            "description": (
+                                "REST API disabled, or a retryable "
+                                "RETRIEVAL_INDEX_WARMING outcome (see retry_after_ms)"
+                            ),
+                        },
                     },
                 }
             }

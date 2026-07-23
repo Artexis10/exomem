@@ -637,9 +637,8 @@ def test_probe_failure_memoizes_and_signals_fallback(tmp_path, monkeypatch):
     assert not lexstore.lexical_path(tmp_path).exists()
 
 
-def test_runtime_failure_falls_back_for_the_process(tmp_path, monkeypatch):
-    """A query that raises at runtime: that call signals fallback (None) and
-    later calls stop attempting the sidecar."""
+def test_unclassified_runtime_failure_retries_on_the_next_call(tmp_path, monkeypatch):
+    """An unclassified query error degrades one call without retiring the sidecar."""
     _write_page(tmp_path, "Knowledge Base/a.md", "content")
     assert lexstore.search_bm25(tmp_path, "content", k=3, scope="kb")  # healthy first
 
@@ -648,12 +647,15 @@ def test_runtime_failure_falls_back_for_the_process(tmp_path, monkeypatch):
 
     def _flaky(self, *a, **kw):
         calls["n"] += 1
-        raise sqlite3.OperationalError("simulated corruption")
+        if calls["n"] == 1:
+            raise sqlite3.OperationalError("simulated unclassified failure")
+        return real(self, *a, **kw)
 
     monkeypatch.setattr(lexstore.LexicalStore, "_bm25_query", _flaky)
     assert lexstore.search_bm25(tmp_path, "content", k=3, scope="kb") is None
-    assert lexstore.search_bm25(tmp_path, "content", k=3, scope="kb") is None
-    assert calls["n"] == 1
+    recovered = lexstore.search_bm25(tmp_path, "content", k=3, scope="kb")
+    assert recovered and recovered[0][0] == "Knowledge Base/a.md"
+    assert calls["n"] == 2
     monkeypatch.setattr(lexstore.LexicalStore, "_bm25_query", real)
 
 

@@ -253,6 +253,13 @@ def op_bootstrap(
     active_product_names = frozenset(active_descriptor.product_commands)
     requested_workflow = workflow.strip() if workflow and workflow.strip() else "general"
     selected_packs = knowledge_packs_module.selected_pack_state(vault_root)
+    # Project the semantic authoring contract ONCE at the selected profile and
+    # reuse it everywhere in the payload. A compact bootstrap must stay compact
+    # through the whole payload, so the nested authoring_contract projection can
+    # never fall back to the full profile and leak the rich example.
+    semantic_authoring_projection = semantic_authoring_module.bootstrap_projection(
+        profile=profile
+    )
     payload: dict = {
         "contract_version": "2026-07-19.1",
         "profile": profile,
@@ -271,7 +278,7 @@ def op_bootstrap(
             "compute_policy": compute_policy,
         },
         "active_capabilities": active_descriptor.as_metadata(),
-        "semantic_authoring": semantic_authoring_module.bootstrap_projection(),
+        "semantic_authoring": semantic_authoring_projection,
         "memory_model": {
             "built_in_ai_memory": (
                 "Use as short-term or behavioural memory for user preferences, working "
@@ -382,7 +389,7 @@ def op_bootstrap(
                 "production-log": "Creative artifact record with Frame, Artifact, Outcomes, Reflection, and typed Relations.",
             },
             "semantic_units": {
-                "contract": semantic_authoring_module.bootstrap_projection(),
+                "contract": semantic_authoring_projection,
                 "compact_syntax": semantic_authoring_module.AUTHORING_CONTRACT.compact[
                     "syntax"
                 ],

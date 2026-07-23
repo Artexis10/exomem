@@ -60,6 +60,8 @@ def _build_server(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     monkeypatch.setenv("EXOMEM_DISABLE_RELEVANCE_CHECK", "1")
     monkeypatch.setenv("EXOMEM_DISABLE_MEDIA_EXTRACTION", "1")
     monkeypatch.setenv("EXOMEM_DISABLE_CLIP", "1")
+    monkeypatch.setenv("EXOMEM_LEXICAL_BACKEND", "python")
+    monkeypatch.setenv("EXOMEM_DISABLE_FILE_WATCHER", "1")
     monkeypatch.delenv("EXOMEM_DISABLE_TIER2", raising=False)
     monkeypatch.setenv(
         "EXOMEM_WRITER_LEASE_STATE_DIR", str(tmp_path / "writer-lease")

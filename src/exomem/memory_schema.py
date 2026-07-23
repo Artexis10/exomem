@@ -26,6 +26,12 @@ from .kbdir import kb_dirname
 
 SCHEMA_VERSION = 1
 MIN_REQUIRED_SAMPLE = 5
+# Fixed generic description for reviewed-corpus category candidates. Inference
+# never infers semantics, so every proposed definition shares this public-safe
+# text; a human reviewer refines it before saving.
+INFERRED_CATEGORY_DESCRIPTION = (
+    "User-defined semantic category observed across multiple pages."
+)
 CONTRACT_RELATION_ORIGINS = frozenset({"semantic_relation", "markdown_relation"})
 _NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
 _VALIDATION_MODES = frozenset({"off", "warn", "strict"})
@@ -629,6 +635,7 @@ def infer_category_registry(
 
     categories: list[dict[str, Any]] = []
     normalization_candidates: list[dict[str, Any]] = []
+    candidate_changes: list[dict[str, Any]] = []
     for key in sorted(grouped):
         items = grouped[key]
         raw_forms = Counter(str(item["category_raw"]) for item in items)
@@ -646,25 +653,7 @@ def infer_category_registry(
             for item in items
             if item["replacement"] is not None
         )
-        examples = sorted(
-            (
-                {
-                    "path": item["path"],
-                    "line": item["line"],
-                    "anchor": item["anchor"],
-                    "raw_category": item["category_raw"],
-                    "excerpt": item["excerpt"],
-                    "excerpt_truncated": item["excerpt_truncated"],
-                }
-                for item in items
-            ),
-            key=lambda item: (
-                item["path"],
-                item["line"],
-                item["anchor"] or "",
-                item["raw_category"],
-            ),
-        )[:5]
+        examples = _category_examples(items)
         raw_form_map = dict(sorted(raw_forms.items()))
         canonical_collision = len(raw_form_map) > 1
         if canonical_collision:
@@ -697,6 +686,9 @@ def infer_category_registry(
                 "examples": examples,
             }
         )
+        candidate = _register_category_candidate(key, items, statuses, registry)
+        if candidate is not None:
+            candidate_changes.append(candidate)
 
     return {
         "subject": "categories",
@@ -710,7 +702,7 @@ def infer_category_registry(
             {"alias": alias, "category": canonical, "basis": "reviewed_registry"}
             for alias, canonical in sorted(registry.category_aliases.items())
         ],
-        "candidate_changes": [],
+        "candidate_changes": candidate_changes,
         "proposal": semantic_language_registry.registry_proposal(registry),
         "content_hash": registry.content_hash,
         "registry_findings": [item.as_dict() for item in registry.findings],
@@ -780,6 +772,12 @@ def _scan_category_observations(
                     "excerpt_truncated": truncated,
                     "page_type": page.page_type,
                     "projects": projects,
+                    # A rich unit that omits ``- category:`` defaults its category
+                    # to the governed kind; that is not an authored category
+                    # choice and never seeds a registration candidate.
+                    "defaulted_category": (
+                        unit.form == "rich" and "category" not in unit.metadata
+                    ),
                 }
             )
     return pages, sorted(
@@ -808,7 +806,15 @@ def validate_category_registry(
         else semantic_language_registry.load_registry(vault_root)
     )
     findings: list[dict[str, Any]] = [item.as_dict() for item in registry.findings]
-    if not registry.findings:
+    # A non-fatal registry finding (e.g. a `core_category_shadowed` warning) must
+    # NOT suppress unrelated observation validation. Category resolution only
+    # collapses to `registry_invalid` when the registry carries an actual error
+    # finding, so continue the deprecated/scope observation checks whenever the
+    # registry is warning-only and block observation scanning solely on errors.
+    registry_has_error = any(
+        item["severity"] == "error" for item in registry.findings
+    )
+    if not registry_has_error:
         for item in category_observations(
             vault_root,
             project=project,
@@ -889,6 +895,62 @@ def _definition_changes(
 
 def _definition_changes_present(changes: dict[str, Any]) -> bool:
     return bool(changes["added"] or changes["removed"] or changes["modified"])
+
+
+def _category_examples(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Return at most five deterministic bounded category examples."""
+    return sorted(
+        (
+            {
+                "path": item["path"],
+                "line": item["line"],
+                "anchor": item["anchor"],
+                "raw_category": item["category_raw"],
+                "excerpt": item["excerpt"],
+                "excerpt_truncated": item["excerpt_truncated"],
+            }
+            for item in items
+        ),
+        key=lambda item: (
+            item["path"],
+            item["line"],
+            item["anchor"] or "",
+            item["raw_category"],
+        ),
+    )[:5]
+
+
+def _register_category_candidate(
+    key: str,
+    items: list[dict[str, Any]],
+    statuses: Counter[str],
+    registry: semantic_language_registry.SemanticLanguageRegistry,
+) -> dict[str, Any] | None:
+    """Emit one complete ``register_category`` proposal, or ``None``.
+
+    A candidate is produced only for a fully unregistered normalized category
+    whose authored (non-defaulted) usage spans at least five distinct pages.
+    Core categories, core aliases, registered extensions, and rich units whose
+    omitted category defaults to a governed kind are therefore excluded. The
+    proposal is the complete reviewed document plus one generic definition and
+    passes ``semantic_language_registry.load_registry(proposal=...)``.
+    """
+    if _single_counter_key(statuses) != "unregistered":
+        return None
+    authored = [item for item in items if not item["defaulted_category"]]
+    pages = {item["path"] for item in authored}
+    if len(pages) < MIN_REQUIRED_SAMPLE:
+        return None
+    proposal = semantic_language_registry.registry_proposal(registry)
+    proposal["categories"][key] = {"description": INFERRED_CATEGORY_DESCRIPTION}
+    return {
+        "type": "register_category",
+        "category_key": key,
+        "unit_count": len(authored),
+        "page_count": len(pages),
+        "examples": _category_examples(authored),
+        "proposal": proposal,
+    }
 
 
 def _single_counter_key(values: Counter[str]) -> str | None:

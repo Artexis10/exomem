@@ -6,6 +6,7 @@ from pathlib import Path
 
 from exomem import (
     epistemic_graph,
+    freshness,
     index_sync,
     lexstore,
     reconcile,
@@ -176,28 +177,50 @@ def test_committed_parent_hash_rejects_old_lexical_and_graph_units_immediately(
 def test_registry_change_rejects_semantically_stale_units_without_markdown_change(
     tmp_path: Path, monkeypatch
 ) -> None:
-    _write_language_registry(tmp_path, alias="configuration", canonical="config")
-    _write(tmp_path, "- [configuration] registry-bound token ^registry\n")
+    _write_language_registry(tmp_path, alias="local_setting", canonical="config")
+    page = _write(tmp_path, "- [local_setting] registry-bound token ^registry\n")
+    entries = [(str(page), freshness.stat_signature(page))]
+    freshness.seed(tmp_path, "kb", entries)
+    freshness.seed(tmp_path, "vault", entries)
+    lexstore.ensure_fresh(tmp_path)
+    current_triple = freshness.triple(tmp_path, "kb")
     initial = lexstore.search_semantic_units(
-        tmp_path, "registry-bound", k=5, categories=["config"], scope="kb"
+        tmp_path,
+        "registry-bound",
+        k=5,
+        categories=["config"],
+        scope="kb",
+        freshness=current_triple,
     )
     assert initial and [hit.category for hit in initial] == ["config"]
 
-    _write_language_registry(tmp_path, alias="configuration", canonical="setting")
+    _write_language_registry(tmp_path, alias="local_setting", canonical="setting")
+    scheduled: list[Path] = []
+    monkeypatch.setattr(lexstore, "_schedule_repair", scheduled.append)
 
-    assert (
-        lexstore.search_semantic_units(
-            tmp_path, "registry-bound", k=5, categories=["config"], scope="kb"
-        )
-        == []
-    )
+    # The old projection is incomplete under the new registry identity; it must
+    # warm/rebuild, never authoritatively false-empty.
+    assert lexstore.search_semantic_units(
+        tmp_path,
+        "registry-bound",
+        k=5,
+        categories=["config"],
+        scope="kb",
+        freshness=current_triple,
+    ) is None
+    assert scheduled == [tmp_path]
 
     monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")
     report = reconcile.reconcile(tmp_path)
 
     assert report.semantic_unit_indexes_status == "repaired"
     repaired = lexstore.search_semantic_units(
-        tmp_path, "registry-bound", k=5, categories=["setting"], scope="kb"
+        tmp_path,
+        "registry-bound",
+        k=5,
+        categories=["setting"],
+        scope="kb",
+        freshness=freshness.triple(tmp_path, "kb"),
     )
     assert repaired and [hit.category for hit in repaired] == ["setting"]
 

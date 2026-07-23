@@ -15,7 +15,9 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any
 
-AUTHORING_CONTRACT_VERSION = 2
+from . import semantic_language_registry
+
+AUTHORING_CONTRACT_VERSION = 3
 AUTHORING_CONTRACT_ID = "exomem.semantic-authoring"
 
 
@@ -57,6 +59,7 @@ class SemanticAuthoringContract:
     minimum_semantic_unit: Mapping[str, Any]
     routes: Mapping[str, Any]
     findings: Mapping[str, Any]
+    portable_categories: Mapping[str, Any]
 
     def __post_init__(self) -> None:
         for name in (
@@ -66,6 +69,7 @@ class SemanticAuthoringContract:
             "minimum_semantic_unit",
             "routes",
             "findings",
+            "portable_categories",
         ):
             object.__setattr__(self, name, _freeze(getattr(self, name)))
 
@@ -80,6 +84,7 @@ class SemanticAuthoringContract:
             "minimum_semantic_unit": _thaw(self.minimum_semantic_unit),
             "routes": _thaw(self.routes),
             "findings": _thaw(self.findings),
+            "portable_categories": _thaw(self.portable_categories),
         }
 
     def as_dict(self) -> dict[str, Any]:
@@ -102,6 +107,7 @@ def contract_from_normative(
         "minimum_semantic_unit",
         "routes",
         "findings",
+        "portable_categories",
     }
     unknown = set(normative) - required
     missing = required - set(normative)
@@ -113,6 +119,54 @@ def contract_from_normative(
     detached = {key: _thaw(normative[key]) for key in sorted(required)}
     digest = f"sha256:{hashlib.sha256(_canonical_bytes(detached)).hexdigest()}"
     return SemanticAuthoringContract(content_digest=digest, **detached)
+
+
+def _build_portable_categories() -> dict[str, Any]:
+    """Derive portable category teaching from the core registry so keys never drift."""
+    registry = semantic_language_registry.core_registry()
+    core_keys = sorted(registry.core_categories)
+    aliases = dict(sorted(registry.core_category_aliases.items()))
+    return {
+        "core_keys": core_keys,
+        "aliases": aliases,
+        "open": (
+            "The category vocabulary is open: these core keys are a shared starting "
+            "point, not a closed list. When no core key is a good primary fit, author a "
+            "new meaningful category rather than forcing an ill-fitting one."
+        ),
+        "short_selection_rule": (
+            "Choose exactly one primary category: prefer a meaningful epistemic or "
+            "operational role and put the domain in tags, but if the role would only be "
+            "a generic fact, finding, or observation and the domain is the durable lens, "
+            "use a domain category instead."
+        ),
+        "rules": [
+            # The role-first / domain-escape selection guidance is carried once by
+            # `short_selection_rule`; it is deliberately NOT restated here so the
+            # rendered contract never emits the same rule twice.
+            "Use exactly one primary category; kind is the governed form, tags are "
+            "secondary facets, and relations are typed edges.",
+            "The rich form's category defaults to its kind, so `category: decision` is "
+            "redundant when the kind is Decision.",
+            "Create multiple distinct semantic observations and typed relations when the "
+            "source genuinely supports them, but never multiply units or relations to "
+            "satisfy a quota and never duplicate the same fact.",
+        ],
+        "examples": {
+            "role": "- [constraint] Keep retry windows bounded #code ^retry-windows",
+            "domain": "- [design] Keep the public adapter stateless #api ^public-adapter",
+            "rich": (
+                "## Decision\n"
+                "- id: choose-public-adapter\n"
+                "- tags: api\n"
+                "- relations: supports: "
+                "[[Knowledge Base/Notes/Design/Public adapter]]\n"
+                "\n"
+                "Adopt the stateless public adapter so callers can retry safely and the "
+                "role stays the durable lens for this decision.\n"
+            ),
+        },
+    }
 
 
 def build_semantic_authoring_contract() -> SemanticAuthoringContract:
@@ -361,6 +415,7 @@ def build_semantic_authoring_contract() -> SemanticAuthoringContract:
         "minimum_semantic_unit": minimum_semantic_unit,
         "routes": routes,
         "findings": findings,
+        "portable_categories": _build_portable_categories(),
     }
     return contract_from_normative(normative)
 
@@ -375,9 +430,29 @@ def get_semantic_authoring_contract() -> SemanticAuthoringContract:
 
 def bootstrap_projection(
     contract: SemanticAuthoringContract = AUTHORING_CONTRACT,
+    *,
+    profile: str = "full",
 ) -> dict[str, Any]:
-    """Return the complete vault-independent object embedded in every profile."""
-    return contract.as_dict()
+    """Return the vault-independent contract projection for a bootstrap profile.
+
+    ``contract`` stays the first positional parameter so existing callers that
+    pass a contract positionally keep working; ``profile`` is keyword-only so it
+    can never be mistaken for a positionally-passed contract. Full returns every
+    example. Compact and diagnostics remove only the rich example while retaining
+    the complete core keys, aliases, open rule, selection guidance, and compact
+    (role and domain) examples.
+    """
+    projection = contract.as_dict()
+    if profile != "full":
+        portable = dict(projection["portable_categories"])
+        examples = {
+            key: value
+            for key, value in portable["examples"].items()
+            if key != "rich"
+        }
+        portable["examples"] = examples
+        projection["portable_categories"] = portable
+    return projection
 
 
 def contract_identity(
@@ -398,7 +473,13 @@ def render_tool_guidance(
     minimum = contract.minimum_semantic_unit
     routes = contract.routes
     findings = contract.findings
+    portable = contract.portable_categories
     identity = contract_identity(contract)
+    portable_line = (
+        f"Portable categories: {portable['short_selection_rule']} {portable['open']} "
+        f"Role example: {portable['examples']['role']} For the complete core keys, "
+        'aliases, and rich example, call bootstrap(profile="full").'
+    )
     compact_form = (
         f"Under `{compact['canonical_section']}`, write "
         f"`{compact['syntax']}` with an {compact['category']['vocabulary']}-vocabulary "
@@ -424,6 +505,7 @@ def render_tool_guidance(
             minimum["final_unit_rule"],
             compact_form,
             rich_form,
+            portable_line,
             refusal,
         )
     )
@@ -486,6 +568,12 @@ def render_concise(
     minimum = contract.minimum_semantic_unit
     routes = contract.routes
     findings = contract.findings
+    portable = contract.portable_categories
+    portable_keys = ", ".join(f"`{key}`" for key in portable["core_keys"])
+    portable_aliases = ", ".join(
+        f"`{alias}` → `{canonical}`" for alias, canonical in portable["aliases"].items()
+    )
+    portable_rules = " ".join(portable["rules"])
     applies = "; ".join(minimum["applies_when"])
     exemptions = ", ".join(minimum["exemptions"])
     compact_exclusions = "; ".join(compact["exclusions"])
@@ -556,6 +644,12 @@ def render_concise(
         f"{findings['missing_semantic_unit']['compact_remediation']}\n"
         f"- Rich remediation: {findings['missing_semantic_unit']['rich_remediation']}\n"
         f"- {minimum['independence_rule']}\n"
+        f"- Portable categories: {portable['short_selection_rule']} "
+        f"{portable['open']} {portable_rules} Core keys are {portable_keys}. "
+        f"Core aliases are {portable_aliases}. Role example: "
+        f"`{portable['examples']['role']}`. Domain example: "
+        f"`{portable['examples']['domain']}`. Rich example:\n\n"
+        f"```markdown\n{portable['examples']['rich']}```\n"
     )
 
 
