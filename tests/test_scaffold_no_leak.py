@@ -86,9 +86,9 @@ def test_shipped_contract_embeddings_are_canonical_and_public_safe() -> None:
         assert text.count(concise) == 1, f"{path} lost the canonical contract"
 
     # The embedded contract carries only invented, generic examples: the canonical
-    # v3 identity and a governed-relative wikilink target, never a vault path.
-    assert "<!-- exomem-semantic-authoring:v3 " in concise
-    assert "[[Knowledge Base/Notes/Design/Public adapter]]" in concise
+    # v4 identity and a governed-relative wikilink target, never a vault path.
+    assert "<!-- exomem-semantic-authoring:v4 " in concise
+    assert "[[Knowledge Base/Notes/Health/Morning training]]" in concise
 
     # The authoritative, provenance-based gate proves public safety without
     # encoding any maintainer name, vault, or private-token denylist here.

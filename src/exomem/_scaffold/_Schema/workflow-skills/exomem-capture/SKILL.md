@@ -26,7 +26,7 @@ Use when the user asks to save or the session lands on durable reusable knowledg
 8. Run `connect_memory(operation="suggest-links")` before writing compiled notes;
    prefer `edit_memory` or `replace_memory` for near-duplicates.
 
-<!-- exomem-semantic-authoring:v3 sha256:2a754bb2da87cf062876878bfb908a9c8a2bd6ded218443890aa89977057d8d6 -->
+<!-- exomem-semantic-authoring:v4 sha256:837b03b15c3d83f6c6eeb50771f4eaa04e4beaaae0f7d54be249be40ce7685f7 -->
 ## Semantic authoring contract
 
 Every new, replaced, or activated active compiled note needs at least one valid, non-empty semantic unit. Either compact or rich form satisfies the minimum; compact is preferred, and a valid rich unit does not need a duplicate compact restatement.
@@ -55,15 +55,24 @@ Compact grammar: `- [category] content #tags (context) ^anchor`. Parse valid com
 - Compact remediation: Add `## Observations` and `- [operating constraint] Keep retries bounded #reliability`.
 - Rich remediation: Alternatively add `## Decision`, a blank line, and a substantive body.
 - Semantic-unit coverage and relation-review disposition are independent obligations.
-- Portable categories: Choose exactly one primary category: prefer a meaningful epistemic or operational role and put the domain in tags, but if the role would only be a generic fact, finding, or observation and the domain is the durable lens, use a domain category instead. The category vocabulary is open: these core keys are a shared starting point, not a closed list. When no core key is a good primary fit, author a new meaningful category rather than forcing an ill-fitting one. Use exactly one primary category; kind is the governed form, tags are secondary facets, and relations are typed edges. The rich form's category defaults to its kind, so `category: decision` is redundant when the kind is Decision. Create multiple distinct semantic observations and typed relations when the source genuinely supports them, but never multiply units or relations to satisfy a quota and never duplicate the same fact. Core keys are `action`, `assumption`, `code`, `config`, `constraint`, `decision`, `design`, `fact`, `finding`, `insight`, `preference`, `problem`, `question`, `requirement`, `risk`, `technique`. Core aliases are `actions` → `action`, `assumptions` → `assumption`, `configs` → `config`, `configuration` → `config`, `configurations` → `config`, `constraints` → `constraint`, `decisions` → `decision`, `designs` → `design`, `facts` → `fact`, `findings` → `finding`, `insights` → `insight`, `open_question` → `question`, `open_questions` → `question`, `preferences` → `preference`, `problems` → `problem`, `questions` → `question`, `requirements` → `requirement`, `risks` → `risk`, `techniques` → `technique`. Role example: `- [constraint] Keep retry windows bounded #code ^retry-windows`. Domain example: `- [design] Keep the public adapter stateless #api ^public-adapter`. Rich example:
+- Portable categories: Choose exactly one primary category: prefer a meaningful epistemic or operational role and put the domain in tags, but if the role would only be a generic fact, finding, or observation and the domain is the durable lens, use a domain category instead. The category vocabulary is open: these core keys are a shared starting point, not a closed list. When no core key is a good primary fit, author a new meaningful category rather than forcing an ill-fitting one. Use exactly one primary category; kind is the governed form, tags are secondary facets, and relations are typed edges. The rich form's category defaults to its kind, so `category: decision` is redundant when the kind is Decision. Create multiple distinct semantic observations and typed relations when the source genuinely supports them, but never multiply units or relations to satisfy a quota and never duplicate the same fact. Core keys are `action`, `assumption`, `code`, `config`, `constraint`, `decision`, `design`, `fact`, `finding`, `insight`, `preference`, `problem`, `question`, `requirement`, `risk`, `technique`. Core aliases are `actions` → `action`, `assumptions` → `assumption`, `configs` → `config`, `configuration` → `config`, `configurations` → `config`, `constraints` → `constraint`, `decisions` → `decision`, `designs` → `design`, `facts` → `fact`, `findings` → `finding`, `insights` → `insight`, `open_question` → `question`, `open_questions` → `question`, `preferences` → `preference`, `problems` → `problem`, `questions` → `question`, `requirements` → `requirement`, `risks` → `risk`, `techniques` → `technique`. Role example: `- [decision] Relocate to a coastal city next spring #life ^relocation`. Domain example: `- [nutrition] Evening protein improves adherence #experiment ^evening-protein`. Breadth example (life, finance, legal/travel, and career alongside one retained code line):
+
+```markdown
+- [constraint] Keep retry windows bounded #code ^retry-windows
+- [risk] Variable-rate mortgage payments could spike #finance ^mortgage-rate-risk
+- [question] Does the destination require a visa before travel #legal #travel ^visa-requirement
+- [career] Weigh a sabbatical before the next promotion cycle #growth ^sabbatical-timing
+```
+
+Rich example:
 
 ```markdown
 ## Decision
-- id: choose-public-adapter
-- tags: api
-- relations: supports: [[Knowledge Base/Notes/Design/Public adapter]]
+- id: commit-to-morning-training
+- tags: health
+- relations: supports: [[Knowledge Base/Notes/Health/Morning training]]
 
-Adopt the stateless public adapter so callers can retry safely and the role stays the durable lens for this decision.
+Commit to a fixed 6am training block on weekdays so consistency compounds and health stays the durable lens for this decision.
 ```
 
 ## Output contract

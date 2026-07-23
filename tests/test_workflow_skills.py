@@ -78,16 +78,17 @@ def test_workflow_skill_index_lists_first_pass_skills() -> None:
 def test_core_and_standalone_authoring_skills_embed_the_canonical_contract() -> None:
     concise = semantic_authoring.render_concise()
     identity = semantic_authoring.contract_identity()
-    # The concise projection carries the v3 identity marker and the complete
+    # The concise projection carries the v4 identity marker and the complete
     # portable-category teaching; every embedding must therefore be exact.
-    assert "exomem-semantic-authoring:v3 " in concise
+    assert "exomem-semantic-authoring:v4 " in concise
     assert identity.split(" ", 1)[1] in concise  # content digest
     for expected_fragment in (
         "Core keys are `action`",
         "`techniques` → `technique`",
+        "- [decision] Relocate to a coastal city next spring #life ^relocation",
+        "- [nutrition] Evening protein improves adherence #experiment ^evening-protein",
         "- [constraint] Keep retry windows bounded #code ^retry-windows",
-        "- [design] Keep the public adapter stateless #api ^public-adapter",
-        "[[Knowledge Base/Notes/Design/Public adapter]]",
+        "[[Knowledge Base/Notes/Health/Morning training]]",
     ):
         assert expected_fragment in concise
 
