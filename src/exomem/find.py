@@ -301,6 +301,7 @@ def _freshness_key(
     snapshot: FreshnessSnapshot,
     unit_filters: bool = False,
     metadata_only_catalog: bool = False,
+    relation_filter: bool = False,
 ) -> tuple:
     """Freshness inputs that can change this request's answer.
 
@@ -323,22 +324,28 @@ def _freshness_key(
         ("access_policy", access.policy_fingerprint(vault_root)),
     ]
     if unit_filters:
-        from . import relation_registry, semantic_language_registry
+        from . import semantic_language_registry
 
         language = semantic_language_registry.load_registry(vault_root)
-        relations = relation_registry.load_registry(vault_root)
-        parts.extend(
+        parts.append(
             (
-                (
-                    "semantic_language_registry",
-                    language.schema_version,
-                    language.content_hash,
-                ),
-                (
-                    "relation_registry",
-                    relations.core_version,
-                    relations.extension_hash,
-                ),
+                "semantic_language_registry",
+                language.schema_version,
+                language.content_hash,
+            )
+        )
+    if unit_filters or relation_filter:
+        # A relation filter resolves participants against the relation registry
+        # (canonicalization + parent roll-up), so its identity must gate the
+        # cache in every mode — not only when a unit predicate is present.
+        from . import relation_registry
+
+        relations = relation_registry.load_registry(vault_root)
+        parts.append(
+            (
+                "relation_registry",
+                relations.core_version,
+                relations.extension_hash,
             )
         )
     if scope in ("kb", "kb-only"):
@@ -350,15 +357,16 @@ def _freshness_key(
 
         parts.append((".embeddings.sqlite", embeddings.EmbeddingIndex.cache_token(vault_root)))
         parts.append((".clip.sqlite", embeddings.ClipIndex.cache_token(vault_root)))
-        if graph:
-            # The typed graph lane can re-rank on sidecar content, so its in-band
-            # generation token joins the key (same guard as embeddings). Absent
-            # sentinel when the sidecar is unavailable keeps typed-mode and
-            # fallback-mode entries from colliding; never the sidecar mtime, which
-            # a WAL checkpoint moves without a content change.
-            from . import epistemic_graph
+    # The typed graph lane can re-rank on sidecar content (hybrid/vector + graph),
+    # and a relation filter resolves participants against the same sidecar, so its
+    # in-band generation token joins the key whenever either is active — in every
+    # mode for a relation filter. Absent sentinel when the sidecar is unavailable
+    # keeps typed-mode and fallback-mode entries from colliding; never the sidecar
+    # mtime, which a WAL checkpoint moves without a content change.
+    if (mode in ("hybrid", "vector") and graph) or relation_filter:
+        from . import epistemic_graph
 
-            parts.append((".graph.sqlite", epistemic_graph.cache_token(vault_root) or "absent"))
+        parts.append((".graph.sqlite", epistemic_graph.cache_token(vault_root) or "absent"))
     if mode in ("hybrid", "keyword"):
         # Which lexical backend serves (fts5 vs python) changes bm25-lane
         # scores, so a mid-process flip must not hit entries cached under the
@@ -388,6 +396,9 @@ def find(
     exclude_file_types: list[str] | None = None,
     categories: list[str] | None = None,
     kinds: list[str] | None = None,
+    relations: list[str] | None = None,
+    relation_of: str | None = None,
+    relation_direction: str = "any",
     filters: dict[str, Any] | None = None,
     result_level: str = "auto",
     limit: int = 15,
@@ -619,6 +630,18 @@ def find(
         updated_after = updated_before = None
         recency_days = None
 
+    # Resolve the relation filter before any caching so a warming/disabled sidecar
+    # raises the typed outcome instead of being masked by a stale cache hit, and an
+    # unknown relation key is rejected up front. `relation_paths` is None when no
+    # filter is active, a (possibly empty, authoritative) participant set otherwise.
+    relation_active = bool(relations or relation_of)
+    relation_paths, relation_provenance, relation_findings = _resolve_relation_filter(
+        vault_root,
+        relations=relations,
+        relation_of=relation_of,
+        relation_direction=relation_direction,
+    )
+
     # One freshness snapshot + one parsed-page memo per request: every
     # consumer below (hot cache, BM25, resolver, auto-widen, boost passes)
     # shares them instead of re-walking / re-stat'ing.
@@ -660,6 +683,7 @@ def find(
                 snapshot=snapshot,
                 unit_filters=True,
                 metadata_only_catalog=unit_algebra.status == "complete",
+                relation_filter=relation_active,
                 )
             unit_request_key = (
                 "unit",
@@ -669,6 +693,7 @@ def find(
                 scope,
                 mode,
                 filter_key,
+                _relation_key(relations, relation_of, relation_direction),
                 prefer_active,
                 resolved_config,
             )
@@ -700,6 +725,15 @@ def find(
             retrieval_trace=retrieval_trace,
             timings=timings,
         )
+        if relation_paths is not None:
+            # A unit qualifies through its parent page (per-unit edge anchoring is
+            # deferred); annotate the survivors with why the page participated.
+            parents = set(relation_paths)
+            unit_hits = [u for u in unit_hits if u.parent_path in parents]
+            for unit in unit_hits:
+                match = relation_provenance.get(unit.parent_path)
+                if match is not None:
+                    unit.relation_match = _relation_match_dict(match, matched="parent")
         if unit_cache_key is not None and not degraded and not failed:
             with _FIND_CACHE_LOCK:
                 _FIND_CACHE[unit_cache_key] = copy.deepcopy(unit_hits)
@@ -743,6 +777,7 @@ def find(
             updated_before,
             recency_days,
             filter_key,
+            _relation_key(relations, relation_of, relation_direction),
             effective_result_level,
             prefer_compiled,
             prefer_active,
@@ -762,6 +797,7 @@ def find(
                     and structured_filters.plan_index_candidates(filter_plan).status
                     == "complete"
                 ),
+                relation_filter=relation_active,
             )
         cache_key = (request_key, fresh)
         with _span(timings, "cache_lookup"):
@@ -829,6 +865,14 @@ def find(
                 snapshot=snapshot,
                 timings=timings,
             )
+    # Intersect the relation participants into the eligibility seam so the filter
+    # composes AND with every structured filter and gates every ranking lane and
+    # empty-query recall. An authoritative empty participant set yields no hits.
+    if relation_paths is not None:
+        relation_set = set(relation_paths)
+        eligible_paths = (
+            relation_set if eligible_paths is None else (eligible_paths & relation_set)
+        )
 
     # Empty queries always degrade to keyword behavior — there's no signal
     # to embed or score with, just "give me recent stuff that matches the
@@ -982,6 +1026,12 @@ def find(
     if filter_plan.has_unit_predicate:
         with _span(timings, "matched_units"):
             _annotate_matched_units(vault_root, hits, filter_plan)
+
+    if relation_paths is not None:
+        for hit in hits:
+            match = relation_provenance.get(hit.path)
+            if match is not None:
+                hit.relation_match = _relation_match_dict(match, matched="self")
 
     if mixed:
         return _merge_mixed_hits(
@@ -1984,6 +2034,105 @@ def _raise_catalog_outcome(readiness: object) -> None:
         else "warming"
     )
     raise RetrievalIndexWarming(status=public_status)
+
+
+_RELATION_DIRECTIONS = ("any", "outbound", "inbound")
+
+
+def _relation_key(
+    relations: list[str] | None, relation_of: str | None, relation_direction: str
+) -> tuple | None:
+    """Stable hot-cache key fragment for the relation filter (None when inactive)."""
+    if not relations and not relation_of:
+        return None
+    return (tuple(relations or ()), relation_of, relation_direction)
+
+
+def _relation_match_dict(match: Any, *, matched: str = "self") -> dict[str, Any]:
+    """Additive `relation_match` hit annotation, distinct from graph-provenance.
+
+    `matched` is "self" when a page-level hit qualified directly, "parent" when a
+    unit qualified through its parent page. `matched_via` (from the edge) is
+    "relation_type" or "parent_relation" (extension roll-up).
+    """
+    return {
+        "relation_type": match.relation_type,
+        "direction": match.direction,
+        "counterpart": match.counterpart,
+        "matched_via": match.matched_via,
+        "matched": matched,
+    }
+
+
+def _nearest_relation_keys(registry: object, raw: str, *, limit: int = 3) -> list[str]:
+    import difflib
+
+    from . import relation_registry
+
+    label = relation_registry.normalize_relation(raw)
+    keys = sorted(getattr(registry, "keys", frozenset()))
+    return difflib.get_close_matches(label, keys, n=limit, cutoff=0.4)
+
+
+def _resolve_relation_filter(
+    vault_root: Path,
+    *,
+    relations: list[str] | None,
+    relation_of: str | None,
+    relation_direction: str,
+) -> tuple[frozenset[str] | None, dict[str, Any], tuple[dict[str, str], ...]]:
+    """Resolve the relation filter to a participant path set (None when inactive),
+    plus per-path provenance and advisory findings.
+
+    Each requested relation is canonicalized through the registry; an unknown key
+    raises ``INVALID_RELATION_FILTER`` with nearest-canonical suggestions (never a
+    silent empty). A missing or stale sidecar raises the typed warming outcome and
+    schedules a single-flight rebuild; a disabled index raises
+    ``temporarily_unavailable``. An empty participant set from a current sidecar is
+    authoritative.
+    """
+    if not relations and not relation_of:
+        return None, {}, ()
+    if relation_direction not in _RELATION_DIRECTIONS:
+        raise cli_ops.OpError(
+            "INVALID_RELATION_FILTER",
+            f"relation_direction must be one of {list(_RELATION_DIRECTIONS)}, "
+            f"got {relation_direction!r}",
+        )
+    from . import epistemic_graph, relation_registry
+
+    registry = relation_registry.load_registry(vault_root)
+    canonical: list[str] = []
+    findings: list[dict[str, str]] = []
+    for raw in relations or ():
+        resolution = registry.resolve(raw)
+        if resolution.canonical is None or resolution.status == "unregistered":
+            raise cli_ops.OpError(
+                "INVALID_RELATION_FILTER",
+                f"unknown relation {raw!r}",
+                details={
+                    "relation": raw,
+                    "suggestions": _nearest_relation_keys(registry, raw),
+                },
+            )
+        canonical.append(resolution.canonical)
+        if resolution.status == "deprecated" and resolution.replacement:
+            findings.append(
+                {
+                    "code": "relation_deprecated",
+                    "relation": resolution.canonical,
+                    "replaced_by": resolution.replacement,
+                }
+            )
+    result = epistemic_graph.EpistemicGraphIndex(vault_root).relation_participants(
+        canonical, anchor=relation_of, direction=relation_direction
+    )
+    if result.status == "temporarily_unavailable":
+        raise RetrievalIndexWarming(status="temporarily_unavailable")
+    if result.status == "warming":
+        epistemic_graph.schedule_background_rebuild(vault_root)
+        raise RetrievalIndexWarming(status="warming")
+    return result.paths, dict(result.provenance), tuple(findings)
 
 
 def _resolve_eligible_filter_paths(

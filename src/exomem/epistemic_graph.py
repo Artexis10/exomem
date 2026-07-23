@@ -12,6 +12,7 @@ import json
 import os
 import re
 import sqlite3
+import threading
 from collections.abc import Iterable
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
@@ -1234,6 +1235,40 @@ def cache_token(vault_root: Path) -> tuple | None:
         values.get("extension_registry_hash"),
         values.get("generation"),
     )
+
+
+_REBUILD_LOCK = threading.Lock()
+_REBUILDING: set[str] = set()
+
+
+def schedule_background_rebuild(vault_root: Path) -> bool:
+    """Kick a single-flight background rebuild of the sidecar and return whether
+    one was started.
+
+    The relation-filter warming path calls this so a missing or stale sidecar
+    converges without blocking the request. At most one rebuild per vault runs at
+    a time (a second call while one is in flight is a no-op); the daemon thread
+    swallows its own errors so a failed rebuild never surfaces on the request.
+    """
+    if not graph_enabled():
+        return False
+    key = str(Path(vault_root).resolve())
+    with _REBUILD_LOCK:
+        if key in _REBUILDING:
+            return False
+        _REBUILDING.add(key)
+
+    def _run() -> None:
+        try:
+            EpistemicGraphIndex(vault_root).rebuild_all()
+        except Exception:  # noqa: BLE001 - a background rebuild must never raise
+            pass
+        finally:
+            with _REBUILD_LOCK:
+                _REBUILDING.discard(key)
+
+    threading.Thread(target=_run, name="exomem-graph-rebuild", daemon=True).start()
+    return True
 
 
 def upsert_after_write(vault_root: Path, written_paths: list[Path]) -> None:
