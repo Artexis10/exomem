@@ -2731,20 +2731,62 @@ def test_many_busy_prune_candidates_do_not_starve_supported_writer(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     home = tmp_path / "home"
-    root = checkpoint.client_state_root(home, "codex")
-    root.mkdir(parents=True)
-    root.chmod(0o700)
-    for number in range(20):
-        busy = root / f"busy-{number:02d}"
+    client = "codex"
+    root_path = checkpoint.client_state_root(home, client)
+    root_path.mkdir(parents=True)
+    root_path.chmod(0o700)
+    # The point of this test is sustained contention: ONE prune call must walk
+    # SEVERAL busy candidates while the writer tries to get in. How many a call
+    # walks differs by enumeration path. The directory window (POSIX) yields up
+    # to MAX_PRUNE_ENUM_ENTRIES real entries. The portable catalog window
+    # (Windows, and forced elsewhere) inspects that many *slots* of a 512-slot
+    # open-addressed table, so a sparse root leaves almost all of them empty and
+    # the call walks one -- the "many" scenario never happens there. Twenty bare
+    # mkdirs, as this test first had them, additionally left the catalog scan
+    # empty entirely, because Windows never enumerates from the directory.
+    #
+    # Register enough real, catalogued candidates that the first window is dense
+    # on BOTH paths. The count is deterministic (the busy-NNNN hash is fixed):
+    # 256 registrations put ~6 live entries in the catalog's first 16 slots and
+    # fill the directory window, so each path walks several. Floor asserted
+    # below; the exact number is a property of the two windows, not of this test.
+    busy_names = [f"busy-{number:04d}" for number in range(256)]
+    for name in busy_names:
+        busy = root_path / name
         busy.mkdir()
         busy.chmod(0o700)
+    with checkpoint._open_secure_directory(root_path, create=False) as root:
+        with checkpoint._advisory_lock_at(root, ".root.lock") as root_lock:
+            for name in busy_names:
+                checkpoint._register_prune_catalog_entry(root, root_lock, name)
+
+    # A busy candidate holds .root.lock for this long before giving up. Only
+    # MAX_PRUNE_ENUM_ENTRIES candidates are scanned per call, so total
+    # contention stays bounded by their product however large the budget is --
+    # comfortably inside the writer's own lock timeout, which is what keeps
+    # widening the budget below from turning into real starvation.
+    busy_hold = 0.01
+    # prune_expired charges its whole run to MAX_PRUNE_LOCK_SECONDS, setup
+    # included: opening the root, acquiring .root.lock (which fsyncs), the
+    # window scan, and one stat per scanned entry. On a loaded runner setup
+    # alone can exhaust the 50ms budget, and the prune then exits before
+    # touching a single candidate -- correct behaviour, but it leaves this test
+    # with nothing to observe and no event to wait on. Budget enforcement is
+    # covered by test_prune_respects_total_budget_when_root_lock_is_held;
+    # widening it here leaves contention as the only thing under test.
+    monkeypatch.setattr(checkpoint, "MAX_PRUNE_LOCK_SECONDS", 2.0)
+
     real_lock = checkpoint._advisory_lock_at
     first_busy = threading.Event()
+    busy_guard = threading.Lock()
+    busy_entries: list[float] = []
 
     class BusyLock:
         def __enter__(self):
+            with busy_guard:
+                busy_entries.append(time.monotonic())
             first_busy.set()
-            time.sleep(0.06)
+            time.sleep(busy_hold)
             raise TimeoutError("busy")
 
         def __exit__(self, *_: object) -> None:
@@ -2760,27 +2802,42 @@ def test_many_busy_prune_candidates_do_not_starve_supported_writer(
         target=checkpoint.prune_expired,
         kwargs={
             "home": home,
-            "client": "codex",
+            "client": client,
             "current_session": "other",
             "now_ns": checkpoint.RETENTION_NS + 1,
         },
     )
     prune.start()
-    assert first_busy.wait(timeout=1)
-    started = time.monotonic()
+    try:
+        assert first_busy.wait(timeout=10), "prune never reached a busy candidate"
+        started = time.monotonic()
+        outcome = checkpoint.write_checkpoint(
+            _event(client=client, session_id="writer"),
+            home,
+            observed_at_ns=100,
+        )
+        elapsed = time.monotonic() - started
+    finally:
+        prune.join(timeout=10)
 
-    outcome = checkpoint.write_checkpoint(
-        _event(client="codex", session_id="writer"),
-        home,
-        observed_at_ns=100,
-    )
-    elapsed = time.monotonic() - started
-    prune.join(timeout=3)
-
+    # The writer has no stake in the prune's work and must land regardless: a
+    # failed acquisition surfaces as a non-written status, so this assertion is
+    # the starvation check itself rather than a proxy for it.
     assert outcome["status"] == "written"
-    assert elapsed < 0.45
     assert not prune.is_alive()
-    assert (checkpoint.session_state_dir(home, "codex", "writer") / "current.json").is_file()
+    assert (checkpoint.session_state_dir(home, client, "writer") / "current.json").is_file()
+    # "Many" is the whole point, and one candidate is not many -- a single walk
+    # is what the sparse fixture used to (accidentally) assert, and it never
+    # reproduced starvation. Require several so the writer is genuinely landing
+    # amid repeated .root.lock hand-offs. The floor sits well under both paths'
+    # deterministic counts (catalog ~6, directory up to 16) so it flags a
+    # regression back toward one candidate without pinning window internals.
+    with busy_guard:
+        observed_busy = len(busy_entries)
+    assert observed_busy >= 3, (
+        f"expected sustained contention, prune walked only {observed_busy} candidate(s)"
+    )
+    assert elapsed < checkpoint.MAX_PRUNE_ENUM_ENTRIES * busy_hold + 0.3
 
 
 def test_prune_respects_total_budget_when_root_lock_is_held(tmp_path: Path) -> None:
