@@ -362,6 +362,113 @@ def test_move_file_refuses_sources(vault: Path) -> None:
     assert exc.value.code == "APPEND_ONLY"
 
 
+_SOURCE_REL = "Knowledge Base/Sources/Articles/2026-05-04-best-egcg-supplements.md"
+
+
+def test_promoting_a_source_into_evidence_carries_bytes_verbatim(vault: Path) -> None:
+    """A Source that becomes proof-bearing can be filed into its case.
+
+    Source-vs-Evidence is a judgement about purpose, made at capture time when
+    the answer is often unknowable — a receipt is reference material until the
+    appliance fails. Refusing the move left re-capture through `preserve` as the
+    only route, duplicating a file whose whole point is to be singular.
+    """
+    dst_rel = "Knowledge Base/Evidence/warranty-2026/2026-05-04-best-egcg-supplements.md"
+    before = (vault / _SOURCE_REL).read_text(encoding="utf-8")
+
+    result = move_module.move_file(
+        vault,
+        old_path=_SOURCE_REL,
+        new_path=dst_rel,
+        update_wikilinks=False,
+        today=TODAY,
+        promotion_reason="supports the warranty claim opened 2026-05",
+    )
+
+    assert result is not None
+    assert (vault / dst_rel).read_text(encoding="utf-8") == before
+    assert not (vault / _SOURCE_REL).exists()
+    log = (vault / "Knowledge Base" / "log.md").read_text(encoding="utf-8")
+    assert "supports the warranty claim opened 2026-05" in log
+
+
+def test_product_surface_passes_the_promotion_reason_through(vault: Path) -> None:
+    """The reason must survive the product command, not just the leaf.
+
+    `op_manage_memory_file` routes operation="move" to `op_move_file`. Adding
+    the parameter only to the leaf left the promotion unreachable from MCP: the
+    router dropped it, so every promotion arrived reasonless and was refused.
+    """
+    from exomem import commands
+
+    result = commands.op_manage_memory_file(
+        vault,
+        operation="move",
+        old_path=_SOURCE_REL,
+        new_path="Knowledge Base/Evidence/warranty-2026/promoted.md",
+        update_wikilinks=False,
+        promotion_reason="warranty claim opened 2026-05",
+    )
+
+    assert result is not None
+    assert (vault / "Knowledge Base/Evidence/warranty-2026/promoted.md").exists()
+
+
+def test_promotion_requires_a_stated_reason(vault: Path) -> None:
+    """Reclassifying to proof-bearing is a judgement that must be recorded."""
+    with pytest.raises(move_module.MoveFileError) as exc:
+        move_module.move_file(
+            vault,
+            old_path=_SOURCE_REL,
+            new_path="Knowledge Base/Evidence/warranty-2026/x.md",
+            update_wikilinks=False,
+            today=TODAY,
+        )
+    assert exc.value.code == "PROMOTION_REASON_REQUIRED"
+    assert (vault / _SOURCE_REL).exists()
+
+
+def test_evidence_is_never_demoted_even_with_a_reason(vault: Path) -> None:
+    """A case scope must stay complete; removing an item changes what it claims."""
+    evidence_rel = "Knowledge Base/Evidence/case-a/receipt.md"
+    (vault / evidence_rel).parent.mkdir(parents=True, exist_ok=True)
+    (vault / evidence_rel).write_text("receipt bytes\n", encoding="utf-8")
+
+    with pytest.raises(move_module.MoveFileError) as exc:
+        move_module.move_file(
+            vault,
+            old_path=evidence_rel,
+            new_path="Knowledge Base/Sources/Other/receipt.md",
+            update_wikilinks=False,
+            today=TODAY,
+            promotion_reason="turns out it was just reference",
+        )
+
+    assert exc.value.code == "APPEND_ONLY"
+    assert "complete" in exc.value.reason
+    assert (vault / evidence_rel).exists()
+
+
+def test_outside_content_still_routes_through_the_capture_writers(vault: Path) -> None:
+    """Landing content from a non-append-only tree still goes via add/preserve."""
+    note_rel = "Knowledge Base/Notes/Insights/not-evidence.md"
+    (vault / note_rel).parent.mkdir(parents=True, exist_ok=True)
+    (vault / note_rel).write_text("---\ntype: insight\n---\n# X\n", encoding="utf-8")
+
+    with pytest.raises(move_module.MoveFileError) as exc:
+        move_module.move_file(
+            vault,
+            old_path=note_rel,
+            new_path="Knowledge Base/Evidence/case-a/not-evidence.md",
+            update_wikilinks=False,
+            today=TODAY,
+            promotion_reason="should not matter",
+        )
+
+    assert exc.value.code == "APPEND_ONLY"
+    assert "preserve" in exc.value.reason
+
+
 def test_move_file_allows_intra_sources_relocation(vault: Path) -> None:
     """Relocating WITHIN Sources/ (e.g. into a themed sub-folder) is allowed.
 

@@ -2147,6 +2147,18 @@
           "default": null,
           "description": "Audit reason for a reviewed-none disposition."
         },
+        "promotion_reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Required only for a move that promotes Sources/ to Evidence/; recorded in the activity log as the audit trail for the reclassification."
+        },
         "response_detail": {
           "default": "compact",
           "description": "Successful committed mutation detail: compact (default), full diagnostics, or legacy raw leaf result.",
