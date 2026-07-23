@@ -718,7 +718,8 @@ class EpistemicGraphIndex:
         index is disabled. It never scans the corpus and never false-empties.
         """
         key_set = {str(k) for k in keys if k}
-        if not key_set:
+        anchor_rel = _with_md(anchor) if anchor else None
+        if not key_set and anchor_rel is None:
             return RelationFilterResult(status="available")
         if not graph_enabled():
             return RelationFilterResult(
@@ -729,22 +730,45 @@ class EpistemicGraphIndex:
         conn = self._open_read_snapshot()
         if conn is None:
             return RelationFilterResult(status="warming")
-        anchor_rel = _with_md(anchor) if anchor else None
+        select = (
+            "SELECT s.path, d.path, e.relation_type, e.rowid "
+            "FROM graph_edges e "
+            "JOIN graph_nodes s ON s.node_key = e.src_key "
+            "JOIN graph_nodes d ON d.node_key = e.dst_key "
+        )
         try:
-            placeholders = ",".join("?" for _ in key_set)
-            params = list(key_set)
-            select = (
-                "SELECT s.path, d.path, e.relation_type, e.rowid "
-                "FROM graph_edges e "
-                "JOIN graph_nodes s ON s.node_key = e.src_key "
-                "JOIN graph_nodes d ON d.node_key = e.dst_key "
-            )
-            rows = conn.execute(
-                f"{select} WHERE e.relation_type IN ({placeholders}) "
-                f"UNION {select} WHERE e.parent_relation IN ({placeholders}) "
-                "ORDER BY 4",
-                params + params,
-            ).fetchall()
+            if key_set:
+                # Edges whose canonical relation_type or parent_relation matches a
+                # requested key (two indexed lookups UNIONed — an OR across the two
+                # columns would defeat both indexes). Anchor narrowing, when set, is
+                # applied in Python below.
+                placeholders = ",".join("?" for _ in key_set)
+                params = list(key_set)
+                rows = conn.execute(
+                    f"{select} WHERE e.relation_type IN ({placeholders}) "
+                    f"UNION {select} WHERE e.parent_relation IN ({placeholders}) "
+                    "ORDER BY 4",
+                    params + params,
+                ).fetchall()
+            else:
+                # Anchor alone (no relation keys): every typed edge touching the
+                # anchor qualifies. Resolve the anchor's node keys, then two indexed
+                # endpoint lookups — never an unfiltered edge scan.
+                anchor_node_keys = [
+                    row[0]
+                    for row in conn.execute(
+                        "SELECT node_key FROM graph_nodes WHERE path = ?", (anchor_rel,)
+                    ).fetchall()
+                ]
+                if not anchor_node_keys:
+                    return RelationFilterResult(status="available")
+                kp = ",".join("?" for _ in anchor_node_keys)
+                rows = conn.execute(
+                    f"{select} WHERE e.relation_type IS NOT NULL AND e.src_key IN ({kp}) "
+                    f"UNION {select} WHERE e.relation_type IS NOT NULL AND e.dst_key IN ({kp}) "
+                    "ORDER BY 4",
+                    anchor_node_keys + anchor_node_keys,
+                ).fetchall()
         except sqlite3.Error:
             return RelationFilterResult(status="warming")
         finally:
@@ -756,7 +780,13 @@ class EpistemicGraphIndex:
         def _add(page: str, counterpart: str, relation_type: str | None, cand_dir: str) -> None:
             if anchor_rel is not None and page == anchor_rel:
                 return
-            matched_via = "relation_type" if relation_type in key_set else "parent_relation"
+            # In anchor-alone mode there is no requested key; the edge's canonical
+            # relation is what matched.
+            matched_via = (
+                "relation_type"
+                if (not key_set or relation_type in key_set)
+                else "parent_relation"
+            )
             paths.add(page)
             provenance.setdefault(
                 page, RelationMatch(relation_type, cand_dir, counterpart, matched_via)

@@ -508,6 +508,11 @@ def op_bootstrap(
                     "use filters for typed page.* or unit.* predicates; categories and "
                     "kinds are shortcuts compiled into the same bounded filter plan"
                 ),
+                "relation_filter": (
+                    "relations/relation_of/relation_direction recall pages by typed edge "
+                    "(e.g. supports, contradicts, supersedes), optionally anchored to one "
+                    "page; unknown relations are rejected, never silently empty"
+                ),
                 "filter_only": (
                     "an empty query with filters is a filter-only lookup ordered by the "
                     "documented filtered-most-recent tuple, not a fabricated text match"

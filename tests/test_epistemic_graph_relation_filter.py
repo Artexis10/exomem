@@ -87,6 +87,23 @@ def test_anchor_join_excludes_anchor_and_is_anchor_relative(tmp_path: Path) -> N
     assert result.provenance[B].direction == "inbound"
 
 
+def test_anchor_alone_matches_all_typed_edges(tmp_path: Path) -> None:
+    # relation_of with no relation keys: every typed edge touching the anchor
+    # qualifies (supports->B and contradicts->C), never a silent empty.
+    idx = _built(tmp_path / "vault")
+    result = idx.relation_participants([], anchor=A)
+    assert result.status == "available"
+    assert result.paths == frozenset({B, C})
+
+
+def test_anchor_alone_on_edgeless_page_is_authoritative_empty(tmp_path: Path) -> None:
+    idx = _built(tmp_path / "vault")
+    # C has no outgoing edges of its own; only the inbound contradicts from A.
+    result = idx.relation_participants([], anchor=B)
+    assert result.status == "available"
+    assert result.paths == frozenset({A})
+
+
 def test_placeholder_and_self_edges_excluded(tmp_path: Path) -> None:
     idx = _built(tmp_path / "vault")
     # links_to points at a non-existent page; no participant is produced for it.

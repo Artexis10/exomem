@@ -71,6 +71,27 @@ def test_symmetric_relation_ignores_direction(tmp_path: Path) -> None:
     assert _paths(vault, relations=["contradicts"], relation_direction="outbound") == {A, C}
 
 
+def test_relation_of_alone_matches_all_edges(tmp_path: Path) -> None:
+    # An anchor with no relation keys must match every typed edge touching it,
+    # never a silent empty (A supports B, A contradicts C).
+    vault = _vault(tmp_path)
+    assert _paths(vault, relation_of=A) == {B, C}
+
+
+def test_mixed_result_level_applies_relation_filter_to_units(tmp_path: Path) -> None:
+    # In mixed mode the unit half must be gated by the relation filter too — a unit
+    # whose parent page does not participate must not leak through.
+    vault = _vault(tmp_path)
+    hits = find_module.find(
+        vault, query="", relations=["supports"], result_level="mixed", limit=15
+    )
+    parents = set()
+    for h in hits:
+        parents.add(getattr(h, "parent_path", None) or getattr(h, "path", None))
+    # Only A and B participate in a supports edge; C must not appear via any unit.
+    assert C not in parents
+
+
 def test_filter_still_applies_with_graph_disabled_lane(tmp_path: Path) -> None:
     # graph=False turns off the graph ranking lane, but the relation filter is
     # eligibility, not lane fusion — it must still apply.

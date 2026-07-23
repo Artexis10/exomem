@@ -5,7 +5,8 @@
 ### Requirement: Relation Participant Selection
 
 `find` and `ask_memory` SHALL accept `relations` (a list of relation keys),
-`relation_of` (an optional anchor page path or memory identifier), and
+`relation_of` (an optional anchor page as a vault-relative path; memory-identifier
+resolution at the command layer is a documented follow-up), and
 `relation_direction` (`outbound`, `inbound`, or `any`; default `any`). A KB page
 qualifies when it participates in at least one typed edge whose canonical
 `relation_type` equals a requested key or whose `parent_relation` equals it
@@ -29,23 +30,24 @@ page; unresolved-placeholder endpoints SHALL NOT qualify a page.
 ### Requirement: Relation Keys Resolve Through The Governed Registry
 
 Requested relation keys SHALL be canonicalized through the relation registry:
-canonical keys and aliases resolve; deprecated keys resolve, still match, and
-produce a bounded advisory finding naming the replacement. A key that resolves
-to nothing in the closed governed vocabulary SHALL raise a typed
-`INVALID_RELATION_FILTER` error naming the offending key with a bounded list of
-nearest canonical suggestions — it MUST NOT silently return an empty result.
-Matching against `raw_relation` text of unregistered edges is out of scope and
-MUST NOT occur.
+canonical keys and aliases resolve; deprecated keys resolve and still match. A
+bounded advisory finding naming the replacement is computed internally;
+surfacing it to the response envelope is a documented follow-up (v1 matches
+without blocking). A key that resolves to nothing in the closed governed
+vocabulary SHALL raise a typed `INVALID_RELATION_FILTER` error naming the
+offending key with a bounded list of nearest canonical suggestions — it MUST NOT
+silently return an empty result. Matching against `raw_relation` text of
+unregistered edges is out of scope and MUST NOT occur.
 
 #### Scenario: Typo is rejected with suggestions
 
 - **WHEN** `find` runs with `relations=["implments"]`
 - **THEN** the request fails with `INVALID_RELATION_FILTER` naming `implments` and suggesting `implements`, and no retrieval work is performed
 
-#### Scenario: Deprecated key still matches with advice
+#### Scenario: Deprecated key still matches
 
 - **WHEN** a registry marks a relation key deprecated with a replacement and a request uses it
-- **THEN** matching edges qualify and the response carries an advisory finding naming the replacement
+- **THEN** matching edges qualify (the deprecated key is not rejected), and the replacement advisory is computed for a future response-envelope surface
 
 ### Requirement: Relation Filters Never Return A False Empty
 

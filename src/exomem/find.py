@@ -635,7 +635,10 @@ def find(
     # unknown relation key is rejected up front. `relation_paths` is None when no
     # filter is active, a (possibly empty, authoritative) participant set otherwise.
     relation_active = bool(relations or relation_of)
-    relation_paths, relation_provenance, relation_findings = _resolve_relation_filter(
+    # `_relation_findings` (deprecated-key advisories) is computed but not yet
+    # surfaced to the response envelope — a documented follow-up; the deprecated
+    # key still resolves and matches correctly.
+    relation_paths, relation_provenance, _relation_findings = _resolve_relation_filter(
         vault_root,
         relations=relations,
         relation_of=relation_of,
@@ -851,6 +854,15 @@ def find(
             )
         if retrieval_trace is not None:
             retrieval_trace.snapshot_result_plan("unit")
+        if relation_paths is not None:
+            # The mixed unit half is produced before the eligibility seam, so gate
+            # it here through the parent page exactly as the unit-only branch does.
+            parents = set(relation_paths)
+            mixed_unit_hits = [u for u in mixed_unit_hits if u.parent_path in parents]
+            for unit in mixed_unit_hits:
+                match = relation_provenance.get(unit.parent_path)
+                if match is not None:
+                    unit.relation_match = _relation_match_dict(match, matched="parent")
 
     # "kb-only" is the strict opt-out (legacy KB-only behavior); "kb" walks the
     # same KB tree but auto-widens to the vault below when it underfills. Both
