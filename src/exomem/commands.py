@@ -2923,10 +2923,14 @@ def op_move_file(
     new_path: str,
     update_wikilinks: bool = True,
     allow_curated: bool = False,
+    promotion_reason: str | None = None,
 ) -> dict:
     """Tier 2: relocate a file, optionally rewriting inbound wikilinks.
 
-    Refuses moves out of OR into Sources/ and Evidence/ (append-only).
+    Refuses moves out of OR into Sources/ and Evidence/ (append-only), with one
+    exception: Sources/ -> Evidence/ is a promotion, permitted when
+    `promotion_reason` names the claim, case, or record the item is now
+    preserved for. Evidence/ is never demoted, so a case scope stays complete.
     Curated trees on either end need `allow_curated=true`. Refuses to
     overwrite existing destinations.
 
@@ -2940,10 +2944,13 @@ def op_move_file(
         new_path: Vault-relative destination (must not exist).
         update_wikilinks: Default true.
         allow_curated: Required if either end is in a curated tree.
+        promotion_reason: Required only for a Sources/ -> Evidence/ promotion;
+            recorded in the activity log as the audit trail for the
+            reclassification.
 
     Returns: {old_path, new_path, wikilinks_updated, files_touched, warnings}.
     Errors: INVALID_PATH; NOT_FOUND; DEST_EXISTS; APPEND_ONLY;
-            CURATED_PROTECTED.
+            CURATED_PROTECTED; PROMOTION_REASON_REQUIRED.
     """
     old_path = _resolve_memory_identifier(vault_root, old_path)
     try:
@@ -2953,6 +2960,7 @@ def op_move_file(
             new_path=new_path,
             update_wikilinks=update_wikilinks,
             allow_curated=allow_curated,
+            promotion_reason=promotion_reason,
         )
     except move_file_module.MoveFileError as e:
         raise ValueError(f"{e.code}: {e.reason}") from e
@@ -5140,6 +5148,7 @@ def op_manage_memory_file(
     relation_disposition: str | None = None,
     relation_review_hash: str | None = None,
     relation_review_reason: str | None = None,
+    promotion_reason: str | None = None,
 ) -> dict:
     """Manage files through one governed file operation.
 
@@ -5176,6 +5185,9 @@ def op_manage_memory_file(
         relation_disposition: Reviewed relation outcome for semantic create or append.
         relation_review_hash: Draft or transition hash covered by the relation review.
         relation_review_reason: Audit reason for a reviewed-none disposition.
+        promotion_reason: Required only for a move that promotes Sources/ to
+            Evidence/; recorded in the activity log as the audit trail for the
+            reclassification.
     """
     creation_review_requested = any(
         value is not None
@@ -5253,6 +5265,7 @@ def op_manage_memory_file(
             new_path=new_path,
             update_wikilinks=update_wikilinks,
             allow_curated=allow_curated,
+            promotion_reason=promotion_reason,
         )
     if operation == "delete":
         return op_delete(

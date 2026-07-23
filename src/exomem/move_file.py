@@ -77,6 +77,7 @@ def move_file(
     update_wikilinks: bool = True,
     allow_curated: bool = False,
     today: dt.date | None = None,
+    promotion_reason: str | None = None,
 ) -> MoveFileResult:
     try:
         old_abs, old_rel = resolve_under_vault(
@@ -109,14 +110,49 @@ def move_file(
     src_append = in_append_only_tree(old_rel)
     dst_append = in_append_only_tree(new_rel)
     intra_append = bool(src_append) and src_append == dst_append
-    if not intra_append:
+    # Sources -> Evidence is a *promotion*: the same raw item, reclassified once
+    # it becomes proof-bearing. Whether an item is a Source or Evidence is a
+    # judgement about purpose, made at capture time when the answer is often
+    # unknowable — a receipt is reference material until the appliance fails.
+    # The move carries bytes verbatim, exactly like a sanctioned intra-tree
+    # relocation, so content immutability is untouched.
+    #
+    # The reverse is refused, and the asymmetry is the point. `Evidence/<scope>/`
+    # claims to hold everything preserved for that case; handing over a case
+    # means handing over that folder. Removing an item alters what the folder
+    # claims to contain — bytes unchanged, integrity broken. `Sources/` carries
+    # no such completeness property, so promoting out of it subtracts from
+    # nothing.
+    promotion = src_append == "Sources" and dst_append == "Evidence"
+    if promotion and not (promotion_reason or "").strip():
+        raise MoveFileError(
+            code="PROMOTION_REASON_REQUIRED",
+            reason=(
+                f"promoting {old_rel} into {dst_append}/ reclassifies it as "
+                f"proof-bearing; supply `promotion_reason` naming the claim, "
+                f"case, dispute, or record it is being preserved for."
+            ),
+        )
+    if not intra_append and not promotion:
+        if src_append == "Evidence":
+            raise MoveFileError(
+                code="APPEND_ONLY",
+                reason=(
+                    f"{old_rel} is in Evidence/ and cannot be moved out. A case "
+                    f"scope must stay complete: handing over a case means "
+                    f"handing over its folder, so removing an item changes what "
+                    f"that folder claims to contain. Relocation WITHIN "
+                    f"Evidence/ is allowed."
+                ),
+            )
         if src_append:
             raise MoveFileError(
                 code="APPEND_ONLY",
                 reason=(
                     f"{old_rel} is in {src_append}/ which is append-only "
                     f"(SKILL.md rule 2). Moves OUT of {src_append}/ are "
-                    f"forbidden; relocation WITHIN {src_append}/ is allowed."
+                    f"forbidden; relocation WITHIN {src_append}/ is allowed, "
+                    f"and Sources/ may be promoted into Evidence/."
                 ),
             )
         if dst_append:
@@ -445,6 +481,11 @@ def move_file(
     )
     if src_curated or dst_curated:
         log_body += f" allow_curated=true (tree: {src_curated or dst_curated})."
+    if promotion:
+        # The reason is the whole audit trail for a reclassification: it records
+        # which claim or case made this raw item proof-bearing, at the moment
+        # someone judged that it had.
+        log_body += f" Promoted Sources → Evidence: {promotion_reason.strip()}"
     log_warning = write_log_entry(
         vault_root,
         date_iso=date_iso,
