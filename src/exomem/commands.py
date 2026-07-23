@@ -611,6 +611,9 @@ def op_find(
     exclude_file_types: list[str] | None = None,
     categories: list[str] | None = None,
     kinds: list[str] | None = None,
+    relations: list[str] | None = None,
+    relation_of: str | None = None,
+    relation_direction: str = "any",
     filters: dict[str, Any] | None = None,
     result_level: str = "auto",
     limit: int = 15,
@@ -651,6 +654,15 @@ def op_find(
         exclude_file_types: Drop these kinds from results (same vocabulary).
         categories: Semantic-unit category shortcuts, such as config or rule.
         kinds: Semantic-unit kind shortcuts, such as decision or claim.
+        relations: Typed-relation filter — recall pages participating in a typed
+            edge of these relations (e.g. supports, contradicts, supersedes).
+            OR'd within the list; extension relations roll up to their core
+            parent. An unknown relation is rejected, never silently empty.
+        relation_of: Restrict `relations` to pages connected to this anchor page
+            (vault-relative path); the anchor itself is excluded from results.
+        relation_direction: outbound, inbound, or any (default), relative to the
+            anchor when `relation_of` is set else the candidate page. Ignored for
+            symmetric relations (contradicts, duplicates, relates_to).
         filters: Structured page/unit metadata filters.
         result_level: auto, page, unit, or mixed. Auto preserves page recall
             unless semantic-unit filters request independently ranked units.
@@ -860,6 +872,9 @@ def op_find(
         exclude_file_types=exclude_file_types,
         categories=categories,
         kinds=kinds,
+        relations=relations,
+        relation_of=relation_of,
+        relation_direction=relation_direction,
         filters=filters,
         result_level=result_level,
         limit=limit,
@@ -3293,6 +3308,9 @@ def op_ask_memory(
     exclude_file_types: list[str] | None = None,
     categories: list[str] | None = None,
     kinds: list[str] | None = None,
+    relations: list[str] | None = None,
+    relation_of: str | None = None,
+    relation_direction: str = "any",
     filters: dict[str, Any] | None = None,
     result_level: str = "auto",
     limit: int = 15,
@@ -3329,6 +3347,13 @@ def op_ask_memory(
         exclude_file_types: Optional artifact kinds to exclude.
         categories: Semantic-unit category shortcuts, such as config or rule.
         kinds: Semantic-unit kind shortcuts, such as decision or claim.
+        relations: Typed-relation filter — recall pages participating in a typed
+            edge of these relations (e.g. supports, contradicts, supersedes),
+            OR'd within the list, extensions rolling up to their core parent.
+        relation_of: Restrict `relations` to pages connected to this anchor page
+            (vault-relative path); the anchor is excluded from results.
+        relation_direction: outbound, inbound, or any (default). Ignored for
+            symmetric relations.
         filters: Structured page/unit metadata filters.
         result_level: auto, page, unit, or mixed.
         limit: Max hits. Default 15.
@@ -3358,6 +3383,9 @@ def op_ask_memory(
         exclude_file_types=exclude_file_types,
         categories=categories,
         kinds=kinds,
+        relations=relations,
+        relation_of=relation_of,
+        relation_direction=relation_direction,
         filters=filters,
         result_level=result_level,
         limit=limit,

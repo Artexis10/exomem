@@ -457,6 +457,38 @@
           "default": null,
           "description": "Semantic-unit kind shortcuts, such as decision or claim."
         },
+        "relations": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Typed-relation filter — recall pages participating in a typed edge of these relations (e.g. supports, contradicts, supersedes), OR'd within the list, extensions rolling up to their core parent."
+        },
+        "relation_of": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Restrict `relations` to pages connected to this anchor page (vault-relative path); the anchor is excluded from results."
+        },
+        "relation_direction": {
+          "default": "any",
+          "description": "outbound, inbound, or any (default). Ignored for symmetric relations.",
+          "type": "string"
+        },
         "filters": {
           "anyOf": [
             {

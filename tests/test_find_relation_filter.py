@@ -130,6 +130,25 @@ def test_no_relation_filter_is_unaffected(tmp_path: Path) -> None:
     assert _paths(vault) == {A, B, C}
 
 
+def test_op_ask_memory_passes_relation_filter(tmp_path: Path) -> None:
+    from exomem import commands
+
+    vault = _vault(tmp_path)
+    hits = commands.op_ask_memory(vault, query="", relations=["supports"], limit=15)
+    # compact detail projects hits as dicts; the relation_match annotation rides through.
+    assert {h["path"] for h in hits} == {A, B}
+    assert any(h.get("relation_match", {}).get("relation_type") == "supports" for h in hits)
+
+
+def test_op_find_rejects_unknown_relation(tmp_path: Path) -> None:
+    from exomem import commands
+
+    vault = _vault(tmp_path)
+    with pytest.raises(OpError) as excinfo:
+        commands.op_find(vault, query="", relations=["contradcts"], limit=15)
+    assert excinfo.value.code == "INVALID_RELATION_FILTER"
+
+
 def test_relation_match_annotation_is_additive(tmp_path: Path) -> None:
     vault = _vault(tmp_path)
     hits = find_module.find(vault, query="", relations=["supports"], limit=15)
