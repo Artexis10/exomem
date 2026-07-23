@@ -21,16 +21,55 @@ COMPILED_DESTINATIONS = {
     "research-note": "Notes/Research",
 }
 EXPECTED_NORMATIVE_IDENTITY = (
-    2,
-    "sha256:b5fd73be05d4d07cf37c941625f8fe5e09a1ae2bc6f9e2db43392583e9eb2d5f",
+    3,
+    "sha256:2a754bb2da87cf062876878bfb908a9c8a2bd6ded218443890aa89977057d8d6",
 )
+PORTABLE_CORE_KEYS = [
+    "action",
+    "assumption",
+    "code",
+    "config",
+    "constraint",
+    "decision",
+    "design",
+    "fact",
+    "finding",
+    "insight",
+    "preference",
+    "problem",
+    "question",
+    "requirement",
+    "risk",
+    "technique",
+]
+PORTABLE_ALIASES = {
+    "actions": "action",
+    "assumptions": "assumption",
+    "configs": "config",
+    "configuration": "config",
+    "configurations": "config",
+    "constraints": "constraint",
+    "decisions": "decision",
+    "designs": "design",
+    "facts": "fact",
+    "findings": "finding",
+    "insights": "insight",
+    "open_question": "question",
+    "open_questions": "question",
+    "preferences": "preference",
+    "problems": "problem",
+    "questions": "question",
+    "requirements": "requirement",
+    "risks": "risk",
+    "techniques": "technique",
+}
 
 
 def test_contract_pins_exact_language_applicability_and_findings() -> None:
     contract = semantic_authoring.build_semantic_authoring_contract().as_dict()
 
     assert contract["contract_id"] == "exomem.semantic-authoring"
-    assert contract["version"] == 2
+    assert contract["version"] == 3
     assert (contract["version"], contract["content_digest"]) == (
         EXPECTED_NORMATIVE_IDENTITY
     )
@@ -270,6 +309,46 @@ def test_contract_pins_exact_language_applicability_and_findings() -> None:
         },
     }
 
+    assert contract["portable_categories"] == {
+        "core_keys": PORTABLE_CORE_KEYS,
+        "aliases": PORTABLE_ALIASES,
+        "open": (
+            "The category vocabulary is open: these core keys are a shared starting "
+            "point, not a closed list. When no core key is a good primary fit, author a "
+            "new meaningful category rather than forcing an ill-fitting one."
+        ),
+        "short_selection_rule": (
+            "Choose exactly one primary category: prefer a meaningful epistemic or "
+            "operational role and put the domain in tags, but if the role would only be "
+            "a generic fact, finding, or observation and the domain is the durable lens, "
+            "use a domain category instead."
+        ),
+        "rules": [
+            "Use exactly one primary category; kind is the governed form, tags are "
+            "secondary facets, and relations are typed edges.",
+            "The rich form's category defaults to its kind, so `category: decision` is "
+            "redundant when the kind is Decision.",
+            "Create multiple distinct semantic observations and typed relations when the "
+            "source genuinely supports them, but never multiply units or relations to "
+            "satisfy a quota and never duplicate the same fact.",
+        ],
+        "examples": {
+            "role": "- [constraint] Keep retry windows bounded #code ^retry-windows",
+            "domain": "- [design] Keep the public adapter stateless #api ^public-adapter",
+            "rich": (
+                "## Decision\n"
+                "- id: choose-public-adapter\n"
+                "- tags: api\n"
+                "- relations: supports: "
+                "[[Knowledge Base/Notes/Design/Public adapter]]\n"
+                "\n"
+                "Adopt the stateless public adapter so callers can retry safely and the "
+                "role stays the durable lens for this decision.\n"
+            ),
+        },
+    }
+    assert len(contract["portable_categories"]["core_keys"]) == 16
+
 
 def test_contract_digest_is_deterministic_and_covers_normative_content() -> None:
     first = semantic_authoring.build_semantic_authoring_contract()
@@ -364,7 +443,7 @@ def test_concise_and_expanded_renderers_are_byte_stable_and_complete() -> None:
         "utf-8"
     )
     assert concise.startswith(
-        "<!-- exomem-semantic-authoring:v2 " + contract.content_digest + " -->\n"
+        "<!-- exomem-semantic-authoring:v3 " + contract.content_digest + " -->\n"
     )
     for required in (
         "`## Observations`",
@@ -416,6 +495,27 @@ def test_concise_and_expanded_renderers_are_byte_stable_and_complete() -> None:
         assert f"`{path}`" in concise
     for lifecycle in contract.minimum_semantic_unit["inactive_lifecycles"]:
         assert f"`{lifecycle}`" in concise
+
+    portable = contract.portable_categories
+    # The full concise projection carries the complete portable-category teaching:
+    # exact 16 core keys, exact aliases, the open escape, role-first/domain escape
+    # guidance, both compact examples, and the rich example.
+    assert len(portable["core_keys"]) == 16
+    for key in portable["core_keys"]:
+        assert f"`{key}`" in concise
+        assert f"`{key}`" in expanded
+    for alias, canonical in portable["aliases"].items():
+        assert f"`{alias}` → `{canonical}`" in concise
+        assert f"`{alias}` → `{canonical}`" in expanded
+    assert portable["open"] in concise
+    assert portable["short_selection_rule"] in concise
+    for rule in portable["rules"]:
+        assert rule in concise
+    assert f"`{portable['examples']['role']}`" in concise
+    assert f"`{portable['examples']['domain']}`" in concise
+    assert portable["examples"]["rich"] in concise
+    assert "Rich example:" in concise
+
     assert expanded.startswith(concise + "\n")
     assert "### Exact applicability" in expanded
     assert "### Exempt content" in expanded
@@ -445,6 +545,31 @@ def test_tool_description_projection_is_independent_of_docstring_parsers() -> No
     assert "Returns:" not in projected
     assert "Full Markdown body" not in projected
     assert projected.count(semantic_authoring.contract_identity()) == 1
+
+
+def test_tool_write_guidance_is_bounded_and_routes_to_full_bootstrap() -> None:
+    contract = semantic_authoring.get_semantic_authoring_contract()
+    portable = contract.portable_categories
+
+    for tool in ("remember", "replace_memory", "observe_memory", "edit_memory"):
+        guidance = semantic_authoring.render_tool_guidance(tool)
+
+        # Bounded: identity + short selection rule + exactly one compact example +
+        # an explicit route to the full bootstrap projection.
+        assert semantic_authoring.contract_identity() in guidance
+        assert portable["short_selection_rule"] in guidance
+        assert portable["examples"]["role"] in guidance
+        assert 'call bootstrap(profile="full")' in guidance
+
+        # It must NOT duplicate the 16-label vocabulary table, the alias table,
+        # the domain/rich examples, or the full concise contract body.
+        assert "Core keys are" not in guidance
+        assert " → " not in guidance
+        assert portable["examples"]["domain"] not in guidance
+        assert portable["examples"]["rich"] not in guidance
+        for key in portable["core_keys"]:
+            assert f"`{key}`, `" not in guidance
+        assert semantic_authoring.render_concise() not in guidance
 
 
 def test_public_semantic_language_doc_projects_the_canonical_contract() -> None:
@@ -584,3 +709,65 @@ def test_rich_contract_matches_canonical_writer_metadata_order_and_parser() -> N
     assert [(relation.kind, relation.target) for relation in unit.relations] == [
         ("supports", "[[Synthetic Target]]")
     ]
+
+
+def test_bootstrap_projection_first_positional_is_contract_and_profile_is_keyword_only() -> None:
+    import inspect
+
+    original = semantic_authoring.get_semantic_authoring_contract()
+    normative = original.normative_dict()
+    normative["version"] += 1
+    mutated = semantic_authoring.contract_from_normative(normative)
+
+    # The FIRST positional argument is the contract (the existing positional
+    # contract API), never the profile. A positionally-passed contract projects
+    # THAT contract, so two different contracts yield different projections.
+    projected = semantic_authoring.bootstrap_projection(mutated)
+    assert projected["version"] == mutated.version
+    assert projected["content_digest"] == mutated.content_digest
+    assert projected != semantic_authoring.bootstrap_projection(original)
+
+    # Profile stays keyword-only and defaults to full; compact drops only the
+    # rich example. Positional contract and keyword profile compose cleanly.
+    full = semantic_authoring.bootstrap_projection(profile="full")
+    compact = semantic_authoring.bootstrap_projection(profile="compact")
+    assert set(full["portable_categories"]["examples"]) == {"role", "domain", "rich"}
+    assert set(compact["portable_categories"]["examples"]) == {"role", "domain"}
+    compact_mutated = semantic_authoring.bootstrap_projection(mutated, profile="compact")
+    assert compact_mutated["version"] == mutated.version
+    assert "rich" not in compact_mutated["portable_categories"]["examples"]
+
+    signature = inspect.signature(semantic_authoring.bootstrap_projection)
+    assert signature.parameters["profile"].kind is inspect.Parameter.KEYWORD_ONLY
+    assert signature.parameters["contract"].kind in (
+        inspect.Parameter.POSITIONAL_ONLY,
+        inspect.Parameter.POSITIONAL_OR_KEYWORD,
+    )
+    # A profile can never be passed positionally: doing so would be read as a
+    # contract and fail, proving the two arguments cannot be transposed.
+    with pytest.raises(AttributeError):
+        semantic_authoring.bootstrap_projection("compact")
+
+
+def test_portable_selection_rule_is_not_duplicated_and_teaches_distinct_richness() -> None:
+    contract = semantic_authoring.get_semantic_authoring_contract()
+    portable = contract.portable_categories
+    concise = semantic_authoring.render_concise(contract)
+
+    # Dedup: the role-first / domain-escape selection guidance is emitted exactly
+    # once (via short_selection_rule); the full rules block must not restate it.
+    assert "put the domain in tags" in portable["short_selection_rule"]
+    assert "use a domain category" in portable["short_selection_rule"]
+    for rule in portable["rules"]:
+        assert "put the domain in tags" not in rule
+        assert "use a domain category" not in rule
+    assert concise.count("put the domain in tags") == 1
+    assert concise.count("use a domain category") == 1
+
+    # The canonical teaching rule: create multiple distinct observations and typed
+    # relations when the source supports them, never for a quota, never duplicating.
+    teaching = next(rule for rule in portable["rules"] if "multiple distinct" in rule)
+    assert "typed relations" in teaching
+    assert "satisfy a quota" in teaching
+    assert "never duplicate the same fact" in teaching
+    assert teaching in concise

@@ -460,6 +460,82 @@ class ContractFinding:
         }
 
 
+# Bounded advisory category feedback. Public statuses are exactly these four;
+# ordinary canonical/core categories produce no entry and are never rewritten.
+_CATEGORY_FEEDBACK_LIMIT = 8
+_CATEGORY_FEEDBACK_STATUSES = MappingProxyType(
+    {
+        "alias": "alias",
+        "deprecated": "deprecated",
+        "scope_violation": "scope_violation",
+        "unregistered": "open",
+    }
+)
+
+
+@dataclass(frozen=True, slots=True)
+class CategoryFeedback:
+    """One deterministic advisory entry for an authored semantic-unit category."""
+
+    unit_ref: str | None
+    authored: str
+    normalized: str
+    canonical: str
+    status: str
+    replacement: str | None
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "unit_ref": self.unit_ref,
+            "authored": self.authored,
+            "normalized": self.normalized,
+            "canonical": self.canonical,
+            "status": self.status,
+            "replacement": self.replacement,
+        }
+
+
+def _derive_category_feedback(
+    page: SemanticPageState,
+    language_registry: semantic_language_registry.SemanticLanguageRegistry | None,
+) -> tuple[tuple[CategoryFeedback, ...], int]:
+    """Resolve every authored category once with exact page-scoped resolution.
+
+    Uses the same attached-project + page-type resolution the parser applied, so
+    MCP/REST/CLI serialized results inherit byte-equivalent data. Rich units that
+    default their category to the governed kind carry no authored category and
+    therefore never produce an entry.
+    """
+    if language_registry is None:
+        return (), 0
+    view = semantic_language_registry.for_attached_projects(language_registry, page.projects)
+    entries: list[CategoryFeedback] = []
+    for unit in page.document.units:
+        if unit.form == "rich" and "category" not in unit.metadata:
+            continue
+        resolution = view.resolve_category(unit.category_raw, page_type=page.page_type)
+        public_status = _CATEGORY_FEEDBACK_STATUSES.get(resolution.status)
+        if public_status is None:
+            continue
+        canonical = (
+            resolution.definition.key
+            if resolution.definition is not None
+            else (resolution.resolved or unit.category_key)
+        )
+        entries.append(
+            CategoryFeedback(
+                unit_ref=unit.unit_ref,
+                authored=unit.category_raw,
+                normalized=unit.category_key,
+                canonical=canonical,
+                status=public_status,
+                replacement=resolution.replacement,
+            )
+        )
+    retained = tuple(entries[:_CATEGORY_FEEDBACK_LIMIT])
+    return retained, len(entries) - len(retained)
+
+
 @dataclass(frozen=True, slots=True)
 class SemanticContractResult:
     mode: str
@@ -476,6 +552,8 @@ class SemanticContractResult:
     actions: tuple[str, ...]
     compact_unit_count: int = 0
     rich_unit_count: int = 0
+    category_feedback: tuple[CategoryFeedback, ...] = ()
+    category_feedback_omitted: int = 0
 
     def __post_init__(self) -> None:
         for name in (
@@ -486,6 +564,7 @@ class SemanticContractResult:
             "kind_counts",
             "category_counts",
             "actions",
+            "category_feedback",
         ):
             object.__setattr__(self, name, tuple(getattr(self, name)))
 
@@ -509,6 +588,8 @@ class SemanticContractResult:
                 else None
             ),
             "actions": list(self.actions),
+            "category_feedback": [entry.as_dict() for entry in self.category_feedback],
+            "category_feedback_omitted": self.category_feedback_omitted,
         }
 
 
@@ -2824,6 +2905,7 @@ def evaluate(
     after_review: RelationReviewState | None = None,
     grandfathered: bool = False,
     include_relation_disposition: bool = True,
+    language_registry: semantic_language_registry.SemanticLanguageRegistry | None = None,
 ) -> SemanticContractResult:
     """Evaluate supplied immutable state without crossing any adapter boundary."""
     if mode not in {"precommit", "posthoc"}:
@@ -2924,6 +3006,9 @@ def evaluate(
     category_counts = tuple(sorted(Counter(unit.category for unit in after.document.units).items()))
     compact_unit_count = sum(unit.form == "compact" for unit in after.document.units)
     rich_unit_count = sum(unit.form == "rich" for unit in after.document.units)
+    category_feedback, category_feedback_omitted = _derive_category_feedback(
+        after, language_registry
+    )
     return SemanticContractResult(
         mode=mode,
         operation=operation,
@@ -2939,4 +3024,6 @@ def evaluate(
         actions=disposition.actions if disposition is not None else (),
         compact_unit_count=compact_unit_count,
         rich_unit_count=rich_unit_count,
+        category_feedback=category_feedback,
+        category_feedback_omitted=category_feedback_omitted,
     )

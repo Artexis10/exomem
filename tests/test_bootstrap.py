@@ -140,29 +140,91 @@ def test_bootstrap_compact_contract_is_public_safe(vault: Path) -> None:
     assert "Progressive disclosure" not in serialized
 
 
-def test_every_bootstrap_profile_projects_the_same_semantic_authoring_contract(
+def test_bootstrap_profiles_project_profile_aware_semantic_authoring_contract(
     vault: Path,
 ) -> None:
-    expected = semantic_authoring.get_semantic_authoring_contract().as_dict()
-
-    projections = [
-        commands.op_bootstrap(vault, profile=profile)["semantic_authoring"]
-        for profile in ("compact", "full", "diagnostics")
+    full = commands.op_bootstrap(vault, profile="full")["semantic_authoring"]
+    compact = commands.op_bootstrap(vault, profile="compact")["semantic_authoring"]
+    diagnostics = commands.op_bootstrap(vault, profile="diagnostics")[
+        "semantic_authoring"
     ]
 
-    assert projections == [expected, expected, expected]
-    serialized = json.dumps(expected, ensure_ascii=False)
-    for required in (
-        "## Observations",
-        "- [category] content #tags (context) ^anchor",
-        "open",
-        "missing_semantic_unit",
-        "empty_rich_unit",
-        "remember",
-        "replace_memory",
-        "manage_memory_file create, overwrite, and append",
-    ):
-        assert required in serialized
+    # Each surface projects exactly the deterministic profile projection. Profile
+    # is keyword-only so it can never be mistaken for a positionally-passed
+    # contract (the existing positional-contract API is preserved).
+    assert full == semantic_authoring.bootstrap_projection(profile="full")
+    assert compact == semantic_authoring.bootstrap_projection(profile="compact")
+    assert diagnostics == semantic_authoring.bootstrap_projection(profile="diagnostics")
+
+    # Full carries every example; compact/diagnostics intentionally omit ONLY the
+    # rich example while keeping the complete core keys, aliases, open rule,
+    # selection guidance, and both compact (role and domain) examples.
+    full_examples = full["portable_categories"]["examples"]
+    compact_examples = compact["portable_categories"]["examples"]
+    assert set(full_examples) == {"role", "domain", "rich"}
+    assert set(compact_examples) == {"role", "domain"}
+    assert compact == diagnostics
+    assert compact["portable_categories"]["core_keys"] == (
+        full["portable_categories"]["core_keys"]
+    )
+    assert compact["portable_categories"]["aliases"] == (
+        full["portable_categories"]["aliases"]
+    )
+    assert len(full["portable_categories"]["core_keys"]) == 16
+
+    # The compact projection differs from full only by the dropped rich example.
+    reconstructed = json.loads(json.dumps(compact))
+    reconstructed["portable_categories"]["examples"]["rich"] = full_examples["rich"]
+    assert reconstructed == full
+
+    for projection in (full, compact, diagnostics):
+        serialized = json.dumps(projection, ensure_ascii=False)
+        for required in (
+            "## Observations",
+            "- [category] content #tags (context) ^anchor",
+            "open",
+            "missing_semantic_unit",
+            "empty_rich_unit",
+            "remember",
+            "replace_memory",
+            "manage_memory_file create, overwrite, and append",
+            "- [constraint] Keep retry windows bounded #code ^retry-windows",
+            "- [design] Keep the public adapter stateless #api ^public-adapter",
+        ):
+            assert required in serialized
+
+
+def test_bootstrap_compact_is_compact_through_the_entire_payload(vault: Path) -> None:
+    rich_example = semantic_authoring.get_semantic_authoring_contract().portable_categories[
+        "examples"
+    ]["rich"]
+
+    def contains_exact(value: object, needle: str) -> bool:
+        if isinstance(value, str):
+            return value == needle
+        if isinstance(value, dict):
+            return any(contains_exact(item, needle) for item in value.values())
+        if isinstance(value, (list, tuple)):
+            return any(contains_exact(item, needle) for item in value)
+        return False
+
+    # A compact (or diagnostics) bootstrap must stay compact through the WHOLE
+    # payload: the rich example may not appear anywhere, including the nested
+    # authoring_contract.semantic_units.contract projection.
+    for profile in ("compact", "diagnostics"):
+        payload = commands.op_bootstrap(vault, profile=profile)
+        assert not contains_exact(payload, rich_example)
+        nested = payload["authoring_contract"]["semantic_units"]["contract"]
+        assert nested == semantic_authoring.bootstrap_projection(profile=profile)
+        assert "rich" not in nested["portable_categories"]["examples"]
+
+    # The full profile carries the rich example in both the top projection and
+    # the nested authoring_contract projection.
+    full_payload = commands.op_bootstrap(vault, profile="full")
+    assert contains_exact(full_payload, rich_example)
+    full_nested = full_payload["authoring_contract"]["semantic_units"]["contract"]
+    assert full_nested == semantic_authoring.bootstrap_projection(profile="full")
+    assert full_nested["portable_categories"]["examples"]["rich"] == rich_example
 
 
 def test_bootstrap_semantic_authoring_projection_is_vault_blind(tmp_path: Path) -> None:

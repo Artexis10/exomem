@@ -121,7 +121,9 @@ def in_excluded_scan_dir(rel_path: str) -> bool:
 # `[[Target]]` or `[[Target|Alias]]`.
 _WIKILINK_PATTERN = re.compile(r"\[\[([^\]\|\n]+?)(?:\|[^\]\n]*)?\]\]")
 _FM_PATTERN = re.compile(r"^---\n(.*?)\n---\n?(.*)", re.DOTALL)
-_LOCK_NAMESPACES = frozenset({"activation-manifest", "semantic-creation"})
+_LOCK_NAMESPACES = frozenset(
+    {"activation-manifest", "semantic-creation", "lexical-catalog-publication"}
+)
 _THREAD_LOCKS: dict[str, threading.Lock] = {}
 _THREAD_LOCKS_GUARD = threading.Lock()
 _HELD_LOCKS = threading.local()
@@ -361,11 +363,20 @@ class _InterprocessFileLock:
 @contextmanager
 def vault_creation_lock(
     vault_root: Path,
-    namespace: Literal["activation-manifest", "semantic-creation"],
+    namespace: Literal[
+        "activation-manifest", "semantic-creation", "lexical-catalog-publication"
+    ],
     *,
     timeout: float = 30.0,
 ):
-    """Serialize one vault-scoped creation namespace under one shared deadline."""
+    """Serialize one vault-scoped creation namespace under one shared deadline.
+
+    ``lexical-catalog-publication`` serializes atomic lexical-catalog publication
+    (background ``rebuild_atomic`` replacement and the bounded foreground
+    ``apply_catalog_delta`` patch) so a background publish can re-check the live
+    catalog's generation and never overwrite a newer catalog a concurrent
+    foreground delta produced.
+    """
     if type(timeout) not in {int, float} or isinstance(timeout, bool) or timeout < 0:
         raise VaultLockError("VAULT_LOCK_TIMEOUT_VALUE", "lock timeout must be nonnegative")
     root, digest = _lock_key(Path(vault_root), namespace)

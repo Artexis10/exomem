@@ -322,6 +322,10 @@ def _bounded_semantic_feedback(
         "rich_unit_count": result.rich_unit_count,
         "kind_counts": _bounded_feedback_value(dict(kind_counts), truncation),
         "category_counts": _bounded_feedback_value(dict(category_counts), truncation),
+        # Already bounded to at most eight deterministic entries in the shared
+        # leaf; adapters carry it verbatim and never recompute it.
+        "category_feedback": [entry.as_dict() for entry in result.category_feedback],
+        "category_feedback_omitted": result.category_feedback_omitted,
         "relation_disposition": relation_value,
         "actions": items("actions", result.actions),
         "omitted_counts": dict(sorted(omitted.items())),
@@ -1417,6 +1421,7 @@ def preflight_existing(
         after_review=after_review,
         grandfathered=grandfathered and before.eligible_compiled,
         include_relation_disposition=applicability == "full",
+        language_registry=language,
     )
     return ExistingPreflight(
         applicability,
@@ -1475,6 +1480,9 @@ def _reevaluate_existing(
         after_review=preflight.after_review,
         grandfathered=grandfathered and preflight.before.eligible_compiled,
         include_relation_disposition=preflight.applicability == "full",
+        language_registry=semantic_language_registry.load_registry(
+            preflight.before_corpus.vault_root
+        ),
     )
     return result, grandfathered
 
@@ -2081,6 +2089,7 @@ def preflight_move(
             after_review=after_review,
             grandfathered=grandfathered,
             include_relation_disposition=applicability == "full",
+            language_registry=language,
         )
         token = _existing_transition_token(
             operation="move",
@@ -2413,6 +2422,7 @@ def preflight_recovery(
             after_review=after_review,
             grandfathered=grandfathered,
             include_relation_disposition=applicability == "full",
+            language_registry=language,
         )
         if requested_review is not None:
             expected_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
@@ -2468,6 +2478,7 @@ def preflight_recovery(
                 after_review=after_review,
                 grandfathered=grandfathered,
                 include_relation_disposition=True,
+                language_registry=language,
             )
         evaluations.append(
             RecoveryPageEvaluation(
@@ -2695,6 +2706,7 @@ def _evaluate_structural(
             before_corpus=before,
             after_corpus=before.with_candidate(candidate),
             include_relation_disposition=semantic_contract.requires_semantic_unit(candidate),
+            language_registry=language,
         ),
         candidate,
     )

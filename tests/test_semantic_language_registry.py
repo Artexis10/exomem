@@ -49,40 +49,40 @@ def test_category_alias_deprecation_replacement_and_scope_are_explicit() -> None
     registry = language_registry.load_registry(
         proposal=_proposal(
             categories={
-                "config": {
+                "runtime_config": {
                     "description": "Configuration facts",
-                    "aliases": ["configuration"],
+                    "aliases": ["runtime_configuration"],
                     "scope": {"projects": ["alpha"], "page_types": ["note"]},
                 },
                 "legacy_config": {
                     "description": "Retired configuration facts",
                     "status": "deprecated",
-                    "replaced_by": "config",
+                    "replaced_by": "runtime_config",
                 },
             }
         )
     )
 
     alias = registry.resolve_category(
-        "Configuration", project="alpha", page_type="note"
+        "Runtime Configuration", project="alpha", page_type="note"
     )
     deprecated = registry.resolve_category("legacy-config")
     out_of_scope = registry.resolve_category(
-        "configuration", project="beta", page_type="note"
+        "runtime_configuration", project="beta", page_type="note"
     )
 
     assert (alias.key, alias.resolved, alias.status) == (
-        "configuration",
-        "config",
+        "runtime_configuration",
+        "runtime_config",
         "alias",
     )
     assert (deprecated.resolved, deprecated.status, deprecated.replacement) == (
         "legacy_config",
         "deprecated",
-        "config",
+        "runtime_config",
     )
     assert (out_of_scope.resolved, out_of_scope.status) == (
-        "configuration",
+        "runtime_configuration",
         "scope_violation",
     )
     assert [finding["code"] for finding in out_of_scope.findings] == [
@@ -93,7 +93,7 @@ def test_category_alias_deprecation_replacement_and_scope_are_explicit() -> None
 def test_custom_rich_kind_is_scoped_and_namespaces_are_distinct() -> None:
     registry = language_registry.load_registry(
         proposal=_proposal(
-            categories={"decision": {"description": "A domain category"}},
+            categories={"protocol": {"description": "A domain category"}},
             kinds={
                 "protocol": {
                     "description": "A repeatable protocol",
@@ -106,7 +106,7 @@ def test_custom_rich_kind_is_scoped_and_namespaces_are_distinct() -> None:
     )
 
     assert registry.findings == ()
-    assert registry.resolve_category("decision").definition is not None
+    assert registry.resolve_category("protocol").definition is not None
     assert registry.resolve_kind("decision").status == "core"
     assert registry.resolve_kind("playbook", project="alpha").resolved == "protocol"
     assert registry.resolve_heading("Protocols", project="alpha").resolved == "protocol"

@@ -69,6 +69,9 @@ _REMEDIATION: dict[str, str] = {
     ),
     "MUTATION_BUSY": "Retry after the active vault mutation finishes.",
     "MUTATION_WARMING": "Retry after semantic corpus warm-up completes.",
+    "RETRIEVAL_INDEX_WARMING": (
+        "Retry the exact recall after the maintained semantic index finishes warming."
+    ),
     "MUTATION_ACKNOWLEDGEMENT_PENDING": (
         "Retry with the same mutation identity; do not submit a revised payload."
     ),
@@ -89,6 +92,17 @@ _REMEDIATION: dict[str, str] = {
 }
 
 # Error codes whose HTTP status is NOT the default 400.
+_SERVICE_UNAVAILABLE_CODES = frozenset(
+    {
+        "WRITER_COORDINATOR_UNAVAILABLE",
+        "MUTATION_LOCK_UNAVAILABLE",
+        # Retrieval-index-reliability (restore-indexed-category-recall): a safe
+        # exact category/kind plan whose maintained semantic catalog cannot yet
+        # prove completeness — retryable with bounded `retry_after_ms`, never a
+        # client-fault 400.
+        "RETRIEVAL_INDEX_WARMING",
+    }
+)
 _NOT_FOUND_CODES = frozenset({"NOT_FOUND", "OLD_NOT_FOUND", "SOURCES_NOT_FOUND", "NOT_IN_TRASH"})
 _CONFLICT_CODES = frozenset(
     {
@@ -234,7 +248,7 @@ def http_status_for(code: str) -> int:
         return 404
     if code in _CONFLICT_CODES or code.endswith("_EXISTS"):
         return 409
-    if code in {"WRITER_COORDINATOR_UNAVAILABLE", "MUTATION_LOCK_UNAVAILABLE"}:
+    if code in _SERVICE_UNAVAILABLE_CODES:
         return 503
     if code == "INGRESS_BYPASSED":
         return 403
