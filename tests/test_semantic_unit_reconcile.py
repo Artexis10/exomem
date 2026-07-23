@@ -85,7 +85,7 @@ def test_hierarchy_parser_and_sidecar_versions_are_incremented() -> None:
     assert semantic_index.PARSER_VERSION == 4
     assert embedding_index.SEMANTIC_UNIT_SCHEMA_VERSION == 3
     assert lexstore.SCHEMA_VERSION == 5
-    assert epistemic_graph.SCHEMA_VERSION == 6
+    assert epistemic_graph.SCHEMA_VERSION == 7
 
 
 def test_explicit_upgrade_reconcile_reprojects_unchanged_rich_units_everywhere(
