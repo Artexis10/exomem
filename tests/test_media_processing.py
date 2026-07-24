@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib
+import logging
 import os
 import uuid
 from pathlib import Path
@@ -14,6 +15,7 @@ import yaml
 
 from exomem import commands as commands_module
 from exomem import media_jobs
+from exomem.cli_ops import OpError
 
 
 def _media_processing():
@@ -1326,3 +1328,130 @@ def test_reconciliation_confines_paths_to_governed_knowledge_base(
     assert exc.value.code == "MEDIA_PATH_OUTSIDE_KB"
     assert not binary.with_name(binary.name + ".md").exists()
     assert _job_count(vault) == 0
+
+
+def _reconcile_raising(exc: BaseException):
+    """A ``reconcile_media`` stand-in that always raises the given exception."""
+
+    def _fake(root: Path, path: Path, *, explicit: bool = True, **_: object) -> None:
+        raise exc
+
+    return _fake
+
+
+def test_reconcile_all_media_logs_read_only_replica_once_without_traceback(
+    vault: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Expected read-only-replica lease refusal: one WARNING, no traceback.
+
+    A replica correctly declining the writer lease is a benign operational
+    state. It must be recorded as a single concise line (throttled across the
+    whole pass) so a full-stack traceback per artifact cannot flood the log.
+    """
+    media_processing = _media_processing()
+    media_processing._READONLY_LOG_STATE.clear()
+    _drop_media(vault, "readonly-a.m4a")
+    _drop_media(vault, "readonly-b.m4a")
+    monkeypatch.setattr(
+        media_processing,
+        "reconcile_media",
+        _reconcile_raising(
+            OpError(
+                "WRITER_LEASE_REQUIRED",
+                "replica is read-only; current writer is laptop",
+            )
+        ),
+    )
+
+    with caplog.at_level(logging.WARNING, logger="exomem.media_processing"):
+        attempted = media_processing.reconcile_all_media(vault, limit=10)
+
+    assert attempted == 2  # both artifacts were attempted
+    records = [r for r in caplog.records if r.name == "exomem.media_processing"]
+    assert len(records) == 1  # throttled to a single line despite two failures
+    record = records[0]
+    assert record.levelno == logging.WARNING
+    assert record.exc_info is None  # no traceback dumped
+    message = record.getMessage()
+    assert "read-only replica" in message
+    assert "WRITER_LEASE_REQUIRED" in message
+    assert "laptop" in message  # the current lease holder is preserved
+
+
+def test_reconcile_all_media_keeps_traceback_for_other_op_error(
+    vault: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Any OpError other than the read-only-replica case keeps its traceback."""
+    media_processing = _media_processing()
+    media_processing._READONLY_LOG_STATE.clear()
+    _drop_media(vault, "other-error.m4a")
+    monkeypatch.setattr(
+        media_processing,
+        "reconcile_media",
+        _reconcile_raising(OpError("MEDIA_NOT_FOUND", "vanished mid-pass")),
+    )
+
+    with caplog.at_level(logging.WARNING, logger="exomem.media_processing"):
+        media_processing.reconcile_all_media(vault, limit=10)
+
+    records = [r for r in caplog.records if r.name == "exomem.media_processing"]
+    assert len(records) == 1
+    record = records[0]
+    assert record.levelno == logging.WARNING
+    assert record.exc_info is not None  # full traceback preserved
+    assert record.exc_info[0] is OpError
+    assert "failed for" in record.getMessage()
+
+
+def test_reconcile_all_media_keeps_traceback_for_unexpected_exception(
+    vault: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A non-OpError failure still logs a full traceback (path left unchanged)."""
+    media_processing = _media_processing()
+    _drop_media(vault, "unexpected.m4a")
+    monkeypatch.setattr(
+        media_processing,
+        "reconcile_media",
+        _reconcile_raising(OSError("disk gremlin")),
+    )
+
+    with caplog.at_level(logging.WARNING, logger="exomem.media_processing"):
+        media_processing.reconcile_all_media(vault, limit=10)
+
+    records = [r for r in caplog.records if r.name == "exomem.media_processing"]
+    assert len(records) == 1
+    assert records[0].exc_info is not None
+    assert records[0].exc_info[0] is OSError
+
+
+def test_retry_all_media_logs_read_only_replica_without_traceback(
+    vault: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The retry pass shares the expected-read-only-replica logging treatment."""
+    media_processing = _media_processing()
+    media_processing._READONLY_LOG_STATE.clear()
+    store = media_jobs.MediaJobStore(vault)
+    binary = _drop_media(vault, "retry-readonly.m4a")
+    reconciled = media_processing.reconcile_media(vault, binary)
+    claimed = store.claim_next()
+    assert claimed is not None and claimed.id == reconciled.job_id
+    store.mark(claimed.id, media_jobs.FAILED, "InvalidDataError: retryable")
+
+    def _raise_lease(root: Path, binary_path: object, *, commit_guard: object = None):
+        raise OpError(
+            "WRITER_LEASE_REQUIRED",
+            "replica is read-only; current writer is laptop",
+        )
+
+    monkeypatch.setattr(media_processing, "retry_media", _raise_lease)
+
+    with caplog.at_level(logging.WARNING, logger="exomem.media_processing"):
+        requeued = media_processing.retry_all_media(vault, limit=10)
+
+    assert requeued == 0
+    records = [r for r in caplog.records if r.name == "exomem.media_processing"]
+    assert len(records) == 1
+    record = records[0]
+    assert record.exc_info is None
+    assert "media retry reconciliation" in record.getMessage()
+    assert "laptop" in record.getMessage()

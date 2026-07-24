@@ -12,6 +12,7 @@ import logging
 import os
 import re
 import threading
+import time
 from collections.abc import Callable
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from dataclasses import dataclass
@@ -44,6 +45,49 @@ _TRANSIENT_COORDINATION_CODES = frozenset(
         "WRITER_LEASE_REQUIRED",
     }
 )
+
+# A read-only replica correctly declining the writer lease
+# (WRITER_LEASE_REQUIRED) is an EXPECTED operational state, not a crash. The
+# background reconcile loop retries the whole pass every cycle, so logging a
+# full multi-frame traceback per artifact floods exomem.log and evicts the
+# tool-call trace history operators rely on. Record it instead as one concise
+# WARNING line with no traceback, throttled down to one line per holder change
+# or interval while the condition persists.
+_READONLY_REPLICA_CODE = "WRITER_LEASE_REQUIRED"
+_READONLY_LOG_LOCK = threading.Lock()
+# resolved vault root -> (holder note, monotonic deadline) of the last notice.
+_READONLY_LOG_STATE: dict[str, tuple[str, float]] = {}
+_READONLY_LOG_INTERVAL_SECONDS = 300.0
+
+
+def _should_log_readonly_replica(vault: Path, holder_note: str) -> bool:
+    """True only when this read-only notice is new, its holder changed, or its
+    throttle window lapsed — so a bounded pass over many artifacts, and a
+    persistent read-only state across cycles, both collapse to a single line."""
+    key = str(Path(vault).resolve())
+    now = time.monotonic()
+    with _READONLY_LOG_LOCK:
+        previous = _READONLY_LOG_STATE.get(key)
+        if previous is not None and previous[0] == holder_note and now < previous[1]:
+            return False
+        _READONLY_LOG_STATE[key] = (holder_note, now + _READONLY_LOG_INTERVAL_SECONDS)
+        return True
+
+
+def _log_reconcile_op_error(
+    error: OpError, binary: Path, vault: Path, *, activity: str
+) -> None:
+    """Record a soft-failed background reconcile at a severity that fits its cause.
+
+    The read-only-replica case (``WRITER_LEASE_REQUIRED``) is expected and gets a
+    single throttled WARNING with no traceback; every other OpError keeps its
+    full traceback so genuinely unexpected failures stay diagnosable.
+    """
+    if error.code == _READONLY_REPLICA_CODE:
+        if _should_log_readonly_replica(vault, error.message):
+            log.warning("%s skipped for read-only replica: %s", activity, error)
+        return
+    log.warning("%s failed for %s", activity, binary, exc_info=True)
 
 
 class MediaProcessingError(Exception):
@@ -354,10 +398,8 @@ def reconcile_all_media(
                     and error.code in _TRANSIENT_COORDINATION_CODES
                 ):
                     raise
-                log.warning(
-                    "media reconciliation failed for %s",
-                    binary,
-                    exc_info=True,
+                _log_reconcile_op_error(
+                    error, binary, vault, activity="media reconciliation"
                 )
             except Exception:  # noqa: BLE001 - one artifact must not abort discovery
                 log.warning("media reconciliation failed for %s", binary, exc_info=True)
@@ -613,10 +655,8 @@ def retry_all_media(
                 and error.code in _TRANSIENT_COORDINATION_CODES
             ):
                 raise
-            log.warning(
-                "media retry reconciliation failed for %s",
-                job.binary_path,
-                exc_info=True,
+            _log_reconcile_op_error(
+                error, job.binary_path, vault, activity="media retry reconciliation"
             )
             continue
         except Exception:  # noqa: BLE001 - one stale artifact must not abort the pass
