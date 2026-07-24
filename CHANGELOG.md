@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.30.0](https://github.com/Artexis10/exomem/compare/v0.29.3...v0.30.0) (2026-07-24)
+
+
+### Features
+
+* allow promoting a Source into Evidence ([#288](https://github.com/Artexis10/exomem/issues/288)) ([f50da6d](https://github.com/Artexis10/exomem/commit/f50da6dd16904828288db0963fe7eec0595659b2))
+* **memory:** relation-filtered recall on find and ask_memory ([#313](https://github.com/Artexis10/exomem/issues/313)) ([79010a1](https://github.com/Artexis10/exomem/commit/79010a11f57ed2303d19006a64bbfa9d18546226))
+* **memory:** ship portable indexed categories ([#308](https://github.com/Artexis10/exomem/issues/308)) ([56aa1d0](https://github.com/Artexis10/exomem/commit/56aa1d0a5fec93ead77d885d6f308b91113001e5))
+* **memory:** teach cross-domain category examples ([#312](https://github.com/Artexis10/exomem/issues/312)) ([342f582](https://github.com/Artexis10/exomem/commit/342f582f849f6a6c44e6bd0ebb3d064d2cc29c7f))
+
+
+### Bug Fixes
+
+* close two write/read contract divergences and unbreak the checkpoint suite on Windows ([#289](https://github.com/Artexis10/exomem/issues/289)) ([e22788c](https://github.com/Artexis10/exomem/commit/e22788c3aa2fba45cf8fefb374e9a2bb97072be4))
+
 ## [0.29.3](https://github.com/Artexis10/exomem/compare/v0.29.2...v0.29.3) (2026-07-22)
 
 
