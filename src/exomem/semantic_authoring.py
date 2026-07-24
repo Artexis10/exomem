@@ -17,7 +17,7 @@ from typing import Any
 
 from . import semantic_language_registry
 
-AUTHORING_CONTRACT_VERSION = 3
+AUTHORING_CONTRACT_VERSION = 4
 AUTHORING_CONTRACT_ID = "exomem.semantic-authoring"
 
 
@@ -153,17 +153,29 @@ def _build_portable_categories() -> dict[str, Any]:
             "satisfy a quota and never duplicate the same fact.",
         ],
         "examples": {
-            "role": "- [constraint] Keep retry windows bounded #code ^retry-windows",
-            "domain": "- [design] Keep the public adapter stateless #api ^public-adapter",
+            "role": "- [decision] Relocate to a coastal city next spring #life ^relocation",
+            "domain": (
+                "- [nutrition] Evening protein improves adherence #experiment "
+                "^evening-protein"
+            ),
+            "breadth": [
+                "- [constraint] Keep retry windows bounded #code ^retry-windows",
+                "- [risk] Variable-rate mortgage payments could spike #finance "
+                "^mortgage-rate-risk",
+                "- [question] Does the destination require a visa before travel "
+                "#legal #travel ^visa-requirement",
+                "- [career] Weigh a sabbatical before the next promotion cycle "
+                "#growth ^sabbatical-timing",
+            ],
             "rich": (
                 "## Decision\n"
-                "- id: choose-public-adapter\n"
-                "- tags: api\n"
+                "- id: commit-to-morning-training\n"
+                "- tags: health\n"
                 "- relations: supports: "
-                "[[Knowledge Base/Notes/Design/Public adapter]]\n"
+                "[[Knowledge Base/Notes/Health/Morning training]]\n"
                 "\n"
-                "Adopt the stateless public adapter so callers can retry safely and the "
-                "role stays the durable lens for this decision.\n"
+                "Commit to a fixed 6am training block on weekdays so consistency "
+                "compounds and health stays the durable lens for this decision.\n"
             ),
         },
     }
@@ -588,6 +600,7 @@ def render_concise(
         f"`{lifecycle}`" for lifecycle in minimum["inactive_lifecycles"]
     )
     metadata = ", ".join(f"`{row}`" for row in rich["metadata_syntax"])
+    breadth_block = "\n".join(portable["examples"]["breadth"])
     return (
         f"<!-- exomem-semantic-authoring:v{contract.version} "
         f"{contract.content_digest} -->\n"
@@ -648,7 +661,10 @@ def render_concise(
         f"{portable['open']} {portable_rules} Core keys are {portable_keys}. "
         f"Core aliases are {portable_aliases}. Role example: "
         f"`{portable['examples']['role']}`. Domain example: "
-        f"`{portable['examples']['domain']}`. Rich example:\n\n"
+        f"`{portable['examples']['domain']}`. Breadth example (life, finance, "
+        f"legal/travel, and career alongside one retained code line):\n\n"
+        f"```markdown\n{breadth_block}\n```\n\n"
+        f"Rich example:\n\n"
         f"```markdown\n{portable['examples']['rich']}```\n"
     )
 

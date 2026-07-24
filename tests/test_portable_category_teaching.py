@@ -40,9 +40,9 @@ def test_contract_examples_are_parseable_nonduplicative_and_generic() -> None:
     domain_example = portable["examples"]["domain"]
     rich_example = portable["examples"]["rich"]
 
-    assert "[constraint]" in role_example and "#code" in role_example
-    assert "[design]" in domain_example and "#api" in domain_example
-    for example, expected in ((role_example, "constraint"), (domain_example, "design")):
+    assert "[decision]" in role_example and "#life" in role_example
+    assert "[nutrition]" in domain_example and "#experiment" in domain_example
+    for example, expected in ((role_example, "decision"), (domain_example, "nutrition")):
         document = semantic_units.parse_semantic_units(example)
         assert len(document.units) == 1
         assert document.units[0].category == expected
@@ -51,9 +51,41 @@ def test_contract_examples_are_parseable_nonduplicative_and_generic() -> None:
     assert len(rich.units) == 1
     assert rich.units[0].kind == "decision"
     assert rich.units[0].anchor
-    assert "- tags:" in rich_example
+    assert "- tags: health" in rich_example
     assert "- relations: supports: [[" in rich_example
     assert "category: decision" not in rich_example.lower()
+
+
+def test_breadth_examples_span_domains_and_prove_open_vocabulary_escape() -> None:
+    contract = semantic_authoring.get_semantic_authoring_contract()
+    portable = contract.as_dict()["portable_categories"]
+    breadth = portable["examples"]["breadth"]
+    registry = semantic_language_registry.core_registry()
+    concise = semantic_authoring.render_concise(contract)
+
+    assert len(breadth) == 4
+    assert sum("#code" in line for line in breadth) == 1
+
+    domains: set[str] = set()
+    code_tokens = 0
+    statuses: list[str] = []
+    for line in breadth:
+        document = semantic_units.parse_semantic_units(line)
+        assert len(document.units) == 1
+        unit = document.units[0]
+        resolution = registry.resolve_category(unit.category)
+        statuses.append(resolution.status)
+        for token in {unit.category, *unit.tags}:
+            if token == "code":
+                code_tokens += 1
+            else:
+                domains.add(token)
+        assert line in concise
+
+    assert code_tokens == 1
+    assert len(domains) >= 4
+    assert statuses.count("core") >= 2
+    assert "unregistered" in statuses
 
 
 def test_bootstrap_profiles_teach_full_core_without_vault_leak(tmp_path: Path) -> None:

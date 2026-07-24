@@ -21,8 +21,8 @@ COMPILED_DESTINATIONS = {
     "research-note": "Notes/Research",
 }
 EXPECTED_NORMATIVE_IDENTITY = (
-    3,
-    "sha256:2a754bb2da87cf062876878bfb908a9c8a2bd6ded218443890aa89977057d8d6",
+    4,
+    "sha256:837b03b15c3d83f6c6eeb50771f4eaa04e4beaaae0f7d54be249be40ce7685f7",
 )
 PORTABLE_CORE_KEYS = [
     "action",
@@ -69,7 +69,7 @@ def test_contract_pins_exact_language_applicability_and_findings() -> None:
     contract = semantic_authoring.build_semantic_authoring_contract().as_dict()
 
     assert contract["contract_id"] == "exomem.semantic-authoring"
-    assert contract["version"] == 3
+    assert contract["version"] == 4
     assert (contract["version"], contract["content_digest"]) == (
         EXPECTED_NORMATIVE_IDENTITY
     )
@@ -333,17 +333,29 @@ def test_contract_pins_exact_language_applicability_and_findings() -> None:
             "satisfy a quota and never duplicate the same fact.",
         ],
         "examples": {
-            "role": "- [constraint] Keep retry windows bounded #code ^retry-windows",
-            "domain": "- [design] Keep the public adapter stateless #api ^public-adapter",
+            "role": "- [decision] Relocate to a coastal city next spring #life ^relocation",
+            "domain": (
+                "- [nutrition] Evening protein improves adherence #experiment "
+                "^evening-protein"
+            ),
+            "breadth": [
+                "- [constraint] Keep retry windows bounded #code ^retry-windows",
+                "- [risk] Variable-rate mortgage payments could spike #finance "
+                "^mortgage-rate-risk",
+                "- [question] Does the destination require a visa before travel "
+                "#legal #travel ^visa-requirement",
+                "- [career] Weigh a sabbatical before the next promotion cycle "
+                "#growth ^sabbatical-timing",
+            ],
             "rich": (
                 "## Decision\n"
-                "- id: choose-public-adapter\n"
-                "- tags: api\n"
+                "- id: commit-to-morning-training\n"
+                "- tags: health\n"
                 "- relations: supports: "
-                "[[Knowledge Base/Notes/Design/Public adapter]]\n"
+                "[[Knowledge Base/Notes/Health/Morning training]]\n"
                 "\n"
-                "Adopt the stateless public adapter so callers can retry safely and the "
-                "role stays the durable lens for this decision.\n"
+                "Commit to a fixed 6am training block on weekdays so consistency "
+                "compounds and health stays the durable lens for this decision.\n"
             ),
         },
     }
@@ -443,7 +455,7 @@ def test_concise_and_expanded_renderers_are_byte_stable_and_complete() -> None:
         "utf-8"
     )
     assert concise.startswith(
-        "<!-- exomem-semantic-authoring:v3 " + contract.content_digest + " -->\n"
+        "<!-- exomem-semantic-authoring:v4 " + contract.content_digest + " -->\n"
     )
     for required in (
         "`## Observations`",
@@ -513,7 +525,11 @@ def test_concise_and_expanded_renderers_are_byte_stable_and_complete() -> None:
         assert rule in concise
     assert f"`{portable['examples']['role']}`" in concise
     assert f"`{portable['examples']['domain']}`" in concise
+    for breadth_line in portable["examples"]["breadth"]:
+        assert breadth_line in concise
+    assert len(portable["examples"]["breadth"]) == 4
     assert portable["examples"]["rich"] in concise
+    assert "Breadth example" in concise
     assert "Rich example:" in concise
 
     assert expanded.startswith(concise + "\n")
@@ -562,11 +578,13 @@ def test_tool_write_guidance_is_bounded_and_routes_to_full_bootstrap() -> None:
         assert 'call bootstrap(profile="full")' in guidance
 
         # It must NOT duplicate the 16-label vocabulary table, the alias table,
-        # the domain/rich examples, or the full concise contract body.
+        # the domain/breadth/rich examples, or the full concise contract body.
         assert "Core keys are" not in guidance
         assert " → " not in guidance
         assert portable["examples"]["domain"] not in guidance
         assert portable["examples"]["rich"] not in guidance
+        for breadth_line in portable["examples"]["breadth"]:
+            assert breadth_line not in guidance
         for key in portable["core_keys"]:
             assert f"`{key}`, `" not in guidance
         assert semantic_authoring.render_concise() not in guidance
@@ -731,8 +749,17 @@ def test_bootstrap_projection_first_positional_is_contract_and_profile_is_keywor
     # rich example. Positional contract and keyword profile compose cleanly.
     full = semantic_authoring.bootstrap_projection(profile="full")
     compact = semantic_authoring.bootstrap_projection(profile="compact")
-    assert set(full["portable_categories"]["examples"]) == {"role", "domain", "rich"}
-    assert set(compact["portable_categories"]["examples"]) == {"role", "domain"}
+    assert set(full["portable_categories"]["examples"]) == {
+        "role",
+        "domain",
+        "breadth",
+        "rich",
+    }
+    assert set(compact["portable_categories"]["examples"]) == {
+        "role",
+        "domain",
+        "breadth",
+    }
     compact_mutated = semantic_authoring.bootstrap_projection(mutated, profile="compact")
     assert compact_mutated["version"] == mutated.version
     assert "rich" not in compact_mutated["portable_categories"]["examples"]

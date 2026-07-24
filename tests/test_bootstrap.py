@@ -161,8 +161,8 @@ def test_bootstrap_profiles_project_profile_aware_semantic_authoring_contract(
     # selection guidance, and both compact (role and domain) examples.
     full_examples = full["portable_categories"]["examples"]
     compact_examples = compact["portable_categories"]["examples"]
-    assert set(full_examples) == {"role", "domain", "rich"}
-    assert set(compact_examples) == {"role", "domain"}
+    assert set(full_examples) == {"role", "domain", "breadth", "rich"}
+    assert set(compact_examples) == {"role", "domain", "breadth"}
     assert compact == diagnostics
     assert compact["portable_categories"]["core_keys"] == (
         full["portable_categories"]["core_keys"]
@@ -188,8 +188,9 @@ def test_bootstrap_profiles_project_profile_aware_semantic_authoring_contract(
             "remember",
             "replace_memory",
             "manage_memory_file create, overwrite, and append",
+            "- [decision] Relocate to a coastal city next spring #life ^relocation",
+            "- [nutrition] Evening protein improves adherence #experiment ^evening-protein",
             "- [constraint] Keep retry windows bounded #code ^retry-windows",
-            "- [design] Keep the public adapter stateless #api ^public-adapter",
         ):
             assert required in serialized
 
