@@ -3070,6 +3070,40 @@ def _canonical_kb_segment(rel: str) -> str:
     return rel
 
 
+def is_casing_only_rewrite(canonical: str, original: str) -> bool:
+    """True when `canonical` differs from `original` in letter casing alone.
+
+    THIS IS A SECURITY GUARD, not a nicety. `Path.resolve()` re-spells a path
+    to its real on-disk casing — but it also follows symlinks, expands Windows
+    8.3 short names and junctions, and collapses `..`. Any of those rewrite
+    *which file* the path addresses. `hosted_transfer_routes.
+    _open_bounded_vault_file` re-opens the returned rel-form component by
+    component under `O_NOFOLLOW` precisely so a symlink raises `ELOOP`; handing
+    it a rel-form that resolution already replaced with the symlink's target
+    launders the link into a real file and defeats the check. So the canonical
+    form is adopted only when the sole difference is casing; otherwise the
+    caller's own spelling is returned and the downstream guards see what the
+    caller actually asked for.
+
+    `str.casefold()` — not `os.path.normcase()`. `posixpath.normcase()` is the
+    identity function, so a normcase comparison is byte-exact on every
+    non-Windows platform: it would reject the very re-spell this module exists
+    to perform on macOS APFS and on case-folding Linux mounts (ext4 `+F`,
+    CIFS), and would make the invariant mean something different per platform.
+    `casefold()` is the Unicode-correct, platform-independent answer.
+
+    The length guard closes casefold's non-length-preserving expansions.
+    `'ß'.casefold() == 'ss'`, `'ﬁ'` folds to `'fi'`, `'İ'` to `'i'` plus a
+    combining dot — spellings that name a *genuinely different* file, so a
+    bare casefold comparison would call `straße.md -> STRASSE.md` a casing-only
+    rewrite and launder that symlink. Comparing the pre-fold lengths rejects
+    every such pair. (This is the same hazard `_probe_casefolds` documents for
+    `swapcase()`.) The guard can only ever err toward returning the caller's
+    literal form, which is the fail-open behavior this module already promises.
+    """
+    return len(canonical) == len(original) and canonical.casefold() == original.casefold()
+
+
 def canonical_vault_rel(vault_root: Path, rel: str) -> str:
     """Return `rel` re-spelled with the real on-disk casing under `vault_root`.
 
@@ -3080,6 +3114,17 @@ def canonical_vault_rel(vault_root: Path, rel: str) -> str:
     `Path.resolve()` returns the real casing for the components that exist and
     preserves a not-yet-existing tail verbatim, so this handles both an edit
     (whole path exists) and a create into an existing differently-cased parent.
+
+    Casing-only invariant: `Path.resolve()` also follows symlinks, expands
+    Windows 8.3 short names and junctions, and collapses `..` — rewrites that
+    change *which file* the rel-form addresses, laundering a symlink past the
+    `O_NOFOLLOW` guard in `hosted_transfer_routes._open_bounded_vault_file`.
+    So the resolved form is adopted only when `is_casing_only_rewrite` says the
+    sole difference from the caller's path is casing; otherwise `rel` comes
+    back untouched. A consequence: `Knowledge Base/../Knowledge Base/x.md` is
+    no longer incidentally collapsed. That is intended — vault-escape is
+    checked separately in `resolve_under_vault`, against the *resolved* path,
+    and is unaffected.
 
     Fails open: any `OSError`/`ValueError` (vault momentarily unreachable, a
     path that escapes the root) returns `rel` unchanged — exactly today's
@@ -3093,7 +3138,14 @@ def canonical_vault_rel(vault_root: Path, rel: str) -> str:
         return rel
     if not canonical or canonical == ".":
         return rel
-    return _canonical_kb_segment(canonical)
+    canonical = _canonical_kb_segment(canonical)
+    # Compare against the slash-normalized caller form: `Path` accepts `\` and
+    # a leading `/`, and `as_posix()` has already normalized those away, so
+    # comparing raw would reject a legitimate re-spell over pure spelling noise.
+    cleaned = str(rel).replace("\\", "/").lstrip("/")
+    if not is_casing_only_rewrite(canonical, cleaned):
+        return rel
+    return canonical
 
 
 # Probing the filesystem costs a couple of syscalls; the answer is a property
@@ -3280,12 +3332,19 @@ def resolve_under_vault(
     # drive-lowercasing that made us prefer the literal candidate-form is not a
     # concern here: `relative_to` strips the drive entirely. Fail open to the
     # literal form if the relative computation can't be established.
+    #
+    # Adopted ONLY when the rewrite is casing-only. `resolved` has followed any
+    # symlink, and `_open_bounded_vault_file` re-opens this rel-form under
+    # `O_NOFOLLOW` expecting to *reject* one — handing it the link's target
+    # would launder the link into a real file. See `is_casing_only_rewrite`.
     try:
         canonical = resolved.relative_to(vault_resolved).as_posix()
     except ValueError:
         canonical = ""
     if canonical and canonical != ".":
-        rel = _canonical_kb_segment(canonical)
+        canonical = _canonical_kb_segment(canonical)
+        if is_casing_only_rewrite(canonical, rel):
+            rel = canonical
     return candidate, rel
 
 
