@@ -5,6 +5,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from exomem import audit as audit_module
 
 
@@ -141,3 +143,27 @@ def test_audit_frontmatter_compliance_flags_singular_project_on_pattern(vault: P
         if "singular-project-pattern" in f.path and "projects" in f.detail
     ]
     assert matches, [f.as_dict() for f in report.findings]
+
+
+def test_audit_unknown_category_message_names_category_and_lists_valid(
+    vault: Path,
+) -> None:
+    """`audit()` must reject unknown categories with a message that both
+    echoes the invalid name(s) back and enumerates the valid categories —
+    the incident this pins was a client (maintain_memory audit mode)
+    inventing category names ('duplicate', 'frontmatter', 'identity') and
+    getting a bare `ValueError` it couldn't self-correct from. The fix was
+    already present at HEAD (see audit.py's `audit()` validation); this
+    only guards against a future regression of the message shape."""
+    with pytest.raises(ValueError) as exc_info:
+        audit_module.audit(vault, categories=["nope"])
+
+    message = str(exc_info.value)
+    assert "unknown audit categories" in message
+    assert "['nope']" in message
+
+    valid_categories = set(audit_module.ALL_CATEGORIES) | set(
+        audit_module.OPTIONAL_CATEGORIES
+    )
+    for category in valid_categories:
+        assert category in message, (category, message)

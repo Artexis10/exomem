@@ -164,10 +164,27 @@ class ReferenceIndex:
         if not self.available():
             return
         clean = [str(path).replace("\\", "/").lstrip("/") for path in paths]
+        # Rows are keyed by the on-disk spelling (`refresh_paths` resolves), but
+        # on a case-insensitive filesystem the caller may address the page with
+        # different casing. Delete both spellings, or the real row survives the
+        # delete and reads back as a second owner of the identity. On a
+        # case-sensitive filesystem the two spellings are the same string.
+        targets = list(
+            dict.fromkeys(
+                spelling
+                for path in clean
+                for spelling in (
+                    path,
+                    vault_module.canonical_vault_rel(self.vault_root, path),
+                )
+            )
+        )
         conn = self._connect()
         try:
             with conn:
-                conn.executemany("DELETE FROM identities WHERE path = ?", [(p,) for p in clean])
+                conn.executemany(
+                    "DELETE FROM identities WHERE path = ?", [(p,) for p in targets]
+                )
         finally:
             conn.close()
 
@@ -220,7 +237,11 @@ class ReferenceIndex:
         return self.refs_for_paths([clean]).get(clean)
 
     def refs_for_paths(self, paths: list[str]) -> dict[str, str | None]:
-        """Resolve many paths with one sidecar query or one Markdown scan."""
+        """Resolve many paths with one sidecar query or one Markdown scan.
+
+        The returned dict is keyed by the caller's own cleaned spelling; callers
+        index it by the string they passed in.
+        """
         clean = [str(path or "").replace("\\", "/").lstrip("/") for path in paths]
         wanted = list(dict.fromkeys(path for path in clean if path))
         if not wanted:
@@ -238,14 +259,27 @@ class ReferenceIndex:
                         return _refs_for_paths_from_scan(self.vault_root, wanted)
 
         resolved, indexed_paths = self._refs_from_index(wanted)
-        # Rows absent from the index may be new external files whose watcher
-        # event has not landed yet. Refresh only those exact paths; never turn
-        # an ordinary negative lookup into a full-corpus scan.
+        # Try the caller's own spelling first and canonicalize only on a miss:
+        # `canonical_vault_rel` costs a `resolve()` syscall per path, and the
+        # hit path is the common one. A miss may be a new external file whose
+        # watcher event has not landed, or a caller whose casing differs from
+        # the row's. The invariant is only that a row is keyed by the spelling
+        # `_relative_markdown` resolved to *when the row was written* — not
+        # that every live row is canonical now. Renaming a directory's casing
+        # leaves the old-cased row behind (`refresh_paths` deletes just the
+        # newly-resolved key), and `reconcile` / `rebuild_all` is what heals
+        # that. Retry those exact paths only; never turn a negative lookup
+        # into a corpus scan.
         missing = [path for path in wanted if path not in indexed_paths]
         if missing:
-            self.refresh_paths([self.vault_root / path for path in missing])
-            refreshed, _ = self._refs_from_index(missing)
-            resolved.update(refreshed)
+            canonical = {
+                path: vault_module.canonical_vault_rel(self.vault_root, path)
+                for path in missing
+            }
+            retry = list(dict.fromkeys(canonical.values()))
+            self.refresh_paths([self.vault_root / path for path in retry])
+            refreshed, _ = self._refs_from_index(retry)
+            resolved.update({path: refreshed.get(canonical[path]) for path in missing})
         return resolved
 
     def _refs_from_index(

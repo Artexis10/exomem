@@ -31,6 +31,7 @@ from .vault import (
     PlannedWrite,
     WikilinkResolver,
     batch_atomic_write,
+    canonical_vault_rel,
     escape_wikilinks_for_log,
     kb_root,
     normalize_body_wikilinks,
@@ -637,7 +638,13 @@ def link(
         )
     folder = kb_root(vault_root) / "Entities" / ENTITY_TYPE_TO_FOLDER[entity_type]
     entity_path = folder / f"{filename_slug or _sanitize_name(name)}.md"
-    rel_entity = entity_path.relative_to(vault_root).as_posix()
+    # Re-spell the destination to the real on-disk casing *before* it is bound
+    # into the draft token: creating into an existing but differently-cased
+    # entity folder would otherwise record the minted spelling as the page's
+    # identity path.
+    rel_entity = canonical_vault_rel(
+        vault_root, entity_path.relative_to(vault_root).as_posix()
+    )
     if entity_path.exists():
         raise LinkError(
             "ENTITY_EXISTS",

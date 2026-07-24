@@ -3054,6 +3054,136 @@ class VaultPathError(Exception):
         super().__init__(reason)
 
 
+def _canonical_kb_segment(rel: str) -> str:
+    """Re-spell a leading KB segment to the literal ``kb_dirname()`` spelling.
+
+    On a case-insensitive filesystem the real on-disk casing of the governed
+    folder may differ from the configured name (`knowledge base` vs
+    `Knowledge Base`). The identity census keys segment 1 literally and every
+    `rel.startswith(kb_prefix())` check is byte-exact (e.g. memory_refs), so a
+    canonicalized rel-form must still lead with the configured spelling.
+    """
+    head, sep, tail = rel.partition("/")
+    kb = kb_dirname()
+    if head != kb and head.casefold() == kb.casefold():
+        return f"{kb}{sep}{tail}" if sep else kb
+    return rel
+
+
+def canonical_vault_rel(vault_root: Path, rel: str) -> str:
+    """Return `rel` re-spelled with the real on-disk casing under `vault_root`.
+
+    On a case-insensitive filesystem (Windows NTFS, macOS APFS by default) a
+    caller may address `Notes/Polly/x.md` while the directory on disk is
+    `POLLY`. Both open the same file, but identity comparisons keyed on the
+    path string then see two owners for one physical page. Non-strict
+    `Path.resolve()` returns the real casing for the components that exist and
+    preserves a not-yet-existing tail verbatim, so this handles both an edit
+    (whole path exists) and a create into an existing differently-cased parent.
+
+    Fails open: any `OSError`/`ValueError` (vault momentarily unreachable, a
+    path that escapes the root) returns `rel` unchanged — exactly today's
+    behavior. On a case-sensitive filesystem this is an identity transform for
+    existing paths.
+    """
+    try:
+        root = Path(vault_root)
+        canonical = (root / rel).resolve().relative_to(root.resolve()).as_posix()
+    except (OSError, ValueError):
+        return rel
+    if not canonical or canonical == ".":
+        return rel
+    return _canonical_kb_segment(canonical)
+
+
+# Probing the filesystem costs a couple of syscalls; the answer is a property
+# of the mount, so cache it per normcased root spelling. Tests reset it.
+# Deliberately NOT keyed on a *resolved* root: `Path.resolve()` is itself the
+# expensive syscall this cache exists to avoid (~120 us on Windows), and the
+# guard path calls this once per page — `evaluate_posthoc_batch` loops over the
+# whole vault. Two spellings of one root simply get two entries holding the
+# same answer, which is harmless because the answer describes the volume.
+_CASEFOLD_PROBE_CACHE: dict[str, bool] = {}
+_CASEFOLD_PROBE_LOCK = threading.Lock()
+
+
+def reset_casefold_probe_cache() -> None:
+    """Drop the memoized `vault_casefolds` answers (tests, vault relocation)."""
+    with _CASEFOLD_PROBE_LOCK:
+        _CASEFOLD_PROBE_CACHE.clear()
+
+
+def _probe_casefolds(root: Path) -> bool | None:
+    """Ask the filesystem whether it folds case, or None when unprobeable.
+
+    Takes one existing entry below the KB root (falling back to the vault root)
+    whose name `swapcase()`s to a purely re-cased sibling, and checks that the
+    swapped spelling both exists and is the *same* file. Returns None when no
+    suitable entry is available, so the caller can fall back to platform policy
+    instead of guessing.
+
+    Only a candidate whose swap is a pure re-casing can answer the question.
+    `swapcase()` is not length-preserving for every character — `straße` swaps
+    to `STRASSE`, `ﬁ` to `FI`, `ŉ` to `ʼN`, `İ` to `i` plus a combining dot —
+    and those spellings name a genuinely *different* file, so concluding from
+    them would report a case-folding volume as case-sensitive. Unsuitable
+    candidates are skipped rather than answered from, as is one that vanishes
+    mid-probe; only a candidate that round-trips can yield `False`.
+    """
+    for base in (kb_root(root), root):
+        try:
+            for entry in base.iterdir():
+                name = entry.name
+                swapped_name = name.swapcase()
+                if (
+                    swapped_name == name
+                    or len(swapped_name) != len(name)
+                    or swapped_name.swapcase() != name
+                    or not entry.exists()
+                ):
+                    continue
+                swapped = base / swapped_name
+                if not swapped.exists():
+                    if not entry.exists():
+                        # Deleted between the two probes: a race, not a verdict.
+                        continue
+                    return False
+                return os.path.samefile(entry, swapped)
+        except OSError:
+            continue
+    return None
+
+
+def vault_casefolds(vault_root: Path) -> bool:
+    """True when `vault_root` lives on a case-insensitive filesystem.
+
+    `EXOMEM_CASEFOLD_PATHS=1|0` overrides the answer without probing — that is
+    how Linux CI exercises the folding branch. Its reach is exactly this
+    predicate: the case-folded identity *comparison* (whether two spellings
+    count as one owner). It does not disable path canonicalization —
+    `canonical_vault_rel` / `resolve_under_vault` re-spell to the on-disk casing
+    unconditionally, on every platform. Otherwise the filesystem is probed once
+    per root; when nothing is probeable the platform default
+    (`os.path.normcase`) decides.
+    """
+    override = os.environ.get("EXOMEM_CASEFOLD_PATHS", "").strip()
+    if override in {"0", "1"}:
+        return override == "1"
+
+    root = Path(vault_root)
+    cache_key = os.path.normcase(str(root))
+    with _CASEFOLD_PROBE_LOCK:
+        cached = _CASEFOLD_PROBE_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+
+    probed = _probe_casefolds(root)
+    folds = os.path.normcase("Aa") == os.path.normcase("aa") if probed is None else probed
+    with _CASEFOLD_PROBE_LOCK:
+        _CASEFOLD_PROBE_CACHE[cache_key] = folds
+    return folds
+
+
 def resolve_under_vault(
     vault_root: Path,
     path: str,
@@ -3145,8 +3275,17 @@ def resolve_under_vault(
             reason=f"path is not a directory: {rel}",
         )
 
-    # Normalize the *returned* rel-form. resolved.relative_to(...) lowercases
-    # the drive on Windows; use the literal candidate-form for stability.
+    # Normalize the *returned* rel-form to the real on-disk casing, reusing the
+    # `resolved` computed for the escape check above (zero extra syscalls). The
+    # drive-lowercasing that made us prefer the literal candidate-form is not a
+    # concern here: `relative_to` strips the drive entirely. Fail open to the
+    # literal form if the relative computation can't be established.
+    try:
+        canonical = resolved.relative_to(vault_resolved).as_posix()
+    except ValueError:
+        canonical = ""
+    if canonical and canonical != ".":
+        rel = _canonical_kb_segment(canonical)
     return candidate, rel
 
 

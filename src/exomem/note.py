@@ -55,6 +55,7 @@ from .vault import (
     PlannedWrite,
     WikilinkResolver,
     batch_atomic_write,
+    canonical_vault_rel,
     content_hash,
     ensure_canonical_h1,
     escape_wikilinks_for_log,
@@ -1428,7 +1429,11 @@ def note(
             project_registry=key_plan.registry,
             create_parents=False,
         )
-        destination = note_path.relative_to(root).as_posix()
+        # Re-spell the destination to the real on-disk casing *before* it is
+        # bound into the draft token: creating into an existing but
+        # differently-cased folder (`Polly/` vs an on-disk `POLLY/`) would
+        # otherwise record the minted spelling as the page's identity path.
+        destination = canonical_vault_rel(root, note_path.relative_to(root).as_posix())
         token_value = semantic_writes.DraftToken(
             "note", _preflight_operation, destination, render_date, registrations
         )
