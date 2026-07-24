@@ -12,7 +12,10 @@ import json
 import os
 import re
 import sqlite3
+import threading
+from collections.abc import Iterable
 from dataclasses import dataclass
+from dataclasses import field as dataclass_field
 from pathlib import Path
 from typing import Any
 
@@ -32,7 +35,7 @@ from .cli_ops import OpError
 from .kbdir import kb_dirname, kb_prefix
 from .markdown_relations import MarkdownRelation
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 UNIT_SEED_MAX_BATCHES = 4
 UNIT_PARENT_REF_MAX_CANDIDATES = 16
 EDGE_INSPECTION_MULTIPLIER = 4
@@ -118,6 +121,40 @@ class GraphNeighbor:
     relation_type: str | None
     direction: str
     family: str
+
+
+@dataclass(frozen=True)
+class RelationMatch:
+    """Why a page qualified for a relation filter — an additive find-hit annotation.
+
+    `direction` is relative to the qualifying page ("outbound" when the page owns
+    the edge source, "inbound" when it owns the destination). `counterpart` is the
+    page on the other end of the qualifying edge. `matched_via` is "relation_type"
+    when the edge's canonical relation matched a requested key, or "parent_relation"
+    when it matched through extension parent roll-up.
+    """
+
+    relation_type: str | None
+    direction: str
+    counterpart: str
+    matched_via: str
+
+
+@dataclass(frozen=True)
+class RelationFilterResult:
+    """Outcome of a relation-participant lookup.
+
+    `status` is one of "available" (authoritative — an empty `paths` is a real
+    "no such edges"), "warming" (sidecar missing or stale — the caller raises the
+    typed warming outcome and schedules a rebuild), or "temporarily_unavailable"
+    (graph index disabled). `provenance` maps each participant path to its best
+    (lowest source-order) qualifying match.
+    """
+
+    status: str
+    paths: frozenset[str] = frozenset()
+    provenance: dict[str, RelationMatch] = dataclass_field(default_factory=dict)
+    reason: str | None = None
 
 
 def graph_enabled() -> bool:
@@ -219,6 +256,17 @@ class EpistemicGraphIndex:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_graph_edges_dst ON graph_edges(dst_key)")
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_graph_edges_source_path ON graph_edges(source_path)"
+        )
+        # Relation-type indexes back the relation-filtered-recall lookups; the two
+        # columns are queried by separate UNIONed branches (an OR across them would
+        # defeat both indexes).
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_graph_edges_relation_type "
+            "ON graph_edges(relation_type, src_key, dst_key)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_graph_edges_parent_relation "
+            "ON graph_edges(parent_relation, src_key, dst_key)"
         )
         return conn
 
@@ -644,6 +692,134 @@ class EpistemicGraphIndex:
         finally:
             conn.close()
         return {row[0] for row in rows}
+
+    def relation_participants(
+        self,
+        keys: Iterable[str],
+        *,
+        anchor: str | None = None,
+        direction: str = "any",
+    ) -> RelationFilterResult:
+        """Pages participating in a typed edge whose canonical `relation_type` or
+        `parent_relation` is in `keys` (extension parent roll-up).
+
+        `keys` MUST already be canonical registry keys — find.py canonicalizes and
+        rejects unknowns before calling, so an unknown key never reaches here. When
+        `anchor` is given, only pages connected to that page qualify and `direction`
+        ("outbound" | "inbound" | "any") is relative to the anchor; without an
+        anchor `direction` is relative to the candidate page. Direction is a no-op
+        for symmetric relations. The anchor is excluded from results. Block-level
+        endpoints resolve to their owning page (INNER JOIN drops unresolved
+        placeholders); self-edges (a block to its owning file) drop out.
+
+        Status mirrors the exact-recall reliability contract: "available" is
+        authoritative (an empty set means no such edges); "warming" means the
+        sidecar is missing or stale; "temporarily_unavailable" means the graph
+        index is disabled. It never scans the corpus and never false-empties.
+        """
+        key_set = {str(k) for k in keys if k}
+        anchor_rel = _with_md(anchor) if anchor else None
+        if not key_set and anchor_rel is None:
+            return RelationFilterResult(status="available")
+        if not graph_enabled():
+            return RelationFilterResult(
+                status="temporarily_unavailable", reason="graph_index_disabled"
+            )
+        if not self.path.exists():
+            return RelationFilterResult(status="warming")
+        conn = self._open_read_snapshot()
+        if conn is None:
+            return RelationFilterResult(status="warming")
+        select = (
+            "SELECT s.path, d.path, e.relation_type, e.rowid "
+            "FROM graph_edges e "
+            "JOIN graph_nodes s ON s.node_key = e.src_key "
+            "JOIN graph_nodes d ON d.node_key = e.dst_key "
+        )
+        try:
+            if key_set:
+                # Edges whose canonical relation_type or parent_relation matches a
+                # requested key (two indexed lookups UNIONed — an OR across the two
+                # columns would defeat both indexes). Anchor narrowing, when set, is
+                # applied in Python below.
+                placeholders = ",".join("?" for _ in key_set)
+                params = list(key_set)
+                rows = conn.execute(
+                    f"{select} WHERE e.relation_type IN ({placeholders}) "
+                    f"UNION {select} WHERE e.parent_relation IN ({placeholders}) "
+                    "ORDER BY 4",
+                    params + params,
+                ).fetchall()
+            else:
+                # Anchor alone (no relation keys): every typed edge touching the
+                # anchor qualifies. Resolve the anchor's node keys, then two indexed
+                # endpoint lookups — never an unfiltered edge scan.
+                anchor_node_keys = [
+                    row[0]
+                    for row in conn.execute(
+                        "SELECT node_key FROM graph_nodes WHERE path = ?", (anchor_rel,)
+                    ).fetchall()
+                ]
+                if not anchor_node_keys:
+                    return RelationFilterResult(status="available")
+                kp = ",".join("?" for _ in anchor_node_keys)
+                rows = conn.execute(
+                    f"{select} WHERE e.relation_type IS NOT NULL AND e.src_key IN ({kp}) "
+                    f"UNION {select} WHERE e.relation_type IS NOT NULL AND e.dst_key IN ({kp}) "
+                    "ORDER BY 4",
+                    anchor_node_keys + anchor_node_keys,
+                ).fetchall()
+        except sqlite3.Error:
+            return RelationFilterResult(status="warming")
+        finally:
+            conn.close()
+
+        paths: set[str] = set()
+        provenance: dict[str, RelationMatch] = {}
+
+        def _add(page: str, counterpart: str, relation_type: str | None, cand_dir: str) -> None:
+            if anchor_rel is not None and page == anchor_rel:
+                return
+            # In anchor-alone mode there is no requested key; the edge's canonical
+            # relation is what matched.
+            matched_via = (
+                "relation_type"
+                if (not key_set or relation_type in key_set)
+                else "parent_relation"
+            )
+            paths.add(page)
+            provenance.setdefault(
+                page, RelationMatch(relation_type, cand_dir, counterpart, matched_via)
+            )
+
+        for src_path, dst_path, relation_type, _rowid in rows:
+            if src_path == dst_path:
+                continue
+            edge_def = self.registry.definition(str(relation_type or ""))
+            is_symmetric = edge_def is not None and edge_def.direction == "symmetric"
+            if anchor_rel is not None:
+                if src_path == anchor_rel:
+                    candidate, counterpart, cand_dir, anchor_dir = (
+                        dst_path, src_path, "inbound", "outbound",
+                    )
+                elif dst_path == anchor_rel:
+                    candidate, counterpart, cand_dir, anchor_dir = (
+                        src_path, dst_path, "outbound", "inbound",
+                    )
+                else:
+                    continue
+                if not is_symmetric and direction != "any" and direction != anchor_dir:
+                    continue
+                _add(candidate, counterpart, relation_type, cand_dir)
+            else:
+                if is_symmetric or direction in ("any", "outbound"):
+                    _add(src_path, dst_path, relation_type, "outbound")
+                if is_symmetric or direction in ("any", "inbound"):
+                    _add(dst_path, src_path, relation_type, "inbound")
+
+        return RelationFilterResult(
+            status="available", paths=frozenset(paths), provenance=provenance
+        )
 
 
 def graph_context(
@@ -1089,6 +1265,40 @@ def cache_token(vault_root: Path) -> tuple | None:
         values.get("extension_registry_hash"),
         values.get("generation"),
     )
+
+
+_REBUILD_LOCK = threading.Lock()
+_REBUILDING: set[str] = set()
+
+
+def schedule_background_rebuild(vault_root: Path) -> bool:
+    """Kick a single-flight background rebuild of the sidecar and return whether
+    one was started.
+
+    The relation-filter warming path calls this so a missing or stale sidecar
+    converges without blocking the request. At most one rebuild per vault runs at
+    a time (a second call while one is in flight is a no-op); the daemon thread
+    swallows its own errors so a failed rebuild never surfaces on the request.
+    """
+    if not graph_enabled():
+        return False
+    key = str(Path(vault_root).resolve())
+    with _REBUILD_LOCK:
+        if key in _REBUILDING:
+            return False
+        _REBUILDING.add(key)
+
+    def _run() -> None:
+        try:
+            EpistemicGraphIndex(vault_root).rebuild_all()
+        except Exception:  # noqa: BLE001 - a background rebuild must never raise
+            pass
+        finally:
+            with _REBUILD_LOCK:
+                _REBUILDING.discard(key)
+
+    threading.Thread(target=_run, name="exomem-graph-rebuild", daemon=True).start()
+    return True
 
 
 def upsert_after_write(vault_root: Path, written_paths: list[Path]) -> None:

@@ -199,6 +199,7 @@ class Hit:
     activation: float | None = None
     usage_boost_applied: float | None = None
     graph_provenance: GraphProvenance | None = None
+    relation_match: dict[str, Any] | None = None
     matched_units: list[dict[str, Any]] | None = None
     matched_units_truncated: int = 0
     result_type: str | None = None
@@ -219,6 +220,8 @@ class Hit:
                 "direction": self.graph_provenance.direction,
                 "seed": self.graph_provenance.seed,
             }
+        if self.relation_match is not None:
+            out["relation_match"] = self.relation_match
         if self.media_type:
             out["media_type"] = self.media_type
         if self.media_file:
@@ -288,6 +291,8 @@ class Hit:
                 "direction": self.graph_provenance.direction,
                 "seed": self.graph_provenance.seed,
             }
+        if self.relation_match is not None:
+            out["relation_match"] = self.relation_match
         if self.media_type:
             out["media_type"] = self.media_type
         if self.media_file:
@@ -342,6 +347,7 @@ class SemanticUnitHit:
     parent_updated: str
     parent_superseded_by: list[str] = field(default_factory=list)
     relations: list[dict[str, Any]] = field(default_factory=list)
+    relation_match: dict[str, Any] | None = None
     bm25_rank: int | None = None
     bm25_score: float | None = None
     vector_rank: int | None = None
@@ -374,6 +380,8 @@ class SemanticUnitHit:
         }
         if self.parent_superseded_by:
             out["parent_superseded_by"] = self.parent_superseded_by
+        if self.relation_match is not None:
+            out["relation_match"] = self.relation_match
         if self.mixed_units_truncated:
             out["mixed_units_truncated"] = self.mixed_units_truncated
         signals: dict[str, Any] = {}
