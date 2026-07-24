@@ -232,8 +232,21 @@ class StableIdentityCensus:
             ),
         )
 
-    def with_page(self, page: SemanticPageState) -> StableIdentityCensus:
-        entries = [entry for entry in self.entries if entry.path != page.path]
+    def with_page(
+        self, page: SemanticPageState, *, casefold_paths: bool = False
+    ) -> StableIdentityCensus:
+        """Replace the entry `page` owns, returning a new census.
+
+        `casefold_paths` is set when the vault lives on a case-insensitive
+        filesystem: the census records the real on-disk casing while a caller
+        may address the same physical file differently, so dropping only the
+        byte-equal entry would manufacture a phantom second owner in memory.
+        """
+        if casefold_paths:
+            folded = page.path.casefold()
+            entries = [entry for entry in self.entries if entry.path.casefold() != folded]
+        else:
+            entries = [entry for entry in self.entries if entry.path != page.path]
         entries.append(
             StableIdentityEntry(
                 page.path,
@@ -270,6 +283,27 @@ class StableIdentityCensus:
                 identity: list(paths) for identity, paths in self.paths_by_identity.items()
             },
         }
+
+
+def identity_owners_match(
+    owners: tuple[str, ...] | None,
+    page_path: str,
+    *,
+    folds: bool,
+) -> bool:
+    """True when `page_path` is the sole corpus owner recorded in the census.
+
+    `folds` is the vault's case-insensitivity: with it set, an owner that
+    differs from `page_path` only in casing is the SAME physical file, so it
+    must not read as a second owner. With it clear this is byte-for-byte the
+    exact-tuple comparison it replaces — genuine case-variant files on a
+    case-sensitive filesystem stay distinct and still block.
+    """
+    if owners == (page_path,):
+        return True
+    if not folds or not owners:
+        return False
+    return {owner.casefold() for owner in owners} == {page_path.casefold()}
 
 
 @dataclass(frozen=True, slots=True)
@@ -908,7 +942,9 @@ class SemanticCorpusContext:
             self.vault_root,
             pages,
             self.registry,
-            self.identity_census.with_page(state),
+            self.identity_census.with_page(
+                state, casefold_paths=vault.vault_casefolds(self.vault_root)
+            ),
         )
 
     def as_dict(self) -> dict[str, Any]:
@@ -1509,11 +1545,12 @@ def _patch_corpus_files_changed_locked(
     def relative(value: Path | str) -> str | None:
         path = Path(value)
         try:
-            return (
-                path.resolve().relative_to(root.resolve()).as_posix()
-                if path.is_absolute()
-                else _normalize_path(root, path)
-            )
+            if path.is_absolute():
+                return path.resolve().relative_to(root.resolve()).as_posix()
+            # The absolute branch already lands on real on-disk casing; a
+            # caller-cased relative delta key must be canonicalized too, or the
+            # warm-corpus patch keys a phantom sibling of the page it changed.
+            return vault.canonical_vault_rel(root, _normalize_path(root, path))
         except (OSError, ValueError):
             return None
 
@@ -1838,7 +1875,9 @@ def _build_corpus_context_uncached(
         )
     if candidate is not None:
         states[candidate.path] = candidate
-        identity_census = identity_census.with_page(candidate)
+        identity_census = identity_census.with_page(
+            candidate, casefold_paths=vault.vault_casefolds(root)
+        )
     return _context_from_state_map(
         root,
         states,
@@ -2878,16 +2917,23 @@ def _raw_findings(
     minimum_finding = _missing_semantic_unit_finding(page)
     if minimum_finding is not None:
         findings.append(minimum_finding)
-    if page.identity_kind == "exomem_id" and corpus.identity_census.paths_by_identity.get(
-        page.identity
-    ) != (page.path,):
+    owners = corpus.identity_census.paths_by_identity.get(page.identity)
+    if page.identity_kind == "exomem_id" and not identity_owners_match(
+        owners, page.path, folds=vault.vault_casefolds(corpus.vault_root)
+    ):
         findings.append(
             ContractFinding(
                 code="SEMANTIC_IDENTITY_DUPLICATE",
                 severity="error",
                 path=page.path,
                 span=None,
-                detail="the stable page identity has another corpus owner",
+                detail=(
+                    "the stable page identity has another corpus owner: "
+                    # `owners` can be None: the census and `pages` come from two
+                    # separate walks and may diverge, so name that state rather
+                    # than render a dangling colon.
+                    + (", ".join(owners) if owners else "no census entry for this page")
+                ),
                 remediation="Resolve the duplicate stable identity before writing.",
                 governed_element_identity=("identity", page.identity),
                 resolved_rule=("semantic_contract", "identity", "unique"),

@@ -545,7 +545,13 @@ def _posthoc_relative_path(root: Path, path: Path | str) -> str | None:
         except (OSError, ValueError):
             return None
     value = str(path).replace("\\", "/").lstrip("/")
-    return value or None
+    if not value:
+        return None
+    # Same shape as `semantic_contract._patch_corpus_files_changed_locked`: the
+    # absolute branch already lands on real on-disk casing, so a caller-cased
+    # relative path must be canonicalized too or the page silently drops out of
+    # the batch (it keys a phantom sibling the corpus has never heard of).
+    return vault.canonical_vault_rel(root, value)
 
 
 def evaluate_posthoc_batch(
@@ -1239,6 +1245,15 @@ def preflight_existing(
     if relation_disposition not in {None, "reviewed_none"}:
         raise SemanticWriteError("INVALID_RELATION_REVIEW", "relation disposition is invalid")
     root = Path(vault_root)
+    # Idempotent backstop, deliberately kept: every caller today already hands
+    # over a canonical rel (the Tier 2 writers via `resolve_under_vault`,
+    # `observe_memory` via `edit._resolve`), but this is the single choke point
+    # every governed edit funnels through, and on a case-insensitive filesystem
+    # a differently-cased spelling names the same physical page as the census
+    # entry. Re-spelling here means no future caller can key the corpus off a
+    # phantom casing. Everything below is built from `root / path`, so a
+    # re-spell stays self-consistent, and a canonical input is a no-op.
+    path = vault.canonical_vault_rel(root, path)
     before_source, primary_guard = vault.read_guarded_text(root, root / path)
     raw_before_hash = vault.content_hash(before_source)
     # The parser/corpus and public content-hash contract normalize platform
@@ -1343,7 +1358,11 @@ def preflight_existing(
         if (
             after.identity_kind != "exomem_id"
             or after.review_fingerprint is None
-            or after_corpus.identity_census.paths_by_identity.get(after.identity) != (after.path,)
+            or not semantic_contract.identity_owners_match(
+                after_corpus.identity_census.paths_by_identity.get(after.identity),
+                after.path,
+                folds=vault.vault_casefolds(root),
+            )
         ):
             raise SemanticWriteError(
                 "RELATION_REVIEW_STABLE_ID_REQUIRED",
@@ -1720,8 +1739,9 @@ def _move_state_map(
         if entry.path not in {old_path, *changed}
     )
     identity_census = semantic_contract.StableIdentityCensus(entries)
+    casefold_paths = vault.vault_casefolds(root)
     for state in changed.values():
-        identity_census = identity_census.with_page(state)
+        identity_census = identity_census.with_page(state, casefold_paths=casefold_paths)
     return (
         semantic_contract.SemanticCorpusContext.from_states(
             root,
@@ -2218,9 +2238,10 @@ def _corpus_with_recovery_states(
     identity_census = semantic_contract.StableIdentityCensus(
         tuple(entry for entry in base.identity_census.entries if entry.path not in removed_paths)
     )
+    casefold_paths = vault.vault_casefolds(root)
     for state in states:
         pages[state.path] = state
-        identity_census = identity_census.with_page(state)
+        identity_census = identity_census.with_page(state, casefold_paths=casefold_paths)
     return semantic_contract.SemanticCorpusContext.from_states(
         root,
         pages.values(),

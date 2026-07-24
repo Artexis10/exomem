@@ -47,6 +47,7 @@ from .vault import (
     content_hash,
     escape_wikilinks_for_log,
     in_append_only_tree,
+    is_casing_only_rewrite,
     kb_root,
     normalize_body_wikilinks,
     plan_log_writes,
@@ -363,7 +364,7 @@ def _resolve(vault_root: Path, path: str) -> tuple[Path, str]:
     candidate = vault_root / rel
     try:
         resolved = candidate.resolve()
-        resolved.relative_to(kb_root(vault_root).resolve())
+        kb_relative = resolved.relative_to(kb_root(vault_root).resolve())
     except (ValueError, OSError) as e:
         raise EditError(
             code="INVALID_PATH",
@@ -376,6 +377,24 @@ def _resolve(vault_root: Path, path: str) -> tuple[Path, str]:
             missing=["path"],
             reason=f"file does not exist: {rel}",
         )
+    # Return the rel-form re-spelled to the real on-disk casing, reusing the
+    # `resolved` already computed for the escape check above (no extra
+    # syscalls). On a case-insensitive filesystem a caller addressing
+    # `…/Polly/x.md` for an on-disk `…/POLLY/` would otherwise carry its own
+    # spelling into every identity comparison keyed on `rel_path`. Rebuilding
+    # from `kb_prefix()` also re-spells segment 1 to the configured KB name,
+    # matching `vault.canonical_vault_rel`; fail open to the literal form.
+    #
+    # Adopted ONLY when the rewrite is casing-only — `resolved` has followed any
+    # symlink, expanded any junction/8.3 short name and collapsed any `..`, and
+    # a rel-form silently swapped for a link's target defeats the callers that
+    # re-check it (see `vault.is_casing_only_rewrite`). Comparing two strings
+    # adds no syscalls, so the property this mirror exists for is preserved.
+    canonical = kb_relative.as_posix()
+    if canonical and canonical != ".":
+        canonical = kb_prefix() + canonical
+        if is_casing_only_rewrite(canonical, rel):
+            rel = canonical
     return candidate, rel
 
 

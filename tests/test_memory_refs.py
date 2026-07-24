@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import datetime as dt
+import sys
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+import pytest
 import yaml
 
 from exomem import add, commands, link, memory_refs, note, preserve
@@ -65,6 +67,67 @@ def test_bulk_reference_lookup_uses_index_and_refreshes_only_missing_paths(tmp_p
         second_path: memory_refs.memory_ref(second_id),
         "missing.md": None,
     }
+
+
+def test_bulk_reference_lookup_answers_phantom_casing_in_the_callers_form(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A caller may spell a page's folder differently than the disk does.
+
+    Sidecar rows are keyed by the on-disk spelling (`refresh_paths` resolves),
+    so the lookup has to canonicalize — but the answer must stay keyed by what
+    the caller passed in, because callers index the result by their own string.
+    The casefold is modelled here so the contract is pinned on Linux CI too.
+    """
+    vault = tmp_path / "vault"
+    folder = vault / "Knowledge Base" / "Notes" / "POLLY"
+    folder.mkdir(parents=True)
+    identity = memory_refs.new_id()
+    (folder / "terms.md").write_text(_page(identity), encoding="utf-8")
+    on_disk = "Knowledge Base/Notes/POLLY/terms.md"
+    phantom = "Knowledge Base/Notes/Polly/terms.md"
+
+    index = memory_refs.ReferenceIndex(vault)
+    assert index.rebuild_all() == {"indexed": 1, "duplicates": 0, "malformed": 0}
+    monkeypatch.setattr(
+        memory_refs.vault_module,
+        "canonical_vault_rel",
+        lambda _root, rel: on_disk if rel.casefold() == on_disk.casefold() else rel,
+    )
+
+    ref = memory_refs.memory_ref(identity)
+    assert index.refs_for_paths([phantom]) == {phantom: ref}
+    assert index.ref_for_path(phantom) == ref
+
+
+@pytest.mark.skipif(
+    sys.platform != "win32",
+    reason="phantom path casing only names the same page on a case-insensitive filesystem",
+)
+def test_delete_paths_removes_the_canonical_row_for_phantom_casing(tmp_path: Path) -> None:
+    """A delete addressed with the caller's casing must not orphan the real row.
+
+    On NTFS `.../Polly/terms.md` and `.../POLLY/terms.md` open one file, but the
+    sidecar keys rows as case-sensitive text: a stale row survives the delete and
+    then reads back as a second owner of the identity.
+    """
+    vault = tmp_path / "vault"
+    folder = vault / "Knowledge Base" / "Notes" / "POLLY"
+    folder.mkdir(parents=True)
+    identity = memory_refs.new_id()
+    page = folder / "terms.md"
+    page.write_text(_page(identity), encoding="utf-8")
+
+    index = memory_refs.ReferenceIndex(vault)
+    assert index.rebuild_all() == {"indexed": 1, "duplicates": 0, "malformed": 0}
+    assert index.resolve(identity) == "Knowledge Base/Notes/POLLY/terms.md"
+
+    page.unlink()
+    index.delete_paths(["Knowledge Base/Notes/Polly/terms.md"])
+
+    with pytest.raises(memory_refs.ReferenceError) as excinfo:
+        index.resolve(identity)
+    assert excinfo.value.code == "REFERENCE_NOT_FOUND"
 
 
 def test_legacy_negative_reference_is_indexed_without_repeat_scan(
