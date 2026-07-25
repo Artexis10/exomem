@@ -1,5 +1,7 @@
 # exomem
 
+<!-- mcp-name: io.github.Artexis10/exomem -->
+
 [![PyPI](https://img.shields.io/pypi/v/exomem.svg)](https://pypi.org/project/exomem/)
 [![Python](https://img.shields.io/badge/python-%3E%3D3.11-3776ab.svg)](https://pypi.org/project/exomem/)
 [![CI](https://github.com/Artexis10/exomem/actions/workflows/ci.yml/badge.svg)](https://github.com/Artexis10/exomem/actions/workflows/ci.yml)
