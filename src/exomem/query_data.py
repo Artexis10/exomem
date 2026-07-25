@@ -33,8 +33,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from . import access
 from .vault import VaultPathError, resolve_under_vault
-
 
 log = logging.getLogger(__name__)
 
@@ -467,6 +467,11 @@ def query_data(
         abs_path, rel = resolve_under_vault(vault_root, path, must_exist=True, must_be_file=True)
     except VaultPathError as e:
         raise QueryDataError(e.code, e.reason) from None
+    # `excluded` paths (_access.yaml) refuse identically to a missing path —
+    # same code/shape/text as resolve_under_vault's own NOT_FOUND, never a
+    # distinct error, so this is not an existence oracle.
+    if access.refuse_if_excluded(vault_root, rel):
+        raise QueryDataError("NOT_FOUND", f"path does not exist: {rel}")
     if abs_path.suffix.lower() not in ALLOWED_SUFFIXES:
         raise QueryDataError("UNSUPPORTED_FORMAT", f"only {list(ALLOWED_SUFFIXES)} supported")
 
