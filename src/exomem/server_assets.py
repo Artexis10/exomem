@@ -129,6 +129,24 @@ def register_asset_routes(mcp_app: FastMCP) -> None:
             headers={"Cache-Control": "no-store"},
         )
 
+    @mcp_app.custom_route("/metrics.json", methods=["GET"])
+    async def _metrics_json(request: Request) -> JSONResponse:  # noqa: ARG001
+        """Unauthenticated content-free counters/histograms snapshot, beside
+        `/health/ready`. Disabled via `EXOMEM_DISABLE_METRICS`."""
+        from . import metrics
+
+        if metrics.metrics_disabled():
+            return JSONResponse(
+                {"error": "METRICS_DISABLED"},
+                status_code=404,
+                headers={"Cache-Control": "no-store"},
+            )
+        try:
+            payload = metrics.render_json()
+        except Exception:  # noqa: BLE001 - metrics must never fail the probe
+            payload = {"counters": [], "histograms": [], "bucket_bounds_ms": []}
+        return JSONResponse(payload, headers={"Cache-Control": "no-store"})
+
     @mcp_app.custom_route("/favicon.ico", methods=["GET"])
     async def _favicon_ico(request: Request):  # noqa: ARG001
         return FileResponse(

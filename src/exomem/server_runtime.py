@@ -17,7 +17,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import env_compat, hosted_runtime, media_processing, privacy_log, project_keys, schema
+from . import (
+    env_compat,
+    hosted_runtime,
+    media_processing,
+    metrics,
+    privacy_log,
+    project_keys,
+    schema,
+)
 from .hosted_runtime import (
     HostedBindingV2,
     HostedCellConfig,
@@ -64,6 +72,7 @@ def initialize_runtime(*, load_dotenv_func: Callable[..., object]) -> ServerRunt
     log.info("vault=%s source_types=%s", vault_root, source_schema.source_types)
 
     project_keys_hint = project_keys.keys_hint(vault_root)
+    _start_metrics_persistence()
     _start_compute_runtime(vault_root)
     media_worker = _start_media_worker(vault_root)
     file_watcher = _start_file_watcher(vault_root)
@@ -114,6 +123,7 @@ def _initialize_locked_hosted_runtime(
     """Finish hosted startup while retaining exclusive target-root ownership."""
 
     config.apply_process_environment()
+    _start_metrics_persistence()
     lifecycle = HostedCellLifecycle(config)
     security_authority = _initialize_hosted_security(config)
     vault_root = config.vault_root
@@ -274,6 +284,24 @@ def probe_hosted_mutation_authority(vault_root: Path) -> tuple[bool, str]:
         )
         return False, "HOSTED_MUTATION_AUTHORITY_UNAVAILABLE"
     return True, "HOSTED_READY"
+
+
+def _start_metrics_persistence() -> None:
+    """Restore the metrics registry from its prior snapshot and start the
+    background snapshotter against the writer-lease state directory.
+
+    Best-effort: metrics persistence is not part of server readiness, so any
+    failure here (an unreadable snapshot, a lease-config error) is logged and
+    swallowed rather than blocking startup.
+    """
+    try:
+        from .writer_lease import get_manager
+
+        state_dir = get_manager().config.state_dir
+        metrics.load_snapshot_once(state_dir)
+        metrics.start_snapshotter(state_dir, metrics.snapshot_interval_seconds_from_env())
+    except Exception as exc:  # noqa: BLE001 - metrics startup must never break the server
+        log.warning("metrics persistence unavailable at startup: %s", exc)
 
 
 def _start_compute_runtime(vault_root: Path) -> None:

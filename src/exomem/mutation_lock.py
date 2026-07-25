@@ -20,6 +20,7 @@ import time
 import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, BinaryIO
@@ -39,7 +40,53 @@ _SAFE_LABEL = re.compile(r"^[A-Za-z0-9._:-]{1,64}$")
 _DEFAULT_LONG_HOLDER_SECONDS = 30.0
 _STATUS_TIMEOUT_SECONDS = 0.25
 _HOLDER_SCHEMA = 1
+
+# The most recent `wait_ms`/`hold_ms` this task/thread measured acquiring and
+# holding the vault mutation boundary — set by `VaultMutationCoordinator.hold()`
+# for the OUTER (non-reentrant) acquisition only, so a nested command helper
+# reusing an already-held lock never overwrites its caller's timing. Read by
+# `writer_lease.invoke()` at the mutation-journal seam (O5) and by the R1
+# telemetry events, both of which run in the same execution context shortly
+# after the `with ...hold():` block exits.
+_LAST_MUTATION_TIMING: ContextVar[dict[str, float] | None] = ContextVar(
+    "exomem_last_mutation_timing", default=None
+)
+
+
+def last_mutation_timing() -> dict[str, float] | None:
+    """Return `{"wait_ms", "hold_ms"}` for the most recent boundary hold in
+    this context, or `None` if none has been recorded yet."""
+    return _LAST_MUTATION_TIMING.get()
+
+
 logger = logging.getLogger(__name__)
+
+
+def _log_mutation_lock_event(event: str, **fields: Any) -> None:
+    try:
+        from .log_events import log_event
+
+        log_event(logger, logging.INFO, event, fields=fields)
+    except Exception:  # noqa: BLE001 - observability must never break a mutation
+        pass
+
+
+def _bump_boundary_metric(name: str, labels: dict[str, str] | None = None) -> None:
+    try:
+        from . import metrics
+
+        metrics.inc_counter(name, labels or {})
+    except Exception:  # noqa: BLE001 - observability must never break a mutation
+        pass
+
+
+def _observe_boundary_ms(name: str, value_ms: float) -> None:
+    try:
+        from . import metrics
+
+        metrics.observe_duration_ms(name, value_ms, {})
+    except Exception:  # noqa: BLE001 - observability must never break a mutation
+        pass
 
 
 def canonical_mutation_identity(vault_or_cell: os.PathLike[str] | str) -> str:
@@ -145,11 +192,17 @@ class VaultMutationCoordinator:
         timeout = self.timeout_seconds if timeout_seconds is None else timeout_seconds
         if timeout < 0:
             raise ValueError("mutation lock timeout must be non-negative")
-        deadline = time.monotonic() + timeout
+        wait_start = time.monotonic()
+        # Clear any prior hold's timing so a mutation that fails BEFORE
+        # acquiring can never journal a previous mutation's wait/hold values.
+        _LAST_MUTATION_TIMING.set(None)
+        deadline = wait_start + timeout
         state = _state_for(self.lock_path)
         remaining = max(0.0, deadline - time.monotonic())
         if not state.guard.acquire(timeout=remaining):
-            raise _mutation_busy(self.snapshot())
+            raise _mutation_busy(
+                self.snapshot(), wait_ms=(time.monotonic() - wait_start) * 1000
+            )
         try:
             thread_id = threading.get_ident()
             if state.owner_thread == thread_id:
@@ -163,11 +216,16 @@ class VaultMutationCoordinator:
             handle = self._open_lock_file(self.lock_path)
             metadata_handle = self._open_lock_file(self.metadata_lock_path)
             try:
-                self._acquire_boundary(handle, metadata_handle, deadline, request_id, operation, holder_kind)
+                self._acquire_boundary(
+                    handle, metadata_handle, deadline, request_id, operation, holder_kind,
+                    wait_start=wait_start,
+                )
             except Exception:
                 handle.close()
                 metadata_handle.close()
                 raise
+            acquired_at = time.monotonic()
+            wait_ms = round((acquired_at - wait_start) * 1000, 2)
             state.owner_thread = thread_id
             state.depth = 1
             state.handle = handle
@@ -175,18 +233,31 @@ class VaultMutationCoordinator:
                 state.request_id = _safe_label(request_id, fallback="untracked")
                 state.operation = _safe_label(operation, fallback="unknown")
                 state.holder_kind = _safe_label(holder_kind, fallback="unknown")
-                state.acquired_at = time.monotonic()
+                state.acquired_at = acquired_at
                 state.long_holder_seconds = self.long_holder_seconds
                 state.long_warning_emitted = False
+            _log_mutation_lock_event(
+                "mutation_lock_acquired",
+                operation=operation,
+                holder_kind=holder_kind,
+                wait_ms=wait_ms,
+            )
+            _observe_boundary_ms("exomem_boundary_wait_ms", wait_ms)
             try:
                 yield
             finally:
+                hold_ms = round((time.monotonic() - acquired_at) * 1000, 2)
+                _LAST_MUTATION_TIMING.set({"wait_ms": wait_ms, "hold_ms": hold_ms})
                 with state.metadata_guard:
+                    already_warned = state.long_warning_emitted
                     state.request_id = None
                     state.operation = None
                     state.holder_kind = None
                     state.acquired_at = None
                     state.long_warning_emitted = False
+                # Reset reentrancy state BEFORE releasing the OS lock: a stale
+                # owner_thread would route this thread's next hold() through the
+                # reentrant fast path with no OS lock at all.
                 state.depth = 0
                 state.owner_thread = None
                 state.handle = None
@@ -195,6 +266,36 @@ class VaultMutationCoordinator:
                 finally:
                     handle.close()
                     metadata_handle.close()
+                # Telemetry AFTER release, so log appends never extend the
+                # critical section other writers are polling on. Guaranteed on
+                # release, regardless of whether anyone ever probed this hold
+                # while it was live (`_snapshot_state`'s warning only fires
+                # when something calls `snapshot()`).
+                overdue = hold_ms >= self.long_holder_seconds * 1000
+                if not already_warned and overdue:
+                    logger.warning(
+                        "vault mutation boundary held too long request_id=%s operation=%s "
+                        "holder_kind=%s hold_ms=%.2f",
+                        _safe_label(request_id, fallback="untracked"),
+                        _safe_label(operation, fallback="unknown"),
+                        _safe_label(holder_kind, fallback="unknown"),
+                        hold_ms,
+                    )
+                    _log_mutation_lock_event(
+                        "mutation_lock_long_hold",
+                        operation=operation,
+                        holder_kind=holder_kind,
+                        hold_ms=hold_ms,
+                    )
+                if overdue:
+                    _bump_boundary_metric("exomem_boundary_overdue_total")
+                _log_mutation_lock_event(
+                    "mutation_lock_released",
+                    operation=operation,
+                    holder_kind=holder_kind,
+                    hold_ms=hold_ms,
+                )
+                _observe_boundary_ms("exomem_boundary_hold_ms", hold_ms)
         finally:
             state.guard.release()
 
@@ -220,6 +321,20 @@ class VaultMutationCoordinator:
                 self.poll_interval_seconds,
             )
             if not metadata_locked:
+                # The metadata mutex is genuinely contended (not just briefly
+                # held during a publish). Rather than fabricate a healthy-
+                # looking unknown holder at age 0, fall back to a lock-free
+                # read of the sidecar: it is published via atomic
+                # `os.replace`, so a read without the mutex is tear-free even
+                # though it cannot be verified current. Only the genuine
+                # absence of any sidecar still fabricates an unknown holder.
+                holder = _read_holder_metadata(self.metadata_path)
+                if holder is not None:
+                    _log_mutation_lock_event(
+                        "mutation_holder_unverified",
+                        holder_kind=holder.get("holder_kind"),
+                    )
+                    return _holder_snapshot(holder, verified=False)
                 return _unknown_external_holder()
             mutation_locked = _try_os_lock(mutation_handle)
             if mutation_locked:
@@ -256,6 +371,9 @@ class VaultMutationCoordinator:
             handle.seek(0)
             return handle
         except OSError as exc:
+            _bump_boundary_metric(
+                "exomem_mutation_busy_total", {"code": "MUTATION_LOCK_UNAVAILABLE"}
+            )
             raise OpError(
                 "MUTATION_LOCK_UNAVAILABLE",
                 f"vault mutation lock could not be opened (host error {exc.errno})",
@@ -270,6 +388,8 @@ class VaultMutationCoordinator:
         request_id: str | None,
         operation: str | None,
         holder_kind: str,
+        *,
+        wait_start: float,
     ) -> None:
         """Acquire and publish with the metadata mutex held for one generation."""
         while True:
@@ -280,7 +400,9 @@ class VaultMutationCoordinator:
             except OSError as exc:
                 raise self._lock_unavailable(exc) from None
             if not metadata_locked:
-                raise _mutation_busy(self.snapshot())
+                raise _mutation_busy(
+                    self.snapshot(), wait_ms=(time.monotonic() - wait_start) * 1000
+                )
             acquired = False
             try:
                 try:
@@ -316,7 +438,9 @@ class VaultMutationCoordinator:
                 return
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                raise _mutation_busy(self.snapshot())
+                raise _mutation_busy(
+                    self.snapshot(), wait_ms=(time.monotonic() - wait_start) * 1000
+                )
             time.sleep(min(self.poll_interval_seconds, remaining))
 
     def _publish_holder_metadata(self, holder: dict[str, object]) -> None:
@@ -360,6 +484,9 @@ class VaultMutationCoordinator:
 
     @staticmethod
     def _lock_unavailable(exc: OSError) -> OpError:
+        _bump_boundary_metric(
+            "exomem_mutation_busy_total", {"code": "MUTATION_LOCK_UNAVAILABLE"}
+        )
         return OpError(
             "MUTATION_LOCK_UNAVAILABLE",
             f"vault mutation authority could not be established (host error {exc.errno})",
@@ -541,14 +668,34 @@ def active_mutation_snapshot() -> dict[str, object]:
     return max(held, key=lambda item: float(item["age_seconds"]))
 
 
-def _mutation_busy(snapshot: dict[str, object] | None = None) -> OpError:
+def dynamic_retry_after_ms(snapshot: dict[str, object] | None) -> int:
+    """Scale the retry hint with observed contention instead of a fixed 750ms.
+
+    `min(15000, max(750, age_seconds*500))`, floored at 5000 when the holder
+    is overdue; 750 when there is no known holder (age 0 / no snapshot).
+    """
+    if not snapshot or snapshot.get("state") != "held":
+        return 750
+    age_seconds = float(snapshot.get("age_seconds") or 0.0)
+    retry_after_ms = min(15000, max(750, int(age_seconds * 500)))
+    if snapshot.get("overdue"):
+        retry_after_ms = max(retry_after_ms, 5000)
+    return retry_after_ms
+
+
+def _mutation_busy(
+    snapshot: dict[str, object] | None = None, *, wait_ms: float | None = None
+) -> OpError:
     details: dict[str, object] = {
         "status": "retryable",
         "committed": False,
-        "retry_after_ms": 750,
+        "retry_after_ms": dynamic_retry_after_ms(snapshot),
     }
+    if wait_ms is not None:
+        details["wait_ms"] = round(wait_ms, 2)
     if snapshot and snapshot.get("state") == "held":
         details["holder"] = snapshot
+    _bump_boundary_metric("exomem_mutation_busy_total", {"code": "MUTATION_BUSY"})
     return OpError(
         "MUTATION_BUSY",
         "vault mutation boundary is busy",

@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.32.0](https://github.com/Artexis10/exomem/compare/v0.31.0...v0.32.0) (2026-07-25)
+
+
+### Features
+
+* move semantic validation and model loading outside the mutation boundary ([#327](https://github.com/Artexis10/exomem/issues/327)) ([4246bd8](https://github.com/Artexis10/exomem/commit/4246bd8a382a75127e9272b128847bda1cf23cc3))
+* **registry:** publish exomem to the official MCP Registry ([#323](https://github.com/Artexis10/exomem/issues/323)) ([4fae99a](https://github.com/Artexis10/exomem/commit/4fae99a2207b181f4b5de2175e85c4c476e7cd7f))
+
+## [0.31.0](https://github.com/Artexis10/exomem/compare/v0.30.1...v0.31.0) (2026-07-25)
+
+
+### Features
+
+* full observability and write-path reliability ([#320](https://github.com/Artexis10/exomem/issues/320)) ([da10c8b](https://github.com/Artexis10/exomem/commit/da10c8bc97dd91ef5ce83932f230f589d6f3e3c2))
+
+
+### Bug Fixes
+
+* **packaging:** add project URLs so PyPI links to the docs, source and site ([#319](https://github.com/Artexis10/exomem/issues/319)) ([58e181f](https://github.com/Artexis10/exomem/commit/58e181f706a1c6f423e915626a741b4476aa2ca7))
+
 ## [0.30.1](https://github.com/Artexis10/exomem/compare/v0.30.0...v0.30.1) (2026-07-24)
 
 

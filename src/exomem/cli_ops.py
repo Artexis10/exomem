@@ -79,6 +79,10 @@ _REMEDIATION: dict[str, str] = {
         "Do not rerun with a new identity; reconcile the committed mutation and retry "
         "only with the same identity."
     ),
+    "MUTATION_OUTCOME_UNKNOWN": (
+        "Verify whether the mutation actually landed before retrying; an identical retry "
+        "is safe again after the abandonment grace period."
+    ),
     "MUTATION_LOCK_UNAVAILABLE": (
         "Check that the runtime state root is writable and supports host file locking."
     ),
@@ -129,6 +133,7 @@ _CONFLICT_CODES = frozenset(
         "MUTATION_WARMING",
         "MUTATION_ACKNOWLEDGEMENT_PENDING",
         "MUTATION_COMMITTED_ACKNOWLEDGEMENT_UNCERTAIN",
+        "MUTATION_OUTCOME_UNKNOWN",
         # Adoption Studio drift codes (add-adoption-studio): a stale plan/apply or a
         # proposal whose bound content changed since review is a conflict, not a
         # plain bad-request — the client's honest recourse is to re-scan/re-read,
