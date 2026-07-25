@@ -44,6 +44,18 @@ dependencies = [
     "watchdog>=4.0",            # live file-watcher: re-embed out-of-band .md edits (lazy import; soft-fails if absent)
 ]
 
+# Rendered by PyPI as the "Project links" sidebar block. Without this table the
+# project page offers no route anywhere — not to the docs, not to the source, not
+# to the issue tracker — which is both a usability gap for anyone landing on the
+# package and a missed link from pypi.org to the project's own surfaces.
+# Key order is preserved by PyPI, and "Homepage" gets special treatment.
+[project.urls]
+Homepage = "https://substratesystems.io/exomem"
+Documentation = "https://github.com/Artexis10/exomem/blob/main/QUICKSTART.md"
+Source = "https://github.com/Artexis10/exomem"
+Changelog = "https://github.com/Artexis10/exomem/blob/main/CHANGELOG.md"
+Issues = "https://github.com/Artexis10/exomem/issues"
+
 # Hybrid semantic search (local vector embeddings). Optional so a lean install
 # — `uv sync` — works in keyword/BM25 mode (KB_MCP_DISABLE_EMBEDDINGS=1) without
 # the ~1-2 GB torch/CUDA download. The code soft-falls back to BM25 when these
