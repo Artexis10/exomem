@@ -7,7 +7,6 @@ from pathlib import Path
 
 from .kbdir import kb_dirname
 
-
 INDEX_SCOPES = ("kb", "vault")
 
 # Navigation files that are generated summaries/activity feeds, not user content.
@@ -22,6 +21,11 @@ def sidecar_path(vault_root: Path) -> Path:
 def clip_sidecar_path(vault_root: Path) -> Path:
     """Per-machine CLIP image/video vector sidecar path."""
     return vault_root / kb_dirname() / ".clip.sqlite"
+
+
+def governance_sidecar_path(vault_root: Path) -> Path:
+    """Per-machine governance compiled-policy sidecar path (inspection only)."""
+    return vault_root / kb_dirname() / ".governance.sqlite"
 
 
 def kb_index_root(vault_root: Path) -> Path:
