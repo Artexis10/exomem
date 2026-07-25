@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -332,6 +333,12 @@ def _rest_client(vault, monkeypatch: pytest.MonkeyPatch, **env: str) -> TestClie
         "EXOMEM_CF_ACCESS_TEAM_DOMAIN", "EXOMEM_CF_ACCESS_AUD",
     ):
         monkeypatch.delenv(leaky, raising=False)
+    # Isolate metrics state: no snapshotter thread, and any restore reads a
+    # private state dir instead of a shared one another test polluted.
+    monkeypatch.setenv("EXOMEM_METRICS_SNAPSHOT_SECONDS", "0")
+    monkeypatch.setenv(
+        "EXOMEM_WRITER_LEASE_STATE_DIR", str(Path(str(vault)) / ".metrics-test-state")
+    )
     for key, value in env.items():
         monkeypatch.setenv(key, value)
     mcp = server.build_server(require_auth=False)

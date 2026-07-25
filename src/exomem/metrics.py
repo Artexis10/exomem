@@ -213,6 +213,27 @@ def load_snapshot(state_dir: Path | str) -> None:
         log.debug("metrics load_snapshot failed", exc_info=True)
 
 
+_SNAPSHOT_LOADED = False
+_SNAPSHOT_LOADED_LOCK = threading.Lock()
+
+
+def load_snapshot_once(state_dir: Path | str) -> None:
+    """Restore from disk at most once per process.
+
+    Runtime initialization can legitimately run more than once in a process
+    (server rebuilds, test suites); restoring again would clobber LIVE
+    in-process counters with older persisted values. Only the first
+    initialization consumes the on-disk snapshot. Deliberately not re-armed by
+    `reset()`.
+    """
+    global _SNAPSHOT_LOADED
+    with _SNAPSHOT_LOADED_LOCK:
+        if _SNAPSHOT_LOADED:
+            return
+        _SNAPSHOT_LOADED = True
+    load_snapshot(state_dir)
+
+
 def snapshot_interval_seconds_from_env(env: Mapping[str, str] | None = None) -> float:
     """`EXOMEM_METRICS_SNAPSHOT_SECONDS`, default 60.0; `0` disables the thread."""
     values = os.environ if env is None else env

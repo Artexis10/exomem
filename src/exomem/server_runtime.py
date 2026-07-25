@@ -298,7 +298,7 @@ def _start_metrics_persistence() -> None:
         from .writer_lease import get_manager
 
         state_dir = get_manager().config.state_dir
-        metrics.load_snapshot(state_dir)
+        metrics.load_snapshot_once(state_dir)
         metrics.start_snapshotter(state_dir, metrics.snapshot_interval_seconds_from_env())
     except Exception as exc:  # noqa: BLE001 - metrics startup must never break the server
         log.warning("metrics persistence unavailable at startup: %s", exc)

@@ -153,3 +153,28 @@ def test_snapshot_interval_seconds_from_env_zero_disables(
 ) -> None:
     monkeypatch.setenv("EXOMEM_METRICS_SNAPSHOT_SECONDS", "0")
     assert metrics.snapshot_interval_seconds_from_env() == 0.0
+
+def test_load_snapshot_once_consumes_the_restore_for_the_whole_process(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Runtime init can run more than once per process; only the FIRST init may
+    restore from disk, or later inits would clobber live in-process counters
+    with older persisted values (and, in a shared test process, re-import
+    another test's persisted counts over a per-test reset)."""
+    monkeypatch.setattr(metrics, "_SNAPSHOT_LOADED", False)
+    metrics.inc_counter("exomem_tool_calls_total", {"tool": "x", "outcome": "success"})
+    metrics.save_snapshot(tmp_path)
+    metrics.reset()
+
+    metrics.load_snapshot_once(tmp_path)
+    first = {
+        (c["name"], tuple(sorted(c["labels"].items()))): c["value"]
+        for c in metrics.snapshot()["counters"]
+    }
+    assert first[
+        ("exomem_tool_calls_total", (("outcome", "success"), ("tool", "x")))
+    ] == 1
+
+    metrics.reset()
+    metrics.load_snapshot_once(tmp_path)
+    assert metrics.snapshot()["counters"] == []
