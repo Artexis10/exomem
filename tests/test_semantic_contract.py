@@ -1841,3 +1841,106 @@ def test_contract_finding_key_is_exact_public_triple() -> None:
         ("fields", "status"),
         ("fields", "status", "required"),
     )
+
+
+def _minimal_vault(tmp_path: Path) -> Path:
+    notes = tmp_path / "Knowledge Base" / "Notes" / "Insights"
+    notes.mkdir(parents=True)
+    (notes / "one.md").write_text(_source(title="One"), encoding="utf-8")
+    return tmp_path
+
+
+def test_corpus_validity_token_none_on_unsafe_review_artifact_tree(
+    tmp_path: Path,
+) -> None:
+    vault_root = _minimal_vault(tmp_path)
+    reviews = vault_root / "Knowledge Base" / "_Schema" / "relation-reviews"
+    reviews.mkdir(parents=True)
+    outside = tmp_path / "outside.json"
+    outside.write_text("{}", encoding="utf-8")
+    (reviews / "linked.json").symlink_to(outside)
+
+    assert semantic_contract.corpus_validity_token(vault_root) is None
+
+
+def test_corpus_validity_token_flips_on_review_artifact_change(
+    tmp_path: Path,
+) -> None:
+    vault_root = _minimal_vault(tmp_path)
+    reviews = vault_root / "Knowledge Base" / "_Schema" / "relation-reviews"
+    reviews.mkdir(parents=True)
+    artifact = reviews / "00000000-0000-0000-0000-000000000001.json"
+    artifact.write_text("{}", encoding="utf-8")
+
+    before = semantic_contract.corpus_validity_token(vault_root)
+    assert before is not None
+
+    artifact.write_text('{"changed": true}', encoding="utf-8")
+    after = semantic_contract.corpus_validity_token(vault_root)
+
+    assert after is not None
+    assert after != before
+
+
+def test_corpus_validity_token_flips_on_lifecycle_sidecar_change(
+    tmp_path: Path,
+) -> None:
+    vault_root = _minimal_vault(tmp_path)
+    lifecycle = (
+        vault_root
+        / "Knowledge Base"
+        / "_Schema"
+        / "relation-reviews"
+        / "lifecycle"
+        / "00000000-0000-0000-0000-000000000001"
+    )
+    lifecycle.mkdir(parents=True)
+    prepared = lifecycle / "prepared.json"
+    prepared.write_text("{}", encoding="utf-8")
+
+    before = semantic_contract.corpus_validity_token(vault_root)
+    assert before is not None
+
+    prepared.write_text('{"changed": true}', encoding="utf-8")
+    after = semantic_contract.corpus_validity_token(vault_root)
+
+    assert after is not None
+    assert after != before
+
+
+def test_corpus_validity_token_flips_on_config_change(tmp_path: Path) -> None:
+    vault_root = _minimal_vault(tmp_path)
+    before = semantic_contract.corpus_validity_token(vault_root)
+    assert before is not None
+
+    access_config = vault_root / "Knowledge Base" / "_access.yaml"
+    access_config.write_text("readonly:\n- Notes\n", encoding="utf-8")
+    after = semantic_contract.corpus_validity_token(vault_root)
+
+    assert after is not None
+    assert after != before
+
+
+def test_corpus_validity_token_none_when_corpus_census_is_none(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault_root = _minimal_vault(tmp_path)
+
+    monkeypatch.setattr(semantic_contract, "_corpus_census", lambda root: None)
+
+    assert semantic_contract.corpus_validity_token(vault_root) is None
+
+
+def test_corpus_validity_token_stable_when_nothing_changes(tmp_path: Path) -> None:
+    vault_root = _minimal_vault(tmp_path)
+    reviews = vault_root / "Knowledge Base" / "_Schema" / "relation-reviews"
+    reviews.mkdir(parents=True)
+    (reviews / "00000000-0000-0000-0000-000000000001.json").write_text(
+        "{}", encoding="utf-8"
+    )
+
+    first = semantic_contract.corpus_validity_token(vault_root)
+    second = semantic_contract.corpus_validity_token(vault_root)
+
+    assert first is not None
+    assert first == second

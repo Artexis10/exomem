@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import re
 import stat
@@ -55,6 +56,34 @@ _LIFECYCLE_ATOMIC_RESIDUE = re.compile(
 _LIFECYCLE_OPERATIONS = frozenset(
     {"edit", "observe", "tier2_overwrite", "tier2_append", "move", "recover"}
 )
+
+logger = logging.getLogger(__name__)
+
+
+def _record_prevalidated_commit_outcome(outcome: str) -> None:
+    """Record whether an in-lock ``_attempt`` reused pre-boundary validation.
+
+    Best-effort, content-free, never raises: observability must never break
+    a commit. ``outcome`` is one of ``"reused"``, ``"revalidated"``, or
+    ``"unavailable"`` (no pre-boundary census token to compare against).
+    """
+    try:
+        from . import metrics
+
+        metrics.inc_counter("exomem_prevalidated_commit_total", {"outcome": outcome})
+    except Exception:  # noqa: BLE001 - observability must never break a commit
+        pass
+    try:
+        from .log_events import log_event
+
+        log_event(
+            logger,
+            logging.INFO,
+            "prevalidated_commit",
+            fields={"outcome": outcome},
+        )
+    except Exception:  # noqa: BLE001 - observability must never break a commit
+        pass
 _LIFECYCLE_DECISION_KEYS = frozenset(
     {
         "schema_version",
@@ -424,6 +453,49 @@ class _Attempt:
     artifact_bytes_hash: str | None
     lifecycle_guard: vault.DirectoryCensusGuard | None
     language_registry: semantic_language_registry.SemanticLanguageRegistry
+    reused: bool = False
+
+    @property
+    def prevalidated_outcome(self) -> str:
+        """One of ``"reused"``/``"revalidated"``, for telemetry only.
+
+        Only meaningful for an ``_attempt`` call that was given a ``reuse``
+        candidate at all (i.e. the in-lock call inside
+        ``commit_creation_draft``); other call sites never set ``reused``.
+        """
+        return "reused" if self.reused else "revalidated"
+
+
+@dataclass(frozen=True, slots=True)
+class _PrevalidatedAttempt:
+    """A pre-boundary ``_attempt`` result, reusable by a later ``_attempt``
+    call only while ``census_token`` still matches a freshly computed one."""
+
+    census_token: tuple | None
+    before_corpus: semantic_contract.SemanticCorpusContext
+    candidate: semantic_contract.SemanticPageState
+    contracts: memory_schema.ResolvedMemoryContracts
+    language_registry: semantic_language_registry.SemanticLanguageRegistry
+    result: semantic_contract.SemanticContractResult
+    validation: CreationDraftValidation
+
+
+@dataclass(frozen=True, slots=True)
+class _PreparedCreationDraft:
+    """Everything ``commit_creation_draft`` needs after the pre-boundary
+    validation pass that ``prepare_commit_creation_draft`` performs."""
+
+    identity: str
+    destination: str
+    artifact_rel: str
+    auxiliaries: tuple[vault.PlannedWrite, ...]
+    auxiliary_digest: str
+    requested_review: bool
+    reason: str | None
+    token_hash: str
+    preliminary: _Attempt
+    reuse: _PrevalidatedAttempt | None
+    preliminary_commit_result: semantic_contract.SemanticContractResult
 
 
 class _DuplicateJsonKey(ValueError):
@@ -2940,6 +3012,7 @@ def _attempt(
     draft_token_hash: str | None = None,
     predecessor_path: str | None = None,
     predecessor_content_hash: str | None = None,
+    reuse: _PrevalidatedAttempt | None = None,
 ) -> _Attempt:
     if operation not in _OPERATIONS:
         raise RelationReviewError("INVALID_DRAFT_OPERATION", "unsupported creation operation")
@@ -2985,19 +3058,35 @@ def _attempt(
             raise RelationReviewError(
                 "DRAFT_DESTINATION_OCCUPIED", "draft destination is already occupied"
             )
-    registry = relation_registry.load_registry(root)
-    language = semantic_language_registry.load_registry(root)
-    loaded_contracts = memory_schema.load_saved_contracts(root)
-    before = semantic_contract.build_corpus_context(
-        root, registry=registry, language_registry=language
-    )
-    candidate = semantic_contract.build_page_state(
-        root,
-        destination,
-        normalized,
-        relation_registry=registry,
-        language_registry=language,
-    )
+    if reuse is not None:
+        from .writer_lease import read_commit_generation
+
+        stamp_current = semantic_contract.validity_stamp_current(
+            root,
+            reuse.census_token,
+            commit_generation=read_commit_generation(root),
+        )
+    else:
+        stamp_current = False
+    reused = reuse if stamp_current else None
+    if reused is not None:
+        before = reused.before_corpus
+        candidate = reused.candidate
+        language = reused.language_registry
+    else:
+        registry = relation_registry.load_registry(root)
+        language = semantic_language_registry.load_registry(root)
+        loaded_contracts = memory_schema.load_saved_contracts(root)
+        before = semantic_contract.build_corpus_context(
+            root, registry=registry, language_registry=language
+        )
+        candidate = semantic_contract.build_page_state(
+            root,
+            destination,
+            normalized,
+            relation_registry=registry,
+            language_registry=language,
+        )
     if not candidate.eligible_compiled:
         raise RelationReviewError(
             "INVALID_DRAFT_PATH", "draft destination is not an eligible compiled page"
@@ -3024,31 +3113,36 @@ def _attempt(
             "DRAFT_DESTINATION_OCCUPIED", "draft destination is already occupied"
         )
     after = before.with_candidate(candidate)
-    contracts = memory_schema.resolve_contracts(
-        loaded_contracts,
-        projects=candidate.projects,
-        page_type=candidate.page_type,
-        language_registry=language,
-    )
-    review = None
-    if artifact is not None and artifact.kind != "qualifying":
-        review = semantic_contract.RelationReviewState(
-            artifact.kind,
-            artifact.page_identity,
-            artifact.content_fingerprint,
-            reason=artifact.reason,
-            reference=artifact.reference,
+    if reused is not None:
+        contracts = reused.contracts
+        result = reused.result
+        validation = reused.validation
+    else:
+        contracts = memory_schema.resolve_contracts(
+            loaded_contracts,
+            projects=candidate.projects,
+            page_type=candidate.page_type,
+            language_registry=language,
         )
-    result = _evaluate(candidate, before, after, contracts, operation, review, language)
-    validation = _validation(
-        identity,
-        destination,
-        fingerprint,
-        result,
-        candidate,
-        after,
-        draft_token_hash,
-    )
+        review = None
+        if artifact is not None and artifact.kind != "qualifying":
+            review = semantic_contract.RelationReviewState(
+                artifact.kind,
+                artifact.page_identity,
+                artifact.content_fingerprint,
+                reason=artifact.reason,
+                reference=artifact.reference,
+            )
+        result = _evaluate(candidate, before, after, contracts, operation, review, language)
+        validation = _validation(
+            identity,
+            destination,
+            fingerprint,
+            result,
+            candidate,
+            after,
+            draft_token_hash,
+        )
     if exact_destination:
         expected_kind = (
             "qualifying"
@@ -3130,6 +3224,7 @@ def _attempt(
         artifact_hash,
         lifecycle_guard,
         language,
+        reused is not None,
     )
 
 
@@ -3377,6 +3472,7 @@ def _commit_plan(
     draft_token_hash: str,
     predecessor_path: str | None,
     predecessor_content_hash: str | None,
+    reuse_result: semantic_contract.SemanticContractResult | None = None,
 ) -> tuple[semantic_contract.SemanticContractResult, RelationReviewRecord | None]:
     validation = attempt.validation
     if requested_review and supplied_hash != validation.draft_hash:
@@ -3405,14 +3501,23 @@ def _commit_plan(
             reference=artifact_reference,
         )
         if result.relation_disposition.kind != "reviewed_none":
-            result = _evaluate(
-                attempt.candidate,
-                attempt.before_corpus,
-                attempt.after_corpus,
-                attempt.contracts,
-                operation,
-                review_state,
-                attempt.language_registry,
+            # `reuse_result` is only ever supplied when the caller already
+            # proved (via a matching census token) that candidate/corpus/
+            # contracts/review_state are byte-identical to the pre-boundary
+            # pass that computed it — a deterministic function of unchanged
+            # inputs, so this is a cache hit, not a shortcut around safety.
+            result = (
+                reuse_result
+                if reuse_result is not None
+                else _evaluate(
+                    attempt.candidate,
+                    attempt.before_corpus,
+                    attempt.after_corpus,
+                    attempt.contracts,
+                    operation,
+                    review_state,
+                    attempt.language_registry,
+                )
             )
         if result.should_block or result.relation_disposition.kind != "reviewed_none":
             raise RelationReviewError(
@@ -3493,7 +3598,7 @@ def _commit_plan(
     return result, record
 
 
-def commit_creation_draft(
+def prepare_commit_creation_draft(
     vault_root: Path,
     *,
     path: str,
@@ -3507,9 +3612,20 @@ def commit_creation_draft(
     draft_token: str = "",
     predecessor_path: str | None = None,
     predecessor_content_hash: str | None = None,
-    semantic_state: Any | None = None,
-) -> CreationDraftCommit:
+) -> _PreparedCreationDraft:
+    """Pre-boundary validation for ``commit_creation_draft``.
+
+    Parses, canonicalizes, and runs the preliminary structural/relation-review
+    ``_attempt`` + ``_commit_plan`` pass — the same work ``commit_creation_draft``
+    always did before acquiring ``vault_creation_lock``. Every error raised
+    here happens before any lock or mutation-boundary exists to acquire.
+    """
     root = Path(vault_root).absolute()
+    # Entry read: a governed commit landing during this preliminary pass
+    # moves the generation past this value, disabling reuse in-boundary.
+    from .writer_lease import read_commit_generation
+
+    entry_generation = read_commit_generation(root)
     try:
         identity = _canonical_id(draft_id)
         token_hash = draft_token_hash(draft_token)
@@ -3575,7 +3691,7 @@ def commit_creation_draft(
             predecessor_path=predecessor_path,
             predecessor_content_hash=predecessor_content_hash,
         )
-        _commit_plan(
+        preliminary_commit_result, _preliminary_record = _commit_plan(
             preliminary,
             operation=operation,
             requested_review=requested_review,
@@ -3587,6 +3703,81 @@ def commit_creation_draft(
             predecessor_path=predecessor_path,
             predecessor_content_hash=predecessor_content_hash,
         )
+        sc_token = (
+            semantic_contract.corpus_validity_token(
+                root,
+                corpus_census=semantic_contract.cached_corpus_census(root),
+            )
+            if entry_generation is not None
+            else None
+        )
+        census_token = (sc_token, entry_generation) if sc_token is not None else None
+        reuse = (
+            _PrevalidatedAttempt(
+                census_token,
+                preliminary.before_corpus,
+                preliminary.candidate,
+                preliminary.contracts,
+                preliminary.language_registry,
+                preliminary.result,
+                preliminary.validation,
+            )
+            if census_token is not None
+            else None
+        )
+        return _PreparedCreationDraft(
+            identity,
+            destination,
+            artifact_rel,
+            tuple(auxiliaries),
+            auxiliary_digest,
+            requested_review,
+            reason,
+            token_hash,
+            preliminary,
+            reuse,
+            preliminary_commit_result,
+        )
+    except RelationReviewError:
+        raise
+    except Exception as error:
+        raise _translate(error) from error
+
+
+def commit_prepared_creation_draft(
+    vault_root: Path,
+    prepared: _PreparedCreationDraft,
+    *,
+    path: str,
+    source: str,
+    operation: str,
+    relation_disposition: str | None = None,
+    relation_review_hash: str | None = None,
+    predecessor_path: str | None = None,
+    predecessor_content_hash: str | None = None,
+    semantic_state: Any | None = None,
+) -> CreationDraftCommit:
+    """Commit a draft already validated by ``prepare_commit_creation_draft``.
+
+    Everything here (``ensure_manifest``, the creation lock, the fresh
+    in-lock ``_attempt``, and the atomic write) is the part of
+    ``commit_creation_draft`` that a caller narrowing its mutation boundary
+    to just the commit seam should hold that boundary around — the pre-lock
+    validation already ran when ``prepared`` was built.
+    """
+    root = Path(vault_root).absolute()
+    try:
+        identity = prepared.identity
+        destination = prepared.destination
+        artifact_rel = prepared.artifact_rel
+        auxiliaries = prepared.auxiliaries
+        auxiliary_digest = prepared.auxiliary_digest
+        requested_review = prepared.requested_review
+        reason = prepared.reason
+        token_hash = prepared.token_hash
+        preliminary = prepared.preliminary
+        reuse = prepared.reuse
+        preliminary_commit_result = prepared.preliminary_commit_result
         activation_manifest.ensure_manifest(
             root, census=preliminary.before_corpus.activation_census
         )
@@ -3603,6 +3794,10 @@ def commit_creation_draft(
                 draft_token_hash=token_hash,
                 predecessor_path=predecessor_path,
                 predecessor_content_hash=predecessor_content_hash,
+                reuse=reuse,
+            )
+            _record_prevalidated_commit_outcome(
+                "unavailable" if reuse is None else attempt.prevalidated_outcome
             )
             validation = attempt.validation
             result, record = _commit_plan(
@@ -3616,15 +3811,16 @@ def commit_creation_draft(
                 draft_token_hash=token_hash,
                 predecessor_path=predecessor_path,
                 predecessor_content_hash=predecessor_content_hash,
+                reuse_result=preliminary_commit_result if attempt.reused else None,
             )
 
-            prepared = attempt.artifact
+            existing_artifact = attempt.artifact
             resumed = False
             required_guards: tuple[
                 vault.PathGuard | vault.DirectoryCensusGuard, ...
             ] = ()
             writes: list[vault.PlannedWrite] = []
-            if prepared is not None:
+            if existing_artifact is not None:
                 if attempt.artifact_bytes_hash is None:
                     raise RelationReviewError(
                         "DRAFT_ID_IN_USE", "draft identity is already reserved"
@@ -3747,3 +3943,54 @@ def commit_creation_draft(
         raise
     except Exception as error:
         raise _translate(error) from error
+
+
+def commit_creation_draft(
+    vault_root: Path,
+    *,
+    path: str,
+    source: str,
+    draft_id: str,
+    operation: str,
+    relation_disposition: str | None = None,
+    relation_review_hash: str | None = None,
+    relation_review_reason: str | None = None,
+    auxiliary_writes: tuple[vault.PlannedWrite, ...] | list[vault.PlannedWrite] = (),
+    draft_token: str = "",
+    predecessor_path: str | None = None,
+    predecessor_content_hash: str | None = None,
+    semantic_state: Any | None = None,
+) -> CreationDraftCommit:
+    """One-call convenience: validate, then commit, with no boundary between.
+
+    Callers that narrow their own mutation boundary to just the commit seam
+    should instead call ``prepare_commit_creation_draft`` before acquiring
+    that boundary and ``commit_prepared_creation_draft`` inside it.
+    """
+    root = Path(vault_root).absolute()
+    prepared = prepare_commit_creation_draft(
+        root,
+        path=path,
+        source=source,
+        draft_id=draft_id,
+        operation=operation,
+        relation_disposition=relation_disposition,
+        relation_review_hash=relation_review_hash,
+        relation_review_reason=relation_review_reason,
+        auxiliary_writes=auxiliary_writes,
+        draft_token=draft_token,
+        predecessor_path=predecessor_path,
+        predecessor_content_hash=predecessor_content_hash,
+    )
+    return commit_prepared_creation_draft(
+        root,
+        prepared,
+        path=path,
+        source=source,
+        operation=operation,
+        relation_disposition=relation_disposition,
+        relation_review_hash=relation_review_hash,
+        predecessor_path=predecessor_path,
+        predecessor_content_hash=predecessor_content_hash,
+        semantic_state=semantic_state,
+    )
