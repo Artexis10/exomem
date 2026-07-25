@@ -38,8 +38,18 @@ else
     echo "Could not resolve the service interpreter from the installed unit; skipping preflight." >&2
 fi
 
-# Truncate the app log (keep the file, just empty it).
-: > "$LOG" 2>/dev/null || true
+# Archive the app log (instead of truncating it) so the post-restart tail
+# shows only this session while the previous session's diagnostics are still
+# recoverable from logs/archive/, keeping the newest 10 archives.
+ARCHIVE_DIR="$REPO_ROOT/logs/archive"
+if [[ -s "$LOG" ]]; then
+    mkdir -p "$ARCHIVE_DIR"
+    mv "$LOG" "$ARCHIVE_DIR/exomem-$(date -u +%Y%m%d-%H%M%S).log"
+    # Keep the newest 10 archives; oldest-first so `tail` drops the survivors.
+    ls -1t "$ARCHIVE_DIR"/exomem-*.log 2>/dev/null | tail -n +11 | while IFS= read -r stale; do
+        rm -f -- "$stale"
+    done
+fi
 
 case "$(uname -s)" in
     Darwin)

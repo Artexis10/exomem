@@ -22,11 +22,13 @@ from __future__ import annotations
 
 import importlib
 import importlib.util
+import json
 import os
 import shutil
 import sqlite3
 import subprocess
 import sys
+import time
 import urllib.parse
 from dataclasses import dataclass
 from pathlib import Path
@@ -1592,6 +1594,112 @@ def _check_edge_ingress_read_routing(base_url: str, config: LeaseConfig) -> Doct
     )
 
 
+def _check_observability() -> DoctorCheck:
+    """Log directory writability, active/rotated file sizes, JSONL
+    tail-parseability, the NSSM `service.*` rotation pile, and
+    metrics-snapshot freshness. Never touches the network."""
+    from . import metrics
+    from .logging_config import resolve_log_dir
+
+    details: dict[str, object] = {}
+    problems: list[str] = []
+    warnings: list[str] = []
+
+    log_dir = resolve_log_dir()
+    try:
+        log_dir.mkdir(parents=True, exist_ok=True)
+        probe_path = log_dir / f".exomem-doctor-probe-{os.getpid()}"
+        probe_path.write_text("", encoding="utf-8")
+        probe_path.unlink(missing_ok=True)
+        details["log_dir_writable"] = True
+    except (OSError, ValueError):
+        details["log_dir_writable"] = False
+        problems.append("log directory is not writable")
+
+    jsonl_names = ("queries.jsonl", "writes.jsonl", "reads.jsonl", "mutations.jsonl")
+    for name in jsonl_names:
+        try:
+            path = log_dir / name
+            details[f"{name}.rotated"] = (log_dir / f"{name}.1").exists()
+            if not path.exists():
+                continue
+            details[f"{name}.bytes"] = path.stat().st_size
+            lines = path.read_text(encoding="utf-8").splitlines()
+            if lines and lines[-1].strip():
+                json.loads(lines[-1])
+        except (OSError, ValueError):
+            warnings.append(f"{name} tail is not parseable JSON")
+
+    try:
+        service_pile = sum(
+            1
+            for pattern in ("service.out.log.*", "service.err.log.*")
+            for _ in log_dir.glob(pattern)
+        )
+    except (OSError, ValueError):
+        service_pile = 0
+    details["service_pile_count"] = service_pile
+    if service_pile > 50:
+        warnings.append(f"{service_pile} service.* rotated files have accumulated")
+
+    try:
+        from .writer_lease import get_manager
+
+        state_dir = get_manager().config.state_dir
+        interval = metrics.snapshot_interval_seconds_from_env()
+        snapshot_path = metrics.snapshot_path(state_dir)
+        if interval > 0 and snapshot_path.exists():
+            age = time.time() - snapshot_path.stat().st_mtime
+            details["metrics_snapshot_age_seconds"] = round(age, 1)
+            if age > interval * 2:
+                warnings.append("metrics snapshot is stale")
+    except Exception:  # noqa: BLE001 - doctor must stay structured
+        pass
+
+    if problems:
+        return _check(
+            "observability",
+            "fail",
+            "; ".join(problems),
+            "Ensure the log directory is writable (check permissions or EXOMEM_LOG_DIR).",
+            details=details,
+        )
+    if warnings:
+        return _check("observability", "warn", "; ".join(warnings), None, details=details)
+    return _check(
+        "observability", "pass", "Log directory, JSONL logs, and metrics snapshot look healthy.",
+        details=details,
+    )
+
+
+def _check_idempotency_store() -> DoctorCheck:
+    """Warn when idempotency receipts have piled up abandoned, or the oldest
+    pending row has sat unresolved past the legacy grace window — either is
+    a sign a mutation crashed and needs operator attention, not necessarily
+    a fault by itself. Never touches the network."""
+    try:
+        from .writer_lease import get_manager
+
+        summary = get_manager().idempotency.status_summary()
+    except Exception:  # noqa: BLE001 - doctor must stay structured
+        summary = {"pending": None, "abandoned": None, "oldest_pending_age_seconds": None}
+
+    abandoned = summary.get("abandoned")
+    oldest_pending_age_seconds = summary.get("oldest_pending_age_seconds")
+    warnings: list[str] = []
+    if isinstance(abandoned, int) and abandoned > 0:
+        warnings.append(f"{abandoned} abandoned idempotency receipt(s)")
+    if isinstance(oldest_pending_age_seconds, (int, float)) and oldest_pending_age_seconds > 600:
+        warnings.append(
+            f"oldest pending idempotency receipt is {oldest_pending_age_seconds:.0f}s old"
+        )
+    if warnings:
+        return _check("idempotency_store", "warn", "; ".join(warnings), None, details=summary)
+    return _check(
+        "idempotency_store", "pass", "Idempotency receipts look healthy.", details=summary
+    )
+
+
 def _check_edge_ingress(*, probe: bool) -> list[DoctorCheck]:
     """Doctor's `edge-ingress` section (design.md Decision 3): verifies the public
     apex is fronted by the HA edge worker rather than tunnel-direct. Skipped
@@ -1736,6 +1844,8 @@ def doctor(
     # Not profile-gated: any profile can run with writer-lease coordination
     # enabled, and the section self-skips when it is not (design.md Decision 3).
     checks.extend(_check_edge_ingress(probe=probe))
+    checks.append(_check_observability())
+    checks.append(_check_idempotency_store())
 
     return DoctorReport(profile=profile, checks=checks)
 

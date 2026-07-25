@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import secrets
+import time
 import typing
 from pathlib import Path
 from typing import Any
@@ -20,6 +22,45 @@ from . import capabilities, cf_access, cli_ops, edit_operations, upload_tokens
 from . import commands as commands_module
 from .command_surface import canonical_request_id
 from .server_transfer import TransferConfig
+
+_log = logging.getLogger(__name__)
+
+
+def _log_rest_failure(
+    *, tool: str, request_id: str, code: str, duration_ms: float, message: str, scope: str
+) -> None:
+    try:
+        from . import metrics
+        from .log_events import log_event
+
+        log_event(
+            _log,
+            logging.WARNING,
+            "rest_failure",
+            fields={
+                "tool": tool,
+                "request_id": request_id,
+                "code": code,
+                "duration_ms": duration_ms,
+                "scope": scope,
+            },
+            content={"message": message[:300]},
+        )
+        metrics.inc_counter("exomem_tool_calls_total", {"tool": tool, "outcome": "failure"})
+        metrics.inc_counter("exomem_tool_failures_total", {"tool": tool, "code": code})
+        metrics.observe_duration_ms("exomem_tool_duration_ms", duration_ms, {"tool": tool})
+    except Exception:  # noqa: BLE001 - observability must never break a REST call
+        pass
+
+
+def _log_rest_success(*, tool: str, duration_ms: float) -> None:
+    try:
+        from . import metrics
+
+        metrics.inc_counter("exomem_tool_calls_total", {"tool": tool, "outcome": "success"})
+        metrics.observe_duration_ms("exomem_tool_duration_ms", duration_ms, {"tool": tool})
+    except Exception:  # noqa: BLE001 - observability must never break a REST call
+        pass
 
 
 class RestJSONResponse(JSONResponse):
@@ -255,6 +296,10 @@ def register_rest_facade(
             body = await _rest_body(request)
             if body is None:
                 return _rest_err("INVALID_BODY", "request body must be a JSON object", 400)
+            request_id = (
+                canonical_request_id(request.headers.get("x-exomem-request-id")) or "unknown"
+            )
+            t0 = time.perf_counter()
             try:
                 if _cmd.name == "edit_memory":
                     body = edit_operations.normalize_edit_surface_arguments(body)
@@ -280,10 +325,21 @@ def register_rest_facade(
                 result = await run_in_threadpool(invoke_bound)
             except (cli_ops.OpError, ValueError, TypeError) as exc:
                 err = cli_ops.error_dict(exc)
+                _log_rest_failure(
+                    tool=_cmd.name,
+                    request_id=request_id,
+                    code=str(err.get("code") or "OP_ERROR"),
+                    duration_ms=round((time.perf_counter() - t0) * 1000, 2),
+                    message=str(err.get("message") or ""),
+                    scope="cf_access" if principal_scope else "api_key",
+                )
                 return RestJSONResponse(
                     cli_ops.envelope(False, error=err),
                     status_code=cli_ops.http_status_for(err["code"]),
                 )
+            _log_rest_success(
+                tool=_cmd.name, duration_ms=round((time.perf_counter() - t0) * 1000, 2)
+            )
             return RestJSONResponse(cli_ops.envelope(True, data=result))
 
         _handler.__name__ = f"_api_{cmd.name}"

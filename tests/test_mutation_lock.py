@@ -593,6 +593,189 @@ def test_long_holder_warning_is_bounded_and_content_free(
     assert "private-vault-name" not in messages[0]
 
 
+def test_dynamic_retry_after_ms_scales_with_age_and_is_capped() -> None:
+    from exomem.mutation_lock import dynamic_retry_after_ms
+
+    assert dynamic_retry_after_ms(None) == 750
+    assert dynamic_retry_after_ms({"state": "free"}) == 750
+    assert dynamic_retry_after_ms({"state": "held", "age_seconds": 0.0, "overdue": False}) == 750
+    assert dynamic_retry_after_ms({"state": "held", "age_seconds": 4.0, "overdue": False}) == 2000
+    # Capped at 15000 regardless of how large age_seconds gets.
+    assert dynamic_retry_after_ms({"state": "held", "age_seconds": 100.0, "overdue": False}) == 15000
+    # Overdue floors at 5000 even for a still-small age.
+    assert dynamic_retry_after_ms({"state": "held", "age_seconds": 1.0, "overdue": True}) == 5000
+
+
+def test_mutation_busy_includes_wait_ms_and_dynamic_retry_hint(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    holder = VaultMutationCoordinator(tmp_path / "state", vault, long_holder_seconds=60.0)
+    contender = VaultMutationCoordinator(tmp_path / "state", vault, long_holder_seconds=60.0)
+    entered = threading.Event()
+    release = threading.Event()
+
+    def hold_lock() -> None:
+        with holder.hold(timeout_seconds=2.0):
+            entered.set()
+            assert release.wait(2.0)
+
+    thread = threading.Thread(target=hold_lock)
+    thread.start()
+    assert entered.wait(1.0)
+    try:
+        time.sleep(0.05)
+        with pytest.raises(OpError) as raised:
+            with contender.hold(timeout_seconds=0.03):
+                pytest.fail("contender entered a held mutation boundary")
+        assert raised.value.details["wait_ms"] >= 0
+        assert 750 <= raised.value.details["retry_after_ms"] <= 15000
+    finally:
+        release.set()
+        thread.join(timeout=2.0)
+
+
+def test_hold_emits_acquired_and_released_events_with_timing(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    coordinator = VaultMutationCoordinator(tmp_path / "state", vault)
+
+    with caplog.at_level(logging.INFO, logger="exomem.mutation_lock"):
+        with coordinator.hold(request_id="req-timed", operation="remember", holder_kind="command"):
+            pass
+
+    acquired = next(r for r in caplog.records if getattr(r, "event", None) == "mutation_lock_acquired")
+    released = next(r for r in caplog.records if getattr(r, "event", None) == "mutation_lock_released")
+    assert isinstance(acquired.fields["wait_ms"], float)
+    assert acquired.fields["operation"] == "remember"
+    assert isinstance(released.fields["hold_ms"], float)
+    assert released.fields["operation"] == "remember"
+
+
+def test_long_hold_warning_is_guaranteed_on_release_without_any_probe(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Unlike a probe-triggered warning, this warning must fire even when
+    nobody ever calls `snapshot()` while the boundary is held."""
+    vault = tmp_path / "unprobed-vault"
+    vault.mkdir()
+    coordinator = VaultMutationCoordinator(
+        tmp_path / "state", vault, long_holder_seconds=0.01
+    )
+
+    with caplog.at_level(logging.WARNING, logger="exomem.mutation_lock"):
+        with coordinator.hold(request_id="req-unprobed", operation="edit", holder_kind="command"):
+            time.sleep(0.02)
+            # Deliberately never call coordinator.snapshot() here.
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert len(messages) == 1
+    assert "req-unprobed" in messages[0]
+    assert "unprobed-vault" not in messages[0]
+
+
+def test_orphan_snapshot_reports_real_age_when_metadata_mutex_is_contended(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """When the metadata mutex cannot be acquired within the status timeout,
+    a lock-free (tear-free, atomically-published) sidecar read must report
+    the holder's real age/overdue rather than fabricating a healthy-looking
+    unknown holder at age 0."""
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    coordinator = VaultMutationCoordinator(tmp_path / "state", vault, long_holder_seconds=60.0)
+
+    acquired_at = time.time() - 5.0
+    holder = {
+        "schema": 1,
+        "generation": "a" * 32,
+        "request_id": "req-orphan",
+        "operation": "remember",
+        "holder_kind": "command",
+        "acquired_at": acquired_at,
+        "long_holder_seconds": 60.0,
+    }
+    mutation_lock_module._atomic_write_holder_metadata(coordinator.metadata_path, holder)
+
+    metadata_handle = coordinator._open_lock_file(coordinator.metadata_lock_path)
+    assert mutation_lock_module._try_os_lock(metadata_handle)
+    try:
+        with caplog.at_level(logging.INFO, logger="exomem.mutation_lock"):
+            snapshot = coordinator.snapshot()
+    finally:
+        mutation_lock_module._release_os_lock(metadata_handle)
+        metadata_handle.close()
+
+    assert snapshot["state"] == "held"
+    assert snapshot["verified"] is False
+    assert snapshot["request_id"] == "req-orphan"
+    assert snapshot["holder_kind"] == "command"
+    assert snapshot["age_seconds"] >= 4.5
+    assert snapshot["overdue"] is False
+    assert any(
+        getattr(r, "event", None) == "mutation_holder_unverified" for r in caplog.records
+    )
+
+
+def test_orphan_snapshot_reports_real_overdue_state(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    coordinator = VaultMutationCoordinator(tmp_path / "state", vault, long_holder_seconds=1.0)
+
+    holder = {
+        "schema": 1,
+        "generation": "b" * 32,
+        "request_id": "req-overdue-orphan",
+        "operation": "edit_memory",
+        "holder_kind": "background",
+        "acquired_at": time.time() - 10.0,
+        "long_holder_seconds": 1.0,
+    }
+    mutation_lock_module._atomic_write_holder_metadata(coordinator.metadata_path, holder)
+
+    metadata_handle = coordinator._open_lock_file(coordinator.metadata_lock_path)
+    assert mutation_lock_module._try_os_lock(metadata_handle)
+    try:
+        snapshot = coordinator.snapshot()
+    finally:
+        mutation_lock_module._release_os_lock(metadata_handle)
+        metadata_handle.close()
+
+    assert snapshot["overdue"] is True
+    assert snapshot["verified"] is False
+
+
+def test_orphan_snapshot_falls_back_to_unknown_holder_without_a_sidecar(
+    tmp_path: Path,
+) -> None:
+    """No sidecar at all (never published, or already cleared) still
+    fabricates the unknown-holder shape — only a readable sidecar earns the
+    age-aware path."""
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    coordinator = VaultMutationCoordinator(tmp_path / "state", vault)
+    assert not coordinator.metadata_path.exists()
+
+    metadata_handle = coordinator._open_lock_file(coordinator.metadata_lock_path)
+    assert mutation_lock_module._try_os_lock(metadata_handle)
+    try:
+        snapshot = coordinator.snapshot()
+    finally:
+        mutation_lock_module._release_os_lock(metadata_handle)
+        metadata_handle.close()
+
+    assert snapshot == {
+        "state": "held",
+        "request_id": "untracked",
+        "operation": "unknown",
+        "holder_kind": "external",
+        "age_seconds": 0.0,
+        "overdue": False,
+        "verified": False,
+    }
+
+
 def test_process_exit_releases_os_mutation_lock(tmp_path: Path) -> None:
     context = multiprocessing.get_context("spawn")
     state_root = tmp_path / "state"
@@ -614,3 +797,37 @@ def test_process_exit_releases_os_mutation_lock(tmp_path: Path) -> None:
     recovered = VaultMutationCoordinator(state_root, vault)
     with recovered.hold(timeout_seconds=1.0):
         assert recovered.lock_path.exists()
+
+def test_sequential_holds_on_one_thread_reacquire_the_os_boundary(
+    tmp_path: Path,
+) -> None:
+    """Regression: releasing a hold must reset the reentrancy state so the same
+    thread's NEXT hold reacquires the OS lock and republishes the holder
+    sidecar, instead of silently taking the reentrant fast path with no
+    cross-process exclusion at all."""
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    coordinator = VaultMutationCoordinator(tmp_path / "state", vault)
+
+    with coordinator.hold(timeout_seconds=3.0, operation="first", holder_kind="command"):
+        pass
+
+    with coordinator.hold(timeout_seconds=3.0, operation="second", holder_kind="command"):
+        probe = coordinator._open_lock_file(coordinator.lock_path)
+        try:
+            assert not mutation_lock_module._try_os_lock(probe), (
+                "a foreign handle acquired the vault lock while the second "
+                "sequential hold was supposedly active"
+            )
+        finally:
+            probe.close()
+        snapshot = coordinator.snapshot()
+        assert snapshot["state"] == "held"
+        assert snapshot["operation"] == "second"
+
+    probe = coordinator._open_lock_file(coordinator.lock_path)
+    try:
+        assert mutation_lock_module._try_os_lock(probe)
+        mutation_lock_module._release_os_lock(probe)
+    finally:
+        probe.close()

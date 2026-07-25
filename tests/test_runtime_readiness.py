@@ -41,6 +41,11 @@ def test_standalone_runtime_is_ready_without_multi_host_coordination() -> None:
             "mutation_boundary": {"state": "free"},
         },
         "session_store": {"state": "ok", "stale_served_count": 0},
+        "observability": {
+            "log_dir_writable": None,
+            "metrics_snapshot_age_seconds": None,
+            "journal_ok": None,
+        },
         "takeover_eligible": True,
         "reasons": [],
     }
