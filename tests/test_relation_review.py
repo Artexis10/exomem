@@ -936,17 +936,22 @@ def test_commit_creation_draft_falls_through_to_full_attempt_on_census_mismatch(
 
     monkeypatch.setattr(relation_review.semantic_contract, "build_corpus_context", counted_build)
 
-    real_token = relation_review.semantic_contract.corpus_validity_token
-    calls = {"count": 0}
+    real_prepare = relation_review.prepare_commit_creation_draft
 
-    def drifting_token(root):
-        calls["count"] += 1
-        if calls["count"] == 1:
-            return real_token(root)
-        return (("drifted",), ())
+    def prepare_then_concurrent_commit(*args, **kwargs):
+        prepared = real_prepare(*args, **kwargs)
+        # Simulate a concurrent governed writer committing after the
+        # pre-boundary validation: every mutation-guard exit bumps the
+        # boundary commit-generation, which must disable stamp reuse.
+        from exomem import writer_lease
+
+        writer_lease._bump_commit_generation(
+            writer_lease.active_manager().config.state_dir, tmp_path
+        )
+        return prepared
 
     monkeypatch.setattr(
-        relation_review.semantic_contract, "corpus_validity_token", drifting_token
+        relation_review, "prepare_commit_creation_draft", prepare_then_concurrent_commit
     )
 
     commit = relation_review.commit_creation_draft(
@@ -1004,17 +1009,22 @@ def test_commit_creation_draft_records_revalidated_outcome_on_census_mismatch(
     source, validation = _reviewed_validation(tmp_path)
     metrics.reset()
 
-    real_token = relation_review.semantic_contract.corpus_validity_token
-    calls = {"count": 0}
+    real_prepare = relation_review.prepare_commit_creation_draft
 
-    def drifting_token(root):
-        calls["count"] += 1
-        if calls["count"] == 1:
-            return real_token(root)
-        return (("drifted",), ())
+    def prepare_then_concurrent_commit(*args, **kwargs):
+        prepared = real_prepare(*args, **kwargs)
+        # Simulate a concurrent governed writer committing after the
+        # pre-boundary validation: every mutation-guard exit bumps the
+        # boundary commit-generation, which must disable stamp reuse.
+        from exomem import writer_lease
+
+        writer_lease._bump_commit_generation(
+            writer_lease.active_manager().config.state_dir, tmp_path
+        )
+        return prepared
 
     monkeypatch.setattr(
-        relation_review.semantic_contract, "corpus_validity_token", drifting_token
+        relation_review, "prepare_commit_creation_draft", prepare_then_concurrent_commit
     )
 
     relation_review.commit_creation_draft(

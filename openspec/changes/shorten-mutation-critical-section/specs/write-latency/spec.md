@@ -26,47 +26,55 @@ a cold embedding-model load.
 - **AND** the mutation snapshot observed at the moment of that load attempt
   reports no in-flight mutation for this write
 
-### Requirement: Census-Token Validity Governs Pre-Boundary Reuse
+### Requirement: Validity-Stamp Admission Governs Pre-Boundary Reuse
 
-A pre-boundary preflight result SHALL carry a census-validity token —
-derived from a stat-level census of every corpus input plus a scandir-census
-of the relation-review artifact and lifecycle sidecar directories — captured
-as a before/after sandwich around the preflight. Inside the boundary, a
-freshly computed token SHALL be compared against the captured one; the
-pre-boundary corpus build, evaluation, and validation results MAY be reused
-only on an exact match. Identity, artifact-reservation, and
-destination-occupancy checks MUST always be re-executed against live
-filesystem state inside the boundary regardless of token match. A token
-mismatch, or a token that is `None` because some input could not be censused
-cheaply or the sandwich disagreed, MUST fall back to a full, bounded
-in-boundary revalidation rather than reusing any pre-boundary result, and
-MUST produce the same semantic-contract verdict a fresh evaluation would
-produce.
+A pre-boundary preflight result SHALL carry a validity stamp composed of:
+the corpus census the preflight's own corpus build already walked (never a
+second stat-walk — the CI write-latency gate holds preflight to one walk
+total), a scandir-census of the relation-review artifact and lifecycle
+sidecar directories, and the boundary commit-generation read at preflight
+ENTRY. The commit-generation is a monotonic per-vault counter advanced on
+every mutation-guard exit while the boundary is still held, so every
+governed writer moves it. Inside the boundary, admission SHALL compare only
+the commit-generation and a fresh sidecar census against the stamp — an
+O(sidecars) check with no corpus stat-walk; the pre-boundary corpus build,
+evaluation, and validation results MAY be reused only when both match.
+Identity, artifact-reservation, and destination-occupancy checks MUST always
+be re-executed against live filesystem state inside the boundary regardless
+of stamp match. A stamp mismatch, or a stamp that is `None` because an input
+could not be censused cheaply or the commit-generation could not be read
+(fail closed), MUST fall back to a full, bounded in-boundary revalidation
+rather than reusing any pre-boundary result, and MUST produce the same
+semantic-contract verdict a fresh evaluation would produce. Edits made
+outside any governed writer (external tools, sync) are outside the stamp's
+detection — for those, the same write-time protections the wide boundary
+relied on (path guards, `create_only`, target freshness) still apply.
 
-#### Scenario: An exact census match reuses pre-boundary validation
+#### Scenario: A current stamp reuses pre-boundary validation
 
-- **WHEN** the census token recomputed inside the boundary exactly matches
-  the token captured for the pre-boundary preflight
+- **WHEN** the commit-generation inside the boundary equals the one captured
+  at preflight entry and the fresh sidecar census matches the stamp
 - **THEN** the commit reuses the pre-boundary corpus build, evaluation, and
-  validation results instead of rebuilding them
+  validation results instead of rebuilding them, without a corpus stat-walk
 - **AND** the identity, artifact-reservation, and destination-occupancy
   checks still run fresh against live filesystem state
 
-#### Scenario: A sibling write between preflight and commit invalidates reuse
+#### Scenario: A governed commit between preflight and commit invalidates reuse
 
-- **WHEN** another write changes corpus, relation-review, or lifecycle state
-  between the pre-boundary preflight and the in-boundary commit
-- **THEN** the freshly computed census token does not match the captured one
+- **WHEN** any governed writer commits (exiting a mutation guard) between
+  the pre-boundary preflight and the in-boundary admission check
+- **THEN** the commit-generation no longer matches the captured stamp
 - **AND** the commit falls back to a full in-boundary revalidation that
   produces the same verdict a fresh evaluation would have produced, rather
   than reusing stale results
 
-#### Scenario: An uncensusable tree never reuses pre-boundary validation
+#### Scenario: An uncensusable tree or unreadable counter never reuses
 
-- **WHEN** the corpus tree, or the relation-review artifact and lifecycle
-  sidecar directories, cannot be censused cheaply (for example an unsafe
-  symlink or reparse point)
-- **THEN** the census token is `None`
+- **WHEN** the corpus tree or the relation-review artifact and lifecycle
+  sidecar directories cannot be censused cheaply (for example an unsafe
+  symlink or reparse point), or the boundary commit-generation cannot be
+  read for any reason other than never having been written
+- **THEN** the validity stamp is `None`
 - **AND** the commit always performs a full in-boundary revalidation, never
   a reuse
 

@@ -1248,7 +1248,7 @@ def _relation_review_census(root: Path) -> tuple | None:
     return tuple(sorted(entries))
 
 
-def corpus_validity_token(root: Path) -> tuple | None:
+def corpus_validity_token(root: Path, *, corpus_census: tuple | None = None) -> tuple | None:
     """Stable identity for narrow-boundary preflight reuse.
 
     Combines ``_corpus_census`` (every corpus/config input
@@ -1257,14 +1257,59 @@ def corpus_validity_token(root: Path) -> tuple | None:
     does not cover). ``None`` means some input cannot be censused cheaply;
     callers must then always revalidate rather than reuse a pre-boundary
     result.
+
+    Pass ``corpus_census`` to reuse a census that was just walked (e.g. the
+    one ``build_corpus_context`` validated its cache with) instead of paying
+    a second stat-walk — at thousands of pages the walk dominates write
+    latency, and the CI write-latency gate holds preflight to one walk total.
     """
-    corpus = _corpus_census(root)
+    corpus = corpus_census if corpus_census is not None else _corpus_census(root)
     if corpus is None:
         return None
     review = _relation_review_census(root)
     if review is None:
         return None
     return (corpus, review)
+
+
+def cached_corpus_census(root: Path) -> tuple | None:
+    """The census stored with the current cached corpus context — no walk.
+
+    Only meaningful immediately after a ``build_corpus_context`` call on the
+    same root: the walk that validated (or populated) the cache entry is the
+    census returned here. ``None`` when nothing is cached."""
+    try:
+        cache_key = _corpus_cache_key(root)
+    except Exception:  # noqa: BLE001 - an unkeyable root simply has no cache
+        return None
+    with _CORPUS_CONTEXT_CACHE_LOCK:
+        entry = _CORPUS_CONTEXT_CACHE.get(cache_key)
+    return entry[0] if entry is not None else None
+
+
+def validity_stamp_current(
+    root: Path, stamp: tuple | None, *, commit_generation: int | None
+) -> bool:
+    """O(sidecars) in-boundary admission check for a captured validity stamp.
+
+    ``stamp`` is ``(corpus_validity_token, entry_commit_generation)``. The
+    boundary commit-generation (bumped on every mutation-guard exit) proves
+    no governed writer committed since the generation was captured, and the
+    fresh review-artifact census covers the sidecar inputs. This replaces the
+    in-boundary corpus stat-walk, which at thousands of pages costs more than
+    the commit itself. External (non-governed) edits are outside this check —
+    the same protections the wide boundary relied on (path guards,
+    ``create_only``, target freshness) still apply at write time.
+    """
+    if stamp is None or commit_generation is None:
+        return False
+    sc_token, captured_generation = stamp
+    if sc_token is None or captured_generation is None:
+        return False
+    if commit_generation != captured_generation:
+        return False
+    fresh_review = _relation_review_census(root)
+    return fresh_review is not None and fresh_review == sc_token[1]
 
 
 def _config_census(root: Path) -> tuple[tuple[str, str, int, int], ...] | None:

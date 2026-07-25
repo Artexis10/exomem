@@ -3058,11 +3058,17 @@ def _attempt(
             raise RelationReviewError(
                 "DRAFT_DESTINATION_OCCUPIED", "draft destination is already occupied"
             )
-    reused = (
-        reuse
-        if reuse is not None and semantic_contract.corpus_validity_token(root) == reuse.census_token
-        else None
-    )
+    if reuse is not None:
+        from .writer_lease import read_commit_generation
+
+        stamp_current = semantic_contract.validity_stamp_current(
+            root,
+            reuse.census_token,
+            commit_generation=read_commit_generation(root),
+        )
+    else:
+        stamp_current = False
+    reused = reuse if stamp_current else None
     if reused is not None:
         before = reused.before_corpus
         candidate = reused.candidate
@@ -3615,6 +3621,11 @@ def prepare_commit_creation_draft(
     here happens before any lock or mutation-boundary exists to acquire.
     """
     root = Path(vault_root).absolute()
+    # Entry read: a governed commit landing during this preliminary pass
+    # moves the generation past this value, disabling reuse in-boundary.
+    from .writer_lease import read_commit_generation
+
+    entry_generation = read_commit_generation(root)
     try:
         identity = _canonical_id(draft_id)
         token_hash = draft_token_hash(draft_token)
@@ -3692,7 +3703,15 @@ def prepare_commit_creation_draft(
             predecessor_path=predecessor_path,
             predecessor_content_hash=predecessor_content_hash,
         )
-        census_token = semantic_contract.corpus_validity_token(root)
+        sc_token = (
+            semantic_contract.corpus_validity_token(
+                root,
+                corpus_census=semantic_contract.cached_corpus_census(root),
+            )
+            if entry_generation is not None
+            else None
+        )
+        census_token = (sc_token, entry_generation) if sc_token is not None else None
         reuse = (
             _PrevalidatedAttempt(
                 census_token,

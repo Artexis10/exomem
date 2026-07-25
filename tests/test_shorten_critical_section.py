@@ -206,28 +206,28 @@ def test_mutation_busy_shape_is_unchanged_under_a_narrow_hold(
     assert "request_id" in busy.value.details
 
 
-def test_remember_commit_revalidates_on_a_census_mismatch_between_prepare_and_commit(
+def test_remember_commit_revalidates_when_a_governed_commit_lands_between_prepare_and_commit(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from exomem import semantic_contract
-
+    """A governed commit between the pre-boundary validation and the commit
+    bumps the boundary commit-generation (every mutation-guard exit does), so
+    the validity stamp must be refused and the in-boundary revalidation must
+    run — the stamp's whole job."""
     kwargs = _validated_kwargs(vault)
-
-    real_token = semantic_contract.corpus_validity_token
-    calls = {"count": 0}
-
-    def drifting_token(root):
-        calls["count"] += 1
-        if calls["count"] == 1:
-            return real_token(root)
-        # Every call after the first returns a distinct value, so whichever
-        # pair of calls straddles the prepare/commit boundary always mismatches
-        # (a constant post-first value would spuriously re-match itself).
-        return (("drifted", calls["count"]),)
-
-    monkeypatch.setattr(semantic_contract, "corpus_validity_token", drifting_token)
-
     manager = _standalone_manager(vault.parent / "state")
+
+    real_prepare = relation_review.prepare_commit_creation_draft
+
+    def prepare_then_concurrent_commit(*args, **kw):
+        prepared = real_prepare(*args, **kw)
+        # Simulate a concurrent governed writer committing right after our
+        # pre-boundary validation finished.
+        writer_lease._bump_commit_generation(manager.config.state_dir, vault)
+        return prepared
+
+    monkeypatch.setattr(
+        relation_review, "prepare_commit_creation_draft", prepare_then_concurrent_commit
+    )
 
     result = _invoke_remember(vault, manager, **kwargs)
 

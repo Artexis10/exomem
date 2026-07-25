@@ -1257,7 +1257,7 @@ def preflight_existing(
     # phantom casing. Everything below is built from `root / path`, so a
     # re-spell stays self-consistent, and a canonical input is a no-op.
     path = vault.canonical_vault_rel(root, path)
-    census_token_before = semantic_contract.corpus_validity_token(root)
+    entry_generation = _entry_commit_generation(root)
     before_source, primary_guard = vault.read_guarded_text(root, root / path)
     raw_before_hash = vault.content_hash(before_source)
     # The parser/corpus and public content-hash contract normalize platform
@@ -1415,8 +1415,7 @@ def preflight_existing(
         include_relation_disposition=applicability == "full",
         language_registry=language,
     )
-    census_token_after = semantic_contract.corpus_validity_token(root)
-    census_token = census_token_before if census_token_before == census_token_after else None
+    census_token = _capture_validity_stamp(root, entry_generation)
     return ExistingPreflight(
         applicability,
         operation,
@@ -1692,14 +1691,19 @@ def commit_existing(
         operation=f"semantic_existing_{preflight.operation}_commit",
         holder_kind="command",
     ):
-        # An exact census_token match means nothing has changed since
-        # preflight, so this preflight is still current — commit as today.
-        # A mismatch (or a preflight built on an uncensusable tree,
-        # census_token=None) re-runs preflight_existing warm, surfacing
+        # A current validity stamp (commit-generation unchanged + sidecar
+        # census unchanged — no corpus walk) means no governed writer
+        # committed since preflight, so it is still current — commit as
+        # today. Otherwise re-run preflight_existing warm, surfacing
         # STALE_SEMANTIC_WRITE/SEMANTIC_CONTRACT_BLOCKED exactly as the
         # existing cross-invocation replay path already does.
-        fresh_census_token = semantic_contract.corpus_validity_token(root)
-        if preflight.census_token is None or fresh_census_token != preflight.census_token:
+        from .writer_lease import read_commit_generation
+
+        if not semantic_contract.validity_stamp_current(
+            root,
+            preflight.census_token,
+            commit_generation=read_commit_generation(root),
+        ):
             preflight = _revalidate_existing_preflight(root, preflight)
             if preflight.contract_result.should_block:
                 raise SemanticWriteError(
@@ -2802,7 +2806,7 @@ def preflight_creation(
         vault.parse_frontmatter(source, strict=True)
     except vault.FrontmatterError as error:
         raise SemanticWriteError(error.code, "draft frontmatter is invalid") from error
-    census_token_before = semantic_contract.corpus_validity_token(root)
+    entry_generation = _entry_commit_generation(root)
     result, state = _evaluate_structural(root, destination=path, source=source, operation=operation)
     if semantic_contract.requires_semantic_unit(state):
         if draft_id is None:
@@ -2818,10 +2822,7 @@ def preflight_creation(
             predecessor_path=predecessor_path,
             predecessor_content_hash=predecessor_content_hash,
         )
-        census_token_after = semantic_contract.corpus_validity_token(root)
-        census_token = (
-            census_token_before if census_token_before == census_token_after else None
-        )
+        census_token = _capture_validity_stamp(root, entry_generation)
         return CreationPreflight(
             "full",
             path,
@@ -2839,11 +2840,38 @@ def preflight_creation(
         if state.page_type is not None or semantic_contract.compiled_intent(state)
         else "not_semantic"
     )
-    census_token_after = semantic_contract.corpus_validity_token(root)
-    census_token = census_token_before if census_token_before == census_token_after else None
+    census_token = _capture_validity_stamp(root, entry_generation)
     return CreationPreflight(
         applicability, path, source, draft_id, draft_token, False, result, None, state, census_token
     )
+
+
+def _entry_commit_generation(root: Path):  # noqa: ANN201 - int | None
+    """Read the boundary commit-generation at preflight ENTRY, before any
+    validation work, so a governed commit landing during the preflight moves
+    the generation past the captured value and disables reuse."""
+    from .writer_lease import read_commit_generation
+
+    return read_commit_generation(root)
+
+
+def _capture_validity_stamp(root: Path, entry_generation) -> tuple | None:  # noqa: ANN001
+    """Assemble the preflight validity stamp WITHOUT a second corpus walk.
+
+    The corpus census is reused from the cache entry the validation's own
+    ``build_corpus_context`` call just walked/validated; only the cheap
+    review-artifact census is computed here. The stamp pairs that with the
+    entry commit-generation; the in-boundary admission check is then
+    ``semantic_contract.validity_stamp_current`` — O(sidecars), no walk.
+    """
+    if entry_generation is None:
+        return None
+    sc_token = semantic_contract.corpus_validity_token(
+        root, corpus_census=semantic_contract.cached_corpus_census(root)
+    )
+    if sc_token is None:
+        return None
+    return (sc_token, entry_generation)
 
 
 def _prewarm_embeddings() -> None:
@@ -2940,16 +2968,18 @@ def commit_creation(
             return CreationCommit(
                 "full", True, committed.written_paths, committed.contract_result, committed
             )
-        # Structural / non-semantic creations honour the census stamp too:
-        # recompute it inside the boundary; on mismatch (or an uncensusable
-        # tree) re-run the structural evaluation so a concurrently-changed
-        # config or registry cannot admit a stale pre-boundary verdict.
+        # Structural / non-semantic creations honour the validity stamp too:
+        # check it inside the boundary (commit-generation + sidecar census,
+        # no corpus walk); on mismatch (or an uncensusable tree) re-run the
+        # structural evaluation so a concurrently-changed config or registry
+        # cannot admit a stale pre-boundary verdict.
+        from .writer_lease import read_commit_generation
+
         contract_result = preflight.contract_result
-        fresh_census_token = semantic_contract.corpus_validity_token(root)
-        if (
-            preflight.census_token is None
-            or fresh_census_token is None
-            or fresh_census_token != preflight.census_token
+        if not semantic_contract.validity_stamp_current(
+            root,
+            preflight.census_token,
+            commit_generation=read_commit_generation(root),
         ):
             relation_review._record_prevalidated_commit_outcome("revalidated")
             contract_result, _fresh_state = _evaluate_structural(

@@ -1230,8 +1230,16 @@ class LeaseManager:
             operation=operation,
             holder_kind=holder_kind,
         ) as mutation:
-            with self.writer_authority_guard():
-                yield mutation
+            try:
+                with self.writer_authority_guard():
+                    yield mutation
+            finally:
+                # Bump while the boundary is still held, so the counter is
+                # serialized with the mutations it fingerprints. Every
+                # governed writer exits through here (wide or narrow), which
+                # is what lets the validity-stamp comparison skip the
+                # in-boundary corpus stat-walk.
+                _bump_commit_generation(self.config.state_dir, vault_root)
 
     @contextmanager
     def writer_authority_guard(self) -> Iterator[None]:
@@ -1743,6 +1751,55 @@ def get_manager() -> LeaseManager:
             manager = LeaseManager(config)
             _MANAGERS[config] = manager
         return manager
+
+
+def _commit_generation_path(
+    state_dir: Path, vault_or_cell: os.PathLike[str] | str
+) -> Path:
+    from .mutation_lock import canonical_mutation_identity
+
+    digest = hashlib.sha256(
+        canonical_mutation_identity(vault_or_cell).encode("utf-8")
+    ).hexdigest()[:20]
+    return Path(state_dir) / "commit-generations" / f"{digest}.txt"
+
+
+def read_commit_generation(vault_or_cell: os.PathLike[str] | str) -> int | None:
+    """Monotonic count of boundary-held mutations for this vault.
+
+    Read outside the boundary at preflight and compared inside it to admit
+    validity-stamp reuse without a corpus stat-walk. ``0`` when never bumped;
+    ``None`` on any read error other than the file simply not existing —
+    fail closed: an unreadable counter must disable reuse, never admit it.
+    """
+    try:
+        path = _commit_generation_path(
+            active_manager().config.state_dir, vault_or_cell
+        )
+    except Exception:  # noqa: BLE001 - unresolvable identity disables reuse
+        return None
+    try:
+        return int(path.read_text(encoding="utf-8").strip() or "0")
+    except FileNotFoundError:
+        return 0
+    except Exception:  # noqa: BLE001 - unreadable counter disables reuse
+        return None
+
+
+def _bump_commit_generation(
+    state_dir: Path, vault_or_cell: os.PathLike[str] | str
+) -> None:
+    """Advance the counter; called while the mutation boundary is held."""
+    try:
+        path = _commit_generation_path(state_dir, vault_or_cell)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            current = int(path.read_text(encoding="utf-8").strip() or "0")
+        except Exception:  # noqa: BLE001 - a fresh/corrupt counter restarts
+            current = 0
+        path.write_text(str(current + 1), encoding="utf-8")
+    except Exception:  # noqa: BLE001 - the counter must never break a commit
+        pass
 
 
 def active_manager() -> LeaseManager:
