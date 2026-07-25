@@ -132,11 +132,14 @@ if ($Force) {
     }
 }
 
-# Truncate the app log so the post-restart tail shows only this session.
-$logPath = Join-Path (Split-Path -Parent $PSScriptRoot) "logs\exomem.log"
-if (Test-Path $logPath) {
-    Remove-Item $logPath -Force -ErrorAction SilentlyContinue
-}
+# Archive the app log (instead of deleting it) so the post-restart tail shows
+# only this session while the previous session's diagnostics are still
+# recoverable from logs\archive\. Also prune NSSM's uncapped service.out/err
+# rotation pile.
+$logDir = Join-Path (Split-Path -Parent $PSScriptRoot) "logs"
+$logPath = Join-Path $logDir "exomem.log"
+Backup-ExomemAppLog -LogPath $logPath -ArchiveDir (Join-Path $logDir "archive") -Keep 10
+Limit-ExomemServiceLogPile -LogDir $logDir -Keep 20
 
 Write-Host "Starting $ServiceName..."
 sc.exe start $ServiceName | Out-Null

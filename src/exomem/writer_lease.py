@@ -34,7 +34,10 @@ from .mutation_lock import (
     VaultMutationCoordinator,
     active_mutation_snapshot,
     canonical_mutation_identity,
+    last_mutation_timing,
 )
+from .mutation_lock import _release_os_lock as _release_owner_lock
+from .mutation_lock import _try_os_lock as _try_owner_lock
 from .mutation_terminal import (
     committed_terminal,
     project_terminal,
@@ -52,6 +55,21 @@ _COORDINATOR_USER_AGENT = (
 # 60s was shorter than one abandoned-write investigation; 10 minutes covers a
 # human noticing the timeout, checking state, and retrying.
 _IMPLICIT_RETRY_TTL_SECONDS = 600.0
+
+# Commands whose `invoke()` boundary is narrowed to `writer_authority_guard`
+# (fence-only, no shared vault lock) instead of the full `mutation_guard`.
+# The command's own commit seam (`semantic_writes.commit_creation` or
+# `commit_existing`) is responsible for acquiring the vault mutation boundary
+# itself, around only its commit — not the corpus validation and model
+# loading that precede it. Every name here ends in `commit_creation` or
+# `commit_existing`, both self-guarding: `remember`/`replace_memory` ->
+# `commit_creation`; `edit_memory` (all four of its edit/multi_edit/
+# set_take/set_frontmatter_field sub-modes) and `observe_memory` ->
+# `commit_existing`. `EXOMEM_WIDE_MUTATION_BOUNDARY` restores today's
+# wide-boundary behavior for every command in this set.
+_NARROW_BOUNDARY_COMMANDS = frozenset(
+    {"remember", "replace_memory", "edit_memory", "observe_memory"}
+)
 _EXPLICIT_RETRY_TTL_SECONDS = 24 * 60 * 60.0
 _IDEMPOTENCY_WAIT_SECONDS = 5.0
 _IDEMPOTENCY_POLL_INTERVAL_SECONDS = 0.025
@@ -73,6 +91,16 @@ _COMMITTED_FAILURE_OUTCOME_KEYS = frozenset(
     }
 )
 _RETRY_IDEMPOTENCY_CLAIM = object()
+# A `pending` row whose owning process is dead becomes `abandoned` rather
+# than blocking every future retry forever; this is the pause before an
+# identical retry is allowed to execute fresh (not the same as the general
+# `expires_after` a caller passes, which governs `completed`/
+# `committed_failure` rows and may be None).
+_IDEMPOTENCY_ABANDONED_RETRY_AFTER_SECONDS = 60.0
+# A `pending` row written before this feature shipped has no `owner` to
+# probe; it is honored under the pre-existing any-pending-blocks-forever
+# rule for this long before it, too, ages into `abandoned`.
+_IDEMPOTENCY_LEGACY_OWNER_GRACE_SECONDS = 600.0
 _WINDOWS_DRIVE_PREFIX = re.compile(r"^[A-Za-z]:")
 logger = logging.getLogger(__name__)
 _mutation_logger = logging.getLogger("exomem.calls")
@@ -293,6 +321,12 @@ class LeaseConfig:
     # uncached and the corpus-aware embedding pass runs inside the boundary —
     # not widening the wait.
     mutation_timeout_seconds: float = 5.0
+    # A non-preferred holder that has issued no mutation for this long hands
+    # writer authority back on its own, so a laptop that is powered on but
+    # not in use stops blocking the desktop indefinitely (design.md GAP A).
+    # `0` disables idle release entirely. A preferred replica is exempt —
+    # see writer_lease.py's `_maybe_idle_release` docstring for why.
+    idle_release_seconds: float = 60.0
 
     @property
     def enabled(self) -> bool:
@@ -303,16 +337,32 @@ class LeaseConfig:
         values = os.environ if env is None else env
         url = values.get("EXOMEM_WRITER_LEASE_URL", "").strip() or None
         state_raw = values.get("EXOMEM_WRITER_LEASE_STATE_DIR", "").strip()
+        ttl_seconds = _positive_float(values, "EXOMEM_WRITER_LEASE_TTL", 30.0)
+        idle_raw = values.get("EXOMEM_WRITER_LEASE_IDLE_SECONDS", "").strip()
+        if idle_raw:
+            idle_release_seconds = _non_negative_float(
+                values, "EXOMEM_WRITER_LEASE_IDLE_SECONDS", 60.0
+            )
+            if 0 < idle_release_seconds < ttl_seconds:
+                raise ValueError(
+                    "WRITER_LEASE_CONFIG: EXOMEM_WRITER_LEASE_IDLE_SECONDS must be 0 (disabled) "
+                    "or >= EXOMEM_WRITER_LEASE_TTL"
+                )
+        else:
+            # The default tracks the TTL so raising EXOMEM_WRITER_LEASE_TTL
+            # alone can never trip the idle>=ttl validation and brick startup.
+            idle_release_seconds = max(60.0, ttl_seconds)
         config = cls(
             url=url.rstrip("/") if url else None,
             vault_id=values.get("EXOMEM_WRITER_LEASE_VAULT_ID", "").strip() or None,
             replica_id=values.get("EXOMEM_WRITER_LEASE_REPLICA_ID", "").strip() or None,
             token=values.get("EXOMEM_WRITER_LEASE_TOKEN", "").strip() or None,
-            ttl_seconds=_positive_float(values, "EXOMEM_WRITER_LEASE_TTL", 30.0),
+            ttl_seconds=ttl_seconds,
             timeout_seconds=_positive_float(values, "EXOMEM_WRITER_LEASE_TIMEOUT", 3.0),
             preferred_writer=_truthy(values.get("EXOMEM_WRITER_LEASE_PREFERRED", "")),
             state_dir=Path(state_raw).expanduser() if state_raw else cls.state_dir,
             mutation_timeout_seconds=_positive_float(values, "EXOMEM_MUTATION_TIMEOUT", 5.0),
+            idle_release_seconds=idle_release_seconds,
         )
         if config.enabled and (not config.vault_id or not config.replica_id):
             raise ValueError(
@@ -330,6 +380,17 @@ def _positive_float(values: Mapping[str, str], name: str, default: float) -> flo
         raise ValueError(f"WRITER_LEASE_CONFIG: {name} must be a number") from None
     if value <= 0:
         raise ValueError(f"WRITER_LEASE_CONFIG: {name} must be positive")
+    return value
+
+
+def _non_negative_float(values: Mapping[str, str], name: str, default: float) -> float:
+    raw = values.get(name, "").strip()
+    try:
+        value = float(raw) if raw else default
+    except ValueError:
+        raise ValueError(f"WRITER_LEASE_CONFIG: {name} must be a number") from None
+    if value < 0:
+        raise ValueError(f"WRITER_LEASE_CONFIG: {name} must be non-negative")
     return value
 
 
@@ -390,10 +451,19 @@ class LeaseCoordinatorClient:
         )
 
     def release(self, fencing_token: int) -> LeaseRecord:
+        return self.release_holder(self.config.replica_id, fencing_token)
+
+    def release_holder(self, holder_replica_id: str, fencing_token: int) -> LeaseRecord:
+        """Release on behalf of ANY holder, not just this client's own
+        configured `replica_id` — the ops-only `exomem lease release`
+        cross-device path (R6). No coordinator change needed: the server
+        already keys `/release` on the body's `replica_id` + `fencing_token`
+        rather than the caller's own identity (the bearer token is a single
+        shared HA-cell secret, not a per-replica credential)."""
         return self._request(
             "POST",
             "release",
-            {"replica_id": self.config.replica_id, "fencing_token": fencing_token},
+            {"replica_id": holder_replica_id, "fencing_token": fencing_token},
         )
 
     def status(self) -> LeaseRecord:
@@ -433,6 +503,82 @@ class LeaseCoordinatorClient:
             ) from None
 
 
+def _mutation_outcome_unknown_error() -> OpError:
+    return OpError(
+        "MUTATION_OUTCOME_UNKNOWN",
+        "the executing process terminated before recording this mutation's outcome",
+        "Verify whether the mutation landed before retrying; an identical retry executes "
+        "fresh once the abandonment grace period has passed.",
+        details={"status": "uncertain", "committed": None, "abandoned": True},
+    )
+
+
+def _generate_owner_id() -> str:
+    """`pid:nonce` — immune to PID reuse because the nonce is random per
+    process, never reused across a reboot the way a bare PID can be."""
+    return f"{os.getpid()}:{uuid.uuid4().hex[:16]}"
+
+
+def _owner_lock_path(state_dir: Path, owner: str) -> Path:
+    return Path(state_dir) / "idempotency-owners" / f"{owner.replace(':', '-')}.lock"
+
+
+def _acquire_own_owner_lock(state_dir: Path, owner: str) -> Any | None:
+    """Open and lock this process's own owner file, held for the store's
+    lifetime (closed only at process exit). A leftover locked-then-abandoned
+    file is harmless: `_probe_owner_liveness` either finds it still locked
+    (this process, still alive) or, once genuinely gone, lockable — and
+    cleans it up itself."""
+    path = _owner_lock_path(state_dir, owner)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        handle = path.open("a+b")
+    except OSError:
+        return None
+    try:
+        if _try_owner_lock(handle):
+            return handle
+    except OSError:
+        pass
+    handle.close()
+    return None
+
+
+def _probe_owner_liveness(state_dir: Path, owner: str) -> bool:
+    """Fail-closed liveness probe for `owner` (a `pid:nonce` string).
+
+    Missing file -> dead (the owner released and cleaned up, or never
+    existed). Lockable -> dead, and this probe cleans the file up. Refused
+    (someone holds it) -> alive. ANY probe error -> alive: an inconclusive
+    probe must never cause a live mutation to be declared abandoned.
+    """
+    path = _owner_lock_path(state_dir, owner)
+    try:
+        if not path.exists():
+            return False
+        handle = path.open("a+b")
+    except OSError:
+        return True
+    try:
+        lockable = _try_owner_lock(handle)
+    except OSError:
+        handle.close()
+        return True
+    if not lockable:
+        handle.close()
+        return True
+    try:
+        _release_owner_lock(handle)
+    except OSError:
+        pass
+    handle.close()
+    try:
+        path.unlink()
+    except OSError:
+        pass
+    return False
+
+
 class IdempotencyStore:
     """Durable per-replica retry cache, deliberately outside the synced vault."""
 
@@ -451,6 +597,7 @@ class IdempotencyStore:
         if poll_interval_seconds <= 0:
             raise ValueError("idempotency poll interval must be positive")
         self.path = path
+        self.state_dir = path.parent
         self.clock = clock
         self.monotonic = monotonic
         self.wait_seconds = wait_seconds
@@ -458,12 +605,32 @@ class IdempotencyStore:
         self.after_terminal_persisted = after_terminal_persisted
         self._condition = threading.Condition()
         path.parent.mkdir(parents=True, exist_ok=True)
+        self.owner_id = _generate_owner_id()
+        # Held for this store's lifetime (process lifetime, in practice —
+        # stores are cached singletons keyed by vault+replica); never
+        # explicitly released. See `_probe_owner_liveness`.
+        self._owner_lock_handle = _acquire_own_owner_lock(self.state_dir, self.owner_id)
+        if self._owner_lock_handle is None:
+            # Fail closed on the REGISTRATION side too: advertising an owner id
+            # whose lock file could not be created/held would let any peer
+            # probe it as dead and abandon a LIVE mutation. A NULL owner rides
+            # the legacy grace path instead (abandoned only after
+            # _IMPLICIT_RETRY_TTL_SECONDS), which cannot abandon a running
+            # write inside its window.
+            logger.warning(
+                "idempotency owner lock unavailable; falling back to the "
+                "legacy ownerless grace period for this store"
+            )
+            self.owner_id = None
         with self._connect() as conn:
             conn.execute(
                 "CREATE TABLE IF NOT EXISTS mutations ("
                 "key TEXT PRIMARY KEY, digest TEXT NOT NULL, state TEXT NOT NULL, "
                 "result BLOB, updated_at REAL NOT NULL)"
             )
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(mutations)").fetchall()}
+            if "owner" not in columns:
+                conn.execute("ALTER TABLE mutations ADD COLUMN owner TEXT")
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.path, timeout=10)
@@ -494,6 +661,8 @@ class IdempotencyStore:
                 if waited is _RETRY_IDEMPOTENCY_CLAIM:
                     continue
                 return waited
+            if disposition == "abandoned":
+                raise _mutation_outcome_unknown_error()
             return self._replay(disposition, stored, on_replay)
 
         guard = operation_guard() if operation_guard is not None else nullcontext()
@@ -569,19 +738,59 @@ class IdempotencyStore:
             conn.execute("BEGIN IMMEDIATE")
             self._prune_expired(conn, now, expires_after, key)
             row = conn.execute(
-                "SELECT digest, state, result, updated_at FROM mutations WHERE key = ?", (key,)
+                "SELECT digest, state, result, updated_at, owner FROM mutations WHERE key = ?",
+                (key,),
             ).fetchone()
             if row and self._expired_row(row, now, expires_after):
                 conn.execute("DELETE FROM mutations WHERE key = ?", (key,))
                 row = None
             if row is not None:
+                row = self._abandon_if_dead(conn, key, row, now)
                 return self._decode_disposition(row, digest)
             conn.execute(
-                "INSERT INTO mutations(key, digest, state, updated_at) VALUES (?, ?, 'pending', ?)",
-                (key, digest, now),
+                "INSERT INTO mutations(key, digest, state, updated_at, owner) "
+                "VALUES (?, ?, 'pending', ?, ?)",
+                (key, digest, now, self.owner_id),
             )
         _log_mutation_event("reserved", receipt=_receipt_tag(key))
         return "owner", None
+
+    def _abandon_if_dead(
+        self, conn: sqlite3.Connection, key: str, row: tuple[Any, ...], now: float
+    ) -> tuple[Any, ...]:
+        """If `row` is `pending` and its owner is provably dead, transition it
+        to `abandoned` in the same transaction and return the updated row.
+        Fail-closed: an inconclusive liveness probe leaves the row `pending`.
+        """
+        if row[1] != "pending":
+            return row
+        owner = row[4]
+        if owner is None:
+            dead = (now - row[3]) >= _IDEMPOTENCY_LEGACY_OWNER_GRACE_SECONDS
+        elif owner == self.owner_id:
+            dead = False
+        else:
+            dead = not _probe_owner_liveness(self.state_dir, owner)
+        if not dead:
+            return row
+        cursor = conn.execute(
+            "UPDATE mutations SET state = 'abandoned', updated_at = ? "
+            "WHERE key = ? AND state = 'pending'",
+            (now, key),
+        )
+        if cursor.rowcount != 1:
+            # Raced with another abandon/terminal transition; re-read rather
+            # than assume which one won.
+            refreshed = conn.execute(
+                "SELECT digest, state, result, updated_at, owner FROM mutations WHERE key = ?",
+                (key,),
+            ).fetchone()
+            return refreshed if refreshed is not None else row
+        _log_mutation_event(
+            "abandoned", level=logging.WARNING, receipt=_receipt_tag(key)
+        )
+        self._notify_waiters()
+        return (row[0], "abandoned", None, now, owner)
 
     def _prune_expired(
         self,
@@ -590,33 +799,42 @@ class IdempotencyStore:
         expires_after: float | None,
         key: str,
     ) -> None:
-        if expires_after is None:
-            return
-        cutoff = now - expires_after
         key_pattern = f"{key.partition(':')[0]}:%"
+        if expires_after is not None:
+            cutoff = now - expires_after
+            conn.execute(
+                "DELETE FROM mutations WHERE key LIKE ? "
+                "AND state = 'completed' "
+                "AND typeof(updated_at) IN ('integer', 'real') "
+                "AND updated_at >= 0 AND updated_at <= ?",
+                (key_pattern, cutoff),
+            )
+            expired_failures = conn.execute(
+                "SELECT key, result FROM mutations WHERE key LIKE ? "
+                "AND state = 'committed_failure' "
+                "AND typeof(updated_at) IN ('integer', 'real') "
+                "AND updated_at >= 0 AND updated_at <= ?",
+                (key_pattern, cutoff),
+            ).fetchall()
+            for expired_key, expired_payload in expired_failures:
+                try:
+                    _deserialize_committed_failure_payload(expired_payload)
+                except Exception:  # noqa: BLE001 - corrupt markers remain fail-closed
+                    continue
+                conn.execute(
+                    "DELETE FROM mutations WHERE key = ? AND state = 'committed_failure'",
+                    (expired_key,),
+                )
+        # Abandoned rows always expire after their own fixed grace period,
+        # regardless of the caller's `expires_after` (which may be None).
+        abandoned_cutoff = now - _IDEMPOTENCY_ABANDONED_RETRY_AFTER_SECONDS
         conn.execute(
             "DELETE FROM mutations WHERE key LIKE ? "
-            "AND state = 'completed' "
+            "AND state = 'abandoned' "
             "AND typeof(updated_at) IN ('integer', 'real') "
             "AND updated_at >= 0 AND updated_at <= ?",
-            (key_pattern, cutoff),
+            (key_pattern, abandoned_cutoff),
         )
-        expired_failures = conn.execute(
-            "SELECT key, result FROM mutations WHERE key LIKE ? "
-            "AND state = 'committed_failure' "
-            "AND typeof(updated_at) IN ('integer', 'real') "
-            "AND updated_at >= 0 AND updated_at <= ?",
-            (key_pattern, cutoff),
-        ).fetchall()
-        for expired_key, expired_payload in expired_failures:
-            try:
-                _deserialize_committed_failure_payload(expired_payload)
-            except Exception:  # noqa: BLE001 - corrupt markers remain fail-closed
-                continue
-            conn.execute(
-                "DELETE FROM mutations WHERE key = ? AND state = 'committed_failure'",
-                (expired_key,),
-            )
 
     def _expired_row(self, row: tuple[Any, ...], now: float, expires_after: float | None) -> bool:
         if expires_after is None or row[1] not in {"completed", "committed_failure"}:
@@ -652,6 +870,8 @@ class IdempotencyStore:
             return "committed_uncertain", _PostCommitOutcomeUncertain()
         if state == "pending":
             return "pending", None
+        if state == "abandoned":
+            return "abandoned", None
         raise self._reconciliation_error("cached mutation state")
 
     def _wait_for_terminal(
@@ -664,14 +884,20 @@ class IdempotencyStore:
         _log_mutation_event("pending", receipt=_receipt_tag(key))
         deadline = self.monotonic() + self.wait_seconds
         while True:
+            now = self.clock()
             with self._connect() as conn:
+                conn.execute("BEGIN IMMEDIATE")
                 row = conn.execute(
-                    "SELECT digest, state, result, updated_at FROM mutations WHERE key = ?",
+                    "SELECT digest, state, result, updated_at, owner FROM mutations WHERE key = ?",
                     (key,),
                 ).fetchone()
+                if row is not None:
+                    row = self._abandon_if_dead(conn, key, row, now)
             if row is None:
                 return _RETRY_IDEMPOTENCY_CLAIM
             disposition, stored = self._decode_disposition(row, digest)
+            if disposition == "abandoned":
+                raise _mutation_outcome_unknown_error()
             if disposition != "pending":
                 return self._replay(disposition, stored, on_replay)
             remaining = deadline - self.monotonic()
@@ -750,6 +976,35 @@ class IdempotencyStore:
         if self.after_terminal_persisted is not None:
             self.after_terminal_persisted()
 
+    def status_summary(self) -> dict[str, Any]:
+        """Content-free counts for `coordination_status`/`doctor`: never a
+        key, digest, or result — just how many rows are pending/abandoned
+        and how stale the oldest pending row is."""
+        try:
+            now = self.clock()
+            with self._connect() as conn:
+                pending_updated_at = [
+                    row[0]
+                    for row in conn.execute(
+                        "SELECT updated_at FROM mutations WHERE state = 'pending'"
+                    ).fetchall()
+                ]
+                abandoned = conn.execute(
+                    "SELECT COUNT(*) FROM mutations WHERE state = 'abandoned'"
+                ).fetchone()[0]
+            oldest_pending_age_seconds = (
+                round(max(0.0, now - min(pending_updated_at)), 3)
+                if pending_updated_at
+                else None
+            )
+            return {
+                "pending": len(pending_updated_at),
+                "abandoned": int(abandoned),
+                "oldest_pending_age_seconds": oldest_pending_age_seconds,
+            }
+        except Exception:  # noqa: BLE001 - status must never break the caller
+            return {"pending": None, "abandoned": None, "oldest_pending_age_seconds": None}
+
     @staticmethod
     def _reconciliation_error(subject: str) -> OpError:
         return OpError(
@@ -781,28 +1036,6 @@ def _command_digest(command: Any, kwargs: Mapping[str, Any]) -> str:
 
 
 _PUBLIC_IDEMPOTENCY_KEY_UNSET = object()
-
-
-def _read_bypasses_consistency_guard(command: Any, kwargs: Mapping[str, Any]) -> bool:
-    """Return whether a read can tolerate a changing snapshot without contention."""
-    if command.name == "audit":
-        return True
-    if command.name == "review_memory":
-        return kwargs.get("mode") == "audit"
-    if command.name == "maintain_memory":
-        return kwargs.get("mode", "audit") == "audit"
-    if command.name in {"remember", "replace_memory"}:
-        return kwargs.get("validate_only") is True
-    if command.name == "edit_memory":
-        if kwargs.get("validate_only") is True:
-            return True
-        operation = kwargs.get("operation")
-        return (
-            isinstance(operation, Mapping)
-            and operation.get("kind") in {"replace_string", "batch_replace", "patch_frontmatter"}
-            and operation.get("validate_only") is True
-        )
-    return False
 
 
 def _effective_idempotency_key(
@@ -839,6 +1072,12 @@ def _effective_idempotency_key(
                 command=command.name,
                 receipt=_receipt_tag(key),
             )
+            try:
+                from . import metrics
+
+                metrics.inc_counter("exomem_idempotency_replays_total", {})
+            except Exception:  # noqa: BLE001 - observability must never break a replay
+                pass
 
         return key, _IMPLICIT_RETRY_TTL_SECONDS, log_replay
     return None, None, None
@@ -882,21 +1121,74 @@ class LeaseManager:
             else mutation_timeout_seconds
         )
         self._mutation_poll_interval_seconds = mutation_poll_interval_seconds
+        self._last_renew_monotonic: float | None = None
+        # (code, monotonic-timestamp) for the most recent coordinator RPC
+        # failure, so `status()` can surface a fault instead of only ever
+        # flipping `coordinator_healthy` to False with no further detail.
+        self._last_coordinator_error: tuple[str, float] | None = None
+        # Idle-release accounting (R5), both guarded by `self._lock`.
+        # `_active_mutations` is incremented/decremented ONLY by
+        # `writer_authority_guard()` — the single choke point that also sets
+        # `_ACTIVE_WRITE_FENCE` — so `count == 0` provably means no
+        # outstanding fence anywhere in this process.
+        self._active_mutations = 0
+        self._last_activity_monotonic = time.monotonic()
 
-    def ensure_writer(self) -> LeaseRecord:
+    def _record_coordinator_error(self, code: str) -> None:
+        self._last_coordinator_error = (code, time.monotonic())
+        try:
+            from . import metrics
+
+            metrics.inc_counter("exomem_coordinator_errors_total", {"code": code})
+        except Exception:  # noqa: BLE001 - observability must never break the caller
+            pass
+
+    def _record_lease_op(self, op: str, outcome: str) -> None:
+        try:
+            from . import metrics
+
+            metrics.inc_counter("exomem_lease_ops_total", {"op": op, "outcome": outcome})
+        except Exception:  # noqa: BLE001 - observability must never break the caller
+            pass
+
+    def _log_lease_event(self, event: str, **fields: Any) -> None:
+        try:
+            from .log_events import log_event
+
+            log_event(logger, logging.INFO, event, fields=fields)
+        except Exception:  # noqa: BLE001 - observability must never break the caller
+            pass
+
+    def ensure_writer(self, *, cause: str = "mutation") -> LeaseRecord:
         if not self.config.enabled:
             return LeaseRecord(self.config.replica_id, None, 0, True)
         assert self.client is not None
         with self._lock:
-            record = self.client.acquire()
+            try:
+                record = self.client.acquire()
+            except OpError as error:
+                self._record_coordinator_error(error.code)
+                self._record_lease_op("acquire", "error")
+                raise
             if not record.granted or record.holder != self.config.replica_id:
+                self._record_lease_op("acquire", "refused")
                 raise OpError(
                     "WRITER_LEASE_REQUIRED",
                     f"replica is read-only; current writer is {record.holder or 'unassigned'}",
                     "Send the mutation to the current writer or retry after its lease expires.",
                 )
+            self._record_lease_op("acquire", "granted")
             self._fencing_token = record.fencing_token
             self._expires_at = record.expires_at
+            if cause == "mutation":
+                # Only a mutation-driven grant counts as write activity for the
+                # idle-release timer (it closes the window between this grant
+                # and the writer_authority_guard count increment). Probe and
+                # startup grants must NOT refresh the timer, or a polling
+                # caller — e.g. the media worker's 5s availability probe —
+                # would suppress idle release forever without writing a byte.
+                self._last_activity_monotonic = time.monotonic()
+            self._log_lease_event("lease_acquired", cause=cause)
             return record
 
     @contextmanager
@@ -938,21 +1230,44 @@ class LeaseManager:
             operation=operation,
             holder_kind=holder_kind,
         ) as mutation:
-            with self.writer_authority_guard():
-                yield mutation
+            try:
+                with self.writer_authority_guard():
+                    yield mutation
+            finally:
+                # Bump while the boundary is still held, so the counter is
+                # serialized with the mutations it fingerprints. Every
+                # governed writer exits through here (wide or narrow), which
+                # is what lets the validity-stamp comparison skip the
+                # in-boundary corpus stat-walk.
+                _bump_commit_generation(self.config.state_dir, vault_root)
 
     @contextmanager
     def writer_authority_guard(self) -> Iterator[None]:
-        """Revalidate writer authority without holding the vault mutation lock."""
+        """Revalidate writer authority without holding the vault mutation lock.
+
+        The single choke point for idle-release accounting (R5): this is the
+        only place `_ACTIVE_WRITE_FENCE` is set, so it is also the only place
+        that may safely count `_active_mutations` — `count == 0` therefore
+        provably means no outstanding fence anywhere in this process.
+        """
         fence_context: Token[tuple[Any, int] | None] | None = None
+        counted = False
         if self.config.enabled:
             lease = self.ensure_writer()
             fence_context = _ACTIVE_WRITE_FENCE.set((self, lease.fencing_token))
+            with self._lock:
+                self._active_mutations += 1
+                self._last_activity_monotonic = time.monotonic()
+            counted = True
         try:
             yield
         finally:
             if fence_context is not None:
                 _ACTIVE_WRITE_FENCE.reset(fence_context)
+            if counted:
+                with self._lock:
+                    self._active_mutations -= 1
+                    self._last_activity_monotonic = time.monotonic()
 
     def invoke(
         self,
@@ -967,6 +1282,7 @@ class LeaseManager:
         implicit_idempotency_scope: str | None = None,
         mutation_request_id: str | None = None,
     ) -> Any:
+        t_start = time.perf_counter()
         kwargs, response_detail = split_response_detail(kwargs)
         if public_idempotency_key is _PUBLIC_IDEMPOTENCY_KEY_UNSET:
             effective_public_idempotency_key = idempotency_key
@@ -975,10 +1291,13 @@ class LeaseManager:
             effective_public_idempotency_key = public_idempotency_key
         invocation_read_only = command.read_only if read_only is None else read_only
         if invocation_read_only:
-            audit_without_consistency_lock = _read_bypasses_consistency_guard(command, kwargs)
-            if content_private_logging_enabled() and not audit_without_consistency_lock:
-                with self.consistency_guard(self._mutation_subject(injected)):
-                    return command.leaf(*injected, **kwargs)
+            # Reads never take the mutation boundary, hosted or local: every
+            # canonical write lands via atomic staging (write-to-temp then
+            # `os.replace`), which already makes a concurrent whole-file read
+            # torn-free without any lock. This supersedes the archived
+            # decision that reserved the bypass to `mode="audit"`/
+            # `validate_only` reads while other hosted reads held the guard
+            # (openspec/changes/archive/2026-07-20-make-mcp-acknowledgement-replay-safe/design.md:64).
             return command.leaf(*injected, **kwargs)
         mutation_subject = self._mutation_subject(injected)
         digest = _command_digest(command, kwargs)
@@ -1057,6 +1376,30 @@ class LeaseManager:
         narrow_media_commit = command.name == "process_media" and kwargs.get(
             "operation", "process"
         ) in {"process", "retry"}
+        # `manage_memory_file` is the Tier-2 escape hatch's single consolidated
+        # command; only its `create`/`append` operations narrow. Their leaves
+        # are self-guarding on EVERY routing: governed Markdown goes through
+        # `commit_creation`/`commit_existing`, and the non-semantic branches
+        # (non-`.md` targets, Evidence appends, `kind="dir"`) acquire the
+        # mutation boundary in the leaf itself (`create_file.py`,
+        # `append_to_file.py`, `create_directory.py`).
+        # `move`/`delete`/`recover`/`list`/`trash-list` still rely entirely on
+        # this outer boundary (`commit_move`/`commit_recovery` are out of
+        # scope for this change), so only the file-write operations narrow —
+        # never the whole command.
+        narrow_tier2_file_commit = (
+            command.name == "manage_memory_file"
+            and kwargs.get("operation", "list") in {"create", "append"}
+            and not os.environ.get("EXOMEM_WIDE_MUTATION_BOUNDARY")
+        )
+        narrow_boundary = (
+            narrow_media_commit
+            or narrow_tier2_file_commit
+            or (
+                command.name in _NARROW_BOUNDARY_COMMANDS
+                and not os.environ.get("EXOMEM_WIDE_MUTATION_BOUNDARY")
+            )
+        )
         try:
             result = self.idempotency.run(
                 key,
@@ -1066,7 +1409,7 @@ class LeaseManager:
                 on_replay=on_replay,
                 operation_guard=(
                     self.writer_authority_guard
-                    if narrow_media_commit
+                    if narrow_boundary
                     else lambda: self.mutation_guard(
                         mutation_subject,
                         request_id=request_id,
@@ -1079,7 +1422,11 @@ class LeaseManager:
         except BaseException as error:
             if isinstance(error, OpError):
                 if error.code == "MUTATION_BUSY":
-                    error.details.update(status="retryable", committed=False, retry_after_ms=750)
+                    error.details.update(status="retryable", committed=False)
+                    # `_mutation_busy()` (mutation_lock.py) already computed a
+                    # load-aware hint; only fill in the static floor when
+                    # nothing more specific was set.
+                    error.details.setdefault("retry_after_ms", 750)
                 elif error.code == "MUTATION_ACKNOWLEDGEMENT_PENDING":
                     error.details.update(status="uncertain", committed=None)
                 error.details.update(request_id=request_id, receipt_id=receipt)
@@ -1094,6 +1441,16 @@ class LeaseManager:
                 receipt=receipt or "none",
                 error=type(error).__name__,
             )
+            self._record_mutation_journal(
+                request_id=request_id,
+                command=command.name,
+                receipt=receipt,
+                outcome="failed",
+                error_code=error.code if isinstance(error, OpError) else type(error).__name__,
+                duration_ms=round((time.perf_counter() - t_start) * 1000, 2),
+                scope=implicit_idempotency_scope or idempotency_principal_scope,
+                targets=[str(mutation_subject)],
+            )
             raise
         _log_mutation_event(
             "returned",
@@ -1101,7 +1458,59 @@ class LeaseManager:
             command=command.name,
             receipt=receipt or "none",
         )
+        self._record_mutation_journal(
+            request_id=request_id,
+            command=command.name,
+            receipt=receipt,
+            outcome="committed",
+            error_code=None,
+            duration_ms=round((time.perf_counter() - t_start) * 1000, 2),
+            scope=implicit_idempotency_scope or idempotency_principal_scope,
+            targets=[str(mutation_subject)],
+        )
         return project_terminal(result, response_detail)
+
+    def _record_mutation_journal(
+        self,
+        *,
+        request_id: str,
+        command: str,
+        receipt: str | None,
+        outcome: str,
+        error_code: str | None,
+        duration_ms: float,
+        scope: str | None,
+        targets: list[str],
+    ) -> None:
+        """Best-effort mutation-journal write. Never raises."""
+        try:
+            from .mutation_journal import record_mutation
+
+            timing = last_mutation_timing()
+            lease_role = (
+                "standalone"
+                if not self.config.enabled
+                else ("writer" if self._fencing_token is not None else "follower")
+            )
+            scope_kind = scope.split(":", 1)[0] if scope else None
+            record_mutation(
+                request_id=request_id,
+                tool=command,
+                command=command,
+                receipt_id=receipt,
+                outcome=outcome,
+                error_code=error_code,
+                duration_ms=duration_ms,
+                boundary_wait_ms=timing.get("wait_ms") if timing else None,
+                boundary_hold_ms=timing.get("hold_ms") if timing else None,
+                lease_role=lease_role,
+                fencing_token=self._fencing_token,
+                replica_id=self.config.replica_id,
+                scope=scope_kind,
+                targets=targets,
+            )
+        except Exception:  # noqa: BLE001 - the journal must never break a mutation
+            pass
 
     def _mutation_subject(self, injected: tuple[Any, ...]) -> os.PathLike[str] | str:
         if injected and isinstance(injected[0], os.PathLike):
@@ -1148,7 +1557,13 @@ class LeaseManager:
             if vault_or_cell is not None
             else active_mutation_snapshot()
         )
-        base = {
+        renewer_alive = self._renewer is not None and self._renewer.is_alive()
+        last_renew_age_seconds = (
+            round(time.monotonic() - self._last_renew_monotonic, 3)
+            if self._last_renew_monotonic is not None
+            else None
+        )
+        base: dict[str, Any] = {
             "enabled": self.config.enabled,
             "role": "standalone" if not self.config.enabled else "unknown",
             "replica_id": self.config.replica_id,
@@ -1157,21 +1572,44 @@ class LeaseManager:
             "fencing_token": None,
             "coordinator_healthy": True if not self.config.enabled else False,
             "mutation_boundary": mutation_boundary,
+            "ttl_remaining_seconds": None,
+            "renewer_alive": renewer_alive,
+            "last_renew_age_seconds": last_renew_age_seconds,
+            "last_coordinator_error": None,
+            "idempotency": self.idempotency.status_summary(),
         }
         if not self.config.enabled:
             return base
         assert self.client is not None
         try:
             record = self.client.status()
-        except OpError:
+        except OpError as error:
+            # Record the fault instead of only ever reporting
+            # `coordinator_healthy: False` with no further detail.
+            self._record_coordinator_error(error.code)
+            code, at = self._last_coordinator_error
+            base["last_coordinator_error"] = {
+                "code": code,
+                "age_seconds": round(time.monotonic() - at, 3),
+            }
             return base
+        ttl_remaining_seconds = (
+            round(record.expires_at - time.time(), 3) if record.expires_at is not None else None
+        )
         base.update(
             role="writer" if record.holder == self.config.replica_id else "follower",
             holder=record.holder,
             expires_at=record.expires_at,
             fencing_token=record.fencing_token,
             coordinator_healthy=True,
+            ttl_remaining_seconds=ttl_remaining_seconds,
         )
+        if self._last_coordinator_error is not None:
+            code, at = self._last_coordinator_error
+            base["last_coordinator_error"] = {
+                "code": code,
+                "age_seconds": round(time.monotonic() - at, 3),
+            }
         return base
 
     def start_renewer(self) -> None:
@@ -1201,9 +1639,50 @@ class LeaseManager:
         if not self.config.preferred_writer:
             return
         try:
-            self.ensure_writer()
+            self.ensure_writer(cause="reclaim")
         except OpError:
             return
+        self._log_lease_event("lease_reclaimed")
+
+    def _maybe_idle_release(self, token: int) -> bool:
+        """Hand writer authority back when idle. Returns True if it released
+        (the caller should skip renewing this tick).
+
+        A preferred replica is exempt — without the exemption it would
+        acquire, sit idle, release, and reclaim on the very next renew tick
+        (via `_attempt_preferred_reclaim`), churning edge routing every
+        interval for no benefit. Idle release exists to let a non-preferred
+        holder (e.g. a laptop that is powered on but unused) hand back to the
+        preferred replica on its own.
+        """
+        idle_seconds = self.config.idle_release_seconds
+        if idle_seconds <= 0 or self.config.preferred_writer:
+            return False
+        assert self.client is not None
+        with self._lock:
+            if self._fencing_token != token:
+                return False
+            if self._active_mutations != 0:
+                return False
+            if time.monotonic() - self._last_activity_monotonic < idle_seconds:
+                return False
+            # Clear local state BEFORE (and during) the release RPC, still
+            # holding the lock: an `ensure_writer` arriving concurrently
+            # blocks on this same lock and then acquires a fresh token — it
+            # can never observe us as still the writer mid-release.
+            self._fencing_token = None
+            self._expires_at = None
+            try:
+                self.client.release(token)
+                self._record_lease_op("idle_release", "ok")
+            except OpError as error:
+                # Swallowed: the local token is already cleared, and the
+                # coordinator's own TTL expiry closes the gap within one TTL
+                # — a degraded handover, never split-brain.
+                self._record_coordinator_error(error.code)
+                self._record_lease_op("idle_release", "error")
+            self._log_lease_event("lease_idle_released")
+            return True
 
     def _renew_loop(self) -> None:
         interval = max(1.0, self.config.ttl_seconds / 3)
@@ -1215,6 +1694,8 @@ class LeaseManager:
             if token is None:
                 self._attempt_preferred_reclaim()
                 continue
+            if self._maybe_idle_release(token):
+                continue
             try:
                 record = self.client.renew(token)
                 with self._lock:
@@ -1222,11 +1703,17 @@ class LeaseManager:
                         continue
                     if record.granted and record.holder == self.config.replica_id:
                         self._expires_at = record.expires_at
+                        self._last_renew_monotonic = time.monotonic()
+                        self._record_lease_op("renew", "granted")
                     else:
                         self._fencing_token = None
                         self._expires_at = None
-            except OpError:
+                        self._record_lease_op("renew", "rejected")
+                        self._log_lease_event("lease_renew_rejected")
+            except OpError as error:
                 # Mutations still revalidate synchronously and fail closed.
+                self._record_coordinator_error(error.code)
+                self._record_lease_op("renew", "error")
                 continue
 
     def close(self) -> None:
@@ -1237,8 +1724,10 @@ class LeaseManager:
         if token is not None and self.client is not None:
             try:
                 self.client.release(token)
-            except OpError:
-                pass
+                self._record_lease_op("release", "ok")
+            except OpError as error:
+                self._record_coordinator_error(error.code)
+                self._record_lease_op("release", "error")
 
 
 def validate_active_write_fence() -> None:
@@ -1262,6 +1751,55 @@ def get_manager() -> LeaseManager:
             manager = LeaseManager(config)
             _MANAGERS[config] = manager
         return manager
+
+
+def _commit_generation_path(
+    state_dir: Path, vault_or_cell: os.PathLike[str] | str
+) -> Path:
+    from .mutation_lock import canonical_mutation_identity
+
+    digest = hashlib.sha256(
+        canonical_mutation_identity(vault_or_cell).encode("utf-8")
+    ).hexdigest()[:20]
+    return Path(state_dir) / "commit-generations" / f"{digest}.txt"
+
+
+def read_commit_generation(vault_or_cell: os.PathLike[str] | str) -> int | None:
+    """Monotonic count of boundary-held mutations for this vault.
+
+    Read outside the boundary at preflight and compared inside it to admit
+    validity-stamp reuse without a corpus stat-walk. ``0`` when never bumped;
+    ``None`` on any read error other than the file simply not existing —
+    fail closed: an unreadable counter must disable reuse, never admit it.
+    """
+    try:
+        path = _commit_generation_path(
+            active_manager().config.state_dir, vault_or_cell
+        )
+    except Exception:  # noqa: BLE001 - unresolvable identity disables reuse
+        return None
+    try:
+        return int(path.read_text(encoding="utf-8").strip() or "0")
+    except FileNotFoundError:
+        return 0
+    except Exception:  # noqa: BLE001 - unreadable counter disables reuse
+        return None
+
+
+def _bump_commit_generation(
+    state_dir: Path, vault_or_cell: os.PathLike[str] | str
+) -> None:
+    """Advance the counter; called while the mutation boundary is held."""
+    try:
+        path = _commit_generation_path(state_dir, vault_or_cell)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            current = int(path.read_text(encoding="utf-8").strip() or "0")
+        except Exception:  # noqa: BLE001 - a fresh/corrupt counter restarts
+            current = 0
+        path.write_text(str(current + 1), encoding="utf-8")
+    except Exception:  # noqa: BLE001 - the counter must never break a commit
+        pass
 
 
 def active_manager() -> LeaseManager:

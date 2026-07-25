@@ -136,6 +136,42 @@ jobs:
         with:
           packages-dir: dist
 
+  # Lists the server in the official MCP Registry, which is where MCP-aware
+  # clients and directories discover servers. Runs after PyPI because the
+  # registry entry points at a published package version — publishing first
+  # would advertise a version nobody can install yet.
+  #
+  # Ownership is proven two ways at once: GitHub OIDC for the io.github.Artexis10
+  # namespace, and the `mcp-name` marker in README.md, which PyPI renders as the
+  # package description. Both must agree with `name` in server.json.
+  #
+  # Gated on a repo variable and deliberately non-blocking: a registry outage or
+  # a CLI change must not fail a release that already shipped to PyPI.
+  publish-mcp-registry:
+    needs: [release-please, publish-pypi]
+    if: ${{ github.event_name == 'push' && needs.release-please.outputs.release_created == 'true' && vars.MCP_REGISTRY_PUBLISH_ENABLED == 'true' }}
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Install mcp-publisher
+        run: |
+          curl -fsSL "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_linux_amd64.tar.gz" \
+            | tar -xz mcp-publisher
+          chmod +x mcp-publisher
+
+      - name: Authenticate via GitHub OIDC
+        run: ./mcp-publisher login github-oidc
+
+      - name: Publish server.json
+        run: ./mcp-publisher publish
+
   publish-image:
     needs: [release-please, build-artifacts]
     if: ${{ github.event_name == 'push' && needs.release-please.outputs.release_created == 'true' && vars.GHCR_PUBLISH_ENABLED == 'true' }}

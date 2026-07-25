@@ -16,6 +16,8 @@ accounts at the server configured below. Hosted operators should also read
 Throughout, replace `<your-host>` / `example.com` with your own hostname.
 For the guided ≤15-minute bring-up, start with
 [remote-quickstart.md](remote-quickstart.md); this document is the reference.
+For structured logs, metrics, and diagnosing a failure after the fact, see
+[observability.md](observability.md).
 
 ## Architecture
 
@@ -951,7 +953,6 @@ The remote tier is intentionally minimal. Not included:
 
 - Auth layers beyond single-user GitHub OAuth (no mTLS, IP allowlist, multi-user
   RBAC).
-- Monitoring/metrics/observability beyond rotating file logs.
 - Web UI.
 - Highly available coordinator hosting (the bundled SQLite coordinator is a
   strongly consistent single-node reference).

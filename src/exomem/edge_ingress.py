@@ -120,6 +120,15 @@ def _refusal_exception() -> OpError:
     return OpError("INGRESS_BYPASSED", INGRESS_BYPASSED_MESSAGE)
 
 
+def _bump_edge_ingress_metric(outcome: str) -> None:
+    try:
+        from . import metrics
+
+        metrics.inc_counter("exomem_edge_ingress_total", {"outcome": outcome})
+    except Exception:  # noqa: BLE001 - observability must never break a request
+        pass
+
+
 async def _send_refusal(send: Send) -> None:
     err = cli_ops.error_dict(_refusal_exception())
     body = json.dumps(
@@ -179,6 +188,7 @@ class EdgeIngressMiddleware:
                     path,
                     self._bypassed_count,
                 )
+                _bump_edge_ingress_metric("bypassed")
             else:
                 self._refused_count += 1
                 logger.warning(
@@ -186,6 +196,7 @@ class EdgeIngressMiddleware:
                     path,
                     self._refused_count,
                 )
+                _bump_edge_ingress_metric("refused")
                 await _send_refusal(send)
                 return
 

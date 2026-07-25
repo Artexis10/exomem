@@ -208,7 +208,14 @@ class SessionStoreTelemetry:
     def stale_served(self) -> int:
         with self._lock:
             self._stale_served_count += 1
-            return self._stale_served_count
+            count = self._stale_served_count
+        try:
+            from . import metrics
+
+            metrics.inc_counter("exomem_stale_session_serves_total")
+        except Exception:  # noqa: BLE001 - observability must never break the caller
+            pass
+        return count
 
     def snapshot(self) -> dict[str, Any]:
         with self._lock:
