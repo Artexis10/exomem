@@ -45,6 +45,99 @@ def test_doctor_lean_passes_with_fixture_vault(vault: Path) -> None:
     assert checks["command.registry"].status == "pass"
 
 
+def test_doctor_includes_observability_check(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("EXOMEM_LOG_DIR", str(tmp_path / "logs"))
+    report = doctor_module.doctor(vault=str(vault))
+    checks = {c.id: c for c in report.checks}
+    assert "observability" in checks
+    assert checks["observability"].status in {"pass", "warn"}
+    assert checks["observability"].details["log_dir_writable"] is True
+
+
+def test_observability_check_fails_when_log_dir_unwritable(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    def boom_resolve_log_dir():
+        return tmp_path / "does" / "not" / "exist" / "\x00bad"
+
+    monkeypatch.setattr(
+        "exomem.logging_config.resolve_log_dir", boom_resolve_log_dir
+    )
+    check = doctor_module._check_observability()
+    assert check.status == "fail"
+    assert check.details["log_dir_writable"] is False
+
+
+def test_observability_check_warns_on_stale_service_pile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir(parents=True)
+    for i in range(51):
+        (log_dir / f"service.out.log.{i}").write_text("x", encoding="utf-8")
+    monkeypatch.setenv("EXOMEM_LOG_DIR", str(log_dir))
+    check = doctor_module._check_observability()
+    assert check.status == "warn"
+    assert check.details["service_pile_count"] == 51
+
+
+def test_observability_check_warns_on_unparseable_jsonl_tail(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir(parents=True)
+    (log_dir / "queries.jsonl").write_text("not json\n", encoding="utf-8")
+    monkeypatch.setenv("EXOMEM_LOG_DIR", str(log_dir))
+    check = doctor_module._check_observability()
+    assert check.status == "warn"
+    assert "queries.jsonl" in check.message
+
+
+@pytest.fixture()
+def _isolated_lease_manager(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    from exomem import writer_lease as writer_lease_module
+
+    writer_lease_module.reset_managers_for_tests()
+    monkeypatch.setenv("EXOMEM_WRITER_LEASE_STATE_DIR", str(tmp_path / "state"))
+    yield writer_lease_module.get_manager()
+    writer_lease_module.reset_managers_for_tests()
+
+
+def test_idempotency_store_check_passes_when_healthy(_isolated_lease_manager) -> None:
+    check = doctor_module._check_idempotency_store()
+    assert check.status == "pass"
+    assert check.details["abandoned"] == 0
+
+
+def test_idempotency_store_check_warns_on_abandoned_receipts(_isolated_lease_manager) -> None:
+    store = _isolated_lease_manager.idempotency
+    with sqlite3.connect(store.path) as connection:
+        connection.execute(
+            "INSERT INTO mutations(key, digest, state, updated_at, owner) "
+            "VALUES ('k1', 'd1', 'abandoned', ?, NULL)",
+            (0.0,),
+        )
+    check = doctor_module._check_idempotency_store()
+    assert check.status == "warn"
+    assert "abandoned" in check.message
+    assert check.details["abandoned"] == 1
+
+
+def test_idempotency_store_check_warns_on_stale_pending(_isolated_lease_manager) -> None:
+    store = _isolated_lease_manager.idempotency
+    with sqlite3.connect(store.path) as connection:
+        connection.execute(
+            "INSERT INTO mutations(key, digest, state, updated_at, owner) "
+            "VALUES ('k1', 'd1', 'pending', ?, NULL)",
+            (0.0,),
+        )
+    check = doctor_module._check_idempotency_store()
+    assert check.status == "warn"
+    assert "oldest pending" in check.message
+
+
 def test_lexical_check_uses_escaped_immutable_query_only_snapshot(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

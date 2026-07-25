@@ -75,7 +75,9 @@ _LOCK_UNAVAILABLE_RECHECK_SECONDS = 30.0
 
 def _writer_authority_available() -> bool:
     try:
-        get_manager().ensure_writer()
+        # cause="probe": an availability poll must not count as write activity
+        # for the lease idle-release timer.
+        get_manager().ensure_writer(cause="probe")
     except OpError as exc:
         if exc.code in _TRANSIENT_OPERATION_CODES:
             return False

@@ -77,46 +77,60 @@ def create_directory(
             ),
         )
 
-    already_existed = abs_path.exists()
-    if already_existed and not abs_path.is_dir():
-        raise CreateDirectoryError(
-            code="NOT_A_DIR",
-            reason=f"{rel_path} exists but is not a directory",
-        )
+    # A raw mkdir mutates the vault tree, so this leaf takes the mutation
+    # boundary itself (a reentrant no-op for callers that still hold the
+    # full-leaf guard); the existence check runs under the boundary so
+    # concurrent creates stay idempotent instead of racing.
+    from .writer_lease import active_manager, active_mutation_request_id
 
-    if not already_existed:
-        try:
-            abs_path.mkdir(parents=parents, exist_ok=False)
-        except FileNotFoundError as e:
+    with active_manager().mutation_guard(
+        vault_root,
+        request_id=active_mutation_request_id(),
+        operation="directory_create_commit",
+        holder_kind="command",
+    ):
+        already_existed = abs_path.exists()
+        if already_existed and not abs_path.is_dir():
             raise CreateDirectoryError(
-                code="MISSING_PARENT",
-                reason=(
-                    f"intermediate folders missing for {rel_path}; "
-                    f"call with parents=true or create them first ({e})"
-                ),
-            ) from e
-        except OSError as e:
-            raise CreateDirectoryError(
-                code="MKDIR_FAILED",
-                reason=f"could not create {rel_path}: {e}",
-            ) from e
+                code="NOT_A_DIR",
+                reason=f"{rel_path} exists but is not a directory",
+            )
 
-    warnings: list[str] = []
-    if not already_existed:
-        today = today or dt.date.today()
-        date_iso = today.isoformat()
-        log_body = "Created directory via exomem Tier 2."
-        if curated and allow_curated:
-            log_body += f" allow_curated=true (target tree: {curated})."
-        log_warning = write_log_entry(
-            vault_root,
-            date_iso=date_iso,
-            op="create_directory",
-            rel_path_no_ext=rel_path,
-            body=log_body,
-        )
-        if log_warning:
-            warnings.append(log_warning)
+        if not already_existed:
+            try:
+                abs_path.mkdir(parents=parents, exist_ok=False)
+            except FileNotFoundError as e:
+                raise CreateDirectoryError(
+                    code="MISSING_PARENT",
+                    reason=(
+                        f"intermediate folders missing for {rel_path}; "
+                        f"call with parents=true or create them first ({e})"
+                    ),
+                ) from e
+            except OSError as e:
+                raise CreateDirectoryError(
+                    code="MKDIR_FAILED",
+                    reason=f"could not create {rel_path}: {e}",
+                ) from e
+
+        # The log.md entry is governed shared state — written under the same
+        # boundary hold as the mkdir it records.
+        warnings: list[str] = []
+        if not already_existed:
+            today = today or dt.date.today()
+            date_iso = today.isoformat()
+            log_body = "Created directory via exomem Tier 2."
+            if curated and allow_curated:
+                log_body += f" allow_curated=true (target tree: {curated})."
+            log_warning = write_log_entry(
+                vault_root,
+                date_iso=date_iso,
+                op="create_directory",
+                rel_path_no_ext=rel_path,
+                body=log_body,
+            )
+            if log_warning:
+                warnings.append(log_warning)
 
     return CreateDirectoryResult(
         path=rel_path, created=not already_existed, warnings=warnings
