@@ -61,11 +61,57 @@ def decide(
 ) -> Decision:
     """Resolve the disclosure ceiling for one item already resolved to `scope_ids`.
 
+    **Purpose may only narrow, never widen.** For every audience and every
+    declared purpose X:
+
+        decide(..., purpose=X).level <= decide(..., purpose=None).level
+
+    enforced by evaluating the lattice twice — once with the declared purpose,
+    once as undeclared — and returning whichever produced the lower ceiling.
+
+    This is what makes `purpose` safe to accept from an untrusted client. A
+    declared purpose is a self-assertion by the party the rules constrain, so
+    the only sound reading is one where lying can never help:
+
+    - An `outside purpose P` restriction can no longer be escaped by declaring
+      P. Undeclared fires the restriction (ceiling 0); declaring P does not
+      (ceiling 6); `min(6, 0) = 0`, so the restriction holds either way.
+    - A purpose-conditioned *grant* can no longer raise a ceiling. Widening
+      belongs to identity, not to a claim the caller makes about intent —
+      audience-conditioned grants still raise exactly as before.
+
     `active_grants` defaults to every grant in `policy` — this change has no
     session-scoped grant tracking yet (a later change narrows "active" to a
     live session); the parameter exists so the evaluator itself never needs to
     change shape when that arrives.
     """
+    if purpose is None:
+        return _decide_at(
+            scope_ids, audience=audience, purpose=None, policy=policy,
+            active_grants=active_grants,
+        )
+    declared = _decide_at(
+        scope_ids, audience=audience, purpose=purpose, policy=policy,
+        active_grants=active_grants,
+    )
+    undeclared = _decide_at(
+        scope_ids, audience=audience, purpose=None, policy=policy,
+        active_grants=active_grants,
+    )
+    # Ties go to the declared branch so its rule_ids/scope_ids explain the
+    # outcome when both branches agree on the level.
+    return declared if declared.level <= undeclared.level else undeclared
+
+
+def _decide_at(
+    scope_ids: Iterable[str],
+    *,
+    audience: str,
+    purpose: str | None,
+    policy: Policy,
+    active_grants: Iterable[StandingGrant] | None = None,
+) -> Decision:
+    """One evaluation of the lattice at a single purpose value."""
     scope_id_set = frozenset(scope_ids)
     grants = policy.grants if active_grants is None else tuple(active_grants)
 

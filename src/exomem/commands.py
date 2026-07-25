@@ -112,6 +112,8 @@ from .command_surface import (
     type_tag as _type_tag,  # noqa: F401 - re-exported for server.py
 )
 from .entity_types import EntityTypeId
+from .governance import egress as egress_module
+from .governance import principal as principal_module
 from .kbdir import kb_dirname
 from .vault import (
     VaultPathError,
@@ -635,6 +637,7 @@ def op_find(
     detail: str = "full",
     include_timings: bool = False,
     explain: bool = False,
+    purpose: str | None = None,
 ) -> list[RetrievalHit] | FindEnvelope:
     """Search / find / look up / query / retrieve / recall pages in the Knowledge Base (KB vault): notes, sources, insights, failures, patterns, experiments, entities. Hybrid semantic + keyword search, read-only. Filters are AND'd; tag/project lists are OR'd within.
 
@@ -776,6 +779,12 @@ def op_find(
             → the response shape is unchanged.
         explain: Add a bounded retrieval profile and per-hit ranking evidence.
             False by default; omitted/false preserves the existing response.
+        purpose: Optional declared purpose for this request, e.g. "audit" or
+            "due-diligence". Governance rules may widen or narrow what a given
+            audience may see for a stated purpose; leaving it unset is
+            deterministic (a purpose-conditioned allowance does not fire), not
+            a wildcard. Never affects ranking, and never enters the recall
+            cache key.
 
     Returns:
         With pack off (default): a list of {path, type, scope, title, updated,
@@ -866,6 +875,12 @@ def op_find(
         )
     degraded: list[str] = []
     failed: list[str] = []
+    # Release gate, part 1 of 2 (design D4): decide the over-fetch pool BEFORE
+    # retrieval, from the request alone. `gate_state` costs one `is_dir()` on
+    # an ungoverned vault, so the empty-policy fast path keeps `limit` exactly
+    # as the caller asked and the latency profile is unchanged.
+    _release_policy, _release_active = egress_module.gate_state(vault_root)
+    retrieval_limit = egress_module.pool_limit(limit) if _release_active else limit
     hits = find_module.find(
         vault_root,
         query=query,
@@ -882,7 +897,7 @@ def op_find(
         relation_direction=relation_direction,
         filters=filters,
         result_level=result_level,
-        limit=limit,
+        limit=retrieval_limit,
         scope=scope,
         mode=mode,
         graph=graph,
@@ -899,17 +914,34 @@ def op_find(
         failed_out=failed,
         retrieval_trace=retrieval_trace,
     )
+    # Release gate, part 2 of 2 (design D2): decisions are computed HERE —
+    # strictly after `find()` has returned and deep-copied its candidates into
+    # the shared `_FIND_CACHE`, and before `assemble_pack` and serialization.
+    # Nothing principal-dependent may run any earlier than this line, or one
+    # principal's decisions would be cached for the next.
+    with find_module._span(timings, "release_gate"):
+        release = egress_module.annotate_hits(
+            vault_root, hits, limit=limit, purpose=purpose
+        )
+        hits = release.hits
     pack_obj: dict | None = None
     if pack:
         with find_module._span(timings, "pack"):
             pack_obj = context_pack_module.assemble_pack(
                 vault_root, hits, graph_enrich=graph_enrich
             )
+            if release.active:
+                pack_obj = egress_module.annotate_pack(pack_obj, release)
     with find_module._span(timings, "serialize"):
-        if detail == "compact":
-            hit_dicts = [h.as_compact_dict() for h in hits]
-        else:
-            hit_dicts = [h.as_dict() for h in hits]
+        # `project` is the ONLY serializer to a wire dict (design D3): the raw
+        # `Hit.as_dict`/`as_compact_dict` calls that used to sit here are gone
+        # from the egress path, so a field that is not on a level's allow-list
+        # cannot reach a client even if a future change adds it upstream.
+        hit_dicts = egress_module.project_hits(
+            hits,
+            compact=(detail == "compact"),
+            withheld_paths=release.withheld_paths,
+        )
         ref_index = memory_refs_module.ReferenceIndex(vault_root)
         refs = ref_index.refs_for_paths(
             [str(hit.get("path") or "") for hit in hit_dicts]
@@ -920,6 +952,8 @@ def op_find(
                 hit["ref"] = ref
         if retrieval_trace is not None:
             retrieval_explain_module.attach_hit_explanations(retrieval_trace, hit_dicts)
+        # Notices occupy only the slots the over-fetch pool could not backfill.
+        hit_dicts.extend(release.notices)
     timings_dict = timings.as_dict() if timings is not None else None
     # Durable structured log → feeds the offline retrieval feedback loop.
     # Best-effort; never affects the returned result.
@@ -1115,6 +1149,28 @@ def op_search(
     return {"results": [_search_result_from_hit(hit) for hit in hits]}
 
 
+def _refuse_policy_tree_read(candidate: object) -> None:
+    """Refuse a direct READ of the policy tree, as if the file were absent.
+
+    The enumeration surfaces (`overview`, `list`) already exclude
+    `_Governance/`, but `get` and `fetch` reached `get_page` directly and
+    handed back the rules themselves — so the constrained party could read the
+    exact rules constraining them. `annotate_page` cannot catch this: the
+    policy tree belongs to no scope, so it decides at DISCLOSURE_MAX and
+    releases the file in full. `rules/` and `scopes/` are fixed scaffold
+    conventions, which makes filename guessing a low bar.
+
+    The refusal is byte-identical to `get_page`'s own missing-file error and is
+    audience- AND policy-independent, so it cannot itself signal that
+    governance is active on this vault.
+    """
+    from .governance.policy import is_governance_path
+
+    rel = str(candidate or "")
+    if is_governance_path(rel):
+        raise ValueError(f"NOT_FOUND: file does not exist: {rel}")
+
+
 def op_fetch(
     vault_root: Path,
     id: str,
@@ -1136,13 +1192,34 @@ def op_fetch(
         {"id", "title", "text", "url", "metadata"}. `text` is the markdown body;
         it ends with `[truncated]` when the body exceeded the effective cap.
     """
+    _refuse_policy_tree_read(id)
     id = _resolve_memory_identifier(vault_root, id)
+    _refuse_policy_tree_read(id)
     try:
         page = get_page_module.get_page(vault_root, path=id)
     except get_page_module.GetError as e:
         raise ValueError(f"{e.code}: {e.reason}") from e
-    text_out, truncated = _bounded_text(page.body, max_chars)
-    metadata = _frontmatter_metadata(page.path, page.frontmatter)
+    # Release gate. `fetch` is the deep-research read step between metadata-only
+    # `search` and full `get`, and it reached `get_page` directly — so a
+    # sub-notice item's body, title, frontmatter and canonical path crossed the
+    # boundary untouched. Decided against the same page dict `op_get` uses, so
+    # both direct-read surfaces share one decision and one refusal shape.
+    released = egress_module.annotate_page(
+        vault_root,
+        {
+            "path": page.path,
+            "frontmatter": page.frontmatter,
+            "body": page.body,
+        },
+    )
+    if released is None:
+        raise ValueError(f"NOT_FOUND: file does not exist: {id}")
+    body_for_text = str(released.get("body", ""))
+    # Below full disclosure the ladder caps what may be rendered: `annotate_page`
+    # has already bounded the body at L5, so honour that ceiling rather than
+    # re-expanding it from `page.body`.
+    text_out, truncated = _bounded_text(body_for_text, max_chars)
+    metadata = _frontmatter_metadata(page.path, released.get("frontmatter") or {})
     metadata.update(_string_metadata(truncated=truncated))
     query_log.log_get_call(
         read_path=page.path,
@@ -1260,6 +1337,7 @@ def op_graph_context(
     max_nodes: int = 40,
     max_edges: int = 80,
     traversal_profile: str | None = None,
+    purpose: str | None = None,
 ) -> dict:
     """Return a bounded typed-graph neighborhood for a page or query. Read-only.
 
@@ -1288,6 +1366,12 @@ def op_graph_context(
         max_edges: Cap returned edges. Default 80.
         traversal_profile: Deterministic traversal lens. One of `epistemic`,
             `provenance`, `causal`, `decision`, `all`, or a governed custom profile.
+        purpose: Optional declared purpose for this request, e.g. "audit" or
+            "due-diligence". Governance rules may widen or narrow what a given
+            audience may see for a stated purpose; leaving it unset is
+            deterministic (a purpose-conditioned allowance does not fire), not
+            a wildcard. Never affects ranking, and never enters the recall
+            cache key.
 
     Returns:
         {available, reason, seeds, nodes, edges, truncation}. Nodes and edges
@@ -1295,7 +1379,7 @@ def op_graph_context(
     """
     if path:
         path = _resolve_memory_identifier(vault_root, path)
-    return epistemic_graph_module.graph_context(
+    context = epistemic_graph_module.graph_context(
         vault_root,
         path=path,
         query=query,
@@ -1309,6 +1393,9 @@ def op_graph_context(
         max_edges=max_edges,
         traversal_profile=traversal_profile,
     )
+    # A neighborhood is provenance: a sub-notice page must not appear as a
+    # seed, a node, or an edge endpoint (design D4 / graph-find-ranking).
+    return egress_module.guard_graph_context(vault_root, context, purpose=purpose)
 
 
 def op_suggest_relations(
@@ -1821,7 +1908,9 @@ def op_get(
         INVALID_PATH (path escapes vault root or empty);
         NOT_FOUND (no such file); UNREADABLE (parse failure).
     """
+    _refuse_policy_tree_read(path)
     path = _resolve_memory_identifier(vault_root, path)
+    _refuse_policy_tree_read(path)
     if frontmatter_only:
         try:
             fm_result = get_frontmatter_module.get_frontmatter(
@@ -1860,6 +1949,18 @@ def op_get(
         out["links"] = _link_summary(
             vault_root, out.get("path", ""), out.get("body", "")
         )
+    # Release gate for direct reads: render at the page's decision level, and
+    # answer byte-identically to a missing path when it is below notice — a
+    # withheld page must be indistinguishable from one that never existed.
+    released = egress_module.annotate_page(vault_root, out)
+    if released is None:
+        raise ValueError(f"NOT_FOUND: file does not exist: {out['path']}")
+    out = released
+    if "path" not in out:
+        # A sub-floor notice: no path to resolve a memory ref against, and
+        # attaching one would reintroduce exactly the identifier the notice
+        # withholds.
+        return out
     return _attach_memory_ref(vault_root, out, str(out["path"]))
 
 
@@ -2925,6 +3026,15 @@ def op_list_directory(
 
     Errors: INVALID_PATH; NOT_FOUND; NOT_A_DIR.
     """
+    from .governance.policy import is_governance_path
+
+    # The policy tree is not vault content for ANY audience — the same
+    # structural exclusion `overview` applies, and `list` had none at all.
+    # Refusing the scan root first, with the module's own NOT_FOUND shape, so
+    # a probe straight at `_Governance` cannot be told apart from a probe at a
+    # path that does not exist.
+    if is_governance_path(path or ""):
+        raise ValueError(f"NOT_FOUND: no such vault path: {path}")
     try:
         result = list_directory_module.list_directory(
             vault_root,
@@ -2934,7 +3044,15 @@ def op_list_directory(
         )
     except list_directory_module.ListDirectoryError as e:
         raise ValueError(f"{e.code}: {e.reason}") from e
-    return result.as_dict()
+    payload = result.as_dict()
+    entries = payload.get("entries")
+    if isinstance(entries, list):
+        payload["entries"] = [
+            entry
+            for entry in entries
+            if not is_governance_path(str((entry or {}).get("path", "")))
+        ]
+    return payload
 
 
 def op_move_file(
@@ -3210,6 +3328,7 @@ def op_list_inbound_links(vault_root: Path, target: str) -> dict:
              count}.
     Errors: INVALID_TARGET; INVALID_PATH.
     """
+    requested = str(target)
     target = _resolve_memory_identifier(vault_root, target)
     try:
         result = list_inbound_links_module.list_inbound_links(
@@ -3217,7 +3336,74 @@ def op_list_inbound_links(vault_root: Path, target: str) -> dict:
         )
     except list_inbound_links_module.ListInboundLinksError as e:
         raise ValueError(f"{e.code}: {e.reason}") from e
-    return result.as_dict()
+    payload = result.as_dict()
+    # Release gate on the TARGET (finding N2). The dispatcher's entry filter
+    # cannot reach this one: every inbound row's own `path` is the PERMITTED
+    # source note, so nothing about the row looks withheld — while
+    # `raw_target` carries the withheld stem and `context` quotes the line
+    # containing its full path. The count alone settles it, 1 versus 0.
+    #
+    # Absence shape: this surface deliberately does not require the target to
+    # exist, so a missing target already returns an EMPTY result rather than
+    # an error. Returning that same empty result makes withheld
+    # indistinguishable from both "nothing links here" and "never existed";
+    # raising NOT_FOUND would invent a signal the surface otherwise never
+    # emits, which is its own oracle.
+    #
+    # The echoed `target` reverts to what the CALLER sent, because the
+    # normalized form can be strictly more specific than the input — a bare
+    # basename resolves to a full vault path — and confirming the canonical
+    # location of a withheld page is the same disclosure the L17 fix removed
+    # from sub-floor notices.
+    if not _release_permits_link_target(vault_root, target):
+        payload["target"] = requested.strip().replace("\\", "/").lstrip("/")
+        payload["inbound"] = []
+        payload["count"] = 0
+    return payload
+
+
+def _release_permits_link_target(vault_root: Path, target: object) -> bool:
+    """False only when `target` names a real vault page released below the floor.
+
+    A target that resolves to nothing under the vault is not a vault item and
+    is therefore not the release plane's business (finding N6) — the caller is
+    entitled to hear "no inbound links" about a path they invented.
+
+    All three accepted target forms are covered, because the bare-basename
+    form is the one an attacker would reach for: it never resolves to a path
+    on its own, so a path-only check would have left the cheapest probe open.
+    """
+    if not isinstance(target, str) or not target.strip():
+        return True
+    from .governance import egress as egress_module
+
+    policy, _ = egress_module.gate_state(Path(vault_root))
+    if policy.empty:
+        return True
+
+    def _permits(rel_path: str) -> bool:
+        level = egress_module.release_level_for(vault_root, rel_path)
+        return level is not None and level >= egress_module.RELEASE_FLOOR
+
+    clean = target.strip().replace("\\", "/").strip("/")
+    if "/" in clean:
+        for candidate in ({clean, f"{clean}.md"} if not clean.lower().endswith(".md") else {clean}):
+            if (Path(vault_root) / candidate).is_file():
+                return _permits(candidate)
+        return True
+    # Bare basename: resolve it the way the matcher does — by filename across
+    # the vault. Ambiguity fails closed; a name that matches nothing is simply
+    # not a vault item.
+    stem = clean[: -len(".md")] if clean.lower().endswith(".md") else clean
+    matches = [
+        p for p in Path(vault_root).rglob(f"{stem}.md") if p.is_file()
+    ]
+    if not matches:
+        return True
+    return all(
+        _permits(str(p.relative_to(Path(vault_root))).replace("\\", "/"))
+        for p in matches
+    )
 
 
 def op_get_video_frames(
@@ -3264,6 +3450,12 @@ def op_get_video_frames(
         NO_DECODABLE_FRAMES (corrupt/streamless video, or a window on a
         video of unknown duration).
     """
+    # Release gate BEFORE extraction: frames are the item's content in image
+    # form, so a sub-floor decision must refuse rather than render — and it
+    # must refuse indistinguishably from a missing path, exactly as `op_get`
+    # does. Decided first so a withheld video is never even decoded.
+    if not egress_module.release_allows_frames(vault_root, path):
+        raise ValueError(f"NOT_FOUND: file does not exist: {path}")
     video_frames_module = _video_frames_module()
     try:
         result = video_frames_module.get_frames(
@@ -3332,6 +3524,7 @@ def op_ask_memory(
     graph_enrich: bool = False,
     include_timings: bool = False,
     explain: bool = False,
+    purpose: str | None = None,
 ) -> list[RetrievalHit] | FindEnvelope:
     """Recall durable knowledge from Exomem with product defaults.
 
@@ -3376,6 +3569,11 @@ def op_ask_memory(
         graph_enrich: With deep mode, include typed graph neighborhood data.
         include_timings: Include retrieval timings for diagnostics.
         explain: Add bounded retrieval-plan and per-hit ranking evidence.
+        purpose: Optional declared purpose for this request, e.g. "audit" or
+            "due-diligence". Governance rules may widen or narrow what a given
+            audience may see for a stated purpose; leaving it unset is
+            deterministic, not a wildcard. Never affects ranking, and never
+            enters the recall cache key.
     """
     result = op_find(
         vault_root,
@@ -3407,6 +3605,7 @@ def op_ask_memory(
         detail=detail,
         include_timings=include_timings,
         explain=explain,
+        purpose=purpose,
     )
     return result
 
@@ -3419,6 +3618,7 @@ def op_read_memory(
     links: bool = False,
     include_raw: bool = False,
     unit_ref: str | None = None,
+    purpose: str | None = None,
 ) -> dict:
     """Read one memory page or one exact semantic unit by reference.
 
@@ -3437,7 +3637,28 @@ def op_read_memory(
         include_raw: Include the raw markdown file text.
         unit_ref: Exact unit reference returned by unit-level recall. Page-only
             expansion flags are not accepted together with an exact unit read.
+        purpose: Optional declared purpose for this request, e.g. "audit" or
+            "due-diligence". Governance rules may widen or narrow what a given
+            audience may see for a stated purpose; leaving it unset is
+            deterministic, not a wildcard. Never affects ranking, and never
+            enters the recall cache key.
     """
+    # `purpose` is a per-call leaf parameter, not a surface property: layer it
+    # onto the bound principal so the release decisions taken inside `op_get`
+    # (which has no `purpose` parameter of its own) see the declared purpose.
+    if purpose is not None:
+        with principal_module.request_scope(
+            principal_module.effective_principal().with_purpose(purpose)
+        ):
+            return op_read_memory(
+                vault_root,
+                path=path,
+                frontmatter_only=frontmatter_only,
+                include_history=include_history,
+                links=links,
+                include_raw=include_raw,
+                unit_ref=unit_ref,
+            )
     if unit_ref is not None:
         if frontmatter_only or include_history or links or include_raw:
             raise ValueError(
@@ -5693,6 +5914,14 @@ def _build_commands() -> tuple[Command, ...]:
 
 COMMANDS: tuple[Command, ...] = _build_commands()
 
+#: Boot refusal (design D3 risk mitigation). Coverage is derived from THIS
+#: registry and default-deny, so a command added without declaring how it
+#: renders through the release plane fails at import — the process refuses to
+#: start rather than serving an ungated surface. This is the check that would
+#: have caught `fetch` and the eight structure surfaces on the day each was
+#: written, instead of at security review.
+egress_module.assert_projectors_registered({command.name: command for command in COMMANDS})
+
 _PRODUCT_SPEC: tuple[tuple, ...] = (
     (
         "coordination_status",
@@ -6195,6 +6424,17 @@ def validate_product_registry() -> dict:
 
 
 validate_product_registry()
+
+#: Boot refusal for the ALIAS layer (P1), the companion to the leaf-registry
+#: assertion above. `validate_product_registry` proves each route names a real
+#: leaf; this proves each route names a *gated* leaf. Without it, the product
+#: names a client actually calls — `browse_memory`, `review_memory`,
+#: `maintain_memory`, none of which exists in `COMMANDS` — sit outside the
+#: structural coverage guarantee entirely: a second registry with no gate.
+egress_module.assert_alias_projectors_registered(
+    {command.name: command for command in PRODUCT_COMMANDS},
+    {command.name: command for command in COMMANDS},
+)
 
 
 def _active_bootstrap_descriptor() -> capabilities_module.ActiveSurfaceDescriptor:

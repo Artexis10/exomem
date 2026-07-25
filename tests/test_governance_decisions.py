@@ -140,10 +140,100 @@ def test_outside_purpose_restriction_fires_when_undeclared() -> None:
     assert decision.level == 1
 
 
-def test_outside_purpose_restriction_does_not_fire_when_purpose_matches() -> None:
+def test_declaring_the_matching_purpose_cannot_escape_an_outside_restriction() -> None:
+    """Purpose may only narrow, never widen.
+
+    The `outside` branch alone would let a caller escape the restriction by
+    declaring the very purpose it names (undeclared -> ceiling 1; declared ->
+    the rule does not fire -> ceiling 6). Since a declared purpose is a
+    self-assertion by the party the rule constrains, the evaluator takes the
+    minimum of the declared and undeclared branches, so the restriction holds
+    either way and lying can never help.
+    """
     pol = _policy(rules=[_rule("restrict", 1, purpose="due-diligence", purpose_condition="outside")])
-    decision = decide([SCOPE], audience="ext", purpose="due-diligence", policy=pol)
-    assert decision.level == DISCLOSURE_MAX
+    undeclared = decide([SCOPE], audience="ext", policy=pol)
+    declared = decide([SCOPE], audience="ext", purpose="due-diligence", policy=pol)
+    assert undeclared.level == 1
+    assert declared.level == 1
+
+
+def test_purpose_conditioned_grant_cannot_raise_a_ceiling() -> None:
+    """Widening belongs to identity, not to a claim about intent."""
+    pol = _policy(
+        rules=[
+            _rule("floor", 1),
+            _rule("allow", DISCLOSURE_MAX, purpose="audit", purpose_condition="matches"),
+        ]
+    )
+    assert decide([SCOPE], audience="ext", policy=pol).level == 1
+    assert decide([SCOPE], audience="ext", purpose="audit", policy=pol).level == 1
+
+
+def test_purpose_still_narrows() -> None:
+    """The direction that remains available: a purpose-conditioned rule that
+    LOWERS the ceiling still applies when that purpose is declared."""
+    pol = _policy(
+        rules=[_rule("narrow", 0, purpose="marketing", purpose_condition="matches")]
+    )
+    assert decide([SCOPE], audience="ext", policy=pol).level == DISCLOSURE_MAX
+    assert decide([SCOPE], audience="ext", purpose="marketing", policy=pol).level == 0
+
+
+def test_purpose_never_widens_over_every_fixture_rule() -> None:
+    """The mandated invariant, exhaustively over both purpose-conditions."""
+    purposes = ("audit", "due-diligence", "marketing", "unrelated")
+    for condition in ("matches", "outside"):
+        for rule_purpose in purposes:
+            for ceiling in range(DISCLOSURE_MAX + 1):
+                pol = _policy(
+                    rules=[
+                        _rule("floor", 3),
+                        _rule(
+                            "conditioned",
+                            ceiling,
+                            purpose=rule_purpose,
+                            purpose_condition=condition,
+                        ),
+                    ]
+                )
+                baseline = decide([SCOPE], audience="ext", policy=pol).level
+                for declared in purposes:
+                    got = decide(
+                        [SCOPE], audience="ext", purpose=declared, policy=pol
+                    ).level
+                    assert got <= baseline, (
+                        f"purpose={declared!r} widened {baseline} -> {got} "
+                        f"(rule purpose={rule_purpose!r} condition={condition} "
+                        f"ceiling={ceiling})"
+                    )
+
+
+def test_purpose_never_widens_under_random_declarations() -> None:
+    """Property test: a client may declare ANY string, including ones no rule
+    mentions. None of them may raise the ceiling."""
+    rng = random.Random(20260725)
+    alphabet = "abcdefghijklmnopqrstuvwxyz-"
+    for _ in range(300):
+        rule_purpose = "".join(rng.choice(alphabet) for _ in range(rng.randint(1, 8)))
+        pol = _policy(
+            rules=[
+                _rule("floor", rng.randint(0, DISCLOSURE_MAX)),
+                _rule(
+                    "conditioned",
+                    rng.randint(0, DISCLOSURE_MAX),
+                    purpose=rule_purpose,
+                    purpose_condition=rng.choice(("matches", "outside")),
+                ),
+            ],
+            grants=[_grant("g", rng.randint(0, DISCLOSURE_MAX))],
+        )
+        baseline = decide([SCOPE], audience="ext", policy=pol).level
+        for _probe in range(4):
+            declared = rng.choice(
+                [rule_purpose, "".join(rng.choice(alphabet) for _ in range(6))]
+            )
+            got = decide([SCOPE], audience="ext", purpose=declared, policy=pol).level
+            assert got <= baseline
 
 
 def test_active_grants_override_policy_grants_when_supplied() -> None:

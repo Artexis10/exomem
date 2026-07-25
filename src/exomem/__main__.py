@@ -2289,9 +2289,15 @@ def _core_op_main(argv: list[str]) -> int:
             injected = (vault_root, schema_module.load_source_schema(vault_root))
         else:
             injected = (vault_root,)
+        from .governance import principal as principal_module
         from .writer_lease import invoke_command
 
-        with capabilities.active_surface(surface_descriptor):
+        # The CLI runs in the vault owner's own process: canonical audience is
+        # `owner` (design D5), bound explicitly rather than left to the
+        # unbound-contextvar default so the surface label is accurate.
+        with capabilities.active_surface(
+            surface_descriptor
+        ), principal_module.request_scope(principal_module.owner_principal(surface="cli")):
             result = invoke_command(
                 cmd,
                 *injected,

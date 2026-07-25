@@ -26,6 +26,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
+from .governance.policy import GOVERNANCE_DIRNAME, is_governance_path
 from .kbdir import kb_dirname
 
 DEFAULT_MAX_DEPTH = 3
@@ -35,7 +36,16 @@ TOP_FILES_CAP = 5          # largest / oldest-unmodified entries
 PATTERN_CAP = 3            # dominant name patterns per folder
 CONTENT_READ_CAP = 512 * 1024  # bytes; larger md files are counted, not read
 
-_SKIP_ALWAYS = frozenset({".git", "node_modules"})
+#: `_Governance/` is the policy tree, not vault content, and it is skipped for
+#: EVERY audience including the owner — the same reasoning that keeps it out of
+#: `find` (`test_governance_dir_never_surfaces_in_find`). It holds YAML rather
+#: than markdown, so before this it sailed past the release walk filter and
+#: enumerated the policy filenames themselves — `rules/['r.yaml']`,
+#: `scopes/['patterns.yaml']` — telling a restricted audience how the vault is
+#: governed and how many rules constrain it. Excluded outright rather than
+#: decided, because a decision is the wrong shape: the answer never depends on
+#: who is asking.
+_SKIP_ALWAYS = frozenset({".git", "node_modules", GOVERNANCE_DIRNAME})
 _SKIP_DEFAULT = frozenset({"_trash", "_attachments", ".trash"})
 
 _WIKILINK = re.compile(r"\[\[[^\]]+\]\]")
@@ -96,6 +106,25 @@ def _resolve_subtree(root: Path, path: str) -> tuple[Path, str]:
             raise OverviewError("INVALID_PATH", f"path escapes the vault: {path!r}")
     else:
         scan = root
+    # A scan rooted AT (or inside) the policy tree walks it: pruning by child
+    # dirname never fires, because a directory is not a child of itself. Same
+    # NOT_FOUND shape the withheld-subtree probe uses, and ordered before
+    # `exists()` so a present-but-excluded tree cannot answer differently from
+    # an absent one.
+    if rel and is_governance_path(rel):
+        raise OverviewError("NOT_FOUND", f"no such vault path: {rel}")
+    # …and again on the RESOLVED root, because a symlink launders the name:
+    # `Notes/gov-link -> _Governance` carries no `_Governance` component in
+    # `rel`, so the check above never fires, and `os.walk` follows the scan
+    # root it is handed regardless of `followlinks=False` — that flag governs
+    # descent, not the starting point.
+    try:
+        resolved = scan.resolve()
+        if is_governance_path(str(resolved.relative_to(root.resolve()))):
+            raise OverviewError("NOT_FOUND", f"no such vault path: {rel}")
+    except (OSError, ValueError):
+        # Unresolvable or outside the root — the checks below own that case.
+        pass
     if not scan.exists():
         raise OverviewError("NOT_FOUND", f"no such vault path: {rel or '.'}")
     if not scan.is_dir():
@@ -120,6 +149,19 @@ def overview(
         raise OverviewError("NOT_FOUND", f"no such directory: {root}")
     scan, rel = _resolve_subtree(root, path)
 
+    # Release-plane pruning, at the walk (design D1 / finding N1c). Imported
+    # lazily so this module keeps no import-time dependency on governance, and
+    # `None` on an ungoverned vault means the loop below is untouched.
+    #
+    # It has to happen HERE rather than at the dispatcher because every number
+    # this function returns — per-folder counts, frontmatter coverage, totals,
+    # `largest`, `oldest_unmodified`, junk lists — is a reduction over the
+    # walk. Filtering the rendered rows afterwards leaves the counts standing,
+    # and a count is a sharper oracle than the row it replaced.
+    from .governance import egress as _egress
+
+    release_keep = _egress.release_walk_filter(root)
+
     dirstats: dict[str, _DirStat] = {}
     skipped_dirs: set[str] = set()
     oversized = 0
@@ -135,6 +177,12 @@ def overview(
         filenames.sort()
         kept: list[str] = []
         for d in dirnames:
+            if d == GOVERNANCE_DIRNAME:
+                # Pruned SILENTLY — not even a `skipped.dirs` entry. Naming it
+                # there just relocates the oracle: "this vault is governed" is
+                # exactly the fact the entry would carry, and it is the first
+                # thing a restricted audience wants to know.
+                continue
             if d in _SKIP_ALWAYS or (
                 not include_hidden and (d.startswith(".") or d in _SKIP_DEFAULT)
             ):
@@ -145,6 +193,9 @@ def overview(
 
         rp = os.path.relpath(dirpath, scan)
         rp = "" if rp == "." else rp.replace(os.sep, "/")
+        # Vault-relative (from `root`, not `scan`) form — governance rules are
+        # keyed from the vault root, not from the scanned subtree.
+        root_rp = f"{rel}/{rp}" if rel and rp else (rel or rp)
         depth = 0 if not rp else rp.count("/") + 1
         max_depth_seen = max(max_depth_seen, depth)
         st = dirstats.setdefault(rp, _DirStat(path=rp, depth=depth))
@@ -154,6 +205,13 @@ def overview(
         for fn in filenames:
             if not include_hidden and fn.startswith("."):
                 continue
+            # Withheld pages never enter the walk, so they cannot reach a
+            # count, a sample, a size ranking or a junk list. Pruned silently:
+            # a "hidden N" marker would itself be the oracle.
+            if release_keep is not None:
+                child_rel = f"{root_rp}/{fn}" if root_rp else fn
+                if not release_keep(child_rel):
+                    continue
             fpath = Path(dirpath) / fn
             try:
                 fst = fpath.stat()
@@ -221,12 +279,26 @@ def overview(
             shown[rp] = len(st.children)
             return
         ranked = sorted(st.children, key=lambda c: (-dirstats[c].files_rec, c))
+        if release_keep is not None:
+            # A folder whose every page was pruned must not appear as an
+            # empty node: "this folder exists and holds nothing you may see"
+            # is the same disclosure the counts were making. It reads as a
+            # folder that is not there.
+            ranked = [c for c in ranked if dirstats[c].files_rec > 0]
         keep = ranked[:BREADTH_CAP]
         shown[rp] = len(ranked) - len(keep)
         for child in sorted(keep):
             _select(child)
 
     _select("")
+
+    # Scoped-probe refusal, the same shape PR #321 used for excluded subtrees:
+    # asking specifically about a subtree that governance empties reads as
+    # NOT_FOUND — byte-identical to a path that does not exist — rather than
+    # returning a valid report full of zeroes, which would confirm both that
+    # the folder exists and that it is being withheld.
+    if release_keep is not None and rel and dirstats[""].files_rec == 0:
+        raise OverviewError("NOT_FOUND", f"no such vault path: {rel}")
 
     tree: list[dict] = []
     for rp in sorted(shown):
