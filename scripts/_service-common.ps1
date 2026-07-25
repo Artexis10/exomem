@@ -356,6 +356,58 @@ function Write-ExomemManagedManifest {
     Write-Host "Managed install manifest: $path"
 }
 
+function Backup-ExomemAppLog {
+    <#
+    .SYNOPSIS
+      Archive logs/exomem.log to logs/archive/ (keep newest N) instead of
+      deleting it outright, so a restart doesn't erase the previous session's
+      diagnostics before anyone reads them.
+    #>
+    param(
+        [string]$LogPath,
+        [string]$ArchiveDir,
+        [int]$Keep = 10
+    )
+
+    if (-not (Test-Path $LogPath)) { return }
+    if (-not (Test-Path $ArchiveDir)) {
+        New-Item -ItemType Directory -Path $ArchiveDir -Force | Out-Null
+    }
+    $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
+    $dest = Join-Path $ArchiveDir "exomem-$stamp.log"
+    Move-Item -LiteralPath $LogPath -Destination $dest -Force
+    $archives = @(
+        Get-ChildItem -Path $ArchiveDir -Filter "exomem-*.log" -ErrorAction SilentlyContinue |
+            Sort-Object LastWriteTime -Descending
+    )
+    if ($archives.Count -gt $Keep) {
+        $archives | Select-Object -Skip $Keep | Remove-Item -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Limit-ExomemServiceLogPile {
+    <#
+    .SYNOPSIS
+      Prune NSSM's online-rotated service.out.log.*/service.err.log.* pile,
+      keeping the newest N of each stream. NSSM's AppRotateOnline renames the
+      live file on every rotation and never caps how many accumulate.
+    #>
+    param(
+        [string]$LogDir,
+        [int]$Keep = 20
+    )
+
+    foreach ($pattern in @("service.out.log.*", "service.err.log.*")) {
+        $files = @(
+            Get-ChildItem -Path $LogDir -Filter $pattern -ErrorAction SilentlyContinue |
+                Sort-Object LastWriteTime -Descending
+        )
+        if ($files.Count -gt $Keep) {
+            $files | Select-Object -Skip $Keep | Remove-Item -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
 function Assert-ExomemVisibleCliVersions {
     param(
         [string]$ExpectedVersion,

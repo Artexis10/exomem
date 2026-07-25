@@ -13,6 +13,7 @@ from pathlib import Path
 
 from . import semantic_writes
 from .vault import (
+    PathGuardError,
     PlannedWrite,
     VaultPathError,
     batch_atomic_write,
@@ -238,12 +239,31 @@ def append_to_file(
         semantic = committed.as_dict()
     else:
         writes = [*log_plan.writes, PlannedWrite(abs_path, new_text, guard=primary_guard)]
-        try:
-            batch_atomic_write(writes, vault_root=vault_root)
-        except Exception as error:
-            log.exception("append_to_file write failed for %s", rel_path)
-            warnings.append(f"partial write — reconcile on desktop: {error}")
-            raise
+        # Non-semantic append targets have no self-guarding commit seam, so
+        # this leaf takes the mutation boundary itself (a reentrant no-op
+        # for callers that still hold the full-leaf guard).
+        from .writer_lease import active_manager, active_mutation_request_id
+
+        with active_manager().mutation_guard(
+            vault_root,
+            request_id=active_mutation_request_id(),
+            operation="file_append_commit",
+            holder_kind="command",
+        ):
+            try:
+                batch_atomic_write(writes, vault_root=vault_root)
+            except PathGuardError as error:
+                raise AppendError(
+                    code="STALE_WRITE",
+                    reason=(
+                        "a concurrent write updated this file or a shared "
+                        f"auxiliary during commit; re-read and retry ({error})"
+                    ),
+                ) from error
+            except Exception as error:
+                log.exception("append_to_file write failed for %s", rel_path)
+                warnings.append(f"partial write — reconcile on desktop: {error}")
+                raise
 
     return AppendResult(
         path=rel_path,

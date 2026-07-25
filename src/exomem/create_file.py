@@ -374,12 +374,44 @@ def create_file(
         writes.append(
             PlannedWrite(path=abs_path, content=full_text, guard=existing_guard)
         )
-        try:
-            batch_atomic_write(writes, vault_root=vault_root)
-        except Exception as e:
-            log.exception("create_file write failed for %s", rel_path)
-            warnings.append(f"partial write — reconcile on desktop: {e}")
-            raise
+        # Non-semantic targets have no self-guarding commit seam, so this
+        # leaf takes the mutation boundary itself (a reentrant no-op for
+        # callers that still hold the full-leaf guard). Without it, a
+        # narrowed command surface would write governed log/index state —
+        # and race concurrent creates — with no boundary at all.
+        from .writer_lease import active_manager, active_mutation_request_id
+
+        with active_manager().mutation_guard(
+            vault_root,
+            request_id=active_mutation_request_id(),
+            operation="file_create_commit",
+            holder_kind="command",
+        ):
+            if not existing_file and not overwrite and abs_path.exists():
+                # Re-check under the boundary: a concurrent create landed
+                # after the pre-boundary existence check.
+                raise CreateFileError(
+                    code="FILE_EXISTS",
+                    reason=(
+                        f"{rel_path} was created concurrently. Pass "
+                        f"`overwrite=true` to replace, or use `edit` / "
+                        f"`append_to_file` for surgical changes."
+                    ),
+                )
+            try:
+                batch_atomic_write(writes, vault_root=vault_root)
+            except vault_module.PathGuardError as e:
+                raise CreateFileError(
+                    code="STALE_WRITE",
+                    reason=(
+                        "a concurrent write updated a shared file (log/index) "
+                        f"during commit; retry the operation ({e})"
+                    ),
+                ) from e
+            except Exception as e:
+                log.exception("create_file write failed for %s", rel_path)
+                warnings.append(f"partial write — reconcile on desktop: {e}")
+                raise
 
     return CreateFileResult(
         path=rel_path,
