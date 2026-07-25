@@ -128,6 +128,79 @@ def test_config_loads_without_exposing_token_in_status(tmp_path: Path) -> None:
     assert "vault_id" not in status
 
 
+def test_status_reports_ttl_remaining_and_renewer_liveness(tmp_path: Path) -> None:
+    expires_at = time.time() + 42.0
+    manager = LeaseManager(
+        LeaseConfig(
+            url="https://lease.example",
+            vault_id="main",
+            replica_id="desktop",
+            state_dir=tmp_path,
+        ),
+        client=FakeClient(LeaseRecord("desktop", expires_at, 7)),
+    )
+    status = manager.status()
+    assert status["ttl_remaining_seconds"] == pytest.approx(42.0, abs=1.0)
+    assert status["renewer_alive"] is False
+    assert status["last_renew_age_seconds"] is None
+    assert status["last_coordinator_error"] is None
+
+
+def test_status_records_coordinator_error_instead_of_silently_returning_unhealthy(
+    tmp_path: Path,
+) -> None:
+    manager = LeaseManager(
+        LeaseConfig(
+            url="https://lease.example",
+            vault_id="main",
+            replica_id="desktop",
+            state_dir=tmp_path,
+        ),
+        client=FakeClient(OpError("WRITER_COORDINATOR_UNAVAILABLE", "down")),
+    )
+    status = manager.status()
+    assert status["coordinator_healthy"] is False
+    assert status["last_coordinator_error"]["code"] == "WRITER_COORDINATOR_UNAVAILABLE"
+    assert status["last_coordinator_error"]["age_seconds"] >= 0
+
+
+def test_status_last_coordinator_error_persists_across_a_later_healthy_status(
+    tmp_path: Path,
+) -> None:
+    manager = LeaseManager(
+        LeaseConfig(
+            url="https://lease.example",
+            vault_id="main",
+            replica_id="desktop",
+            state_dir=tmp_path,
+        ),
+        client=FakeClient(OpError("WRITER_COORDINATOR_UNAVAILABLE", "down")),
+    )
+    manager.status()
+    manager.client.record = LeaseRecord("desktop", time.time() + 10, 7)
+    status = manager.status()
+    assert status["coordinator_healthy"] is True
+    assert status["last_coordinator_error"]["code"] == "WRITER_COORDINATOR_UNAVAILABLE"
+
+
+def test_renewer_alive_reflects_a_running_renew_thread(tmp_path: Path) -> None:
+    manager = LeaseManager(
+        LeaseConfig(
+            url="https://lease.example",
+            vault_id="main",
+            replica_id="desktop",
+            state_dir=tmp_path,
+            ttl_seconds=300.0,
+        ),
+        client=FakeClient(LeaseRecord("desktop", time.time() + 300, 1)),
+    )
+    manager.start_renewer()
+    try:
+        assert manager.status()["renewer_alive"] is True
+    finally:
+        manager.close()
+
+
 def test_coordinator_requests_use_cloudflare_compatible_user_agent(monkeypatch) -> None:
     from exomem.writer_lease import LeaseCoordinatorClient
 
@@ -248,9 +321,15 @@ def test_reads_bypass_unavailable_coordinator(tmp_path: Path) -> None:
     )
 
 
-def test_hosted_reads_serialize_without_contacting_unavailable_coordinator(
+def test_hosted_reads_never_contact_the_coordinator_or_wait_for_the_boundary(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Superseded contract (R3): hosted reads no longer take the mutation
+    boundary at all — they behave exactly like local reads, because atomic
+    staging already makes a concurrent whole-file read torn-free. This
+    supersedes the archived decision at
+    openspec/changes/archive/2026-07-20-make-mcp-acknowledgement-replay-safe/design.md:64.
+    """
     monkeypatch.setenv("EXOMEM_HOSTED_CELL", "true")
     vault = tmp_path / "vault"
     vault.mkdir()
@@ -259,36 +338,31 @@ def test_hosted_reads_serialize_without_contacting_unavailable_coordinator(
     coordinator = VaultMutationCoordinator(state_root, vault)
     boundary_entered = threading.Event()
     release_boundary = threading.Event()
-    read_finished = threading.Event()
-    result: list[str] = []
 
     def hold_mutation() -> None:
         with coordinator.hold(timeout_seconds=2.0):
             boundary_entered.set()
             assert release_boundary.wait(2.0)
 
-    def read() -> None:
-        result.append(
+    writer = threading.Thread(target=hold_mutation)
+    writer.start()
+    try:
+        assert boundary_entered.wait(1.0)
+        # The read returns immediately without waiting for release — it
+        # never even attempts to acquire the boundary a concurrent writer
+        # is holding.
+        assert (
             manager.invoke(
                 _command(writes=False, leaf=lambda _vault: "read-ok"),
                 (vault,),
                 {},
             )
+            == "read-ok"
         )
-        read_finished.set()
-
-    writer = threading.Thread(target=hold_mutation)
-    reader = threading.Thread(target=read)
-    writer.start()
-    assert boundary_entered.wait(1.0)
-    reader.start()
-    assert not read_finished.wait(0.1)
-    release_boundary.set()
-    assert read_finished.wait(1.0)
-    writer.join(timeout=2.0)
-    reader.join(timeout=2.0)
-
-    assert result == ["read-ok"]
+    finally:
+        release_boundary.set()
+        writer.join(timeout=2.0)
+    assert not writer.is_alive()
 
 
 def test_read_only_invocation_bypasses_held_mutation_boundary(tmp_path: Path) -> None:
@@ -323,47 +397,43 @@ def test_read_only_invocation_bypasses_held_mutation_boundary(tmp_path: Path) ->
     assert not thread.is_alive()
 
 
-def test_hosted_read_waits_for_complete_multi_file_mutation_snapshot(
+def test_hosted_plain_read_bypasses_boundary_held_by_other_manager(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("EXOMEM_HOSTED_CELL", "true")
-    state_root = tmp_path / "state"
+    """Mirrors `test_hosted_public_audit_routes_bypass_boundary_held_by_other_manager`,
+    but for an ORDINARY (non-audit) hosted read — proving R3's universal
+    bypass rather than the superseded audit-only allowlist."""
+    state_dir = tmp_path / "shared-state"
     vault = tmp_path / "vault"
     vault.mkdir()
-    coordinator = VaultMutationCoordinator(state_root, vault)
-    entered = threading.Event()
-    release = threading.Event()
-    read_finished = threading.Event()
-    result: list[str] = []
+    holder = LeaseManager(LeaseConfig(state_dir=state_dir), mutation_timeout_seconds=0.0)
+    reader = LeaseManager(LeaseConfig(state_dir=state_dir), mutation_timeout_seconds=0.0)
+    boundary_held = threading.Event()
+    release_boundary = threading.Event()
 
-    def hold_mutation() -> None:
-        with coordinator.hold(timeout_seconds=2.0):
-            entered.set()
-            assert release.wait(2.0)
+    def hold_boundary() -> None:
+        with holder.mutation_guard(vault):
+            boundary_held.set()
+            assert release_boundary.wait(timeout=2)
 
-    manager = LeaseManager(LeaseConfig(state_dir=state_root))
+    worker = threading.Thread(target=hold_boundary, daemon=True)
+    worker.start()
+    assert boundary_held.wait(timeout=2)
+    monkeypatch.setattr(writer_lease_module, "content_private_logging_enabled", lambda: True)
 
-    def read() -> None:
-        result.append(
-            manager.invoke(
+    try:
+        assert (
+            reader.invoke(
                 _command(writes=False, leaf=lambda _vault: "consistent"),
                 (vault,),
                 {},
             )
+            == "consistent"
         )
-        read_finished.set()
-
-    writer = threading.Thread(target=hold_mutation)
-    reader = threading.Thread(target=read)
-    writer.start()
-    assert entered.wait(1.0)
-    reader.start()
-    assert not read_finished.wait(0.1)
-    release.set()
-    assert read_finished.wait(1.0)
-    writer.join(timeout=2.0)
-    reader.join(timeout=2.0)
-    assert result == ["consistent"]
+    finally:
+        release_boundary.set()
+        worker.join(timeout=2)
+    assert not worker.is_alive()
 
 
 def test_write_leaf_is_serialized_for_entire_invocation(tmp_path: Path) -> None:
@@ -1058,9 +1128,13 @@ def test_terminal_receipt_survives_acknowledgement_cancellation(tmp_path: Path) 
     assert calls == [1]
 
 
-def test_identical_orphaned_pending_reports_acknowledgement_uncertain(
+def test_identical_orphaned_legacy_pending_becomes_abandoned_after_grace_period(
     tmp_path: Path,
 ) -> None:
+    """Superseded contract (R4/GAP B): a `pending` row from before the owner
+    column existed (NULL owner) — the exact "orphaned pending never resolves"
+    bug this feature fixes — transitions to `abandoned` once the legacy grace
+    period has passed, instead of blocking every retry forever."""
     manager = LeaseManager(
         LeaseConfig(state_dir=tmp_path),
         idempotency_wait_seconds=0,
@@ -1077,8 +1151,54 @@ def test_identical_orphaned_pending_reports_acknowledgement_uncertain(
     )[0]
     with sqlite3.connect(manager.idempotency.path) as connection:
         connection.execute(
-            "INSERT INTO mutations(key, digest, state, updated_at) VALUES (?, ?, 'pending', ?)",
+            "INSERT INTO mutations(key, digest, state, updated_at, owner) "
+            "VALUES (?, ?, 'pending', ?, NULL)",
             (key, digest, 100.0),
+        )
+
+    with pytest.raises(OpError) as outcome_unknown:
+        manager.invoke(
+            command,
+            (),
+            {},
+            idempotency_key="pending",
+            idempotency_principal_scope="principal:alice",
+        )
+    assert outcome_unknown.value.code == "MUTATION_OUTCOME_UNKNOWN"
+    payload = error_dict(outcome_unknown.value)
+    assert payload["status"] == "uncertain"
+    assert payload["committed"] is None
+    assert payload["abandoned"] is True
+    assert payload["request_id"]
+    assert payload["idempotency_key"] == "pending"
+    assert payload["receipt_id"]
+
+
+def test_identical_recently_orphaned_legacy_pending_still_reports_acknowledgement_pending(
+    tmp_path: Path,
+) -> None:
+    """A legacy NULL-owner row younger than the grace period is honored under
+    the pre-existing any-pending-blocks rule — it has not yet earned
+    abandonment."""
+    manager = LeaseManager(
+        LeaseConfig(state_dir=tmp_path),
+        idempotency_wait_seconds=0,
+    )
+    command = _command(writes=True, leaf=lambda: pytest.fail("pending retry ran leaf"))
+    digest = writer_lease_module._command_digest(command, {})
+    key = writer_lease_module._effective_idempotency_key(
+        manager,
+        command=command,
+        mutation_subject="standalone",
+        digest=digest,
+        idempotency_key="pending",
+        principal_scope="principal:alice",
+    )[0]
+    with sqlite3.connect(manager.idempotency.path) as connection:
+        connection.execute(
+            "INSERT INTO mutations(key, digest, state, updated_at, owner) "
+            "VALUES (?, ?, 'pending', ?, NULL)",
+            (key, digest, time.time()),
         )
 
     with pytest.raises(OpError) as pending:
@@ -1093,9 +1213,94 @@ def test_identical_orphaned_pending_reports_acknowledgement_uncertain(
     pending_payload = error_dict(pending.value)
     assert pending_payload["status"] == "uncertain"
     assert pending_payload["committed"] is None
-    assert pending_payload["request_id"]
-    assert pending_payload["idempotency_key"] == "pending"
-    assert pending_payload["receipt_id"]
+
+
+def test_pending_row_with_dead_owner_becomes_abandoned(tmp_path: Path) -> None:
+    manager = LeaseManager(
+        LeaseConfig(state_dir=tmp_path),
+        idempotency_wait_seconds=0,
+    )
+    command = _command(writes=True, leaf=lambda: pytest.fail("pending retry ran leaf"))
+    digest = writer_lease_module._command_digest(command, {})
+    key = writer_lease_module._effective_idempotency_key(
+        manager,
+        command=command,
+        mutation_subject="standalone",
+        digest=digest,
+        idempotency_key="pending",
+        principal_scope="principal:alice",
+    )[0]
+    dead_owner = "999999:deadowner00000000"
+    with sqlite3.connect(manager.idempotency.path) as connection:
+        connection.execute(
+            "INSERT INTO mutations(key, digest, state, updated_at, owner) "
+            "VALUES (?, ?, 'pending', ?, ?)",
+            (key, digest, time.time(), dead_owner),
+        )
+
+    with pytest.raises(OpError) as outcome_unknown:
+        manager.invoke(
+            command,
+            (),
+            {},
+            idempotency_key="pending",
+            idempotency_principal_scope="principal:alice",
+        )
+    assert outcome_unknown.value.code == "MUTATION_OUTCOME_UNKNOWN"
+
+
+def test_identical_retry_executes_fresh_after_abandonment_grace_period(
+    tmp_path: Path,
+) -> None:
+    """After a `pending` row is abandoned, an identical retry made at least
+    `_IDEMPOTENCY_ABANDONED_RETRY_AFTER_SECONDS` later executes fresh rather
+    than replaying `MUTATION_OUTCOME_UNKNOWN` forever."""
+    clock = Clock()
+    manager = LeaseManager(
+        LeaseConfig(state_dir=tmp_path),
+        idempotency_wait_seconds=0,
+        clock=clock,
+    )
+    calls: list[str] = []
+    command = _command(writes=True, leaf=lambda: calls.append("ran") or "fresh-result")
+    digest = writer_lease_module._command_digest(command, {})
+    key = writer_lease_module._effective_idempotency_key(
+        manager,
+        command=command,
+        mutation_subject="standalone",
+        digest=digest,
+        idempotency_key="pending",
+        principal_scope="principal:alice",
+    )[0]
+    dead_owner = "999999:deadowner00000001"
+    with sqlite3.connect(manager.idempotency.path) as connection:
+        connection.execute(
+            "INSERT INTO mutations(key, digest, state, updated_at, owner) "
+            "VALUES (?, ?, 'pending', ?, ?)",
+            (key, digest, clock.value, dead_owner),
+        )
+
+    with pytest.raises(OpError) as outcome_unknown:
+        manager.invoke(
+            command,
+            (),
+            {},
+            idempotency_key="pending",
+            idempotency_principal_scope="principal:alice",
+        )
+    assert outcome_unknown.value.code == "MUTATION_OUTCOME_UNKNOWN"
+    assert calls == []
+
+    clock.value += writer_lease_module._IDEMPOTENCY_ABANDONED_RETRY_AFTER_SECONDS + 1
+    result = manager.invoke(
+        command,
+        (),
+        {},
+        idempotency_key="pending",
+        idempotency_principal_scope="principal:alice",
+    )
+    assert result == "fresh-result"
+    assert calls == ["ran"]
 
 
 def test_different_identity_busy_is_precommit(tmp_path: Path) -> None:
@@ -2259,3 +2464,463 @@ def test_public_coordination_command_forwards_its_injected_vault(
     monkeypatch.setattr(writer_lease, "coordination_status", fake_status)
     assert commands.op_coordination_status(vault) == {"mutation_boundary": {"state": "free"}}
     assert observed == [vault]
+
+
+# --------------------------------------------------------------------------- #
+# R5 — writer-lease idle release
+# --------------------------------------------------------------------------- #
+
+
+def _idle_manager(
+    tmp_path: Path,
+    record: LeaseRecord,
+    *,
+    idle_release_seconds: float = 60.0,
+    preferred_writer: bool = False,
+    ttl_seconds: float = 30.0,
+) -> LeaseManager:
+    return LeaseManager(
+        LeaseConfig(
+            url="https://lease.example",
+            vault_id="main",
+            replica_id=record.holder or "desktop",
+            state_dir=tmp_path,
+            idle_release_seconds=idle_release_seconds,
+            preferred_writer=preferred_writer,
+            ttl_seconds=ttl_seconds,
+        ),
+        client=FakeClient(record),
+    )
+
+
+def test_idle_release_config_defaults_to_60_seconds() -> None:
+    assert LeaseConfig().idle_release_seconds == 60.0
+    config = LeaseConfig.from_env(
+        {
+            "EXOMEM_WRITER_LEASE_URL": "https://lease.example",
+            "EXOMEM_WRITER_LEASE_VAULT_ID": "main",
+            "EXOMEM_WRITER_LEASE_REPLICA_ID": "desktop",
+        }
+    )
+    assert config.idle_release_seconds == 60.0
+
+
+def test_idle_release_config_zero_disables_and_is_valid() -> None:
+    config = LeaseConfig.from_env(
+        {
+            "EXOMEM_WRITER_LEASE_URL": "https://lease.example",
+            "EXOMEM_WRITER_LEASE_VAULT_ID": "main",
+            "EXOMEM_WRITER_LEASE_REPLICA_ID": "desktop",
+            "EXOMEM_WRITER_LEASE_IDLE_SECONDS": "0",
+        }
+    )
+    assert config.idle_release_seconds == 0.0
+
+
+def test_idle_release_config_rejects_a_value_between_zero_and_ttl() -> None:
+    with pytest.raises(ValueError, match="EXOMEM_WRITER_LEASE_IDLE_SECONDS"):
+        LeaseConfig.from_env(
+            {
+                "EXOMEM_WRITER_LEASE_URL": "https://lease.example",
+                "EXOMEM_WRITER_LEASE_VAULT_ID": "main",
+                "EXOMEM_WRITER_LEASE_REPLICA_ID": "desktop",
+                "EXOMEM_WRITER_LEASE_TTL": "30",
+                "EXOMEM_WRITER_LEASE_IDLE_SECONDS": "10",
+            }
+        )
+
+
+def test_idle_release_config_accepts_a_value_at_or_above_ttl() -> None:
+    config = LeaseConfig.from_env(
+        {
+            "EXOMEM_WRITER_LEASE_URL": "https://lease.example",
+            "EXOMEM_WRITER_LEASE_VAULT_ID": "main",
+            "EXOMEM_WRITER_LEASE_REPLICA_ID": "desktop",
+            "EXOMEM_WRITER_LEASE_TTL": "30",
+            "EXOMEM_WRITER_LEASE_IDLE_SECONDS": "30",
+        }
+    )
+    assert config.idle_release_seconds == 30.0
+
+
+def test_idle_release_fires_at_exactly_idle_release_seconds(tmp_path: Path) -> None:
+    manager = _idle_manager(tmp_path, LeaseRecord("desktop", 99, 1), idle_release_seconds=60.0)
+    manager.ensure_writer()
+    manager._last_activity_monotonic = time.monotonic() - 60.0
+
+    assert manager._maybe_idle_release(1) is True
+    assert manager._fencing_token is None
+    assert manager._expires_at is None
+    assert manager.client.releases == [1]
+
+
+def test_idle_release_does_not_fire_before_the_threshold(tmp_path: Path) -> None:
+    manager = _idle_manager(tmp_path, LeaseRecord("desktop", 99, 1), idle_release_seconds=60.0)
+    manager.ensure_writer()
+    manager._last_activity_monotonic = time.monotonic() - 59.9
+
+    assert manager._maybe_idle_release(1) is False
+    assert manager._fencing_token == 1
+    assert manager.client.releases == []
+
+
+def test_activity_at_t59_defers_release_to_t119(tmp_path: Path) -> None:
+    """Activity at T+59 resets the idle clock, so idle release does not fire
+    at T+60 (only 1s since the reset) but does fire once T+119 arrives (60s
+    after the T+59 reset)."""
+    manager = _idle_manager(tmp_path, LeaseRecord("desktop", 99, 1), idle_release_seconds=60.0)
+    manager.ensure_writer()
+    start = time.monotonic()
+    manager._last_activity_monotonic = start - 59.0  # T+59 activity happened
+
+    # T+60 overall (only 1s since the T+59 reset): must not release.
+    assert manager._maybe_idle_release(1) is False
+    assert manager._fencing_token == 1
+
+    # Advance to T+119 relative to the reset (60s since T+59): must release.
+    manager._last_activity_monotonic = start - 119.0
+    assert manager._maybe_idle_release(1) is True
+
+
+def test_in_flight_mutation_blocks_release_until_it_completes(tmp_path: Path) -> None:
+    manager = _idle_manager(tmp_path, LeaseRecord("desktop", 99, 1), idle_release_seconds=60.0)
+    manager.ensure_writer()
+    manager._last_activity_monotonic = time.monotonic() - 60.0
+
+    entered = threading.Event()
+    release_guard = threading.Event()
+
+    def hold_guard() -> None:
+        with manager.writer_authority_guard():
+            entered.set()
+            assert release_guard.wait(timeout=2)
+
+    worker = threading.Thread(target=hold_guard)
+    worker.start()
+    try:
+        assert entered.wait(timeout=2)
+        # In flight: idle release must not fire even though activity is stale
+        # (writer_authority_guard refreshed it, but force it stale again to
+        # prove the mutation-count gate — not just the timestamp — blocks it).
+        manager._last_activity_monotonic = time.monotonic() - 60.0
+        assert manager._maybe_idle_release(1) is False
+    finally:
+        release_guard.set()
+        worker.join(timeout=2)
+    assert not worker.is_alive()
+
+    # First tick after completion: activity was refreshed on guard exit, so
+    # backdate it once more to simulate the idle window having elapsed since.
+    manager._last_activity_monotonic = time.monotonic() - 60.0
+    assert manager._maybe_idle_release(1) is True
+
+
+def test_preferred_replica_never_idle_releases(tmp_path: Path) -> None:
+    manager = _idle_manager(
+        tmp_path, LeaseRecord("desktop", 99, 1), idle_release_seconds=60.0, preferred_writer=True
+    )
+    manager.ensure_writer()
+    manager._last_activity_monotonic = time.monotonic() - 3600.0
+
+    assert manager._maybe_idle_release(1) is False
+    assert manager._fencing_token == 1
+    assert manager.client.releases == []
+
+
+def test_idle_release_disabled_when_idle_seconds_is_zero(tmp_path: Path) -> None:
+    manager = _idle_manager(tmp_path, LeaseRecord("desktop", 99, 1), idle_release_seconds=0.0)
+    manager.ensure_writer()
+    manager._last_activity_monotonic = time.monotonic() - 3600.0
+
+    assert manager._maybe_idle_release(1) is False
+    assert manager.client.releases == []
+
+
+def test_idle_release_swallows_coordinator_release_rpc_failure(tmp_path: Path) -> None:
+    class FailingReleaseClient(FakeClient):
+        def release(self, fencing_token: int) -> LeaseRecord:
+            raise OpError("WRITER_COORDINATOR_UNAVAILABLE", "down")
+
+    manager = LeaseManager(
+        LeaseConfig(
+            url="https://lease.example",
+            vault_id="main",
+            replica_id="desktop",
+            state_dir=tmp_path,
+            idle_release_seconds=60.0,
+        ),
+        client=FailingReleaseClient(LeaseRecord("desktop", 99, 1)),
+    )
+    manager.ensure_writer()
+    manager._last_activity_monotonic = time.monotonic() - 60.0
+
+    # The token is cleared LOCALLY even though the release RPC failed — a
+    # degraded handover (the coordinator's own TTL closes the gap), never a
+    # crash and never split-brain.
+    assert manager._maybe_idle_release(1) is True
+    assert manager._fencing_token is None
+
+
+def test_mid_release_race_gets_a_fresh_bumped_token_no_writer_fenced(tmp_path: Path) -> None:
+    """After idle release, an `ensure_writer` racing in (from this or another
+    replica) acquires a strictly newer fencing token — no confusion, no
+    WRITER_FENCED for that fresh acquisition."""
+    clock = Clock()
+    store = SQLiteLeaseStore(tmp_path / "leases.sqlite", clock=clock)
+    laptop = LeaseManager(
+        LeaseConfig(
+            url="https://lease.example",
+            vault_id="main",
+            replica_id="laptop",
+            state_dir=tmp_path / "laptop-state",
+            idle_release_seconds=60.0,
+        ),
+        client=StoreClient(store, "laptop"),
+    )
+    token = laptop.ensure_writer().fencing_token
+    assert token == 1
+    laptop._last_activity_monotonic = time.monotonic() - 60.0
+
+    assert laptop._maybe_idle_release(token) is True
+
+    desktop = LeaseManager(
+        LeaseConfig(
+            url="https://lease.example",
+            vault_id="main",
+            replica_id="desktop",
+            state_dir=tmp_path / "desktop-state",
+        ),
+        client=StoreClient(store, "desktop"),
+    )
+    fresh = desktop.ensure_writer()
+    assert fresh.fencing_token > token
+    # The fresh holder is fully authorized: validating its own token succeeds.
+    desktop.validate_fencing_token(fresh.fencing_token)
+
+
+def test_straggler_write_is_fenced_after_idle_release(tmp_path: Path) -> None:
+    """A write authorized before idle release cleared the local token is
+    rejected at the fence-validation boundary once another replica has
+    acquired a newer token — `writer_authority_guard()`'s single choke point
+    keeps `_active_mutations` accurate for real invocations, so this proves
+    the independent defense-in-depth layer (`validate_active_write_fence`)
+    still catches a stale token that reaches a commit boundary."""
+    clock = Clock()
+    store = SQLiteLeaseStore(tmp_path / "leases.sqlite", clock=clock)
+    laptop = LeaseManager(
+        LeaseConfig(
+            url="https://lease.example",
+            vault_id="main",
+            replica_id="laptop",
+            state_dir=tmp_path / "laptop-state",
+            idle_release_seconds=60.0,
+        ),
+        client=StoreClient(store, "laptop"),
+    )
+    stale_token = laptop.ensure_writer().fencing_token
+    fence_context = writer_lease_module._ACTIVE_WRITE_FENCE.set((laptop, stale_token))
+    try:
+        laptop._last_activity_monotonic = time.monotonic() - 60.0
+        assert laptop._maybe_idle_release(stale_token) is True
+
+        desktop = LeaseManager(
+            LeaseConfig(
+                url="https://lease.example",
+                vault_id="main",
+                replica_id="desktop",
+                state_dir=tmp_path / "desktop-state",
+            ),
+            client=StoreClient(store, "desktop"),
+        )
+        fresh = desktop.ensure_writer()
+        assert fresh.fencing_token > stale_token
+
+        with pytest.raises(OpError) as fenced:
+            writer_lease_module.validate_active_write_fence()
+        assert fenced.value.code == "WRITER_FENCED"
+    finally:
+        writer_lease_module._ACTIVE_WRITE_FENCE.reset(fence_context)
+
+
+def test_two_manager_handover_completes_within_idle_plus_ttl_third(
+    tmp_path: Path,
+) -> None:
+    """A non-preferred holder (laptop) idles out; the preferred replica
+    (desktop) reclaims within roughly one renew tick after that — bounded by
+    `idle_release_seconds + ttl_seconds/3` (desktop's own reclaim cadence)."""
+    ttl = 3.0
+    idle = 1.0
+    store = SQLiteLeaseStore(tmp_path / "leases.sqlite")
+    laptop = LeaseManager(
+        LeaseConfig(
+            url="https://lease.example",
+            vault_id="main",
+            replica_id="laptop",
+            state_dir=tmp_path / "laptop-state",
+            ttl_seconds=ttl,
+            idle_release_seconds=idle,
+        ),
+        client=StoreClient(store, "laptop"),
+    )
+    desktop = LeaseManager(
+        LeaseConfig(
+            url="https://lease.example",
+            vault_id="main",
+            replica_id="desktop",
+            state_dir=tmp_path / "desktop-state",
+            ttl_seconds=ttl,
+            idle_release_seconds=idle,
+            preferred_writer=True,
+        ),
+        client=StoreClient(store, "desktop"),
+    )
+    laptop.ensure_writer()
+    started = time.monotonic()
+    laptop.start_renewer()
+    desktop.start_renewer()
+    try:
+        deadline = started + idle + ttl / 3 + 3.0  # generous scheduling slack
+        reclaimed = False
+        while time.monotonic() < deadline:
+            if desktop.status()["role"] == "writer":
+                reclaimed = True
+                break
+            time.sleep(0.05)
+        assert reclaimed, "preferred replica did not reclaim after the idle holder released"
+        elapsed = time.monotonic() - started
+        assert elapsed <= idle + ttl / 3 + 3.0
+    finally:
+        laptop.close()
+        desktop.close()
+
+def test_owner_lock_registration_failure_falls_back_to_ownerless_grace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression: a store whose own owner-lock file cannot be held must NOT
+    stamp its owner id onto pending rows — a peer would probe that owner as
+    dead and abandon a LIVE mutation. NULL ownership rides the fail-closed
+    legacy grace period instead."""
+    with monkeypatch.context() as patched:
+        patched.setattr(
+            writer_lease_module, "_acquire_own_owner_lock", lambda *_args: None
+        )
+        manager = LeaseManager(
+            LeaseConfig(state_dir=tmp_path), idempotency_wait_seconds=0
+        )
+    assert manager.idempotency.owner_id is None
+
+    command = _command(writes=True, leaf=lambda: pytest.fail("pending retry ran leaf"))
+    digest = writer_lease_module._command_digest(command, {})
+    key = writer_lease_module._effective_idempotency_key(
+        manager,
+        command=command,
+        mutation_subject="standalone",
+        digest=digest,
+        idempotency_key="live",
+        principal_scope="principal:alice",
+    )[0]
+    with sqlite3.connect(manager.idempotency.path) as connection:
+        connection.execute(
+            "INSERT INTO mutations(key, digest, state, updated_at, owner) "
+            "VALUES (?, ?, 'pending', ?, NULL)",
+            (key, digest, time.time()),
+        )
+
+    peer = LeaseManager(LeaseConfig(state_dir=tmp_path), idempotency_wait_seconds=0)
+    with pytest.raises(OpError) as pending:
+        peer.invoke(
+            command,
+            (),
+            {},
+            idempotency_key="live",
+            idempotency_principal_scope="principal:alice",
+        )
+    assert pending.value.code == "MUTATION_ACKNOWLEDGEMENT_PENDING"
+
+def test_idle_release_default_tracks_a_raised_ttl() -> None:
+    """Raising EXOMEM_WRITER_LEASE_TTL alone must never brick startup on the
+    idle>=ttl validation: the unset-idle default tracks the TTL."""
+    config = LeaseConfig.from_env({"EXOMEM_WRITER_LEASE_TTL": "90"})
+    assert config.idle_release_seconds == 90.0
+    assert LeaseConfig.from_env({}).idle_release_seconds == 60.0
+
+
+def test_probe_acquire_does_not_refresh_idle_activity(tmp_path: Path) -> None:
+    """An availability probe (media worker polls every 5s) must not count as
+    write activity, or a stuck queue would suppress idle release forever."""
+    store = SQLiteLeaseStore(tmp_path / "leases.sqlite")
+    manager = LeaseManager(
+        LeaseConfig(
+            url="https://lease.example",
+            vault_id="main",
+            replica_id="laptop",
+            state_dir=tmp_path / "laptop-state",
+            idle_release_seconds=60.0,
+        ),
+        client=StoreClient(store, "laptop"),
+    )
+    manager.ensure_writer()
+    backdated = time.monotonic() - 120.0
+    manager._last_activity_monotonic = backdated
+    manager.ensure_writer(cause="probe")
+    assert manager._last_activity_monotonic == backdated
+
+
+def test_ensure_writer_racing_a_live_in_flight_release_gets_a_fresh_token(
+    tmp_path: Path,
+) -> None:
+    """A genuinely concurrent race: `client.release()` is blocked mid-flight
+    while the idle-release path holds `self._lock`; an `ensure_writer`
+    arriving during that window must wait out the locked release and then
+    acquire a strictly newer token — never a grant the release then revokes."""
+    store = SQLiteLeaseStore(tmp_path / "leases.sqlite")
+    release_entered = threading.Event()
+    release_unblocked = threading.Event()
+
+    class BlockingReleaseClient(StoreClient):
+        def release(self, fencing_token):  # noqa: ANN001, ANN201
+            release_entered.set()
+            assert release_unblocked.wait(5.0)
+            return super().release(fencing_token)
+
+    laptop = LeaseManager(
+        LeaseConfig(
+            url="https://lease.example",
+            vault_id="main",
+            replica_id="laptop",
+            state_dir=tmp_path / "laptop-state",
+            idle_release_seconds=60.0,
+        ),
+        client=BlockingReleaseClient(store, "laptop"),
+    )
+    first = laptop.ensure_writer().fencing_token
+    laptop._last_activity_monotonic = time.monotonic() - 60.0
+
+    release_result: dict[str, bool] = {}
+
+    def run_release() -> None:
+        release_result["released"] = laptop._maybe_idle_release(first)
+
+    releaser = threading.Thread(target=run_release)
+    releaser.start()
+    assert release_entered.wait(5.0)
+
+    acquired: dict[str, object] = {}
+
+    def run_acquire() -> None:
+        acquired["record"] = laptop.ensure_writer()
+
+    acquirer = threading.Thread(target=run_acquire)
+    acquirer.start()
+    acquirer.join(0.3)
+    assert acquirer.is_alive(), "ensure_writer did not wait for the locked release"
+    assert "record" not in acquired
+
+    release_unblocked.set()
+    releaser.join(5.0)
+    acquirer.join(5.0)
+    assert not acquirer.is_alive()
+    assert release_result["released"] is True
+    record = acquired["record"]
+    assert record.fencing_token > first
+    laptop.validate_fencing_token(record.fencing_token)

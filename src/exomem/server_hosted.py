@@ -46,6 +46,7 @@ from .hosted_runtime import (
 from .vault import VaultPathError, resolve_under_vault
 from .writer_lease import IdempotencyStore
 
+log = logging.getLogger(__name__)
 _call_log = logging.getLogger("exomem.calls")
 _MAX_COMMAND_BODY_BYTES = 1024 * 1024
 _MAX_QUIESCE_SECONDS = 30.0
@@ -239,6 +240,48 @@ def _trace(
     )
 
 
+def _bump_hosted_error_metrics(*, operation: str, code: str, started: float) -> None:
+    """Count a hosted route failure. The `event=hosted_call ...` trace line
+    logged by `_trace` already carries this error; this only adds the metric,
+    it does not add a second, differently-shaped log line."""
+    try:
+        from . import metrics
+
+        duration_ms = round((time.perf_counter() - started) * 1000, 2)
+        metrics.inc_counter("exomem_tool_calls_total", {"tool": operation, "outcome": "failure"})
+        metrics.inc_counter("exomem_tool_failures_total", {"tool": operation, "code": code})
+        metrics.observe_duration_ms("exomem_tool_duration_ms", duration_ms, {"tool": operation})
+    except Exception as exc:  # noqa: BLE001 - observability must never break a hosted call
+        from .log_events import log_event
+
+        log_event(
+            log,
+            logging.DEBUG,
+            "observability_internal_error",
+            fields={"where": "_bump_hosted_error_metrics"},
+            content={"message": f"{type(exc).__name__}: {exc}"},
+        )
+
+
+def _bump_hosted_success_metrics(*, operation: str, started: float) -> None:
+    try:
+        from . import metrics
+
+        duration_ms = round((time.perf_counter() - started) * 1000, 2)
+        metrics.inc_counter("exomem_tool_calls_total", {"tool": operation, "outcome": "success"})
+        metrics.observe_duration_ms("exomem_tool_duration_ms", duration_ms, {"tool": operation})
+    except Exception as exc:  # noqa: BLE001 - observability must never break a hosted call
+        from .log_events import log_event
+
+        log_event(
+            log,
+            logging.DEBUG,
+            "observability_internal_error",
+            fields={"where": "_bump_hosted_success_metrics"},
+            content={"message": f"{type(exc).__name__}: {exc}"},
+        )
+
+
 def _error_response(
     code: str,
     *,
@@ -257,6 +300,7 @@ def _error_response(
         code=code,
         started=started,
     )
+    _bump_hosted_error_metrics(operation=operation, code=code, started=started)
     error = {
         "code": code,
         "message": _message_for(code),
@@ -325,6 +369,7 @@ def _success_response(
         code="OK",
         started=started,
     )
+    _bump_hosted_success_metrics(operation=operation, started=started)
     return HostedJSONResponse(cli_ops.envelope(True, data=data), status_code=status)
 
 
@@ -772,6 +817,7 @@ def register_hosted_routes(
             code="OK",
             started=started,
         )
+        _bump_hosted_success_metrics(operation="contract", started=started)
         return Response(
             gateway.canonical_contract_json(contract),
             media_type="application/json",
@@ -809,6 +855,7 @@ def register_hosted_routes(
             code="OK",
             started=started,
         )
+        _bump_hosted_success_metrics(operation="agent-contract", started=started)
         return Response(
             gateway.canonical_contract_json(agent_contract),
             media_type="application/json",

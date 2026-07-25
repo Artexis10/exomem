@@ -21,6 +21,7 @@ from starlette.middleware import Middleware as ASGIMiddleware
 
 from . import capabilities, edit_operations, guards, multi_edit
 from . import commands as commands_module
+from .access_log import AccessLogMiddleware
 from .edge_ingress import EdgeIngressMiddleware
 from .server_assets import (
     register_asset_routes,
@@ -81,13 +82,13 @@ class CallTraceMiddleware(Middleware):
         self.hosted = hosted
 
     async def on_call_tool(self, context: MiddlewareContext, call_next):
-        from .command_surface import mcp_request_context, mcp_request_id
+        from .command_surface import mcp_request_context, mcp_request_id, pop_tool_failure
 
         tool_name = _extract_tool_name(context.message)
         if tool_name == "edit_memory":
             context = _translated_edit_context(context)
         request_id = mcp_request_id()
-        with mcp_request_context(request_id):
+        with mcp_request_context(request_id) as call_token:
             guarded_fields = _GUARDED_WRITE_FIELDS.get(tool_name)
             if guarded_fields:
                 args = _extract_tool_args(context.message)
@@ -130,12 +131,27 @@ class CallTraceMiddleware(Middleware):
             try:
                 result = await call_next(context)
                 dur = round((time.perf_counter() - t0) * 1000, 2)
-                _call_log.info(
-                    f"event={event_prefix}tool_success tool={tool_name} "
-                    f"request_id={request_id} duration_ms={dur}{extras}"
-                )
+                # A ContextVar set inside the synchronous tool wrapper (which
+                # runs in FastMCP's anyio threadpool) does not propagate back
+                # here, so the wrapper leaves this bounded, locked breadcrumb
+                # instead, keyed by this call's unique token. Pop
+                # unconditionally: a call the wrapper never failed simply pops
+                # `None`.
+                failure = pop_tool_failure(call_token)
+                if failure is not None:
+                    _call_log.info(
+                        f"event={event_prefix}tool_failure tool={tool_name} "
+                        f"request_id={request_id} duration_ms={dur} "
+                        f"code={failure.get('code')}{extras}"
+                    )
+                else:
+                    _call_log.info(
+                        f"event={event_prefix}tool_success tool={tool_name} "
+                        f"request_id={request_id} duration_ms={dur}{extras}"
+                    )
                 return result
             except Exception as exc:
+                pop_tool_failure(call_token)
                 dur = round((time.perf_counter() - t0) * 1000, 2)
                 _call_log.error(
                     f"event={event_prefix}tool_error tool={tool_name} "
@@ -487,7 +503,9 @@ def run(
     """CLI entry: configure logging, build the server, run it."""
     from .logging_config import configure_logging, resolve_log_dir
 
-    configure_logging(log_dir if log_dir is not None else resolve_log_dir())
+    configure_logging(
+        log_dir if log_dir is not None else resolve_log_dir(), process="server"
+    )
 
     require_auth = transport != "stdio"
     mcp = build_server(require_auth=require_auth)
@@ -507,6 +525,7 @@ def run(
             # see the request (design.md Decision 1).
             middleware=[
                 ASGIMiddleware(EdgeIngressMiddleware),
+                ASGIMiddleware(AccessLogMiddleware),
                 ASGIMiddleware(PrimeMcpSSEMiddleware),
             ],
             # Remote clients may be routed to another replica or outlive this
