@@ -1210,6 +1210,63 @@ def _corpus_census(root: Path) -> tuple | None:
     return tuple(sorted(entries))
 
 
+def _relation_review_census(root: Path) -> tuple | None:
+    """Stat census of relation-review artifacts and lifecycle sidecars.
+
+    ``_corpus_census`` only tracks ``.md`` files, so the JSON review
+    artifacts (``relation_review.review_artifact_path``) and lifecycle
+    decision/prepared sidecars (``lifecycle_decision_path``,
+    ``lifecycle_prepared_path``) under ``<KB>/_Schema/relation-reviews/`` are
+    otherwise invisible to a census-based reuse token. Mirrors the
+    alias-refusal safety rule of the strict corpus walk. Returns ``None``
+    when the tree cannot be fingerprinted safely.
+    """
+    entries: set[tuple[str, str, int, int]] = set()
+    directory = vault.kb_root(root) / "_Schema" / "relation-reviews"
+
+    def walk(current: Path) -> None:
+        try:
+            children = list(os.scandir(current))
+        except FileNotFoundError:
+            return
+        for child in children:
+            path = Path(child.path)
+            info = child.stat(follow_symlinks=False)
+            if child.is_symlink() or vault._is_reparse(info):
+                raise _CensusUnsafe
+            if stat.S_ISDIR(info.st_mode):
+                walk(path)
+                continue
+            if not stat.S_ISREG(info.st_mode):
+                raise _CensusUnsafe
+            entries.add((path.relative_to(root).as_posix(), "f", info.st_size, info.st_mtime_ns))
+
+    try:
+        walk(directory)
+    except (_CensusUnsafe, OSError, ValueError):
+        return None
+    return tuple(sorted(entries))
+
+
+def corpus_validity_token(root: Path) -> tuple | None:
+    """Stable identity for narrow-boundary preflight reuse.
+
+    Combines ``_corpus_census`` (every corpus/config input
+    ``build_corpus_context`` reads) with ``_relation_review_census`` (the
+    review-artifact and lifecycle-sidecar inputs the plain corpus census
+    does not cover). ``None`` means some input cannot be censused cheaply;
+    callers must then always revalidate rather than reuse a pre-boundary
+    result.
+    """
+    corpus = _corpus_census(root)
+    if corpus is None:
+        return None
+    review = _relation_review_census(root)
+    if review is None:
+        return None
+    return (corpus, review)
+
+
 def _config_census(root: Path) -> tuple[tuple[str, str, int, int], ...] | None:
     """O(1) freshness stamp for non-Markdown semantic inputs."""
     entries: list[tuple[str, str, int, int]] = []

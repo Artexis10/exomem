@@ -7,6 +7,7 @@ import binascii
 import datetime as dt
 import hashlib
 import json
+import os
 import re
 import uuid
 from collections.abc import Callable, Mapping, Sequence
@@ -778,6 +779,7 @@ class CreationPreflight:
     contract_result: semantic_contract.SemanticContractResult | None
     creation_validation: relation_review.CreationDraftValidation | None
     semantic_state: semantic_contract.SemanticPageState
+    census_token: tuple | None = None
 
     @property
     def draft_hash(self) -> str | None:
@@ -861,6 +863,7 @@ class ExistingPreflight:
     resolver_freshness: tuple[int, int, str] | None
     primary_guard: vault.PathGuard
     committed_replay: bool
+    census_token: tuple | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -1254,6 +1257,7 @@ def preflight_existing(
     # phantom casing. Everything below is built from `root / path`, so a
     # re-spell stays self-consistent, and a canonical input is a no-op.
     path = vault.canonical_vault_rel(root, path)
+    census_token_before = semantic_contract.corpus_validity_token(root)
     before_source, primary_guard = vault.read_guarded_text(root, root / path)
     raw_before_hash = vault.content_hash(before_source)
     # The parser/corpus and public content-hash contract normalize platform
@@ -1411,6 +1415,8 @@ def preflight_existing(
         include_relation_disposition=applicability == "full",
         language_registry=language,
     )
+    census_token_after = semantic_contract.corpus_validity_token(root)
+    census_token = census_token_before if census_token_before == census_token_after else None
     return ExistingPreflight(
         applicability,
         operation,
@@ -1437,6 +1443,7 @@ def preflight_existing(
         resolver_freshness,
         primary_guard,
         committed_replay,
+        census_token,
     )
 
 
@@ -1631,6 +1638,35 @@ def _commit_existing_locked(
     )
 
 
+def _revalidate_existing_preflight(
+    vault_root: Path, preflight: ExistingPreflight
+) -> ExistingPreflight:
+    """Re-run ``preflight_existing`` warm when a pre-boundary census token has
+    gone stale. Surfaces ``STALE_SEMANTIC_WRITE``/``SEMANTIC_CONTRACT_BLOCKED``
+    exactly as the existing cross-invocation replay path already does — this
+    is the same warm revalidation, just triggered by a census mismatch instead
+    of a second caller-supplied invocation.
+    """
+    relation_disposition: str | None = None
+    relation_review_hash: str | None = None
+    relation_review_reason: str | None = None
+    if preflight.requested_decision is not None:
+        relation_disposition = "reviewed_none"
+        relation_review_hash = preflight.transition_hash
+        relation_review_reason = preflight.requested_decision.reason
+    return preflight_existing(
+        vault_root,
+        path=preflight.path,
+        after_source=preflight.after_source,
+        operation=preflight.operation,
+        expected_before_hash=preflight.before.source_hash,
+        transition_token=preflight.transition_token,
+        relation_disposition=relation_disposition,
+        relation_review_hash=relation_review_hash,
+        relation_review_reason=relation_review_reason,
+    )
+
+
 def commit_existing(
     vault_root: Path,
     *,
@@ -1646,46 +1682,81 @@ def commit_existing(
             preflight.contract_result.blocking_findings,
         )
 
-    result = preflight.contract_result
     auxiliaries = tuple(auxiliary_writes)
-    if preflight.manifest_install_required:
-        winner = activation_manifest.ensure_manifest(root, census=preflight.activation_census)
-        result, _ = _reevaluate_existing(preflight, manifest=winner)
-        if result.should_block:
-            raise SemanticWriteError(
-                "SEMANTIC_CONTRACT_BLOCKED",
-                _blocking_reason(
-                    result,
-                    "semantic contract blocked against the activation boundary winner",
-                ),
-                result.blocking_findings,
-            )
+    _prewarm_embeddings()
+    from .writer_lease import active_manager, active_mutation_request_id
 
-    if preflight.resolver_freshness is not None:
+    with active_manager().mutation_guard(
+        root,
+        request_id=active_mutation_request_id(),
+        operation=f"semantic_existing_{preflight.operation}_commit",
+        holder_kind="command",
+    ):
+        # An exact census_token match means nothing has changed since
+        # preflight, so this preflight is still current — commit as today.
+        # A mismatch (or a preflight built on an uncensusable tree,
+        # census_token=None) re-runs preflight_existing warm, surfacing
+        # STALE_SEMANTIC_WRITE/SEMANTIC_CONTRACT_BLOCKED exactly as the
+        # existing cross-invocation replay path already does.
+        fresh_census_token = semantic_contract.corpus_validity_token(root)
+        if preflight.census_token is None or fresh_census_token != preflight.census_token:
+            preflight = _revalidate_existing_preflight(root, preflight)
+            if preflight.contract_result.should_block:
+                raise SemanticWriteError(
+                    "SEMANTIC_CONTRACT_BLOCKED",
+                    _blocking_reason(preflight.contract_result),
+                    preflight.contract_result.blocking_findings,
+                )
+
+        result = preflight.contract_result
+        if preflight.manifest_install_required:
+            winner = activation_manifest.ensure_manifest(root, census=preflight.activation_census)
+            result, _ = _reevaluate_existing(preflight, manifest=winner)
+            if result.should_block:
+                raise SemanticWriteError(
+                    "SEMANTIC_CONTRACT_BLOCKED",
+                    _blocking_reason(
+                        result,
+                        "semantic contract blocked against the activation boundary winner",
+                    ),
+                    result.blocking_findings,
+                )
+
+        if preflight.resolver_freshness is not None:
+            try:
+                find_module.prime_resolver_from_entries(
+                    root,
+                    preflight.before_corpus.resolver_entries,
+                    expected_freshness=preflight.resolver_freshness,
+                )
+            except Exception:  # noqa: BLE001 — rebuildable graph cache never blocks commit
+                pass
+
         try:
-            find_module.prime_resolver_from_entries(
-                root,
-                preflight.before_corpus.resolver_entries,
-                expected_freshness=preflight.resolver_freshness,
-            )
-        except Exception:  # noqa: BLE001 — rebuildable graph cache never blocks commit
-            pass
-
-    try:
-        with vault.vault_creation_lock(root, "semantic-creation"):
-            return _commit_existing_locked(
-                root,
-                preflight=preflight,
-                auxiliaries=auxiliaries,
-                result=result,
-            )
-    except vault.VaultLockTimeout as error:
-        raise SemanticWriteError(
-            "SEMANTIC_CREATION_LOCK_TIMEOUT",
-            "timed out acquiring semantic creation lock",
-        ) from error
-    except vault.VaultLockError as error:
-        raise SemanticWriteError(error.code, error.reason) from error
+            with vault.vault_creation_lock(root, "semantic-creation"):
+                return _commit_existing_locked(
+                    root,
+                    preflight=preflight,
+                    auxiliaries=auxiliaries,
+                    result=result,
+                )
+        except vault.PathGuardError as error:
+            # A caller-captured auxiliary guard (log/index) lost a race the
+            # wide boundary used to prevent. The batch aborted atomically —
+            # nothing was written — so surface the documented retryable
+            # staleness instead of a raw internal error.
+            raise SemanticWriteError(
+                "STALE_SEMANTIC_WRITE",
+                "a concurrent write updated a shared auxiliary during commit; "
+                "retry the operation",
+            ) from error
+        except vault.VaultLockTimeout as error:
+            raise SemanticWriteError(
+                "SEMANTIC_CREATION_LOCK_TIMEOUT",
+                "timed out acquiring semantic creation lock",
+            ) from error
+        except vault.VaultLockError as error:
+            raise SemanticWriteError(error.code, error.reason) from error
 
 
 def _move_state_map(
@@ -2731,6 +2802,7 @@ def preflight_creation(
         vault.parse_frontmatter(source, strict=True)
     except vault.FrontmatterError as error:
         raise SemanticWriteError(error.code, "draft frontmatter is invalid") from error
+    census_token_before = semantic_contract.corpus_validity_token(root)
     result, state = _evaluate_structural(root, destination=path, source=source, operation=operation)
     if semantic_contract.requires_semantic_unit(state):
         if draft_id is None:
@@ -2746,6 +2818,10 @@ def preflight_creation(
             predecessor_path=predecessor_path,
             predecessor_content_hash=predecessor_content_hash,
         )
+        census_token_after = semantic_contract.corpus_validity_token(root)
+        census_token = (
+            census_token_before if census_token_before == census_token_after else None
+        )
         return CreationPreflight(
             "full",
             path,
@@ -2756,15 +2832,41 @@ def preflight_creation(
             validation.contract_result,
             validation,
             state,
+            census_token,
         )
     applicability: Literal["structural", "not_semantic"] = (
         "structural"
         if state.page_type is not None or semantic_contract.compiled_intent(state)
         else "not_semantic"
     )
+    census_token_after = semantic_contract.corpus_validity_token(root)
+    census_token = census_token_before if census_token_before == census_token_after else None
     return CreationPreflight(
-        applicability, path, source, draft_id, draft_token, False, result, None, state
+        applicability, path, source, draft_id, draft_token, False, result, None, state, census_token
     )
+
+
+def _prewarm_embeddings() -> None:
+    """Best-effort embedding-model warm-up before the mutation boundary.
+
+    Removes the chance of a cold model load happening while the boundary is
+    held — the root cause of the multi-minute hold observed on 2026-07-25 —
+    by attempting the load here instead. Never blocks or fails a commit:
+    every failure, including the model being unavailable or still warming
+    up, is swallowed.
+    """
+    if os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
+        return
+    try:
+        from . import readiness
+
+        if readiness.should_defer("embeddings"):
+            return
+        from . import embeddings
+
+        embeddings.get_model()
+    except Exception:  # noqa: BLE001 - a warm-up attempt must never break a commit
+        pass
 
 
 def commit_creation(
@@ -2793,9 +2895,13 @@ def commit_creation(
             _blocking_reason(preflight.contract_result),
             preflight.contract_result.blocking_findings,
         )
+    prepared: relation_review._PreparedCreationDraft | None = None
     if preflight.applicability == "full":
         assert preflight.draft_id is not None
-        committed = relation_review.commit_creation_draft(
+        # Pre-boundary: parse/canonicalize + the preliminary structural and
+        # relation-review validation. Any failure here raises before the
+        # mutation boundary below is ever acquired.
+        prepared = relation_review.prepare_commit_creation_draft(
             root,
             path=preflight.destination,
             source=preflight.source,
@@ -2808,32 +2914,85 @@ def commit_creation(
             draft_token=preflight.draft_token,
             predecessor_path=predecessor_path,
             predecessor_content_hash=predecessor_content_hash,
-            semantic_state=semantic_index.from_semantic_page_state(preflight.semantic_state),
         )
+    _prewarm_embeddings()
+    from .writer_lease import active_manager, active_mutation_request_id
+
+    with active_manager().mutation_guard(
+        root,
+        request_id=active_mutation_request_id(),
+        operation=f"semantic_creation_{operation}_commit",
+        holder_kind="command",
+    ):
+        if prepared is not None:
+            committed = relation_review.commit_prepared_creation_draft(
+                root,
+                prepared,
+                path=preflight.destination,
+                source=preflight.source,
+                operation=operation,
+                relation_disposition=relation_disposition,
+                relation_review_hash=relation_review_hash,
+                predecessor_path=predecessor_path,
+                predecessor_content_hash=predecessor_content_hash,
+                semantic_state=semantic_index.from_semantic_page_state(preflight.semantic_state),
+            )
+            return CreationCommit(
+                "full", True, committed.written_paths, committed.contract_result, committed
+            )
+        # Structural / non-semantic creations honour the census stamp too:
+        # recompute it inside the boundary; on mismatch (or an uncensusable
+        # tree) re-run the structural evaluation so a concurrently-changed
+        # config or registry cannot admit a stale pre-boundary verdict.
+        contract_result = preflight.contract_result
+        fresh_census_token = semantic_contract.corpus_validity_token(root)
+        if (
+            preflight.census_token is None
+            or fresh_census_token is None
+            or fresh_census_token != preflight.census_token
+        ):
+            relation_review._record_prevalidated_commit_outcome("revalidated")
+            contract_result, _fresh_state = _evaluate_structural(
+                root,
+                destination=preflight.destination,
+                source=preflight.source,
+                operation=operation,
+            )
+            if contract_result.should_block:
+                raise SemanticWriteError(
+                    "SEMANTIC_CONTRACT_BLOCKED",
+                    _blocking_reason(contract_result),
+                    contract_result.blocking_findings,
+                )
+        else:
+            relation_review._record_prevalidated_commit_outcome("reused")
+        writes = [*auxiliary_writes]
+        writes.append(
+            vault.PlannedWrite(
+                root / preflight.destination,
+                preflight.source,
+                create_only=True,
+                guard=vault.PathGuard.capture(root, preflight.destination, leaf_policy="absent"),
+            )
+        )
+        token = semantic_index.set_parent_states(
+            {preflight.destination: semantic_index.from_semantic_page_state(preflight.semantic_state)}
+        )
+        try:
+            written = vault.batch_atomic_write(writes, vault_root=root)
+        except vault.PathGuardError as error:
+            raise SemanticWriteError(
+                "STALE_SEMANTIC_WRITE",
+                "a concurrent write updated a shared auxiliary during commit; "
+                "retry the operation",
+            ) from error
+        finally:
+            semantic_index.reset_parent_states(token)
+        paths = tuple(path.relative_to(root).as_posix() for path in written)
         return CreationCommit(
-            "full", True, committed.written_paths, committed.contract_result, committed
+            preflight.applicability,
+            True,
+            paths,
+            contract_result,
+            None,
         )
-    writes = [*auxiliary_writes]
-    writes.append(
-        vault.PlannedWrite(
-            root / preflight.destination,
-            preflight.source,
-            create_only=True,
-            guard=vault.PathGuard.capture(root, preflight.destination, leaf_policy="absent"),
-        )
-    )
-    token = semantic_index.set_parent_states(
-        {preflight.destination: semantic_index.from_semantic_page_state(preflight.semantic_state)}
-    )
-    try:
-        written = vault.batch_atomic_write(writes, vault_root=root)
-    finally:
-        semantic_index.reset_parent_states(token)
-    paths = tuple(path.relative_to(root).as_posix() for path in written)
-    return CreationCommit(
-        preflight.applicability,
-        True,
-        paths,
-        preflight.contract_result,
-        None,
-    )

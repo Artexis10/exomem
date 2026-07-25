@@ -55,6 +55,21 @@ _COORDINATOR_USER_AGENT = (
 # 60s was shorter than one abandoned-write investigation; 10 minutes covers a
 # human noticing the timeout, checking state, and retrying.
 _IMPLICIT_RETRY_TTL_SECONDS = 600.0
+
+# Commands whose `invoke()` boundary is narrowed to `writer_authority_guard`
+# (fence-only, no shared vault lock) instead of the full `mutation_guard`.
+# The command's own commit seam (`semantic_writes.commit_creation` or
+# `commit_existing`) is responsible for acquiring the vault mutation boundary
+# itself, around only its commit — not the corpus validation and model
+# loading that precede it. Every name here ends in `commit_creation` or
+# `commit_existing`, both self-guarding: `remember`/`replace_memory` ->
+# `commit_creation`; `edit_memory` (all four of its edit/multi_edit/
+# set_take/set_frontmatter_field sub-modes) and `observe_memory` ->
+# `commit_existing`. `EXOMEM_WIDE_MUTATION_BOUNDARY` restores today's
+# wide-boundary behavior for every command in this set.
+_NARROW_BOUNDARY_COMMANDS = frozenset(
+    {"remember", "replace_memory", "edit_memory", "observe_memory"}
+)
 _EXPLICIT_RETRY_TTL_SECONDS = 24 * 60 * 60.0
 _IDEMPOTENCY_WAIT_SECONDS = 5.0
 _IDEMPOTENCY_POLL_INTERVAL_SECONDS = 0.025
@@ -1353,6 +1368,30 @@ class LeaseManager:
         narrow_media_commit = command.name == "process_media" and kwargs.get(
             "operation", "process"
         ) in {"process", "retry"}
+        # `manage_memory_file` is the Tier-2 escape hatch's single consolidated
+        # command; only its `create`/`append` operations narrow. Their leaves
+        # are self-guarding on EVERY routing: governed Markdown goes through
+        # `commit_creation`/`commit_existing`, and the non-semantic branches
+        # (non-`.md` targets, Evidence appends, `kind="dir"`) acquire the
+        # mutation boundary in the leaf itself (`create_file.py`,
+        # `append_to_file.py`, `create_directory.py`).
+        # `move`/`delete`/`recover`/`list`/`trash-list` still rely entirely on
+        # this outer boundary (`commit_move`/`commit_recovery` are out of
+        # scope for this change), so only the file-write operations narrow —
+        # never the whole command.
+        narrow_tier2_file_commit = (
+            command.name == "manage_memory_file"
+            and kwargs.get("operation", "list") in {"create", "append"}
+            and not os.environ.get("EXOMEM_WIDE_MUTATION_BOUNDARY")
+        )
+        narrow_boundary = (
+            narrow_media_commit
+            or narrow_tier2_file_commit
+            or (
+                command.name in _NARROW_BOUNDARY_COMMANDS
+                and not os.environ.get("EXOMEM_WIDE_MUTATION_BOUNDARY")
+            )
+        )
         try:
             result = self.idempotency.run(
                 key,
@@ -1362,7 +1401,7 @@ class LeaseManager:
                 on_replay=on_replay,
                 operation_guard=(
                     self.writer_authority_guard
-                    if narrow_media_commit
+                    if narrow_boundary
                     else lambda: self.mutation_guard(
                         mutation_subject,
                         request_id=request_id,

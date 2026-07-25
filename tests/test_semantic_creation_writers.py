@@ -1544,3 +1544,68 @@ def test_v2_qualifying_receipt_is_internal_and_never_review_state(tmp_path: Path
 
     assert receipt is not None and receipt.kind == "qualifying"
     assert relation_review.load_relation_reviews(tmp_path) == ()
+
+
+def test_creation_preflight_census_token_matches_fresh_token_on_stable_tree(
+    vault: Path,
+) -> None:
+    from exomem import semantic_contract
+
+    kwargs = {
+        "content": _compact_content("Census token stability"),
+        "note_type": "research-note",
+        "title": "Census token stability",
+        "project": "census-token-project",
+        "project_category": "domain",
+        "today": TODAY,
+    }
+    validation = note.note(vault, validate_only=True, **kwargs)
+    prepared = note.note(
+        vault,
+        draft_id=validation.draft_id,
+        draft_hash=validation.draft_hash,
+        draft_token=validation.draft_token,
+        _return_prepared=True,
+        **kwargs,
+    )
+
+    assert prepared.preflight.census_token is not None
+    assert prepared.preflight.census_token == semantic_contract.corpus_validity_token(vault)
+
+
+def test_creation_preflight_census_token_is_none_on_sandwich_drift(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import semantic_contract
+
+    kwargs = {
+        "content": _compact_content("Census token drift"),
+        "note_type": "research-note",
+        "title": "Census token drift",
+        "project": "census-token-drift-project",
+        "project_category": "domain",
+        "today": TODAY,
+    }
+    validation = note.note(vault, validate_only=True, **kwargs)
+
+    real_token = semantic_contract.corpus_validity_token
+    calls = {"count": 0}
+
+    def drifting_token(root: Path):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            return real_token(root)
+        return (("drifted",), ())
+
+    monkeypatch.setattr(semantic_writes.semantic_contract, "corpus_validity_token", drifting_token)
+
+    prepared = note.note(
+        vault,
+        draft_id=validation.draft_id,
+        draft_hash=validation.draft_hash,
+        draft_token=validation.draft_token,
+        _return_prepared=True,
+        **kwargs,
+    )
+
+    assert prepared.preflight.census_token is None

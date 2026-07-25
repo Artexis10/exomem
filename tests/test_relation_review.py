@@ -10,7 +10,14 @@ from pathlib import Path
 
 import pytest
 
-from exomem import activation_manifest, memory_refs, relation_review, semantic_contract, vault
+from exomem import (
+    activation_manifest,
+    memory_refs,
+    metrics,
+    relation_review,
+    semantic_contract,
+    vault,
+)
 
 _ID_A = "00000000-0000-4000-8000-000000000001"
 _ID_B = "00000000-0000-4000-8000-000000000002"
@@ -878,6 +885,172 @@ def test_load_reviews_returns_sorted_immutable_records_and_ignores_temp_residue(
     assert records[0].reference.endswith(f"/{_ID_A}.json")
     with pytest.raises(FrozenInstanceError):
         records[0].reason = "changed"  # type: ignore[misc]
+
+
+def test_commit_creation_draft_reuses_prevalidated_attempt_on_matching_census_token(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source, validation = _reviewed_validation(tmp_path)
+    counts = {"corpus": 0, "validation": 0}
+    seams = (
+        (relation_review.semantic_contract, "build_corpus_context", "corpus"),
+        (relation_review, "_validation", "validation"),
+    )
+    for owner, name, key in seams:
+        original = getattr(owner, name)
+
+        def counted(*args, _original=original, _key=key, **kwargs):
+            counts[_key] += 1
+            return _original(*args, **kwargs)
+
+        monkeypatch.setattr(owner, name, counted)
+
+    commit = relation_review.commit_creation_draft(
+        tmp_path,
+        path=_PAGE_B,
+        source=source,
+        draft_id=_ID_B,
+        operation="create",
+        relation_disposition="reviewed_none",
+        relation_review_hash=validation.draft_hash,
+        relation_review_reason="No honest typed relation yet",
+    )
+
+    assert commit.mutated is True
+    # Without reuse, both the preliminary and in-lock `_attempt` calls run
+    # `build_corpus_context`/`_validation` fresh (2 each). A matching census
+    # token collapses the in-lock call to a reuse, so each drops to 1.
+    assert counts == {"corpus": 1, "validation": 1}
+
+
+def test_commit_creation_draft_falls_through_to_full_attempt_on_census_mismatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source, validation = _reviewed_validation(tmp_path)
+    counts = {"corpus": 0}
+    original_build = relation_review.semantic_contract.build_corpus_context
+
+    def counted_build(*args, **kwargs):
+        counts["corpus"] += 1
+        return original_build(*args, **kwargs)
+
+    monkeypatch.setattr(relation_review.semantic_contract, "build_corpus_context", counted_build)
+
+    real_token = relation_review.semantic_contract.corpus_validity_token
+    calls = {"count": 0}
+
+    def drifting_token(root):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            return real_token(root)
+        return (("drifted",), ())
+
+    monkeypatch.setattr(
+        relation_review.semantic_contract, "corpus_validity_token", drifting_token
+    )
+
+    commit = relation_review.commit_creation_draft(
+        tmp_path,
+        path=_PAGE_B,
+        source=source,
+        draft_id=_ID_B,
+        operation="create",
+        relation_disposition="reviewed_none",
+        relation_review_hash=validation.draft_hash,
+        relation_review_reason="No honest typed relation yet",
+    )
+
+    assert commit.mutated is True
+    assert counts["corpus"] == 2
+
+
+def _prevalidated_commit_counts() -> dict[str, int]:
+    snap = metrics.snapshot()
+    counts: dict[str, int] = {}
+    for entry in snap["counters"]:
+        if entry["name"] != "exomem_prevalidated_commit_total":
+            continue
+        outcome = dict(entry["labels"]).get("outcome", "")
+        counts[outcome] = counts.get(outcome, 0) + entry["value"]
+    return counts
+
+
+def test_commit_creation_draft_records_reused_outcome_on_matching_token(
+    tmp_path: Path,
+) -> None:
+    source, validation = _reviewed_validation(tmp_path)
+    metrics.reset()
+
+    relation_review.commit_creation_draft(
+        tmp_path,
+        path=_PAGE_B,
+        source=source,
+        draft_id=_ID_B,
+        operation="create",
+        relation_disposition="reviewed_none",
+        relation_review_hash=validation.draft_hash,
+        relation_review_reason="No honest typed relation yet",
+    )
+
+    counts = _prevalidated_commit_counts()
+    metrics.reset()
+    assert counts.get("reused") == 1
+    assert counts.get("revalidated") is None
+
+
+def test_commit_creation_draft_records_revalidated_outcome_on_census_mismatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source, validation = _reviewed_validation(tmp_path)
+    metrics.reset()
+
+    real_token = relation_review.semantic_contract.corpus_validity_token
+    calls = {"count": 0}
+
+    def drifting_token(root):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            return real_token(root)
+        return (("drifted",), ())
+
+    monkeypatch.setattr(
+        relation_review.semantic_contract, "corpus_validity_token", drifting_token
+    )
+
+    relation_review.commit_creation_draft(
+        tmp_path,
+        path=_PAGE_B,
+        source=source,
+        draft_id=_ID_B,
+        operation="create",
+        relation_disposition="reviewed_none",
+        relation_review_hash=validation.draft_hash,
+        relation_review_reason="No honest typed relation yet",
+    )
+
+    counts = _prevalidated_commit_counts()
+    metrics.reset()
+    assert counts.get("revalidated") == 1
+    assert counts.get("reused") is None
+
+
+def test_prepare_commit_creation_draft_validates_before_any_lock_or_write(
+    tmp_path: Path,
+) -> None:
+    source, _ = _reviewed_validation(tmp_path)
+
+    with pytest.raises(relation_review.RelationReviewError) as exc:
+        relation_review.prepare_commit_creation_draft(
+            tmp_path,
+            path=_PAGE_B,
+            source=source,
+            draft_id=_ID_B,
+            operation="replacement",
+        )
+
+    assert exc.value.code == "INVALID_PREDECESSOR"
+    assert not relation_review.review_artifact_path(tmp_path, _ID_B).exists()
+    assert not (tmp_path / _PAGE_B).exists()
 
 
 def test_attempt_loaders_and_corpus_walk_are_each_called_once(

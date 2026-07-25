@@ -40,6 +40,7 @@ from pathlib import Path
 
 from . import corpus_aware, indexes, semantic_writes
 from . import find as find_module
+from .cli_ops import OpError
 from .kbdir import kb_prefix
 from .vault import (
     PlannedWrite,
@@ -751,6 +752,12 @@ def commit_edit(
         )
     except semantic_writes.SemanticWriteError as error:
         raise EditError(error.code, ["semantic"], error.reason) from error
+    except OpError:
+        # Ordinary boundary contention (MUTATION_BUSY/MUTATION_WARMING) from
+        # the commit seam's own guard is not a partial write — nothing was
+        # written. Let it surface with its retryable envelope instead of a
+        # false partial-write alarm.
+        raise
     except Exception as e:
         log.exception("partial write during edit(); some files may be updated")
         warnings.append(f"partial write — reconcile on desktop: {e}")

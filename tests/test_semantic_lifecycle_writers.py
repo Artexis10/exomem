@@ -158,6 +158,100 @@ def test_compliant_page_cannot_remove_its_final_unit(tmp_path: Path) -> None:
     assert path.read_bytes() == before_bytes
 
 
+def test_existing_preflight_census_token_matches_fresh_token_on_stable_tree(
+    tmp_path: Path,
+) -> None:
+    before = _source("Legacy prose without semantic units.")
+    after = before.replace("Legacy prose", "Updated legacy prose")
+    _write(tmp_path, _PAGE, before)
+
+    preflight = semantic_writes.preflight_existing(
+        tmp_path,
+        path=_PAGE,
+        after_source=after,
+        operation="edit",
+    )
+
+    assert preflight.census_token is not None
+    assert preflight.census_token == semantic_contract.corpus_validity_token(tmp_path)
+
+
+def test_existing_preflight_census_token_is_none_on_sandwich_drift(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    before = _source("Legacy prose without semantic units.")
+    after = before.replace("Legacy prose", "Updated legacy prose")
+    _write(tmp_path, _PAGE, before)
+
+    real_token = semantic_contract.corpus_validity_token
+    calls = {"count": 0}
+
+    def drifting_token(root: Path):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            return real_token(root)
+        return (("drifted",), ())
+
+    monkeypatch.setattr(semantic_writes.semantic_contract, "corpus_validity_token", drifting_token)
+
+    preflight = semantic_writes.preflight_existing(
+        tmp_path,
+        path=_PAGE,
+        after_source=after,
+        operation="edit",
+    )
+
+    assert preflight.census_token is None
+
+
+def test_revalidate_existing_preflight_on_mismatch_reproduces_unchanged_state(
+    tmp_path: Path,
+) -> None:
+    before = _source("Legacy prose without semantic units.")
+    after = before.replace("Legacy prose", "Updated legacy prose")
+    _write(tmp_path, _PAGE, before)
+
+    preflight = semantic_writes.preflight_existing(
+        tmp_path,
+        path=_PAGE,
+        after_source=after,
+        operation="edit",
+    )
+
+    revalidated = semantic_writes._revalidate_existing_preflight(tmp_path, preflight)
+
+    assert revalidated.after.source_hash == preflight.after.source_hash
+    assert revalidated.before.source_hash == preflight.before.source_hash
+    assert revalidated.transition_token == preflight.transition_token
+    assert revalidated.contract_result.should_block == preflight.contract_result.should_block
+
+
+def test_revalidate_existing_preflight_on_mismatch_surfaces_stale_write(
+    tmp_path: Path,
+) -> None:
+    before = _source("Legacy prose without semantic units.")
+    after = before.replace("Legacy prose", "Updated legacy prose")
+    path = _write(tmp_path, _PAGE, before)
+
+    preflight = semantic_writes.preflight_existing(
+        tmp_path,
+        path=_PAGE,
+        after_source=after,
+        operation="edit",
+    )
+
+    path.write_text(
+        before.replace("Legacy prose", "A sibling write raced ahead"),
+        encoding="utf-8",
+        newline="\n",
+    )
+
+    with pytest.raises(semantic_writes.SemanticWriteError) as exc:
+        semantic_writes._revalidate_existing_preflight(tmp_path, preflight)
+
+    assert exc.value.code == "STALE_SEMANTIC_WRITE"
+
+
 def _write(root: Path, rel: str, source: str) -> Path:
     path = root / rel
     path.parent.mkdir(parents=True, exist_ok=True)
