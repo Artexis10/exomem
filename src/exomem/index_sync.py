@@ -52,6 +52,7 @@ class IndexComponentOutcome:
             "epistemic_graph",
             "embeddings",
             "watcher",
+            "clip",
         }:
             raise ValueError("unsupported index component")
         if type(self.outcome) is not str or self.outcome not in {
@@ -607,7 +608,15 @@ def delete_after_remove(
     vault_root: Path, removed_rel_paths: list[str]
 ) -> IndexSyncReport:
     """Fan a removal out to every index sidecar."""
-    from . import embeddings, epistemic_graph, find, lexstore, memory_refs
+    from . import (
+        embeddings,
+        epistemic_graph,
+        find,
+        lexstore,
+        media_types,
+        memory_refs,
+        scene_frames,
+    )
 
     safe_paths = [
         normalized
@@ -629,6 +638,10 @@ def delete_after_remove(
             "epistemic_graph",
             lambda: epistemic_graph.delete_after_remove(vault_root, safe_paths),
         ),
+        _legacy_component(
+            "clip",
+            lambda: embeddings.delete_clip_after_remove(vault_root, safe_paths),
+        ),
     ]
     try:
         status = embeddings.delete_after_remove_status(vault_root, safe_paths)
@@ -648,6 +661,18 @@ def delete_after_remove(
             else None
         )
     )
+    # A removed video also drops its scene-frame derivatives: clear_scene_frames
+    # deletes the `<video>.frames/` jpg+sidecar pairs from disk and purges their
+    # own lexical/embedding rows via its own delete_after_remove call (recursive,
+    # idempotent). No-op (guarded inside clear_scene_frames) when the video never
+    # had persisted frames.
+    for rel in safe_paths:
+        if media_types.media_type_for(rel) != "video":
+            continue
+        try:
+            scene_frames.clear_scene_frames(vault_root, vault_root / rel)
+        except Exception:  # noqa: BLE001 - frame cleanup is best-effort
+            log.warning("scene-frame cleanup failed for %s", rel, exc_info=True)
     return IndexSyncReport(
         "delete",
         requested_report,
