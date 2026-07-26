@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import time
 from collections.abc import Mapping
 from importlib.metadata import PackageNotFoundError, version
@@ -11,6 +12,13 @@ from typing import Any
 
 RUNTIME_CONTRACT = 1
 HTTP_TRANSPORT = "streamable-http-stateless"
+
+
+def _instance_id() -> str | None:
+    value = os.environ.get("EXOMEM_INSTANCE_ID", "").strip()
+    if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", value):
+        return value
+    return None
 
 
 def _public_mutation_boundary(value: object) -> dict[str, Any]:
@@ -89,6 +97,7 @@ def build_runtime_readiness(
         "mcp_tool_surface_sha256": mcp_tool_surface_sha256,
         "runtime_contract": RUNTIME_CONTRACT,
         "transport": HTTP_TRANSPORT,
+        "instance_id": _instance_id(),
         "replica_id": replica_id,
         "coordination": {
             "enabled": enabled,
