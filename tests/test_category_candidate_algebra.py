@@ -609,6 +609,138 @@ def test_unit_exact_candidates_are_post_filtered_before_limit(
 
 
 @needs_fts5
+def test_limited_exact_unit_recall_opens_only_a_bounded_leading_window(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A broad exact category must not validate or hydrate every matching parent."""
+    pages = [
+        _write_page(
+            tmp_path,
+            f"Knowledge Base/Notes/candidate-{index:03d}.md",
+            f"- [decision] broad candidate {index} ^candidate-{index}",
+        )
+        for index in range(128)
+    ]
+    _seed_live_freshness(tmp_path, pages)
+    lexstore.ensure_fresh(tmp_path)
+
+    def forbidden_walk(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("limited exact unit recall must not walk the corpus")
+
+    opened: set[str] = set()
+    original_validate = semantic_index.validate_parent_record
+    original_state = semantic_index.current_parent_index_state
+
+    def observed_validate(root: Path, **kwargs: Any) -> Any:
+        opened.add(Path(kwargs["parent_path"]).as_posix())
+        return original_validate(root, **kwargs)
+
+    def observed_state(root: Path, path: Path | str, **kwargs: Any) -> Any:
+        opened.add(Path(path).as_posix())
+        return original_state(root, path, **kwargs)
+
+    monkeypatch.setattr(find_module, "_walk_md", forbidden_walk)
+    monkeypatch.setattr(semantic_index, "validate_parent_record", observed_validate)
+    monkeypatch.setattr(semantic_index, "current_parent_index_state", observed_state)
+
+    hits = find_module.find(
+        tmp_path,
+        query="",
+        scope="kb-only",
+        mode="keyword",
+        graph=False,
+        result_level="unit",
+        categories=["decision"],
+        limit=3,
+    )
+
+    assert [hit.parent_path for hit in hits] == [
+        "Knowledge Base/Notes/candidate-127.md",
+        "Knowledge Base/Notes/candidate-126.md",
+        "Knowledge Base/Notes/candidate-125.md",
+    ]
+    assert len(opened) <= 8
+
+
+@needs_fts5
+def test_limited_exact_unit_recall_advances_past_excluded_leading_windows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Canonical access rejection advances rather than underfilling or scanning all."""
+    excluded = [
+        _write_page(
+            tmp_path,
+            f"Knowledge Base/ZZ-Private/candidate-{index:03d}.md",
+            f"- [decision] excluded candidate {index} ^excluded-{index}",
+        )
+        for index in range(8)
+    ]
+    visible = _write_page(
+        tmp_path,
+        "Knowledge Base/MM-Visible/visible.md",
+        "- [decision] first visible candidate ^visible",
+    )
+    trailing = [
+        _write_page(
+            tmp_path,
+            f"Knowledge Base/AA-Trailing/candidate-{index:03d}.md",
+            f"- [decision] trailing candidate {index} ^trailing-{index}",
+        )
+        for index in range(118)
+    ]
+    pages = [*excluded, visible, *trailing]
+    _seed_live_freshness(tmp_path, pages)
+    lexstore.ensure_fresh(tmp_path)
+    (tmp_path / "Knowledge Base" / "_access.yaml").write_text(
+        "excluded:\n  - ZZ-Private\n", encoding="utf-8"
+    )
+
+    opened: set[str] = set()
+    original_validate = semantic_index.validate_parent_record
+    original_state = semantic_index.current_parent_index_state
+    original_search = lexstore.search_semantic_units_result
+    query_windows: list[tuple[int, int]] = []
+    mutated = False
+
+    def observed_validate(root: Path, **kwargs: Any) -> Any:
+        opened.add(Path(kwargs["parent_path"]).as_posix())
+        return original_validate(root, **kwargs)
+
+    def observed_state(root: Path, path: Path | str, **kwargs: Any) -> Any:
+        opened.add(Path(path).as_posix())
+        return original_state(root, path, **kwargs)
+
+    def observed_search(*args: Any, **kwargs: Any) -> Any:
+        nonlocal mutated
+        query_windows.append((kwargs["k"], kwargs.get("offset", 0)))
+        result = original_search(*args, **kwargs)
+        if not mutated:
+            mutated = True
+            removed = excluded[0].relative_to(tmp_path).as_posix()
+            assert lexstore.get_store(tmp_path).delete_rel_paths([removed]) is True
+        return result
+
+    monkeypatch.setattr(semantic_index, "validate_parent_record", observed_validate)
+    monkeypatch.setattr(semantic_index, "current_parent_index_state", observed_state)
+    monkeypatch.setattr(lexstore, "search_semantic_units_result", observed_search)
+
+    hits = find_module.find(
+        tmp_path,
+        query="",
+        scope="kb-only",
+        mode="keyword",
+        graph=False,
+        result_level="unit",
+        categories=["decision"],
+        limit=1,
+    )
+
+    assert [hit.parent_path for hit in hits] == ["Knowledge Base/MM-Visible/visible.md"]
+    assert len(opened) <= 17
+    assert query_windows == [(8, 0), (16, 0)]
+
+
+@needs_fts5
 def test_vector_unit_exact_candidates_are_post_filtered_before_limit(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
