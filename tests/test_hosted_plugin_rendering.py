@@ -189,6 +189,56 @@ def test_openai_archive_blocks_an_interleaved_render(tmp_path: Path, monkeypatch
     assert app["apps"]["exomem"]["id"] == first_id
 
 
+def test_openai_archive_blocks_an_interleaved_claude_render(
+    tmp_path: Path, monkeypatch
+) -> None:
+    root = copy_hosted_tree(tmp_path / "repo")
+    hosted_plugins.render(
+        root,
+        openai_app_id="asdk_app_releaseinput123",
+        platform="openai",
+    )
+    original_archive = hosted_plugins._archive_bytes
+
+    def archive_with_interleaved_render(package: Path) -> bytes:
+        with pytest.raises(ValueError, match="another process"):
+            hosted_plugins.render(root, platform="claude")
+        return original_archive(package)
+
+    monkeypatch.setattr(hosted_plugins, "_archive_bytes", archive_with_interleaved_render)
+    hosted_plugins.archive(root, tmp_path / "archive", platform="openai")
+
+
+def test_managed_render_blocks_an_interleaved_other_platform_render(
+    tmp_path: Path, monkeypatch
+) -> None:
+    root = copy_hosted_tree(tmp_path / "repo")
+    generated = root / "plugins/hosted/generated"
+    original_copytree = hosted_plugins.shutil.copytree
+    interleaved = False
+
+    def copytree_with_interleaved_render(
+        source: Path, destination: Path, *args, **kwargs
+    ):
+        nonlocal interleaved
+        result = original_copytree(source, destination, *args, **kwargs)
+        if source.resolve() == generated.resolve() and not interleaved:
+            interleaved = True
+            with pytest.raises(ValueError, match="another process"):
+                hosted_plugins.render(
+                    root,
+                    openai_app_id="asdk_app_otherrelease456",
+                    platform="openai",
+                )
+        return result
+
+    monkeypatch.setattr(
+        hosted_plugins.shutil, "copytree", copytree_with_interleaved_render
+    )
+    hosted_plugins.render(root, platform="claude")
+    assert not (generated / "openai").exists()
+
+
 def test_rendered_packages_are_deterministic_and_remote_only(tmp_path: Path) -> None:
     first = hosted_plugins.render(
         REPO_ROOT,

@@ -886,7 +886,7 @@ def render(
     selected = PLATFORMS if platform == "all" else (platform,)
     with ExitStack() as release_locks:
         if destination == managed_destination:
-            for selected_platform in sorted(selected):
+            for selected_platform in sorted(PLATFORMS):
                 release_locks.enter_context(_promotion_mutex(root, selected_platform))
         candidate = candidate_files(root, platform=platform, openai_app_id=openai_app_id)
         nonce = uuid4().hex
