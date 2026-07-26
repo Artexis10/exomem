@@ -381,7 +381,7 @@ def render(
         raise ValueError("render output already exists; refuse to replace an unchecked directory")
     selected = PLATFORMS if platform == "all" else (platform,)
     registered_openai_app = _validate_openai_app_id(openai_app_id) if "openai" in selected else None
-    temporary_root = Path(tempfile.mkdtemp(prefix="exomem-hosted-render-", dir=root.parent))
+    temporary_root = Path(tempfile.mkdtemp(prefix="exomem-hosted-render-", dir=allowed_root))
     temporary = temporary_root / destination.name
     if destination.exists():
         shutil.copytree(destination, temporary)
