@@ -44,9 +44,12 @@ mutually exclusive with `--mcp-url`. A bare origin is normalized to `/mcp`; an e
 `/mcp` path is accepted. Credentials, query strings, fragments, unrelated paths, public
 plain HTTP, and malformed ports are rejected. Plain HTTP is accepted only for loopback.
 
-The route object renders both client forms: Claude's `--transport http` invocation and
-Codex's `--url` invocation/TOML. This avoids duplicating validation and keeps credentials
-out of configuration. OAuth login remains a client operation printed as a next step.
+The route object renders every client form: Claude HTTP through `mcp add`, Claude stdio
+through `mcp add-json`, and Codex through its native invocation or TOML fallback. Claude's
+ordinary `mcp add` parser drops dash-prefixed child arguments such as Exomem's required
+`--transport stdio`; the JSON form preserves command, args, and environment exactly. This
+avoids duplicating validation and keeps credentials out of configuration. OAuth login
+remains a client operation printed as a next step.
 
 The plugin no longer declares a full stdio core. It retains skills/hooks and declares an
 optional HTTP server whose `userConfig.mcp_url` value is either blank or the full canonical

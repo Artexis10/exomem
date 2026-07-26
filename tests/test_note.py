@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import datetime as dt
+import json
 from pathlib import Path
 
 from exomem import note as note_module
+from exomem import relation_review
 
 TODAY = dt.date(2026, 5, 18)
 
@@ -123,6 +125,32 @@ def test_note_feedback_surfaces_relation_debt_without_blocking_write(vault: Path
 
     assert result.write_feedback["relations"]["relation_debt"] is True
     assert any("suggest-relations" in action for action in result.write_feedback["next_actions"])
+
+
+def test_note_direct_leaf_canonicalizes_reviewed_none_hyphen_alias(vault: Path) -> None:
+    kwargs = {
+        "content": "# Direct alias\n\n## Observations\n\n- [constraint] Keep retries bounded.\n",
+        "note_type": "insight",
+        "title": "Direct alias",
+        "suggestions": False,
+        "today": TODAY,
+    }
+    validation = note_module.note(vault, validate_only=True, **kwargs)
+
+    result = note_module.note(
+        vault,
+        draft_id=validation.draft_id,
+        draft_hash=validation.draft_hash,
+        draft_token=validation.draft_token,
+        relation_disposition="reviewed-none",
+        relation_review_hash=validation.draft_hash,
+        relation_review_reason="No honest relation exists in this fixture corpus.",
+        **kwargs,
+    )
+
+    assert (vault / result.path).is_file()
+    artifact = relation_review.review_artifact_path(vault, validation.draft_id)
+    assert json.loads(artifact.read_text(encoding="utf-8"))["kind"] == "reviewed_none"
 
 def test_note_slug_truncation_emits_warning(vault: Path) -> None:
     """A title that exceeds SLUG_MAX_LENGTH should produce a slug_warning."""

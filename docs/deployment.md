@@ -275,6 +275,10 @@ persistent-core envelope with `python scripts/verify-resource-envelope.py` (targ
 one service, zero media children, <=512 MiB pre-cache RSS, and <1% idle CPU). GPU
 acceptance is checked separately with `nvidia-smi` or Activity Monitor: the idle
 core must not be a CUDA compute process and targets <200 MiB GPU delta.
+On macOS the JSON also reports Activity Monitor's physical-footprint metric via
+`proc_pid_rusage`; use `--max-memory-mb` for an optional physical-footprint
+limit. That limit is evaluated only when every server PID has a native sample,
+while `--max-rss-mb` keeps its existing RSS meaning.
 
 **macOS (launchd):**
 

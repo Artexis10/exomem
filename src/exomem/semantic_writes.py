@@ -1240,13 +1240,17 @@ def preflight_existing(
     relation_review_reason: str | None = None,
 ) -> ExistingPreflight:
     """Evaluate an existing-page transition without mutating any shared state."""
+    relation_disposition = relation_review.normalize_relation_disposition(relation_disposition)
     if operation not in _EXISTING_OPERATIONS:
         raise SemanticWriteError(
             "LIFECYCLE_TRANSITION_INVALID_OPERATION",
             "existing semantic write operation is unsupported",
         )
     if relation_disposition not in {None, "reviewed_none"}:
-        raise SemanticWriteError("INVALID_RELATION_REVIEW", "relation disposition is invalid")
+        raise SemanticWriteError(
+            "INVALID_RELATION_REVIEW",
+            "relation disposition must be 'reviewed_none' or 'reviewed-none'",
+        )
     root = Path(vault_root)
     # Idempotent backstop, deliberately kept: every caller today already hands
     # over a canonical rel (the Tier 2 writers via `resolve_under_vault`,
@@ -2792,8 +2796,12 @@ def preflight_creation(
     predecessor_content_hash: str | None = None,
 ) -> CreationPreflight:
     root = Path(vault_root)
+    relation_disposition = relation_review.normalize_relation_disposition(relation_disposition)
     if relation_disposition not in {None, "reviewed_none"}:
-        raise SemanticWriteError("INVALID_RELATION_REVIEW", "relation disposition is invalid")
+        raise SemanticWriteError(
+            "INVALID_RELATION_REVIEW",
+            "relation disposition must be 'reviewed_none' or 'reviewed-none'",
+        )
     token = DraftToken.decode(draft_token)
     if (
         token.writer != writer

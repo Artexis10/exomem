@@ -7,6 +7,9 @@ an existing registration without being asked, or leave invalid TOML behind.
 
 from __future__ import annotations
 
+import json
+import os
+import stat
 import tomllib
 from pathlib import Path
 
@@ -16,14 +19,106 @@ from exomem import client_config
 
 WINDOWS_VAULT = "C:" + r"\vault"
 
-BLOCK = client_config.render_codex_block(
-    "exomem", ["--transport", "stdio"], {"EXOMEM_VAULT_PATH": WINDOWS_VAULT}
+def _stdio_block() -> str:
+    route = client_config.McpRoute.stdio(
+        ["exomem", "--transport", "stdio"],
+        {"EXOMEM_VAULT_PATH": WINDOWS_VAULT},
+    )
+    return client_config.render_codex_block(route)
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("https://kb.example.com", "https://kb.example.com/mcp"),
+        ("https://kb.example.com/", "https://kb.example.com/mcp"),
+        ("https://kb.example.com/mcp", "https://kb.example.com/mcp"),
+        ("http://localhost:8123", "http://localhost:8123/mcp"),
+        ("http://127.0.0.1:8123/mcp", "http://127.0.0.1:8123/mcp"),
+        ("http://[::1]:8123", "http://[::1]:8123/mcp"),
+    ],
 )
+def test_normalize_mcp_url_canonicalizes_only_origin_or_exact_endpoint(
+    raw: str, expected: str
+) -> None:
+    assert client_config.normalize_mcp_url(raw) == expected
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "http://kb.example.com",
+        "https://user:pass@kb.example.com",
+        "https://kb.example.com/other",
+        "https://kb.example.com/mcp/",
+        "https://kb.example.com/mcp?q=1",
+        "https://kb.example.com/mcp#fragment",
+        "https://kb.example.com:not-a-port",
+        "https://kb.example.com:",
+        "http://[::1]:",
+        "  https://kb.example.com",
+        "https://kb.example.com/\nmcp",
+        "kb.example.com",
+    ],
+)
+def test_normalize_mcp_url_rejects_unsafe_or_noncanonical_values(raw: str) -> None:
+    with pytest.raises(ValueError, match="MCP URL"):
+        client_config.normalize_mcp_url(raw)
+
+
+def test_http_route_renders_native_client_forms_without_credentials() -> None:
+    route = client_config.McpRoute.http("https://kb.example.com/mcp")
+
+    assert route.claude_add_argv("claude", scope="user") == [
+        "claude",
+        "mcp",
+        "add",
+        "--transport",
+        "http",
+        "--scope",
+        "user",
+        "exomem",
+        "https://kb.example.com/mcp",
+    ]
+    assert route.codex_add_argv("codex") == [
+        "codex",
+        "mcp",
+        "add",
+        "exomem",
+        "--url",
+        "https://kb.example.com/mcp",
+    ]
+    parsed = tomllib.loads(client_config.render_codex_block(route))
+    assert parsed["mcp_servers"]["exomem"] == {
+        "url": "https://kb.example.com/mcp"
+    }
+
+
+def test_stdio_route_uses_json_so_claude_preserves_child_flags() -> None:
+    route = client_config.McpRoute.stdio(
+        ["exomem", "--transport", "stdio"], {"EXOMEM_VAULT_PATH": WINDOWS_VAULT}
+    )
+
+    argv = route.claude_add_argv("claude", scope="project")
+    assert argv[:6] == [
+        "claude",
+        "mcp",
+        "add-json",
+        "--scope",
+        "project",
+        "exomem",
+    ]
+    assert json.loads(argv[6]) == {
+        "type": "stdio",
+        "command": "exomem",
+        "args": ["--transport", "stdio"],
+        "env": {"EXOMEM_VAULT_PATH": WINDOWS_VAULT},
+    }
 
 
 def test_rendered_block_is_valid_toml_with_windows_paths() -> None:
     """Backslashes in a Windows vault path must be escaped, not emitted raw."""
-    parsed = tomllib.loads(BLOCK)
+    parsed = tomllib.loads(_stdio_block())
 
     server = parsed["mcp_servers"]["exomem"]
     assert server["command"] == "exomem"
@@ -33,13 +128,13 @@ def test_rendered_block_is_valid_toml_with_windows_paths() -> None:
 
 def test_rendered_block_pins_stdio_transport() -> None:
     """The server defaults to http; a config without this starts a web server."""
-    assert '"--transport", "stdio"' in BLOCK
+    assert '"--transport", "stdio"' in _stdio_block()
 
 
 def test_creates_the_file_when_codex_has_no_config_yet(tmp_path: Path) -> None:
     path = tmp_path / "config.toml"
 
-    outcome = client_config.merge_codex_mcp(BLOCK, path=path)
+    outcome = client_config.merge_codex_mcp(_stdio_block(), path=path)
 
     assert outcome["action"] == "created"
     assert outcome["backup"] is None
@@ -56,7 +151,7 @@ def test_preserves_every_other_server_and_setting(tmp_path: Path) -> None:
         encoding="utf-8",
     )
 
-    outcome = client_config.merge_codex_mcp(BLOCK, path=path)
+    outcome = client_config.merge_codex_mcp(_stdio_block(), path=path)
 
     assert outcome["action"] == "added"
     parsed = tomllib.loads(path.read_text(encoding="utf-8"))
@@ -72,7 +167,7 @@ def test_existing_registration_is_reported_not_silently_overwritten(tmp_path: Pa
         "[mcp_servers.exomem]\ncommand = \"hand-tuned\"\nargs = []\n", encoding="utf-8"
     )
 
-    outcome = client_config.merge_codex_mcp(BLOCK, path=path)
+    outcome = client_config.merge_codex_mcp(_stdio_block(), path=path)
 
     assert outcome["action"] == "exists"
     assert outcome["backup"] is None
@@ -92,7 +187,7 @@ def test_replace_swaps_only_our_section_and_backs_the_file_up(tmp_path: Path) ->
         encoding="utf-8",
     )
 
-    outcome = client_config.merge_codex_mcp(BLOCK, path=path, replace=True)
+    outcome = client_config.merge_codex_mcp(_stdio_block(), path=path, replace=True)
 
     assert outcome["action"] == "replaced"
     parsed = tomllib.loads(path.read_text(encoding="utf-8"))
@@ -102,11 +197,27 @@ def test_replace_swaps_only_our_section_and_backs_the_file_up(tmp_path: Path) ->
     assert "hand-tuned" in Path(outcome["backup"]).read_text(encoding="utf-8")
 
 
+@pytest.mark.skipif(os.name == "nt", reason="Windows mode bits do not model POSIX 0600")
+def test_codex_backup_preserves_restrictive_config_permissions(tmp_path: Path) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text(
+        '[mcp_servers.exomem]\ncommand = "hand-tuned"\nargs = []\n',
+        encoding="utf-8",
+    )
+    path.chmod(0o600)
+
+    outcome = client_config.merge_codex_mcp(_stdio_block(), path=path, replace=True)
+
+    backup = Path(outcome["backup"])
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    assert stat.S_IMODE(backup.stat().st_mode) == 0o600
+
+
 def test_diff_shows_the_user_what_changed(tmp_path: Path) -> None:
     path = tmp_path / "config.toml"
     path.write_text('model = "gpt-5"\n', encoding="utf-8")
 
-    outcome = client_config.merge_codex_mcp(BLOCK, path=path)
+    outcome = client_config.merge_codex_mcp(_stdio_block(), path=path)
 
     assert "+[mcp_servers.exomem]" in outcome["diff"]
 

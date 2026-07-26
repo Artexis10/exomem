@@ -56,6 +56,9 @@ rejected before client configuration changes.
 Claude Code and Codex will receive native streamable-HTTP registrations rather
 than a proxy process. Both clients already support HTTP and OAuth. Setup will
 print the exact client-login follow-up and will never persist bearer tokens.
+The explicit Claude stdio fallback uses `mcp add-json`, because Claude's ordinary
+`mcp add` parser drops dash-prefixed child arguments such as Exomem's required
+`--transport stdio`; the JSON form preserves command, args, and environment.
 Interactive replacement still requires confirmation. Non-interactive setup
 changes an existing registration only when the caller passes
 `--replace-client-registration`, so a stale URL cannot silently mask a working

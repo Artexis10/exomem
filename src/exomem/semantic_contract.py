@@ -2960,7 +2960,9 @@ def _disposition_finding(
         span=None,
         detail=_disposition_detail(page, disposition),
         remediation=(
-            "Add a qualifying typed relation or record a current reviewed-none disposition."
+            "Add a qualifying typed relation, or validate_only=true then commit unchanged "
+            "draft_id, draft_hash, draft_token, relation_disposition=\"reviewed_none\", "
+            "relation_review_hash=<returned>, and relation_review_reason."
         ),
         governed_element_identity=("relations", "disposition"),
         resolved_rule=("relations", "*", "disposition"),

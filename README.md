@@ -73,29 +73,27 @@ full manual walkthrough in
 
 ### Claude Code: install as a plugin
 
-If you only want it in Claude Code, the plugin is a single install — it carries
-the MCP server, the skills, and the hooks together, and the server registers
-itself (no separate `claude mcp add`):
+The plugin carries the skills and hooks. Its MCP entry is an optional shared
+HTTP URL; it deliberately does **not** auto-start a full stdio server in every
+Claude Code session:
 
 ```
 /plugin marketplace add Artexis10/exomem
 /plugin install exomem@exomem
 ```
 
-**Set `EXOMEM_VAULT_PATH` before installing** — a plugin cannot ask where your
-notes live, so without it the MCP server refuses to start:
+Then choose the route. If you already run Exomem as a service for phone or
+hosted access, reuse that one authenticated core:
 
-```powershell
-setx EXOMEM_VAULT_PATH "C:\path\to\your\Obsidian"   # Windows, then reopen the terminal
-```
 ```bash
-export EXOMEM_VAULT_PATH="/path/to/your/Obsidian"   # macOS/Linux, add to your shell profile
+exomem setup --vault "/path/to/vault" --mcp-url https://<host>/mcp
 ```
 
-Don't have a vault yet, or want the path baked into the registration instead of
-read from the environment? Use the one-line installer above — `exomem setup`
-passes the vault explicitly via `claude mcp add --env`, so it works regardless of
-your environment.
+For local-only use, run `exomem setup --vault "/path/to/vault" --stdio`.
+Stdio is intentionally explicit because each client session owns its process
+and can load its own embedding runtime. When updating from an older plugin,
+run `/plugin update exomem@exomem`, then `/reload-plugins` or restart Claude
+Code before rerunning setup.
 
 ### claude.ai and ChatGPT
 
@@ -126,6 +124,14 @@ One command does the whole local setup: the wizard scans your vault and shows
 what's already there, initializes `Knowledge Base/`, runs the `doctor`
 preflight, registers the server with every client it detects (Claude Code and
 Codex), and installs the skills into each.
+
+If cwd `.env` or the process contains `EXOMEM_BASE_URL`, setup registers its
+canonical `/mcp` endpoint with Claude Code and Codex so they share the existing
+service. Otherwise it uses the explicit local stdio fallback. Use `--mcp-url`
+to choose a service directly, `--stdio` to force local stdio, and
+`--replace-client-registration` when you deliberately want to replace an
+existing manual route. Native clients handle OAuth; setup never stores bearer
+tokens.
 
 Config files it did not create are treated as yours: it merges rather than
 overwrites, backs the file up first, and prints the diff.
