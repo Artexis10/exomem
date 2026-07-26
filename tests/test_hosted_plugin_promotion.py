@@ -249,6 +249,7 @@ def test_openai_promotion_binds_the_registered_app_identity_and_claude_rejects_i
         root,
         platform="openai",
         openai_app_id="asdk_app_releaseinput123",
+        output=root / "plugins/hosted/generated",
     )
     evidence = signed_evidence(root, platform="openai")
     missing_identity = {
