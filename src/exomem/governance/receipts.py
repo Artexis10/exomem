@@ -336,7 +336,7 @@ def _open_month_fd(instance_dir: Path, name: str, *, write: bool = False, create
                 if exc.errno == errno.ELOOP:
                     raise ReceiptError("receipt evidence path escaped its instance directory") from exc
                 if not isinstance(exc, FileNotFoundError):
-                    raise
+                    raise ReceiptError("receipt evidence path could not be opened") from exc
                 if not create:
                     raise ReceiptError("receipt evidence path is missing") from exc
                 try:
@@ -350,7 +350,11 @@ def _open_month_fd(instance_dir: Path, name: str, *, write: bool = False, create
                     break
                 except FileExistsError:
                     continue
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
+        try:
+            final_stat = os.fstat(fd)
+        except OSError as exc:
+            raise ReceiptError("receipt evidence path could not be inspected") from exc
+        if not stat.S_ISREG(final_stat.st_mode):
             raise ReceiptError("receipt evidence path is not a regular file")
         yield fd
     finally:
@@ -840,6 +844,7 @@ def append_event(
                     if critical and tail.get("durable") is True:
                         tail_path = Path(tail["_path"])
                         _fsync_durable_prefix(instance_dir, tail_path)
+                        _fsync_durable_directories(vault_root, instance_dir)
                         conn.execute(
                             "UPDATE receipts_head SET durable_seq=?, durable_hash=?, observed_seq=?, observed_hash=?, "
                             "path=?, byte_offset=? WHERE instance_id=?",
@@ -1341,6 +1346,7 @@ def _reconcile_locked(
         if not dry_run and (anchor_repair or not locator_matches_target):
             if target_durable_seq > durable_seq and target_record is not None:
                 _fsync_durable_prefix(instance_dir, Path(str(target_record["_path"])))
+                _fsync_durable_directories(vault_root, instance_dir)
             conn = store.open_connection(Path(vault_root))
             try:
                 conn.execute(

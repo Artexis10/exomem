@@ -1174,3 +1174,60 @@ def test_instance_disappearance_at_the_month_open_seam_is_a_receipt_error(
     monkeypatch.setattr(receipts, "_after_month_enumeration", remove_instance)
     with pytest.raises(receipts.ReceiptError):
         receipts.append_event(vault, event_type="disclosure", payload={"outcomes": []})
+
+
+@pytest.mark.parametrize("promotion", ["retry", "reconcile"])
+def test_file_ahead_critical_promotion_requires_directory_durability(
+    vault: Path, monkeypatch: pytest.MonkeyPatch, promotion: str
+) -> None:
+    event = receipts.append_event(
+        vault, event_type="deletion", event_id=_RETRY_ID, payload=_lifecycle_payload(), critical=True
+    )
+    conn = store.open_connection(vault)
+    try:
+        conn.execute(
+            "UPDATE receipts_head SET durable_seq=0, durable_hash=?, observed_seq=0, "
+            "observed_hash=?, path='', byte_offset=0",
+            ("0" * 64, "0" * 64),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    monkeypatch.setattr(
+        receipts,
+        "_fsync_durable_directories",
+        lambda *_args: (_ for _ in ()).throw(receipts.ReceiptError("directory fsync failed")),
+    )
+    if promotion == "retry":
+        with pytest.raises(receipts.ReceiptError, match="directory"):
+            receipts.append_event(
+                vault, event_type="deletion", event_id=_RETRY_ID, payload=_lifecycle_payload(), critical=True
+            )
+    else:
+        with pytest.raises(receipts.ReceiptError, match="directory"):
+            receipts.reconcile(vault)
+
+    conn = store.open_connection(vault)
+    try:
+        assert conn.execute("SELECT durable_seq FROM receipts_head").fetchone()[0] == 0
+    finally:
+        conn.close()
+    assert event["seq"] == 1
+
+
+def test_final_month_open_permission_error_is_normalized(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    event = receipts.append_event(vault, event_type="disclosure", payload={"outcomes": []})
+    instance_dir = vault / "Knowledge Base" / "_Governance" / "events" / event["instance_id"]
+    name = next(instance_dir.glob("*.jsonl")).name
+    original_open = receipts.os.open
+
+    def deny_final_entry(path, *args, **kwargs):
+        if Path(path).name == name:
+            raise PermissionError("denied")
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(receipts.os, "open", deny_final_entry)
+    with pytest.raises(receipts.ReceiptError, match="evidence path"):
+        with receipts._open_month_fd(instance_dir, name):
+            pass
