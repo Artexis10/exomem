@@ -317,6 +317,46 @@ def _validate_openai_app_id(value: str | None) -> str:
     return clean
 
 
+def validate_openai_candidate(package: Path) -> None:
+    """Repository-owned equivalent of the current universal-plugin ingestion gate."""
+
+    try:
+        plugin = json.loads((package / ".codex-plugin" / "plugin.json").read_text(encoding="utf-8"))
+        app = json.loads((package / ".app.json").read_text(encoding="utf-8"))
+        marketplace = json.loads((package / "marketplace.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError("OpenAI candidate manifests must be valid JSON") from exc
+    if plugin.get("skills") != "./skills/" or plugin.get("mcpServers") != "./.mcp.json" or plugin.get("apps") != "./.app.json":
+        raise ValueError("OpenAI plugin manifest has invalid companion paths")
+    if set(app) != {"apps"} or not isinstance(app["apps"].get("exomem"), dict) or set(app["apps"]["exomem"]) - {"id", "category"}:
+        raise ValueError("OpenAI app manifest must contain only the registered app mapping")
+    if not re.fullmatch(r"asdk_app_[A-Za-z0-9]+", str(app["apps"]["exomem"].get("id", ""))):
+        raise ValueError("OpenAI app manifest must contain a registered app ID")
+    plugins = marketplace.get("plugins")
+    if not isinstance(plugins, list) or len(plugins) != 1 or plugins[0].get("policy", {}).get("authentication") != "ON_INSTALL":
+        raise ValueError("OpenAI marketplace metadata must own ON_INSTALL authentication")
+
+
+def _interface_metadata(definition: HostedDefinition) -> dict[str, Any]:
+    return {
+        "displayName": "Exomem Hosted",
+        "shortDescription": "Governed long-term memory.",
+        "longDescription": "Governed long-term memory for relevant project work.",
+        "developerName": definition.author_name,
+        "category": "productivity",
+        "capabilities": ["Interactive", "Write"],
+        "websiteURL": definition.website_url,
+        "privacyPolicyURL": definition.privacy_url,
+        "termsOfServiceURL": definition.terms_url,
+        "brandColor": "#172033",
+        "composerIcon": "./assets/icon.svg",
+        "logo": "./assets/icon.svg",
+        "logoDark": "./assets/icon.svg",
+        "screenshots": [],
+        "defaultPrompt": ["Use governed long-term memory."],
+    }
+
+
 def render(
     repo_root: Path | None = None,
     output: Path | None = None,
@@ -360,9 +400,11 @@ def render(
                 "name": definition.plugin_id,
                 "version": definition.version,
                 "description": "Governed long-term memory for relevant project work.",
-                "homepage": definition.support_url,
-                "privacy_policy": definition.privacy_url,
-                "terms_of_service": definition.terms_url,
+                "author": {"name": definition.author_name, "url": definition.author_url},
+                "homepage": definition.website_url,
+                "repository": definition.repository_url,
+                "license": definition.license,
+                "keywords": ["memory", "knowledge", "governance"],
             })
         else:
             _write_json(package / ".codex-plugin" / "plugin.json", {
@@ -378,32 +420,19 @@ def render(
                 "repository": definition.repository_url,
                 "license": definition.license,
                 "keywords": ["memory", "knowledge", "governance"],
-                "interface": {
-                    "displayName": "Exomem Hosted",
-                    "shortDescription": "Governed long-term memory.",
-                    "longDescription": "Governed long-term memory for relevant project work.",
-                    "developerName": definition.author_name,
-                    "category": "productivity",
-                    "capabilities": ["memory", "research"],
-                    "websiteURL": definition.website_url,
-                    "privacyPolicyURL": definition.privacy_url,
-                    "termsOfServiceURL": definition.terms_url,
-                    "brandColor": "#172033",
-                    "composerIcon": "assets/icon.svg",
-                    "logo": "assets/icon.svg",
-                    "logoDark": "assets/icon.svg",
-                    "screenshots": ["assets/icon.svg"],
-                    "defaultPrompt": "Use governed long-term memory when prior project context is relevant.",
-                },
+                "interface": _interface_metadata(definition),
             })
             _write_json(package / ".app.json", {
                 "apps": {"exomem": {"id": registered_openai_app, "category": "productivity"}},
             })
             _write_json(package / "marketplace.json", {
-                "distribution_scope": "pending",
-                "authentication": "ON_INSTALL",
-                "privacy_url": definition.privacy_url,
-                "terms_url": definition.terms_url,
+                "name": definition.plugin_id,
+                "interface": _interface_metadata(definition),
+                "plugins": [{
+                    "source": "./.codex-plugin/plugin.json",
+                    "policy": {"installation": "ON_INSTALL", "authentication": "ON_INSTALL"},
+                    "category": "productivity",
+                }],
             })
         _write_json(temporary / f"{selected_platform}.lock.json", _package_lock(root, selected_platform, package))
     _write_json(temporary / "compatibility.json", compatibility_manifest(root))
@@ -464,6 +493,35 @@ def check(
         }
     if expected_files != actual_files:
         raise ValueError("Hosted generated artifacts are stale; run hosted-plugin.py render")
+
+
+def regenerate_claude(repo_root: Path | None = None) -> Path:
+    """Refresh only the known committed Claude candidate, without staging a new tree."""
+
+    root = _repo_root(repo_root)
+    generated = root / PLUGIN_ROOT / "generated"
+    package = generated / "claude"
+    required = (package / ".claude-plugin" / "plugin.json", package / ".mcp.json")
+    if not all(path.is_file() for path in required):
+        raise ValueError("committed Claude candidate is absent")
+    definition = load_definition(root)
+    skill_dependencies(root)
+    _copy_skills(root, package / "skills")
+    _copy_assets(root, package / "assets")
+    _write_json(package / ".mcp.json", {"mcpServers": {"exomem": {"type": "http", "url": definition.endpoint}}})
+    _write_json(package / ".claude-plugin" / "plugin.json", {
+        "name": definition.plugin_id,
+        "version": definition.version,
+        "description": "Governed long-term memory for relevant project work.",
+        "author": {"name": definition.author_name, "url": definition.author_url},
+        "homepage": definition.website_url,
+        "repository": definition.repository_url,
+        "license": definition.license,
+        "keywords": ["memory", "knowledge", "governance"],
+    })
+    _write_json(generated / "claude.lock.json", _package_lock(root, "claude", package))
+    _write_json(generated / "compatibility.json", compatibility_manifest(root))
+    return generated
 
 
 def archive(

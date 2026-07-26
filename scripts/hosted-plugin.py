@@ -18,7 +18,7 @@ from exomem import hosted_plugins  # noqa: E402
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("render", "check", "archive", "promote", "demote", "status"))
+    parser.add_argument("command", choices=("render", "regenerate", "check", "archive", "promote", "demote", "status"))
     parser.add_argument("--openai-app-id")
     parser.add_argument("--platform", choices=(*hosted_plugins.PLATFORMS, "all"))
     parser.add_argument("--evidence", type=Path)
@@ -29,6 +29,10 @@ def main() -> int:
             print(hosted_plugins.render(
                 REPO_ROOT, openai_app_id=args.openai_app_id, platform=args.platform or "claude"
             ))
+        elif args.command == "regenerate":
+            if args.platform not in (None, "claude"):
+                parser.error("regenerate supports only the committed Claude candidate")
+            print(hosted_plugins.regenerate_claude(REPO_ROOT))
         elif args.command == "check":
             hosted_plugins.check(
                 REPO_ROOT, openai_app_id=args.openai_app_id, platform=args.platform or "claude"

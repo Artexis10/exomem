@@ -40,11 +40,13 @@ def test_rendered_packages_are_deterministic_and_remote_only(tmp_path: Path) -> 
     assert claude_mcp["mcpServers"]["exomem"] == {
         "type": "http", "url": "https://substratesystems.io/api/exomem/mcp/v1"
     }
-    assert openai_app["apps"]["exomem"] == {"id": "asdk_app_releaseinput123", "required": True}
-    assert openai_app["authentication"]["policy"] == "ON_INSTALL"
     openai_plugin = json.loads((first / "openai/.codex-plugin/plugin.json").read_text(encoding="utf-8"))
-    assert openai_plugin["skills"] == "./skills"
+    assert openai_plugin["skills"] == "./skills/"
     assert openai_plugin["mcpServers"] == "./.mcp.json"
     assert openai_plugin["apps"] == "./.app.json"
     assert openai_app == {"apps": {"exomem": {"id": "asdk_app_releaseinput123", "category": "productivity"}}}
+    marketplace = json.loads((first / "openai/marketplace.json").read_text(encoding="utf-8"))
+    assert marketplace["plugins"][0]["policy"]["authentication"] == "ON_INSTALL"
+    assert marketplace["interface"]["defaultPrompt"] == ["Use governed long-term memory."]
+    hosted_plugins.validate_openai_candidate(first / "openai")
     assert "uvx" not in b"\n".join(contents(first).values()).decode("utf-8")

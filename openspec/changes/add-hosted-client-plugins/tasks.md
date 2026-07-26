@@ -16,9 +16,9 @@
 
 - [x] 3.1 Add failing golden/schema tests for the Claude package layout, remote MCP declaration, skills/assets, public metadata, and absence of local stdio/hooks/setup requirements.
 - [x] 3.2 Implement deterministic Claude Hosted rendering and validation into a dedicated generated package without changing `plugins/claude-code/`.
-- [x] 3.3 Add failing golden/schema tests for `.codex-plugin/plugin.json`, `.mcp.json`, skills/assets, marketplace entry, `ON_INSTALL` authentication, and required OpenAI interface metadata.
-- [x] 3.4 Implement deterministic OpenAI Hosted rendering, plugin validation, and pending distribution metadata using the canonical definition.
-- [x] 3.5 Add one check/regenerate command that fails on uncommitted generated drift, missing assets/legal URLs, unsupported manifest fields, placeholders, unsafe archive entries, or a package-lock mismatch.
+- [ ] 3.3 Add failing golden/schema tests for `.codex-plugin/plugin.json`, `.mcp.json`, skills/assets, marketplace entry, `ON_INSTALL` authentication, and required OpenAI interface metadata.
+- [ ] 3.4 Implement deterministic OpenAI Hosted rendering, plugin validation, and pending distribution metadata using the canonical definition.
+- [ ] 3.5 Add one check/regenerate command that fails on uncommitted generated drift, missing assets/legal URLs, unsupported manifest fields, placeholders, unsafe archive entries, or a package-lock mismatch.
 
 ## 4. Implement Promotion Evidence
 
