@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import shutil
 import stat
 import tempfile
 import zipfile
@@ -50,6 +51,11 @@ class HostedDefinition:
     support_url: str
     privacy_url: str
     terms_url: str
+    website_url: str
+    repository_url: str
+    license: str
+    author_name: str
+    author_url: str
     claude_schema_version: str
     openai_schema_version: str
 
@@ -70,6 +76,7 @@ def _validate_definition(raw: dict[str, Any]) -> HostedDefinition:
     allowed = {
         "plugin_id", "version", "endpoint", "profile", "channel", "distribution_scope", "source_release",
         "support_url", "privacy_url", "terms_url", "claude_schema_version", "openai_schema_version",
+        "website_url", "repository_url", "license", "author_name", "author_url",
     }
     unexpected = set(raw) - allowed
     if unexpected:
@@ -329,15 +336,20 @@ def render(
         raise ValueError("render output must be below the explicit staging root")
     if destination == root or destination in root.parents:
         raise ValueError("render output must not be at or above the repository")
-    if destination.exists():
+    managed_destination = (root / PLUGIN_ROOT / "generated").resolve()
+    if destination.exists() and destination != managed_destination:
         raise ValueError("render output already exists; refuse to replace an unchecked directory")
     selected = PLATFORMS if platform == "all" else (platform,)
     registered_openai_app = _validate_openai_app_id(openai_app_id) if "openai" in selected else None
-    temporary = destination.with_name(f".{destination.name}.new")
-    if temporary.exists():
-        raise ValueError("render staging directory already exists")
+    temporary_root = Path(tempfile.mkdtemp(prefix="exomem-hosted-render-", dir=root.parent))
+    temporary = temporary_root / destination.name
+    if destination.exists():
+        shutil.copytree(destination, temporary)
     for selected_platform in selected:
         package = temporary / selected_platform
+        if package.exists():
+            shutil.rmtree(package)
+        (temporary / f"{selected_platform}.lock.json").unlink(missing_ok=True)
         package.mkdir(parents=True)
         _copy_skills(root, package / "skills")
         _copy_assets(root, package / "assets")
@@ -354,23 +366,66 @@ def render(
             })
         else:
             _write_json(package / ".codex-plugin" / "plugin.json", {
+                "id": definition.plugin_id,
                 "name": definition.plugin_id,
                 "version": definition.version,
                 "description": "Governed long-term memory for relevant project work.",
-                "skills": "./skills",
-                "mcp_servers": "./.mcp.json",
+                "skills": "./skills/",
+                "mcpServers": "./.mcp.json",
                 "apps": "./.app.json",
-                "interface": {"type": "chatgpt", "authentication": "ON_INSTALL"},
+                "author": {"name": definition.author_name, "url": definition.author_url},
+                "homepage": definition.website_url,
+                "repository": definition.repository_url,
+                "license": definition.license,
+                "keywords": ["memory", "knowledge", "governance"],
+                "interface": {
+                    "displayName": "Exomem Hosted",
+                    "shortDescription": "Governed long-term memory.",
+                    "longDescription": "Governed long-term memory for relevant project work.",
+                    "developerName": definition.author_name,
+                    "category": "productivity",
+                    "capabilities": ["memory", "research"],
+                    "websiteURL": definition.website_url,
+                    "privacyPolicyURL": definition.privacy_url,
+                    "termsOfServiceURL": definition.terms_url,
+                    "brandColor": "#172033",
+                    "composerIcon": "assets/icon.svg",
+                    "logo": "assets/icon.svg",
+                    "logoDark": "assets/icon.svg",
+                    "screenshots": ["assets/icon.svg"],
+                    "defaultPrompt": "Use governed long-term memory when prior project context is relevant.",
+                },
             })
             _write_json(package / ".app.json", {
-                "name": definition.plugin_id,
-                "display_name": "Exomem Hosted",
-                "authentication": {"type": "oauth", "policy": "ON_INSTALL"},
-                "apps": {"exomem": {"id": registered_openai_app, "required": True}},
+                "apps": {"exomem": {"id": registered_openai_app, "category": "productivity"}},
+            })
+            _write_json(package / "marketplace.json", {
+                "distribution_scope": "pending",
+                "authentication": "ON_INSTALL",
+                "privacy_url": definition.privacy_url,
+                "terms_url": definition.terms_url,
             })
         _write_json(temporary / f"{selected_platform}.lock.json", _package_lock(root, selected_platform, package))
     _write_json(temporary / "compatibility.json", compatibility_manifest(root))
-    temporary.replace(destination)
+    if destination.exists():
+        backup = destination.with_name(f".{destination.name}.previous")
+        if backup.exists():
+            raise ValueError("render backup directory already exists")
+        destination.replace(backup)
+        try:
+            temporary.replace(destination)
+        except OSError:
+            backup.replace(destination)
+            raise
+        shutil.rmtree(backup)
+    else:
+        temporary.replace(destination)
+    try:
+        temporary_root.rmdir()
+    except OSError:
+        # The candidate has already been atomically installed; staging cleanup is
+        # best-effort and never turns a completed render into a false failure.
+        pass
     return destination
 
 

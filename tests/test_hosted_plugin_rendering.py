@@ -44,6 +44,7 @@ def test_rendered_packages_are_deterministic_and_remote_only(tmp_path: Path) -> 
     assert openai_app["authentication"]["policy"] == "ON_INSTALL"
     openai_plugin = json.loads((first / "openai/.codex-plugin/plugin.json").read_text(encoding="utf-8"))
     assert openai_plugin["skills"] == "./skills"
-    assert openai_plugin["mcp_servers"] == "./.mcp.json"
+    assert openai_plugin["mcpServers"] == "./.mcp.json"
     assert openai_plugin["apps"] == "./.app.json"
+    assert openai_app == {"apps": {"exomem": {"id": "asdk_app_releaseinput123", "category": "productivity"}}}
     assert "uvx" not in b"\n".join(contents(first).values()).decode("utf-8")
