@@ -6,12 +6,14 @@ anchor/cache used to detect a lost or divergent tail before another append.
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import hmac
 import json
 import os
 import re
 import sqlite3
+import stat
 import uuid
 from collections.abc import Callable, Mapping
 from contextlib import contextmanager
@@ -107,11 +109,14 @@ def _instance_dir(vault_root: Path, instance_id: str) -> Path:
     if not _hex32(instance_id):
         raise ReceiptError("receipt instance id is invalid")
     events_root = _validated_events_root(vault_root)
-    candidate = _events_root(Path(vault_root)) / instance_id
-    resolved = candidate.resolve()
-    if resolved.parent != events_root:
-        raise ReceiptError("receipt instance path escaped the events root")
-    return resolved
+    candidate = events_root / instance_id
+    try:
+        entry = os.lstat(candidate)
+    except FileNotFoundError:
+        return candidate
+    if stat.S_ISLNK(entry.st_mode) or not stat.S_ISDIR(entry.st_mode):
+        raise ReceiptError("receipt instance path is not a real directory")
+    return candidate
 
 
 def _timestamp(timestamp: str) -> tuple[str, datetime]:
@@ -179,7 +184,7 @@ def _head(conn: sqlite3.Connection, instance_id: str) -> tuple[int, str, int, st
 def _relative_locator(vault_root: Path, path: Path) -> str:
     root = Path(vault_root).resolve()
     try:
-        return path.resolve().relative_to(root).as_posix()
+        return path.relative_to(root).as_posix()
     except ValueError as exc:
         raise ReceiptError("receipt locator escaped the vault") from exc
 
@@ -189,8 +194,8 @@ def _resolve_locator(vault_root: Path, instance_id: str, locator: str) -> Path:
         raise ReceiptError("receipt locator must be vault-relative")
     root = Path(vault_root).resolve()
     instance_dir = _instance_dir(root, instance_id)
-    target = (root / locator).resolve()
-    if target.parent != instance_dir or re.fullmatch(r"\d{4}-\d{2}\.jsonl", target.name) is None:
+    target = root / locator
+    if target.parent != instance_dir or not _valid_month_name(target.name):
         raise ReceiptError("receipt locator escaped its instance directory")
     return target
 
@@ -209,9 +214,13 @@ def _durable_locator_matches(
         path = _resolve_locator(vault_root, instance_id, locator)
         if byte_offset < 0:
             return False
-        with path.open("rb") as source:
-            source.seek(byte_offset)
-            line = source.readline(MAX_RECORD_BYTES + 1)
+        with _open_month_fd(_instance_dir(vault_root, instance_id), path.name) as fd:
+            source = os.fdopen(fd, "rb", closefd=False)
+            try:
+                source.seek(byte_offset)
+                line = source.readline(MAX_RECORD_BYTES + 1)
+            finally:
+                source.close()
         if not line.endswith(b"\n") or len(line) > MAX_RECORD_BYTES:
             return False
         record = json.loads(line)
@@ -221,7 +230,7 @@ def _durable_locator_matches(
             and record["seq"] == durable_seq
             and record["hash"] == durable_hash
             and _record_hash(record) == durable_hash
-            and _month_path(vault_root, instance_id, record["timestamp"]).resolve() == path
+            and _month_path(vault_root, instance_id, record["timestamp"]) == path
         )
     except (OSError, ValueError, json.JSONDecodeError, ReceiptError):
         return False
@@ -251,25 +260,93 @@ def _update_durable_head(
 
 
 def _validated_month_path(instance_dir: Path, candidate: Path) -> Path:
-    if candidate.parent != instance_dir or _MONTH_FILE.fullmatch(candidate.name) is None:
+    if candidate.parent != instance_dir or not _valid_month_name(candidate.name):
         raise ReceiptError("receipt evidence path escaped its instance directory")
-    if candidate.is_symlink():
-        raise ReceiptError("receipt evidence path escaped its instance directory")
-    resolved = candidate.resolve()
-    if resolved.parent != instance_dir:
-        raise ReceiptError("receipt evidence path escaped its instance directory")
-    return resolved
+    return candidate
 
 
-def _monthly_evidence_paths(instance_dir: Path) -> tuple[list[Path], list[dict[str, str]]]:
-    paths: list[Path] = []
+def _valid_month_name(name: str) -> bool:
+    if _MONTH_FILE.fullmatch(name) is None:
+        return False
+    year, month = name.removesuffix(".jsonl").split("-", 1)
+    return 1 <= int(month) <= 12 and len(year) == 4
+
+
+def _after_month_enumeration(_instance_dir: Path, _name: str) -> None:
+    """Test seam: runs after a month name is enumerated and before opening it."""
+
+
+def _monthly_evidence_names(instance_dir: Path) -> tuple[list[str], list[dict[str, str]]]:
+    names: list[str] = []
     issues: list[dict[str, str]] = []
     for candidate in sorted(instance_dir.glob("????-??.jsonl")):
-        try:
-            paths.append(_validated_month_path(instance_dir, candidate))
-        except ReceiptError as exc:
-            issues.append({"code": "evidence_path_escape", "path": str(candidate), "detail": str(exc)})
-    return paths, issues
+        if not _valid_month_name(candidate.name):
+            issues.append({"code": "invalid_month_filename", "path": str(candidate), "detail": "month is not calendar-real"})
+            continue
+        names.append(candidate.name)
+    return names, issues
+
+
+@contextmanager
+def _open_month_fd(instance_dir: Path, name: str, *, write: bool = False, create: bool = False):
+    """Open one direct-child evidence file without following its final entry.
+
+    POSIX uses ``dir_fd`` plus ``O_NOFOLLOW``.  The stdlib fallback compares
+    pre/post entry identity and descriptor metadata; it detects static and
+    entry-swap attacks, but cannot provide POSIX openat equivalence on Windows.
+    """
+    _validated_month_path(instance_dir, instance_dir / name)
+    _after_month_enumeration(instance_dir, name)
+    instance_stat = os.lstat(instance_dir)
+    if stat.S_ISLNK(instance_stat.st_mode) or not stat.S_ISDIR(instance_stat.st_mode):
+        raise ReceiptError("receipt instance path is not a real directory")
+    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    supports_dir_fd = nofollow and os.open in os.supports_dir_fd
+    directory_fd = os.open(instance_dir, directory_flags | (nofollow if supports_dir_fd else 0))
+    fd = -1
+    try:
+        if not stat.S_ISDIR(os.fstat(directory_fd).st_mode) or not os.path.samestat(instance_stat, os.fstat(directory_fd)):
+            raise ReceiptError("receipt instance path changed during open")
+        flags = (os.O_WRONLY | os.O_APPEND) if write else os.O_RDONLY
+        while True:
+            try:
+                if supports_dir_fd:
+                    fd = os.open(name, flags | nofollow, dir_fd=directory_fd)
+                else:
+                    candidate = instance_dir / name
+                    entry = os.lstat(candidate)
+                    if stat.S_ISLNK(entry.st_mode) or not stat.S_ISREG(entry.st_mode):
+                        raise ReceiptError("receipt evidence path escaped its instance directory")
+                    fd = os.open(candidate, flags)
+                    if not os.path.samestat(entry, os.fstat(fd)):
+                        raise ReceiptError("receipt evidence path changed during open")
+                break
+            except OSError as exc:
+                if exc.errno == errno.ELOOP:
+                    raise ReceiptError("receipt evidence path escaped its instance directory") from exc
+                if not isinstance(exc, FileNotFoundError):
+                    raise
+                if not create:
+                    raise ReceiptError("receipt evidence path is missing") from exc
+                try:
+                    create_flags = flags | os.O_CREAT | os.O_EXCL
+                    fd = os.open(
+                        name if supports_dir_fd else instance_dir / name,
+                        create_flags | (nofollow if supports_dir_fd else 0),
+                        0o600,
+                        **({"dir_fd": directory_fd} if supports_dir_fd else {}),
+                    )
+                    break
+                except FileExistsError:
+                    continue
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise ReceiptError("receipt evidence path is not a regular file")
+        yield fd
+    finally:
+        if fd >= 0:
+            os.close(fd)
+        os.close(directory_fd)
 
 
 def _read_records(instance_dir: Path) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
@@ -277,39 +354,60 @@ def _read_records(instance_dir: Path) -> tuple[list[dict[str, Any]], list[dict[s
     issues: list[dict[str, str]] = []
     if not instance_dir.exists():
         return records, issues
-    paths, path_issues = _monthly_evidence_paths(instance_dir)
+    names, path_issues = _monthly_evidence_names(instance_dir)
     issues.extend(path_issues)
-    for path in paths:
+    for name in names:
+        path = instance_dir / name
         try:
-            data = path.read_bytes()
+            with _open_month_fd(instance_dir, name) as fd:
+                source = os.fdopen(fd, "rb", closefd=False)
+                try:
+                    offset = 0
+                    line_no = 0
+                    saw_data = False
+                    final_newline = True
+                    while raw_line := source.readline(MAX_RECORD_BYTES + 1):
+                        saw_data = True
+                        line_no += 1
+                        line_offset = offset
+                        offset += len(raw_line)
+                        oversized = len(raw_line) > MAX_RECORD_BYTES
+                        while oversized and not raw_line.endswith(b"\n"):
+                            chunk = source.readline(8192)
+                            if not chunk:
+                                break
+                            offset += len(chunk)
+                            raw_line = chunk
+                        if oversized:
+                            issues.append({"code": "record_too_large", "path": str(path), "detail": f"line {line_no}"})
+                            final_newline = raw_line.endswith(b"\n")
+                            continue
+                        final_newline = raw_line.endswith(b"\n")
+                        line = raw_line[:-1] if final_newline else raw_line
+                        if line.endswith(b"\r"):
+                            line = line[:-1]
+                        try:
+                            value = json.loads(line)
+                        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                            issues.append({"code": "invalid_json", "path": str(path), "detail": f"line {line_no}: {exc}"})
+                            continue
+                        if not isinstance(value, dict):
+                            issues.append({"code": "invalid_record", "path": str(path), "detail": f"line {line_no}"})
+                            continue
+                        value["_path"] = str(path)
+                        value["_offset"] = line_offset
+                        records.append(value)
+                    if saw_data and not final_newline:
+                        issues.append({"code": "truncated_evidence", "path": str(path), "detail": "nonempty JSONL file is missing its final newline"})
+                finally:
+                    source.close()
+        except ReceiptError as exc:
+            code = "evidence_path_escape" if "evidence path" in str(exc) else "read_error"
+            issues.append({"code": code, "path": str(path), "detail": str(exc)})
+            continue
         except OSError as exc:
             issues.append({"code": "read_error", "path": str(path), "detail": str(exc)})
             continue
-        if data and not data.endswith(b"\n"):
-            issues.append({
-                "code": "truncated_evidence",
-                "path": str(path),
-                "detail": "nonempty JSONL file is missing its final newline",
-            })
-        offset = 0
-        for line_no, raw_line in enumerate(data.splitlines(keepends=True), 1):
-            line = raw_line[:-1] if raw_line.endswith(b"\n") else raw_line
-            if line.endswith(b"\r"):
-                line = line[:-1]
-            try:
-                value = json.loads(line)
-            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-                issues.append({"code": "invalid_json", "path": str(path), "detail": f"line {line_no}: {exc}"})
-                offset += len(raw_line)
-                continue
-            if not isinstance(value, dict):
-                issues.append({"code": "invalid_record", "path": str(path), "detail": f"line {line_no}"})
-                offset += len(raw_line)
-                continue
-            value["_path"] = str(path)
-            value["_offset"] = offset
-            records.append(value)
-            offset += len(raw_line)
     return records, issues
 
 
@@ -323,6 +421,12 @@ def _chain_state(instance_dir: Path) -> tuple[list[dict[str, Any]], list[dict[st
         path = str(record.pop("_path"))
         offset = int(record.pop("_offset"))
         month = Path(path).stem
+        try:
+            _normalized, parsed = _timestamp(record.get("timestamp"))
+            if f"{parsed:%Y-%m}" != month:
+                issues.append({"code": "timestamp_month_mismatch", "path": path, "detail": "record timestamp does not match evidence month"})
+        except ReceiptError:
+            pass
         envelope_error = _envelope_error(record)
         if envelope_error is not None:
             issues.append({"code": "invalid_envelope", "path": path, "detail": envelope_error})
@@ -551,22 +655,27 @@ def _crash_point(_point: str) -> None:
 
 
 def _read_tail_record(instance_dir: Path) -> dict[str, Any] | None:
-    paths, issues = _monthly_evidence_paths(instance_dir)
+    names, issues = _monthly_evidence_names(instance_dir)
     if issues:
         raise ReceiptError(issues[0]["detail"])
-    if not paths:
+    if not names:
         return None
-    path = paths[-1]
-    with path.open("rb") as source:
-        source.seek(0, os.SEEK_END)
-        size = source.tell()
-        if size == 0:
-            return None
-        source.seek(-1, os.SEEK_END)
-        if source.read(1) != b"\n":
-            raise ReceiptError("receipt tail is missing its final newline")
-        source.seek(max(0, size - _TAIL_READ_BYTES))
-        chunk = source.read()
+    name = names[-1]
+    path = instance_dir / name
+    with _open_month_fd(instance_dir, name) as fd:
+        source = os.fdopen(fd, "rb", closefd=False)
+        try:
+            source.seek(0, os.SEEK_END)
+            size = source.tell()
+            if size == 0:
+                return None
+            source.seek(-1, os.SEEK_END)
+            if source.read(1) != b"\n":
+                raise ReceiptError("receipt tail is missing its final newline")
+            source.seek(max(0, size - _TAIL_READ_BYTES))
+            chunk = source.read()
+        finally:
+            source.close()
     lines = [line for line in chunk.splitlines() if line]
     if not lines:
         return None
@@ -584,18 +693,18 @@ def _read_tail_record(instance_dir: Path) -> dict[str, Any] | None:
 
 
 def _fsync_path(path: Path) -> None:
-    with path.open("rb") as source:
-        os.fsync(source.fileno())
+    with _open_month_fd(path.parent, path.name) as fd:
+        os.fsync(fd)
 
 
 def _fsync_durable_prefix(instance_dir: Path, target: Path) -> None:
     target = _validated_month_path(instance_dir, target)
-    paths, issues = _monthly_evidence_paths(instance_dir)
+    names, issues = _monthly_evidence_names(instance_dir)
     if issues:
         raise ReceiptError(issues[0]["detail"])
-    for path in paths:
-        if path.name <= target.name:
-            _fsync_path(path)
+    for name in names:
+        if name <= target.name:
+            _fsync_path(instance_dir / name)
 
 
 def _matching_existing_event(
@@ -643,7 +752,11 @@ def append_event(
         try:
             instance_id = _instance_id(conn)
             instance_dir = _instance_dir(vault_root, instance_id)
-            instance_dir.mkdir(parents=True, exist_ok=True)
+            try:
+                instance_dir.mkdir(parents=True, exist_ok=True)
+            except FileExistsError as exc:
+                raise ReceiptError("receipt instance path is not a real directory") from exc
+            instance_dir = _instance_dir(vault_root, instance_id)
             if _conflicted_evidence(instance_dir):
                 raise ReceiptError("conflicted receipt evidence must be resolved")
             (
@@ -723,15 +836,19 @@ def append_event(
             if len(encoded) + 1 > MAX_RECORD_BYTES:
                 raise ReceiptError("receipt record exceeds the bounded tail window")
             path.parent.mkdir(parents=True, exist_ok=True)
-            with path.open("ab") as output:
-                offset = output.tell()
-                output.write(encoded + b"\n")
-                _crash_point("after_jsonl_write")
-                output.flush()
-                _crash_point("after_jsonl_flush")
-                if critical:
-                    os.fsync(output.fileno())
-                    _crash_point("after_jsonl_fsync")
+            with _open_month_fd(instance_dir, path.name, write=True, create=True) as fd:
+                output = os.fdopen(fd, "ab", closefd=False)
+                try:
+                    offset = output.tell()
+                    output.write(encoded + b"\n")
+                    _crash_point("after_jsonl_write")
+                    output.flush()
+                    _crash_point("after_jsonl_flush")
+                    if critical:
+                        os.fsync(fd)
+                        _crash_point("after_jsonl_fsync")
+                finally:
+                    output.close()
             _crash_point("before_sidecar_commit")
             if critical:
                 _fsync_durable_prefix(instance_dir, path)
@@ -925,7 +1042,7 @@ def _scanned_locator_matches(
     except ReceiptError:
         return False
     return (
-        Path(str(record.get("_path", ""))).resolve() == target
+        Path(str(record.get("_path", ""))) == target
         and record.get("_offset") == byte_offset
         and _durable_locator_matches(
             vault_root,

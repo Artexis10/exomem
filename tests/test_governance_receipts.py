@@ -1008,3 +1008,93 @@ def test_lifecycle_artifact_refs_require_the_parallel_digest(
 
     with pytest.raises(receipts.ReceiptError):
         receipts.append_event(vault, event_type="deletion", payload=payload)
+
+
+@pytest.mark.parametrize("entry_kind", ["regular", "same_root_symlink"])
+def test_active_instance_entry_must_be_a_real_directory(vault: Path, entry_kind: str) -> None:
+    conn = store.open_connection(vault)
+    try:
+        instance_id = receipts._instance_id(conn)
+    finally:
+        conn.close()
+    events_root = vault / "Knowledge Base" / "_Governance" / "events"
+    events_root.mkdir(parents=True)
+    entry = events_root / instance_id
+    if entry_kind == "regular":
+        entry.write_text("not a directory", encoding="utf-8")
+    else:
+        alias = events_root / "alias"
+        alias.mkdir()
+        entry.symlink_to(alias, target_is_directory=True)
+
+    report = receipts.verify_chain(vault)
+
+    assert any(issue["code"] == "instance_path_escape" for issue in report["issues"])
+    with pytest.raises(receipts.ReceiptError, match="instance"):
+        receipts.append_event(vault, event_type="disclosure", payload={"outcomes": []})
+
+
+def test_month_swap_after_enumeration_never_opens_outside_evidence(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    event = receipts.append_event(vault, event_type="deletion", payload=_lifecycle_payload(), critical=True)
+    instance_dir = vault / "Knowledge Base" / "_Governance" / "events" / event["instance_id"]
+    month = next(instance_dir.glob("*.jsonl"))
+    outside = tmp_path / "outside.jsonl"
+    outside.write_bytes(b"outside evidence")
+    before = outside.read_bytes()
+    swapped = False
+
+    def swap_after_enumeration(_instance_dir: Path, name: str) -> None:
+        nonlocal swapped
+        if not swapped and name == month.name:
+            month.unlink()
+            month.symlink_to(outside)
+            swapped = True
+
+    monkeypatch.setattr(receipts, "_after_month_enumeration", swap_after_enumeration)
+    report = receipts.verify_chain(vault)
+
+    assert swapped is True
+    assert any(issue["code"] == "evidence_path_escape" for issue in report["issues"])
+    assert receipts._durable_locator_matches(
+        vault,
+        event["instance_id"],
+        event["seq"],
+        event["hash"],
+        f"Knowledge Base/_Governance/events/{event['instance_id']}/{month.name}",
+        0,
+    ) is False
+    with pytest.raises(receipts.ReceiptError, match="evidence path"):
+        receipts._fsync_durable_prefix(instance_dir, month)
+    with pytest.raises(receipts.ReceiptError, match="evidence path"):
+        receipts.append_event(vault, event_type="disclosure", payload={"outcomes": []})
+    assert outside.read_bytes() == before
+
+
+def test_invalid_month_name_and_timestamp_month_mismatch_are_reported(vault: Path) -> None:
+    event = receipts.append_event(
+        vault, event_type="disclosure", payload={"outcomes": []}, timestamp="2026-07-01T00:00:00Z"
+    )
+    instance_dir = vault / "Knowledge Base" / "_Governance" / "events" / event["instance_id"]
+    month = next(instance_dir.glob("*.jsonl"))
+    invalid = instance_dir / "2026-99.jsonl"
+    month.rename(invalid)
+
+    assert any(issue["code"] == "invalid_month_filename" for issue in receipts.verify_chain(vault)["issues"])
+
+    invalid.rename(instance_dir / "2026-08.jsonl")
+    assert any(issue["code"] == "timestamp_month_mismatch" for issue in receipts.verify_chain(vault)["issues"])
+
+
+def test_oversized_line_is_drained_and_preserves_the_next_record_offset(vault: Path) -> None:
+    receipts.append_event(vault, event_type="disclosure", payload={"outcomes": []})
+    path = next((vault / "Knowledge Base" / "_Governance" / "events").rglob("*.jsonl"))
+    original = path.read_bytes()
+    oversized = b"{" + b"x" * receipts.MAX_RECORD_BYTES + b"\n"
+    path.write_bytes(oversized + original)
+
+    records, issues = receipts._read_records(path.parent)
+
+    assert any(issue["code"] == "record_too_large" for issue in issues)
+    assert records[0]["_offset"] == len(oversized)
