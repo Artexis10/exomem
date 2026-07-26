@@ -245,6 +245,11 @@ def test_openai_promotion_binds_the_registered_app_identity_and_claude_rejects_i
         platform="openai",
         openai_app_id="asdk_app_releaseinput123",
     )
+    hosted_plugins.archive(
+        root,
+        platform="openai",
+        openai_app_id="asdk_app_releaseinput123",
+    )
     evidence = signed_evidence(root, platform="openai")
     missing_identity = {
         key: value for key, value in evidence.items() if key != "registered_app_id_sha256"
