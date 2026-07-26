@@ -1480,33 +1480,76 @@ def _find_semantic_units(
             # Exact eligibility is normal-table metadata only. Hybrid/vector
             # content ranking consumes this finite candidate set independently,
             # so FTS absence cannot change the catalog outcome.
-            # Category/kind rows are only the exact seed. Page predicates and
-            # other canonical filters run after hydration, so limiting this
-            # seed before post-evaluation can false-empty when the first window
-            # is ineligible. Fetch the complete finite catalog match set, then
-            # apply the caller's result limit to the eligible/ranked records.
-            exact_limit = 2_147_483_647
             with _span(timings, "filter_eligibility"):
-                catalog_result = lexstore.search_semantic_units_result(
-                    vault_root,
-                    query,
-                    k=exact_limit,
-                    clauses=dnf_clauses,
-                    scope=scope,
-                    freshness=snapshot.for_scope(scope),
-                    literal_all=mode == "keyword" and bool(query.strip()),
-                    _repair_stale=True,
-                    repair=_bounded_lexical_repair_allowed(snapshot.for_scope(scope)),
+                exact_freshness = snapshot.for_scope(scope)
+                exact_repair = _bounded_lexical_repair_allowed(exact_freshness)
+                bounded_filter_only = (
+                    not query.strip()
+                    and limit is not None
+                    and not algebra.post_filter_required
                 )
-                _set_catalog_timing_profile(timings, catalog_result.readiness)
-                if not catalog_result.readiness.complete:
-                    _raise_catalog_outcome(catalog_result.readiness)
-                indexed = list(catalog_result.value or [])
-                records = (
-                    {}
-                    if mode == "vector"
-                    else _hydrate_indexed_unit_records(vault_root, indexed, plan=plan)
-                )
+                if bounded_filter_only:
+                    # SQL and final filter-only ordering are identical. Read a
+                    # small leading prefix, apply access/current-parent checks,
+                    # and expand only when canonical rejection underfills it.
+                    # Re-reading from zero makes each prefix self-contained if a
+                    # concurrent catalog writer inserts, deletes, or reorders a
+                    # row between reads; offset pagination could skip across that
+                    # moving boundary. The common eligible path still opens only
+                    # max(8, requested_limit) rows.
+                    prefix_size = max(8, requested_limit)
+                    indexed = []
+                    records = {}
+                    while True:
+                        catalog_result = lexstore.search_semantic_units_result(
+                            vault_root,
+                            query,
+                            k=prefix_size,
+                            clauses=dnf_clauses,
+                            scope=scope,
+                            freshness=exact_freshness,
+                            _repair_stale=True,
+                            repair=exact_repair,
+                        )
+                        _set_catalog_timing_profile(timings, catalog_result.readiness)
+                        if not catalog_result.readiness.complete:
+                            _raise_catalog_outcome(catalog_result.readiness)
+                        indexed = list(catalog_result.value or [])
+                        records = _hydrate_indexed_unit_records(
+                            vault_root, indexed, plan=plan
+                        )
+                        if (
+                            len(records) >= requested_limit
+                            or len(indexed) < prefix_size
+                        ):
+                            break
+                        prefix_size *= 2
+                else:
+                    # Category/kind rows are only the exact seed. Page
+                    # predicates and other canonical filters run after
+                    # hydration, so limiting this seed before post-evaluation
+                    # can false-empty when the first window is ineligible.
+                    exact_limit = 2_147_483_647
+                    catalog_result = lexstore.search_semantic_units_result(
+                        vault_root,
+                        query,
+                        k=exact_limit,
+                        clauses=dnf_clauses,
+                        scope=scope,
+                        freshness=exact_freshness,
+                        literal_all=mode == "keyword" and bool(query.strip()),
+                        _repair_stale=True,
+                        repair=exact_repair,
+                    )
+                    _set_catalog_timing_profile(timings, catalog_result.readiness)
+                    if not catalog_result.readiness.complete:
+                        _raise_catalog_outcome(catalog_result.readiness)
+                    indexed = list(catalog_result.value or [])
+                    records = (
+                        {}
+                        if mode == "vector"
+                        else _hydrate_indexed_unit_records(vault_root, indexed, plan=plan)
+                    )
         else:
             indexed = lexstore.search_semantic_units(
                 vault_root,

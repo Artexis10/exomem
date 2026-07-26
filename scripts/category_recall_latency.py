@@ -78,6 +78,7 @@ SAMPLE_COUNT = 30
 CORPUS_BUCKET_SIZE = 500
 CANDIDATE_BUCKET_SIZE = 5
 REQUIRED_CANDIDATE_COUNT = 2
+BROAD_MINIMUM_CANDIDATE_COUNT = 100
 PREFLIGHT_LIMIT = 10
 
 GATE_COLD_FILTER_ELIGIBILITY_MS = 100.0
@@ -234,9 +235,21 @@ def wait_for_catalog_ready(
     return result
 
 
-def check_cardinality(candidate_count: int | None, *, expected: int = REQUIRED_CANDIDATE_COUNT) -> bool:
-    """`True` only when the catalog reports exactly `expected` candidates."""
-    return candidate_count == expected
+def check_cardinality(
+    candidate_count: int | None,
+    *,
+    expected: int = REQUIRED_CANDIDATE_COUNT,
+    profile: str = "selective",
+    minimum: int = BROAD_MINIMUM_CANDIDATE_COUNT,
+) -> bool:
+    """Validate the selective exact-count or broad minimum-count preflight."""
+    if candidate_count is None:
+        return False
+    if profile == "selective":
+        return candidate_count == expected
+    if profile == "broad":
+        return candidate_count >= minimum
+    raise ValueError(f"unknown cardinality profile {profile!r}")
 
 
 # --------------------------------------------------------------------------
@@ -363,6 +376,8 @@ def run_harness(
     count_pages: Callable[[Path], int] = count_corpus_pages,
     prepare_freshness: Callable[[Path], Any] = freshness_module.rebaseline,
     run_id: str | None = None,
+    profile: str = "selective",
+    broad_minimum: int = BROAD_MINIMUM_CANDIDATE_COUNT,
 ) -> dict[str, Any]:
     """Run the full four-lane harness and return the anonymized report.
 
@@ -387,11 +402,24 @@ def run_harness(
     # walks the corpus and the supposed hot lane measures watcher absence.
     prepare_freshness(vault_root)
 
+    if profile not in {"selective", "broad"}:
+        raise ValueError(f"unknown cardinality profile {profile!r}")
+    if broad_minimum < 1:
+        raise ValueError("broad_minimum must be positive")
+    preflight_limit = max(limit, broad_minimum) if profile == "broad" else limit
     preflight = wait_for_catalog_ready(
-        op_find, vault_root, category, max_wait_s=warmup_timeout_s, limit=limit
+        op_find,
+        vault_root,
+        category,
+        max_wait_s=warmup_timeout_s,
+        limit=preflight_limit,
     )
     candidate_count = preflight["candidate_count"]
-    cardinality_ok = check_cardinality(candidate_count)
+    cardinality_ok = check_cardinality(
+        candidate_count,
+        profile=profile,
+        minimum=broad_minimum,
+    )
     report["preflight"] = {
         "catalog_status": preflight["catalog_status"],
         "candidate_count_bucket": (
@@ -426,6 +454,18 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--category", type=str, required=True, help="exact category to filter on (never written to the report)")
     ap.add_argument("--samples", type=int, default=SAMPLE_COUNT, help=f"samples per lane (default {SAMPLE_COUNT})")
     ap.add_argument("--limit", type=int, default=PREFLIGHT_LIMIT, help=f"result limit per request (default {PREFLIGHT_LIMIT})")
+    ap.add_argument(
+        "--profile",
+        choices=("selective", "broad"),
+        default="selective",
+        help="candidate-cardinality gate (default selective: exactly two)",
+    )
+    ap.add_argument(
+        "--broad-minimum",
+        type=int,
+        default=BROAD_MINIMUM_CANDIDATE_COUNT,
+        help=f"minimum candidates for --profile broad (default {BROAD_MINIMUM_CANDIDATE_COUNT})",
+    )
     ap.add_argument("--warmup-timeout", type=float, default=30.0, help="max seconds to wait for a warming catalog before the gate fails (default 30)")
     ap.add_argument("--out", type=Path, default=None, help="write the JSON report here instead of stdout")
     args = ap.parse_args(argv)
@@ -436,6 +476,8 @@ def main(argv: list[str] | None = None) -> int:
         samples=args.samples,
         limit=args.limit,
         warmup_timeout_s=args.warmup_timeout,
+        profile=args.profile,
+        broad_minimum=args.broad_minimum,
     )
     text = json.dumps(report, indent=2, sort_keys=True)
     if args.out:
