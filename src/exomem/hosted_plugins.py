@@ -992,28 +992,33 @@ def archive(
     platform: str = "claude",
 ) -> Path:
     root = _repo_root(repo_root)
-    validate_hosted_public_inputs(root)
-    check(root, openai_app_id=openai_app_id, platform=platform)
-    output_root = output or root / "dist" / "hosted"
-    output_root.mkdir(parents=True, exist_ok=True)
+    if platform not in (*PLATFORMS, "all"):
+        raise ValueError("unsupported platform")
     selected = PLATFORMS if platform == "all" else (platform,)
-    for selected_platform in selected:
-        package = root / PLUGIN_ROOT / "generated" / selected_platform
-        archive_path = output_root / f"{selected_platform}.zip"
-        archive_bytes = _archive_bytes(package)
-        _write_bytes_atomic(archive_path, archive_bytes)
-        lock = {
-            "platform": selected_platform,
-            "archive_sha256": _sha256(archive_bytes),
-        }
-        if selected_platform == "openai":
-            lock["registered_app_id_sha256"] = _registered_app_id_sha256(
-                _generated_openai_app_id(root / PLUGIN_ROOT / "generated")
+    with ExitStack() as release_locks:
+        for selected_platform in sorted(selected):
+            release_locks.enter_context(_promotion_mutex(root, selected_platform))
+        validate_hosted_public_inputs(root)
+        check(root, openai_app_id=openai_app_id, platform=platform)
+        output_root = output or root / "dist" / "hosted"
+        output_root.mkdir(parents=True, exist_ok=True)
+        for selected_platform in selected:
+            package = root / PLUGIN_ROOT / "generated" / selected_platform
+            archive_path = output_root / f"{selected_platform}.zip"
+            archive_bytes = _archive_bytes(package)
+            _write_bytes_atomic(archive_path, archive_bytes)
+            lock = {
+                "platform": selected_platform,
+                "archive_sha256": _sha256(archive_bytes),
+            }
+            if selected_platform == "openai":
+                lock["registered_app_id_sha256"] = _registered_app_id_sha256(
+                    _generated_openai_app_id(root / PLUGIN_ROOT / "generated")
+                )
+            _write_json_atomic(
+                output_root / f"{selected_platform}.zip.lock.json",
+                lock,
             )
-        _write_json_atomic(
-            output_root / f"{selected_platform}.zip.lock.json",
-            lock,
-        )
     return output_root
 
 

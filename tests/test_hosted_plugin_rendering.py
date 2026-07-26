@@ -162,6 +162,33 @@ def test_claude_archive_is_deterministic_and_locked(tmp_path: Path) -> None:
         assert {entry.create_system for entry in package.infolist()} == {3}
 
 
+def test_openai_archive_blocks_an_interleaved_render(tmp_path: Path, monkeypatch) -> None:
+    root = copy_hosted_tree(tmp_path / "repo")
+    first_id = "asdk_app_releaseinput123"
+    hosted_plugins.render(root, openai_app_id=first_id, platform="openai")
+    original_archive = hosted_plugins._archive_bytes
+
+    def archive_with_interleaved_render(package: Path) -> bytes:
+        with pytest.raises(ValueError, match="another process"):
+            hosted_plugins.render(
+                root,
+                openai_app_id="asdk_app_otherrelease456",
+                platform="openai",
+            )
+        return original_archive(package)
+
+    monkeypatch.setattr(hosted_plugins, "_archive_bytes", archive_with_interleaved_render)
+    output = hosted_plugins.archive(root, tmp_path / "archive", platform="openai")
+
+    lock = json.loads((output / "openai.zip.lock.json").read_text(encoding="utf-8"))
+    assert lock["registered_app_id_sha256"] == hosted_plugins._sha256(
+        first_id.encode("utf-8")
+    )
+    with zipfile.ZipFile(output / "openai.zip") as package:
+        app = json.loads(package.read(".app.json"))
+    assert app["apps"]["exomem"]["id"] == first_id
+
+
 def test_rendered_packages_are_deterministic_and_remote_only(tmp_path: Path) -> None:
     first = hosted_plugins.render(
         REPO_ROOT,
