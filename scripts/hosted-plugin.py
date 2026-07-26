@@ -82,6 +82,14 @@ def main() -> int:
                             )
                             for platform, record in records.items()
                         },
+                        "registered_app_id_sha256": {
+                            platform: (
+                                record["evidence"].get("registered_app_id_sha256")
+                                if isinstance(record.get("evidence"), dict)
+                                else None
+                            )
+                            for platform, record in records.items()
+                        },
                     },
                     sort_keys=True,
                 )

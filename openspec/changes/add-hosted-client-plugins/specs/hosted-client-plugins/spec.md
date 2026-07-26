@@ -143,6 +143,11 @@ validation SHALL check only the required digest shape and the evidence
 signature; the digest is live evidence and MUST NOT alter the package lock,
 archive bytes, or compatibility identity.
 
+OpenAI promotion evidence SHALL additionally contain
+`registered_app_id_sha256`; it SHALL be a lowercase 64-hex digest exactly equal
+to the value in both the current OpenAI package lock and archive lock. Claude
+promotion evidence SHALL NOT contain this OpenAI-only field.
+
 #### Scenario: Shared Claude CIMD digest vector
 
 - **WHEN** the producer canonicalizes `{platform:"claude", admission_mode:"cimd", client_id:"https://claude.example.com/oauth/client", redirect_uris:["https://claude.example.com/oauth/return", "https://claude.example.com/oauth/callback"], token_endpoint_auth_method:"none"}`

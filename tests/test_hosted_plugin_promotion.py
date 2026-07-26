@@ -61,18 +61,22 @@ def copy_hosted_tree(destination: Path) -> Path:
     return destination
 
 
-def signed_evidence(root: Path, *, secret: str = "operator-secret") -> dict[str, object]:
+def signed_evidence(
+    root: Path, *, platform: str = "claude", secret: str = "operator-secret"
+) -> dict[str, object]:
     compatibility = hosted_plugins.compatibility_manifest(root)
     definition = hosted_plugins.load_definition(root)
     generated = root / "plugins/hosted/generated"
-    package_lock = json.loads((generated / "claude.lock.json").read_text(encoding="utf-8"))
-    archive_lock = json.loads((generated / "claude.zip.lock.json").read_text(encoding="utf-8"))
+    package_lock = json.loads((generated / f"{platform}.lock.json").read_text(encoding="utf-8"))
+    archive_lock = json.loads((generated / f"{platform}.zip.lock.json").read_text(encoding="utf-8"))
     evidence: dict[str, object] = {
         "schema_version": 1,
-        "platform": "claude",
+        "platform": platform,
         "client_version": "1.0.0",
         "clean_client_identity_hmac_sha256": digest("clean-client-run"),
-        "oauth_client_config_sha256": oauth_client_config_digest(),
+        "oauth_client_config_sha256": (
+            oauth_client_config_digest() if platform == "claude" else digest("openai-client-config")
+        ),
         "timestamp": datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z"),
         "paired_run_hmac_sha256": digest("paired-run-1"),
         "test_identity": "hosted-client-plugins-v1",
@@ -105,6 +109,8 @@ def signed_evidence(root: Path, *, secret: str = "operator-secret") -> dict[str,
         "durable_capture": True,
         "fresh_chat_recall": True,
     }
+    if platform == "openai":
+        evidence["registered_app_id_sha256"] = package_lock["registered_app_id_sha256"]
     evidence["operator_signature"] = hmac.new(
         secret.encode(), hosted_plugins._canonical_json(evidence), hashlib.sha256
     ).hexdigest()
@@ -228,6 +234,96 @@ def test_promotion_requires_and_persists_signed_oauth_client_config_digest(tmp_p
 
     record = json.loads(hosted_plugins.promotion_record(root, "claude").read_text(encoding="utf-8"))
     assert record["evidence"]["oauth_client_config_sha256"] == oauth_client_config_digest()
+
+
+def test_openai_promotion_binds_the_registered_app_identity_and_claude_rejects_it(
+    tmp_path: Path,
+) -> None:
+    root = copy_hosted_tree(tmp_path / "repo")
+    hosted_plugins.render(
+        root,
+        platform="openai",
+        openai_app_id="asdk_app_releaseinput123",
+    )
+    evidence = signed_evidence(root, platform="openai")
+    missing_identity = {
+        key: value for key, value in evidence.items() if key != "registered_app_id_sha256"
+    }
+    missing_identity["operator_signature"] = hmac.new(
+        b"operator-secret",
+        hosted_plugins._canonical_json(
+            {key: value for key, value in missing_identity.items() if key != "operator_signature"}
+        ),
+        hashlib.sha256,
+    ).hexdigest()
+    with pytest.raises(ValueError, match="content-bearing"):
+        hosted_plugins.promote(
+            root,
+            "openai",
+            missing_identity,
+            trusted_key_id="operator-key",
+            trusted_secret="operator-secret",
+            expected_state="pending",
+            expected_record_sha256=hosted_plugins.promotion_record_sha256(root, "openai"),
+        )
+
+    wrong_identity = {**evidence, "registered_app_id_sha256": "0" * 64}
+    wrong_identity["operator_signature"] = hmac.new(
+        b"operator-secret",
+        hosted_plugins._canonical_json(
+            {key: value for key, value in wrong_identity.items() if key != "operator_signature"}
+        ),
+        hashlib.sha256,
+    ).hexdigest()
+
+    with pytest.raises(ValueError, match="registered app identity"):
+        hosted_plugins.promote(
+            root,
+            "openai",
+            wrong_identity,
+            trusted_key_id="operator-key",
+            trusted_secret="operator-secret",
+            expected_state="pending",
+            expected_record_sha256=hosted_plugins.promotion_record_sha256(root, "openai"),
+        )
+
+    hosted_plugins.promote(
+        root,
+        "openai",
+        evidence,
+        trusted_key_id="operator-key",
+        trusted_secret="operator-secret",
+        expected_state="pending",
+        expected_record_sha256=hosted_plugins.promotion_record_sha256(root, "openai"),
+    )
+    record = json.loads(hosted_plugins.promotion_record(root, "openai").read_text(encoding="utf-8"))
+    assert record["evidence"]["registered_app_id_sha256"] == evidence["registered_app_id_sha256"]
+
+    claude_with_registered_app = {
+        **signed_evidence(root),
+        "registered_app_id_sha256": evidence["registered_app_id_sha256"],
+    }
+    claude_with_registered_app["operator_signature"] = hmac.new(
+        b"operator-secret",
+        hosted_plugins._canonical_json(
+            {
+                key: value
+                for key, value in claude_with_registered_app.items()
+                if key != "operator_signature"
+            }
+        ),
+        hashlib.sha256,
+    ).hexdigest()
+    with pytest.raises(ValueError, match="content-bearing"):
+        hosted_plugins.promote(
+            root,
+            "claude",
+            claude_with_registered_app,
+            trusted_key_id="operator-key",
+            trusted_secret="operator-secret",
+            expected_state="pending",
+            expected_record_sha256=hosted_plugins.promotion_record_sha256(root, "claude"),
+        )
 
 
 def test_demotion_rejects_free_form_public_reason(tmp_path: Path) -> None:

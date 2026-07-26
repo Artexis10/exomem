@@ -1126,6 +1126,8 @@ def _validate_promotion_evidence(
         "operator_key_id",
         "operator_signature",
     }
+    if platform == "openai":
+        required_strings.add("registered_app_id_sha256")
     required_counts = {
         "identity_count",
         "tenant_count",
@@ -1199,27 +1201,37 @@ def _validate_promotion_evidence(
         "package_artifact_sha256": lock["artifact_sha256"],
         "archive_sha256": archive_lock["archive_sha256"],
     }
+    if platform == "openai":
+        registered_app_id_sha256 = lock.get("registered_app_id_sha256")
+        if (
+            not isinstance(registered_app_id_sha256, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", registered_app_id_sha256)
+            or archive_lock.get("registered_app_id_sha256") != registered_app_id_sha256
+        ):
+            raise ValueError("promotion candidate does not bind the registered app identity")
+        if evidence["registered_app_id_sha256"] != registered_app_id_sha256:
+            raise ValueError("promotion evidence has a different registered app identity")
     if any(evidence[key] != value for key, value in expected_identity.items()):
         raise ValueError("promotion evidence has a different compatibility or package identity")
-    if not all(
-        re.fullmatch(r"[0-9a-f]{64}", evidence[key])
-        for key in (
-            "result_sha256",
-            "package_artifact_sha256",
-            "archive_sha256",
-            "compatibility_sha256",
-            "schema_contract_sha256",
-            "command_surface_sha256",
-            "clean_client_identity_hmac_sha256",
-            "oauth_client_config_sha256",
-            "paired_run_hmac_sha256",
-            "exomem_identity_hmac_sha256",
-            "tenant_hmac_sha256",
-            "entitlement_hmac_sha256",
-            "provisioning_operation_hmac_sha256",
-            "cell_hmac_sha256",
-        )
-    ):
+    digest_keys = (
+        "result_sha256",
+        "package_artifact_sha256",
+        "archive_sha256",
+        "compatibility_sha256",
+        "schema_contract_sha256",
+        "command_surface_sha256",
+        "clean_client_identity_hmac_sha256",
+        "oauth_client_config_sha256",
+        "paired_run_hmac_sha256",
+        "exomem_identity_hmac_sha256",
+        "tenant_hmac_sha256",
+        "entitlement_hmac_sha256",
+        "provisioning_operation_hmac_sha256",
+        "cell_hmac_sha256",
+    )
+    if platform == "openai":
+        digest_keys += ("registered_app_id_sha256",)
+    if not all(re.fullmatch(r"[0-9a-f]{64}", evidence[key]) for key in digest_keys):
         raise ValueError("promotion evidence digests must be SHA-256 values")
     if not trusted_key_id or not trusted_secret or evidence["operator_key_id"] != trusted_key_id:
         raise ValueError("promotion requires an operator-trusted signing key")
