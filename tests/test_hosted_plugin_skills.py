@@ -31,7 +31,7 @@ def test_hosted_skills_do_not_depend_on_local_plugin_mechanisms() -> None:
 def test_tool_reference_scanner_rejects_legacy_and_undeclared_callable_names() -> None:
     with pytest.raises(ValueError, match="unavailable Hosted tools"):
         hosted_plugins.validate_skill_text(
-            "---\nrequired_tools: [ask_memory]\n---\nUse ask_memory and edit_memory.",
+            "---\nrequired_tools: [ask_memory]\n---\nUse `ask_memory` and `edit_memory`.",
             Path("malicious.md"),
         )
 

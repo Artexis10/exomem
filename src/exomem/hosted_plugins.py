@@ -35,9 +35,9 @@ _LEGACY_OR_EXCLUDED_TOOLS = frozenset({
     "create_file", "move_file", "delete", "edit", "replace", "note", "find", "get", "add", "query_data",
 })
 TOOL_REFERENCE = re.compile(
-    r"\b(" + "|".join(re.escape(name) for name in sorted(
+    r"(?:`|\b)(" + "|".join(re.escape(name) for name in sorted(
         set(commands.PRODUCT_PUBLIC_NAMES) | _LEGACY_OR_EXCLUDED_TOOLS
-    )) + r")\b"
+    )) + r")(?:`|\s*\()"
 )
 
 
