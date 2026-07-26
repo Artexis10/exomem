@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import subprocess
 import sys
 import threading
@@ -19,6 +20,11 @@ from exomem.governance import receipts, store
 
 _PRIOR = "a" * 64
 _TARGET = "b" * 64
+_MEMORY_REF = "exomem://memory/12345678-1234-1234-1234-123456789abc"
+_OPERATION_ID = "d" * 64
+_BOUNDARY_ID = "e" * 32
+_RETRY_ID = "f" * 32
+_CRASH_ID = "1" * 32
 
 
 @pytest.fixture(autouse=True)
@@ -31,10 +37,10 @@ def receipt_state_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 def _lifecycle_payload() -> dict[str, object]:
     return {
         "manifest_digest": "a" * 64,
-        "affected_refs": ["Notes/one"],
+        "affected_refs": [_MEMORY_REF],
         "content_hashes": ["b" * 64],
         "exact_state_digest": "c" * 64,
-        "causation_id": "operation-1",
+        "causation_id": _OPERATION_ID,
     }
 
 
@@ -51,6 +57,16 @@ def _recursive_snapshot(*roots: Path) -> dict[tuple[int, str], tuple[str, bytes 
                 ("directory", None) if path.is_dir() else ("file", path.read_bytes())
             )
     return snapshot
+
+
+def _semantic_snapshot(*roots: Path) -> dict[tuple[int, str], tuple[str, bytes | None]]:
+    """Snapshot evidence/data, excluding SQLite's empty lock coordination files."""
+    return {
+        key: value
+        for key, value in _recursive_snapshot(*roots).items()
+        if not key[1].endswith(".sqlite-shm")
+        and not (key[1].endswith(".sqlite-wal") and value == ("file", b""))
+    }
 
 
 def test_append_canonical_record_and_verify_chain(vault: Path) -> None:
@@ -131,7 +147,7 @@ def test_rejects_nonfinite_payload_and_stale_anchor(vault: Path) -> None:
 
 def test_internal_retry_adopts_its_own_verified_tail_without_duplication(vault: Path) -> None:
     event = receipts.append_event(
-        vault, event_type="disclosure", event_id="boundary-1", payload={"outcomes": []}
+        vault, event_type="disclosure", event_id=_BOUNDARY_ID, payload={"outcomes": []}
     )
     conn = store.open_connection(vault)
     try:
@@ -141,7 +157,7 @@ def test_internal_retry_adopts_its_own_verified_tail_without_duplication(vault: 
         conn.close()
 
     retry = receipts.append_event(
-        vault, event_type="disclosure", event_id="boundary-1", payload={"outcomes": []}
+        vault, event_type="disclosure", event_id=_BOUNDARY_ID, payload={"outcomes": []}
     )
 
     assert retry["hash"] == event["hash"]
@@ -255,7 +271,7 @@ def test_critical_retry_promotes_the_durable_anchor(vault: Path) -> None:
     event = receipts.append_event(
         vault,
         event_type="deletion",
-        event_id="critical-retry",
+        event_id=_RETRY_ID,
         payload=_lifecycle_payload(),
         critical=True,
     )
@@ -273,7 +289,7 @@ def test_critical_retry_promotes_the_durable_anchor(vault: Path) -> None:
     receipts.append_event(
         vault,
         event_type="deletion",
-        event_id="critical-retry",
+        event_id=_RETRY_ID,
         payload=_lifecycle_payload(),
         critical=True,
     )
@@ -373,7 +389,7 @@ def test_crash_after_critical_fsync_leaves_sidecar_unadvanced_until_retry(vault:
         receipts.append_event(
             vault,
             event_type="deletion",
-            event_id="crash-critical",
+            event_id=_CRASH_ID,
             payload=_lifecycle_payload(),
             critical=True,
         )
@@ -382,7 +398,7 @@ def test_crash_after_critical_fsync_leaves_sidecar_unadvanced_until_retry(vault:
     receipts.append_event(
         vault,
         event_type="deletion",
-        event_id="crash-critical",
+        event_id=_CRASH_ID,
         payload=_lifecycle_payload(),
         critical=True,
     )
@@ -393,7 +409,7 @@ def test_crash_after_critical_fsync_leaves_sidecar_unadvanced_until_retry(vault:
 def test_critical_write_order_crashes_recover_idempotently(
     vault: Path, monkeypatch, point: str
 ) -> None:
-    event_id = f"crash-{point}"
+    event_id = _CRASH_ID
 
     def crash(candidate: str) -> None:
         if candidate == point:
@@ -555,11 +571,11 @@ def test_reconcile_dry_run_keeps_evidence_and_operational_files_byte_identical(v
     derivative.parent.mkdir(exist_ok=True)
     derivative.write_bytes(b"unchanged")
     state_root = Path(os.environ["EXOMEM_WRITER_LEASE_STATE_DIR"])
-    before = _recursive_snapshot(vault, state_root)
+    before = _semantic_snapshot(vault, state_root)
 
     receipts.reconcile(vault, dry_run=True)
 
-    assert _recursive_snapshot(vault, state_root) == before
+    assert _semantic_snapshot(vault, state_root) == before
 
 
 def test_reconcile_repair_is_idempotent(vault: Path) -> None:
@@ -725,7 +741,7 @@ def test_lifecycle_schemas_require_the_complete_content_free_state(
 ) -> None:
     record = receipts.append_event(vault, event_type=event_type, payload=_lifecycle_payload())
 
-    assert record["affected_refs"] == ["Notes/one"]
+    assert record["affected_refs"] == [_MEMORY_REF]
     assert record["content_hashes"] == ["b" * 64]
 
 
@@ -745,3 +761,119 @@ def test_lifecycle_schemas_reject_incomplete_or_mistyped_state(
 ) -> None:
     with pytest.raises(receipts.ReceiptError):
         receipts.append_event(vault, event_type=event_type, payload=payload)
+
+
+def test_verify_reads_a_current_wal_anchor_and_detects_jsonl_rollback(vault: Path) -> None:
+    receipts.append_event(vault, event_type="deletion", payload=_lifecycle_payload(), critical=True)
+    reader = sqlite3.connect(store.sidecar_path(vault))
+    reader.execute("BEGIN")
+    reader.execute("SELECT durable_seq FROM receipts_head").fetchone()
+    try:
+        receipts.append_event(vault, event_type="deletion", payload=_lifecycle_payload(), critical=True)
+        path = next((vault / "Knowledge Base" / "_Governance" / "events").rglob("*.jsonl"))
+        path.write_bytes(path.read_bytes().splitlines()[0] + b"\n")
+        before = _semantic_snapshot(vault)
+
+        report = receipts.verify_chain(vault)
+
+        assert any(issue["code"] == "durable_anchor_divergence" for issue in report["issues"])
+        assert _semantic_snapshot(vault) == before
+    finally:
+        reader.close()
+
+
+def test_verify_reads_a_locator_corruption_committed_to_wal(vault: Path) -> None:
+    event = receipts.append_event(vault, event_type="deletion", payload=_lifecycle_payload(), critical=True)
+    reader = sqlite3.connect(store.sidecar_path(vault))
+    reader.execute("BEGIN")
+    reader.execute("SELECT path FROM receipts_head").fetchone()
+    try:
+        conn = store.open_connection(vault)
+        try:
+            conn.execute(
+                "UPDATE receipts_head SET path=? WHERE instance_id=?",
+                ("../../outside.jsonl", event["instance_id"]),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        before = _semantic_snapshot(vault)
+
+        report = receipts.verify_chain(vault)
+
+        assert any(issue["code"] == "locator_divergence" for issue in report["issues"])
+        assert _semantic_snapshot(vault) == before
+    finally:
+        reader.close()
+
+
+def test_append_and_verify_reject_an_instance_symlink_escaping_events_root(
+    vault: Path, tmp_path: Path
+) -> None:
+    event = receipts.append_event(vault, event_type="disclosure", payload={"outcomes": []})
+    instance_dir = vault / "Knowledge Base" / "_Governance" / "events" / event["instance_id"]
+    outside = tmp_path / "outside-instance"
+    instance_dir.rename(outside)
+    instance_dir.symlink_to(outside, target_is_directory=True)
+    before = _recursive_snapshot(outside)
+
+    with pytest.raises(receipts.ReceiptError, match="instance"):
+        receipts.append_event(vault, event_type="disclosure", payload={"outcomes": []})
+
+    report = receipts.verify_chain(vault)
+    assert any(issue["code"] == "instance_path_escape" for issue in report["issues"])
+    assert _recursive_snapshot(outside) == before
+
+
+def test_append_and_verify_reject_a_corrupt_sidecar_instance_id(vault: Path, tmp_path: Path) -> None:
+    receipts.append_event(vault, event_type="disclosure", payload={"outcomes": []})
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    conn = store.open_connection(vault)
+    try:
+        conn.execute("UPDATE receipt_instance SET instance_id=?", ("../../outside",))
+        conn.commit()
+    finally:
+        conn.close()
+    before = _recursive_snapshot(outside)
+
+    with pytest.raises(receipts.ReceiptError, match="instance"):
+        receipts.append_event(vault, event_type="disclosure", payload={"outcomes": []})
+
+    report = receipts.verify_chain(vault)
+    assert any(issue["code"] == "invalid_instance_id" for issue in report["issues"])
+    assert _recursive_snapshot(outside) == before
+
+
+@pytest.mark.parametrize(
+    "event_type,phase,event_id,payload",
+    [
+        ("disclosure", "recorded", "Patient Alice diagnosis", {"outcomes": []}),
+        (
+            "critical",
+            "intent",
+            "Patient Alice diagnosis",
+            {"operation": "delete", "prior": _PRIOR, "target": _TARGET, "affected_ids": []},
+        ),
+    ],
+)
+def test_receipt_event_ids_must_be_opaque(
+    vault: Path, event_type: str, phase: str, event_id: str, payload: dict[str, object]
+) -> None:
+    with pytest.raises(receipts.ReceiptError, match="event id"):
+        receipts.append_event(
+            vault, event_type=event_type, phase=phase, event_id=event_id, payload=payload, critical=True
+        )
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {**_lifecycle_payload(), "affected_refs": ["ConfidentialProject"]},
+        {**_lifecycle_payload(), "affected_refs": ["Notes/one"]},
+        {**_lifecycle_payload(), "causation_id": "Alice"},
+    ],
+)
+def test_lifecycle_refs_and_causation_ids_must_be_opaque(vault: Path, payload: dict[str, object]) -> None:
+    with pytest.raises(receipts.ReceiptError):
+        receipts.append_event(vault, event_type="deletion", payload=payload)

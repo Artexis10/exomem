@@ -19,6 +19,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from .. import memory_refs
 from ..mutation_lock import VaultMutationCoordinator
 from ..writer_lease import LeaseConfig
 from . import store
@@ -32,6 +33,7 @@ MAX_OUTCOMES = 128
 _MAX_IDENTIFIER_LENGTH = 256
 _MAX_COUNT = 2**31 - 1
 _HEX64 = re.compile(r"^[0-9a-f]{64}$")
+_HEX32 = re.compile(r"^[0-9a-f]{32}$")
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$")
 _EVENT_PAYLOAD_FIELDS = {
     ("disclosure", "recorded"): frozenset({"outcomes"}),
@@ -89,6 +91,28 @@ def _events_root(vault_root: Path) -> Path:
     return governance_root(Path(vault_root)) / "events"
 
 
+def _validated_events_root(vault_root: Path) -> Path:
+    vault = Path(vault_root).resolve()
+    events_root = _events_root(vault).resolve()
+    try:
+        events_root.relative_to(vault)
+    except ValueError as exc:
+        raise ReceiptError("receipt events root escaped the vault") from exc
+    return events_root
+
+
+def _instance_dir(vault_root: Path, instance_id: str) -> Path:
+    """Return a verified direct child of the in-vault receipt events root."""
+    if not _hex32(instance_id):
+        raise ReceiptError("receipt instance id is invalid")
+    events_root = _validated_events_root(vault_root)
+    candidate = _events_root(Path(vault_root)) / instance_id
+    resolved = candidate.resolve()
+    if resolved.parent != events_root:
+        raise ReceiptError("receipt instance path escaped the events root")
+    return resolved
+
+
 def _timestamp(timestamp: str) -> tuple[str, datetime]:
     if not isinstance(timestamp, str):
         raise ReceiptError("timestamp must be an RFC3339 UTC timestamp")
@@ -104,7 +128,7 @@ def _timestamp(timestamp: str) -> tuple[str, datetime]:
 
 def _month_path(vault_root: Path, instance_id: str, timestamp: str) -> Path:
     _normalized, parsed = _timestamp(timestamp)
-    instance_dir = (_events_root(vault_root) / instance_id).resolve()
+    instance_dir = _instance_dir(vault_root, instance_id)
     target = (instance_dir / f"{parsed:%Y-%m}.jsonl").resolve()
     if target.parent != instance_dir:
         raise ReceiptError("receipt month path escaped its instance directory")
@@ -128,7 +152,10 @@ def _instance_id(conn: sqlite3.Connection) -> str:
         )
         conn.commit()
         return instance_id
-    return str(row[0])
+    instance_id = str(row[0])
+    if not _hex32(instance_id):
+        raise ReceiptError("receipt instance id is invalid")
+    return instance_id
 
 
 def _head(conn: sqlite3.Connection, instance_id: str) -> tuple[int, str, int, str, str, int]:
@@ -163,7 +190,7 @@ def _resolve_locator(vault_root: Path, instance_id: str, locator: str) -> Path:
     if not locator or Path(locator).is_absolute():
         raise ReceiptError("receipt locator must be vault-relative")
     root = Path(vault_root).resolve()
-    instance_dir = (_events_root(root) / instance_id).resolve()
+    instance_dir = _instance_dir(root, instance_id)
     target = (root / locator).resolve()
     if target.parent != instance_dir or re.fullmatch(r"\d{4}-\d{2}\.jsonl", target.name) is None:
         raise ReceiptError("receipt locator escaped its instance directory")
@@ -315,7 +342,7 @@ def _validate_event(event_type: str, phase: str, payload: Mapping[str, Any]) -> 
     if event_type in {"token_mint", "token_redeem"}:
         if set(payload) != {"token_id_digest", "bounds_fingerprint", "causation_id"}:
             raise ReceiptError("token receipts require all declared fields")
-        if not _hex(payload["token_id_digest"]) or not _hex(payload["bounds_fingerprint"]) or not _identifier_value(payload["causation_id"]):
+        if not _hex(payload["token_id_digest"]) or not _hex(payload["bounds_fingerprint"]) or not _opaque_causation_id(payload["causation_id"]):
             raise ReceiptError("token receipt fields are invalid")
     if event_type in {"deletion", "recovery"}:
         required = {
@@ -325,7 +352,7 @@ def _validate_event(event_type: str, phase: str, payload: Mapping[str, Any]) -> 
             raise ReceiptError("lifecycle receipt requires all declared fields")
         if not _hex(payload["manifest_digest"]) or not _hex(payload["exact_state_digest"]):
             raise ReceiptError("lifecycle receipt digests are invalid")
-        if not _identifiers(payload["affected_refs"]) or not payload["affected_refs"]:
+        if not _lifecycle_refs(payload["affected_refs"]) or not payload["affected_refs"]:
             raise ReceiptError("lifecycle affected refs are invalid")
         content_hashes = payload["content_hashes"]
         if (
@@ -336,7 +363,7 @@ def _validate_event(event_type: str, phase: str, payload: Mapping[str, Any]) -> 
             or len(content_hashes) != len(payload["affected_refs"])
         ):
             raise ReceiptError("lifecycle content hashes are invalid")
-        if not _identifier_value(payload["causation_id"]):
+        if not _opaque_causation_id(payload["causation_id"]):
             raise ReceiptError("lifecycle causation id is invalid")
     if event_type == "credential_block":
         if "count" not in payload or not _count(payload["count"]):
@@ -356,7 +383,7 @@ def _validate_event(event_type: str, phase: str, payload: Mapping[str, Any]) -> 
         if "affected_ids" in payload and not _identifiers(payload["affected_ids"]):
             raise ReceiptError("critical affected ids are invalid")
     if phase in {"committed", "aborted"}:
-        if not _identifier_value(payload.get("causation_id")):
+        if not _opaque_causation_id(payload.get("causation_id")):
             raise ReceiptError("critical terminal causation id is invalid")
         if "outcome" in payload and not _identifier_value(payload["outcome"]):
             raise ReceiptError("critical outcome is invalid")
@@ -370,6 +397,31 @@ def _hex(value: Any) -> bool:
     return isinstance(value, str) and _HEX64.fullmatch(value) is not None
 
 
+def _hex32(value: Any) -> bool:
+    return isinstance(value, str) and _HEX32.fullmatch(value) is not None
+
+
+def _opaque_causation_id(value: Any) -> bool:
+    return _hex32(value) or _hex(value)
+
+
+def _canonical_memory_ref(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    memory_id = memory_refs.parse_memory_ref(value)
+    return memory_id is not None and memory_refs.memory_ref(memory_id) == value
+
+
+def _valid_event_id(event_type: str, phase: str, event_id: Any) -> bool:
+    if event_type != "critical":
+        return _hex32(event_id)
+    if phase == "intent":
+        return _hex(event_id)
+    if phase in {"committed", "aborted"}:
+        return isinstance(event_id, str) and event_id == f"{event_id[:64]}:{phase}" and _hex(event_id[:64])
+    return False
+
+
 def _identifier_value(value: Any) -> bool:
     return isinstance(value, str) and _IDENTIFIER.fullmatch(value) is not None
 
@@ -380,6 +432,10 @@ def _count(value: Any) -> bool:
 
 def _identifiers(value: Any) -> bool:
     return isinstance(value, list) and len(value) <= MAX_OUTCOMES and all(_identifier_value(item) for item in value)
+
+
+def _lifecycle_refs(value: Any) -> bool:
+    return isinstance(value, list) and len(value) <= MAX_OUTCOMES and all(_canonical_memory_ref(item) for item in value)
 
 
 def _valid_outcome(value: Any) -> bool:
@@ -410,9 +466,12 @@ def _envelope_error(record: Mapping[str, Any]) -> str | None:
     required = {"schema", "event_id", "event_type", "phase", "timestamp", "instance_id", "seq", "prev", "hash", "durable"}
     if required - set(record):
         return "missing common envelope fields"
-    if record.get("schema") != SCHEMA or not isinstance(record.get("event_id"), str):
+    if (
+        record.get("schema") != SCHEMA
+        or not _valid_event_id(str(record.get("event_type")), str(record.get("phase")), record.get("event_id"))
+    ):
         return "invalid common envelope fields"
-    if not isinstance(record.get("instance_id"), str) or not isinstance(record.get("seq"), int) or isinstance(record.get("seq"), bool) or record["seq"] < 1:
+    if not _hex32(record.get("instance_id")) or not isinstance(record.get("seq"), int) or isinstance(record.get("seq"), bool) or record["seq"] < 1:
         return "invalid common envelope fields"
     if not isinstance(record.get("prev"), str) or not isinstance(record.get("hash"), str) or not isinstance(record.get("durable"), bool):
         return "invalid common envelope fields"
@@ -536,12 +595,16 @@ def append_event(
 ) -> dict[str, Any]:
     """Append one validated receipt, failing closed if its anchor is stale."""
     _validate_event(event_type, phase, payload)
+    if event_id is not None and not _valid_event_id(event_type, phase, event_id):
+        raise ReceiptError("receipt event id is not opaque for its event phase")
+    if event_type == "critical" and event_id is None:
+        raise ReceiptError("critical receipts require a deterministic event id")
     timestamp, _parsed = _timestamp(timestamp or _now())
     with _receipt_lock(vault_root):
         conn = store.open_connection(Path(vault_root))
         try:
             instance_id = _instance_id(conn)
-            instance_dir = _events_root(vault_root) / instance_id
+            instance_dir = _instance_dir(vault_root, instance_id)
             instance_dir.mkdir(parents=True, exist_ok=True)
             if _conflicted_evidence(instance_dir):
                 raise ReceiptError("conflicted receipt evidence must be resolved")
@@ -708,11 +771,13 @@ def begin_event(
 def terminal_event(vault_root: Path, event_id: str, *, phase: str, outcome: str | None = None) -> dict[str, Any]:
     if phase not in {"committed", "aborted"}:
         raise ReceiptError("terminal phase must be committed or aborted")
+    if not _hex(event_id):
+        raise ReceiptError("critical terminal requires an opaque intent event id")
     with _receipt_lock(vault_root):
         conn = store.open_connection(Path(vault_root))
         try:
             instance_id = _instance_id(conn)
-            records, issues = _chain_state(_events_root(vault_root) / instance_id)
+            records, issues = _chain_state(_instance_dir(vault_root, instance_id))
             if issues:
                 raise ReceiptError("receipt chain requires reconciliation")
             existing = [record for record in records if record.get("event_id") == event_id]
@@ -758,8 +823,9 @@ def _read_sidecar_head(
     if not path.exists():
         return None
     try:
-        conn = sqlite3.connect(f"file:{path}?mode=ro&immutable=1", uri=True)
+        conn = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)
         try:
+            conn.execute("PRAGMA query_only=ON")
             columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(receipts_head)")}
             has_locator = {"path", "byte_offset"} <= columns
             selected = (
@@ -778,8 +844,26 @@ def _read_sidecar_head(
             return int(row[0]), str(row[1]), int(row[2]), str(row[3]), locator, offset
         finally:
             conn.close()
-    except sqlite3.Error:
+    except sqlite3.Error as exc:
+        raise ReceiptError(f"receipt sidecar read error: {exc}") from exc
+
+
+def _read_sidecar_instance_id(vault_root: Path) -> str | None:
+    path = store.sidecar_path(Path(vault_root))
+    if not path.exists():
         return None
+    try:
+        conn = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)
+        try:
+            conn.execute("PRAGMA query_only=ON")
+            row = conn.execute(
+                "SELECT instance_id FROM receipt_instance WHERE singleton=1"
+            ).fetchone()
+            return None if row is None else str(row[0])
+        finally:
+            conn.close()
+    except sqlite3.Error as exc:
+        raise ReceiptError(f"receipt sidecar read error: {exc}") from exc
 
 
 def _scanned_locator_matches(
@@ -821,14 +905,45 @@ def verify_chain(vault_root: Path) -> dict[str, Any]:
     instances: dict[str, dict[str, Any]] = {}
     all_issues: list[dict[str, str]] = []
     root = _events_root(vault_root)
+    try:
+        _validated_events_root(vault_root)
+    except ReceiptError as exc:
+        return {
+            "valid": False,
+            "issues": [{"code": "events_root_escape", "path": str(root), "detail": str(exc)}],
+            "instances": instances,
+        }
     if root.exists():
+        try:
+            active_instance_id = _read_sidecar_instance_id(vault_root)
+            if active_instance_id is not None:
+                _instance_dir(vault_root, active_instance_id)
+        except ReceiptError as exc:
+            code = (
+                "invalid_instance_id"
+                if "id is invalid" in str(exc)
+                else "instance_path_escape"
+                if "instance path" in str(exc)
+                else "sidecar_read_error"
+            )
+            all_issues.append({"code": code, "path": str(root), "detail": str(exc)})
         for path in root.rglob("*"):
             if "conflicted copy" in path.name.lower():
                 all_issues.append({"code": "evidence_conflict", "path": str(path), "detail": "conflicted receipt evidence"})
-        for instance_dir in sorted(path for path in root.iterdir() if path.is_dir()):
+        for candidate in sorted(path for path in root.iterdir() if path.is_dir()):
+            try:
+                instance_dir = _instance_dir(vault_root, candidate.name)
+            except ReceiptError as exc:
+                code = "invalid_instance_id" if "id is invalid" in str(exc) else "instance_path_escape"
+                all_issues.append({"code": code, "path": str(candidate), "detail": str(exc)})
+                continue
             records, issues = _chain_state(instance_dir)
             actual_seq, actual_hash = _tail(records)
-            anchor = _read_sidecar_head(vault_root, instance_dir.name)
+            try:
+                anchor = _read_sidecar_head(vault_root, instance_dir.name)
+            except ReceiptError as exc:
+                issues.append({"code": "sidecar_read_error", "path": str(instance_dir), "detail": str(exc)})
+                anchor = None
             if anchor is not None:
                 durable_seq, durable_hash, observed_seq, observed_hash, locator, byte_offset = anchor
                 hashes = {item["seq"]: item["hash"] for item in records}
@@ -905,14 +1020,25 @@ def _reconcile_locked(
     report = verify_chain(vault_root)
     repairs: list[dict[str, Any]] = []
     root = _events_root(vault_root)
+    try:
+        _validated_events_root(vault_root)
+    except ReceiptError:
+        return {"dry_run": dry_run, "repairs": repairs, "unresolved": [], "verification": report}
     if not root.exists():
         return {"dry_run": dry_run, "repairs": repairs, "unresolved": [], "verification": report}
-    for instance_dir in sorted(path for path in root.iterdir() if path.is_dir()):
+    for candidate in sorted(path for path in root.iterdir() if path.is_dir()):
+        try:
+            instance_dir = _instance_dir(vault_root, candidate.name)
+        except ReceiptError:
+            continue
         records, issues = _chain_state(instance_dir)
         if issues:
             continue
         actual_seq, actual_hash = _tail(records)
-        anchor = _read_sidecar_head(vault_root, instance_dir.name)
+        try:
+            anchor = _read_sidecar_head(vault_root, instance_dir.name)
+        except ReceiptError:
+            continue
         if anchor is None:
             continue
         durable_seq, durable_hash, observed_seq, observed_hash, locator, byte_offset = anchor
