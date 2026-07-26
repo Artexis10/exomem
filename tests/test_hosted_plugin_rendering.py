@@ -46,6 +46,54 @@ def test_candidate_file_map_is_deterministic_without_staging_directory() -> None
     assert "claude.zip" in first
 
 
+def test_openai_locks_bind_but_do_not_expose_the_registered_app_id() -> None:
+    first_id = "asdk_app_releaseinput123"
+    second_id = "asdk_app_otherrelease456"
+    first = hosted_plugins.candidate_files(
+        REPO_ROOT, platform="openai", openai_app_id=first_id
+    )
+    second = hosted_plugins.candidate_files(
+        REPO_ROOT, platform="openai", openai_app_id=second_id
+    )
+
+    first_lock = json.loads(first["openai.lock.json"])
+    first_archive_lock = json.loads(first["openai.zip.lock.json"])
+    expected = hosted_plugins._sha256(first_id.encode("utf-8"))
+
+    assert first_lock["registered_app_id_sha256"] == expected
+    assert first_archive_lock["registered_app_id_sha256"] == expected
+    assert first_lock != json.loads(second["openai.lock.json"])
+    assert first_archive_lock != json.loads(second["openai.zip.lock.json"])
+    assert first_id not in first["openai.lock.json"].decode("utf-8")
+    assert first_id not in first["openai.zip.lock.json"].decode("utf-8")
+
+
+def test_openai_check_rejects_a_lock_reused_for_another_registered_app(tmp_path: Path) -> None:
+    root = copy_hosted_tree(tmp_path / "repo")
+    hosted_plugins.render(
+        root,
+        openai_app_id="asdk_app_releaseinput123",
+        platform="openai",
+    )
+    app = root / "plugins/hosted/generated/openai/.app.json"
+    app.write_text(
+        json.dumps(
+            {
+                "apps": {
+                    "exomem": {
+                        "id": "asdk_app_otherrelease456",
+                        "category": "productivity",
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="does not bind the registered app identity"):
+        hosted_plugins.check(root, platform="openai")
+
+
 def test_managed_regeneration_atomically_replaces_existing_candidate(tmp_path: Path) -> None:
     root = copy_hosted_tree(tmp_path / "repo")
     stale = root / "plugins/hosted/generated/claude/stale.txt"

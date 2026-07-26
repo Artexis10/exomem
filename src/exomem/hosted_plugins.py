@@ -614,10 +614,16 @@ def _archive_bytes_from_map(files: dict[str, bytes], prefix: str) -> bytes:
     )
 
 
-def _package_lock(root: Path, platform: str, artifact_root: Path) -> dict[str, Any]:
+def _package_lock(
+    root: Path,
+    platform: str,
+    artifact_root: Path,
+    *,
+    registered_app_id: str | None = None,
+) -> dict[str, Any]:
     definition = load_definition(root)
     compatibility = compatibility_manifest(root)
-    return {
+    lock = {
         "schema_version": 1,
         "platform": platform,
         "platform_schema_version": getattr(definition, f"{platform}_schema_version"),
@@ -633,6 +639,11 @@ def _package_lock(root: Path, platform: str, artifact_root: Path) -> dict[str, A
         "oauth_discovery_sha256": compatibility["oauth_discovery_sha256"],
         "artifact_sha256": _files_digest(artifact_root),
     }
+    if platform == "openai":
+        if registered_app_id is None:
+            raise ValueError("OpenAI package lock requires a registered app identity")
+        lock["registered_app_id_sha256"] = _registered_app_id_sha256(registered_app_id)
+    return lock
 
 
 def _validate_openai_app_id(value: str | None) -> str:
@@ -640,6 +651,31 @@ def _validate_openai_app_id(value: str | None) -> str:
     if not re.fullmatch(r"asdk_app_[A-Za-z0-9]+", clean):
         raise ValueError("OpenAI candidate requires a registered OpenAI app release input")
     return clean
+
+
+def _registered_app_id_sha256(value: str) -> str:
+    return _sha256(_validate_openai_app_id(value).encode("utf-8"))
+
+
+def _generated_openai_app_id(generated: Path) -> str:
+    try:
+        app_id = json.loads(
+            (generated / "openai" / ".app.json").read_text(encoding="utf-8")
+        )["apps"]["exomem"]["id"]
+    except (OSError, KeyError, TypeError, json.JSONDecodeError) as exc:
+        raise ValueError("OpenAI candidate is registration-pending or invalid") from exc
+    return _validate_openai_app_id(app_id)
+
+
+def _validate_openai_lock_identity(generated: Path, app_id: str) -> None:
+    expected = _registered_app_id_sha256(app_id)
+    for name in ("openai.lock.json", "openai.zip.lock.json"):
+        try:
+            lock = json.loads((generated / name).read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ValueError("OpenAI candidate is registration-pending or invalid") from exc
+        if lock.get("registered_app_id_sha256") != expected:
+            raise ValueError("OpenAI lock does not bind the registered app identity")
 
 
 def validate_openai_candidate(package: Path) -> None:
@@ -663,8 +699,10 @@ def validate_openai_candidate(package: Path) -> None:
         or set(app["apps"]["exomem"]) - {"id", "category"}
     ):
         raise ValueError("OpenAI app manifest must contain only the registered app mapping")
-    if not re.fullmatch(r"asdk_app_[A-Za-z0-9]+", str(app["apps"]["exomem"].get("id", ""))):
-        raise ValueError("OpenAI app manifest must contain a registered app ID")
+    try:
+        app_id = _validate_openai_app_id(app["apps"]["exomem"].get("id"))
+    except ValueError as exc:
+        raise ValueError("OpenAI app manifest must contain a registered app ID") from exc
     plugins = marketplace.get("plugins")
     if (
         set(marketplace) != {"name", "interface", "plugins"}
@@ -680,6 +718,7 @@ def validate_openai_candidate(package: Path) -> None:
     }
     if not isinstance(plugins, list) or len(plugins) != 1 or plugins[0] != expected_marketplace:
         raise ValueError("OpenAI marketplace metadata must own ON_INSTALL authentication")
+    _validate_openai_lock_identity(package.parent, app_id)
 
 
 def _interface_metadata(definition: HostedDefinition) -> dict[str, Any]:
@@ -796,7 +835,12 @@ def candidate_files(
                 )
                 + b"\n"
             )
-        lock = _package_lock(root, item, root / PLUGIN_ROOT / "generated" / item)
+        lock = _package_lock(
+            root,
+            item,
+            root / PLUGIN_ROOT / "generated" / item,
+            registered_app_id=app_id,
+        )
         lock["artifact_sha256"] = _map_digest(files, prefix)
         files[f"{item}.lock.json"] = _canonical_json(lock) + b"\n"
         archive_bytes = _archive_bytes_from_map(files, prefix)
@@ -806,6 +850,11 @@ def candidate_files(
                 {
                     "platform": item,
                     "archive_sha256": _sha256(archive_bytes),
+                    **(
+                        {"registered_app_id_sha256": _registered_app_id_sha256(app_id)}
+                        if item == "openai"
+                        else {}
+                    ),
                 }
             )
             + b"\n"
@@ -893,13 +942,13 @@ def check(
         raise ValueError("unsupported platform")
     selected = PLATFORMS if platform == "all" else (platform,)
     expected = root / PLUGIN_ROOT / "generated"
-    if "openai" in selected and openai_app_id is None:
-        try:
-            openai_app_id = json.loads(
-                (expected / "openai" / ".app.json").read_text(encoding="utf-8")
-            )["apps"]["exomem"]["id"]
-        except (OSError, KeyError, TypeError, json.JSONDecodeError) as exc:
-            raise ValueError("OpenAI candidate is registration-pending or invalid") from exc
+    if "openai" in selected:
+        generated_app_id = _generated_openai_app_id(expected)
+        if openai_app_id is None:
+            openai_app_id = generated_app_id
+        elif _validate_openai_app_id(openai_app_id) != generated_app_id:
+            raise ValueError("OpenAI candidate app identity does not match the requested release")
+        _validate_openai_lock_identity(expected, generated_app_id)
     expected_files = {
         path.relative_to(expected).as_posix(): path.read_bytes()
         for path in expected.rglob("*")
@@ -953,9 +1002,17 @@ def archive(
         archive_path = output_root / f"{selected_platform}.zip"
         archive_bytes = _archive_bytes(package)
         _write_bytes_atomic(archive_path, archive_bytes)
+        lock = {
+            "platform": selected_platform,
+            "archive_sha256": _sha256(archive_bytes),
+        }
+        if selected_platform == "openai":
+            lock["registered_app_id_sha256"] = _registered_app_id_sha256(
+                _generated_openai_app_id(root / PLUGIN_ROOT / "generated")
+            )
         _write_json_atomic(
             output_root / f"{selected_platform}.zip.lock.json",
-            {"platform": selected_platform, "archive_sha256": _sha256(archive_bytes)},
+            lock,
         )
     return output_root
 
