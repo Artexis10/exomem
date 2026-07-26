@@ -201,8 +201,17 @@ def _iter_all_files(root: Path):
     if not root.is_dir():
         return
     for p in sorted(root.rglob("*")):
-        if p.is_file():
+        if p.is_file() and not _is_operational_state(root, p):
             yield p
+
+
+def _is_operational_state(root: Path, path: Path) -> bool:
+    """Receipt evidence is governed state, never a policy input or warning."""
+    try:
+        parts = path.relative_to(root).parts
+    except ValueError:
+        return False
+    return bool(parts) and parts[0] in {"events", "deletion-tombstones"}
 
 
 def _iter_policy_files(root: Path) -> list[tuple[str, Path]]:

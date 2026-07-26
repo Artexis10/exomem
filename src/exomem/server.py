@@ -384,7 +384,10 @@ def _gated_adoption_egress(vault_root: Path, command_name: str, payload: Any) ->
         # ordinary postfilter for credentials.
         if isinstance(payload, str):
             payload = egress_module.redact_withheld_references(vault_root, payload)
-        return egress_module.postfilter(command_name, payload, vault_root)
+        with egress_module.disclosure_boundary(vault_root, command_name) as collector:
+            result = egress_module.postfilter(command_name, payload, vault_root)
+            egress_module.emit_boundary_receipt(collector)
+            return result
 
 
 def register_adoption_mcp(mcp: FastMCP, *, vault_root: Path) -> None:

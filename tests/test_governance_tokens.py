@@ -18,6 +18,7 @@ ceiling is, so both refuse to mint.
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import time
 from pathlib import Path
@@ -97,6 +98,17 @@ def _mint(vault: Path, **kw) -> str:
     return tokens.mint(vault, **kw)
 
 
+def _receipt_records(vault: Path) -> list[dict[str, object]]:
+    events = _gov(vault) / "events"
+    if not events.exists():
+        return []
+    return [
+        json.loads(line)
+        for path in sorted(events.rglob("*.jsonl"))
+        for line in path.read_text(encoding="utf-8").splitlines()
+    ]
+
+
 # --------------------------------------------------------------------------
 # Wire form and mint/verify
 # --------------------------------------------------------------------------
@@ -111,6 +123,23 @@ def test_mint_produces_the_wh1_wire_form(vault: Path) -> None:
     assert parts[1] and parts[2].isdigit() and parts[3]
     # The wire form carries no path, no content, no level.
     assert RESTRICTED_PATH not in token
+
+
+def test_token_mint_and_redeem_are_receipted_without_token_bytes(vault: Path) -> None:
+    govern(vault)
+    token = _mint(vault)
+    minted = _receipt_records(vault)
+    assert [record["event_type"] for record in minted] == ["token_mint"]
+    assert token not in json.dumps(minted)
+    assert minted[0]["token_id_digest"] != token.split(".")[1]
+
+    tokens.redeem(vault, token, audience=EXTERNAL)
+    events = _receipt_records(vault)
+    assert [record["event_type"] for record in events] == [
+        "token_mint", "critical", "token_redeem", "critical"
+    ]
+    assert [record["phase"] for record in events[1:]] == ["intent", "recorded", "committed"]
+    assert token not in json.dumps(events)
 
 
 def test_verify_round_trips_the_bound_claims(vault: Path) -> None:

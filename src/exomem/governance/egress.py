@@ -33,9 +33,13 @@ import inspect
 import logging
 import os
 import re
+import sqlite3
 import textwrap
+import uuid
 from collections import OrderedDict
 from collections.abc import Iterable, Mapping, Sequence
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -46,7 +50,7 @@ from ..find_types import Hit, SemanticUnitHit
 from ..kbdir import kb_dirname
 from . import membership as membership_module
 from . import policy as policy_module
-from . import scrubber, tokens
+from . import receipts, scrubber, tokens
 from .decisions import Decision, decide
 from .policy import DISCLOSURE_MAX, DISCLOSURE_MIN, Policy
 from .principal import OWNER_AUDIENCE, RequestPrincipal, effective_principal
@@ -55,6 +59,118 @@ log = logging.getLogger(__name__)
 
 #: Sentinel for a memo that legitimately caches .
 _UNSET = object()
+
+
+class ReceiptUnavailableError(RuntimeError):
+    """Publicly safe failure when a governed representation lacks evidence."""
+
+    def __init__(self) -> None:
+        super().__init__("GOVERNANCE_RECEIPT_UNAVAILABLE: retry the request")
+
+
+@dataclass
+class DisclosureOutcome:
+    """A content-free decision made while shaping one boundary response."""
+
+    value: dict[str, Any]
+
+
+@dataclass
+class DisclosureCollector:
+    vault_root: Path
+    boundary_id: str
+    command_name: str
+    outcomes: list[DisclosureOutcome] = field(default_factory=list)
+    credential_redactions: int = 0
+
+
+_DISCLOSURE_COLLECTOR: ContextVar[DisclosureCollector | None] = ContextVar(
+    "exomem_disclosure_collector", default=None
+)
+
+
+@contextmanager
+def disclosure_boundary(vault_root: Path, command_name: str):
+    """Collect one top-level read's decisions and emit only on its success."""
+    collector = DisclosureCollector(Path(vault_root), uuid.uuid4().hex, command_name)
+    token = _DISCLOSURE_COLLECTOR.set(collector)
+    try:
+        yield collector
+    finally:
+        _DISCLOSURE_COLLECTOR.reset(token)
+
+
+def _collector() -> DisclosureCollector | None:
+    return _DISCLOSURE_COLLECTOR.get()
+
+
+def _record_outcome(value: Mapping[str, Any]) -> None:
+    collector = _collector()
+    if collector is None:
+        return
+    collector.outcomes.append(DisclosureOutcome(dict(value)))
+
+
+def _record_credential_block(count: int = 1) -> None:
+    collector = _collector()
+    if collector is not None:
+        collector.credential_redactions += count
+
+
+def _record_blocked_outcome(audience: str) -> None:
+    value: dict[str, Any] = {"decision": "blocked"}
+    if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}", audience):
+        value["audience"] = audience
+    _record_outcome(value)
+
+
+def _outcome_for_decision(
+    vault_root: Path,
+    rel_path: str,
+    *,
+    decision: Decision | None,
+    policy: Policy,
+    audience: str,
+    outcome: str,
+) -> None:
+    """Project a decision into the receipt union without carrying a path/title."""
+    value: dict[str, Any] = {"decision": outcome}
+    if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}", audience):
+        value["audience"] = audience
+    if decision is not None:
+        value["level"] = decision.level
+        if policy.fingerprint != "blocked":
+            value["policy_fingerprint"] = policy.fingerprint
+        if decision.scope_ids:
+            value["scope_ids"] = list(decision.scope_ids)
+    try:
+        target = Path(vault_root) / rel_path
+        value["content_hash"] = hashlib.sha256(target.read_bytes()).hexdigest()
+        value["size"] = target.stat().st_size
+    except OSError:
+        pass
+    _record_outcome(value)
+
+
+def emit_boundary_receipt(collector: DisclosureCollector) -> None:
+    """Synchronously append evidence after the final representation is fixed."""
+    try:
+        if collector.credential_redactions:
+            receipts.append_event(
+                collector.vault_root,
+                event_type="credential_block",
+                event_id=collector.boundary_id,
+                payload={"count": collector.credential_redactions, "redaction_count": collector.credential_redactions},
+            )
+        elif collector.outcomes:
+            receipts.append_event(
+                collector.vault_root,
+                event_type="disclosure",
+                event_id=collector.boundary_id,
+                payload={"outcomes": [outcome.value for outcome in collector.outcomes]},
+            )
+    except (receipts.ReceiptError, OSError, sqlite3.Error) as exc:
+        raise ReceiptUnavailableError() from exc
 
 # ---------------------------------------------------------------------------
 # The disclosure ladder
@@ -756,6 +872,8 @@ def annotate_hits(
     #     should have resolved and did not. Both are DISCLOSURE_MIN for every
     #     item, and L0 is silent: no notices, no count, no marker.
     if policy.blocked or not who.resolved:
+        for _hit in hits:
+            _record_blocked_outcome(who.audience_id)
         return AnnotatedHits(
             hits=[],
             notices=[],
@@ -792,7 +910,16 @@ def annotate_hits(
             # The page vanished or would not parse: it cannot be shown to
             # have been permitted, so it is withheld rather than released.
             withheld.add(rel_path)
+            _outcome_for_decision(
+                vault_root, rel_path, decision=None, policy=policy,
+                audience=who.audience_id, outcome="withheld",
+            )
             continue
+        _outcome_for_decision(
+            vault_root, rel_path, decision=decision, policy=policy,
+            audience=who.audience_id,
+            outcome="released" if decision.level >= RELEASE_FLOOR else "withheld",
+        )
         if decision.level >= RELEASE_FLOOR:
             hit.decision = decision
             permitted.append(hit)
@@ -946,6 +1073,7 @@ def guard_graph_context(
     if policy.empty:
         return payload
     if policy.blocked or not who.resolved:
+        _record_blocked_outcome(who.audience_id)
         payload["seeds"] = []
         payload["nodes"] = []
         payload["edges"] = []
@@ -975,6 +1103,18 @@ def guard_graph_context(
         is None
         or decision.level < RELEASE_FLOOR
     }
+    for rel_path in candidate_paths:
+        _outcome_for_decision(
+            vault_root,
+            rel_path,
+            decision=_decide_path(
+                vault_root, rel_path, policy=policy, audience=who.audience_id,
+                purpose=declared_purpose, grants_hash=grants_hash,
+            ),
+            policy=policy,
+            audience=who.audience_id,
+            outcome="withheld" if rel_path in withheld else "released",
+        )
     return guard_seed(payload, frozenset(withheld))
 
 
@@ -1035,6 +1175,7 @@ def annotate_page(
     if policy.empty:
         return page
     if policy.blocked or not who.resolved:
+        _record_blocked_outcome(who.audience_id)
         return None
 
     rel_path = str(page.get("path") or "")
@@ -1051,7 +1192,17 @@ def annotate_page(
         grants_hash=grants_hash,
     )
     if decision is None or decision.level <= LEVEL_NONE:
+        _outcome_for_decision(
+            vault_root, rel_path, decision=decision, policy=policy,
+            audience=who.audience_id, outcome="withheld",
+        )
         return None
+
+    _outcome_for_decision(
+        vault_root, rel_path, decision=decision, policy=policy,
+        audience=who.audience_id,
+        outcome="released" if decision.level >= RELEASE_FLOOR else "withheld",
+    )
 
     level = LEVEL_ABSTRACT if decision.level == LEVEL_EXCERPT_REDACTED else decision.level
     if level < RELEASE_FLOOR:
@@ -1286,9 +1437,13 @@ def postfilter(command_name: str, result: Any, vault_root: Path) -> Any:
     if not scrubber.enabled(vault_root):
         return result
     if hasattr(result, "content") and hasattr(result, "structured_content"):
-        cleaned, _ = _scrub_tool_result(result, vault_root)
+        cleaned, blocked = _scrub_tool_result(result, vault_root)
+        if blocked:
+            _record_credential_block()
         return cleaned
-    cleaned, _ = scrubber.scrub_value(result)
+    cleaned, blocked = scrubber.scrub_value(result)
+    if blocked:
+        _record_credential_block()
     return cleaned
 
 
@@ -1391,6 +1546,40 @@ _COMMAND_PROJECTOR_KIND: dict[str, str] = {
     "query_data": "structure",
     "adopt": "structure",
 }
+
+# Receipt adapters follow the same default-deny registry as serializers.  A
+# new mode cannot inherit a command's name and silently skip evidence: it must
+# name the reduction that contributes its content-free outcome.
+_COMMAND_OUTCOME_ADAPTER: dict[str, str] = {
+    **{name: "hits" for name in ("find", "search", "suggest_links", "suggest_relations")},
+    **{name: "page" for name in ("get", "fetch", "review_item_context")},
+    "graph_context": "graph",
+    "get_video_frames": "frames",
+    **{
+        name: "structure"
+        for name in (
+            "attention", "audit", "overview", "list_directory", "list_inbound_links",
+            "evolution", "propose_compilation", "provenance_report", "query_data", "adopt",
+        )
+    },
+}
+
+
+def unrecorded_commands(registry: Mapping[str, Any]) -> tuple[str, ...]:
+    if not isinstance(registry, Mapping):
+        raise TypeError("unrecorded_commands expects a {name: command} mapping")
+    return tuple(
+        sorted(name for name in content_returning_commands(registry) if name not in _COMMAND_OUTCOME_ADAPTER)
+    )
+
+
+def assert_outcomes_registered(registry: Mapping[str, Any]) -> None:
+    missing = unrecorded_commands(registry)
+    if missing:
+        raise RuntimeError(
+            "RECEIPT_OUTCOME_MISSING: content-returning commands without a "
+            f"receipt outcome adapter: {', '.join(missing)}"
+        )
 
 
 def content_returning_commands(registry: Mapping[str, Any]) -> tuple[str, ...]:
@@ -1577,6 +1766,7 @@ def release_level_for(
     *,
     principal: RequestPrincipal | None = None,
     purpose: str | None = None,
+    receipt_decision: str | None = None,
 ) -> int | None:
     """The disclosure ceiling for one item, or `None` when it cannot be decided.
 
@@ -1592,6 +1782,7 @@ def release_level_for(
         return DISCLOSURE_MAX
     who = principal if principal is not None else effective_principal()
     if policy.blocked or not who.resolved:
+        _record_blocked_outcome(who.audience_id)
         return DISCLOSURE_MIN
     decision = _decide_path(
         vault_root,
@@ -1601,7 +1792,46 @@ def release_level_for(
         purpose=purpose if purpose is not None else who.purpose,
         grants_hash=_grants_hash(policy),
     )
-    return None if decision is None else decision.level
+    level = None if decision is None else decision.level
+    _outcome_for_decision(
+        vault_root,
+        rel_path,
+        decision=decision,
+        policy=policy,
+        audience=who.audience_id,
+        outcome=(
+            receipt_decision
+            if level is not None and level >= RELEASE_FLOOR and receipt_decision is not None
+            else "released" if level is not None and level >= RELEASE_FLOOR else "withheld"
+        ),
+    )
+    return level
+
+
+def _binary_boundary(
+    vault_root: Path,
+    rel_path: str,
+    *,
+    boundary_name: str,
+    minimum_level: int,
+    principal: RequestPrincipal | None,
+    purpose: str | None,
+) -> bool:
+    """Own direct download/frame authorization when no command dispatcher does."""
+    if _collector() is not None:
+        level = release_level_for(
+            vault_root, rel_path, principal=principal, purpose=purpose,
+            receipt_decision="release_authorized",
+        )
+        return level is not None and level >= minimum_level
+    with disclosure_boundary(vault_root, boundary_name) as collector:
+        level = release_level_for(
+            vault_root, rel_path, principal=principal, purpose=purpose,
+            receipt_decision="release_authorized",
+        )
+        allowed = level is not None and level >= minimum_level
+        emit_boundary_receipt(collector)
+        return allowed
 
 
 #: What replaces a withheld reference inside free text. Fixed, like the
@@ -1663,6 +1893,10 @@ def redact_withheld_references(
             grants_hash=grants_hash,
         )
         allowed = decision is not None and decision.level >= RELEASE_FLOOR
+        _outcome_for_decision(
+            vault_root, rel_path, decision=decision, policy=policy,
+            audience=who.audience_id, outcome="released" if allowed else "withheld",
+        )
         verdicts[rel_path] = allowed
         return allowed
 
@@ -1750,6 +1984,7 @@ def release_walk_filter(
 
     def keep(rel_path: str) -> bool:
         if fail_closed:
+            _record_blocked_outcome(who.audience_id)
             return False
         cached = verdicts.get(rel_path)
         if cached is not None:
@@ -1763,6 +1998,10 @@ def release_walk_filter(
             grants_hash=grants_hash,
         )
         allowed = decision is not None and decision.level >= RELEASE_FLOOR
+        _outcome_for_decision(
+            vault_root, rel_path, decision=decision, policy=policy,
+            audience=who.audience_id, outcome="released" if allowed else "withheld",
+        )
         verdicts[rel_path] = allowed
         return allowed
 
@@ -1783,10 +2022,10 @@ def release_allows_download(
     original would let any ceiling be escaped by asking for the artifact
     instead of the text.
     """
-    level = release_level_for(
-        vault_root, rel_path, principal=principal, purpose=purpose
+    return _binary_boundary(
+        vault_root, rel_path, boundary_name="download", minimum_level=LEVEL_FULL,
+        principal=principal, purpose=purpose,
     )
-    return level is not None and level >= LEVEL_FULL
 
 
 def release_allows_frames(
@@ -1803,10 +2042,10 @@ def release_allows_frames(
     same floor rather than requiring full disclosure. Below it there is no
     'abstracted frame', so the answer is a refusal, not a degraded render.
     """
-    level = release_level_for(
-        vault_root, rel_path, principal=principal, purpose=purpose
+    return _binary_boundary(
+        vault_root, rel_path, boundary_name="video_frame", minimum_level=RELEASE_FLOOR,
+        principal=principal, purpose=purpose,
     )
-    return level is not None and level >= RELEASE_FLOOR
 
 
 # ---------------------------------------------------------------------------
@@ -2035,6 +2274,14 @@ def filter_withheld_entries(
             grants_hash=grants_hash,
         )
         allowed = decision is not None and decision.level >= RELEASE_FLOOR
+        _outcome_for_decision(
+            vault_root,
+            rel_path,
+            decision=decision,
+            policy=policy,
+            audience=who.audience_id,
+            outcome="released" if allowed else "withheld",
+        )
         verdicts[rel_path] = allowed
         return allowed
 
@@ -2137,6 +2384,7 @@ def filter_withheld_entries(
             return True
         for rel_path in candidates:
             if fail_closed:
+                _record_blocked_outcome(who.audience_id)
                 return False
             # Decide the REAL path the reference resolves to, not the spelling
             # it happened to use — otherwise a `.MD` or percent-encoded variant

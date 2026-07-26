@@ -20,7 +20,7 @@ import pytest
 from exomem import commands
 from exomem import find as find_module
 from exomem.find_types import GraphProvenance, Hit
-from exomem.governance import egress
+from exomem.governance import egress, receipts
 from exomem.governance.principal import RequestPrincipal, request_scope
 
 # --------------------------------------------------------------------------
@@ -128,6 +128,17 @@ def _reset_caches() -> None:
     membership.clear_memo()
     egress.clear_decision_memo()
     find_module.clear_cache()
+
+
+def _receipt_records(vault: Path) -> list[dict[str, object]]:
+    events = _gov_dir(vault) / "events"
+    if not events.exists():
+        return []
+    return [
+        json.loads(line)
+        for path in sorted(events.rglob("*.jsonl"))
+        for line in path.read_text(encoding="utf-8").splitlines()
+    ]
 
 
 # --------------------------------------------------------------------------
@@ -1236,6 +1247,100 @@ def test_dispatcher_backstop_drops_withheld_entries(vault: Path) -> None:
     with request_scope(_external()):
         out = egress.postfilter("list_directory", payload, vault)
     assert [e["path"] for e in out["entries"]] == [OPEN_PATH]
+
+
+def test_dispatcher_emits_one_plaintext_free_receipt_after_final_governed_representation(
+    vault: Path,
+) -> None:
+    """The owning dispatcher, not the reusable postfilter, records egress."""
+    _restricted_vault(vault)
+    with request_scope(_external()):
+        _through_dispatcher(vault, "list_directory", path="Knowledge Base/Notes/Patterns")
+
+    records = _receipt_records(vault)
+    assert len(records) == 1
+    record = records[0]
+    assert record["event_type"] == "disclosure"
+    assert record["phase"] == "recorded"
+    outcomes = record["outcomes"]
+    assert isinstance(outcomes, list) and outcomes
+    assert outcomes[0]["decision"] == "withheld"
+    serialized = json.dumps(record)
+    assert "kill-switch-for-risky-releases" not in serialized
+    assert "Patterns" not in serialized
+
+
+def test_postfilter_second_pass_is_receipt_silent(vault: Path) -> None:
+    """MCP runs this filter twice, so it cannot own receipt emission."""
+    _restricted_vault(vault)
+    payload = {"entries": [{"path": RESTRICTED_PATH}]}
+    with request_scope(_external()):
+        egress.postfilter("list_directory", payload, vault)
+        egress.postfilter("list_directory", payload, vault)
+    assert _receipt_records(vault) == []
+
+
+def test_ungoverned_dispatcher_recall_writes_no_receipt(vault: Path) -> None:
+    with request_scope(_external()):
+        _through_dispatcher(vault, "list_directory", path="Knowledge Base/Notes/Patterns")
+    assert _receipt_records(vault) == []
+
+
+def test_external_dispatcher_retries_mint_distinct_boundary_ids(vault: Path) -> None:
+    _restricted_vault(vault)
+    with request_scope(_external()):
+        _through_dispatcher(vault, "list_directory", path="Knowledge Base/Notes/Patterns")
+        _through_dispatcher(vault, "list_directory", path="Knowledge Base/Notes/Patterns")
+    records = _receipt_records(vault)
+    assert len(records) == 2
+    assert records[0]["event_id"] != records[1]["event_id"]
+
+
+def test_governed_dispatcher_fails_closed_when_receipt_append_fails(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _restricted_vault(vault)
+
+    def fail(*_args, **_kwargs):
+        raise receipts.ReceiptError("sidecar unavailable")
+
+    monkeypatch.setattr(receipts, "append_event", fail)
+    with request_scope(_external()):
+        with pytest.raises(egress.ReceiptUnavailableError, match="retry"):
+            _through_dispatcher(vault, "list_directory", path="Knowledge Base/Notes/Patterns")
+    assert _receipt_records(vault) == []
+
+
+def test_registry_refuses_new_content_command_without_receipt_adapter() -> None:
+    registry = {"future_mode": object()}
+    with pytest.raises(RuntimeError, match="RECEIPT_OUTCOME_MISSING"):
+        egress.assert_outcomes_registered(registry)
+
+
+def test_every_content_command_declares_a_receipt_outcome_adapter() -> None:
+    registry = {command.name: command for command in commands.COMMANDS}
+    assert egress.unrecorded_commands(registry) == ()
+
+
+def test_credential_block_is_receipted_without_a_policy(vault: Path) -> None:
+    secret = "Authorization: Bearer sk-proj-9dQm2XvKpLzR4wTnBcYeF8aHgJ1sVuNiO0rEyMdA"
+    with egress.disclosure_boundary(vault, "test") as collector:
+        cleaned = egress.postfilter("test", {"value": secret}, vault)
+        egress.emit_boundary_receipt(collector)
+    records = _receipt_records(vault)
+    assert cleaned["value"] != secret
+    assert len(records) == 1 and records[0]["event_type"] == "credential_block"
+    assert secret not in json.dumps(records)
+
+
+def test_direct_download_boundary_emits_a_single_authorization_receipt(vault: Path) -> None:
+    write_scope(vault)
+    write_rule(vault, ceiling=egress.LEVEL_FULL)
+    assert egress.release_allows_download(vault, RESTRICTED_PATH, principal=_external())
+    records = _receipt_records(vault)
+    assert len(records) == 1
+    assert records[0]["event_type"] == "disclosure"
+    assert records[0]["outcomes"][0]["decision"] == "release_authorized"
 
 
 def test_structure_surfaces_are_registered_content_returning() -> None:

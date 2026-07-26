@@ -42,7 +42,7 @@ from pathlib import Path
 from typing import Any
 
 from . import policy as policy_module
-from . import store
+from . import receipts, store
 from .policy import DISCLOSURE_MAX, DISCLOSURE_MIN
 
 TOKEN_VERSION = "wh1"
@@ -176,6 +176,37 @@ def _sign(
     return hmac.new(key, payload, hashlib.sha256).hexdigest()
 
 
+def _token_id_digest(jti: str) -> str:
+    return hashlib.sha256(jti.encode("ascii")).hexdigest()
+
+
+def _bounds_fingerprint(claim: WithholdClaim) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            {
+                "audience": claim.audience,
+                "fingerprints": sorted(claim.fingerprints),
+                "max_level": claim.max_level,
+                "expires_at": claim.expires_at,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _record_mint(vault_root: Path, claim: WithholdClaim) -> None:
+    receipts.append_event(
+        vault_root,
+        event_type="token_mint",
+        payload={
+            "token_id_digest": _token_id_digest(claim.jti),
+            "bounds_fingerprint": _bounds_fingerprint(claim),
+            "causation_id": uuid.uuid4().hex,
+        },
+    )
+
+
 def _parse(token: str) -> tuple[str, int, str]:
     parts = str(token or "").split(".")
     if len(parts) != 4 or parts[0] != TOKEN_VERSION:
@@ -259,6 +290,21 @@ def mint(
         conn.commit()
     finally:
         conn.close()
+    claim = WithholdClaim(
+        jti=jti,
+        audience=audience,
+        max_level=int(max_level),
+        fingerprints=fingerprints,
+        expires_at=expires_at,
+        paths=ordered,
+    )
+    try:
+        _record_mint(vault_root, claim)
+    except (receipts.ReceiptError, OSError, sqlite3.Error) as exc:
+        raise WithholdTokenError(
+            "TOKEN_RECEIPT_UNAVAILABLE",
+            "the escalation token could not be evidenced; retry the request",
+        ) from exc
     return f"{TOKEN_VERSION}.{jti}.{expires_at}.{signature}"
 
 
@@ -387,6 +433,31 @@ def redeem(
     claim = verify(vault_root, token, audience=audience, now=now)
     _check_content(vault_root, claim)
 
+    token_digest = _token_id_digest(claim.jti)
+    intent = receipts.begin_event(
+        vault_root,
+        operation="token_redeem",
+        prior=hashlib.sha256(f"unconsumed:{token_digest}".encode("ascii")).hexdigest(),
+        target=hashlib.sha256(f"consumed:{token_digest}".encode("ascii")).hexdigest(),
+        affected_ids=[token_digest],
+    )
+    try:
+        receipts.append_event(
+            vault_root,
+            event_type="token_redeem",
+            payload={
+                "token_id_digest": token_digest,
+                "bounds_fingerprint": _bounds_fingerprint(claim),
+                "causation_id": str(intent["event_id"]),
+            },
+            critical=True,
+        )
+    except (receipts.ReceiptError, OSError, sqlite3.Error) as exc:
+        raise WithholdTokenError(
+            "TOKEN_RECEIPT_UNAVAILABLE",
+            "the token could not be evidenced for consumption; retry the request",
+        ) from exc
+
     moment = time.time() if now is None else float(now)
     conn = _open(vault_root)
     try:
@@ -416,6 +487,13 @@ def redeem(
             raise
     finally:
         conn.close()
+    try:
+        receipts.commit_event(vault_root, str(intent["event_id"]), outcome="consumed")
+    except (receipts.ReceiptError, OSError, sqlite3.Error) as exc:
+        raise WithholdTokenError(
+            "TOKEN_RECEIPT_UNAVAILABLE",
+            "the token was consumed but its terminal receipt could not be recorded",
+        ) from exc
     return claim
 
 

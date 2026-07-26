@@ -5924,6 +5924,7 @@ COMMANDS: tuple[Command, ...] = _build_commands()
 #: have caught `fetch` and the eight structure surfaces on the day each was
 #: written, instead of at security review.
 egress_module.assert_projectors_registered({command.name: command for command in COMMANDS})
+egress_module.assert_outcomes_registered({command.name: command for command in COMMANDS})
 
 _PRODUCT_SPEC: tuple[tuple, ...] = (
     (

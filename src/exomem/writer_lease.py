@@ -1838,27 +1838,37 @@ def invoke_command(
 
         kwargs = normalize_edit_surface_arguments(kwargs)
 
-    result = get_manager().invoke(
-        command,
-        injected,
-        kwargs,
-        read_only=invocation_is_read_only(command, kwargs),
-        idempotency_key=idempotency_key,
-        public_idempotency_key=public_idempotency_key,
-        idempotency_principal_scope=idempotency_principal_scope,
-        implicit_idempotency_scope=implicit_idempotency_scope,
-        mutation_request_id=mutation_request_id,
-    )
     # Terminal egress filter (design D1). THIS is the one dispatcher shared by
     # MCP, REST, hosted, and CLI — `command_surface.bind_vault` covers MCP
     # only, and the `EXOMEM_RETRIEVE_INJECT` hook deliberately reaches memory
     # over REST-then-CLI, the two paths that skip it. Putting the scrubber and
     # the withheld cross-check here removes that whole bypass class.
-    from .governance.egress import is_vault_root, postfilter
+    from .governance.egress import (
+        disclosure_boundary,
+        emit_boundary_receipt,
+        is_vault_root,
+        postfilter,
+    )
 
-    if injected and is_vault_root(injected[0]):
-        result = postfilter(command.name, result, injected[0])
-    return result
+    def _invoke() -> Any:
+        return get_manager().invoke(
+            command,
+            injected,
+            kwargs,
+            read_only=invocation_is_read_only(command, kwargs),
+            idempotency_key=idempotency_key,
+            public_idempotency_key=public_idempotency_key,
+            idempotency_principal_scope=idempotency_principal_scope,
+            implicit_idempotency_scope=implicit_idempotency_scope,
+            mutation_request_id=mutation_request_id,
+        )
+
+    if not injected or not is_vault_root(injected[0]):
+        return _invoke()
+    with disclosure_boundary(injected[0], command.name) as collector:
+        result = postfilter(command.name, _invoke(), injected[0])
+        emit_boundary_receipt(collector)
+        return result
 
 
 def coordination_status(

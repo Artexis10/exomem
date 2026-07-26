@@ -11,7 +11,7 @@ import os
 import time
 from pathlib import Path
 
-from exomem.governance import policy
+from exomem.governance import policy, receipts
 
 
 def _write(vault: Path, kind: str, name: str, text: str) -> Path:
@@ -284,6 +284,46 @@ def test_scope_without_a_path_selector_warns_that_media_is_uncovered(
     # A warning must not refuse the compile.
     assert pol.blocked is False
     assert "01ARZ3NDEKTSV4RRFFQ69G5FAV" in pol.scopes
+
+
+def test_operational_evidence_does_not_invalidate_policy_cache_or_enforcement(vault: Path) -> None:
+    gov = vault / "Knowledge Base" / "_Governance"
+    (gov / "scopes").mkdir(parents=True, exist_ok=True)
+    (gov / "scopes" / "confidential.yaml").write_text(
+        "governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FAV\n"
+        'name: Confidential\npaths: ["Notes/**"]\n',
+        encoding="utf-8",
+    )
+    before = policy.load(vault)
+    (gov / "events" / ("f" * 32)).mkdir(parents=True, exist_ok=True)
+    (gov / "events" / ("f" * 32) / "2026-07.jsonl").write_text("{}\n", encoding="utf-8")
+    (gov / "deletion-tombstones" / "batch.json").parent.mkdir(parents=True, exist_ok=True)
+    (gov / "deletion-tombstones" / "batch.json").write_text("{}\n", encoding="utf-8")
+    assert policy.load(vault) is before
+    policy._CACHE.clear()
+    after = policy.load(vault)
+    assert after.fingerprint == before.fingerprint
+    assert not [f for f in after.findings if f["code"] == "unknown_file"]
+
+
+def test_receipt_conflict_does_not_disable_active_policy_but_blocks_append(vault: Path) -> None:
+    _write(vault, "scopes", "acmeco", _SCOPE_A)
+    _write(vault, "rules", "external", _RULE_A)
+    active = policy.load(vault)
+    receipts.append_event(vault, event_type="disclosure", payload={"outcomes": []})
+    events = vault / "Knowledge Base" / "_Governance" / "events"
+    (events / "conflicted copy.jsonl").write_text("{}\n", encoding="utf-8")
+    policy._CACHE.clear()
+    assert policy.load(vault).fingerprint == active.fingerprint
+    try:
+        receipts.append_event(vault, event_type="disclosure", payload={"outcomes": []})
+    except receipts.ReceiptError as exc:
+        assert "conflicted receipt evidence" in str(exc)
+    else:  # pragma: no cover - fail closed is the assertion
+        raise AssertionError("conflicted receipt evidence was appended")
+    assert any(
+        issue["code"] == "evidence_conflict" for issue in receipts.verify_chain(vault)["issues"]
+    )
 
 
 def test_scope_with_a_path_selector_emits_no_media_warning(vault: Path) -> None:

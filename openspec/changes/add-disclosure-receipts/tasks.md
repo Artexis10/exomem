@@ -18,7 +18,7 @@
 
 ## 2. Existing egress and token wiring
 
-- [ ] 2.1 Red tests cover once-only, plaintext-free outcomes for search,
+- [x] 2.1 Red tests cover once-only, plaintext-free outcomes for search,
       direct page reads, graph, overview/count reductions, structure/review
       payloads, downloads, video frames, and MCP prompt/resources; prove MCP's
       second filter pass and nested alias calls emit nothing independently,
@@ -27,21 +27,21 @@
       closed instead of leaving unreceipted. Prove internal anchor retry reuses
       the invocation's minted boundary id while external CLI/REST/MCP retries
       mint new ids even for identical arguments/shared transport ids.
-- [ ] 2.2 Implement a content-free `DisclosureOutcome` collector in
+- [x] 2.2 Implement a content-free `DisclosureOutcome` collector in
       `governance/egress.py` and explicit final-representation adapters at every
       existing operation/mode reduction and non-command boundary. Keep nested
       aliases and `postfilter` side-effect-free; streaming routes emit
       `release_authorized` only. Add a mutation test showing a new mode inside an
       existing command fails registry-derived coverage.
-- [ ] 2.3 Red tests cover withhold-token mint and receipt-first consume events,
+- [x] 2.3 Red tests cover withhold-token mint and receipt-first consume events,
       distinct event types/causation ids for token redemption versus future
       grant creation, and always-on credential blocking without policy.
-- [ ] 2.4 Wire token mint/redeem in `governance/tokens.py`; never record token
+- [x] 2.4 Wire token mint/redeem in `governance/tokens.py`; never record token
       bytes, credentials, released content, or human scope labels.
-- [ ] 2.5 Define and validate common-envelope plus event-specific schemas for
+- [x] 2.5 Define and validate common-envelope plus event-specific schemas for
       disclosure/credential/token/deletion/critical records; required fields are
       type-correct and inapplicable policy/scope fields remain optional.
-- [ ] 2.6 Red tests prove events/tombstones do not change policy fingerprints or
+- [x] 2.6 Red tests prove events/tombstones do not change policy fingerprints or
       warm-cache identity; cold load ignores them; a conflicted event file leaves
       policy enforcement active but makes receipt append fail closed and receipt
       audit report the conflict. Keep manual policy YAML behavior unchanged.
