@@ -243,6 +243,100 @@ def test_check_cardinality_exactly_two_required():
     assert crl.check_cardinality(None) is False
 
 
+def test_broad_cardinality_requires_at_least_the_configured_minimum():
+    assert crl.check_cardinality(100, profile="broad", minimum=100) is True
+    assert crl.check_cardinality(101, profile="broad", minimum=100) is True
+    assert crl.check_cardinality(99, profile="broad", minimum=100) is False
+    assert crl.check_cardinality(None, profile="broad", minimum=100) is False
+
+
+def test_broad_profile_uses_large_untimed_preflight_but_keeps_timed_limit():
+    responses = (
+        [[{"path": f"candidate-{index}.md"} for index in range(100)]]
+        + [_envelope(5.0, 1.0) for _ in range(4)]
+    )
+    op_find = FakeOpFind(responses)
+
+    report = crl.run_harness(
+        Path("/vault"),
+        "cat-a",
+        op_find=op_find,
+        reset_cache=lambda: None,
+        samples=1,
+        count_pages=lambda _vault: 2500,
+        profile="broad",
+        broad_minimum=100,
+        limit=3,
+    )
+
+    assert report["preflight"]["cardinality_ok"] is True
+    assert op_find.calls[0]["limit"] >= 100
+    assert op_find.calls[0]["include_timings"] is False
+    assert {call["limit"] for call in op_find.calls[1:]} == {3}
+
+
+def test_broad_profile_rejects_below_minimum_without_running_lanes():
+    op_find = FakeOpFind(
+        [[{"path": f"candidate-{index}.md"} for index in range(99)]]
+    )
+
+    report = crl.run_harness(
+        SECRET_VAULT,
+        SECRET_CATEGORY,
+        op_find=op_find,
+        reset_cache=lambda: None,
+        count_pages=lambda _vault: 100,
+        profile="broad",
+        broad_minimum=100,
+    )
+
+    assert report["preflight"]["cardinality_ok"] is False
+    assert report["lanes"] == {}
+    assert report["gates"] == {"pass": False, "reason": "preflight_failed"}
+    assert len(op_find.calls) == 1
+
+
+def test_broad_profile_reports_only_bucketed_candidate_cardinality():
+    op_find = FakeOpFind(
+        [[{"path": f"secret-{index}.md"} for index in range(123)]]
+        + [_envelope(5.0, 1.0) for _ in range(4)]
+    )
+
+    report = crl.run_harness(
+        SECRET_VAULT,
+        SECRET_CATEGORY,
+        op_find=op_find,
+        reset_cache=lambda: None,
+        samples=1,
+        count_pages=lambda _vault: 2413,
+        profile="broad",
+        broad_minimum=100,
+    )
+
+    blob = json.dumps(report)
+    assert SECRET_CATEGORY not in blob
+    assert str(SECRET_VAULT) not in blob
+    assert "secret-0.md" not in blob
+    assert "candidate_count" not in report["preflight"]
+    assert report["preflight"]["candidate_count_bucket"] == 125
+
+
+def test_selective_cardinality_profile_remains_the_default():
+    op_find = FakeOpFind([[{"path": "a.md"}, {"path": "b.md"}]])
+
+    report = crl.run_harness(
+        Path("/vault"),
+        "cat-a",
+        op_find=op_find,
+        reset_cache=lambda: None,
+        samples=0,
+        count_pages=lambda _vault: 100,
+    )
+
+    assert report["preflight"]["cardinality_ok"] is True
+    assert op_find.calls[0]["limit"] == crl.PREFLIGHT_LIMIT
+
+
 def test_preflight_once_reports_candidate_count():
     op_find = FakeOpFind([[{"path": "a.md"}, {"path": "b.md"}]])
     result = crl.preflight_once(op_find, Path("/vault"), "cat-a")
