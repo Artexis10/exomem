@@ -3,6 +3,8 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+import pytest
+
 from exomem import hosted_plugins
 
 
@@ -24,3 +26,11 @@ def test_hosted_skills_do_not_depend_on_local_plugin_mechanisms() -> None:
 
     for forbidden in ("uvx", "exomem_vault_path", "hooks", "transfer", "media", "adopt", "maintain", "edit_memory", "replace_memory"):
         assert not re.search(rf"\b{re.escape(forbidden)}\b", prose)
+
+
+def test_tool_reference_scanner_rejects_legacy_and_undeclared_callable_names() -> None:
+    with pytest.raises(ValueError, match="unavailable Hosted tools"):
+        hosted_plugins.validate_skill_text(
+            "---\nrequired_tools: [ask_memory]\n---\nUse ask_memory and edit_memory.",
+            Path("malicious.md"),
+        )

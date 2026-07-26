@@ -73,3 +73,18 @@ def test_compatibility_manifest_uses_the_exact_ordered_alpha_contract() -> None:
     assert manifest["skills_sha256"]
     assert manifest["oauth_discovery_sha256"]
     assert manifest["compatibility_sha256"]
+
+
+def test_compatibility_manifest_exports_exact_mcp_contract_and_standard_oauth_overlay() -> None:
+    manifest = hosted_plugins.compatibility_manifest(REPO_ROOT)
+
+    assert tuple(entry["name"] for entry in manifest["agent_contract"]["commands"]) == tuple(
+        manifest["commands"]
+    )
+    assert all({"name", "description", "inputSchema", "annotations"} <= set(entry["mcp_tool"])
+               for entry in manifest["agent_contract"]["commands"])
+    assert manifest["oauth_discovery"]["resource"] == manifest["endpoint"]
+    assert all(
+        overlay["securitySchemes"][0]["type"] == "oauth2"
+        for overlay in manifest["oauth_discovery"]["tools"].values()
+    )

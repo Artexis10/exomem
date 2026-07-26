@@ -5,7 +5,6 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-import shutil
 import stat
 import tempfile
 import zipfile
@@ -27,7 +26,16 @@ SKILL_NAMES = (
     "exomem-review",
 )
 SEMVER = re.compile(r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$")
-TOOL_REFERENCE = re.compile(r"\b(" + "|".join(re.escape(name) for name in commands.PRODUCT_PUBLIC_NAMES) + r")\b")
+_LEGACY_OR_EXCLUDED_TOOLS = frozenset({
+    "edit_memory", "replace_memory", "transfer_artifact", "process_media", "adopt_vault",
+    "adoption_studio", "maintain_memory", "schema_memory", "manage_memory_file",
+    "query_dataset", "read_media", "coordination_status",
+})
+TOOL_REFERENCE = re.compile(
+    r"\b(" + "|".join(re.escape(name) for name in sorted(
+        set(commands.PRODUCT_PUBLIC_NAMES) | _LEGACY_OR_EXCLUDED_TOOLS
+    )) + r")\b"
+)
 
 
 @dataclass(frozen=True)
@@ -130,22 +138,29 @@ def _frontmatter(text: str, skill: Path) -> dict[str, Any]:
     return fields
 
 
-def skill_dependencies(repo_root: Path | None = None) -> dict[str, tuple[str, ...]]:
-    root = _repo_root(repo_root)
+def validate_skill_text(text: str, skill: Path) -> tuple[str, ...]:
     allowed = set(commands.product_commands_for_profile(commands.HOSTED_ALPHA_AGENT_PROFILE, "rest"))
     allowed_names = {command.name for command in allowed}
+    declared = _frontmatter(text, skill)["required_tools"]
+    observed = tuple(sorted(set(TOOL_REFERENCE.findall(text))))
+    unavailable = (set(declared) | set(observed)) - allowed_names
+    if unavailable:
+        raise ValueError(f"{skill}: unavailable Hosted tools: {', '.join(sorted(unavailable))}")
+    missing_declaration = set(observed) - set(declared)
+    if missing_declaration:
+        raise ValueError(f"{skill}: callable tools must be declared: {', '.join(sorted(missing_declaration))}")
+    unused = set(declared) - set(observed)
+    if unused:
+        raise ValueError(f"{skill}: declared tools are not used: {', '.join(sorted(unused))}")
+    return tuple(declared)
+
+
+def skill_dependencies(repo_root: Path | None = None) -> dict[str, tuple[str, ...]]:
+    root = _repo_root(repo_root)
     result: dict[str, tuple[str, ...]] = {}
     for skill in _skill_paths(root):
         text = skill.read_text(encoding="utf-8")
-        declared = _frontmatter(text, skill)["required_tools"]
-        observed = tuple(sorted(set(TOOL_REFERENCE.findall(text))))
-        unavailable = (set(declared) | set(observed)) - allowed_names
-        if unavailable:
-            raise ValueError(f"{skill}: unavailable Hosted tools: {', '.join(sorted(unavailable))}")
-        unused = set(declared) - set(observed)
-        if unused:
-            raise ValueError(f"{skill}: declared tools are not used: {', '.join(sorted(unused))}")
-        result[skill.parent.name] = tuple(declared)
+        result[skill.parent.name] = validate_skill_text(text, skill)
     return result
 
 
@@ -162,16 +177,23 @@ def oauth_discovery_overlay(contract: dict[str, Any]) -> dict[str, Any]:
 
     return {
         "schema_version": 1,
+        "resource": "https://substratesystems.io/api/exomem/mcp/v1",
+        "protected_resource_metadata": (
+            "https://substratesystems.io/.well-known/oauth-protected-resource/api/exomem/mcp/v1"
+        ),
         "securitySchemes": {
             "oauth2": {
-                "authorization_url": "https://substratesystems.io/api/exomem/authorize",
-                "token_url": "https://substratesystems.io/api/exomem/token",
+                "authorization_url": "https://substratesystems.io/.well-known/oauth-authorization-server",
+                "token_url": "https://substratesystems.io/oauth/token",
                 "scopes": {"exomem.read": "Read governed memory", "exomem.write": "Write governed memory"},
             }
         },
         "tools": {
             entry["name"]: {
-                "securitySchemes": [{"oauth2": ["exomem.read" if entry["read_only"] else "exomem.write"]}]
+                "securitySchemes": [{
+                    "type": "oauth2",
+                    "scopes": ["exomem.read" if entry["read_only"] else "exomem.write"],
+                }]
             }
             for entry in contract["commands"]
         },
@@ -200,6 +222,7 @@ def compatibility_manifest(repo_root: Path | None = None) -> dict[str, Any]:
         "definition_sha256": _sha256(_canonical_json(raw_definition)),
         "skills_sha256": _skills_digest(root),
         "skills": {name: list(required_tools) for name, required_tools in dependencies.items()},
+        "agent_contract": contract,
         "oauth_discovery": oauth_overlay,
         "oauth_discovery_sha256": _sha256(_canonical_json(oauth_overlay)),
     }
@@ -208,21 +231,12 @@ def compatibility_manifest(repo_root: Path | None = None) -> dict[str, Any]:
 
 def check_compatibility_descriptor(repo_root: Path | None = None) -> None:
     root = _repo_root(repo_root)
-    path = root / PLUGIN_ROOT / "compatibility.json"
+    path = root / PLUGIN_ROOT / "generated" / "compatibility.json"
     try:
         committed = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise ValueError("Hosted compatibility descriptor must be valid JSON") from exc
-    manifest = compatibility_manifest(root)
-    expected = {
-        key: manifest[key]
-        for key in (
-            "schema_version", "plugin_id", "plugin_version", "endpoint", "profile", "source_release",
-            "commands", "command_surface_sha256", "schema_contract_sha256", "definition_sha256",
-            "skills_sha256", "oauth_discovery_sha256", "compatibility_sha256",
-        )
-    }
-    if committed != expected:
+    if committed != compatibility_manifest(root):
         raise ValueError("Hosted compatibility descriptor is stale")
 
 
@@ -301,22 +315,35 @@ def render(
     output: Path | None = None,
     *,
     openai_app_id: str | None = None,
+    platform: str = "claude",
+    staging_root: Path | None = None,
 ) -> Path:
     root = _repo_root(repo_root)
     definition = load_definition(root)
     skill_dependencies(root)
+    if platform not in (*PLATFORMS, "all"):
+        raise ValueError("unsupported platform")
     destination = (output or root / PLUGIN_ROOT / "generated").resolve()
+    allowed_root = (staging_root or (root / PLUGIN_ROOT)).resolve()
+    if allowed_root not in destination.parents or destination == allowed_root:
+        raise ValueError("render output must be below the explicit staging root")
+    if destination == root or destination in root.parents:
+        raise ValueError("render output must not be at or above the repository")
     if destination.exists():
-        shutil.rmtree(destination)
-    registered_openai_app = _validate_openai_app_id(openai_app_id)
-    for platform in PLATFORMS:
-        package = destination / platform
+        raise ValueError("render output already exists; refuse to replace an unchecked directory")
+    selected = PLATFORMS if platform == "all" else (platform,)
+    registered_openai_app = _validate_openai_app_id(openai_app_id) if "openai" in selected else None
+    temporary = destination.with_name(f".{destination.name}.new")
+    if temporary.exists():
+        raise ValueError("render staging directory already exists")
+    for selected_platform in selected:
+        package = temporary / selected_platform
         package.mkdir(parents=True)
         _copy_skills(root, package / "skills")
         _copy_assets(root, package / "assets")
         mcp = {"mcpServers": {"exomem": {"type": "http", "url": definition.endpoint}}}
         _write_json(package / ".mcp.json", mcp)
-        if platform == "claude":
+        if selected_platform == "claude":
             _write_json(package / ".claude-plugin" / "plugin.json", {
                 "name": definition.plugin_id,
                 "version": definition.version,
@@ -330,30 +357,49 @@ def render(
                 "name": definition.plugin_id,
                 "version": definition.version,
                 "description": "Governed long-term memory for relevant project work.",
+                "skills": "./skills",
+                "mcp_servers": "./.mcp.json",
+                "apps": "./.app.json",
+                "interface": {"type": "chatgpt", "authentication": "ON_INSTALL"},
             })
             _write_json(package / ".app.json", {
                 "name": definition.plugin_id,
                 "display_name": "Exomem Hosted",
                 "authentication": {"type": "oauth", "policy": "ON_INSTALL"},
                 "apps": {"exomem": {"id": registered_openai_app, "required": True}},
-                "support_url": definition.support_url,
-                "privacy_url": definition.privacy_url,
-                "terms_url": definition.terms_url,
             })
-        _write_json(destination / f"{platform}.lock.json", _package_lock(root, platform, package))
-    _write_json(destination / "compatibility.json", compatibility_manifest(root))
+        _write_json(temporary / f"{selected_platform}.lock.json", _package_lock(root, selected_platform, package))
+    _write_json(temporary / "compatibility.json", compatibility_manifest(root))
+    temporary.replace(destination)
     return destination
 
 
-def check(repo_root: Path | None = None, *, openai_app_id: str | None = None) -> None:
+def check(
+    repo_root: Path | None = None,
+    *,
+    openai_app_id: str | None = None,
+    platform: str = "claude",
+) -> None:
     root = _repo_root(repo_root)
     check_compatibility_descriptor(root)
+    if platform not in (*PLATFORMS, "all"):
+        raise ValueError("unsupported platform")
+    selected = PLATFORMS if platform == "all" else (platform,)
     expected = root / PLUGIN_ROOT / "generated"
-    with tempfile.TemporaryDirectory() as temporary:
-        actual = render(root, Path(temporary) / "generated", openai_app_id=openai_app_id)
+    with tempfile.TemporaryDirectory(dir=root / PLUGIN_ROOT) as temporary:
+        actual = render(
+            root,
+            Path(temporary) / "generated",
+            openai_app_id=openai_app_id,
+            platform=platform,
+            staging_root=Path(temporary),
+        )
         expected_files = {
             path.relative_to(expected).as_posix(): path.read_bytes()
-            for path in expected.rglob("*") if path.is_file()
+            for path in expected.rglob("*")
+            if path.is_file() and (path.parts[len(expected.parts)] in selected or path.name in {
+                "compatibility.json", *(f"{item}.lock.json" for item in selected)
+            })
         }
         actual_files = {
             path.relative_to(actual).as_posix(): path.read_bytes()
@@ -368,14 +414,16 @@ def archive(
     output: Path | None = None,
     *,
     openai_app_id: str | None = None,
+    platform: str = "claude",
 ) -> Path:
     root = _repo_root(repo_root)
-    check(root, openai_app_id=openai_app_id)
+    check(root, openai_app_id=openai_app_id, platform=platform)
     output_root = output or root / "dist" / "hosted"
     output_root.mkdir(parents=True, exist_ok=True)
-    for platform in PLATFORMS:
-        package = root / PLUGIN_ROOT / "generated" / platform
-        archive_path = output_root / f"{platform}.zip"
+    selected = PLATFORMS if platform == "all" else (platform,)
+    for selected_platform in selected:
+        package = root / PLUGIN_ROOT / "generated" / selected_platform
+        archive_path = output_root / f"{selected_platform}.zip"
         with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED) as archive_file:
             for path in sorted(package.rglob("*")):
                 if path.is_file():
@@ -383,8 +431,8 @@ def archive(
                     entry.external_attr = (stat.S_IFREG | 0o644) << 16
                     entry.compress_type = zipfile.ZIP_DEFLATED
                     archive_file.writestr(entry, path.read_bytes())
-        _write_json(output_root / f"{platform}.zip.lock.json", {
-            "platform": platform, "archive_sha256": _sha256(archive_path.read_bytes())
+        _write_json(output_root / f"{selected_platform}.zip.lock.json", {
+            "platform": selected_platform, "archive_sha256": _sha256(archive_path.read_bytes())
         })
     return output_root
 
@@ -400,17 +448,46 @@ def promote(repo_root: Path | None, platform: str, evidence: dict[str, Any]) -> 
     if platform not in PLATFORMS:
         raise ValueError("unsupported platform")
     required = {
-        "client_version", "test_identity", "timestamp", "result_sha256", "native_install",
+        "schema_version", "platform", "client_version", "clean_client_identity", "timestamp",
+        "paired_run_id", "exomem_identity", "tenant", "entitlement", "provisioning_operation", "cell",
+        "cell_count", "volume_count", "result_sha256", "package_artifact_sha256", "archive_sha256",
+        "compatibility_sha256", "schema_contract_sha256", "endpoint", "attestation", "native_install",
         "authorization", "tool_discovery", "content_recall", "citation", "durable_capture",
         "fresh_chat_recall",
     }
-    if evidence.get("mocked") or not required.issubset(evidence) or not all(evidence[key] for key in required - {"client_version", "test_identity", "timestamp", "result_sha256"}):
+    if evidence.get("mocked") or not required.issubset(evidence) or not all(evidence[key] for key in required - {
+        "schema_version", "platform", "client_version", "clean_client_identity", "timestamp", "paired_run_id",
+        "exomem_identity", "tenant", "entitlement", "provisioning_operation", "cell", "cell_count",
+        "volume_count", "result_sha256", "package_artifact_sha256", "archive_sha256", "compatibility_sha256",
+        "schema_contract_sha256", "endpoint", "attestation",
+    }):
         raise ValueError("live promotion requires real content-bearing client evidence")
     root = _repo_root(repo_root)
     compatibility = compatibility_manifest(root)
-    lock = json.loads((root / PLUGIN_ROOT / "generated" / f"{platform}.lock.json").read_text(encoding="utf-8"))
-    if evidence.get("compatibility_sha256") != compatibility["compatibility_sha256"]:
+    try:
+        lock = json.loads((root / PLUGIN_ROOT / "generated" / f"{platform}.lock.json").read_text(encoding="utf-8"))
+        archive_lock = json.loads((root / "dist" / "hosted" / f"{platform}.zip.lock.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError("promotion requires a committed generated package and archive lock") from exc
+    if evidence["schema_version"] != 1 or evidence["platform"] != platform:
+        raise ValueError("promotion evidence has an invalid version or platform")
+    if evidence["endpoint"] != compatibility["endpoint"] or any(
+        evidence[key] != compatibility[key]
+        for key in ("compatibility_sha256", "schema_contract_sha256")
+    ):
         raise ValueError("promotion evidence has a different compatibility identity")
+    if evidence["package_artifact_sha256"] != lock["artifact_sha256"] or evidence["archive_sha256"] != archive_lock["archive_sha256"]:
+        raise ValueError("promotion evidence has a different package binding")
+    if not all(re.fullmatch(r"[0-9a-f]{64}", str(evidence[key])) for key in (
+        "result_sha256", "package_artifact_sha256", "archive_sha256", "compatibility_sha256", "schema_contract_sha256"
+    )):
+        raise ValueError("promotion evidence digests must be SHA-256 values")
+    attestation = evidence["attestation"]
+    unsigned = {key: value for key, value in evidence.items() if key != "attestation"}
+    if not isinstance(attestation, dict) or attestation.get("schema_version") != 1 or not re.fullmatch(
+        r"[0-9a-f]{32,}", str(attestation.get("run_nonce", ""))
+    ) or attestation.get("evidence_sha256") != _sha256(_canonical_json(unsigned)) or not str(attestation.get("maintainer", "")).strip():
+        raise ValueError("promotion requires a versioned maintainer attestation receipt")
     _write_json_atomic(promotion_record(root, platform), {
         "schema_version": 1, "platform": platform, "state": "live", "package_lock": lock,
         "compatibility_sha256": compatibility["compatibility_sha256"], "evidence": evidence,
@@ -434,7 +511,14 @@ def distribution_manifest(repo_root: Path | None = None) -> dict[str, Any]:
     }
     live = [platform for platform, record in records.items() if record["state"] == "live"]
     identities = {records[platform].get("compatibility_sha256") for platform in live}
+    paired = {
+        tuple(records[platform].get("evidence", {}).get(key) for key in (
+            "paired_run_id", "exomem_identity", "tenant", "entitlement", "provisioning_operation", "cell",
+            "cell_count", "volume_count",
+        ))
+        for platform in live
+    }
     return {
         "live_platforms": live,
-        "cross_client_ready": len(live) == len(PLATFORMS) and len(identities) == 1,
+        "cross_client_ready": len(live) == len(PLATFORMS) and len(identities) == 1 and len(paired) == 1,
     }

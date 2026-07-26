@@ -20,27 +20,33 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("command", choices=("render", "check", "archive", "promote", "demote", "status"))
     parser.add_argument("--openai-app-id")
-    parser.add_argument("--platform", choices=hosted_plugins.PLATFORMS)
+    parser.add_argument("--platform", choices=(*hosted_plugins.PLATFORMS, "all"))
     parser.add_argument("--evidence", type=Path)
     parser.add_argument("--reason")
     args = parser.parse_args()
     try:
         if args.command == "render":
-            print(hosted_plugins.render(REPO_ROOT, openai_app_id=args.openai_app_id))
+            print(hosted_plugins.render(
+                REPO_ROOT, openai_app_id=args.openai_app_id, platform=args.platform or "claude"
+            ))
         elif args.command == "check":
-            hosted_plugins.check(REPO_ROOT, openai_app_id=args.openai_app_id)
+            hosted_plugins.check(
+                REPO_ROOT, openai_app_id=args.openai_app_id, platform=args.platform or "claude"
+            )
             print("Hosted generated artifacts are current")
         elif args.command == "archive":
-            print(hosted_plugins.archive(REPO_ROOT, openai_app_id=args.openai_app_id))
+            print(hosted_plugins.archive(
+                REPO_ROOT, openai_app_id=args.openai_app_id, platform=args.platform or "claude"
+            ))
         elif args.command == "status":
             hosted_plugins.check_compatibility_descriptor(REPO_ROOT)
             print(json.dumps(hosted_plugins.distribution_manifest(REPO_ROOT), sort_keys=True))
         elif args.command == "promote":
-            if not args.platform or not args.evidence:
+            if args.platform not in hosted_plugins.PLATFORMS or not args.evidence:
                 parser.error("promote requires --platform and --evidence")
             hosted_plugins.promote(REPO_ROOT, args.platform, json.loads(args.evidence.read_text(encoding="utf-8")))
         else:
-            if not args.platform or not args.reason:
+            if args.platform not in hosted_plugins.PLATFORMS or not args.reason:
                 parser.error("demote requires --platform and --reason")
             hosted_plugins.demote(REPO_ROOT, args.platform, args.reason)
     except (OSError, ValueError, json.JSONDecodeError) as error:
