@@ -1098,3 +1098,79 @@ def test_oversized_line_is_drained_and_preserves_the_next_record_offset(vault: P
 
     assert any(issue["code"] == "record_too_large" for issue in issues)
     assert records[0]["_offset"] == len(oversized)
+
+
+def test_append_rejects_a_tail_whose_timestamp_does_not_match_its_month(vault: Path) -> None:
+    event = receipts.append_event(
+        vault, event_type="disclosure", payload={"outcomes": []}, timestamp="2026-07-01T00:00:00Z"
+    )
+    instance_dir = vault / "Knowledge Base" / "_Governance" / "events" / event["instance_id"]
+    july = next(instance_dir.glob("*.jsonl"))
+    june = instance_dir / "2026-06.jsonl"
+    july.rename(june)
+
+    with pytest.raises(receipts.ReceiptError, match="month"):
+        receipts.append_event(
+            vault, event_type="disclosure", payload={"outcomes": []}, timestamp="2026-07-02T00:00:00Z"
+        )
+
+    assert not (instance_dir / "2026-07.jsonl").exists()
+
+
+def test_critical_directory_fsync_precedes_the_sidecar_commit(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    order: list[str] = []
+    original_fsync = receipts.os.fsync
+    original_update = receipts._update_durable_head
+
+    def track_fsync(fd: int) -> None:
+        path = Path(f"/proc/self/fd/{fd}").resolve()
+        if path.suffix == ".jsonl":
+            order.append("file")
+        original_fsync(fd)
+
+    def track_directories(*args, **kwargs) -> None:
+        order.append("directory")
+
+    def track_sidecar(*args, **kwargs) -> None:
+        order.append("sidecar")
+        original_update(*args, **kwargs)
+
+    monkeypatch.setattr(receipts.os, "fsync", track_fsync)
+    monkeypatch.setattr(receipts, "_fsync_durable_directories", track_directories)
+    monkeypatch.setattr(receipts, "_update_durable_head", track_sidecar)
+    receipts.append_event(
+        vault, event_type="deletion", payload=_lifecycle_payload(), critical=True, timestamp="2026-06-30T12:00:00Z"
+    )
+    assert order.index("file") < order.index("directory") < order.index("sidecar")
+
+    order.clear()
+    receipts.append_event(
+        vault, event_type="deletion", payload=_lifecycle_payload(), critical=True, timestamp="2026-07-01T12:00:00Z"
+    )
+    assert order.index("file") < order.index("directory") < order.index("sidecar")
+
+
+def test_year_zero_month_is_invalid_without_a_sidecar(vault: Path) -> None:
+    instance_dir = vault / "Knowledge Base" / "_Governance" / "events" / ("3" * 32)
+    instance_dir.mkdir(parents=True)
+    (instance_dir / "0000-01.jsonl").write_bytes(b"")
+
+    assert any(issue["code"] == "invalid_month_filename" for issue in receipts.verify_chain(vault)["issues"])
+
+
+def test_instance_disappearance_at_the_month_open_seam_is_a_receipt_error(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    event = receipts.append_event(vault, event_type="disclosure", payload={"outcomes": []})
+    instance_dir = vault / "Knowledge Base" / "_Governance" / "events" / event["instance_id"]
+    removed = False
+
+    def remove_instance(_instance_dir: Path, _name: str) -> None:
+        nonlocal removed
+        if not removed:
+            shutil.rmtree(instance_dir)
+            removed = True
+
+    monkeypatch.setattr(receipts, "_after_month_enumeration", remove_instance)
+    with pytest.raises(receipts.ReceiptError):
+        receipts.append_event(vault, event_type="disclosure", payload={"outcomes": []})

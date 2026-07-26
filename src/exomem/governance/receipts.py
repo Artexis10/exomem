@@ -269,7 +269,11 @@ def _valid_month_name(name: str) -> bool:
     if _MONTH_FILE.fullmatch(name) is None:
         return False
     year, month = name.removesuffix(".jsonl").split("-", 1)
-    return 1 <= int(month) <= 12 and len(year) == 4
+    try:
+        parsed = datetime(int(year), int(month), 1)
+    except ValueError:
+        return False
+    return parsed.strftime("%Y-%m") == name.removesuffix(".jsonl")
 
 
 def _after_month_enumeration(_instance_dir: Path, _name: str) -> None:
@@ -297,13 +301,19 @@ def _open_month_fd(instance_dir: Path, name: str, *, write: bool = False, create
     """
     _validated_month_path(instance_dir, instance_dir / name)
     _after_month_enumeration(instance_dir, name)
-    instance_stat = os.lstat(instance_dir)
+    try:
+        instance_stat = os.lstat(instance_dir)
+    except FileNotFoundError as exc:
+        raise ReceiptError("receipt instance path disappeared during open") from exc
     if stat.S_ISLNK(instance_stat.st_mode) or not stat.S_ISDIR(instance_stat.st_mode):
         raise ReceiptError("receipt instance path is not a real directory")
     directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
     nofollow = getattr(os, "O_NOFOLLOW", 0)
     supports_dir_fd = nofollow and os.open in os.supports_dir_fd
-    directory_fd = os.open(instance_dir, directory_flags | (nofollow if supports_dir_fd else 0))
+    try:
+        directory_fd = os.open(instance_dir, directory_flags | (nofollow if supports_dir_fd else 0))
+    except OSError as exc:
+        raise ReceiptError("receipt instance path could not be opened") from exc
     fd = -1
     try:
         if not stat.S_ISDIR(os.fstat(directory_fd).st_mode) or not os.path.samestat(instance_stat, os.fstat(directory_fd)):
@@ -685,6 +695,9 @@ def _read_tail_record(instance_dir: Path) -> dict[str, Any] | None:
         raise ReceiptError("receipt tail is malformed") from exc
     if not isinstance(record, dict) or _envelope_error(record) is not None:
         raise ReceiptError("receipt tail has an invalid envelope")
+    _normalized, parsed = _timestamp(record["timestamp"])
+    if f"{parsed:%Y-%m}" != Path(name).stem:
+        raise ReceiptError("receipt tail timestamp does not match its evidence month")
     if _record_hash(record) != record["hash"]:
         raise ReceiptError("receipt tail hash is invalid")
     record["_path"] = str(path)
@@ -705,6 +718,42 @@ def _fsync_durable_prefix(instance_dir: Path, target: Path) -> None:
     for name in names:
         if name <= target.name:
             _fsync_path(instance_dir / name)
+
+
+def _fsync_directory(path: Path) -> None:
+    """Fsync a real directory entry; unsupported directory fsync fails closed."""
+    try:
+        entry = os.lstat(path)
+        if stat.S_ISLNK(entry.st_mode) or not stat.S_ISDIR(entry.st_mode):
+            raise ReceiptError("receipt durable directory is not a real directory")
+        flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+        nofollow = getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(path, flags | nofollow)
+    except ReceiptError:
+        raise
+    except OSError as exc:
+        raise ReceiptError("receipt durable directory could not be opened") from exc
+    try:
+        if not stat.S_ISDIR(os.fstat(fd).st_mode) or not os.path.samestat(entry, os.fstat(fd)):
+            raise ReceiptError("receipt durable directory changed during open")
+        os.fsync(fd)
+    except OSError as exc:
+        raise ReceiptError("receipt durable directory fsync failed") from exc
+    finally:
+        os.close(fd)
+
+
+def _fsync_durable_directories(vault_root: Path, instance_dir: Path) -> None:
+    """Persist receipt path entries through the existing Knowledge Base root.
+
+    Windows' portable stdlib does not offer an openat-style equivalent for this
+    directory durability operation, so an unsupported directory fsync refuses
+    the critical append rather than claiming a durable name.
+    """
+    governance = governance_root(Path(vault_root)).resolve()
+    directories = (instance_dir, instance_dir.parent, governance, governance.parent)
+    for directory in dict.fromkeys(directories):
+        _fsync_directory(directory)
 
 
 def _matching_existing_event(
@@ -852,6 +901,7 @@ def append_event(
             _crash_point("before_sidecar_commit")
             if critical:
                 _fsync_durable_prefix(instance_dir, path)
+                _fsync_durable_directories(vault_root, instance_dir)
                 _update_durable_head(conn, vault_root, instance_id, record, path, offset)
             else:
                 conn.execute(
