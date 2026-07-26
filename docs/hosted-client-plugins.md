@@ -9,9 +9,9 @@ Render candidates only with the registered OpenAI app ID supplied by the release
 operator:
 
 ```powershell
-python scripts/hosted-plugin.py render --openai-app-id asdk_app_<registered-id>
-python scripts/hosted-plugin.py check --openai-app-id asdk_app_<registered-id>
-python scripts/hosted-plugin.py archive --openai-app-id asdk_app_<registered-id>
+python scripts/hosted-plugin.py render --platform all --openai-app-id asdk_app_<registered-id>
+python scripts/hosted-plugin.py check --platform all --openai-app-id asdk_app_<registered-id>
+python scripts/hosted-plugin.py archive --platform all --openai-app-id asdk_app_<registered-id>
 ```
 
 The generated Claude and OpenAI files share a compatibility identity but remain
@@ -27,6 +27,14 @@ citation, ordinary-conversation durable capture, and a later fresh-chat recall.
 Validator, OAuth-only, discovery-only, bootstrap-only, metadata-only, and mocked
 results are rejected. Demotion withdraws the platform candidate without deleting
 tenant data.
+
+The reusable promotion HMAC secret is read only from
+`EXOMEM_HOSTED_PROMOTION_SECRET`; it is never accepted on the command line.
+Run `hosted-plugin.py status` to obtain the current record digest, then pass its
+state and SHA-256 through `--expected-state` and `--expected-record-sha256` for
+compare-and-swap promotion or demotion. Live status validation requires the
+trusted key ID plus that environment-provided secret and rechecks both package
+and archive bytes.
 
 The gateway supplies the OAuth discovery overlay for the raw Hosted schema:
 read-only tools require `exomem.read`, mutating tools require `exomem.write`, and

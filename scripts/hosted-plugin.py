@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -18,19 +19,25 @@ from exomem import hosted_plugins  # noqa: E402
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("render", "regenerate", "check", "archive", "promote", "demote", "status"))
+    parser.add_argument(
+        "command",
+        choices=("render", "regenerate", "check", "archive", "promote", "demote", "status"),
+    )
     parser.add_argument("--openai-app-id")
     parser.add_argument("--platform", choices=(*hosted_plugins.PLATFORMS, "all"))
     parser.add_argument("--evidence", type=Path)
     parser.add_argument("--reason")
     parser.add_argument("--operator-key-id")
-    parser.add_argument("--operator-secret")
+    parser.add_argument("--expected-state", choices=("pending", "live", "failed"))
+    parser.add_argument("--expected-record-sha256")
     args = parser.parse_args()
     try:
         if args.command == "render":
-            print(hosted_plugins.render(
-                REPO_ROOT, openai_app_id=args.openai_app_id, platform=args.platform or "claude"
-            ))
+            print(
+                hosted_plugins.render(
+                    REPO_ROOT, openai_app_id=args.openai_app_id, platform=args.platform or "claude"
+                )
+            )
         elif args.command == "regenerate":
             if args.platform not in (None, "claude"):
                 parser.error("regenerate supports only the committed Claude candidate")
@@ -41,12 +48,30 @@ def main() -> int:
             )
             print("Hosted generated artifacts are current")
         elif args.command == "archive":
-            print(hosted_plugins.archive(
-                REPO_ROOT, openai_app_id=args.openai_app_id, platform=args.platform or "claude"
-            ))
+            print(
+                hosted_plugins.archive(
+                    REPO_ROOT, openai_app_id=args.openai_app_id, platform=args.platform or "claude"
+                )
+            )
         elif args.command == "status":
             hosted_plugins.check_compatibility_descriptor(REPO_ROOT)
-            print(json.dumps(hosted_plugins.distribution_manifest(REPO_ROOT), sort_keys=True))
+            print(
+                json.dumps(
+                    {
+                        "distribution": hosted_plugins.distribution_manifest(
+                            REPO_ROOT,
+                            trusted_key_id=args.operator_key_id
+                            or os.environ.get("EXOMEM_HOSTED_PROMOTION_KEY_ID"),
+                            trusted_secret=os.environ.get("EXOMEM_HOSTED_PROMOTION_SECRET"),
+                        ),
+                        "records": {
+                            platform: hosted_plugins.promotion_record_sha256(REPO_ROOT, platform)
+                            for platform in hosted_plugins.PLATFORMS
+                        },
+                    },
+                    sort_keys=True,
+                )
+            )
         elif args.command == "promote":
             if args.platform not in hosted_plugins.PLATFORMS or not args.evidence:
                 parser.error("promote requires --platform and --evidence")
@@ -55,12 +80,20 @@ def main() -> int:
                 args.platform,
                 json.loads(args.evidence.read_text(encoding="utf-8")),
                 trusted_key_id=args.operator_key_id,
-                trusted_secret=args.operator_secret,
+                trusted_secret=os.environ.get("EXOMEM_HOSTED_PROMOTION_SECRET"),
+                expected_state=args.expected_state,
+                expected_record_sha256=args.expected_record_sha256,
             )
         else:
             if args.platform not in hosted_plugins.PLATFORMS or not args.reason:
                 parser.error("demote requires --platform and --reason")
-            hosted_plugins.demote(REPO_ROOT, args.platform, args.reason)
+            hosted_plugins.demote(
+                REPO_ROOT,
+                args.platform,
+                args.reason,
+                expected_state=args.expected_state,
+                expected_record_sha256=args.expected_record_sha256,
+            )
     except (OSError, ValueError, json.JSONDecodeError) as error:
         print(error, file=sys.stderr)
         return 1
