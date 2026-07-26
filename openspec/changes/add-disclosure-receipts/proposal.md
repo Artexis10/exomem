@@ -2,9 +2,9 @@
 
 ## Why
 
-Governed releases and policy changes currently leave no durable, verifiable
-record. For the professional use cases (legal, medical, consulting) and for the
-owner's own trust in the system, a governed release should produce a
+Governed releases currently leave no durable, verifiable record. For the
+professional use cases (legal, medical, consulting) and for the owner's own
+trust in the system, a governed release should produce a
 **tamper-evident** receipt: what representation of which item left, to which
 audience, under which policy version — without storing the plaintext that was
 released. Exomem has no hash-chained or tamper-evident log today (verified); the
@@ -18,22 +18,31 @@ silent.
 - A hash-chained append-only event log under
   `Knowledge Base/_Governance/events/<instance-id>/YYYY-MM.jsonl` — **one chain
   per machine** so a synced vault never forks a single chain. Each record links to
-  the previous by hash; the chain head + monotonic seq are anchored in the
-  per-machine `.governance.sqlite` so truncation is detected on load.
+  the previous by hash; the per-machine `.governance.sqlite` separates the last
+  fsync'd durable head from the observed-tail cache so recovery detects
+  truncation without forking after a crash.
 - **Proportional emission**: events fire only for governed decisions (any non-L6
-  participation), policy changes, grants/revocations, deletions of governed
-  material, and budget warnings. An ungoverned vault writes nothing. An optional
-  per-scope "log everything" mode exists.
-- **No plaintext**: a record carries refs, source and released **content hashes**,
-  byte sizes, representation level, redaction counts, principal, audience, declared
-  purpose, policy fingerprint, and confirmation type — never released content, and
-  scope **ids + hashed labels**, not human label text. Full-text logging is an
-  explicit opt-in.
-- **Deletion events**: `delete_file`/`recover_from_trash` emit a
-  deletion/inverse event so evidence survives source deletion without retaining
-  the protected plaintext.
-- **Chain verification** as a new `governance_receipts` audit category reachable
-  via `maintain_memory(mode="audit")`.
+  participation, including an always-on credential block), withhold-token
+  lifecycle events, and deletion or recovery of governed material. Ordinary
+  ungoverned L6 recall writes nothing. Policy-lifecycle wiring is owned by the
+  dependent `add-governance-tools` change; budgets remain deferred.
+- **No plaintext**: versioned event-type schemas select from a union of refs,
+  source/released content hashes, sizes, level/outcome summaries, principal,
+  audience, purpose, policy fingerprint, confirmation type, and scope ids/keyed
+  label digests. Inapplicable fields are absent rather than fabricated. No event
+  carries released content, credentials, or human label text, and there is no
+  full-text mode.
+- **Critical-event protocol**: deletion, recovery, and token consumption append
+  and fsync a plaintext-free intent before state changes, then append and fsync a
+  terminal event. A deterministic event id makes crash reconciliation idempotent.
+- **Deletion events**: both file and directory deletion, plus
+  `recover_from_trash`, use content-free tombstones around the move and derived
+  index/media cleanup. Evidence survives source deletion without retaining
+  protected plaintext, and stale derivatives cannot disclose a half-finished
+  deletion.
+- **Read-only chain verification** as a new `governance_receipts` audit category
+  reachable via `maintain_memory(mode="audit")`; a write-capable reconcile path,
+  never audit, repairs a lagging sidecar anchor.
 
 The vocabulary is honestly "tamper-evident," never "immutable": on a personal
 instance the owner can destroy both chain and anchor. Tamper-evidence targets
@@ -45,19 +54,25 @@ countersign — and the docs say exactly that.
 ### New Capabilities
 
 - `disclosure-evidence`: a proportional, per-machine, hash-chained,
-  plaintext-free receipt log for governed releases, policy changes, grants, and
-  deletions, with sidecar-anchored truncation detection and an audit-mode chain
-  verifier.
+  plaintext-free receipt foundation for governed release decisions,
+  withhold-token lifecycle events, and governed content deletion/recovery, with
+  sidecar-anchored truncation detection, critical-event reconciliation, and a
+  read-only audit verifier.
 
 ## Impact
 
-- Code: new `src/exomem/governance/receipts.py` (chained JSONL append, head cache,
-  `verify_chain`); emission wiring in `governance/tool.py` (policy/grant/revoke —
-  fsync'd), `governance/egress.py` (release/withhold — buffered), `governance/tokens.py`
-  (mint/redeem); `src/exomem/delete_file.py` + `recover_from_trash.py` (deletion
-  events); `src/exomem/audit.py` (`governance_receipts` category in
-  `ALL_CATEGORIES`).
+- Code: new `src/exomem/governance/receipts.py` (chained JSONL append, critical
+  intent/terminal events, durable/observed heads, `verify_chain`, reconcile);
+  content-free
+  outcome collection in `governance/egress.py` with explicit once-only emission
+  at the existing search, direct-read, graph, overview, structure/review,
+  download, frame, and prompt/resource boundaries; `governance/tokens.py`
+  (mint/redeem); `delete_file.py`, `delete_directory.py`, and
+  `recover_from_trash.py`; `audit.py` (`governance_receipts` category) and the
+  existing write-capable reconcile route; policy-source discovery excludes the
+  reserved events/tombstone operational namespaces.
 - Tests: `tests/test_governance_receipts.py`; `tests/test_audit.py` extension;
   deletion-event tests.
-- Explicitly NOT in scope: signed checkpoints (SPECULATIVE, later), Hosted org
-  checkpoints (Hosted wave), exportable compliance reports (later), budgets.
+- Explicitly NOT in scope: policy/grant authoring (the dependent governance-tools
+  change), signed checkpoints (SPECULATIVE, later), Hosted org checkpoints
+  (Hosted wave), exportable compliance reports, budgets, or plaintext logging.
