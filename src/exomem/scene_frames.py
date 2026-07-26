@@ -92,6 +92,31 @@ def clear_scene_frames(vault_root: Path, video_path: Path) -> int:
     return n
 
 
+def list_scene_frame_children(vault_root: Path, video_path: Path) -> list[str]:
+    """Vault-relative rel paths of this video's owned frame files (jpg + `.md`
+    sidecar), read-only. Mirrors `clear_scene_frames`' iteration without
+    deleting -- for a caller that needs to know what a deletion is about to
+    remove (e.g. watcher self-delete suppression) before it happens. No-op
+    (empty list) when no `.frames/` directory exists.
+    """
+    d = frames_dir_for(video_path)
+    if not d.is_dir():
+        return []
+    out: list[str] = []
+    for f in sorted(d.iterdir()):
+        if parse_frame_ts(f.name) is None:
+            continue
+        for child in (f, f.with_name(f.name + ".md")):
+            if not child.exists():
+                continue
+            try:
+                rel = child.resolve().relative_to(vault_root.resolve()).as_posix()
+            except (ValueError, OSError):
+                continue
+            out.append(rel)
+    return out
+
+
 def _save_jpeg(img, path: Path) -> None:
     """Downscale (longest side ≤ JPEG_MAX_SIDE) and save as JPEG."""
     w, h = img.size
