@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import re
 import shutil
@@ -31,6 +32,7 @@ _LEGACY_OR_EXCLUDED_TOOLS = frozenset({
     "edit_memory", "replace_memory", "transfer_artifact", "process_media", "adopt_vault",
     "adoption_studio", "maintain_memory", "schema_memory", "manage_memory_file",
     "query_dataset", "read_media", "coordination_status",
+    "create_file", "move_file", "delete", "edit", "replace", "note", "find", "get", "add", "query_data",
 })
 TOOL_REFERENCE = re.compile(
     r"\b(" + "|".join(re.escape(name) for name in sorted(
@@ -171,6 +173,26 @@ def skill_dependencies(repo_root: Path | None = None) -> dict[str, tuple[str, ..
     return result
 
 
+def validate_hosted_public_inputs(repo_root: Path | None = None) -> None:
+    """Fail closed over Hosted sources and committed candidate files before release."""
+
+    root = _repo_root(repo_root)
+    paths = [root / PLUGIN_ROOT / "definition.json", root / PLUGIN_ROOT / "behavior-fixtures-v1.json"]
+    paths.extend(_skill_paths(root))
+    generated = root / PLUGIN_ROOT / "generated"
+    if generated.is_dir():
+        paths.extend(path for path in generated.rglob("*") if path.is_file())
+    forbidden = re.compile(
+        r"(?i)(\[todo:|\$\{[^}]+\}|exomem_vault_path|localhost|127\.0\.0\.1|"
+        r"file://|[A-Z0-9_]*(?:token|secret|password)\s*[:=]|tenant[_-]?id|vault[_-]?path|"
+        r"\buvx\b|\bhooks?\b)"
+    )
+    for path in paths:
+        text = path.read_text(encoding="utf-8")
+        if forbidden.search(text):
+            raise ValueError(f"Hosted public artifact is unsafe: {path}")
+
+
 def _skills_digest(root: Path) -> str:
     payload = {
         path.relative_to(root).as_posix(): path.read_text(encoding="utf-8").replace("\r\n", "\n")
@@ -188,10 +210,17 @@ def oauth_discovery_overlay(contract: dict[str, Any]) -> dict[str, Any]:
         "protected_resource_metadata": (
             "https://substratesystems.io/.well-known/oauth-protected-resource/api/exomem/mcp/v1"
         ),
+        "issuer": "https://substratesystems.io/api/exomem/oauth",
+        "authorization_server_metadata": (
+            "https://substratesystems.io/.well-known/oauth-authorization-server/api/exomem/oauth"
+        ),
+        "authorize_url": "https://substratesystems.io/api/exomem/oauth/authorize",
+        "token_url": "https://substratesystems.io/api/exomem/oauth/token",
+        "revoke_url": "https://substratesystems.io/api/exomem/oauth/revoke",
         "securitySchemes": {
             "oauth2": {
-                "authorization_url": "https://substratesystems.io/.well-known/oauth-authorization-server",
-                "token_url": "https://substratesystems.io/oauth/token",
+                "authorization_url": "https://substratesystems.io/api/exomem/oauth/authorize",
+                "token_url": "https://substratesystems.io/api/exomem/oauth/token",
                 "scopes": {"exomem.read": "Read governed memory", "exomem.write": "Write governed memory"},
             }
         },
@@ -552,7 +581,14 @@ def promotion_record(repo_root: Path | None, platform: str) -> Path:
     return _repo_root(repo_root) / PLUGIN_ROOT / "promotion" / f"{platform}.json"
 
 
-def promote(repo_root: Path | None, platform: str, evidence: dict[str, Any]) -> None:
+def promote(
+    repo_root: Path | None,
+    platform: str,
+    evidence: dict[str, Any],
+    *,
+    trusted_key_id: str | None = None,
+    trusted_secret: str | None = None,
+) -> None:
     """Promote only evidence from a real, content-bearing clean-client journey."""
     if platform not in PLATFORMS:
         raise ValueError("unsupported platform")
@@ -560,7 +596,8 @@ def promote(repo_root: Path | None, platform: str, evidence: dict[str, Any]) -> 
         "schema_version", "platform", "client_version", "clean_client_identity", "timestamp",
         "paired_run_id", "exomem_identity", "tenant", "entitlement", "provisioning_operation", "cell",
         "cell_count", "volume_count", "result_sha256", "package_artifact_sha256", "archive_sha256",
-        "compatibility_sha256", "schema_contract_sha256", "endpoint", "attestation", "native_install",
+        "compatibility_sha256", "schema_contract_sha256", "endpoint", "operator_key_id",
+        "operator_signature", "native_install",
         "authorization", "tool_discovery", "content_recall", "citation", "durable_capture",
         "fresh_chat_recall",
     }
@@ -568,7 +605,7 @@ def promote(repo_root: Path | None, platform: str, evidence: dict[str, Any]) -> 
         "schema_version", "platform", "client_version", "clean_client_identity", "timestamp", "paired_run_id",
         "exomem_identity", "tenant", "entitlement", "provisioning_operation", "cell", "cell_count",
         "volume_count", "result_sha256", "package_artifact_sha256", "archive_sha256", "compatibility_sha256",
-        "schema_contract_sha256", "endpoint", "attestation",
+        "schema_contract_sha256", "endpoint", "operator_key_id", "operator_signature",
     }):
         raise ValueError("live promotion requires real content-bearing client evidence")
     root = _repo_root(repo_root)
@@ -591,12 +628,14 @@ def promote(repo_root: Path | None, platform: str, evidence: dict[str, Any]) -> 
         "result_sha256", "package_artifact_sha256", "archive_sha256", "compatibility_sha256", "schema_contract_sha256"
     )):
         raise ValueError("promotion evidence digests must be SHA-256 values")
-    attestation = evidence["attestation"]
-    unsigned = {key: value for key, value in evidence.items() if key != "attestation"}
-    if not isinstance(attestation, dict) or attestation.get("schema_version") != 1 or not re.fullmatch(
-        r"[0-9a-f]{32,}", str(attestation.get("run_nonce", ""))
-    ) or attestation.get("evidence_sha256") != _sha256(_canonical_json(unsigned)) or not str(attestation.get("maintainer", "")).strip():
-        raise ValueError("promotion requires a versioned maintainer attestation receipt")
+    unsigned = {key: value for key, value in evidence.items() if key != "operator_signature"}
+    if not trusted_key_id or not trusted_secret or evidence["operator_key_id"] != trusted_key_id:
+        raise ValueError("promotion requires an operator-trusted signing key")
+    expected_signature = hmac.new(
+        trusted_secret.encode("utf-8"), _canonical_json(unsigned), hashlib.sha256
+    ).hexdigest()
+    if not hmac.compare_digest(str(evidence["operator_signature"]), expected_signature):
+        raise ValueError("promotion operator signature is invalid")
     _write_json_atomic(promotion_record(root, platform), {
         "schema_version": 1, "platform": platform, "state": "live", "package_lock": lock,
         "compatibility_sha256": compatibility["compatibility_sha256"], "evidence": evidence,

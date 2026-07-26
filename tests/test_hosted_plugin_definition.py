@@ -88,3 +88,11 @@ def test_compatibility_manifest_exports_exact_mcp_contract_and_standard_oauth_ov
         overlay["securitySchemes"][0]["type"] == "oauth2"
         for overlay in manifest["oauth_discovery"]["tools"].values()
     )
+    oauth = manifest["oauth_discovery"]
+    assert oauth["issuer"] == "https://substratesystems.io/api/exomem/oauth"
+    assert oauth["authorization_server_metadata"] == (
+        "https://substratesystems.io/.well-known/oauth-authorization-server/api/exomem/oauth"
+    )
+    assert oauth["authorize_url"] == "https://substratesystems.io/api/exomem/oauth/authorize"
+    assert oauth["token_url"] == "https://substratesystems.io/api/exomem/oauth/token"
+    assert oauth["revoke_url"] == "https://substratesystems.io/api/exomem/oauth/revoke"

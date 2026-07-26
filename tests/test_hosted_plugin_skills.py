@@ -34,3 +34,7 @@ def test_tool_reference_scanner_rejects_legacy_and_undeclared_callable_names() -
             "---\nrequired_tools: [ask_memory]\n---\nUse ask_memory and edit_memory.",
             Path("malicious.md"),
         )
+
+
+def test_hosted_public_inputs_pass_the_hosted_no_leak_gate() -> None:
+    hosted_plugins.validate_hosted_public_inputs(REPO_ROOT)
