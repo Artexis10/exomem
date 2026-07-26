@@ -22,6 +22,7 @@ import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
+from . import media_types
 from .kbdir import kb_dirname, kb_prefix
 from .vault import (
     VaultPathError,
@@ -213,12 +214,39 @@ def delete_directory(
         except ValueError:
             continue
 
+    # A doomed subtree may also contain CLIP-relevant media binaries (image/
+    # video — the only kinds with derived-index residue: CLIP rows, and for a
+    # video, scene-frame children). Other extractable-but-not-visual kinds
+    # (audio/pdf/docx/text/email/calendar) keep the prior .md-only behavior:
+    # their OCR/ASR text lives in a separate `.md` sidecar, already covered
+    # above. Unlike delete_file (single target, needs list_scene_frame_children
+    # to reach siblings), the recursive walk here already visits `.frames/`
+    # children itself: the frame `.jpg` lands in media_rels and its `.jpg.md`
+    # sidecar in the markdown walk.
+    media_rels: list[str] = []
+    for p in files:
+        if p.suffix.lower() == ".md":
+            continue
+        media_type = media_types.media_type_for(p)
+        if media_type not in {"image", "video"}:
+            continue
+        try:
+            rel = p.resolve().relative_to(vault_root.resolve()).as_posix()
+        except ValueError:
+            continue
+        media_rels.append(rel)
+
+    fanout_rels = list(dict.fromkeys(md_rels_to_unindex + media_rels))
+
     # Register the self-authored removals BEFORE the move so the watcher's
     # per-file delete events are dropped (sidecar purge happens below).
-    if md_rels_to_unindex:
+    # register_self_delete itself filters to `.md` paths, so the media
+    # binaries' own (non-md) rels here are a harmless no-op; the frame `.md`
+    # sidecars are what need suppressing.
+    if fanout_rels:
         try:
             from . import file_watcher
-            file_watcher.register_self_delete(vault_root, md_rels_to_unindex)
+            file_watcher.register_self_delete(vault_root, fanout_rels)
         except Exception:  # noqa: BLE001 — suppression is best-effort
             log.debug("self-delete suppression registration failed", exc_info=True)
 
@@ -231,17 +259,17 @@ def delete_directory(
         ) from e
 
     index_feedback: dict | None = None
-    if md_rels_to_unindex:
+    if fanout_rels:
         try:
             from . import index_sync
             raw_report = index_sync.delete_after_remove(
-                vault_root, md_rels_to_unindex
+                vault_root, fanout_rels
             )
             report = (
                 raw_report
                 if isinstance(raw_report, index_sync.IndexSyncReport)
                 else index_sync.observed_delete_report(
-                    md_rels_to_unindex, degraded=False
+                    fanout_rels, degraded=False
                 )
             )
         except Exception:  # noqa: BLE001 — sidecars are best-effort
@@ -253,7 +281,7 @@ def delete_directory(
                 "trash succeeded but derived-index cleanup failed; run reconcile"
             )
             report = index_sync.observed_delete_report(
-                md_rels_to_unindex, degraded=True
+                fanout_rels, degraded=True
             )
         index_feedback = report.as_dict()
 
