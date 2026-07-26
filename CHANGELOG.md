@@ -5,6 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.33.0](https://github.com/Artexis10/exomem/compare/v0.32.0...v0.33.0) (2026-07-26)
+
+
+### Features
+
+* **governance:** add the governance kernel — policy, compiler, membership, pure evaluator ([#326](https://github.com/Artexis10/exomem/issues/326)) ([db1bb6e](https://github.com/Artexis10/exomem/commit/db1bb6ee19bf927b2c6bb08a04685169f998f636))
+* **governance:** add the release gate — ladder, projector, principal, tokens, scrubber ([#329](https://github.com/Artexis10/exomem/issues/329)) ([7cebfe0](https://github.com/Artexis10/exomem/commit/7cebfe032d8eeb9240b173bad96b48af87bdf259))
+
+
+### Bug Fixes
+
+* **access:** enforce excluded tier on all direct-read surfaces ([#321](https://github.com/Artexis10/exomem/issues/321)) ([a23c306](https://github.com/Artexis10/exomem/commit/a23c3068eb31ee29c0870e74f2fa6dac15726a21))
+* **ci:** skip generated Python bytecode in secret scan ([#334](https://github.com/Artexis10/exomem/issues/334)) ([93c13e6](https://github.com/Artexis10/exomem/commit/93c13e6811795304bb2d973c782312f78ffab7e2))
+* **hosted:** preserve HCP backend proof HCL quoting ([#332](https://github.com/Artexis10/exomem/issues/332)) ([d83bcc2](https://github.com/Artexis10/exomem/commit/d83bcc2c37fadd1f917e5333ae61d382700db6fb))
+* **media:** propagate deletion to CLIP rows and scene-frame derivatives ([#325](https://github.com/Artexis10/exomem/issues/325)) ([47b4a20](https://github.com/Artexis10/exomem/commit/47b4a20007fe91d43bcff79632142cd99e3cd906))
+* share local clients and repair diagnostics ([#335](https://github.com/Artexis10/exomem/issues/335)) ([0476418](https://github.com/Artexis10/exomem/commit/0476418bd717bb05a6e293046fe2e0281a207736))
+* **tests:** mint hosted transfer grants at call time, not at import ([#328](https://github.com/Artexis10/exomem/issues/328)) ([5c76ede](https://github.com/Artexis10/exomem/commit/5c76edeba3d24559343f60e72fd799b760a71db0))
+
+
+### Performance
+
+* bound broad category recall ([#331](https://github.com/Artexis10/exomem/issues/331)) ([78df4c4](https://github.com/Artexis10/exomem/commit/78df4c4d9f2d078aefb85c898fd9550ba289ca8a))
+
 ## [0.32.0](https://github.com/Artexis10/exomem/compare/v0.31.0...v0.32.0) (2026-07-25)
 
 

@@ -3,7 +3,7 @@
   "name": "io.github.Artexis10/exomem",
   "title": "Exomem",
   "description": "Local knowledge substrate for owned Markdown/Obsidian vaults, exposed through MCP, REST, and CLI with multimodal OCR/ASR/CLIP search.",
-  "version": "0.32.0",
+  "version": "0.33.0",
   "websiteUrl": "https://substratesystems.io/exomem",
   "repository": {
     "url": "https://github.com/Artexis10/exomem",
@@ -13,7 +13,7 @@
     {
       "registryType": "pypi",
       "identifier": "exomem",
-      "version": "0.32.0",
+      "version": "0.33.0",
       "transport": {
         "type": "stdio"
       }
