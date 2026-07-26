@@ -173,6 +173,12 @@ class CredentialPattern:
 #: The credential shapes, one named alternative each. Adding a shape here is
 #: the ONLY way to add one to the scrubber, and the dataclass refuses an entry
 #: that cannot be checked.
+#:
+#: Every sample is ASSEMBLED from parts rather than written out as one literal.
+#: A realistic-looking credential literal in this file is flagged by secret
+#: scanners — GitHub push protection blocked a branch over the Slack sample and
+#: Trivy failed CI over the GitHub one — and the samples only need to match
+#: their own pattern and anchors, not look plausible. Keep new ones synthesised.
 CREDENTIAL_PATTERNS: tuple[CredentialPattern, ...] = (
     CredentialPattern(
         name="pem_private_key",
@@ -196,13 +202,13 @@ CREDENTIAL_PATTERNS: tuple[CredentialPattern, ...] = (
         name="aws_access_key_id",
         pattern=r"\b(?:AKIA|ASIA|ABIA|ACCA)[0-9A-Z]{16}\b",
         anchors=("akia", "asia", "abia", "acca"),
-        samples=("AKIAIOSFODNN7EXAMPLE", "ASIAY34FZKBOKMUTVV7A"),
+        samples=("AKIA" + "A" * 16, "ASIA" + "B" * 16),
     ),
     CredentialPattern(
         name="aws_secret_access_key",
         pattern=r"\baws_secret_access_key\s*[=:]\s*\S+",
         anchors=("aws_secret_access_key",),
-        samples=("aws_secret_access_key = wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",),
+        samples=("aws_secret_access_key = " + "A" * 40,),
         # `[=:]` is mandatory in the pattern.
         also_requires=("=", ":"),
     ),
@@ -210,7 +216,7 @@ CREDENTIAL_PATTERNS: tuple[CredentialPattern, ...] = (
         name="github_token",
         pattern=r"\bgh[pousr]_[A-Za-z0-9]{36,}\b",
         anchors=("ghp_", "gho_", "ghu_", "ghs_", "ghr_"),
-        samples=("ghp_16C7e42F292c6912E7710c838347Ae178B4a",),
+        samples=("ghp_" + "A" * 36,),
     ),
     CredentialPattern(
         name="github_fine_grained_pat",
@@ -223,11 +229,7 @@ CREDENTIAL_PATTERNS: tuple[CredentialPattern, ...] = (
         # Three base64url segments, alg header first.
         pattern=r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b",
         anchors=("eyj",),
-        samples=(
-            "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9."
-            "eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIn0."
-            "SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c",
-        ),
+        samples=("eyJ" + "A" * 12 + "." + "B" * 12 + "." + "C" * 12,),
     ),
     CredentialPattern(
         name="bearer_credential",
@@ -240,7 +242,7 @@ CREDENTIAL_PATTERNS: tuple[CredentialPattern, ...] = (
         # avoids that shape.
         pattern=r"(?i:(?:\bbearer\s+[A-Za-z0-9._~+/-]{16,}={0,2}))",
         anchors=("bearer",),
-        samples=("Authorization: Bearer sk-proj-9dQm2XvKpLzR4wTnBcYeF8aHgJ1sVuNiO0rEyMdA",),
+        samples=("Authorization: Bearer " + "A" * 40,),
     ),
     CredentialPattern(
         name="labelled_secret_assignment",
@@ -266,7 +268,7 @@ CREDENTIAL_PATTERNS: tuple[CredentialPattern, ...] = (
         name="sk_provider_token",
         pattern=r"\bsk-[A-Za-z0-9-]{20,}\b",
         anchors=("sk-",),
-        samples=("sk-proj-9dQm2XvKpLzR4wTnBcYeF8aHgJ1sVuNiO0rEyMdA",),
+        samples=("sk-proj-" + "A" * 40,),
     ),
     CredentialPattern(
         name="slack_token",
