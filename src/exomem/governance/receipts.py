@@ -350,13 +350,20 @@ def _open_month_fd(instance_dir: Path, name: str, *, write: bool = False, create
                     break
                 except FileExistsError:
                     continue
+                except OSError as exc:
+                    raise ReceiptError("receipt evidence path could not be created") from exc
         try:
             final_stat = os.fstat(fd)
         except OSError as exc:
             raise ReceiptError("receipt evidence path could not be inspected") from exc
         if not stat.S_ISREG(final_stat.st_mode):
             raise ReceiptError("receipt evidence path is not a regular file")
-        yield fd
+        try:
+            yield fd
+        except ReceiptError:
+            raise
+        except OSError as exc:
+            raise ReceiptError("receipt evidence path I/O failed") from exc
     finally:
         if fd >= 0:
             os.close(fd)

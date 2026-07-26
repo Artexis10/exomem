@@ -1231,3 +1231,34 @@ def test_final_month_open_permission_error_is_normalized(vault: Path, monkeypatc
     with pytest.raises(receipts.ReceiptError, match="evidence path"):
         with receipts._open_month_fd(instance_dir, name):
             pass
+
+
+def test_exclusive_month_create_permission_error_is_normalized(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    receipts.append_event(
+        vault, event_type="disclosure", payload={"outcomes": []}, timestamp="2026-06-30T12:00:00Z"
+    )
+    original_open = receipts.os.open
+
+    def deny_create(path, flags, *args, **kwargs):
+        if flags & os.O_CREAT:
+            raise PermissionError("denied")
+        return original_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(receipts.os, "open", deny_create)
+    with pytest.raises(receipts.ReceiptError, match="evidence path"):
+        receipts.append_event(
+            vault, event_type="disclosure", payload={"outcomes": []}, timestamp="2026-07-01T00:00:00Z"
+        )
+
+
+def test_yielded_month_io_error_is_normalized_and_receipt_errors_are_preserved(vault: Path) -> None:
+    event = receipts.append_event(vault, event_type="disclosure", payload={"outcomes": []})
+    instance_dir = vault / "Knowledge Base" / "_Governance" / "events" / event["instance_id"]
+    name = next(instance_dir.glob("*.jsonl")).name
+
+    with pytest.raises(receipts.ReceiptError, match="evidence path"):
+        with receipts._open_month_fd(instance_dir, name):
+            raise OSError("injected read failure")
+    with pytest.raises(receipts.ReceiptError, match="already content-free"):
+        with receipts._open_month_fd(instance_dir, name):
+            raise receipts.ReceiptError("already content-free")
