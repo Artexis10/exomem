@@ -143,3 +143,12 @@ def test_unlock_retries_transient_hcp_failure(monkeypatch: pytest.MonkeyPatch) -
     module._unlock_with_retry(client, "ws-example")
 
     assert client.calls == 3
+
+
+def test_proof_configuration_preserves_shell_quotes_for_hcl() -> None:
+    module = _load_module()
+
+    assert (
+        'command = "umask 077; : > \\"$HOLD_MARKER\\"; '
+        'sleep \\"$HOLD_SECONDS\\""' in module.PROOF_CONFIGURATION
+    )
