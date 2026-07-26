@@ -31,13 +31,27 @@ identity, tenant, entitlement, operation, cell, and volume identifiers never
 enter the public promotion record. Demotion withdraws the platform candidate
 without deleting tenant data and records only a stable public reason code.
 
+Every Claude and OpenAI evidence record also carries the operator-signed,
+64-hex `oauth_client_config_sha256`. The deployment computes it as the lowercase
+SHA-256 digest of the exact byte string
+`exomem-oauth-client-config:v1\0` followed by canonical UTF-8 JSON for
+`{platform, admission_mode, client_id, redirect_uris(sorted exact raw strings),
+token_endpoint_auth_method:'none'}`. Canonical JSON sorts object keys, has no
+whitespace (`separators=(',', ':')`), and uses `ensure_ascii=false`. This tuple
+is public; the evidence signature, not an additional HMAC secret, provides
+authority. The package validator checks only the digest shape and evidence
+signature. This is live promotion evidence, not package identity, so it must
+not change a rendered archive, package lock, or compatibility digest.
+
 The reusable promotion HMAC secret is read only from
 `EXOMEM_HOSTED_PROMOTION_SECRET`; it is never accepted on the command line.
 Run `hosted-plugin.py status` to obtain the current record digest, then pass its
 state and SHA-256 through `--expected-state` and `--expected-record-sha256` for
 compare-and-swap promotion or demotion. Live status validation requires the
 trusted key ID plus that environment-provided secret and rechecks both package
-and archive bytes.
+and archive bytes. Its `oauth_client_config_sha256` map exposes the
+redacted config digest for each platform (or `null` while no live evidence is
+recorded), never the raw OAuth configuration.
 
 The gateway supplies the OAuth discovery overlay for the raw Hosted schema:
 read-only tools require `exomem.read`, mutating tools require `exomem.write`, and

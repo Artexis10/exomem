@@ -92,7 +92,7 @@ The package never contains an access token, refresh token, invite token, user/te
 
 Each rendered platform artifact begins in `pending`. Static validation covers manifest schema, referenced files, skill syntax, no-private-leak rules, no placeholders, HTTPS endpoint policy, exact hashes, and profile dependency closure. Pending artifacts may be installed only by maintainers or the test cohort.
 
-Promotion to `live` requires evidence from an actual clean installation in the supported host, not merely a validator or MCP handshake. The evidence record binds platform/client version, plugin version, endpoint, profile fingerprint, contract digest, test identity, timestamp, and redacted result hashes. It must prove:
+Promotion to `live` requires evidence from an actual clean installation in the supported host, not merely a validator or MCP handshake. The evidence record binds platform/client version, plugin version, endpoint, profile fingerprint, contract digest, test identity, timestamp, and redacted result hashes. It also contains an operator-signed `oauth_client_config_sha256`: the deployment computes this lowercase 64-hex value as SHA-256 over the ASCII prefix `exomem-oauth-client-config:v1\0` followed by canonical UTF-8 JSON (sorted keys, no whitespace, `ensure_ascii=false`) for `{platform, admission_mode, client_id, redirect_uris(sorted exact raw strings), token_endpoint_auth_method:'none'}`. This tuple is public; the evidence signature supplies authority. The package validator verifies only the digest shape and signed evidence. This live datum is outside the package lock and compatibility identity. It must prove:
 
 1. native install succeeds;
 2. the Exomem authorization journey completes;

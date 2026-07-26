@@ -1105,6 +1105,7 @@ def _validate_promotion_evidence(
     required_strings = {
         "client_version",
         "clean_client_identity_hmac_sha256",
+        "oauth_client_config_sha256",
         "timestamp",
         "paired_run_hmac_sha256",
         "test_identity",
@@ -1210,6 +1211,7 @@ def _validate_promotion_evidence(
             "schema_contract_sha256",
             "command_surface_sha256",
             "clean_client_identity_hmac_sha256",
+            "oauth_client_config_sha256",
             "paired_run_hmac_sha256",
             "exomem_identity_hmac_sha256",
             "tenant_hmac_sha256",

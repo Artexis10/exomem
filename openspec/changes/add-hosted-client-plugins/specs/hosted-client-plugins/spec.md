@@ -131,6 +131,18 @@ Every package candidate SHALL have an immutable lock binding plugin ID/version, 
 
 Every rendered platform artifact SHALL begin in a non-public `pending` state. Promotion to `live` SHALL require static validation plus a real clean installation on the target host that proves OAuth connection, exact tool discovery, content-bearing recall, citation, governed durable capture, and recall from a later fresh conversation. A manifest validator, successful OAuth callback, MCP initialization, `tools/list`, bootstrap, frontmatter-only read, or mocked client SHALL NOT independently satisfy promotion.
 
+Each Claude or OpenAI promotion evidence record SHALL additionally contain an
+operator-signed, 64-hex `oauth_client_config_sha256`. The deployment SHALL
+compute it as SHA-256 over the ASCII domain prefix
+`exomem-oauth-client-config:v1\0` followed by UTF-8 canonical JSON for OAuth
+client configuration `{platform, admission_mode, client_id, redirect_uris(sorted
+exact raw strings), token_endpoint_auth_method:'none'}`. Canonical JSON SHALL
+sort object keys, use no whitespace, and use `ensure_ascii=false`. This tuple
+is public; the promotion-evidence signature supplies authority. Package
+validation SHALL check only the required digest shape and the evidence
+signature; the digest is live evidence and MUST NOT alter the package lock,
+archive bytes, or compatibility identity.
+
 #### Scenario: Static validation passes but native install fails
 
 - **WHEN** a candidate passes repository tests but the supported host rejects or cannot install it

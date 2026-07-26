@@ -55,6 +55,12 @@ def main() -> int:
             )
         elif args.command == "status":
             hosted_plugins.check_compatibility_descriptor(REPO_ROOT)
+            records = {
+                platform: json.loads(
+                    hosted_plugins.promotion_record(REPO_ROOT, platform).read_text(encoding="utf-8")
+                )
+                for platform in hosted_plugins.PLATFORMS
+            }
             print(
                 json.dumps(
                     {
@@ -66,7 +72,15 @@ def main() -> int:
                         ),
                         "records": {
                             platform: hosted_plugins.promotion_record_sha256(REPO_ROOT, platform)
-                            for platform in hosted_plugins.PLATFORMS
+                            for platform in records
+                        },
+                        "oauth_client_config_sha256": {
+                            platform: (
+                                record["evidence"].get("oauth_client_config_sha256")
+                                if isinstance(record.get("evidence"), dict)
+                                else None
+                            )
+                            for platform, record in records.items()
                         },
                     },
                     sort_keys=True,

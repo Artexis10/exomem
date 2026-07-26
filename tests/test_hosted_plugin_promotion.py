@@ -19,6 +19,20 @@ def digest(value: str) -> str:
     return hmac.new(b"acceptance-pairing-key", value.encode(), hashlib.sha256).hexdigest()
 
 
+def oauth_client_config_digest() -> str:
+    config = {
+        "platform": "claude",
+        "admission_mode": "pinned",
+        "client_id": "https://client.example/claude",
+        "redirect_uris": sorted(
+            ["https://client.example/return/z", "https://client.example/return/a"]
+        ),
+        "token_endpoint_auth_method": "none",
+    }
+    canonical = json.dumps(config, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(b"exomem-oauth-client-config:v1\0" + canonical.encode()).hexdigest()
+
+
 def copy_hosted_tree(destination: Path) -> Path:
     shutil.copytree(
         REPO_ROOT / "plugins" / "hosted",
@@ -39,6 +53,7 @@ def signed_evidence(root: Path, *, secret: str = "operator-secret") -> dict[str,
         "platform": "claude",
         "client_version": "1.0.0",
         "clean_client_identity_hmac_sha256": digest("clean-client-run"),
+        "oauth_client_config_sha256": oauth_client_config_digest(),
         "timestamp": datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z"),
         "paired_run_hmac_sha256": digest("paired-run-1"),
         "test_identity": "hosted-client-plugins-v1",
@@ -136,6 +151,64 @@ def test_promotion_requires_exact_signed_evidence_and_compare_and_swap(tmp_path:
         "live_platforms": [],
         "cross_client_ready": False,
     }
+
+
+def test_promotion_requires_and_persists_signed_oauth_client_config_digest(tmp_path: Path) -> None:
+    root = copy_hosted_tree(tmp_path / "repo")
+    evidence = signed_evidence(root)
+    missing_digest = {
+        key: value for key, value in evidence.items() if key != "oauth_client_config_sha256"
+    }
+    missing_digest["operator_signature"] = hmac.new(
+        b"operator-secret",
+        hosted_plugins._canonical_json(
+            {key: value for key, value in missing_digest.items() if key != "operator_signature"}
+        ),
+        hashlib.sha256,
+    ).hexdigest()
+
+    with pytest.raises(ValueError, match="content-bearing"):
+        hosted_plugins.promote(
+            root,
+            "claude",
+            missing_digest,
+            trusted_key_id="operator-key",
+            trusted_secret="operator-secret",
+            expected_state="pending",
+            expected_record_sha256=hosted_plugins.promotion_record_sha256(root, "claude"),
+        )
+
+    malformed_digest = {**evidence, "oauth_client_config_sha256": "not-a-digest"}
+    malformed_digest["operator_signature"] = hmac.new(
+        b"operator-secret",
+        hosted_plugins._canonical_json(
+            {key: value for key, value in malformed_digest.items() if key != "operator_signature"}
+        ),
+        hashlib.sha256,
+    ).hexdigest()
+    with pytest.raises(ValueError, match="digests"):
+        hosted_plugins.promote(
+            root,
+            "claude",
+            malformed_digest,
+            trusted_key_id="operator-key",
+            trusted_secret="operator-secret",
+            expected_state="pending",
+            expected_record_sha256=hosted_plugins.promotion_record_sha256(root, "claude"),
+        )
+
+    hosted_plugins.promote(
+        root,
+        "claude",
+        evidence,
+        trusted_key_id="operator-key",
+        trusted_secret="operator-secret",
+        expected_state="pending",
+        expected_record_sha256=hosted_plugins.promotion_record_sha256(root, "claude"),
+    )
+
+    record = json.loads(hosted_plugins.promotion_record(root, "claude").read_text(encoding="utf-8"))
+    assert record["evidence"]["oauth_client_config_sha256"] == oauth_client_config_digest()
 
 
 def test_demotion_rejects_free_form_public_reason(tmp_path: Path) -> None:
