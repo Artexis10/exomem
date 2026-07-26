@@ -222,7 +222,7 @@ def test_managed_render_blocks_an_interleaved_other_platform_render(
     ):
         nonlocal interleaved
         result = original_copytree(source, destination, *args, **kwargs)
-        if source.resolve() == generated.resolve() and not interleaved:
+        if Path(source).resolve() == generated.resolve() and not interleaved:
             interleaved = True
             with pytest.raises(ValueError, match="another process"):
                 hosted_plugins.render(
