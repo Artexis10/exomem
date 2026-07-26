@@ -5691,7 +5691,10 @@ def invocation_is_read_only(command: Command, kwargs: dict[str, Any]) -> bool:
         return isinstance(mode, str) and mode in _ADOPT_VAULT_READ_ONLY_MODES
     if command.name == "adoption_studio":
         action = _resolved_invocation_selector(command, kwargs, "action")
-        return isinstance(action, str) and action in _ADOPTION_STUDIO_READ_ONLY_ACTIONS
+        if not isinstance(action, str):
+            return False
+        adapter = egress_module.assert_selector_covered(command.name, "action", action)
+        return adapter != "mutation"
     if command.name == "process_media":
         operation = _resolved_invocation_selector(command, kwargs, "operation")
         return (

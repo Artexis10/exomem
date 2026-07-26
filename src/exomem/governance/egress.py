@@ -30,6 +30,7 @@ import ast
 import functools
 import hashlib
 import inspect
+import json
 import logging
 import os
 import re
@@ -82,6 +83,8 @@ class DisclosureCollector:
     command_name: str
     outcomes: list[DisclosureOutcome] = field(default_factory=list)
     credential_redactions: int = 0
+    credential_principal: str | None = None
+    credential_purpose: str | None = None
 
 
 _DISCLOSURE_COLLECTOR: ContextVar[DisclosureCollector | None] = ContextVar(
@@ -115,12 +118,25 @@ def _record_credential_block(count: int = 1) -> None:
     collector = _collector()
     if collector is not None:
         collector.credential_redactions += count
+        principal = effective_principal().audience_id
+        if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}", principal):
+            collector.credential_principal = principal
+        purpose = effective_principal().purpose
+        if purpose and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}", purpose):
+            collector.credential_purpose = purpose
 
 
 def _record_blocked_outcome(audience: str) -> None:
     value: dict[str, Any] = {"decision": "blocked"}
     if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}", audience):
         value["audience"] = audience
+        value["principal"] = audience
+    collector = _collector()
+    if collector is not None:
+        value["command"] = collector.command_name
+    purpose = effective_principal().purpose
+    if purpose and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}", purpose):
+        value["purpose"] = purpose
     _record_outcome(value)
 
 
@@ -142,8 +158,9 @@ def _outcome_for_decision(
     collector = _collector()
     if collector is not None:
         value["command"] = collector.command_name
-    if purpose and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}", purpose):
-        value["purpose"] = purpose
+    declared_purpose = purpose if purpose is not None else effective_principal().purpose
+    if declared_purpose and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}", declared_purpose):
+        value["purpose"] = declared_purpose
     if decision is not None:
         value["level"] = decision.level
         if policy.fingerprint != "blocked":
@@ -177,7 +194,16 @@ def emit_boundary_receipt(collector: DisclosureCollector) -> None:
                 collector.vault_root,
                 event_type="credential_block",
                 event_id=uuid.uuid5(uuid.NAMESPACE_URL, f"credential:{collector.boundary_id}").hex,
-                payload={"count": collector.credential_redactions, "redaction_count": collector.credential_redactions},
+                payload={
+                    "count": collector.credential_redactions,
+                    "redaction_count": collector.credential_redactions,
+                    "command": collector.command_name,
+                    **(
+                        {"principal": collector.credential_principal, "audience": collector.credential_principal}
+                        if collector.credential_principal else {}
+                    ),
+                    **({"purpose": collector.credential_purpose} if collector.credential_purpose else {}),
+                },
             )
         if collector.outcomes:
             receipts.append_event(
@@ -195,11 +221,31 @@ def _bounded_outcomes(outcomes: Sequence[DisclosureOutcome]) -> list[dict[str, A
     values = [outcome.value for outcome in outcomes]
     if len(values) <= receipts.MAX_OUTCOMES:
         return values
-    counts: dict[str, int] = {}
+    counts: dict[str, list[dict[str, Any]]] = {}
     for value in values:
-        decision = str(value.get("decision") or "withheld")
-        counts[decision] = counts.get(decision, 0) + 1
-    return [{"decision": decision, "count": count} for decision, count in sorted(counts.items())]
+        identity = {
+            key: value[key]
+            for key in (
+                "decision", "level", "command", "principal", "audience", "purpose",
+                "policy_fingerprint", "confirmation", "scope_ids", "scope_label_digests",
+            )
+            if key in value
+        }
+        key = json.dumps(identity, sort_keys=True, separators=(",", ":"))
+        counts.setdefault(key, []).append(value)
+    result: list[dict[str, Any]] = []
+    for key, members in sorted(counts.items()):
+        identity = json.loads(key)
+        digest = hashlib.sha256(
+            json.dumps(
+                sorted(
+                    str(member.get("content_hash") or member.get("ref") or "")
+                    for member in members
+                ), separators=(",", ":")
+            ).encode()
+        ).hexdigest()
+        result.append({**identity, "count": len(members), "membership_digest": digest})
+    return result
 
 # ---------------------------------------------------------------------------
 # The disclosure ladder
@@ -1149,6 +1195,7 @@ def guard_graph_context(
             policy=policy,
             audience=who.audience_id,
             outcome="withheld" if rel_path in withheld else "released",
+            purpose=declared_purpose,
         )
     return guard_seed(payload, frozenset(withheld))
 
@@ -1229,7 +1276,7 @@ def annotate_page(
     if decision is None or decision.level <= LEVEL_NONE:
         _outcome_for_decision(
             vault_root, rel_path, decision=decision, policy=policy,
-            audience=who.audience_id, outcome="withheld",
+            audience=who.audience_id, outcome="withheld", purpose=declared_purpose,
         )
         return None
 
@@ -1237,6 +1284,7 @@ def annotate_page(
         vault_root, rel_path, decision=decision, policy=policy,
         audience=who.audience_id,
         outcome="released" if decision.level >= RELEASE_FLOOR else "withheld",
+        purpose=declared_purpose,
     )
 
     level = LEVEL_ABSTRACT if decision.level == LEVEL_EXCERPT_REDACTED else decision.level
@@ -1605,6 +1653,24 @@ _DATA_REPRESENTATION_ADAPTER: dict[str, str] = {
     "profile": "dataset",
 }
 
+_SELECTOR_ADAPTERS: dict[tuple[str, str], dict[str, str]] = {
+    ("adoption_studio", "action"): {
+        "start": "mutation", "status": "structure", "select": "mutation",
+        "plan": "mutation", "apply": "mutation", "cancel": "mutation",
+        "finish": "mutation", "work-item": "structure", "propose": "mutation",
+    },
+}
+
+
+def assert_selector_covered(command: str, selector: str, value: str) -> str:
+    adapter = _SELECTOR_ADAPTERS.get((command, selector), {}).get(value)
+    if adapter is None:
+        raise RuntimeError(
+            "RECEIPT_OUTCOME_MISSING: command selector without an egress adapter: "
+            f"{command}.{selector}={value}"
+        )
+    return adapter
+
 
 def data_representation_adapter(representation: str) -> str | None:
     return _DATA_REPRESENTATION_ADAPTER.get(representation)
@@ -1829,6 +1895,7 @@ def annotate_dataset(
         return dict(payload)
     who = principal if principal is not None else effective_principal()
     rel_path = str(payload.get("path") or "")
+    declared_purpose = purpose if purpose is not None else who.purpose
     if policy.blocked or not who.resolved or not rel_path:
         _record_blocked_outcome(who.audience_id)
         return None
@@ -1837,18 +1904,18 @@ def annotate_dataset(
         rel_path,
         policy=policy,
         audience=who.audience_id,
-        purpose=purpose if purpose is not None else who.purpose,
+        purpose=declared_purpose,
         grants_hash=_grants_hash(policy),
     )
     if decision is None or decision.level < RELEASE_FLOOR:
         _outcome_for_decision(
             vault_root, rel_path, decision=decision, policy=policy,
-            audience=who.audience_id, outcome="withheld",
+            audience=who.audience_id, outcome="withheld", purpose=declared_purpose,
         )
         return None
     _outcome_for_decision(
         vault_root, rel_path, decision=decision, policy=policy,
-        audience=who.audience_id, outcome="released",
+        audience=who.audience_id, outcome="released", purpose=declared_purpose,
     )
     return dict(payload)
 
@@ -1879,6 +1946,7 @@ def release_level_for(
     if policy.empty:
         return DISCLOSURE_MAX
     who = principal if principal is not None else effective_principal()
+    declared_purpose = purpose if purpose is not None else who.purpose
     if policy.blocked or not who.resolved:
         _record_blocked_outcome(who.audience_id)
         return DISCLOSURE_MIN
@@ -1887,7 +1955,7 @@ def release_level_for(
         rel_path,
         policy=policy,
         audience=who.audience_id,
-        purpose=purpose if purpose is not None else who.purpose,
+        purpose=declared_purpose,
         grants_hash=_grants_hash(policy),
     )
     level = None if decision is None else decision.level
@@ -1902,6 +1970,7 @@ def release_level_for(
             if level is not None and level >= RELEASE_FLOOR and receipt_decision is not None
             else "released" if level is not None and level >= RELEASE_FLOOR else "withheld"
         ),
+        purpose=declared_purpose,
     )
     return level
 
@@ -1941,7 +2010,7 @@ WITHHELD_REFERENCE = "[withheld]"
 _TEXT_REFERENCE = re.compile(
     r"\[\[[^\[\]]+\]\]"
     r"|exomem://[^\s\"'<>)\]]+"
-    r"|[^\s\"'<>()\[\]]+\.md\b",
+    r"|[^\s\"'<>()\[\]]+\.(?:md|csv|tsv|json|pdf|png|jpe?g|mp4)\b",
     re.IGNORECASE,
 )
 
@@ -1994,6 +2063,7 @@ def redact_withheld_references(
         _outcome_for_decision(
             vault_root, rel_path, decision=decision, policy=policy,
             audience=who.audience_id, outcome="released" if allowed else "withheld",
+            purpose=declared_purpose,
         )
         verdicts[rel_path] = allowed
         return allowed
@@ -2009,7 +2079,7 @@ def redact_withheld_references(
         nonlocal stem_index
         if stem_index is None:
             stem_index = {}
-            for page in vault_root.rglob("*.md"):
+            for page in vault_root.rglob("*"):
                 if page.is_file():
                     rel = str(page.relative_to(vault_root)).replace("\\", "/")
                     stem_index.setdefault(page.stem.casefold(), []).append(rel)
@@ -2099,6 +2169,7 @@ def release_walk_filter(
         _outcome_for_decision(
             vault_root, rel_path, decision=decision, policy=policy,
             audience=who.audience_id, outcome="released" if allowed else "withheld",
+            purpose=declared_purpose,
         )
         verdicts[rel_path] = allowed
         return allowed
@@ -2191,6 +2262,8 @@ _ENTRY_PATH_FIELDS = (
     "logical_source_path",
     "sidecar_path",
     "ordering_path",
+    "resource",
+    "resource_path",
 )
 
 
@@ -2242,13 +2315,13 @@ def _normalize_pathish(value: Any) -> str | None:
     if not isinstance(value, str):
         return None
     candidate = _decode_pathish(value)
-    if candidate is None or not candidate.lower().endswith(".md"):
+    if candidate is None or "/" not in candidate and "." not in candidate:
         return None
     return candidate
 
 
 def _path_like(value: Any) -> str | None:
-    """The vault-relative markdown path `value` names, if it names one."""
+    """The vault-relative artifact path `value` names, if it names one."""
     candidate = _normalize_pathish(value)
     if candidate is None or "/" not in candidate:
         return None
@@ -2256,7 +2329,7 @@ def _path_like(value: Any) -> str | None:
 
 
 def _bare_name(value: Any) -> str | None:
-    """A bare `foo.md` filename — meaningful only against a sibling directory."""
+    """A bare artifact filename — meaningful only against a sibling directory."""
     candidate = _normalize_pathish(value)
     if candidate is None or "/" in candidate:
         return None
@@ -2379,6 +2452,7 @@ def filter_withheld_entries(
             policy=policy,
             audience=who.audience_id,
             outcome="released" if allowed else "withheld",
+            purpose=declared_purpose,
         )
         verdicts[rel_path] = allowed
         return allowed
@@ -2504,6 +2578,8 @@ def filter_withheld_entries(
                 # A map keyed BY vault path (`outcomes[source] = {...}`) leaks
                 # through its KEYS, which no amount of value filtering reaches.
                 if _path_like(key) is not None and not _keep({"path": key}, here):
+                    continue
+                if key in _ENTRY_PATH_FIELDS and not _keep(value, here):
                     continue
                 # …and a map VALUE that is itself an entry gets the same
                 # predicate a list entry gets. Without this, the whole check

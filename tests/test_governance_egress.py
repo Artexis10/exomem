@@ -1155,6 +1155,22 @@ def test_filter_withheld_entries_drops_bare_path_strings(vault: Path) -> None:
     assert out["inbound"] == [OPEN_PATH]
 
 
+def test_structure_filter_gates_governed_csv_and_resource_entries(vault: Path) -> None:
+    csv_path = "Knowledge Base/Notes/Patterns/private.csv"
+    target = vault / csv_path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("name,value\nAlice,42\n", encoding="utf-8")
+    _restricted_vault(vault)
+    with request_scope(_external()):
+        out = egress.postfilter(
+            "list_directory",
+            {"entries": [{"path": csv_path, "size": target.stat().st_size}], "resource": csv_path},
+            vault,
+        )
+    assert out["entries"] == []
+    assert csv_path not in str(out)
+
+
 def test_filter_withheld_entries_empty_policy_is_identity(vault: Path) -> None:
     payload = {"entries": [{"path": RESTRICTED_PATH}, {"path": OPEN_PATH}]}
     assert egress.filter_withheld_entries(
@@ -1324,12 +1340,16 @@ def test_every_content_command_declares_a_receipt_outcome_adapter() -> None:
 
 def test_credential_block_is_receipted_without_a_policy(vault: Path) -> None:
     secret = "Authorization: Bearer sk-proj-9dQm2XvKpLzR4wTnBcYeF8aHgJ1sVuNiO0rEyMdA"
-    with egress.disclosure_boundary(vault, "test") as collector:
-        cleaned = egress.postfilter("test", {"value": secret}, vault)
-        egress.emit_boundary_receipt(collector)
+    with request_scope(_external("credential-review")):
+        with egress.disclosure_boundary(vault, "test") as collector:
+            cleaned = egress.postfilter("test", {"value": secret}, vault)
+            egress.emit_boundary_receipt(collector)
     records = _receipt_records(vault)
     assert cleaned["value"] != secret
     assert len(records) == 1 and records[0]["event_type"] == "credential_block"
+    assert records[0]["command"] == "test"
+    assert records[0]["principal"] == records[0]["audience"] == EXTERNAL
+    assert records[0]["purpose"] == "credential-review"
     assert secret not in json.dumps(records)
 
 
@@ -1337,13 +1357,21 @@ def test_credential_block_does_not_suppress_the_disclosure_receipt(vault: Path) 
     write_scope(vault)
     write_rule(vault, ceiling=egress.LEVEL_FULL)
     secret = "Authorization: Bearer sk-proj-9dQm2XvKpLzR4wTnBcYeF8aHgJ1sVuNiO0rEyMdA"
-    with egress.disclosure_boundary(vault, "find") as collector:
-        egress.annotate_hits(vault, [_hit(RESTRICTED_PATH)], principal=_external(), limit=1)
-        egress.postfilter("find", {"value": secret}, vault)
-        egress.emit_boundary_receipt(collector)
-    assert [record["event_type"] for record in _receipt_records(vault)] == [
+    with request_scope(_external("credential-review")):
+        with egress.disclosure_boundary(vault, "find") as collector:
+            egress.annotate_hits(
+                vault, [_hit(RESTRICTED_PATH)], principal=_external("credential-review"), limit=1
+            )
+            egress.postfilter("find", {"value": secret}, vault)
+            egress.emit_boundary_receipt(collector)
+    records = _receipt_records(vault)
+    assert [record["event_type"] for record in records] == [
         "credential_block", "disclosure"
     ]
+    assert records[0]["command"] == "find"
+    assert records[0]["principal"] == records[0]["audience"] == EXTERNAL
+    assert records[0]["purpose"] == "credential-review"
+    assert secret not in json.dumps(records)
 
 
 def test_direct_download_boundary_emits_a_single_authorization_receipt(vault: Path) -> None:
@@ -1373,7 +1401,24 @@ def test_large_reduction_receipt_uses_truthful_bounded_aggregates(vault: Path) -
             egress._record_outcome({"decision": "withheld"})
         egress.emit_boundary_receipt(collector)
     outcomes = _receipt_records(vault)[0]["outcomes"]
-    assert outcomes == [{"decision": "withheld", "count": 140}]
+    assert outcomes[0]["decision"] == "withheld"
+    assert outcomes[0]["count"] == 140
+    assert len(outcomes[0]["membership_digest"]) == 64
+
+
+def test_bounded_outcomes_keep_different_levels_and_scopes_distinct() -> None:
+    outcomes = [
+        egress.DisclosureOutcome({"decision": "released", "level": 5, "scope_ids": ["a"], "content_hash": "a" * 64})
+        for _ in range(70)
+    ] + [
+        egress.DisclosureOutcome({"decision": "released", "level": 6, "scope_ids": ["b"], "content_hash": "b" * 64})
+        for _ in range(70)
+    ]
+    reduced = egress._bounded_outcomes(outcomes)
+    assert {(item["level"], tuple(item["scope_ids"]), item["count"]) for item in reduced} == {
+        (5, ("a",), 70), (6, ("b",), 70)
+    }
+    assert all("membership_digest" in item for item in reduced)
 
 
 def test_disclosure_identity_is_content_free_and_complete(vault: Path) -> None:
@@ -1401,6 +1446,12 @@ def test_query_data_csv_is_a_registered_receipt_representation() -> None:
     assert egress.data_representation_adapter("rows") == "dataset"
     with pytest.raises(RuntimeError, match="RECEIPT_OUTCOME_MISSING"):
         egress.assert_data_representation_covered("future_rows")
+
+
+def test_adoption_selector_requires_an_explicit_egress_adapter() -> None:
+    command = next(command for command in commands.PRODUCT_COMMANDS if command.name == "adoption_studio")
+    with pytest.raises(RuntimeError, match="RECEIPT_OUTCOME_MISSING"):
+        commands.invocation_is_read_only(command, {"action": "future-read"})
 
 
 def test_query_data_csv_rows_are_gated_and_receipted(vault: Path) -> None:

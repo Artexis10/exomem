@@ -41,7 +41,7 @@ _MONTH_FILE = re.compile(r"^\d{4}-\d{2}\.jsonl$")
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$")
 _EVENT_PAYLOAD_FIELDS = {
     ("disclosure", "recorded"): frozenset({"outcomes"}),
-    ("credential_block", "recorded"): frozenset({"principal", "audience", "redaction_count", "count"}),
+    ("credential_block", "recorded"): frozenset({"principal", "audience", "purpose", "command", "redaction_count", "count"}),
     ("token_mint", "recorded"): frozenset({"token_id_digest", "bounds_fingerprint", "causation_id"}),
     ("token_redeem", "recorded"): frozenset({"token_id_digest", "bounds_fingerprint", "causation_id"}),
     ("deletion", "recorded"): frozenset({
@@ -58,6 +58,7 @@ _OUTCOME_FIELDS = frozenset({
     "ref", "content_hash", "size", "level", "decision", "redaction_count", "count",
     "principal", "audience", "purpose", "policy_fingerprint", "confirmation",
     "scope_ids", "scope_label_digests", "command",
+    "membership_digest",
 })
 _STATE_RESOLVERS: dict[str, Callable[[Mapping[str, Any]], Any]] = {}
 
@@ -521,7 +522,7 @@ def _validate_event(event_type: str, phase: str, payload: Mapping[str, Any]) -> 
             raise ReceiptError("credential receipt requires a count")
         if "redaction_count" in payload and not _count(payload["redaction_count"]):
             raise ReceiptError("credential redaction count is invalid")
-        for field in ("principal", "audience"):
+        for field in ("principal", "audience", "purpose", "command"):
             if field in payload and not _identifier_value(payload[field]):
                 raise ReceiptError("credential identifier is invalid")
     if phase == "intent":
@@ -602,7 +603,7 @@ def _valid_outcome(value: Any) -> bool:
     for key, item in value.items():
         if key in {"ref", "principal", "audience", "purpose", "command"} and not _identifier_value(item):
             return False
-        if key in {"content_hash", "policy_fingerprint"} and not _hex(item):
+        if key in {"content_hash", "policy_fingerprint", "membership_digest"} and not _hex(item):
             return False
         if key in {"size", "redaction_count", "count"} and not _count(item):
             return False
