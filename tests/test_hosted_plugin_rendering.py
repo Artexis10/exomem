@@ -35,6 +35,15 @@ def test_candidate_file_map_is_deterministic_without_staging_directory() -> None
     assert "claude/.claude-plugin/plugin.json" in first
 
 
+def test_claude_archive_is_deterministic_and_locked(tmp_path: Path) -> None:
+    first = hosted_plugins.archive(REPO_ROOT, tmp_path / "first", platform="claude")
+    second = hosted_plugins.archive(REPO_ROOT, tmp_path / "second", platform="claude")
+
+    assert (first / "claude.zip").read_bytes() == (second / "claude.zip").read_bytes()
+    lock = json.loads((first / "claude.zip.lock.json").read_text(encoding="utf-8"))
+    assert lock == {"platform": "claude", "archive_sha256": hosted_plugins._sha256((first / "claude.zip").read_bytes())}
+
+
 def test_rendered_packages_are_deterministic_and_remote_only(tmp_path: Path) -> None:
     first = hosted_plugins.render(REPO_ROOT, tmp_path / "first", openai_app_id="asdk_app_releaseinput123", platform="all", staging_root=tmp_path)
     second = hosted_plugins.render(REPO_ROOT, tmp_path / "second", openai_app_id="asdk_app_releaseinput123", platform="all", staging_root=tmp_path)

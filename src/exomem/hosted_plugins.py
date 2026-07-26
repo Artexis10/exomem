@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import io
 import json
 import re
 import shutil
@@ -186,24 +187,43 @@ def validate_hosted_public_inputs(repo_root: Path | None = None) -> None:
     """Fail closed over Hosted sources and committed candidate files before release."""
 
     root = _repo_root(repo_root)
-    paths = [root / PLUGIN_ROOT / "definition.json", root / PLUGIN_ROOT / "behavior-fixtures-v1.json"]
+    hosted_root = root / PLUGIN_ROOT
+    paths = [hosted_root / "definition.json", hosted_root / "behavior-fixtures-v1.json"]
     paths.extend(_skill_paths(root))
-    generated = root / PLUGIN_ROOT / "generated"
-    if generated.is_dir():
-        paths.extend(path for path in generated.rglob("*") if path.is_file() or path.is_symlink())
+    for directory in ("assets", "acceptance", "promotion", "generated"):
+        candidate = hosted_root / directory
+        if candidate.exists():
+            paths.extend(path for path in candidate.rglob("*") if path.is_file() or path.is_symlink())
     forbidden = re.compile(
         r"(?i)(\[todo:|\$\{[^}]+\}|exomem_vault_path|localhost|127\.0\.0\.1|"
         r"file://|[A-Z0-9_]*(?:token|secret|password)\s*[:=]|tenant[_-]?id|vault[_-]?path|"
         r"\buvx\b|\bhooks?\b)"
     )
-    for path in paths:
+    def inspect(path: Path, content: bytes | None = None) -> None:
         if path.is_symlink():
             raise ValueError(f"Hosted public artifact may not be a symlink: {path}")
-        if path.suffix.lower() not in {".json", ".md", ".svg"}:
+        if path.suffix.lower() not in {".json", ".md", ".svg", ".zip"}:
             raise ValueError(f"Hosted public artifact has an unknown binary format: {path}")
-        text = path.read_text(encoding="utf-8")
+        if path.suffix.lower() == ".zip":
+            with zipfile.ZipFile(io.BytesIO(content if content is not None else path.read_bytes())) as archive_file:
+                for info in archive_file.infolist():
+                    member = Path(info.filename)
+                    mode = info.external_attr >> 16
+                    if member.is_absolute() or ".." in member.parts or (mode and stat.S_IFMT(mode) != stat.S_IFREG):
+                        raise ValueError(f"Hosted archive has an unsafe member: {path}!{info.filename}")
+                    if info.is_dir() or member.suffix.lower() not in {".json", ".md", ".svg"}:
+                        raise ValueError(f"Hosted archive has an unknown member: {path}!{info.filename}")
+                    inspect(Path(info.filename), archive_file.read(info))
+            return
+        try:
+            text = (content if content is not None else path.read_bytes()).decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ValueError(f"Hosted public artifact is not UTF-8: {path}") from exc
         if forbidden.search(text):
             raise ValueError(f"Hosted public artifact is unsafe: {path}")
+
+    for path in paths:
+        inspect(path)
 
 
 def _skills_digest(root: Path) -> str:
@@ -299,6 +319,17 @@ def _write_json_atomic(path: Path, value: Any) -> None:
     temporary = path.with_name(f".{path.name}.new")
     try:
         temporary.write_bytes(_canonical_json(value) + b"\n")
+        temporary.replace(path)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+
+
+def _write_bytes_atomic(path: Path, value: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.new")
+    try:
+        temporary.write_bytes(value)
         temporary.replace(path)
     finally:
         if temporary.exists():
@@ -623,7 +654,24 @@ def regenerate_claude(repo_root: Path | None = None) -> Path:
         target = generated / relative
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(contents)
+    archive_bytes = _archive_bytes(package)
+    _write_bytes_atomic(generated / "claude.zip", archive_bytes)
+    _write_json_atomic(generated / "claude.zip.lock.json", {
+        "platform": "claude", "archive_sha256": _sha256(archive_bytes),
+    })
     return generated
+
+
+def _archive_bytes(package: Path) -> bytes:
+    payload = io.BytesIO()
+    with zipfile.ZipFile(payload, "w", compression=zipfile.ZIP_DEFLATED) as archive_file:
+        for path in sorted(package.rglob("*")):
+            if path.is_file():
+                entry = zipfile.ZipInfo(path.relative_to(package).as_posix(), (1980, 1, 1, 0, 0, 0))
+                entry.external_attr = (stat.S_IFREG | 0o644) << 16
+                entry.compress_type = zipfile.ZIP_DEFLATED
+                archive_file.writestr(entry, path.read_bytes())
+    return payload.getvalue()
 
 
 def archive(
@@ -642,15 +690,10 @@ def archive(
     for selected_platform in selected:
         package = root / PLUGIN_ROOT / "generated" / selected_platform
         archive_path = output_root / f"{selected_platform}.zip"
-        with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED) as archive_file:
-            for path in sorted(package.rglob("*")):
-                if path.is_file():
-                    entry = zipfile.ZipInfo(path.relative_to(package).as_posix(), (1980, 1, 1, 0, 0, 0))
-                    entry.external_attr = (stat.S_IFREG | 0o644) << 16
-                    entry.compress_type = zipfile.ZIP_DEFLATED
-                    archive_file.writestr(entry, path.read_bytes())
-        _write_json(output_root / f"{selected_platform}.zip.lock.json", {
-            "platform": selected_platform, "archive_sha256": _sha256(archive_path.read_bytes())
+        archive_bytes = _archive_bytes(package)
+        _write_bytes_atomic(archive_path, archive_bytes)
+        _write_json_atomic(output_root / f"{selected_platform}.zip.lock.json", {
+            "platform": selected_platform, "archive_sha256": _sha256(archive_bytes)
         })
     return output_root
 
@@ -697,8 +740,8 @@ def promote(
     compatibility = compatibility_manifest(root)
     try:
         lock = json.loads((root / PLUGIN_ROOT / "generated" / f"{platform}.lock.json").read_text(encoding="utf-8"))
-        archive_path = root / "dist" / "hosted" / f"{platform}.zip"
-        archive_lock = json.loads((root / "dist" / "hosted" / f"{platform}.zip.lock.json").read_text(encoding="utf-8"))
+        archive_path = root / PLUGIN_ROOT / "generated" / f"{platform}.zip"
+        archive_lock = json.loads((root / PLUGIN_ROOT / "generated" / f"{platform}.zip.lock.json").read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise ValueError("promotion requires a committed generated package and archive lock") from exc
     if evidence["schema_version"] != 1 or evidence["platform"] != platform:

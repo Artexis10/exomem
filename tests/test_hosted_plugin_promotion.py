@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import zipfile
 
 import pytest
 
@@ -28,3 +29,34 @@ def test_promotion_never_accepts_a_trust_key_from_evidence() -> None:
             "claude",
             {"operator_key_id": "evidence-key", "operator_signature": "0" * 64},
         )
+
+
+def test_public_gate_rejects_private_tokens_in_source_assets(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    hosted = tmp_path / "plugins" / "hosted"
+    (hosted / "assets").mkdir(parents=True)
+    (hosted / "definition.json").write_text("{}", encoding="utf-8")
+    (hosted / "behavior-fixtures-v1.json").write_text("{}", encoding="utf-8")
+    (hosted / "assets" / "icon.svg").write_text("api_secret=private", encoding="utf-8")
+    monkeypatch.setattr(hosted_plugins, "PLUGIN_ROOT", Path("plugins/hosted"))
+    monkeypatch.setattr(hosted_plugins, "_skill_paths", lambda root: ())
+
+    with pytest.raises(ValueError, match="unsafe"):
+        hosted_plugins.validate_hosted_public_inputs(tmp_path)
+
+
+def test_public_gate_rejects_private_tokens_in_archive_members(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    hosted = tmp_path / "plugins" / "hosted"
+    (hosted / "generated").mkdir(parents=True)
+    (hosted / "definition.json").write_text("{}", encoding="utf-8")
+    (hosted / "behavior-fixtures-v1.json").write_text("{}", encoding="utf-8")
+    with zipfile.ZipFile(hosted / "generated" / "claude.zip", "w") as archive:
+        archive.writestr("skills/exomem/SKILL.md", "api_secret=private")
+    monkeypatch.setattr(hosted_plugins, "PLUGIN_ROOT", Path("plugins/hosted"))
+    monkeypatch.setattr(hosted_plugins, "_skill_paths", lambda root: ())
+
+    with pytest.raises(ValueError, match="unsafe"):
+        hosted_plugins.validate_hosted_public_inputs(tmp_path)

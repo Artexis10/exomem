@@ -10,15 +10,15 @@
 - [x] 2.1 Add failing tests that extract callable references and require each skill's declared/observed dependencies to be a subset of the exact alpha profile, with explicit failures for broad edit/replace, transfer, media, adoption, maintenance, schema, coordination, and Tier-2 references.
 - [x] 2.2 Add failing behavior fixtures for quiet project-memory retrieval, useful-note citation, durable decision/failure/pattern/research capture without an explicit save prompt, fresh-chat continuation, redundant/trivial-write avoidance, and no transcript dumps.
 - [x] 2.3 Hand-author the generic Hosted core, capture, continue, reflect, research, and review skills under `plugins/hosted/skills/`, keeping every advertised workflow complete on the alpha profile.
-- [ ] 2.4 Add bootstrap/profile parity and no-private-leak gates covering all Hosted skill prose, references, examples, generated copies, metadata, and assets.
+- [x] 2.4 Add bootstrap/profile parity and no-private-leak gates covering all Hosted skill prose, references, examples, generated copies, metadata, and assets.
 
 ## 3. Render And Validate Native Packages
 
 - [x] 3.1 Add failing golden/schema tests for the Claude package layout, remote MCP declaration, skills/assets, public metadata, and absence of local stdio/hooks/setup requirements.
 - [x] 3.2 Implement deterministic Claude Hosted rendering and validation into a dedicated generated package without changing `plugins/claude-code/`.
-- [ ] 3.3 Add failing golden/schema tests for `.codex-plugin/plugin.json`, `.mcp.json`, skills/assets, marketplace entry, `ON_INSTALL` authentication, and required OpenAI interface metadata.
-- [ ] 3.4 Implement deterministic OpenAI Hosted rendering, plugin validation, and pending distribution metadata using the canonical definition.
-- [ ] 3.5 Add one check/regenerate command that fails on uncommitted generated drift, missing assets/legal URLs, unsupported manifest fields, placeholders, unsafe archive entries, or a package-lock mismatch.
+- [x] 3.3 Add failing golden/schema tests for `.codex-plugin/plugin.json`, `.mcp.json`, skills/assets, marketplace entry, `ON_INSTALL` authentication, and required OpenAI interface metadata.
+- [x] 3.4 Implement deterministic OpenAI Hosted rendering, plugin validation, and pending distribution metadata using the canonical definition.
+- [x] 3.5 Add one check/regenerate command that fails on uncommitted generated drift, missing assets/legal URLs, unsupported manifest fields, placeholders, unsafe archive entries, or a package-lock mismatch.
 
 ## 4. Implement Promotion Evidence
 
