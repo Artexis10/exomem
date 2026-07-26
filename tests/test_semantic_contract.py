@@ -465,6 +465,14 @@ def test_valid_unit_does_not_satisfy_missing_relation_review(tmp_path: Path) -> 
     codes = {item.code for item in result.blocking_findings}
     assert "RELATION_DISPOSITION_MISSING" in codes
     assert "missing_semantic_unit" not in codes
+    finding = next(item for item in result.blocking_findings if item.code == "RELATION_DISPOSITION_MISSING")
+    assert "validate_only=true" in finding.remediation
+    assert "draft_id" in finding.remediation
+    assert "draft_hash" in finding.remediation
+    assert "draft_token" in finding.remediation
+    assert 'relation_disposition="reviewed_none"' in finding.remediation
+    assert "relation_review_hash" in finding.remediation
+    assert "relation_review_reason" in finding.remediation
 
 
 def test_qualifying_relation_does_not_satisfy_missing_unit(tmp_path: Path) -> None:

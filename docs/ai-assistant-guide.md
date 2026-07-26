@@ -135,7 +135,10 @@ Agent behavior:
 
 For one observation or rich unit, use `observe_memory` rather than page-wide
 string editing. For reviewed creation, validate first and commit the unchanged
-`draft_id`/`draft_hash`; never infer reviewed-none from a missing relation.
+`draft_id`, `draft_hash`, and `draft_token`. When required, echo the returned
+`relation_review_hash` with `relation_disposition="reviewed_none"` and an
+explicit `relation_review_reason`; never infer reviewed-none from a missing
+relation.
 
 ### Preserve proof
 

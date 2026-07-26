@@ -262,9 +262,60 @@ def test_validate_only_is_deterministic_normalized_and_nonmutating(
     assert validation.draft_hash == expected_draft
     assert validation.mutated is False
     assert validation.relation_disposition == "bootstrap"
+    assert validation.as_dict()["relation_review_hash"] is None
     assert validation.committable_without_review
     assert validation.as_dict()["contract_result"] == validation.contract_result.as_dict()
     assert tuple(tmp_path.rglob("*")) == before
+
+
+def test_reviewed_none_validation_returns_the_commit_review_hash(tmp_path: Path) -> None:
+    _source, validation = _reviewed_validation(tmp_path)
+
+    assert validation.as_dict()["relation_review_hash"] == validation.draft_hash
+
+
+def test_reviewed_none_hyphen_alias_commits_as_canonical_receipt(tmp_path: Path) -> None:
+    source, validation = _reviewed_validation(tmp_path)
+
+    committed = relation_review.commit_creation_draft(
+        tmp_path,
+        path=_PAGE_B,
+        source=source,
+        draft_id=_ID_B,
+        operation="create",
+        relation_disposition="reviewed-none",
+        relation_review_hash=validation.draft_hash,
+        relation_review_reason="No honest typed relation yet",
+    )
+
+    assert committed.relation_disposition == "reviewed_none"
+    corpus = semantic_contract.build_corpus_context(tmp_path)
+    persisted = relation_review.load_relation_review(
+        tmp_path,
+        corpus.pages[_PAGE_B],
+        corpus=corpus,
+    )
+    assert persisted is not None
+    assert persisted.kind == "reviewed_none"
+
+
+def test_invalid_review_disposition_names_the_accepted_spellings(tmp_path: Path) -> None:
+    source, validation = _reviewed_validation(tmp_path)
+
+    with pytest.raises(relation_review.RelationReviewError) as error:
+        relation_review.commit_creation_draft(
+            tmp_path,
+            path=_PAGE_B,
+            source=source,
+            draft_id=_ID_B,
+            operation="create",
+            relation_disposition="declined",
+            relation_review_hash=validation.draft_hash,
+            relation_review_reason="No honest typed relation yet",
+        )
+
+    assert error.value.code == "INVALID_RELATION_REVIEW"
+    assert "'reviewed_none' or 'reviewed-none'" in error.value.reason
     with pytest.raises(FrozenInstanceError):
         validation.destination = "changed.md"  # type: ignore[misc]
 

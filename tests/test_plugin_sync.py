@@ -11,6 +11,8 @@ Regenerate with:  exomem package-skills --plugin-root plugins/claude-code
 from __future__ import annotations
 
 import json
+import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -68,13 +70,35 @@ def test_manifest_matches_apart_from_the_version(regenerated: dict[str, bytes]) 
     assert committed == expected
 
 
-def test_plugin_declares_stdio_transport_explicitly() -> None:
-    """The server defaults to http; omitting --transport stdio starts a web server."""
+def test_plugin_never_auto_starts_a_full_stdio_core() -> None:
     manifest = json.loads((PLUGIN_ROOT / _MANIFEST).read_text(encoding="utf-8"))
 
-    args = manifest["mcpServers"]["exomem"]["args"]
-    assert "--transport" in args
-    assert args[args.index("--transport") + 1] == "stdio"
+    server = manifest["mcpServers"]["exomem"]
+    assert server == {"type": "http", "url": "${user_config.mcp_url}"}
+    option = manifest["userConfig"]["mcp_url"]
+    assert option["type"] == "string"
+    assert option["default"] == ""
+    assert option["required"] is False
+    assert "/mcp" in option["description"]
+    assert "command" not in server and "args" not in server
+
+
+def test_plugin_http_placeholder_passes_claude_validation() -> None:
+    claude = shutil.which("claude")
+    if claude is None:
+        pytest.skip("claude CLI is unavailable")
+
+    result = subprocess.run(
+        [claude, "plugin", "validate", str(PLUGIN_ROOT)],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=30,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 def test_plugin_ships_every_skill() -> None:

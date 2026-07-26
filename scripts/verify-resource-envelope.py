@@ -11,14 +11,23 @@ import argparse
 import json
 import os
 import subprocess
+import sys
 import time
 from dataclasses import asdict, dataclass
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+
+from exomem import process_memory
 
 
 @dataclass(frozen=True)
 class ProcessRow:
     pid: int
     rss_mb: float
+    memory_mb: float
+    memory_metric: str
+    physical_footprint_mb: float | None
     cpu_percent: float
     command: str
 
@@ -37,10 +46,12 @@ def _posix_rows() -> list[ProcessRow]:
         if len(parts) != 4:
             continue
         try:
+            rss_mb = round(int(parts[1]) / 1024, 1)
             rows.append(
                 ProcessRow(
                     pid=int(parts[0]),
-                    rss_mb=round(int(parts[1]) / 1024, 1),
+                    rss_mb=rss_mb,
+                    **process_memory.enrich_process_memory(int(parts[0]), rss_mb),
                     cpu_percent=float(parts[2]),
                     command=parts[3],
                 )
@@ -77,15 +88,18 @@ Get-CimInstance Win32_PerfFormattedData_PerfProc_Process |
     payload = json.loads(result.stdout)
     if isinstance(payload, dict):
         payload = [payload]
-    return [
-        ProcessRow(
-            pid=int(row["pid"]),
-            rss_mb=float(row["rss_mb"]),
+    rows: list[ProcessRow] = []
+    for row in payload:
+        pid = int(row["pid"])
+        rss_mb = float(row["rss_mb"])
+        rows.append(ProcessRow(
+            pid=pid,
+            rss_mb=rss_mb,
+            **process_memory.enrich_process_memory(pid, rss_mb),
             cpu_percent=float(row["cpu_percent"]),
             command=str(row.get("command") or ""),
-        )
-        for row in payload
-    ]
+        ))
+    return rows
 
 
 def process_rows() -> list[ProcessRow]:
@@ -106,6 +120,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--samples", type=int, default=6)
     parser.add_argument("--sample-seconds", type=float, default=10.0)
     parser.add_argument("--max-rss-mb", type=float, default=512.0)
+    parser.add_argument("--max-memory-mb", type=float)
     parser.add_argument("--max-cpu-percent", type=float, default=1.0)
     parser.add_argument("--expected-servers", type=int, default=1)
     args = parser.parse_args(argv)
@@ -122,6 +137,7 @@ def main(argv: list[str] | None = None) -> int:
 
     servers = [row for row in latest if _is_server(row)]
     workers = [row for row in latest if _is_media_worker(row)]
+    server_memory = process_memory.aggregate_memory([asdict(row) for row in servers])
     failures: list[str] = []
     if len(servers) != args.expected_servers:
         failures.append(f"expected {args.expected_servers} server(s), found {len(servers)}")
@@ -137,13 +153,24 @@ def main(argv: list[str] | None = None) -> int:
             failures.append(
                 f"pid {row.pid} CPU {average_cpu:.2f}% > {args.max_cpu_percent:.2f}%"
             )
+    if (
+        args.max_memory_mb is not None
+        and server_memory["memory_metric"] == "physical_footprint"
+        and server_memory["memory_mb_total"] > args.max_memory_mb
+    ):
+        failures.append(
+            "physical footprint total "
+            f"{server_memory['memory_mb_total']} MiB > {args.max_memory_mb} MiB"
+        )
 
     payload = {
         "success": not failures,
         "servers": [asdict(row) for row in servers],
         "media_workers": [asdict(row) for row in workers],
+        "server_memory": server_memory,
         "limits": {
             "max_rss_mb": args.max_rss_mb,
+            "max_memory_mb": args.max_memory_mb,
             "max_cpu_percent": args.max_cpu_percent,
             "expected_servers": args.expected_servers,
         },

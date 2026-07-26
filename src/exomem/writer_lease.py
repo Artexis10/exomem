@@ -1035,6 +1035,12 @@ def _command_digest(command: Any, kwargs: Mapping[str, Any]) -> str:
     ).hexdigest()
 
 
+def _canonicalize_command_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
+    if kwargs.get("relation_disposition") == "reviewed-none":
+        return {**kwargs, "relation_disposition": "reviewed_none"}
+    return kwargs
+
+
 _PUBLIC_IDEMPOTENCY_KEY_UNSET = object()
 
 
@@ -1283,6 +1289,7 @@ class LeaseManager:
         mutation_request_id: str | None = None,
     ) -> Any:
         t_start = time.perf_counter()
+        kwargs = _canonicalize_command_kwargs(kwargs)
         kwargs, response_detail = split_response_detail(kwargs)
         if public_idempotency_key is _PUBLIC_IDEMPOTENCY_KEY_UNSET:
             effective_public_idempotency_key = idempotency_key
