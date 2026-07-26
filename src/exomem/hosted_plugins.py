@@ -382,7 +382,7 @@ def render(
     selected = PLATFORMS if platform == "all" else (platform,)
     registered_openai_app = _validate_openai_app_id(openai_app_id) if "openai" in selected else None
     temporary_root = Path(tempfile.mkdtemp(prefix="exomem-hosted-render-", dir=allowed_root))
-    temporary = temporary_root / destination.name
+    temporary = temporary_root
     if destination.exists():
         shutil.copytree(destination, temporary)
     for selected_platform in selected:
@@ -449,12 +449,6 @@ def render(
         shutil.rmtree(backup)
     else:
         temporary.replace(destination)
-    try:
-        temporary_root.rmdir()
-    except OSError:
-        # The candidate has already been atomically installed; staging cleanup is
-        # best-effort and never turns a completed render into a false failure.
-        pass
     return destination
 
 
