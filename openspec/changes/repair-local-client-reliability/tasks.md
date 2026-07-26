@@ -29,4 +29,4 @@
 - [x] 5.1 Run focused setup, diagnostics, semantic-contract, schema, plugin, and generated-document tests plus lint and strict OpenSpec validation.
 - [x] 5.2 Run the repository privacy/public-artifact gates and the proportionate full test suite with writable temporary and uv-cache directories.
 - [x] 5.3 Complete independent code review and verification, resolve attributable findings, and record any Apple-Silicon-only acceptance item explicitly.
-- [ ] 5.4 Commit the intended scope, integrate the current remote default branch, push, and open a ready pull request with rationale and verification evidence.
+- [x] 5.4 Commit the intended scope, integrate the current remote default branch, push, and open a ready pull request with rationale and verification evidence.
