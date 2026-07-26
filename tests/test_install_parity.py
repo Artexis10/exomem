@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import stat
 import subprocess
 import sys
@@ -131,14 +132,15 @@ def _run_unix_sync(mode: str, *, tool_present: bool) -> subprocess.CompletedProc
     common_script = "./scripts/_service-common.sh"
     command = (
         "uv() { "
-        'if [ "\\$1 \\$2" = "tool list" ]; then '
+        'if [ "$1 $2" = "tool list" ]; then '
         f"{listed}; "
-        "else printf 'UV_CALL %s\\n' \"\\$*\"; fi; }; "
+        "else printf 'UV_CALL %s\\n' \"$*\"; fi; }; "
         f'. "{common_script}"; '
         f'exomem_sync_uv_cli "{mode}" "1.2.3"'
     )
+    bash = shutil.which("bash") or "bash"
     return subprocess.run(
-        ["bash", "-c", command],
+        [bash, "-c", command],
         cwd=ROOT,
         text=True,
         capture_output=True,
