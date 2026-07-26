@@ -7,6 +7,7 @@ print_fn): no test touches the real `~/.claude` or spawns a real `claude`.
 from __future__ import annotations
 
 import json
+import stat
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -30,6 +31,8 @@ class Recorder:
         for key, (rc, out, err) in self.results.items():
             if key in joined:
                 return subprocess.CompletedProcess(argv, rc, out, err)
+        if "plugin list --json" in joined:
+            return subprocess.CompletedProcess(argv, 0, "[]", "")
         return subprocess.CompletedProcess(argv, 0, "", "")
 
 
@@ -40,6 +43,14 @@ def _messy_vault(tmp_path: Path) -> Path:
     (daily / "2026-01-05.md").write_text("- 09:00 log\n", encoding="utf-8")
     (vault / "floating.md").write_text("note\n", encoding="utf-8")
     return vault
+
+
+def test_default_claude_config_path_honors_relocated_config_dir(tmp_path: Path) -> None:
+    config_dir = tmp_path / "relocated-claude"
+
+    assert setup_wizard._default_claude_config_path(  # noqa: SLF001
+        {"CLAUDE_CONFIG_DIR": str(config_dir)}
+    ) == config_dir / ".claude.json"
 
 
 def _setup(vault: Path, home: Path, recorder: Recorder, **overrides):
@@ -55,6 +66,10 @@ def _setup(vault: Path, home: Path, recorder: Recorder, **overrides):
         run_fn=recorder,
         which_fn=lambda name: f"C:/fake/{name}.CMD",
         home=home,
+        claude_config_path=home.parent / ".claude.json",
+        project_dir=vault.parent,
+        environ={},
+        persist_profile_fn=lambda _profile: None,
         # Always sandboxed: without this the wizard would resolve the REAL
         # ~/.codex and a test run could rewrite the developer's own config.toml.
         codex_home=home.parent / "codex",
@@ -83,13 +98,18 @@ def test_fresh_vault_happy_path(tmp_path: Path) -> None:
     assert "compile planning" in out
     assert "writes only under 'Knowledge Base/'" in out
     # registration argv shape (Codex is registered too; pick the Claude call)
-    (reg,) = [c for c in recorder.calls if "add" in c and "claude" in c[0]]
+    (reg,) = [
+        c
+        for c in recorder.calls
+        if c[1:3] == ["mcp", "add-json"] and "claude" in c[0]
+    ]
     assert reg[0].endswith("claude.CMD")
-    assert reg[1:4] == ["mcp", "add", "exomem"]
-    assert ["--scope", "user"] == reg[4:6]
-    assert f"EXOMEM_VAULT_PATH={vault}" in reg
-    assert "EXOMEM_DISABLE_EMBEDDINGS=1" in reg  # lean profile
-    assert "--" in reg
+    assert reg[1:6] == ["mcp", "add-json", "--scope", "user", "exomem"]
+    registration = json.loads(reg[6])
+    assert registration["type"] == "stdio"
+    assert registration["args"][-2:] == ["--transport", "stdio"]
+    assert registration["env"]["EXOMEM_VAULT_PATH"] == str(vault)
+    assert registration["env"]["EXOMEM_DISABLE_EMBEDDINGS"] == "1"
 
 
 def test_interactive_setup_can_select_multiple_packs(tmp_path: Path) -> None:
@@ -109,6 +129,9 @@ def test_interactive_setup_can_select_multiple_packs(tmp_path: Path) -> None:
         run_fn=recorder,
         which_fn=lambda name: None,
         home=home,
+        environ={},
+        project_dir=tmp_path,
+        persist_profile_fn=lambda _profile: None,
         print_fn=lines.append,
     )
 
@@ -122,12 +145,31 @@ def test_rerun_converges_to_skips(tmp_path: Path) -> None:
     vault, home = _messy_vault(tmp_path), tmp_path / "home"
     code, _ = _setup(vault, home, Recorder())
     assert code == 0
-    rerun = Recorder(results={"mcp add": (1, "", "MCP server exomem already exists")})
+    (tmp_path / ".claude.json").write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "exomem": {
+                        "command": "uv",
+                        "args": setup_wizard._server_command(
+                            lambda name: f"C:/fake/{name}.CMD"
+                        )[1:],
+                        "env": {
+                            "EXOMEM_VAULT_PATH": str(vault),
+                            "EXOMEM_DISABLE_EMBEDDINGS": "1",
+                        },
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    rerun = Recorder()
     code, out = _setup(vault, home, rerun)
     assert code == 0
     assert "[skipped: Knowledge Base/ already exists]" in out
     assert "[skipped: already installed]" in out
-    assert "[skipped: already registered]" in out
+    assert "[skipped: already registered in user]" in out
 
 
 def test_foreign_skill_is_preserved(tmp_path: Path) -> None:
@@ -175,15 +217,382 @@ def test_setup_generates_access_policy(tmp_path: Path) -> None:
 
 def test_setup_skips_registration_when_exomem_exists_in_another_scope(tmp_path: Path) -> None:
     vault, home = _messy_vault(tmp_path), tmp_path / "home"
-    recorder = Recorder(results={"mcp list --scope local": (0, "exomem\n", "")})
+    project_dir = tmp_path / "workspace"
+    project_dir.mkdir()
+    config_path = tmp_path / ".claude.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "projects": {
+                    project_dir.resolve().as_posix(): {
+                        "mcpServers": {
+                            "exomem": {
+                                "command": "exomem",
+                                "args": ["--transport", "stdio"],
+                            }
+                        }
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    recorder = Recorder()
 
-    code, out = _setup(vault, home, recorder, scope="user")
+    code, out = _setup(
+        vault,
+        home,
+        recorder,
+        scope="user",
+        project_dir=project_dir,
+        claude_config_path=config_path,
+    )
 
     assert code == 0
     assert "[skipped: already registered in local]" in out
     # An existing Claude registration must be left alone. Codex is a separate
     # client with its own registration, so it is still wired.
     assert not [c for c in recorder.calls if "add" in c and "claude" in c[0]]
+
+
+def test_client_route_prefers_explicit_then_dotenv_then_inherited_env(tmp_path: Path) -> None:
+    (tmp_path / ".env").write_text(
+        "EXOMEM_BASE_URL=https://dotenv.example.com\n", encoding="utf-8"
+    )
+    common = dict(
+        force_stdio=False,
+        cwd=tmp_path,
+        environ={"EXOMEM_BASE_URL": "https://inherited.example.com"},
+        which_fn=lambda name: f"/fake/{name}",
+        vault_path=tmp_path / "vault",
+        profile="hybrid",
+    )
+
+    explicit = setup_wizard._resolve_client_route(
+        mcp_url="https://explicit.example.com/mcp", **common
+    )
+    dotenv = setup_wizard._resolve_client_route(mcp_url=None, **common)
+    inherited = setup_wizard._resolve_client_route(
+        mcp_url=None, **(common | {"cwd": tmp_path / "no-dotenv"})
+    )
+
+    assert explicit.url == "https://explicit.example.com/mcp"
+    assert dotenv.url == "https://dotenv.example.com/mcp"
+    assert inherited.url == "https://inherited.example.com/mcp"
+
+
+def test_client_route_force_stdio_ignores_configured_service(tmp_path: Path) -> None:
+    (tmp_path / ".env").write_text(
+        "EXOMEM_BASE_URL=https://dotenv.example.com\n", encoding="utf-8"
+    )
+
+    route = setup_wizard._resolve_client_route(
+        mcp_url=None,
+        force_stdio=True,
+        cwd=tmp_path,
+        environ={"EXOMEM_BASE_URL": "https://inherited.example.com"},
+        which_fn=lambda name: f"/fake/{name}",
+        vault_path=tmp_path / "vault",
+        profile="lean",
+    )
+
+    assert route.transport == "stdio"
+    assert route.command[-2:] == ("--transport", "stdio")
+    assert route.env["EXOMEM_DISABLE_EMBEDDINGS"] == "1"
+
+
+def test_present_invalid_dotenv_service_url_fails_instead_of_falling_back(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / ".env").write_text(
+        "EXOMEM_BASE_URL=http://public.example.com\n", encoding="utf-8"
+    )
+
+    with pytest.raises(ValueError, match="MCP URL"):
+        setup_wizard._resolve_client_route(
+            mcp_url=None,
+            force_stdio=False,
+            cwd=tmp_path,
+            environ={},
+            which_fn=lambda name: f"/fake/{name}",
+            vault_path=tmp_path / "vault",
+            profile="lean",
+        )
+
+
+def test_invalid_service_url_fails_before_setup_mutates_any_configuration(
+    tmp_path: Path,
+) -> None:
+    vault = tmp_path / "new-vault"
+    config_path = tmp_path / ".claude.json"
+    original = b'{"mcpServers":{"exomem":{"command":"old"}}}\n'
+    config_path.write_bytes(original)
+    lines: list[str] = []
+
+    code = setup_wizard.run_setup(
+        vault=str(vault),
+        yes=True,
+        profile="lean",
+        mcp_url="http://public.example.com",
+        run_fn=Recorder(),
+        which_fn=lambda name: f"C:/fake/{name}.CMD",
+        claude_config_path=config_path,
+        project_dir=tmp_path,
+        environ={},
+        persist_profile_fn=lambda _profile: pytest.fail("profile was persisted"),
+        print_fn=lines.append,
+    )
+
+    assert code == 2
+    assert not vault.exists()
+    assert config_path.read_bytes() == original
+    assert "MCP URL" in "\n".join(lines)
+
+
+def test_http_route_registers_native_claude_and_codex_clients(tmp_path: Path) -> None:
+    vault, home = _messy_vault(tmp_path), tmp_path / "home"
+    recorder = Recorder()
+
+    code, out = _setup(
+        vault,
+        home,
+        recorder,
+        mcp_url="https://kb.example.com",
+    )
+
+    assert code == 0
+    (claude_add,) = [c for c in recorder.calls if c[1:3] == ["mcp", "add"] and "claude" in c[0]]
+    (codex_add,) = [c for c in recorder.calls if c[1:3] == ["mcp", "add"] and "codex" in c[0]]
+    assert claude_add == [
+        "C:/fake/claude.CMD",
+        "mcp",
+        "add",
+        "--transport",
+        "http",
+        "--scope",
+        "user",
+        "exomem",
+        "https://kb.example.com/mcp",
+    ]
+    assert codex_add == [
+        "C:/fake/codex.CMD",
+        "mcp",
+        "add",
+        "exomem",
+        "--url",
+        "https://kb.example.com/mcp",
+    ]
+    assert "claude mcp" in out and "/mcp" in out
+    assert "codex mcp login exomem" in out
+
+
+def _write_shadowing_claude_configs(config_path: Path, project_dir: Path) -> None:
+    stdio = {"command": "exomem", "args": ["--transport", "stdio"]}
+    config_path.write_text(
+        json.dumps(
+            {
+                "mcpServers": {"exomem": stdio},
+                "projects": {
+                    project_dir.resolve().as_posix(): {"mcpServers": {"exomem": stdio}}
+                },
+                "unrelated": {"keep": True},
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    (project_dir / ".mcp.json").write_text(
+        json.dumps({"mcpServers": {"exomem": stdio}, "keep": True}, indent=2),
+        encoding="utf-8",
+    )
+
+
+def test_explicit_replacement_removes_every_shadowing_claude_scope(tmp_path: Path) -> None:
+    vault, home = _messy_vault(tmp_path), tmp_path / "home"
+    project_dir = tmp_path / "workspace"
+    project_dir.mkdir()
+    config_path = tmp_path / ".claude.json"
+    _write_shadowing_claude_configs(config_path, project_dir)
+    recorder = Recorder()
+
+    code, out = _setup(
+        vault,
+        home,
+        recorder,
+        project_dir=project_dir,
+        claude_config_path=config_path,
+        mcp_url="https://kb.example.com/mcp",
+        replace_client_registration=True,
+    )
+
+    assert code == 0
+    removals = [c for c in recorder.calls if c[1:3] == ["mcp", "remove"]]
+    assert {c[c.index("--scope") + 1] for c in removals} == {"local", "project", "user"}
+    assert "local, project, user" in out
+    assert [c for c in recorder.calls if c[1:3] == ["mcp", "add"] and "claude" in c[0]]
+
+
+def test_failed_claude_replacement_restores_every_snapshotted_file(tmp_path: Path) -> None:
+    vault, home = _messy_vault(tmp_path), tmp_path / "home"
+    project_dir = tmp_path / "workspace"
+    project_dir.mkdir()
+    config_path = tmp_path / ".claude.json"
+    project_path = project_dir / ".mcp.json"
+    _write_shadowing_claude_configs(config_path, project_dir)
+    original_user = config_path.read_bytes()
+    original_project = project_path.read_bytes()
+    calls: list[list[str]] = []
+
+    def failing_run(argv, **_kwargs):
+        calls.append(list(argv))
+        joined = " ".join(str(value) for value in argv)
+        if "plugin list --json" in joined:
+            return subprocess.CompletedProcess(argv, 0, "[]", "")
+        if argv[1:3] == ["mcp", "remove"]:
+            config_path.write_text('{"mutated": true}\n', encoding="utf-8")
+            project_path.write_text('{"mutated": true}\n', encoding="utf-8")
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        if argv[1:3] == ["mcp", "add"] and "claude" in argv[0]:
+            return subprocess.CompletedProcess(argv, 1, "", "synthetic add failure")
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    code, out = _setup(
+        vault,
+        home,
+        Recorder(),
+        run_fn=failing_run,
+        project_dir=project_dir,
+        claude_config_path=config_path,
+        mcp_url="https://kb.example.com/mcp",
+        replace_client_registration=True,
+    )
+
+    assert code == 1
+    assert "synthetic add failure" in out
+    assert "restored previous registration" in out
+    assert config_path.read_bytes() == original_user
+    assert project_path.read_bytes() == original_project
+
+
+def test_configuration_snapshot_restore_preserves_restrictive_mode(tmp_path: Path) -> None:
+    path = tmp_path / "config.json"
+    path.write_text('{"secret": true}\n', encoding="utf-8")
+    path.chmod(0o444)
+    expected_mode = stat.S_IMODE(path.stat().st_mode)
+    snapshots = setup_wizard._snapshot_files((path,))  # noqa: SLF001
+
+    path.chmod(0o666)
+    path.write_text('{"mutated": true}\n', encoding="utf-8")
+    try:
+        setup_wizard._restore_files(snapshots)  # noqa: SLF001
+
+        assert path.read_text(encoding="utf-8") == '{"secret": true}\n'
+        assert stat.S_IMODE(path.stat().st_mode) == expected_mode
+    finally:
+        path.chmod(0o666)
+
+
+def test_enabled_legacy_stdio_plugin_blocks_false_shared_route_claim(tmp_path: Path) -> None:
+    vault, home = _messy_vault(tmp_path), tmp_path / "home"
+    legacy = [
+        {
+            "id": "exomem@exomem",
+            "enabled": True,
+            "mcpServers": {
+                "exomem": {
+                    "command": "uvx",
+                    "args": ["exomem", "--transport", "stdio"],
+                }
+            },
+        }
+    ]
+    recorder = Recorder(results={"plugin list --json": (0, json.dumps(legacy), "")})
+
+    code, out = _setup(
+        vault,
+        home,
+        recorder,
+        mcp_url="https://kb.example.com/mcp",
+    )
+
+    assert code == 1
+    assert "claude plugin update exomem@exomem" in out
+    assert "/reload-plugins" in out
+    assert not [c for c in recorder.calls if c[1:3] == ["mcp", "add"] and "claude" in c[0]]
+
+
+def test_unverifiable_plugin_inventory_blocks_a_convergence_claim(tmp_path: Path) -> None:
+    vault, home = _messy_vault(tmp_path), tmp_path / "home"
+    recorder = Recorder(results={"plugin list --json": (1, "", "inventory unavailable")})
+
+    code, out = _setup(vault, home, recorder, mcp_url="https://kb.example.com/mcp")
+
+    assert code == 1
+    assert "could not verify Claude plugin state" in out
+    assert not [c for c in recorder.calls if c[1:3] == ["mcp", "add"] and "claude" in c[0]]
+
+
+@pytest.mark.parametrize(
+    "plugin",
+    [
+        {"id": "exomem@exomem", "enabled": True},
+        {"id": "exomem@exomem", "enabled": True, "mcpServers": []},
+        {
+            "id": "exomem@exomem",
+            "enabled": True,
+            "mcpServers": {"another-server": {"type": "http", "url": "https://example.com/mcp"}},
+        },
+        {"id": "exomem@exomem", "enabled": True, "mcpServers": {"exomem": {}}},
+    ],
+)
+def test_incomplete_enabled_exomem_plugin_inventory_fails_closed(
+    tmp_path: Path, plugin: dict
+) -> None:
+    vault, home = _messy_vault(tmp_path), tmp_path / "home"
+    recorder = Recorder(
+        results={"plugin list --json": (0, json.dumps([plugin]), "")}
+    )
+
+    code, out = _setup(vault, home, recorder, mcp_url="https://kb.example.com/mcp")
+
+    assert code == 1
+    assert "could not verify Claude plugin state" in out
+    assert not [c for c in recorder.calls if c[1:3] == ["mcp", "add"] and "claude" in c[0]]
+
+
+def test_failed_codex_replacement_restores_its_config(tmp_path: Path) -> None:
+    vault, home = _messy_vault(tmp_path), tmp_path / "home"
+    codex_home = tmp_path / "codex"
+    codex_home.mkdir()
+    config_path = codex_home / "config.toml"
+    original = '[mcp_servers.exomem]\ncommand = "old"\nargs = []\n'
+    config_path.write_text(original, encoding="utf-8")
+
+    def failing_run(argv, **_kwargs):
+        joined = " ".join(str(value) for value in argv)
+        if "plugin list --json" in joined:
+            return subprocess.CompletedProcess(argv, 0, "[]", "")
+        if "codex" in argv[0] and argv[1:3] == ["mcp", "remove"]:
+            config_path.write_text("", encoding="utf-8")
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        if "codex" in argv[0] and argv[1:3] == ["mcp", "add"]:
+            return subprocess.CompletedProcess(argv, 1, "", "synthetic codex failure")
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    code, out = _setup(
+        vault,
+        home,
+        Recorder(),
+        run_fn=failing_run,
+        codex_home=codex_home,
+        mcp_url="https://kb.example.com/mcp",
+        replace_client_registration=True,
+    )
+
+    assert code == 1
+    assert "synthetic codex failure" in out
+    assert "restored previous Codex registration" in out
+    assert config_path.read_text(encoding="utf-8") == original
 
 
 
@@ -222,11 +631,27 @@ def test_yes_without_vault_is_usage_error(capsys) -> None:
 def test_setup_dispatches_from_main(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys) -> None:
     called: dict = {}
     monkeypatch.setattr(setup_wizard, "run_setup", lambda **kw: called.update(kw) or 0)
-    code = main(["setup", "--vault", str(tmp_path), "--yes", "--hybrid", "--scope", "local"])
+    code = main(
+        [
+            "setup",
+            "--vault",
+            str(tmp_path),
+            "--yes",
+            "--hybrid",
+            "--scope",
+            "local",
+            "--mcp-url",
+            "https://kb.example.com/mcp",
+            "--replace-client-registration",
+        ]
+    )
     assert code == 0
     assert called["vault"] == str(tmp_path)
     assert called["profile"] == "hybrid"
     assert called["scope"] == "local"
+    assert called["mcp_url"] == "https://kb.example.com/mcp"
+    assert called["force_stdio"] is False
+    assert called["replace_client_registration"] is True
 
 
 # ============================================================================

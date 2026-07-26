@@ -148,11 +148,14 @@ infer a typed edge from a compact observation's category or prose.
 ## Reviewed creation and adoption
 
 For a validate/review/commit creation flow, call the intended writer with
-`validate_only=true`, retain the returned `draft_id`, `draft_hash`, candidate,
-and semantic feedback, then commit the unchanged draft through the same writer.
-If a governed qualifying relation has no accepted edge, use the returned
-relation review hash and an explicit reason; never invent a reviewed-none
-decision from an empty Relations section.
+`validate_only=true`, retain the returned `draft_id`, `draft_hash`,
+`draft_token`, candidate, and semantic feedback, then commit the unchanged draft
+through the same writer. If validation returns `reviewed_none_required=true`,
+commit with `relation_disposition="reviewed_none"`, the returned
+`relation_review_hash`, and an explicit `relation_review_reason`. Never invent a
+reviewed-none decision from an empty Relations section. The legacy advertised
+spelling `reviewed-none` is accepted at the boundary but stored canonically as
+`reviewed_none`.
 
 `adopt_vault(mode="scan-only")` includes a bounded read-only semantic census:
 compact/rich counts, raw/canonical/resolved categories, collisions, malformed

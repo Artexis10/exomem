@@ -417,16 +417,18 @@ def op_bootstrap(
             "reviewed_creation": {
                 "validate_only": (
                     "call the intended creation writer with validate_only=true and retain "
-                    "its draft_id, draft_hash, candidate, and semantic feedback"
+                    "its draft_id, draft_hash, draft_token, relation_review_hash, candidate, "
+                    "and semantic feedback"
                 ),
                 "commit": (
                     "after review, call the same writer with the unchanged draft_id and "
-                    "draft_hash; changed candidates must be validated again"
+                    "draft_hash plus draft_token; changed drafts must be validated again"
                 ),
                 "reviewed_none": (
-                    "when a governed qualifying relation has no accepted edge, use the "
-                    "returned relation review hash and an explicit reason; never fabricate "
-                    "a none decision or infer review from missing relations"
+                    "when validation requires it, commit the unchanged draft with "
+                    "relation_disposition=\"reviewed_none\", the returned "
+                    "relation_review_hash, and an explicit bounded relation_review_reason; "
+                    "never fabricate a none decision or infer review from missing relations"
                 ),
                 "adoption_handoff": (
                     "adopt_vault(mode='compile-selected') returns a proposal only; review "
@@ -2314,6 +2316,7 @@ def op_replace(
                     predecessor_hash=predecessor_hash,
                 ),
             )
+            value["relation_review_hash"] = value["draft_hash"]
             return value
 
         effective_draft_hash = draft_hash

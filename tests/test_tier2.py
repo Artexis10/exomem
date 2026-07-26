@@ -8,6 +8,7 @@ refusal with no override), inbound-wikilink safety on delete/move.
 from __future__ import annotations
 
 import datetime as dt
+import json
 from pathlib import Path
 
 import pytest
@@ -24,6 +25,7 @@ from exomem import list_inbound_links as inbound_module
 from exomem import list_trash as list_trash_module
 from exomem import move_file as move_module
 from exomem import recover_from_trash as recover_module
+from exomem import relation_review
 from exomem import set_frontmatter_field as set_fm_module
 
 TODAY = dt.date(2026, 5, 24)
@@ -62,6 +64,38 @@ def test_create_file_writes_file_with_frontmatter(vault: Path) -> None:
     assert "created: \"2026-05-24\"" in text
     assert "updated: \"2026-05-24\"" in text
     assert "# Career" in text
+
+
+def test_create_file_direct_leaf_canonicalizes_reviewed_none_hyphen_alias(vault: Path) -> None:
+    path = "Knowledge Base/Notes/Insights/direct-alias.md"
+    content = "# Direct alias\n\n## Observations\n\n- [constraint] Keep retries bounded.\n"
+    frontmatter = {"type": "insight", "title": "Direct alias", "status": "active"}
+    validation = create_file_module.create_file(
+        vault,
+        path=path,
+        content=content,
+        frontmatter=frontmatter,
+        today=TODAY,
+        validate_only=True,
+    )
+
+    result = create_file_module.create_file(
+        vault,
+        path=path,
+        content=content,
+        frontmatter=frontmatter,
+        today=TODAY,
+        draft_id=validation.draft_id,
+        draft_hash=validation.draft_hash,
+        draft_token=validation.draft_token,
+        relation_disposition="reviewed-none",
+        relation_review_hash=validation.draft_hash,
+        relation_review_reason="No honest relation exists in this fixture corpus.",
+    )
+
+    assert result.creation is not None
+    artifact = relation_review.review_artifact_path(vault, validation.draft_id)
+    assert json.loads(artifact.read_text(encoding="utf-8"))["kind"] == "reviewed_none"
 
 
 def test_create_file_without_frontmatter_writes_verbatim(vault: Path) -> None:

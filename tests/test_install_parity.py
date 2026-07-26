@@ -4,12 +4,16 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
+import stat
 import subprocess
 import sys
 import textwrap
 from pathlib import Path
 
 import pytest
+
+from exomem import install_info
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -125,16 +129,18 @@ def test_plain_version_is_a_single_stable_line() -> None:
 
 def _run_unix_sync(mode: str, *, tool_present: bool) -> subprocess.CompletedProcess[str]:
     listed = "printf '%s\\n' 'exomem v0.4.1'" if tool_present else ":"
+    common_script = "./scripts/_service-common.sh"
     command = (
         "uv() { "
         'if [ "$1 $2" = "tool list" ]; then '
         f"{listed}; "
         "else printf 'UV_CALL %s\\n' \"$*\"; fi; }; "
-        f'. "{ROOT / "scripts" / "_service-common.sh"}"; '
+        f'. "{common_script}"; '
         f'exomem_sync_uv_cli "{mode}" "1.2.3"'
     )
+    bash = shutil.which("bash") or "bash"
     return subprocess.run(
-        ["bash", "-c", command],
+        [bash, "-c", command],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -204,3 +210,117 @@ def test_bootstrap_upgrades_an_existing_uv_tool_instead_of_leaving_it_stale() ->
 
     assert "uv tool list" in install
     assert "uv tool upgrade exomem" in install
+
+
+def test_editable_project_root_comes_from_a_valid_direct_url(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    root = tmp_path / "checkout"
+    root.mkdir()
+    (root / "pyproject.toml").write_text("[project]\nname = 'exomem'\n", encoding="utf-8")
+    (root / "uv.lock").write_text("version = 1\n", encoding="utf-8")
+
+    class Distribution:
+        @staticmethod
+        def read_text(name: str) -> str:
+            assert name == "direct_url.json"
+            return json.dumps({"url": root.as_uri(), "dir_info": {"editable": True}})
+
+    monkeypatch.setattr(install_info, "distribution", lambda _name: Distribution())
+
+    assert install_info.editable_project_root() == root.resolve()
+
+
+def test_editable_project_root_rejects_non_file_or_unvalidated_direct_urls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Distribution:
+        @staticmethod
+        def read_text(_name: str) -> str:
+            return json.dumps({"url": "https://example.test/exomem", "dir_info": {"editable": True}})
+
+    monkeypatch.setattr(install_info, "distribution", lambda _name: Distribution())
+
+    assert install_info.editable_project_root() is None
+
+
+def test_editable_project_root_reports_malformed_dir_info(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Distribution:
+        @staticmethod
+        def read_text(_name: str) -> str:
+            return json.dumps({"url": "file:///tmp/exomem", "dir_info": []})
+
+    monkeypatch.setattr(install_info, "distribution", lambda _name: Distribution())
+
+    root, warning = install_info.editable_project_root_status()
+
+    assert root is None
+    assert warning == "direct_url.json has malformed dir_info"
+
+
+def test_editable_project_root_requires_the_project_and_lock_files(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    root = tmp_path / "checkout"
+    root.mkdir()
+    (root / "pyproject.toml").write_text("[project]\nname = 'exomem'\n", encoding="utf-8")
+
+    class Distribution:
+        @staticmethod
+        def read_text(_name: str) -> str:
+            return json.dumps({"url": root.as_uri(), "dir_info": {"editable": True}})
+
+    monkeypatch.setattr(install_info, "distribution", lambda _name: Distribution())
+
+    assert install_info.editable_project_root() is None
+
+
+def test_persisted_local_profile_merges_valid_managed_manifest(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    manifest = tmp_path / "managed-install.json"
+    manifest.write_text(
+        json.dumps({"schema_version": 1, "service_profile": "media", "future": "keep"}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("EXOMEM_MANAGED_INSTALL_MANIFEST", str(manifest))
+
+    install_info.persist_local_profile("hybrid")
+
+    assert json.loads(manifest.read_text(encoding="utf-8")) == {
+        "schema_version": 1,
+        "service_profile": "media",
+        "cli_profile": "hybrid",
+        "future": "keep",
+    }
+    assert install_info.configured_local_profile() == "hybrid"
+
+
+def test_persisted_local_profile_preserves_manifest_permissions(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    manifest = tmp_path / "managed-install.json"
+    manifest.write_text(json.dumps({"schema_version": 1}), encoding="utf-8")
+    os.chmod(manifest, 0o600)
+    original_mode = stat.S_IMODE(manifest.stat().st_mode)
+    monkeypatch.setenv("EXOMEM_MANAGED_INSTALL_MANIFEST", str(manifest))
+
+    install_info.persist_local_profile("hybrid")
+
+    assert stat.S_IMODE(manifest.stat().st_mode) == original_mode
+
+
+@pytest.mark.parametrize("content", ["not json", '{"schema_version": 2}'])
+def test_persisted_local_profile_refuses_to_overwrite_unknown_manifest_state(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, content: str
+) -> None:
+    manifest = tmp_path / "managed-install.json"
+    manifest.write_text(content, encoding="utf-8")
+    monkeypatch.setenv("EXOMEM_MANAGED_INSTALL_MANIFEST", str(manifest))
+
+    with pytest.raises(ValueError):
+        install_info.persist_local_profile("hybrid")
+
+    assert manifest.read_text(encoding="utf-8") == content

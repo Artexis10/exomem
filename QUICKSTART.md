@@ -29,7 +29,8 @@ If you're comfortable in Claude Code, this is ~20–30 minutes.
 > ```
 >
 > Claude Code alone? `/plugin marketplace add Artexis10/exomem` then
-> `/plugin install exomem@exomem` — the MCP server registers itself.
+> `/plugin install exomem@exomem` installs the skills and hooks. Finish the MCP
+> route with `exomem setup --stdio`, or point setup at your existing service.
 >
 > The manual walkthrough below exists so you can see what those do, and for when
 > you want to run the steps yourself.
@@ -60,6 +61,12 @@ then initializes the KB, picks lean vs hybrid, runs `doctor`, registers the
 server with Claude Code (or prints the `.mcp.json` snippet if the `claude` CLI
 isn't on PATH), installs the skill, and offers the optional hooks. Re-running
 is safe: completed steps report `[skipped]`.
+
+Setup prefers one already-running authenticated service when `--mcp-url` or
+`EXOMEM_BASE_URL` is configured, including cwd `.env`; Claude Code and Codex
+then use the same `/mcp` core. With no service it registers stdio. Force that
+local fallback with `--stdio`. Existing registrations are preserved unless you
+confirm replacement or pass `--replace-client-registration`.
 
 Non-interactive (scripts/CI):
 `uv run python -m exomem setup --yes --vault "/path/to/vault" --lean`
@@ -327,7 +334,18 @@ uv run python -m exomem mode performance
 
 ## 5. Add it to Claude Code
 
-Easiest — the CLI (run from anywhere):
+If an Exomem HTTP service already runs on this machine or behind your tunnel,
+reuse it instead of starting one model-capable process per Claude session:
+
+```bash
+uv run python -m exomem setup \
+  --vault "/path/to/your/Obsidian" \
+  --mcp-url https://<host>/mcp
+```
+
+Authenticate from Claude Code with `/mcp`. For a deliberately local-only
+installation, setup can create the stdio route for you with `--stdio`. The
+manual equivalent is:
 
 ```bash
 claude mcp add exomem \
@@ -338,6 +356,10 @@ claude mcp add exomem \
 
 (Drop the `EXOMEM_DISABLE_EMBEDDINGS` line for hybrid. If you use the pip
 fallback instead of uv, use the **full path to your venv's `python`**.)
+
+Each stdio client/session owns this process. Several active sessions can
+therefore load several private embedding/Metal runtimes; use the shared HTTP
+route when a service is already available.
 
 Or by hand in `.mcp.json` (project) / your Claude Code settings:
 
