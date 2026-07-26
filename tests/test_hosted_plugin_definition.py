@@ -7,7 +7,6 @@ import pytest
 
 from exomem import hosted_plugins
 
-
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
