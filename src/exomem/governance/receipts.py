@@ -9,6 +9,7 @@ from __future__ import annotations
 import errno
 import hashlib
 import hmac
+import inspect
 import json
 import os
 import re
@@ -56,7 +57,7 @@ _EVENT_PAYLOAD_FIELDS = {
 _OUTCOME_FIELDS = frozenset({
     "ref", "content_hash", "size", "level", "decision", "redaction_count", "count",
     "principal", "audience", "purpose", "policy_fingerprint", "confirmation",
-    "scope_ids", "scope_label_digests",
+    "scope_ids", "scope_label_digests", "command",
 })
 _STATE_RESOLVERS: dict[str, Callable[[Mapping[str, Any]], Any]] = {}
 
@@ -599,7 +600,7 @@ def _valid_outcome(value: Any) -> bool:
     if not isinstance(value, Mapping) or set(value) - _OUTCOME_FIELDS:
         return False
     for key, item in value.items():
-        if key in {"ref", "principal", "audience", "purpose"} and not _identifier_value(item):
+        if key in {"ref", "principal", "audience", "purpose", "command"} and not _identifier_value(item):
             return False
         if key in {"content_hash", "policy_fingerprint"} and not _hex(item):
             return False
@@ -1379,7 +1380,8 @@ def _reconcile_locked(
                 continue
             resolver = state_resolver or _STATE_RESOLVERS.get(str(item.get("operation")))
             if resolver is not None:
-                current = resolver(item)
+                parameters = inspect.signature(resolver).parameters
+                current = resolver(vault_root, item) if len(parameters) >= 2 else resolver(item)
                 phase = "committed" if current == item.get("target") else "aborted" if current == item.get("prior") else None
                 if phase is None:
                     continue

@@ -433,6 +433,22 @@ def redeem(
     claim = verify(vault_root, token, audience=audience, now=now)
     _check_content(vault_root, claim)
 
+    # Refuse a retry before beginning another critical operation.  The
+    # consumed flag is the authoritative target-state witness for reconcile;
+    # writing another intent here would turn a successful retry into duplicate
+    # redemption evidence.
+    conn = _open(vault_root)
+    try:
+        _stored_claim, consumed_at = _load_claim(conn, claim.jti)
+    finally:
+        conn.close()
+    if consumed_at is not None:
+        raise WithholdTokenError(
+            "TOKEN_CONSUMED",
+            "this escalation has already been used",
+            "Re-run the query to request a fresh escalation.",
+        )
+
     token_digest = _token_id_digest(claim.jti)
     intent = receipts.begin_event(
         vault_root,
@@ -445,6 +461,9 @@ def redeem(
         receipts.append_event(
             vault_root,
             event_type="token_redeem",
+            event_id=uuid.uuid5(
+                uuid.NAMESPACE_URL, f"token-redeem:{intent['event_id']}"
+            ).hex,
             payload={
                 "token_id_digest": token_digest,
                 "bounds_fingerprint": _bounds_fingerprint(claim),
@@ -517,3 +536,24 @@ def sweep(vault_root: Path, *, now: int | None = None) -> int:
 def describe(claim: WithholdClaim) -> dict[str, Any]:
     """Public, content-free description of what a token would unlock."""
     return {"max_level": claim.max_level, "expires_at": claim.expires_at}
+
+
+def _resolve_redeem_state(vault_root: Path, intent: dict[str, Any]) -> str | None:
+    """Classify an unresolved redeem intent without replaying consumption."""
+    affected = intent.get("affected_ids")
+    if not isinstance(affected, list) or len(affected) != 1:
+        return None
+    digest = affected[0]
+    if not isinstance(digest, str) or not store.sidecar_path(vault_root).exists():
+        return None
+    conn = _open(vault_root)
+    try:
+        for jti, consumed_at in conn.execute(f"SELECT jti, consumed_at FROM {TOKENS_TABLE}"):
+            if _token_id_digest(str(jti)) == digest:
+                return str(intent["target"] if consumed_at is not None else intent["prior"])
+    finally:
+        conn.close()
+    return None
+
+
+receipts.register_state_resolver("token_redeem", _resolve_redeem_state)

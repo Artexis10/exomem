@@ -1333,6 +1333,19 @@ def test_credential_block_is_receipted_without_a_policy(vault: Path) -> None:
     assert secret not in json.dumps(records)
 
 
+def test_credential_block_does_not_suppress_the_disclosure_receipt(vault: Path) -> None:
+    write_scope(vault)
+    write_rule(vault, ceiling=egress.LEVEL_FULL)
+    secret = "Authorization: Bearer sk-proj-9dQm2XvKpLzR4wTnBcYeF8aHgJ1sVuNiO0rEyMdA"
+    with egress.disclosure_boundary(vault, "find") as collector:
+        egress.annotate_hits(vault, [_hit(RESTRICTED_PATH)], principal=_external(), limit=1)
+        egress.postfilter("find", {"value": secret}, vault)
+        egress.emit_boundary_receipt(collector)
+    assert [record["event_type"] for record in _receipt_records(vault)] == [
+        "credential_block", "disclosure"
+    ]
+
+
 def test_direct_download_boundary_emits_a_single_authorization_receipt(vault: Path) -> None:
     write_scope(vault)
     write_rule(vault, ceiling=egress.LEVEL_FULL)
@@ -1341,6 +1354,92 @@ def test_direct_download_boundary_emits_a_single_authorization_receipt(vault: Pa
     assert len(records) == 1
     assert records[0]["event_type"] == "disclosure"
     assert records[0]["outcomes"][0]["decision"] == "release_authorized"
+
+
+def test_hit_receipt_describes_only_the_final_limited_representation(vault: Path) -> None:
+    write_scope(vault)
+    write_rule(vault, ceiling=egress.LEVEL_FULL)
+    hits = [_hit(RESTRICTED_PATH), _hit(OPEN_PATH)]
+    with egress.disclosure_boundary(vault, "find") as collector:
+        egress.annotate_hits(vault, hits, principal=_external(), limit=1)
+        egress.emit_boundary_receipt(collector)
+    outcomes = _receipt_records(vault)[0]["outcomes"]
+    assert len(outcomes) == 1
+
+
+def test_large_reduction_receipt_uses_truthful_bounded_aggregates(vault: Path) -> None:
+    with egress.disclosure_boundary(vault, "overview") as collector:
+        for _ in range(140):
+            egress._record_outcome({"decision": "withheld"})
+        egress.emit_boundary_receipt(collector)
+    outcomes = _receipt_records(vault)[0]["outcomes"]
+    assert outcomes == [{"decision": "withheld", "count": 140}]
+
+
+def test_disclosure_identity_is_content_free_and_complete(vault: Path) -> None:
+    write_scope(vault, name="Sensitive scope")
+    write_rule(vault, ceiling=egress.LEVEL_FULL)
+    with egress.disclosure_boundary(vault, "find") as collector:
+        egress.annotate_hits(
+            vault, [_hit(RESTRICTED_PATH)], principal=_external("analysis-purpose"), limit=1
+        )
+        egress.emit_boundary_receipt(collector)
+    record = _receipt_records(vault)[0]
+    outcome = record["outcomes"][0]
+    assert len(record["event_id"]) == 32
+    assert outcome["command"] == "find"
+    assert outcome["principal"] == outcome["audience"] == EXTERNAL
+    assert outcome["purpose"] == "analysis-purpose"
+    assert outcome["confirmation"] == "none"
+    assert outcome["scope_label_digests"]
+    serialized = json.dumps(record)
+    assert "Sensitive scope" not in serialized
+    assert "kill-switch-for-risky-releases" not in serialized
+
+
+def test_query_data_csv_is_a_registered_receipt_representation() -> None:
+    assert egress.data_representation_adapter("rows") == "dataset"
+    with pytest.raises(RuntimeError, match="RECEIPT_OUTCOME_MISSING"):
+        egress.assert_data_representation_covered("future_rows")
+
+
+def test_query_data_csv_rows_are_gated_and_receipted(vault: Path) -> None:
+    dataset = "Knowledge Base/Notes/Patterns/private.csv"
+    target = vault / dataset
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("name,value\nAlice,42\n", encoding="utf-8")
+    write_scope(vault)
+    write_rule(vault, ceiling=egress.LEVEL_NONE)
+    with request_scope(_external()):
+        with pytest.raises(ValueError, match="NOT_FOUND"):
+            commands.op_query_data(vault, path=dataset)
+
+    write_rule(vault, ceiling=egress.LEVEL_FULL)
+    _reset_caches()
+    with request_scope(_external()):
+        with egress.disclosure_boundary(vault, "query_data") as collector:
+            payload = commands.op_query_data(vault, path=dataset)
+            egress.emit_boundary_receipt(collector)
+    assert payload["rows"] == [{"name": "Alice", "value": "42"}]
+    record = _receipt_records(vault)[0]
+    assert record["outcomes"][0]["decision"] == "released"
+    assert "Alice" not in json.dumps(record)
+
+
+def test_receipt_conflict_never_turns_a_committed_mutation_into_a_retry_error(vault: Path) -> None:
+    write_scope(vault)
+    write_rule(vault, ceiling=egress.LEVEL_FULL)
+    events = _gov_dir(vault) / "events"
+    events.mkdir(parents=True, exist_ok=True)
+    (events / "conflicted copy.jsonl").write_text("{}\n", encoding="utf-8")
+    result = _through_dispatcher(
+        vault,
+        "create_file",
+        path="Knowledge Base/Notes/receipt-mutation.md",
+        content="committed body",
+    )
+    assert (vault / "Knowledge Base/Notes/receipt-mutation.md").exists()
+    assert "GOVERNANCE_RECEIPT_UNAVAILABLE" not in str(result)
 
 
 def test_structure_surfaces_are_registered_content_returning() -> None:

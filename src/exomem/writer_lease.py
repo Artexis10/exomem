@@ -1850,12 +1850,14 @@ def invoke_command(
         postfilter,
     )
 
+    read_only = invocation_is_read_only(command, kwargs)
+
     def _invoke() -> Any:
         return get_manager().invoke(
             command,
             injected,
             kwargs,
-            read_only=invocation_is_read_only(command, kwargs),
+            read_only=read_only,
             idempotency_key=idempotency_key,
             public_idempotency_key=public_idempotency_key,
             idempotency_principal_scope=idempotency_principal_scope,
@@ -1865,6 +1867,8 @@ def invoke_command(
 
     if not injected or not is_vault_root(injected[0]):
         return _invoke()
+    if not read_only:
+        return postfilter(command.name, _invoke(), injected[0])
     with disclosure_boundary(injected[0], command.name) as collector:
         result = postfilter(command.name, _invoke(), injected[0])
         emit_boundary_receipt(collector)

@@ -132,17 +132,34 @@ def _outcome_for_decision(
     policy: Policy,
     audience: str,
     outcome: str,
+    purpose: str | None = None,
 ) -> None:
     """Project a decision into the receipt union without carrying a path/title."""
     value: dict[str, Any] = {"decision": outcome}
     if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}", audience):
         value["audience"] = audience
+        value["principal"] = audience
+    collector = _collector()
+    if collector is not None:
+        value["command"] = collector.command_name
+    if purpose and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}", purpose):
+        value["purpose"] = purpose
     if decision is not None:
         value["level"] = decision.level
         if policy.fingerprint != "blocked":
             value["policy_fingerprint"] = policy.fingerprint
         if decision.scope_ids:
             value["scope_ids"] = list(decision.scope_ids)
+            labels = [
+                policy.scopes[scope_id].name
+                for scope_id in decision.scope_ids
+                if scope_id in policy.scopes and policy.scopes[scope_id].name
+            ]
+            if labels:
+                value["scope_label_digests"] = [
+                    receipts.label_digest(vault_root, label) for label in labels
+                ]
+        value["confirmation"] = "none"
     try:
         target = Path(vault_root) / rel_path
         value["content_hash"] = hashlib.sha256(target.read_bytes()).hexdigest()
@@ -159,18 +176,30 @@ def emit_boundary_receipt(collector: DisclosureCollector) -> None:
             receipts.append_event(
                 collector.vault_root,
                 event_type="credential_block",
-                event_id=collector.boundary_id,
+                event_id=uuid.uuid5(uuid.NAMESPACE_URL, f"credential:{collector.boundary_id}").hex,
                 payload={"count": collector.credential_redactions, "redaction_count": collector.credential_redactions},
             )
-        elif collector.outcomes:
+        if collector.outcomes:
             receipts.append_event(
                 collector.vault_root,
                 event_type="disclosure",
                 event_id=collector.boundary_id,
-                payload={"outcomes": [outcome.value for outcome in collector.outcomes]},
+                payload={"outcomes": _bounded_outcomes(collector.outcomes)},
             )
     except (receipts.ReceiptError, OSError, sqlite3.Error) as exc:
         raise ReceiptUnavailableError() from exc
+
+
+def _bounded_outcomes(outcomes: Sequence[DisclosureOutcome]) -> list[dict[str, Any]]:
+    """Keep receipt schemas bounded without making a large reduction fail closed."""
+    values = [outcome.value for outcome in outcomes]
+    if len(values) <= receipts.MAX_OUTCOMES:
+        return values
+    counts: dict[str, int] = {}
+    for value in values:
+        decision = str(value.get("decision") or "withheld")
+        counts[decision] = counts.get(decision, 0) + 1
+    return [{"decision": decision, "count": count} for decision, count in sorted(counts.items())]
 
 # ---------------------------------------------------------------------------
 # The disclosure ladder
@@ -910,16 +939,7 @@ def annotate_hits(
             # The page vanished or would not parse: it cannot be shown to
             # have been permitted, so it is withheld rather than released.
             withheld.add(rel_path)
-            _outcome_for_decision(
-                vault_root, rel_path, decision=None, policy=policy,
-                audience=who.audience_id, outcome="withheld",
-            )
             continue
-        _outcome_for_decision(
-            vault_root, rel_path, decision=decision, policy=policy,
-            audience=who.audience_id,
-            outcome="released" if decision.level >= RELEASE_FLOOR else "withheld",
-        )
         if decision.level >= RELEASE_FLOOR:
             hit.decision = decision
             permitted.append(hit)
@@ -964,6 +984,21 @@ def annotate_hits(
         if token is not None:
             notice["escalation_token"] = token
         notices.append(notice)
+        _outcome_for_decision(
+            vault_root, rel_path, decision=decision, policy=policy,
+            audience=who.audience_id, outcome="withheld", purpose=declared_purpose,
+        )
+    for hit in released:
+        rel_path = _hit_path(hit)
+        decision = getattr(hit, "decision", None)
+        if rel_path and decision is not None:
+            _outcome_for_decision(
+                vault_root, rel_path, decision=decision, policy=policy,
+                audience=who.audience_id, outcome="released", purpose=declared_purpose,
+            )
+    hidden_count = len(withheld) - len(notices)
+    if hidden_count:
+        _record_outcome({"decision": "withheld", "count": hidden_count})
     return AnnotatedHits(
         hits=released,
         notices=notices,
@@ -1564,6 +1599,24 @@ _COMMAND_OUTCOME_ADAPTER: dict[str, str] = {
     },
 }
 
+_DATA_REPRESENTATION_ADAPTER: dict[str, str] = {
+    "rows": "dataset",
+    "aggregate": "dataset",
+    "profile": "dataset",
+}
+
+
+def data_representation_adapter(representation: str) -> str | None:
+    return _DATA_REPRESENTATION_ADAPTER.get(representation)
+
+
+def assert_data_representation_covered(representation: str) -> None:
+    if data_representation_adapter(representation) is None:
+        raise RuntimeError(
+            "RECEIPT_OUTCOME_MISSING: query_data representation without a receipt adapter: "
+            f"{representation}"
+        )
+
 
 def unrecorded_commands(registry: Mapping[str, Any]) -> tuple[str, ...]:
     if not isinstance(registry, Mapping):
@@ -1753,6 +1806,51 @@ def assert_alias_projectors_registered(
             "ALIAS_PROJECTOR_MISSING: product-facing aliases that reach no "
             f"projector-registered leaf: {', '.join(missing)}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Structured datasets
+# ---------------------------------------------------------------------------
+
+
+def annotate_dataset(
+    vault_root: Path,
+    payload: Mapping[str, Any],
+    *,
+    representation: str,
+    principal: RequestPrincipal | None = None,
+    purpose: str | None = None,
+) -> dict[str, Any] | None:
+    """Authorize final CSV/TSV/JSON rows before they cross the boundary."""
+    assert_data_representation_covered(representation)
+    vault_root = Path(vault_root)
+    policy = policy_module.load(vault_root)
+    if policy.empty:
+        return dict(payload)
+    who = principal if principal is not None else effective_principal()
+    rel_path = str(payload.get("path") or "")
+    if policy.blocked or not who.resolved or not rel_path:
+        _record_blocked_outcome(who.audience_id)
+        return None
+    decision = _decide_path(
+        vault_root,
+        rel_path,
+        policy=policy,
+        audience=who.audience_id,
+        purpose=purpose if purpose is not None else who.purpose,
+        grants_hash=_grants_hash(policy),
+    )
+    if decision is None or decision.level < RELEASE_FLOOR:
+        _outcome_for_decision(
+            vault_root, rel_path, decision=decision, policy=policy,
+            audience=who.audience_id, outcome="withheld",
+        )
+        return None
+    _outcome_for_decision(
+        vault_root, rel_path, decision=decision, policy=policy,
+        audience=who.audience_id, outcome="released",
+    )
+    return dict(payload)
 
 
 # ---------------------------------------------------------------------------

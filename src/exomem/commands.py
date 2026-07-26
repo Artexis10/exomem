@@ -2785,7 +2785,15 @@ def op_query_data(
         )
     except query_data_module.QueryDataError as e:
         raise ValueError(f"{e.code}: {e.reason}") from e
-    return result.as_dict()
+    representation = "profile" if aggregate and aggregate.strip() == "profile" else (
+        "aggregate" if aggregate else "rows"
+    )
+    released = egress_module.annotate_dataset(
+        vault_root, result.as_dict(), representation=representation
+    )
+    if released is None:
+        raise ValueError(f"NOT_FOUND: file does not exist: {path}")
+    return released
 
 
 def op_create_file(

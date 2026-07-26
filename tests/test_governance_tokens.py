@@ -25,7 +25,7 @@ from pathlib import Path
 
 import pytest
 
-from exomem.governance import egress, tokens
+from exomem.governance import egress, receipts, tokens
 from exomem.governance.principal import RequestPrincipal
 from exomem.governance.store import sidecar_path
 
@@ -140,6 +140,50 @@ def test_token_mint_and_redeem_are_receipted_without_token_bytes(vault: Path) ->
     ]
     assert [record["phase"] for record in events[1:]] == ["intent", "recorded", "committed"]
     assert token not in json.dumps(events)
+
+
+def test_consumed_token_is_rejected_before_any_new_redeem_receipt(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    govern(vault)
+    token = _mint(vault)
+    tokens.redeem(vault, token, audience=EXTERNAL)
+    before = _receipt_records(vault)
+    monkeypatch.setattr(receipts, "begin_event", lambda *_a, **_kw: (_ for _ in ()).throw(AssertionError("receipt appended")))
+    with pytest.raises(tokens.WithholdTokenError, match="TOKEN_CONSUMED"):
+        tokens.redeem(vault, token, audience=EXTERNAL)
+    assert _receipt_records(vault) == before
+
+
+def test_redeem_terminal_failure_reconciles_from_consumed_token_state(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    govern(vault)
+    token = _mint(vault)
+
+    def fail_terminal(*_args, **_kwargs):
+        raise receipts.ReceiptError("injected terminal failure")
+
+    monkeypatch.setattr(receipts, "commit_event", fail_terminal)
+    with pytest.raises(tokens.WithholdTokenError, match="TOKEN_RECEIPT_UNAVAILABLE"):
+        tokens.redeem(vault, token, audience=EXTERNAL)
+    monkeypatch.undo()
+    report = receipts.reconcile(vault)
+    assert any(item["kind"] == "terminal" and item["phase"] == "committed" for item in report["repairs"])
+    events = _receipt_records(vault)
+    assert [event["phase"] for event in events].count("committed") == 1
+
+
+def test_redeem_resolver_classifies_exact_prior_target_and_third_state(vault: Path) -> None:
+    govern(vault)
+    token = _mint(vault)
+    jti = token.split(".")[1]
+    digest = tokens._token_id_digest(jti)
+    intent = {"affected_ids": [digest], "prior": "a" * 64, "target": "b" * 64}
+    assert tokens._resolve_redeem_state(vault, intent) == intent["prior"]
+    tokens.redeem(vault, token, audience=EXTERNAL)
+    assert tokens._resolve_redeem_state(vault, intent) == intent["target"]
+    assert tokens._resolve_redeem_state(vault, {**intent, "affected_ids": ["c" * 64]}) is None
 
 
 def test_verify_round_trips_the_bound_claims(vault: Path) -> None:

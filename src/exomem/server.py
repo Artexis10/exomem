@@ -382,9 +382,9 @@ def _gated_adoption_egress(vault_root: Path, command_name: str, payload: Any) ->
         # binding and a credential scrubber that were both working and simply
         # had nothing to grip. Reference-aware redaction first, then the
         # ordinary postfilter for credentials.
-        if isinstance(payload, str):
-            payload = egress_module.redact_withheld_references(vault_root, payload)
         with egress_module.disclosure_boundary(vault_root, command_name) as collector:
+            if isinstance(payload, str):
+                payload = egress_module.redact_withheld_references(vault_root, payload)
             result = egress_module.postfilter(command_name, payload, vault_root)
             egress_module.emit_boundary_receipt(collector)
             return result
