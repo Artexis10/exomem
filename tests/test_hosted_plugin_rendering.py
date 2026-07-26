@@ -27,6 +27,14 @@ def test_claude_candidate_can_render_and_check_without_openai_registration(tmp_p
     assert not (rendered / "openai").exists()
 
 
+def test_candidate_file_map_is_deterministic_without_staging_directory() -> None:
+    first = hosted_plugins.candidate_files(REPO_ROOT, platform="claude")
+    second = hosted_plugins.candidate_files(REPO_ROOT, platform="claude")
+
+    assert first == second
+    assert "claude/.claude-plugin/plugin.json" in first
+
+
 def test_rendered_packages_are_deterministic_and_remote_only(tmp_path: Path) -> None:
     first = hosted_plugins.render(REPO_ROOT, tmp_path / "first", openai_app_id="asdk_app_releaseinput123", platform="all", staging_root=tmp_path)
     second = hosted_plugins.render(REPO_ROOT, tmp_path / "second", openai_app_id="asdk_app_releaseinput123", platform="all", staging_root=tmp_path)
@@ -46,7 +54,12 @@ def test_rendered_packages_are_deterministic_and_remote_only(tmp_path: Path) -> 
     assert openai_plugin["apps"] == "./.app.json"
     assert openai_app == {"apps": {"exomem": {"id": "asdk_app_releaseinput123", "category": "productivity"}}}
     marketplace = json.loads((first / "openai/marketplace.json").read_text(encoding="utf-8"))
-    assert marketplace["plugins"][0]["policy"]["authentication"] == "ON_INSTALL"
+    assert marketplace["plugins"][0] == {
+        "name": "exomem-hosted",
+        "source": {"source": "local", "path": "./plugins/exomem-hosted"},
+        "policy": {"installation": "AVAILABLE", "authentication": "ON_INSTALL"},
+        "category": "productivity",
+    }
     assert marketplace["interface"]["defaultPrompt"] == ["Use governed long-term memory."]
     hosted_plugins.validate_openai_candidate(first / "openai")
     assert "uvx" not in b"\n".join(contents(first).values()).decode("utf-8")

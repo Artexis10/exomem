@@ -318,6 +318,15 @@ def _files_digest(directory: Path, *, exclude: Iterable[str] = ()) -> str:
     return _sha256(_canonical_json(entries))
 
 
+def _map_digest(files: dict[str, bytes], prefix: str) -> str:
+    entries = [
+        (path.removeprefix(prefix), _sha256(contents))
+        for path, contents in sorted(files.items())
+        if path.startswith(prefix)
+    ]
+    return _sha256(_canonical_json(entries))
+
+
 def _package_lock(root: Path, platform: str, artifact_root: Path) -> dict[str, Any]:
     definition = load_definition(root)
     compatibility = compatibility_manifest(root)
@@ -362,7 +371,13 @@ def validate_openai_candidate(package: Path) -> None:
     if not re.fullmatch(r"asdk_app_[A-Za-z0-9]+", str(app["apps"]["exomem"].get("id", ""))):
         raise ValueError("OpenAI app manifest must contain a registered app ID")
     plugins = marketplace.get("plugins")
-    if not isinstance(plugins, list) or len(plugins) != 1 or plugins[0].get("policy", {}).get("authentication") != "ON_INSTALL":
+    expected_marketplace = {
+        "name": plugin.get("name"),
+        "source": {"source": "local", "path": "./plugins/exomem-hosted"},
+        "policy": {"installation": "AVAILABLE", "authentication": "ON_INSTALL"},
+        "category": "productivity",
+    }
+    if not isinstance(plugins, list) or len(plugins) != 1 or plugins[0] != expected_marketplace:
         raise ValueError("OpenAI marketplace metadata must own ON_INSTALL authentication")
 
 
@@ -384,6 +399,60 @@ def _interface_metadata(definition: HostedDefinition) -> dict[str, Any]:
         "screenshots": [],
         "defaultPrompt": ["Use governed long-term memory."],
     }
+
+
+def candidate_files(
+    repo_root: Path | None = None, *, platform: str = "claude", openai_app_id: str | None = None
+) -> dict[str, bytes]:
+    """Return deterministic candidate bytes without creating a staging directory."""
+
+    root = _repo_root(repo_root)
+    definition = load_definition(root)
+    skill_dependencies(root)
+    if platform not in (*PLATFORMS, "all"):
+        raise ValueError("unsupported platform")
+    selected = PLATFORMS if platform == "all" else (platform,)
+    app_id = _validate_openai_app_id(openai_app_id) if "openai" in selected else None
+    files: dict[str, bytes] = {}
+    for item in selected:
+        prefix = f"{item}/"
+        for source in _skill_paths(root):
+            files[prefix + "skills/" + source.relative_to(root / PLUGIN_ROOT / "skills").as_posix()] = (
+                source.read_text(encoding="utf-8").replace("\r\n", "\n").encode("utf-8")
+            )
+        for source in (root / PLUGIN_ROOT / "assets").rglob("*"):
+            if source.is_file():
+                files[prefix + "assets/" + source.relative_to(root / PLUGIN_ROOT / "assets").as_posix()] = source.read_bytes()
+        files[prefix + ".mcp.json"] = _canonical_json({"mcpServers": {"exomem": {"type": "http", "url": definition.endpoint}}}) + b"\n"
+        if item == "claude":
+            files[prefix + ".claude-plugin/plugin.json"] = _canonical_json({
+                "name": definition.plugin_id, "version": definition.version,
+                "description": "Governed long-term memory for relevant project work.",
+                "author": {"name": definition.author_name, "url": definition.author_url},
+                "homepage": definition.website_url, "repository": definition.repository_url,
+                "license": definition.license, "keywords": ["memory", "knowledge", "governance"],
+            }) + b"\n"
+        else:
+            files[prefix + ".codex-plugin/plugin.json"] = _canonical_json({
+                "id": definition.plugin_id, "name": definition.plugin_id, "version": definition.version,
+                "description": "Governed long-term memory for relevant project work.", "skills": "./skills/",
+                "mcpServers": "./.mcp.json", "apps": "./.app.json",
+                "author": {"name": definition.author_name, "url": definition.author_url},
+                "homepage": definition.website_url, "repository": definition.repository_url, "license": definition.license,
+                "keywords": ["memory", "knowledge", "governance"], "interface": _interface_metadata(definition),
+            }) + b"\n"
+            files[prefix + ".app.json"] = _canonical_json({"apps": {"exomem": {"id": app_id, "category": "productivity"}}}) + b"\n"
+            files[prefix + "marketplace.json"] = _canonical_json({
+                "name": definition.plugin_id, "interface": _interface_metadata(definition), "plugins": [{
+                    "name": definition.plugin_id, "source": {"source": "local", "path": "./plugins/exomem-hosted"},
+                    "policy": {"installation": "AVAILABLE", "authentication": "ON_INSTALL"}, "category": "productivity",
+                }],
+            }) + b"\n"
+        lock = _package_lock(root, item, root / PLUGIN_ROOT / "generated" / item)
+        lock["artifact_sha256"] = _map_digest(files, prefix)
+        files[f"{item}.lock.json"] = _canonical_json(lock) + b"\n"
+    files["compatibility.json"] = _canonical_json(compatibility_manifest(root)) + b"\n"
+    return files
 
 
 def render(
@@ -458,8 +527,9 @@ def render(
                 "name": definition.plugin_id,
                 "interface": _interface_metadata(definition),
                 "plugins": [{
-                    "source": "./.codex-plugin/plugin.json",
-                    "policy": {"installation": "ON_INSTALL", "authentication": "ON_INSTALL"},
+                    "name": definition.plugin_id,
+                    "source": {"source": "local", "path": "./plugins/exomem-hosted"},
+                    "policy": {"installation": "AVAILABLE", "authentication": "ON_INSTALL"},
                     "category": "productivity",
                 }],
             })
@@ -493,27 +563,14 @@ def check(
         raise ValueError("unsupported platform")
     selected = PLATFORMS if platform == "all" else (platform,)
     expected = root / PLUGIN_ROOT / "generated"
-    # Never stage a check inside the committed plugin source tree.  In particular,
-    # a failed sandbox cleanup must not leave an untracked candidate beside inputs.
-    with tempfile.TemporaryDirectory() as temporary:
-        actual = render(
-            root,
-            Path(temporary) / "generated",
-            openai_app_id=openai_app_id,
-            platform=platform,
-            staging_root=Path(temporary),
-        )
-        expected_files = {
-            path.relative_to(expected).as_posix(): path.read_bytes()
-            for path in expected.rglob("*")
-            if path.is_file() and (path.parts[len(expected.parts)] in selected or path.name in {
-                "compatibility.json", *(f"{item}.lock.json" for item in selected)
-            })
-        }
-        actual_files = {
-            path.relative_to(actual).as_posix(): path.read_bytes()
-            for path in actual.rglob("*") if path.is_file()
-        }
+    expected_files = {
+        path.relative_to(expected).as_posix(): path.read_bytes()
+        for path in expected.rglob("*")
+        if path.is_file() and (path.parts[len(expected.parts)] in selected or path.name in {
+            "compatibility.json", *(f"{item}.lock.json" for item in selected)
+        })
+    }
+    actual_files = candidate_files(root, platform=platform, openai_app_id=openai_app_id)
     if expected_files != actual_files:
         raise ValueError("Hosted generated artifacts are stale; run hosted-plugin.py render")
 
