@@ -16,7 +16,7 @@ from pathlib import Path
 
 import numpy as np
 
-from . import embeddings
+from . import access, embeddings
 from .extract import media_type_for
 from .vault import VaultPathError, resolve_under_vault
 
@@ -122,6 +122,11 @@ def get_frames(
         )
     except VaultPathError as e:
         raise VideoFramesError(e.code, e.reason) from e
+    # `excluded` paths (_access.yaml) refuse identically to a missing path —
+    # checked before any other differentiation (e.g. NOT_A_VIDEO) so the
+    # refusal never leaks that the excluded path exists.
+    if access.refuse_if_excluded(vault_root, rel_path):
+        raise VideoFramesError("NOT_FOUND", f"path does not exist: {rel_path}")
     if media_type_for(abs_path) != "video":
         raise VideoFramesError("NOT_A_VIDEO", f"not a video file: {rel_path}")
 

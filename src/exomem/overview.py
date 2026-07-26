@@ -26,6 +26,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
+from . import access
 from .kbdir import kb_dirname
 
 DEFAULT_MAX_DEPTH = 3
@@ -96,6 +97,12 @@ def _resolve_subtree(root: Path, path: str) -> tuple[Path, str]:
             raise OverviewError("INVALID_PATH", f"path escapes the vault: {path!r}")
     else:
         scan = root
+    # Scoped-probe refusal: an excluded scan root (dir OR file) reads as
+    # missing — byte-identical to the NOT_FOUND below — before `scan.exists()`
+    # can let an excluded-but-present subtree succeed with an empty-but-valid
+    # report, or `scan.is_dir()` can leak an excluded file via NOT_A_DIR.
+    if rel and access.refuse_if_excluded(root, rel):
+        raise OverviewError("NOT_FOUND", f"no such vault path: {rel}")
     if not scan.exists():
         raise OverviewError("NOT_FOUND", f"no such vault path: {rel or '.'}")
     if not scan.is_dir():
@@ -133,18 +140,30 @@ def overview(
     for dirpath, dirnames, filenames in os.walk(scan):
         dirnames.sort()
         filenames.sort()
+
+        rp = os.path.relpath(dirpath, scan)
+        rp = "" if rp == "." else rp.replace(os.sep, "/")
+        # vault-relative (from `root`, not `scan`) form for access-tier checks —
+        # `_access.yaml` entries are keyed from the vault root, not the scanned
+        # subtree.
+        root_rp = f"{rel}/{rp}" if rel and rp else (rel or rp)
+
         kept: list[str] = []
         for d in dirnames:
             if d in _SKIP_ALWAYS or (
                 not include_hidden and (d.startswith(".") or d in _SKIP_DEFAULT)
             ):
                 skipped_dirs.add(d)
-            else:
-                kept.append(d)
+                continue
+            # Excluded subtrees are pruned silently — no skipped-dir entry, no
+            # "hidden N" marker (either would itself leak the subtree's
+            # existence/size). They simply never entered the walk.
+            child_rel = f"{root_rp}/{d}" if root_rp else d
+            if access.access_tier(root, child_rel) == access.TIER_EXCLUDED:
+                continue
+            kept.append(d)
         dirnames[:] = kept
 
-        rp = os.path.relpath(dirpath, scan)
-        rp = "" if rp == "." else rp.replace(os.sep, "/")
         depth = 0 if not rp else rp.count("/") + 1
         max_depth_seen = max(max_depth_seen, depth)
         st = dirstats.setdefault(rp, _DirStat(path=rp, depth=depth))
@@ -153,6 +172,9 @@ def overview(
         name_set = set(filenames)
         for fn in filenames:
             if not include_hidden and fn.startswith("."):
+                continue
+            child_rel = f"{root_rp}/{fn}" if root_rp else fn
+            if access.access_tier(root, child_rel) == access.TIER_EXCLUDED:
                 continue
             fpath = Path(dirpath) / fn
             try:

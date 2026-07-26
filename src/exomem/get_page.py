@@ -21,8 +21,8 @@ import logging
 from dataclasses import dataclass
 from pathlib import Path
 
+from . import access, privacy_log
 from . import find as find_module
-from . import privacy_log
 from .kbdir import kb_prefix
 from .vault import content_hash
 
@@ -110,7 +110,14 @@ def get_page(vault_root: Path, *, path: str) -> GetResult:
             reason=f"path escapes vault or is unreadable: {e}",
         ) from None
 
-    if not candidate.exists() or not candidate.is_file():
+    # `excluded` paths (_access.yaml) refuse identically to a missing file —
+    # never a distinct error, never echoed differently — so the response is
+    # not an existence oracle for content the tier marks truly private.
+    if (
+        access.refuse_if_excluded(vault_root, rel)
+        or not candidate.exists()
+        or not candidate.is_file()
+    ):
         raise GetError(
             code="NOT_FOUND",
             reason=f"file does not exist: {rel}",

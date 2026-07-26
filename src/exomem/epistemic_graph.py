@@ -19,8 +19,8 @@ from dataclasses import field as dataclass_field
 from pathlib import Path
 from typing import Any
 
-from . import find as find_module
 from . import (
+    access,
     memory_refs,
     mutation_lock,
     relation_registry,
@@ -30,6 +30,7 @@ from . import (
     semantic_units,
     traversal_profiles,
 )
+from . import find as find_module
 from . import vault as vault_module
 from .cli_ops import OpError
 from .kbdir import kb_dirname, kb_prefix
@@ -918,6 +919,16 @@ def graph_context(
                 unit_ref=unit_ref,
                 limit=UNIT_PARENT_REF_MAX_CANDIDATES,
             )
+            # An excluded parent's own seed row is dropped up front so the
+            # unit_ref resolution machinery lands in the same branch a
+            # truly-gone unit takes (unit_status "stale") rather than
+            # "found" with empty seeds, which would leak that the page
+            # still exists.
+            indexed = [
+                seed
+                for seed in indexed
+                if not access.refuse_if_excluded(vault_root, str(seed.get("path") or ""))
+            ]
             current = [
                 seed
                 for seed in indexed
@@ -930,6 +941,14 @@ def graph_context(
                 parent_drift_counts,
                 unit_parent_work_exhausted,
             ) = _current_unit_status(conn, vault_root, unit_ref)
+            current_parent_paths = [
+                p for p in current_parent_paths if not access.refuse_if_excluded(vault_root, p)
+            ]
+            canonical_seeds = [
+                seed
+                for seed in canonical_seeds
+                if not access.refuse_if_excluded(vault_root, str(seed.get("path") or ""))
+            ]
             for code, count in parent_drift_counts.items():
                 drift_counts[code] = max(drift_counts.get(code, 0), count)
             current = [
@@ -1001,6 +1020,14 @@ def graph_context(
                 for seed in _seed_nodes(conn, path=path, query=query)
                 if _current_record(seed, parent_path=str(seed.get("path") or ""))
             ]
+        # An `excluded` page is never a seed — by path OR by query — mirroring
+        # find's hit-assembly filter (find.py:2601), which this lane otherwise
+        # bypasses.
+        seeds = [
+            seed
+            for seed in seeds
+            if not access.refuse_if_excluded(vault_root, str(seed.get("path") or ""))
+        ]
         if not seeds:
             empty: dict[str, Any] = {
                 "available": True,
@@ -1080,6 +1107,24 @@ def graph_context(
                     continue
                 if profile.direction == "incoming" and edge["dst_key"] not in frontier:
                     continue
+                # An `excluded` page is never a neighbour and never either edge
+                # endpoint: resolve both not-yet-seen endpoints first (`seen_nodes`
+                # only ever holds non-excluded keys, so anything already there is
+                # already known-safe) and drop the whole edge if either is excluded
+                # — before it (or its nodes) enter any output collection.
+                endpoint_nodes: dict[str, dict[str, Any] | None] = {}
+                endpoint_excluded = False
+                for key in (edge["src_key"], edge["dst_key"]):
+                    if key in seen_nodes:
+                        continue
+                    node = _node_by_key(conn, key)
+                    endpoint_nodes[key] = node
+                    if node is not None and access.refuse_if_excluded(
+                        vault_root, str(node.get("path") or "")
+                    ):
+                        endpoint_excluded = True
+                if endpoint_excluded:
+                    continue
                 if edge["edge_key"] not in seen_edges:
                     if len(seen_edges) >= max_edges:
                         edge_cap_hit = True
@@ -1087,7 +1132,7 @@ def graph_context(
                     seen_edges[edge["edge_key"]] = edge
                 for key in (edge["src_key"], edge["dst_key"]):
                     if key not in seen_nodes:
-                        node = _node_by_key(conn, key)
+                        node = endpoint_nodes[key]
                         if node is None:
                             node = _placeholder_node(key)
                         elif not _current_record(
