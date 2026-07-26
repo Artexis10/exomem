@@ -640,10 +640,6 @@ def archive(
 def promotion_record(repo_root: Path | None, platform: str) -> Path:
     if platform not in PLATFORMS:
         raise ValueError("unsupported platform")
-    if "operator_key_id" in evidence and (
-        not trusted_key_id or not trusted_secret or evidence["operator_key_id"] != trusted_key_id
-    ):
-        raise ValueError("promotion requires an operator-trusted signing key")
     return _repo_root(repo_root) / PLUGIN_ROOT / "promotion" / f"{platform}.json"
 
 
@@ -658,6 +654,10 @@ def promote(
     """Promote only evidence from a real, content-bearing clean-client journey."""
     if platform not in PLATFORMS:
         raise ValueError("unsupported platform")
+    if "operator_key_id" in evidence and (
+        not trusted_key_id or not trusted_secret or evidence["operator_key_id"] != trusted_key_id
+    ):
+        raise ValueError("promotion requires an operator-trusted signing key")
     required = {
         "schema_version", "platform", "client_version", "clean_client_identity", "timestamp",
         "paired_run_id", "exomem_identity", "tenant", "entitlement", "provisioning_operation", "cell",
