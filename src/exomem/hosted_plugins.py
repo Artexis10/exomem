@@ -386,7 +386,9 @@ def check(
         raise ValueError("unsupported platform")
     selected = PLATFORMS if platform == "all" else (platform,)
     expected = root / PLUGIN_ROOT / "generated"
-    with tempfile.TemporaryDirectory(dir=root / PLUGIN_ROOT) as temporary:
+    # Never stage a check inside the committed plugin source tree.  In particular,
+    # a failed sandbox cleanup must not leave an untracked candidate beside inputs.
+    with tempfile.TemporaryDirectory() as temporary:
         actual = render(
             root,
             Path(temporary) / "generated",
