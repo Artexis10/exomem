@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 
 from exomem.governance import compile as governance_compile
-from exomem.governance import policy, store
+from exomem.governance import policy, store, tokens
 
 
 def test_open_connection_creates_sidecar_with_pragmas_and_meta(vault: Path) -> None:
@@ -85,8 +85,68 @@ def test_open_connection_migrates_v1_to_receipt_schema_v2(vault: Path) -> None:
         assert migrated.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='receipts_head'"
         ).fetchone()
+        columns = {row[1] for row in migrated.execute("PRAGMA table_info(receipts_head)")}
+        assert {"path", "byte_offset"} <= columns
+        assert migrated.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='receipt_anchor'"
+        ).fetchone() is None
     finally:
         migrated.close()
+
+
+def _prepare_future_sidecar(vault: Path, version: int) -> Path:
+    token_conn = tokens._open(vault)
+    token_conn.close()
+    path = store.sidecar_path(vault)
+    conn = sqlite3.connect(path)
+    try:
+        conn.execute("DROP TABLE receipts_head")
+        conn.execute(
+            "CREATE TABLE receipts_head ("
+            "instance_id TEXT PRIMARY KEY, durable_seq INTEGER NOT NULL, durable_hash TEXT NOT NULL, "
+            "observed_seq INTEGER NOT NULL, observed_hash TEXT NOT NULL)"
+        )
+        conn.execute("DROP TABLE IF EXISTS receipt_anchor")
+        conn.execute(f"PRAGMA user_version = {version}")
+        conn.commit()
+        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    finally:
+        conn.close()
+    return path
+
+
+def _sidecar_snapshot(path: Path) -> tuple[bytes, tuple[tuple[object, ...], ...], int]:
+    conn = sqlite3.connect(path)
+    try:
+        schema = tuple(
+            conn.execute(
+                "SELECT type, name, tbl_name, sql FROM sqlite_master ORDER BY type, name"
+            )
+        )
+        version = int(conn.execute("PRAGMA user_version").fetchone()[0])
+    finally:
+        conn.close()
+    return path.read_bytes(), schema, version
+
+
+@pytest.mark.parametrize("version", [3, 4])
+@pytest.mark.parametrize("opener", ["receipt", "token", "policy"])
+def test_older_openers_leave_future_schema_without_v2_locator_state_byte_identical(
+    vault: Path, version: int, opener: str
+) -> None:
+    path = _prepare_future_sidecar(vault, version)
+    before = _sidecar_snapshot(path)
+
+    if opener == "receipt":
+        conn = store.open_connection(vault)
+        conn.close()
+    elif opener == "token":
+        conn = tokens._open(vault)
+        conn.close()
+    else:
+        assert governance_compile.read_snapshot(vault, "missing") is None
+
+    assert _sidecar_snapshot(path) == before
 
 
 def _write_scope(vault: Path) -> None:

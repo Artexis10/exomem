@@ -52,22 +52,21 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.execute(
             "CREATE TABLE IF NOT EXISTS receipts_head ("
             "instance_id TEXT PRIMARY KEY, durable_seq INTEGER NOT NULL, durable_hash TEXT NOT NULL, "
-            "observed_seq INTEGER NOT NULL, observed_hash TEXT NOT NULL)"
+            "observed_seq INTEGER NOT NULL, observed_hash TEXT NOT NULL, "
+            "path TEXT NOT NULL DEFAULT '', byte_offset INTEGER NOT NULL DEFAULT 0)"
         )
         conn.execute(
             "CREATE TABLE IF NOT EXISTS receipt_secrets ("
             "name TEXT PRIMARY KEY, value BLOB NOT NULL)"
         )
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS receipt_anchor ("
-            "instance_id TEXT PRIMARY KEY, durable_seq INTEGER NOT NULL, durable_hash TEXT NOT NULL, "
-            "path TEXT NOT NULL, byte_offset INTEGER NOT NULL)"
-        )
         version = 2
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS receipt_anchor ("
-        "instance_id TEXT PRIMARY KEY, durable_seq INTEGER NOT NULL, durable_hash TEXT NOT NULL, "
-        "path TEXT NOT NULL, byte_offset INTEGER NOT NULL)"
-    )
+    if version == 2:
+        columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(receipts_head)")}
+        if "path" not in columns:
+            conn.execute("ALTER TABLE receipts_head ADD COLUMN path TEXT NOT NULL DEFAULT ''")
+        if "byte_offset" not in columns:
+            conn.execute(
+                "ALTER TABLE receipts_head ADD COLUMN byte_offset INTEGER NOT NULL DEFAULT 0"
+            )
     if version <= SCHEMA_USER_VERSION:
         conn.execute(f"PRAGMA user_version = {version}")

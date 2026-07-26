@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import threading
+import time
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -17,6 +19,39 @@ from exomem.governance import receipts, store
 
 _PRIOR = "a" * 64
 _TARGET = "b" * 64
+
+
+@pytest.fixture(autouse=True)
+def receipt_state_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    root = tmp_path / "machine-state"
+    monkeypatch.setenv("EXOMEM_WRITER_LEASE_STATE_DIR", str(root))
+    return root
+
+
+def _lifecycle_payload() -> dict[str, object]:
+    return {
+        "manifest_digest": "a" * 64,
+        "affected_refs": ["Notes/one"],
+        "content_hashes": ["b" * 64],
+        "exact_state_digest": "c" * 64,
+        "causation_id": "operation-1",
+    }
+
+
+def _recursive_snapshot(*roots: Path) -> dict[tuple[int, str], tuple[str, bytes | None]]:
+    snapshot: dict[tuple[int, str], tuple[str, bytes | None]] = {}
+    for index, root in enumerate(roots):
+        if not root.exists():
+            snapshot[(index, ".")] = ("missing", None)
+            continue
+        snapshot[(index, ".")] = ("directory", None)
+        for path in sorted(root.rglob("*")):
+            relative = path.relative_to(root).as_posix()
+            snapshot[(index, relative)] = (
+                ("directory", None) if path.is_dir() else ("file", path.read_bytes())
+            )
+    return snapshot
+
 
 def test_append_canonical_record_and_verify_chain(vault: Path) -> None:
     record = receipts.append_event(
@@ -114,7 +149,9 @@ def test_internal_retry_adopts_its_own_verified_tail_without_duplication(vault: 
 
 
 def test_reconcile_repairs_ahead_critical_anchor_and_lost_buffered_suffix(vault: Path) -> None:
-    critical = receipts.append_event(vault, event_type="deletion", payload={"manifest_digest": "a" * 64}, critical=True)
+    critical = receipts.append_event(
+        vault, event_type="deletion", payload=_lifecycle_payload(), critical=True
+    )
     conn = store.open_connection(vault)
     try:
         conn.execute(
@@ -158,7 +195,10 @@ def test_same_instance_process_appenders_serialize_sequences(vault: Path) -> Non
         "import sys; receipts.append_event(Path(sys.argv[1]), event_type='disclosure', payload={'outcomes': []})"
     )
     processes = [
-        subprocess.Popen([sys.executable, "-c", script, str(vault)], env={"PYTHONPATH": "src", "EXOMEM_DISABLE_EMBEDDINGS": "1"})
+        subprocess.Popen(
+            [sys.executable, "-c", script, str(vault)],
+            env={**os.environ, "PYTHONPATH": "src", "EXOMEM_DISABLE_EMBEDDINGS": "1"},
+        )
         for _ in range(4)
     ]
     assert [process.wait(timeout=20) for process in processes] == [0, 0, 0, 0]
@@ -185,7 +225,7 @@ def test_fresh_sidecar_appenders_bootstrap_once_under_a_shared_lock(tmp_path: Pa
         "receipts.append_event(Path(sys.argv[1]), event_type='disclosure', payload={'outcomes': []})"
     )
     processes = [
-        subprocess.Popen([sys.executable, "-c", script, str(root)], env={"PYTHONPATH": "src"})
+        subprocess.Popen([sys.executable, "-c", script, str(root)], env={**os.environ, "PYTHONPATH": "src"})
         for _ in range(12)
     ]
     assert [process.wait(timeout=20) for process in processes] == [0] * 12
@@ -213,17 +253,29 @@ def test_reconcile_does_not_promote_buffered_records_to_durable(vault: Path) -> 
 
 def test_critical_retry_promotes_the_durable_anchor(vault: Path) -> None:
     event = receipts.append_event(
-        vault, event_type="deletion", event_id="critical-retry", payload={"manifest_digest": "a" * 64}, critical=True
+        vault,
+        event_type="deletion",
+        event_id="critical-retry",
+        payload=_lifecycle_payload(),
+        critical=True,
     )
     conn = store.open_connection(vault)
     try:
-        conn.execute("UPDATE receipts_head SET durable_seq=0, durable_hash=?, observed_seq=0, observed_hash=?", ("0" * 64, "0" * 64))
+        conn.execute(
+            "UPDATE receipts_head SET durable_seq=0, durable_hash=?, observed_seq=0, "
+            "observed_hash=?, path='', byte_offset=0",
+            ("0" * 64, "0" * 64),
+        )
         conn.commit()
     finally:
         conn.close()
 
     receipts.append_event(
-        vault, event_type="deletion", event_id="critical-retry", payload={"manifest_digest": "a" * 64}, critical=True
+        vault,
+        event_type="deletion",
+        event_id="critical-retry",
+        payload=_lifecycle_payload(),
+        critical=True,
     )
 
     conn = store.open_connection(vault)
@@ -319,12 +371,20 @@ def test_crash_after_critical_fsync_leaves_sidecar_unadvanced_until_retry(vault:
     monkeypatch.setattr(receipts, "_crash_point", crash)
     with pytest.raises(RuntimeError, match="injected crash"):
         receipts.append_event(
-            vault, event_type="deletion", event_id="crash-critical", payload={"manifest_digest": "a" * 64}, critical=True
+            vault,
+            event_type="deletion",
+            event_id="crash-critical",
+            payload=_lifecycle_payload(),
+            critical=True,
         )
     monkeypatch.setattr(receipts, "_crash_point", lambda _point: None)
 
     receipts.append_event(
-        vault, event_type="deletion", event_id="crash-critical", payload={"manifest_digest": "a" * 64}, critical=True
+        vault,
+        event_type="deletion",
+        event_id="crash-critical",
+        payload=_lifecycle_payload(),
+        critical=True,
     )
     assert receipts.verify_chain(vault)["valid"] is True
 
@@ -351,14 +411,20 @@ def test_critical_write_order_crashes_recover_idempotently(
             receipts.commit_event(vault, event_id)
     else:
         with pytest.raises(RuntimeError, match=point):
-            append(vault, event_type="deletion", event_id=event_id, payload={"manifest_digest": "a" * 64}, critical=True)
+            append(
+                vault,
+                event_type="deletion",
+                event_id=event_id,
+                payload=_lifecycle_payload(),
+                critical=True,
+            )
 
         def retry() -> None:
             append(
                 vault,
                 event_type="deletion",
                 event_id=event_id,
-                payload={"manifest_digest": "a" * 64},
+                payload=_lifecycle_payload(),
                 critical=True,
             )
     monkeypatch.setattr(receipts, "_crash_point", lambda _point: None)
@@ -398,7 +464,7 @@ def test_critical_append_fsyncs_the_entire_new_durable_prefix(vault: Path, monke
     receipts.append_event(
         vault,
         event_type="deletion",
-        payload={"manifest_digest": "a" * 64},
+        payload=_lifecycle_payload(),
         critical=True,
         timestamp="2026-07-01T12:00:00Z",
     )
@@ -481,28 +547,23 @@ def test_outcome_count_is_bounded_below_the_tail_window(vault: Path) -> None:
 
 
 def test_reconcile_dry_run_keeps_evidence_and_operational_files_byte_identical(vault: Path) -> None:
-    receipts.append_event(vault, event_type="deletion", payload={"manifest_digest": "a" * 64}, critical=True)
+    receipts.append_event(vault, event_type="deletion", payload=_lifecycle_payload(), critical=True)
     tombstone = vault / "Knowledge Base" / "_Governance" / "deletion-tombstones" / "pending.json"
     tombstone.parent.mkdir(parents=True)
     tombstone.write_bytes(b'{"pending":true}\n')
     derivative = vault / "Knowledge Base" / "Notes" / "derived.bin"
     derivative.parent.mkdir(exist_ok=True)
     derivative.write_bytes(b"unchanged")
-    files = [
-        *sorted((vault / "Knowledge Base" / "_Governance" / "events").rglob("*.jsonl")),
-        store.sidecar_path(vault),
-        tombstone,
-        derivative,
-    ]
-    before = {path: path.read_bytes() for path in files}
+    state_root = Path(os.environ["EXOMEM_WRITER_LEASE_STATE_DIR"])
+    before = _recursive_snapshot(vault, state_root)
 
     receipts.reconcile(vault, dry_run=True)
 
-    assert {path: path.read_bytes() for path in files} == before
+    assert _recursive_snapshot(vault, state_root) == before
 
 
 def test_reconcile_repair_is_idempotent(vault: Path) -> None:
-    event = receipts.append_event(vault, event_type="deletion", payload={"manifest_digest": "a" * 64}, critical=True)
+    event = receipts.append_event(vault, event_type="deletion", payload=_lifecycle_payload(), critical=True)
     conn = store.open_connection(vault)
     try:
         conn.execute("UPDATE receipts_head SET durable_seq=0, durable_hash=?, observed_seq=0, observed_hash=?", ("0" * 64, "0" * 64))
@@ -530,3 +591,157 @@ def test_after_sidecar_commit_intent_retry_is_idempotent(vault: Path, monkeypatc
     retry = receipts.begin_event(vault, operation="delete", prior=_PRIOR, target=_TARGET)
 
     assert retry["seq"] == 1
+
+
+@pytest.mark.parametrize("corruption", ["path", "byte_offset"])
+def test_corrupt_head_locator_is_reported_refused_and_reconciled(
+    vault: Path, corruption: str
+) -> None:
+    event = receipts.append_event(
+        vault, event_type="disclosure", payload={"outcomes": []}, critical=True
+    )
+    sidecar = store.sidecar_path(vault)
+    conn = store.open_connection(vault)
+    try:
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(receipts_head)")}
+        assert {"path", "byte_offset"} <= columns
+        locator = conn.execute(
+            "SELECT path FROM receipts_head WHERE instance_id=?", (event["instance_id"],)
+        ).fetchone()[0]
+        assert not Path(locator).is_absolute()
+        assert (vault / locator).resolve() == next(
+            (vault / "Knowledge Base" / "_Governance" / "events").rglob("*.jsonl")
+        ).resolve()
+        if corruption == "path":
+            conn.execute(
+                "UPDATE receipts_head SET path=? WHERE instance_id=?",
+                ("../../outside.jsonl", event["instance_id"]),
+            )
+        else:
+            conn.execute(
+                "UPDATE receipts_head SET byte_offset=byte_offset+1 WHERE instance_id=?",
+                (event["instance_id"],),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+    verification = receipts.verify_chain(vault)
+    assert any(issue["code"].startswith("locator_") for issue in verification["issues"])
+    assert audit.audit(vault, categories=["governance_receipts"]).findings
+    with pytest.raises(receipts.ReceiptError, match="locator"):
+        receipts.append_event(vault, event_type="disclosure", payload={"outcomes": []})
+
+    before_dry_run = sidecar.read_bytes()
+    preview = receipts.reconcile(vault, dry_run=True)
+    assert any(repair["kind"] == "locator" for repair in preview["repairs"])
+    assert sidecar.read_bytes() == before_dry_run
+    receipts.reconcile(vault)
+
+    assert receipts.verify_chain(vault)["valid"] is True
+    receipts.append_event(vault, event_type="disclosure", payload={"outcomes": []})
+
+
+def test_verify_reports_a_non_newline_terminated_final_record_as_truncated(vault: Path) -> None:
+    receipts.append_event(vault, event_type="disclosure", payload={"outcomes": []})
+    path = next((vault / "Knowledge Base" / "_Governance" / "events").rglob("*.jsonl"))
+    path.write_bytes(path.read_bytes().removesuffix(b"\n"))
+
+    report = receipts.verify_chain(vault)
+
+    assert any(issue["code"] == "truncated_evidence" for issue in report["issues"])
+    assert audit.audit(vault, categories=["governance_receipts"]).findings
+
+
+def test_empty_vault_dry_run_creates_no_sidecar_events_or_lock_state(
+    tmp_path: Path, receipt_state_root: Path
+) -> None:
+    empty = tmp_path / "empty-vault"
+    (empty / "Knowledge Base").mkdir(parents=True)
+    before = _recursive_snapshot(empty, receipt_state_root)
+
+    report = receipts.reconcile(empty, dry_run=True)
+
+    assert report["repairs"] == []
+    assert _recursive_snapshot(empty, receipt_state_root) == before
+
+
+def test_receipt_lock_uses_only_the_machine_writer_lease_state_root(
+    vault: Path, receipt_state_root: Path
+) -> None:
+    receipts.append_event(vault, event_type="disclosure", payload={"outcomes": []})
+
+    assert list((receipt_state_root / "mutation-locks").glob("*.lock"))
+    assert not list(vault.rglob("mutation-locks"))
+
+
+def test_barrier_synchronized_first_label_digests_are_process_safe(
+    vault: Path, receipt_state_root: Path, tmp_path: Path
+) -> None:
+    conn = store.open_connection(vault)
+    conn.close()
+    ready = tmp_path / "ready"
+    ready.mkdir()
+    go = tmp_path / "go"
+    script = (
+        "import os,sys,time; from pathlib import Path; "
+        "from exomem.governance import receipts; "
+        "vault,ready,go=map(Path,sys.argv[1:4]); "
+        "original=receipts.os.urandom; "
+        "receipts.os.urandom=lambda n:(ready.joinpath('secret-'+str(os.getpid())).touch(),time.sleep(.25),original(n))[2]; "
+        "ready.joinpath('call-'+str(os.getpid())).touch(); "
+        "exec(\"while not go.exists(): time.sleep(.005)\"); "
+        "print(receipts.label_digest(vault, 'Sensitive project'))"
+    )
+    env = {
+        **os.environ,
+        "PYTHONPATH": "src",
+        "EXOMEM_DISABLE_EMBEDDINGS": "1",
+        "EXOMEM_WRITER_LEASE_STATE_DIR": str(receipt_state_root),
+    }
+    processes = [
+        subprocess.Popen(
+            [sys.executable, "-c", script, str(vault), str(ready), str(go)],
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        for _ in range(8)
+    ]
+    deadline = time.monotonic() + 10
+    while len(list(ready.glob("call-*"))) < len(processes) and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert len(list(ready.glob("call-*"))) == len(processes)
+    go.touch()
+    results = [process.communicate(timeout=20) for process in processes]
+
+    assert [process.returncode for process in processes] == [0] * len(processes), results
+    assert len({stdout.strip() for stdout, _stderr in results}) == 1
+
+
+@pytest.mark.parametrize("event_type", ["deletion", "recovery"])
+def test_lifecycle_schemas_require_the_complete_content_free_state(
+    vault: Path, event_type: str
+) -> None:
+    record = receipts.append_event(vault, event_type=event_type, payload=_lifecycle_payload())
+
+    assert record["affected_refs"] == ["Notes/one"]
+    assert record["content_hashes"] == ["b" * 64]
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"manifest_digest": "a" * 64},
+        {**_lifecycle_payload(), "affected_refs": ["human label"]},
+        {**_lifecycle_payload(), "content_hashes": ["not-a-hash"]},
+        {**_lifecycle_payload(), "exact_state_digest": True},
+        {**_lifecycle_payload(), "causation_id": "human label"},
+    ],
+)
+@pytest.mark.parametrize("event_type", ["deletion", "recovery"])
+def test_lifecycle_schemas_reject_incomplete_or_mistyped_state(
+    vault: Path, event_type: str, payload: dict[str, object]
+) -> None:
+    with pytest.raises(receipts.ReceiptError):
+        receipts.append_event(vault, event_type=event_type, payload=payload)

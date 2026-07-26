@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from ..mutation_lock import VaultMutationCoordinator
+from ..writer_lease import LeaseConfig
 from . import store
 from .policy import governance_root
 
@@ -37,8 +38,12 @@ _EVENT_PAYLOAD_FIELDS = {
     ("credential_block", "recorded"): frozenset({"principal", "audience", "redaction_count", "count"}),
     ("token_mint", "recorded"): frozenset({"token_id_digest", "bounds_fingerprint", "causation_id"}),
     ("token_redeem", "recorded"): frozenset({"token_id_digest", "bounds_fingerprint", "causation_id"}),
-    ("deletion", "recorded"): frozenset({"manifest_digest", "affected_ids", "causation_id"}),
-    ("recovery", "recorded"): frozenset({"manifest_digest", "affected_ids", "causation_id"}),
+    ("deletion", "recorded"): frozenset({
+        "manifest_digest", "affected_refs", "content_hashes", "exact_state_digest", "causation_id",
+    }),
+    ("recovery", "recorded"): frozenset({
+        "manifest_digest", "affected_refs", "content_hashes", "exact_state_digest", "causation_id",
+    }),
     ("critical", "intent"): frozenset({"operation", "prior", "target", "affected_ids", "prepared"}),
     ("critical", "committed"): frozenset({"causation_id", "outcome"}),
     ("critical", "aborted"): frozenset({"causation_id", "outcome"}),
@@ -116,7 +121,9 @@ def _instance_id(conn: sqlite3.Connection) -> str:
         instance_id = uuid.uuid4().hex
         conn.execute("INSERT INTO receipt_instance (singleton, instance_id) VALUES (1, ?)", (instance_id,))
         conn.execute(
-            "INSERT INTO receipts_head VALUES (?, 0, ?, 0, ?)",
+            "INSERT INTO receipts_head "
+            "(instance_id, durable_seq, durable_hash, observed_seq, observed_hash, path, byte_offset) "
+            "VALUES (?, 0, ?, 0, ?, '', 0)",
             (instance_id, GENESIS_HASH, GENESIS_HASH),
         )
         conn.commit()
@@ -124,36 +131,61 @@ def _instance_id(conn: sqlite3.Connection) -> str:
     return str(row[0])
 
 
-def _head(conn: sqlite3.Connection, instance_id: str) -> tuple[int, str, int, str]:
-    row = conn.execute(
-        "SELECT durable_seq, durable_hash, observed_seq, observed_hash "
-        "FROM receipts_head WHERE instance_id = ?", (instance_id,)
-    ).fetchone()
+def _head(conn: sqlite3.Connection, instance_id: str) -> tuple[int, str, int, str, str, int]:
+    try:
+        row = conn.execute(
+            "SELECT durable_seq, durable_hash, observed_seq, observed_hash, path, byte_offset "
+            "FROM receipts_head WHERE instance_id = ?", (instance_id,)
+        ).fetchone()
+    except sqlite3.OperationalError as exc:
+        raise ReceiptError("receipt locator columns are unavailable") from exc
     if row is None:
         conn.execute(
-            "INSERT INTO receipts_head VALUES (?, 0, ?, 0, ?)",
+            "INSERT INTO receipts_head "
+            "(instance_id, durable_seq, durable_hash, observed_seq, observed_hash, path, byte_offset) "
+            "VALUES (?, 0, ?, 0, ?, '', 0)",
             (instance_id, GENESIS_HASH, GENESIS_HASH),
         )
         conn.commit()
-        return 0, GENESIS_HASH, 0, GENESIS_HASH
-    return int(row[0]), str(row[1]), int(row[2]), str(row[3])
+        return 0, GENESIS_HASH, 0, GENESIS_HASH, "", 0
+    return int(row[0]), str(row[1]), int(row[2]), str(row[3]), str(row[4]), int(row[5])
 
 
-def _durable_anchor_matches(
-    conn: sqlite3.Connection, instance_id: str, durable_seq: int, durable_hash: str
+def _relative_locator(vault_root: Path, path: Path) -> str:
+    root = Path(vault_root).resolve()
+    try:
+        return path.resolve().relative_to(root).as_posix()
+    except ValueError as exc:
+        raise ReceiptError("receipt locator escaped the vault") from exc
+
+
+def _resolve_locator(vault_root: Path, instance_id: str, locator: str) -> Path:
+    if not locator or Path(locator).is_absolute():
+        raise ReceiptError("receipt locator must be vault-relative")
+    root = Path(vault_root).resolve()
+    instance_dir = (_events_root(root) / instance_id).resolve()
+    target = (root / locator).resolve()
+    if target.parent != instance_dir or re.fullmatch(r"\d{4}-\d{2}\.jsonl", target.name) is None:
+        raise ReceiptError("receipt locator escaped its instance directory")
+    return target
+
+
+def _durable_locator_matches(
+    vault_root: Path,
+    instance_id: str,
+    durable_seq: int,
+    durable_hash: str,
+    locator: str,
+    byte_offset: int,
 ) -> bool:
     if durable_seq == 0:
-        return durable_hash == GENESIS_HASH
-    row = conn.execute(
-        "SELECT durable_seq, durable_hash, path, byte_offset FROM receipt_anchor WHERE instance_id=?",
-        (instance_id,),
-    ).fetchone()
-    if row is None or (int(row[0]), str(row[1])) != (durable_seq, durable_hash):
-        return False
+        return durable_hash == GENESIS_HASH and locator == "" and byte_offset == 0
     try:
-        path = Path(str(row[2]))
+        path = _resolve_locator(vault_root, instance_id, locator)
+        if byte_offset < 0:
+            return False
         with path.open("rb") as source:
-            source.seek(int(row[3]))
+            source.seek(byte_offset)
             line = source.readline(MAX_RECORD_BYTES + 1)
         if not line.endswith(b"\n") or len(line) > MAX_RECORD_BYTES:
             return False
@@ -164,19 +196,32 @@ def _durable_anchor_matches(
             and record["seq"] == durable_seq
             and record["hash"] == durable_hash
             and _record_hash(record) == durable_hash
+            and _month_path(vault_root, instance_id, record["timestamp"]).resolve() == path
         )
     except (OSError, ValueError, json.JSONDecodeError, ReceiptError):
         return False
 
 
-def _store_durable_anchor(
-    conn: sqlite3.Connection, instance_id: str, record: Mapping[str, Any], path: Path, byte_offset: int
+def _update_durable_head(
+    conn: sqlite3.Connection,
+    vault_root: Path,
+    instance_id: str,
+    record: Mapping[str, Any],
+    path: Path,
+    byte_offset: int,
 ) -> None:
     conn.execute(
-        "INSERT INTO receipt_anchor (instance_id, durable_seq, durable_hash, path, byte_offset) VALUES (?, ?, ?, ?, ?) "
-        "ON CONFLICT(instance_id) DO UPDATE SET durable_seq=excluded.durable_seq, durable_hash=excluded.durable_hash, "
-        "path=excluded.path, byte_offset=excluded.byte_offset",
-        (instance_id, record["seq"], record["hash"], str(path), byte_offset),
+        "UPDATE receipts_head SET durable_seq=?, durable_hash=?, observed_seq=?, observed_hash=?, "
+        "path=?, byte_offset=? WHERE instance_id=?",
+        (
+            record["seq"],
+            record["hash"],
+            record["seq"],
+            record["hash"],
+            _relative_locator(vault_root, path),
+            byte_offset,
+            instance_id,
+        ),
     )
 
 
@@ -187,21 +232,35 @@ def _read_records(instance_dir: Path) -> tuple[list[dict[str, Any]], list[dict[s
         return records, issues
     for path in sorted(instance_dir.glob("????-??.jsonl")):
         try:
-            lines = path.read_bytes().splitlines()
+            data = path.read_bytes()
         except OSError as exc:
             issues.append({"code": "read_error", "path": str(path), "detail": str(exc)})
             continue
-        for line_no, line in enumerate(lines, 1):
+        if data and not data.endswith(b"\n"):
+            issues.append({
+                "code": "truncated_evidence",
+                "path": str(path),
+                "detail": "nonempty JSONL file is missing its final newline",
+            })
+        offset = 0
+        for line_no, raw_line in enumerate(data.splitlines(keepends=True), 1):
+            line = raw_line[:-1] if raw_line.endswith(b"\n") else raw_line
+            if line.endswith(b"\r"):
+                line = line[:-1]
             try:
                 value = json.loads(line)
             except (UnicodeDecodeError, json.JSONDecodeError) as exc:
                 issues.append({"code": "invalid_json", "path": str(path), "detail": f"line {line_no}: {exc}"})
+                offset += len(raw_line)
                 continue
             if not isinstance(value, dict):
                 issues.append({"code": "invalid_record", "path": str(path), "detail": f"line {line_no}"})
+                offset += len(raw_line)
                 continue
             value["_path"] = str(path)
+            value["_offset"] = offset
             records.append(value)
+            offset += len(raw_line)
     return records, issues
 
 
@@ -213,6 +272,7 @@ def _chain_state(instance_dir: Path) -> tuple[list[dict[str, Any]], list[dict[st
     previous_month: str | None = None
     for record in records:
         path = str(record.pop("_path"))
+        offset = int(record.pop("_offset"))
         month = Path(path).stem
         envelope_error = _envelope_error(record)
         if envelope_error is not None:
@@ -235,6 +295,7 @@ def _chain_state(instance_dir: Path) -> tuple[list[dict[str, Any]], list[dict[st
         expected_seq += 1
         previous_month = month
         record["_path"] = path
+        record["_offset"] = offset
         valid_records.append(record)
     return valid_records, issues
 
@@ -257,11 +318,25 @@ def _validate_event(event_type: str, phase: str, payload: Mapping[str, Any]) -> 
         if not _hex(payload["token_id_digest"]) or not _hex(payload["bounds_fingerprint"]) or not _identifier_value(payload["causation_id"]):
             raise ReceiptError("token receipt fields are invalid")
     if event_type in {"deletion", "recovery"}:
-        if "manifest_digest" not in payload or not _hex(payload["manifest_digest"]):
-            raise ReceiptError("lifecycle receipt requires a manifest digest")
-        if "affected_ids" in payload and not _identifiers(payload["affected_ids"]):
-            raise ReceiptError("lifecycle affected ids are invalid")
-        if "causation_id" in payload and not _identifier_value(payload["causation_id"]):
+        required = {
+            "manifest_digest", "affected_refs", "content_hashes", "exact_state_digest", "causation_id",
+        }
+        if set(payload) != required:
+            raise ReceiptError("lifecycle receipt requires all declared fields")
+        if not _hex(payload["manifest_digest"]) or not _hex(payload["exact_state_digest"]):
+            raise ReceiptError("lifecycle receipt digests are invalid")
+        if not _identifiers(payload["affected_refs"]) or not payload["affected_refs"]:
+            raise ReceiptError("lifecycle affected refs are invalid")
+        content_hashes = payload["content_hashes"]
+        if (
+            not isinstance(content_hashes, list)
+            or not content_hashes
+            or len(content_hashes) > MAX_OUTCOMES
+            or not all(_hex(value) for value in content_hashes)
+            or len(content_hashes) != len(payload["affected_refs"])
+        ):
+            raise ReceiptError("lifecycle content hashes are invalid")
+        if not _identifier_value(payload["causation_id"]):
             raise ReceiptError("lifecycle causation id is invalid")
     if event_type == "credential_block":
         if "count" not in payload or not _count(payload["count"]):
@@ -368,7 +443,7 @@ def _receipt_lock(vault_root: Path):
     """Cross-platform process/thread lock acquired before sidecar bootstrap."""
     root = Path(vault_root).resolve()
     coordinator = VaultMutationCoordinator(
-        store.sidecar_path(root).parent,
+        LeaseConfig.from_env().state_dir,
         f"receipt:{root}",
     )
     with coordinator.hold(operation="governance_receipt", holder_kind="receipt"):
@@ -439,7 +514,10 @@ def _matching_existing_event(
     existing_payload = {
         key: value
         for key, value in record.items()
-        if key not in {"schema", "event_id", "event_type", "phase", "timestamp", "instance_id", "seq", "prev", "hash", "durable", "_path"}
+        if key not in {
+            "schema", "event_id", "event_type", "phase", "timestamp", "instance_id", "seq",
+            "prev", "hash", "durable", "_path", "_offset",
+        }
     }
     if record.get("event_type") == event_type and record.get("phase") == phase and existing_payload == dict(payload):
         return record
@@ -467,12 +545,26 @@ def append_event(
             instance_dir.mkdir(parents=True, exist_ok=True)
             if _conflicted_evidence(instance_dir):
                 raise ReceiptError("conflicted receipt evidence must be resolved")
-            durable_seq, durable_hash, observed_seq, observed_hash = _head(conn, instance_id)
+            (
+                durable_seq,
+                durable_hash,
+                observed_seq,
+                observed_hash,
+                locator,
+                durable_offset,
+            ) = _head(conn, instance_id)
             eid = event_id or uuid.uuid4().hex
             tail = _read_tail_record(instance_dir)
             actual_seq, actual_hash = (0, GENESIS_HASH) if tail is None else (tail["seq"], tail["hash"])
-            if durable_seq > actual_seq or not _durable_anchor_matches(conn, instance_id, durable_seq, durable_hash):
-                raise ReceiptError("durable receipt anchor is truncated or divergent")
+            if durable_seq > actual_seq or not _durable_locator_matches(
+                vault_root,
+                instance_id,
+                durable_seq,
+                durable_hash,
+                locator,
+                durable_offset,
+            ):
+                raise ReceiptError("durable receipt locator is missing or divergent")
             if (actual_seq, actual_hash) != (observed_seq, observed_hash):
                 if (
                     tail is not None
@@ -486,10 +578,18 @@ def append_event(
                         tail_path = Path(tail["_path"])
                         _fsync_durable_prefix(instance_dir, tail_path)
                         conn.execute(
-                            "UPDATE receipts_head SET durable_seq=?, durable_hash=?, observed_seq=?, observed_hash=? WHERE instance_id=?",
-                            (actual_seq, actual_hash, actual_seq, actual_hash, instance_id),
+                            "UPDATE receipts_head SET durable_seq=?, durable_hash=?, observed_seq=?, observed_hash=?, "
+                            "path=?, byte_offset=? WHERE instance_id=?",
+                            (
+                                actual_seq,
+                                actual_hash,
+                                actual_seq,
+                                actual_hash,
+                                _relative_locator(vault_root, tail_path),
+                                int(tail["_offset"]),
+                                instance_id,
+                            ),
                         )
-                        _store_durable_anchor(conn, instance_id, tail, tail_path, int(tail["_offset"]))
                     else:
                         conn.execute(
                             "UPDATE receipts_head SET observed_seq=?, observed_hash=? WHERE instance_id=?",
@@ -534,11 +634,7 @@ def append_event(
             _crash_point("before_sidecar_commit")
             if critical:
                 _fsync_durable_prefix(instance_dir, path)
-                conn.execute(
-                    "UPDATE receipts_head SET durable_seq=?, durable_hash=?, observed_seq=?, observed_hash=? WHERE instance_id=?",
-                    (record["seq"], record["hash"], record["seq"], record["hash"], instance_id),
-                )
-                _store_durable_anchor(conn, instance_id, record, path, offset)
+                _update_durable_head(conn, vault_root, instance_id, record, path, offset)
             else:
                 conn.execute(
                     "UPDATE receipts_head SET observed_seq=?, observed_hash=? WHERE instance_id=?",
@@ -561,18 +657,28 @@ def critical_event_id(operation_identity: Any) -> str:
 
 def label_digest(vault_root: Path, label: str) -> str:
     """Digest a human label with a machine-local secret, never the raw label."""
-    conn = store.open_connection(Path(vault_root))
-    try:
-        row = conn.execute("SELECT value FROM receipt_secrets WHERE name = 'label_hmac'").fetchone()
-        if row is None:
-            secret = os.urandom(32)
-            conn.execute("INSERT INTO receipt_secrets VALUES ('label_hmac', ?)", (secret,))
-            conn.commit()
-        else:
+    with _receipt_lock(vault_root):
+        conn = store.open_connection(Path(vault_root))
+        try:
+            row = conn.execute(
+                "SELECT value FROM receipt_secrets WHERE name = 'label_hmac'"
+            ).fetchone()
+            if row is None:
+                conn.execute(
+                    "INSERT INTO receipt_secrets (name, value) VALUES ('label_hmac', ?) "
+                    "ON CONFLICT(name) DO NOTHING",
+                    (os.urandom(32),),
+                )
+                conn.commit()
+                row = conn.execute(
+                    "SELECT value FROM receipt_secrets WHERE name = 'label_hmac'"
+                ).fetchone()
+            if row is None:
+                raise ReceiptError("label digest secret initialization failed")
             secret = bytes(row[0])
-        return hmac.new(secret, label.encode("utf-8"), hashlib.sha256).hexdigest()
-    finally:
-        conn.close()
+            return hmac.new(secret, label.encode("utf-8"), hashlib.sha256).hexdigest()
+        finally:
+            conn.close()
 
 
 def begin_event(
@@ -645,22 +751,69 @@ def abort_event(vault_root: Path, event_id: str, *, outcome: str | None = None) 
     return terminal_event(vault_root, event_id, phase="aborted", outcome=outcome)
 
 
-def _read_sidecar_head(vault_root: Path, instance_id: str) -> tuple[int, str, int, str] | None:
+def _read_sidecar_head(
+    vault_root: Path, instance_id: str
+) -> tuple[int, str, int, str, str | None, int | None] | None:
     path = store.sidecar_path(Path(vault_root))
     if not path.exists():
         return None
     try:
-        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        conn = sqlite3.connect(f"file:{path}?mode=ro&immutable=1", uri=True)
         try:
+            columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(receipts_head)")}
+            has_locator = {"path", "byte_offset"} <= columns
+            selected = (
+                "durable_seq, durable_hash, observed_seq, observed_hash, path, byte_offset"
+                if has_locator
+                else "durable_seq, durable_hash, observed_seq, observed_hash"
+            )
             row = conn.execute(
-                "SELECT durable_seq, durable_hash, observed_seq, observed_hash FROM receipts_head WHERE instance_id=?",
+                f"SELECT {selected} FROM receipts_head WHERE instance_id=?",
                 (instance_id,),
             ).fetchone()
-            return None if row is None else (int(row[0]), str(row[1]), int(row[2]), str(row[3]))
+            if row is None:
+                return None
+            locator = str(row[4]) if has_locator else None
+            offset = int(row[5]) if has_locator else None
+            return int(row[0]), str(row[1]), int(row[2]), str(row[3]), locator, offset
         finally:
             conn.close()
     except sqlite3.Error:
         return None
+
+
+def _scanned_locator_matches(
+    vault_root: Path,
+    instance_id: str,
+    records: list[dict[str, Any]],
+    durable_seq: int,
+    durable_hash: str,
+    locator: str | None,
+    byte_offset: int | None,
+) -> bool:
+    if locator is None or byte_offset is None:
+        return False
+    if durable_seq == 0:
+        return durable_hash == GENESIS_HASH and locator == "" and byte_offset == 0
+    record = next((item for item in records if item.get("seq") == durable_seq), None)
+    if record is None or record.get("hash") != durable_hash:
+        return False
+    try:
+        target = _resolve_locator(vault_root, instance_id, locator)
+    except ReceiptError:
+        return False
+    return (
+        Path(str(record.get("_path", ""))).resolve() == target
+        and record.get("_offset") == byte_offset
+        and _durable_locator_matches(
+            vault_root,
+            instance_id,
+            durable_seq,
+            durable_hash,
+            locator,
+            byte_offset,
+        )
+    )
 
 
 def verify_chain(vault_root: Path) -> dict[str, Any]:
@@ -677,10 +830,30 @@ def verify_chain(vault_root: Path) -> dict[str, Any]:
             actual_seq, actual_hash = _tail(records)
             anchor = _read_sidecar_head(vault_root, instance_dir.name)
             if anchor is not None:
-                durable_seq, durable_hash, observed_seq, observed_hash = anchor
+                durable_seq, durable_hash, observed_seq, observed_hash, locator, byte_offset = anchor
                 hashes = {item["seq"]: item["hash"] for item in records}
                 if durable_seq > actual_seq or hashes.get(durable_seq, GENESIS_HASH) != durable_hash:
                     issues.append({"code": "durable_anchor_divergence", "path": str(instance_dir), "detail": "durable head is not in chain"})
+                if locator is None or byte_offset is None or (durable_seq > 0 and not locator):
+                    issues.append({
+                        "code": "locator_absent",
+                        "path": str(instance_dir),
+                        "detail": "durable head has no usable JSONL locator",
+                    })
+                elif not _scanned_locator_matches(
+                    vault_root,
+                    instance_dir.name,
+                    records,
+                    durable_seq,
+                    durable_hash,
+                    locator,
+                    byte_offset,
+                ):
+                    issues.append({
+                        "code": "locator_divergence",
+                        "path": str(instance_dir),
+                        "detail": "durable locator differs from the verified JSONL record",
+                    })
                 if (observed_seq, observed_hash) != (actual_seq, actual_hash):
                     code = "anchor_lag" if observed_seq < actual_seq else "truncated_tail"
                     issues.append({"code": code, "path": str(instance_dir), "detail": "observed head differs from actual tail"})
@@ -715,9 +888,11 @@ def reconcile(
     dry_run: bool = False,
     state_resolver: Callable[[Mapping[str, Any]], Any] | None = None,
 ) -> dict[str, Any]:
-    """Reconcile from one serialized receipt snapshot, even for dry-runs."""
+    """Preview from a read-only snapshot or repair under the append lock."""
+    if dry_run:
+        return _reconcile_locked(vault_root, dry_run=True, state_resolver=state_resolver)
     with _receipt_lock(vault_root):
-        return _reconcile_locked(vault_root, dry_run=dry_run, state_resolver=state_resolver)
+        return _reconcile_locked(vault_root, dry_run=False, state_resolver=state_resolver)
 
 
 def _reconcile_locked(
@@ -740,44 +915,86 @@ def _reconcile_locked(
         anchor = _read_sidecar_head(vault_root, instance_dir.name)
         if anchor is None:
             continue
-        durable_seq, durable_hash, observed_seq, observed_hash = anchor
+        durable_seq, durable_hash, observed_seq, observed_hash, locator, byte_offset = anchor
         hashes = {int(item["seq"]): str(item["hash"]) for item in records}
         if durable_seq > actual_seq or hashes.get(durable_seq, GENESIS_HASH) != durable_hash:
             continue
+        target_durable_seq = durable_seq
+        target_durable_hash = durable_hash
+        target_observed_seq = observed_seq
+        target_observed_hash = observed_hash
+        anchor_repair = False
         if (observed_seq, observed_hash) != (actual_seq, actual_hash):
             if actual_seq < durable_seq:
                 continue
             suffix = [item for item in records if observed_seq < item["seq"] <= actual_seq]
             promote_durable = bool(suffix) and all(item["durable"] for item in suffix)
-            repair = {
+            if promote_durable:
+                target_durable_seq = actual_seq
+                target_durable_hash = actual_hash
+            target_observed_seq = actual_seq
+            target_observed_hash = actual_hash
+            repairs.append({
                 "kind": "anchor",
                 "instance_id": instance_dir.name,
-                "durable_seq": actual_seq if promote_durable else durable_seq,
+                "durable_seq": target_durable_seq,
                 "observed_seq": actual_seq,
-            }
-            repairs.append(repair)
-            if not dry_run:
-                conn = store.open_connection(Path(vault_root))
-                try:
-                    if promote_durable:
-                        tail = _read_tail_record(instance_dir)
-                        if tail is None or tail["seq"] != actual_seq or tail["hash"] != actual_hash:
-                            continue
-                        tail_path = Path(tail["_path"])
-                        _fsync_durable_prefix(instance_dir, tail_path)
-                        conn.execute(
-                            "UPDATE receipts_head SET durable_seq=?, durable_hash=?, observed_seq=?, observed_hash=? WHERE instance_id=?",
-                            (actual_seq, actual_hash, actual_seq, actual_hash, instance_dir.name),
-                        )
-                        _store_durable_anchor(conn, instance_dir.name, tail, tail_path, int(tail["_offset"]))
-                    else:
-                        conn.execute(
-                            "UPDATE receipts_head SET observed_seq=?, observed_hash=? WHERE instance_id=?",
-                            (actual_seq, actual_hash, instance_dir.name),
-                        )
-                    conn.commit()
-                finally:
-                    conn.close()
+            })
+            anchor_repair = True
+
+        target_record = (
+            None
+            if target_durable_seq == 0
+            else next(
+                (item for item in records if item.get("seq") == target_durable_seq),
+                None,
+            )
+        )
+        if target_durable_seq == 0:
+            target_locator = ""
+            target_offset = 0
+        elif target_record is not None:
+            target_locator = _relative_locator(vault_root, Path(str(target_record["_path"])))
+            target_offset = int(target_record["_offset"])
+        else:
+            continue
+        locator_matches_target = _scanned_locator_matches(
+            vault_root,
+            instance_dir.name,
+            records,
+            target_durable_seq,
+            target_durable_hash,
+            locator,
+            byte_offset,
+        )
+        if not locator_matches_target and not anchor_repair:
+            repairs.append({
+                "kind": "locator",
+                "instance_id": instance_dir.name,
+                "durable_seq": target_durable_seq,
+            })
+
+        if not dry_run and (anchor_repair or not locator_matches_target):
+            if target_durable_seq > durable_seq and target_record is not None:
+                _fsync_durable_prefix(instance_dir, Path(str(target_record["_path"])))
+            conn = store.open_connection(Path(vault_root))
+            try:
+                conn.execute(
+                    "UPDATE receipts_head SET durable_seq=?, durable_hash=?, observed_seq=?, "
+                    "observed_hash=?, path=?, byte_offset=? WHERE instance_id=?",
+                    (
+                        target_durable_seq,
+                        target_durable_hash,
+                        target_observed_seq,
+                        target_observed_hash,
+                        target_locator,
+                        target_offset,
+                        instance_dir.name,
+                    ),
+                )
+                conn.commit()
+            finally:
+                conn.close()
         terminals = {str(item.get("causation_id")) for item in records if item.get("phase") in {"committed", "aborted"}}
         for item in records:
             event_id = str(item.get("event_id"))
