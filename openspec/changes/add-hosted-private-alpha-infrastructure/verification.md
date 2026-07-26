@@ -82,6 +82,13 @@ Evidence is appended as implementation gates close. A checked task means the res
 - The corrected real-account proof then held the HCP lock in one Terraform apply, proved a second mutating writer was rejected, published a distinct contended state version, operator-locked the proof workspace, duplicated the selected baseline state version as current, recovered output revision `baseline`, passed a locked refresh-only plan, unlocked, and destroyed the disposable `terraform_data` resource. The mode-`0600` content-free evidence records `concurrentWriterRejected: true`, `proofWorkspaceCleaned: true`, and the final proof-workspace preflight passed unlocked.
 - Task 6.6 is closed. HCP is now the approved state/history/locking authority; production foundation and durability applies remain separately gated by reviewed saved plans under task 16.1.
 
+## 2026-07-26 — live durability apply
+
+- The real durability root produced a mode-`0600` saved plan with SHA-256 `e2f582d6eb3c209fa677bc74d9fe1ddbed255217b4516a356dbaee800fa313a8`: exactly 15 creates, zero updates, zero replacements, and zero deletes. Independent review confirmed three private SSE-B2 AES-256 buckets, the declared governance Object Lock and lifecycle rules, eleven separately scoped application keys, `prevent_destroy` on every bucket, and sensitive markings on all 22 key/key-ID outputs.
+- `apply_saved_plan.sh` re-ran the HCP workspace preflight and policy inspector, then applied that exact saved artifact without recomputing it. The live result was 15 added, zero changed, and zero destroyed. A fresh post-apply saved plan refreshed all 15 objects and reported no changes.
+- The 22 Terraform-owned durability outputs were routed through the destination matrix into separate version-`v1` SOPS artifacts for provisioner, Ansible, and offline escrow consumers. Every artifact passed exact destination-shape validation and a fresh decrypt round-trip with the Bitwarden-escrowed age identity; no plaintext output, state, plan, or identity is committed.
+- Task 16.1 remains open until the separately reviewed foundation plan is applied and the combined redacted plan, locking, and live cost evidence is retained.
+
 ## 2026-07-14 — hardened host and K3s bootstrap
 
 - Added idempotent Ansible roles for safe package updates, a locked dedicated administrator, key-only SSH, explicit-CIDR UFW, Kubernetes forwarding rules, fail2ban, systemd time sync, bounded journal storage, unattended security updates, and `cryptsetup`.
