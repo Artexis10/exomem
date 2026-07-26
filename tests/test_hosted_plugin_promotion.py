@@ -22,15 +22,34 @@ def digest(value: str) -> str:
 def oauth_client_config_digest() -> str:
     config = {
         "platform": "claude",
-        "admission_mode": "pinned",
-        "client_id": "https://client.example/claude",
+        "admission_mode": "cimd",
+        "client_id": "https://claude.example.com/oauth/client",
         "redirect_uris": sorted(
-            ["https://client.example/return/z", "https://client.example/return/a"]
+            [
+                "https://claude.example.com/oauth/return",
+                "https://claude.example.com/oauth/callback",
+            ]
         ),
         "token_endpoint_auth_method": "none",
     }
     canonical = json.dumps(config, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-    return hashlib.sha256(b"exomem-oauth-client-config:v1\0" + canonical.encode()).hexdigest()
+    assert canonical == (
+        '{"admission_mode":"cimd","client_id":"https://claude.example.com/oauth/client",'
+        '"platform":"claude","redirect_uris":["https://claude.example.com/oauth/callback",'
+        '"https://claude.example.com/oauth/return"],"token_endpoint_auth_method":"none"}'
+    )
+    assert (
+        hashlib.sha256(b"exomem-oauth-client-config:v1\0" + canonical.encode()).hexdigest()
+        == "3c8bbd83906d29816f59d21b48a7e5a859379b124108b2abb1aa9a309ec3a339"
+    )
+    return "3c8bbd83906d29816f59d21b48a7e5a859379b124108b2abb1aa9a309ec3a339"
+
+
+def test_oauth_client_config_digest_matches_shared_cimd_vector() -> None:
+    assert (
+        oauth_client_config_digest()
+        == "3c8bbd83906d29816f59d21b48a7e5a859379b124108b2abb1aa9a309ec3a339"
+    )
 
 
 def copy_hosted_tree(destination: Path) -> Path:

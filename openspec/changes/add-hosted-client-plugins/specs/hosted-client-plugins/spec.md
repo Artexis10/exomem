@@ -143,6 +143,13 @@ validation SHALL check only the required digest shape and the evidence
 signature; the digest is live evidence and MUST NOT alter the package lock,
 archive bytes, or compatibility identity.
 
+#### Scenario: Shared Claude CIMD digest vector
+
+- **WHEN** the producer canonicalizes `{platform:"claude", admission_mode:"cimd", client_id:"https://claude.example.com/oauth/client", redirect_uris:["https://claude.example.com/oauth/return", "https://claude.example.com/oauth/callback"], token_endpoint_auth_method:"none"}`
+- **THEN** the canonical JSON is `{"admission_mode":"cimd","client_id":"https://claude.example.com/oauth/client","platform":"claude","redirect_uris":["https://claude.example.com/oauth/callback","https://claude.example.com/oauth/return"],"token_endpoint_auth_method":"none"}`
+- **AND** SHA-256 over `exomem-oauth-client-config:v1\0` followed by those UTF-8 JSON bytes is `3c8bbd83906d29816f59d21b48a7e5a859379b124108b2abb1aa9a309ec3a339`
+- **AND** the JSON contains no `v` member because the prefix carries the version
+
 #### Scenario: Static validation passes but native install fails
 
 - **WHEN** a candidate passes repository tests but the supported host rejects or cannot install it

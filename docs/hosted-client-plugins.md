@@ -43,6 +43,11 @@ authority. The package validator checks only the digest shape and evidence
 signature. This is live promotion evidence, not package identity, so it must
 not change a rendered archive, package lock, or compatibility digest.
 
+The shared Claude CIMD test vector is canonical JSON
+`{"admission_mode":"cimd","client_id":"https://claude.example.com/oauth/client","platform":"claude","redirect_uris":["https://claude.example.com/oauth/callback","https://claude.example.com/oauth/return"],"token_endpoint_auth_method":"none"}`
+and digest `3c8bbd83906d29816f59d21b48a7e5a859379b124108b2abb1aa9a309ec3a339`.
+The JSON has no `v` member; the version is solely in the domain prefix.
+
 The reusable promotion HMAC secret is read only from
 `EXOMEM_HOSTED_PROMOTION_SECRET`; it is never accepted on the command line.
 Run `hosted-plugin.py status` to obtain the current record digest, then pass its
