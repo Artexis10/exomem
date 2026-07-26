@@ -10,6 +10,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import sqlite3
 import uuid
 from collections.abc import Callable, Mapping
@@ -25,6 +26,12 @@ from .policy import governance_root
 SCHEMA = "receipt/v1"
 GENESIS_HASH = "0" * 64
 _TAIL_READ_BYTES = 1024 * 1024
+MAX_RECORD_BYTES = 64 * 1024
+MAX_OUTCOMES = 128
+_MAX_IDENTIFIER_LENGTH = 256
+_MAX_COUNT = 2**31 - 1
+_HEX64 = re.compile(r"^[0-9a-f]{64}$")
+_IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$")
 _EVENT_PAYLOAD_FIELDS = {
     ("disclosure", "recorded"): frozenset({"outcomes"}),
     ("credential_block", "recorded"): frozenset({"principal", "audience", "redaction_count", "count"}),
@@ -132,6 +139,47 @@ def _head(conn: sqlite3.Connection, instance_id: str) -> tuple[int, str, int, st
     return int(row[0]), str(row[1]), int(row[2]), str(row[3])
 
 
+def _durable_anchor_matches(
+    conn: sqlite3.Connection, instance_id: str, durable_seq: int, durable_hash: str
+) -> bool:
+    if durable_seq == 0:
+        return durable_hash == GENESIS_HASH
+    row = conn.execute(
+        "SELECT durable_seq, durable_hash, path, byte_offset FROM receipt_anchor WHERE instance_id=?",
+        (instance_id,),
+    ).fetchone()
+    if row is None or (int(row[0]), str(row[1])) != (durable_seq, durable_hash):
+        return False
+    try:
+        path = Path(str(row[2]))
+        with path.open("rb") as source:
+            source.seek(int(row[3]))
+            line = source.readline(MAX_RECORD_BYTES + 1)
+        if not line.endswith(b"\n") or len(line) > MAX_RECORD_BYTES:
+            return False
+        record = json.loads(line)
+        return (
+            isinstance(record, dict)
+            and _envelope_error(record) is None
+            and record["seq"] == durable_seq
+            and record["hash"] == durable_hash
+            and _record_hash(record) == durable_hash
+        )
+    except (OSError, ValueError, json.JSONDecodeError, ReceiptError):
+        return False
+
+
+def _store_durable_anchor(
+    conn: sqlite3.Connection, instance_id: str, record: Mapping[str, Any], path: Path, byte_offset: int
+) -> None:
+    conn.execute(
+        "INSERT INTO receipt_anchor (instance_id, durable_seq, durable_hash, path, byte_offset) VALUES (?, ?, ?, ?, ?) "
+        "ON CONFLICT(instance_id) DO UPDATE SET durable_seq=excluded.durable_seq, durable_hash=excluded.durable_hash, "
+        "path=excluded.path, byte_offset=excluded.byte_offset",
+        (instance_id, record["seq"], record["hash"], str(path), byte_offset),
+    )
+
+
 def _read_records(instance_dir: Path) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
     records: list[dict[str, Any]] = []
     issues: list[dict[str, str]] = []
@@ -197,19 +245,89 @@ def _validate_event(event_type: str, phase: str, payload: Mapping[str, Any]) -> 
         raise ReceiptError("receipt payload has unregistered fields")
     if event_type == "disclosure":
         outcomes = payload.get("outcomes")
-        if not isinstance(outcomes, list) or any(
-            not isinstance(item, Mapping) or set(item) - _OUTCOME_FIELDS for item in outcomes
+        if (
+            not isinstance(outcomes, list)
+            or len(outcomes) > MAX_OUTCOMES
+            or any(not _valid_outcome(item) for item in outcomes)
         ):
             raise ReceiptError("disclosure receipts require registered content-free outcomes")
+    if event_type in {"token_mint", "token_redeem"}:
+        if set(payload) != {"token_id_digest", "bounds_fingerprint", "causation_id"}:
+            raise ReceiptError("token receipts require all declared fields")
+        if not _hex(payload["token_id_digest"]) or not _hex(payload["bounds_fingerprint"]) or not _identifier_value(payload["causation_id"]):
+            raise ReceiptError("token receipt fields are invalid")
+    if event_type in {"deletion", "recovery"}:
+        if "manifest_digest" not in payload or not _hex(payload["manifest_digest"]):
+            raise ReceiptError("lifecycle receipt requires a manifest digest")
+        if "affected_ids" in payload and not _identifiers(payload["affected_ids"]):
+            raise ReceiptError("lifecycle affected ids are invalid")
+        if "causation_id" in payload and not _identifier_value(payload["causation_id"]):
+            raise ReceiptError("lifecycle causation id is invalid")
+    if event_type == "credential_block":
+        if "count" not in payload or not _count(payload["count"]):
+            raise ReceiptError("credential receipt requires a count")
+        if "redaction_count" in payload and not _count(payload["redaction_count"]):
+            raise ReceiptError("credential redaction count is invalid")
+        for field in ("principal", "audience"):
+            if field in payload and not _identifier_value(payload[field]):
+                raise ReceiptError("credential identifier is invalid")
     if phase == "intent":
         if not {"operation", "prior", "target"} <= set(payload):
             raise ReceiptError("critical intent requires operation, prior, and target")
-        if not all(isinstance(payload[key], str) for key in ("operation", "prior", "target")):
-            raise ReceiptError("critical intent fingerprints must be strings")
+        if not _identifier_value(payload["operation"]) or not _hex(payload["prior"]) or not _hex(payload["target"]):
+            raise ReceiptError("critical intent fingerprints must be registered digests")
+        if "prepared" in payload and not _hex(payload["prepared"]):
+            raise ReceiptError("critical prepared fingerprint is invalid")
+        if "affected_ids" in payload and not _identifiers(payload["affected_ids"]):
+            raise ReceiptError("critical affected ids are invalid")
+    if phase in {"committed", "aborted"}:
+        if not _identifier_value(payload.get("causation_id")):
+            raise ReceiptError("critical terminal causation id is invalid")
+        if "outcome" in payload and not _identifier_value(payload["outcome"]):
+            raise ReceiptError("critical outcome is invalid")
     try:
         _canonical_json(payload)
     except ReceiptError:
         raise
+
+
+def _hex(value: Any) -> bool:
+    return isinstance(value, str) and _HEX64.fullmatch(value) is not None
+
+
+def _identifier_value(value: Any) -> bool:
+    return isinstance(value, str) and _IDENTIFIER.fullmatch(value) is not None
+
+
+def _count(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= _MAX_COUNT
+
+
+def _identifiers(value: Any) -> bool:
+    return isinstance(value, list) and len(value) <= MAX_OUTCOMES and all(_identifier_value(item) for item in value)
+
+
+def _valid_outcome(value: Any) -> bool:
+    if not isinstance(value, Mapping) or set(value) - _OUTCOME_FIELDS:
+        return False
+    for key, item in value.items():
+        if key in {"ref", "principal", "audience", "purpose"} and not _identifier_value(item):
+            return False
+        if key in {"content_hash", "policy_fingerprint"} and not _hex(item):
+            return False
+        if key in {"size", "redaction_count", "count"} and not _count(item):
+            return False
+        if key == "level" and (not _count(item) or item > 6):
+            return False
+        if key == "decision" and item not in {"released", "withheld", "blocked", "release_authorized"}:
+            return False
+        if key == "confirmation" and item not in {"none", "requested", "confirmed", "not_required"}:
+            return False
+        if key in {"scope_ids"} and not _identifiers(item):
+            return False
+        if key == "scope_label_digests" and (not isinstance(item, list) or len(item) > MAX_OUTCOMES or not all(_hex(digest) for digest in item)):
+            return False
+    return True
 
 
 def _envelope_error(record: Mapping[str, Any]) -> str | None:
@@ -274,6 +392,11 @@ def _read_tail_record(instance_dir: Path) -> dict[str, Any] | None:
     with path.open("rb") as source:
         source.seek(0, os.SEEK_END)
         size = source.tell()
+        if size == 0:
+            return None
+        source.seek(-1, os.SEEK_END)
+        if source.read(1) != b"\n":
+            raise ReceiptError("receipt tail is missing its final newline")
         source.seek(max(0, size - _TAIL_READ_BYTES))
         chunk = source.read()
     lines = [line for line in chunk.splitlines() if line]
@@ -287,12 +410,40 @@ def _read_tail_record(instance_dir: Path) -> dict[str, Any] | None:
         raise ReceiptError("receipt tail has an invalid envelope")
     if _record_hash(record) != record["hash"]:
         raise ReceiptError("receipt tail hash is invalid")
+    record["_path"] = str(path)
+    record["_offset"] = max(0, size - _TAIL_READ_BYTES) + chunk.rfind(lines[-1])
     return record
 
 
 def _fsync_path(path: Path) -> None:
     with path.open("rb") as source:
         os.fsync(source.fileno())
+
+
+def _fsync_durable_prefix(instance_dir: Path, target: Path) -> None:
+    for path in sorted(instance_dir.glob("????-??.jsonl")):
+        if path.name <= target.name:
+            _fsync_path(path)
+
+
+def _matching_existing_event(
+    instance_dir: Path, event_id: str, event_type: str, phase: str, payload: Mapping[str, Any]
+) -> dict[str, Any] | None:
+    records, issues = _chain_state(instance_dir)
+    if issues:
+        raise ReceiptError("receipt chain requires reconciliation")
+    matches = [record for record in records if record.get("event_id") == event_id]
+    if not matches:
+        return None
+    record = matches[-1]
+    existing_payload = {
+        key: value
+        for key, value in record.items()
+        if key not in {"schema", "event_id", "event_type", "phase", "timestamp", "instance_id", "seq", "prev", "hash", "durable", "_path"}
+    }
+    if record.get("event_type") == event_type and record.get("phase") == phase and existing_payload == dict(payload):
+        return record
+    raise ReceiptError("event id already has a different receipt")
 
 
 def append_event(
@@ -320,7 +471,7 @@ def append_event(
             eid = event_id or uuid.uuid4().hex
             tail = _read_tail_record(instance_dir)
             actual_seq, actual_hash = (0, GENESIS_HASH) if tail is None else (tail["seq"], tail["hash"])
-            if durable_seq > actual_seq:
+            if durable_seq > actual_seq or not _durable_anchor_matches(conn, instance_id, durable_seq, durable_hash):
                 raise ReceiptError("durable receipt anchor is truncated or divergent")
             if (actual_seq, actual_hash) != (observed_seq, observed_hash):
                 if (
@@ -332,11 +483,13 @@ def append_event(
                     and tail.get("prev") == observed_hash
                 ):
                     if critical and tail.get("durable") is True:
-                        _fsync_path(Path(tail["_path"]) if "_path" in tail else _month_path(vault_root, instance_id, tail["timestamp"]))
+                        tail_path = Path(tail["_path"])
+                        _fsync_durable_prefix(instance_dir, tail_path)
                         conn.execute(
                             "UPDATE receipts_head SET durable_seq=?, durable_hash=?, observed_seq=?, observed_hash=? WHERE instance_id=?",
                             (actual_seq, actual_hash, actual_seq, actual_hash, instance_id),
                         )
+                        _store_durable_anchor(conn, instance_id, tail, tail_path, int(tail["_offset"]))
                     else:
                         conn.execute(
                             "UPDATE receipts_head SET observed_seq=?, observed_hash=? WHERE instance_id=?",
@@ -345,6 +498,13 @@ def append_event(
                     conn.commit()
                     return tail
                 raise ReceiptError("receipt anchor is stale; reconcile before append")
+            if event_id is not None and critical:
+                existing = _matching_existing_event(instance_dir, eid, event_type, phase, payload)
+                if existing is not None:
+                    return existing
+            path = _month_path(vault_root, instance_id, timestamp)
+            if tail is not None and path.name < Path(tail["_path"]).name:
+                raise ReceiptError("backdated receipt month rotation is refused")
             record: dict[str, Any] = {
                 "schema": SCHEMA,
                 "event_id": eid,
@@ -358,10 +518,13 @@ def append_event(
                 **dict(payload),
             }
             record["hash"] = _record_hash(record)
-            path = _month_path(vault_root, instance_id, timestamp)
+            encoded = _canonical_json(record)
+            if len(encoded) + 1 > MAX_RECORD_BYTES:
+                raise ReceiptError("receipt record exceeds the bounded tail window")
             path.parent.mkdir(parents=True, exist_ok=True)
             with path.open("ab") as output:
-                output.write(_canonical_json(record) + b"\n")
+                offset = output.tell()
+                output.write(encoded + b"\n")
                 _crash_point("after_jsonl_write")
                 output.flush()
                 _crash_point("after_jsonl_flush")
@@ -370,10 +533,12 @@ def append_event(
                     _crash_point("after_jsonl_fsync")
             _crash_point("before_sidecar_commit")
             if critical:
+                _fsync_durable_prefix(instance_dir, path)
                 conn.execute(
                     "UPDATE receipts_head SET durable_seq=?, durable_hash=?, observed_seq=?, observed_hash=? WHERE instance_id=?",
                     (record["seq"], record["hash"], record["seq"], record["hash"], instance_id),
                 )
+                _store_durable_anchor(conn, instance_id, record, path, offset)
             else:
                 conn.execute(
                     "UPDATE receipts_head SET observed_seq=?, observed_hash=? WHERE instance_id=?",
@@ -550,6 +715,17 @@ def reconcile(
     dry_run: bool = False,
     state_resolver: Callable[[Mapping[str, Any]], Any] | None = None,
 ) -> dict[str, Any]:
+    """Reconcile from one serialized receipt snapshot, even for dry-runs."""
+    with _receipt_lock(vault_root):
+        return _reconcile_locked(vault_root, dry_run=dry_run, state_resolver=state_resolver)
+
+
+def _reconcile_locked(
+    vault_root: Path,
+    *,
+    dry_run: bool = False,
+    state_resolver: Callable[[Mapping[str, Any]], Any] | None = None,
+) -> dict[str, Any]:
     """Repair only verified anchor lag and exact critical-event classifications."""
     report = verify_chain(vault_root)
     repairs: list[dict[str, Any]] = []
@@ -584,12 +760,16 @@ def reconcile(
                 conn = store.open_connection(Path(vault_root))
                 try:
                     if promote_durable:
-                        for path in sorted({Path(item["_path"]) for item in records if observed_seq < item["seq"] <= actual_seq}):
-                            _fsync_path(path)
+                        tail = _read_tail_record(instance_dir)
+                        if tail is None or tail["seq"] != actual_seq or tail["hash"] != actual_hash:
+                            continue
+                        tail_path = Path(tail["_path"])
+                        _fsync_durable_prefix(instance_dir, tail_path)
                         conn.execute(
                             "UPDATE receipts_head SET durable_seq=?, durable_hash=?, observed_seq=?, observed_hash=? WHERE instance_id=?",
                             (actual_seq, actual_hash, actual_seq, actual_hash, instance_dir.name),
                         )
+                        _store_durable_anchor(conn, instance_dir.name, tail, tail_path, int(tail["_offset"]))
                     else:
                         conn.execute(
                             "UPDATE receipts_head SET observed_seq=?, observed_hash=? WHERE instance_id=?",

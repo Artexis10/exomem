@@ -58,6 +58,16 @@ def _migrate(conn: sqlite3.Connection) -> None:
             "CREATE TABLE IF NOT EXISTS receipt_secrets ("
             "name TEXT PRIMARY KEY, value BLOB NOT NULL)"
         )
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS receipt_anchor ("
+            "instance_id TEXT PRIMARY KEY, durable_seq INTEGER NOT NULL, durable_hash TEXT NOT NULL, "
+            "path TEXT NOT NULL, byte_offset INTEGER NOT NULL)"
+        )
         version = 2
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS receipt_anchor ("
+        "instance_id TEXT PRIMARY KEY, durable_seq INTEGER NOT NULL, durable_hash TEXT NOT NULL, "
+        "path TEXT NOT NULL, byte_offset INTEGER NOT NULL)"
+    )
     if version <= SCHEMA_USER_VERSION:
         conn.execute(f"PRAGMA user_version = {version}")
