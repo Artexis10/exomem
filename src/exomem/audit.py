@@ -75,7 +75,7 @@ ALL_CATEGORIES: tuple[str, ...] = (
     "index_drift", "tag_inconsistency", "frontmatter_compliance",
     "unregistered_project_key", "embedding_drift", "graph_drift", "reference_identity",
     "relevance_pairs_pending", "stale_review", "corpus_contradictions",
-    "relation_debt",
+    "relation_debt", "governance_receipts",
 )
 OPTIONAL_CATEGORIES: tuple[str, ...] = (
     "relation_registry",
@@ -384,6 +384,8 @@ def audit(
         findings.extend(_check_relation_registry(vault_root))
     if "relation_debt" in selected:
         findings.extend(_check_relation_debt(vault_root, pages))
+    if "governance_receipts" in selected:
+        findings.extend(_check_governance_receipts(vault_root))
     semantic_categories = selected & _SEMANTIC_AUDIT_CATEGORIES
     if semantic_categories:
         semantic_findings, semantic_metadata = _check_semantic_contract_drift(
@@ -407,6 +409,23 @@ def audit(
         summary=summary,
         metadata=metadata or None,
     )
+
+
+def _check_governance_receipts(vault_root: Path) -> list[AuditFinding]:
+    """Project receipt-chain evidence problems without touching its sidecar."""
+    from .governance import receipts
+
+    report = receipts.verify_chain(vault_root)
+    return [
+        AuditFinding(
+            category="governance_receipts",
+            severity="error",
+            path=item["path"],
+            detail=f"{item['code']}: {item['detail']}",
+            proposed_fix="Run `maintain_memory` with mode `reconcile` after reviewing evidence.",
+        )
+        for item in report["issues"]
+    ]
 
 
 def _check_semantic_contract_drift(

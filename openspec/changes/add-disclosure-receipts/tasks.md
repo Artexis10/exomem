@@ -2,18 +2,18 @@
 
 ## 1. Chained log (src/exomem/governance/receipts.py)
 
-- [ ] 1.1 Red test `tests/test_governance_receipts.py`: canonical append +
+- [x] 1.1 Red test `tests/test_governance_receipts.py`: canonical append +
       `verify_chain`; edited-line, truncated-tail, broken-month, invalid-number,
       durable/observed head divergence; JSONL-fsync-before-sidecar crash;
       buffered-suffix power loss; stale-anchor append refusal; no duplicate seq
       or fork; concurrent same-instance appends serialize.
-- [ ] 1.2 Implement the process-safe per-instance monthly JSONL chain with exact
+- [x] 1.2 Implement the process-safe per-instance monthly JSONL chain with exact
       canonical JSON/hash rules, deterministic event ids, keyed label digests,
       and separate durable/observed heads in `.governance.sqlite receipts_head`.
-- [ ] 1.3 Red crash-injection tests for `begin_event` + idempotent
+- [x] 1.3 Red crash-injection tests for `begin_event` + idempotent
       `committed`/`aborted` terminal phases: before state change, after state
       change, after terminal append, and a neither-prior-nor-target ambiguity.
-- [ ] 1.4 Implement receipt-first critical events and read-only verification;
+- [x] 1.4 Implement receipt-first critical events and read-only verification;
       keep JSONL authoritative and the sidecar recovery-only.
 
 ## 2. Existing egress and token wiring
@@ -66,15 +66,15 @@
 
 ## 4. Audit and reconcile integration
 
-- [ ] 4.1 Red tests prove `governance_receipts` audit reports tamper, anchor lag,
+- [x] 4.1 Red tests prove `governance_receipts` audit reports tamper, anchor lag,
       and unresolved intents without writing; explicit reconcile repairs only an
       intact lagging anchor or an exact prior/target match and is idempotent.
       `dry_run=True` reports exact repairs while leaving JSONL, tombstones,
       derivatives, and sidecar byte-identical.
-- [ ] 4.2 Add `governance_receipts` to `audit.ALL_CATEGORIES` + a check block
+- [x] 4.2 Add `governance_receipts` to `audit.ALL_CATEGORIES` + a check block
       calling `receipts.verify_chain`; wire `receipts.reconcile` only into the
       existing write-capable `maintain_memory(mode="reconcile")` route.
-- [ ] 4.3 Make `governance/store.py` the sole migration owner: migrate v1→v2,
+- [x] 4.3 Make `governance/store.py` the sole migration owner: migrate v1→v2,
       preserve newer versions in every opener, and test that the dependent v3
       schema is never reset or rerun.
 

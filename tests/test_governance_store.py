@@ -52,6 +52,43 @@ def test_open_connection_is_idempotent(vault: Path) -> None:
         second.close()
 
 
+def test_open_connection_preserves_a_newer_sidecar_version(vault: Path) -> None:
+    first = store.open_connection(vault)
+    first.execute("PRAGMA user_version = 3")
+    first.commit()
+    first.close()
+
+    second = store.open_connection(vault)
+    try:
+        assert second.execute("PRAGMA user_version").fetchone()[0] == 3
+    finally:
+        second.close()
+
+
+def test_open_connection_migrates_v1_to_receipt_schema_v2(vault: Path) -> None:
+    path = store.sidecar_path(vault)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(path)
+    try:
+        conn.execute(
+            "CREATE TABLE compiled_policy "
+            "(fingerprint TEXT PRIMARY KEY, snapshot TEXT NOT NULL, compiled_at REAL NOT NULL)"
+        )
+        conn.execute("PRAGMA user_version = 1")
+        conn.commit()
+    finally:
+        conn.close()
+
+    migrated = store.open_connection(vault)
+    try:
+        assert migrated.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert migrated.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='receipts_head'"
+        ).fetchone()
+    finally:
+        migrated.close()
+
+
 def _write_scope(vault: Path) -> None:
     p = vault / "Knowledge Base" / "_Governance" / "scopes" / "acmeco.yaml"
     p.parent.mkdir(parents=True, exist_ok=True)
