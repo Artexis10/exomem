@@ -376,15 +376,11 @@ def _gated_adoption_egress(vault_root: Path, command_name: str, payload: Any) ->
     from .governance import principal as principal_module
 
     with principal_module.request_scope(principal_module.resolve_mcp_principal()):
-        # A bare string has no entries for the dispatcher's walker to filter
-        # (finding N3) — `continue_adoption` returns `handoff.prompt_text`, so
-        # a withheld path and its wikilink rode straight out past a principal
-        # binding and a credential scrubber that were both working and simply
-        # had nothing to grip. Reference-aware redaction first, then the
-        # ordinary postfilter for credentials.
+        # The ordinary terminal postfilter includes the recursive artifact
+        # resolver as well as credential scrubbing. Keeping the complete
+        # residual payload in one pass gives repeated prompt/resource
+        # references one verdict and one receipt outcome.
         with egress_module.disclosure_boundary(vault_root, command_name) as collector:
-            if isinstance(payload, str):
-                payload = egress_module.redact_withheld_references(vault_root, payload)
             result = egress_module.postfilter(command_name, payload, vault_root)
             egress_module.emit_boundary_receipt(collector)
             return result

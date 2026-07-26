@@ -24,6 +24,7 @@ import inspect
 import json
 import os
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
@@ -59,7 +60,6 @@ from . import entity_types as entity_types_module
 from . import epistemic_graph as epistemic_graph_module
 from . import evolution as evolution_module
 from . import find as find_module
-from . import get_frontmatter as get_frontmatter_module
 from . import get_page as get_page_module
 from . import knowledge_packs as knowledge_packs_module
 from . import link as link_module
@@ -1027,8 +1027,33 @@ def _resolve_memory_identifier(vault_root: Path, value: str) -> str:
         raise ValueError(f"{exc.code}: {exc.reason}") from exc
 
 
-def _attach_memory_ref(vault_root: Path, out: dict, path: str) -> dict:
-    ref = memory_refs_module.ReferenceIndex(vault_root).ref_for_path(path)
+def _snapshot_memory_ref(
+    vault_root: Path, path: str, frontmatter: Mapping[str, Any]
+) -> str | None:
+    """A canonical ref only when the index agrees with this exact snapshot."""
+    normalized = memory_refs_module.normalize_id(frontmatter.get("exomem_id"))
+    if normalized is None:
+        return None
+    expected = memory_refs_module.memory_ref(normalized)
+    indexed = memory_refs_module.ReferenceIndex(vault_root).ref_for_path(path)
+    return expected if indexed == expected else None
+
+
+_SNAPSHOT_REF_UNSET = object()
+
+
+def _attach_memory_ref(
+    vault_root: Path,
+    out: dict,
+    path: str,
+    *,
+    snapshot_ref: str | None | object = _SNAPSHOT_REF_UNSET,
+) -> dict:
+    ref = (
+        memory_refs_module.ReferenceIndex(vault_root).ref_for_path(path)
+        if snapshot_ref is _SNAPSHOT_REF_UNSET
+        else snapshot_ref
+    )
     if ref:
         out["ref"] = ref
     return out
@@ -1206,13 +1231,18 @@ def op_fetch(
     # sub-notice item's body, title, frontmatter and canonical path crossed the
     # boundary untouched. Decided against the same page dict `op_get` uses, so
     # both direct-read surfaces share one decision and one refusal shape.
+    snapshot_ref = _snapshot_memory_ref(vault_root, page.path, page.frontmatter)
     released = egress_module.annotate_page(
         vault_root,
         {
             "path": page.path,
             "frontmatter": page.frontmatter,
             "body": page.body,
+            "content_hash": page.content_hash,
+            "mtime": page.mtime,
         },
+        snapshot_content=page.content,
+        stable_ref=snapshot_ref,
     )
     if released is None:
         raise ValueError(f"NOT_FOUND: file does not exist: {id}")
@@ -1235,7 +1265,7 @@ def op_fetch(
         "url": _citation_url(page.path),
         "metadata": metadata,
     }
-    return _attach_memory_ref(vault_root, out, page.path)
+    return _attach_memory_ref(vault_root, out, page.path, snapshot_ref=snapshot_ref)
 def _timing_log_summary(timings_dict: dict | None) -> dict | None:
     """Query-log-safe slice of a timings envelope: totals + per-stage ms only
     (never content; stage entries drop skip/error detail to stay compact)."""
@@ -1913,33 +1943,20 @@ def op_get(
     _refuse_policy_tree_read(path)
     path = _resolve_memory_identifier(vault_root, path)
     _refuse_policy_tree_read(path)
+    try:
+        result = get_page_module.get_page(vault_root, path=path)
+    except get_page_module.GetError as e:
+        raise ValueError(f"{e.code}: {e.reason}") from e
     if frontmatter_only:
-        try:
-            fm_result = get_frontmatter_module.get_frontmatter(
-                vault_root, path=path
-            )
-        except get_frontmatter_module.GetFrontmatterError as e:
-            raise ValueError(f"{e.code}: {e.reason}") from e
-        out = fm_result.as_dict()
+        out = {
+            "path": result.path,
+            "frontmatter": result.frontmatter,
+            "has_frontmatter": vault.parse_frontmatter(result.content)[2] is not None,
+        }
     else:
-        try:
-            result = get_page_module.get_page(vault_root, path=path)
-        except get_page_module.GetError as e:
-            raise ValueError(f"{e.code}: {e.reason}") from e
         out = result.as_dict(include_raw=include_raw)
-    if max_body_chars is not None and not frontmatter_only:
-        if max_body_chars < 0:
-            raise ValueError("get: max_body_chars must be non-negative")
-        max_body_chars = min(max_body_chars, 12000)
-        body = str(out.get("body", ""))
-        if len(body) > max_body_chars:
-            marker = "\n\n[truncated]"
-            keep = max(0, max_body_chars - len(marker))
-            out["body"] = body[:keep].rstrip() + marker
-            out["body_truncated"] = True
-        else:
-            out["body_truncated"] = False
-        out["body_chars"] = len(str(out.get("body", "")))
+    if max_body_chars is not None and max_body_chars < 0:
+        raise ValueError("get: max_body_chars must be non-negative")
     query_log.log_get_call(
         read_path=out["path"],
         frontmatter_only=frontmatter_only,
@@ -1954,7 +1971,13 @@ def op_get(
     # Release gate for direct reads: render at the page's decision level, and
     # answer byte-identically to a missing path when it is below notice — a
     # withheld page must be indistinguishable from one that never existed.
-    released = egress_module.annotate_page(vault_root, out)
+    snapshot_ref = _snapshot_memory_ref(vault_root, result.path, result.frontmatter)
+    released = egress_module.annotate_page(
+        vault_root,
+        out,
+        snapshot_content=result.content,
+        stable_ref=snapshot_ref,
+    )
     if released is None:
         raise ValueError(f"NOT_FOUND: file does not exist: {out['path']}")
     out = released
@@ -1963,7 +1986,20 @@ def op_get(
         # attaching one would reintroduce exactly the identifier the notice
         # withholds.
         return out
-    return _attach_memory_ref(vault_root, out, str(out["path"]))
+    if max_body_chars is not None and not frontmatter_only and "body" in out:
+        max_body_chars = min(max_body_chars, 12000)
+        body = str(out.get("body", ""))
+        if len(body) > max_body_chars:
+            marker = "\n\n[truncated]"
+            keep = max(0, max_body_chars - len(marker))
+            out["body"] = body[:keep].rstrip() + marker
+            out["body_truncated"] = True
+        else:
+            out["body_truncated"] = bool(out.get("body_truncated", False))
+        out["body_chars"] = len(str(out.get("body", "")))
+    return _attach_memory_ref(
+        vault_root, out, str(out["path"]), snapshot_ref=snapshot_ref
+    )
 
 
 def op_edit(
@@ -5640,20 +5676,6 @@ def note_description(project_keys_hint: str) -> str:
 # The registry
 # --------------------------------------------------------------------------- #
 # (name, leaf, tier, cli_writes, needs_schema, cli_positional, surfaces)
-_CONNECT_MEMORY_READ_ONLY_OPERATIONS = frozenset(
-    {
-        "suggest-links",
-        "suggest-relations",
-        "context",
-        "graph-context",
-        "inbound-links",
-        "resolve-entity",
-    }
-)
-_ADOPT_VAULT_READ_ONLY_MODES = frozenset({"scan-only"})
-_ADOPTION_STUDIO_READ_ONLY_ACTIONS = frozenset({"status", "work-item"})
-_PROCESS_MEDIA_READ_ONLY_OPERATIONS = frozenset({"status"})
-_OBSERVE_MEMORY_READ_ONLY_OPERATIONS = frozenset({"validate"})
 _MISSING_SELECTOR_DEFAULT = object()
 
 
@@ -5680,36 +5702,29 @@ def invocation_is_read_only(command: Command, kwargs: dict[str, Any]) -> bool:
     """
     if command.read_only:
         return True
-    if command.name == "connect_memory":
-        operation = _resolved_invocation_selector(command, kwargs, "operation")
-        return (
-            isinstance(operation, str)
-            and operation in _CONNECT_MEMORY_READ_ONLY_OPERATIONS
-        )
-    if command.name == "adopt_vault":
-        mode = _resolved_invocation_selector(command, kwargs, "mode")
-        return isinstance(mode, str) and mode in _ADOPT_VAULT_READ_ONLY_MODES
-    if command.name == "adoption_studio":
-        action = _resolved_invocation_selector(command, kwargs, "action")
-        if not isinstance(action, str):
+    selector = egress_module.selector_for_command(command.name)
+    if selector is not None:
+        value = _resolved_invocation_selector(command, kwargs, selector)
+        # A required selector omitted before argument validation remains on the
+        # conservative writer path. An explicit unknown value is a registry
+        # failure, never an implicit mutation classification.
+        if value is _MISSING_SELECTOR_DEFAULT:
             return False
-        adapter = egress_module.assert_selector_covered(command.name, "action", action)
+        if not isinstance(value, str):
+            raise RuntimeError(
+                "RECEIPT_OUTCOME_MISSING: command selector must resolve to a string: "
+                f"{command.name}.{selector}"
+            )
+        adapter = egress_module.assert_selector_covered(command.name, selector, value)
+        if adapter == "validation":
+            return kwargs.get("validate_only") is True
+        if adapter == "save-conditional":
+            return kwargs.get("save") is not True
+        if adapter == "dry-run-default":
+            return kwargs.get("dry_run") is not False
+        if adapter == "dry-run-opt-in":
+            return kwargs.get("dry_run") is True
         return adapter != "mutation"
-    if command.name == "process_media":
-        operation = _resolved_invocation_selector(command, kwargs, "operation")
-        return (
-            isinstance(operation, str)
-            and operation in _PROCESS_MEDIA_READ_ONLY_OPERATIONS
-        )
-    if command.name == "observe_memory":
-        operation = _resolved_invocation_selector(command, kwargs, "operation")
-        return (
-            isinstance(operation, str)
-            and operation in _OBSERVE_MEMORY_READ_ONLY_OPERATIONS
-        )
-    if command.name == "maintain_memory":
-        mode = _resolved_invocation_selector(command, kwargs, "mode")
-        return mode == "audit"
     if command.name == "edit_memory":
         if kwargs.get("validate_only") is True:
             return True
@@ -5728,12 +5743,6 @@ def invocation_is_read_only(command: Command, kwargs: dict[str, Any]) -> bool:
         # inconsistency from reading beside a concurrent write is caught by
         # the fresh under-lock re-validation at commit time.
         return kwargs.get("validate_only") is True
-    if command.name == "manage_memory_file":
-        operation = _resolved_invocation_selector(command, kwargs, "operation")
-        return (
-            operation in {"create", "append"}
-            and kwargs.get("validate_only") is True
-        )
     return False
 
 

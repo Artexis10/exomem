@@ -18,6 +18,7 @@ compat with how this tool worked before the broadening.
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -123,19 +124,24 @@ def get_page(vault_root: Path, *, path: str) -> GetResult:
             reason=f"file does not exist: {rel}",
         )
 
+    # One immutable representation feeds parsing, the edit hash, and every
+    # downstream release decision.  Parsing and then reopening the path used
+    # to let a rename/swap bind frontmatter from one file to bytes from another.
     try:
-        mtime = candidate.stat().st_mtime
-    except OSError as e:
+        with candidate.open("rb") as handle:
+            stat = os.fstat(handle.fileno())
+            raw = handle.read()
+        content = raw.decode("utf-8")
+    except (OSError, UnicodeDecodeError) as e:
         raise GetError(code="UNREADABLE", reason=str(e)) from e
 
-    parsed = find_module._parse_page(candidate, mtime, vault_root)
+    mtime = stat.st_mtime
+    parsed = find_module._parse_page(candidate, mtime, vault_root, content=raw)
     if parsed is None:
         raise GetError(
             code="UNREADABLE",
             reason=f"could not parse {rel} as a markdown file with frontmatter",
         )
-
-    content = candidate.read_text(encoding="utf-8")
     return GetResult(
         path=rel,
         frontmatter=parsed.frontmatter,

@@ -58,7 +58,9 @@ _OUTCOME_FIELDS = frozenset({
     "ref", "content_hash", "size", "level", "decision", "redaction_count", "count",
     "principal", "audience", "purpose", "policy_fingerprint", "confirmation",
     "scope_ids", "scope_label_digests", "command",
-    "membership_digest",
+    "membership_digest", "identity_manifest_digest", "principal_set_digest",
+    "audience_set_digest", "purpose_set_digest", "policy_set_digest",
+    "confirmation_set_digest", "scope_set_digest", "boundary_set_digest",
 })
 _STATE_RESOLVERS: dict[str, Callable[[Mapping[str, Any]], Any]] = {}
 
@@ -603,7 +605,19 @@ def _valid_outcome(value: Any) -> bool:
     for key, item in value.items():
         if key in {"ref", "principal", "audience", "purpose", "command"} and not _identifier_value(item):
             return False
-        if key in {"content_hash", "policy_fingerprint", "membership_digest"} and not _hex(item):
+        if key in {
+            "content_hash",
+            "policy_fingerprint",
+            "membership_digest",
+            "identity_manifest_digest",
+            "principal_set_digest",
+            "audience_set_digest",
+            "purpose_set_digest",
+            "policy_set_digest",
+            "confirmation_set_digest",
+            "scope_set_digest",
+            "boundary_set_digest",
+        } and not _hex(item):
             return False
         if key in {"size", "redaction_count", "count"} and not _count(item):
             return False

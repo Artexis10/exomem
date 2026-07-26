@@ -46,7 +46,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import unquote
 
-from .. import find_corpus
+from .. import find_corpus, memory_refs
 from ..find_types import Hit, SemanticUnitHit
 from ..kbdir import kb_dirname
 from . import membership as membership_module
@@ -82,6 +82,7 @@ class DisclosureCollector:
     boundary_id: str
     command_name: str
     outcomes: list[DisclosureOutcome] = field(default_factory=list)
+    path_outcomes: set[tuple[str, str, int | None]] = field(default_factory=set)
     credential_redactions: int = 0
     credential_principal: str | None = None
     credential_purpose: str | None = None
@@ -149,6 +150,9 @@ def _outcome_for_decision(
     audience: str,
     outcome: str,
     purpose: str | None = None,
+    content_hash: str | None = None,
+    size: int | None = None,
+    ref: str | None = None,
 ) -> None:
     """Project a decision into the receipt union without carrying a path/title."""
     value: dict[str, Any] = {"decision": outcome}
@@ -177,12 +181,30 @@ def _outcome_for_decision(
                     receipts.label_digest(vault_root, label) for label in labels
                 ]
         value["confirmation"] = "none"
-    try:
-        target = Path(vault_root) / rel_path
-        value["content_hash"] = hashlib.sha256(target.read_bytes()).hexdigest()
-        value["size"] = target.stat().st_size
-    except OSError:
-        pass
+    if content_hash is not None:
+        value["content_hash"] = content_hash
+        if size is not None:
+            value["size"] = size
+        if ref is not None:
+            value["ref"] = ref
+    else:
+        try:
+            target = Path(vault_root) / rel_path
+            raw = target.read_bytes()
+            value["content_hash"] = hashlib.sha256(raw).hexdigest()
+            value["size"] = len(raw)
+        except OSError:
+            pass
+    collector = _collector()
+    outcome_key = (
+        rel_path,
+        outcome,
+        decision.level if decision is not None else None,
+    )
+    if collector is not None:
+        if outcome_key in collector.path_outcomes:
+            return
+        collector.path_outcomes.add(outcome_key)
     _record_outcome(value)
 
 
@@ -219,32 +241,125 @@ def emit_boundary_receipt(collector: DisclosureCollector) -> None:
 def _bounded_outcomes(outcomes: Sequence[DisclosureOutcome]) -> list[dict[str, Any]]:
     """Keep receipt schemas bounded without making a large reduction fail closed."""
     values = [outcome.value for outcome in outcomes]
-    if len(values) <= receipts.MAX_OUTCOMES:
+    raw_size = len(
+        json.dumps(
+            {"outcomes": values},
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode("utf-8")
+    )
+    if (
+        len(values) <= receipts.MAX_OUTCOMES
+        and raw_size <= receipts.MAX_RECORD_BYTES // 2
+    ):
         return values
-    counts: dict[str, list[dict[str, Any]]] = {}
+
+    # At most 4 decisions x 7 disclosure levels (including a missing level).
+    # Higher-cardinality typed identities become deterministic set/manifest
+    # digests inside those audit-useful buckets instead of one row per
+    # principal/scope/purpose, which could itself exceed MAX_OUTCOMES.
+    buckets: dict[str, list[dict[str, Any]]] = {}
     for value in values:
-        identity = {
-            key: value[key]
-            for key in (
-                "decision", "level", "command", "principal", "audience", "purpose",
-                "policy_fingerprint", "confirmation", "scope_ids", "scope_label_digests",
-            )
-            if key in value
+        typed = {
+            key: value[key] for key in ("decision", "level") if key in value
         }
-        key = json.dumps(identity, sort_keys=True, separators=(",", ":"))
-        counts.setdefault(key, []).append(value)
-    result: list[dict[str, Any]] = []
-    for key, members in sorted(counts.items()):
-        identity = json.loads(key)
-        digest = hashlib.sha256(
-            json.dumps(
-                sorted(
-                    str(member.get("content_hash") or member.get("ref") or "")
-                    for member in members
-                ), separators=(",", ":")
-            ).encode()
+        key = json.dumps(typed, sort_keys=True, separators=(",", ":"))
+        buckets.setdefault(key, []).append(value)
+
+    def _digest(items: Iterable[Any], *, unique: bool = False) -> str:
+        encoded = [
+            json.dumps(item, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+            for item in items
+        ]
+        manifest = sorted(set(encoded) if unique else encoded)
+        return hashlib.sha256(
+            json.dumps(manifest, separators=(",", ":")).encode()
         ).hexdigest()
-        result.append({**identity, "count": len(members), "membership_digest": digest})
+
+    identity_keys = (
+        "command",
+        "principal",
+        "audience",
+        "purpose",
+        "policy_fingerprint",
+        "confirmation",
+        "scope_ids",
+        "scope_label_digests",
+    )
+    set_dimensions = {
+        "principal_set_digest": "principal",
+        "audience_set_digest": "audience",
+        "purpose_set_digest": "purpose",
+        "policy_set_digest": "policy_fingerprint",
+        "confirmation_set_digest": "confirmation",
+        "boundary_set_digest": "command",
+    }
+    result: list[dict[str, Any]] = []
+    optional_identity: list[tuple[int, str, Any]] = []
+    for key, members in sorted(buckets.items()):
+        summary = json.loads(key)
+        identities = [
+            {identity_key: member.get(identity_key) for identity_key in identity_keys}
+            for member in members
+        ]
+        summary.update(
+            {
+                "count": len(members),
+                "membership_digest": _digest(
+                    [
+                        member.get("content_hash") or member.get("ref") or ""
+                        for member in members
+                    ]
+                ),
+                "identity_manifest_digest": _digest(identities),
+                "scope_set_digest": _digest(
+                    [
+                        {
+                            "scope_ids": member.get("scope_ids"),
+                            "scope_label_digests": member.get("scope_label_digests"),
+                        }
+                        for member in members
+                    ],
+                    unique=True,
+                ),
+                **{
+                    digest_field: _digest(
+                        [member.get(source_field) for member in members], unique=True
+                    )
+                    for digest_field, source_field in set_dimensions.items()
+                },
+            }
+        )
+        result.append(summary)
+        # Preserve compact singleton dimensions when the complete aggregate
+        # still fits a conservative fraction of the receipt record window.
+        # The set/manifest digests above remain the truthful representation
+        # when a 128-element scope identity would make raw retention unsafe.
+        result_index = len(result) - 1
+        for identity_key in identity_keys:
+            present = [member[identity_key] for member in members if identity_key in member]
+            if (
+                present
+                and len(present) == len(members)
+                and _digest(present, unique=True) == _digest([present[0]], unique=True)
+            ):
+                optional_identity.append((result_index, identity_key, present[0]))
+    if len(result) > receipts.MAX_OUTCOMES:  # defensive if decision schema expands
+        raise ReceiptUnavailableError()
+    optional_budget = receipts.MAX_RECORD_BYTES // 2
+    for result_index, identity_key, identity_value in optional_identity:
+        result[result_index][identity_key] = identity_value
+        encoded_size = len(
+            json.dumps(
+                {"outcomes": result},
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+            ).encode("utf-8")
+        )
+        if encoded_size > optional_budget:
+            result[result_index].pop(identity_key)
     return result
 
 # ---------------------------------------------------------------------------
@@ -1243,6 +1358,8 @@ def annotate_page(
     *,
     principal: RequestPrincipal | None = None,
     purpose: str | None = None,
+    snapshot_content: str | bytes | None = None,
+    stable_ref: str | None = None,
 ) -> dict[str, Any] | None:
     """Render one page at its release decision's level, or `None` below notice.
 
@@ -1265,18 +1382,78 @@ def annotate_page(
         return None
     grants_hash = _grants_hash(policy)
     declared_purpose = purpose if purpose is not None else who.purpose
-    decision = _decide_path(
-        vault_root,
-        rel_path,
-        policy=policy,
-        audience=who.audience_id,
-        purpose=declared_purpose,
-        grants_hash=grants_hash,
-    )
+    snapshot_hash: str | None = None
+    snapshot_size: int | None = None
+    if snapshot_content is not None:
+        raw = (
+            snapshot_content.encode("utf-8")
+            if isinstance(snapshot_content, str)
+            else bytes(snapshot_content)
+        )
+        snapshot_hash = hashlib.sha256(raw).hexdigest()
+        snapshot_size = len(raw)
+        expected_hash = page.get("content_hash")
+        if expected_hash is not None and expected_hash != snapshot_hash:
+            _record_blocked_outcome(who.audience_id)
+            return None
+        try:
+            # This is a swap detector, not the source of authorization.  The
+            # immutable ``raw`` bytes remain the sole representation decided,
+            # hashed, receipted, and returned below.
+            if (vault_root / rel_path).read_bytes() != raw:
+                _record_blocked_outcome(who.audience_id)
+                return None
+        except OSError:
+            _record_blocked_outcome(who.audience_id)
+            return None
+        parsed = find_corpus.parse_page(
+            vault_root / rel_path,
+            float(page.get("mtime") or 0.0),
+            vault_root,
+            content=raw,
+        )
+        if parsed is None or parsed.rel_path != rel_path:
+            _record_blocked_outcome(who.audience_id)
+            return None
+        # A caller cannot bind arbitrary returned fields to unrelated bytes.
+        # Body may already be intentionally truncated, but frontmatter is the
+        # complete membership-bearing projection and must match exactly.
+        if isinstance(page.get("frontmatter"), Mapping) and dict(
+            page["frontmatter"]
+        ) != parsed.frontmatter:
+            _record_blocked_outcome(who.audience_id)
+            return None
+        if "body" in page and page.get("body") != parsed.body:
+            _record_blocked_outcome(who.audience_id)
+            return None
+        if "content" in page and page.get("content") != raw.decode("utf-8"):
+            _record_blocked_outcome(who.audience_id)
+            return None
+        scope_ids = membership_module.evaluate_snapshot(
+            parsed, policy, content_hash=snapshot_hash
+        )
+        decision = decide(
+            scope_ids,
+            audience=who.audience_id,
+            purpose=declared_purpose,
+            policy=policy,
+        )
+    else:
+        # Compatibility for internal/synthetic callers. Production direct-read
+        # leaves always supply ``snapshot_content``.
+        decision = _decide_path(
+            vault_root,
+            rel_path,
+            policy=policy,
+            audience=who.audience_id,
+            purpose=declared_purpose,
+            grants_hash=grants_hash,
+        )
     if decision is None or decision.level <= LEVEL_NONE:
         _outcome_for_decision(
             vault_root, rel_path, decision=decision, policy=policy,
             audience=who.audience_id, outcome="withheld", purpose=declared_purpose,
+            content_hash=snapshot_hash, size=snapshot_size, ref=stable_ref,
         )
         return None
 
@@ -1285,6 +1462,9 @@ def annotate_page(
         audience=who.audience_id,
         outcome="released" if decision.level >= RELEASE_FLOOR else "withheld",
         purpose=declared_purpose,
+        content_hash=snapshot_hash,
+        size=snapshot_size,
+        ref=stable_ref,
     )
 
     level = LEVEL_ABSTRACT if decision.level == LEVEL_EXCERPT_REDACTED else decision.level
@@ -1517,6 +1697,16 @@ def postfilter(command_name: str, result: Any, vault_root: Path) -> Any:
         return None
     vault_root = Path(vault_root)
     result = _withheld_cross_check(vault_root, result)
+    # Free text and nested resource/prompt strings have no structural entry
+    # for the cross-check to drop. Resolve those only after structural paths
+    # have been removed; scanning an ordinary released page body would change
+    # the content the page decision explicitly authorized.
+    result = gate_artifact_references(
+        vault_root,
+        result,
+        scan_all=command_name
+        in {"continue_adoption", "adoption_run", "adoption_runs", "adoption_studio"},
+    )
     if not scrubber.enabled(vault_root):
         return result
     if hasattr(result, "content") and hasattr(result, "structured_content"):
@@ -1654,12 +1844,72 @@ _DATA_REPRESENTATION_ADAPTER: dict[str, str] = {
 }
 
 _SELECTOR_ADAPTERS: dict[tuple[str, str], dict[str, str]] = {
+    ("connect_memory", "operation"): {
+        "suggest-links": "structure",
+        "suggest-relations": "structure",
+        "context": "structure",
+        "graph-context": "structure",
+        "inbound-links": "structure",
+        "resolve-entity": "structure",
+        "create-entity": "mutation",
+        "accept-relation": "mutation",
+    },
+    ("adopt_vault", "mode"): {
+        "scan-only": "structure",
+        "save-manifest": "mutation",
+        "copy-as-sources": "mutation",
+        "compile-selected": "mutation",
+    },
     ("adoption_studio", "action"): {
         "start": "mutation", "status": "structure", "select": "mutation",
         "plan": "mutation", "apply": "mutation", "cancel": "mutation",
         "finish": "mutation", "work-item": "structure", "propose": "mutation",
+        "apply-proposal": "mutation",
+    },
+    ("process_media", "operation"): {
+        "process": "mutation",
+        "status": "structure",
+        "retry": "mutation",
+    },
+    ("observe_memory", "operation"): {
+        "add": "mutation",
+        "update": "mutation",
+        "remove": "mutation",
+        "validate": "structure",
+    },
+    ("maintain_memory", "mode"): {
+        "audit": "structure",
+        "fix": "dry-run-default",
+        "reconcile": "dry-run-opt-in",
+        "backfill-ids": "dry-run-default",
+    },
+    ("manage_memory_file", "operation"): {
+        "list": "structure",
+        "create": "validation",
+        "append": "validation",
+        "move": "mutation",
+        "delete": "mutation",
+        "trash-list": "structure",
+        "recover": "mutation",
+    },
+    ("schema_memory", "operation"): {
+        "infer": "save-conditional",
+        "validate": "structure",
+        "diff": "structure",
     },
 }
+
+
+def selector_registry() -> dict[tuple[str, str], dict[str, str]]:
+    """The one finite selector registry used by lease and egress coverage."""
+    return {key: dict(values) for key, values in _SELECTOR_ADAPTERS.items()}
+
+
+def selector_for_command(command: str) -> str | None:
+    selectors = [selector for name, selector in _SELECTOR_ADAPTERS if name == command]
+    if len(selectors) > 1:
+        raise RuntimeError(f"RECEIPT_OUTCOME_MISSING: ambiguous selectors for {command}")
+    return selectors[0] if selectors else None
 
 
 def assert_selector_covered(command: str, selector: str, value: str) -> str:
@@ -2005,14 +2255,200 @@ def _binary_boundary(
 #: scrubber's notice: a per-item description would itself carry information.
 WITHHELD_REFERENCE = "[withheld]"
 
-#: Reference shapes that can name a vault page inside prose: a wikilink, an
-#: `exomem://` citation, or a bare `.md` path token.
-_TEXT_REFERENCE = re.compile(
-    r"\[\[[^\[\]]+\]\]"
-    r"|exomem://[^\s\"'<>)\]]+"
-    r"|[^\s\"'<>()\[\]]+\.(?:md|csv|tsv|json|pdf|png|jpe?g|mp4)\b",
-    re.IGNORECASE,
+_WRAPPED_ARTIFACT_REFERENCE = re.compile(
+    r"\[\[[^\[\]]+\]\]|exomem://[^\s\"'<>)\]]+", re.IGNORECASE
 )
+
+
+class _ArtifactReferenceGate:
+    """Resolve and gate references against the vault's actual artifact set.
+
+    File existence is the type registry: Markdown, datasets, Office, PDF,
+    image/audio/video, extensionless files, and future artifact kinds all take
+    the same path.  No suffix allowlist can quietly become incomplete.
+    """
+
+    def __init__(
+        self,
+        vault_root: Path,
+        *,
+        principal: RequestPrincipal | None,
+        purpose: str | None,
+    ) -> None:
+        self.vault_root = Path(vault_root)
+        self.policy = policy_module.load(self.vault_root)
+        self.who = principal if principal is not None else effective_principal()
+        self.fail_closed = self.policy.blocked or not self.who.resolved
+        self.grants_hash = "" if self.fail_closed else _grants_hash(self.policy)
+        self.purpose = purpose if purpose is not None else self.who.purpose
+        self.verdicts: dict[str, bool] = {}
+        self.by_path: dict[str, list[str]] = {}
+        self.by_name: dict[str, list[str]] = {}
+        self.by_stem: dict[str, list[str]] = {}
+        self.literal_aliases: set[str] = set()
+        if not self.policy.empty:
+            self._index()
+
+    def _add(self, table: dict[str, list[str]], alias: str, rel: str) -> None:
+        key = alias.casefold()
+        rows = table.setdefault(key, [])
+        if rel not in rows:
+            rows.append(rel)
+
+    def _index(self) -> None:
+        kb_prefix = f"{kb_dirname()}/"
+        try:
+            paths = sorted(path for path in self.vault_root.rglob("*") if path.is_file())
+        except OSError:
+            paths = []
+        for path in paths:
+            try:
+                rel = path.relative_to(self.vault_root).as_posix()
+            except ValueError:
+                continue
+            aliases = {rel, unquote(rel)}
+            if rel.startswith(kb_prefix):
+                aliases.add(rel[len(kb_prefix) :])
+            without_suffix = str(Path(rel).with_suffix("")) if path.suffix else rel
+            aliases.add(without_suffix)
+            for alias in aliases:
+                self._add(self.by_path, alias, rel)
+                if len(alias) >= 3:
+                    self.literal_aliases.add(alias)
+            self._add(self.by_name, path.name, rel)
+            self._add(self.by_stem, path.stem, rel)
+            if len(path.name) >= 3:
+                self.literal_aliases.add(path.name)
+
+    @staticmethod
+    def _unwrap(value: str) -> tuple[str, bool]:
+        token = value.strip()
+        wikilink = token.startswith("[[") and token.endswith("]]")
+        if wikilink:
+            token = token[2:-2].strip().split("|", 1)[0]
+        token = token.split("#", 1)[0].strip().strip("\"'").rstrip(".,;:!?")
+        return token, wikilink
+
+    def resolve(self, value: str, *, directory: str | None = None) -> tuple[str, ...]:
+        token, wikilink = self._unwrap(value)
+        lowered = token.casefold()
+        if lowered.startswith(memory_refs.REF_PREFIX):
+            try:
+                token = memory_refs.resolve_identifier_read_only(self.vault_root, token)
+            except memory_refs.ReferenceError:
+                return ()
+        else:
+            for prefix in _EXOMEM_PATH_PREFIXES:
+                if lowered.startswith(prefix):
+                    token = unquote(token[len(prefix) :])
+                    break
+        token = unquote(token).replace("\\", "/").strip().strip("/")
+        if not token:
+            return ()
+        direct = self.by_path.get(token.casefold())
+        if direct:
+            return tuple(sorted(direct))
+        if directory is not None and "/" not in token:
+            sibling = f"{directory.rstrip('/')}/{token}" if directory else token
+            direct = self.by_path.get(sibling.casefold())
+            if direct:
+                return tuple(sorted(direct))
+        if "/" not in token:
+            named = self.by_name.get(token.casefold())
+            if named:
+                return tuple(sorted(named))
+            if wikilink or "." not in token:
+                stemmed = self.by_stem.get(Path(token).stem.casefold())
+                if stemmed:
+                    return tuple(sorted(stemmed))
+        return ()
+
+    def _permits(self, rel_path: str) -> bool:
+        cached = self.verdicts.get(rel_path)
+        if cached is not None:
+            return cached
+        if self.fail_closed:
+            _record_blocked_outcome(self.who.audience_id)
+            allowed = False
+        else:
+            decision = _decide_path(
+                self.vault_root,
+                rel_path,
+                policy=self.policy,
+                audience=self.who.audience_id,
+                purpose=self.purpose,
+                grants_hash=self.grants_hash,
+            )
+            allowed = decision is not None and decision.level >= RELEASE_FLOOR
+            _outcome_for_decision(
+                self.vault_root,
+                rel_path,
+                decision=decision,
+                policy=self.policy,
+                audience=self.who.audience_id,
+                outcome="released" if allowed else "withheld",
+                purpose=self.purpose,
+            )
+        self.verdicts[rel_path] = allowed
+        return allowed
+
+    def gate_text(self, text: str) -> str:
+        if not text or self.policy.empty:
+            return text
+
+        def _replace_token(match: re.Match[str]) -> str:
+            token = match.group(0)
+            candidates = self.resolve(token)
+            if candidates and not all(self._permits(rel) for rel in candidates):
+                return WITHHELD_REFERENCE
+            return token
+
+        out = _WRAPPED_ARTIFACT_REFERENCE.sub(_replace_token, text)
+        if not self.literal_aliases:
+            return out
+        literal_pattern = re.compile(
+            r"(?<![\w./-])(?:"
+            + "|".join(
+                re.escape(alias)
+                for alias in sorted(self.literal_aliases, key=lambda item: (-len(item), item))
+            )
+            + r")(?![\w./-])",
+            re.IGNORECASE,
+        )
+        return literal_pattern.sub(_replace_token, out)
+
+    def gate_payload(self, value: Any, *, scan_strings: bool = False) -> Any:
+        if isinstance(value, str):
+            return self.gate_text(value) if scan_strings else value
+        if isinstance(value, Mapping):
+            gated: dict[Any, Any] = {}
+            for key, item in value.items():
+                if isinstance(key, str) and scan_strings:
+                    gated_key = self.gate_text(key)
+                    if gated_key != key:
+                        # Replacing a key can collide with another withheld
+                        # key. Omission is the same fail-closed shape used by
+                        # the structural map-key filter.
+                        continue
+                key_marks_free_text = isinstance(key, str) and any(
+                    marker in key.casefold()
+                    for marker in ("handoff", "prompt", "resource")
+                )
+                gated[key] = self.gate_payload(
+                    item, scan_strings=scan_strings or key_marks_free_text
+                )
+            return gated
+        if isinstance(value, (list, tuple, set, frozenset)):
+            items = [
+                self.gate_payload(item, scan_strings=scan_strings) for item in value
+            ]
+            if isinstance(value, tuple):
+                rebuild = getattr(type(value), "_make", None)
+                return rebuild(items) if rebuild is not None else type(value)(items)
+            if isinstance(value, (set, frozenset)):
+                return type(value)(items)
+            return items
+        return value
 
 
 def redact_withheld_references(
@@ -2022,92 +2458,27 @@ def redact_withheld_references(
     principal: RequestPrincipal | None = None,
     purpose: str | None = None,
 ) -> str:
-    """Replace references to withheld pages inside a free-text payload.
+    """Replace any actual vault-artifact reference withheld from the caller."""
+    return _ArtifactReferenceGate(
+        Path(vault_root), principal=principal, purpose=purpose
+    ).gate_text(text)
 
-    For the handlers that return a bare STRING (finding N3). The dispatcher's
-    walker filters entries, and a string has none — `continue_adoption`
-    returns `handoff.prompt_text`, so a withheld path and its wikilink rode
-    out untouched past a principal binding and a credential scrubber that were
-    both working correctly and simply had nothing to grip.
 
-    Deliberately narrow: it decides the reference SHAPES this module already
-    canonicalizes (wikilink, `exomem://`, `.md` token), not arbitrary prose.
-    Full body-text scanning of released pages remains out of scope.
-    """
-    if not text:
-        return text
-    policy = policy_module.load(Path(vault_root))
-    if policy.empty:
-        return text
-
-    vault_root = Path(vault_root)
-    who = principal if principal is not None else effective_principal()
-    fail_closed = policy.blocked or not who.resolved
-    grants_hash = "" if fail_closed else _grants_hash(policy)
-    declared_purpose = purpose if purpose is not None else who.purpose
-    verdicts: dict[str, bool] = {}
-
-    def _permits(rel_path: str) -> bool:
-        cached = verdicts.get(rel_path)
-        if cached is not None:
-            return cached
-        decision = _decide_path(
-            vault_root,
-            rel_path,
-            policy=policy,
-            audience=who.audience_id,
-            purpose=declared_purpose,
-            grants_hash=grants_hash,
-        )
-        allowed = decision is not None and decision.level >= RELEASE_FLOOR
-        _outcome_for_decision(
-            vault_root, rel_path, decision=decision, policy=policy,
-            audience=who.audience_id, outcome="released" if allowed else "withheld",
-            purpose=declared_purpose,
-        )
-        verdicts[rel_path] = allowed
-        return allowed
-
-    stem_index: dict[str, list[str]] | None = None
-
-    def _by_stem(stem: str) -> list[str]:
-        """Case-insensitive filename lookup, built once and only if needed.
-
-        `_canonical_reference` casefolds its key, so a case-sensitive glob
-        would miss the very variants the normalization exists to catch.
-        """
-        nonlocal stem_index
-        if stem_index is None:
-            stem_index = {}
-            for page in vault_root.rglob("*"):
-                if page.is_file():
-                    rel = str(page.relative_to(vault_root)).replace("\\", "/")
-                    stem_index.setdefault(page.stem.casefold(), []).append(rel)
-        return stem_index.get(stem, [])
-
-    def _replace(match: re.Match[str]) -> str:
-        token = match.group(0)
-        canonical = _canonical_reference(token)
-        if canonical is None:
-            return token
-        key, compare_stems = canonical
-        # Resolve the reference to real vault pages. A reference that names
-        # nothing under this vault is not a vault item (N6) and is left alone.
-        if compare_stems:
-            candidates = _by_stem(key.rsplit("/", 1)[-1])
-        else:
-            candidates = [
-                rel for rel in (f"{key}.md", key) if (vault_root / rel).is_file()
-            ][:1]
-            if not candidates:
-                candidates = _by_stem(key.rsplit("/", 1)[-1])
-        if not candidates:
-            return token
-        if fail_closed or not all(_permits(rel) for rel in candidates):
-            return WITHHELD_REFERENCE
-        return token
-
-    return _TEXT_REFERENCE.sub(_replace, text)
+def gate_artifact_references(
+    vault_root: Path,
+    payload: Any,
+    *,
+    principal: RequestPrincipal | None = None,
+    purpose: str | None = None,
+    scan_all: bool = False,
+) -> Any:
+    """Recursively gate nested prompt/resource payloads with one verdict cache."""
+    gate = _ArtifactReferenceGate(
+        Path(vault_root), principal=principal, purpose=purpose
+    )
+    return gate.gate_payload(
+        payload, scan_strings=scan_all or isinstance(payload, str)
+    )
 
 
 def release_walk_filter(
