@@ -25,8 +25,11 @@ Promotion evidence must bind the generated lock and compatibility identity to a
 native install, authorization, exact discovery, seeded content recall with a
 citation, ordinary-conversation durable capture, and a later fresh-chat recall.
 Validator, OAuth-only, discovery-only, bootstrap-only, metadata-only, and mocked
-results are rejected. Demotion withdraws the platform candidate without deleting
-tenant data.
+results are rejected. Cross-client resource equality is recorded only as
+HMAC-SHA-256 values made with an operator-held per-run pairing key; raw client,
+identity, tenant, entitlement, operation, cell, and volume identifiers never
+enter the public promotion record. Demotion withdraws the platform candidate
+without deleting tenant data and records only a stable public reason code.
 
 The reusable promotion HMAC secret is read only from
 `EXOMEM_HOSTED_PROMOTION_SECRET`; it is never accepted on the command line.

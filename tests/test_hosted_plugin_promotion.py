@@ -15,6 +15,10 @@ from exomem import hosted_plugins
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
+def digest(value: str) -> str:
+    return hmac.new(b"acceptance-pairing-key", value.encode(), hashlib.sha256).hexdigest()
+
+
 def copy_hosted_tree(destination: Path) -> Path:
     shutil.copytree(
         REPO_ROOT / "plugins" / "hosted",
@@ -34,15 +38,15 @@ def signed_evidence(root: Path, *, secret: str = "operator-secret") -> dict[str,
         "schema_version": 1,
         "platform": "claude",
         "client_version": "1.0.0",
-        "clean_client_identity": "clean-client-run",
+        "clean_client_identity_hmac_sha256": digest("clean-client-run"),
         "timestamp": datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z"),
-        "paired_run_id": "paired-run-1",
+        "paired_run_hmac_sha256": digest("paired-run-1"),
         "test_identity": "hosted-client-plugins-v1",
-        "exomem_identity": "identity-1",
-        "tenant": "tenant-1",
-        "entitlement": "entitlement-1",
-        "provisioning_operation": "operation-1",
-        "cell": "cell-1",
+        "exomem_identity_hmac_sha256": digest("identity-1"),
+        "tenant_hmac_sha256": digest("tenant-1"),
+        "entitlement_hmac_sha256": digest("entitlement-1"),
+        "provisioning_operation_hmac_sha256": digest("operation-1"),
+        "cell_hmac_sha256": digest("cell-1"),
         "identity_count": 1,
         "tenant_count": 1,
         "entitlement_count": 1,
@@ -75,7 +79,13 @@ def signed_evidence(root: Path, *, secret: str = "operator-secret") -> dict[str,
 
 def test_promotion_rejects_discovery_only_or_mocked_evidence() -> None:
     with pytest.raises(ValueError, match="content-bearing"):
-        hosted_plugins.promote(REPO_ROOT, "claude", {"mocked": True})
+        hosted_plugins.promote(
+            REPO_ROOT,
+            "claude",
+            {"mocked": True},
+            expected_state="pending",
+            expected_record_sha256=hosted_plugins.promotion_record_sha256(REPO_ROOT, "claude"),
+        )
 
 
 def test_pending_records_are_not_distributed() -> None:
@@ -118,7 +128,7 @@ def test_promotion_requires_exact_signed_evidence_and_compare_and_swap(tmp_path:
     hosted_plugins.demote(
         root,
         "claude",
-        "client regression",
+        "client-regression",
         expected_state="live",
         expected_record_sha256=live_digest,
     )
@@ -128,10 +138,29 @@ def test_promotion_requires_exact_signed_evidence_and_compare_and_swap(tmp_path:
     }
 
 
+def test_demotion_rejects_free_form_public_reason(tmp_path: Path) -> None:
+    root = copy_hosted_tree(tmp_path / "repo")
+    record_path = hosted_plugins.promotion_record(root, "claude")
+    record_path.write_text(
+        json.dumps({"schema_version": 1, "platform": "claude", "state": "live"}),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="stable reason code"):
+        hosted_plugins.demote(
+            root,
+            "claude",
+            "Customer tenant failed in a private region",
+            expected_state="live",
+            expected_record_sha256=hosted_plugins.promotion_record_sha256(root, "claude"),
+        )
+
+
 def test_promotion_rejects_wrongly_typed_success_and_duplicate_counts(tmp_path: Path) -> None:
     root = copy_hosted_tree(tmp_path / "repo")
     hosted_plugins.regenerate_claude(root)
     evidence = signed_evidence(root)
+    pending_digest = hosted_plugins.promotion_record_sha256(root, "claude")
 
     with pytest.raises(ValueError, match="successful"):
         hosted_plugins.promote(
@@ -140,6 +169,8 @@ def test_promotion_rejects_wrongly_typed_success_and_duplicate_counts(tmp_path: 
             {**evidence, "authorization": "failed"},
             trusted_key_id="operator-key",
             trusted_secret="operator-secret",
+            expected_state="pending",
+            expected_record_sha256=pending_digest,
         )
     with pytest.raises(ValueError, match="resource counts"):
         hosted_plugins.promote(
@@ -148,7 +179,38 @@ def test_promotion_rejects_wrongly_typed_success_and_duplicate_counts(tmp_path: 
             {**evidence, "tenant_count": 2},
             trusted_key_id="operator-key",
             trusted_secret="operator-secret",
+            expected_state="pending",
+            expected_record_sha256=pending_digest,
         )
+
+
+def test_live_distribution_does_not_expire_with_acceptance_timestamp(tmp_path: Path) -> None:
+    root = copy_hosted_tree(tmp_path / "repo")
+    hosted_plugins.regenerate_claude(root)
+    evidence = signed_evidence(root)
+    hosted_plugins.promote(
+        root,
+        "claude",
+        evidence,
+        trusted_key_id="operator-key",
+        trusted_secret="operator-secret",
+        expected_state="pending",
+        expected_record_sha256=hosted_plugins.promotion_record_sha256(root, "claude"),
+    )
+    record_path = hosted_plugins.promotion_record(root, "claude")
+    record = json.loads(record_path.read_text(encoding="utf-8"))
+    record["evidence"]["timestamp"] = "2026-01-01T00:00:00Z"
+    unsigned = {
+        key: value for key, value in record["evidence"].items() if key != "operator_signature"
+    }
+    record["evidence"]["operator_signature"] = hmac.new(
+        b"operator-secret", hosted_plugins._canonical_json(unsigned), hashlib.sha256
+    ).hexdigest()
+    record_path.write_text(json.dumps(record), encoding="utf-8")
+
+    assert hosted_plugins.distribution_manifest(
+        root, trusted_key_id="operator-key", trusted_secret="operator-secret"
+    ) == {"live_platforms": ["claude"], "cross_client_ready": False}
 
 
 def test_promotion_recomputes_archive_instead_of_trusting_its_lock(tmp_path: Path) -> None:
@@ -194,6 +256,7 @@ def test_public_gate_rejects_private_tokens_in_source_assets(
     (hosted / "assets").mkdir(parents=True)
     (hosted / "definition.json").write_text("{}", encoding="utf-8")
     (hosted / "behavior-fixtures-v1.json").write_text("{}", encoding="utf-8")
+    (hosted / "acceptance-fixture-v1.json").write_text("{}", encoding="utf-8")
     (hosted / "assets" / "icon.svg").write_text("api_secret=private", encoding="utf-8")
     monkeypatch.setattr(hosted_plugins, "PLUGIN_ROOT", Path("plugins/hosted"))
     monkeypatch.setattr(hosted_plugins, "_skill_paths", lambda root: ())
@@ -209,13 +272,33 @@ def test_public_gate_rejects_quoted_json_credentials(
     hosted.mkdir(parents=True)
     (hosted / "definition.json").write_text("{}", encoding="utf-8")
     (hosted / "behavior-fixtures-v1.json").write_text("{}", encoding="utf-8")
+    (hosted / "acceptance-fixture-v1.json").write_text("{}", encoding="utf-8")
     (hosted / "acceptance-fixture-v1.json").write_text(
         '{"access_token":"private"}', encoding="utf-8"
     )
     monkeypatch.setattr(hosted_plugins, "PLUGIN_ROOT", Path("plugins/hosted"))
     monkeypatch.setattr(hosted_plugins, "_skill_paths", lambda root: ())
 
-    with pytest.raises(ValueError, match="unsafe"):
+    with pytest.raises(ValueError, match="credential value"):
+        hosted_plugins.validate_hosted_public_inputs(tmp_path)
+
+
+def test_public_gate_rejects_raw_promotion_resource_identifiers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    hosted = tmp_path / "plugins" / "hosted"
+    (hosted / "promotion").mkdir(parents=True)
+    (hosted / "definition.json").write_text("{}", encoding="utf-8")
+    (hosted / "behavior-fixtures-v1.json").write_text("{}", encoding="utf-8")
+    (hosted / "acceptance-fixture-v1.json").write_text("{}", encoding="utf-8")
+    (hosted / "promotion/claude.json").write_text(
+        '{"state":"live","evidence":{"tenant":"production-tenant"}}',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(hosted_plugins, "PLUGIN_ROOT", Path("plugins/hosted"))
+    monkeypatch.setattr(hosted_plugins, "_skill_paths", lambda root: ())
+
+    with pytest.raises(ValueError, match="raw private identifier"):
         hosted_plugins.validate_hosted_public_inputs(tmp_path)
 
 
@@ -226,6 +309,7 @@ def test_public_gate_rejects_private_tokens_in_archive_members(
     (hosted / "generated").mkdir(parents=True)
     (hosted / "definition.json").write_text("{}", encoding="utf-8")
     (hosted / "behavior-fixtures-v1.json").write_text("{}", encoding="utf-8")
+    (hosted / "acceptance-fixture-v1.json").write_text("{}", encoding="utf-8")
     with zipfile.ZipFile(hosted / "generated" / "claude.zip", "w") as archive:
         archive.writestr("skills/exomem/SKILL.md", "api_secret=private")
     monkeypatch.setattr(hosted_plugins, "PLUGIN_ROOT", Path("plugins/hosted"))

@@ -23,6 +23,9 @@ from . import commands, hosted_gateway
 
 PLUGIN_ROOT = Path("plugins/hosted")
 PLATFORMS = ("claude", "openai")
+DEMOTION_REASONS = frozenset(
+    {"artifact-withdrawn", "client-regression", "contract-drift", "operator-withdrawal"}
+)
 SKILL_NAMES = (
     "exomem",
     "exomem-capture",
@@ -64,6 +67,17 @@ _CANONICAL_CALLABLES = frozenset(
     | {route for command in commands.COMMANDS for route in command.routes}
     | {action for command in commands.COMMANDS for action in command.product_actions}
     | _LEGACY_OR_EXCLUDED_TOOLS
+)
+_RAW_PRIVATE_IDENTITY_FIELDS = frozenset(
+    {
+        "clean_client_identity",
+        "paired_run_id",
+        "exomem_identity",
+        "tenant",
+        "entitlement",
+        "provisioning_operation",
+        "cell",
+    }
 )
 TOOL_REFERENCE = re.compile(
     r"(?:`|\b)("
@@ -265,6 +279,8 @@ def validate_behavior_observation(scenario: dict[str, Any], observation: dict[st
         return
     if not isinstance(capture_contract, dict) or not isinstance(capture, dict):
         raise ValueError("behavior observation is missing its capture")
+    if write_count < 1:
+        raise ValueError("behavior observation capture requires a durable write")
     text = capture.get("text")
     if (
         capture.get("kind") != capture_contract.get("kind")
@@ -277,7 +293,9 @@ def validate_behavior_observation(scenario: dict[str, Any], observation: dict[st
         raise ValueError("behavior observation capture violates the distilled payload contract")
 
 
-def validate_hosted_public_inputs(repo_root: Path | None = None) -> None:
+def validate_hosted_public_inputs(
+    repo_root: Path | None = None, *, include_generated: bool = True
+) -> None:
     """Fail closed over Hosted sources and committed candidate files before release."""
 
     root = _repo_root(repo_root)
@@ -288,7 +306,10 @@ def validate_hosted_public_inputs(repo_root: Path | None = None) -> None:
         hosted_root / "acceptance-fixture-v1.json",
     ]
     paths.extend(_skill_paths(root))
-    for directory in ("assets", "acceptance", "promotion", "generated"):
+    directories = ["assets", "acceptance", "promotion"]
+    if include_generated:
+        directories.append("generated")
+    for directory in directories:
         candidate = hosted_root / directory
         if candidate.exists():
             paths.extend(
@@ -342,6 +363,19 @@ def validate_hosted_public_inputs(repo_root: Path | None = None) -> None:
             def inspect_json(value: Any) -> None:
                 if isinstance(value, dict):
                     for key, nested in value.items():
+                        evidence_path = (
+                            "promotion" in path.parts
+                            or "acceptance" in path.parts
+                            or path.name.startswith("acceptance-")
+                        )
+                        if (
+                            evidence_path
+                            and key in _RAW_PRIVATE_IDENTITY_FIELDS
+                            and isinstance(nested, str)
+                        ):
+                            raise ValueError(
+                                f"Hosted public artifact contains a raw private identifier: {path}"
+                            )
                         if re.search(r"(?i)(?:token|secret|password)$", str(key)) and isinstance(
                             nested, str
                         ):
@@ -586,6 +620,12 @@ def validate_openai_candidate(package: Path) -> None:
     if not re.fullmatch(r"asdk_app_[A-Za-z0-9]+", str(app["apps"]["exomem"].get("id", ""))):
         raise ValueError("OpenAI app manifest must contain a registered app ID")
     plugins = marketplace.get("plugins")
+    if (
+        set(marketplace) != {"name", "interface", "plugins"}
+        or marketplace.get("name") != plugin.get("name")
+        or marketplace.get("interface") != {"displayName": "Exomem Hosted"}
+    ):
+        raise ValueError("OpenAI marketplace interface contains unsupported fields")
     expected_marketplace = {
         "name": plugin.get("name"),
         "source": {"source": "local", "path": "./plugins/exomem-hosted"},
@@ -624,7 +664,7 @@ def candidate_files(
     root = _repo_root(repo_root)
     definition = load_definition(root)
     skill_dependencies(root)
-    validate_hosted_public_inputs(root)
+    validate_hosted_public_inputs(root, include_generated=False)
     if platform not in (*PLATFORMS, "all"):
         raise ValueError("unsupported platform")
     selected = PLATFORMS if platform == "all" else (platform,)
@@ -694,7 +734,7 @@ def candidate_files(
                 _canonical_json(
                     {
                         "name": definition.plugin_id,
-                        "interface": _interface_metadata(definition),
+                        "interface": {"displayName": "Exomem Hosted"},
                         "plugins": [
                             {
                                 "name": definition.plugin_id,
@@ -952,18 +992,19 @@ def _validate_promotion_evidence(
     *,
     trusted_key_id: str | None,
     trusted_secret: str | None,
+    require_fresh: bool = True,
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
     required_strings = {
         "client_version",
-        "clean_client_identity",
+        "clean_client_identity_hmac_sha256",
         "timestamp",
-        "paired_run_id",
+        "paired_run_hmac_sha256",
         "test_identity",
-        "exomem_identity",
-        "tenant",
-        "entitlement",
-        "provisioning_operation",
-        "cell",
+        "exomem_identity_hmac_sha256",
+        "tenant_hmac_sha256",
+        "entitlement_hmac_sha256",
+        "provisioning_operation_hmac_sha256",
+        "cell_hmac_sha256",
         "result_sha256",
         "package_artifact_sha256",
         "archive_sha256",
@@ -1033,7 +1074,7 @@ def _validate_promotion_evidence(
         raise ValueError("promotion evidence timestamp must be canonical UTC")
     timestamp = datetime.fromisoformat(evidence["timestamp"].replace("Z", "+00:00"))
     now = datetime.now(UTC)
-    if timestamp > now or (now - timestamp).total_seconds() > 24 * 60 * 60:
+    if timestamp > now or (require_fresh and (now - timestamp).total_seconds() > 24 * 60 * 60):
         raise ValueError("promotion evidence timestamp is stale")
 
     compatibility = compatibility_manifest(root)
@@ -1060,6 +1101,13 @@ def _validate_promotion_evidence(
             "compatibility_sha256",
             "schema_contract_sha256",
             "command_surface_sha256",
+            "clean_client_identity_hmac_sha256",
+            "paired_run_hmac_sha256",
+            "exomem_identity_hmac_sha256",
+            "tenant_hmac_sha256",
+            "entitlement_hmac_sha256",
+            "provisioning_operation_hmac_sha256",
+            "cell_hmac_sha256",
         )
     ):
         raise ValueError("promotion evidence digests must be SHA-256 values")
@@ -1137,8 +1185,8 @@ def demote(
     expected_record_sha256: str | None = None,
 ) -> None:
     root = _repo_root(repo_root)
-    if not reason.strip():
-        raise ValueError("demotion requires a reason")
+    if reason not in DEMOTION_REASONS:
+        raise ValueError("demotion requires a stable reason code")
     if expected_state != "live" or not re.fullmatch(
         r"[0-9a-f]{64}", str(expected_record_sha256 or "")
     ):
@@ -1160,7 +1208,7 @@ def demote(
                 "schema_version": 1,
                 "platform": platform,
                 "state": "failed",
-                "reason": reason.strip(),
+                "reason": reason,
             },
         )
 
@@ -1184,7 +1232,12 @@ def distribution_manifest(
         if not isinstance(evidence, dict):
             raise ValueError("live promotion record has no evidence")
         compatibility, lock, _archive_lock = _validate_promotion_evidence(
-            root, platform, evidence, trusted_key_id=trusted_key_id, trusted_secret=trusted_secret
+            root,
+            platform,
+            evidence,
+            trusted_key_id=trusted_key_id,
+            trusted_secret=trusted_secret,
+            require_fresh=False,
         )
         if (
             record.get("package_lock") != lock
@@ -1197,12 +1250,12 @@ def distribution_manifest(
         tuple(
             records[platform].get("evidence", {}).get(key)
             for key in (
-                "paired_run_id",
-                "exomem_identity",
-                "tenant",
-                "entitlement",
-                "provisioning_operation",
-                "cell",
+                "paired_run_hmac_sha256",
+                "exomem_identity_hmac_sha256",
+                "tenant_hmac_sha256",
+                "entitlement_hmac_sha256",
+                "provisioning_operation_hmac_sha256",
+                "cell_hmac_sha256",
                 "cell_count",
                 "volume_count",
             )

@@ -22,15 +22,15 @@
 
 ## 4. Implement Promotion Evidence
 
-- [ ] 4.1 Add failing tests for per-platform `pending`/`live`/`failed` transitions, exact evidence identity, atomic replacement, demotion, and rejection of validator-only, OAuth-only, discovery-only, bootstrap-only, metadata-only, or mocked-client evidence.
+- [x] 4.1 Add failing tests for per-platform `pending`/`live`/`failed` transitions, exact evidence identity, atomic replacement, demotion, and rejection of validator-only, OAuth-only, discovery-only, bootstrap-only, metadata-only, or mocked-client evidence.
 - [x] 4.2 Implement the promotion record and maintainer commands that bind platform/client version, plugin version, endpoint, profile fingerprint, contract digest, test identity, timestamp, and redacted result hashes.
-- [ ] 4.3 Add content-bearing smoke assertions for seeded recall and citation, ordinary-conversation durable capture, and recall from a later fresh conversation.
+- [x] 4.3 Add content-bearing smoke assertions for seeded recall and citation, ordinary-conversation durable capture, and recall from a later fresh conversation.
 - [x] 4.4 Make release/distribution metadata expose only live platform artifacts and prohibit the cross-client-ready label until both platforms pass against one compatibility identity.
 
 ## 5. Exercise The Paired Product Journey
 
 - [x] 5.1 Add a shared versioned acceptance-fixture format and run identifier compatible with Substrate's `add-exomem-hosted-mcp-oauth` evidence, including exact identity/tenant/operation/cell/volume count assertions.
-- [ ] 5.2 Run the static package, dependency, bootstrap, archive-safety, reproducibility, no-leak, and generated-drift suites for both artifacts.
+- [x] 5.2 Run the static package, dependency, bootstrap, archive-safety, reproducibility, no-leak, and generated-drift suites for both artifacts.
 - [ ] 5.3 Install the pending Claude artifact in a clean supported account and record native install, one-login authorization, exact discovery, unprompted seeded content recall/citation, durable capture, and fresh-chat recall evidence.
 - [ ] 5.4 Install the pending OpenAI artifact in a clean ChatGPT/Codex account and record the same content-bearing journey rather than accepting connection or tool listing alone.
 - [ ] 5.5 Authorize the other client as the same identity and prove both see the same memory while Substrate reports no second tenant, entitlement, provision operation, cell, or volume.
@@ -39,5 +39,5 @@
 ## 6. Document And Verify The Friends Release
 
 - [x] 6.1 Document pending distribution, authorization expectations, demotion/rollback, support references, privacy/terms metadata, and the boundary between friends design-partner feedback and market validation.
-- [ ] 6.2 Run changed-file formatting/lint, focused and lean tests, package validators, archive inspection, generated-drift checks, and `openspec validate add-hosted-client-plugins --type change --strict --no-interactive`.
+- [x] 6.2 Run changed-file formatting/lint, focused and lean tests, package validators, archive inspection, generated-drift checks, and `openspec validate add-hosted-client-plugins --type change --strict --no-interactive`.
 - [ ] 6.3 Complete an independent security/package review and verifier pass, resolve findings, and promote only the exact evidence-bound Claude/OpenAI artifacts that pass the real-client matrix.

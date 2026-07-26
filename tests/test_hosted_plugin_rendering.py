@@ -144,6 +144,14 @@ def test_rendered_packages_are_deterministic_and_remote_only(tmp_path: Path) -> 
         "policy": {"installation": "AVAILABLE", "authentication": "ON_INSTALL"},
         "category": "productivity",
     }
-    assert marketplace["interface"]["defaultPrompt"] == ["Use governed long-term memory."]
+    assert marketplace["interface"] == {"displayName": "Exomem Hosted"}
+    assert openai_plugin["interface"]["defaultPrompt"] == ["Use governed long-term memory."]
     hosted_plugins.validate_openai_candidate(first / "openai")
-    assert "uvx" not in b"\n".join(contents(first).values()).decode("utf-8")
+    marketplace["interface"]["defaultPrompt"] = ["unsupported"]
+    (first / "openai/marketplace.json").write_text(json.dumps(marketplace), encoding="utf-8")
+    with pytest.raises(ValueError, match="unsupported fields"):
+        hosted_plugins.validate_openai_candidate(first / "openai")
+    text_payload = b"\n".join(
+        content for name, content in contents(first).items() if not name.endswith(".zip")
+    ).decode("utf-8")
+    assert "uvx" not in text_payload

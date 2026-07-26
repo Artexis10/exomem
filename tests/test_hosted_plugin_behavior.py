@@ -54,25 +54,35 @@ def test_hosted_core_skill_teaches_the_fixture_behavior_without_save_prompt_or_t
 
 def test_behavior_fixture_is_executable_against_client_trace_observations() -> None:
     fixture = json.loads((REPO_ROOT / "plugins/hosted/behavior-fixtures-v1.json").read_text())
+    observations = {}
+    for scenario in fixture["scenarios"]:
+        capture_contract = scenario["capture"]
+        observations[scenario["id"]] = {
+            "tools": scenario["expected_tools"],
+            "fresh_chat": scenario["fresh_chat"],
+            "citation": "Knowledge Base/Notes/useful-note.md" if scenario["citation"] else None,
+            "write_count": 0 if scenario["no_write"] else 1,
+            "capture": (
+                {
+                    "kind": capture_contract["kind"],
+                    "text": "A concise reusable conclusion from the ordinary conversation.",
+                    "distilled": True,
+                    "transcript_dump": False,
+                }
+                if capture_contract
+                else None
+            ),
+        }
+        hosted_plugins.validate_behavior_observation(scenario, observations[scenario["id"]])
+
     scenario = next(
         item for item in fixture["scenarios"] if item["id"] == "automatic-decision-capture"
     )
-    observation = {
-        "tools": ["ask_memory", "remember"],
-        "fresh_chat": False,
-        "citation": None,
-        "write_count": 1,
-        "capture": {
-            "kind": "decision",
-            "text": "Use the versioned resource for future client connections.",
-            "distilled": True,
-            "transcript_dump": False,
-        },
-    }
-
-    hosted_plugins.validate_behavior_observation(scenario, observation)
+    observation = observations[scenario["id"]]
     with pytest.raises(ValueError, match="tool sequence"):
         hosted_plugins.validate_behavior_observation(scenario, {**observation, "tools": []})
+    with pytest.raises(ValueError, match="durable write"):
+        hosted_plugins.validate_behavior_observation(scenario, {**observation, "write_count": 0})
     with pytest.raises(ValueError, match="distilled payload"):
         hosted_plugins.validate_behavior_observation(
             scenario,
