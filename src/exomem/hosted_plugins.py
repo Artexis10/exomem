@@ -597,6 +597,9 @@ def _archive_bytes_from_entries(entries: Iterable[tuple[str, bytes]]) -> bytes:
     with zipfile.ZipFile(payload, "w", compression=zipfile.ZIP_STORED) as archive_file:
         for name, contents in sorted(entries):
             entry = zipfile.ZipInfo(name, (1980, 1, 1, 0, 0, 0))
+            # ZipInfo otherwise writes the host OS into the central directory
+            # (Windows=0, Unix=3), making identical package inputs drift in CI.
+            entry.create_system = 3
             entry.external_attr = (stat.S_IFREG | 0o644) << 16
             entry.compress_type = zipfile.ZIP_STORED
             archive_file.writestr(entry, contents)

@@ -110,6 +110,8 @@ def test_claude_archive_is_deterministic_and_locked(tmp_path: Path) -> None:
         "platform": "claude",
         "archive_sha256": hosted_plugins._sha256((first / "claude.zip").read_bytes()),
     }
+    with zipfile.ZipFile(first / "claude.zip") as package:
+        assert {entry.create_system for entry in package.infolist()} == {3}
 
 
 def test_rendered_packages_are_deterministic_and_remote_only(tmp_path: Path) -> None:
