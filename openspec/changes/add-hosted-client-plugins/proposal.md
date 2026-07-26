@@ -4,7 +4,7 @@ Exomem Hosted needs to feel like a product, not an MCP integration project: an i
 
 ## What Changes
 
-- Add one canonical Hosted plugin definition that renders installable Claude and OpenAI packages for the shared Exomem Hosted MCP endpoint.
+- Add one canonical Hosted plugin definition that renders installable Claude and OpenAI packages for the versioned shared Exomem Hosted MCP resource, including OpenAI's `.app.json` registered-app mapping.
 - Bundle a Hosted-safe core skill and compatible workflow skills that teach automatic recall, capture, continuation, and governance without requiring explicit "use Exomem" prompts.
 - Make every bundled skill declare its required Exomem tools and fail packaging when a dependency is absent from `hosted-alpha-agent-v1`.
 - Bind each package to the Hosted endpoint, profile identifier, command-surface fingerprint, full contract digest, skill-content hash, and plugin version without embedding tenant identifiers, credentials, vault paths, or local runtime configuration.

@@ -1,0 +1,26 @@
+from __future__ import annotations
+
+import re
+from pathlib import Path
+
+from exomem import hosted_plugins
+
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_every_hosted_skill_declares_and_uses_only_alpha_profile_tools() -> None:
+    dependencies = hosted_plugins.skill_dependencies(REPO_ROOT)
+
+    assert tuple(dependencies) == hosted_plugins.SKILL_NAMES
+    assert set(dependencies["exomem"]) == {"ask_memory", "read_memory", "remember", "observe_memory"}
+
+
+def test_hosted_skills_do_not_depend_on_local_plugin_mechanisms() -> None:
+    prose = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in (REPO_ROOT / "plugins/hosted/skills").glob("*/SKILL.md")
+    ).lower()
+
+    for forbidden in ("uvx", "exomem_vault_path", "hooks", "transfer", "media", "adopt", "maintain", "edit_memory", "replace_memory"):
+        assert not re.search(rf"\b{re.escape(forbidden)}\b", prose)

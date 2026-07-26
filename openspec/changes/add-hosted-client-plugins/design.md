@@ -16,7 +16,7 @@ The release target is exact:
 - Require only native installation and one Exomem authorization per client installation.
 - Make recall and durable capture happen naturally in relevant fresh conversations without `@Exomem`, a bootstrap prompt, or custom instructions.
 - Keep every bundled instruction executable on exactly `hosted-alpha-agent-v1`.
-- Make package identity reproducible and bind it to the exact remote tool contract.
+- Make package identity reproducible and bind it to the exact remote tool contract plus the gateway-owned OAuth discovery overlay; live evidence remains outside that immutable identity.
 - Treat successful real installation and content-bearing use as release gates, not manual follow-up.
 - Start with private or unlisted friends-cohort distribution while preserving a clean path to public directories.
 
@@ -35,11 +35,11 @@ The release target is exact:
 A new Hosted plugin source owns the product identity, production MCP resource URL, semantic plugin version, `hosted-alpha-agent-v1` binding, package policy, shared assets, and Hosted skill set. Deterministic renderers produce:
 
 - a Claude package using the currently supported Claude plugin/connector manifest and bundled skills; and
-- an OpenAI package with `.codex-plugin/plugin.json`, `.mcp.json`, `skills/`, and assets, plus marketplace metadata whose authentication policy is `ON_INSTALL`.
+- an OpenAI package with `.codex-plugin/plugin.json`, `.mcp.json`, required `.app.json` registered-app mapping, `skills/`, and assets, plus marketplace metadata whose authentication policy is `ON_INSTALL`.
 
 The generated artifacts are checked and validated, but the canonical definition and Hosted skill sources are hand-authored. Platform adapters may change syntax without creating independent product behavior. A generic zip with setup prose was rejected because it recreates the configuration burden this change exists to remove. Hand-maintaining two unrelated packages was rejected because endpoint, skills, and contract identity would drift.
 
-The published MCP URL is a release input selected by maintainers and rendered as one literal HTTPS endpoint. It is never a user input. Development endpoints may be rendered only into non-distributable fixtures with an explicit development channel.
+The published MCP URL is a release input selected by maintainers and rendered as one literal HTTPS endpoint: `https://substratesystems.io/api/exomem/mcp/v1`. It is never a user input. Development endpoints may be rendered only into non-distributable fixtures with an explicit development channel. The registered OpenAI app ID is a separate operator release input; discovering a developer app proves package shape only, not supported distribution.
 
 ### 2. The initial Hosted skill set is intentionally smaller than the local scaffold
 
@@ -72,7 +72,7 @@ Automatic selection is partly host behavior, so static prompt inspection is nece
 
 ### 4. Every artifact carries one immutable compatibility identity
 
-The candidate lock contains at least:
+The immutable compatibility manifest contains the canonical definition and exact ordered raw tool schemas/annotations, plus the gateway-owned OAuth discovery overlay (per-tool read/write scopes and required runtime `mcp/www_authenticate` metadata). Pending Exomem packages and the paired Substrate contract may reference this one identity. The candidate lock contains at least:
 
 - plugin ID and semantic version;
 - target platform and package schema version;
@@ -84,7 +84,7 @@ The candidate lock contains at least:
 - aggregate Hosted skill-content digest; and
 - artifact digest.
 
-The platform manifest contains only fields accepted by that platform; unsupported compatibility metadata lives in the package lock rather than being smuggled into manifests. The build fails if the agent contract, skill content, endpoint, generated artifacts, or lock disagree. Any profile membership change requires a new profile identifier and a new plugin candidate; a silent profile change under an existing package is forbidden.
+The platform manifest contains only fields accepted by that platform; unsupported compatibility metadata lives in the package lock rather than being smuggled into manifests. Live evidence is deliberately excluded from the compatibility digest so promotion cannot form a dependency cycle. The build fails if the agent contract, skill content, endpoint, generated artifacts, or lock disagree. Any profile membership change requires a new profile identifier and a new plugin candidate; a silent profile change under an existing package is forbidden.
 
 The package never contains an access token, refresh token, invite token, user/tenant/cell identifier, private cell endpoint, service credential, vault path, `EXOMEM_VAULT_PATH`, or local executable command. OAuth state belongs to the client and Substrate, not the archive.
 

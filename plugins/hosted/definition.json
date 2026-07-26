@@ -1,0 +1,14 @@
+{
+  "channel": "production",
+  "claude_schema_version": "1.0.0",
+  "distribution_scope": "pending",
+  "endpoint": "https://substratesystems.io/api/exomem/mcp/v1",
+  "openai_schema_version": "1.0.0",
+  "plugin_id": "exomem-hosted",
+  "privacy_url": "https://substratesystems.io/exomem/privacy",
+  "profile": "hosted-alpha-agent-v1",
+  "source_release": "0.32.0",
+  "support_url": "https://github.com/Artexis10/exomem/issues",
+  "terms_url": "https://substratesystems.io/exomem/terms",
+  "version": "0.1.0"
+}

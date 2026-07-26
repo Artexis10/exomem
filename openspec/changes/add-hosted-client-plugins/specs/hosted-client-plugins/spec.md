@@ -2,7 +2,7 @@
 
 ### Requirement: One Canonical Definition Renders Supported Hosted Packages
 
-The system SHALL maintain one canonical Exomem Hosted plugin definition and SHALL deterministically render installable Claude and OpenAI artifacts from it. Both artifacts MUST represent the same product identity, production Hosted MCP resource, `hosted-alpha-agent-v1` profile, Hosted skill set, and release version while using only manifest fields and file layouts accepted by the target platform.
+The system SHALL maintain one canonical Exomem Hosted plugin definition and SHALL deterministically render installable Claude and OpenAI artifacts from it. The OpenAI artifact MUST include `.app.json` with its registered-app mapping. Both artifacts MUST represent the same product identity, versioned production Hosted MCP resource, `hosted-alpha-agent-v1` profile, Hosted skill set, and release version while using only manifest fields and file layouts accepted by the target platform.
 
 #### Scenario: Claude and OpenAI candidates are rendered
 
@@ -109,7 +109,7 @@ A production package SHALL contain only public product metadata, public document
 
 ### Requirement: Release Identity Detects Contract And Skill Drift
 
-Every package candidate SHALL have an immutable lock binding plugin ID/version, target platform/schema, Hosted MCP resource, profile ID, ordered command-surface fingerprint, full schema-contract digest, canonical-definition digest, aggregate skill-content digest, and final artifact digest. Any mismatch MUST fail generation, validation, installation evidence recording, or promotion before distribution.
+Every package candidate SHALL have an immutable lock binding plugin ID/version, target platform/schema, Hosted MCP resource, profile ID, ordered command-surface fingerprint, full schema-contract digest, gateway OAuth discovery-overlay digest, canonical-definition digest, aggregate skill-content digest, and final artifact digest. Live evidence MUST NOT be included in this compatibility identity. Any mismatch MUST fail generation, validation, installation evidence recording, or promotion before distribution.
 
 #### Scenario: Skill content changes without a release rebuild
 
