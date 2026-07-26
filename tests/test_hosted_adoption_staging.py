@@ -124,6 +124,10 @@ def _grant(
             hosted_transfer.canonical_json(metadata)
         ).hexdigest(),
     }
+    # Minted per call, never at import: pytest collects this module minutes
+    # before a slow suite reaches it, and the routes validate against the real
+    # clock, so an import-time constant mints already-expired grants.
+    minted_at = int(time.time())
     return hosted_transfer.mint_transfer_grant_v2(
         signing_credential=CREDENTIAL,
         kid=KID,
@@ -134,9 +138,9 @@ def _grant(
         jti=jti,
         max_bytes=max_bytes,
         target=target,
-        issued_at=NOW,
-        not_before=NOW,
-        expires_at=NOW + 300,
+        issued_at=minted_at,
+        not_before=minted_at,
+        expires_at=minted_at + 300,
     )
 
 
