@@ -34,6 +34,7 @@ _MAX_IDENTIFIER_LENGTH = 256
 _MAX_COUNT = 2**31 - 1
 _HEX64 = re.compile(r"^[0-9a-f]{64}$")
 _HEX32 = re.compile(r"^[0-9a-f]{32}$")
+_MONTH_FILE = re.compile(r"^\d{4}-\d{2}\.jsonl$")
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$")
 _EVENT_PAYLOAD_FIELDS = {
     ("disclosure", "recorded"): frozenset({"outcomes"}),
@@ -129,10 +130,7 @@ def _timestamp(timestamp: str) -> tuple[str, datetime]:
 def _month_path(vault_root: Path, instance_id: str, timestamp: str) -> Path:
     _normalized, parsed = _timestamp(timestamp)
     instance_dir = _instance_dir(vault_root, instance_id)
-    target = (instance_dir / f"{parsed:%Y-%m}.jsonl").resolve()
-    if target.parent != instance_dir:
-        raise ReceiptError("receipt month path escaped its instance directory")
-    return target
+    return _validated_month_path(instance_dir, instance_dir / f"{parsed:%Y-%m}.jsonl")
 
 
 def _now() -> str:
@@ -252,12 +250,36 @@ def _update_durable_head(
     )
 
 
+def _validated_month_path(instance_dir: Path, candidate: Path) -> Path:
+    if candidate.parent != instance_dir or _MONTH_FILE.fullmatch(candidate.name) is None:
+        raise ReceiptError("receipt evidence path escaped its instance directory")
+    if candidate.is_symlink():
+        raise ReceiptError("receipt evidence path escaped its instance directory")
+    resolved = candidate.resolve()
+    if resolved.parent != instance_dir:
+        raise ReceiptError("receipt evidence path escaped its instance directory")
+    return resolved
+
+
+def _monthly_evidence_paths(instance_dir: Path) -> tuple[list[Path], list[dict[str, str]]]:
+    paths: list[Path] = []
+    issues: list[dict[str, str]] = []
+    for candidate in sorted(instance_dir.glob("????-??.jsonl")):
+        try:
+            paths.append(_validated_month_path(instance_dir, candidate))
+        except ReceiptError as exc:
+            issues.append({"code": "evidence_path_escape", "path": str(candidate), "detail": str(exc)})
+    return paths, issues
+
+
 def _read_records(instance_dir: Path) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
     records: list[dict[str, Any]] = []
     issues: list[dict[str, str]] = []
     if not instance_dir.exists():
         return records, issues
-    for path in sorted(instance_dir.glob("????-??.jsonl")):
+    paths, path_issues = _monthly_evidence_paths(instance_dir)
+    issues.extend(path_issues)
+    for path in paths:
         try:
             data = path.read_bytes()
         except OSError as exc:
@@ -352,7 +374,8 @@ def _validate_event(event_type: str, phase: str, payload: Mapping[str, Any]) -> 
             raise ReceiptError("lifecycle receipt requires all declared fields")
         if not _hex(payload["manifest_digest"]) or not _hex(payload["exact_state_digest"]):
             raise ReceiptError("lifecycle receipt digests are invalid")
-        if not _lifecycle_refs(payload["affected_refs"]) or not payload["affected_refs"]:
+        affected_refs = payload["affected_refs"]
+        if not isinstance(affected_refs, list) or not affected_refs or len(affected_refs) > MAX_OUTCOMES:
             raise ReceiptError("lifecycle affected refs are invalid")
         content_hashes = payload["content_hashes"]
         if (
@@ -360,9 +383,11 @@ def _validate_event(event_type: str, phase: str, payload: Mapping[str, Any]) -> 
             or not content_hashes
             or len(content_hashes) > MAX_OUTCOMES
             or not all(_hex(value) for value in content_hashes)
-            or len(content_hashes) != len(payload["affected_refs"])
+            or len(content_hashes) != len(affected_refs)
         ):
             raise ReceiptError("lifecycle content hashes are invalid")
+        if not _lifecycle_refs(affected_refs, content_hashes):
+            raise ReceiptError("lifecycle affected refs are invalid")
         if not _opaque_causation_id(payload["causation_id"]):
             raise ReceiptError("lifecycle causation id is invalid")
     if event_type == "credential_block":
@@ -434,8 +459,15 @@ def _identifiers(value: Any) -> bool:
     return isinstance(value, list) and len(value) <= MAX_OUTCOMES and all(_identifier_value(item) for item in value)
 
 
-def _lifecycle_refs(value: Any) -> bool:
-    return isinstance(value, list) and len(value) <= MAX_OUTCOMES and all(_canonical_memory_ref(item) for item in value)
+def _lifecycle_refs(value: Any, content_hashes: list[Any]) -> bool:
+    if not isinstance(value, list) or len(value) > MAX_OUTCOMES:
+        return False
+    for ref, content_hash in zip(value, content_hashes, strict=True):
+        if _canonical_memory_ref(ref):
+            continue
+        if not isinstance(ref, str) or not ref.startswith("sha256:") or ref[7:] != content_hash or not _hex(ref[7:]):
+            return False
+    return True
 
 
 def _valid_outcome(value: Any) -> bool:
@@ -519,7 +551,9 @@ def _crash_point(_point: str) -> None:
 
 
 def _read_tail_record(instance_dir: Path) -> dict[str, Any] | None:
-    paths = sorted(instance_dir.glob("????-??.jsonl"))
+    paths, issues = _monthly_evidence_paths(instance_dir)
+    if issues:
+        raise ReceiptError(issues[0]["detail"])
     if not paths:
         return None
     path = paths[-1]
@@ -555,7 +589,11 @@ def _fsync_path(path: Path) -> None:
 
 
 def _fsync_durable_prefix(instance_dir: Path, target: Path) -> None:
-    for path in sorted(instance_dir.glob("????-??.jsonl")):
+    target = _validated_month_path(instance_dir, target)
+    paths, issues = _monthly_evidence_paths(instance_dir)
+    if issues:
+        raise ReceiptError(issues[0]["detail"])
+    for path in paths:
         if path.name <= target.name:
             _fsync_path(path)
 
@@ -900,6 +938,57 @@ def _scanned_locator_matches(
     )
 
 
+def _active_sidecar_anchor(
+    vault_root: Path,
+) -> tuple[str, Path, tuple[int, str, int, str, str | None, int | None]] | None:
+    instance_id = _read_sidecar_instance_id(vault_root)
+    if instance_id is None:
+        return None
+    instance_dir = _instance_dir(vault_root, instance_id)
+    anchor = _read_sidecar_head(vault_root, instance_id)
+    if anchor is None:
+        raise ReceiptError("receipt sidecar is missing its active anchor")
+    return instance_id, instance_dir, anchor
+
+
+def _anchor_issues(
+    vault_root: Path,
+    instance_dir: Path,
+    records: list[dict[str, Any]],
+    anchor: tuple[int, str, int, str, str | None, int | None],
+) -> list[dict[str, str]]:
+    issues: list[dict[str, str]] = []
+    actual_seq, actual_hash = _tail(records)
+    durable_seq, durable_hash, observed_seq, observed_hash, locator, byte_offset = anchor
+    hashes = {item["seq"]: item["hash"] for item in records}
+    if durable_seq > actual_seq or hashes.get(durable_seq, GENESIS_HASH) != durable_hash:
+        issues.append({"code": "durable_anchor_divergence", "path": str(instance_dir), "detail": "durable head is not in chain"})
+    if locator is None or byte_offset is None or (durable_seq > 0 and not locator):
+        issues.append({
+            "code": "locator_absent",
+            "path": str(instance_dir),
+            "detail": "durable head has no usable JSONL locator",
+        })
+    elif not _scanned_locator_matches(
+        vault_root,
+        instance_dir.name,
+        records,
+        durable_seq,
+        durable_hash,
+        locator,
+        byte_offset,
+    ):
+        issues.append({
+            "code": "locator_divergence",
+            "path": str(instance_dir),
+            "detail": "durable locator differs from the verified JSONL record",
+        })
+    if (observed_seq, observed_hash) != (actual_seq, actual_hash):
+        code = "anchor_lag" if observed_seq < actual_seq else "truncated_tail"
+        issues.append({"code": code, "path": str(instance_dir), "detail": "observed head differs from actual tail"})
+    return issues
+
+
 def verify_chain(vault_root: Path) -> dict[str, Any]:
     """Read the JSONL evidence and anchors without creating or changing either."""
     instances: dict[str, dict[str, Any]] = {}
@@ -913,24 +1002,26 @@ def verify_chain(vault_root: Path) -> dict[str, Any]:
             "issues": [{"code": "events_root_escape", "path": str(root), "detail": str(exc)}],
             "instances": instances,
         }
+    active_anchor: tuple[str, Path, tuple[int, str, int, str, str | None, int | None]] | None = None
+    try:
+        active_anchor = _active_sidecar_anchor(vault_root)
+    except ReceiptError as exc:
+        code = (
+            "invalid_instance_id"
+            if "id is invalid" in str(exc)
+            else "instance_path_escape"
+            if "instance path" in str(exc)
+            else "sidecar_read_error"
+        )
+        all_issues.append({"code": code, "path": str(root), "detail": str(exc)})
+    active_seen = False
     if root.exists():
-        try:
-            active_instance_id = _read_sidecar_instance_id(vault_root)
-            if active_instance_id is not None:
-                _instance_dir(vault_root, active_instance_id)
-        except ReceiptError as exc:
-            code = (
-                "invalid_instance_id"
-                if "id is invalid" in str(exc)
-                else "instance_path_escape"
-                if "instance path" in str(exc)
-                else "sidecar_read_error"
-            )
-            all_issues.append({"code": code, "path": str(root), "detail": str(exc)})
         for path in root.rglob("*"):
             if "conflicted copy" in path.name.lower():
                 all_issues.append({"code": "evidence_conflict", "path": str(path), "detail": "conflicted receipt evidence"})
         for candidate in sorted(path for path in root.iterdir() if path.is_dir()):
+            if active_anchor is not None and candidate.name == active_anchor[0]:
+                active_seen = True
             try:
                 instance_dir = _instance_dir(vault_root, candidate.name)
             except ReceiptError as exc:
@@ -939,39 +1030,14 @@ def verify_chain(vault_root: Path) -> dict[str, Any]:
                 continue
             records, issues = _chain_state(instance_dir)
             actual_seq, actual_hash = _tail(records)
-            try:
-                anchor = _read_sidecar_head(vault_root, instance_dir.name)
-            except ReceiptError as exc:
-                issues.append({"code": "sidecar_read_error", "path": str(instance_dir), "detail": str(exc)})
-                anchor = None
+            anchor = active_anchor[2] if active_anchor is not None and instance_dir.name == active_anchor[0] else None
+            if anchor is None:
+                try:
+                    anchor = _read_sidecar_head(vault_root, instance_dir.name)
+                except ReceiptError as exc:
+                    issues.append({"code": "sidecar_read_error", "path": str(instance_dir), "detail": str(exc)})
             if anchor is not None:
-                durable_seq, durable_hash, observed_seq, observed_hash, locator, byte_offset = anchor
-                hashes = {item["seq"]: item["hash"] for item in records}
-                if durable_seq > actual_seq or hashes.get(durable_seq, GENESIS_HASH) != durable_hash:
-                    issues.append({"code": "durable_anchor_divergence", "path": str(instance_dir), "detail": "durable head is not in chain"})
-                if locator is None or byte_offset is None or (durable_seq > 0 and not locator):
-                    issues.append({
-                        "code": "locator_absent",
-                        "path": str(instance_dir),
-                        "detail": "durable head has no usable JSONL locator",
-                    })
-                elif not _scanned_locator_matches(
-                    vault_root,
-                    instance_dir.name,
-                    records,
-                    durable_seq,
-                    durable_hash,
-                    locator,
-                    byte_offset,
-                ):
-                    issues.append({
-                        "code": "locator_divergence",
-                        "path": str(instance_dir),
-                        "detail": "durable locator differs from the verified JSONL record",
-                    })
-                if (observed_seq, observed_hash) != (actual_seq, actual_hash):
-                    code = "anchor_lag" if observed_seq < actual_seq else "truncated_tail"
-                    issues.append({"code": code, "path": str(instance_dir), "detail": "observed head differs from actual tail"})
+                issues.extend(_anchor_issues(vault_root, instance_dir, records, anchor))
             terminals = {str(item.get("causation_id")) for item in records if item.get("phase") in {"committed", "aborted"}}
             terminal_phases: dict[str, set[str]] = {}
             for item in records:
@@ -985,6 +1051,11 @@ def verify_chain(vault_root: Path) -> dict[str, Any]:
                     issues.append({"code": "unresolved_intent", "path": str(instance_dir), "detail": str(item.get("event_id"))})
             instances[instance_dir.name] = {"tail_seq": actual_seq, "tail_hash": actual_hash, "issues": issues}
             all_issues.extend(issues)
+    if active_anchor is not None and not active_seen:
+        instance_id, instance_dir, anchor = active_anchor
+        issues = _anchor_issues(vault_root, instance_dir, [], anchor)
+        instances[instance_id] = {"tail_seq": 0, "tail_hash": GENESIS_HASH, "issues": issues}
+        all_issues.extend(issues)
     return {"valid": not all_issues, "issues": all_issues, "instances": instances}
 
 

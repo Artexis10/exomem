@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -875,5 +876,135 @@ def test_receipt_event_ids_must_be_opaque(
     ],
 )
 def test_lifecycle_refs_and_causation_ids_must_be_opaque(vault: Path, payload: dict[str, object]) -> None:
+    with pytest.raises(receipts.ReceiptError):
+        receipts.append_event(vault, event_type="deletion", payload=payload)
+
+
+def test_missing_events_tree_diverges_from_a_non_genesis_sidecar(vault: Path) -> None:
+    receipts.append_event(vault, event_type="deletion", payload=_lifecycle_payload(), critical=True)
+    events_root = vault / "Knowledge Base" / "_Governance" / "events"
+    shutil.rmtree(events_root)
+
+    report = receipts.verify_chain(vault)
+
+    assert any(issue["code"] == "durable_anchor_divergence" for issue in report["issues"])
+    assert audit.audit(vault, categories=["governance_receipts"]).findings
+    with pytest.raises(receipts.ReceiptError, match="durable"):
+        receipts.append_event(vault, event_type="disclosure", payload={"outcomes": []})
+
+
+def test_genesis_sidecar_without_events_is_valid(vault: Path) -> None:
+    conn = store.open_connection(vault)
+    try:
+        receipts._instance_id(conn)
+    finally:
+        conn.close()
+
+    assert receipts.verify_chain(vault)["valid"] is True
+
+
+def test_invalid_active_instance_id_without_events_is_reported(vault: Path) -> None:
+    conn = store.open_connection(vault)
+    try:
+        receipts._instance_id(conn)
+        conn.execute("UPDATE receipt_instance SET instance_id='invalid'")
+        conn.commit()
+    finally:
+        conn.close()
+
+    report = receipts.verify_chain(vault)
+
+    assert any(issue["code"] == "invalid_instance_id" for issue in report["issues"])
+
+
+def test_unreadable_sidecar_without_events_is_reported(vault: Path) -> None:
+    conn = store.open_connection(vault)
+    try:
+        conn.execute("DROP TABLE receipt_instance")
+        conn.commit()
+    finally:
+        conn.close()
+
+    report = receipts.verify_chain(vault)
+
+    assert any(issue["code"] == "sidecar_read_error" for issue in report["issues"])
+
+
+def test_verify_never_follows_a_historical_month_symlink(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    instance_id = "2" * 32
+    instance_dir = vault / "Knowledge Base" / "_Governance" / "events" / instance_id
+    instance_dir.mkdir(parents=True)
+    outside = tmp_path / "outside.jsonl"
+    outside.write_bytes(b"x" * (receipts.MAX_RECORD_BYTES + 1))
+    (instance_dir / "2026-01.jsonl").symlink_to(outside)
+    before = outside.read_bytes()
+    original_open = Path.open
+
+    def forbid_outside_open(path: Path, *args, **kwargs):
+        if path.resolve() == outside:
+            pytest.fail("verification followed outside monthly evidence")
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", forbid_outside_open)
+    report = receipts.verify_chain(vault)
+
+    assert any(issue["code"] == "evidence_path_escape" for issue in report["issues"])
+    assert original_open(outside, "rb").read() == before
+
+
+def test_append_never_follows_a_current_month_symlink(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    event = receipts.append_event(vault, event_type="disclosure", payload={"outcomes": []})
+    path = next(
+        (vault / "Knowledge Base" / "_Governance" / "events" / event["instance_id"]).glob("*.jsonl")
+    )
+    outside = tmp_path / "outside.jsonl"
+    path.replace(outside)
+    path.symlink_to(outside)
+    before = outside.read_bytes()
+    original_open = Path.open
+
+    def forbid_outside_open(candidate: Path, *args, **kwargs):
+        if candidate.resolve() == outside:
+            pytest.fail("append followed outside monthly evidence")
+        return original_open(candidate, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", forbid_outside_open)
+    with pytest.raises(receipts.ReceiptError, match="evidence path"):
+        receipts.append_event(vault, event_type="disclosure", payload={"outcomes": []})
+
+    assert original_open(outside, "rb").read() == before
+
+
+def test_lifecycle_schema_accepts_opaque_artifact_refs(vault: Path) -> None:
+    artifact = "e" * 64
+    second = "f" * 64
+    payload = {
+        **_lifecycle_payload(),
+        "affected_refs": [f"sha256:{artifact}", _MEMORY_REF, f"sha256:{second}"],
+        "content_hashes": [artifact, "b" * 64, second],
+    }
+
+    record = receipts.append_event(vault, event_type="deletion", payload=payload)
+
+    assert record["affected_refs"] == payload["affected_refs"]
+
+
+@pytest.mark.parametrize(
+    "affected_ref,content_hash",
+    [
+        (f"sha256:{'e' * 64}", "f" * 64),
+        (f"sha256:{'E' * 64}", "e" * 64),
+        ("sha256:not-a-digest", "e" * 64),
+    ],
+)
+def test_lifecycle_artifact_refs_require_the_parallel_digest(
+    vault: Path, affected_ref: str, content_hash: str
+) -> None:
+    payload = {**_lifecycle_payload(), "affected_refs": [affected_ref], "content_hashes": [content_hash]}
+
     with pytest.raises(receipts.ReceiptError):
         receipts.append_event(vault, event_type="deletion", payload=payload)
