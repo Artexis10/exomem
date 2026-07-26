@@ -23,6 +23,8 @@ def main() -> int:
     parser.add_argument("--platform", choices=(*hosted_plugins.PLATFORMS, "all"))
     parser.add_argument("--evidence", type=Path)
     parser.add_argument("--reason")
+    parser.add_argument("--operator-key-id")
+    parser.add_argument("--operator-secret")
     args = parser.parse_args()
     try:
         if args.command == "render":
@@ -48,7 +50,13 @@ def main() -> int:
         elif args.command == "promote":
             if args.platform not in hosted_plugins.PLATFORMS or not args.evidence:
                 parser.error("promote requires --platform and --evidence")
-            hosted_plugins.promote(REPO_ROOT, args.platform, json.loads(args.evidence.read_text(encoding="utf-8")))
+            hosted_plugins.promote(
+                REPO_ROOT,
+                args.platform,
+                json.loads(args.evidence.read_text(encoding="utf-8")),
+                trusted_key_id=args.operator_key_id,
+                trusted_secret=args.operator_secret,
+            )
         else:
             if args.platform not in hosted_plugins.PLATFORMS or not args.reason:
                 parser.error("demote requires --platform and --reason")

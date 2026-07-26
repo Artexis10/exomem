@@ -409,6 +409,7 @@ def candidate_files(
     root = _repo_root(repo_root)
     definition = load_definition(root)
     skill_dependencies(root)
+    validate_hosted_public_inputs(root)
     if platform not in (*PLATFORMS, "all"):
         raise ValueError("unsupported platform")
     selected = PLATFORMS if platform == "all" else (platform,)
@@ -558,6 +559,7 @@ def check(
     platform: str = "claude",
 ) -> None:
     root = _repo_root(repo_root)
+    validate_hosted_public_inputs(root)
     check_compatibility_descriptor(root)
     if platform not in (*PLATFORMS, "all"):
         raise ValueError("unsupported platform")
@@ -614,6 +616,7 @@ def archive(
     platform: str = "claude",
 ) -> Path:
     root = _repo_root(repo_root)
+    validate_hosted_public_inputs(root)
     check(root, openai_app_id=openai_app_id, platform=platform)
     output_root = output or root / "dist" / "hosted"
     output_root.mkdir(parents=True, exist_ok=True)
@@ -637,6 +640,10 @@ def archive(
 def promotion_record(repo_root: Path | None, platform: str) -> Path:
     if platform not in PLATFORMS:
         raise ValueError("unsupported platform")
+    if "operator_key_id" in evidence and (
+        not trusted_key_id or not trusted_secret or evidence["operator_key_id"] != trusted_key_id
+    ):
+        raise ValueError("promotion requires an operator-trusted signing key")
     return _repo_root(repo_root) / PLUGIN_ROOT / "promotion" / f"{platform}.json"
 
 
@@ -668,14 +675,26 @@ def promote(
     }):
         raise ValueError("live promotion requires real content-bearing client evidence")
     root = _repo_root(repo_root)
+    validate_hosted_public_inputs(root)
     compatibility = compatibility_manifest(root)
     try:
         lock = json.loads((root / PLUGIN_ROOT / "generated" / f"{platform}.lock.json").read_text(encoding="utf-8"))
+        archive_path = root / "dist" / "hosted" / f"{platform}.zip"
         archive_lock = json.loads((root / "dist" / "hosted" / f"{platform}.zip.lock.json").read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise ValueError("promotion requires a committed generated package and archive lock") from exc
     if evidence["schema_version"] != 1 or evidence["platform"] != platform:
         raise ValueError("promotion evidence has an invalid version or platform")
+    if not all(isinstance(evidence[key], str) and evidence[key].strip() for key in (
+        "client_version", "clean_client_identity", "timestamp", "paired_run_id", "exomem_identity",
+        "tenant", "entitlement", "provisioning_operation", "cell",
+    )) or evidence["cell_count"] != 1 or evidence["volume_count"] != 1:
+        raise ValueError("promotion evidence has invalid identity or expected resource counts")
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z", evidence["timestamp"]):
+        raise ValueError("promotion evidence timestamp must be canonical UTC")
+    check(root, platform=platform)
+    if _files_digest(root / PLUGIN_ROOT / "generated" / platform) != lock["artifact_sha256"] or _sha256(archive_path.read_bytes()) != archive_lock["archive_sha256"]:
+        raise ValueError("promotion candidate bytes are stale")
     if evidence["endpoint"] != compatibility["endpoint"] or any(
         evidence[key] != compatibility[key]
         for key in ("compatibility_sha256", "schema_contract_sha256")

@@ -19,3 +19,12 @@ def test_pending_records_are_not_distributed() -> None:
     distribution = hosted_plugins.distribution_manifest(REPO_ROOT)
 
     assert distribution == {"live_platforms": [], "cross_client_ready": False}
+
+
+def test_promotion_never_accepts_a_trust_key_from_evidence() -> None:
+    with pytest.raises(ValueError, match="operator-trusted signing key"):
+        hosted_plugins.promote(
+            REPO_ROOT,
+            "claude",
+            {"operator_key_id": "evidence-key", "operator_signature": "0" * 64},
+        )

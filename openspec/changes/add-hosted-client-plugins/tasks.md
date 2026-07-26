@@ -8,7 +8,7 @@
 ## 2. Author The Hosted-Safe Skill Set
 
 - [x] 2.1 Add failing tests that extract callable references and require each skill's declared/observed dependencies to be a subset of the exact alpha profile, with explicit failures for broad edit/replace, transfer, media, adoption, maintenance, schema, coordination, and Tier-2 references.
-- [ ] 2.2 Add failing behavior fixtures for quiet project-memory retrieval, useful-note citation, durable decision/failure/pattern/research capture without an explicit save prompt, fresh-chat continuation, redundant/trivial-write avoidance, and no transcript dumps.
+- [x] 2.2 Add failing behavior fixtures for quiet project-memory retrieval, useful-note citation, durable decision/failure/pattern/research capture without an explicit save prompt, fresh-chat continuation, redundant/trivial-write avoidance, and no transcript dumps.
 - [x] 2.3 Hand-author the generic Hosted core, capture, continue, reflect, research, and review skills under `plugins/hosted/skills/`, keeping every advertised workflow complete on the alpha profile.
 - [ ] 2.4 Add bootstrap/profile parity and no-private-leak gates covering all Hosted skill prose, references, examples, generated copies, metadata, and assets.
 
