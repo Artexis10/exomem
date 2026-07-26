@@ -1150,10 +1150,9 @@ def op_search(
 
 
 def _refuse_policy_tree_read(
-    vault_root: Path,
     candidate: object,
     *,
-    resolve_target: bool = False,
+    missing_path: object | None = None,
 ) -> None:
     """Refuse a direct READ of the policy tree, as if the file were absent.
 
@@ -1171,23 +1170,8 @@ def _refuse_policy_tree_read(
     """
     from .governance.policy import is_governance_path
 
-    rel = str(candidate or "")
-    refused = is_governance_path(rel)
-    if not refused and resolve_target:
-        probe_rel = rel.strip().replace("\\", "/").lstrip("/")
-        if "." not in probe_rel.rsplit("/", 1)[-1]:
-            probe_rel += ".md"
-        try:
-            _candidate, _lexical_rel, resolved_rel = resolve_under_vault(
-                vault_root,
-                probe_rel,
-                return_resolved_rel=True,
-            )
-        except VaultPathError:
-            pass  # The direct-read backend owns the precise path error.
-        else:
-            refused = is_governance_path(resolved_rel)
-    if refused:
+    if is_governance_path(str(candidate or "")):
+        rel = str(candidate if missing_path is None else missing_path)
         raise ValueError(f"NOT_FOUND: file does not exist: {rel}")
 
 
@@ -1212,11 +1196,14 @@ def op_fetch(
         {"id", "title", "text", "url", "metadata"}. `text` is the markdown body;
         it ends with `[truncated]` when the body exceeded the effective cap.
     """
-    _refuse_policy_tree_read(vault_root, id)
     id = _resolve_memory_identifier(vault_root, id)
-    _refuse_policy_tree_read(vault_root, id, resolve_target=True)
     try:
-        page = get_page_module.get_page(vault_root, path=id)
+        prepared = get_page_module.prepare_page_read(vault_root, path=id)
+        _refuse_policy_tree_read(
+            prepared.resolved_relative,
+            missing_path=prepared.missing_path,
+        )
+        page = get_page_module.get_page(vault_root, path=id, _prepared=prepared)
     except get_page_module.GetError as e:
         raise ValueError(f"{e.code}: {e.reason}") from e
     # Release gate. `fetch` is the deep-research read step between metadata-only
@@ -1928,20 +1915,28 @@ def op_get(
         INVALID_PATH (path escapes vault root or empty);
         NOT_FOUND (no such file); UNREADABLE (parse failure).
     """
-    _refuse_policy_tree_read(vault_root, path)
     path = _resolve_memory_identifier(vault_root, path)
-    _refuse_policy_tree_read(vault_root, path, resolve_target=True)
+    try:
+        prepared = get_page_module.prepare_page_read(vault_root, path=path)
+    except get_page_module.GetError as e:
+        raise ValueError(f"{e.code}: {e.reason}") from e
+    _refuse_policy_tree_read(
+        prepared.resolved_relative,
+        missing_path=prepared.missing_path,
+    )
     if frontmatter_only:
         try:
             fm_result = get_frontmatter_module.get_frontmatter(
-                vault_root, path=path
+                vault_root, path=path, _prepared=prepared
             )
         except get_frontmatter_module.GetFrontmatterError as e:
             raise ValueError(f"{e.code}: {e.reason}") from e
         out = fm_result.as_dict()
     else:
         try:
-            result = get_page_module.get_page(vault_root, path=path)
+            result = get_page_module.get_page(
+                vault_root, path=path, _prepared=prepared
+            )
         except get_page_module.GetError as e:
             raise ValueError(f"{e.code}: {e.reason}") from e
         out = result.as_dict(include_raw=include_raw)

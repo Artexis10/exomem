@@ -3236,6 +3236,16 @@ def vault_casefolds(vault_root: Path) -> bool:
     return folds
 
 
+@dataclass(frozen=True)
+class VaultPathResolution:
+    """Lexical and resolved forms from one vault-containment resolution."""
+
+    candidate: Path
+    relative: str
+    resolved: Path
+    resolved_relative: str
+
+
 def resolve_under_vault(
     vault_root: Path,
     path: str,
@@ -3244,15 +3254,15 @@ def resolve_under_vault(
     must_be_file: bool = False,
     must_be_dir: bool = False,
     must_be_under_kb: bool = False,
-    return_resolved_rel: bool = False,
-) -> tuple[Path, str] | tuple[Path, str, str]:
+    return_details: bool = False,
+) -> tuple[Path, str] | VaultPathResolution:
     """Resolve a vault-relative path; guard against escape; normalize.
 
     Returns `(absolute_path, vault_relative_posix)`. With
-    `return_resolved_rel=True`, also returns the resolved target's
-    vault-relative path, reusing the containment resolution without another
-    syscall. The ordinary relative form remains lexical across symlinks so
-    downstream no-follow guards still see the path the caller supplied.
+    `return_details=True`, returns both lexical and resolved forms from the
+    same containment resolution. The ordinary relative form remains lexical
+    across symlinks so downstream no-follow guards still see the path the
+    caller supplied.
 
     `must_be_under_kb` additionally refuses any target that resolves OUTSIDE
     `Knowledge Base/` (checked on the resolved path, so `Knowledge Base/../x`
@@ -3349,8 +3359,13 @@ def resolve_under_vault(
         resolved_rel = canonical
         if is_casing_only_rewrite(canonical, rel):
             rel = canonical
-    if return_resolved_rel:
-        return candidate, rel, resolved_rel
+    if return_details:
+        return VaultPathResolution(
+            candidate=candidate,
+            relative=rel,
+            resolved=resolved,
+            resolved_relative=resolved_rel,
+        )
     return candidate, rel
 
 

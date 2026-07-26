@@ -2472,6 +2472,124 @@ def test_direct_reads_refuse_symlinked_policy_markdown_as_missing(
     assert "policy-tree-secret" not in str(refused.value)
 
 
+def _symlink_policy_markdown(vault: Path, rel: str) -> Path:
+    target = vault / "Knowledge Base" / "_Governance" / "private.md"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(
+        "---\ntype: source\nclassification: governance\n---\npolicy-tree-secret\n",
+        encoding="utf-8",
+    )
+    link = vault / rel
+    link.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        link.symlink_to(target)
+    except OSError:
+        pytest.skip("symlinks unavailable")
+    return link
+
+
+@pytest.mark.parametrize("leaf", ["get", "fetch"])
+@pytest.mark.parametrize(
+    "alias",
+    [
+        "Notes/review-link",
+        "exomem://vault/Notes/review-link",
+        "exomem://source/Notes/review-link",
+    ],
+    ids=["kb-shortcut", "vault-ref", "source-ref"],
+)
+def test_direct_reads_refuse_kb_shortcuts_to_policy_symlinks(
+    vault: Path, leaf: str, alias: str
+) -> None:
+    link = _symlink_policy_markdown(
+        vault, "Knowledge Base/Notes/review-link.md"
+    )
+    call = (
+        (lambda: commands.op_get(vault, path=alias))
+        if leaf == "get"
+        else (lambda: commands.op_fetch(vault, id=alias))
+    )
+
+    with pytest.raises(ValueError) as refused:
+        call()
+    link.unlink()
+    with pytest.raises(ValueError) as missing:
+        call()
+
+    assert str(refused.value) == str(missing.value)
+    assert "_Governance" not in str(refused.value)
+
+
+@pytest.mark.parametrize("leaf", ["get", "fetch"])
+def test_extensionless_policy_refusal_matches_missing_file(
+    vault: Path, leaf: str
+) -> None:
+    rel = "Knowledge Base/Notes/extensionless-link"
+    link = _symlink_policy_markdown(vault, f"{rel}.md")
+    call = (
+        (lambda: commands.op_get(vault, path=rel))
+        if leaf == "get"
+        else (lambda: commands.op_fetch(vault, id=rel))
+    )
+
+    with pytest.raises(ValueError) as refused:
+        call()
+    link.unlink()
+    with pytest.raises(ValueError) as missing:
+        call()
+
+    assert str(refused.value) == str(missing.value)
+    assert str(refused.value) == f"NOT_FOUND: file does not exist: {rel}.md"
+
+
+@pytest.mark.parametrize("leaf", ["get", "fetch", "frontmatter"])
+def test_direct_read_uses_the_target_it_classified_when_symlink_is_swapped(
+    vault: Path, leaf: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ordinary = vault / "Knowledge Base" / "Notes" / "ordinary-target.md"
+    ordinary.parent.mkdir(parents=True, exist_ok=True)
+    ordinary.write_text(
+        "---\ntype: source\nclassification: ordinary\n---\nordinary-body\n",
+        encoding="utf-8",
+    )
+    governance = vault / "Knowledge Base" / "_Governance" / "private.md"
+    governance.parent.mkdir(parents=True, exist_ok=True)
+    governance.write_text(
+        "---\ntype: source\nclassification: governance\n---\npolicy-tree-secret\n",
+        encoding="utf-8",
+    )
+    rel = "Knowledge Base/Notes/swap-link.md"
+    link = vault / rel
+    try:
+        link.symlink_to(ordinary)
+    except OSError:
+        pytest.skip("symlinks unavailable")
+
+    original_resolve = Path.resolve
+    swapped = False
+
+    def _resolve_then_swap(self: Path, *args, **kwargs) -> Path:
+        nonlocal swapped
+        resolved = original_resolve(self, *args, **kwargs)
+        if self == link and not swapped:
+            link.unlink()
+            link.symlink_to(governance)
+            swapped = True
+        return resolved
+
+    monkeypatch.setattr(Path, "resolve", _resolve_then_swap)
+
+    if leaf == "fetch":
+        out = commands.op_fetch(vault, id=rel)
+        assert "ordinary-body" in out["text"]
+        assert "policy-tree-secret" not in out["text"]
+    else:
+        out = commands.op_get(vault, path=rel, frontmatter_only=leaf == "frontmatter")
+        assert out["frontmatter"]["classification"] == "ordinary"
+        assert "policy-tree-secret" not in json.dumps(out, default=str)
+    assert swapped is True
+
+
 # --------------------------------------------------------------------------
 # Non-blocking 1 — a symlink into the policy tree bypasses the overview guard
 # --------------------------------------------------------------------------
