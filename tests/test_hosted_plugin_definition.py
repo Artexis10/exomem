@@ -51,6 +51,7 @@ def test_compatibility_manifest_uses_the_exact_ordered_alpha_contract() -> None:
     manifest = hosted_plugins.compatibility_manifest(REPO_ROOT)
 
     assert manifest["profile"] == "hosted-alpha-agent-v1"
+    assert manifest["source_release"] == manifest["agent_contract"]["exomem_release"]
     assert manifest["endpoint"] == "https://substratesystems.io/api/exomem/mcp/v1"
     assert tuple(manifest["commands"]) == (
         "bootstrap",

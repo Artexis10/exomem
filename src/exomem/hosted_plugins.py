@@ -486,6 +486,10 @@ def compatibility_manifest(repo_root: Path | None = None) -> dict[str, Any]:
     definition = load_definition(root)
     dependencies = skill_dependencies(root)
     contract = hosted_gateway.build_agent_gateway_contract(profile=definition.profile)
+    if definition.source_release != contract["exomem_release"]:
+        raise ValueError(
+            "Hosted definition source release must match the agent contract release"
+        )
     oauth_overlay = oauth_discovery_overlay(contract)
     raw_definition = json.loads(
         (root / PLUGIN_ROOT / "definition.json").read_text(encoding="utf-8")
