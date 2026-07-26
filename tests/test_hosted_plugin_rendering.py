@@ -86,6 +86,20 @@ def test_check_recomputes_zip_from_committed_package(tmp_path: Path) -> None:
         hosted_plugins.check(root, platform="claude")
 
 
+def test_stale_compatibility_reports_bounded_difference_paths(tmp_path: Path) -> None:
+    root = copy_hosted_tree(tmp_path / "repo")
+    path = root / "plugins/hosted/generated/compatibility.json"
+    compatibility = json.loads(path.read_text(encoding="utf-8"))
+    compatibility["agent_contract"]["commands"][0]["name"] = "changed"
+    path.write_text(json.dumps(compatibility), encoding="utf-8")
+
+    with pytest.raises(
+        ValueError,
+        match=r"agent_contract\.commands\[0\]\.name",
+    ):
+        hosted_plugins.check_compatibility_descriptor(root)
+
+
 def test_claude_archive_is_deterministic_and_locked(tmp_path: Path) -> None:
     first = hosted_plugins.archive(REPO_ROOT, tmp_path / "first", platform="claude")
     second = hosted_plugins.archive(REPO_ROOT, tmp_path / "second", platform="claude")

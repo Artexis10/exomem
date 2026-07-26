@@ -120,6 +120,43 @@ def _sha256(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
 
 
+def _json_difference_paths(left: Any, right: Any, *, limit: int = 12) -> tuple[str, ...]:
+    """Return bounded, value-free paths that explain a JSON contract mismatch."""
+
+    differences: list[str] = []
+
+    def visit(expected: Any, actual: Any, path: str) -> None:
+        if len(differences) >= limit or expected == actual:
+            return
+        if type(expected) is not type(actual):
+            differences.append(path)
+            return
+        if isinstance(expected, dict):
+            for key in sorted(set(expected) | set(actual)):
+                nested_path = f"{path}.{key}" if path else str(key)
+                if key not in expected or key not in actual:
+                    differences.append(nested_path)
+                else:
+                    visit(expected[key], actual[key], nested_path)
+                if len(differences) >= limit:
+                    return
+            return
+        if isinstance(expected, list):
+            for index in range(max(len(expected), len(actual))):
+                nested_path = f"{path}[{index}]"
+                if index >= len(expected) or index >= len(actual):
+                    differences.append(nested_path)
+                else:
+                    visit(expected[index], actual[index], nested_path)
+                if len(differences) >= limit:
+                    return
+            return
+        differences.append(path or "root")
+
+    visit(left, right, "")
+    return tuple(differences)
+
+
 def _repo_root(repo_root: Path | None = None) -> Path:
     return (repo_root or Path(__file__).resolve().parents[2]).resolve()
 
@@ -481,8 +518,10 @@ def check_compatibility_descriptor(repo_root: Path | None = None) -> None:
         committed = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise ValueError("Hosted compatibility descriptor must be valid JSON") from exc
-    if committed != compatibility_manifest(root):
-        raise ValueError("Hosted compatibility descriptor is stale")
+    actual = compatibility_manifest(root)
+    if committed != actual:
+        paths = ", ".join(_json_difference_paths(committed, actual))
+        raise ValueError(f"Hosted compatibility descriptor is stale: {paths}")
 
 
 def _write_json(path: Path, value: Any) -> None:
