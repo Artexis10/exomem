@@ -599,8 +599,10 @@ def regenerate_claude(repo_root: Path | None = None) -> Path:
         "license": definition.license,
         "keywords": ["memory", "knowledge", "governance"],
     })
-    _write_json(generated / "claude.lock.json", _package_lock(root, "claude", package))
-    _write_json(generated / "compatibility.json", compatibility_manifest(root))
+    for relative, contents in candidate_files(root, platform="claude").items():
+        target = generated / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(contents)
     return generated
 
 
