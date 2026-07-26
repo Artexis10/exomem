@@ -657,6 +657,7 @@ def test_native_syncthing_delivery_accepts_documented_file_response(tmp_path: Pa
             if parsed.path == "/rest/db/file":
                 stat = intent_path.stat()
                 seconds, nanoseconds = divmod(stat.st_mtime_ns, 1_000_000_000)
+                nanoseconds = (nanoseconds // 100) * 100 + 37
                 modified = f"{time.strftime('%Y-%m-%dT%H:%M:%S', time.gmtime(seconds))}.{nanoseconds:09d}Z"
                 entry = {
                     "deleted": False,

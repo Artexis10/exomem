@@ -1037,7 +1037,10 @@ function Get-NativeAdapter {
                 try { $modifiedTime = [DateTimeOffset]::Parse($modifiedText, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind) } catch { return @{ state = 'unknown'; generation = $null; marker_version = $null } }
                 $fractionMatch = [regex]::Match($modifiedText, '\.(?<fraction>[0-9]+)(?:Z|[+-][0-9]{2}:[0-9]{2})$')
                 $modifiedNs = if ($fractionMatch.Success) { [int64]($fractionMatch.Groups['fraction'].Value.PadRight(9, '0').Substring(0, 9)) } else { 0 }
-                if ([int64]$modifiedTime.ToUnixTimeSeconds() -ne [int64]$markerVersion.modified_s -or $modifiedNs -ne [int64]$markerVersion.modified_ns -or [int64]$file.local.size -ne [int64]$markerVersion.size) { return @{ state = 'pending'; generation = $null; marker_version = $null } }
+                # PowerShell DateTime ticks resolve to 100 ns even when Syncthing
+                # reports a Linux filesystem's full nanosecond timestamp.
+                $modifiedNsAtPowerShellPrecision = $modifiedNs - ($modifiedNs % 100)
+                if ([int64]$modifiedTime.ToUnixTimeSeconds() -ne [int64]$markerVersion.modified_s -or $modifiedNsAtPowerShellPrecision -ne [int64]$markerVersion.modified_ns -or [int64]$file.local.size -ne [int64]$markerVersion.size) { return @{ state = 'pending'; generation = $null; marker_version = $null } }
                 $globalProperties = if ($null -ne $file.global) { @($file.global.PSObject.Properties.Name) } else { @() }
                 if ('version' -notin $globalProperties) { return @{ state = 'pending'; generation = $null; marker_version = $null } }
                 $localVector = (@($file.local.version) | ForEach-Object { [string]$_ }) -join ','
