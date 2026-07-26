@@ -3244,13 +3244,15 @@ def resolve_under_vault(
     must_be_file: bool = False,
     must_be_dir: bool = False,
     must_be_under_kb: bool = False,
-) -> tuple[Path, str]:
+    return_resolved_rel: bool = False,
+) -> tuple[Path, str] | tuple[Path, str, str]:
     """Resolve a vault-relative path; guard against escape; normalize.
 
-    Returns `(absolute_path, vault_relative_posix)`. The relative form is
-    always forward-slashed, never starts with `/`. The leading
-    `Knowledge Base/` is preserved as-is (we don't auto-strip it like
-    `get_page` does — Tier 2 ops take explicit paths).
+    Returns `(absolute_path, vault_relative_posix)`. With
+    `return_resolved_rel=True`, also returns the resolved target's
+    vault-relative path, reusing the containment resolution without another
+    syscall. The ordinary relative form remains lexical across symlinks so
+    downstream no-follow guards still see the path the caller supplied.
 
     `must_be_under_kb` additionally refuses any target that resolves OUTSIDE
     `Knowledge Base/` (checked on the resolved path, so `Knowledge Base/../x`
@@ -3341,10 +3343,14 @@ def resolve_under_vault(
         canonical = resolved.relative_to(vault_resolved).as_posix()
     except ValueError:
         canonical = ""
+    resolved_rel = rel
     if canonical and canonical != ".":
         canonical = _canonical_kb_segment(canonical)
+        resolved_rel = canonical
         if is_casing_only_rewrite(canonical, rel):
             rel = canonical
+    if return_resolved_rel:
+        return candidate, rel, resolved_rel
     return candidate, rel
 
 

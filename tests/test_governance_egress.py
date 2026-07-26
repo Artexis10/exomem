@@ -2428,6 +2428,50 @@ def test_ordinary_reads_are_unaffected(vault: Path) -> None:
     assert page["path"] == OPEN_PATH
 
 
+@pytest.mark.parametrize("leaf", ["get", "fetch"])
+@pytest.mark.parametrize("governed", [False, True], ids=["stray-tree", "governed"])
+def test_direct_reads_refuse_symlinked_policy_markdown_as_missing(
+    vault: Path, leaf: str, governed: bool
+) -> None:
+    """Containment must classify the real target without disclosing its path."""
+    target = vault / "Knowledge Base" / "_Governance" / "private.md"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(
+        "---\ntype: source\n---\npolicy-tree-secret\n",
+        encoding="utf-8",
+    )
+    if governed:
+        write_scope(vault)
+        write_rule(vault, ceiling=egress.LEVEL_NONE)
+
+    rel = "Knowledge Base/Notes/ordinary-link.md"
+    link = vault / rel
+    link.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        link.symlink_to(target)
+    except OSError:
+        pytest.skip("symlinks unavailable")
+
+    call = (
+        (lambda: commands.op_get(vault, path=rel))
+        if leaf == "get"
+        else (lambda: commands.op_fetch(vault, id=rel))
+    )
+    _reset_caches()
+    with pytest.raises(ValueError) as refused:
+        call()
+
+    link.unlink()
+    _reset_caches()
+    with pytest.raises(ValueError) as missing:
+        call()
+
+    assert str(refused.value) == str(missing.value)
+    assert str(refused.value) == f"NOT_FOUND: file does not exist: {rel}"
+    assert "_Governance" not in str(refused.value)
+    assert "policy-tree-secret" not in str(refused.value)
+
+
 # --------------------------------------------------------------------------
 # Non-blocking 1 — a symlink into the policy tree bypasses the overview guard
 # --------------------------------------------------------------------------
