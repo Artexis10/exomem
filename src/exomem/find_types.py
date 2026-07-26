@@ -204,6 +204,12 @@ class Hit:
     matched_units_truncated: int = 0
     result_type: str | None = None
     mixed_units_truncated: int = 0
+    # Release-plane annotation, attached by `governance.egress.annotate_hits`
+    # strictly AFTER `find()` returns (design D2). It is per-principal, so it
+    # must never be present on a candidate stored in the shared `_FIND_CACHE`
+    # — `find()` deep-copies into the cache before annotation ever runs, and
+    # `test_find_hot_cache_stays_principal_free` pins that.
+    decision: Any = None
 
     def as_dict(self) -> dict:
         out: dict = {
@@ -353,6 +359,8 @@ class SemanticUnitHit:
     vector_rank: int | None = None
     vector_score: float | None = None
     mixed_units_truncated: int = 0
+    # See `Hit.decision` — same per-principal, post-`find()` contract.
+    decision: Any = None
 
     def as_dict(self) -> dict[str, Any]:
         out: dict[str, Any] = {

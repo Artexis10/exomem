@@ -177,3 +177,74 @@ def test_memo_invalidates_on_mtime_change(vault: Path) -> None:
     page_path.write_text("---\ntype: source\n---\nbody\n", encoding="utf-8")
     reparsed = _parse(vault, "Knowledge Base/Sources/x.md")
     assert "01ARZ3NDEKTSV4RRFFQ69G5FB2" in membership.evaluate(reparsed, pol)
+
+
+# --------------------------------------------------------------------------
+# Kernel residual — an unreadable page must not resolve to "member of nothing"
+# --------------------------------------------------------------------------
+
+
+def test_unstattable_page_refuses_to_resolve_membership(vault: Path) -> None:
+    """`except OSError` fell back to `page.mtime`, which is fail-OPEN.
+
+    The stat is the cache-validity probe AND the only evidence that the page
+    on disk is the page that was parsed. When it fails, the honest answer is
+    "unresolvable" — and it must not be spelled `frozenset()`, because an
+    empty scope set means "member of no scope", which `decisions.decide`
+    resolves to DISCLOSURE_MAX. Silently degrading to a stale mtime turned an
+    unreadable file into full disclosure.
+    """
+    import pytest
+
+    _write_scope(
+        vault,
+        "patterns",
+        'governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FAV\npaths: ["Knowledge Base/Notes/Patterns/**"]\n',
+    )
+    pol = policy.load(vault)
+    page_path = _write_page(vault, "Knowledge Base/Notes/Patterns/p.md", "type: pattern")
+    parsed = _parse(vault, "Knowledge Base/Notes/Patterns/p.md")
+    membership.clear_memo()
+
+    page_path.unlink()
+    with pytest.raises(membership.MembershipUnresolved):
+        membership.evaluate(parsed, pol)
+
+
+def test_unresolvable_membership_makes_the_decision_fail_closed(
+    vault: Path, monkeypatch
+) -> None:
+    """The caller contract: `_decide_path` must translate "unresolvable" into
+    `None` — its established fail-closed signal — not into a level."""
+    from exomem.governance import egress
+
+    _write_scope(
+        vault,
+        "patterns",
+        'governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FAV\npaths: ["Knowledge Base/Notes/Patterns/**"]\n',
+    )
+    rules = vault / "Knowledge Base" / "_Governance" / "rules"
+    rules.mkdir(parents=True, exist_ok=True)
+    (rules / "r.yaml").write_text(
+        "governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FB0\n"
+        'scope_ids: ["01ARZ3NDEKTSV4RRFFQ69G5FAV"]\naudience: external\nceiling: 6\n',
+        encoding="utf-8",
+    )
+    _write_page(vault, "Knowledge Base/Notes/Patterns/p.md", "type: pattern")
+    pol = policy.load(vault)
+    membership.clear_memo()
+    egress.clear_decision_memo()
+
+    def _boom(page, policy_arg):
+        raise membership.MembershipUnresolved("Knowledge Base/Notes/Patterns/p.md")
+
+    monkeypatch.setattr(egress.membership_module, "evaluate", _boom)
+    decision = egress._decide_path(
+        vault,
+        "Knowledge Base/Notes/Patterns/p.md",
+        policy=pol,
+        audience="external",
+        purpose=None,
+        grants_hash="",
+    )
+    assert decision is None

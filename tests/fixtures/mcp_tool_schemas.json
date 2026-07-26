@@ -593,6 +593,18 @@
           "default": false,
           "description": "Add bounded retrieval-plan and per-hit ranking evidence.",
           "type": "boolean"
+        },
+        "purpose": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional declared purpose for this request, e.g. \"audit\" or \"due-diligence\". Governance rules may widen or narrow what a given audience may see for a stated purpose; leaving it unset is deterministic, not a wildcard. Never affects ranking, and never enters the recall cache key."
         }
       },
       "type": "object"
@@ -2712,6 +2724,18 @@
           ],
           "default": null,
           "description": "Exact unit reference returned by unit-level recall. Page-only expansion flags are not accepted together with an exact unit read."
+        },
+        "purpose": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional declared purpose for this request, e.g. \"audit\" or \"due-diligence\". Governance rules may widen or narrow what a given audience may see for a stated purpose; leaving it unset is deterministic, not a wildcard. Never affects ranking, and never enters the recall cache key."
         }
       },
       "required": [

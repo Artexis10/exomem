@@ -1831,7 +1831,7 @@ def invoke_command(
 
         kwargs = normalize_edit_surface_arguments(kwargs)
 
-    return get_manager().invoke(
+    result = get_manager().invoke(
         command,
         injected,
         kwargs,
@@ -1842,6 +1842,16 @@ def invoke_command(
         implicit_idempotency_scope=implicit_idempotency_scope,
         mutation_request_id=mutation_request_id,
     )
+    # Terminal egress filter (design D1). THIS is the one dispatcher shared by
+    # MCP, REST, hosted, and CLI — `command_surface.bind_vault` covers MCP
+    # only, and the `EXOMEM_RETRIEVE_INJECT` hook deliberately reaches memory
+    # over REST-then-CLI, the two paths that skip it. Putting the scrubber and
+    # the withheld cross-check here removes that whole bypass class.
+    from .governance.egress import is_vault_root, postfilter
+
+    if injected and is_vault_root(injected[0]):
+        result = postfilter(command.name, result, injected[0])
+    return result
 
 
 def coordination_status(

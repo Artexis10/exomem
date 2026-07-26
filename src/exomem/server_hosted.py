@@ -738,6 +738,12 @@ def register_hosted_routes(
     lifecycle: HostedCellLifecycle,
     source_schema: Any,
     expose_tier2: bool = True,
+    # TEST-ONLY SEAM — AN INJECTED INVOKER BYPASSES THE TERMINAL EGRESS FILTER.
+    # `writer_lease.invoke_command` is where design D1 runs the credential
+    # scrubber and the withheld cross-check, so a substitute that does not call
+    # it serves results that never crossed the release boundary. Two call
+    # sites today, both in tests. Production must leave this `None`; anything
+    # passed here has to run `governance.egress.postfilter` itself.
     invoke_command_func: Callable[..., Any] | None = None,
     mutation_guard_factory: Callable[[Path], AbstractContextManager[None]] | None = None,
     preserve_stream_func: Callable[..., Any] | None = None,
@@ -953,7 +959,16 @@ def register_hosted_routes(
             )
 
             def invoke_admitted() -> Any:
-                with capabilities.active_surface(descriptor):
+                from .governance import principal as principal_module
+
+                # Canonical audience at the hosted-cell boundary (design D5).
+                # A cell is reached only through the gateway, so a missing
+                # principal scope fails closed rather than resolving to owner.
+                with capabilities.active_surface(
+                    descriptor
+                ), principal_module.request_scope(
+                    principal_module.resolve_hosted_principal(context.principal_scope)
+                ):
                     if commands_module.invocation_is_read_only(command, kwargs):
                         with lifecycle.admit_read():
                             return invoke(
@@ -1555,6 +1570,23 @@ def register_hosted_routes(
             requested_path = str(body["path"])
             if not requested_path.strip():
                 raise gateway.HostedGatewayError("INVALID_PATH", "download path is required")
+            # Release gate on the download TARGET, before the file is opened:
+            # a download hands over the complete bytes, so only full
+            # disclosure authorizes one. Refused as NOT_FOUND so a withheld
+            # artifact is indistinguishable from one that does not exist.
+            from .governance import egress as egress_module
+            from .governance import principal as principal_module
+
+            allowed = await run_in_threadpool(
+                egress_module.release_allows_download,
+                config.vault_root,
+                requested_path,
+                principal=principal_module.resolve_hosted_principal(
+                    context.principal_scope
+                ),
+            )
+            if not allowed:
+                raise VaultPathError("NOT_FOUND", "file does not exist")
             stream, size, filename = await run_in_threadpool(
                 _open_bounded_vault_file,
                 config.vault_root,

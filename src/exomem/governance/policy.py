@@ -32,6 +32,23 @@ import yaml
 from ..kbdir import kb_dirname
 
 GOVERNANCE_DIRNAME = "_Governance"
+
+
+def is_governance_path(rel_path: str) -> bool:
+    """True when `rel_path` IS the policy tree or lives inside it.
+
+    The policy tree is never vault content, for any audience including the
+    owner — the answer never depends on who is asking, so this is a structural
+    exclusion rather than a release decision. Callers use it to prune the tree
+    from a walk AND to refuse a scan whose root points at it: pruning alone
+    only ever removes it as a CHILD, and a directory is never a child of
+    itself, so a scoped probe straight at `_Governance` walked it happily.
+    """
+    clean = str(rel_path or "").replace("\\", "/").strip("/")
+    if not clean:
+        return False
+    folded = GOVERNANCE_DIRNAME.casefold()
+    return any(part.casefold() == folded for part in clean.split("/"))
 GOVERNANCE_VERSION = 1
 DISCLOSURE_MIN = 0
 DISCLOSURE_MAX = 6  # L0 (nothing) .. L6 (full disclosure)
@@ -453,6 +470,29 @@ def _parse_scope(data: dict[str, Any], rel: str) -> tuple[Scope | None, list[dic
         exclude_classes=_as_str_tuple(exclude.get("classes"), rel, "exclude.classes", findings),
         exclude_refs=_as_str_tuple(exclude.get("refs"), rel, "exclude.refs", findings),
     )
+    # Authoring foot-gun, reported rather than guessed at. A binary carries no
+    # frontmatter, so `tags`/`types`/`classes`/`projects` cannot select one —
+    # only `paths` and `refs` can. A scope built purely from frontmatter
+    # selectors therefore withholds the tagged `.md` while `board-call.mp4`
+    # beside it stays at full disclosure, which is a surprise in a control that
+    # fails closed everywhere else.
+    #
+    # A WARNING, not an error: the semantics are deliberately unchanged.
+    # Inferring membership for an item we cannot read would be guessing, and
+    # refusing the compile would break working policies. The author is the one
+    # who knows whether media is in scope, so tell them.
+    if not scope.paths and not scope.refs and (
+        scope.projects or scope.tags or scope.types or scope.classes
+    ):
+        findings.append(
+            _finding(
+                "SCOPE_CANNOT_SELECT_MEDIA",
+                rel,
+                "this scope cannot select non-markdown items; add a `paths` "
+                "selector to cover media",
+                severity="warning",
+            )
+        )
     return scope, findings
 
 

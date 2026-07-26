@@ -310,7 +310,16 @@ def register_rest_facade(
                 from .writer_lease import invoke_command
 
                 def invoke_bound() -> Any:
-                    with capabilities.active_surface(surface_descriptor):
+                    from .governance import principal as principal_module
+
+                    # Canonical audience at the REST boundary (design D5): a
+                    # `None` scope is the vault's own shared key (owner); a
+                    # CF-Access scope folds into the shared OAuth id space.
+                    with capabilities.active_surface(
+                        surface_descriptor
+                    ), principal_module.request_scope(
+                        principal_module.resolve_rest_principal(principal_scope)
+                    ):
                         return invoke_command(
                             _cmd,
                             *injected,

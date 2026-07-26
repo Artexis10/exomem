@@ -386,12 +386,20 @@ def bind_vault(
     new_sig = sig.replace(parameters=visible)
 
     def wrapper(**kwargs):
+        from .governance import principal as principal_module
+
         context = (
             capabilities.active_surface(surface_descriptor)
             if surface_descriptor is not None
             else nullcontext()
         )
-        with context:
+        # Resolve the canonical audience at the MCP boundary, beside the
+        # existing `mcp_retry_scope()` identity derivation (design D5). Bound
+        # for the whole invocation so every read leaf under it decides against
+        # the same principal; stdio resolves to `owner`.
+        with context, principal_module.request_scope(
+            principal_module.resolve_mcp_principal()
+        ):
             if command is None:
                 return leaf(*injected, **kwargs)
             from .commands import invocation_is_read_only
@@ -414,6 +422,20 @@ def bind_vault(
                     implicit_idempotency_scope=retry_scope,
                     **kwargs,
                 )
+                # MCP-layer second pass (design D1): defense in depth where
+                # the FastMCP context is live. `postfilter` is idempotent —
+                # an already-replaced credential matches nothing — so running
+                # it again after the dispatcher's pass costs a walk, not a
+                # second rewrite.
+                #
+                # Ordered BEFORE the success log on purpose: the timing the
+                # log reports should include the egress pass, and nothing
+                # should be recorded as successfully served until the result
+                # has actually cleared the boundary.
+                from .governance.egress import is_vault_root, postfilter
+
+                if injected and is_vault_root(injected[0]):
+                    result = postfilter(command.name, result, injected[0])
                 _log_tool_success(
                     tool=tool_name,
                     duration_ms=round((time.perf_counter() - t0) * 1000, 2),

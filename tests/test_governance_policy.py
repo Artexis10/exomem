@@ -248,3 +248,53 @@ def test_dir_of_only_conflicted_copies_is_blocked_not_empty(vault: Path) -> None
     assert pol.empty is False
     assert pol.blocked is True
     assert any(f["code"] == "conflicted_copy" for f in pol.findings)
+
+
+# --------------------------------------------------------------------------
+# DEFECT A — a scope that cannot select non-markdown items
+# --------------------------------------------------------------------------
+
+
+def test_scope_without_a_path_selector_warns_that_media_is_uncovered(
+    vault: Path,
+) -> None:
+    """A tag/type/class scope cannot cover a sidecar-less binary.
+
+    `board-call.mp4` beside a `tags: [confidential]` note comes back at
+    DISCLOSURE_MAX while the tagged `.md` is withheld, because a binary has no
+    frontmatter to match and no sidecar to borrow it from. The SEMANTICS are
+    deliberately unchanged — changing them would make an unreadable file
+    guess — but a control that fails closed everywhere else should not leave
+    an authoring foot-gun silent, so the compile says so.
+    """
+    gov = vault / "Knowledge Base" / "_Governance"
+    (gov / "scopes").mkdir(parents=True, exist_ok=True)
+    (gov / "scopes" / "confidential.yaml").write_text(
+        "governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FAV\n"
+        'name: Confidential\ntags: ["confidential"]\n',
+        encoding="utf-8",
+    )
+    pol = policy.load(vault)
+    media_findings = [
+        f for f in pol.findings if f.get("code") == "SCOPE_CANNOT_SELECT_MEDIA"
+    ]
+    assert media_findings, f"no media-coverage finding in {pol.findings}"
+    assert media_findings[0]["severity"] == "warning"
+    assert "paths" in media_findings[0]["detail"]
+    # A warning must not refuse the compile.
+    assert pol.blocked is False
+    assert "01ARZ3NDEKTSV4RRFFQ69G5FAV" in pol.scopes
+
+
+def test_scope_with_a_path_selector_emits_no_media_warning(vault: Path) -> None:
+    gov = vault / "Knowledge Base" / "_Governance"
+    (gov / "scopes").mkdir(parents=True, exist_ok=True)
+    (gov / "scopes" / "patterns.yaml").write_text(
+        "governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FAV\n"
+        'name: Patterns\npaths: ["Notes/Patterns/**"]\ntags: ["confidential"]\n',
+        encoding="utf-8",
+    )
+    pol = policy.load(vault)
+    assert not [
+        f for f in pol.findings if f.get("code") == "SCOPE_CANNOT_SELECT_MEDIA"
+    ]

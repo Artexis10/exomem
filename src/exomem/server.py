@@ -13,6 +13,7 @@ import os
 import time
 from copy import copy
 from pathlib import Path
+from typing import Any
 
 from dotenv import load_dotenv
 from fastmcp import FastMCP
@@ -354,6 +355,38 @@ def _newest_open_adoption_run(vault_root: Path) -> dict | None:
     return None
 
 
+def _gated_adoption_egress(vault_root: Path, command_name: str, payload: Any) -> Any:
+    """Bind the MCP principal and run the terminal egress filter over `payload`.
+
+    Design D1 names these handlers as an explicit residual: `@mcp.resource` and
+    `@mcp.prompt` are registered by hand, so they never travel through
+    `commands.bind_vault` (which binds the principal) nor
+    `writer_lease.invoke_command` (which runs `postfilter`). Without this call
+    an adoption run document — inventory rows and `selection.paths` naming real
+    vault items, plus `handoff.prompt_text` — reaches whoever is on the other
+    end of the connector with no principal, no withheld cross-check and no
+    credential scrubber. That is the entire release plane bypassed by a
+    decorator.
+
+    The principal is resolved the same way `bind_vault` resolves it, so a
+    grant authored against the connector's identity matches here too; stdio
+    still resolves to the owner.
+    """
+    from .governance import egress as egress_module
+    from .governance import principal as principal_module
+
+    with principal_module.request_scope(principal_module.resolve_mcp_principal()):
+        # A bare string has no entries for the dispatcher's walker to filter
+        # (finding N3) — `continue_adoption` returns `handoff.prompt_text`, so
+        # a withheld path and its wikilink rode straight out past a principal
+        # binding and a credential scrubber that were both working and simply
+        # had nothing to grip. Reference-aware redaction first, then the
+        # ordinary postfilter for credentials.
+        if isinstance(payload, str):
+            payload = egress_module.redact_withheld_references(vault_root, payload)
+        return egress_module.postfilter(command_name, payload, vault_root)
+
+
 def register_adoption_mcp(mcp: FastMCP, *, vault_root: Path) -> None:
     """Register the progressive-enhancement Adoption Studio prompt and resources.
 
@@ -388,15 +421,16 @@ def register_adoption_mcp(mcp: FastMCP, *, vault_root: Path) -> None:
             )
         try:
             doc = adoption_run_module.status(vault_root, run_id=row["run_id"])
-            return doc["handoff"]["prompt_text"]
+            text = doc["handoff"]["prompt_text"]
         except Exception:  # noqa: BLE001 - fall back to a minimal, still-useful prompt
             run_id = row.get("run_id", "")
-            return (
+            text = (
                 f"Continue my Exomem adoption run {run_id}. Call "
                 f'adoption_studio(action="work-item", run_id="{run_id}") to load the '
                 "bounded, read-only context, then submit structured proposals via "
                 f'adoption_studio(action="propose", run_id="{run_id}").'
             )
+        return _gated_adoption_egress(vault_root, "continue_adoption", text)
 
     @mcp.resource(
         "exomem://adoption/runs",
@@ -412,7 +446,7 @@ def register_adoption_mcp(mcp: FastMCP, *, vault_root: Path) -> None:
         except Exception:  # noqa: BLE001
             rows = []
         open_rows = [r for r in rows if r.get("phase") not in ("done", "cancelled")]
-        return {"runs": open_rows}
+        return _gated_adoption_egress(vault_root, "adoption_runs", {"runs": open_rows})
 
     @mcp.resource(
         "exomem://adoption/run/{run_id}",
@@ -422,9 +456,10 @@ def register_adoption_mcp(mcp: FastMCP, *, vault_root: Path) -> None:
     )
     def adoption_run_resource(run_id: str) -> dict:
         try:
-            return adoption_run_module.status(vault_root, run_id=run_id)
+            doc = adoption_run_module.status(vault_root, run_id=run_id)
         except adoption_run_module.AdoptionRunError as exc:
-            return {"error": {"code": exc.code, "reason": exc.reason}, "run_id": run_id}
+            doc = {"error": {"code": exc.code, "reason": exc.reason}, "run_id": run_id}
+        return _gated_adoption_egress(vault_root, "adoption_run", doc)
 
 
 def _legacy_mcp_compat_enabled() -> bool:
