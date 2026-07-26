@@ -53,6 +53,8 @@ class ReconcileReport:
     references_status: str = "current"  # "current" | "refreshed"
     semantic_unit_parents_refreshed: int = 0
     semantic_unit_orphans_removed: int = 0
+    clip_orphans_removed: int = 0
+    frame_orphans_removed: int = 0
     semantic_unit_indexes_status: str = "current"
     semantic_unit_index_drift: list[dict] = field(default_factory=list)
     semantic_unit_index_remaining: list[dict] = field(default_factory=list)
@@ -86,6 +88,8 @@ class ReconcileReport:
             "references_status": self.references_status,
             "semantic_unit_parents_refreshed": self.semantic_unit_parents_refreshed,
             "semantic_unit_orphans_removed": self.semantic_unit_orphans_removed,
+            "clip_orphans_removed": self.clip_orphans_removed,
+            "frame_orphans_removed": self.frame_orphans_removed,
             "semantic_unit_indexes_status": self.semantic_unit_indexes_status,
             "semantic_unit_index_drift": self.semantic_unit_index_drift,
             "semantic_unit_index_remaining": self.semantic_unit_index_remaining,
@@ -135,6 +139,48 @@ def _changed_writes(writes: list[PlannedWrite]) -> list[PlannedWrite]:
 def _bounded_lifecycle_values(values):
     retained = list(values[:_LIFECYCLE_REPORT_LIMIT])
     return retained, max(0, len(values) - len(retained))
+
+
+def _iter_frame_dirs(kb: Path):
+    """Yield every `<file>.frames/` directory under `kb`, pruning cruft dirs.
+
+    Frame dirs are leaves (scene_frames never nests one inside another), so
+    a matched dir is not descended into further.
+    """
+    from . import scene_frames
+    from .vault import VAULT_SCAN_SKIP_DIRS
+
+    stack = [kb]
+    while stack:
+        d = stack.pop()
+        try:
+            children = list(d.iterdir())
+        except OSError:
+            continue
+        for child in children:
+            if not child.is_dir():
+                continue
+            if child.name in VAULT_SCAN_SKIP_DIRS:
+                continue
+            if child.name.endswith(scene_frames.FRAMES_DIR_SUFFIX):
+                yield child
+            else:
+                stack.append(child)
+
+
+def _dangling_frame_dirs(vault_root: Path) -> list[tuple[Path, Path]]:
+    """`[(frame_dir, video_path)]` for every frame dir whose parent video is gone."""
+    from . import scene_frames
+
+    kb = kb_root(vault_root)
+    out: list[tuple[Path, Path]] = []
+    for frame_dir in _iter_frame_dirs(kb):
+        video_path = frame_dir.with_name(
+            frame_dir.name[: -len(scene_frames.FRAMES_DIR_SUFFIX)]
+        )
+        if not video_path.exists():
+            out.append((frame_dir, video_path))
+    return out
 
 
 def reconcile(vault_root: Path, *, dry_run: bool = False) -> ReconcileReport:
@@ -314,6 +360,37 @@ def reconcile(vault_root: Path, *, dry_run: bool = False) -> ReconcileReport:
                 epistemic_graph.EpistemicGraphIndex(vault_root).rebuild_all()
         report.graph_refreshed = len(initial_graph_drift)
         report.graph_status = "refreshed" if initial_graph_drift else "current"
+
+    # ---- 2d. CLIP + scene-frame orphan healing ----
+    # Heals vaults that already lost content through the pre-fix gap (a media
+    # deletion that predated CLIP/scene-frame fan-out): stale CLIP rows for
+    # paths no longer on disk, and `.frames/` directories whose parent video
+    # is gone. Idempotent — re-running finds nothing left once healed.
+    # Detection always runs (dry_run reports the true counts, same pattern as
+    # the graph/reference drift above); only the repair is gated by dry_run.
+    from . import embeddings as embeddings_module
+    from . import scene_frames
+
+    clip_orphans: list[str] = []
+    if embeddings_module.clip_enabled():
+        clip_index = embeddings_module.get_clip_index(vault_root)
+        clip_paths, _frame_ts, _matrix = clip_index.all_vectors()
+        clip_orphans = sorted(
+            {p for p in clip_paths if not (vault_root / p).exists()}
+        )
+        if clip_orphans and not dry_run:
+            embeddings_module.delete_clip_after_remove(vault_root, clip_orphans)
+    report.clip_orphans_removed = len(clip_orphans)
+
+    frame_orphans = _dangling_frame_dirs(vault_root)
+    if not dry_run:
+        for frame_dir, video_path in frame_orphans:
+            scene_frames.clear_scene_frames(vault_root, video_path)
+            try:
+                frame_dir.rmdir()
+            except OSError:
+                pass
+    report.frame_orphans_removed = len(frame_orphans)
 
     # ---- 3. Stable-reference sidecar ----
     from . import memory_refs

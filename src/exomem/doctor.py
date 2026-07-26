@@ -34,6 +34,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
+from . import __version__, install_info, process_memory
 from .cli_ops import OpError
 from .kbdir import kb_dirname, kb_prefix
 
@@ -145,6 +146,107 @@ def infer_profile() -> Profile:
     if media_ready:
         return "media" if shutil.which("tesseract") else "standard"
     return "hybrid"
+
+
+def resolve_profile(explicit: Profile | None) -> Profile:
+    """Resolve explicit, environment, persisted, then inferred profile intent."""
+    selected = explicit or (os.environ.get(PROFILE_ENV) or "").strip().lower()
+    if selected:
+        if selected not in VALID_PROFILES:
+            raise ValueError(f"unknown profile: {selected!r}. Valid: {list(VALID_PROFILES)}")
+        return selected  # type: ignore[return-value]
+    persisted = install_info.configured_local_profile()
+    if persisted:
+        return persisted  # type: ignore[return-value]
+    return infer_profile()
+
+
+def _profile_extras(profile: Profile) -> list[str]:
+    extras = ["embeddings"] if profile in {"hybrid", "standard", "media"} else []
+    if profile in {"standard", "media"}:
+        extras.append("media")
+        if os.environ.get("EXOMEM_ASR_BACKEND", "").strip().lower() == "mlx":
+            extras.append("media-mlx")
+    return extras
+
+
+def _check_editable_lock_parity(profile: Profile) -> DoctorCheck | None:
+    root, metadata_warning = install_info.editable_project_root_status()
+    if root is None:
+        if metadata_warning is None:
+            return None
+        return _check(
+            "install.lock_parity",
+            "warn",
+            f"Editable install lock parity could not be verified: {metadata_warning}.",
+        )
+    uv = shutil.which("uv")
+    if not uv:
+        return _check("install.lock_parity", "warn", "Editable install lock parity could not be verified: uv is unavailable.")
+    command = [
+        uv, "sync", "--check", "--locked", "--no-dev", "--active", "--project", str(root),
+        "--offline", "--no-cache", "--inexact",
+        *[option for extra in _profile_extras(profile) for option in ("--extra", extra)],
+    ]
+    identity = install_info.report()
+    details = {
+        "project_root": str(root),
+        "source_version": __version__,
+        "distribution_version": identity["version"],
+        "python_executable": sys.executable,
+        "profile": profile,
+    }
+    try:
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            env={**os.environ, "VIRTUAL_ENV": sys.prefix},
+            timeout=15.0,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return _check(
+            "install.lock_parity",
+            "warn",
+            "Editable install lock parity check timed out after 15 seconds.",
+            details=details,
+        )
+    except OSError as exc:
+        return _check(
+            "install.lock_parity",
+            "warn",
+            f"Editable install lock parity could not run: {exc}.",
+            details=details,
+        )
+    output = ((result.stderr or "") + (result.stdout or "")).strip()[:2000]
+    remediation = "Run `uv " + " ".join(command[1:]) + "` from the editable checkout."
+    if result.returncode == 0:
+        return _check(
+            "install.lock_parity",
+            "pass",
+            "Editable install matches the selected locked runtime dependencies.",
+            details=details,
+        )
+    unsupported = ("unknown option", "unrecognized option", "unexpected argument", "no such option")
+    if any(marker in output.lower() for marker in unsupported):
+        return _check(
+            "install.lock_parity",
+            "warn",
+            "Editable install lock parity could not be verified by this uv version.",
+            remediation,
+            details=details,
+        )
+    detail = f" ({output})" if output else ""
+    return _check(
+        "install.lock_parity",
+        "fail",
+        f"Editable install is stale against its selected locked runtime dependencies.{detail}",
+        remediation,
+        details=details,
+    )
 
 
 def _resolve_vault(vault: str | None) -> tuple[Path | None, DoctorCheck]:
@@ -704,7 +806,8 @@ def _list_exomem_processes() -> list[dict[str, object]]:
             continue
         if "--transport" not in command_l and "python -m exomem" not in command_l:
             continue
-        rows.append({"pid": pid, "rss_mb": round(rss_kb / 1024, 1), "command": command[:180]})
+        rss_mb = round(rss_kb / 1024, 1)
+        rows.append({"pid": pid, "rss_mb": rss_mb, "command": command[:180], **process_memory.enrich_process_memory(pid, rss_mb)})
     return rows
 
 
@@ -712,16 +815,29 @@ def _check_runtime_processes() -> DoctorCheck | None:
     rows = _list_exomem_processes()
     if not rows:
         return None
-    total = round(sum(float(row.get("rss_mb") or 0.0) for row in rows), 1)
+    memory = process_memory.aggregate_memory(rows)
     count = len(rows)
     status: Status = "warn" if count > 1 else "pass"
+    if memory["memory_metric"] == "physical_footprint":
+        memory_message = (
+            f"about {memory['memory_mb_total']} MB physical footprint total "
+            f"({memory['rss_mb_total']} MB RSS compatibility total)"
+        )
+    elif memory["memory_metric"] == "mixed":
+        memory_message = (
+            f"mixed metrics: {memory['physical_footprint_mb_total']} MB physical footprint "
+            f"plus {memory['rss_fallback_mb_total']} MB RSS fallback "
+            f"({memory['rss_mb_total']} MB RSS compatibility total)"
+        )
+    else:
+        memory_message = f"about {memory['rss_mb_total']} MB RSS total"
     return _check(
         "runtime.processes",
         status,
-        f"Detected {count} other exomem server process(es) using about {total} MB RSS total. "
+        f"Detected {count} other exomem server process(es) using {memory_message}. "
         "Each stdio MCP client/session launches its own process; use HTTP service mode "
         "or lazy/quiet policies on small-memory Macs.",
-        details={"count": count, "rss_mb_total": total, "processes": rows[:8]},
+        details={"count": count, **memory, "processes": rows[:8]},
     )
 
 
@@ -1760,14 +1876,16 @@ def doctor(
     probe: bool = False,
     replica_urls: list[str] | tuple[str, ...] | None = None,
 ) -> DoctorReport:
-    profile = profile or infer_profile()
+    profile = resolve_profile(profile)
     if profile not in VALID_PROFILES:
         raise ValueError(f"unknown profile: {profile!r}. Valid: {list(VALID_PROFILES)}")
 
     vault_root, vault_check = _resolve_vault(vault)
+    lock_parity = _check_editable_lock_parity(profile)
     checks: list[DoctorCheck] = [
         _check_python(),
         _check_uv(),
+        *([lock_parity] if lock_parity is not None else []),
         _check_console_scripts(),
         _check_package_import(),
         vault_check,

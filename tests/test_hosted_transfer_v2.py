@@ -100,10 +100,20 @@ def _grant(
     jti: str = JTI,
     origin: str = ORIGIN,
     kid: str = KID,
-    issued_at: int = NOW,
-    not_before: int = NOW,
-    expires_at: int = NOW + 300,
+    issued_at: int | None = None,
+    not_before: int | None = None,
+    expires_at: int | None = None,
 ) -> str:
+    # Resolved per call, never at import: pytest collects this module minutes
+    # before a slow suite reaches it, and the routes validate against the real
+    # clock, so an import-time default mints grants that already expired.
+    minted_at = int(time.time())
+    if issued_at is None:
+        issued_at = minted_at
+    if not_before is None:
+        not_before = minted_at
+    if expires_at is None:
+        expires_at = minted_at + 300
     if target is None:
         target = _upload_target() if operation == "upload" else {
             "kind": "download-v1",
@@ -244,7 +254,10 @@ def test_implemented_public_error_catalog_exactly_matches_normative_artifact() -
 
 
 def test_grant_v2_has_exact_canonical_claims_and_uses_versioned_authority() -> None:
-    token = _grant()
+    # Pinned to the import-time constant on purpose: this asserts exact claim
+    # bytes and verifies with an explicit `now=NOW`, so it never reaches a
+    # route that consults the real clock and cannot expire mid-suite.
+    token = _grant(issued_at=NOW, not_before=NOW, expires_at=NOW + 300)
     claims = _claims(token)
 
     assert list(sorted(claims)) == sorted(
@@ -480,14 +493,19 @@ def test_public_upload_consumes_before_body_and_returns_exact_envelope(tmp_path:
     assert len(security.consume_calls) == 1
     consumed = dict(security.consume_calls[0])
     consumed_at = consumed.pop("consumed_at")
+    # Both stamps track the real clock because the grant is minted per call,
+    # so derive the mint instant from the expiry and bound the pair by it
+    # rather than pinning either to an import-time constant.
+    expires_at = consumed.pop("expires_at")
+    minted_at = expires_at - 300
+    assert NOW <= minted_at <= int(time.time())
     assert consumed == {
         "cell_id": "cell-alpha",
         "schema_version": 2,
         "kid": KID,
         "jti": JTI,
-        "expires_at": NOW + 300,
     }
-    assert NOW <= consumed_at < NOW + 300
+    assert minted_at <= consumed_at <= int(time.time())
     assert events == ["commit"]
     assert stat.S_IMODE((tmp_path / "state/tmp/transfers-v2").stat().st_mode) == 0o700
     assert lifecycle.snapshot().active_transfers == 0

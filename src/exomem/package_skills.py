@@ -148,11 +148,12 @@ def _write_zip(path: Path, payload: dict[str, str]) -> int:
 
 # --- Claude Code plugin ------------------------------------------------------------
 #
-# A plugin is the only channel that installs MCP + skills + hooks in ONE user action:
-# declared mcpServers auto-register and start when the plugin is enabled, so there is
-# no separate `claude mcp add` step. Its skills/ and hooks/ trees must be committed
-# (the marketplace installs straight from git), so they are GENERATED from the same
-# package sources and guarded by a sync test rather than hand-maintained.
+# The plugin installs skills and hooks in one action. Its MCP declaration is an
+# optional shared HTTP endpoint: a blank URL is inert on current Claude Code, so
+# enabling the plugin never launches another full Exomem core per chat session.
+# Local-only users can opt into stdio explicitly with `exomem setup --stdio`.
+# The skills/ and hooks/ trees are GENERATED from the same package sources and
+# guarded by a sync test rather than hand-maintained.
 
 _PLUGIN_HOOK_EVENTS: tuple[tuple[str, str | None], ...] = (
     ("Stop", None),
@@ -201,15 +202,22 @@ def _plugin_manifest() -> dict:
         # skills/ is likewise auto-discovered; declared here because it is the
         # documented form and does not collide.
         "skills": "./skills/",
+        "userConfig": {
+            "mcp_url": {
+                "type": "string",
+                "title": "Exomem MCP URL",
+                "description": (
+                    "Optional full Exomem MCP service URL ending in /mcp. "
+                    "Leave blank and run `exomem setup` to configure a native client route."
+                ),
+                "default": "",
+                "required": False,
+            }
+        },
         "mcpServers": {
             "exomem": {
-                # `uvx` fetches and runs the published package, so the plugin works
-                # on a machine that has never installed exomem.
-                "command": "uvx",
-                # --transport stdio is REQUIRED and easy to miss: the server defaults
-                # to http, so omitting it starts a web server instead of speaking MCP.
-                "args": ["exomem", "--transport", "stdio"],
-                "env": {"EXOMEM_VAULT_PATH": "${EXOMEM_VAULT_PATH}"},
+                "type": "http",
+                "url": "${user_config.mcp_url}",
             }
         },
     }

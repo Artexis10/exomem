@@ -12,7 +12,7 @@ import logging
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import privacy_log
+from . import access, privacy_log
 from .vault import (
     VaultPathError,
     parse_frontmatter,
@@ -76,6 +76,18 @@ def list_directory(
         rel_path = ""
     else:
         try:
+            _, rel_path = resolve_under_vault(vault_root, path, must_exist=True)
+        except VaultPathError as e:
+            raise ListDirectoryError(code=e.code, reason=e.reason) from e
+        # Scoped-probe refusal: an excluded dir OR an excluded file probed as
+        # `path` reads as missing — byte-identical to resolve_under_vault's own
+        # must_exist failure — before the must_be_dir check below can leak an
+        # excluded file's existence via NOT_A_DIR.
+        if access.refuse_if_excluded(vault_root, rel_path):
+            raise ListDirectoryError(
+                code="NOT_FOUND", reason=f"path does not exist: {rel_path}"
+            )
+        try:
             target_abs, rel_path = resolve_under_vault(
                 vault_root, path, must_exist=True, must_be_dir=True
             )
@@ -87,6 +99,8 @@ def list_directory(
         try:
             child_rel = child_abs.resolve().relative_to(vault_root.resolve()).as_posix()
         except ValueError:
+            continue
+        if access.refuse_if_excluded(vault_root, child_rel):
             continue
         entries.append(_entry_for(child_abs, child_rel))
 

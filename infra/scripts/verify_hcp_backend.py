@@ -196,7 +196,7 @@ def preflight_workspace(
     )
 
 
-PROOF_CONFIGURATION = f'''terraform {{
+PROOF_CONFIGURATION = rf'''terraform {{
   required_version = "= {EXPECTED_TERRAFORM_VERSION}"
 
   cloud {{

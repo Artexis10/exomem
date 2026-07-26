@@ -22,10 +22,13 @@ import importlib.util
 import json
 import os
 import shutil
+import stat
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
 
 from . import adopt as adopt_module
+from . import client_config, install_info
 from . import doctor as doctor_module
 from . import init as init_module
 from . import install_hook as hook_module
@@ -36,9 +39,6 @@ from . import personalize as personalize_module
 from .kbdir import kb_dirname, kb_prefix
 
 _SKILL_NAME_MARKER = "name: exomem"
-_CLAUDE_SCOPES = ("user", "local", "project")
-
-
 def _format_pack_suggestions(packs: list[dict], *, limit: int = 3) -> str:
     shown = []
     for pack in packs[:limit]:
@@ -134,31 +134,307 @@ def _server_command(which_fn) -> list[str]:
     return ["uvx", "exomem", "--transport", "stdio"]
 
 
-def _output_mentions_exomem(output: str) -> bool:
-    for line in output.splitlines():
-        stripped = line.strip().lower()
-        if not stripped:
+def _read_json_object(path: Path) -> dict:
+    if not path.is_file():
+        return {}
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"cannot inspect Claude MCP registrations in {path}: {exc}") from exc
+    if not isinstance(value, dict):
+        raise ValueError(f"cannot inspect Claude MCP registrations in {path}: expected an object")
+    return value
+
+
+def _project_entry(config: dict, project_dir: Path) -> dict:
+    target = project_dir.resolve()
+    projects = config.get("projects")
+    if not isinstance(projects, dict):
+        return {}
+    for raw_path, value in projects.items():
+        if not isinstance(raw_path, str) or not isinstance(value, dict):
             continue
-        if stripped.startswith("exomem") or '"exomem"' in stripped or "name: exomem" in stripped:
-            return True
-    return False
-
-
-def _claude_registered_scopes(claude: str, run_fn, run_kwargs: dict) -> list[str]:
-    scopes: list[str] = []
-    for item in _CLAUDE_SCOPES:
         try:
-            result = run_fn([claude, "mcp", "list", "--scope", item], **run_kwargs)
-        except Exception:  # noqa: BLE001 - registration can still try the requested add
+            if Path(raw_path).expanduser().resolve() == target:
+                return value
+        except OSError:
             continue
-        output = (result.stdout or "") + (result.stderr or "")
-        if result.returncode == 0 and _output_mentions_exomem(output):
-            scopes.append(item)
-    return scopes
+    return {}
+
+
+def _registered_server(config: dict) -> dict | None:
+    servers = config.get("mcpServers")
+    if not isinstance(servers, dict):
+        return None
+    value = servers.get("exomem")
+    return value if isinstance(value, dict) else None
+
+
+def _claude_registrations(*, config_path: Path, project_dir: Path) -> dict[str, dict]:
+    """Inventory registrations without `claude mcp list/get` health checks."""
+    user_config = _read_json_object(config_path)
+    project_config = _read_json_object(project_dir / ".mcp.json")
+    found: dict[str, dict] = {}
+    candidates = (
+        ("local", _registered_server(_project_entry(user_config, project_dir))),
+        ("project", _registered_server(project_config)),
+        ("user", _registered_server(user_config)),
+    )
+    for scope, server in candidates:
+        if server is not None:
+            found[scope] = server
+    return found
+
+
+def _registration_matches(route: client_config.McpRoute, server: dict) -> bool:
+    if route.transport == "http":
+        return server.get("url") == route.url and server.get("type", "http") == "http"
+    desired = route.as_claude_config()
+    return all(server.get(key) == value for key, value in desired.items())
+
+
+@dataclass(frozen=True)
+class _FileSnapshot:
+    content: bytes | None
+    mode: int | None
+
+
+def _snapshot_files(paths: tuple[Path, ...]) -> dict[Path, _FileSnapshot]:
+    snapshots: dict[Path, _FileSnapshot] = {}
+    for path in paths:
+        if path.is_file():
+            snapshots[path] = _FileSnapshot(
+                content=path.read_bytes(),
+                mode=stat.S_IMODE(path.stat().st_mode),
+            )
+        else:
+            snapshots[path] = _FileSnapshot(content=None, mode=None)
+    return snapshots
+
+
+def _restore_files(snapshots: dict[Path, _FileSnapshot]) -> None:
+    for path, snapshot in snapshots.items():
+        if snapshot.content is None:
+            path.unlink(missing_ok=True)
+            continue
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_suffix(path.suffix + ".exomem-restore")
+        temporary.write_bytes(snapshot.content)
+        if snapshot.mode is not None:
+            os.chmod(temporary, snapshot.mode)
+        os.replace(temporary, path)
+
+
+def _legacy_stdio_plugins(claude: str, run_fn, run_kwargs: dict) -> list[str]:
+    """Return enabled Exomem plugin IDs that still declare a stdio core."""
+    try:
+        result = run_fn([claude, "plugin", "list", "--json"], **run_kwargs)
+    except Exception as exc:  # noqa: BLE001 - an unknown plugin state must fail closed
+        raise ValueError(f"could not verify Claude plugin state: {exc}") from exc
+    if result.returncode != 0:
+        detail = (result.stderr or "").strip() or f"exit {result.returncode}"
+        raise ValueError(f"could not verify Claude plugin state: {detail}")
+    try:
+        payload = json.loads(result.stdout or "[]")
+    except json.JSONDecodeError as exc:
+        raise ValueError("could not verify Claude plugin state: invalid JSON") from exc
+    plugins = payload.get("plugins", []) if isinstance(payload, dict) else payload
+    if not isinstance(plugins, list):
+        raise ValueError("could not verify Claude plugin state: unexpected inventory shape")
+    legacy: list[str] = []
+    for plugin in plugins:
+        if not isinstance(plugin, dict) or plugin.get("enabled") is not True:
+            continue
+        plugin_id = str(plugin.get("id") or plugin.get("name") or "")
+        if "exomem" not in plugin_id.casefold():
+            continue
+        servers = plugin.get("mcpServers")
+        server = servers.get("exomem") if isinstance(servers, dict) else None
+        if not isinstance(server, dict):
+            raise ValueError(
+                f"could not verify Claude plugin state for {plugin_id}: "
+                "Exomem MCP inventory is missing"
+            )
+        if server.get("command") or server.get("args"):
+            legacy.append(plugin_id)
+            continue
+        if server.get("type") != "http" or not isinstance(server.get("url"), str):
+            raise ValueError(
+                f"could not verify Claude plugin state for {plugin_id}: "
+                "Exomem MCP declaration is incomplete"
+            )
+    return legacy
+
+
+def _configured_mcp_url(
+    *,
+    mcp_url: str | None,
+    force_stdio: bool,
+    cwd: Path,
+    environ: dict[str, str],
+) -> str | None:
+    if force_stdio:
+        return None
+    configured = mcp_url
+    env_path = cwd / ".env"
+    if configured is None and env_path.is_file():
+        from .remote_setup_wizard import parse_env
+
+        parsed = parse_env(env_path.read_text(encoding="utf-8"))
+        if "EXOMEM_BASE_URL" in parsed:
+            configured = parsed["EXOMEM_BASE_URL"]
+    if configured is None and "EXOMEM_BASE_URL" in environ:
+        configured = environ["EXOMEM_BASE_URL"]
+    return client_config.normalize_mcp_url(configured) if configured is not None else None
+
+
+def _default_claude_config_path(environ: dict[str, str]) -> Path:
+    """Return Claude's user-state path, including configured relocation."""
+    config_dir = environ.get("CLAUDE_CONFIG_DIR")
+    if config_dir:
+        return Path(config_dir).expanduser() / ".claude.json"
+    return Path.home() / ".claude.json"
+
+
+def _resolve_client_route(
+    *,
+    mcp_url: str | None,
+    force_stdio: bool,
+    cwd: Path,
+    environ: dict[str, str],
+    which_fn,
+    vault_path: Path,
+    profile: str,
+) -> client_config.McpRoute:
+    env = {"EXOMEM_VAULT_PATH": str(vault_path)}
+    if profile == "lean":
+        env["EXOMEM_DISABLE_EMBEDDINGS"] = "1"
+    if force_stdio:
+        return client_config.McpRoute.stdio(_server_command(which_fn), env)
+
+    configured = _configured_mcp_url(
+        mcp_url=mcp_url,
+        force_stdio=force_stdio,
+        cwd=cwd,
+        environ=environ,
+    )
+    if configured is not None:
+        return client_config.McpRoute.http(configured)
+    return client_config.McpRoute.stdio(_server_command(which_fn), env)
 
 
 def _format_scopes(scopes: list[str]) -> str:
     return ", ".join(scopes) if scopes else "none"
+
+
+def _register_claude(
+    *,
+    claude: str,
+    route: client_config.McpRoute,
+    scope: str,
+    config_path: Path,
+    project_dir: Path,
+    replace_client_registration: bool,
+    yes: bool,
+    input_fn,
+    run_fn,
+    run_kwargs: dict,
+    report,
+) -> None:
+    try:
+        registrations = _claude_registrations(
+            config_path=config_path,
+            project_dir=project_dir,
+        )
+    except ValueError as exc:
+        report("register", f"[failed: {exc}]")
+        return
+
+    existing_scopes = list(registrations)
+    scope_text = _format_scopes(existing_scopes)
+    desired_is_active = (
+        existing_scopes == [scope]
+        and _registration_matches(route, registrations[scope])
+    )
+    if desired_is_active:
+        report("register", f"[skipped: already registered in {scope}]")
+        return
+
+    replace = replace_client_registration and bool(existing_scopes)
+    if existing_scopes and not replace:
+        if yes or not _ask_yn(
+            input_fn,
+            f"exomem is already registered in {scope_text}. Replace every explicit route?",
+            False,
+        ):
+            report("register", f"[skipped: already registered in {scope_text}]")
+            return
+        replace = True
+
+    argv = route.claude_add_argv(claude, scope=scope)
+    if replace:
+        paths = (config_path, project_dir / ".mcp.json")
+        try:
+            snapshots = _snapshot_files(paths)
+        except OSError as exc:
+            report("register", f"[failed: could not snapshot Claude configuration: {exc}]")
+            return
+        failure = ""
+        for existing_scope in existing_scopes:
+            try:
+                result = run_fn(
+                    [claude, "mcp", "remove", "exomem", "--scope", existing_scope],
+                    **run_kwargs,
+                )
+            except Exception as exc:  # noqa: BLE001 - restore is the safety boundary
+                failure = str(exc)
+                break
+            if result.returncode != 0:
+                failure = (result.stderr or "").strip() or (
+                    f"claude mcp remove ({existing_scope}) exited {result.returncode}"
+                )
+                break
+        if not failure:
+            try:
+                result = run_fn(argv, **run_kwargs)
+            except Exception as exc:  # noqa: BLE001 - restore is the safety boundary
+                failure = str(exc)
+            else:
+                if result.returncode != 0:
+                    failure = (result.stderr or "").strip() or (
+                        f"claude mcp add exited {result.returncode}"
+                    )
+        if failure:
+            try:
+                _restore_files(snapshots)
+            except OSError as restore_exc:
+                report(
+                    "register",
+                    f"[failed: {failure}; restoring previous registration also failed: "
+                    f"{restore_exc}]",
+                )
+                return
+            report("register", f"[failed: {failure}; restored previous registration]")
+            return
+        report(
+            "register",
+            f"[done] replaced {scope_text} with Claude Code scope {scope}",
+        )
+        return
+
+    try:
+        result = run_fn(argv, **run_kwargs)
+    except Exception as exc:  # noqa: BLE001 - report client invocation failures
+        report("register", f"[failed: {exc}]")
+        return
+    output = (result.stderr or "") + (result.stdout or "")
+    if result.returncode == 0:
+        report("register", f"[done] registered with Claude Code (scope {scope})")
+    elif "already exists" in output.casefold():
+        report("register", "[skipped: already registered]")
+    else:
+        detail = (result.stderr or "").strip() or f"claude mcp add exited {result.returncode}"
+        report("register", f"[failed: {detail}]")
 
 
 def _resolve_codex_home(codex_home: Path | None) -> Path:
@@ -175,36 +451,97 @@ def _codex_present(which_fn, codex_home: Path | None) -> bool:
 
 def _register_codex(
     *,
-    server_cmd: list[str],
-    env_dict: dict[str, str],
+    route: client_config.McpRoute,
     which_fn,
     run_fn,
     input_fn,
     print_fn,
     report,
     yes: bool,
+    replace_client_registration: bool,
     codex_home: Path | None = None,
 ) -> None:
     """Register the MCP server with Codex, preferring its CLI over file surgery."""
-    from . import client_config
+    block = client_config.render_codex_block(route)
+    path = _resolve_codex_home(codex_home) / "config.toml"
+    try:
+        existing = client_config.codex_mcp_exists(path)
+    except ValueError as exc:
+        report("register-codex", f"[failed: {exc}]")
+        return
+    replace = replace_client_registration and existing
+    if existing and not replace:
+        if yes or not _ask_yn(input_fn, f"exomem is already in {path}. Replace it?", False):
+            report("register-codex", "[skipped: already in config.toml]")
+            return
+        replace = True
 
     codex = which_fn("codex")
+    run_kwargs = dict(capture_output=True, text=True, encoding="utf-8", errors="replace")
+    if replace and codex:
+        try:
+            snapshot = _snapshot_files((path,))
+        except OSError as exc:
+            report("register-codex", f"[failed: could not snapshot Codex configuration: {exc}]")
+            return
+        failure = ""
+        try:
+            removed = run_fn([codex, "mcp", "remove", "exomem"], **run_kwargs)
+            if removed.returncode != 0:
+                detail = (removed.stderr or "").strip() or (
+                    f"codex mcp remove exited {removed.returncode}"
+                )
+                failure = detail
+            else:
+                added = run_fn(route.codex_add_argv(codex), **run_kwargs)
+                if added.returncode != 0:
+                    failure = (added.stderr or "").strip() or (
+                        f"codex mcp add exited {added.returncode}"
+                    )
+        except Exception as exc:  # noqa: BLE001 - restore is the safety boundary
+            failure = str(exc)
+        if failure:
+            try:
+                _restore_files(snapshot)
+            except OSError as restore_exc:
+                report(
+                    "register-codex",
+                    f"[failed: {failure}; restoring previous Codex registration also failed: "
+                    f"{restore_exc}]",
+                )
+                return
+            report(
+                "register-codex",
+                f"[failed: {failure}; restored previous Codex registration]",
+            )
+            return
+        report("register-codex", "[done] replaced registration with Codex")
+        return
+
+    if replace:
+        try:
+            outcome = client_config.merge_codex_mcp(block, path=path, replace=True)
+        except (ValueError, OSError) as e:
+            report("register-codex", f"[failed: {e}]")
+            return
+        _report_codex_file_outcome(outcome, path=path, print_fn=print_fn, report=report)
+        return
+
     if codex:
-        argv = [codex, "mcp", "add", "exomem"]
-        for key, value in env_dict.items():
-            argv += ["--env", f"{key}={value}"]
-        argv += ["--", *server_cmd]
-        run_kwargs = dict(capture_output=True, text=True, encoding="utf-8", errors="replace")
-        result = run_fn(argv, **run_kwargs)
-        if result.returncode == 0:
+        argv = route.codex_add_argv(codex)
+        try:
+            result = run_fn(argv, **run_kwargs)
+        except Exception as exc:  # noqa: BLE001 - fall back to the config file
+            print_fn(f"  codex mcp add unavailable ({exc}); writing config.toml directly.")
+            result = None
+        if result is not None and result.returncode == 0:
             report("register-codex", "[done] registered with Codex")
             return
         # Older Codex builds have no `mcp add`; fall through to the config file
         # rather than leaving the user unregistered.
-        print_fn("  codex mcp add unavailable; writing config.toml directly.")
+        if result is not None:
+            print_fn("  codex mcp add unavailable; writing config.toml directly.")
 
-    block = client_config.render_codex_block(server_cmd[0], server_cmd[1:], env_dict)
-    path = _resolve_codex_home(codex_home) / "config.toml"
     try:
         outcome = client_config.merge_codex_mcp(block, path=path)
         if outcome["action"] == "exists":
@@ -219,6 +556,10 @@ def _register_codex(
         report("register-codex", f"[failed: {e}]")
         return
 
+    _report_codex_file_outcome(outcome, path=path, print_fn=print_fn, report=report)
+
+
+def _report_codex_file_outcome(outcome: dict, *, path: Path, print_fn, report) -> None:
     if outcome["diff"]:
         print_fn(f"  {path}:")
         for line in outcome["diff"].splitlines():
@@ -236,13 +577,39 @@ def run_setup(
     with_hooks: bool | None = None,
     skip_claude_register: bool = False,
     scope: str = "user",
+    mcp_url: str | None = None,
+    force_stdio: bool = False,
+    replace_client_registration: bool = False,
     input_fn=input,
     run_fn=subprocess.run,
     which_fn=shutil.which,
     home: Path | None = None,
     codex_home: Path | None = None,
+    claude_config_path: Path | None = None,
+    project_dir: Path | None = None,
+    environ: dict[str, str] | None = None,
+    persist_profile_fn=None,
     print_fn=print,
 ) -> int:
+    environ = dict(os.environ if environ is None else environ)
+    project_dir = Path.cwd() if project_dir is None else Path(project_dir)
+    claude_config_path = (
+        _default_claude_config_path(environ)
+        if claude_config_path is None
+        else Path(claude_config_path)
+    )
+    if persist_profile_fn is None:
+        persist_profile_fn = install_info.persist_local_profile
+    try:
+        configured_mcp_url = _configured_mcp_url(
+            mcp_url=mcp_url,
+            force_stdio=force_stdio,
+            cwd=project_dir,
+            environ=environ,
+        )
+    except (OSError, UnicodeError, ValueError) as exc:
+        print_fn(f"setup: {exc}")
+        return 2
     steps: list[tuple[str, str]] = []
 
     def report(name: str, status: str) -> None:
@@ -264,7 +631,7 @@ def run_setup(
         if yes:
             print_fn("setup: --yes requires --vault.")
             return 2
-        env_default = os.environ.get("EXOMEM_VAULT_PATH", "")
+        env_default = environ.get("EXOMEM_VAULT_PATH", "")
         raw = input_fn(f"Vault folder [{env_default}]: ").strip()
         vault = raw or env_default
         if not vault:
@@ -384,6 +751,10 @@ def run_setup(
                 else "lean"
             )
     report("profile", f"[done] {profile}")
+    try:
+        persist_profile_fn(profile)
+    except (OSError, ValueError) as exc:
+        print_fn(f"  Warning: could not persist the selected doctor profile: {exc}")
 
     # 5. doctor preflight — hard gate in non-interactive mode
     doctor_report = doctor_module.doctor(vault=str(vault_path), profile=profile)
@@ -416,17 +787,25 @@ def run_setup(
             else:
                 report("gpu", "[skipped] staying on CPU (normal mode)")
 
+    try:
+        route = _resolve_client_route(
+            mcp_url=configured_mcp_url,
+            force_stdio=force_stdio,
+            cwd=project_dir,
+            environ={},
+            which_fn=which_fn,
+            vault_path=vault_path,
+            profile=profile,
+        )
+    except (OSError, UnicodeError, ValueError) as exc:
+        report("route", f"[failed: {exc}]")
+        return finish()
+
     # 6. Claude Code registration
     if skip_claude_register:
         report("register", "[skipped: --skip-claude-register]")
     else:
-        env_args = ["--env", f"EXOMEM_VAULT_PATH={vault_path}"]
-        env_dict = {"EXOMEM_VAULT_PATH": str(vault_path)}
-        if profile == "lean":
-            env_args += ["--env", "EXOMEM_DISABLE_EMBEDDINGS=1"]
-            env_dict["EXOMEM_DISABLE_EMBEDDINGS"] = "1"
-        server_cmd = _server_command(which_fn)
-        if server_cmd[0] == "uvx":
+        if route.transport == "stdio" and route.command[0] == "uvx":
             print_fn(
                 "  Note: exomem is not durably installed, so the server will be "
                 "registered as `uvx exomem`. For a registration that never "
@@ -434,56 +813,47 @@ def run_setup(
             )
         claude = which_fn("claude")
         if not claude:
-            snippet = {
-                "mcpServers": {
-                    "exomem": {
-                        "command": server_cmd[0],
-                        "args": server_cmd[1:],
-                        "env": env_dict,
-                    }
-                }
-            }
+            snippet = {"mcpServers": {"exomem": route.as_claude_config()}}
             print_fn("  claude CLI not found — add this to .mcp.json or Claude Code settings:")
             print_fn(json.dumps(snippet, indent=2))
             report("register", "[skipped: no claude CLI — snippet printed above]")
         else:
-            argv = [claude, "mcp", "add", "exomem", "--scope", scope, *env_args, "--", *server_cmd]
             # encoding pinned: Windows-native Python otherwise decodes pipes as
             # cp1252 and multibyte output crashes the reader thread
-            run_kwargs = dict(capture_output=True, text=True, encoding="utf-8", errors="replace")
-            existing_scopes = _claude_registered_scopes(claude, run_fn, run_kwargs)
-            if existing_scopes:
-                scope_text = _format_scopes(existing_scopes)
-                if yes:
-                    report("register", f"[skipped: already registered in {scope_text}]")
-                elif _ask_yn(input_fn, f"exomem is already registered in {scope_text}. Replace it?", False):
-                    for existing_scope in existing_scopes:
-                        run_fn([claude, "mcp", "remove", "exomem", "--scope", existing_scope], **run_kwargs)
-                    result = run_fn(argv, **run_kwargs)
-                    if result.returncode == 0:
-                        report("register", f"[done] re-registered with Claude Code (scope {scope})")
-                    else:
-                        report("register", f"[failed: {(result.stderr or '').strip()}]")
-                else:
-                    report("register", f"[skipped: already registered in {scope_text}]")
-            else:
-                result = run_fn(argv, **run_kwargs)
-                output = (result.stderr or "") + (result.stdout or "")
-                if result.returncode == 0:
-                    report("register", f"[done] registered with Claude Code (scope {scope})")
-                elif "already exists" in output:
-                    if not yes and _ask_yn(input_fn, "exomem is already registered. Replace it?", False):
-                        run_fn([claude, "mcp", "remove", "exomem", "--scope", scope], **run_kwargs)
-                        result = run_fn(argv, **run_kwargs)
-                        if result.returncode == 0:
-                            report("register", "[done] re-registered")
-                        else:
-                            report("register", f"[failed: {(result.stderr or '').strip()}]")
-                    else:
-                        report("register", "[skipped: already registered]")
-                else:
-                    detail = (result.stderr or "").strip() or f"claude mcp add exited {result.returncode}"
-                    report("register", f"[failed: {detail}]")
+            run_kwargs = dict(
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                cwd=str(project_dir),
+            )
+            legacy_plugins: list[str] | None = None
+            try:
+                legacy_plugins = _legacy_stdio_plugins(claude, run_fn, run_kwargs)
+            except ValueError as exc:
+                report("register", f"[failed: {exc}]")
+            if legacy_plugins:
+                plugin_id = legacy_plugins[0]
+                print_fn(
+                    "  The enabled Exomem plugin still launches a full stdio core. "
+                    f"Run `claude plugin update {plugin_id}`, then `/reload-plugins` "
+                    "(or restart Claude Code) before rerunning setup."
+                )
+                report("register", "[failed: enabled plugin still declares stdio]")
+            elif legacy_plugins is not None:
+                _register_claude(
+                    claude=claude,
+                    route=route,
+                    scope=scope,
+                    config_path=claude_config_path,
+                    project_dir=project_dir,
+                    replace_client_registration=replace_client_registration,
+                    yes=yes,
+                    input_fn=input_fn,
+                    run_fn=run_fn,
+                    run_kwargs=run_kwargs,
+                    report=report,
+                )
 
     # 6b. Codex registration — symmetric with Claude Code above. Codex reads
     # skills from disk and speaks MCP just like Claude Code does, so leaving it
@@ -496,17 +866,14 @@ def run_setup(
     else:
         _register_codex(
             codex_home=codex_home,
-            server_cmd=_server_command(which_fn),
-            env_dict=(
-                {"EXOMEM_VAULT_PATH": str(vault_path)}
-                | ({"EXOMEM_DISABLE_EMBEDDINGS": "1"} if profile == "lean" else {})
-            ),
+            route=route,
             which_fn=which_fn,
             run_fn=run_fn,
             input_fn=input_fn,
             print_fn=print_fn,
             report=report,
             yes=yes,
+            replace_client_registration=replace_client_registration,
         )
 
     # 7. skill — the brain; without it the tools sit unused
@@ -570,7 +937,11 @@ def run_setup(
     code = finish()
     print_fn("")
     print_fn("Next steps:")
-    print_fn("  1. Restart Claude Code so it loads the exomem server and skill.")
+    if route.transport == "http":
+        print_fn("  1. In Claude Code, use /mcp to authenticate the claude mcp connection.")
+        print_fn("     For Codex, run: codex mcp login exomem")
+    else:
+        print_fn("  1. Restart Claude Code so it loads the exomem server and skill.")
     print_fn('  2. Try: "what does this vault look like" or "find my notes on X".')
     print_fn("  3. Optional, for direct CLI use (`kb find ...`): set EXOMEM_VAULT_PATH.")
     print_fn(
@@ -616,6 +987,22 @@ def setup_main(argv: list[str]) -> int:
                        help="Skip the hooks step without asking.")
     parser.add_argument("--skip-claude-register", action="store_true",
                         help="Don't touch Claude Code's MCP registration.")
+    route = parser.add_mutually_exclusive_group()
+    route.add_argument(
+        "--mcp-url",
+        help="Shared Exomem service origin or exact /mcp URL (HTTPS, or loopback HTTP).",
+    )
+    route.add_argument(
+        "--stdio",
+        action="store_true",
+        dest="force_stdio",
+        help="Register a separate local stdio server even when a service URL is configured.",
+    )
+    parser.add_argument(
+        "--replace-client-registration",
+        action="store_true",
+        help="Replace existing Exomem MCP registrations across client scopes.",
+    )
     parser.add_argument("--scope", choices=("user", "local", "project"), default="user",
                         help="claude mcp add scope (default: user — available in every project).")
     args = parser.parse_args(argv)
@@ -628,4 +1015,7 @@ def setup_main(argv: list[str]) -> int:
         with_hooks=args.with_hooks,
         skip_claude_register=args.skip_claude_register,
         scope=args.scope,
+        mcp_url=args.mcp_url,
+        force_stdio=args.force_stdio,
+        replace_client_registration=args.replace_client_registration,
     )

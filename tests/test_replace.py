@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from exomem import commands
 from exomem import note as note_module
 from exomem import replace as replace_module
 from exomem import vault as vault_module
@@ -94,6 +95,36 @@ def _assert_cause_contains(error: BaseException, text: str) -> None:
             return
         current = current.__cause__
     raise AssertionError(f"{text!r} missing from exception cause chain")
+
+
+def test_replace_validate_only_binds_public_review_hash_to_predecessor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    old_path = "Knowledge Base/Notes/Insights/old.md"
+    target = tmp_path / old_path
+    target.parent.mkdir(parents=True)
+    target.write_text("old\n", encoding="utf-8")
+
+    class Preview:
+        draft_hash = "a" * 64
+
+        def as_dict(self) -> dict[str, str]:
+            return {"draft_hash": self.draft_hash}
+
+    monkeypatch.setattr(commands, "_resolve_memory_identifier", lambda _root, path: path)
+    monkeypatch.setattr(commands.replace_module, "replace", lambda *_args, **_kwargs: Preview())
+
+    preview = commands.op_replace(
+        tmp_path,
+        old_path=old_path,
+        content="replacement",
+        note_type="insight",
+        title="Replacement",
+        validate_only=True,
+    )
+
+    assert preview["relation_review_hash"] == preview["draft_hash"]
+    assert preview["draft_hash"] != "a" * 64
 
 
 def test_replace_writes_new_and_flips_old(vault: Path) -> None:

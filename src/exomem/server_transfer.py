@@ -16,6 +16,8 @@ from starlette.requests import Request
 from starlette.responses import FileResponse, HTMLResponse, JSONResponse
 
 from . import cf_access, upload_tokens
+from .governance import egress
+from .governance import principal as principal_module
 from .vault import VaultPathError, resolve_under_vault
 
 DEFAULT_UPLOAD_MAX_BYTES = 100 * 1024 * 1024
@@ -91,6 +93,52 @@ def load_transfer_config() -> TransferConfig:
         cf_aud=cf_aud,
         cf_jwks=cf_jwks,
     )
+
+
+def download_principal(
+    request: Request, config: TransferConfig
+) -> principal_module.RequestPrincipal:
+    """Canonical audience for a `/download` caller (design D5).
+
+    Two credentials reach this route and they are NOT the same human:
+    `EXOMEM_UPLOAD_TOKEN` (and tokens minted from it) is the vault owner's own
+    key, while a Cloudflare Access assertion carries a real third-party
+    identity. Resolving both to `owner` would let a CF-Access downloader
+    inherit the owner's ceiling — so the CF claims are folded into the same id
+    space `server_rest._rest_principal` uses, and a grant authored for that
+    human on MCP or REST applies here too.
+
+    Module-level (not a closure over the route) so the resolution contract is
+    directly testable without reaching through a registered endpoint.
+    """
+    if config.upload_token is not None:
+        header = request.headers.get("authorization", "")
+        if header.startswith("Bearer "):
+            presented = header[len("Bearer ") :].strip()
+            if secrets.compare_digest(
+                presented, config.upload_token
+            ) or upload_tokens.verify(presented, config.upload_token, scope="download"):
+                return principal_module.owner_principal(surface="transfer")
+    if config.cf_jwks is not None:
+        claims = cf_access.verified_claims(
+            request.headers.get("cf-access-jwt-assertion"),
+            jwks_client=config.cf_jwks,
+            team_domain=config.cf_team,
+            audience=config.cf_aud,
+        )
+        if claims is not None:
+            subject = str(claims.get("sub") or claims.get("email") or "").strip()
+            issuer = str(claims.get("iss") or "").strip()
+            if subject and issuer:
+                return principal_module.RequestPrincipal(
+                    audience_id=principal_module.normalize_audience(
+                        subject=subject, issuer=issuer
+                    ),
+                    surface="transfer",
+                )
+    # Authorized (the route already checked) but unresolvable: an identity was
+    # expected and did not resolve, so fail closed rather than open.
+    return principal_module.most_restrictive_principal(surface="transfer")
 
 
 def register_transfer_routes(
@@ -268,9 +316,23 @@ out.textContent=r.status+' '+await r.text();}}catch(err){{out.textContent='Error
                 status_code=400,
             )
         try:
-            abs_path, _rel = resolve_under_vault(
+            abs_path, rel = resolve_under_vault(
                 vault_root, path, must_exist=True, must_be_file=True
             )
+            # Release gate on the download TARGET, after the path resolves and
+            # before any bytes are handed to `FileResponse` (design D1: the
+            # transfer routes bypass `invoke_command`, so they carry the gate
+            # explicitly). A download hands over the item's COMPLETE bytes, so
+            # only full disclosure authorizes one — otherwise any ceiling
+            # could be escaped by asking for the artifact instead of the text.
+            #
+            # Raised as the route's own NOT_FOUND rather than a new code, so a
+            # withheld artifact is byte-identical to one that never existed:
+            # a distinct "forbidden" reply would itself be an existence oracle.
+            if not egress.release_allows_download(
+                vault_root, rel, principal=download_principal(request, config)
+            ):
+                raise VaultPathError("NOT_FOUND", f"path does not exist: {rel}")
         except VaultPathError as exc:
             status = 404 if exc.code == "NOT_FOUND" else 400
             return JSONResponse({"code": exc.code, "reason": exc.reason}, status_code=status)

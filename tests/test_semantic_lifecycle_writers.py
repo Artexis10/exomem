@@ -2278,6 +2278,33 @@ def test_material_edit_requires_and_commits_exact_reviewed_none_transition(
     assert loaded == reviewed.requested_decision
 
 
+def test_existing_reviewed_none_hyphen_alias_is_canonicalized(tmp_path: Path) -> None:
+    before = _source("A")
+    _write(tmp_path, _PAGE, before)
+    after = before.replace("A\n\n## Relations", "B\n\n## Relations")
+    preview = semantic_writes.preflight_existing(
+        tmp_path,
+        path=_PAGE,
+        after_source=after,
+        operation="edit",
+        expected_before_hash=vault.content_hash(before),
+    )
+
+    reviewed = semantic_writes.preflight_existing(
+        tmp_path,
+        path=_PAGE,
+        after_source=after,
+        operation="edit",
+        expected_before_hash=vault.content_hash(before),
+        transition_token=preview.transition_token,
+        relation_disposition="reviewed-none",
+        relation_review_hash=preview.transition_hash,
+        relation_review_reason="No honest relation exists for the revised page",
+    )
+
+    assert reviewed.requested_decision is not None
+
+
 def test_surgical_validate_only_adds_semantic_preflight_without_mutation(
     tmp_path: Path,
 ) -> None:

@@ -1033,6 +1033,32 @@ def test_idempotency_returns_saved_result_and_rejects_mismatch(tmp_path: Path) -
     assert calls == [1]
 
 
+def test_idempotency_replays_reviewed_none_alias_as_the_same_mutation(tmp_path: Path) -> None:
+    calls: list[str] = []
+    manager = _manager(tmp_path, LeaseRecord("desktop", 99, 4))
+    command = _command(
+        writes=True,
+        leaf=lambda relation_disposition: calls.append(relation_disposition)
+        or {"relation_disposition": relation_disposition},
+    )
+
+    first = manager.invoke(
+        command,
+        (),
+        {"relation_disposition": "reviewed-none"},
+        idempotency_key="reviewed-none-retry",
+    )
+    replay = manager.invoke(
+        command,
+        (),
+        {"relation_disposition": "reviewed_none"},
+        idempotency_key="reviewed-none-retry",
+    )
+
+    assert first == replay == {"relation_disposition": "reviewed_none"}
+    assert calls == ["reviewed_none"]
+
+
 def test_identical_inflight_retry_waits_for_original_terminal_result(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

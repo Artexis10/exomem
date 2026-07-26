@@ -214,6 +214,22 @@ Then add Exomem behavior to the hosted client. Paste the instruction block from
 [ai-assistant-guide.md](ai-assistant-guide.md), or at minimum start new chats by
 asking it to call `bootstrap(profile="compact")` once before using the KB.
 
+### Reuse this service from Claude Code and Codex
+
+Do not leave desktop clients on separate full stdio processes after installing
+the service. From the directory containing `.env`, rerun local setup; it reads
+`EXOMEM_BASE_URL` automatically. Or name the endpoint explicitly:
+
+```bash
+exomem setup --vault "/path/to/vault" \
+  --mcp-url https://<host>/mcp \
+  --replace-client-registration
+```
+
+Then use `/mcp` in Claude Code and `codex mcp login exomem` for native OAuth.
+After updating an older Exomem Claude plugin, run `/reload-plugins` or restart
+Claude Code so its former stdio process does not survive in the live session.
+
 ### ChatGPT Personal Plugin (OAuth only)
 
 Create the Personal Plugin with MCP Server URL `https://<host>/mcp` and

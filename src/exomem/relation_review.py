@@ -60,6 +60,11 @@ _LIFECYCLE_OPERATIONS = frozenset(
 logger = logging.getLogger(__name__)
 
 
+def normalize_relation_disposition(value: str | None) -> str | None:
+    """Return the canonical durable spelling for the advertised review alias."""
+    return "reviewed_none" if value == "reviewed-none" else value
+
+
 def _record_prevalidated_commit_outcome(outcome: str) -> None:
     """Record whether an in-lock ``_attempt`` reused pre-boundary validation.
 
@@ -211,6 +216,9 @@ class CreationDraftValidation:
             "mutated": self.mutated,
             "relation_disposition": self.relation_disposition,
             "reviewed_none_required": self.reviewed_none_required,
+            "relation_review_hash": (
+                self.draft_hash if self.reviewed_none_required else None
+            ),
             "has_non_review_blockers": self.has_non_review_blockers,
             "committable_without_review": self.committable_without_review,
             "committable_after_review": self.committable_after_review,
@@ -3285,9 +3293,11 @@ def revalidate_prepared_creation_draft(
     reconstruct that exact ordered batch.
     """
     try:
+        requested_disposition = normalize_relation_disposition(requested_disposition)
         if requested_disposition not in {None, "reviewed_none"}:
             raise RelationReviewError(
-                "INVALID_RELATION_REVIEW", "relation disposition is invalid"
+                "INVALID_RELATION_REVIEW",
+                "relation disposition must be 'reviewed_none' or 'reviewed-none'",
             )
         token_hash = draft_token_hash(draft_token)
         attempt = _attempt(
@@ -3627,6 +3637,7 @@ def prepare_commit_creation_draft(
 
     entry_generation = read_commit_generation(root)
     try:
+        relation_disposition = normalize_relation_disposition(relation_disposition)
         identity = _canonical_id(draft_id)
         token_hash = draft_token_hash(draft_token)
         predecessor_fields = (predecessor_path is not None, predecessor_content_hash is not None)
@@ -3660,7 +3671,10 @@ def prepare_commit_creation_draft(
                 "INVALID_RELATION_REVIEW", "relation review fields must be supplied together"
             )
         if relation_disposition not in {None, "reviewed_none"}:
-            raise RelationReviewError("INVALID_RELATION_REVIEW", "relation disposition is invalid")
+            raise RelationReviewError(
+                "INVALID_RELATION_REVIEW",
+                "relation disposition must be 'reviewed_none' or 'reviewed-none'",
+            )
         reason = (
             _review_reason(relation_review_reason)
             if relation_disposition == "reviewed_none"
@@ -3767,6 +3781,7 @@ def commit_prepared_creation_draft(
     """
     root = Path(vault_root).absolute()
     try:
+        relation_disposition = normalize_relation_disposition(relation_disposition)
         identity = prepared.identity
         destination = prepared.destination
         artifact_rel = prepared.artifact_rel

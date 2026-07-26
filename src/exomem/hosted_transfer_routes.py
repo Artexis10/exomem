@@ -331,6 +331,33 @@ def register_public_transfer_routes(
             requested_path = grant.download_path
             if requested_path is None:
                 raise hosted_transfer.TransferGrantRejected
+            # Release gate on the download TARGET, after path resolution and
+            # BEFORE the file is opened — the same consult, in the same
+            # position, as the sibling `/private/exomem/v1/download`.
+            #
+            # A transfer grant is minted by the hosted control plane: it proves
+            # WHO is asking and that the request is fresh and single-use. It
+            # says nothing about what that audience may see. Without this, any
+            # holder of a valid download grant escapes every disclosure ceiling
+            # by asking for the artifact instead of the text — a download hands
+            # over the complete bytes, so only full disclosure authorizes one.
+            #
+            # Refused as `VaultPathError`, which this route already renders as
+            # TRANSFER_TARGET_UNAVAILABLE, so a withheld artifact is
+            # indistinguishable from one that never existed.
+            from .governance import egress as egress_module
+            from .governance import principal as principal_module
+
+            allowed = await run_in_threadpool_func(
+                egress_module.release_allows_download,
+                config.vault_root,
+                requested_path,
+                principal=principal_module.resolve_hosted_principal(
+                    grant.principal_scope
+                ),
+            )
+            if not allowed:
+                raise VaultPathError(code="NOT_FOUND", reason="path does not exist")
             stream, size, filename = await run_in_threadpool_func(
                 _open_bounded_vault_file,
                 config.vault_root,

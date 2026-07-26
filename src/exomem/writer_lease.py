@@ -1035,6 +1035,12 @@ def _command_digest(command: Any, kwargs: Mapping[str, Any]) -> str:
     ).hexdigest()
 
 
+def _canonicalize_command_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
+    if kwargs.get("relation_disposition") == "reviewed-none":
+        return {**kwargs, "relation_disposition": "reviewed_none"}
+    return kwargs
+
+
 _PUBLIC_IDEMPOTENCY_KEY_UNSET = object()
 
 
@@ -1283,6 +1289,7 @@ class LeaseManager:
         mutation_request_id: str | None = None,
     ) -> Any:
         t_start = time.perf_counter()
+        kwargs = _canonicalize_command_kwargs(kwargs)
         kwargs, response_detail = split_response_detail(kwargs)
         if public_idempotency_key is _PUBLIC_IDEMPOTENCY_KEY_UNSET:
             effective_public_idempotency_key = idempotency_key
@@ -1831,7 +1838,7 @@ def invoke_command(
 
         kwargs = normalize_edit_surface_arguments(kwargs)
 
-    return get_manager().invoke(
+    result = get_manager().invoke(
         command,
         injected,
         kwargs,
@@ -1842,6 +1849,16 @@ def invoke_command(
         implicit_idempotency_scope=implicit_idempotency_scope,
         mutation_request_id=mutation_request_id,
     )
+    # Terminal egress filter (design D1). THIS is the one dispatcher shared by
+    # MCP, REST, hosted, and CLI — `command_surface.bind_vault` covers MCP
+    # only, and the `EXOMEM_RETRIEVE_INJECT` hook deliberately reaches memory
+    # over REST-then-CLI, the two paths that skip it. Putting the scrubber and
+    # the withheld cross-check here removes that whole bypass class.
+    from .governance.egress import is_vault_root, postfilter
+
+    if injected and is_vault_root(injected[0]):
+        result = postfilter(command.name, result, injected[0])
+    return result
 
 
 def coordination_status(

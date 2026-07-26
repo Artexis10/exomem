@@ -142,6 +142,7 @@ def test_hosted_ci_wires_every_static_security_gate() -> None:
     assert (
         '"${helm_bin}" lint "${infra_dir}/helm/platform" --strict \\\n  --namespace exomem-platform'
     ) in validator
+    assert "--skip-dirs '**/__pycache__'" in validator
     assert '--skip-dirs charts "${repo_root}"' in validator
     for action_line in (
         line.strip() for line in workflow.splitlines() if line.strip().startswith("- uses:")
