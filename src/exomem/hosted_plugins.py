@@ -9,6 +9,7 @@ import re
 import shutil
 import stat
 import tempfile
+from datetime import UTC, datetime
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -38,6 +39,9 @@ TOOL_REFERENCE = re.compile(
     r"(?:`|\b)(" + "|".join(re.escape(name) for name in sorted(
         set(commands.PRODUCT_PUBLIC_NAMES) | _LEGACY_OR_EXCLUDED_TOOLS
     )) + r")(?:`|\s*\()"
+)
+PROSE_CALL_REFERENCE = re.compile(
+    r"\b(?:use|call|run)\s+([a-z_][a-z0-9_]*)\b", re.IGNORECASE
 )
 
 
@@ -151,7 +155,12 @@ def validate_skill_text(text: str, skill: Path) -> tuple[str, ...]:
     allowed = set(commands.product_commands_for_profile(commands.HOSTED_ALPHA_AGENT_PROFILE, "rest"))
     allowed_names = {command.name for command in allowed}
     declared = _frontmatter(text, skill)["required_tools"]
-    observed = tuple(sorted(set(TOOL_REFERENCE.findall(text))))
+    observed = set(TOOL_REFERENCE.findall(text))
+    observed.update(
+        name for name in PROSE_CALL_REFERENCE.findall(text)
+        if name in _LEGACY_OR_EXCLUDED_TOOLS or name in commands.PRODUCT_PUBLIC_NAMES
+    )
+    observed = tuple(sorted(observed))
     unavailable = (set(declared) | set(observed)) - allowed_names
     if unavailable:
         raise ValueError(f"{skill}: unavailable Hosted tools: {', '.join(sorted(unavailable))}")
@@ -181,13 +190,17 @@ def validate_hosted_public_inputs(repo_root: Path | None = None) -> None:
     paths.extend(_skill_paths(root))
     generated = root / PLUGIN_ROOT / "generated"
     if generated.is_dir():
-        paths.extend(path for path in generated.rglob("*") if path.is_file())
+        paths.extend(path for path in generated.rglob("*") if path.is_file() or path.is_symlink())
     forbidden = re.compile(
         r"(?i)(\[todo:|\$\{[^}]+\}|exomem_vault_path|localhost|127\.0\.0\.1|"
         r"file://|[A-Z0-9_]*(?:token|secret|password)\s*[:=]|tenant[_-]?id|vault[_-]?path|"
         r"\buvx\b|\bhooks?\b)"
     )
     for path in paths:
+        if path.is_symlink():
+            raise ValueError(f"Hosted public artifact may not be a symlink: {path}")
+        if path.suffix.lower() not in {".json", ".md", ".svg"}:
+            raise ValueError(f"Hosted public artifact has an unknown binary format: {path}")
         text = path.read_text(encoding="utf-8")
         if forbidden.search(text):
             raise ValueError(f"Hosted public artifact is unsafe: {path}")
@@ -565,6 +578,11 @@ def check(
         raise ValueError("unsupported platform")
     selected = PLATFORMS if platform == "all" else (platform,)
     expected = root / PLUGIN_ROOT / "generated"
+    if "openai" in selected and openai_app_id is None:
+        try:
+            openai_app_id = json.loads((expected / "openai" / ".app.json").read_text(encoding="utf-8"))["apps"]["exomem"]["id"]
+        except (OSError, KeyError, TypeError, json.JSONDecodeError) as exc:
+            raise ValueError("OpenAI candidate is registration-pending or invalid") from exc
     expected_files = {
         path.relative_to(expected).as_posix(): path.read_bytes()
         for path in expected.rglob("*")
@@ -688,10 +706,13 @@ def promote(
     if not all(isinstance(evidence[key], str) and evidence[key].strip() for key in (
         "client_version", "clean_client_identity", "timestamp", "paired_run_id", "exomem_identity",
         "tenant", "entitlement", "provisioning_operation", "cell",
-    )) or evidence["cell_count"] != 1 or evidence["volume_count"] != 1:
+    )) or type(evidence["cell_count"]) is not int or type(evidence["volume_count"]) is not int or evidence["cell_count"] != 1 or evidence["volume_count"] != 1:
         raise ValueError("promotion evidence has invalid identity or expected resource counts")
     if not re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z", evidence["timestamp"]):
         raise ValueError("promotion evidence timestamp must be canonical UTC")
+    timestamp = datetime.fromisoformat(evidence["timestamp"].replace("Z", "+00:00"))
+    if abs((datetime.now(UTC) - timestamp).total_seconds()) > 24 * 60 * 60:
+        raise ValueError("promotion evidence timestamp is stale")
     check(root, platform=platform)
     if _files_digest(root / PLUGIN_ROOT / "generated" / platform) != lock["artifact_sha256"] or _sha256(archive_path.read_bytes()) != archive_lock["archive_sha256"]:
         raise ValueError("promotion candidate bytes are stale")
@@ -714,7 +735,12 @@ def promote(
     ).hexdigest()
     if not hmac.compare_digest(str(evidence["operator_signature"]), expected_signature):
         raise ValueError("promotion operator signature is invalid")
-    _write_json_atomic(promotion_record(root, platform), {
+    record_path = promotion_record(root, platform)
+    if record_path.is_file():
+        prior = json.loads(record_path.read_text(encoding="utf-8"))
+        if prior.get("state") == "live":
+            raise ValueError("promotion is already live; demote before a new promotion")
+    _write_json_atomic(record_path, {
         "schema_version": 1, "platform": platform, "state": "live", "package_lock": lock,
         "compatibility_sha256": compatibility["compatibility_sha256"], "evidence": evidence,
     })

@@ -35,6 +35,12 @@ def test_tool_reference_scanner_rejects_legacy_and_undeclared_callable_names() -
             Path("malicious.md"),
         )
 
+    with pytest.raises(ValueError, match="unavailable Hosted tools"):
+        hosted_plugins.validate_skill_text(
+            "---\nrequired_tools: [ask_memory]\n---\nUse ask_memory, then use edit_memory.",
+            Path("ordinary-prose.md"),
+        )
+
 
 def test_hosted_public_inputs_pass_the_hosted_no_leak_gate() -> None:
     hosted_plugins.validate_hosted_public_inputs(REPO_ROOT)
