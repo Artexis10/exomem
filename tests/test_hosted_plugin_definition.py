@@ -50,7 +50,11 @@ def test_compatibility_manifest_uses_the_exact_ordered_alpha_contract() -> None:
     manifest = hosted_plugins.compatibility_manifest(REPO_ROOT)
 
     assert manifest["profile"] == "hosted-alpha-agent-v1"
-    assert manifest["source_release"] == manifest["agent_contract"]["exomem_release"]
+    # The descriptor identifies the contract surface, not the build: it carries
+    # no Exomem release, so a version bump leaves it untouched. Covered in
+    # tests/test_hosted_plugin_release_identity.py.
+    assert "source_release" not in manifest
+    assert "exomem_release" not in manifest["agent_contract"]
     assert manifest["endpoint"] == "https://substratesystems.io/api/exomem/mcp/v1"
     assert tuple(manifest["commands"]) == (
         "bootstrap",

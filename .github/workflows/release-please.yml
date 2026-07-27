@@ -45,12 +45,11 @@ jobs:
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
 
-  # Release Please bumps the package version but cannot carry the hosted plugin
-  # artifacts with it. `plugins/hosted/definition.json` pins `source_release`,
-  # `hosted_plugins` hard-fails when that diverges from the package release, and
-  # the generated descriptors carry sha256 locks over the definition and the
-  # compatibility manifest that no `extra-files` updater can recompute. So the
-  # release branch runs the real generator and amends its own PR.
+  # The descriptor no longer embeds the Exomem release, so an ordinary version
+  # bump leaves the hosted artifacts untouched and this job is a no-op. It stays
+  # because a release that DOES change the contract surface (a command, schema,
+  # capability, skill, or endpoint) still needs the generated descriptors and
+  # their sha256 locks rebuilt, and no `extra-files` updater can recompute a hash.
   #
   # Without the GitHub App token this push uses GITHUB_TOKEN, which does not
   # retrigger the PR's checks -- the amended branch is correct but shows the
@@ -81,11 +80,6 @@ jobs:
         uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
-
-      # Order matters: regenerate refuses to run while the definition is stale,
-      # so the release guard blocks its own remedy until this resync lands.
-      - name: Sync hosted source_release with the release version
-        run: python scripts/sync_hosted_release.py
 
       - name: Regenerate hosted plugin artifacts
         run: uv run --frozen python scripts/hosted-plugin.py regenerate --platform claude
