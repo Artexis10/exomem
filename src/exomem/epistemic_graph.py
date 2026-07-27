@@ -414,16 +414,36 @@ class EpistemicGraphIndex:
             conn.close()
 
     def refresh_paths(self, paths: list[Path]) -> dict[str, int]:
+        """Index just the written paths. Never escalates to a full rebuild.
+
+        This runs on the write path (`upsert_after_write`), inside the vault
+        mutation boundary. A missing or schema-invalid sidecar used to escalate
+        to `_rebuild_all_locked()` here, so one ordinary write rebuilt the whole
+        vault graph while holding the boundary — measured at 39s over 2,000
+        pages and 172s over 8,000, with every other mutation blocked throughout
+        and the writer's own client free to time out on a write that then
+        succeeded.
+
+        A missing sidecar is drift, not a write's problem to solve. `graph_drift`
+        reports exactly this condition, and `reconcile` owns `rebuild_all` for
+        it. Checked before acquiring the boundary so an unbuildable graph does
+        not even contend for it.
+        """
         if not graph_enabled():
             return {"indexed_files": 0, "nodes": 0, "edges": 0, "disabled": 1}
+        if not self.available():
+            return {"indexed_files": 0, "nodes": 0, "edges": 0, "deferred": 1}
         with self._mutation_coordinator.hold(
             operation="epistemic_graph_refresh_paths", holder_kind="graph"
         ):
             return self._refresh_paths_locked(paths)
 
     def _refresh_paths_locked(self, paths: list[Path]) -> dict[str, int]:
+        # Defensive: `refresh_paths` already screened this. The sidecar can still
+        # vanish between that check and the boundary, and the write hook treats
+        # graph maintenance as best-effort, so defer rather than rebuild.
         if not self.available():
-            return self._rebuild_all_locked()
+            return {"indexed_files": 0, "nodes": 0, "edges": 0, "deferred": 1}
         resolver = find_module.writer_resolver_snapshot(self.vault_root)
         conn = self._connect()
         indexed = 0
