@@ -1,0 +1,1 @@
+{"schema_version":1,"run_id":"hosted-client-plugins-v1","required_counts":{"cell":1,"entitlement":1,"identity":1,"operation":1,"tenant":1,"volume":1},"required_operations":["native_install","authorization","tool_discovery","content_recall","citation","durable_capture","fresh_chat_recall"],"tenant_identity":"paired-runtime-evidence"}
