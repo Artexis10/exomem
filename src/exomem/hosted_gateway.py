@@ -137,7 +137,11 @@ def _mcp_tool_contract(
         name=command.name,
         annotations=command.mcp_annotations,
     )
-    return tool.to_mcp_tool().model_dump(mode="json", by_alias=True)
+    return {
+        key: value
+        for key, value in tool.to_mcp_tool().model_dump(mode="json", by_alias=True).items()
+        if value is not None
+    }
 
 
 def hosted_agent_surface_descriptor(

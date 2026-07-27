@@ -109,6 +109,7 @@ def test_readiness_endpoint_is_public_and_content_free(
             "release": "1.2.3",
             "runtime_contract": 1,
             "transport": "streamable-http-stateless",
+            "instance_id": "desktop-01",
             "replica_id": "desktop",
             "coordination": {
                 "enabled": True,
@@ -124,6 +125,7 @@ def test_readiness_endpoint_is_public_and_content_free(
     assert response.status_code == 200
     assert response.headers["cache-control"] == "no-store"
     assert response.json()["runtime_contract"] == 1
+    assert response.json()["instance_id"] == "desktop-01"
     rendered = response.text.lower()
     assert "vault" not in rendered
     assert "token" not in rendered
@@ -143,6 +145,7 @@ def test_readiness_endpoint_returns_503_without_changing_liveness(
             "release": "1.2.3",
             "runtime_contract": 1,
             "transport": "streamable-http-stateless",
+            "instance_id": None,
             "replica_id": "desktop",
             "coordination": {
                 "enabled": True,
