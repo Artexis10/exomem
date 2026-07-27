@@ -284,6 +284,234 @@ def test_fresh_sidecar_appenders_bootstrap_once_under_a_shared_lock(tmp_path: Pa
     assert next(iter(receipts.verify_chain(root)["instances"].values()))["tail_seq"] == 12
 
 
+def test_quiesced_receipt_connections_allow_an_atomic_sidecar_replacement(
+    vault: Path, tmp_path: Path
+) -> None:
+    first = receipts.append_event(
+        vault, event_type="disclosure", payload={"outcomes": []}
+    )
+    sidecar = store.sidecar_path(vault).resolve()
+    old_entry = receipts._RECEIPT_CONNECTIONS[sidecar]
+    receipts._close_receipt_connections()
+    with pytest.raises(sqlite3.ProgrammingError):
+        old_entry.connection.execute("SELECT 1")
+
+    replacement_vault = tmp_path / "replacement-vault"
+    (replacement_vault / "Knowledge Base").mkdir(parents=True)
+    replacement = store.open_connection(replacement_vault)
+    replacement_instance = "9" * 32
+    try:
+        replacement.execute(
+            "INSERT INTO receipt_instance(singleton, instance_id) VALUES (1, ?)",
+            (replacement_instance,),
+        )
+        replacement.commit()
+    finally:
+        replacement.close()
+    os.replace(store.sidecar_path(replacement_vault), sidecar)
+
+    second = receipts.append_event(
+        vault, event_type="disclosure", payload={"outcomes": []}
+    )
+
+    assert first["instance_id"] != replacement_instance
+    assert second["instance_id"] == replacement_instance
+    assert second["seq"] == 1
+
+
+def test_warmed_receipt_connection_preserves_an_in_place_future_schema(
+    vault: Path,
+) -> None:
+    first = receipts.append_event(
+        vault, event_type="disclosure", payload={"outcomes": []}
+    )
+    path = store.sidecar_path(vault).resolve()
+    prior = receipts._RECEIPT_CONNECTIONS[path]
+    external = store.open_connection(vault)
+    try:
+        external.execute("CREATE TABLE future_receipt_marker(value TEXT)")
+        external.execute("PRAGMA user_version = 3")
+        external.commit()
+    finally:
+        external.close()
+
+    second = receipts.append_event(
+        vault, event_type="disclosure", payload={"outcomes": []}
+    )
+    current = store.open_connection(vault)
+    try:
+        version = current.execute("PRAGMA user_version").fetchone()[0]
+        marker = current.execute(
+            "SELECT 1 FROM sqlite_master "
+            "WHERE type='table' AND name='future_receipt_marker'"
+        ).fetchone()
+    finally:
+        current.close()
+
+    assert second["instance_id"] == first["instance_id"]
+    assert second["seq"] == 2
+    assert receipts._RECEIPT_CONNECTIONS[path] is not prior
+    with pytest.raises(sqlite3.ProgrammingError):
+        prior.connection.execute("SELECT 1")
+    assert version == 3
+    assert marker == (1,)
+
+
+def test_receipt_connection_exception_is_evicted_and_reopened(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    first = receipts.append_event(
+        vault, event_type="disclosure", payload={"outcomes": []}
+    )
+    original_read_tail = receipts._read_tail_record
+    path = store.sidecar_path(vault).resolve()
+    failed_entry = receipts._RECEIPT_CONNECTIONS[path]
+
+    def fail_tail(_instance_dir: Path) -> None:
+        raise RuntimeError("injected tail failure")
+
+    monkeypatch.setattr(receipts, "_read_tail_record", fail_tail)
+    with pytest.raises(RuntimeError, match="injected tail failure"):
+        receipts.append_event(
+            vault, event_type="disclosure", payload={"outcomes": []}
+        )
+    assert path not in receipts._RECEIPT_CONNECTIONS
+    with pytest.raises(sqlite3.ProgrammingError):
+        failed_entry.connection.execute("SELECT 1")
+
+    monkeypatch.setattr(receipts, "_read_tail_record", original_read_tail)
+    second = receipts.append_event(
+        vault, event_type="disclosure", payload={"outcomes": []}
+    )
+    assert second["instance_id"] == first["instance_id"]
+    assert second["seq"] == 2
+
+
+def test_receipt_connection_quiesce_closes_descriptors_and_reopens(
+    vault: Path,
+) -> None:
+    first = receipts.append_event(
+        vault, event_type="disclosure", payload={"outcomes": []}
+    )
+    path = store.sidecar_path(vault).resolve()
+    closed_entry = receipts._RECEIPT_CONNECTIONS[path]
+
+    receipts._close_receipt_connections()
+
+    assert receipts._RECEIPT_ACTIVE_CONNECTIONS == 0
+    assert not receipts._RECEIPT_CONNECTIONS
+    with pytest.raises(sqlite3.ProgrammingError):
+        closed_entry.connection.execute("SELECT 1")
+    second = receipts.append_event(
+        vault, event_type="disclosure", payload={"outcomes": []}
+    )
+    assert second["instance_id"] == first["instance_id"]
+    assert second["seq"] == 2
+
+
+def test_receipt_connection_lru_evicts_and_closes_idle_handles(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    receipts._close_receipt_connections()
+    monkeypatch.setattr(receipts, "_RECEIPT_CONNECTIONS_MAX", 2)
+    roots = [tmp_path / f"lru-{index}" for index in range(3)]
+    for root in roots:
+        (root / "Knowledge Base").mkdir(parents=True)
+    ready = threading.Barrier(4)
+    release = threading.Event()
+    opened: list[sqlite3.Connection] = []
+
+    def hold(root: Path) -> None:
+        with receipts._receipt_connection(root) as connection:
+            opened.append(connection)
+            ready.wait(timeout=5)
+            assert release.wait(timeout=5)
+
+    threads = [threading.Thread(target=hold, args=(root,)) for root in roots]
+    for thread in threads:
+        thread.start()
+    ready.wait(timeout=5)
+    assert len(receipts._RECEIPT_CONNECTIONS) == 3
+    release.set()
+    for thread in threads:
+        thread.join(timeout=5)
+        assert not thread.is_alive()
+
+    assert len(receipts._RECEIPT_CONNECTIONS) == 2
+    closed = 0
+    for connection in opened:
+        try:
+            connection.execute("SELECT 1")
+        except sqlite3.ProgrammingError:
+            closed += 1
+    assert closed == 1
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="requires POSIX fork")
+def test_fork_quiesces_active_receipt_connection_and_reopens_per_pid(
+    vault: Path,
+) -> None:
+    first = receipts.append_event(
+        vault, event_type="disclosure", payload={"outcomes": []}
+    )
+    inherited_entry = receipts._RECEIPT_CONNECTIONS[
+        store.sidecar_path(vault).resolve()
+    ]
+    active = threading.Event()
+    release = threading.Event()
+
+    def hold_connection() -> None:
+        with receipts._receipt_connection(vault):
+            active.set()
+            assert release.wait(timeout=5)
+
+    holder = threading.Thread(target=hold_connection)
+    holder.start()
+    assert active.wait(timeout=5)
+    with pytest.raises(receipts.ReceiptError, match="still in use"):
+        receipts._close_receipt_connections()
+    timer = threading.Timer(0.05, release.set)
+    timer.start()
+    read_fd, write_fd = os.pipe()
+    pid = os.fork()
+    if pid == 0:  # pragma: no cover - assertions are reported through the pipe
+        try:
+            os.close(read_fd)
+            assert receipts._RECEIPT_ACTIVE_CONNECTIONS == 0
+            assert not receipts._RECEIPT_CONNECTIONS
+            child = receipts.append_event(
+                vault, event_type="disclosure", payload={"outcomes": []}
+            )
+            result = {"instance_id": child["instance_id"], "seq": child["seq"]}
+        except Exception as exc:  # noqa: BLE001 - child reports failures through pipe
+            result = {"error": repr(exc)}
+        os.write(write_fd, json.dumps(result).encode("utf-8"))
+        os.close(write_fd)
+        os._exit(0)
+
+    os.close(write_fd)
+    child_payload = os.read(read_fd, 4096)
+    os.close(read_fd)
+    _, status = os.waitpid(pid, 0)
+    timer.join(timeout=5)
+    holder.join(timeout=5)
+    assert not holder.is_alive()
+    assert os.waitstatus_to_exitcode(status) == 0
+    result = json.loads(child_payload)
+    assert "error" not in result, result
+    assert result == {"instance_id": first["instance_id"], "seq": 2}
+    assert receipts._RECEIPT_ACTIVE_CONNECTIONS == 0
+    assert not receipts._RECEIPT_CONNECTIONS
+    with pytest.raises(sqlite3.ProgrammingError):
+        inherited_entry.connection.execute("SELECT 1")
+
+    parent = receipts.append_event(
+        vault, event_type="disclosure", payload={"outcomes": []}
+    )
+    assert parent["instance_id"] == first["instance_id"]
+    assert parent["seq"] == 3
+
+
 def test_reconcile_does_not_promote_buffered_records_to_durable(vault: Path) -> None:
     event = receipts.append_event(vault, event_type="disclosure", payload={"outcomes": []})
     conn = store.open_connection(vault)

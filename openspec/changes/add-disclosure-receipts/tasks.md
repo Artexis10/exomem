@@ -80,7 +80,7 @@
 
 ## 5. Gates
 
-- [ ] 5.1 `PYTHONPATH=src EXOMEM_DISABLE_EMBEDDINGS=1 uv run python -m pytest -q
+- [x] 5.1 `PYTHONPATH=src EXOMEM_DISABLE_EMBEDDINGS=1 uv run python -m pytest -q
       tests/test_governance_receipts.py tests/test_governance_egress.py
       tests/test_governance_tokens.py tests/test_audit.py` green; deletion and
       recovery scenarios live in `tests/test_governance_receipts.py`.

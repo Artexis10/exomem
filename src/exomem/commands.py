@@ -4277,11 +4277,7 @@ def op_process_media(
     from .cli_ops import OpError
     from .writer_lease import active_manager, active_mutation_request_id
 
-    if operation not in {"process", "status", "retry"}:
-        raise OpError(
-            "INVALID_MEDIA_OPERATION",
-            "process_media operation must be process, status, or retry",
-        )
+    validate_process_media_operation(operation)
 
     vault_root = Path(vault_root).resolve()
     manager = active_manager()
@@ -5679,6 +5675,17 @@ def note_description(project_keys_hint: str) -> str:
 _MISSING_SELECTOR_DEFAULT = object()
 
 
+def validate_process_media_operation(operation: Any) -> None:
+    """Raise the product command's existing public selector error."""
+    if operation not in {"process", "status", "retry"}:
+        from .cli_ops import OpError
+
+        raise OpError(
+            "INVALID_MEDIA_OPERATION",
+            "process_media operation must be process, status, or retry",
+        )
+
+
 def _resolved_invocation_selector(
     command: Command, kwargs: dict[str, Any], selector: str
 ) -> Any:
@@ -5711,7 +5718,7 @@ def invocation_is_read_only(command: Command, kwargs: dict[str, Any]) -> bool:
         if value is _MISSING_SELECTOR_DEFAULT:
             return False
         if not isinstance(value, str):
-            raise RuntimeError(
+            raise egress_module.SelectorCoverageError(
                 "RECEIPT_OUTCOME_MISSING: command selector must resolve to a string: "
                 f"{command.name}.{selector}"
             )

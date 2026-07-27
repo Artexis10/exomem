@@ -6,6 +6,7 @@ anchor/cache used to detect a lost or divergent tail before another append.
 
 from __future__ import annotations
 
+import atexit
 import errno
 import hashlib
 import hmac
@@ -15,23 +16,31 @@ import os
 import re
 import sqlite3
 import stat
+import threading
+import time
 import uuid
+from collections import OrderedDict
 from collections.abc import Callable, Mapping
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from .. import memory_refs
-from ..mutation_lock import VaultMutationCoordinator
+from ..mutation_lock import (
+    VaultMutationCoordinator,
+    _release_os_lock,
+    _try_os_lock,
+)
 from ..writer_lease import LeaseConfig
 from . import store
 from .policy import governance_root
 
 SCHEMA = "receipt/v1"
 GENESIS_HASH = "0" * 64
-_TAIL_READ_BYTES = 1024 * 1024
 MAX_RECORD_BYTES = 64 * 1024
+_TAIL_READ_BYTES = MAX_RECORD_BYTES
 MAX_OUTCOMES = 128
 _MAX_IDENTIFIER_LENGTH = 256
 _MAX_COUNT = 2**31 - 1
@@ -63,6 +72,136 @@ _OUTCOME_FIELDS = frozenset({
     "confirmation_set_digest", "scope_set_digest", "boundary_set_digest",
 })
 _STATE_RESOLVERS: dict[str, Callable[[Mapping[str, Any]], Any]] = {}
+_RECEIPT_LOCK_TIMEOUT_SECONDS = 30.0
+_RECEIPT_LOCAL_LOCKS: dict[Path, threading.RLock] = {}
+_RECEIPT_LOCAL_LOCKS_GUARD = threading.Lock()
+_RECEIPT_LOCK_HANDLES: set[Any] = set()
+_RECEIPT_LOCK_DEPTH = threading.local()
+_RECEIPT_CONNECTIONS_CONDITION = threading.Condition()
+_RECEIPT_ACTIVE_CONNECTIONS = 0
+_RECEIPT_CONNECTIONS_FORKING = False
+_RECEIPT_CONNECTIONS_MAX = 32
+
+
+@dataclass
+class _ReceiptConnectionEntry:
+    connection: sqlite3.Connection
+    state: tuple[int, int, int, int, int, str]
+    users: int = 0
+
+
+_RECEIPT_CONNECTIONS: OrderedDict[Path, _ReceiptConnectionEntry] = OrderedDict()
+
+
+def _reset_receipt_locks_after_fork() -> None:
+    global _RECEIPT_LOCAL_LOCKS, _RECEIPT_LOCAL_LOCKS_GUARD
+    global _RECEIPT_LOCK_HANDLES, _RECEIPT_LOCK_DEPTH
+    for handle in _RECEIPT_LOCK_HANDLES:
+        try:
+            handle.close()
+        except OSError:
+            pass
+    _RECEIPT_LOCAL_LOCKS = {}
+    _RECEIPT_LOCAL_LOCKS_GUARD = threading.Lock()
+    _RECEIPT_LOCK_HANDLES = set()
+    _RECEIPT_LOCK_DEPTH = threading.local()
+
+
+def _prepare_receipt_connections_for_fork() -> None:
+    global _RECEIPT_CONNECTIONS_FORKING
+    _RECEIPT_CONNECTIONS_CONDITION.acquire()
+    _RECEIPT_CONNECTIONS_FORKING = True
+    while _RECEIPT_ACTIVE_CONNECTIONS:
+        _RECEIPT_CONNECTIONS_CONDITION.wait()
+    _close_receipt_connections_locked()
+
+
+def _resume_receipt_connections_after_fork() -> None:
+    global _RECEIPT_CONNECTIONS_FORKING
+    _RECEIPT_CONNECTIONS_FORKING = False
+    _RECEIPT_CONNECTIONS_CONDITION.notify_all()
+    _RECEIPT_CONNECTIONS_CONDITION.release()
+
+
+def _reset_receipt_connections_after_fork() -> None:
+    global _RECEIPT_CONNECTIONS, _RECEIPT_CONNECTIONS_CONDITION
+    global _RECEIPT_ACTIVE_CONNECTIONS
+    global _RECEIPT_CONNECTIONS_FORKING
+    _RECEIPT_CONNECTIONS = OrderedDict()
+    _RECEIPT_CONNECTIONS_CONDITION = threading.Condition()
+    _RECEIPT_ACTIVE_CONNECTIONS = 0
+    _RECEIPT_CONNECTIONS_FORKING = False
+
+
+def _close_receipt_connections_locked() -> None:
+    for entry in tuple(_RECEIPT_CONNECTIONS.values()):
+        try:
+            entry.connection.close()
+        except sqlite3.Error:
+            pass
+    _RECEIPT_CONNECTIONS.clear()
+
+
+def _evict_idle_receipt_connections_locked() -> None:
+    while len(_RECEIPT_CONNECTIONS) > _RECEIPT_CONNECTIONS_MAX:
+        candidate = next(
+            (
+                (path, entry)
+                for path, entry in _RECEIPT_CONNECTIONS.items()
+                if entry.users == 0
+            ),
+            None,
+        )
+        if candidate is None:
+            return
+        path, entry = candidate
+        _RECEIPT_CONNECTIONS.pop(path, None)
+        try:
+            entry.connection.close()
+        except sqlite3.Error:
+            pass
+
+
+def _close_receipt_connections() -> None:
+    """Quiesce cached receipt handles before a managed vault replacement.
+
+    Callers must first stop receipt-producing work. Hosted restore already runs
+    outside the server lifetime and publishes only onto an absent/empty target;
+    any future in-process replacement must invoke this hook before replacing
+    the vault or ``.governance.sqlite``. SQLite cannot safely support a live
+    main-file-only replacement while a WAL handle is open.
+    """
+    with _RECEIPT_CONNECTIONS_CONDITION:
+        if _RECEIPT_ACTIVE_CONNECTIONS:
+            raise ReceiptError("receipt connections are still in use")
+        _close_receipt_connections_locked()
+
+
+def _close_receipt_connections_at_exit() -> None:
+    """Best-effort idle-handle cleanup without noisy shutdown exceptions."""
+    if not _RECEIPT_CONNECTIONS_CONDITION.acquire(blocking=False):
+        return
+    try:
+        for path, entry in tuple(_RECEIPT_CONNECTIONS.items()):
+            if entry.users:
+                continue
+            _RECEIPT_CONNECTIONS.pop(path, None)
+            try:
+                entry.connection.close()
+            except sqlite3.Error:
+                pass
+    finally:
+        _RECEIPT_CONNECTIONS_CONDITION.release()
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_reset_receipt_locks_after_fork)
+    os.register_at_fork(
+        before=_prepare_receipt_connections_for_fork,
+        after_in_parent=_resume_receipt_connections_after_fork,
+        after_in_child=_reset_receipt_connections_after_fork,
+    )
+atexit.register(_close_receipt_connections_at_exit)
 
 
 class ReceiptError(RuntimeError):
@@ -672,14 +811,146 @@ def _tail(records: list[dict[str, Any]]) -> tuple[int, str]:
 
 @contextmanager
 def _receipt_lock(vault_root: Path):
-    """Cross-platform process/thread lock acquired before sidecar bootstrap."""
+    """Lean process/thread append lock acquired before sidecar bootstrap.
+
+    Receipt serialization needs one stable OS lock, not the mutation boundary's
+    fsync'd holder-metadata protocol: the JSONL record and sidecar anchor carry
+    the receipt's crash evidence themselves. The lock file remains under the
+    machine writer-state root and keeps the same canonical identity/path as the
+    former ``VaultMutationCoordinator.hold`` implementation.
+    """
     root = Path(vault_root).resolve()
     coordinator = VaultMutationCoordinator(
         LeaseConfig.from_env().state_dir,
         f"receipt:{root}",
     )
-    with coordinator.hold(operation="governance_receipt", holder_kind="receipt"):
+    lock_path = coordinator.lock_path
+    with _RECEIPT_LOCAL_LOCKS_GUARD:
+        local_lock = _RECEIPT_LOCAL_LOCKS.setdefault(lock_path, threading.RLock())
+    deadline = time.monotonic() + _RECEIPT_LOCK_TIMEOUT_SECONDS
+    if not local_lock.acquire(timeout=_RECEIPT_LOCK_TIMEOUT_SECONDS):
+        raise ReceiptError("receipt append lock timed out")
+    depths = getattr(_RECEIPT_LOCK_DEPTH, "depths", None)
+    if depths is None:
+        depths = {}
+        _RECEIPT_LOCK_DEPTH.depths = depths
+    if depths.get(lock_path, 0):
+        depths[lock_path] += 1
+        try:
+            yield
+        finally:
+            depths[lock_path] -= 1
+            local_lock.release()
+        return
+    handle = None
+    locked = False
+    try:
+        try:
+            lock_path.parent.mkdir(parents=True, exist_ok=True)
+            handle = lock_path.open("a+b")
+            handle.seek(0, os.SEEK_END)
+            if handle.tell() == 0:
+                handle.write(b"\0")
+                handle.flush()
+            handle.seek(0)
+            with _RECEIPT_LOCAL_LOCKS_GUARD:
+                _RECEIPT_LOCK_HANDLES.add(handle)
+            while not _try_os_lock(handle):
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise ReceiptError("receipt append lock timed out")
+                time.sleep(min(0.01, remaining))
+            locked = True
+        except OSError as exc:
+            raise ReceiptError("receipt append lock is unavailable") from exc
+        depths[lock_path] = 1
         yield
+    finally:
+        if handle is not None:
+            if locked:
+                try:
+                    _release_os_lock(handle)
+                except OSError:
+                    pass
+            with _RECEIPT_LOCAL_LOCKS_GUARD:
+                _RECEIPT_LOCK_HANDLES.discard(handle)
+            try:
+                handle.close()
+            except OSError:
+                pass
+        depths.pop(lock_path, None)
+        local_lock.release()
+
+
+@contextmanager
+def _receipt_connection(vault_root: Path):
+    """Yield a validated process-local writer while the receipt lock is held."""
+    global _RECEIPT_ACTIVE_CONNECTIONS
+    path = store.sidecar_path(Path(vault_root)).resolve()
+    with _RECEIPT_CONNECTIONS_CONDITION:
+        while _RECEIPT_CONNECTIONS_FORKING:
+            _RECEIPT_CONNECTIONS_CONDITION.wait()
+        entry = _RECEIPT_CONNECTIONS.get(path)
+        if entry is not None:
+            try:
+                path_stat = path.stat()
+            except OSError as exc:
+                raise ReceiptError("receipt sidecar disappeared while active") from exc
+            identity = os.getpid(), int(path_stat.st_dev), int(path_stat.st_ino)
+            if identity != entry.state[:3]:
+                raise ReceiptError(
+                    "receipt sidecar changed while active; quiesce before replacement"
+                )
+            try:
+                current_state = store._connection_state(entry.connection, path)
+            except (OSError, sqlite3.Error):
+                _RECEIPT_CONNECTIONS.pop(path, None)
+                try:
+                    entry.connection.close()
+                except sqlite3.Error:
+                    pass
+                entry = None
+            else:
+                if current_state != entry.state:
+                    _RECEIPT_CONNECTIONS.pop(path, None)
+                    try:
+                        entry.connection.close()
+                    except sqlite3.Error:
+                        pass
+                    entry = None
+        if entry is None:
+            connection = store.open_connection(
+                Path(vault_root), check_same_thread=False
+            )
+            try:
+                state = store._connection_state(connection, path)
+            except BaseException:
+                connection.close()
+                raise
+            entry = _ReceiptConnectionEntry(connection=connection, state=state)
+            _RECEIPT_CONNECTIONS[path] = entry
+        entry.users += 1
+        _RECEIPT_ACTIVE_CONNECTIONS += 1
+        _RECEIPT_CONNECTIONS.move_to_end(path)
+        _evict_idle_receipt_connections_locked()
+    try:
+        yield entry.connection
+    except BaseException:
+        with _RECEIPT_CONNECTIONS_CONDITION:
+            if _RECEIPT_CONNECTIONS.get(path) is entry:
+                _RECEIPT_CONNECTIONS.pop(path, None)
+                try:
+                    entry.connection.close()
+                except sqlite3.Error:
+                    pass
+        raise
+    finally:
+        with _RECEIPT_CONNECTIONS_CONDITION:
+            if _RECEIPT_CONNECTIONS.get(path) is entry:
+                entry.users -= 1
+            _RECEIPT_ACTIVE_CONNECTIONS -= 1
+            _evict_idle_receipt_connections_locked()
+            _RECEIPT_CONNECTIONS_CONDITION.notify_all()
 
 
 def _conflicted_evidence(instance_dir: Path) -> bool:
@@ -824,8 +1095,7 @@ def append_event(
         raise ReceiptError("critical receipts require a deterministic event id")
     timestamp, _parsed = _timestamp(timestamp or _now())
     with _receipt_lock(vault_root):
-        conn = store.open_connection(Path(vault_root))
-        try:
+        with _receipt_connection(vault_root) as conn:
             instance_id = _instance_id(conn)
             instance_dir = _instance_dir(vault_root, instance_id)
             try:
@@ -941,8 +1211,6 @@ def append_event(
             if event_type == "critical" and phase in {"committed", "aborted"}:
                 _crash_point("after_terminal_append")
             return record
-        finally:
-            conn.close()
 
 
 def critical_event_id(operation_identity: Any) -> str:
@@ -954,8 +1222,7 @@ def critical_event_id(operation_identity: Any) -> str:
 def label_digest(vault_root: Path, label: str) -> str:
     """Digest a human label with a machine-local secret, never the raw label."""
     with _receipt_lock(vault_root):
-        conn = store.open_connection(Path(vault_root))
-        try:
+        with _receipt_connection(vault_root) as conn:
             row = conn.execute(
                 "SELECT value FROM receipt_secrets WHERE name = 'label_hmac'"
             ).fetchone()
@@ -973,8 +1240,6 @@ def label_digest(vault_root: Path, label: str) -> str:
                 raise ReceiptError("label digest secret initialization failed")
             secret = bytes(row[0])
             return hmac.new(secret, label.encode("utf-8"), hashlib.sha256).hexdigest()
-        finally:
-            conn.close()
 
 
 def begin_event(
@@ -1007,8 +1272,7 @@ def terminal_event(vault_root: Path, event_id: str, *, phase: str, outcome: str 
     if not _hex(event_id):
         raise ReceiptError("critical terminal requires an opaque intent event id")
     with _receipt_lock(vault_root):
-        conn = store.open_connection(Path(vault_root))
-        try:
+        with _receipt_connection(vault_root) as conn:
             instance_id = _instance_id(conn)
             records, issues = _chain_state(_instance_dir(vault_root, instance_id))
             if issues:
@@ -1026,8 +1290,6 @@ def terminal_event(vault_root: Path, event_id: str, *, phase: str, outcome: str 
                 raise ReceiptError("critical event already has a different terminal phase")
             if not any(record.get("phase") == "intent" for record in existing):
                 raise ReceiptError("critical terminal requires an intent")
-        finally:
-            conn.close()
         payload: dict[str, Any] = {"causation_id": event_id}
         if outcome is not None:
             payload["outcome"] = outcome

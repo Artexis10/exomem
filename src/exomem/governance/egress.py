@@ -58,6 +58,15 @@ from .principal import OWNER_AUDIENCE, RequestPrincipal, effective_principal
 
 log = logging.getLogger(__name__)
 
+
+class SelectorCoverageError(RuntimeError):
+    """An invocation selector has no release/tombstone adapter.
+
+    The direct classifier keeps raising this hard coverage failure. Dispatch
+    seams may recognize the type only to acquire mutation authority first and
+    then translate it into a content-free refusal before the leaf executes.
+    """
+
 #: Sentinel for a memo that legitimately caches .
 _UNSET = object()
 
@@ -2001,7 +2010,7 @@ def assert_selector_covered(command: str, selector: str, value: str) -> str:
     adapter = _SELECTOR_ADAPTERS.get((command, selector), {}).get(value)
     tombstone_adapter = _SELECTOR_TOMBSTONE_ADAPTERS.get((command, selector), {}).get(value)
     if adapter is None or tombstone_adapter is None:
-        raise RuntimeError(
+        raise SelectorCoverageError(
             "RECEIPT_OUTCOME_MISSING: command selector without evidence/tombstone adapters: "
             f"{command}.{selector}={value}"
         )

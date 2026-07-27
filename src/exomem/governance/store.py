@@ -10,29 +10,87 @@ call opens this file.
 
 from __future__ import annotations
 
+import os
 import sqlite3
+import threading
+from collections import OrderedDict
 from pathlib import Path
 
 from .. import index_paths, sidecar_store
 
 SCHEMA_USER_VERSION = 2
 DATA_TABLE = "compiled_policy"
+_INITIALIZED_SIDECARS_MAX = 64
+_INITIALIZED_SIDECARS: OrderedDict[
+    Path, tuple[int, int, int, int, int, str]
+] = OrderedDict()
+_INITIALIZED_SIDECARS_LOCK = threading.Lock()
+
+
+def _reset_initialized_sidecars_after_fork() -> None:
+    global _INITIALIZED_SIDECARS, _INITIALIZED_SIDECARS_LOCK
+    _INITIALIZED_SIDECARS = OrderedDict()
+    _INITIALIZED_SIDECARS_LOCK = threading.Lock()
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_reset_initialized_sidecars_after_fork)
 
 
 def sidecar_path(vault_root: Path) -> Path:
     return index_paths.governance_sidecar_path(Path(vault_root))
 
 
-def open_connection(vault_root: Path) -> sqlite3.Connection:
+def open_connection(
+    vault_root: Path, *, check_same_thread: bool = True
+) -> sqlite3.Connection:
     """Open (creating if absent) the governance sidecar with its schema in place."""
-    path = sidecar_path(vault_root)
+    path = sidecar_path(vault_root).resolve()
     path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(path)
-    sidecar_store.apply_sidecar_pragmas(conn)
-    _migrate(conn)
-    sidecar_store.ensure_meta_table(conn, DATA_TABLE, "governance")
-    conn.commit()
-    return conn
+    conn = sqlite3.connect(path, check_same_thread=check_same_thread)
+    try:
+        with _INITIALIZED_SIDECARS_LOCK:
+            state = _connection_state(conn, path)
+            cached = _INITIALIZED_SIDECARS.get(path)
+            if cached == state:
+                # WAL mode persists in the database. These two pragmas are
+                # connection-local and cheap, so every new handle still gets
+                # the production timeout/durability settings without rerunning
+                # journal negotiation and idempotent DDL on every receipt.
+                conn.execute("PRAGMA synchronous=NORMAL")
+                conn.execute("PRAGMA busy_timeout=5000")
+                _INITIALIZED_SIDECARS.move_to_end(path)
+            else:
+                sidecar_store.apply_sidecar_pragmas(conn)
+                _migrate(conn)
+                sidecar_store.ensure_meta_table(conn, DATA_TABLE, "governance")
+                conn.commit()
+                _INITIALIZED_SIDECARS[path] = _connection_state(conn, path)
+                _INITIALIZED_SIDECARS.move_to_end(path)
+                while len(_INITIALIZED_SIDECARS) > _INITIALIZED_SIDECARS_MAX:
+                    _INITIALIZED_SIDECARS.popitem(last=False)
+        return conn
+    except BaseException:
+        conn.close()
+        raise
+
+
+def _connection_state(
+    conn: sqlite3.Connection, path: Path
+) -> tuple[int, int, int, int, int, str]:
+    """Identity + live schema state; DML does not invalidate this fast path."""
+    stat_result = path.stat()
+    user_version = int(conn.execute("PRAGMA user_version").fetchone()[0])
+    schema_version = int(conn.execute("PRAGMA schema_version").fetchone()[0])
+    journal_mode = str(conn.execute("PRAGMA journal_mode").fetchone()[0]).lower()
+    return (
+        os.getpid(),
+        int(stat_result.st_dev),
+        int(stat_result.st_ino),
+        user_version,
+        schema_version,
+        journal_mode,
+    )
 
 
 def _migrate(conn: sqlite3.Connection) -> None:

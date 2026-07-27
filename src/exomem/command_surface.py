@@ -403,9 +403,16 @@ def bind_vault(
             if command is None:
                 return leaf(*injected, **kwargs)
             from .commands import invocation_is_read_only
+            from .governance.egress import SelectorCoverageError
             from .writer_lease import invoke_command
 
-            invocation_read_only = invocation_is_read_only(command, kwargs)
+            try:
+                invocation_read_only = invocation_is_read_only(command, kwargs)
+            except SelectorCoverageError:
+                # The dispatcher will acquire writer authority and reject the
+                # uncovered selector before its leaf. This preliminary result
+                # exists only to keep retry/admission metadata conservative.
+                invocation_read_only = False
             request_id = mcp_request_id()
             tool_name = command.name
             # Computed at most once per call, and only for a mutation: a

@@ -960,6 +960,7 @@ def register_hosted_routes(
 
             def invoke_admitted() -> Any:
                 from .governance import principal as principal_module
+                from .governance.egress import SelectorCoverageError
 
                 # Canonical audience at the hosted-cell boundary (design D5).
                 # A cell is reached only through the gateway, so a missing
@@ -969,7 +970,17 @@ def register_hosted_routes(
                 ), principal_module.request_scope(
                     principal_module.resolve_hosted_principal(context.principal_scope)
                 ):
-                    if commands_module.invocation_is_read_only(command, kwargs):
+                    selector_error: SelectorCoverageError | None = None
+                    try:
+                        read_only = commands_module.invocation_is_read_only(command, kwargs)
+                    except SelectorCoverageError as error:
+                        if command.name == "process_media":
+                            commands_module.validate_process_media_operation(
+                                kwargs.get("operation", "process")
+                            )
+                        selector_error = error
+                        read_only = False
+                    if read_only:
                         with lifecycle.admit_read():
                             return invoke(
                                 command,
@@ -981,6 +992,11 @@ def register_hosted_routes(
                                 **kwargs,
                             )
                     with lifecycle.admit_mutation():
+                        if selector_error is not None:
+                            raise cli_ops.OpError(
+                                "RECEIPT_OUTCOME_MISSING",
+                                "command selector is not release-covered",
+                            )
                         return invoke(
                             command,
                             *injected,

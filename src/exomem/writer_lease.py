@@ -25,7 +25,7 @@ import uuid
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar, Token
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -1831,7 +1831,7 @@ def invoke_command(
     mutation_request_id: str | None = None,
     **kwargs: Any,
 ) -> Any:
-    from .commands import invocation_is_read_only
+    from .commands import invocation_is_read_only, validate_process_media_operation
 
     if command.name == "edit_memory":
         from .edit_operations import normalize_edit_surface_arguments
@@ -1844,17 +1844,40 @@ def invoke_command(
     # over REST-then-CLI, the two paths that skip it. Putting the scrubber and
     # the withheld cross-check here removes that whole bypass class.
     from .governance.egress import (
+        SelectorCoverageError,
         disclosure_boundary,
         emit_boundary_receipt,
         is_vault_root,
         postfilter,
     )
 
-    read_only = invocation_is_read_only(command, kwargs)
+    selector_error: SelectorCoverageError | None = None
+    try:
+        read_only = invocation_is_read_only(command, kwargs)
+    except SelectorCoverageError as error:
+        # Unknown selectors must first take the conservative writer/admission
+        # path, but must never execute a leaf that could return an unreceipted
+        # future read representation. process_media already owns a stable
+        # public input error, so preserve it before entering the writer path.
+        if command.name == "process_media":
+            validate_process_media_operation(kwargs.get("operation", "process"))
+        selector_error = error
+        read_only = False
+
+    dispatch_command = command
+    if selector_error is not None:
+
+        def reject_uncovered_selector(*_args: Any, **_kwargs: Any) -> Any:
+            raise OpError(
+                "RECEIPT_OUTCOME_MISSING",
+                "command selector is not release-covered",
+            )
+
+        dispatch_command = replace(command, leaf=reject_uncovered_selector)
 
     def _invoke() -> Any:
         return get_manager().invoke(
-            command,
+            dispatch_command,
             injected,
             kwargs,
             read_only=read_only,
