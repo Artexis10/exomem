@@ -97,7 +97,6 @@ class HostedDefinition:
     profile: str
     channel: str
     distribution_scope: str
-    source_release: str
     support_url: str
     privacy_url: str
     terms_url: str
@@ -169,7 +168,6 @@ def _validate_definition(raw: dict[str, Any]) -> HostedDefinition:
         "profile",
         "channel",
         "distribution_scope",
-        "source_release",
         "support_url",
         "privacy_url",
         "terms_url",
@@ -189,8 +187,6 @@ def _validate_definition(raw: dict[str, Any]) -> HostedDefinition:
         raise ValueError(f"missing Hosted definition fields: {', '.join(sorted(missing))}")
     if not SEMVER.fullmatch(str(raw["version"])):
         raise ValueError("plugin version must be a strict semantic version")
-    if not SEMVER.fullmatch(str(raw["source_release"])):
-        raise ValueError("source release must be a strict semantic version")
     endpoint = str(raw["endpoint"])
     if not endpoint.startswith("https://") or not endpoint.endswith("/mcp/v1"):
         raise ValueError("Hosted endpoint must be a fixed HTTPS versioned /mcp/v1 resource")
@@ -486,11 +482,30 @@ def compatibility_manifest(repo_root: Path | None = None) -> dict[str, Any]:
     definition = load_definition(root)
     dependencies = skill_dependencies(root)
     contract = hosted_gateway.build_agent_gateway_contract(profile=definition.profile)
-    if definition.source_release != contract["exomem_release"]:
-        raise ValueError(
-            "Hosted definition source release must match the agent contract release"
-        )
     oauth_overlay = oauth_discovery_overlay(contract)
+    # The descriptor identifies the contract surface, not the build that emitted
+    # it. `exomem_release` belongs to the running server's contract, and keeping
+    # it here made `compatibility_sha256` move on every version bump -- which
+    # invalidated the committed artifacts and, worse, any live promotion record
+    # for a plugin whose contract had not changed at all. The running release is
+    # still reported by `build_agent_gateway_contract`; a published artifact just
+    # is not the place to pin it.
+    #
+    # The contract's own digest hashes a base that includes `exomem_release`, so
+    # re-digesting the published contract is part of the decoupling rather than a
+    # cosmetic tidy: leaving the runtime digest in place would carry the release
+    # back into `schema_contract_sha256` and keep the churn. `schema_contract_sha256`
+    # never leaves this module -- descriptor, lock, promotion evidence -- and
+    # nothing cross-checks it against the running gateway's digest, so this stays
+    # out of the runtime contract, which still advertises its release-inclusive
+    # digest unchanged.
+    published_base = {
+        key: value for key, value in contract.items() if key not in {"exomem_release", "digest"}
+    }
+    published_contract = {
+        **published_base,
+        "digest": {"algorithm": "sha256", "value": _sha256(_canonical_json(published_base))},
+    }
     raw_definition = json.loads(
         (root / PLUGIN_ROOT / "definition.json").read_text(encoding="utf-8")
     )
@@ -501,14 +516,13 @@ def compatibility_manifest(repo_root: Path | None = None) -> dict[str, Any]:
         "plugin_version": definition.version,
         "endpoint": definition.endpoint,
         "profile": definition.profile,
-        "source_release": definition.source_release,
         "commands": list(commands_in_order),
         "command_surface_sha256": contract["agent_profile"]["active_capability_sha256"],
-        "schema_contract_sha256": contract["digest"]["value"],
+        "schema_contract_sha256": published_contract["digest"]["value"],
         "definition_sha256": _sha256(_canonical_json(raw_definition)),
         "skills_sha256": _skills_digest(root),
         "skills": {name: list(required_tools) for name, required_tools in dependencies.items()},
-        "agent_contract": contract,
+        "agent_contract": published_contract,
         "oauth_discovery": oauth_overlay,
         "oauth_discovery_sha256": _sha256(_canonical_json(oauth_overlay)),
     }
