@@ -2284,6 +2284,19 @@ def _core_op_main(argv: list[str]) -> int:
             kwargs = cli_ops.coerce(
                 cmd.params, raw, guarded_fields=cmd.guarded_fields, tool=cmd.name, cli=True
             )
+        # Domain-invalid mixed selectors must reach their stable public error
+        # before the lease/egress coverage classifier.  Coverage still rejects
+        # unknown selectors on every executable branch; this is input
+        # validation, not a branch registration.
+        if cmd.name == "process_media" and kwargs.get("operation", "process") not in {
+            "process",
+            "status",
+            "retry",
+        }:
+            raise cli_ops.OpError(
+                "INVALID_MEDIA_OPERATION",
+                "process_media operation must be process, status, or retry",
+            )
         vault_root = _resolve_core_op_vault(cmd.name, kwargs, resolve_vault)
         if cmd.needs_schema:
             injected = (vault_root, schema_module.load_source_schema(vault_root))

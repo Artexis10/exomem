@@ -23,11 +23,11 @@ from __future__ import annotations
 import datetime as dt
 import json
 import logging
-import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
 from . import media_types
+from .governance import lifecycle
 from .kbdir import kb_dirname, kb_prefix
 from .vault import (
     VaultPathError,
@@ -105,6 +105,11 @@ def delete_file(
         )
     except VaultPathError as e:
         raise DeleteFileError(code=e.code, reason=e.reason) from e
+
+    try:
+        lifecycle.assert_not_protected(vault_root, rel_path)
+    except lifecycle.LifecycleError as error:
+        raise DeleteFileError(code=error.code, reason=error.reason) from error
 
     # Trash items can't be re-trashed.
     parts = rel_path.split("/")
@@ -230,6 +235,14 @@ def delete_file(
                 break
             i += 1
 
+    trash_rel = trash_abs.relative_to(vault_root).as_posix()
+    try:
+        lifecycle_operation = lifecycle.begin_deletion(
+            vault_root, source_rel=rel_path, trash_rel=trash_rel
+        )
+    except lifecycle.LifecycleError as error:
+        raise DeleteFileError(code=error.code, reason=error.reason) from error
+
     # A removed CLIP-relevant media binary (image/video — the only kinds with
     # derived-index residue: CLIP rows, and for a video, scene-frame children)
     # also drops its scene-frame sidecar children (if any) via the same
@@ -264,11 +277,14 @@ def delete_file(
             log.debug("self-delete suppression registration failed", exc_info=True)
 
     try:
-        shutil.move(str(abs_path), str(trash_abs))
-    except OSError as e:
+        lifecycle.atomic_rename(
+            lifecycle_operation, source=abs_path, destination=trash_abs
+        )
+    except lifecycle.LifecycleError as e:
+        lifecycle.abort_deletion(lifecycle_operation)
         raise DeleteFileError(
-            code="TRASH_FAILED",
-            reason=f"could not move {rel_path} to trash: {e}",
+            code=e.code,
+            reason=e.reason,
         ) from e
 
     # Drop Markdown rows from the semantic index sidecars. A removed media
@@ -315,7 +331,13 @@ def delete_file(
     except OSError as e:
         warnings.append(f"trashed file ok but meta sidecar write failed: {e}")
 
-    trash_rel = trash_abs.resolve().relative_to(vault_root.resolve()).as_posix()
+    if not lifecycle.finish_deletion(
+        lifecycle_operation, index_report=index_feedback
+    ):
+        warnings.append(
+            "trash succeeded but governed derived state is not exact; "
+            "content remains tombstoned until reconcile"
+        )
 
     today_iso = today.isoformat()
     rel_no_ext = rel_path.removesuffix(".md") if rel_path.endswith(".md") else rel_path

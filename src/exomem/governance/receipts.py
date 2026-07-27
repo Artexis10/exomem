@@ -1263,6 +1263,28 @@ def unregister_state_resolver(operation: str) -> None:
     _STATE_RESOLVERS.pop(operation, None)
 
 
+def event_records(vault_root: Path) -> list[dict[str, Any]]:
+    """Return verified content-free records without mutating chain or sidecar."""
+    root = _events_root(Path(vault_root))
+    if not root.exists():
+        return []
+    records: list[dict[str, Any]] = []
+    for candidate in sorted(path for path in root.iterdir() if path.is_dir()):
+        instance_dir = _instance_dir(vault_root, candidate.name)
+        instance_records, issues = _chain_state(instance_dir)
+        if issues:
+            raise ReceiptError("receipt chain requires reconciliation")
+        records.extend(
+            {
+                key: value
+                for key, value in record.items()
+                if key not in {"_path", "_offset"}
+            }
+            for record in instance_records
+        )
+    return sorted(records, key=lambda item: (str(item.get("instance_id")), int(item.get("seq", 0))))
+
+
 def reconcile(
     vault_root: Path,
     *,
@@ -1271,9 +1293,25 @@ def reconcile(
 ) -> dict[str, Any]:
     """Preview from a read-only snapshot or repair under the append lock."""
     if dry_run:
-        return _reconcile_locked(vault_root, dry_run=True, state_resolver=state_resolver)
-    with _receipt_lock(vault_root):
-        return _reconcile_locked(vault_root, dry_run=False, state_resolver=state_resolver)
+        report = _reconcile_locked(vault_root, dry_run=True, state_resolver=state_resolver)
+    else:
+        with _receipt_lock(vault_root):
+            report = _reconcile_locked(vault_root, dry_run=False, state_resolver=state_resolver)
+    # Lifecycle markers are durable transaction guards in their own right.
+    # Scan them even when the critical intent already has a terminal (notably a
+    # recovery crash after terminal fsync but before tombstone removal).
+    from . import lifecycle
+
+    lifecycle_report = lifecycle.reconcile(vault_root, dry_run=dry_run)
+    report["lifecycle"] = lifecycle_report
+    report["repairs"] = [*report["repairs"], *lifecycle_report["repairs"]]
+    report["verification"] = verify_chain(vault_root)
+    report["unresolved"] = [
+        issue
+        for issue in report["verification"]["issues"]
+        if issue["code"] == "unresolved_intent"
+    ]
+    return report
 
 
 def _reconcile_locked(

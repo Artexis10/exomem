@@ -12,12 +12,13 @@ import threading
 import time
 from contextlib import contextmanager
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
-from exomem import audit
+from exomem import audit, delete_directory, delete_file, recover_from_trash
 from exomem import reconcile as reconcile_module
-from exomem.governance import receipts, store
+from exomem.governance import egress, receipts, store
 
 _PRIOR = "a" * 64
 _TARGET = "b" * 64
@@ -26,6 +27,9 @@ _OPERATION_ID = "d" * 64
 _BOUNDARY_ID = "e" * 32
 _RETRY_ID = "f" * 32
 _CRASH_ID = "1" * 32
+
+_LIFECYCLE_SCOPE = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+_LIFECYCLE_RULE = "01ARZ3NDEKTSV4RRFFQ69G5FB0"
 
 
 @pytest.fixture(autouse=True)
@@ -43,6 +47,37 @@ def _lifecycle_payload() -> dict[str, object]:
         "exact_state_digest": "c" * 64,
         "causation_id": _OPERATION_ID,
     }
+
+
+def _write_restricting_policy(vault: Path, pattern: str) -> None:
+    governance = vault / "Knowledge Base" / "_Governance"
+    scope = governance / "scopes" / "lifecycle.yaml"
+    rule = governance / "rules" / "lifecycle.yaml"
+    scope.parent.mkdir(parents=True, exist_ok=True)
+    rule.parent.mkdir(parents=True, exist_ok=True)
+    scope.write_text(
+        f'governance_version: 1\nid: {_LIFECYCLE_SCOPE}\npaths: ["{pattern}"]\n',
+        encoding="utf-8",
+    )
+    rule.write_text(
+        f"governance_version: 1\nid: {_LIFECYCLE_RULE}\n"
+        f"scope_ids: [\"{_LIFECYCLE_SCOPE}\"]\naudience: external\nceiling: 4\n",
+        encoding="utf-8",
+    )
+    from exomem.governance import membership, policy
+
+    policy._CACHE.clear()
+    membership.clear_memo()
+    egress.clear_decision_memo()
+
+
+def _receipt_records(vault: Path) -> list[dict[str, object]]:
+    root = vault / "Knowledge Base" / "_Governance" / "events"
+    return [
+        json.loads(line)
+        for path in sorted(root.rglob("*.jsonl")) if path.is_file()
+        for line in path.read_text(encoding="utf-8").splitlines()
+    ] if root.exists() else []
 
 
 def _recursive_snapshot(*roots: Path) -> dict[tuple[int, str], tuple[str, bytes | None]]:
@@ -1262,3 +1297,1077 @@ def test_yielded_month_io_error_is_normalized_and_receipt_errors_are_preserved(v
     with pytest.raises(receipts.ReceiptError, match="already content-free"):
         with receipts._open_month_fd(instance_dir, name):
             raise receipts.ReceiptError("already content-free")
+
+
+# ---------------------------------------------------------------------------
+# Governed deletion/recovery lifecycle (OpenSpec tasks 3.1-3.2)
+# ---------------------------------------------------------------------------
+
+
+def test_governed_file_delete_records_lifecycle_before_terminal_and_keeps_lineage(
+    vault: Path,
+) -> None:
+    rel = "Knowledge Base/Notes/Insights/governed-delete.md"
+    target = vault / rel
+    plaintext = "---\ntags: [secret]\n---\n# Never in evidence\nprivate body\n"
+    target.write_text(plaintext, encoding="utf-8")
+    _write_restricting_policy(vault, "Notes/Insights/governed-delete.md")
+
+    result = delete_file.delete_file(vault, path=rel, confirm=True)
+
+    records = _receipt_records(vault)
+    phases = [(item["event_type"], item["phase"]) for item in records]
+    intent_index = phases.index(("critical", "intent"))
+    deletion_index = phases.index(("deletion", "recorded"))
+    terminal_index = phases.index(("critical", "committed"))
+    assert intent_index < deletion_index < terminal_index
+    assert plaintext not in json.dumps(records)
+    assert (vault / result.trash_path).read_text(encoding="utf-8") == plaintext
+    tombstones = list(
+        (vault / "Knowledge Base" / "_Governance" / "deletion-tombstones").glob("*.json")
+    )
+    assert len(tombstones) == 1
+    assert json.loads(tombstones[0].read_text(encoding="utf-8"))["state"] == "committed"
+
+
+def test_tombstone_suppresses_stale_page_before_empty_policy_and_not_same_hash_sibling(
+    vault: Path,
+) -> None:
+    doomed_rel = "Knowledge Base/Notes/Insights/doomed.md"
+    sibling_rel = "Knowledge Base/Notes/Insights/sibling.md"
+    body = "---\ntype: insight\n---\n# Identical\n"
+    (vault / doomed_rel).write_text(body, encoding="utf-8")
+    (vault / sibling_rel).write_text(body, encoding="utf-8")
+    _write_restricting_policy(vault, "Notes/Insights/doomed.md")
+    delete_file.delete_file(vault, path=doomed_rel, confirm=True)
+    governance = vault / "Knowledge Base" / "_Governance"
+    shutil.rmtree(governance / "scopes")
+    shutil.rmtree(governance / "rules")
+    from exomem.governance import membership, policy
+
+    policy._CACHE.clear()
+    membership.clear_memo()
+    egress.clear_decision_memo()
+
+    assert egress.annotate_page(vault, {"path": doomed_rel, "body": body}) is None
+    assert egress.annotate_page(vault, {"path": sibling_rel, "body": body}) == {
+        "path": sibling_rel,
+        "body": body,
+    }
+    assert egress.release_level_for(vault, doomed_rel) is None
+
+
+def test_recovery_uses_committed_deletion_lineage_after_policy_disappears(
+    vault: Path,
+) -> None:
+    rel = "Knowledge Base/Notes/Insights/recover-lineage.md"
+    target = vault / rel
+    target.write_text(
+        "---\ntype: insight\nstatus: draft\n---\n# Restore me\n",
+        encoding="utf-8",
+    )
+    _write_restricting_policy(vault, "Notes/Insights/recover-lineage.md")
+    deleted = delete_file.delete_file(vault, path=rel, confirm=True)
+    governance = vault / "Knowledge Base" / "_Governance"
+    shutil.rmtree(governance / "scopes")
+    shutil.rmtree(governance / "rules")
+    from exomem.governance import membership, policy
+
+    policy._CACHE.clear()
+    membership.clear_memo()
+    egress.clear_decision_memo()
+
+    recovered = recover_from_trash.recover_from_trash(
+        vault, trash_path=deleted.trash_path
+    )
+
+    assert recovered.restored_path == rel
+    assert target.exists()
+    phases = [(item["event_type"], item["phase"]) for item in _receipt_records(vault)]
+    recovery_index = phases.index(("recovery", "recorded"))
+    recovery_terminal = max(
+        index for index, item in enumerate(phases) if item == ("critical", "committed")
+    )
+    assert recovery_index < recovery_terminal
+    assert not list(
+        (governance / "deletion-tombstones").glob("*.json")
+    )
+
+
+def test_governed_directory_over_receipt_bound_refuses_before_any_evidence_or_move(
+    vault: Path,
+) -> None:
+    rel = "Knowledge Base/Scratch/too-many"
+    root = vault / rel
+    root.mkdir(parents=True)
+    for index in range(receipts.MAX_OUTCOMES + 1):
+        (root / f"{index:03}.md").write_text(f"# {index}\n", encoding="utf-8")
+    _write_restricting_policy(vault, "Scratch/too-many/**")
+
+    with pytest.raises(delete_directory.DeleteDirectoryError) as error:
+        delete_directory.delete_directory(
+            vault, path=rel, confirm=True, recursive=True, force_orphan=True
+        )
+
+    assert error.value.code == "GOVERNED_BATCH_LIMIT"
+    assert root.exists()
+    assert _receipt_records(vault) == []
+    assert not (
+        vault / "Knowledge Base" / "_Governance" / "deletion-tombstones"
+    ).exists()
+
+
+@pytest.mark.parametrize(
+    "rel,kind",
+    [
+        ("Knowledge Base", "directory"),
+        ("Knowledge Base/_Governance", "directory"),
+        ("Knowledge Base/_Governance/events", "directory"),
+        ("Knowledge Base/_Governance/deletion-tombstones/pending.json", "file"),
+    ],
+)
+def test_lifecycle_refuses_operational_state_and_every_ancestor(
+    vault: Path, rel: str, kind: str
+) -> None:
+    target = vault / rel
+    if kind == "file":
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("{}\n", encoding="utf-8")
+
+        def invoke() -> object:
+            return delete_file.delete_file(vault, path=rel, confirm=True)
+
+        error_type = delete_file.DeleteFileError
+    else:
+        target.mkdir(parents=True, exist_ok=True)
+
+        def invoke() -> object:
+            return delete_directory.delete_directory(
+                vault,
+                path=rel,
+                confirm=True,
+                recursive=True,
+                force_orphan=True,
+                allow_curated=True,
+            )
+
+        error_type = delete_directory.DeleteDirectoryError
+
+    with pytest.raises(error_type) as error:
+        invoke()
+
+    assert error.value.code == "GOVERNANCE_STATE_PROTECTED"
+    assert target.exists()
+
+
+def test_recovery_terminal_crash_is_finalized_from_marker_without_replaying_move(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem.governance import lifecycle
+
+    rel = "Knowledge Base/Notes/Insights/recovery-crash.md"
+    target = vault / rel
+    target.write_text(
+        "---\ntype: insight\nstatus: draft\n---\n# Restore once\n",
+        encoding="utf-8",
+    )
+    _write_restricting_policy(vault, "Notes/Insights/recovery-crash.md")
+    deleted = delete_file.delete_file(vault, path=rel, confirm=True)
+
+    def crash(point: str) -> None:
+        if point == "recovery_terminal":
+            raise RuntimeError("simulated crash")
+
+    monkeypatch.setattr(lifecycle, "_checkpoint", crash)
+    with pytest.raises(RuntimeError, match="simulated crash"):
+        recover_from_trash.recover_from_trash(vault, trash_path=deleted.trash_path)
+    assert target.exists()
+    before = _semantic_snapshot(vault)
+
+    preview = lifecycle.reconcile(vault, dry_run=True)
+
+    assert _semantic_snapshot(vault) == before
+    assert preview["repairs"] == [{"kind": "recovery_finalize", "event_id": preview["repairs"][0]["event_id"]}]
+    monkeypatch.setattr(lifecycle, "_checkpoint", lambda _point: None)
+    applied = lifecycle.reconcile(vault, dry_run=False)
+    assert applied["repairs"] == preview["repairs"]
+    assert target.exists()
+    assert not list(
+        (vault / "Knowledge Base" / "_Governance" / "deletion-tombstones").glob("*.json")
+    )
+
+
+def test_direct_residue_probe_blocks_terminal_even_when_fanout_claims_success(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import index_sync
+    from exomem.governance import lifecycle
+
+    rel = "Knowledge Base/Notes/Insights/stale-row.md"
+    target = vault / rel
+    target.write_text("# Indexed secret\n", encoding="utf-8")
+    _write_restricting_policy(vault, "Notes/Insights/stale-row.md")
+    lexical = vault / "Knowledge Base" / ".lexical.sqlite"
+    conn = sqlite3.connect(lexical)
+    conn.execute("CREATE TABLE pages(path TEXT PRIMARY KEY)")
+    conn.execute("CREATE TABLE semantic_units(parent_path TEXT)")
+    conn.execute("INSERT INTO pages(path) VALUES (?)", (rel,))
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(
+        index_sync,
+        "delete_after_remove",
+        lambda _vault, paths: index_sync.observed_delete_report(paths, degraded=False),
+    )
+
+    result = delete_file.delete_file(vault, path=rel, confirm=True)
+
+    assert any("remains tombstoned" in warning for warning in result.warnings)
+    records = _receipt_records(vault)
+    assert not any(item["event_type"] == "deletion" for item in records)
+    assert not any(item["phase"] == "committed" for item in records)
+    assert egress.annotate_page(vault, {"path": rel, "body": "stale"}) is None
+    conn = sqlite3.connect(lexical)
+    conn.execute("DELETE FROM pages WHERE path = ?", (rel,))
+    conn.commit()
+    conn.close()
+
+    preview = lifecycle.reconcile(vault, dry_run=True)
+    assert preview["repairs"][0]["kind"] == "deletion_commit"
+    lifecycle.reconcile(vault, dry_run=False)
+    phases = [(item["event_type"], item["phase"]) for item in _receipt_records(vault)]
+    assert phases.index(("deletion", "recorded")) < phases.index(("critical", "committed"))
+
+
+@pytest.mark.parametrize(
+    ("component", "sidecar", "schema", "insert"),
+    [
+        (
+            "lexical",
+            ".lexical.sqlite",
+            "CREATE TABLE pages(path TEXT); CREATE TABLE semantic_units(parent_path TEXT)",
+            "INSERT INTO pages(path) VALUES (?)",
+        ),
+        (
+            "semantic_units",
+            ".lexical.sqlite",
+            "CREATE TABLE pages(path TEXT); CREATE TABLE semantic_units(parent_path TEXT)",
+            "INSERT INTO semantic_units(parent_path) VALUES (?)",
+        ),
+        (
+            "refs",
+            ".refs.sqlite",
+            "CREATE TABLE identities(path TEXT)",
+            "INSERT INTO identities(path) VALUES (?)",
+        ),
+        (
+            "graph",
+            ".graph.sqlite",
+            "CREATE TABLE graph_nodes(path TEXT); CREATE TABLE graph_parent_refs(path TEXT); "
+            "CREATE TABLE graph_edges(source_path TEXT)",
+            "INSERT INTO graph_nodes(path) VALUES (?)",
+        ),
+        (
+            "embeddings",
+            ".embeddings.sqlite",
+            "CREATE TABLE chunks(file_path TEXT); CREATE TABLE semantic_unit_vectors(parent_path TEXT)",
+            "INSERT INTO chunks(file_path) VALUES (?)",
+        ),
+        (
+            "clip",
+            ".clip.sqlite",
+            "CREATE TABLE images(file_path TEXT)",
+            "INSERT INTO images(file_path) VALUES (?)",
+        ),
+    ],
+)
+def test_direct_residue_probes_each_low_level_sidecar(
+    vault: Path,
+    component: str,
+    sidecar: str,
+    schema: str,
+    insert: str,
+) -> None:
+    from exomem.governance import lifecycle
+
+    rel = "Knowledge Base/Notes/Insights/probe.md"
+    item = lifecycle.ManifestItem(rel, "Knowledge Base/_trash/probe.md", "a" * 64, 1, "file", f"sha256:{'a' * 64}")
+    conn = sqlite3.connect(vault / "Knowledge Base" / sidecar)
+    conn.executescript(schema)
+    conn.execute(insert, (rel,))
+    conn.commit()
+    conn.close()
+
+    assert lifecycle.direct_residue(vault, (item,))[component] is True
+
+
+def test_direct_residue_probes_scene_frame_files(vault: Path) -> None:
+    from exomem.governance import lifecycle
+
+    rel = "Knowledge Base/Evidence/Video/probe.mp4"
+    frame_dir = vault / f"{rel}.frames"
+    frame_dir.mkdir(parents=True)
+    (frame_dir / "scene-001-t0ms.jpg").write_bytes(b"frame")
+    item = lifecycle.ManifestItem(rel, "Knowledge Base/_trash/probe.mp4", "a" * 64, 1, "file", f"sha256:{'a' * 64}")
+
+    assert lifecycle.direct_residue(vault, (item,))["scene"] is True
+
+
+def test_atomic_delete_refuses_cross_device_before_moving_content(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem.governance import lifecycle
+
+    rel = "Knowledge Base/Notes/Insights/cross-device.md"
+    target = vault / rel
+    target.write_text("# Same device only\n", encoding="utf-8")
+    _write_restricting_policy(vault, "Notes/Insights/cross-device.md")
+    devices = iter((10, 11))
+    monkeypatch.setattr(lifecycle, "_device", lambda _path: next(devices))
+
+    with pytest.raises(delete_file.DeleteFileError) as error:
+        delete_file.delete_file(vault, path=rel, confirm=True)
+
+    assert error.value.code == "CROSS_DEVICE_MOVE"
+    assert target.exists()
+    assert not list(
+        (vault / "Knowledge Base" / "_Governance" / "deletion-tombstones").glob("*.json")
+    )
+    assert [(item["event_type"], item["phase"]) for item in _receipt_records(vault)] == [
+        ("critical", "intent"),
+        ("critical", "aborted"),
+    ]
+
+
+def test_directory_census_drift_after_tombstone_refuses_atomic_move(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem.governance import lifecycle
+
+    rel = "Knowledge Base/Scratch/census-drift"
+    root = vault / rel
+    root.mkdir(parents=True)
+    (root / "captured.md").write_text("# captured\n", encoding="utf-8")
+    _write_restricting_policy(vault, "Scratch/census-drift/**")
+
+    def drift(point: str) -> None:
+        if point == "deletion_tombstone":
+            (root / "late.md").write_text("# late\n", encoding="utf-8")
+
+    monkeypatch.setattr(lifecycle, "_checkpoint", drift)
+    with pytest.raises(delete_directory.DeleteDirectoryError) as error:
+        delete_directory.delete_directory(
+            vault,
+            path=rel,
+            confirm=True,
+            recursive=True,
+            force_orphan=True,
+        )
+
+    assert error.value.code == "LIFECYCLE_CENSUS_DRIFT"
+    assert (root / "captured.md").exists()
+    assert (root / "late.md").exists()
+
+
+def test_tombstone_gates_registered_and_explicit_routes_without_policy(
+    vault: Path,
+) -> None:
+    rel = "Knowledge Base/Notes/Insights/all-routes.md"
+    target = vault / rel
+    target.write_text("# stale derivative\n", encoding="utf-8")
+    _write_restricting_policy(vault, "Notes/Insights/all-routes.md")
+    delete_file.delete_file(vault, path=rel, confirm=True)
+    governance = vault / "Knowledge Base" / "_Governance"
+    shutil.rmtree(governance / "scopes")
+    shutil.rmtree(governance / "rules")
+    from exomem.governance import membership, policy
+
+    policy._CACHE.clear()
+    membership.clear_memo()
+    egress.clear_decision_memo()
+
+    hit = SimpleNamespace(path=rel, parent_path="", graph_provenance=None)
+    assert egress.annotate_hits(vault, [hit]).hits == []
+    graph = {"seeds": [{"path": rel}], "nodes": [{"path": rel}], "edges": []}
+    assert egress.guard_graph_context(vault, graph)["nodes"] == []
+    assert egress.annotate_dataset(vault, {"path": rel}, representation="rows") is None
+    assert egress.filter_withheld_entries(vault, [{"path": rel}]) == []
+    assert egress.release_allows_download(vault, rel) is False
+    assert egress.release_allows_frames(vault, rel) is False
+    assert egress.redact_withheld_references(vault, f"read {rel}") == "read [withheld]"
+
+
+def test_selector_tombstone_coverage_mutation_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    key = ("maintain_memory", "mode")
+    monkeypatch.delitem(egress._SELECTOR_TOMBSTONE_ADAPTERS[key], "audit")
+
+    with pytest.raises(RuntimeError, match="TOMBSTONE_GATE_MISSING"):
+        egress.assert_tombstone_coverage()
+
+
+def test_repeat_delete_recover_delete_cycles_have_distinct_persisted_identity(
+    vault: Path,
+) -> None:
+    rel = "Knowledge Base/Notes/Insights/repeat-cycle.md"
+    target = vault / rel
+    target.write_text(
+        "---\ntype: insight\nstatus: draft\n---\n# Repeat cycle\n",
+        encoding="utf-8",
+    )
+    _write_restricting_policy(vault, "Notes/Insights/repeat-cycle.md")
+
+    first = delete_file.delete_file(vault, path=rel, confirm=True)
+    recover_from_trash.recover_from_trash(vault, trash_path=first.trash_path)
+    delete_file.delete_file(vault, path=rel, confirm=True)
+
+    deletion_records = [
+        item for item in _receipt_records(vault) if item["event_type"] == "deletion"
+    ]
+    assert len(deletion_records) == 2
+    assert deletion_records[0]["event_id"] != deletion_records[1]["event_id"]
+    assert deletion_records[0]["causation_id"] != deletion_records[1]["causation_id"]
+
+
+def test_same_cycle_retry_reuses_persisted_operation_identity(vault: Path) -> None:
+    from exomem.governance import lifecycle
+
+    rel = "Knowledge Base/Notes/Insights/retry-cycle.md"
+    (vault / rel).write_text("# Retry same intent\n", encoding="utf-8")
+    _write_restricting_policy(vault, "Notes/Insights/retry-cycle.md")
+    trash_rel = "Knowledge Base/_trash/2026-07-27/retry-cycle.md"
+
+    first = lifecycle.begin_deletion(vault, source_rel=rel, trash_rel=trash_rel)
+    second = lifecycle.begin_deletion(vault, source_rel=rel, trash_rel=trash_rel)
+
+    assert first.event_id == second.event_id
+    assert first.operation_nonce == second.operation_nonce
+    intents = [item for item in _receipt_records(vault) if item["phase"] == "intent"]
+    assert len(intents) == 1
+
+
+@pytest.mark.parametrize(
+    ("crash_point", "expected_terminal"),
+    [
+        ("deletion_intent", "aborted"),
+        ("deletion_tombstone", "aborted"),
+        ("deletion_moved", "committed"),
+        ("deletion_record", "committed"),
+        ("deletion_terminal", "committed"),
+    ],
+)
+def test_deletion_crash_windows_reconcile_once_in_receipt_order(
+    vault: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    crash_point: str,
+    expected_terminal: str,
+) -> None:
+    from exomem.governance import lifecycle
+
+    rel = f"Knowledge Base/Notes/Insights/crash-{crash_point}.md"
+    (vault / rel).write_text("# Crash-safe\n", encoding="utf-8")
+    _write_restricting_policy(vault, f"Notes/Insights/crash-{crash_point}.md")
+
+    def crash(point: str) -> None:
+        if point == crash_point:
+            raise RuntimeError("simulated lifecycle crash")
+
+    monkeypatch.setattr(lifecycle, "_checkpoint", crash)
+    with pytest.raises(RuntimeError, match="simulated lifecycle crash"):
+        delete_file.delete_file(vault, path=rel, confirm=True)
+    monkeypatch.setattr(lifecycle, "_checkpoint", lambda _point: None)
+
+    first = receipts.reconcile(vault, dry_run=False)
+    second = receipts.reconcile(vault, dry_run=False)
+
+    records = _receipt_records(vault)
+    terminals = [
+        item for item in records if item["phase"] in {"committed", "aborted"}
+    ]
+    assert [item["phase"] for item in terminals] == [expected_terminal]
+    lifecycle_records = [item for item in records if item["event_type"] == "deletion"]
+    if expected_terminal == "committed":
+        assert len(lifecycle_records) == 1
+        assert records.index(lifecycle_records[0]) < records.index(terminals[0])
+    else:
+        assert lifecycle_records == []
+    assert second["repairs"] == []
+    assert first["repairs"]
+
+
+@pytest.mark.parametrize(
+    ("crash_point", "expected_terminal"),
+    [
+        ("recovery_intent", "aborted"),
+        ("recovery_marker", "aborted"),
+        ("recovery_moved", "committed"),
+        ("recovery_record", "committed"),
+        ("recovery_terminal", "committed"),
+    ],
+)
+def test_recovery_crash_windows_reconcile_without_replaying_restore(
+    vault: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    crash_point: str,
+    expected_terminal: str,
+) -> None:
+    from exomem.governance import lifecycle
+
+    rel = f"Knowledge Base/Notes/Insights/crash-{crash_point}.md"
+    target = vault / rel
+    target.write_text(
+        "---\ntype: insight\nstatus: draft\n---\n# Recover crash-safe\n",
+        encoding="utf-8",
+    )
+    _write_restricting_policy(vault, f"Notes/Insights/crash-{crash_point}.md")
+    deleted = delete_file.delete_file(vault, path=rel, confirm=True)
+
+    def crash(point: str) -> None:
+        if point == crash_point:
+            raise RuntimeError("simulated recovery crash")
+
+    monkeypatch.setattr(lifecycle, "_checkpoint", crash)
+    with pytest.raises(RuntimeError, match="simulated recovery crash"):
+        recover_from_trash.recover_from_trash(vault, trash_path=deleted.trash_path)
+    monkeypatch.setattr(lifecycle, "_checkpoint", lambda _point: None)
+
+    if crash_point == "recovery_moved":
+        # The semantic move happened but derived rebuild did not. The product
+        # reconcile route heals ordinary indexes before receipt classification.
+        first = reconcile_module.reconcile(vault, dry_run=False).receipt_reconcile
+    else:
+        first = receipts.reconcile(vault, dry_run=False)
+    placement_after_first = (target.exists(), (vault / deleted.trash_path).exists())
+    second = receipts.reconcile(vault, dry_run=False)
+
+    records = _receipt_records(vault)
+    recovery_intents = [
+        item
+        for item in records
+        if item.get("operation") == "governed_recovery" and item["phase"] == "intent"
+    ]
+    assert len(recovery_intents) == 1
+    recovery_terminals = [
+        item
+        for item in records
+        if item.get("causation_id") == recovery_intents[0]["event_id"]
+        and item["phase"] in {"committed", "aborted"}
+    ]
+    assert [item["phase"] for item in recovery_terminals] == [expected_terminal]
+    recovery_records = [item for item in records if item["event_type"] == "recovery"]
+    if expected_terminal == "committed":
+        assert placement_after_first == (True, False)
+        assert len(recovery_records) == 1
+        assert records.index(recovery_records[0]) < records.index(recovery_terminals[0])
+    else:
+        assert placement_after_first == (False, True)
+        assert recovery_records == []
+    assert (target.exists(), (vault / deleted.trash_path).exists()) == placement_after_first
+    assert second["repairs"] == []
+    assert first["repairs"]
+
+
+def test_governed_multi_item_directory_delete_and_inverse_recovery(vault: Path) -> None:
+    rel = "Knowledge Base/Notes/Insights/governed-tree"
+    root = vault / rel
+    root.mkdir(parents=True)
+    for name in ("one.md", "two.md"):
+        (root / name).write_text(
+            f"---\ntype: insight\nstatus: draft\n---\n# {name}\n",
+            encoding="utf-8",
+        )
+    _write_restricting_policy(vault, "Notes/Insights/governed-tree/**")
+
+    deleted = delete_directory.delete_directory(
+        vault, path=rel, confirm=True, recursive=True, force_orphan=True
+    )
+    deletion = next(
+        item for item in _receipt_records(vault) if item["event_type"] == "deletion"
+    )
+    assert len(deletion["affected_refs"]) == 2
+    governance = vault / "Knowledge Base" / "_Governance"
+    shutil.rmtree(governance / "scopes")
+    shutil.rmtree(governance / "rules")
+    from exomem.governance import membership, policy
+
+    policy._CACHE.clear()
+    membership.clear_memo()
+
+    recovered = recover_from_trash.recover_from_trash(
+        vault, trash_path=deleted.trash_path
+    )
+
+    assert recovered.kind == "directory"
+    assert (root / "one.md").exists()
+    assert (root / "two.md").exists()
+    recovery = next(
+        item for item in _receipt_records(vault) if item["event_type"] == "recovery"
+    )
+    assert len(recovery["affected_refs"]) == 2
+
+
+def test_hypothetical_restore_frontmatter_can_govern_without_deletion_lineage(
+    vault: Path,
+) -> None:
+    rel = "Knowledge Base/Notes/Insights/newly-governed.md"
+    target = vault / rel
+    target.write_text(
+        "---\ntype: insight\nstatus: draft\ntags: [secret]\n---\n# Later governed\n",
+        encoding="utf-8",
+    )
+    deleted = delete_file.delete_file(vault, path=rel, confirm=True)
+    governance = vault / "Knowledge Base" / "_Governance"
+    scope = governance / "scopes" / "tagged.yaml"
+    rule = governance / "rules" / "tagged.yaml"
+    scope.parent.mkdir(parents=True, exist_ok=True)
+    rule.parent.mkdir(parents=True, exist_ok=True)
+    scope.write_text(
+        f"governance_version: 1\nid: {_LIFECYCLE_SCOPE}\ntags: [secret]\n",
+        encoding="utf-8",
+    )
+    rule.write_text(
+        f"governance_version: 1\nid: {_LIFECYCLE_RULE}\n"
+        f"scope_ids: [\"{_LIFECYCLE_SCOPE}\"]\naudience: external\nceiling: 4\n",
+        encoding="utf-8",
+    )
+    from exomem.governance import membership, policy
+
+    policy._CACHE.clear()
+    membership.clear_memo()
+
+    recover_from_trash.recover_from_trash(vault, trash_path=deleted.trash_path)
+
+    assert any(item["event_type"] == "recovery" for item in _receipt_records(vault))
+
+
+def test_explicit_l6_only_material_is_an_ungoverned_lifecycle_noop(vault: Path) -> None:
+    rel = "Knowledge Base/Notes/Insights/explicit-l6.md"
+    target = vault / rel
+    target.write_text("# Full disclosure\n", encoding="utf-8")
+    _write_restricting_policy(vault, "Notes/Insights/explicit-l6.md")
+    rule = vault / "Knowledge Base" / "_Governance" / "rules" / "lifecycle.yaml"
+    rule.write_text(rule.read_text(encoding="utf-8").replace("ceiling: 4", "ceiling: 6"), encoding="utf-8")
+    from exomem.governance import membership, policy
+
+    policy._CACHE.clear()
+    membership.clear_memo()
+
+    delete_file.delete_file(vault, path=rel, confirm=True)
+
+    assert _receipt_records(vault) == []
+    assert not (
+        vault / "Knowledge Base" / "_Governance" / "deletion-tombstones"
+    ).exists()
+
+
+def test_blocked_policy_treats_deleted_material_as_governed(vault: Path) -> None:
+    rel = "Knowledge Base/Notes/Insights/blocked-policy.md"
+    (vault / rel).write_text("# Fail closed\n", encoding="utf-8")
+    _write_restricting_policy(vault, "Notes/Insights/blocked-policy.md")
+    rule = vault / "Knowledge Base" / "_Governance" / "rules" / "lifecycle.yaml"
+    rule.write_text(rule.read_text(encoding="utf-8").replace("ceiling: 4", "ceiling: 9"), encoding="utf-8")
+    from exomem.governance import membership, policy
+
+    policy._CACHE.clear()
+    membership.clear_memo()
+
+    delete_file.delete_file(vault, path=rel, confirm=True)
+
+    assert any(item["event_type"] == "deletion" for item in _receipt_records(vault))
+
+
+def test_stable_memory_ref_remains_tombstoned_after_source_disappears(vault: Path) -> None:
+    rel = "Knowledge Base/Notes/Insights/stable-ref.md"
+    stable_ref = "exomem://memory/12345678-1234-1234-1234-123456789abc"
+    (vault / rel).write_text(
+        "---\nexomem_id: 12345678-1234-1234-1234-123456789abc\n---\n# Stable\n",
+        encoding="utf-8",
+    )
+    _write_restricting_policy(vault, "Notes/Insights/stable-ref.md")
+    delete_file.delete_file(vault, path=rel, confirm=True)
+    deletion = next(
+        item for item in _receipt_records(vault) if item["event_type"] == "deletion"
+    )
+    assert deletion["affected_refs"] == [stable_ref]
+    governance = vault / "Knowledge Base" / "_Governance"
+    shutil.rmtree(governance / "scopes")
+    shutil.rmtree(governance / "rules")
+    from exomem.governance import policy
+
+    policy._CACHE.clear()
+
+    assert egress.redact_withheld_references(vault, stable_ref) == "[withheld]"
+
+
+def test_media_recovery_stays_hidden_until_clip_is_rebuilt(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("EXOMEM_DISABLE_CLIP", raising=False)
+    rel = "Knowledge Base/Notes/Insights/recover-image.png"
+    target = vault / rel
+    target.write_bytes(b"not-a-real-image-but-an-exact-artifact")
+    _write_restricting_policy(vault, "Notes/Insights/recover-image.png")
+    deleted = delete_file.delete_file(vault, path=rel, confirm=True)
+
+    recovered = recover_from_trash.recover_from_trash(
+        vault, trash_path=deleted.trash_path
+    )
+
+    assert any("remains tombstoned" in warning for warning in recovered.warnings)
+    assert not any(item["event_type"] == "recovery" for item in _receipt_records(vault))
+    assert egress.release_allows_download(vault, rel) is False
+
+
+def test_media_recovery_can_activate_when_clip_is_explicitly_disabled(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("EXOMEM_DISABLE_CLIP", "1")
+    rel = "Knowledge Base/Notes/Insights/recover-disabled-image.png"
+    target = vault / rel
+    target.write_bytes(b"exact-disabled-artifact")
+    _write_restricting_policy(vault, "Notes/Insights/recover-disabled-image.png")
+    deleted = delete_file.delete_file(vault, path=rel, confirm=True)
+
+    recovered = recover_from_trash.recover_from_trash(
+        vault, trash_path=deleted.trash_path
+    )
+
+    assert not any("remains tombstoned" in warning for warning in recovered.warnings)
+    assert any(item["event_type"] == "recovery" for item in _receipt_records(vault))
+
+
+def test_staged_recovery_tombstones_a_custom_restore_path(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem.governance import lifecycle
+
+    original = "Knowledge Base/Notes/Insights/custom-origin.md"
+    custom = "Knowledge Base/Notes/Insights/custom-target.md"
+    (vault / original).write_text(
+        "---\ntype: insight\nstatus: draft\n---\n# Custom restore\n",
+        encoding="utf-8",
+    )
+    _write_restricting_policy(vault, "Notes/Insights/custom-origin.md")
+    deleted = delete_file.delete_file(vault, path=original, confirm=True)
+    monkeypatch.setattr(lifecycle, "_restored_derivatives_exact", lambda _operation: False)
+
+    recovered = recover_from_trash.recover_from_trash(
+        vault,
+        trash_path=deleted.trash_path,
+        restore_path=custom,
+    )
+
+    assert any("remains tombstoned" in warning for warning in recovered.warnings)
+    assert lifecycle.is_tombstoned(vault, custom) is True
+    assert egress.annotate_page(vault, {"path": custom, "body": "stale"}) is None
+
+
+def test_directory_target_with_uncaptured_extra_file_is_not_exact(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem.governance import lifecycle
+
+    rel = "Knowledge Base/Scratch/target-census"
+    root = vault / rel
+    root.mkdir(parents=True)
+    (root / "captured.md").write_text("# captured\n", encoding="utf-8")
+    _write_restricting_policy(vault, "Scratch/target-census/**")
+
+    def add_uncaptured_target(point: str) -> None:
+        if point != "deletion_moved":
+            return
+        trash_root = vault / "Knowledge Base" / "_trash"
+        moved = next(
+            path
+            for path in trash_root.rglob("*")
+            if path.is_dir() and path.name.endswith("target-census")
+        )
+        (moved / "uncaptured.md").write_text("# uncaptured\n", encoding="utf-8")
+
+    monkeypatch.setattr(lifecycle, "_checkpoint", add_uncaptured_target)
+    deleted = delete_directory.delete_directory(
+        vault,
+        path=rel,
+        confirm=True,
+        recursive=True,
+        force_orphan=True,
+    )
+
+    assert any("remains tombstoned" in warning for warning in deleted.warnings)
+    assert not any(item["event_type"] == "deletion" for item in _receipt_records(vault))
+    assert not any(item["phase"] == "committed" for item in _receipt_records(vault))
+
+
+def test_scene_enabled_video_recovery_finalizes_after_exact_scene_rebuild(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem.governance import lifecycle
+
+    monkeypatch.delenv("EXOMEM_DISABLE_CLIP", raising=False)
+    monkeypatch.setenv("EXOMEM_VIDEO_SCENE_FRAMES", "1")
+    rel = "Knowledge Base/Notes/Insights/recover-video.mp4"
+    (vault / rel).write_bytes(b"video-recovery-artifact")
+    _write_restricting_policy(vault, "Notes/Insights/recover-video.mp4")
+    deleted = delete_file.delete_file(vault, path=rel, confirm=True)
+    recovered = recover_from_trash.recover_from_trash(
+        vault, trash_path=deleted.trash_path
+    )
+    assert any("remains tombstoned" in warning for warning in recovered.warnings)
+
+    clip = sqlite3.connect(vault / "Knowledge Base" / ".clip.sqlite")
+    clip.execute("DELETE FROM images WHERE file_path = ?", (rel,))
+    clip.execute(
+        "INSERT INTO images(file_path, frame_ts, vector, file_mtime) VALUES (?, ?, ?, ?)",
+        (rel, 5.0, b"vector", 0.0),
+    )
+    clip.commit()
+    clip.close()
+    frame_dir = vault / f"{rel}.frames"
+    frame_dir.mkdir(parents=True)
+    frame = frame_dir / "scene-000-t5000ms.jpg"
+    frame.write_bytes(b"frame")
+    frame.with_name(frame.name + ".md").write_text(
+        f"---\nparent_media: {rel}\nframe_ts: 5.0\n---\n",
+        encoding="utf-8",
+    )
+
+    report = lifecycle.reconcile(vault)
+
+    assert report["repairs"][0]["kind"] == "recovery_finalize"
+    assert any(item["event_type"] == "recovery" for item in _receipt_records(vault))
+    assert lifecycle.is_tombstoned(vault, rel) is False
+
+
+def test_corrupt_lifecycle_marker_fails_closed_for_stale_egress(vault: Path) -> None:
+    from exomem.governance import lifecycle, membership, policy
+
+    rel = "Knowledge Base/Notes/Insights/corrupt-marker.md"
+    (vault / rel).write_text("# Corrupt marker secret\n", encoding="utf-8")
+    _write_restricting_policy(vault, "Notes/Insights/corrupt-marker.md")
+    delete_file.delete_file(vault, path=rel, confirm=True)
+    tombstone = next(
+        (
+            vault
+            / "Knowledge Base"
+            / "_Governance"
+            / "deletion-tombstones"
+        ).glob("*.json")
+    )
+    tombstone.write_text("{not-json\n", encoding="utf-8")
+    governance = vault / "Knowledge Base" / "_Governance"
+    shutil.rmtree(governance / "scopes")
+    shutil.rmtree(governance / "rules")
+    policy._CACHE.clear()
+    membership.clear_memo()
+    egress.clear_decision_memo()
+    stale = SimpleNamespace(path=rel, parent_path="", graph_provenance=None)
+
+    annotated = egress.annotate_hits(vault, [stale])
+
+    assert annotated.hits == []
+    assert annotated.active is True
+    assert lifecycle.is_tombstoned(vault, rel) is True
+
+
+def test_redirected_lifecycle_marker_manifest_fails_closed(vault: Path) -> None:
+    from exomem.governance import lifecycle, membership, policy
+
+    rel = "Knowledge Base/Notes/Insights/redirected-marker.md"
+    (vault / rel).write_text("# Redirected marker secret\n", encoding="utf-8")
+    _write_restricting_policy(vault, "Notes/Insights/redirected-marker.md")
+    delete_file.delete_file(vault, path=rel, confirm=True)
+    tombstone = next(
+        (
+            vault
+            / "Knowledge Base"
+            / "_Governance"
+            / "deletion-tombstones"
+        ).glob("*.json")
+    )
+    marker = json.loads(tombstone.read_text(encoding="utf-8"))
+    marker["manifest"][0]["source_path"] = (
+        "Knowledge Base/Notes/Insights/redirect-target.md"
+    )
+    tombstone.write_text(json.dumps(marker), encoding="utf-8")
+    governance = vault / "Knowledge Base" / "_Governance"
+    shutil.rmtree(governance / "scopes")
+    shutil.rmtree(governance / "rules")
+    policy._CACHE.clear()
+    membership.clear_memo()
+    egress.clear_decision_memo()
+    stale = SimpleNamespace(path=rel, parent_path="", graph_provenance=None)
+
+    annotated = egress.annotate_hits(vault, [stale])
+
+    assert annotated.hits == []
+    assert annotated.active is True
+    assert lifecycle.is_tombstoned(vault, rel) is True
+
+
+def test_lifecycle_tombstone_root_symlink_is_refused_before_intent_or_move(
+    vault: Path, tmp_path: Path
+) -> None:
+    rel = "Knowledge Base/Notes/Insights/symlink-root.md"
+    target = vault / rel
+    target.write_text("# Symlink root secret\n", encoding="utf-8")
+    _write_restricting_policy(vault, "Notes/Insights/symlink-root.md")
+    outside = tmp_path / "outside-tombstones"
+    outside.mkdir()
+    tombstone_root = (
+        vault / "Knowledge Base" / "_Governance" / "deletion-tombstones"
+    )
+    tombstone_root.symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(delete_file.DeleteFileError) as error:
+        delete_file.delete_file(vault, path=rel, confirm=True)
+
+    assert error.value.code == "LIFECYCLE_PATH_UNSAFE"
+    assert target.exists()
+    assert list(outside.iterdir()) == []
+    assert _receipt_records(vault) == []
+
+
+def test_tombstone_projection_validates_receipt_binding_once_per_snapshot(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem.governance import lifecycle
+
+    rel = "Knowledge Base/Notes/Insights/snapshot-cache.md"
+    (vault / rel).write_text("# Snapshot cache\n", encoding="utf-8")
+    _write_restricting_policy(vault, "Notes/Insights/snapshot-cache.md")
+    delete_file.delete_file(vault, path=rel, confirm=True)
+    original = receipts.event_records
+    calls = 0
+
+    def counted(root: Path) -> list[dict]:
+        nonlocal calls
+        calls += 1
+        return original(root)
+
+    monkeypatch.setattr(receipts, "event_records", counted)
+    hits = [
+        SimpleNamespace(path=rel, parent_path="", graph_provenance=None)
+        for _index in range(10)
+    ]
+
+    annotated = egress.annotate_hits(vault, hits)
+
+    assert annotated.hits == []
+    assert calls == 1
+    assert lifecycle.is_tombstoned(vault, rel) is True
+    assert calls == 1
+
+
+def test_reconcile_refuses_marker_redirected_away_from_original_source(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem.governance import lifecycle
+
+    rel = "Knowledge Base/Notes/Insights/reconcile-original.md"
+    original = vault / rel
+    content = "# Original must remain\n"
+    original.write_text(content, encoding="utf-8")
+    _write_restricting_policy(vault, "Notes/Insights/reconcile-original.md")
+
+    def crash(point: str) -> None:
+        if point == "deletion_tombstone":
+            raise RuntimeError("simulated crash")
+
+    monkeypatch.setattr(lifecycle, "_checkpoint", crash)
+    with pytest.raises(RuntimeError, match="simulated crash"):
+        delete_file.delete_file(vault, path=rel, confirm=True)
+    tombstone = next(
+        (
+            vault
+            / "Knowledge Base"
+            / "_Governance"
+            / "deletion-tombstones"
+        ).glob("*.json")
+    )
+    marker = json.loads(tombstone.read_text(encoding="utf-8"))
+    decoy_source = "Knowledge Base/Notes/Insights/reconcile-decoy.md"
+    decoy_trash = "Knowledge Base/_trash/reconcile-decoy.md"
+    decoy_target = vault / decoy_trash
+    decoy_target.parent.mkdir(parents=True, exist_ok=True)
+    decoy_target.write_text(content, encoding="utf-8")
+    marker["source_root"] = decoy_source
+    marker["trash_root"] = decoy_trash
+    marker["manifest"][0]["source_path"] = decoy_source
+    marker["manifest"][0]["trash_path"] = decoy_trash
+    tombstone.write_text(json.dumps(marker), encoding="utf-8")
+    monkeypatch.setattr(lifecycle, "_checkpoint", lambda _point: None)
+
+    report = lifecycle.reconcile(vault)
+
+    assert report["repairs"] == []
+    assert original.exists()
+    assert json.loads(tombstone.read_text(encoding="utf-8"))["state"] == "pending"
+    records = _receipt_records(vault)
+    assert [(item["event_type"], item["phase"]) for item in records] == [
+        ("critical", "intent")
+    ]
+
+
+def test_video_deletion_proves_scene_child_sidecar_residue_absent(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import scene_frames
+    from exomem.governance import lifecycle
+
+    rel = "Knowledge Base/Notes/Insights/scene-residue.mp4"
+    target = vault / rel
+    target.write_bytes(b"scene-residue-video")
+    _write_restricting_policy(vault, "Notes/Insights/scene-residue.mp4")
+    frame_dir = scene_frames.frames_dir_for(target)
+    frame_dir.mkdir(parents=True)
+    frame = frame_dir / "scene-000-t0ms.jpg"
+    frame.write_bytes(b"frame")
+    sidecar = frame.with_name(frame.name + ".md")
+    sidecar.write_text(
+        f"---\nparent_media: {rel}\nframe_ts: 0.0\n---\n",
+        encoding="utf-8",
+    )
+    sidecar_rel = sidecar.relative_to(vault).as_posix()
+    lexical = sqlite3.connect(vault / "Knowledge Base" / ".lexical.sqlite")
+    lexical.executescript(
+        "CREATE TABLE pages(path TEXT PRIMARY KEY);"
+        "CREATE TABLE semantic_units(parent_path TEXT)"
+    )
+    lexical.execute("INSERT INTO pages(path) VALUES (?)", (sidecar_rel,))
+    lexical.commit()
+    lexical.close()
+
+    def clear_without_index_proof(_vault: Path, _video: Path) -> int:
+        frame.unlink()
+        sidecar.unlink()
+        return 2
+
+    monkeypatch.setattr(scene_frames, "clear_scene_frames", clear_without_index_proof)
+    deleted = delete_file.delete_file(vault, path=rel, confirm=True)
+
+    assert any("remains tombstoned" in warning for warning in deleted.warnings)
+    assert not any(item["event_type"] == "deletion" for item in _receipt_records(vault))
+    assert lifecycle.is_tombstoned(vault, sidecar_rel) is True
+    assert egress.annotate_page(vault, {"path": sidecar_rel, "body": "stale"}) is None
+
+
+def test_scene_recovery_is_explicitly_disabled_with_clip(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem.governance import lifecycle
+
+    monkeypatch.setenv("EXOMEM_DISABLE_CLIP", "1")
+    monkeypatch.setenv("EXOMEM_VIDEO_SCENE_FRAMES", "1")
+    rel = "Knowledge Base/Notes/Insights/recover-video-disabled.mp4"
+    (vault / rel).write_bytes(b"disabled-video-recovery")
+    _write_restricting_policy(vault, "Notes/Insights/recover-video-disabled.mp4")
+    deleted = delete_file.delete_file(vault, path=rel, confirm=True)
+
+    recovered = recover_from_trash.recover_from_trash(
+        vault, trash_path=deleted.trash_path
+    )
+
+    assert not any("remains tombstoned" in warning for warning in recovered.warnings)
+    assert any(item["event_type"] == "recovery" for item in _receipt_records(vault))
+    assert lifecycle.is_tombstoned(vault, rel) is False

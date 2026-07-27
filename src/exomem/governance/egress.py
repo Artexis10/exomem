@@ -49,9 +49,9 @@ from urllib.parse import unquote
 from .. import find_corpus, memory_refs
 from ..find_types import Hit, SemanticUnitHit
 from ..kbdir import kb_dirname
+from . import lifecycle, receipts, scrubber, tokens
 from . import membership as membership_module
 from . import policy as policy_module
-from . import receipts, scrubber, tokens
 from .decisions import Decision, decide
 from .policy import DISCLOSURE_MAX, DISCLOSURE_MIN, Policy
 from .principal import OWNER_AUDIENCE, RequestPrincipal, effective_principal
@@ -924,6 +924,8 @@ def _decide_path(
     probe, not an afterthought — and a stat failure fails closed with `None`
     rather than falling through to a decision.
     """
+    if lifecycle.is_tombstoned(vault_root, rel_path):
+        return None
     full_path = vault_root / rel_path
     try:
         st = full_path.stat()
@@ -1027,7 +1029,7 @@ def gate_state(vault_root: Path) -> tuple[Policy, bool]:
     genuinely fast.
     """
     policy = policy_module.load(Path(vault_root))
-    return policy, not policy.empty
+    return policy, (not policy.empty or bool(lifecycle.tombstoned_paths(vault_root)))
 
 
 def _hit_path(hit: Any) -> str:
@@ -1054,9 +1056,20 @@ def annotate_hits(
     declared_purpose = purpose if purpose is not None else who.purpose
     effective_limit = len(hits) if limit is None else limit
 
+    tombstoned = frozenset(
+        path for hit in hits if (path := _hit_path(hit)) and lifecycle.is_tombstoned(vault_root, path)
+    )
+    if tombstoned:
+        hits = [hit for hit in hits if _hit_path(hit) not in tombstoned]
+
     # (1) Open fast path — no governance configured.
     if policy.empty:
-        return AnnotatedHits(hits=hits, active=False, fingerprint=policy.fingerprint)
+        return AnnotatedHits(
+            hits=hits,
+            withheld_paths=tombstoned,
+            active=bool(tombstoned),
+            fingerprint=policy.fingerprint,
+        )
 
     # (2) Fail-closed floor — a refused cold-start compile, or an identity that
     #     should have resolved and did not. Both are DISCLOSURE_MIN for every
@@ -1266,6 +1279,16 @@ def guard_graph_context(
     vault_root = Path(vault_root)
     policy = policy_module.load(vault_root)
     who = principal if principal is not None else effective_principal()
+    tombstoned = frozenset(
+        str(node.get("path") or "")
+        for section in ("nodes", "seeds")
+        for node in (payload.get(section) or [])
+        if isinstance(node, Mapping)
+        and node.get("path")
+        and lifecycle.is_tombstoned(vault_root, str(node.get("path")))
+    )
+    if tombstoned:
+        payload = guard_seed(payload, tombstoned)
     if policy.empty:
         return payload
     if policy.blocked or not who.resolved:
@@ -1368,6 +1391,9 @@ def annotate_page(
     that never existed.
     """
     vault_root = Path(vault_root)
+    rel_path = str(page.get("path") or stable_ref or "")
+    if rel_path and lifecycle.is_tombstoned(vault_root, rel_path):
+        return None
     policy = policy_module.load(vault_root)
     who = principal if principal is not None else effective_principal()
 
@@ -1837,6 +1863,13 @@ _COMMAND_OUTCOME_ADAPTER: dict[str, str] = {
     },
 }
 
+# Every content selector declares both evidence collection and tombstone
+# suppression.  The values name the concrete gate used by that representation;
+# mutation selectors explicitly declare that no content is returned.
+_COMMAND_TOMBSTONE_ADAPTER: dict[str, str] = {
+    name: adapter for name, adapter in _COMMAND_OUTCOME_ADAPTER.items()
+}
+
 _DATA_REPRESENTATION_ADAPTER: dict[str, str] = {
     "rows": "dataset",
     "aggregate": "dataset",
@@ -1899,10 +1932,62 @@ _SELECTOR_ADAPTERS: dict[tuple[str, str], dict[str, str]] = {
     },
 }
 
+_SELECTOR_TOMBSTONE_ADAPTERS: dict[tuple[str, str], dict[str, str]] = {
+    key: {
+        value: "not-applicable" if adapter == "mutation" else adapter
+        for value, adapter in values.items()
+    }
+    for key, values in _SELECTOR_ADAPTERS.items()
+}
+
+_EXPLICIT_TOMBSTONE_ROUTES: dict[str, str] = {
+    "direct-read": "page",
+    "download": "binary",
+    "frame": "binary",
+    "prompt": "artifact-reference",
+    "resource": "artifact-reference",
+}
+
 
 def selector_registry() -> dict[tuple[str, str], dict[str, str]]:
     """The one finite selector registry used by lease and egress coverage."""
     return {key: dict(values) for key, values in _SELECTOR_ADAPTERS.items()}
+
+
+def selector_capability_registry() -> dict[tuple[str, str], dict[str, dict[str, str]]]:
+    """Selector-level evidence and tombstone capabilities, default-deny."""
+    return {
+        key: {
+            value: {
+                "outcome": adapter,
+                "tombstone": _SELECTOR_TOMBSTONE_ADAPTERS.get(key, {}).get(value, ""),
+            }
+            for value, adapter in values.items()
+        }
+        for key, values in _SELECTOR_ADAPTERS.items()
+    }
+
+
+def assert_tombstone_coverage() -> None:
+    missing: list[str] = []
+    for command in _COMMAND_OUTCOME_ADAPTER:
+        if not _COMMAND_TOMBSTONE_ADAPTER.get(command):
+            missing.append(command)
+    for (command, selector), values in _SELECTOR_ADAPTERS.items():
+        declared = _SELECTOR_TOMBSTONE_ADAPTERS.get((command, selector), {})
+        missing.extend(
+            f"{command}.{selector}={value}"
+            for value in values
+            if not declared.get(value)
+        )
+    missing.extend(
+        f"explicit:{route}" for route, adapter in _EXPLICIT_TOMBSTONE_ROUTES.items() if not adapter
+    )
+    if missing:
+        raise RuntimeError(
+            "TOMBSTONE_GATE_MISSING: content selectors without tombstone suppression: "
+            + ", ".join(sorted(missing))
+        )
 
 
 def selector_for_command(command: str) -> str | None:
@@ -1914,9 +1999,10 @@ def selector_for_command(command: str) -> str | None:
 
 def assert_selector_covered(command: str, selector: str, value: str) -> str:
     adapter = _SELECTOR_ADAPTERS.get((command, selector), {}).get(value)
-    if adapter is None:
+    tombstone_adapter = _SELECTOR_TOMBSTONE_ADAPTERS.get((command, selector), {}).get(value)
+    if adapter is None or tombstone_adapter is None:
         raise RuntimeError(
-            "RECEIPT_OUTCOME_MISSING: command selector without an egress adapter: "
+            "RECEIPT_OUTCOME_MISSING: command selector without evidence/tombstone adapters: "
             f"{command}.{selector}={value}"
         )
     return adapter
@@ -2140,6 +2226,9 @@ def annotate_dataset(
     """Authorize final CSV/TSV/JSON rows before they cross the boundary."""
     assert_data_representation_covered(representation)
     vault_root = Path(vault_root)
+    rel_path = str(payload.get("path") or "")
+    if rel_path and lifecycle.is_tombstoned(vault_root, rel_path):
+        return None
     policy = policy_module.load(vault_root)
     if policy.empty:
         return dict(payload)
@@ -2192,6 +2281,8 @@ def release_level_for(
     rather than "no rule applies".
     """
     vault_root = Path(vault_root)
+    if lifecycle.is_tombstoned(vault_root, rel_path):
+        return None
     policy = policy_module.load(vault_root)
     if policy.empty:
         return DISCLOSURE_MAX
@@ -2286,7 +2377,8 @@ class _ArtifactReferenceGate:
         self.by_name: dict[str, list[str]] = {}
         self.by_stem: dict[str, list[str]] = {}
         self.literal_aliases: set[str] = set()
-        if not self.policy.empty:
+        self.tombstones = lifecycle.tombstoned_paths(self.vault_root)
+        if not self.policy.empty or self.tombstones:
             self._index()
 
     def _add(self, table: dict[str, list[str]], alias: str, rel: str) -> None:
@@ -2319,6 +2411,18 @@ class _ArtifactReferenceGate:
             self._add(self.by_stem, path.stem, rel)
             if len(path.name) >= 3:
                 self.literal_aliases.add(path.name)
+        for rel in self.tombstones:
+            if rel.startswith(("exomem://", "sha256:")):
+                continue
+            path = Path(rel)
+            aliases = {rel, unquote(rel), path.name, path.stem}
+            kb_prefix = f"{kb_dirname()}/"
+            if rel.startswith(kb_prefix):
+                aliases.add(rel[len(kb_prefix) :])
+            for alias in aliases:
+                self._add(self.by_path, alias, rel)
+                if len(alias) >= 3:
+                    self.literal_aliases.add(alias)
 
     @staticmethod
     def _unwrap(value: str) -> tuple[str, bool]:
@@ -2331,6 +2435,8 @@ class _ArtifactReferenceGate:
 
     def resolve(self, value: str, *, directory: str | None = None) -> tuple[str, ...]:
         token, wikilink = self._unwrap(value)
+        if lifecycle.is_tombstoned(self.vault_root, token):
+            return (token,)
         lowered = token.casefold()
         if lowered.startswith(memory_refs.REF_PREFIX):
             try:
@@ -2364,6 +2470,9 @@ class _ArtifactReferenceGate:
         return ()
 
     def _permits(self, rel_path: str) -> bool:
+        if lifecycle.is_tombstoned(self.vault_root, rel_path):
+            self.verdicts[rel_path] = False
+            return False
         cached = self.verdicts.get(rel_path)
         if cached is not None:
             return cached
@@ -2393,7 +2502,7 @@ class _ArtifactReferenceGate:
         return allowed
 
     def gate_text(self, text: str) -> str:
-        if not text or self.policy.empty:
+        if not text or (self.policy.empty and not self.tombstones):
             return text
 
         def _replace_token(match: re.Match[str]) -> str:
@@ -2511,7 +2620,8 @@ def release_walk_filter(
     without parsing it.
     """
     policy = policy_module.load(Path(vault_root))
-    if policy.empty:
+    tombstones = lifecycle.tombstoned_paths(vault_root)
+    if policy.empty and not tombstones:
         return None
 
     vault_root = Path(vault_root)
@@ -2522,6 +2632,8 @@ def release_walk_filter(
     verdicts: dict[str, bool] = {}
 
     def keep(rel_path: str) -> bool:
+        if lifecycle.is_tombstoned(vault_root, rel_path):
+            return False
         if fail_closed:
             _record_blocked_outcome(who.audience_id)
             return False
@@ -2790,7 +2902,8 @@ def filter_withheld_entries(
     """
     vault_root = Path(vault_root)
     policy = policy_module.load(vault_root)
-    if policy.empty:
+    tombstones = lifecycle.tombstoned_paths(vault_root)
+    if policy.empty and not tombstones:
         return payload
     who = principal if principal is not None else effective_principal()
     fail_closed = policy.blocked or not who.resolved
@@ -2802,6 +2915,9 @@ def filter_withheld_entries(
     def _permitted(rel_path: str) -> bool:
         """True when this vault item may be named. Non-vault paths are NOT
         decided here — see `_is_vault_item`."""
+        if lifecycle.is_tombstoned(vault_root, rel_path):
+            verdicts[rel_path] = False
+            return False
         if fail_closed:
             return False
         cached = verdicts.get(rel_path)
@@ -2855,6 +2971,8 @@ def filter_withheld_entries(
         return result
 
     def _resolve_uncached(rel_path: str) -> str | None:
+        if lifecycle.is_tombstoned(vault_root, rel_path):
+            return _normalize_pathish(rel_path)
         if rel_path.startswith(("http://", "https://", "exomem://")):
             return None
         # RAW exact hit first. `_decode_pathish` is otherwise unconditional,

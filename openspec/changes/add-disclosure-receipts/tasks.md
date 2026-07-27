@@ -48,7 +48,7 @@
 
 ## 3. Deletion events
 
-- [ ] 3.1 Red tests cover governed file deletion, directory deletion containing
+- [x] 3.1 Red tests cover governed file deletion, directory deletion containing
       multiple governed items, and inverse recovery after the governing policy
       changes or disappears. Inject crashes before tombstone, after tombstone,
       after move/restore, after each metadata/semantic/CLIP/scene fan-out, and
@@ -57,7 +57,7 @@
       prompt/resource routes; mutation-test a missing gate so coverage fails.
       Prove residue and ambiguous placement remain hidden. Ordinary ungoverned
       deletion is a receipt no-op.
-- [ ] 3.2 Capture refs/hashes/exact source-trash placement and batch manifest;
+- [x] 3.2 Capture refs/hashes/exact source-trash placement and batch manifest;
       fsync content-free tombstones and use the critical-event protocol around
       `delete_file.py`, `delete_directory.py`, and `recover_from_trash.py`.
       Reconcile derived state before receipt classification and may repeat
