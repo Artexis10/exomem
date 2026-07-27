@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.34.0](https://github.com/Artexis10/exomem/compare/v0.33.0...v0.34.0) (2026-07-27)
+
+
+### Features
+
+* add manual cold standby operations ([#336](https://github.com/Artexis10/exomem/issues/336)) ([c972ef6](https://github.com/Artexis10/exomem/commit/c972ef6cf014de9e2e5a80acd64dd76e4df0a63d))
+* **plugins:** add native hosted client packages ([#337](https://github.com/Artexis10/exomem/issues/337)) ([b171597](https://github.com/Artexis10/exomem/commit/b171597b36d0bfd5e6703bb20145778867806bad))
+
+
+### Bug Fixes
+
+* diagnose service label mismatches and clarify disposition wording ([#341](https://github.com/Artexis10/exomem/issues/341)) ([a820539](https://github.com/Artexis10/exomem/commit/a820539e70f87c5dbba6eee5613ef6ad9f4c6e7e))
+
 ## [0.33.0](https://github.com/Artexis10/exomem/compare/v0.32.0...v0.33.0) (2026-07-26)
 
 
