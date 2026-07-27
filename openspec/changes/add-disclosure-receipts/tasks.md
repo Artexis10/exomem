@@ -84,7 +84,7 @@
       tests/test_governance_receipts.py tests/test_governance_egress.py
       tests/test_governance_tokens.py tests/test_audit.py` green; deletion and
       recovery scenarios live in `tests/test_governance_receipts.py`.
-- [ ] 5.2 Full suite green. Existing `tests/test_latency_gate.py` remains green.
+- [x] 5.2 Full suite green. Existing `tests/test_latency_gate.py` remains green.
       A governed same-process paired micro-gate runs 30 warm-ups and 200
       alternating samples for (a) a fixed 10-hit mixed-level search and (b) a
       100-entry structure reduction, embeddings disabled on a local temp vault.
