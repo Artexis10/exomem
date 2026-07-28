@@ -1151,7 +1151,11 @@ def op_search(
     return {"results": [_search_result_from_hit(hit) for hit in hits]}
 
 
-def _refuse_policy_tree_read(candidate: object) -> None:
+def _refuse_policy_tree_read(
+    candidate: object,
+    *,
+    missing_path: object | None = None,
+) -> None:
     """Refuse a direct READ of the policy tree, as if the file were absent.
 
     The enumeration surfaces (`overview`, `list`) already exclude
@@ -1168,8 +1172,8 @@ def _refuse_policy_tree_read(candidate: object) -> None:
     """
     from .governance.policy import is_governance_path
 
-    rel = str(candidate or "")
-    if is_governance_path(rel):
+    if is_governance_path(str(candidate or "")):
+        rel = str(candidate if missing_path is None else missing_path)
         raise ValueError(f"NOT_FOUND: file does not exist: {rel}")
 
 
@@ -1194,11 +1198,14 @@ def op_fetch(
         {"id", "title", "text", "url", "metadata"}. `text` is the markdown body;
         it ends with `[truncated]` when the body exceeded the effective cap.
     """
-    _refuse_policy_tree_read(id)
     id = _resolve_memory_identifier(vault_root, id)
-    _refuse_policy_tree_read(id)
     try:
-        page = get_page_module.get_page(vault_root, path=id)
+        prepared = get_page_module.prepare_page_read(vault_root, path=id)
+        _refuse_policy_tree_read(
+            prepared.resolved_relative,
+            missing_path=prepared.missing_path,
+        )
+        page = get_page_module.get_page(vault_root, path=id, _prepared=prepared)
     except get_page_module.GetError as e:
         raise ValueError(f"{e.code}: {e.reason}") from e
     # Release gate. `fetch` is the deep-research read step between metadata-only
@@ -1910,20 +1917,28 @@ def op_get(
         INVALID_PATH (path escapes vault root or empty);
         NOT_FOUND (no such file); UNREADABLE (parse failure).
     """
-    _refuse_policy_tree_read(path)
     path = _resolve_memory_identifier(vault_root, path)
-    _refuse_policy_tree_read(path)
+    try:
+        prepared = get_page_module.prepare_page_read(vault_root, path=path)
+    except get_page_module.GetError as e:
+        raise ValueError(f"{e.code}: {e.reason}") from e
+    _refuse_policy_tree_read(
+        prepared.resolved_relative,
+        missing_path=prepared.missing_path,
+    )
     if frontmatter_only:
         try:
             fm_result = get_frontmatter_module.get_frontmatter(
-                vault_root, path=path
+                vault_root, path=path, _prepared=prepared
             )
         except get_frontmatter_module.GetFrontmatterError as e:
             raise ValueError(f"{e.code}: {e.reason}") from e
         out = fm_result.as_dict()
     else:
         try:
-            result = get_page_module.get_page(vault_root, path=path)
+            result = get_page_module.get_page(
+                vault_root, path=path, _prepared=prepared
+            )
         except get_page_module.GetError as e:
             raise ValueError(f"{e.code}: {e.reason}") from e
         out = result.as_dict(include_raw=include_raw)
