@@ -39,7 +39,7 @@
 
 - [x] 6.1 Run strict OpenSpec validation, focused marketplace/package tests, deterministic rerender checks, leak tests, and Ruff on every changed Python surface
 - [x] 6.2 Obtain an independent architecture/security review and address actionable findings
-- [ ] 6.3 Obtain an independent verifier pass over the CLI, generated packets, and regression suite
+- [x] 6.3 Obtain an independent verifier pass over the CLI, generated packets, and regression suite
 - [ ] 6.4 Commit the intended Exomem scope, integrate current remote main, push the feature branch, and open a ready pull request with verification evidence
 
 ## 7. External Launch Handoff
