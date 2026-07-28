@@ -28,6 +28,20 @@ def test_openai_candidate_requires_registered_app_release_input(tmp_path: Path) 
         )
 
 
+@pytest.mark.parametrize("app_id", ["plugin_asdk_app_public123", "asdk_app_", "placeholder"])
+def test_openai_candidate_rejects_public_or_malformed_registered_app_id(
+    tmp_path: Path, app_id: str
+) -> None:
+    with pytest.raises(ValueError, match="registered OpenAI app"):
+        hosted_plugins.render(
+            REPO_ROOT,
+            tmp_path / "generated",
+            platform="openai",
+            openai_app_id=app_id,
+            staging_root=tmp_path,
+        )
+
+
 def test_claude_candidate_can_render_and_check_without_openai_registration(tmp_path: Path) -> None:
     rendered = hosted_plugins.render(
         REPO_ROOT, tmp_path / "generated", platform="claude", staging_root=tmp_path
@@ -268,6 +282,10 @@ def test_rendered_packages_are_deterministic_and_remote_only(tmp_path: Path) -> 
     assert claude_mcp["mcpServers"]["exomem"] == {
         "type": "http",
         "url": "https://substratesystems.io/api/exomem/mcp/v1",
+    }
+    openai_mcp = json.loads((first / "openai/.mcp.json").read_text(encoding="utf-8"))
+    assert openai_mcp == {
+        "mcp_servers": {"exomem": {"type": "http", "url": "https://substratesystems.io/api/exomem/mcp/v1"}}
     }
     openai_plugin = json.loads(
         (first / "openai/.codex-plugin/plugin.json").read_text(encoding="utf-8")

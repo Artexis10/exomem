@@ -1,6 +1,6 @@
 {
   "channel": "production",
-  "author_name": "Exomem",
+  "author_name": "Substrate Systems OÜ",
   "author_url": "https://substratesystems.io",
   "claude_schema_version": "1.0.0",
   "distribution_scope": "pending",
@@ -11,7 +11,7 @@
   "repository_url": "https://github.com/Artexis10/exomem",
   "license": "AGPL-3.0-or-later",
   "profile": "hosted-alpha-agent-v1",
-  "support_url": "https://github.com/Artexis10/exomem/issues",
+  "support_url": "https://substratesystems.io/exomem/support",
   "terms_url": "https://substratesystems.io/exomem/terms",
   "website_url": "https://substratesystems.io/exomem",
   "version": "0.1.0"

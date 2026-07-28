@@ -14,6 +14,119 @@ python scripts/hosted-plugin.py check --platform all --openai-app-id asdk_app_<r
 python scripts/hosted-plugin.py archive --platform all --openai-app-id asdk_app_<registered-id>
 ```
 
+The registered `asdk_app_*` value is package-only: it belongs in the OpenAI
+`.app.json`, package locks, and promotion evidence. A portal-issued public
+plugin identifier is a separate directory-submission concern. Never replace the
+package registration ID with a directory identifier or add either private value
+to a tracked listing input.
+
+## Hosted user journey
+
+Once a channel is actually published, the normal path is deliberately simple:
+install or connect the official directory entry, complete the Hosted OAuth login
+once, then use Claude, ChatGPT, or Codex normally. The remote MCP service and
+bundled skills retrieve relevant governed context and preserve durable
+conclusions where the client supports them. Users should not need a vault path,
+manual MCP JSON, copied API token, or repeated `use Exomem` instruction.
+
+Global custom instructions are only a fallback for a chat surface that connects
+the MCP server but does not activate bundled skills. Keep that fallback concise:
+tell the assistant to retrieve relevant material from the user's governed
+Exomem store, cite retrieved material, and capture only durable conclusions or
+explicitly requested facts. It must not claim access to native assistant memory,
+arbitrary conversation history, or data outside the authorized Hosted store.
+
+## Public-directory release materials
+
+`plugins/hosted/marketplace-definition.json` is the canonical public listing
+input; it imports runtime identity from `definition.json` rather than copying
+endpoint or package fields. `marketplace-review-cases.json` carries the governed
+positive and negative reviewer cases. The CLI only creates redacted local
+materials; it never sends anything to a provider:
+
+```powershell
+python scripts/hosted-plugin.py directory-check --channel claude-connector
+python scripts/hosted-plugin.py directory-render --channel claude-connector
+python scripts/hosted-plugin.py directory-status --deployment-sha256 <trusted-deployment-sha256>
+```
+
+Each packet also carries the checked-in icon path and digest, canonical
+`Productivity` category, documentation and setup URLs, concise read/write
+capability metadata, and concrete use cases needed by current provider forms.
+The operator confirms the provider portal's current category enum at submission
+time; no credentials or provider-specific private values belong in the packet.
+Claude packet validation additionally enforces the current name (100), tagline
+(55), and description (2,000) character limits.
+
+All signed directory evidence, receipts, status checks, submission transitions,
+and activation must bind the same trusted deployment SHA-256. Record every
+provider event with its exact listing version, prior record digest, expected
+active digest, and signed receipt. A published revision is deliberately not
+public yet: first store fresh post-install evidence at
+`directory/post-install-evidence/<channel>/<published-submission-sha256>.json`,
+then activate that exact revision with a compare-and-swap pointer:
+
+```powershell
+python scripts/hosted-plugin.py directory-record --channel claude-connector --directory-state published --expected-state approved --expected-record-sha256 <approved-record-sha256> --expected-active-submission-sha256 none --receipt <signed-receipt.json> --deployment-sha256 <trusted-deployment-sha256>
+python scripts/hosted-plugin.py directory-activate --channel claude-connector --target-submission-sha256 <published-submission-sha256> --expected-active-submission-sha256 none --deployment-sha256 <trusted-deployment-sha256>
+```
+
+`none` is an explicit CAS assertion that no revision is currently active. The
+commands are safe to retry after an interruption: an already appended event is
+not duplicated, and retrying a withdrawal completes its pointer clear. Status
+reports authoritative per-listing-version heads; an in-review v2 therefore does
+not hide an active v1, and withdrawing v1 does not mutate v2.
+
+For an OpenAI receipt, `provider_directory_id_sha256` is the lowercase SHA-256
+of the raw UTF-8 `plugin_asdk_app_*` directory identity, after trimming outer
+whitespace—the same byte-hash convention used for the registered `asdk_app_*`
+package identity. The raw directory ID is optional before publication and
+required when an OpenAI revision is published; its hash must match exactly.
+Every signed production and post-install evidence document also carries the
+exact boolean `sampled_output_sale_free: true`. It attests that the sampled
+public response set contains no buy, Pro, subscribe, upgrade, checkout, or
+other subscription-sale prompt; false or missing evidence blocks readiness or
+activation.
+
+There are three independent public channels: the Claude Connector Directory
+(the remote MCP endpoint), a Claude community/public plugin distribution (the
+public bundle that reuses that connector), and one universal OpenAI Plugin
+Directory entry for both ChatGPT and Codex. The connector covers Claude.ai,
+Desktop, Mobile, Code, and Cowork. Bundled plugin skills apply to Code and
+Cowork; they do not enforce skill activation in Claude.ai. The universal OpenAI
+entry covers ChatGPT and Codex. The OpenAI candidate uses the current
+`mcp_servers` connection map; the Claude bundle retains its `mcpServers` map.
+
+The directory packets are drafts, not listings. Each provider submission needs
+an authorized operator, verified publisher, policy approval, domain proof where
+required, and a seeded reviewer account held outside Git. A reviewer account
+contains realistic governed sample data, but its credentials, tenant binding,
+invite links, and identifiers stay in the external secret manager. Do not
+invent screenshots for this non-UI MCP integration.
+
+A successful friends cohort or reviewer account is not public-launch evidence.
+Before any directory submission, an operator must produce signed evidence that
+ordinary eligible users can acquire access and that capacity, per-user quotas,
+abuse controls, spend alarms, support coverage, and the public pricing decision
+are ready. The OpenAI plugin must never sell or upsell a digital subscription
+inside a plugin interaction.
+
+Provider submission, rejection, publication, smoke testing, and emergency
+withdrawal are operator actions. Record a provider result only with the exact
+listing and artifact bindings produced by the release tooling. If OAuth, MCP,
+privacy, revocation, tenant isolation, or the exact promoted artifact regresses,
+withdraw the affected directory channel immediately and separately demote the
+package when the incident is a runtime or security failure. Withdrawing a
+listing never deletes hosted tenant data; a rejected listing returns to draft
+without demoting a healthy private package.
+
+The paired Substrate deployment must provide truthful Hosted product, setup, and documentation copy,
+privacy, terms, and support pages; the OpenAI domain proof route; OAuth discovery
+and authorization challenge; and healthy MCP initialization and tool discovery.
+`directory-status` stays fail-closed until fresh production probes for every
+surface, exact live promotion bindings, and all operator prerequisites are
+present. Current pending promotions therefore remain non-public.
+
 The generated Claude and OpenAI files share a compatibility identity but remain
 pending. A locally discovered developer app ID is acceptable for package-shape
 validation only; it does not prove that any friend can install the artifact.
