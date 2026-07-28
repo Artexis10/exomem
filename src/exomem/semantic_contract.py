@@ -2975,7 +2975,7 @@ def _disposition_detail(page: SemanticPageState, disposition: RelationDispositio
     if page.document.canonical_section_present and page.document.canonical_bullet_count == 0:
         return (
             "the empty canonical Relations section requires a current "
-            "reviewed-none or bootstrap disposition"
+            "reviewed or bootstrap disposition"
         )
     return "the compiled page needs a qualifying relation or explicit current review"
 
