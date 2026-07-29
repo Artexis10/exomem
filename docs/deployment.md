@@ -16,6 +16,8 @@ accounts at the server configured below. Hosted operators should also read
 Throughout, replace `<your-host>` / `example.com` with your own hostname.
 For the guided ≤15-minute bring-up, start with
 [remote-quickstart.md](remote-quickstart.md); this document is the reference.
+For structured logs, metrics, and diagnosing a failure after the fact, see
+[observability.md](observability.md).
 
 ## Architecture
 
@@ -273,6 +275,10 @@ persistent-core envelope with `python scripts/verify-resource-envelope.py` (targ
 one service, zero media children, <=512 MiB pre-cache RSS, and <1% idle CPU). GPU
 acceptance is checked separately with `nvidia-smi` or Activity Monitor: the idle
 core must not be a CUDA compute process and targets <200 MiB GPU delta.
+On macOS the JSON also reports Activity Monitor's physical-footprint metric via
+`proc_pid_rusage`; use `--max-memory-mb` for an optional physical-footprint
+limit. That limit is evaluated only when every server PID has a native sample,
+while `--max-rss-mb` keeps its existing RSS meaning.
 
 **macOS (launchd):**
 
@@ -395,41 +401,36 @@ service name, so it keeps working across the rename. Verify with
 
 ## Deploying on a second machine (multi-host)
 
-Each machine runs its own Exomem process and local vault replica. If both replicas
-can mutate a Syncthing-replicated vault, enable the writer lease below: Syncthing
-replicates files, while the coordinator guarantees that only one Exomem host writes.
-Without a lease, keep exactly one host writable. The non-obvious per-host parts:
+Each machine has its own Exomem process and local vault replica. Replication moves
+files; it does not decide which process may write. Choose the operating model that
+fits the downtime, automation, and operational complexity you actually want:
 
-- **Its own public hostname.** `EXOMEM_BASE_URL` and the connector URL are
-  per-host. Tailscale gives each node a distinct `<node>.<tailnet>.ts.net`
-  automatically (`tailscale funnel status`); for Cloudflare, give each host a
-  distinct subdomain (e.g. `kb.example.com`, `kb-laptop.example.com`) via
-  `pwsh -File scripts/setup-cloudflared.ps1 -Hostname <this-host> -TunnelName <unique-name>`.
-  ngrok's free tier gives one static dev domain **per account**, not per host —
-  a second host needs Cloudflare (or a paid ngrok domain) for its own hostname.
-- **Its own GitHub OAuth App.** A GitHub OAuth App allows exactly **one**
-  Authorization callback URL, so you *cannot* reuse another host's app — its
-  callback points at the other host and GitHub rejects the redirect with "The
-  redirect_uri is not associated with this application." Create a second app (e.g.
-  `exomem (laptop)`) with callback `https://<this-host>.example.com/auth/callback`
-  and put *its* `GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET` in this machine's
-  `.env`.
-- **Its own `.env` and connector.** Set `EXOMEM_VAULT_PATH` to this machine's vault
-  root. In claude.ai, add a separate connector pointing at this host's `/mcp` URL
-  (the URL usually isn't editable in place, so delete + re-add to repoint).
-- **Its own embedding stack (GPU).** Hybrid `find` needs `torch` +
-  `sentence-transformers` (the optional `embeddings` extra) in the host's `.venv` —
-  `uv sync --extra embeddings` installs them, pulling the pinned `cu132` torch
-  which ships Blackwell `sm_120`, so any RTX 50-series GPU works. **If a host was
-  synced without the extra**, `find` silently degrades to keyword/BM25 and the log
-  shows the vector path failing to import torch — `uv sync --extra embeddings` on
-  that host fixes it. Verify the GPU path:
-  `uv run python -c "import torch; print(torch.cuda.is_available(), torch.cuda.get_arch_list())"`
-  → expect `True` and `sm_120` in the list, plus the startup log line
-  `embedding model ready ... on cuda`. (Default PyPI Windows torch is CPU-only,
-  which is why the explicit CUDA index in `pyproject.toml` exists.)
+| Model | Normal operation | What it gives you | Trade-off |
+|---|---|---|---|
+| Single host | One service and one public URL | Lowest operational overhead | The service is unavailable while that host is off or asleep. |
+| [Manual cold standby](runbooks/cold-standby.md) | Desktop normally active; laptop is demand-start and promoted by an explicit guarded command | One stable connector URL and a recoverable copy without an always-on lease/edge control plane | Planned handoff has bounded downtime; ambiguous/partitioned evidence refuses; forced recovery can lose or fork unreplicated state. |
+| Automatic writer-lease HA | Two replicas, coordinator/lease, and a stable edge route | Automatic active-writer selection and continued reads/failover under the documented HA contract | More moving parts: coordinator, lease, shared OAuth state, edge routing, and release-parity operations. |
 
-### Single-writer lease and automatic laptop takeover
+None is universally preferred. Choose single host when downtime is acceptable,
+manual cold standby when you prefer a deliberate recovery procedure, and automatic
+HA when its availability benefit is worth operating the coordination stack.
+
+### Independent second host with its own URL
+
+If the second machine is an independent deployment rather than manual cold standby
+or automatic HA, give it its own public hostname, OAuth app, `.env`, and connector.
+A GitHub OAuth App accepts one callback URL, so create a separate app whose callback
+is `https://<second-host>/auth/callback`; put that app's client ID and secret in the
+second host's `.env`. Set its own `EXOMEM_BASE_URL` and `EXOMEM_VAULT_PATH`, and add
+a second connector pointing at that host's `/mcp` URL.
+
+Hybrid `find` also needs the embeddings stack on each host independently. Run
+`uv sync --extra embeddings` there and verify the GPU path with
+`uv run python -c "import torch; print(torch.cuda.is_available(), torch.cuda.get_arch_list())"`.
+For an RTX 50-series GPU, expect `True`, `sm_120`, and the startup log line saying
+the embedding model is ready on CUDA; otherwise `find` falls back to keyword/BM25.
+
+### Automatic single-writer lease and laptop takeover
 
 The lease is replication-agnostic. It decides which replica may mutate; it does
 not copy vault files. This desktop/laptop example uses Syncthing, but self-hosters
@@ -951,7 +952,6 @@ The remote tier is intentionally minimal. Not included:
 
 - Auth layers beyond single-user GitHub OAuth (no mTLS, IP allowlist, multi-user
   RBAC).
-- Monitoring/metrics/observability beyond rotating file logs.
 - Web UI.
 - Highly available coordinator hosting (the bundled SQLite coordinator is a
   strongly consistent single-node reference).

@@ -33,6 +33,7 @@ def test_standalone_runtime_is_ready_without_multi_host_coordination() -> None:
         "release": "1.2.3",
         "runtime_contract": RUNTIME_CONTRACT,
         "transport": HTTP_TRANSPORT,
+        "instance_id": None,
         "replica_id": None,
         "coordination": {
             "enabled": False,
@@ -41,9 +42,43 @@ def test_standalone_runtime_is_ready_without_multi_host_coordination() -> None:
             "mutation_boundary": {"state": "free"},
         },
         "session_store": {"state": "ok", "stale_served_count": 0},
+        "observability": {
+            "log_dir_writable": None,
+            "metrics_snapshot_age_seconds": None,
+            "journal_ok": None,
+        },
         "takeover_eligible": True,
         "reasons": [],
     }
+
+
+@pytest.mark.parametrize(
+    ("configured", "expected"),
+    [
+        (" laptop-01 ", "laptop-01"),
+        ("", None),
+        ("not public safe!", None),
+        ("x" * 65, None),
+    ],
+)
+def test_readiness_exposes_only_a_valid_trimmed_instance_id(
+    monkeypatch: pytest.MonkeyPatch, configured: str, expected: str | None
+) -> None:
+    from exomem import runtime_readiness as readiness_module
+
+    monkeypatch.setenv("EXOMEM_INSTANCE_ID", configured)
+    snapshot = readiness_module.build_runtime_readiness(
+        coordination={
+            "enabled": False,
+            "role": "standalone",
+            "replica_id": None,
+            "coordinator_healthy": True,
+        },
+        release="1.2.3",
+        mcp_tool_surface_sha256="a" * 64,
+    )
+
+    assert snapshot["instance_id"] == expected
 
 
 def test_healthy_coordinated_follower_is_takeover_eligible() -> None:

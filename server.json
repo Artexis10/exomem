@@ -1,0 +1,22 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.Artexis10/exomem",
+  "title": "Exomem",
+  "description": "Local Markdown/Obsidian knowledge substrate for MCP agents with governed memory and hybrid search.",
+  "version": "0.34.0",
+  "websiteUrl": "https://substratesystems.io/exomem",
+  "repository": {
+    "url": "https://github.com/Artexis10/exomem",
+    "source": "github"
+  },
+  "packages": [
+    {
+      "registryType": "pypi",
+      "identifier": "exomem",
+      "version": "0.34.0",
+      "transport": {
+        "type": "stdio"
+      }
+    }
+  ]
+}

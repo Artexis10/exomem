@@ -158,6 +158,97 @@ def test_compliant_page_cannot_remove_its_final_unit(tmp_path: Path) -> None:
     assert path.read_bytes() == before_bytes
 
 
+def test_existing_preflight_census_token_matches_fresh_token_on_stable_tree(
+    tmp_path: Path,
+) -> None:
+    before = _source("Legacy prose without semantic units.")
+    after = before.replace("Legacy prose", "Updated legacy prose")
+    _write(tmp_path, _PAGE, before)
+
+    preflight = semantic_writes.preflight_existing(
+        tmp_path,
+        path=_PAGE,
+        after_source=after,
+        operation="edit",
+    )
+
+    assert preflight.census_token is not None
+    sc_token, generation = preflight.census_token
+    assert sc_token == semantic_contract.corpus_validity_token(tmp_path)
+    from exomem import writer_lease
+
+    assert generation == writer_lease.read_commit_generation(tmp_path)
+
+
+def test_existing_preflight_census_token_is_none_when_generation_unreadable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    before = _source("Legacy prose without semantic units.")
+    after = before.replace("Legacy prose", "Updated legacy prose")
+    _write(tmp_path, _PAGE, before)
+
+    # Fail-closed capture: an unreadable boundary commit-generation must
+    # disable stamp reuse entirely rather than admit it.
+    monkeypatch.setattr(semantic_writes, "_entry_commit_generation", lambda root: None)
+
+    preflight = semantic_writes.preflight_existing(
+        tmp_path,
+        path=_PAGE,
+        after_source=after,
+        operation="edit",
+    )
+
+    assert preflight.census_token is None
+
+
+def test_revalidate_existing_preflight_on_mismatch_reproduces_unchanged_state(
+    tmp_path: Path,
+) -> None:
+    before = _source("Legacy prose without semantic units.")
+    after = before.replace("Legacy prose", "Updated legacy prose")
+    _write(tmp_path, _PAGE, before)
+
+    preflight = semantic_writes.preflight_existing(
+        tmp_path,
+        path=_PAGE,
+        after_source=after,
+        operation="edit",
+    )
+
+    revalidated = semantic_writes._revalidate_existing_preflight(tmp_path, preflight)
+
+    assert revalidated.after.source_hash == preflight.after.source_hash
+    assert revalidated.before.source_hash == preflight.before.source_hash
+    assert revalidated.transition_token == preflight.transition_token
+    assert revalidated.contract_result.should_block == preflight.contract_result.should_block
+
+
+def test_revalidate_existing_preflight_on_mismatch_surfaces_stale_write(
+    tmp_path: Path,
+) -> None:
+    before = _source("Legacy prose without semantic units.")
+    after = before.replace("Legacy prose", "Updated legacy prose")
+    path = _write(tmp_path, _PAGE, before)
+
+    preflight = semantic_writes.preflight_existing(
+        tmp_path,
+        path=_PAGE,
+        after_source=after,
+        operation="edit",
+    )
+
+    path.write_text(
+        before.replace("Legacy prose", "A sibling write raced ahead"),
+        encoding="utf-8",
+        newline="\n",
+    )
+
+    with pytest.raises(semantic_writes.SemanticWriteError) as exc:
+        semantic_writes._revalidate_existing_preflight(tmp_path, preflight)
+
+    assert exc.value.code == "STALE_SEMANTIC_WRITE"
+
+
 def _write(root: Path, rel: str, source: str) -> Path:
     path = root / rel
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -2185,6 +2276,33 @@ def test_material_edit_requires_and_commits_exact_reviewed_none_transition(
         tmp_path, _ID, reviewed.after.review_fingerprint
     )
     assert loaded == reviewed.requested_decision
+
+
+def test_existing_reviewed_none_hyphen_alias_is_canonicalized(tmp_path: Path) -> None:
+    before = _source("A")
+    _write(tmp_path, _PAGE, before)
+    after = before.replace("A\n\n## Relations", "B\n\n## Relations")
+    preview = semantic_writes.preflight_existing(
+        tmp_path,
+        path=_PAGE,
+        after_source=after,
+        operation="edit",
+        expected_before_hash=vault.content_hash(before),
+    )
+
+    reviewed = semantic_writes.preflight_existing(
+        tmp_path,
+        path=_PAGE,
+        after_source=after,
+        operation="edit",
+        expected_before_hash=vault.content_hash(before),
+        transition_token=preview.transition_token,
+        relation_disposition="reviewed-none",
+        relation_review_hash=preview.transition_hash,
+        relation_review_reason="No honest relation exists for the revised page",
+    )
+
+    assert reviewed.requested_decision is not None
 
 
 def test_surgical_validate_only_adds_semantic_preflight_without_mutation(

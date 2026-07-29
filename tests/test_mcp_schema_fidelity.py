@@ -267,7 +267,7 @@ def test_process_media_mcp_schema_annotations_and_leaf_result(
     assert "governed" in schema["properties"]["path"]["description"].lower()
     assert "process" in schema["properties"]["operation"]["description"].lower()
     assert tool["annotations"] == {
-        "title": "process_media",
+        "title": "Process Media",
         "readOnlyHint": False,
         "destructiveHint": False,
         "idempotentHint": False,

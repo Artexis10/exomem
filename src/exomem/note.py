@@ -468,6 +468,9 @@ def _legacy_note(
         started=started,
         duration=duration,
         medium=medium,
+        bridge_of=None,
+        bridge_scope=None,
+        bridge_review=None,
         vault_root=vault_root,
         project_registry=planned_registry,
     )
@@ -760,6 +763,7 @@ class _Err:
 
 
 _ISO_DATE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_BRIDGE_SCOPE_PATTERN = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
 
 
 def _validate(
@@ -776,6 +780,9 @@ def _validate(
     started: str | None,
     duration: str | None,
     medium: str | None,
+    bridge_of: list[str] | None,
+    bridge_scope: str | None,
+    bridge_review: str | None,
     vault_root: Path,
     project_registry: project_keys_module.ProjectRegistry | None = None,
 ) -> _Err | None:
@@ -797,6 +804,43 @@ def _validate(
     if not title or not title.strip():
         missing.append("title")
         reasons.append("title is empty")
+
+    bridge_supplied = (
+        bridge_of is not None
+        or bridge_scope is not None
+        or bridge_review is not None
+    )
+    if bridge_supplied:
+        if not bridge_of:
+            missing.append("bridge_of")
+            reasons.append("bridge_of must be a non-empty source identity list")
+        elif not all(isinstance(value, str) and value.strip() for value in bridge_of):
+            return _Err(
+                "INVALID_NOTE",
+                ["bridge_of"],
+                "bridge_of entries must be non-empty source paths or stable refs",
+            )
+        if not bridge_scope:
+            missing.append("bridge_scope")
+            reasons.append("bridge_scope is required with bridge_of")
+        elif _BRIDGE_SCOPE_PATTERN.fullmatch(bridge_scope) is None:
+            return _Err(
+                "INVALID_NOTE",
+                ["bridge_scope"],
+                "bridge_scope must be a lowercase slug",
+            )
+        if not bridge_review:
+            missing.append("bridge_review")
+            reasons.append("bridge_review is required with bridge_of")
+        else:
+            try:
+                dt.date.fromisoformat(bridge_review)
+            except (TypeError, ValueError):
+                return _Err(
+                    "INVALID_NOTE",
+                    ["bridge_review"],
+                    "bridge_review must be an ISO date",
+                )
 
     # Per-type status enum.
     if note_type == "experiment":
@@ -1005,6 +1049,9 @@ def _render_note(
     host: str | None = None,
     editor: str | None = None,
     exomem_id: str,
+    bridge_of: list[str] | None = None,
+    bridge_scope: str | None = None,
+    bridge_review: str | None = None,
 ) -> str:
     lines = ["---"]
     lines.append(f"type: {note_type}")
@@ -1049,6 +1096,13 @@ def _render_note(
             lines.append(f"  - \"[[{s}]]\"")
     else:
         lines.append("sources: []")
+
+    if bridge_of:
+        lines.append("bridge_of:")
+        for source_ref in bridge_of:
+            lines.append(f"  - {yaml_scalar(source_ref)}")
+        lines.append(f"bridge_scope: {bridge_scope}")
+        lines.append(f"bridge_review: {bridge_review}")
 
     # Plural projects: insight, failure, pattern, production-log.
     if note_type in ("insight", "failure", "pattern", "production-log") and projects:
@@ -1170,6 +1224,63 @@ def _normalize_sources(
             seen.add(canonical)
             out.append(canonical)
     return out, warnings
+
+
+def _normalize_bridge_sources(
+    bridge_of: list[str] | None,
+    *,
+    vault_root: Path,
+    resolver: WikilinkResolver,
+) -> list[str] | None:
+    """Resolve bridge dependencies to unique immutable memory refs."""
+    if bridge_of is None:
+        return None
+    refs: list[str] = []
+    for raw in bridge_of:
+        value = str(raw).strip()
+        identity = memory_refs.parse_memory_ref(value)
+        if identity is not None:
+            canonical_ref = memory_refs.memory_ref(identity)
+            try:
+                memory_refs.resolve_identifier_read_only(vault_root, canonical_ref)
+            except memory_refs.ReferenceError as error:
+                raise NoteError(
+                    error.code,
+                    ["bridge_of"],
+                    "bridge source identity is unavailable or ambiguous",
+                ) from error
+        else:
+            canonical, warning = normalize_wikilink(
+                value,
+                vault_root,
+                resolver=resolver,
+                strict=False,
+            )
+            if warning or not canonical:
+                raise NoteError(
+                    "INVALID_NOTE",
+                    ["bridge_of"],
+                    "bridge source path is unavailable or ambiguous",
+                )
+            canonical_path = canonical.split("#", 1)[0].removesuffix(".md") + ".md"
+            canonical_ref = memory_refs._ref_for_path_from_scan(
+                vault_root,
+                canonical_path,
+            )
+            if canonical_ref is None:
+                raise NoteError(
+                    "INVALID_NOTE",
+                    ["bridge_of"],
+                    "bridge source requires one unique stable memory identity",
+                )
+        if canonical_ref in refs:
+            raise NoteError(
+                "INVALID_NOTE",
+                ["bridge_of"],
+                "bridge source identities must be unique",
+            )
+        refs.append(canonical_ref)
+    return sorted(refs)
 
 
 def _resolve_source_path(vault_root: Path, kb_relative: str) -> Path | None:
@@ -1327,6 +1438,9 @@ def note(
     published: str | None = None,
     host: str | None = None,
     editor: str | None = None,
+    bridge_of: list[str] | None = None,
+    bridge_scope: str | None = None,
+    bridge_review: str | None = None,
     suggestions: bool = True,
     today: dt.date | None = None,
     project_category: str | None = None,
@@ -1400,6 +1514,9 @@ def note(
         started=started,
         duration=duration,
         medium=medium,
+        bridge_of=bridge_of,
+        bridge_scope=bridge_scope,
+        bridge_review=bridge_review,
         vault_root=root,
         project_registry=key_plan.registry,
     )
@@ -1448,6 +1565,11 @@ def note(
     sources_norm, source_warnings = _normalize_sources(
         sources, vault_root=root, resolver=resolver
     )
+    bridge_refs = _normalize_bridge_sources(
+        bridge_of,
+        vault_root=root,
+        resolver=resolver,
+    )
     body_clean, body_warnings = normalize_body_wikilinks(
         content, root, resolver=resolver
     )
@@ -1476,6 +1598,9 @@ def note(
         host=host,
         editor=editor,
         exomem_id=identity,
+        bridge_of=bridge_refs,
+        bridge_scope=bridge_scope,
+        bridge_review=bridge_review,
     )
     if _supersedes_target is not None:
         marker = f'supersedes: "[[{_supersedes_target}]]"'

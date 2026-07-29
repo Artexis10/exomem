@@ -74,6 +74,50 @@ def _configure_local_search_capabilities(action: str | None) -> tuple[str, ...]:
     return tuple(introduced)
 
 
+# Subcommands `_dispatch_main` routes explicitly, before falling through to
+# `_serve_main`. Kept alongside `_is_cli_only_invocation` so a one-shot CLI
+# command gets its own log file; `serve` configures server-role logging
+# itself from `server.run()`, so it is deliberately excluded here.
+_CLI_ONLY_SUBCOMMANDS: frozenset[str] = frozenset(
+    {
+        "hosted",
+        "setup",
+        "init",
+        "install-skill",
+        "package-skills",
+        "personalize",
+        "install-hook",
+        "demo",
+        "studio",
+        "doctor",
+        "install-info",
+        "auth",
+        "status",
+        "warm",
+        "mode",
+        "backfill-media",
+        "index",
+        "enroll-speaker",
+        "list-speakers",
+        "remove-speaker",
+        "trace",
+        "logs",
+        "lease",
+    }
+)
+
+
+def _is_cli_only_invocation(raw: list[str]) -> bool:
+    """Whether `raw` routes to a one-shot CLI command rather than `serve`."""
+    if not raw or raw[0].startswith("-"):
+        return False
+    if raw[0] in _CLI_ONLY_SUBCOMMANDS:
+        return True
+    if raw[0] in _core_op_names(expose_tier2=True):
+        return True
+    return raw[0] in _simple_cli_action_names()
+
+
 def main(argv: list[str] | None = None) -> int:
     raw = list(sys.argv[1:] if argv is None else argv)
     if raw in (["--version"], ["--version", "--json"]):
@@ -87,6 +131,10 @@ def main(argv: list[str] | None = None) -> int:
         # `find` was the original friendly retrieval command.  Keep existing
         # scripts useful while the current product language calls it `ask`.
         raw[0] = "ask"
+    if _is_cli_only_invocation(raw):
+        from .logging_config import configure_logging, resolve_log_dir
+
+        configure_logging(resolve_log_dir(), process="cli")
     introduced = _configure_local_search_capabilities(raw[0] if raw else None)
     try:
         return _dispatch_main(raw)
@@ -144,6 +192,12 @@ def _dispatch_main(raw: list[str]) -> int:
         return _list_speakers_main(raw[1:])
     if raw and raw[0] == "remove-speaker":
         return _remove_speaker_main(raw[1:])
+    if raw and raw[0] == "trace":
+        return _trace_main(raw[1:])
+    if raw and raw[0] == "logs":
+        return _logs_main(raw[1:])
+    if raw and raw[0] == "lease":
+        return _lease_main(raw[1:])
     # Registry-driven product operations (reads + writes): `exomem ask_memory "..."`,
     # `exomem remember ...`, etc. Product commands take precedence over old
     # short aliases when a name overlaps.
@@ -933,6 +987,209 @@ def _remove_speaker_main(argv: list[str]) -> int:
         return 1
     print(f"Removed {args.name!r}." if removed else f"No profile named {args.name!r}.")
     return 0
+
+
+def _trace_main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(
+        prog="exomem trace",
+        description=(
+            "Join the server log, queries/writes/reads.jsonl, and mutations.jsonl "
+            "for one request id into a single time-ordered report."
+        ),
+    )
+    parser.add_argument("request_id", help="the x-exomem-request-id to trace")
+    parser.add_argument("--json", action="store_true", help="emit stable JSON")
+    args = parser.parse_args(argv)
+
+    from . import obs_cli
+
+    records = obs_cli.trace(args.request_id)
+    if args.json:
+        print(json.dumps({"request_id": args.request_id, "records": records}, ensure_ascii=False))
+        return 0
+    if not records:
+        print(f"No records found for request id {args.request_id!r}.")
+        return 0
+    for record in records:
+        ts = record.get("ts_utc") or record.get("ts") or "?"
+        source = record.get("_source", "?")
+        event = record.get("event") or record.get("tool") or record.get("outcome") or ""
+        print(f"[{ts}] ({source}) {event} {json.dumps(record, ensure_ascii=False)}")
+    return 0
+
+
+def _logs_main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(
+        prog="exomem logs",
+        description="Tail or grep the per-process JSONL log files.",
+    )
+    subcommands = parser.add_subparsers(dest="command", required=True)
+
+    tail = subcommands.add_parser("tail", help="print the last N lines of a log file")
+    tail.add_argument(
+        "--file", required=True,
+        choices=("server", "cli", "media", "queries", "writes", "reads", "mutations"),
+    )
+    tail.add_argument("-n", "--lines", type=int, default=20)
+    tail.add_argument("-f", "--follow", action="store_true", help="keep following new lines")
+
+    grep = subcommands.add_parser("grep", help="print lines matching a pattern")
+    grep.add_argument(
+        "--file", required=True,
+        choices=("server", "cli", "media", "queries", "writes", "reads", "mutations"),
+    )
+    grep.add_argument("pattern", help="regular expression to match")
+
+    args = parser.parse_args(argv)
+
+    from . import obs_cli
+
+    path = obs_cli.resolve_log_file(args.file)
+    if args.command == "tail":
+        for line in obs_cli.tail_lines(path, args.lines):
+            print(line)
+        if args.follow:
+            try:
+                for line in obs_cli.follow_lines(path):
+                    print(line)
+            except KeyboardInterrupt:
+                pass
+        return 0
+    for line in obs_cli.grep_lines(path, args.pattern):
+        print(line)
+    return 0
+
+
+def _lease_print_error(message: str, *, as_json: bool) -> None:
+    if as_json:
+        print(json.dumps({"error": message}))
+    else:
+        print(message, file=sys.stderr)
+
+
+def _lease_status_main(config, *, as_json: bool) -> int:  # noqa: ANN001
+    from . import writer_lease
+
+    manager = writer_lease.LeaseManager(config)
+    status = manager.status()
+    if as_json:
+        print(json.dumps(status, default=str))
+        return 0
+    print(f"role: {status['role']}")
+    print(f"replica_id: {status['replica_id']}")
+    print(f"holder: {status['holder']}")
+    print(f"fencing_token: {status['fencing_token']}")
+    print(f"coordinator_healthy: {status['coordinator_healthy']}")
+    print(f"ttl_remaining_seconds: {status['ttl_remaining_seconds']}")
+    print(f"renewer_alive: {status['renewer_alive']}")
+    if status.get("last_coordinator_error"):
+        print(f"last_coordinator_error: {status['last_coordinator_error']}")
+    idempotency = status.get("idempotency") or {}
+    print(
+        "idempotency: "
+        f"pending={idempotency.get('pending')} "
+        f"abandoned={idempotency.get('abandoned')} "
+        f"oldest_pending_age_seconds={idempotency.get('oldest_pending_age_seconds')}"
+    )
+    return 0
+
+
+def _lease_release_main(config, *, confirmed: bool, as_json: bool) -> int:  # noqa: ANN001
+    from . import writer_lease
+
+    client = writer_lease.LeaseCoordinatorClient(config)
+    try:
+        record = client.status()
+    except writer_lease.OpError as error:
+        _lease_print_error(f"{error.code}: {error.message}", as_json=as_json)
+        return 1
+
+    if record.holder is None:
+        if as_json:
+            print(json.dumps({"released": False, "reason": "unheld"}))
+        else:
+            print("no lease is currently held; nothing to release.")
+        return 0
+
+    if not confirmed:
+        if as_json:
+            print(
+                json.dumps(
+                    {
+                        "released": False,
+                        "reason": "confirmation_required",
+                        "holder": record.holder,
+                        "fencing_token": record.fencing_token,
+                        "expires_at": record.expires_at,
+                    }
+                )
+            )
+        else:
+            print(
+                f"lease is held by {record.holder!r} (fencing_token={record.fencing_token}, "
+                f"expires_at={record.expires_at}); pass --yes to confirm release.",
+                file=sys.stderr,
+            )
+        return 2
+
+    try:
+        result = client.release_holder(record.holder, record.fencing_token)
+    except writer_lease.OpError as error:
+        _lease_print_error(f"{error.code}: {error.message}", as_json=as_json)
+        return 1
+
+    if as_json:
+        print(json.dumps({"released": bool(result.granted), "previous_holder": record.holder}))
+        return 0
+    if result.granted:
+        print(f"released the lease previously held by {record.holder!r}.")
+    else:
+        print(
+            "release did not take effect (the lease changed hands concurrently); "
+            "rerun 'exomem lease status'."
+        )
+    return 0
+
+
+def _lease_main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(
+        prog="exomem lease",
+        description=(
+            "Ops-only writer-lease inspection and manual release. Not an MCP or REST "
+            "product command; 'steal'/'force-acquire' are deliberately absent — release "
+            "plus preferred-writer reclaim already hands over within roughly one lease TTL."
+        ),
+    )
+    subcommands = parser.add_subparsers(dest="command", required=True)
+
+    status_parser = subcommands.add_parser(
+        "status", help="report coordinator status, local boundary, and idempotency counts"
+    )
+    status_parser.add_argument("--json", action="store_true", help="emit stable JSON")
+
+    release_parser = subcommands.add_parser(
+        "release", help="release the currently held writer lease"
+    )
+    release_parser.add_argument(
+        "--yes", action="store_true", help="confirm the release without prompting"
+    )
+    release_parser.add_argument("--json", action="store_true", help="emit stable JSON")
+
+    args = parser.parse_args(argv)
+
+    from . import writer_lease
+
+    config = writer_lease.LeaseConfig.from_env()
+    if not config.enabled:
+        _lease_print_error(
+            "writer-lease coordination is not configured (EXOMEM_WRITER_LEASE_URL unset).",
+            as_json=args.json,
+        )
+        return 1
+
+    if args.command == "status":
+        return _lease_status_main(config, as_json=args.json)
+    return _lease_release_main(config, confirmed=args.yes, as_json=args.json)
 
 
 def _init_main(argv: list[str]) -> int:
@@ -2027,14 +2284,33 @@ def _core_op_main(argv: list[str]) -> int:
             kwargs = cli_ops.coerce(
                 cmd.params, raw, guarded_fields=cmd.guarded_fields, tool=cmd.name, cli=True
             )
+        # Domain-invalid mixed selectors must reach their stable public error
+        # before the lease/egress coverage classifier.  Coverage still rejects
+        # unknown selectors on every executable branch; this is input
+        # validation, not a branch registration.
+        if cmd.name == "process_media" and kwargs.get("operation", "process") not in {
+            "process",
+            "status",
+            "retry",
+        }:
+            raise cli_ops.OpError(
+                "INVALID_MEDIA_OPERATION",
+                "process_media operation must be process, status, or retry",
+            )
         vault_root = _resolve_core_op_vault(cmd.name, kwargs, resolve_vault)
         if cmd.needs_schema:
             injected = (vault_root, schema_module.load_source_schema(vault_root))
         else:
             injected = (vault_root,)
+        from .governance import principal as principal_module
         from .writer_lease import invoke_command
 
-        with capabilities.active_surface(surface_descriptor):
+        # The CLI runs in the vault owner's own process: canonical audience is
+        # `owner` (design D5), bound explicitly rather than left to the
+        # unbound-contextvar default so the surface label is accurate.
+        with capabilities.active_surface(
+            surface_descriptor
+        ), principal_module.request_scope(principal_module.owner_principal(surface="cli")):
             result = invoke_command(
                 cmd,
                 *injected,

@@ -57,6 +57,10 @@ class _VaultLock:
 
 
 def main(argv: list[str] | None = None) -> int:
+    from .logging_config import configure_logging, resolve_log_dir
+
+    configure_logging(resolve_log_dir(), process="media")
+
     parser = argparse.ArgumentParser(prog="python -m exomem.media_worker_child")
     parser.add_argument("--vault", required=True)
     parser.add_argument("--parent-pid", type=int, required=True)

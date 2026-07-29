@@ -3853,6 +3853,9 @@ async def run_exomem_direct_probes(
 
     async def governance_review() -> tuple[dict[str, bool], dict[str, Any]]:
         before = corpus_hash(corpus.root)
+        governance = await recorder.call(
+            "governance-review", "govern_memory", {"operation": "list"}
+        )
         adoption = await recorder.call(
             "governance-review",
             "adopt_vault",
@@ -3907,6 +3910,14 @@ async def run_exomem_direct_probes(
             {
                 "semantic_census": _has_semantic_census(adoption),
                 "scan_read_only": before == after,
+                "governance_list_typed": isinstance(governance, dict)
+                and isinstance(governance.get("rules"), list)
+                and isinstance(governance.get("scopes"), list)
+                and isinstance(governance.get("grants"), list),
+                "governance_list_read_only": governance.get("enabled") is False
+                and not governance.get("rules")
+                and not governance.get("scopes")
+                and not governance.get("grants"),
                 "audit_typed": isinstance(audit.get("findings", []), list),
                 "attention_bounded": len(attention.get("items", [])) <= 5,
                 "activation_bounded": len(activation.get("items", [])) <= 5,
@@ -3918,6 +3929,7 @@ async def run_exomem_direct_probes(
             },
             {
                 "adoption_mode": adoption.get("mode"),
+                "governance_enabled": governance.get("enabled"),
                 "review_ref": item.get("ref"),
             },
         )

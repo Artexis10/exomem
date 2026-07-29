@@ -23,10 +23,11 @@ from __future__ import annotations
 import datetime as dt
 import json
 import logging
-import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
+from . import media_types
+from .governance import lifecycle
 from .kbdir import kb_dirname, kb_prefix
 from .vault import (
     VaultPathError,
@@ -104,6 +105,11 @@ def delete_file(
         )
     except VaultPathError as e:
         raise DeleteFileError(code=e.code, reason=e.reason) from e
+
+    try:
+        lifecycle.assert_not_protected(vault_root, rel_path)
+    except lifecycle.LifecycleError as error:
+        raise DeleteFileError(code=error.code, reason=error.reason) from error
 
     # Trash items can't be re-trashed.
     parts = rel_path.split("/")
@@ -229,29 +235,65 @@ def delete_file(
                 break
             i += 1
 
+    trash_rel = trash_abs.relative_to(vault_root).as_posix()
+    try:
+        lifecycle_operation = lifecycle.begin_deletion(
+            vault_root, source_rel=rel_path, trash_rel=trash_rel
+        )
+    except lifecycle.LifecycleError as error:
+        raise DeleteFileError(code=error.code, reason=error.reason) from error
+
+    # A removed CLIP-relevant media binary (image/video — the only kinds with
+    # derived-index residue: CLIP rows, and for a video, scene-frame children)
+    # also drops its scene-frame sidecar children (if any) via the same
+    # fan-out below — discover them now, before the fan-out physically removes
+    # them, so the self-delete suppression can cover them too. Other
+    # extractable-but-not-visual kinds (audio/pdf/docx/text/email/calendar)
+    # keep the prior behavior: their OCR/ASR text lives in a separate `.md`
+    # sidecar, not the binary, so deleting the binary alone leaves no CLIP or
+    # scene-frame residue to purge.
+    is_media = media_types.media_type_for(rel_path) in {"image", "video"}
+    frame_children: list[str] = []
+    if is_media:
+        from . import scene_frames
+
+        frame_children = scene_frames.list_scene_frame_children(vault_root, abs_path)
+
     # Register the self-authored removal BEFORE the move so the watcher's
     # delete event for the KB path is dropped (we purge the sidecar ourselves
     # below). Harmless if the move then fails — the entry TTLs out.
-    if rel_path.lower().endswith(".md"):
+    # register_self_delete itself filters to `.md` paths, so a non-md binary
+    # rel_path here is a harmless no-op; the frame `.md` sidecars are what need
+    # suppressing.
+    suppress_rels = (
+        [rel_path] if rel_path.lower().endswith(".md") else []
+    ) + frame_children
+    if suppress_rels:
         try:
             from . import file_watcher
 
-            file_watcher.register_self_delete(vault_root, [rel_path])
+            file_watcher.register_self_delete(vault_root, suppress_rels)
         except Exception:  # noqa: BLE001 — suppression is best-effort
             log.debug("self-delete suppression registration failed", exc_info=True)
 
     try:
-        shutil.move(str(abs_path), str(trash_abs))
-    except OSError as e:
+        lifecycle.atomic_rename(
+            lifecycle_operation, source=abs_path, destination=trash_abs
+        )
+    except lifecycle.LifecycleError as e:
+        lifecycle.abort_deletion(lifecycle_operation)
         raise DeleteFileError(
-            code="TRASH_FAILED",
-            reason=f"could not move {rel_path} to trash: {e}",
+            code=e.code,
+            reason=e.reason,
         ) from e
 
-    # Drop Markdown rows from the semantic index sidecars. Non-Markdown files
-    # have an exact affected Markdown set of zero and must not enter fan-out.
+    # Drop Markdown rows from the semantic index sidecars. A removed media
+    # binary (detected via media_types) also enters the fan-out — it purges
+    # the binary's own CLIP rows and (for a video) its scene-frame derivatives
+    # (index_sync.delete_after_remove). A non-.md, non-media path has an exact
+    # affected Markdown set of zero and must not enter fan-out.
     index_feedback: dict | None = None
-    if rel_path.lower().endswith(".md"):
+    if rel_path.lower().endswith(".md") or is_media:
         try:
             from . import index_sync
             raw_report = index_sync.delete_after_remove(vault_root, [rel_path])
@@ -289,7 +331,13 @@ def delete_file(
     except OSError as e:
         warnings.append(f"trashed file ok but meta sidecar write failed: {e}")
 
-    trash_rel = trash_abs.resolve().relative_to(vault_root.resolve()).as_posix()
+    if not lifecycle.finish_deletion(
+        lifecycle_operation, index_report=index_feedback
+    ):
+        warnings.append(
+            "trash succeeded but governed derived state is not exact; "
+            "content remains tombstoned until reconcile"
+        )
 
     today_iso = today.isoformat()
     rel_no_ext = rel_path.removesuffix(".md") if rel_path.endswith(".md") else rel_path

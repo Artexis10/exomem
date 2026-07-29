@@ -5,6 +5,62 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.34.0](https://github.com/Artexis10/exomem/compare/v0.33.0...v0.34.0) (2026-07-27)
+
+
+### Features
+
+* add manual cold standby operations ([#336](https://github.com/Artexis10/exomem/issues/336)) ([c972ef6](https://github.com/Artexis10/exomem/commit/c972ef6cf014de9e2e5a80acd64dd76e4df0a63d))
+* **plugins:** add native hosted client packages ([#337](https://github.com/Artexis10/exomem/issues/337)) ([b171597](https://github.com/Artexis10/exomem/commit/b171597b36d0bfd5e6703bb20145778867806bad))
+
+
+### Bug Fixes
+
+* diagnose service label mismatches and clarify disposition wording ([#341](https://github.com/Artexis10/exomem/issues/341)) ([a820539](https://github.com/Artexis10/exomem/commit/a820539e70f87c5dbba6eee5613ef6ad9f4c6e7e))
+
+## [0.33.0](https://github.com/Artexis10/exomem/compare/v0.32.0...v0.33.0) (2026-07-26)
+
+
+### Features
+
+* **governance:** add the governance kernel — policy, compiler, membership, pure evaluator ([#326](https://github.com/Artexis10/exomem/issues/326)) ([db1bb6e](https://github.com/Artexis10/exomem/commit/db1bb6ee19bf927b2c6bb08a04685169f998f636))
+* **governance:** add the release gate — ladder, projector, principal, tokens, scrubber ([#329](https://github.com/Artexis10/exomem/issues/329)) ([7cebfe0](https://github.com/Artexis10/exomem/commit/7cebfe032d8eeb9240b173bad96b48af87bdf259))
+
+
+### Bug Fixes
+
+* **access:** enforce excluded tier on all direct-read surfaces ([#321](https://github.com/Artexis10/exomem/issues/321)) ([a23c306](https://github.com/Artexis10/exomem/commit/a23c3068eb31ee29c0870e74f2fa6dac15726a21))
+* **ci:** skip generated Python bytecode in secret scan ([#334](https://github.com/Artexis10/exomem/issues/334)) ([93c13e6](https://github.com/Artexis10/exomem/commit/93c13e6811795304bb2d973c782312f78ffab7e2))
+* **hosted:** preserve HCP backend proof HCL quoting ([#332](https://github.com/Artexis10/exomem/issues/332)) ([d83bcc2](https://github.com/Artexis10/exomem/commit/d83bcc2c37fadd1f917e5333ae61d382700db6fb))
+* **media:** propagate deletion to CLIP rows and scene-frame derivatives ([#325](https://github.com/Artexis10/exomem/issues/325)) ([47b4a20](https://github.com/Artexis10/exomem/commit/47b4a20007fe91d43bcff79632142cd99e3cd906))
+* share local clients and repair diagnostics ([#335](https://github.com/Artexis10/exomem/issues/335)) ([0476418](https://github.com/Artexis10/exomem/commit/0476418bd717bb05a6e293046fe2e0281a207736))
+* **tests:** mint hosted transfer grants at call time, not at import ([#328](https://github.com/Artexis10/exomem/issues/328)) ([5c76ede](https://github.com/Artexis10/exomem/commit/5c76edeba3d24559343f60e72fd799b760a71db0))
+
+
+### Performance
+
+* bound broad category recall ([#331](https://github.com/Artexis10/exomem/issues/331)) ([78df4c4](https://github.com/Artexis10/exomem/commit/78df4c4d9f2d078aefb85c898fd9550ba289ca8a))
+
+## [0.32.0](https://github.com/Artexis10/exomem/compare/v0.31.0...v0.32.0) (2026-07-25)
+
+
+### Features
+
+* move semantic validation and model loading outside the mutation boundary ([#327](https://github.com/Artexis10/exomem/issues/327)) ([4246bd8](https://github.com/Artexis10/exomem/commit/4246bd8a382a75127e9272b128847bda1cf23cc3))
+* **registry:** publish exomem to the official MCP Registry ([#323](https://github.com/Artexis10/exomem/issues/323)) ([4fae99a](https://github.com/Artexis10/exomem/commit/4fae99a2207b181f4b5de2175e85c4c476e7cd7f))
+
+## [0.31.0](https://github.com/Artexis10/exomem/compare/v0.30.1...v0.31.0) (2026-07-25)
+
+
+### Features
+
+* full observability and write-path reliability ([#320](https://github.com/Artexis10/exomem/issues/320)) ([da10c8b](https://github.com/Artexis10/exomem/commit/da10c8bc97dd91ef5ce83932f230f589d6f3e3c2))
+
+
+### Bug Fixes
+
+* **packaging:** add project URLs so PyPI links to the docs, source and site ([#319](https://github.com/Artexis10/exomem/issues/319)) ([58e181f](https://github.com/Artexis10/exomem/commit/58e181f706a1c6f423e915626a741b4476aa2ca7))
+
 ## [0.30.1](https://github.com/Artexis10/exomem/compare/v0.30.0...v0.30.1) (2026-07-24)
 
 

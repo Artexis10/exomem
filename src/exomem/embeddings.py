@@ -1313,6 +1313,43 @@ def delete_after_remove(vault_root: Path, removed_rel_paths: list[str]) -> None:
     delete_after_remove_status(vault_root, removed_rel_paths)
 
 
+def delete_clip_after_remove(
+    vault_root: Path, removed_rel_paths: list[str]
+) -> EmbeddingSyncStatus:
+    """Drop CLIP sidecar rows for removed paths; mirrors delete_after_remove_status.
+
+    A video's per-keyframe rows share its own rel_path (see `ClipIndex`), so
+    deleting that one key purges every keyframe alongside a plain image row.
+    Gated by `clip_enabled()` (EXOMEM_DISABLE_CLIP), not EXOMEM_DISABLE_EMBEDDINGS
+    -- CLIP deletion never touches the heavy torch/sentence-transformers import,
+    only sqlite, so a lean (no `embeddings` extra) install still purges cleanly.
+    """
+    eligible_count = len(removed_rel_paths)
+    if not clip_enabled():
+        return EmbeddingSyncStatus("disabled", "clip_disabled", eligible_count)
+    if not removed_rel_paths:
+        return EmbeddingSyncStatus("completed", "no_eligible_paths", 0)
+    try:
+        index = get_clip_index(vault_root)
+    except Exception as e:  # noqa: BLE001 - derived index deletion is best-effort
+        log.warning("could not open CLIP sidecar for delete: %s", e)
+        return EmbeddingSyncStatus(
+            "degraded", "clip_index_open_failed", eligible_count
+        )
+    succeeded = True
+    for rel in removed_rel_paths:
+        try:
+            index.delete(rel)
+        except Exception as e:  # noqa: BLE001 - derived index deletion is best-effort
+            log.warning("delete(%s) failed in CLIP sidecar: %s", rel, e)
+            succeeded = False
+    return EmbeddingSyncStatus(
+        "completed" if succeeded else "degraded",
+        "clip_delete_completed" if succeeded else "clip_delete_failed",
+        eligible_count,
+    )
+
+
 def index_incremental(
     vault_root: Path,
     *,

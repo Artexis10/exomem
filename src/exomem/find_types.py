@@ -33,6 +33,10 @@ class ParsedPage:
     body: str
     title: str
     mtime: float
+    # Exact raw-byte identity captured by the corpus parser. Private retrieval
+    # state: never serialized, but lets the post-cache release gate detect a
+    # retrieval-to-projection swap even when size/mtime are preserved.
+    snapshot_hash: str | None = None
 
     @property
     def page_type(self) -> str | None:
@@ -204,6 +208,13 @@ class Hit:
     matched_units_truncated: int = 0
     result_type: str | None = None
     mixed_units_truncated: int = 0
+    snapshot_hash: str | None = None
+    # Release-plane annotation, attached by `governance.egress.annotate_hits`
+    # strictly AFTER `find()` returns (design D2). It is per-principal, so it
+    # must never be present on a candidate stored in the shared `_FIND_CACHE`
+    # — `find()` deep-copies into the cache before annotation ever runs, and
+    # `test_find_hot_cache_stays_principal_free` pins that.
+    decision: Any = None
 
     def as_dict(self) -> dict:
         out: dict = {
@@ -353,6 +364,12 @@ class SemanticUnitHit:
     vector_rank: int | None = None
     vector_score: float | None = None
     mixed_units_truncated: int = 0
+    # Private retrieval snapshot identity.  Governance consumes this before
+    # projection so a result cannot be swapped between ranking and release;
+    # it is deliberately absent from every public serializer below.
+    snapshot_hash: str | None = None
+    # See `Hit.decision` — same per-principal, post-`find()` contract.
+    decision: Any = None
 
     def as_dict(self) -> dict[str, Any]:
         out: dict[str, Any] = {

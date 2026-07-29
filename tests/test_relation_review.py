@@ -10,7 +10,14 @@ from pathlib import Path
 
 import pytest
 
-from exomem import activation_manifest, memory_refs, relation_review, semantic_contract, vault
+from exomem import (
+    activation_manifest,
+    memory_refs,
+    metrics,
+    relation_review,
+    semantic_contract,
+    vault,
+)
 
 _ID_A = "00000000-0000-4000-8000-000000000001"
 _ID_B = "00000000-0000-4000-8000-000000000002"
@@ -255,9 +262,60 @@ def test_validate_only_is_deterministic_normalized_and_nonmutating(
     assert validation.draft_hash == expected_draft
     assert validation.mutated is False
     assert validation.relation_disposition == "bootstrap"
+    assert validation.as_dict()["relation_review_hash"] is None
     assert validation.committable_without_review
     assert validation.as_dict()["contract_result"] == validation.contract_result.as_dict()
     assert tuple(tmp_path.rglob("*")) == before
+
+
+def test_reviewed_none_validation_returns_the_commit_review_hash(tmp_path: Path) -> None:
+    _source, validation = _reviewed_validation(tmp_path)
+
+    assert validation.as_dict()["relation_review_hash"] == validation.draft_hash
+
+
+def test_reviewed_none_hyphen_alias_commits_as_canonical_receipt(tmp_path: Path) -> None:
+    source, validation = _reviewed_validation(tmp_path)
+
+    committed = relation_review.commit_creation_draft(
+        tmp_path,
+        path=_PAGE_B,
+        source=source,
+        draft_id=_ID_B,
+        operation="create",
+        relation_disposition="reviewed-none",
+        relation_review_hash=validation.draft_hash,
+        relation_review_reason="No honest typed relation yet",
+    )
+
+    assert committed.relation_disposition == "reviewed_none"
+    corpus = semantic_contract.build_corpus_context(tmp_path)
+    persisted = relation_review.load_relation_review(
+        tmp_path,
+        corpus.pages[_PAGE_B],
+        corpus=corpus,
+    )
+    assert persisted is not None
+    assert persisted.kind == "reviewed_none"
+
+
+def test_invalid_review_disposition_names_the_accepted_spellings(tmp_path: Path) -> None:
+    source, validation = _reviewed_validation(tmp_path)
+
+    with pytest.raises(relation_review.RelationReviewError) as error:
+        relation_review.commit_creation_draft(
+            tmp_path,
+            path=_PAGE_B,
+            source=source,
+            draft_id=_ID_B,
+            operation="create",
+            relation_disposition="declined",
+            relation_review_hash=validation.draft_hash,
+            relation_review_reason="No honest typed relation yet",
+        )
+
+    assert error.value.code == "INVALID_RELATION_REVIEW"
+    assert "'reviewed_none' or 'reviewed-none'" in error.value.reason
     with pytest.raises(FrozenInstanceError):
         validation.destination = "changed.md"  # type: ignore[misc]
 
@@ -878,6 +936,182 @@ def test_load_reviews_returns_sorted_immutable_records_and_ignores_temp_residue(
     assert records[0].reference.endswith(f"/{_ID_A}.json")
     with pytest.raises(FrozenInstanceError):
         records[0].reason = "changed"  # type: ignore[misc]
+
+
+def test_commit_creation_draft_reuses_prevalidated_attempt_on_matching_census_token(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source, validation = _reviewed_validation(tmp_path)
+    counts = {"corpus": 0, "validation": 0}
+    seams = (
+        (relation_review.semantic_contract, "build_corpus_context", "corpus"),
+        (relation_review, "_validation", "validation"),
+    )
+    for owner, name, key in seams:
+        original = getattr(owner, name)
+
+        def counted(*args, _original=original, _key=key, **kwargs):
+            counts[_key] += 1
+            return _original(*args, **kwargs)
+
+        monkeypatch.setattr(owner, name, counted)
+
+    commit = relation_review.commit_creation_draft(
+        tmp_path,
+        path=_PAGE_B,
+        source=source,
+        draft_id=_ID_B,
+        operation="create",
+        relation_disposition="reviewed_none",
+        relation_review_hash=validation.draft_hash,
+        relation_review_reason="No honest typed relation yet",
+    )
+
+    assert commit.mutated is True
+    # Without reuse, both the preliminary and in-lock `_attempt` calls run
+    # `build_corpus_context`/`_validation` fresh (2 each). A matching census
+    # token collapses the in-lock call to a reuse, so each drops to 1.
+    assert counts == {"corpus": 1, "validation": 1}
+
+
+def test_commit_creation_draft_falls_through_to_full_attempt_on_census_mismatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source, validation = _reviewed_validation(tmp_path)
+    counts = {"corpus": 0}
+    original_build = relation_review.semantic_contract.build_corpus_context
+
+    def counted_build(*args, **kwargs):
+        counts["corpus"] += 1
+        return original_build(*args, **kwargs)
+
+    monkeypatch.setattr(relation_review.semantic_contract, "build_corpus_context", counted_build)
+
+    real_prepare = relation_review.prepare_commit_creation_draft
+
+    def prepare_then_concurrent_commit(*args, **kwargs):
+        prepared = real_prepare(*args, **kwargs)
+        # Simulate a concurrent governed writer committing after the
+        # pre-boundary validation: every mutation-guard exit bumps the
+        # boundary commit-generation, which must disable stamp reuse.
+        from exomem import writer_lease
+
+        writer_lease._bump_commit_generation(
+            writer_lease.active_manager().config.state_dir, tmp_path
+        )
+        return prepared
+
+    monkeypatch.setattr(
+        relation_review, "prepare_commit_creation_draft", prepare_then_concurrent_commit
+    )
+
+    commit = relation_review.commit_creation_draft(
+        tmp_path,
+        path=_PAGE_B,
+        source=source,
+        draft_id=_ID_B,
+        operation="create",
+        relation_disposition="reviewed_none",
+        relation_review_hash=validation.draft_hash,
+        relation_review_reason="No honest typed relation yet",
+    )
+
+    assert commit.mutated is True
+    assert counts["corpus"] == 2
+
+
+def _prevalidated_commit_counts() -> dict[str, int]:
+    snap = metrics.snapshot()
+    counts: dict[str, int] = {}
+    for entry in snap["counters"]:
+        if entry["name"] != "exomem_prevalidated_commit_total":
+            continue
+        outcome = dict(entry["labels"]).get("outcome", "")
+        counts[outcome] = counts.get(outcome, 0) + entry["value"]
+    return counts
+
+
+def test_commit_creation_draft_records_reused_outcome_on_matching_token(
+    tmp_path: Path,
+) -> None:
+    source, validation = _reviewed_validation(tmp_path)
+    metrics.reset()
+
+    relation_review.commit_creation_draft(
+        tmp_path,
+        path=_PAGE_B,
+        source=source,
+        draft_id=_ID_B,
+        operation="create",
+        relation_disposition="reviewed_none",
+        relation_review_hash=validation.draft_hash,
+        relation_review_reason="No honest typed relation yet",
+    )
+
+    counts = _prevalidated_commit_counts()
+    metrics.reset()
+    assert counts.get("reused") == 1
+    assert counts.get("revalidated") is None
+
+
+def test_commit_creation_draft_records_revalidated_outcome_on_census_mismatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source, validation = _reviewed_validation(tmp_path)
+    metrics.reset()
+
+    real_prepare = relation_review.prepare_commit_creation_draft
+
+    def prepare_then_concurrent_commit(*args, **kwargs):
+        prepared = real_prepare(*args, **kwargs)
+        # Simulate a concurrent governed writer committing after the
+        # pre-boundary validation: every mutation-guard exit bumps the
+        # boundary commit-generation, which must disable stamp reuse.
+        from exomem import writer_lease
+
+        writer_lease._bump_commit_generation(
+            writer_lease.active_manager().config.state_dir, tmp_path
+        )
+        return prepared
+
+    monkeypatch.setattr(
+        relation_review, "prepare_commit_creation_draft", prepare_then_concurrent_commit
+    )
+
+    relation_review.commit_creation_draft(
+        tmp_path,
+        path=_PAGE_B,
+        source=source,
+        draft_id=_ID_B,
+        operation="create",
+        relation_disposition="reviewed_none",
+        relation_review_hash=validation.draft_hash,
+        relation_review_reason="No honest typed relation yet",
+    )
+
+    counts = _prevalidated_commit_counts()
+    metrics.reset()
+    assert counts.get("revalidated") == 1
+    assert counts.get("reused") is None
+
+
+def test_prepare_commit_creation_draft_validates_before_any_lock_or_write(
+    tmp_path: Path,
+) -> None:
+    source, _ = _reviewed_validation(tmp_path)
+
+    with pytest.raises(relation_review.RelationReviewError) as exc:
+        relation_review.prepare_commit_creation_draft(
+            tmp_path,
+            path=_PAGE_B,
+            source=source,
+            draft_id=_ID_B,
+            operation="replacement",
+        )
+
+    assert exc.value.code == "INVALID_PREDECESSOR"
+    assert not relation_review.review_artifact_path(tmp_path, _ID_B).exists()
+    assert not (tmp_path / _PAGE_B).exists()
 
 
 def test_attempt_loaders_and_corpus_walk_are_each_called_once(

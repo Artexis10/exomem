@@ -183,6 +183,18 @@ def is_indexable(vault_root: Path, rel_path: str) -> bool:
     return access_tier(vault_root, rel_path) != TIER_EXCLUDED
 
 
+def refuse_if_excluded(vault_root: Path, rel_path: str) -> bool:
+    """True when `rel_path` is `excluded` and a read surface must refuse it.
+
+    The single shared enforcement point every direct-read surface (get_page,
+    overview, query_data, video_frames, epistemic_graph) consults at its
+    path-resolve point. Refusal must be rendered indistinguishable from a
+    missing path by the caller (same code/shape/text, no path echo) — this
+    helper only answers "is this excluded", not how to report it.
+    """
+    return access_tier(vault_root, rel_path) == TIER_EXCLUDED
+
+
 def writable_reason(vault_root: Path, rel_path: str) -> str | None:
     """None if the path accepts ordinary writes; else a refusal reason.
 

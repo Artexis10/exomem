@@ -18,10 +18,11 @@ from __future__ import annotations
 import datetime as dt
 import json
 import logging
-import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
+from . import media_types
+from .governance import lifecycle
 from .kbdir import kb_dirname, kb_prefix
 from .vault import (
     VaultPathError,
@@ -96,6 +97,11 @@ def delete_directory(
         )
     except VaultPathError as e:
         raise DeleteDirectoryError(code=e.code, reason=e.reason) from e
+
+    try:
+        lifecycle.assert_not_protected(vault_root, rel_path)
+    except lifecycle.LifecycleError as error:
+        raise DeleteDirectoryError(code=error.code, reason=error.reason) from error
 
     # Don't allow deleting the trash itself, or trash subdirs.
     parts = rel_path.split("/")
@@ -201,6 +207,14 @@ def delete_directory(
         trash_abs = trash_root / f"{trash_basename}-{i}"
         i += 1
 
+    trash_rel = trash_abs.relative_to(vault_root).as_posix()
+    try:
+        lifecycle_operation = lifecycle.begin_deletion(
+            vault_root, source_rel=rel_path, trash_rel=trash_rel
+        )
+    except lifecycle.LifecycleError as error:
+        raise DeleteDirectoryError(code=error.code, reason=error.reason) from error
+
     # Capture vault-relative paths for every .md file in the doomed tree —
     # before the move, while they still resolve under vault_root. Used to
     # purge the embedding sidecar after the trash move succeeds.
@@ -213,35 +227,65 @@ def delete_directory(
         except ValueError:
             continue
 
+    # A doomed subtree may also contain CLIP-relevant media binaries (image/
+    # video — the only kinds with derived-index residue: CLIP rows, and for a
+    # video, scene-frame children). Other extractable-but-not-visual kinds
+    # (audio/pdf/docx/text/email/calendar) keep the prior .md-only behavior:
+    # their OCR/ASR text lives in a separate `.md` sidecar, already covered
+    # above. Unlike delete_file (single target, needs list_scene_frame_children
+    # to reach siblings), the recursive walk here already visits `.frames/`
+    # children itself: the frame `.jpg` lands in media_rels and its `.jpg.md`
+    # sidecar in the markdown walk.
+    media_rels: list[str] = []
+    for p in files:
+        if p.suffix.lower() == ".md":
+            continue
+        media_type = media_types.media_type_for(p)
+        if media_type not in {"image", "video"}:
+            continue
+        try:
+            rel = p.resolve().relative_to(vault_root.resolve()).as_posix()
+        except ValueError:
+            continue
+        media_rels.append(rel)
+
+    fanout_rels = list(dict.fromkeys(md_rels_to_unindex + media_rels))
+
     # Register the self-authored removals BEFORE the move so the watcher's
     # per-file delete events are dropped (sidecar purge happens below).
-    if md_rels_to_unindex:
+    # register_self_delete itself filters to `.md` paths, so the media
+    # binaries' own (non-md) rels here are a harmless no-op; the frame `.md`
+    # sidecars are what need suppressing.
+    if fanout_rels:
         try:
             from . import file_watcher
-            file_watcher.register_self_delete(vault_root, md_rels_to_unindex)
+            file_watcher.register_self_delete(vault_root, fanout_rels)
         except Exception:  # noqa: BLE001 — suppression is best-effort
             log.debug("self-delete suppression registration failed", exc_info=True)
 
     try:
-        shutil.move(str(abs_path), str(trash_abs))
-    except OSError as e:
+        lifecycle.atomic_rename(
+            lifecycle_operation, source=abs_path, destination=trash_abs
+        )
+    except lifecycle.LifecycleError as e:
+        lifecycle.abort_deletion(lifecycle_operation)
         raise DeleteDirectoryError(
-            code="TRASH_FAILED",
-            reason=f"could not move {rel_path} to trash: {e}",
+            code=e.code,
+            reason=e.reason,
         ) from e
 
     index_feedback: dict | None = None
-    if md_rels_to_unindex:
+    if fanout_rels:
         try:
             from . import index_sync
             raw_report = index_sync.delete_after_remove(
-                vault_root, md_rels_to_unindex
+                vault_root, fanout_rels
             )
             report = (
                 raw_report
                 if isinstance(raw_report, index_sync.IndexSyncReport)
                 else index_sync.observed_delete_report(
-                    md_rels_to_unindex, degraded=False
+                    fanout_rels, degraded=False
                 )
             )
         except Exception:  # noqa: BLE001 — sidecars are best-effort
@@ -253,7 +297,7 @@ def delete_directory(
                 "trash succeeded but derived-index cleanup failed; run reconcile"
             )
             report = index_sync.observed_delete_report(
-                md_rels_to_unindex, degraded=True
+                fanout_rels, degraded=True
             )
         index_feedback = report.as_dict()
 
@@ -277,7 +321,13 @@ def delete_directory(
     except OSError as e:
         warnings.append(f"trashed dir ok but meta sidecar write failed: {e}")
 
-    trash_rel = trash_abs.resolve().relative_to(vault_root.resolve()).as_posix()
+    if not lifecycle.finish_deletion(
+        lifecycle_operation, index_report=index_feedback
+    ):
+        warnings.append(
+            "trash succeeded but governed derived state is not exact; "
+            "content remains tombstoned until reconcile"
+        )
 
     today_iso = today.isoformat()
     log_body = (

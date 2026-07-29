@@ -50,11 +50,9 @@ def canon(path: str) -> str:
     return p.lower()
 
 
-def read_jsonl(path: Path) -> list[dict]:
-    """Best-effort JSONL reader; malformed lines are skipped."""
+def _read_jsonl_file(path: Path, out: list[dict]) -> None:
     if not path.exists():
-        return []
-    out: list[dict] = []
+        return
     for line in path.read_text(encoding="utf-8").splitlines():
         line = line.strip()
         if not line:
@@ -63,6 +61,18 @@ def read_jsonl(path: Path) -> list[dict]:
             out.append(json.loads(line))
         except json.JSONDecodeError:
             continue
+
+
+def read_jsonl(path: Path) -> list[dict]:
+    """Best-effort JSONL reader; malformed lines are skipped.
+
+    Also reads one rotated generation (`<path>.1`) when present — read
+    oldest-first — so a query spanning a rotation doesn't silently lose the
+    half that just rotated out of the live file.
+    """
+    out: list[dict] = []
+    _read_jsonl_file(path.with_name(path.name + ".1"), out)
+    _read_jsonl_file(path, out)
     return out
 
 

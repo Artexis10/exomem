@@ -10,6 +10,7 @@ import io
 import json
 import os
 import sqlite3
+import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -43,6 +44,99 @@ def test_doctor_lean_passes_with_fixture_vault(vault: Path) -> None:
     assert checks["python.version"].status == "pass"
     assert checks["vault.path"].status == "pass"
     assert checks["command.registry"].status == "pass"
+
+
+def test_doctor_includes_observability_check(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("EXOMEM_LOG_DIR", str(tmp_path / "logs"))
+    report = doctor_module.doctor(vault=str(vault))
+    checks = {c.id: c for c in report.checks}
+    assert "observability" in checks
+    assert checks["observability"].status in {"pass", "warn"}
+    assert checks["observability"].details["log_dir_writable"] is True
+
+
+def test_observability_check_fails_when_log_dir_unwritable(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    def boom_resolve_log_dir():
+        return tmp_path / "does" / "not" / "exist" / "\x00bad"
+
+    monkeypatch.setattr(
+        "exomem.logging_config.resolve_log_dir", boom_resolve_log_dir
+    )
+    check = doctor_module._check_observability()
+    assert check.status == "fail"
+    assert check.details["log_dir_writable"] is False
+
+
+def test_observability_check_warns_on_stale_service_pile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir(parents=True)
+    for i in range(51):
+        (log_dir / f"service.out.log.{i}").write_text("x", encoding="utf-8")
+    monkeypatch.setenv("EXOMEM_LOG_DIR", str(log_dir))
+    check = doctor_module._check_observability()
+    assert check.status == "warn"
+    assert check.details["service_pile_count"] == 51
+
+
+def test_observability_check_warns_on_unparseable_jsonl_tail(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir(parents=True)
+    (log_dir / "queries.jsonl").write_text("not json\n", encoding="utf-8")
+    monkeypatch.setenv("EXOMEM_LOG_DIR", str(log_dir))
+    check = doctor_module._check_observability()
+    assert check.status == "warn"
+    assert "queries.jsonl" in check.message
+
+
+@pytest.fixture()
+def _isolated_lease_manager(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    from exomem import writer_lease as writer_lease_module
+
+    writer_lease_module.reset_managers_for_tests()
+    monkeypatch.setenv("EXOMEM_WRITER_LEASE_STATE_DIR", str(tmp_path / "state"))
+    yield writer_lease_module.get_manager()
+    writer_lease_module.reset_managers_for_tests()
+
+
+def test_idempotency_store_check_passes_when_healthy(_isolated_lease_manager) -> None:
+    check = doctor_module._check_idempotency_store()
+    assert check.status == "pass"
+    assert check.details["abandoned"] == 0
+
+
+def test_idempotency_store_check_warns_on_abandoned_receipts(_isolated_lease_manager) -> None:
+    store = _isolated_lease_manager.idempotency
+    with sqlite3.connect(store.path) as connection:
+        connection.execute(
+            "INSERT INTO mutations(key, digest, state, updated_at, owner) "
+            "VALUES ('k1', 'd1', 'abandoned', ?, NULL)",
+            (0.0,),
+        )
+    check = doctor_module._check_idempotency_store()
+    assert check.status == "warn"
+    assert "abandoned" in check.message
+    assert check.details["abandoned"] == 1
+
+
+def test_idempotency_store_check_warns_on_stale_pending(_isolated_lease_manager) -> None:
+    store = _isolated_lease_manager.idempotency
+    with sqlite3.connect(store.path) as connection:
+        connection.execute(
+            "INSERT INTO mutations(key, digest, state, updated_at, owner) "
+            "VALUES ('k1', 'd1', 'pending', ?, NULL)",
+            (0.0,),
+        )
+    check = doctor_module._check_idempotency_store()
+    assert check.status == "warn"
+    assert "oldest pending" in check.message
 
 
 def test_lexical_check_uses_escaped_immutable_query_only_snapshot(
@@ -309,6 +403,169 @@ def test_doctor_disable_embeddings_forces_lean(monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")
     monkeypatch.setattr(doctor_module, "_module_available", lambda _name: True)
     assert doctor_module.infer_profile() == "lean"
+
+
+def test_doctor_resolves_profile_explicit_then_env_then_persisted(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("EXOMEM_PROFILE", "media")
+    monkeypatch.setattr(doctor_module.install_info, "configured_local_profile", lambda: "hybrid")
+
+    assert doctor_module.resolve_profile("standard") == "standard"
+    assert doctor_module.resolve_profile(None) == "media"
+
+    monkeypatch.delenv("EXOMEM_PROFILE")
+    assert doctor_module.resolve_profile(None) == "hybrid"
+
+
+def test_editable_lock_check_uses_selected_runtime_extras_offline(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    calls: dict[str, object] = {}
+    monkeypatch.setattr(
+        doctor_module.install_info, "editable_project_root_status", lambda: (tmp_path, None)
+    )
+    monkeypatch.setattr(doctor_module.shutil, "which", lambda name: "/bin/uv" if name == "uv" else None)
+
+    def run(command, **kwargs):
+        calls["command"] = command
+        calls["kwargs"] = kwargs
+        return subprocess.CompletedProcess(command, 1, stdout="stale lock state", stderr="")
+
+    monkeypatch.setattr(doctor_module.subprocess, "run", run)
+    check = doctor_module._check_editable_lock_parity("standard")
+
+    assert check.status == "fail"
+    assert calls["command"] == [
+        "/bin/uv", "sync", "--check", "--locked", "--no-dev", "--active", "--project", str(tmp_path),
+        "--offline", "--no-cache", "--inexact", "--extra", "embeddings", "--extra", "media",
+    ]
+    assert calls["kwargs"]["env"]["VIRTUAL_ENV"] == sys.prefix
+    assert "stale lock state" in check.message
+    assert "uv sync --check --locked --no-dev --active --project" in check.remediation
+
+
+def test_editable_lock_check_warns_when_uv_times_out(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(
+        doctor_module.install_info, "editable_project_root_status", lambda: (tmp_path, None)
+    )
+    monkeypatch.setattr(doctor_module.shutil, "which", lambda _name: "/bin/uv")
+    monkeypatch.setattr(
+        doctor_module.subprocess,
+        "run",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(subprocess.TimeoutExpired("uv", 10)),
+    )
+
+    check = doctor_module._check_editable_lock_parity("hybrid")
+
+    assert check.status == "warn"
+    assert "timed out" in check.message
+
+
+def test_editable_lock_check_warns_for_unverifiable_editable_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        doctor_module.install_info,
+        "editable_project_root_status",
+        lambda: (None, "malformed direct_url.json"),
+    )
+
+    check = doctor_module._check_editable_lock_parity("hybrid")
+
+    assert check is not None
+    assert check.status == "warn"
+    assert "malformed direct_url.json" in check.message
+
+
+def test_editable_lock_check_treats_unsupported_safety_flags_as_unverifiable(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(
+        doctor_module.install_info, "editable_project_root_status", lambda: (tmp_path, None)
+    )
+    monkeypatch.setattr(doctor_module.shutil, "which", lambda _name: "/bin/uv")
+    monkeypatch.setattr(
+        doctor_module.subprocess,
+        "run",
+        lambda command, **_kwargs: subprocess.CompletedProcess(
+            command,
+            2,
+            "",
+            "error: unexpected argument '--inexact'",
+        ),
+    )
+
+    check = doctor_module._check_editable_lock_parity("hybrid")
+
+    assert check.status == "warn"
+    assert "uv version" in check.message
+
+
+def test_darwin_memory_uses_the_complete_v0_abi_and_physical_footprint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem import process_memory
+
+    calls: list[tuple[int, int]] = []
+
+    class ProcPidRusage:
+        def __call__(self, pid, flavor, usage_pointer):
+            calls.append((pid, flavor))
+            usage_pointer._obj.ri_phys_footprint = 3 * 1024 * 1024
+            return 0
+
+    class LibProc:
+        proc_pid_rusage = ProcPidRusage()
+
+    monkeypatch.setattr(process_memory.sys, "platform", "darwin")
+    monkeypatch.setattr(process_memory.ctypes, "CDLL", lambda *_args, **_kwargs: LibProc())
+
+    assert process_memory.ctypes.sizeof(process_memory._RusageInfoV0) == 96
+    assert process_memory.enrich_process_memory(42, 1.0) == {
+        "memory_mb": 3.0,
+        "memory_metric": "physical_footprint",
+        "physical_footprint_mb": 3.0,
+    }
+    assert calls == [(42, 0)]
+
+
+def test_darwin_memory_falls_back_to_labelled_rss_on_native_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem import process_memory
+
+    class ProcPidRusage:
+        def __call__(self, _pid, _flavor, _usage_pointer):
+            return -1
+
+    class LibProc:
+        proc_pid_rusage = ProcPidRusage()
+
+    monkeypatch.setattr(process_memory.sys, "platform", "darwin")
+    monkeypatch.setattr(process_memory.ctypes, "CDLL", lambda *_args, **_kwargs: LibProc())
+
+    assert process_memory.enrich_process_memory(42, 7.5) == {
+        "memory_mb": 7.5,
+        "memory_metric": "rss",
+        "physical_footprint_mb": None,
+    }
+
+
+def test_process_memory_mixed_rows_keep_physical_and_rss_totals_separate() -> None:
+    from exomem import process_memory
+
+    aggregate = process_memory.aggregate_memory([
+        {"pid": 1, "rss_mb": 100.0, "memory_mb": 150.0, "memory_metric": "physical_footprint"},
+        {"pid": 2, "rss_mb": 80.0, "memory_mb": 80.0, "memory_metric": "rss"},
+    ])
+
+    assert aggregate == {
+        "memory_metric": "mixed",
+        "rss_mb_total": 180.0,
+        "physical_footprint_mb_total": 150.0,
+        "rss_fallback_mb_total": 80.0,
+    }
 
 
 def test_standard_profile_accepts_missing_tesseract_as_degraded_warning(
@@ -606,6 +863,31 @@ def test_runtime_process_check_warns_for_multiple_stdio_servers(
     assert check.status == "warn"
     assert "Each stdio MCP client/session launches its own process" in check.message
     assert check.details["count"] == 2
+
+
+def test_runtime_process_check_names_physical_footprint_when_complete(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        doctor_module,
+        "_list_exomem_processes",
+        lambda: [
+            {
+                "pid": 101,
+                "rss_mb": 100.0,
+                "memory_mb": 275.0,
+                "memory_metric": "physical_footprint",
+                "physical_footprint_mb": 275.0,
+                "command": "python -m exomem --transport streamable-http",
+            }
+        ],
+    )
+
+    check = doctor_module._check_runtime_processes()
+
+    assert check is not None
+    assert "275.0 MB physical footprint" in check.message
+    assert check.details["memory_metric"] == "physical_footprint"
 
 
 

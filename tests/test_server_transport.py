@@ -133,9 +133,10 @@ def test_remote_http_runs_stateless(
         "port": 9876,
         "stateless_http": True,
     }
-    assert len(middleware) == 2
+    assert len(middleware) == 3
     assert middleware[0].cls is server.EdgeIngressMiddleware
-    assert middleware[1].cls is server.PrimeMcpSSEMiddleware
+    assert middleware[1].cls is server.AccessLogMiddleware
+    assert middleware[2].cls is server.PrimeMcpSSEMiddleware
 
 
 def test_stdio_does_not_apply_http_stateless_configuration(fake_mcp: _FakeMcp) -> None:

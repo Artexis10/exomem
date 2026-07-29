@@ -36,6 +36,7 @@ FORBIDDEN_COMMANDS = {
     "adoption_studio",
     "maintain_memory",
     "schema_memory",
+    "govern_memory",
     "manage_memory_file",
     "query_dataset",
     "read_media",
@@ -130,6 +131,34 @@ def test_agent_contract_is_mcp_ready_deterministic_and_additive() -> None:
         assert mcp_tool["annotations"] == canonical_commands[
             name
         ].mcp_annotations.model_dump(mode="json", by_alias=True)
+
+
+def test_hosted_alpha_mcp_tools_omit_absent_optional_fields_without_losing_schema_nulls() -> None:
+    contract = gateway.build_agent_gateway_contract(profile=ALPHA_PROFILE)
+    repeated = gateway.build_agent_gateway_contract(profile=ALPHA_PROFILE)
+    fixture = json.loads(MCP_SCHEMA_FIXTURE.read_text(encoding="utf-8"))
+
+    assert gateway.canonical_contract_json(contract) == gateway.canonical_contract_json(
+        repeated
+    )
+    assert tuple(entry["name"] for entry in contract["commands"]) == ALPHA_COMMANDS
+
+    for entry in contract["commands"]:
+        mcp_tool = entry["mcp_tool"]
+        assert "icons" not in mcp_tool
+        assert "execution" not in mcp_tool
+        assert all(value is not None for value in mcp_tool.values())
+        assert mcp_tool["description"] == fixture[entry["name"]]["description"]
+        assert mcp_tool["inputSchema"] == fixture[entry["name"]]["inputSchema"]
+        assert mcp_tool["annotations"]
+        assert mcp_tool["outputSchema"]
+
+    workflow = contract["commands"][0]["mcp_tool"]["inputSchema"]["properties"][
+        "workflow"
+    ]
+    assert workflow["default"] is None
+    assert {branch["type"] for branch in workflow["anyOf"]} == {"string", "null"}
+    assert workflow["description"]
 
 
 def test_agent_contract_rejects_unknown_profile_with_stable_error() -> None:

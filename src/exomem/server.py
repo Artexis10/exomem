@@ -13,6 +13,7 @@ import os
 import time
 from copy import copy
 from pathlib import Path
+from typing import Any
 
 from dotenv import load_dotenv
 from fastmcp import FastMCP
@@ -21,6 +22,7 @@ from starlette.middleware import Middleware as ASGIMiddleware
 
 from . import capabilities, edit_operations, guards, multi_edit
 from . import commands as commands_module
+from .access_log import AccessLogMiddleware
 from .edge_ingress import EdgeIngressMiddleware
 from .server_assets import (
     register_asset_routes,
@@ -81,13 +83,13 @@ class CallTraceMiddleware(Middleware):
         self.hosted = hosted
 
     async def on_call_tool(self, context: MiddlewareContext, call_next):
-        from .command_surface import mcp_request_context, mcp_request_id
+        from .command_surface import mcp_request_context, mcp_request_id, pop_tool_failure
 
         tool_name = _extract_tool_name(context.message)
         if tool_name == "edit_memory":
             context = _translated_edit_context(context)
         request_id = mcp_request_id()
-        with mcp_request_context(request_id):
+        with mcp_request_context(request_id) as call_token:
             guarded_fields = _GUARDED_WRITE_FIELDS.get(tool_name)
             if guarded_fields:
                 args = _extract_tool_args(context.message)
@@ -130,12 +132,27 @@ class CallTraceMiddleware(Middleware):
             try:
                 result = await call_next(context)
                 dur = round((time.perf_counter() - t0) * 1000, 2)
-                _call_log.info(
-                    f"event={event_prefix}tool_success tool={tool_name} "
-                    f"request_id={request_id} duration_ms={dur}{extras}"
-                )
+                # A ContextVar set inside the synchronous tool wrapper (which
+                # runs in FastMCP's anyio threadpool) does not propagate back
+                # here, so the wrapper leaves this bounded, locked breadcrumb
+                # instead, keyed by this call's unique token. Pop
+                # unconditionally: a call the wrapper never failed simply pops
+                # `None`.
+                failure = pop_tool_failure(call_token)
+                if failure is not None:
+                    _call_log.info(
+                        f"event={event_prefix}tool_failure tool={tool_name} "
+                        f"request_id={request_id} duration_ms={dur} "
+                        f"code={failure.get('code')}{extras}"
+                    )
+                else:
+                    _call_log.info(
+                        f"event={event_prefix}tool_success tool={tool_name} "
+                        f"request_id={request_id} duration_ms={dur}{extras}"
+                    )
                 return result
             except Exception as exc:
+                pop_tool_failure(call_token)
                 dur = round((time.perf_counter() - t0) * 1000, 2)
                 _call_log.error(
                     f"event={event_prefix}tool_error tool={tool_name} "
@@ -338,6 +355,37 @@ def _newest_open_adoption_run(vault_root: Path) -> dict | None:
     return None
 
 
+def _gated_adoption_egress(vault_root: Path, command_name: str, payload: Any) -> Any:
+    """Bind the MCP principal and run the terminal egress filter over `payload`.
+
+    Design D1 names these handlers as an explicit residual: `@mcp.resource` and
+    `@mcp.prompt` are registered by hand, so they never travel through
+    `commands.bind_vault` (which binds the principal) nor
+    `writer_lease.invoke_command` (which runs `postfilter`). Without this call
+    an adoption run document — inventory rows and `selection.paths` naming real
+    vault items, plus `handoff.prompt_text` — reaches whoever is on the other
+    end of the connector with no principal, no withheld cross-check and no
+    credential scrubber. That is the entire release plane bypassed by a
+    decorator.
+
+    The principal is resolved the same way `bind_vault` resolves it, so a
+    grant authored against the connector's identity matches here too; stdio
+    still resolves to the owner.
+    """
+    from .governance import egress as egress_module
+    from .governance import principal as principal_module
+
+    with principal_module.request_scope(principal_module.resolve_mcp_principal()):
+        # The ordinary terminal postfilter includes the recursive artifact
+        # resolver as well as credential scrubbing. Keeping the complete
+        # residual payload in one pass gives repeated prompt/resource
+        # references one verdict and one receipt outcome.
+        with egress_module.disclosure_boundary(vault_root, command_name) as collector:
+            result = egress_module.postfilter(command_name, payload, vault_root)
+            egress_module.emit_boundary_receipt(collector)
+            return result
+
+
 def register_adoption_mcp(mcp: FastMCP, *, vault_root: Path) -> None:
     """Register the progressive-enhancement Adoption Studio prompt and resources.
 
@@ -372,15 +420,16 @@ def register_adoption_mcp(mcp: FastMCP, *, vault_root: Path) -> None:
             )
         try:
             doc = adoption_run_module.status(vault_root, run_id=row["run_id"])
-            return doc["handoff"]["prompt_text"]
+            text = doc["handoff"]["prompt_text"]
         except Exception:  # noqa: BLE001 - fall back to a minimal, still-useful prompt
             run_id = row.get("run_id", "")
-            return (
+            text = (
                 f"Continue my Exomem adoption run {run_id}. Call "
                 f'adoption_studio(action="work-item", run_id="{run_id}") to load the '
                 "bounded, read-only context, then submit structured proposals via "
                 f'adoption_studio(action="propose", run_id="{run_id}").'
             )
+        return _gated_adoption_egress(vault_root, "continue_adoption", text)
 
     @mcp.resource(
         "exomem://adoption/runs",
@@ -396,7 +445,7 @@ def register_adoption_mcp(mcp: FastMCP, *, vault_root: Path) -> None:
         except Exception:  # noqa: BLE001
             rows = []
         open_rows = [r for r in rows if r.get("phase") not in ("done", "cancelled")]
-        return {"runs": open_rows}
+        return _gated_adoption_egress(vault_root, "adoption_runs", {"runs": open_rows})
 
     @mcp.resource(
         "exomem://adoption/run/{run_id}",
@@ -406,9 +455,10 @@ def register_adoption_mcp(mcp: FastMCP, *, vault_root: Path) -> None:
     )
     def adoption_run_resource(run_id: str) -> dict:
         try:
-            return adoption_run_module.status(vault_root, run_id=run_id)
+            doc = adoption_run_module.status(vault_root, run_id=run_id)
         except adoption_run_module.AdoptionRunError as exc:
-            return {"error": {"code": exc.code, "reason": exc.reason}, "run_id": run_id}
+            doc = {"error": {"code": exc.code, "reason": exc.reason}, "run_id": run_id}
+        return _gated_adoption_egress(vault_root, "adoption_run", doc)
 
 
 def _legacy_mcp_compat_enabled() -> bool:
@@ -487,7 +537,9 @@ def run(
     """CLI entry: configure logging, build the server, run it."""
     from .logging_config import configure_logging, resolve_log_dir
 
-    configure_logging(log_dir if log_dir is not None else resolve_log_dir())
+    configure_logging(
+        log_dir if log_dir is not None else resolve_log_dir(), process="server"
+    )
 
     require_auth = transport != "stdio"
     mcp = build_server(require_auth=require_auth)
@@ -507,6 +559,7 @@ def run(
             # see the request (design.md Decision 1).
             middleware=[
                 ASGIMiddleware(EdgeIngressMiddleware),
+                ASGIMiddleware(AccessLogMiddleware),
                 ASGIMiddleware(PrimeMcpSSEMiddleware),
             ],
             # Remote clients may be routed to another replica or outlive this

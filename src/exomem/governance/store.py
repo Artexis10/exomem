@@ -1,0 +1,617 @@
+"""Per-machine governance sidecar and its monotonic schema owner.
+
+`.governance.sqlite` is a derived convenience, never the enforcement
+authority (design decision D6): rebuildable at any time from
+`_Governance/**.yaml`, never synced, and never consulted by
+`policy.load`/`membership.evaluate`/`decisions.decide` — those run entirely
+in-process off the parsed YAML. Only an explicit `compile.write_snapshot`
+call opens this file.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import sqlite3
+import threading
+from collections import OrderedDict
+from pathlib import Path
+
+from .. import index_paths, sidecar_store
+
+SCHEMA_USER_VERSION = 3
+DATA_TABLE = "compiled_policy"
+_INITIALIZED_SIDECARS_MAX = 64
+_INITIALIZED_SIDECARS: OrderedDict[
+    Path, tuple[int, int, int, int, int, str]
+] = OrderedDict()
+_INITIALIZED_SIDECARS_LOCK = threading.Lock()
+
+
+class UnsupportedGovernanceSchema(RuntimeError):
+    """The authoring core cannot safely interpret this sidecar version."""
+
+
+def _reset_initialized_sidecars_after_fork() -> None:
+    global _INITIALIZED_SIDECARS, _INITIALIZED_SIDECARS_LOCK
+    _INITIALIZED_SIDECARS = OrderedDict()
+    _INITIALIZED_SIDECARS_LOCK = threading.Lock()
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_reset_initialized_sidecars_after_fork)
+
+
+def sidecar_path(vault_root: Path) -> Path:
+    return index_paths.governance_sidecar_path(Path(vault_root))
+
+
+def open_readonly_connection(vault_root: Path) -> sqlite3.Connection | None:
+    """Open an existing supported sidecar without migration, DDL, or creation."""
+    path = sidecar_path(vault_root)
+    if not path.exists():
+        return None
+    try:
+        conn = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)
+        conn.execute("PRAGMA query_only=ON")
+        if int(conn.execute("PRAGMA user_version").fetchone()[0]) != SCHEMA_USER_VERSION:
+            conn.close()
+            return None
+        return conn
+    except (sqlite3.Error, OSError):
+        return None
+
+
+def open_connection(
+    vault_root: Path, *, check_same_thread: bool = True
+) -> sqlite3.Connection:
+    """Open (creating if absent) the governance sidecar with its schema in place."""
+    path = sidecar_path(vault_root).resolve()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(path, check_same_thread=check_same_thread)
+    try:
+        with _INITIALIZED_SIDECARS_LOCK:
+            state = _connection_state(conn, path)
+            cached = _INITIALIZED_SIDECARS.get(path)
+            if cached == state:
+                # WAL mode persists in the database. These two pragmas are
+                # connection-local and cheap, so every new handle still gets
+                # the production timeout/durability settings without rerunning
+                # journal negotiation and idempotent DDL on every receipt.
+                conn.execute("PRAGMA synchronous=FULL")
+                conn.execute("PRAGMA busy_timeout=5000")
+                _INITIALIZED_SIDECARS.move_to_end(path)
+            else:
+                sidecar_store.apply_sidecar_pragmas(conn)
+                conn.execute("PRAGMA synchronous=FULL")
+                _migrate(conn)
+                if int(conn.execute("PRAGMA user_version").fetchone()[0]) <= SCHEMA_USER_VERSION:
+                    sidecar_store.ensure_meta_table(conn, DATA_TABLE, "governance")
+                    conn.commit()
+                _INITIALIZED_SIDECARS[path] = _connection_state(conn, path)
+                _INITIALIZED_SIDECARS.move_to_end(path)
+                while len(_INITIALIZED_SIDECARS) > _INITIALIZED_SIDECARS_MAX:
+                    _INITIALIZED_SIDECARS.popitem(last=False)
+        return conn
+    except BaseException:
+        conn.close()
+        raise
+
+
+def _connection_state(
+    conn: sqlite3.Connection, path: Path
+) -> tuple[int, int, int, int, int, str]:
+    """Identity + live schema state; DML does not invalidate this fast path."""
+    stat_result = path.stat()
+    user_version = int(conn.execute("PRAGMA user_version").fetchone()[0])
+    schema_version = int(conn.execute("PRAGMA schema_version").fetchone()[0])
+    journal_mode = str(conn.execute("PRAGMA journal_mode").fetchone()[0]).lower()
+    return (
+        os.getpid(),
+        int(stat_result.st_dev),
+        int(stat_result.st_ino),
+        user_version,
+        schema_version,
+        journal_mode,
+    )
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Apply known sidecar migrations without ever lowering a newer version."""
+    version = int(conn.execute("PRAGMA user_version").fetchone()[0])
+    if version < 1:
+        conn.execute(
+            f"CREATE TABLE IF NOT EXISTS {DATA_TABLE} ("
+            "fingerprint TEXT PRIMARY KEY, snapshot TEXT NOT NULL, compiled_at REAL NOT NULL)"
+        )
+        version = 1
+    if version < 2:
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS receipt_instance "
+            "(singleton INTEGER PRIMARY KEY CHECK (singleton = 1), instance_id TEXT NOT NULL)"
+        )
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS receipts_head ("
+            "instance_id TEXT PRIMARY KEY, durable_seq INTEGER NOT NULL, durable_hash TEXT NOT NULL, "
+            "observed_seq INTEGER NOT NULL, observed_hash TEXT NOT NULL, "
+            "path TEXT NOT NULL DEFAULT '', byte_offset INTEGER NOT NULL DEFAULT 0)"
+        )
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS receipt_secrets ("
+            "name TEXT PRIMARY KEY, value BLOB NOT NULL)"
+        )
+        version = 2
+    if version == 2:
+        conn.execute(
+            f"CREATE TABLE IF NOT EXISTS {DATA_TABLE} ("
+            "fingerprint TEXT PRIMARY KEY, snapshot TEXT NOT NULL, compiled_at REAL NOT NULL)"
+        )
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS receipt_instance "
+            "(singleton INTEGER PRIMARY KEY CHECK (singleton = 1), instance_id TEXT NOT NULL)"
+        )
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS receipts_head ("
+            "instance_id TEXT PRIMARY KEY, durable_seq INTEGER NOT NULL, durable_hash TEXT NOT NULL, "
+            "observed_seq INTEGER NOT NULL, observed_hash TEXT NOT NULL, "
+            "path TEXT NOT NULL DEFAULT '', byte_offset INTEGER NOT NULL DEFAULT 0)"
+        )
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS receipt_secrets ("
+            "name TEXT PRIMARY KEY, value BLOB NOT NULL)"
+        )
+        columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(receipts_head)")}
+        if "path" not in columns:
+            conn.execute("ALTER TABLE receipts_head ADD COLUMN path TEXT NOT NULL DEFAULT ''")
+        if "byte_offset" not in columns:
+            conn.execute(
+                "ALTER TABLE receipts_head ADD COLUMN byte_offset INTEGER NOT NULL DEFAULT 0"
+            )
+    if version < 3:
+        _migrate_v3(conn)
+        version = 3
+    elif version == 3:
+        _migrate_v3(conn)
+        _add_column(
+            conn,
+            "governance_session_grants",
+            "membership_manifest TEXT NOT NULL DEFAULT '[]'",
+        )
+        _add_column(
+            conn,
+            "governance_session_grants",
+            "policy_fingerprint TEXT NOT NULL DEFAULT ''",
+        )
+    if version <= SCHEMA_USER_VERSION:
+        conn.execute(f"PRAGMA user_version = {version}")
+
+
+def _columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    return {str(row[1]) for row in conn.execute(f"PRAGMA table_info({table})")}
+
+
+def _add_column(conn: sqlite3.Connection, table: str, declaration: str) -> None:
+    name = declaration.split()[0]
+    if name not in _columns(conn, table):
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {declaration}")
+
+
+def _migrate_v3(conn: sqlite3.Connection) -> None:
+    """Install the complete governance-authoring schema in one owned step."""
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS withhold_tokens ("
+        "jti TEXT PRIMARY KEY, audience TEXT NOT NULL, max_level INTEGER NOT NULL, "
+        "fingerprints TEXT NOT NULL, paths TEXT NOT NULL, expires_at INTEGER NOT NULL, "
+        "minted_at REAL NOT NULL, consumed_at REAL)"
+    )
+    _add_column(conn, "withhold_tokens", "authorization_session TEXT NOT NULL DEFAULT ''")
+    _add_column(conn, "withhold_tokens", "purpose TEXT")
+    _add_column(conn, "withhold_tokens", "org_ceiling INTEGER NOT NULL DEFAULT 6")
+    _add_column(conn, "withhold_tokens", "status TEXT NOT NULL DEFAULT 'active'")
+    _add_column(conn, "withhold_tokens", "prepared_event_id TEXT")
+
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS governance_proposals ("
+        "proposal_id TEXT PRIMARY KEY, created_at REAL NOT NULL, expires_at REAL NOT NULL, "
+        "proposal_json TEXT NOT NULL, fingerprint_at_propose TEXT NOT NULL, "
+        "membership_manifest TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending', "
+        "reserved_event_id TEXT, attempt_no INTEGER NOT NULL DEFAULT 0, "
+        "attempt_nonce TEXT, spent_at REAL)"
+    )
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS governance_operation_journals ("
+        "event_id TEXT PRIMARY KEY, operation TEXT NOT NULL, causation_id TEXT NOT NULL, "
+        "authorization_session TEXT, principal_id TEXT NOT NULL, phase TEXT NOT NULL, "
+        "direction TEXT NOT NULL, prior_digest TEXT NOT NULL, prepared_digest TEXT NOT NULL, "
+        "final_digest TEXT NOT NULL, affected_ids TEXT NOT NULL, "
+        "required_child_intents TEXT NOT NULL, required_child_terminals TEXT NOT NULL, "
+        "proposal_id TEXT, attempt_no INTEGER, marker_required INTEGER NOT NULL DEFAULT 0, "
+        "created_at REAL NOT NULL, updated_at REAL NOT NULL, blocked_reason TEXT)"
+    )
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS governance_operation_components ("
+        "event_id TEXT NOT NULL, phase TEXT NOT NULL, ordinal INTEGER NOT NULL, "
+        "component_kind TEXT NOT NULL, component_key TEXT NOT NULL, "
+        "value_json TEXT NOT NULL, value_hash TEXT NOT NULL, status TEXT NOT NULL, "
+        "PRIMARY KEY(event_id, phase, ordinal), "
+        "FOREIGN KEY(event_id) REFERENCES governance_operation_journals(event_id))"
+    )
+    conn.execute(
+        "CREATE TRIGGER IF NOT EXISTS governance_components_no_update "
+        "BEFORE UPDATE ON governance_operation_components BEGIN "
+        "SELECT RAISE(ABORT, 'governance operation components are immutable'); END"
+    )
+    conn.execute(
+        "CREATE TRIGGER IF NOT EXISTS governance_components_no_delete "
+        "BEFORE DELETE ON governance_operation_components BEGIN "
+        "SELECT RAISE(ABORT, 'governance operation components are immutable'); END"
+    )
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS governance_session_grants ("
+        "grant_id TEXT PRIMARY KEY, authorization_session TEXT NOT NULL, "
+        "audience TEXT NOT NULL, purpose TEXT, ceiling INTEGER NOT NULL, "
+        "paths TEXT NOT NULL, fingerprints TEXT NOT NULL, token_jti TEXT NOT NULL, "
+        "status TEXT NOT NULL, prepared_event_id TEXT, created_at REAL NOT NULL, "
+        "expires_at REAL NOT NULL, revoked_at REAL, "
+        "membership_manifest TEXT NOT NULL DEFAULT '[]', "
+        "policy_fingerprint TEXT NOT NULL DEFAULT '')"
+    )
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS governance_session_purpose ("
+        "authorization_session TEXT PRIMARY KEY, principal_id TEXT NOT NULL, "
+        "purpose TEXT NOT NULL, status TEXT NOT NULL, prepared_event_id TEXT, "
+        "created_at REAL NOT NULL, expires_at REAL NOT NULL)"
+    )
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS governance_session_purpose_staging ("
+        "event_id TEXT PRIMARY KEY, authorization_session TEXT NOT NULL, "
+        "principal_id TEXT NOT NULL, purpose TEXT NOT NULL, created_at REAL NOT NULL, "
+        "expires_at REAL NOT NULL)"
+    )
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS governance_policy_archives ("
+        "archive_id TEXT PRIMARY KEY, event_id TEXT NOT NULL, path TEXT NOT NULL, "
+        "prior_bytes BLOB, prior_hash TEXT NOT NULL, created_at REAL NOT NULL)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS governance_journals_phase "
+        "ON governance_operation_journals(phase)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS governance_grants_session "
+        "ON governance_session_grants(authorization_session, audience, status)"
+    )
+
+
+def require_authoring_schema(vault_root: Path) -> None:
+    """Refuse authoring on a schema this release cannot interpret."""
+    conn = open_connection(vault_root)
+    try:
+        version = int(conn.execute("PRAGMA user_version").fetchone()[0])
+    finally:
+        conn.close()
+    if version != SCHEMA_USER_VERSION:
+        raise UnsupportedGovernanceSchema(
+            f"governance authoring requires schema v{SCHEMA_USER_VERSION}, found v{version}"
+        )
+
+
+def pinned_component_keys(
+    vault_root: Path, *, conn: sqlite3.Connection | None = None
+) -> dict[str, frozenset[str]]:
+    """Rows referenced by a live recovery journal and therefore not GC-able."""
+    path = sidecar_path(vault_root)
+    if not path.exists():
+        return {}
+    owns_connection = conn is None
+    active = open_connection(vault_root) if conn is None else conn
+    try:
+        rows = active.execute(
+            "SELECT DISTINCT c.component_kind, c.component_key "
+            "FROM governance_operation_components c "
+            "JOIN governance_operation_journals j ON j.event_id=c.event_id "
+            "WHERE j.phase IN ('allocating', 'pending')"
+        ).fetchall()
+    finally:
+        if owns_connection:
+            active.close()
+    grouped: dict[str, set[str]] = {}
+    for kind, key in rows:
+        grouped.setdefault(str(kind), set()).add(str(key))
+    return {kind: frozenset(keys) for kind, keys in grouped.items()}
+
+
+def _delete_expired_except(
+    conn: sqlite3.Connection,
+    *,
+    table: str,
+    key_column: str,
+    expiry_column: str,
+    now: float,
+    pinned: frozenset[str],
+) -> int:
+    if pinned:
+        placeholders = ",".join("?" for _ in pinned)
+        cursor = conn.execute(
+            f"DELETE FROM {table} WHERE {expiry_column} < ? "
+            f"AND {key_column} NOT IN ({placeholders})",
+            (now, *sorted(pinned)),
+        )
+    else:
+        cursor = conn.execute(f"DELETE FROM {table} WHERE {expiry_column} < ?", (now,))
+    return int(cursor.rowcount or 0)
+
+
+def sweep_authoring_state(vault_root: Path, *, now: float | None = None) -> int:
+    """Physically retire expired tool state while pinning live composites."""
+    if not sidecar_path(vault_root).exists():
+        return 0
+    moment = __import__("time").time() if now is None else float(now)
+    conn = open_connection(vault_root)
+    conn.isolation_level = None
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        pinned = pinned_component_keys(vault_root, conn=conn)
+        removed = _delete_expired_except(
+            conn,
+            table="governance_proposals",
+            key_column="proposal_id",
+            expiry_column="expires_at",
+            now=moment,
+            pinned=pinned.get("proposal", frozenset()),
+        )
+        grant_pins = pinned.get("grant", frozenset()) | pinned.get(
+            "dependent_grant", frozenset()
+        )
+        removed += _delete_expired_except(
+            conn,
+            table="governance_session_grants",
+            key_column="grant_id",
+            expiry_column="expires_at",
+            now=moment,
+            pinned=grant_pins,
+        )
+        removed += _delete_expired_except(
+            conn,
+            table="governance_session_purpose",
+            key_column="authorization_session",
+            expiry_column="expires_at",
+            now=moment,
+            pinned=pinned.get("purpose", frozenset()),
+        )
+        cursor = conn.execute(
+            "DELETE FROM governance_session_purpose_staging WHERE expires_at < ? "
+            "AND event_id NOT IN (SELECT event_id FROM governance_operation_journals "
+            "WHERE phase IN ('allocating', 'pending'))",
+            (moment,),
+        )
+        removed += int(cursor.rowcount or 0)
+        conn.commit()
+        return removed
+    except BaseException:
+        conn.execute("ROLLBACK")
+        raise
+    finally:
+        conn.close()
+
+
+def active_session_grants(
+    vault_root: Path,
+    *,
+    audience: str,
+    authorization_session: str | None,
+    rel_path: str,
+    purpose: str | None,
+    now: float | None = None,
+) -> tuple[list[dict[str, object]], str]:
+    """Return exact unchanged active grants and their decision identity."""
+    if not authorization_session or not sidecar_path(vault_root).exists():
+        return [], "no-session-grants"
+    moment = __import__("time").time() if now is None else float(now)
+    conn = open_readonly_connection(vault_root)
+    if conn is None:
+        return [], "unavailable-session-grants"
+    try:
+        rows = conn.execute(
+            "SELECT grant_id, purpose, ceiling, paths, fingerprints, expires_at, "
+            "membership_manifest, policy_fingerprint "
+            "FROM governance_session_grants WHERE authorization_session=? AND audience=? "
+            "AND status='active' AND expires_at>=? ORDER BY grant_id",
+            (authorization_session, audience, moment),
+        ).fetchall()
+        purpose_row = conn.execute(
+            "SELECT purpose, expires_at FROM governance_session_purpose "
+            "WHERE authorization_session=? AND principal_id=? AND status='active'",
+            (authorization_session, audience),
+        ).fetchone()
+    finally:
+        conn.close()
+    effective_purpose = purpose
+    if effective_purpose is None and purpose_row is not None and float(purpose_row[1]) >= moment:
+        effective_purpose = str(purpose_row[0])
+    from .. import find_corpus
+    from . import membership as membership_module
+    from . import policy as policy_module
+
+    current_policy = policy_module.load(vault_root)
+    active: list[dict[str, object]] = []
+    for (
+        grant_id,
+        grant_purpose,
+        ceiling,
+        raw_paths,
+        raw_fingerprints,
+        expires_at,
+        raw_membership,
+        policy_fingerprint,
+    ) in rows:
+        paths = tuple(__import__("json").loads(str(raw_paths)))
+        fingerprints = tuple(__import__("json").loads(str(raw_fingerprints)))
+        if rel_path not in paths or (grant_purpose is not None and grant_purpose != effective_purpose):
+            continue
+        current = []
+        for path_value in paths:
+            target = Path(vault_root) / str(path_value)
+            try:
+                current.append(__import__("hashlib").sha256(target.read_bytes()).hexdigest())
+            except OSError:
+                current.append("")
+        if tuple(current) != fingerprints:
+            continue
+        if current_policy.blocked:
+            continue
+        resolved_membership: list[dict[str, object]] = []
+        try:
+            for path_value in paths:
+                path_text = str(path_value)
+                target = Path(vault_root) / path_text
+                if target.suffix.casefold() == ".md":
+                    page = find_corpus.parse_page(
+                        target, target.stat().st_mtime, Path(vault_root)
+                    )
+                    if page is None:
+                        raise membership_module.MembershipUnresolved(path_text)
+                    scope_ids = membership_module.evaluate(page, current_policy)
+                else:
+                    scope_ids = membership_module.evaluate_path_only(
+                        Path(vault_root), path_text, current_policy
+                    )
+                resolved_membership.append(
+                    {"path": path_text, "scope_ids": sorted(scope_ids)}
+                )
+        except (OSError, UnicodeError, membership_module.MembershipUnresolved):
+            continue
+        if resolved_membership != __import__("json").loads(str(raw_membership)):
+            continue
+        active.append(
+            {
+                "grant_id": str(grant_id),
+                "ceiling": int(ceiling),
+                "expires_at": float(expires_at),
+                "policy_fingerprint": str(policy_fingerprint),
+            }
+        )
+    identity = __import__("hashlib").sha256(
+        repr((authorization_session, audience, effective_purpose, active)).encode("utf-8")
+    ).hexdigest()[:16]
+    return active, identity
+
+
+def active_session_purpose(
+    vault_root: Path,
+    *,
+    audience: str,
+    authorization_session: str | None,
+    now: float | None = None,
+) -> str | None:
+    """Resolve the live purpose default for one explicit authorization session."""
+    if not authorization_session or not sidecar_path(vault_root).exists():
+        return None
+    moment = __import__("time").time() if now is None else float(now)
+    conn = open_readonly_connection(vault_root)
+    if conn is None:
+        return None
+    try:
+        row = conn.execute(
+            "SELECT purpose FROM governance_session_purpose WHERE authorization_session=? "
+            "AND principal_id=? AND status='active' AND expires_at>=?",
+            (authorization_session, audience, moment),
+        ).fetchone()
+    finally:
+        conn.close()
+    return None if row is None else str(row[0])
+
+
+_V3_GUARD_TABLES = frozenset(
+    {
+        "governance_operation_journals",
+        "governance_operation_components",
+        "governance_proposals",
+        "governance_session_grants",
+        "governance_session_purpose",
+        "governance_session_purpose_staging",
+        "governance_policy_archives",
+        "withhold_tokens",
+    }
+)
+
+
+def guard_generation_probe(vault_root: Path) -> dict[str, object]:
+    """Non-creating read-only seqlock probe for the policy loader."""
+    path = sidecar_path(vault_root)
+    if not path.exists():
+        return {"state": "clear", "generation": "absent", "event_ids": ()}
+    try:
+        conn = sqlite3.connect(
+            f"{path.resolve().as_uri()}?mode=ro", uri=True, timeout=0.05
+        )
+        try:
+            conn.execute("PRAGMA query_only=ON")
+            version = int(conn.execute("PRAGMA user_version").fetchone()[0])
+            if version < SCHEMA_USER_VERSION:
+                return {
+                    "state": "clear",
+                    "generation": f"legacy:{version}",
+                    "event_ids": (),
+                }
+            if version != SCHEMA_USER_VERSION:
+                return {
+                    "state": "blocked",
+                    "generation": f"unsupported:{version}",
+                    "event_ids": (),
+                }
+            tables = {
+                str(row[0])
+                for row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                )
+            }
+            required_tables = _V3_GUARD_TABLES - {
+                "governance_session_purpose_staging"
+            }
+            if not required_tables <= tables:
+                return {
+                    "state": "blocked",
+                    "generation": "structurally-unknown",
+                    "event_ids": (),
+                }
+            pending = [
+                tuple(row)
+                for row in conn.execute(
+                    "SELECT event_id, operation, prior_digest, prepared_digest, final_digest, "
+                    "affected_ids, required_child_intents, required_child_terminals, "
+                    "marker_required, updated_at FROM governance_operation_journals "
+                    "WHERE phase='pending' ORDER BY event_id"
+                )
+            ]
+            if "governance_session_purpose_staging" not in tables and pending:
+                return {
+                    "state": "blocked",
+                    "generation": "legacy-open-protocol",
+                    "event_ids": tuple(str(row[0]) for row in pending),
+                }
+            schema_generation = int(
+                conn.execute("PRAGMA schema_version").fetchone()[0]
+            )
+        finally:
+            conn.close()
+    except (sqlite3.Error, OSError) as exc:
+        return {
+            "state": "blocked",
+            "generation": f"unreadable:{type(exc).__name__}",
+            "event_ids": (),
+        }
+    generation = hashlib.sha256(
+        json.dumps(
+            [version, schema_generation, pending],
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    return {
+        "state": "pending" if pending else "clear",
+        "generation": generation,
+        "event_ids": tuple(str(row[0]) for row in pending),
+    }

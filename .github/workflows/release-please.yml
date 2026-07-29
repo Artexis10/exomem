@@ -28,6 +28,7 @@ jobs:
     outputs:
       release_created: ${{ steps.release.outputs.release_created }}
       tag_name: ${{ steps.release.outputs.tag_name }}
+      release_branch: ${{ steps.release.outputs.pr && fromJson(steps.release.outputs.pr).headBranchName }}
     steps:
       - name: Mint GitHub App installation token
         if: env.HAS_RELEASE_APP == 'true'
@@ -43,6 +44,60 @@ jobs:
           token: ${{ steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
+
+  # The descriptor no longer embeds the Exomem release, so an ordinary version
+  # bump leaves the hosted artifacts untouched and this job is a no-op. It stays
+  # because a release that DOES change the contract surface (a command, schema,
+  # capability, skill, or endpoint) still needs the generated descriptors and
+  # their sha256 locks rebuilt, and no `extra-files` updater can recompute a hash.
+  #
+  # Without the GitHub App token this push uses GITHUB_TOKEN, which does not
+  # retrigger the PR's checks -- the amended branch is correct but shows the
+  # pre-amendment run, so re-run checks before merging.
+  sync-hosted-artifacts:
+    needs: release-please
+    if: ${{ github.event_name == 'push' && needs.release-please.outputs.release_branch != '' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      HAS_RELEASE_APP: ${{ secrets.RELEASE_PLEASE_APP_CLIENT_ID != '' && secrets.RELEASE_PLEASE_APP_PRIVATE_KEY != '' }}
+    steps:
+      - name: Mint GitHub App installation token
+        if: env.HAS_RELEASE_APP == 'true'
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ secrets.RELEASE_PLEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_PLEASE_APP_PRIVATE_KEY }}
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.release-please.outputs.release_branch }}
+          token: ${{ steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Regenerate hosted plugin artifacts
+        run: uv run --frozen python scripts/hosted-plugin.py regenerate --platform claude
+
+      - name: Verify the regenerated artifacts are current
+        run: uv run --frozen python scripts/hosted-plugin.py check --platform claude
+
+      - name: Commit the resync onto the release PR
+        run: |
+          if git diff --quiet; then
+            echo "hosted artifacts already current for this release"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add plugins/hosted
+          git commit -m "chore(hosted): regenerate plugin artifacts for the release"
+          git push
 
   build-artifacts:
     needs: release-please
@@ -135,6 +190,42 @@ jobs:
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: dist
+
+  # Lists the server in the official MCP Registry, which is where MCP-aware
+  # clients and directories discover servers. Runs after PyPI because the
+  # registry entry points at a published package version — publishing first
+  # would advertise a version nobody can install yet.
+  #
+  # Ownership is proven two ways at once: GitHub OIDC for the io.github.Artexis10
+  # namespace, and the `mcp-name` marker in README.md, which PyPI renders as the
+  # package description. Both must agree with `name` in server.json.
+  #
+  # Gated on a repo variable and deliberately non-blocking: a registry outage or
+  # a CLI change must not fail a release that already shipped to PyPI.
+  publish-mcp-registry:
+    needs: [release-please, publish-pypi]
+    if: ${{ github.event_name == 'push' && needs.release-please.outputs.release_created == 'true' && vars.MCP_REGISTRY_PUBLISH_ENABLED == 'true' }}
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Install mcp-publisher
+        run: |
+          curl -fsSL "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_linux_amd64.tar.gz" \
+            | tar -xz mcp-publisher
+          chmod +x mcp-publisher
+
+      - name: Authenticate via GitHub OIDC
+        run: ./mcp-publisher login github-oidc
+
+      - name: Publish server.json
+        run: ./mcp-publisher publish
 
   publish-image:
     needs: [release-please, build-artifacts]

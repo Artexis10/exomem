@@ -18,7 +18,15 @@ from .find_types import ParsedPage
 log = logging.getLogger(__name__)
 
 EXCLUDED_DIR_NAMES = frozenset(
-    {".graph-coordination", ".trash", "_Schema", "_attachments", "_archive", "_trash"}
+    {
+        ".graph-coordination",
+        ".trash",
+        "_Schema",
+        "_Governance",
+        "_attachments",
+        "_archive",
+        "_trash",
+    }
 )
 EXCLUDED_DIR_PREFIXES = (".exomem-batch-",)
 NAVIGATION_BASENAMES = frozenset({"index.md", "log.md"})
@@ -155,6 +163,7 @@ def parse_page(
     vault_root: Path,
     *,
     content: bytes | None = None,
+    resolved_relative: str | None = None,
 ) -> ParsedPage | None:
     if content is None:
         content = _read_page_bytes(path)
@@ -205,10 +214,13 @@ def parse_page(
 
     title = resolve_display_title(frontmatter, body, path)
 
-    try:
-        rel_path = path.resolve().relative_to(vault_root.resolve()).as_posix()
-    except ValueError:
-        rel_path = path.as_posix()
+    if resolved_relative is not None:
+        rel_path = resolved_relative
+    else:
+        try:
+            rel_path = path.resolve().relative_to(vault_root.resolve()).as_posix()
+        except ValueError:
+            rel_path = path.as_posix()
 
     return ParsedPage(
         path=path,
@@ -217,6 +229,7 @@ def parse_page(
         body=body,
         title=title,
         mtime=mtime,
+        snapshot_hash=hashlib.sha256(content).hexdigest(),
     )
 
 

@@ -22,16 +22,19 @@ from __future__ import annotations
 
 import importlib
 import importlib.util
+import json
 import os
 import shutil
 import sqlite3
 import subprocess
 import sys
+import time
 import urllib.parse
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
+from . import __version__, install_info, process_memory
 from .cli_ops import OpError
 from .kbdir import kb_dirname, kb_prefix
 
@@ -143,6 +146,107 @@ def infer_profile() -> Profile:
     if media_ready:
         return "media" if shutil.which("tesseract") else "standard"
     return "hybrid"
+
+
+def resolve_profile(explicit: Profile | None) -> Profile:
+    """Resolve explicit, environment, persisted, then inferred profile intent."""
+    selected = explicit or (os.environ.get(PROFILE_ENV) or "").strip().lower()
+    if selected:
+        if selected not in VALID_PROFILES:
+            raise ValueError(f"unknown profile: {selected!r}. Valid: {list(VALID_PROFILES)}")
+        return selected  # type: ignore[return-value]
+    persisted = install_info.configured_local_profile()
+    if persisted:
+        return persisted  # type: ignore[return-value]
+    return infer_profile()
+
+
+def _profile_extras(profile: Profile) -> list[str]:
+    extras = ["embeddings"] if profile in {"hybrid", "standard", "media"} else []
+    if profile in {"standard", "media"}:
+        extras.append("media")
+        if os.environ.get("EXOMEM_ASR_BACKEND", "").strip().lower() == "mlx":
+            extras.append("media-mlx")
+    return extras
+
+
+def _check_editable_lock_parity(profile: Profile) -> DoctorCheck | None:
+    root, metadata_warning = install_info.editable_project_root_status()
+    if root is None:
+        if metadata_warning is None:
+            return None
+        return _check(
+            "install.lock_parity",
+            "warn",
+            f"Editable install lock parity could not be verified: {metadata_warning}.",
+        )
+    uv = shutil.which("uv")
+    if not uv:
+        return _check("install.lock_parity", "warn", "Editable install lock parity could not be verified: uv is unavailable.")
+    command = [
+        uv, "sync", "--check", "--locked", "--no-dev", "--active", "--project", str(root),
+        "--offline", "--no-cache", "--inexact",
+        *[option for extra in _profile_extras(profile) for option in ("--extra", extra)],
+    ]
+    identity = install_info.report()
+    details = {
+        "project_root": str(root),
+        "source_version": __version__,
+        "distribution_version": identity["version"],
+        "python_executable": sys.executable,
+        "profile": profile,
+    }
+    try:
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            env={**os.environ, "VIRTUAL_ENV": sys.prefix},
+            timeout=15.0,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return _check(
+            "install.lock_parity",
+            "warn",
+            "Editable install lock parity check timed out after 15 seconds.",
+            details=details,
+        )
+    except OSError as exc:
+        return _check(
+            "install.lock_parity",
+            "warn",
+            f"Editable install lock parity could not run: {exc}.",
+            details=details,
+        )
+    output = ((result.stderr or "") + (result.stdout or "")).strip()[:2000]
+    remediation = "Run `uv " + " ".join(command[1:]) + "` from the editable checkout."
+    if result.returncode == 0:
+        return _check(
+            "install.lock_parity",
+            "pass",
+            "Editable install matches the selected locked runtime dependencies.",
+            details=details,
+        )
+    unsupported = ("unknown option", "unrecognized option", "unexpected argument", "no such option")
+    if any(marker in output.lower() for marker in unsupported):
+        return _check(
+            "install.lock_parity",
+            "warn",
+            "Editable install lock parity could not be verified by this uv version.",
+            remediation,
+            details=details,
+        )
+    detail = f" ({output})" if output else ""
+    return _check(
+        "install.lock_parity",
+        "fail",
+        f"Editable install is stale against its selected locked runtime dependencies.{detail}",
+        remediation,
+        details=details,
+    )
 
 
 def _resolve_vault(vault: str | None) -> tuple[Path | None, DoctorCheck]:
@@ -702,7 +806,8 @@ def _list_exomem_processes() -> list[dict[str, object]]:
             continue
         if "--transport" not in command_l and "python -m exomem" not in command_l:
             continue
-        rows.append({"pid": pid, "rss_mb": round(rss_kb / 1024, 1), "command": command[:180]})
+        rss_mb = round(rss_kb / 1024, 1)
+        rows.append({"pid": pid, "rss_mb": rss_mb, "command": command[:180], **process_memory.enrich_process_memory(pid, rss_mb)})
     return rows
 
 
@@ -710,16 +815,29 @@ def _check_runtime_processes() -> DoctorCheck | None:
     rows = _list_exomem_processes()
     if not rows:
         return None
-    total = round(sum(float(row.get("rss_mb") or 0.0) for row in rows), 1)
+    memory = process_memory.aggregate_memory(rows)
     count = len(rows)
     status: Status = "warn" if count > 1 else "pass"
+    if memory["memory_metric"] == "physical_footprint":
+        memory_message = (
+            f"about {memory['memory_mb_total']} MB physical footprint total "
+            f"({memory['rss_mb_total']} MB RSS compatibility total)"
+        )
+    elif memory["memory_metric"] == "mixed":
+        memory_message = (
+            f"mixed metrics: {memory['physical_footprint_mb_total']} MB physical footprint "
+            f"plus {memory['rss_fallback_mb_total']} MB RSS fallback "
+            f"({memory['rss_mb_total']} MB RSS compatibility total)"
+        )
+    else:
+        memory_message = f"about {memory['rss_mb_total']} MB RSS total"
     return _check(
         "runtime.processes",
         status,
-        f"Detected {count} other exomem server process(es) using about {total} MB RSS total. "
+        f"Detected {count} other exomem server process(es) using {memory_message}. "
         "Each stdio MCP client/session launches its own process; use HTTP service mode "
         "or lazy/quiet policies on small-memory Macs.",
-        details={"count": count, "rss_mb_total": total, "processes": rows[:8]},
+        details={"count": count, **memory, "processes": rows[:8]},
     )
 
 
@@ -1592,6 +1710,112 @@ def _check_edge_ingress_read_routing(base_url: str, config: LeaseConfig) -> Doct
     )
 
 
+def _check_observability() -> DoctorCheck:
+    """Log directory writability, active/rotated file sizes, JSONL
+    tail-parseability, the NSSM `service.*` rotation pile, and
+    metrics-snapshot freshness. Never touches the network."""
+    from . import metrics
+    from .logging_config import resolve_log_dir
+
+    details: dict[str, object] = {}
+    problems: list[str] = []
+    warnings: list[str] = []
+
+    log_dir = resolve_log_dir()
+    try:
+        log_dir.mkdir(parents=True, exist_ok=True)
+        probe_path = log_dir / f".exomem-doctor-probe-{os.getpid()}"
+        probe_path.write_text("", encoding="utf-8")
+        probe_path.unlink(missing_ok=True)
+        details["log_dir_writable"] = True
+    except (OSError, ValueError):
+        details["log_dir_writable"] = False
+        problems.append("log directory is not writable")
+
+    jsonl_names = ("queries.jsonl", "writes.jsonl", "reads.jsonl", "mutations.jsonl")
+    for name in jsonl_names:
+        try:
+            path = log_dir / name
+            details[f"{name}.rotated"] = (log_dir / f"{name}.1").exists()
+            if not path.exists():
+                continue
+            details[f"{name}.bytes"] = path.stat().st_size
+            lines = path.read_text(encoding="utf-8").splitlines()
+            if lines and lines[-1].strip():
+                json.loads(lines[-1])
+        except (OSError, ValueError):
+            warnings.append(f"{name} tail is not parseable JSON")
+
+    try:
+        service_pile = sum(
+            1
+            for pattern in ("service.out.log.*", "service.err.log.*")
+            for _ in log_dir.glob(pattern)
+        )
+    except (OSError, ValueError):
+        service_pile = 0
+    details["service_pile_count"] = service_pile
+    if service_pile > 50:
+        warnings.append(f"{service_pile} service.* rotated files have accumulated")
+
+    try:
+        from .writer_lease import get_manager
+
+        state_dir = get_manager().config.state_dir
+        interval = metrics.snapshot_interval_seconds_from_env()
+        snapshot_path = metrics.snapshot_path(state_dir)
+        if interval > 0 and snapshot_path.exists():
+            age = time.time() - snapshot_path.stat().st_mtime
+            details["metrics_snapshot_age_seconds"] = round(age, 1)
+            if age > interval * 2:
+                warnings.append("metrics snapshot is stale")
+    except Exception:  # noqa: BLE001 - doctor must stay structured
+        pass
+
+    if problems:
+        return _check(
+            "observability",
+            "fail",
+            "; ".join(problems),
+            "Ensure the log directory is writable (check permissions or EXOMEM_LOG_DIR).",
+            details=details,
+        )
+    if warnings:
+        return _check("observability", "warn", "; ".join(warnings), None, details=details)
+    return _check(
+        "observability", "pass", "Log directory, JSONL logs, and metrics snapshot look healthy.",
+        details=details,
+    )
+
+
+def _check_idempotency_store() -> DoctorCheck:
+    """Warn when idempotency receipts have piled up abandoned, or the oldest
+    pending row has sat unresolved past the legacy grace window — either is
+    a sign a mutation crashed and needs operator attention, not necessarily
+    a fault by itself. Never touches the network."""
+    try:
+        from .writer_lease import get_manager
+
+        summary = get_manager().idempotency.status_summary()
+    except Exception:  # noqa: BLE001 - doctor must stay structured
+        summary = {"pending": None, "abandoned": None, "oldest_pending_age_seconds": None}
+
+    abandoned = summary.get("abandoned")
+    oldest_pending_age_seconds = summary.get("oldest_pending_age_seconds")
+    warnings: list[str] = []
+    if isinstance(abandoned, int) and abandoned > 0:
+        warnings.append(f"{abandoned} abandoned idempotency receipt(s)")
+    if isinstance(oldest_pending_age_seconds, (int, float)) and oldest_pending_age_seconds > 600:
+        warnings.append(
+            f"oldest pending idempotency receipt is {oldest_pending_age_seconds:.0f}s old"
+        )
+    if warnings:
+        return _check("idempotency_store", "warn", "; ".join(warnings), None, details=summary)
+    return _check(
+        "idempotency_store", "pass", "Idempotency receipts look healthy.", details=summary
+    )
+
+
 def _check_edge_ingress(*, probe: bool) -> list[DoctorCheck]:
     """Doctor's `edge-ingress` section (design.md Decision 3): verifies the public
     apex is fronted by the HA edge worker rather than tunnel-direct. Skipped
@@ -1652,14 +1876,16 @@ def doctor(
     probe: bool = False,
     replica_urls: list[str] | tuple[str, ...] | None = None,
 ) -> DoctorReport:
-    profile = profile or infer_profile()
+    profile = resolve_profile(profile)
     if profile not in VALID_PROFILES:
         raise ValueError(f"unknown profile: {profile!r}. Valid: {list(VALID_PROFILES)}")
 
     vault_root, vault_check = _resolve_vault(vault)
+    lock_parity = _check_editable_lock_parity(profile)
     checks: list[DoctorCheck] = [
         _check_python(),
         _check_uv(),
+        *([lock_parity] if lock_parity is not None else []),
         _check_console_scripts(),
         _check_package_import(),
         vault_check,
@@ -1736,6 +1962,8 @@ def doctor(
     # Not profile-gated: any profile can run with writer-lease coordination
     # enabled, and the section self-skips when it is not (design.md Decision 3).
     checks.extend(_check_edge_ingress(probe=probe))
+    checks.append(_check_observability())
+    checks.append(_check_idempotency_store())
 
     return DoctorReport(profile=profile, checks=checks)
 
