@@ -168,6 +168,17 @@ def test_marketplace_packets_are_deterministic_and_provider_shaped() -> None:
         {"title", "readOnlyHint", "destructiveHint", "openWorldHint"} <= set(tool["annotations"])
         for tool in openai["tools"]
     )
+    assert all(
+        set(tool["annotation_explanations"])
+        == {"readOnlyHint", "destructiveHint", "idempotentHint", "openWorldHint"}
+        and all(explanation.strip() for explanation in tool["annotation_explanations"].values())
+        for tool in openai["tools"]
+    )
+    assert openai["review_recording"] == {
+        "required": True,
+        "operator_supplied": True,
+    }
+    assert "recording_url" not in json.dumps(openai)
     assert all("_" not in tool["annotations"]["title"] for tool in openai["tools"])
     assert "asdk_app_releaseinput123" not in first["openai-plugin"].decode("utf-8")
     assert openai["brand_asset"] == {
@@ -209,10 +220,39 @@ def test_marketplace_packet_preserves_the_complete_live_tool_contract() -> None:
         for entry in compatibility["agent_contract"]["commands"]
     ]
 
-    assert packet["tools"] == expected_tools
+    assert [
+        {key: value for key, value in tool.items() if key != "annotation_explanations"}
+        for tool in packet["tools"]
+    ] == [
+        tool for tool in expected_tools
+    ]
+    assert all(
+        set(tool["annotation_explanations"])
+        == {"readOnlyHint", "destructiveHint", "idempotentHint", "openWorldHint"}
+        and all(isinstance(value, str) and value.strip() for value in tool["annotation_explanations"].values())
+        for tool in packet["tools"]
+    )
     tools = {tool["name"]: tool for tool in packet["tools"]}
     assert "draft_token" in tools["remember"]["input_schema"]["properties"]
     assert "transition_token" in tools["observe_memory"]["input_schema"]["properties"]
+
+
+def test_openai_packet_rejects_missing_boolean_annotation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = copy_hosted_tree(tmp_path / "repo")
+    original_manifest = hosted_plugins.compatibility_manifest
+
+    def incomplete_annotations(repo_root: Path | None = None) -> dict[str, object]:
+        manifest = json.loads(json.dumps(original_manifest(repo_root)))
+        del manifest["agent_contract"]["commands"][0]["mcp_tool"]["annotations"]["idempotentHint"]
+        return manifest
+
+    monkeypatch.setattr(hosted_plugins, "compatibility_manifest", incomplete_annotations)
+    with pytest.raises(ValueError, match="tool annotations are incomplete"):
+        hosted_plugins.directory_packets(
+            root, channel="openai-plugin", openai_app_id="asdk_app_releaseinput123"
+        )
 
 
 @pytest.mark.parametrize("unsafe_key", ["default", "example", "const", "value"])
@@ -247,15 +287,137 @@ def test_marketplace_definition_rejects_public_url_and_publisher_drift(tmp_path:
         hosted_plugins.load_marketplace_definition(root)
 
 
-def test_marketplace_definition_rejects_provider_field_limit(tmp_path: Path) -> None:
+def test_openai_listing_limits_allow_exact_boundaries_and_reject_next_character(tmp_path: Path) -> None:
     root = copy_hosted_tree(tmp_path / "repo")
     path = root / "plugins/hosted/marketplace-definition.json"
     definition = json.loads(path.read_text(encoding="utf-8"))
-    definition["channels"]["openai-plugin"]["short_description"] = "x" * 201
+    definition["channels"]["openai-plugin"]["short_description"] = "x" * 30
+    definition["channels"]["openai-plugin"]["starter_prompts"][0] = "x" * 128
+    path.write_text(json.dumps(definition), encoding="utf-8")
+
+    hosted_plugins.load_marketplace_definition(root)
+
+    definition["channels"]["openai-plugin"]["short_description"] = "x" * 31
     path.write_text(json.dumps(definition), encoding="utf-8")
 
     with pytest.raises(ValueError, match="short_description"):
         hosted_plugins.load_marketplace_definition(root)
+
+    definition["channels"]["openai-plugin"]["short_description"] = "x" * 30
+    definition["channels"]["openai-plugin"]["starter_prompts"][0] = "x" * 129
+    path.write_text(json.dumps(definition), encoding="utf-8")
+    with pytest.raises(ValueError, match="starter_prompts"):
+        hosted_plugins.load_marketplace_definition(root)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        (("common", "release_notes"), "Private alpha access is available."),
+        (("common", "description"), "A trial service for governed knowledge."),
+        (("channels", "openai-plugin", "title"), "Exomem demo"),
+        (("channels", "openai-plugin", "short_description"), "Hypothetical knowledge."),
+        (("channels", "openai-plugin", "starter_prompts", 0), "Show what is not yet built."),
+    ],
+)
+def test_openai_listing_rejects_release_stage_claims(
+    tmp_path: Path, field: tuple[object, ...], value: str
+) -> None:
+    root = copy_hosted_tree(tmp_path / "repo")
+    path = root / "plugins/hosted/marketplace-definition.json"
+    definition = json.loads(path.read_text(encoding="utf-8"))
+    target = definition
+    for key in field[:-1]:
+        target = target[key]
+    target[field[-1]] = value
+    path.write_text(json.dumps(definition), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="release-stage"):
+        hosted_plugins.load_marketplace_definition(root)
+
+
+def test_openai_listing_does_not_reject_words_containing_forbidden_terms(tmp_path: Path) -> None:
+    root = copy_hosted_tree(tmp_path / "repo")
+    path = root / "plugins/hosted/marketplace-definition.json"
+    definition = json.loads(path.read_text(encoding="utf-8"))
+    definition["channels"]["openai-plugin"]["short_description"] = "Demonstrate cited project work"
+    path.write_text(json.dumps(definition), encoding="utf-8")
+
+    hosted_plugins.load_marketplace_definition(root)
+
+
+def test_marketplace_review_cases_bind_the_versioned_generic_fixture() -> None:
+    fixture_path = REPO_ROOT / "plugins/hosted/marketplace-review-fixture-v1.json"
+    assert fixture_path.is_file(), "the canonical generic reviewer fixture must be checked in"
+
+    fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
+    cases = hosted_plugins.load_marketplace_review_cases(REPO_ROOT)
+    assert fixture["payload_sha256"] == hosted_plugins._sha256(
+        hosted_plugins._canonical_json(fixture["payload"])
+    )
+    assert cases["fixture"] == {
+        "fixture_version": fixture["fixture_version"],
+        "payload_sha256": fixture["payload_sha256"],
+    }
+    references = {note["reference"] for note in fixture["payload"]["notes"]}
+    assert all(
+        case["fixture_version"] == fixture["fixture_version"]
+        and set(case["fixture_references"]).issubset(references)
+        for case in cases["positive"]
+    )
+    write_cases = [case for case in cases["positive"] if "remember" in case["expected_tools"]]
+    assert write_cases
+    assert all(case["fixture_reset"] == fixture["reset"] for case in write_cases)
+
+
+@pytest.mark.parametrize(
+    ("mutate", "match"),
+    [
+        (
+            lambda root: _mutate_review_cases(
+                root, lambda cases: cases["fixture"].update(fixture_version="stale-v1")
+            ),
+            "fixture version",
+        ),
+        (
+            lambda root: _mutate_review_cases(
+                root,
+                lambda cases: cases["positive"][0].update(fixture_references=["unknown-reference"]),
+            ),
+            "fixture reference",
+        ),
+        (
+            lambda root: _mutate_fixture(
+                root,
+                lambda fixture: fixture["payload"]["notes"][0].update(content="Drifted content."),
+            ),
+            "fixture payload digest",
+        ),
+    ],
+)
+def test_marketplace_review_cases_reject_stale_fixture_bindings(
+    tmp_path: Path, mutate: object, match: str
+) -> None:
+    root = copy_hosted_tree(tmp_path / "repo")
+    assert (root / "plugins/hosted/marketplace-review-fixture-v1.json").is_file()
+    mutate(root)
+
+    with pytest.raises(ValueError, match=match):
+        hosted_plugins.load_marketplace_review_cases(root)
+
+
+def _mutate_review_cases(root: Path, mutate: object) -> None:
+    path = root / "plugins/hosted/marketplace-review-cases.json"
+    cases = json.loads(path.read_text(encoding="utf-8"))
+    mutate(cases)
+    path.write_text(json.dumps(cases), encoding="utf-8")
+
+
+def _mutate_fixture(root: Path, mutate: object) -> None:
+    path = root / "plugins/hosted/marketplace-review-fixture-v1.json"
+    fixture = json.loads(path.read_text(encoding="utf-8"))
+    mutate(fixture)
+    path.write_text(json.dumps(fixture), encoding="utf-8")
 
 
 def test_marketplace_definition_rejects_tampered_brand_asset_digest(tmp_path: Path) -> None:

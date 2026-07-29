@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "fixture_version": "v1",
+  "payload": {
+    "notes": [
+      {
+        "reference": "project-brief",
+        "key": "review-project-brief",
+        "title": "Project brief",
+        "content": "The project uses cited retrieval and deliberate durable capture."
+      },
+      {
+        "reference": "decision-record",
+        "key": "review-decision-record",
+        "title": "Decision record",
+        "content": "Keep durable conclusions concise and linked to supporting evidence."
+      },
+      {
+        "reference": "review-disposable-note",
+        "key": "review-disposable-note",
+        "title": "Review scratchpad",
+        "content": "Reset this note to this canonical content before each review run."
+      }
+    ]
+  },
+  "payload_sha256": "196d7e521b01d76a960c1e7613e5cd39cd6bc2a8bca0377de0ec36b8a86c7e6f",
+  "reset": {
+    "disposable_reference": "review-disposable-note",
+    "disposable_key": "review-disposable-note",
+    "procedure": "replace_with_canonical_content"
+  }
+}

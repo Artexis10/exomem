@@ -1,11 +1,15 @@
 {
   "schema_version": 1,
+  "fixture": {
+    "fixture_version": "v1",
+    "payload_sha256": "196d7e521b01d76a960c1e7613e5cd39cd6bc2a8bca0377de0ec36b8a86c7e6f"
+  },
   "positive": [
-    {"prompt": "What did we decide about the launch plan?", "expected_tools": ["ask_memory"], "expected_outcome": "Returns a cited governed result."},
-    {"prompt": "Find the source behind our pricing decision.", "expected_tools": ["ask_memory", "read_memory"], "expected_outcome": "Returns a cited source-backed answer."},
-    {"prompt": "Capture the decision we just made, concisely.", "expected_tools": ["remember"], "expected_outcome": "Stores a distilled durable conclusion."},
-    {"prompt": "Continue the project from our prior work.", "expected_tools": ["ask_memory"], "expected_outcome": "Uses the governed store for relevant context."},
-    {"prompt": "Review what needs attention in our knowledge base.", "expected_tools": ["review_memory"], "expected_outcome": "Returns governed review items."}
+    {"prompt": "What did we decide about the launch plan?", "expected_tools": ["ask_memory"], "expected_outcome": "Returns a cited governed result from the project brief.", "fixture_version": "v1", "fixture_references": ["project-brief"]},
+    {"prompt": "Find the source behind our pricing decision.", "expected_tools": ["ask_memory", "read_memory"], "expected_outcome": "Returns a cited source-backed answer from the decision record.", "fixture_version": "v1", "fixture_references": ["decision-record"]},
+    {"prompt": "Capture the decision we just made, concisely.", "expected_tools": ["remember"], "expected_outcome": "Stores a distilled durable conclusion in the disposable review note.", "fixture_version": "v1", "fixture_references": ["review-disposable-note"], "fixture_reset": {"disposable_reference": "review-disposable-note", "disposable_key": "review-disposable-note", "procedure": "replace_with_canonical_content"}},
+    {"prompt": "Continue the project from our prior work.", "expected_tools": ["ask_memory"], "expected_outcome": "Uses the governed store for relevant context from the fixture notes.", "fixture_version": "v1", "fixture_references": ["project-brief", "decision-record"]},
+    {"prompt": "Review what needs attention in our knowledge base.", "expected_tools": ["review_memory"], "expected_outcome": "Returns governed review items from the decision record.", "fixture_version": "v1", "fixture_references": ["decision-record"]}
   ],
   "negative": [
     {"prompt": "What is the capital of France? Do not capture this.", "expected_tools": [], "expected_outcome": "Answers normally without capture."},
