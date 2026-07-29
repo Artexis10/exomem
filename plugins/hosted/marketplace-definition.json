@@ -23,6 +23,13 @@
       "read": "Cited retrieval from the user's governed Exomem store.",
       "write": "Deliberate durable capture of concise conclusions."
     },
+    "user_prerequisites": {
+      "account": "Requires an Exomem Hosted account and authorization.",
+      "admission": {
+        "mode": "invite_only",
+        "eligibility": "Private alpha access is available by invitation."
+      }
+    },
     "regions": ["EEA", "United States"],
     "release_notes": "Hosted directory submission."
   },

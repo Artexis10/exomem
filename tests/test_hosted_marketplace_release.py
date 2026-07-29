@@ -272,6 +272,43 @@ def test_marketplace_packet_preserves_the_complete_live_tool_contract() -> None:
     assert "transition_token" in tools["observe_memory"]["input_schema"]["properties"]
 
 
+def test_hosted_marketplace_tools_are_account_backed_and_explain_automatic_capture() -> None:
+    packet = json.loads(
+        hosted_plugins.directory_packets(
+            REPO_ROOT, channel="openai-plugin", openai_app_id="plugin_asdk_app_releaseinput123"
+        )["openai-plugin"]
+    )
+
+    assert all(tool["annotations"]["openWorldHint"] is True for tool in packet["tools"])
+    assert all(
+        "account-backed" in tool["annotation_explanations"]["openWorldHint"].lower()
+        for tool in packet["tools"]
+    )
+    for tool in packet["tools"]:
+        if not tool["annotations"]["readOnlyHint"]:
+            explanation = tool["annotation_explanations"]["readOnlyHint"].lower()
+            assert "automatic" in explanation
+            assert "magic" in explanation
+
+
+def test_openai_negative_review_cases_require_and_render_rationale(tmp_path: Path) -> None:
+    root = copy_hosted_tree(tmp_path / "repo")
+    cases_path = root / "plugins/hosted/marketplace-review-cases.json"
+    cases = json.loads(cases_path.read_text(encoding="utf-8"))
+    cases["negative"][0].pop("rationale")
+    cases_path.write_text(json.dumps(cases), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="rationale"):
+        hosted_plugins.load_marketplace_review_cases(root)
+
+    packet = json.loads(
+        hosted_plugins.directory_packets(
+            REPO_ROOT, channel="openai-plugin", openai_app_id="plugin_asdk_app_releaseinput123"
+        )["openai-plugin"]
+    )
+    assert all(case["rationale"].strip() for case in packet["review_cases"]["negative"])
+
+
 def test_openai_packet_rejects_missing_boolean_annotation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -752,6 +789,13 @@ def test_claude_directory_packets_exclude_openai_review_only_fields(channel: str
     packet = json.loads(hosted_plugins.directory_packets(REPO_ROOT, channel=channel)[channel])
 
     assert "review_recording" not in packet
+    assert packet["user_prerequisites"] == {
+        "account": "Requires an Exomem Hosted account and authorization.",
+        "admission": {
+            "mode": "invite_only",
+            "eligibility": "Private alpha access is available by invitation.",
+        },
+    }
     assert all("annotation_explanations" not in tool for tool in packet["tools"])
     assert all(
         set(tool["annotations"])
@@ -835,6 +879,19 @@ def test_directory_status_is_fail_closed_while_promotions_and_probes_are_pending
     assert all(not channel["ready"] for channel in status["channels"].values())
     assert all(channel["state"] == "draft" for channel in status["channels"].values())
     assert "promotion is not live" in status["channels"]["claude-connector"]["blockers"]
+
+
+def test_advertised_regions_require_public_admission_evidence_for_activation(
+    tmp_path: Path,
+) -> None:
+    root = copy_hosted_tree(tmp_path / "repo")
+
+    assert hosted_plugins._public_admission_blockers(
+        root,
+        trusted_key_id=None,
+        trusted_secret=None,
+        deployment_sha256=None,
+    ) == ["public admission evidence is incomplete"]
 
 
 def test_reviewer_ready_openai_candidate_can_enter_review_before_broad_admission(

@@ -565,7 +565,11 @@ def _openai_annotation_explanations(annotations: dict[str, Any]) -> dict[str, st
         "readOnlyHint": (
             "This tool only reads governed knowledge and does not change stored content."
             if annotations["readOnlyHint"]
-            else "This tool may change governed knowledge when the user explicitly requests it."
+            else (
+                "This tool can change account-backed governed knowledge. Under the installed "
+                "workflow guidance, a relevant durable conclusion may be captured automatically "
+                "without the user using a magic Exomem command."
+            )
         ),
         "destructiveHint": (
             "This tool can remove or replace governed content when the user explicitly requests it."
@@ -582,7 +586,7 @@ def _openai_annotation_explanations(annotations: dict[str, Any]) -> dict[str, st
             )
         ),
         "openWorldHint": (
-            "This tool can act beyond the local governed store."
+            "This tool interacts with the user's account-backed Hosted Exomem service."
             if annotations["openWorldHint"]
             else "This tool is limited to the local governed store and its configured service."
         ),
@@ -618,6 +622,7 @@ def load_marketplace_definition(repo_root: Path | None = None) -> dict[str, Any]
         "capabilities",
         "regions",
         "release_notes",
+        "user_prerequisites",
     }
     if set(common) != required_common or set(channels) != set(DIRECTORY_CHANNELS):
         raise ValueError("marketplace definition is incomplete")
@@ -670,6 +675,19 @@ def load_marketplace_definition(repo_root: Path | None = None) -> dict[str, Any]
         raise ValueError("marketplace capabilities are incomplete")
     for capability, description in capabilities.items():
         _validate_listing_text(description, f"marketplace {capability} capability", 200)
+    user_prerequisites = common["user_prerequisites"]
+    if (
+        not isinstance(user_prerequisites, dict)
+        or set(user_prerequisites) != {"account", "admission"}
+        or not isinstance(user_prerequisites["account"], str)
+        or not user_prerequisites["account"].strip()
+        or not isinstance(user_prerequisites["admission"], dict)
+        or set(user_prerequisites["admission"]) != {"mode", "eligibility"}
+        or user_prerequisites["admission"].get("mode") not in {"invite_only", "public"}
+        or not isinstance(user_prerequisites["admission"].get("eligibility"), str)
+        or not user_prerequisites["admission"]["eligibility"].strip()
+    ):
+        raise ValueError("marketplace user prerequisites are invalid")
     regions = common["regions"]
     if (
         not isinstance(regions, list)
@@ -867,6 +885,8 @@ def load_marketplace_review_cases(repo_root: Path | None = None) -> dict[str, An
             if not isinstance(case, dict):
                 raise ValueError(f"marketplace {category} review case is incomplete")
             required = {"prompt", "expected_tools", "expected_outcome"}
+            if category == "negative":
+                required.add("rationale")
             has_write_tool = False
             if category == "positive":
                 required |= {"fixture_version", "fixture_references"}
@@ -876,6 +896,8 @@ def load_marketplace_review_cases(repo_root: Path | None = None) -> dict[str, An
             if set(case) != required:
                 if has_write_tool and "fixture_reset" not in case:
                     raise ValueError("marketplace review case fixture reset is required")
+                if category == "negative" and "rationale" not in case:
+                    raise ValueError("marketplace negative review case rationale is required")
                 raise ValueError(f"marketplace {category} review case is incomplete")
             if not isinstance(case["prompt"], str) or not case["prompt"].strip():
                 raise ValueError(f"marketplace {category} review case prompt is invalid")
@@ -884,6 +906,10 @@ def load_marketplace_review_cases(repo_root: Path | None = None) -> dict[str, An
                 or not case["expected_outcome"].strip()
             ):
                 raise ValueError(f"marketplace {category} review case outcome is invalid")
+            if category == "negative" and (
+                not isinstance(case["rationale"], str) or not case["rationale"].strip()
+            ):
+                raise ValueError("marketplace negative review case rationale is invalid")
             if not isinstance(case["expected_tools"], list) or any(
                 tool not in _CANONICAL_CALLABLES for tool in case["expected_tools"]
             ):
@@ -1198,6 +1224,7 @@ def directory_packets(
             _validate_openai_sale_free_packet(packet)
         else:
             packet["acceptance_surfaces"] = ["claude"]
+            packet["user_prerequisites"] = definition["common"]["user_prerequisites"]
         _validate_public_json(
             packet,
             Path(f"directory-packet-{selected_channel}.json"),
@@ -2749,6 +2776,42 @@ def _post_install_blockers(
     return []
 
 
+def _public_admission_blockers(
+    root: Path,
+    *,
+    trusted_key_id: str | None,
+    trusted_secret: str | None,
+    deployment_sha256: str | None,
+) -> list[str]:
+    """Require signed public-admission proof before activating advertised regions."""
+
+    if not load_marketplace_definition(root)["common"]["regions"]:
+        return []
+    try:
+        admission = _load_signed_directory_evidence(
+            root,
+            "public-admission-evidence",
+            "directory-public-admission",
+            trusted_key_id=trusted_key_id,
+            trusted_secret=trusted_secret,
+            deployment_sha256=deployment_sha256,
+        )
+    except ValueError:
+        return ["public admission evidence is incomplete"]
+    required_admission = {
+        "ordinary_acquisition",
+        "capacity",
+        "quotas",
+        "abuse_controls",
+        "spend_alarms",
+        "support_coverage",
+        "pricing_decision",
+    }
+    if admission.get("admission") != {key: True for key in required_admission}:
+        return ["public admission evidence is incomplete"]
+    return []
+
+
 def directory_status(
     repo_root: Path | None = None,
     *,
@@ -2825,28 +2888,14 @@ def directory_status(
         except ValueError as exc:
             blockers.append(str(exc))
         submission_blockers = list(blockers)
-        try:
-            admission = _load_signed_directory_evidence(
+        blockers.extend(
+            _public_admission_blockers(
                 root,
-                "public-admission-evidence",
-                "directory-public-admission",
                 trusted_key_id=trusted_key_id,
                 trusted_secret=trusted_secret,
                 deployment_sha256=deployment_sha256,
             )
-            required_admission = {
-                "ordinary_acquisition",
-                "capacity",
-                "quotas",
-                "abuse_controls",
-                "spend_alarms",
-                "support_coverage",
-                "pricing_decision",
-            }
-            if admission.get("admission") != {key: True for key in required_admission}:
-                blockers.append("public admission evidence is incomplete")
-        except ValueError as exc:
-            blockers.append(str(exc))
+        )
         active_submission_sha256 = publication["active_submission_sha256"]
         active_record = _directory_submissions(root, channel).get(active_submission_sha256)
         if active_submission_sha256 is not None and active_record is None:
@@ -3059,6 +3108,14 @@ def activate_directory_submission(
         record = _directory_submissions(root, channel).get(target_submission_sha256)
         if record is None or record.get("state") != "published":
             raise ValueError("directory activation requires an exact published submission")
+        admission_blockers = _public_admission_blockers(
+            root,
+            trusted_key_id=trusted_key_id,
+            trusted_secret=trusted_secret,
+            deployment_sha256=deployment_sha256,
+        )
+        if admission_blockers:
+            raise ValueError(admission_blockers[0])
         blockers = _post_install_blockers(
             root,
             channel,
