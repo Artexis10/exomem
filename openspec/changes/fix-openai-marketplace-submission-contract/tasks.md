@@ -24,7 +24,7 @@
 
 ## 5. Verification and Delivery
 
-- [ ] 5.1 Run strict OpenSpec validation, focused marketplace/package/schema/leak tests, the full Exomem suite, and Ruff
+- [x] 5.1 Run strict OpenSpec validation, focused marketplace/package/schema/leak tests, the full Exomem suite, and Ruff
 - [x] 5.2 Obtain independent review of the provider contract and readiness-state diff and address actionable findings
 - [x] 5.3 Commit only the intended Exomem scope, integrate current remote main, push, and open a ready pull request with verification evidence
 
