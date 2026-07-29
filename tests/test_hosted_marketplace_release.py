@@ -467,6 +467,39 @@ def test_marketplace_review_fixture_declares_an_absent_create_only_target() -> N
     assert "delete" in remember_case["expected_outcome"].lower()
 
 
+def test_marketplace_positive_cases_are_backed_by_explicit_fixture_material() -> None:
+    fixture = json.loads(
+        (REPO_ROOT / "plugins/hosted/marketplace-review-fixture-v1.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    notes = {note["reference"]: note for note in fixture["payload"]["notes"]}
+    cases = hosted_plugins.load_marketplace_review_cases(REPO_ROOT)["positive"]
+
+    launch, pricing, capture, prior_work, review = cases
+    assert launch["fixture_references"] == ["launch-plan"]
+    assert "generic launch plan is to validate the provider contract" in notes["launch-plan"]["content"]
+    assert "Prepare the provider review packet after contract validation" in notes["launch-plan"]["content"]
+
+    assert pricing["fixture_references"] == ["pricing-decision", "pricing-policy-source"]
+    assert "generic pricing decision is to keep provider review free of sales language" in notes[
+        "pricing-decision"
+    ]["content"]
+    assert "[[review-pricing-policy-source]]" in notes["pricing-decision"]["content"]
+    assert "provider review uses no sales language" in notes["pricing-policy-source"]["content"]
+
+    assert capture["fixture_references"] == ["review-durable-capture"]
+
+    assert prior_work["fixture_references"] == ["project-brief", "launch-plan"]
+    assert "validated provider contract" in notes["project-brief"]["content"]
+    assert "documented pricing decision" in notes["project-brief"]["content"]
+    assert "Next Step" in notes["launch-plan"]["content"]
+
+    assert review["fixture_references"] == ["review-item"]
+    assert "## Review Item" in notes["review-item"]["content"]
+    assert "pricing policy source remains linked" in notes["review-item"]["content"]
+
+
 def test_marketplace_review_fixture_rejects_preseeded_create_target(tmp_path: Path) -> None:
     root = copy_hosted_tree(tmp_path / "repo")
     fixture_path = root / "plugins/hosted/marketplace-review-fixture-v1.json"
