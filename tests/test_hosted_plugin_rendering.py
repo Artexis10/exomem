@@ -228,6 +228,19 @@ def test_managed_render_blocks_an_interleaved_other_platform_render(
 ) -> None:
     root = copy_hosted_tree(tmp_path / "repo")
     generated = root / "plugins/hosted/generated"
+
+    def openai_files() -> dict[str, bytes]:
+        paths = [
+            *(path for path in (generated / "openai").rglob("*") if path.is_file()),
+            generated / "openai.lock.json",
+            generated / "openai.zip",
+            generated / "openai.zip.lock.json",
+        ]
+        return {
+            path.relative_to(generated).as_posix(): path.read_bytes() for path in paths
+        }
+
+    existing_openai_files = openai_files()
     original_copytree = hosted_plugins.shutil.copytree
     interleaved = False
 
@@ -250,7 +263,7 @@ def test_managed_render_blocks_an_interleaved_other_platform_render(
         hosted_plugins.shutil, "copytree", copytree_with_interleaved_render
     )
     hosted_plugins.render(root, platform="claude")
-    assert not (generated / "openai").exists()
+    assert openai_files() == existing_openai_files
 
 
 def test_rendered_packages_are_deterministic_and_remote_only(tmp_path: Path) -> None:
