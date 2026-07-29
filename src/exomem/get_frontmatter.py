@@ -11,12 +11,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .vault import (
-    VaultPathError,
-    parse_frontmatter,
-    resolve_under_vault,
-)
-
+from .get_page import GetError, PreparedPageRead, prepare_page_read
+from .vault import parse_frontmatter
 
 log = logging.getLogger(__name__)
 
@@ -44,24 +40,27 @@ class GetFrontmatterError(Exception):
         return {"code": self.code, "reason": self.reason}
 
 
-def get_frontmatter(vault_root: Path, *, path: str) -> GetFrontmatterResult:
+def get_frontmatter(
+    vault_root: Path,
+    *,
+    path: str,
+    _prepared: PreparedPageRead | None = None,
+) -> GetFrontmatterResult:
     try:
-        abs_path, rel_path = resolve_under_vault(
-            vault_root, path, must_exist=True, must_be_file=True
-        )
-    except VaultPathError as e:
+        prepared = _prepared or prepare_page_read(vault_root, path=path)
+    except GetError as e:
         raise GetFrontmatterError(code=e.code, reason=e.reason) from e
 
     try:
-        text = abs_path.read_text(encoding="utf-8")
+        text = prepared.target.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError) as e:
         raise GetFrontmatterError(
-            code="UNREADABLE", reason=f"could not read {rel_path}: {e}"
+            code="UNREADABLE", reason=f"could not read {prepared.path}: {e}"
         ) from e
 
     fm, _body, fm_text = parse_frontmatter(text)
     return GetFrontmatterResult(
-        path=rel_path,
+        path=prepared.path,
         frontmatter=fm,
         has_frontmatter=fm_text is not None,
     )

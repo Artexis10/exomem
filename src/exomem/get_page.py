@@ -25,7 +25,12 @@ from pathlib import Path
 from . import access, privacy_log
 from . import find as find_module
 from .kbdir import kb_prefix
-from .vault import content_hash
+from .vault import (
+    VaultPathError,
+    VaultPathResolution,
+    content_hash,
+    resolve_under_vault,
+)
 
 log = logging.getLogger(__name__)
 
@@ -66,15 +71,19 @@ class GetError(Exception):
         return {"code": self.code, "reason": self.reason}
 
 
-def get_page(vault_root: Path, *, path: str) -> GetResult:
-    """Read any markdown file under the vault root.
+@dataclass(frozen=True)
+class PreparedPageRead:
+    """A normalized lexical path bound to one resolved read target."""
 
-    Accepts any vault-relative path. Examples:
-    - `Knowledge Base/Notes/Insights/foo.md`
-    - `Notes/Insights/foo` (auto-prepends `Knowledge Base/`, auto-adds `.md`)
-    - `Reference/Strategy.md`
-    - `Reference/AI Systems & Architecture.md`
-    """
+    target: Path
+    path: str
+    missing_path: str
+    resolved_relative: str
+
+
+def prepare_page_read(vault_root: Path, *, path: str) -> PreparedPageRead:
+    """Normalize and resolve one direct read without opening its content."""
+
     if not path or not path.strip():
         raise GetError(code="INVALID_PATH", reason="path is empty")
 
@@ -88,6 +97,7 @@ def get_page(vault_root: Path, *, path: str) -> GetResult:
     last_segment = rel.rsplit("/", 1)[-1]
     if "." not in last_segment:
         rel = rel + ".md"
+    missing_path = rel
 
     candidate = vault_root / rel
 
@@ -101,34 +111,56 @@ def get_page(vault_root: Path, *, path: str) -> GetResult:
             candidate = kb_candidate
             rel = kb_rel
 
-    # Path-escape guard: resolved path must be under vault_root.
     try:
-        resolved = candidate.resolve()
-        resolved.relative_to(vault_root.resolve())
-    except (ValueError, OSError) as e:
+        resolution = resolve_under_vault(vault_root, rel, return_details=True)
+    except VaultPathError as e:
         raise GetError(
             code="INVALID_PATH",
-            reason=f"path escapes vault or is unreadable: {e}",
+            reason=f"path escapes vault or is unreadable: {e.reason}",
         ) from None
+    assert isinstance(resolution, VaultPathResolution)
 
     # `excluded` paths (_access.yaml) refuse identically to a missing file —
     # never a distinct error, never echoed differently — so the response is
     # not an existence oracle for content the tier marks truly private.
     if (
-        access.refuse_if_excluded(vault_root, rel)
-        or not candidate.exists()
-        or not candidate.is_file()
+        access.refuse_if_excluded(vault_root, resolution.relative)
+        or not resolution.resolved.exists()
+        or not resolution.resolved.is_file()
     ):
         raise GetError(
             code="NOT_FOUND",
-            reason=f"file does not exist: {rel}",
+            reason=f"file does not exist: {missing_path}",
         )
+    return PreparedPageRead(
+        target=resolution.resolved,
+        path=resolution.relative,
+        missing_path=missing_path,
+        resolved_relative=resolution.resolved_relative,
+    )
+
+
+def get_page(
+    vault_root: Path,
+    *,
+    path: str,
+    _prepared: PreparedPageRead | None = None,
+) -> GetResult:
+    """Read any markdown file under the vault root.
+
+    Accepts any vault-relative path. Examples:
+    - `Knowledge Base/Notes/Insights/foo.md`
+    - `Notes/Insights/foo` (auto-prepends `Knowledge Base/`, auto-adds `.md`)
+    - `Reference/Strategy.md`
+    - `Reference/AI Systems & Architecture.md`
+    """
+    prepared = _prepared or prepare_page_read(vault_root, path=path)
 
     # One immutable representation feeds parsing, the edit hash, and every
     # downstream release decision.  Parsing and then reopening the path used
     # to let a rename/swap bind frontmatter from one file to bytes from another.
     try:
-        with candidate.open("rb") as handle:
+        with prepared.target.open("rb") as handle:
             stat = os.fstat(handle.fileno())
             raw = handle.read()
         content = raw.decode("utf-8")
@@ -136,14 +168,14 @@ def get_page(vault_root: Path, *, path: str) -> GetResult:
         raise GetError(code="UNREADABLE", reason=str(e)) from e
 
     mtime = stat.st_mtime
-    parsed = find_module._parse_page(candidate, mtime, vault_root, content=raw)
+    parsed = find_module._parse_page(prepared.target, mtime, vault_root, content=raw)
     if parsed is None:
         raise GetError(
             code="UNREADABLE",
-            reason=f"could not parse {rel} as a markdown file with frontmatter",
+            reason=f"could not parse {prepared.path} as a markdown file with frontmatter",
         )
     return GetResult(
-        path=rel,
+        path=prepared.path,
         frontmatter=parsed.frontmatter,
         body=parsed.body,
         content=content,

@@ -311,7 +311,12 @@ class EpistemicGraphIndex:
     def rebuild_all(self) -> dict[str, int]:
         if not graph_enabled():
             return {"indexed_files": 0, "nodes": 0, "edges": 0, "disabled": 1}
-        with self._mutation_coordinator.hold():
+        # Attributed: a full rebuild is the longest holder of the vault mutation
+        # boundary at scale, and an unattributed "held too long" warning names
+        # neither the operation nor the holder -- which reads as a stalled write.
+        with self._mutation_coordinator.hold(
+            operation="epistemic_graph_rebuild_all", holder_kind="graph"
+        ):
             return self._rebuild_all_locked()
 
     def _rebuild_all_locked(self) -> dict[str, int]:
@@ -411,7 +416,9 @@ class EpistemicGraphIndex:
     def refresh_paths(self, paths: list[Path]) -> dict[str, int]:
         if not graph_enabled():
             return {"indexed_files": 0, "nodes": 0, "edges": 0, "disabled": 1}
-        with self._mutation_coordinator.hold():
+        with self._mutation_coordinator.hold(
+            operation="epistemic_graph_refresh_paths", holder_kind="graph"
+        ):
             return self._refresh_paths_locked(paths)
 
     def _refresh_paths_locked(self, paths: list[Path]) -> dict[str, int]:
@@ -432,7 +439,9 @@ class EpistemicGraphIndex:
             conn.close()
 
     def delete_paths(self, rel_paths: list[str]) -> int:
-        with self._mutation_coordinator.hold():
+        with self._mutation_coordinator.hold(
+            operation="epistemic_graph_delete_paths", holder_kind="graph"
+        ):
             return self._delete_paths_locked(rel_paths)
 
     def _delete_paths_locked(self, rel_paths: list[str]) -> int:

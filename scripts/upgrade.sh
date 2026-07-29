@@ -13,6 +13,7 @@
 #   bash scripts/upgrade.sh --package-version 0.25.4   # pin instead of latest
 #   bash scripts/upgrade.sh --cli-sync always          # install CLI if absent
 #   bash scripts/upgrade.sh --skip-restart             # stage it, restart later
+#   bash scripts/upgrade.sh --unit-file ~/Library/LaunchAgents/com.exomem.http.plist
 
 set -euo pipefail
 
@@ -28,6 +29,7 @@ PACKAGE_VERSION=""
 VAULT=""
 SKIP_RESTART=0
 CLI_SYNC="auto"
+UNIT_FILE=""
 
 die() { echo "upgrade: $*" >&2; exit 1; }
 
@@ -37,8 +39,9 @@ while [[ $# -gt 0 ]]; do
         --package-version) PACKAGE_VERSION="${2:?}"; shift 2 ;;
         --vault)           VAULT="${2:?}"; shift 2 ;;
         --cli-sync)        CLI_SYNC="${2:?}"; shift 2 ;;
+        --unit-file)       UNIT_FILE="${2:?}"; shift 2 ;;
         --skip-restart)    SKIP_RESTART=1; shift ;;
-        -h|--help)         sed -n '2,14p' "$0"; exit 0 ;;
+        -h|--help)         sed -n '2,15p' "$0"; exit 0 ;;
         *)                 die "unknown option: $1" ;;
     esac
 done
@@ -54,12 +57,43 @@ esac
 
 OS="$(uname -s)"
 case "$OS" in
-    Darwin) UNIT_FILE="$HOME/Library/LaunchAgents/$LABEL.plist" ;;
-    Linux)  UNIT_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/$SERVICE_NAME.service" ;;
-    *)      die "unsupported platform $OS; on Windows use scripts/upgrade.ps1" ;;
+    Darwin)
+        UNIT_DIR="$HOME/Library/LaunchAgents"
+        UNIT_GLOB="$LABEL*.plist"
+        DEFAULT_UNIT="$UNIT_DIR/$LABEL.plist"
+        ;;
+    Linux)
+        UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
+        UNIT_GLOB="$SERVICE_NAME*.service"
+        DEFAULT_UNIT="$UNIT_DIR/$SERVICE_NAME.service"
+        ;;
+    *)  die "unsupported platform $OS; on Windows use scripts/upgrade.ps1" ;;
 esac
 
-[[ -f "$UNIT_FILE" ]] || die "no installed service found at $UNIT_FILE. Install one first: bash scripts/install-service.sh --release"
+if [[ -n "$UNIT_FILE" ]]; then
+    [[ -f "$UNIT_FILE" ]] || die "--unit-file not found: $UNIT_FILE"
+elif [[ -f "$DEFAULT_UNIT" ]]; then
+    UNIT_FILE="$DEFAULT_UNIT"
+else
+    # A hand-rolled install may register a suffixed label (com.exomem.http), so
+    # say what was searched and what turned up rather than implying nothing is
+    # installed. Suffixed units are reported, never auto-selected: the upgrade
+    # reads the service venv out of the rendered unit, so guessing wrong fails
+    # later and far less legibly than refusing here.
+    shopt -s nullglob
+    CANDIDATES=("$UNIT_DIR"/$UNIT_GLOB)
+    shopt -u nullglob
+    MSG="no installed service found at $DEFAULT_UNIT (searched $UNIT_DIR for $UNIT_GLOB)."
+    if (( ${#CANDIDATES[@]} )); then
+        MSG="$MSG Found ${#CANDIDATES[@]} similarly-named unit(s): ${CANDIDATES[*]}."
+        MSG="$MSG That is a label mismatch, not a missing install."
+        MSG="$MSG Re-run with --unit-file <path> if the unit launches the exomem entry point;"
+        MSG="$MSG a unit that invokes a custom wrapper cannot be upgraded by this script."
+    else
+        MSG="$MSG Install one first: bash scripts/install-service.sh --release"
+    fi
+    die "$MSG"
+fi
 
 # --- Locate the venv the service ACTUALLY runs ----------------------------------
 # The rendered unit is the source of truth here, the same role the NSSM registry
