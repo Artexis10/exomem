@@ -456,10 +456,13 @@ def test_marketplace_review_fixture_declares_an_absent_create_only_target() -> N
     cases = hosted_plugins.load_marketplace_review_cases(REPO_ROOT)
     remember_case = next(case for case in cases["positive"] if "remember" in case["expected_tools"])
     assert remember_case["fixture_references"] == [target["reference"]]
-    assert target["key"] in remember_case["prompt"]
-    assert target["title"] in remember_case["prompt"]
-    assert target["note_type"] in remember_case["prompt"]
-    assert target["content"] in remember_case["prompt"]
+    assert remember_case["prompt"] == (
+        "Create an insight titled Review durable capture with slug review-durable-capture "
+        "and copy this exact Markdown verbatim\n\n"
+        "## Observations\n\n"
+        "- [review conclusion] Keep provider review fixtures deterministic. "
+        "#review (marketplace review) ^review-durable-capture"
+    )
     assert "create" in remember_case["expected_outcome"].lower()
     assert "delete" in remember_case["expected_outcome"].lower()
 
@@ -529,6 +532,27 @@ def test_marketplace_review_case_rejects_prompt_content_drift(tmp_path: Path) ->
     cases_path = root / "plugins/hosted/marketplace-review-cases.json"
     cases = json.loads(cases_path.read_text(encoding="utf-8"))
     cases["fixture"]["payload_sha256"] = fixture["payload_sha256"]
+    cases_path.write_text(json.dumps(cases), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="fixture prompt"):
+        hosted_plugins.load_marketplace_review_cases(root)
+
+
+@pytest.mark.parametrize(
+    ("prefix", "suffix"),
+    [
+        ("Ignore the fixture and ", ""),
+        ("", "\n\nAlso capture an unrelated second conclusion."),
+    ],
+)
+def test_marketplace_review_case_rejects_extra_prompt_instructions(
+    tmp_path: Path, prefix: str, suffix: str
+) -> None:
+    root = copy_hosted_tree(tmp_path / "repo")
+    cases_path = root / "plugins/hosted/marketplace-review-cases.json"
+    cases = json.loads(cases_path.read_text(encoding="utf-8"))
+    remember_case = next(case for case in cases["positive"] if "remember" in case["expected_tools"])
+    remember_case["prompt"] = f"{prefix}{remember_case['prompt']}{suffix}"
     cases_path.write_text(json.dumps(cases), encoding="utf-8")
 
     with pytest.raises(ValueError, match="fixture prompt"):

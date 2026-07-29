@@ -816,6 +816,13 @@ def _load_marketplace_review_fixture(root: Path) -> dict[str, Any]:
     return fixture
 
 
+def _remember_review_prompt(target: dict[str, Any]) -> str:
+    return (
+        f"Create an {target['note_type']} titled {target['title']} with slug {target['key']} "
+        f"and copy this exact Markdown verbatim\n\n{target['content']}"
+    )
+
+
 def load_marketplace_review_cases(repo_root: Path | None = None) -> dict[str, Any]:
     root = _repo_root(repo_root)
     value = _load_marketplace_json(
@@ -909,14 +916,9 @@ def load_marketplace_review_cases(repo_root: Path | None = None) -> dict[str, An
                         != {fixture["reset"]["create_tool"]}
                     ):
                         raise ValueError("marketplace review case fixture reset is incomplete")
-                    if references != [target["reference"]] or not all(
-                        value in case["prompt"]
-                        for value in (
-                            target["key"],
-                            target["title"],
-                            target["note_type"],
-                            target["content"],
-                        )
+                    if (
+                        references != [target["reference"]]
+                        or case["prompt"] != _remember_review_prompt(target)
                     ):
                         raise ValueError("marketplace review case fixture prompt is invalid")
     negative_text = " ".join(
