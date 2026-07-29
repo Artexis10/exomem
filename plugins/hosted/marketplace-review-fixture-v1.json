@@ -21,11 +21,13 @@
         "reference": "review-durable-capture",
         "key": "review-durable-capture",
         "title": "Review durable capture",
-        "create_tool": "remember"
+        "create_tool": "remember",
+        "note_type": "insight",
+        "content": "## Observations\n\n- [review conclusion] Keep provider review fixtures deterministic. #review (marketplace review) ^review-durable-capture"
       }
     ]
   },
-  "payload_sha256": "53fd0bd6d58f3a55981449277b235544ac8dd0395c63459a38bc7b4a6dcfaee0",
+  "payload_sha256": "ecf23dd7eb880a1f3502c7ab3e034d188a44f00c842c7f9c6a9f6b2edf2f109e",
   "reset": {
     "disposable_reference": "review-durable-capture",
     "disposable_key": "review-durable-capture",

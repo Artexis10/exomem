@@ -2,12 +2,12 @@
   "schema_version": 1,
   "fixture": {
     "fixture_version": "v1",
-    "payload_sha256": "53fd0bd6d58f3a55981449277b235544ac8dd0395c63459a38bc7b4a6dcfaee0"
+    "payload_sha256": "ecf23dd7eb880a1f3502c7ab3e034d188a44f00c842c7f9c6a9f6b2edf2f109e"
   },
   "positive": [
     {"prompt": "What did we decide about the launch plan?", "expected_tools": ["ask_memory"], "expected_outcome": "Returns a cited governed result from the project brief.", "fixture_version": "v1", "fixture_references": ["project-brief"]},
     {"prompt": "Find the source behind our pricing decision.", "expected_tools": ["ask_memory", "read_memory"], "expected_outcome": "Returns a cited source-backed answer from the decision record.", "fixture_version": "v1", "fixture_references": ["decision-record"]},
-    {"prompt": "Capture this conclusion with slug review-durable-capture and title Review durable capture.", "expected_tools": ["remember"], "expected_outcome": "Creates the disposable review note, then operator cleanup deletes it to restore the absent baseline.", "fixture_version": "v1", "fixture_references": ["review-durable-capture"], "fixture_reset": {"disposable_reference": "review-durable-capture", "disposable_key": "review-durable-capture", "disposable_title": "Review durable capture", "create_tool": "remember", "procedure": "delete_created_note"}},
+    {"prompt": "Create an insight titled Review durable capture with slug review-durable-capture and copy this exact Markdown verbatim\n\n## Observations\n\n- [review conclusion] Keep provider review fixtures deterministic. #review (marketplace review) ^review-durable-capture", "expected_tools": ["remember"], "expected_outcome": "Creates exactly the disposable insight, then operator cleanup deletes it to restore the absent baseline.", "fixture_version": "v1", "fixture_references": ["review-durable-capture"], "fixture_reset": {"disposable_reference": "review-durable-capture", "disposable_key": "review-durable-capture", "disposable_title": "Review durable capture", "create_tool": "remember", "procedure": "delete_created_note"}},
     {"prompt": "Continue the project from our prior work.", "expected_tools": ["ask_memory"], "expected_outcome": "Uses the governed store for relevant context from the fixture notes.", "fixture_version": "v1", "fixture_references": ["project-brief", "decision-record"]},
     {"prompt": "Review what needs attention in our knowledge base.", "expected_tools": ["review_memory"], "expected_outcome": "Returns governed review items from the decision record.", "fixture_version": "v1", "fixture_references": ["decision-record"]}
   ],

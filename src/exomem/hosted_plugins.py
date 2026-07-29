@@ -761,12 +761,21 @@ def _load_marketplace_review_fixture(root: Path) -> dict[str, Any]:
         keys.add(note["key"])
     absent_by_reference: dict[str, dict[str, Any]] = {}
     for target in absent_notes:
-        if not isinstance(target, dict) or set(target) != {"reference", "key", "title", "create_tool"}:
+        if not isinstance(target, dict) or set(target) != {
+            "reference",
+            "key",
+            "title",
+            "create_tool",
+            "note_type",
+            "content",
+        }:
             raise ValueError("marketplace review fixture absent target is invalid")
         if any(not isinstance(target[field], str) or not target[field].strip() for field in target):
             raise ValueError("marketplace review fixture absent target is invalid")
         if target["create_tool"] != "remember":
             raise ValueError("marketplace review fixture absent target must use remember")
+        if target["note_type"] not in commands.note_module.NOTE_TYPES:
+            raise ValueError("marketplace review fixture absent target note_type is invalid")
         if target["reference"] in references or target["key"] in keys:
             raise ValueError("marketplace review fixture absent target collides with seeded content")
         references.add(target["reference"])
@@ -836,6 +845,9 @@ def load_marketplace_review_cases(repo_root: Path | None = None) -> dict[str, An
         for group in ("notes", "absent_notes")
         for item in fixture["payload"][group]
     }
+    absent_by_reference = {
+        target["reference"]: target for target in fixture["payload"]["absent_notes"]
+    }
     write_tools = {
         entry["name"]
         for entry in compatibility_manifest(root)["agent_contract"]["commands"]
@@ -890,6 +902,23 @@ def load_marketplace_review_cases(repo_root: Path | None = None) -> dict[str, An
                     )
                 ):
                     raise ValueError("marketplace review case fixture reset is invalid")
+                if write_tools.intersection(case["expected_tools"]):
+                    target = absent_by_reference[fixture["reset"]["disposable_reference"]]
+                    if (
+                        write_tools.intersection(case["expected_tools"])
+                        != {fixture["reset"]["create_tool"]}
+                    ):
+                        raise ValueError("marketplace review case fixture reset is incomplete")
+                    if references != [target["reference"]] or not all(
+                        value in case["prompt"]
+                        for value in (
+                            target["key"],
+                            target["title"],
+                            target["note_type"],
+                            target["content"],
+                        )
+                    ):
+                        raise ValueError("marketplace review case fixture prompt is invalid")
     negative_text = " ".join(
         f"{case['prompt']} {case['expected_outcome']}" for case in negative
     ).lower()

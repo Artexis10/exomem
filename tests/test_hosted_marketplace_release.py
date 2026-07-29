@@ -438,6 +438,12 @@ def test_marketplace_review_fixture_declares_an_absent_create_only_target() -> N
         "key": "review-durable-capture",
         "title": "Review durable capture",
         "create_tool": "remember",
+        "note_type": "insight",
+        "content": (
+            "## Observations\n\n"
+            "- [review conclusion] Keep provider review fixtures deterministic. "
+            "#review (marketplace review) ^review-durable-capture"
+        ),
     }
     assert target["key"] not in {note["key"] for note in fixture["payload"]["notes"]}
     assert fixture["reset"] == {
@@ -452,6 +458,8 @@ def test_marketplace_review_fixture_declares_an_absent_create_only_target() -> N
     assert remember_case["fixture_references"] == [target["reference"]]
     assert target["key"] in remember_case["prompt"]
     assert target["title"] in remember_case["prompt"]
+    assert target["note_type"] in remember_case["prompt"]
+    assert target["content"] in remember_case["prompt"]
     assert "create" in remember_case["expected_outcome"].lower()
     assert "delete" in remember_case["expected_outcome"].lower()
 
@@ -492,6 +500,38 @@ def test_marketplace_review_case_rejects_mismatched_create_reset_tool(tmp_path: 
     cases_path.write_text(json.dumps(cases), encoding="utf-8")
 
     with pytest.raises(ValueError, match="fixture reset tool"):
+        hosted_plugins.load_marketplace_review_cases(root)
+
+
+def test_marketplace_review_case_rejects_extra_write_without_cleanup(tmp_path: Path) -> None:
+    root = copy_hosted_tree(tmp_path / "repo")
+    cases_path = root / "plugins/hosted/marketplace-review-cases.json"
+    cases = json.loads(cases_path.read_text(encoding="utf-8"))
+    remember_case = next(case for case in cases["positive"] if "remember" in case["expected_tools"])
+    remember_case["expected_tools"].append("capture_source")
+    cases_path.write_text(json.dumps(cases), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="fixture reset is incomplete"):
+        hosted_plugins.load_marketplace_review_cases(root)
+
+
+def test_marketplace_review_case_rejects_prompt_content_drift(tmp_path: Path) -> None:
+    root = copy_hosted_tree(tmp_path / "repo")
+    fixture_path = root / "plugins/hosted/marketplace-review-fixture-v1.json"
+    fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
+    target = fixture["payload"]["absent_notes"][0]
+    assert "content" in target
+    target["content"] = "## Observations\n\n- [review conclusion] Drifted content. #review ^drifted"
+    fixture["payload_sha256"] = hosted_plugins._sha256(
+        hosted_plugins._canonical_json(fixture["payload"])
+    )
+    fixture_path.write_text(json.dumps(fixture), encoding="utf-8")
+    cases_path = root / "plugins/hosted/marketplace-review-cases.json"
+    cases = json.loads(cases_path.read_text(encoding="utf-8"))
+    cases["fixture"]["payload_sha256"] = fixture["payload_sha256"]
+    cases_path.write_text(json.dumps(cases), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="fixture prompt"):
         hosted_plugins.load_marketplace_review_cases(root)
 
 
