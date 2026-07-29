@@ -496,8 +496,18 @@ def test_marketplace_positive_cases_are_backed_by_explicit_fixture_material() ->
     assert "Next Step" in notes["launch-plan"]["content"]
 
     assert review["fixture_references"] == ["review-item"]
+    assert review["expected_tools"] == ["ask_memory"]
+    assert "review_memory" not in review["expected_tools"]
+    assert review["prompt"] == "What does the review item say to confirm before provider submission?"
+    assert review["expected_outcome"] == (
+        "Returns the explicit review-item fact that the pricing policy source remains linked "
+        "before provider submission."
+    )
     assert "## Review Item" in notes["review-item"]["content"]
-    assert "pricing policy source remains linked" in notes["review-item"]["content"]
+    assert (
+        "Confirm that the pricing policy source remains linked before provider submission."
+        in notes["review-item"]["content"]
+    )
 
 
 def test_marketplace_review_fixture_rejects_preseeded_create_target(tmp_path: Path) -> None:
