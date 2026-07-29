@@ -20,7 +20,7 @@ import pytest
 from exomem import commands
 from exomem import find as find_module
 from exomem.find_types import GraphProvenance, Hit
-from exomem.governance import egress
+from exomem.governance import egress, receipts
 from exomem.governance.principal import RequestPrincipal, request_scope
 
 # --------------------------------------------------------------------------
@@ -128,6 +128,17 @@ def _reset_caches() -> None:
     membership.clear_memo()
     egress.clear_decision_memo()
     find_module.clear_cache()
+
+
+def _receipt_records(vault: Path) -> list[dict[str, object]]:
+    events = _gov_dir(vault) / "events"
+    if not events.exists():
+        return []
+    return [
+        json.loads(line)
+        for path in sorted(events.rglob("*.jsonl"))
+        for line in path.read_text(encoding="utf-8").splitlines()
+    ]
 
 
 # --------------------------------------------------------------------------
@@ -279,6 +290,23 @@ def test_superseded_by_naming_a_withheld_path_is_stripped() -> None:
 WITHHELD = frozenset({RESTRICTED_PATH})
 RESTRICTED_STEM = "kill-switch-for-risky-releases"
 RESTRICTED_KB_RELATIVE = "Notes/Patterns/kill-switch-for-risky-releases.md"
+
+
+def _read_alias_surface(vault: Path, *, path: str, surface: str) -> object:
+    from exomem import get_frontmatter as get_frontmatter_module
+    from exomem import get_page as get_page_module
+
+    if surface == "get":
+        return commands.op_get(vault, path=path)
+    if surface == "fetch":
+        return commands.op_fetch(vault, id=path)
+    if surface == "frontmatter":
+        return commands.op_get(vault, path=path, frontmatter_only=True)
+    if surface == "get-page":
+        return get_page_module.get_page(vault, path=path)
+    if surface == "get-frontmatter":
+        return get_frontmatter_module.get_frontmatter(vault, path=path)
+    raise AssertionError(f"unexpected read surface: {surface}")
 
 
 @pytest.mark.parametrize(
@@ -691,6 +719,120 @@ def test_get_ungoverned_page_is_unchanged(vault: Path) -> None:
     with request_scope(_external()):
         governed = commands.op_get(vault, path=OPEN_PATH)
     assert governed == baseline
+
+
+@pytest.mark.parametrize(
+    ("initially_restricted", "initial_marker", "replacement_marker"),
+    [
+        (True, "restricted-snapshot-marker", "public-live-marker"),
+        (False, "public-snapshot-marker", "restricted-live-marker"),
+    ],
+)
+def test_get_fails_closed_when_page_swaps_before_release_annotation(
+    vault: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    initially_restricted: bool,
+    initial_marker: str,
+    replacement_marker: str,
+) -> None:
+    """The decision, hash, ref, receipt, and returned body are one snapshot.
+
+    A deterministic swap in either direction between the read leaf and the
+    release plane must not authorize one representation and return another.
+    """
+    rel = "Knowledge Base/Notes/Insights/snapshot-race.md"
+    target = vault / rel
+    target.parent.mkdir(parents=True, exist_ok=True)
+
+    def _page(*, restricted: bool, marker: str, page_id: str) -> str:
+        tags = "tags: [restricted]\n" if restricted else "tags: [public]\n"
+        return (
+            "---\ntype: insight\n"
+            f"exomem_id: {page_id}\n{tags}---\n\n{marker}\n"
+        )
+
+    initial = _page(
+        restricted=initially_restricted,
+        marker=initial_marker,
+        page_id="00000000-0000-4000-8000-000000000101",
+    )
+    replacement = _page(
+        restricted=not initially_restricted,
+        marker=replacement_marker,
+        page_id="00000000-0000-4000-8000-000000000102",
+    )
+    target.write_text(initial, encoding="utf-8")
+    scope = _gov_dir(vault) / "scopes" / "patterns.yaml"
+    scope.parent.mkdir(parents=True, exist_ok=True)
+    scope.write_text(
+        f"governance_version: 1\nid: {SCOPE_ID}\nname: Restricted\n"
+        "tags: [restricted]\n",
+        encoding="utf-8",
+    )
+    write_rule(vault, ceiling=egress.LEVEL_NONE)
+    _reset_caches()
+
+    original = egress.annotate_page
+
+    def _swap_before_annotation(*args, **kwargs):
+        target.write_text(replacement, encoding="utf-8")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(egress, "annotate_page", _swap_before_annotation)
+    with request_scope(_external()), pytest.raises(ValueError, match="NOT_FOUND"):
+        commands.op_get(vault, path=rel)
+
+
+def test_direct_read_receipt_is_bound_to_returned_snapshot(vault: Path) -> None:
+    rel = "Knowledge Base/Notes/Insights/receipt-snapshot.md"
+    target = vault / rel
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(
+        "---\ntype: insight\n"
+        "exomem_id: 00000000-0000-4000-8000-000000000103\n"
+        "---\n\nsnapshot receipt body\n",
+        encoding="utf-8",
+    )
+    write_scope(vault)
+    write_rule(vault, ceiling=egress.LEVEL_FULL)
+    _reset_caches()
+    with request_scope(_external()), egress.disclosure_boundary(vault, "get") as collector:
+        page = commands.op_get(vault, path=rel)
+        egress.emit_boundary_receipt(collector)
+    outcome = _receipt_records(vault)[0]["outcomes"][0]
+    assert outcome["content_hash"] == page["content_hash"]
+    assert outcome["size"] == len(target.read_bytes())
+    assert outcome.get("ref") == page.get("ref")
+
+
+def test_direct_read_never_attaches_a_replacement_page_ref(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rel = "Knowledge Base/Notes/Insights/ref-race.md"
+    target = vault / rel
+    target.parent.mkdir(parents=True, exist_ok=True)
+    initial = "---\ntype: insight\n---\n\noriginal snapshot\n"
+    replacement = (
+        "---\ntype: insight\n"
+        "exomem_id: 00000000-0000-4000-8000-000000000104\n"
+        "---\n\nreplacement snapshot\n"
+    )
+    target.write_text(initial, encoding="utf-8")
+    write_scope(vault)
+    write_rule(vault, ceiling=egress.LEVEL_FULL)
+    _reset_caches()
+    original_annotate = egress.annotate_page
+
+    def _swap_after_annotation(*args, **kwargs):
+        released = original_annotate(*args, **kwargs)
+        target.write_text(replacement, encoding="utf-8")
+        return released
+
+    monkeypatch.setattr(egress, "annotate_page", _swap_after_annotation)
+    with request_scope(_external()):
+        page = commands.op_get(vault, path=rel)
+    assert page["body"] == "original snapshot\n"
+    assert "ref" not in page
 
 
 def test_annotate_page_empty_policy_is_untouched(vault: Path) -> None:
@@ -1144,6 +1286,22 @@ def test_filter_withheld_entries_drops_bare_path_strings(vault: Path) -> None:
     assert out["inbound"] == [OPEN_PATH]
 
 
+def test_structure_filter_gates_governed_csv_and_resource_entries(vault: Path) -> None:
+    csv_path = "Knowledge Base/Notes/Patterns/private.csv"
+    target = vault / csv_path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("name,value\nAlice,42\n", encoding="utf-8")
+    _restricted_vault(vault)
+    with request_scope(_external()):
+        out = egress.postfilter(
+            "list_directory",
+            {"entries": [{"path": csv_path, "size": target.stat().st_size}], "resource": csv_path},
+            vault,
+        )
+    assert out["entries"] == []
+    assert csv_path not in str(out)
+
+
 def test_filter_withheld_entries_empty_policy_is_identity(vault: Path) -> None:
     payload = {"entries": [{"path": RESTRICTED_PATH}, {"path": OPEN_PATH}]}
     assert egress.filter_withheld_entries(
@@ -1236,6 +1394,432 @@ def test_dispatcher_backstop_drops_withheld_entries(vault: Path) -> None:
     with request_scope(_external()):
         out = egress.postfilter("list_directory", payload, vault)
     assert [e["path"] for e in out["entries"]] == [OPEN_PATH]
+
+
+def test_dispatcher_emits_one_plaintext_free_receipt_after_final_governed_representation(
+    vault: Path,
+) -> None:
+    """The owning dispatcher, not the reusable postfilter, records egress."""
+    _restricted_vault(vault)
+    with request_scope(_external()):
+        _through_dispatcher(vault, "list_directory", path="Knowledge Base/Notes/Patterns")
+
+    records = _receipt_records(vault)
+    assert len(records) == 1
+    record = records[0]
+    assert record["event_type"] == "disclosure"
+    assert record["phase"] == "recorded"
+    outcomes = record["outcomes"]
+    assert isinstance(outcomes, list) and outcomes
+    assert outcomes[0]["decision"] == "withheld"
+    serialized = json.dumps(record)
+    assert "kill-switch-for-risky-releases" not in serialized
+    assert "Patterns" not in serialized
+
+
+def test_postfilter_second_pass_is_receipt_silent(vault: Path) -> None:
+    """MCP runs this filter twice, so it cannot own receipt emission."""
+    _restricted_vault(vault)
+    payload = {"entries": [{"path": RESTRICTED_PATH}]}
+    with request_scope(_external()):
+        egress.postfilter("list_directory", payload, vault)
+        egress.postfilter("list_directory", payload, vault)
+    assert _receipt_records(vault) == []
+
+
+def test_ungoverned_dispatcher_recall_writes_no_receipt(vault: Path) -> None:
+    with request_scope(_external()):
+        _through_dispatcher(vault, "list_directory", path="Knowledge Base/Notes/Patterns")
+    assert _receipt_records(vault) == []
+
+
+def test_external_dispatcher_retries_mint_distinct_boundary_ids(vault: Path) -> None:
+    _restricted_vault(vault)
+    with request_scope(_external()):
+        _through_dispatcher(vault, "list_directory", path="Knowledge Base/Notes/Patterns")
+        _through_dispatcher(vault, "list_directory", path="Knowledge Base/Notes/Patterns")
+    records = _receipt_records(vault)
+    assert len(records) == 2
+    assert records[0]["event_id"] != records[1]["event_id"]
+
+
+def test_governed_dispatcher_fails_closed_when_receipt_append_fails(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _restricted_vault(vault)
+
+    def fail(*_args, **_kwargs):
+        raise receipts.ReceiptError("sidecar unavailable")
+
+    monkeypatch.setattr(receipts, "append_event", fail)
+    with request_scope(_external()):
+        with pytest.raises(egress.ReceiptUnavailableError, match="retry"):
+            _through_dispatcher(vault, "list_directory", path="Knowledge Base/Notes/Patterns")
+    assert _receipt_records(vault) == []
+
+
+def test_registry_refuses_new_content_command_without_receipt_adapter() -> None:
+    registry = {"future_mode": object()}
+    with pytest.raises(RuntimeError, match="RECEIPT_OUTCOME_MISSING"):
+        egress.assert_outcomes_registered(registry)
+
+
+def test_every_content_command_declares_a_receipt_outcome_adapter() -> None:
+    registry = {command.name: command for command in commands.COMMANDS}
+    assert egress.unrecorded_commands(registry) == ()
+
+
+def test_credential_block_is_receipted_without_a_policy(vault: Path) -> None:
+    secret = "Authorization: Bearer sk-proj-9dQm2XvKpLzR4wTnBcYeF8aHgJ1sVuNiO0rEyMdA"
+    with request_scope(_external("credential-review")):
+        with egress.disclosure_boundary(vault, "test") as collector:
+            cleaned = egress.postfilter("test", {"value": secret}, vault)
+            egress.emit_boundary_receipt(collector)
+    records = _receipt_records(vault)
+    assert cleaned["value"] != secret
+    assert len(records) == 1 and records[0]["event_type"] == "credential_block"
+    assert records[0]["command"] == "test"
+    assert records[0]["principal"] == records[0]["audience"] == EXTERNAL
+    assert records[0]["purpose"] == "credential-review"
+    assert secret not in json.dumps(records)
+
+
+def test_credential_block_does_not_suppress_the_disclosure_receipt(vault: Path) -> None:
+    write_scope(vault)
+    write_rule(vault, ceiling=egress.LEVEL_FULL)
+    secret = "Authorization: Bearer sk-proj-9dQm2XvKpLzR4wTnBcYeF8aHgJ1sVuNiO0rEyMdA"
+    with request_scope(_external("credential-review")):
+        with egress.disclosure_boundary(vault, "find") as collector:
+            egress.annotate_hits(
+                vault, [_hit(RESTRICTED_PATH)], principal=_external("credential-review"), limit=1
+            )
+            egress.postfilter("find", {"value": secret}, vault)
+            egress.emit_boundary_receipt(collector)
+    records = _receipt_records(vault)
+    assert [record["event_type"] for record in records] == [
+        "credential_block", "disclosure"
+    ]
+    assert records[0]["command"] == "find"
+    assert records[0]["principal"] == records[0]["audience"] == EXTERNAL
+    assert records[0]["purpose"] == "credential-review"
+    assert secret not in json.dumps(records)
+
+
+def test_direct_download_boundary_emits_a_single_authorization_receipt(vault: Path) -> None:
+    write_scope(vault)
+    write_rule(vault, ceiling=egress.LEVEL_FULL)
+    assert egress.release_allows_download(vault, RESTRICTED_PATH, principal=_external())
+    records = _receipt_records(vault)
+    assert len(records) == 1
+    assert records[0]["event_type"] == "disclosure"
+    assert records[0]["outcomes"][0]["decision"] == "release_authorized"
+
+
+def test_hit_receipt_describes_only_the_final_limited_representation(vault: Path) -> None:
+    write_scope(vault)
+    write_rule(vault, ceiling=egress.LEVEL_FULL)
+    hits = [_hit(RESTRICTED_PATH), _hit(OPEN_PATH)]
+    with egress.disclosure_boundary(vault, "find") as collector:
+        egress.annotate_hits(vault, hits, principal=_external(), limit=1)
+        egress.emit_boundary_receipt(collector)
+    outcomes = _receipt_records(vault)[0]["outcomes"]
+    assert len(outcomes) == 1
+
+
+def test_large_reduction_receipt_uses_truthful_bounded_aggregates(vault: Path) -> None:
+    with egress.disclosure_boundary(vault, "overview") as collector:
+        for _ in range(140):
+            egress._record_outcome({"decision": "withheld"})
+        egress.emit_boundary_receipt(collector)
+    outcomes = _receipt_records(vault)[0]["outcomes"]
+    assert outcomes[0]["decision"] == "withheld"
+    assert outcomes[0]["count"] == 140
+    assert len(outcomes[0]["membership_digest"]) == 64
+
+
+def test_bounded_outcomes_keep_different_levels_and_scopes_distinct() -> None:
+    outcomes = [
+        egress.DisclosureOutcome({"decision": "released", "level": 5, "scope_ids": ["a"], "content_hash": "a" * 64})
+        for _ in range(70)
+    ] + [
+        egress.DisclosureOutcome({"decision": "released", "level": 6, "scope_ids": ["b"], "content_hash": "b" * 64})
+        for _ in range(70)
+    ]
+    reduced = egress._bounded_outcomes(outcomes)
+    assert {(item["level"], tuple(item["scope_ids"]), item["count"]) for item in reduced} == {
+        (5, ("a",), 70), (6, ("b",), 70)
+    }
+    assert all("membership_digest" in item for item in reduced)
+
+
+def test_bounded_outcomes_summarize_129_distinct_typed_identities(vault: Path) -> None:
+    outcomes = [
+        egress.DisclosureOutcome(
+            {
+                "decision": "released",
+                "level": 5 if index < 70 else 6,
+                "principal": f"principal-{index}",
+                "audience": f"audience-{index}",
+                "purpose": f"purpose-{index}",
+                "policy_fingerprint": f"{index:064x}",
+                "confirmation": "none" if index % 2 else "confirmed",
+                "scope_ids": [f"scope-{index}"],
+                "command": f"boundary-{index}",
+                "content_hash": f"{index + 1000:064x}",
+            }
+        )
+        for index in range(129)
+    ]
+    reduced = egress._bounded_outcomes(outcomes)
+    reversed_reduced = egress._bounded_outcomes(list(reversed(outcomes)))
+    assert reduced == reversed_reduced
+    assert len(reduced) <= receipts.MAX_OUTCOMES
+    assert {(item["decision"], item["level"], item["count"]) for item in reduced} == {
+        ("released", 5, 70),
+        ("released", 6, 59),
+    }
+    for item in reduced:
+        for field in (
+            "identity_manifest_digest",
+            "principal_set_digest",
+            "audience_set_digest",
+            "purpose_set_digest",
+            "policy_set_digest",
+            "confirmation_set_digest",
+            "scope_set_digest",
+            "boundary_set_digest",
+        ):
+            assert len(item[field]) == 64
+    serialized = json.dumps(reduced)
+    assert "principal-0" not in serialized
+    assert "purpose-128" not in serialized
+    with egress.disclosure_boundary(vault, "large-typed-boundary") as collector:
+        collector.outcomes.extend(outcomes)
+        egress.emit_boundary_receipt(collector)
+    persisted = _receipt_records(vault)[0]["outcomes"]
+    assert persisted == reduced
+    assert len(persisted) <= receipts.MAX_OUTCOMES
+
+
+@pytest.mark.parametrize("outcome_count", [64, 140])
+def test_bounded_outcomes_also_fit_the_receipt_byte_cap(
+    vault: Path, outcome_count: int
+) -> None:
+    scope_ids = [f"scope-{index}-" + "x" * 220 for index in range(128)]
+    scope_digests = [f"{index:064x}" for index in range(128)]
+    outcomes = [
+        egress.DisclosureOutcome(
+            {
+                "decision": "released" if index % 2 else "withheld",
+                "level": index % 7,
+                "principal": "p" * 200,
+                "audience": "a" * 200,
+                "purpose": "u" * 200,
+                "policy_fingerprint": "f" * 64,
+                "confirmation": "none",
+                "scope_ids": scope_ids,
+                "scope_label_digests": scope_digests,
+                "command": "large-boundary",
+                "content_hash": f"{index + 5000:064x}",
+            }
+        )
+        for index in range(outcome_count)
+    ]
+    with egress.disclosure_boundary(vault, "large-boundary") as collector:
+        collector.outcomes.extend(outcomes)
+        egress.emit_boundary_receipt(collector)
+    events = _gov_dir(vault) / "events"
+    raw = next(events.rglob("*.jsonl")).read_bytes()
+    assert len(raw) <= receipts.MAX_RECORD_BYTES
+    persisted = _receipt_records(vault)[0]["outcomes"]
+    assert len(persisted) <= receipts.MAX_OUTCOMES
+    assert {item["level"] for item in persisted} == set(range(7))
+
+
+def test_disclosure_identity_is_content_free_and_complete(vault: Path) -> None:
+    write_scope(vault, name="Sensitive scope")
+    write_rule(vault, ceiling=egress.LEVEL_FULL)
+    with egress.disclosure_boundary(vault, "find") as collector:
+        egress.annotate_hits(
+            vault, [_hit(RESTRICTED_PATH)], principal=_external("analysis-purpose"), limit=1
+        )
+        egress.emit_boundary_receipt(collector)
+    record = _receipt_records(vault)[0]
+    outcome = record["outcomes"][0]
+    assert len(record["event_id"]) == 32
+    assert outcome["command"] == "find"
+    assert outcome["principal"] == outcome["audience"] == EXTERNAL
+    assert outcome["purpose"] == "analysis-purpose"
+    assert outcome["confirmation"] == "none"
+    assert outcome["scope_label_digests"]
+    serialized = json.dumps(record)
+    assert "Sensitive scope" not in serialized
+    assert "kill-switch-for-risky-releases" not in serialized
+
+
+def test_query_data_csv_is_a_registered_receipt_representation() -> None:
+    assert egress.data_representation_adapter("rows") == "dataset"
+    with pytest.raises(RuntimeError, match="RECEIPT_OUTCOME_MISSING"):
+        egress.assert_data_representation_covered("future_rows")
+
+
+def test_adoption_selector_requires_an_explicit_egress_adapter() -> None:
+    command = next(command for command in commands.PRODUCT_COMMANDS if command.name == "adoption_studio")
+    with pytest.raises(RuntimeError, match="RECEIPT_OUTCOME_MISSING"):
+        commands.invocation_is_read_only(command, {"action": "future-read"})
+
+
+def test_every_mixed_selector_uses_one_complete_receipt_registry() -> None:
+    expected = {
+        ("connect_memory", "operation"): {
+            "suggest-links": True,
+            "suggest-relations": True,
+            "context": True,
+            "graph-context": True,
+            "inbound-links": True,
+            "resolve-entity": True,
+            "create-entity": False,
+            "accept-relation": False,
+        },
+        ("adopt_vault", "mode"): {
+            "scan-only": True,
+            "save-manifest": False,
+            "copy-as-sources": False,
+            "compile-selected": False,
+        },
+        ("adoption_studio", "action"): {
+            "start": False,
+            "status": True,
+            "select": False,
+            "plan": False,
+            "apply": False,
+            "cancel": False,
+            "finish": False,
+            "work-item": True,
+            "propose": False,
+            "apply-proposal": False,
+        },
+        ("process_media", "operation"): {
+            "process": False,
+            "status": True,
+            "retry": False,
+        },
+        ("observe_memory", "operation"): {
+            "add": False,
+            "update": False,
+            "remove": False,
+            "validate": True,
+        },
+        ("maintain_memory", "mode"): {
+            "audit": True,
+            "fix": True,
+            "reconcile": False,
+            "backfill-ids": True,
+        },
+    }
+    product = {command.name: command for command in commands.PRODUCT_COMMANDS}
+    registry = egress.selector_registry()
+    assert set(expected) <= set(registry)
+    for (command_name, selector), values in expected.items():
+        assert set(registry[(command_name, selector)]) == set(values)
+        for value, read_only in values.items():
+            adapter = egress.assert_selector_covered(command_name, selector, value)
+            if adapter in {"structure", "mutation"}:
+                assert (adapter != "mutation") is read_only
+            assert commands.invocation_is_read_only(
+                product[command_name], {selector: value}
+            ) is read_only
+        with pytest.raises(RuntimeError, match="RECEIPT_OUTCOME_MISSING"):
+            commands.invocation_is_read_only(
+                product[command_name], {selector: "future-selector"}
+            )
+
+
+def test_conditional_mixed_selectors_are_in_the_same_registry() -> None:
+    product = {command.name: command for command in commands.PRODUCT_COMMANDS}
+    registry = egress.selector_registry()
+    assert registry[("manage_memory_file", "operation")] == {
+        "list": "structure",
+        "create": "validation",
+        "append": "validation",
+        "move": "mutation",
+        "delete": "mutation",
+        "trash-list": "structure",
+        "recover": "mutation",
+    }
+    manage = product["manage_memory_file"]
+    assert commands.invocation_is_read_only(manage, {"operation": "list"})
+    assert commands.invocation_is_read_only(manage, {"operation": "trash-list"})
+    assert commands.invocation_is_read_only(
+        manage, {"operation": "create", "validate_only": True}
+    )
+    assert not commands.invocation_is_read_only(
+        manage, {"operation": "create", "validate_only": False}
+    )
+
+    assert registry[("schema_memory", "operation")] == {
+        "infer": "save-conditional",
+        "validate": "structure",
+        "diff": "structure",
+    }
+    schema = product["schema_memory"]
+    assert commands.invocation_is_read_only(schema, {"operation": "infer"})
+    assert not commands.invocation_is_read_only(
+        schema, {"operation": "infer", "save": True}
+    )
+    assert commands.invocation_is_read_only(schema, {"operation": "validate"})
+    with pytest.raises(RuntimeError, match="RECEIPT_OUTCOME_MISSING"):
+        commands.invocation_is_read_only(schema, {"operation": "future-schema-mode"})
+
+    maintain = product["maintain_memory"]
+    assert commands.invocation_is_read_only(maintain, {"mode": "fix"})
+    assert not commands.invocation_is_read_only(
+        maintain, {"mode": "fix", "dry_run": False}
+    )
+    assert not commands.invocation_is_read_only(maintain, {"mode": "reconcile"})
+    assert commands.invocation_is_read_only(
+        maintain, {"mode": "reconcile", "dry_run": True}
+    )
+    assert commands.invocation_is_read_only(maintain, {"mode": "backfill-ids"})
+
+
+def test_query_data_csv_rows_are_gated_and_receipted(vault: Path) -> None:
+    dataset = "Knowledge Base/Notes/Patterns/private.csv"
+    target = vault / dataset
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("name,value\nAlice,42\n", encoding="utf-8")
+    write_scope(vault)
+    write_rule(vault, ceiling=egress.LEVEL_NONE)
+    with request_scope(_external()):
+        with pytest.raises(ValueError, match="NOT_FOUND"):
+            commands.op_query_data(vault, path=dataset)
+
+    write_rule(vault, ceiling=egress.LEVEL_FULL)
+    _reset_caches()
+    with request_scope(_external()):
+        with egress.disclosure_boundary(vault, "query_data") as collector:
+            payload = commands.op_query_data(vault, path=dataset)
+            egress.emit_boundary_receipt(collector)
+    assert payload["rows"] == [{"name": "Alice", "value": "42"}]
+    record = _receipt_records(vault)[0]
+    assert record["outcomes"][0]["decision"] == "released"
+    assert "Alice" not in json.dumps(record)
+
+
+def test_receipt_conflict_never_turns_a_committed_mutation_into_a_retry_error(vault: Path) -> None:
+    write_scope(vault)
+    write_rule(vault, ceiling=egress.LEVEL_FULL)
+    events = _gov_dir(vault) / "events"
+    events.mkdir(parents=True, exist_ok=True)
+    (events / "conflicted copy.jsonl").write_text("{}\n", encoding="utf-8")
+    result = _through_dispatcher(
+        vault,
+        "create_file",
+        path="Knowledge Base/Notes/receipt-mutation.md",
+        content="committed body",
+    )
+    assert (vault / "Knowledge Base/Notes/receipt-mutation.md").exists()
+    assert "GOVERNANCE_RECEIPT_UNAVAILABLE" not in str(result)
 
 
 def test_structure_surfaces_are_registered_content_returning() -> None:
@@ -2588,6 +3172,132 @@ def test_direct_read_uses_the_target_it_classified_when_symlink_is_swapped(
         assert out["frontmatter"]["classification"] == "ordinary"
         assert "policy-tree-secret" not in json.dumps(out, default=str)
     assert swapped is True
+
+
+@pytest.mark.parametrize("leaf", ["get", "fetch", "frontmatter"])
+def test_direct_read_uses_the_prepared_ordinary_snapshot_after_target_replacement(
+    vault: Path, leaf: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A post-classification rename cannot substitute the returned bytes."""
+    from exomem import get_frontmatter as get_frontmatter_module
+    from exomem import get_page as get_page_module
+
+    rel = "Knowledge Base/Notes/prepared-snapshot.md"
+    target = vault / rel
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(
+        "---\ntype: source\nclassification: ordinary\n---\nordinary-body\n",
+        encoding="utf-8",
+    )
+    replacement = target.with_name("prepared-snapshot-replacement.md")
+    replacement.write_text(
+        "---\ntype: source\nclassification: replacement\n---\nreplacement-body\n",
+        encoding="utf-8",
+    )
+
+    original_refusal = commands._refuse_policy_tree_read
+    replaced = False
+
+    def _classify_then_replace(*args: object, **kwargs: object) -> None:
+        nonlocal replaced
+        original_refusal(*args, **kwargs)
+        if not replaced:
+            replacement.replace(target)
+            replaced = True
+
+    monkeypatch.setattr(commands, "_refuse_policy_tree_read", _classify_then_replace)
+
+    if leaf == "fetch":
+        out = commands.op_fetch(vault, id=rel)
+        assert "ordinary-body" in out["text"]
+        assert "replacement-body" not in out["text"]
+    elif leaf == "get":
+        out = commands.op_get(vault, path=rel)
+        assert out["frontmatter"]["classification"] == "ordinary"
+        assert out["body"] == "ordinary-body\n"
+    else:
+        prepared = get_page_module.prepare_page_read(vault, path=rel)
+        commands._refuse_policy_tree_read(
+            prepared.resolved_relative, missing_path=prepared.missing_path
+        )
+        out = get_frontmatter_module.get_frontmatter(vault, path=rel, _prepared=prepared)
+        assert out.frontmatter["classification"] == "ordinary"
+
+    assert replaced is True
+
+
+def test_prepare_page_read_refuses_a_target_replaced_while_binding(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Preparation refuses rather than binding bytes from a swapped leaf."""
+    from exomem import get_page as get_page_module
+
+    rel = "Knowledge Base/Notes/preparation-race.md"
+    target = vault / rel
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("---\ntype: source\n---\nordinary-body\n", encoding="utf-8")
+    replacement = target.with_name("preparation-race-replacement.md")
+    replacement.write_text("---\ntype: source\n---\nreplacement-body\n", encoding="utf-8")
+
+    original_open = get_page_module.os.open
+    replaced = False
+
+    def _replace_then_open(path: object, flags: int, *args: object) -> int:
+        nonlocal replaced
+        if not replaced and Path(path) == target:
+            replacement.replace(target)
+            replaced = True
+        return original_open(path, flags, *args)
+
+    monkeypatch.setattr(get_page_module.os, "open", _replace_then_open)
+
+    with pytest.raises(get_page_module.GetError) as exc:
+        get_page_module.prepare_page_read(vault, path=rel)
+
+    assert exc.value.code == "UNREADABLE"
+    assert replaced is True
+
+
+@pytest.mark.parametrize(
+    "surface",
+    ["get", "fetch", "frontmatter", "get-page", "get-frontmatter"],
+)
+def test_direct_read_refuses_an_ordinary_alias_to_an_excluded_target(
+    vault: Path, surface: str
+) -> None:
+    """Direct readers enforce exclusion on the resolved target as well."""
+    from exomem import get_frontmatter as get_frontmatter_module
+    from exomem import get_page as get_page_module
+
+    secret = vault / "Knowledge Base/Private/secret.md"
+    secret.parent.mkdir(parents=True, exist_ok=True)
+    secret.write_text("---\ntype: source\n---\nsecret body\n", encoding="utf-8")
+    (vault / "Knowledge Base/_access.yaml").write_text(
+        "excluded:\n  - Private\n", encoding="utf-8"
+    )
+    rel = "Knowledge Base/Notes/private-alias.md"
+    alias = vault / rel
+    alias.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        alias.symlink_to(secret)
+    except OSError:
+        pytest.skip("symlinks unavailable")
+
+    error_type = {
+        "get": ValueError,
+        "fetch": ValueError,
+        "frontmatter": ValueError,
+        "get-page": get_page_module.GetError,
+        "get-frontmatter": get_frontmatter_module.GetFrontmatterError,
+    }[surface]
+
+    with pytest.raises(error_type) as refused:
+        _read_alias_surface(vault, path=rel, surface=surface)
+    alias.unlink()
+    with pytest.raises(error_type) as missing:
+        _read_alias_surface(vault, path=rel, surface=surface)
+
+    assert str(refused.value) == str(missing.value)
 
 
 # --------------------------------------------------------------------------

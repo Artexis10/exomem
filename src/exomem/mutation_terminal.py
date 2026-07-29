@@ -108,10 +108,12 @@ def committed_terminal(
 
 def split_response_detail(
     kwargs: Mapping[str, Any],
+    *,
+    default: ResponseDetail = "compact",
 ) -> tuple[dict[str, Any], ResponseDetail]:
     """Remove presentation detail from an owned invocation-payload copy."""
     payload = dict(kwargs)
-    detail = payload.pop("response_detail", "compact")
+    detail = payload.pop("response_detail", default)
     if not isinstance(detail, str) or detail not in _RESPONSE_DETAILS:
         raise ValueError(
             "response_detail must be one of: compact, full, legacy"

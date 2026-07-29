@@ -18,16 +18,18 @@ compat with how this tool worked before the broadening.
 from __future__ import annotations
 
 import logging
+import os
+import stat
 from dataclasses import dataclass
 from pathlib import Path
 
 from . import access, privacy_log
+from . import find as find_module
 from .kbdir import kb_prefix
 from .vault import (
     VaultPathError,
     VaultPathResolution,
     content_hash,
-    parse_frontmatter,
     resolve_under_vault,
 )
 
@@ -72,16 +74,65 @@ class GetError(Exception):
 
 @dataclass(frozen=True)
 class PreparedPageRead:
-    """A normalized lexical path bound to one resolved read target."""
+    """A normalized lexical path and immutable bytes from one read target."""
 
     target: Path
     path: str
     missing_path: str
     resolved_relative: str
+    raw: bytes
+    mtime: float
+
+
+class _SnapshotChanged(OSError):
+    """The leaf named by a resolved target changed while it was being bound."""
+
+
+def _is_link_or_reparse(info: os.stat_result) -> bool:
+    attributes = getattr(info, "st_file_attributes", 0)
+    reparse = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+    return stat.S_ISLNK(info.st_mode) or bool(attributes & reparse)
+
+
+def _snapshot_identity(info: os.stat_result) -> tuple[int, int]:
+    return info.st_dev, info.st_ino
+
+
+def _read_prepared_snapshot(target: Path) -> tuple[bytes, os.stat_result] | None:
+    """Bind bytes to the resolved leaf without following a later name swap."""
+    before = os.lstat(target)
+    if _is_link_or_reparse(before) or not stat.S_ISREG(before.st_mode):
+        return None
+
+    flags = os.O_RDONLY
+    flags |= getattr(os, "O_BINARY", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(target, flags)
+    try:
+        bound = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(bound.st_mode)
+            or _snapshot_identity(before) != _snapshot_identity(bound)
+        ):
+            raise _SnapshotChanged("file changed while preparing read")
+        chunks: list[bytes] = []
+        while chunk := os.read(descriptor, 1024 * 1024):
+            chunks.append(chunk)
+        raw = b"".join(chunks)
+    finally:
+        os.close(descriptor)
+
+    try:
+        after = os.lstat(target)
+    except OSError as error:
+        raise _SnapshotChanged("file changed while preparing read") from error
+    if _is_link_or_reparse(after) or _snapshot_identity(after) != _snapshot_identity(bound):
+        raise _SnapshotChanged("file changed while preparing read")
+    return raw, bound
 
 
 def prepare_page_read(vault_root: Path, *, path: str) -> PreparedPageRead:
-    """Normalize and resolve one direct read without opening its content."""
+    """Normalize, resolve, and bind one direct read to an immutable snapshot."""
 
     if not path or not path.strip():
         raise GetError(code="INVALID_PATH", reason="path is empty")
@@ -122,20 +173,34 @@ def prepare_page_read(vault_root: Path, *, path: str) -> PreparedPageRead:
     # `excluded` paths (_access.yaml) refuse identically to a missing file —
     # never a distinct error, never echoed differently — so the response is
     # not an existence oracle for content the tier marks truly private.
-    if (
-        access.refuse_if_excluded(vault_root, resolution.relative)
-        or not resolution.resolved.exists()
-        or not resolution.resolved.is_file()
-    ):
+    if access.refuse_if_excluded(
+        vault_root, resolution.relative
+    ) or access.refuse_if_excluded(vault_root, resolution.resolved_relative):
         raise GetError(
             code="NOT_FOUND",
             reason=f"file does not exist: {missing_path}",
         )
+    try:
+        snapshot = _read_prepared_snapshot(resolution.resolved)
+    except FileNotFoundError:
+        snapshot = None
+    except _SnapshotChanged as error:
+        raise GetError(code="UNREADABLE", reason=str(error)) from None
+    except OSError as error:
+        raise GetError(code="UNREADABLE", reason=str(error)) from error
+    if snapshot is None:
+        raise GetError(
+            code="NOT_FOUND",
+            reason=f"file does not exist: {missing_path}",
+        )
+    raw, snapshot_stat = snapshot
     return PreparedPageRead(
         target=resolution.resolved,
         path=resolution.relative,
         missing_path=missing_path,
         resolved_relative=resolution.resolved_relative,
+        raw=raw,
+        mtime=snapshot_stat.st_mtime,
     )
 
 
@@ -156,24 +221,27 @@ def get_page(
     prepared = _prepared or prepare_page_read(vault_root, path=path)
 
     try:
-        mtime = prepared.target.stat().st_mtime
-    except OSError as e:
+        content = prepared.raw.decode("utf-8")
+    except UnicodeDecodeError as e:
         raise GetError(code="UNREADABLE", reason=str(e)) from e
 
-    try:
-        content = prepared.target.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
+    parsed = find_module._parse_page(
+        prepared.target,
+        prepared.mtime,
+        vault_root,
+        content=prepared.raw,
+        resolved_relative=prepared.resolved_relative,
+    )
+    if parsed is None:
         raise GetError(
             code="UNREADABLE",
             reason=f"could not parse {prepared.path} as a markdown file with frontmatter",
-        ) from None
-
-    frontmatter, body, _frontmatter_text = parse_frontmatter(content)
+        )
     return GetResult(
         path=prepared.path,
-        frontmatter=frontmatter,
-        body=body,
+        frontmatter=parsed.frontmatter,
+        body=parsed.body,
         content=content,
         content_hash=content_hash(content),
-        mtime=mtime,
+        mtime=prepared.mtime,
     )

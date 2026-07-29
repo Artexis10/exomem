@@ -64,6 +64,7 @@ class RequestPrincipal:
     audience_id: str
     surface: str = "library"
     session_id: str | None = None
+    authorization_session_id: str | None = None
     purpose: str | None = None
     resolved: bool = True
 
@@ -72,6 +73,10 @@ class RequestPrincipal:
         if purpose is None:
             return self
         return replace(self, purpose=purpose)
+
+    def with_authorization_session(self, handle: str | None) -> RequestPrincipal:
+        """Bind the explicit client-conversation authorization identity."""
+        return replace(self, authorization_session_id=handle)
 
 
 def normalize_audience(*, subject: Any, issuer: Any = None) -> str:

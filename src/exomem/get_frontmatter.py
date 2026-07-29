@@ -52,8 +52,8 @@ def get_frontmatter(
         raise GetFrontmatterError(code=e.code, reason=e.reason) from e
 
     try:
-        text = prepared.target.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError) as e:
+        text = prepared.raw.decode("utf-8")
+    except UnicodeDecodeError as e:
         raise GetFrontmatterError(
             code="UNREADABLE", reason=f"could not read {prepared.path}: {e}"
         ) from e

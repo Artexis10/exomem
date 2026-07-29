@@ -194,7 +194,7 @@ def build_capabilities_markdown() -> str:
             "## Notes",
             "",
             "- A `*` suffix in the parameter list means the parameter is required.",
-            "- Tier 2 commands are advanced file and data operations exposed only when the surface enables tier 2.",
+            "- Tier 2 commands are advanced governance administration and file/data operations exposed only when the surface enables tier 2.",
             "- Destructive commands are writes that can replace, move, delete, or bulk-fix content.",
             "",
         ]

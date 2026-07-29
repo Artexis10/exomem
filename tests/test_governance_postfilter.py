@@ -986,6 +986,94 @@ def test_continue_adoption_prompt_keeps_permitted_references(
     assert "rrf-fusion-beats-score-normalization" in text
 
 
+def test_nested_adoption_payload_gates_every_existing_artifact_kind_once(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Residual prompt/resource payloads use the same artifact resolver.
+
+    Coverage is based on actual vault artifacts, not a suffix regex: paths
+    with spaces, office/media files, bare names, wikilinks, and full refs are
+    recursively gated even below `handoff.prompt_text`.
+    """
+    from urllib.parse import quote
+
+    from exomem import server as server_module
+
+    _as_external_connector_client(monkeypatch)
+    _govern_patterns_shut(vault)
+    root = vault / "Knowledge Base" / "Notes" / "Patterns" / "Private Artifacts"
+    root.mkdir(parents=True, exist_ok=True)
+    names = (
+        "private note.md",
+        "private rows.csv",
+        "private rows.tsv",
+        "private data.json",
+        "private report.pdf",
+        "private brief.docx",
+        "private image.png",
+        "private audio.mp3",
+        "private video.mp4",
+    )
+    for name in names:
+        (root / name).write_bytes(b"governed-artifact")
+    rel = "Knowledge Base/Notes/Patterns/Private Artifacts/private report.pdf"
+    payload = {
+        "handoff": {
+            "prompt_text": (
+                f"Open {rel}; [[{rel}]]; exomem://vault/{quote(rel)}; "
+                "and bare private report.pdf twice: private report.pdf"
+            )
+        },
+        "resources": [
+            {
+                "resource": (
+                    "Knowledge Base/Notes/Patterns/Private Artifacts/" + name
+                )
+            }
+            for name in names
+        ],
+    }
+    out = server_module._gated_adoption_egress(vault, "adoption_run", payload)
+    serialized = json.dumps(out, default=str)
+    assert "Private Artifacts" not in serialized
+    assert "Private%20Artifacts" not in serialized
+    assert "private report.pdf" not in serialized
+    assert egress.WITHHELD_REFERENCE in serialized
+    events = vault / "Knowledge Base" / "_Governance" / "events"
+    records = [
+        json.loads(line)
+        for path in sorted(events.rglob("*.jsonl"))
+        for line in path.read_text(encoding="utf-8").splitlines()
+    ]
+    disclosure = [record for record in records if record["event_type"] == "disclosure"]
+    assert disclosure
+    report_outcomes = [
+        outcome
+        for outcome in disclosure[-1]["outcomes"]
+        if outcome.get("content_hash")
+        == __import__("hashlib").sha256(b"governed-artifact").hexdigest()
+    ]
+    assert len(report_outcomes) == len(names)
+
+
+def test_nested_adoption_payload_gates_artifact_references_in_mapping_keys(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import server as server_module
+
+    _as_external_connector_client(monkeypatch)
+    _govern_patterns_shut(vault)
+    payload = {
+        "handoff": {
+            "resources": {
+                "[[kill-switch-for-risky-releases]]": {"prompt_text": "safe"}
+            }
+        }
+    }
+    out = server_module._gated_adoption_egress(vault, "adoption_run", payload)
+    assert "kill-switch-for-risky-releases" not in json.dumps(out, default=str)
+
+
 # --------------------------------------------------------------------------
 # N8 — alias coverage must not be granted by a hand-written annotation
 # --------------------------------------------------------------------------

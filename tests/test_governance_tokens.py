@@ -18,13 +18,14 @@ ceiling is, so both refuse to mint.
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import time
 from pathlib import Path
 
 import pytest
 
-from exomem.governance import egress, tokens
+from exomem.governance import egress, receipts, tokens
 from exomem.governance.principal import RequestPrincipal
 from exomem.governance.store import sidecar_path
 
@@ -97,6 +98,17 @@ def _mint(vault: Path, **kw) -> str:
     return tokens.mint(vault, **kw)
 
 
+def _receipt_records(vault: Path) -> list[dict[str, object]]:
+    events = _gov(vault) / "events"
+    if not events.exists():
+        return []
+    return [
+        json.loads(line)
+        for path in sorted(events.rglob("*.jsonl"))
+        for line in path.read_text(encoding="utf-8").splitlines()
+    ]
+
+
 # --------------------------------------------------------------------------
 # Wire form and mint/verify
 # --------------------------------------------------------------------------
@@ -111,6 +123,67 @@ def test_mint_produces_the_wh1_wire_form(vault: Path) -> None:
     assert parts[1] and parts[2].isdigit() and parts[3]
     # The wire form carries no path, no content, no level.
     assert RESTRICTED_PATH not in token
+
+
+def test_token_mint_and_redeem_are_receipted_without_token_bytes(vault: Path) -> None:
+    govern(vault)
+    token = _mint(vault)
+    minted = _receipt_records(vault)
+    assert [record["event_type"] for record in minted] == ["token_mint"]
+    assert token not in json.dumps(minted)
+    assert minted[0]["token_id_digest"] != token.split(".")[1]
+
+    tokens.redeem(vault, token, audience=EXTERNAL)
+    events = _receipt_records(vault)
+    assert [record["event_type"] for record in events] == [
+        "token_mint", "critical", "token_redeem", "critical"
+    ]
+    assert [record["phase"] for record in events[1:]] == ["intent", "recorded", "committed"]
+    assert token not in json.dumps(events)
+
+
+def test_consumed_token_is_rejected_before_any_new_redeem_receipt(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    govern(vault)
+    token = _mint(vault)
+    tokens.redeem(vault, token, audience=EXTERNAL)
+    before = _receipt_records(vault)
+    monkeypatch.setattr(receipts, "begin_event", lambda *_a, **_kw: (_ for _ in ()).throw(AssertionError("receipt appended")))
+    with pytest.raises(tokens.WithholdTokenError, match="TOKEN_CONSUMED"):
+        tokens.redeem(vault, token, audience=EXTERNAL)
+    assert _receipt_records(vault) == before
+
+
+def test_redeem_terminal_failure_reconciles_from_consumed_token_state(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    govern(vault)
+    token = _mint(vault)
+
+    def fail_terminal(*_args, **_kwargs):
+        raise receipts.ReceiptError("injected terminal failure")
+
+    monkeypatch.setattr(receipts, "commit_event", fail_terminal)
+    with pytest.raises(tokens.WithholdTokenError, match="TOKEN_RECEIPT_UNAVAILABLE"):
+        tokens.redeem(vault, token, audience=EXTERNAL)
+    monkeypatch.undo()
+    report = receipts.reconcile(vault)
+    assert any(item["kind"] == "terminal" and item["phase"] == "committed" for item in report["repairs"])
+    events = _receipt_records(vault)
+    assert [event["phase"] for event in events].count("committed") == 1
+
+
+def test_redeem_resolver_classifies_exact_prior_target_and_third_state(vault: Path) -> None:
+    govern(vault)
+    token = _mint(vault)
+    jti = token.split(".")[1]
+    digest = tokens._token_id_digest(jti)
+    intent = {"affected_ids": [digest], "prior": "a" * 64, "target": "b" * 64}
+    assert tokens._resolve_redeem_state(vault, intent) == intent["prior"]
+    tokens.redeem(vault, token, audience=EXTERNAL)
+    assert tokens._resolve_redeem_state(vault, intent) == intent["target"]
+    assert tokens._resolve_redeem_state(vault, {**intent, "affected_ids": ["c" * 64]}) is None
 
 
 def test_verify_round_trips_the_bound_claims(vault: Path) -> None:
@@ -181,6 +254,83 @@ def test_token_is_bound_to_its_audience(vault: Path) -> None:
     assert err.value.code == "TOKEN_INVALID"
 
 
+def test_token_signature_binds_exact_paths_level_session_purpose_and_org_ceiling(
+    vault: Path,
+) -> None:
+    govern(vault)
+    token = _mint(
+        vault,
+        authorization_session="opaque-conversation",
+        purpose="audit",
+        org_ceiling=egress.LEVEL_EXCERPT,
+    )
+    claim = tokens.verify(
+        vault,
+        token,
+        audience=EXTERNAL,
+        authorization_session="opaque-conversation",
+        purpose="audit",
+    )
+    assert claim.paths == (RESTRICTED_PATH,)
+    assert claim.authorization_session == "opaque-conversation"
+    assert claim.purpose == "audit"
+    assert claim.org_ceiling == egress.LEVEL_EXCERPT
+
+    with sqlite3.connect(sidecar_path(vault)) as conn:
+        conn.execute(
+            "UPDATE withhold_tokens SET max_level=? WHERE jti=?",
+            (egress.LEVEL_FULL, claim.jti),
+        )
+        conn.commit()
+    with pytest.raises(tokens.WithholdTokenError) as err:
+        tokens.verify(
+            vault,
+            token,
+            audience=EXTERNAL,
+            authorization_session="opaque-conversation",
+            purpose="audit",
+        )
+    assert err.value.code == "TOKEN_INVALID"
+
+
+def test_token_refuses_a_different_authorization_session(vault: Path) -> None:
+    govern(vault)
+    token = _mint(vault, authorization_session="session-a")
+    with pytest.raises(tokens.WithholdTokenError) as err:
+        tokens.verify(
+            vault,
+            token,
+            audience=EXTERNAL,
+            authorization_session="session-b",
+        )
+    assert err.value.code == "TOKEN_INVALID"
+
+
+def test_swapping_approved_file_contents_refuses_without_consuming(vault: Path) -> None:
+    govern(vault, ceiling=egress.LEVEL_NOTICE)
+    first_path = RESTRICTED_PATH
+    second_path = OTHER_PATH
+    token = tokens.mint(
+        vault,
+        paths=[first_path, second_path],
+        audience=EXTERNAL,
+        max_level=egress.LEVEL_EXCERPT,
+    )
+    first = vault / first_path
+    second = vault / second_path
+    first_bytes = first.read_bytes()
+    second_bytes = second.read_bytes()
+    first.write_bytes(second_bytes)
+    second.write_bytes(first_bytes)
+
+    with pytest.raises(tokens.WithholdTokenError) as error:
+        tokens.redeem(vault, token, audience=EXTERNAL)
+    assert error.value.code == "TOKEN_CONTENT_DRIFT"
+    with sqlite3.connect(sidecar_path(vault)) as conn:
+        assert conn.execute(
+            "SELECT consumed_at FROM withhold_tokens WHERE jti=?",
+            (token.split(".")[1],),
+        ).fetchone() == (None,)
 # --------------------------------------------------------------------------
 # Consume-once
 # --------------------------------------------------------------------------

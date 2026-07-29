@@ -6,12 +6,12 @@ Run `uv run python scripts/generate-capabilities.py --check` to verify it is cur
 
 ## Summary
 
-- Product commands: 25
+- Product commands: 26
 - Tier 1 commands: 22
-- Tier 2 commands: 3
-- Registry-generated MCP commands: 25
-- REST commands: 24
-- CLI commands: 24
+- Tier 2 commands: 4
+- Registry-generated MCP commands: 26
+- REST commands: 25
+- CLI commands: 25
 - Hand-registered MCP tools: none
 
 ## Hosted Cell Capability Boundary
@@ -40,10 +40,10 @@ See [hosted-operations.md](hosted-operations.md) and the
 | ask_memory | 1 | MCP, REST, CLI | read | no | query | search, find | query, types, projects, tags, speakers, file_types, exclude_file_types, categories, kinds, relations, relation_of, relation_direction, filters, result_level, limit, scope, mode, detail, deep, graph, rerank, rerank_max_candidates, prefer_compiled, prefer_active, prefer_used, graph_enrich, include_timings, explain, purpose | Recall durable knowledge from Exomem with product defaults. |
 | read_memory | 1 | MCP, REST, CLI | read | no | path | fetch, get | path*, frontmatter_only, include_history, links, include_raw, unit_ref, purpose | Read one memory page or one exact semantic unit by reference. |
 | browse_memory | 1 | MCP, REST, CLI | read | no | path | overview, list_directory | path, mode, max_depth, include_hidden, samples, recursive | Browse vault structure without reading many files. |
-| remember | 1 | MCP, REST, CLI | write | no | - | note | content*, title*, slug, note_type, project, projects, sources, tags, status, severity, pattern_type, domain, started, duration, hypothesis, n, concluded, medium, recorded, published, host, editor, suggestions, project_category, validate_only, draft_id, draft_hash, draft_token, relation_disposition, relation_review_hash, relation_review_reason, response_detail | Remember a durable conclusion as compiled governed knowledge. |
+| remember | 1 | MCP, REST, CLI | write | no | - | note | content*, title*, slug, note_type, project, projects, sources, tags, status, severity, pattern_type, domain, started, duration, hypothesis, n, concluded, medium, recorded, published, host, editor, bridge_of, bridge_scope, bridge_review, suggestions, project_category, validate_only, draft_id, draft_hash, draft_token, relation_disposition, relation_review_hash, relation_review_reason, response_detail | Remember a durable conclusion as compiled governed knowledge. |
 | edit_memory | 1 | MCP, REST, CLI | write | yes | path | edit | path*, why*, operation*, response_detail | Edit an existing memory page with an auditable reason. |
 | observe_memory | 1 | MCP, REST, CLI | write | yes | path | observe_memory | path*, operation, category, content, kind, tags, context, relations, unit_ref, expected_fingerprint, expected_hash, transition_token, relation_disposition, relation_review_hash, relation_review_reason, response_detail | Validate or mutate one semantic unit on a compiled memory page. |
-| replace_memory | 1 | MCP, REST, CLI | write | yes | old_path | replace | old_path*, content*, title*, slug, note_type, reason, project, projects, sources, tags, status, severity, pattern_type, domain, started, duration, hypothesis, n, concluded, medium, recorded, published, host, editor, project_category, validate_only, draft_id, draft_hash, draft_token, relation_disposition, relation_review_hash, relation_review_reason, response_detail | Supersede an existing compiled memory with a new version. |
+| replace_memory | 1 | MCP, REST, CLI | write | yes | old_path | replace | old_path*, content*, title*, slug, note_type, reason, project, projects, sources, tags, status, severity, pattern_type, domain, started, duration, hypothesis, n, concluded, medium, recorded, published, host, editor, bridge_of, bridge_scope, bridge_review, project_category, validate_only, draft_id, draft_hash, draft_token, relation_disposition, relation_review_hash, relation_review_reason, response_detail | Supersede an existing compiled memory with a new version. |
 | capture_source | 1 | MCP, REST, CLI | write | no | - | add, propose_compilation | content*, title*, slug, source_type, url, tags, why_captured, compile_guidance, suggested_title, response_detail | Capture raw source material and optionally return compile guidance. |
 | compile_source | 1 | MCP, REST, CLI | read | no | - | propose_compilation | sources*, suggested_title | Plan a compiled note from one or more raw sources. |
 | preserve_evidence | 1 | MCP, REST, CLI | write | no | - | preserve | scope*, category*, filename*, content*, description, response_detail | Preserve text evidence as append-only proof material. |
@@ -57,6 +57,7 @@ See [hosted-operations.md](hosted-operations.md) and the
 | adoption_studio | 1 | MCP, REST, CLI | write | no | - | adopt | action*, run_id, path, include_hidden, initialize_kb, include, exclude, overrides, include_junk, plan_id, retry_failed, only_paths, why, write_manifest, sources, max_sources, max_chars_per_source, proposals, ref, expected_fingerprint, expected_hash, response_detail | Run a governed, resumable Adoption Studio session over existing material. |
 | maintain_memory | 1 | MCP, REST, CLI | write | yes | - | audit, audit_fix, reconcile | mode, categories, dry_run, rebuild_embeddings, detail, legacy_sample_limit, response_detail | Maintain vault health with explicit write-capable modes. |
 | schema_memory | 1 | MCP, REST, CLI | write | yes | - | schema_memory | operation*, name, subject, project, page_type, save, expected_hash, strict, compare_to, proposal, include_model_suggestions, response_detail | Infer, validate, diff, or save governed memory schemas. |
+| govern_memory | 2 | MCP, REST, CLI | write | yes | operation | - | operation*, documents, selector_paths, intent, ttl_seconds, target_ceiling, duration, proposal_id, scope, grant_id, scope_ids, audience, ceiling, token, authorization_session, purpose, duration_seconds, rule_ids, path, paths, response_detail | Inspect or author opt-in confidential governance policy. |
 | manage_memory_file | 2 | MCP, REST, CLI | write | yes | - | create_file, list_directory, move_file, delete, append_to_file, list_trash, recover_from_trash | operation, path, content, frontmatter, overwrite, allow_curated, kind, parents, recursive, include_hidden, old_path, new_path, update_wikilinks, confirm, force_orphan, force_superseded, expected_dead_inbound, trash_path, restore_path, date, validate_only, draft_id, draft_hash, draft_token, semantic_transition_token, relation_disposition, relation_review_hash, relation_review_reason, promotion_reason, response_detail | Manage files through one governed file operation. |
 | query_dataset | 2 | MCP, REST, CLI | read | no | path | query_data | path*, record_path, filters, columns, sort_by, descending, limit, offset, aggregate, date_from, date_to, date_column | Query a CSV, TSV, or JSON dataset under the vault. |
 | read_media | 2 | MCP | read | no | path | get_video_frames | path*, max_frames, start_sec, end_sec | Read sampled video frames inline for visual inspection. |
@@ -97,5 +98,5 @@ Artifact transfer is exposed through `transfer_artifact`; canonical token helper
 ## Notes
 
 - A `*` suffix in the parameter list means the parameter is required.
-- Tier 2 commands are advanced file and data operations exposed only when the surface enables tier 2.
+- Tier 2 commands are advanced governance administration and file/data operations exposed only when the surface enables tier 2.
 - Destructive commands are writes that can replace, move, delete, or bulk-fix content.

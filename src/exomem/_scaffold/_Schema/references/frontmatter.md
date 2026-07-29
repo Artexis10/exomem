@@ -90,6 +90,18 @@ losslessly; the server never guesses a language, pronunciation, or translation.
 | `entity_type` | yes | Stable ID from the active entity registry; use bootstrap guidance rather than maintaining a separate validity list. |
 | Other | per type | see `page-types.md` for entity-type-specific fields |
 
+### cross-domain bridge (optional on compiled note types)
+
+| Field | Required | Notes |
+|---|---|---|
+| `bridge_of` | all-or-none | non-empty list of stable memory refs after normal authoring resolves supplied source paths |
+| `bridge_scope` | all-or-none | descriptive lowercase slug; it never grants access or changes scope membership |
+| `bridge_review` | all-or-none | ISO date for derived review-queue surfacing; it does not itself expire an otherwise exact release |
+
+Use the normal reviewed `remember` or `replace_memory` flow to author these
+fields. A bridge draft remains unreleased until a separate exact release grant
+is owner-reviewed and committed through governance.
+
 ## Status semantics
 
 For most page types:
