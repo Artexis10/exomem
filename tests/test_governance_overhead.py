@@ -128,8 +128,17 @@ _OVERHEAD_QUERIES = (
 )
 #: Median added milliseconds `op_find` may spend in the release plane on a
 #: vault with no `_Governance/` directory. The empty-policy fast path is a
-#: single `is_dir()` plus the projector's allow-list filter per hit.
+#: bounded set of governance-marker, sidecar, and lifecycle probes plus the
+#: projector's allow-list filter per hit.
 _EMPTY_POLICY_BUDGET_MS = 5.0
+#: Direct entry-point work must not grow with corpus size. This is deliberately
+#: a ratio, not an absolute microsecond ceiling: shared runners can delay an
+#: entire timing batch, but the same bounded probes should cost the same on a
+#: 50-note and a 1,000-note vault. A 3x ceiling matches the other load-invariant
+#: gates in this module while still catching any accidental corpus walk.
+_ENTRY_POINT_SCALE_RATIO_CEILING = 3.0
+_ENTRY_POINT_BATCH_CALLS = 1000
+_ENTRY_POINT_SAMPLES = 5
 #: Scrubber budget: < 2 ms per 100 KB of result text (design D7).
 _SCRUBBER_BUDGET_MS_PER_100KB = 2.0
 
@@ -200,6 +209,32 @@ def _best_ms(fn, samples: int) -> float:
         fn()
         elapsed.append((time.perf_counter() - start) * 1000.0)
     return min(elapsed)
+
+
+def _interleaved_best_per_call_us(
+    small_fn: Callable[[], Any], large_fn: Callable[[], Any]
+) -> tuple[float, float]:
+    """Return the least-contaminated per-call costs for two fixed-work paths.
+
+    Each sample times a batch large enough to span scheduler quanta, and the
+    order alternates so a transient load spike cannot systematically favor one
+    corpus size. Scheduling noise only adds time, so the minimum batch for each
+    side is the useful estimate, as with `_best_ms` above.
+    """
+    small_fn()
+    large_fn()
+    elapsed: dict[str, list[float]] = {"small": [], "large": []}
+    functions = {"small": small_fn, "large": large_fn}
+    for sample in range(_ENTRY_POINT_SAMPLES):
+        order = ("small", "large") if sample % 2 == 0 else ("large", "small")
+        for label in order:
+            start = time.perf_counter()
+            for _ in range(_ENTRY_POINT_BATCH_CALLS):
+                functions[label]()
+            elapsed[label].append(
+                (time.perf_counter() - start) / _ENTRY_POINT_BATCH_CALLS * 1_000_000
+            )
+    return min(elapsed["small"]), min(elapsed["large"])
 
 
 def _skip_unless_quiet(control_ms: float, ratio: float, ratio_ceiling: float) -> None:
@@ -300,23 +335,40 @@ def test_empty_policy_op_find_overhead_under_budget(tmp_path: Path, monkeypatch)
 
 def test_empty_policy_gate_entry_points_are_constant_time(tmp_path: Path) -> None:
     """The two entry points the release plane adds to `op_find` on an
-    ungoverned vault: a `policy.load` that short-circuits on `is_dir()`, and
-    an `annotate_hits` that returns its input. Both are microseconds, and
-    pinning them directly is what makes the paired A/B above interpretable."""
-    vault = tmp_path / "dense-small"
-    gen_dense_vault(vault, 50)
-    for _ in range(20):
-        egress_module.gate_state(vault)
-    start = time.perf_counter()
-    for _ in range(200):
-        egress_module.gate_state(vault)
-    gate_us = (time.perf_counter() - start) / 200 * 1_000_000
-    start = time.perf_counter()
-    for _ in range(200):
-        egress_module.annotate_hits(vault, [], limit=10)
-    annotate_us = (time.perf_counter() - start) / 200 * 1_000_000
-    assert gate_us < 500, f"gate_state cost {gate_us:.1f} us per call"
-    assert annotate_us < 500, f"annotate_hits cost {annotate_us:.1f} us per call"
+    ungoverned vault: a bounded policy/lifecycle probe and an `annotate_hits`
+    call that returns its input. Their cost must not grow with the corpus.
+
+    The end-to-end paired A/B above owns the absolute 5 ms release-plane
+    budget. This direct gate protects the constant-work invariant with an
+    interleaved ratio so scheduler contention cannot turn a healthy path into
+    a false release failure.
+    """
+    small_vault = tmp_path / "dense-small"
+    large_vault = tmp_path / "dense-large"
+    gen_dense_vault(small_vault, 50, links_per_note=0)
+    gen_dense_vault(large_vault, 1000, links_per_note=0)
+
+    small_gate_us, large_gate_us = _interleaved_best_per_call_us(
+        lambda: egress_module.gate_state(small_vault),
+        lambda: egress_module.gate_state(large_vault),
+    )
+    gate_ratio = max(small_gate_us, large_gate_us) / min(small_gate_us, large_gate_us)
+    assert gate_ratio < _ENTRY_POINT_SCALE_RATIO_CEILING, (
+        f"gate_state scaled {gate_ratio:.1f}x with corpus size "
+        f"(small={small_gate_us:.1f} us, large={large_gate_us:.1f} us)"
+    )
+
+    small_annotate_us, large_annotate_us = _interleaved_best_per_call_us(
+        lambda: egress_module.annotate_hits(small_vault, [], limit=10),
+        lambda: egress_module.annotate_hits(large_vault, [], limit=10),
+    )
+    annotate_ratio = max(small_annotate_us, large_annotate_us) / min(
+        small_annotate_us, large_annotate_us
+    )
+    assert annotate_ratio < _ENTRY_POINT_SCALE_RATIO_CEILING, (
+        f"annotate_hits scaled {annotate_ratio:.1f}x with corpus size "
+        f"(small={small_annotate_us:.1f} us, large={large_annotate_us:.1f} us)"
+    )
 
 
 # ---------------------------------------------------------------------------
