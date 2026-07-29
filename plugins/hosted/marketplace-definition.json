@@ -24,7 +24,7 @@
       "write": "Deliberate durable capture of concise conclusions."
     },
     "regions": ["EEA", "United States"],
-    "release_notes": "Initial hosted private-alpha directory submission."
+    "release_notes": "Hosted directory submission."
   },
   "channels": {
     "claude-connector": {
@@ -47,7 +47,7 @@
     },
     "openai-plugin": {
       "title": "Exomem Hosted",
-      "short_description": "Governed project knowledge for ChatGPT and Codex.",
+      "short_description": "Governed knowledge, cited.",
       "starter_prompts": [
         "What is relevant from my governed project knowledge?",
         "Find evidence for this plan and cite it.",

@@ -1,0 +1,56 @@
+{
+  "schema_version": 1,
+  "fixture_version": "v1",
+  "payload": {
+    "notes": [
+      {
+        "reference": "project-brief",
+        "key": "review-project-brief",
+        "title": "Project brief",
+        "content": "## Prior Work\n\nThe generic project has a validated provider contract and a documented pricing decision.\n\n## Next Step\n\nUse the launch plan to prepare the provider review packet."
+      },
+      {
+        "reference": "launch-plan",
+        "key": "review-launch-plan",
+        "title": "Launch plan",
+        "content": "## Decision\n\nThe generic launch plan is to validate the provider contract before preparing the provider review packet.\n\n## Next Step\n\nPrepare the provider review packet after contract validation."
+      },
+      {
+        "reference": "pricing-decision",
+        "key": "review-pricing-decision",
+        "title": "Pricing decision",
+        "content": "## Decision\n\nThe generic pricing decision is to keep provider review free of sales language.\n\n## Provenance\n\nSee [[review-pricing-policy-source]] for the policy source."
+      },
+      {
+        "reference": "pricing-policy-source",
+        "key": "review-pricing-policy-source",
+        "title": "Pricing policy source",
+        "content": "## Source\n\nThe generic pricing policy source states that provider review uses no sales language and no paid-plan offer."
+      },
+      {
+        "reference": "review-item",
+        "key": "review-review-item",
+        "title": "Review item",
+        "content": "## Review Item\n\nConfirm that the pricing policy source remains linked before provider submission."
+      }
+    ],
+    "absent_notes": [
+      {
+        "reference": "review-durable-capture",
+        "key": "review-durable-capture",
+        "title": "Review durable capture",
+        "create_tool": "remember",
+        "note_type": "insight",
+        "content": "## Observations\n\n- [review conclusion] Keep provider review fixtures deterministic. #review (marketplace review) ^review-durable-capture"
+      }
+    ]
+  },
+  "payload_sha256": "15162b1b147016ae3606896e78a14568cb9e5e0aba566eb029b6bd118d88588c",
+  "reset": {
+    "disposable_reference": "review-durable-capture",
+    "disposable_key": "review-durable-capture",
+    "disposable_title": "Review durable capture",
+    "create_tool": "remember",
+    "procedure": "delete_created_note"
+  }
+}

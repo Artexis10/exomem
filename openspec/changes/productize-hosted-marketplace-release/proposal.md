@@ -4,7 +4,7 @@ The hosted runtime and native Claude/OpenAI packages are merged, but they are st
 
 ## What Changes
 
-- Align the OpenAI candidate with the current universal ChatGPT/Codex plugin contract while preserving the registered `asdk_app_*` package identity, using platform-valid MCP wiring, and tracking the later portal-issued `plugin_asdk_app_*` directory identity separately.
+- Align the OpenAI candidate with the current universal ChatGPT/Codex plugin contract while preserving the registered `plugin_asdk_app_*` package identity, using platform-valid MCP wiring, and tracking any later provider-issued directory identity separately.
 - Add a canonical, deterministic marketplace submission definition and generate review packets for the Claude Connector Directory, Claude plugin directory, and OpenAI Plugin Directory from it.
 - Add an executable readiness gate that verifies exact promoted artifact bindings, signed and fresh public-surface evidence, full tool contracts, reviewer account instructions, and platform test cases without committing credentials or tenant identifiers.
 - Track append-only submission revisions and active publications separately from runtime artifact promotion so an update can be reviewed while the prior release remains public and a draft, rejected, or stale listing can never make a pending package appear live.

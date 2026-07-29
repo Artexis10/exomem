@@ -27,6 +27,8 @@ DIRECTORY_CHANNELS = ("claude-connector", "claude-plugin", "openai-plugin")
 DIRECTORY_STATES = frozenset(
     {"draft", "submitted", "in_review", "approved", "published", "rejected", "withdrawn"}
 )
+DIRECTORY_MINIMUM_REVIEW_WINDOW = timedelta(days=1)
+DIRECTORY_REVIEWER_EVIDENCE_MAX_AGE = timedelta(hours=1)
 DEMOTION_REASONS = frozenset(
     {"artifact-withdrawn", "client-regression", "contract-drift", "operator-withdrawal"}
 )
@@ -408,6 +410,7 @@ def validate_hosted_public_inputs(
         hosted_root / "acceptance-fixture-v1.json",
         hosted_root / "marketplace-definition.json",
         hosted_root / "marketplace-review-cases.json",
+        hosted_root / "marketplace-review-fixture-v1.json",
     ]
     paths = [path for path in paths if path.exists()]
     paths.extend(_skill_paths(root))
@@ -522,23 +525,68 @@ def _validate_fresh_utc_timestamp(value: Any, field: str) -> None:
 def _validate_listing_text(value: Any, field: str, maximum: int) -> str:
     if not isinstance(value, str):
         raise ValueError(f"{field} must be a string")
-    text = value.strip()
-    if not text or len(text) > maximum:
+    if not value.strip() or len(value) > maximum:
         raise ValueError(f"{field} must be between 1 and {maximum} characters")
-    lowered = text.lower()
+    lowered = value.lower()
     if "native assistant memory" in lowered or "arbitrary chat history" in lowered:
         raise ValueError(f"{field} makes an unsupported memory claim")
-    return text
+    return value
 
 
 _OPENAI_SALE_LANGUAGE = re.compile(
     r"(?i)\b(?:buy|pro|subscribe(?:d|r|s|ing)?|subscription|upgrade|checkout)\b|\bpaid\s+plan\b"
+)
+_OPENAI_RELEASE_STAGE_LANGUAGE = re.compile(
+    r"(?i)\bprivate[-\s]+alpha\b|\btrial\b|\bdemo\b|\bhypothetical\b|"
+    r"\bnot[-\s]+yet(?:[-\s]+been)?[-\s]+built\b"
+)
+_OPENAI_BOOLEAN_ANNOTATIONS = (
+    "readOnlyHint",
+    "destructiveHint",
+    "idempotentHint",
+    "openWorldHint",
 )
 
 
 def _validate_openai_sale_free_packet(packet: dict[str, Any]) -> None:
     if _OPENAI_SALE_LANGUAGE.search(_canonical_json(packet).decode("utf-8")):
         raise ValueError("openai-plugin packet may not sell or upsell subscriptions")
+
+
+def _validate_openai_release_stage_language(fields: Iterable[str]) -> None:
+    if any(_OPENAI_RELEASE_STAGE_LANGUAGE.search(field) for field in fields):
+        raise ValueError("openai-plugin listing may not make release-stage claims")
+
+
+def _openai_annotation_explanations(annotations: dict[str, Any]) -> dict[str, str]:
+    if any(not isinstance(annotations.get(key), bool) for key in _OPENAI_BOOLEAN_ANNOTATIONS):
+        raise ValueError("marketplace packet tool annotations are incomplete")
+    return {
+        "readOnlyHint": (
+            "This tool only reads governed knowledge and does not change stored content."
+            if annotations["readOnlyHint"]
+            else "This tool may change governed knowledge when the user explicitly requests it."
+        ),
+        "destructiveHint": (
+            "This tool can remove or replace governed content when the user explicitly requests it."
+            if annotations["destructiveHint"]
+            else "This tool does not delete or replace governed content."
+        ),
+        "idempotentHint": (
+            "Repeating the same request produces the same governed result and is safe to retry."
+            if annotations["idempotentHint"]
+            else (
+                "Repeated reads may return different results as governed state changes, so they are not retried automatically."
+                if annotations["readOnlyHint"]
+                else "Repeating this request may create another action, so it is not retried automatically."
+            )
+        ),
+        "openWorldHint": (
+            "This tool can act beyond the local governed store."
+            if annotations["openWorldHint"]
+            else "This tool is limited to the local governed store and its configured service."
+        ),
+    }
 
 
 def load_marketplace_definition(repo_root: Path | None = None) -> dict[str, Any]:
@@ -638,7 +686,7 @@ def load_marketplace_definition(repo_root: Path | None = None) -> dict[str, Any]
         }:
             raise ValueError(f"marketplace channel {channel} is incomplete")
         title_limit = 100 if channel.startswith("claude-") else 80
-        tagline_limit = 55 if channel.startswith("claude-") else 200
+        tagline_limit = 55 if channel.startswith("claude-") else 30
         _validate_listing_text(overlay["title"], f"{channel} title", title_limit)
         _validate_listing_text(
             overlay["short_description"], f"{channel} short_description", tagline_limit
@@ -654,7 +702,9 @@ def load_marketplace_definition(repo_root: Path | None = None) -> dict[str, Any]
             not isinstance(prompts, list)
             or len(prompts) < 3
             or any(
-                not isinstance(prompt, str) or not prompt.strip() or len(prompt) > 300
+                not isinstance(prompt, str)
+                or not prompt.strip()
+                or len(prompt) > (128 if channel == "openai-plugin" else 300)
                 for prompt in prompts
             )
         ):
@@ -673,29 +723,159 @@ def load_marketplace_definition(repo_root: Path | None = None) -> dict[str, Any]
             for term in ("subscription", "checkout", "paid plan", "upgrade")
         ):
             raise ValueError("openai-plugin listing may not sell or upsell subscriptions")
+        if channel == "openai-plugin":
+            _validate_openai_release_stage_language(
+                (
+                    common["description"],
+                    common["release_notes"],
+                    overlay["title"],
+                    overlay["short_description"],
+                    *prompts,
+                )
+            )
     return value
 
 
-def load_marketplace_review_cases(repo_root: Path | None = None) -> dict[str, list[dict[str, Any]]]:
+def _load_marketplace_review_fixture(root: Path) -> dict[str, Any]:
+    fixture = _load_marketplace_json(
+        _marketplace_path(root, "marketplace-review-fixture-v1.json"),
+        "marketplace review fixture",
+    )
+    if set(fixture) != {"schema_version", "fixture_version", "payload", "payload_sha256", "reset"}:
+        raise ValueError("marketplace review fixture has unsupported fields")
+    if fixture["schema_version"] != 1 or not re.fullmatch(r"v[1-9]\d*", str(fixture["fixture_version"])):
+        raise ValueError("marketplace review fixture version is invalid")
+    payload = fixture["payload"]
+    if not isinstance(payload, dict) or set(payload) != {"notes", "absent_notes"}:
+        raise ValueError("marketplace review fixture payload is invalid")
+    notes = payload["notes"]
+    absent_notes = payload["absent_notes"]
+    if not isinstance(notes, list) or not notes or not isinstance(absent_notes, list) or not absent_notes:
+        raise ValueError("marketplace review fixture notes are invalid")
+    references: set[str] = set()
+    keys: set[str] = set()
+    for note in notes:
+        if not isinstance(note, dict) or set(note) != {"reference", "key", "title", "content"}:
+            raise ValueError("marketplace review fixture note is invalid")
+        if any(not isinstance(note[field], str) or not note[field].strip() for field in note):
+            raise ValueError("marketplace review fixture note is invalid")
+        references.add(note["reference"])
+        keys.add(note["key"])
+    absent_by_reference: dict[str, dict[str, Any]] = {}
+    for target in absent_notes:
+        if not isinstance(target, dict) or set(target) != {
+            "reference",
+            "key",
+            "title",
+            "create_tool",
+            "note_type",
+            "content",
+        }:
+            raise ValueError("marketplace review fixture absent target is invalid")
+        if any(not isinstance(target[field], str) or not target[field].strip() for field in target):
+            raise ValueError("marketplace review fixture absent target is invalid")
+        if target["create_tool"] != "remember":
+            raise ValueError("marketplace review fixture absent target must use remember")
+        if target["note_type"] not in commands.note_module.NOTE_TYPES:
+            raise ValueError("marketplace review fixture absent target note_type is invalid")
+        if target["reference"] in references or target["key"] in keys:
+            raise ValueError("marketplace review fixture absent target collides with seeded content")
+        references.add(target["reference"])
+        keys.add(target["key"])
+        absent_by_reference[target["reference"]] = target
+    if (
+        len(references) != len(notes) + len(absent_notes)
+        or len(keys) != len(notes) + len(absent_notes)
+        or len(absent_by_reference) != len(absent_notes)
+    ):
+        raise ValueError("marketplace review fixture references must be unique")
+    payload_sha256 = fixture["payload_sha256"]
+    if not isinstance(payload_sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", payload_sha256):
+        raise ValueError("marketplace review fixture payload digest is invalid")
+    if payload_sha256 != _sha256(_canonical_json(payload)):
+        raise ValueError("marketplace review fixture payload digest is stale")
+    reset = fixture["reset"]
+    if (
+        not isinstance(reset, dict)
+        or set(reset)
+        != {
+            "disposable_reference",
+            "disposable_key",
+            "disposable_title",
+            "create_tool",
+            "procedure",
+        }
+        or reset["disposable_reference"] not in absent_by_reference
+        or reset["procedure"] != "delete_created_note"
+    ):
+        raise ValueError("marketplace review fixture reset is invalid")
+    target = absent_by_reference[reset["disposable_reference"]]
+    if any(
+        reset[field] != target[field.replace("disposable_", "")]
+        for field in ("disposable_key", "disposable_title")
+    ) or reset["create_tool"] != target["create_tool"]:
+        raise ValueError("marketplace review fixture reset is invalid")
+    return fixture
+
+
+def _remember_review_prompt(target: dict[str, Any]) -> str:
+    return (
+        f"Create an {target['note_type']} titled {target['title']} with slug {target['key']} "
+        f"and copy this exact Markdown verbatim\n\n{target['content']}"
+    )
+
+
+def load_marketplace_review_cases(repo_root: Path | None = None) -> dict[str, Any]:
     root = _repo_root(repo_root)
     value = _load_marketplace_json(
         _marketplace_path(root, "marketplace-review-cases.json"), "marketplace review cases"
     )
-    if set(value) != {"schema_version", "positive", "negative"} or value.get("schema_version") != 1:
+    if (
+        set(value) != {"schema_version", "fixture", "positive", "negative"}
+        or value.get("schema_version") != 1
+    ):
         raise ValueError("marketplace review cases have unsupported fields")
+    fixture = _load_marketplace_review_fixture(root)
+    fixture_binding = value["fixture"]
+    expected_fixture_binding = {
+        "fixture_version": fixture["fixture_version"],
+        "payload_sha256": fixture["payload_sha256"],
+    }
+    if fixture_binding != expected_fixture_binding:
+        raise ValueError("marketplace review cases fixture version or payload digest is stale")
     positive = value.get("positive")
     negative = value.get("negative")
     if not isinstance(positive, list) or len(positive) < 5:
         raise ValueError("marketplace review cases require at least five positive cases")
     if not isinstance(negative, list) or len(negative) < 3:
         raise ValueError("marketplace review cases require at least three negative cases")
+    known_references = {
+        item["reference"]
+        for group in ("notes", "absent_notes")
+        for item in fixture["payload"][group]
+    }
+    absent_by_reference = {
+        target["reference"]: target for target in fixture["payload"]["absent_notes"]
+    }
+    write_tools = {
+        entry["name"]
+        for entry in compatibility_manifest(root)["agent_contract"]["commands"]
+        if entry["mcp_tool"]["annotations"].get("readOnlyHint") is False
+    }
     for category, cases in (("positive", positive), ("negative", negative)):
         for case in cases:
-            if not isinstance(case, dict) or set(case) != {
-                "prompt",
-                "expected_tools",
-                "expected_outcome",
-            }:
+            if not isinstance(case, dict):
+                raise ValueError(f"marketplace {category} review case is incomplete")
+            required = {"prompt", "expected_tools", "expected_outcome"}
+            has_write_tool = False
+            if category == "positive":
+                required |= {"fixture_version", "fixture_references"}
+                has_write_tool = bool(write_tools.intersection(case.get("expected_tools", [])))
+                if has_write_tool:
+                    required.add("fixture_reset")
+            if set(case) != required:
+                if has_write_tool and "fixture_reset" not in case:
+                    raise ValueError("marketplace review case fixture reset is required")
                 raise ValueError(f"marketplace {category} review case is incomplete")
             if not isinstance(case["prompt"], str) or not case["prompt"].strip():
                 raise ValueError(f"marketplace {category} review case prompt is invalid")
@@ -708,6 +888,41 @@ def load_marketplace_review_cases(repo_root: Path | None = None) -> dict[str, li
                 tool not in _CANONICAL_CALLABLES for tool in case["expected_tools"]
             ):
                 raise ValueError(f"marketplace {category} review case tools are invalid")
+            if category == "positive":
+                if case["fixture_version"] != fixture["fixture_version"]:
+                    raise ValueError("marketplace review case fixture version is stale")
+                references = case["fixture_references"]
+                if (
+                    not isinstance(references, list)
+                    or not references
+                    or any(reference not in known_references for reference in references)
+                ):
+                    raise ValueError("marketplace review case fixture reference is unknown")
+                if (
+                    write_tools.intersection(case["expected_tools"])
+                    and fixture["reset"]["create_tool"] not in case["expected_tools"]
+                ):
+                    raise ValueError("marketplace review case fixture reset tool is invalid")
+                if (
+                    write_tools.intersection(case["expected_tools"])
+                    and (
+                        case["fixture_reset"] != fixture["reset"]
+                        or fixture["reset"]["disposable_reference"] not in references
+                    )
+                ):
+                    raise ValueError("marketplace review case fixture reset is invalid")
+                if write_tools.intersection(case["expected_tools"]):
+                    target = absent_by_reference[fixture["reset"]["disposable_reference"]]
+                    if (
+                        write_tools.intersection(case["expected_tools"])
+                        != {fixture["reset"]["create_tool"]}
+                    ):
+                        raise ValueError("marketplace review case fixture reset is incomplete")
+                    if (
+                        references != [target["reference"]]
+                        or case["prompt"] != _remember_review_prompt(target)
+                    ):
+                        raise ValueError("marketplace review case fixture prompt is invalid")
     negative_text = " ".join(
         f"{case['prompt']} {case['expected_outcome']}" for case in negative
     ).lower()
@@ -725,7 +940,7 @@ def load_marketplace_review_cases(repo_root: Path | None = None) -> dict[str, li
         for term in ("subscription", "checkout", "paid plan", "upgrade")
     ):
         raise ValueError("marketplace review cases may not sell or upsell subscriptions")
-    return {"positive": positive, "negative": negative}
+    return {"fixture": fixture_binding, "positive": positive, "negative": negative}
 
 
 def _directory_submission_directory(root: Path, channel: str) -> Path:
@@ -887,7 +1102,7 @@ def directory_packets(
     review_cases = load_marketplace_review_cases(root)
     validate_hosted_public_inputs(root, include_generated=False)
     compatibility = compatibility_manifest(root)
-    tools = [
+    tool_entries = [
         {
             "name": entry["name"],
             "description": entry["mcp_tool"]["description"],
@@ -902,17 +1117,44 @@ def directory_packets(
                 key: entry["mcp_tool"]["annotations"][key]
                 for key in ("title", "readOnlyHint", "destructiveHint", "openWorldHint")
             },
+            "mcp_annotations": entry["mcp_tool"]["annotations"],
         }
         for entry in compatibility["agent_contract"]["commands"]
     ]
     if any(
         set(tool["annotations"]) != {"title", "readOnlyHint", "destructiveHint", "openWorldHint"}
-        for tool in tools
+        for tool in tool_entries
     ):
         raise ValueError("marketplace packet tool annotations are incomplete")
     packets: dict[str, bytes] = {}
     for selected_channel in selected:
         overlay = definition["channels"][selected_channel]
+        tools = [
+            {key: value for key, value in tool.items() if key != "mcp_annotations"}
+            for tool in tool_entries
+        ]
+        if selected_channel == "openai-plugin":
+            tools = [
+                {
+                    **{
+                        key: value
+                        for key, value in tool.items()
+                        if key != "mcp_annotations"
+                    },
+                    "annotations": {
+                        "title": tool["annotations"]["title"],
+                        **{
+                            key: raw_annotations[key]
+                            for key in _OPENAI_BOOLEAN_ANNOTATIONS
+                            if key in raw_annotations
+                        },
+                    },
+                    "annotation_explanations": _openai_annotation_explanations(raw_annotations),
+                }
+                for tool, raw_annotations in (
+                    (item, item["mcp_annotations"]) for item in tool_entries
+                )
+            ]
         packet = {
             "schema_version": 1,
             "channel": selected_channel,
@@ -949,6 +1191,10 @@ def directory_packets(
         if selected_channel == "openai-plugin":
             packet["acceptance_surfaces"] = ["chatgpt", "codex"]
             packet["operator_prerequisites"].append("verified domain")
+            packet["review_recording"] = {
+                "required": True,
+                "operator_supplied": True,
+            }
             _validate_openai_sale_free_packet(packet)
         else:
             packet["acceptance_surfaces"] = ["claude"]
@@ -1240,7 +1486,7 @@ def _package_lock(
 
 def _validate_openai_app_id(value: str | None) -> str:
     clean = str(value or "").strip()
-    if not re.fullmatch(r"asdk_app_[A-Za-z0-9]+", clean):
+    if not re.fullmatch(r"plugin_asdk_app_[A-Za-z0-9]+", clean):
         raise ValueError("OpenAI candidate requires a registered OpenAI app release input")
     return clean
 
@@ -2134,6 +2380,40 @@ def distribution_manifest(
     }
 
 
+def _contains_private_reviewer_field(value: Any) -> bool:
+    prohibited = {
+        "accesstoken",
+        "apikey",
+        "bearertoken",
+        "credentialid",
+        "credentialidentifier",
+        "invitation",
+        "invitelink",
+        "invitetoken",
+        "inviteurl",
+        "password",
+        "refreshtoken",
+        "revieweremail",
+        "revieweridentity",
+        "samplecontent",
+        "tenantid",
+        "userid",
+        "username",
+    }
+    if isinstance(value, dict):
+        for key, nested in value.items():
+            normalized = re.sub(r"[^a-z0-9]", "", str(key).lower())
+            if (
+                normalized in prohibited
+                or normalized.endswith(("username", "userid", "userids"))
+                or _contains_private_reviewer_field(nested)
+            ):
+                return True
+    elif isinstance(value, list):
+        return any(_contains_private_reviewer_field(nested) for nested in value)
+    return False
+
+
 def _load_signed_directory_evidence(
     root: Path,
     name: str,
@@ -2147,6 +2427,8 @@ def _load_signed_directory_evidence(
     if not path.is_file():
         raise ValueError(f"{name} is missing")
     value = _load_marketplace_json(path, name)
+    if evidence_type == "directory-reviewer-access" and _contains_private_reviewer_field(value):
+        raise ValueError(f"{name} contains private material")
     required = {
         "schema_version",
         "evidence_type",
@@ -2169,6 +2451,7 @@ def _load_signed_directory_evidence(
         },
         "directory-prerequisites": {"channels"},
         "directory-public-admission": {"admission"},
+        "directory-reviewer-access": {"channels"},
         "directory-post-install": {
             "channel",
             "submission_sha256",
@@ -2216,6 +2499,7 @@ def _load_signed_directory_evidence(
         or not trusted_secret
         or value.get("operator_key_id") != trusted_key_id
         or not isinstance(value.get("operator_signature"), str)
+        or not re.fullmatch(r"[0-9a-f]{64}", value["operator_signature"])
     ):
         raise ValueError(f"{name} is unsigned or untrusted")
     unsigned = {key: nested for key, nested in value.items() if key != "operator_signature"}
@@ -2252,7 +2536,11 @@ def _directory_prerequisites(
         "publisher_verified",
         "policy_approved",
         "reviewer_seeded",
-        *({"domain_verified"} if channel == "openai-plugin" else set()),
+        *(
+            {"domain_verified", "review_recording_prepared"}
+            if channel == "openai-plugin"
+            else set()
+        ),
     }
     if (
         not isinstance(requirements, dict)
@@ -2261,6 +2549,80 @@ def _directory_prerequisites(
     ):
         raise ValueError("directory operator prerequisites are incomplete")
     return requirements
+
+
+def _validate_reviewer_access_entry(
+    channel: str,
+    access: Any,
+    fixture: dict[str, Any],
+    *,
+    require_active: bool,
+) -> None:
+    expected = {
+        "provider",
+        "feature_enabled",
+        "credential_active",
+        "credential_expires_at",
+        "fixture_version",
+        "payload_sha256",
+    }
+    if not isinstance(access, dict) or set(access) != expected:
+        raise ValueError("reviewer access evidence has an invalid channel entry")
+    if access["provider"] != ("openai" if channel == "openai-plugin" else "anthropic"):
+        raise ValueError("reviewer access provider does not match the channel")
+    if type(access["feature_enabled"]) is not bool or type(access["credential_active"]) is not bool:
+        raise ValueError("reviewer access evidence has an invalid channel entry")
+    if require_active and (
+        access["feature_enabled"] is not True or access["credential_active"] is not True
+    ):
+        raise ValueError("reviewer access feature or credential is inactive")
+    credential_expires_at = access["credential_expires_at"]
+    if not isinstance(credential_expires_at, str) or not re.fullmatch(
+        r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z", credential_expires_at
+    ):
+        raise ValueError("reviewer access credential expiry is invalid")
+    try:
+        credential_expiry = datetime.fromisoformat(credential_expires_at.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError("reviewer access credential expiry is invalid") from exc
+    if require_active and credential_expiry <= datetime.now(UTC) + DIRECTORY_MINIMUM_REVIEW_WINDOW:
+        raise ValueError("reviewer access credential expires before the minimum review window")
+    if access["fixture_version"] != fixture["fixture_version"]:
+        raise ValueError("reviewer access fixture version is stale")
+    if access["payload_sha256"] != fixture["payload_sha256"]:
+        raise ValueError("reviewer access fixture payload digest is stale")
+
+
+def _directory_reviewer_access(
+    root: Path,
+    channel: str,
+    *,
+    trusted_key_id: str | None,
+    trusted_secret: str | None,
+    deployment_sha256: str | None,
+) -> None:
+    value = _load_signed_directory_evidence(
+        root,
+        "reviewer-access-evidence",
+        "directory-reviewer-access",
+        trusted_key_id=trusted_key_id,
+        trusted_secret=trusted_secret,
+        deployment_sha256=deployment_sha256,
+    )
+    channels = value.get("channels")
+    if not isinstance(channels, dict) or set(channels) != set(DIRECTORY_CHANNELS):
+        raise ValueError("reviewer access evidence is incomplete")
+    fixture = _load_marketplace_review_fixture(root)
+    for candidate_channel in DIRECTORY_CHANNELS:
+        _validate_reviewer_access_entry(
+            candidate_channel,
+            channels[candidate_channel],
+            fixture,
+            require_active=candidate_channel == channel,
+        )
+    checked_at = datetime.fromisoformat(value["checked_at"].replace("Z", "+00:00"))
+    if datetime.now(UTC) - checked_at > DIRECTORY_REVIEWER_EVIDENCE_MAX_AGE:
+        raise ValueError("reviewer access evidence is stale")
 
 
 def _directory_probe_blockers(
@@ -2453,6 +2815,17 @@ def directory_status(
         except ValueError as exc:
             blockers.append(str(exc))
         try:
+            _directory_reviewer_access(
+                root,
+                channel,
+                trusted_key_id=trusted_key_id,
+                trusted_secret=trusted_secret,
+                deployment_sha256=deployment_sha256,
+            )
+        except ValueError as exc:
+            blockers.append(str(exc))
+        submission_blockers = list(blockers)
+        try:
             admission = _load_signed_directory_evidence(
                 root,
                 "public-admission-evidence",
@@ -2503,6 +2876,8 @@ def directory_status(
         channels[channel] = {
             "state": record["state"] if len(listing_heads) == 1 else None,
             "latest_event_state": record["state"],
+            "submission_ready": not submission_blockers,
+            "submission_blockers": submission_blockers,
             "ready": ready,
             "public": active_record is not None and not blockers,
             "blockers": blockers,
@@ -2599,7 +2974,9 @@ def record_directory_state(
                 trusted_secret=trusted_secret,
                 deployment_sha256=deployment_sha256,
             )["channels"][channel]
-            if not status["ready"]:
+            if state != "published" and not status["submission_ready"]:
+                raise ValueError("directory submission requires current submission readiness")
+            if state == "published" and not status["ready"]:
                 raise ValueError("directory submission requires current public readiness")
             receipt_error = _validate_directory_receipt(
                 root,
