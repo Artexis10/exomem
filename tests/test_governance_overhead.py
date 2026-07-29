@@ -595,6 +595,7 @@ def _measure_receipt_case(
             gc.enable()
 
 
+@pytest.mark.timeout(240)
 def test_governed_receipt_append_overhead_under_budget(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
