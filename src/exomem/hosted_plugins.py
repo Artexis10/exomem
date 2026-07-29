@@ -28,6 +28,7 @@ DIRECTORY_STATES = frozenset(
     {"draft", "submitted", "in_review", "approved", "published", "rejected", "withdrawn"}
 )
 DIRECTORY_MINIMUM_REVIEW_WINDOW = timedelta(days=1)
+DIRECTORY_REVIEWER_EVIDENCE_MAX_AGE = timedelta(hours=1)
 DEMOTION_REASONS = frozenset(
     {"artifact-withdrawn", "client-regression", "contract-drift", "operator-withdrawal"}
 )
@@ -2379,6 +2380,36 @@ def distribution_manifest(
     }
 
 
+def _contains_private_reviewer_field(value: Any) -> bool:
+    prohibited = {
+        "accesstoken",
+        "apikey",
+        "bearertoken",
+        "credentialid",
+        "credentialidentifier",
+        "invitation",
+        "invitelink",
+        "invitetoken",
+        "inviteurl",
+        "password",
+        "refreshtoken",
+        "revieweremail",
+        "revieweridentity",
+        "samplecontent",
+        "tenantid",
+        "userid",
+        "username",
+    }
+    if isinstance(value, dict):
+        for key, nested in value.items():
+            normalized = re.sub(r"[^a-z0-9]", "", str(key).lower())
+            if normalized in prohibited or _contains_private_reviewer_field(nested):
+                return True
+    elif isinstance(value, list):
+        return any(_contains_private_reviewer_field(nested) for nested in value)
+    return False
+
+
 def _load_signed_directory_evidence(
     root: Path,
     name: str,
@@ -2392,6 +2423,8 @@ def _load_signed_directory_evidence(
     if not path.is_file():
         raise ValueError(f"{name} is missing")
     value = _load_marketplace_json(path, name)
+    if evidence_type == "directory-reviewer-access" and _contains_private_reviewer_field(value):
+        raise ValueError(f"{name} contains private material")
     required = {
         "schema_version",
         "evidence_type",
@@ -2462,6 +2495,7 @@ def _load_signed_directory_evidence(
         or not trusted_secret
         or value.get("operator_key_id") != trusted_key_id
         or not isinstance(value.get("operator_signature"), str)
+        or not re.fullmatch(r"[0-9a-f]{64}", value["operator_signature"])
     ):
         raise ValueError(f"{name} is unsigned or untrusted")
     unsigned = {key: nested for key, nested in value.items() if key != "operator_signature"}
@@ -2533,19 +2567,6 @@ def _directory_reviewer_access(
     if not isinstance(channels, dict) or set(channels) != set(DIRECTORY_CHANNELS):
         raise ValueError("reviewer access evidence is incomplete")
     access = channels.get(channel)
-    private_fields = {
-        "username",
-        "password",
-        "credential_id",
-        "credential_identifier",
-        "user_id",
-        "tenant_id",
-        "invitation",
-        "sample_content",
-        "bearer_token",
-    }
-    if isinstance(access, dict) and private_fields.intersection(access):
-        raise ValueError("reviewer access evidence contains private material")
     expected = {
         "provider",
         "feature_enabled",
@@ -2576,6 +2597,9 @@ def _directory_reviewer_access(
         raise ValueError("reviewer access fixture version is stale")
     if access["payload_sha256"] != fixture["payload_sha256"]:
         raise ValueError("reviewer access fixture payload digest is stale")
+    checked_at = datetime.fromisoformat(value["checked_at"].replace("Z", "+00:00"))
+    if datetime.now(UTC) - checked_at > DIRECTORY_REVIEWER_EVIDENCE_MAX_AGE:
+        raise ValueError("reviewer access evidence is stale")
 
 
 def _directory_probe_blockers(

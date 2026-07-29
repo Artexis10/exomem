@@ -914,6 +914,24 @@ def test_reviewer_ready_openai_candidate_can_enter_review_before_broad_admission
         ),
         (
             lambda evidence: evidence["channels"]["openai-plugin"].update(
+                payload_sha256="f" * 64
+            ),
+            "fixture payload digest is stale",
+        ),
+        (
+            lambda evidence: evidence["channels"]["openai-plugin"].update(
+                feature_enabled=False
+            ),
+            "feature or credential is inactive",
+        ),
+        (
+            lambda evidence: evidence["channels"]["openai-plugin"].update(
+                credential_active=False
+            ),
+            "feature or credential is inactive",
+        ),
+        (
+            lambda evidence: evidence["channels"]["openai-plugin"].update(
                 credential_expires_at=(datetime.now(UTC) + timedelta(hours=23))
                 .replace(microsecond=0)
                 .isoformat()
@@ -950,6 +968,101 @@ def test_openai_submission_readiness_requires_bound_secret_free_reviewer_access(
     assert not status["submission_ready"]
     assert any(match in blocker for blocker in status["submission_blockers"])
     assert "must-not-leak" not in "\n".join(status["submission_blockers"])
+
+
+@pytest.mark.parametrize(
+    ("mutate", "private_value"),
+    [
+        (lambda evidence: evidence.update(reviewerEmail="must-not-leak"), "must-not-leak"),
+        (
+            lambda evidence: evidence["channels"]["claude-plugin"].update(
+                reviewer_email="must-not-leak"
+            ),
+            "must-not-leak",
+        ),
+        (
+            lambda evidence: evidence["channels"]["claude-plugin"].update(
+                diagnostics={"bearerToken": "must-not-leak"}
+            ),
+            "must-not-leak",
+        ),
+    ],
+)
+def test_openai_submission_readiness_rejects_private_reviewer_fields_anywhere(
+    tmp_path: Path, mutate: object, private_value: str
+) -> None:
+    root = copy_hosted_tree(tmp_path / "repo")
+    key_id, secret, _receipt = openai_published_receipt(root)
+    path = root / "plugins/hosted/directory/reviewer-access-evidence.json"
+    evidence = json.loads(path.read_text(encoding="utf-8"))
+    mutate(evidence)
+    path.write_text(json.dumps(signed_evidence(evidence, secret)), encoding="utf-8")
+
+    status = hosted_plugins.directory_status(
+        root,
+        openai_app_id="asdk_app_releaseinput123",
+        trusted_key_id=key_id,
+        trusted_secret=secret,
+        deployment_sha256="b" * 64,
+    )["channels"]["openai-plugin"]
+
+    assert not status["submission_ready"]
+    assert "reviewer-access-evidence contains private material" in status["submission_blockers"]
+    assert private_value not in "\n".join(status["submission_blockers"])
+
+
+def test_openai_submission_readiness_rejects_stale_reviewer_evidence(tmp_path: Path) -> None:
+    root = copy_hosted_tree(tmp_path / "repo")
+    key_id, secret, _receipt = openai_published_receipt(root)
+    path = root / "plugins/hosted/directory/reviewer-access-evidence.json"
+    evidence = json.loads(path.read_text(encoding="utf-8"))
+    checked_at = datetime.now(UTC).replace(microsecond=0) - timedelta(hours=2)
+    evidence["checked_at"] = checked_at.isoformat().replace("+00:00", "Z")
+    evidence["expires_at"] = (checked_at + timedelta(hours=3)).isoformat().replace(
+        "+00:00", "Z"
+    )
+    path.write_text(json.dumps(signed_evidence(evidence, secret)), encoding="utf-8")
+
+    status = hosted_plugins.directory_status(
+        root,
+        openai_app_id="asdk_app_releaseinput123",
+        trusted_key_id=key_id,
+        trusted_secret=secret,
+        deployment_sha256="b" * 64,
+    )["channels"]["openai-plugin"]
+
+    assert not status["submission_ready"]
+    assert "reviewer access evidence is stale" in status["submission_blockers"]
+
+
+@pytest.mark.parametrize(
+    ("signature", "match"),
+    [
+        ("g" * 64, "reviewer-access-evidence is unsigned or untrusted"),
+        ("0" * 64, "reviewer-access-evidence has an invalid operator signature"),
+        ("é" * 64, "reviewer-access-evidence is unsigned or untrusted"),
+    ],
+)
+def test_openai_submission_readiness_rejects_malformed_reviewer_signature(
+    tmp_path: Path, signature: str, match: str
+) -> None:
+    root = copy_hosted_tree(tmp_path / "repo")
+    key_id, secret, _receipt = openai_published_receipt(root)
+    path = root / "plugins/hosted/directory/reviewer-access-evidence.json"
+    evidence = json.loads(path.read_text(encoding="utf-8"))
+    evidence["operator_signature"] = signature
+    path.write_text(json.dumps(evidence), encoding="utf-8")
+
+    status = hosted_plugins.directory_status(
+        root,
+        openai_app_id="asdk_app_releaseinput123",
+        trusted_key_id=key_id,
+        trusted_secret=secret,
+        deployment_sha256="b" * 64,
+    )["channels"]["openai-plugin"]
+
+    assert not status["submission_ready"]
+    assert match in status["submission_blockers"]
 
 
 def test_openai_submission_readiness_requires_review_recording_prepared(
