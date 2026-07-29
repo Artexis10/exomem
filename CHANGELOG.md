@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.35.0](https://github.com/Artexis10/exomem/compare/v0.34.0...v0.35.0) (2026-07-29)
+
+
+### Features
+
+* **governance:** add governed egress and cross-domain bridges ([#349](https://github.com/Artexis10/exomem/issues/349)) ([5bd533a](https://github.com/Artexis10/exomem/commit/5bd533aaeba1204ee2c8aa8e27624b309505588d))
+* **hosted:** prepare marketplace distribution ([#348](https://github.com/Artexis10/exomem/issues/348)) ([253c9aa](https://github.com/Artexis10/exomem/commit/253c9aa365d7afd8829dc7843f1cac53353ac825))
+
+
+### Bug Fixes
+
+* **diagnostics:** confirm latency-gate failures and attribute graph holds ([#344](https://github.com/Artexis10/exomem/issues/344)) ([a9b4bf0](https://github.com/Artexis10/exomem/commit/a9b4bf0b6e65bc493e1d4b37f9e7f9357900d0ca))
+* **governance:** block resolved policy-tree read aliases ([#338](https://github.com/Artexis10/exomem/issues/338)) ([6977e3a](https://github.com/Artexis10/exomem/commit/6977e3add5df585c02af17f7f59b8d1a3797bed9))
+* **hosted:** identify the plugin descriptor by contract, not release ([#345](https://github.com/Artexis10/exomem/issues/345)) ([430d1f5](https://github.com/Artexis10/exomem/commit/430d1f5c8ac37797d2941373f3f3b5d23a565d59))
+* **hosted:** prepare OpenAI marketplace submission ([#350](https://github.com/Artexis10/exomem/issues/350)) ([d103f31](https://github.com/Artexis10/exomem/commit/d103f31ef5443468874fdf2a7d98a5140836cc30))
+* **release:** regenerate hosted plugin artifacts on the release branch ([#342](https://github.com/Artexis10/exomem/issues/342)) ([8b2769b](https://github.com/Artexis10/exomem/commit/8b2769ba35987dcc0d9ed5dd8d1d264852d2c61b))
+* stop media-reconcile log flood from read-only-replica lease refusals ([#317](https://github.com/Artexis10/exomem/issues/317)) ([a4483e9](https://github.com/Artexis10/exomem/commit/a4483e9b95adf9514cd30b5f95ce705250a5e992))
+
 ## [0.34.0](https://github.com/Artexis10/exomem/compare/v0.33.0...v0.34.0) (2026-07-27)
 
 
