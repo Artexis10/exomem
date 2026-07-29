@@ -867,6 +867,41 @@ def test_omitted_selector_fails_closed_when_leaf_default_is_not_known_read_only(
         reset_managers_for_tests()
 
 
+@pytest.mark.parametrize("selector_source", ["explicit", "leaf-default"])
+def test_unknown_selector_with_local_writer_never_executes_the_leaf(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    selector_source: str,
+) -> None:
+    from exomem.commands import product_commands_for
+
+    calls: list[dict] = []
+    command = next(c for c in product_commands_for("mcp") if c.name == "connect_memory")
+    if selector_source == "explicit":
+        command = _recording_product_command(command, calls, "unreceipted-payload")
+        kwargs = {"operation": "future-read-mode"}
+    else:
+
+        def leaf(_vault_root, operation="future-read-mode", **leaf_kwargs):  # noqa: ANN001, ANN202
+            calls.append({"operation": operation, **leaf_kwargs})
+            return "unreceipted-payload"
+
+        command = replace(command, leaf=leaf)
+        kwargs = {}
+
+    manager = LeaseManager(LeaseConfig(state_dir=tmp_path / "state"))
+    monkeypatch.setattr(writer_lease_module, "get_manager", lambda: manager)
+    try:
+        with pytest.raises(OpError) as raised:
+            invoke_command(command, tmp_path / "vault", **kwargs)
+    finally:
+        manager.close()
+
+    assert raised.value.code == "RECEIPT_OUTCOME_MISSING"
+    assert raised.value.message == "command selector is not release-covered"
+    assert calls == []
+
+
 @pytest.mark.parametrize(
     ("command_name", "kwargs"),
     [

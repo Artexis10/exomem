@@ -13,12 +13,12 @@ from __future__ import annotations
 
 import datetime as dt
 import logging
-import shutil
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
 from . import relation_review, semantic_index, semantic_writes
+from .governance import lifecycle
 from .kbdir import kb_dirname, kb_prefix
 from .vault import (
     DirectoryCensusGuard,
@@ -142,6 +142,11 @@ def recover_from_trash(
     except VaultPathError as e:
         raise RecoverError(code=e.code, reason=e.reason) from e
 
+    try:
+        lifecycle.assert_not_protected(vault_root, restore_rel)
+    except lifecycle.LifecycleError as error:
+        raise RecoverError(code=error.code, reason=error.reason) from error
+
     # The destination must not be inside the trash (recovery, not re-trashing).
     rparts = restore_rel.split("/")
     if len(rparts) >= 2 and rparts[0] == kb_dirname() and rparts[1] == TRASH_SUBPATH:
@@ -184,6 +189,7 @@ def recover_from_trash(
         )
 
     semantic: dict | None = None
+    lifecycle_operation: lifecycle.LifecycleOperation | None = None
     semantic_states: dict[str, semantic_index.SemanticParentIndexState] = {}
     recovery_entries: list[semantic_writes.RecoveryEntry] = []
     destination_root_guard: PathGuard | None = None
@@ -288,15 +294,26 @@ def recover_from_trash(
                     semantic=preflight.as_dict(),
                 )
 
+            try:
+                lifecycle_operation = lifecycle.begin_recovery(
+                    vault_root, trash_rel=trash_rel, source_rel=restore_rel
+                )
+            except lifecycle.LifecycleError as error:
+                raise RecoverError(code=error.code, reason=error.reason) from error
+
             def restore() -> None:
                 try:
-                    shutil.move(str(trash_abs), str(restore_abs))
-                except OSError as error:
+                    assert lifecycle_operation is not None
+                    lifecycle.atomic_rename(
+                        lifecycle_operation,
+                        source=trash_abs,
+                        destination=restore_abs,
+                        recovery=True,
+                    )
+                except lifecycle.LifecycleError as error:
                     raise RecoverError(
-                        code="RECOVER_FAILED",
-                        reason=(
-                            f"could not move {trash_rel!r} → {restore_rel!r}: {error}"
-                        ),
+                        code=error.code,
+                        reason=error.reason,
                     ) from error
 
             committed = semantic_writes.commit_recovery(
@@ -304,8 +321,12 @@ def recover_from_trash(
             )
             semantic = committed.as_dict()
         except semantic_writes.SemanticWriteError as error:
+            if lifecycle_operation is not None:
+                lifecycle.abort_recovery(lifecycle_operation)
             raise RecoverError(code=error.code, reason=error.reason) from error
         except PathGuardError as error:
+            if lifecycle_operation is not None:
+                lifecycle.abort_recovery(lifecycle_operation)
             raise RecoverError(code=error.code, reason=error.reason) from error
     else:
         if relation_reviews:
@@ -320,13 +341,25 @@ def recover_from_trash(
                 kind="directory" if trash_abs.is_dir() else "file",
                 warnings=[],
             )
+        try:
+            lifecycle_operation = lifecycle.begin_recovery(
+                vault_root, trash_rel=trash_rel, source_rel=restore_rel
+            )
+        except lifecycle.LifecycleError as error:
+            raise RecoverError(code=error.code, reason=error.reason) from error
         restore_abs.parent.mkdir(parents=True, exist_ok=True)
         try:
-            shutil.move(str(trash_abs), str(restore_abs))
-        except OSError as e:
+            lifecycle.atomic_rename(
+                lifecycle_operation,
+                source=trash_abs,
+                destination=restore_abs,
+                recovery=True,
+            )
+        except lifecycle.LifecycleError as e:
+            lifecycle.abort_recovery(lifecycle_operation)
             raise RecoverError(
-                code="RECOVER_FAILED",
-                reason=f"could not move {trash_rel!r} → {restore_rel!r}: {e}",
+                code=e.code,
+                reason=e.reason,
             ) from e
 
     warnings: list[str] = []
@@ -407,6 +440,14 @@ def recover_from_trash(
                 watcher_outcome,
             )
         index_feedback = report.as_dict()
+
+    if lifecycle_operation is not None and not lifecycle.finish_recovery(
+        lifecycle_operation, index_report=index_feedback
+    ):
+        warnings.append(
+            "recovery staged but governed derived state is not exact; "
+            "content remains tombstoned until reconcile"
+        )
 
     today = today or dt.date.today()
     date_iso = today.isoformat()

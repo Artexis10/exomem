@@ -25,7 +25,7 @@ import uuid
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar, Token
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -1290,7 +1290,10 @@ class LeaseManager:
     ) -> Any:
         t_start = time.perf_counter()
         kwargs = _canonicalize_command_kwargs(kwargs)
-        kwargs, response_detail = split_response_detail(kwargs)
+        response_detail_default = getattr(command, "response_detail", None) or "compact"
+        kwargs, response_detail = split_response_detail(
+            kwargs, default=response_detail_default
+        )
         if public_idempotency_key is _PUBLIC_IDEMPOTENCY_KEY_UNSET:
             effective_public_idempotency_key = idempotency_key
         else:
@@ -1831,34 +1834,71 @@ def invoke_command(
     mutation_request_id: str | None = None,
     **kwargs: Any,
 ) -> Any:
-    from .commands import invocation_is_read_only
+    from .commands import invocation_is_read_only, validate_process_media_operation
 
     if command.name == "edit_memory":
         from .edit_operations import normalize_edit_surface_arguments
 
         kwargs = normalize_edit_surface_arguments(kwargs)
 
-    result = get_manager().invoke(
-        command,
-        injected,
-        kwargs,
-        read_only=invocation_is_read_only(command, kwargs),
-        idempotency_key=idempotency_key,
-        public_idempotency_key=public_idempotency_key,
-        idempotency_principal_scope=idempotency_principal_scope,
-        implicit_idempotency_scope=implicit_idempotency_scope,
-        mutation_request_id=mutation_request_id,
-    )
     # Terminal egress filter (design D1). THIS is the one dispatcher shared by
     # MCP, REST, hosted, and CLI — `command_surface.bind_vault` covers MCP
     # only, and the `EXOMEM_RETRIEVE_INJECT` hook deliberately reaches memory
     # over REST-then-CLI, the two paths that skip it. Putting the scrubber and
     # the withheld cross-check here removes that whole bypass class.
-    from .governance.egress import is_vault_root, postfilter
+    from .governance.egress import (
+        SelectorCoverageError,
+        disclosure_boundary,
+        emit_boundary_receipt,
+        is_vault_root,
+        postfilter,
+    )
 
-    if injected and is_vault_root(injected[0]):
-        result = postfilter(command.name, result, injected[0])
-    return result
+    selector_error: SelectorCoverageError | None = None
+    try:
+        read_only = invocation_is_read_only(command, kwargs)
+    except SelectorCoverageError as error:
+        # Unknown selectors must first take the conservative writer/admission
+        # path, but must never execute a leaf that could return an unreceipted
+        # future read representation. process_media already owns a stable
+        # public input error, so preserve it before entering the writer path.
+        if command.name == "process_media":
+            validate_process_media_operation(kwargs.get("operation", "process"))
+        selector_error = error
+        read_only = False
+
+    dispatch_command = command
+    if selector_error is not None:
+
+        def reject_uncovered_selector(*_args: Any, **_kwargs: Any) -> Any:
+            raise OpError(
+                "RECEIPT_OUTCOME_MISSING",
+                "command selector is not release-covered",
+            )
+
+        dispatch_command = replace(command, leaf=reject_uncovered_selector)
+
+    def _invoke() -> Any:
+        return get_manager().invoke(
+            dispatch_command,
+            injected,
+            kwargs,
+            read_only=read_only,
+            idempotency_key=idempotency_key,
+            public_idempotency_key=public_idempotency_key,
+            idempotency_principal_scope=idempotency_principal_scope,
+            implicit_idempotency_scope=implicit_idempotency_scope,
+            mutation_request_id=mutation_request_id,
+        )
+
+    if not injected or not is_vault_root(injected[0]):
+        return _invoke()
+    if not read_only:
+        return postfilter(command.name, _invoke(), injected[0])
+    with disclosure_boundary(injected[0], command.name) as collector:
+        result = postfilter(command.name, _invoke(), injected[0])
+        emit_boundary_receipt(collector)
+        return result
 
 
 def coordination_status(

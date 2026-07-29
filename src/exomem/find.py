@@ -1363,6 +1363,7 @@ def _semantic_unit_hit(
         parent_status=page.status,
         parent_updated=page.updated,
         parent_superseded_by=page.superseded_by,
+        snapshot_hash=page.snapshot_hash,
         bm25_rank=bm25_rank,
         bm25_score=bm25_score,
         vector_rank=vector_rank,
@@ -2446,6 +2447,7 @@ def _find_keyword(
             superseded_by=page.superseded_by,
             scene_frame=scene_frame,
             scene_frame_ts=scene_frame_ts,
+            snapshot_hash=page.snapshot_hash,
         )
         hit.transcript_ts = _transcript_ts_for_hit(page, None, query_norm)
         if (
@@ -2724,6 +2726,7 @@ def _find_semantic(
             usage_boost_applied=hit_usage_mult,
             scene_frame=attr[0] if attr else None,
             scene_frame_ts=attr[1] if attr else None,
+            snapshot_hash=page.snapshot_hash,
         )
         hit.transcript_ts = _transcript_ts_for_hit(page, chunk, query_norm)
         if hit.scene_frame is None and page.media_type == "video" and page.media_file:
@@ -3055,6 +3058,7 @@ def _find_outside_kb(
                 status=page.status,
                 superseded_by=page.superseded_by,
                 outside_kb=True,
+                snapshot_hash=page.snapshot_hash,
             )
         )
         if len(hits) >= limit:

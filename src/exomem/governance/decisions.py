@@ -27,11 +27,17 @@ class Decision:
     options: dict[str, Any] = field(default_factory=dict)
     notice: str | None = None
     bridge: str | None = None
+    release_reason: str | None = None
+    release_grant_id: str | None = None
+    release_strip: tuple[Any, ...] = ()
+    release_dependency_digest: str | None = None
 
 
 def _rule_matches(
     rule: Rule, scope_ids: frozenset[str], audience: str, purpose: str | None
 ) -> bool:
+    if rule.options.get("suspended") is True:
+        return False
     if rule.audience != audience:
         return False
     if not (set(rule.scope_ids) & scope_ids):
@@ -129,6 +135,24 @@ def _decide_at(
     options: dict[str, Any] = {}
     for rule in sorted(matched_rules, key=lambda r: r.id):
         options.update(rule.options)
+
+    # Scope-registered L2 constraints are governed micro-bridges.  Resolve
+    # them as a set, not by document/rule order: one distinct approved string
+    # is deterministic; two different strings are ambiguous and therefore
+    # cannot cross the boundary.  Legacy rule-option constraints remain the
+    # fallback when no scope record applies.
+    scope_constraints = {
+        scope.constraint
+        for scope_id in scope_id_set
+        if (scope := policy.scopes.get(scope_id)) is not None and scope.constraint
+    }
+    if level >= 2 and len(scope_constraints) == 1:
+        options["constraint"] = next(iter(scope_constraints))
+        options["constraint_source"] = "scope"
+    elif level >= 2 and len(scope_constraints) > 1:
+        level = min(level, 1)
+        options.pop("constraint", None)
+        options["constraint_ambiguous"] = True
 
     return Decision(
         level=level,

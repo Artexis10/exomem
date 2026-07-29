@@ -11,12 +11,12 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1]
 CHART = ROOT / "infra/helm/platform"
 VALUES = CHART / "values.validation.yaml"
-HELM = Path(os.environ.get("HELM_BIN", "/tmp/exomem-hosted-tools/linux-amd64/helm"))
+HELM = Path(os.environ["HELM_BIN"]) if "HELM_BIN" in os.environ else None
 
 
 def _render(*, upgrade: bool) -> list[dict]:
-    if not HELM.is_file():
-        pytest.skip(f"Helm is unavailable at {HELM}")
+    if HELM is None:
+        pytest.skip("set HELM_BIN to run pinned Helm rendering")
     command = [
         str(HELM),
         "template",

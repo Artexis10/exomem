@@ -1206,6 +1206,30 @@ def test_mixed_command_route_admits_only_resolved_read_operations(
     assert [call["command"] for call in invoker.calls] == ["connect_memory"]
 
 
+def test_future_read_selector_is_admitted_as_mutation_then_rejected_before_leaf(
+    tmp_path: Path,
+) -> None:
+    client, config, _lifecycle, invoker = _cell(
+        tmp_path,
+        cell_id="cell-alpha",
+        credential="alpha-private-service-credential-0001",
+    )
+
+    response = client.post(
+        "/private/exomem/v1/command/connect_memory",
+        headers=_headers(config),
+        json={"operation": "future-read-mode"},
+    )
+
+    assert response.status_code == 400, response.text
+    assert response.json()["error"] == {
+        "code": "RECEIPT_OUTCOME_MISSING",
+        "message": "hosted command failed",
+        "remediation": None,
+    }
+    assert invoker.calls == []
+
+
 def test_private_export_is_verified_downloadable_and_explicitly_released(
     tmp_path: Path,
 ) -> None:

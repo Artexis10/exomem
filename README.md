@@ -374,8 +374,9 @@ exomem exposes typed MCP tools for common knowledge-base work:
 | `overview` | Bounded, read-only structure report of the vault or a subtree — works outside `Knowledge Base/` and before `init`. |
 | `adopt` | Existing-vault adoption: scan-only by default; can save a manifest, copy selected legacy text files as Sources, or return a compile plan while preserving originals. |
 
-Tier-2 filesystem tools exist for escape hatches such as listing directories,
-creating files, moving pages, trashing files, and recovering from trash. Set
+Tier-2 tools cover governance administration and filesystem escape hatches such
+as listing directories, creating files, moving pages, trashing files, and
+recovering from trash. Set
 `EXOMEM_DISABLE_TIER2=1` if you want a smaller tool surface.
 
 Every write records durable history in `Knowledge Base/log.md`. Service calls

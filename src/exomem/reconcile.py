@@ -75,6 +75,7 @@ class ReconcileReport:
         default_factory=dict
     )
     remaining_drift: list[dict] = field(default_factory=list)
+    receipt_reconcile: dict = field(default_factory=dict)
     dry_run: bool = False
 
     def as_dict(self) -> dict:
@@ -112,6 +113,7 @@ class ReconcileReport:
                 self.lifecycle_prepared_omitted_counts
             ),
             "remaining_drift": self.remaining_drift,
+            "receipt_reconcile": self.receipt_reconcile,
             "dry_run": self.dry_run,
         }
 
@@ -439,5 +441,11 @@ def reconcile(vault_root: Path, *, dry_run: bool = False) -> ReconcileReport:
 
         freshness.rebaseline(vault_root)
         vault_module.clear_inbound_index()
+
+    # Receipt evidence is intentionally repaired only here, after ordinary
+    # derived-state reconciliation has established any critical-event target.
+    from .governance import receipts
+
+    report.receipt_reconcile = receipts.reconcile(vault_root, dry_run=dry_run)
 
     return report

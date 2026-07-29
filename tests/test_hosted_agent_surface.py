@@ -36,6 +36,7 @@ FORBIDDEN_COMMANDS = {
     "adoption_studio",
     "maintain_memory",
     "schema_memory",
+    "govern_memory",
     "manage_memory_file",
     "query_dataset",
     "read_media",
