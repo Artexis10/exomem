@@ -2403,7 +2403,11 @@ def _contains_private_reviewer_field(value: Any) -> bool:
     if isinstance(value, dict):
         for key, nested in value.items():
             normalized = re.sub(r"[^a-z0-9]", "", str(key).lower())
-            if normalized in prohibited or _contains_private_reviewer_field(nested):
+            if (
+                normalized in prohibited
+                or normalized.endswith(("username", "userid", "userids"))
+                or _contains_private_reviewer_field(nested)
+            ):
                 return True
     elif isinstance(value, list):
         return any(_contains_private_reviewer_field(nested) for nested in value)
@@ -2547,6 +2551,48 @@ def _directory_prerequisites(
     return requirements
 
 
+def _validate_reviewer_access_entry(
+    channel: str,
+    access: Any,
+    fixture: dict[str, Any],
+    *,
+    require_active: bool,
+) -> None:
+    expected = {
+        "provider",
+        "feature_enabled",
+        "credential_active",
+        "credential_expires_at",
+        "fixture_version",
+        "payload_sha256",
+    }
+    if not isinstance(access, dict) or set(access) != expected:
+        raise ValueError("reviewer access evidence has an invalid channel entry")
+    if access["provider"] != ("openai" if channel == "openai-plugin" else "anthropic"):
+        raise ValueError("reviewer access provider does not match the channel")
+    if type(access["feature_enabled"]) is not bool or type(access["credential_active"]) is not bool:
+        raise ValueError("reviewer access evidence has an invalid channel entry")
+    if require_active and (
+        access["feature_enabled"] is not True or access["credential_active"] is not True
+    ):
+        raise ValueError("reviewer access feature or credential is inactive")
+    credential_expires_at = access["credential_expires_at"]
+    if not isinstance(credential_expires_at, str) or not re.fullmatch(
+        r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z", credential_expires_at
+    ):
+        raise ValueError("reviewer access credential expiry is invalid")
+    try:
+        credential_expiry = datetime.fromisoformat(credential_expires_at.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError("reviewer access credential expiry is invalid") from exc
+    if require_active and credential_expiry <= datetime.now(UTC) + DIRECTORY_MINIMUM_REVIEW_WINDOW:
+        raise ValueError("reviewer access credential expires before the minimum review window")
+    if access["fixture_version"] != fixture["fixture_version"]:
+        raise ValueError("reviewer access fixture version is stale")
+    if access["payload_sha256"] != fixture["payload_sha256"]:
+        raise ValueError("reviewer access fixture payload digest is stale")
+
+
 def _directory_reviewer_access(
     root: Path,
     channel: str,
@@ -2566,37 +2612,14 @@ def _directory_reviewer_access(
     channels = value.get("channels")
     if not isinstance(channels, dict) or set(channels) != set(DIRECTORY_CHANNELS):
         raise ValueError("reviewer access evidence is incomplete")
-    access = channels.get(channel)
-    expected = {
-        "provider",
-        "feature_enabled",
-        "credential_active",
-        "credential_expires_at",
-        "fixture_version",
-        "payload_sha256",
-    }
-    if not isinstance(access, dict) or set(access) != expected:
-        raise ValueError("reviewer access evidence is incomplete")
-    if access["provider"] != ("openai" if channel == "openai-plugin" else "anthropic"):
-        raise ValueError("reviewer access provider does not match the channel")
-    if access["feature_enabled"] is not True or access["credential_active"] is not True:
-        raise ValueError("reviewer access feature or credential is inactive")
-    credential_expires_at = access["credential_expires_at"]
-    if not isinstance(credential_expires_at, str) or not re.fullmatch(
-        r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z", credential_expires_at
-    ):
-        raise ValueError("reviewer access credential expiry is invalid")
-    try:
-        credential_expiry = datetime.fromisoformat(credential_expires_at.replace("Z", "+00:00"))
-    except ValueError as exc:
-        raise ValueError("reviewer access credential expiry is invalid") from exc
-    if credential_expiry <= datetime.now(UTC) + DIRECTORY_MINIMUM_REVIEW_WINDOW:
-        raise ValueError("reviewer access credential expires before the minimum review window")
     fixture = _load_marketplace_review_fixture(root)
-    if access["fixture_version"] != fixture["fixture_version"]:
-        raise ValueError("reviewer access fixture version is stale")
-    if access["payload_sha256"] != fixture["payload_sha256"]:
-        raise ValueError("reviewer access fixture payload digest is stale")
+    for candidate_channel in DIRECTORY_CHANNELS:
+        _validate_reviewer_access_entry(
+            candidate_channel,
+            channels[candidate_channel],
+            fixture,
+            require_active=candidate_channel == channel,
+        )
     checked_at = datetime.fromisoformat(value["checked_at"].replace("Z", "+00:00"))
     if datetime.now(UTC) - checked_at > DIRECTORY_REVIEWER_EVIDENCE_MAX_AGE:
         raise ValueError("reviewer access evidence is stale")

@@ -1011,6 +1011,70 @@ def test_openai_submission_readiness_rejects_private_reviewer_fields_anywhere(
     assert private_value not in "\n".join(status["submission_blockers"])
 
 
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda evidence: evidence["channels"]["claude-plugin"].update(
+            reviewer_username="must-not-leak"
+        ),
+        lambda evidence: evidence["channels"]["claude-plugin"].update(
+            user_ids=["must-not-leak"]
+        ),
+        lambda evidence: evidence["channels"]["claude-plugin"].update(
+            account_username="must-not-leak"
+        ),
+        lambda evidence: evidence["channels"]["claude-plugin"].update(
+            diagnostics={"nested_key": "must-not-leak"}
+        ),
+        lambda evidence: evidence["channels"]["claude-plugin"].update(
+            provider="must-not-leak"
+        ),
+    ],
+)
+def test_openai_submission_readiness_validates_every_reviewer_channel_entry(
+    tmp_path: Path, mutate: object
+) -> None:
+    root = copy_hosted_tree(tmp_path / "repo")
+    key_id, secret, _receipt = openai_published_receipt(root)
+    path = root / "plugins/hosted/directory/reviewer-access-evidence.json"
+    evidence = json.loads(path.read_text(encoding="utf-8"))
+    mutate(evidence)
+    path.write_text(json.dumps(signed_evidence(evidence, secret)), encoding="utf-8")
+
+    status = hosted_plugins.directory_status(
+        root,
+        openai_app_id="asdk_app_releaseinput123",
+        trusted_key_id=key_id,
+        trusted_secret=secret,
+        deployment_sha256="b" * 64,
+    )["channels"]["openai-plugin"]
+
+    assert not status["submission_ready"]
+    assert status["submission_blockers"]
+    assert "must-not-leak" not in "\n".join(status["submission_blockers"])
+
+
+def test_openai_submission_readiness_allows_inactive_sibling_reviewer_access(tmp_path: Path) -> None:
+    root = copy_hosted_tree(tmp_path / "repo")
+    key_id, secret, _receipt = openai_published_receipt(root)
+    path = root / "plugins/hosted/directory/reviewer-access-evidence.json"
+    evidence = json.loads(path.read_text(encoding="utf-8"))
+    evidence["channels"]["claude-plugin"].update(
+        feature_enabled=False, credential_active=False
+    )
+    path.write_text(json.dumps(signed_evidence(evidence, secret)), encoding="utf-8")
+
+    status = hosted_plugins.directory_status(
+        root,
+        openai_app_id="asdk_app_releaseinput123",
+        trusted_key_id=key_id,
+        trusted_secret=secret,
+        deployment_sha256="b" * 64,
+    )["channels"]["openai-plugin"]
+
+    assert status["submission_ready"]
+
+
 def test_openai_submission_readiness_rejects_stale_reviewer_evidence(tmp_path: Path) -> None:
     root = copy_hosted_tree(tmp_path / "repo")
     key_id, secret, _receipt = openai_published_receipt(root)
