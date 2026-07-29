@@ -24,6 +24,7 @@ from . import commands, hosted_gateway
 PLUGIN_ROOT = Path("plugins/hosted")
 PLATFORMS = ("claude", "openai")
 DIRECTORY_CHANNELS = ("claude-connector", "claude-plugin", "openai-plugin")
+REGISTERED_OPENAI_APP_ID = "plugin_asdk_app_6a5e3d26f2b08191a04424d1c1b33fc0"
 DIRECTORY_STATES = frozenset(
     {"draft", "submitted", "in_review", "approved", "published", "rejected", "withdrawn"}
 )
@@ -558,17 +559,57 @@ def _validate_openai_release_stage_language(fields: Iterable[str]) -> None:
         raise ValueError("openai-plugin listing may not make release-stage claims")
 
 
-def _openai_annotation_explanations(annotations: dict[str, Any]) -> dict[str, str]:
+def _openai_annotation_explanations(name: str, annotations: dict[str, Any]) -> dict[str, str]:
     if any(not isinstance(annotations.get(key), bool) for key in _OPENAI_BOOLEAN_ANNOTATIONS):
         raise ValueError("marketplace packet tool annotations are incomplete")
+    write_explanations = {
+        "remember": (
+            "This tool records a durable conclusion in account-backed governed knowledge. "
+            "Under the installed workflow guidance, a relevant durable conclusion may be "
+            "captured automatically without the user using a magic Exomem command."
+        ),
+        "observe_memory": (
+            "This tool records a durable observation in account-backed governed knowledge. "
+            "Under the installed workflow guidance, a relevant durable outcome may be captured "
+            "automatically without the user using a magic Exomem command."
+        ),
+        "capture_source": (
+            "This tool preserves supplied raw source material; it does not turn that material "
+            "into a durable conclusion automatically."
+        ),
+        "preserve_evidence": (
+            "This tool writes supplied proof material as append-only evidence; it does not "
+            "create a durable conclusion automatically."
+        ),
+        "triage_memory": (
+            "This tool records the selected review decision against the current signal "
+            "fingerprint; it does not capture a durable conclusion automatically."
+        ),
+        "connect_memory": (
+            "This tool writes only an explicitly selected entity or accepted relation; its "
+            "proposal operations remain read-only."
+        ),
+        "maintain_memory": (
+            "This tool applies maintenance only for explicit write-capable modes and flags; "
+            "its audit mode is read-only."
+        ),
+        "adoption_studio": (
+            "This tool applies only an explicitly selected adoption proposal; proposal review "
+            "does not write by itself."
+        ),
+        "transfer_artifact": (
+            "This tool prepares the requested out-of-band artifact transfer and does not "
+            "automatically capture a durable conclusion."
+        ),
+    }
     return {
         "readOnlyHint": (
             "This tool only reads governed knowledge and does not change stored content."
             if annotations["readOnlyHint"]
-            else (
-                "This tool can change account-backed governed knowledge. Under the installed "
-                "workflow guidance, a relevant durable conclusion may be captured automatically "
-                "without the user using a magic Exomem command."
+            else write_explanations.get(
+                name,
+                "This tool performs only its documented write operation and does not "
+                "automatically capture a durable conclusion.",
             )
         ),
         "destructiveHint": (
@@ -1175,7 +1216,9 @@ def directory_packets(
                             if key in raw_annotations
                         },
                     },
-                    "annotation_explanations": _openai_annotation_explanations(raw_annotations),
+                    "annotation_explanations": _openai_annotation_explanations(
+                        tool["name"], raw_annotations
+                    ),
                 }
                 for tool, raw_annotations in (
                     (item, item["mcp_annotations"]) for item in tool_entries
@@ -1246,6 +1289,11 @@ def directory_render(
     if channel not in (*DIRECTORY_CHANNELS, "all"):
         raise ValueError("unsupported directory channel")
     target = output or _marketplace_path(root, "directory/generated")
+    if (
+        target.resolve() == _marketplace_path(root, "directory/generated").resolve()
+        and channel in ("openai-plugin", "all")
+    ):
+        _validate_repository_openai_app_id(root, openai_app_id)
     packets = directory_packets(root, channel=channel, openai_app_id=openai_app_id)
     target.mkdir(parents=True, exist_ok=True)
     selected = DIRECTORY_CHANNELS if channel == "all" else (channel,)
@@ -1516,6 +1564,15 @@ def _validate_openai_app_id(value: str | None) -> str:
     if not re.fullmatch(r"plugin_asdk_app_[A-Za-z0-9]+", clean):
         raise ValueError("OpenAI candidate requires a registered OpenAI app release input")
     return clean
+
+
+def _validate_repository_openai_app_id(root: Path, value: str | None) -> str:
+    """Keep fixture IDs out of the committed production candidate artifacts."""
+
+    app_id = _validate_openai_app_id(value)
+    if root.resolve() == _repo_root().resolve() and app_id != REGISTERED_OPENAI_APP_ID:
+        raise ValueError("repository OpenAI artifacts may not use a fixture app ID")
+    return app_id
 
 
 def _registered_app_id_sha256(value: str) -> str:
@@ -1899,6 +1956,8 @@ def render(
     if destination.exists() and destination != managed_destination:
         raise ValueError("render output already exists; refuse to replace an unchecked directory")
     selected = PLATFORMS if platform == "all" else (platform,)
+    if destination == managed_destination and "openai" in selected:
+        _validate_repository_openai_app_id(root, openai_app_id)
     with ExitStack() as release_locks:
         if destination == managed_destination:
             for selected_platform in sorted(PLATFORMS):
@@ -1959,6 +2018,7 @@ def check(
     expected = root / PLUGIN_ROOT / "generated"
     if "openai" in selected:
         generated_app_id = _generated_openai_app_id(expected)
+        _validate_repository_openai_app_id(root, generated_app_id)
         if openai_app_id is None:
             openai_app_id = generated_app_id
         elif _validate_openai_app_id(openai_app_id) != generated_app_id:

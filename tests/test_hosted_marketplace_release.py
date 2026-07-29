@@ -272,7 +272,7 @@ def test_marketplace_packet_preserves_the_complete_live_tool_contract() -> None:
     assert "transition_token" in tools["observe_memory"]["input_schema"]["properties"]
 
 
-def test_hosted_marketplace_tools_are_account_backed_and_explain_automatic_capture() -> None:
+def test_hosted_marketplace_tools_are_account_backed_and_explain_write_side_effects() -> None:
     packet = json.loads(
         hosted_plugins.directory_packets(
             REPO_ROOT, channel="openai-plugin", openai_app_id="plugin_asdk_app_releaseinput123"
@@ -284,11 +284,28 @@ def test_hosted_marketplace_tools_are_account_backed_and_explain_automatic_captu
         "account-backed" in tool["annotation_explanations"]["openWorldHint"].lower()
         for tool in packet["tools"]
     )
-    for tool in packet["tools"]:
-        if not tool["annotations"]["readOnlyHint"]:
-            explanation = tool["annotation_explanations"]["readOnlyHint"].lower()
-            assert "automatic" in explanation
-            assert "magic" in explanation
+    explanations = {
+        tool["name"]: tool["annotation_explanations"]["readOnlyHint"].lower()
+        for tool in packet["tools"]
+        if not tool["annotations"]["readOnlyHint"]
+    }
+    assert set(explanations) == {
+        "remember",
+        "observe_memory",
+        "capture_source",
+        "preserve_evidence",
+        "triage_memory",
+        "connect_memory",
+    }
+    for name in ("remember", "observe_memory"):
+        assert "automatic" in explanations[name]
+        assert "magic" in explanations[name]
+    assert "raw source" in explanations["capture_source"]
+    assert "append-only" in explanations["preserve_evidence"]
+    assert "review decision" in explanations["triage_memory"]
+    assert "explicit" in explanations["connect_memory"]
+    for name in ("capture_source", "preserve_evidence", "triage_memory", "connect_memory"):
+        assert "may be captured automatically" not in explanations[name]
 
 
 def test_openai_negative_review_cases_require_and_render_rationale(tmp_path: Path) -> None:
