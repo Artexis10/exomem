@@ -92,7 +92,11 @@ def ready_directory_evidence(root: Path) -> tuple[str, str]:
             "publisher_verified": True,
             "policy_approved": True,
             "reviewer_seeded": True,
-            **({"domain_verified": True} if channel == "openai-plugin" else {}),
+            **(
+                {"domain_verified": True, "review_recording_prepared": True}
+                if channel == "openai-plugin"
+                else {}
+            ),
         }
         for channel in hosted_plugins.DIRECTORY_CHANNELS
     }
@@ -100,6 +104,31 @@ def ready_directory_evidence(root: Path) -> tuple[str, str]:
         json.dumps(
             signed_evidence(
                 {**common, "evidence_type": "directory-prerequisites", "channels": channels}, secret
+            )
+        ),
+        encoding="utf-8",
+    )
+    fixture = hosted_plugins._load_marketplace_review_fixture(root)
+    reviewer_access = {
+        channel: {
+            "provider": "openai" if channel == "openai-plugin" else "anthropic",
+            "feature_enabled": True,
+            "credential_active": True,
+            "credential_expires_at": timestamp(checked_at + timedelta(days=7)),
+            "fixture_version": fixture["fixture_version"],
+            "payload_sha256": fixture["payload_sha256"],
+        }
+        for channel in hosted_plugins.DIRECTORY_CHANNELS
+    }
+    (evidence_root / "reviewer-access-evidence.json").write_text(
+        json.dumps(
+            signed_evidence(
+                {
+                    **common,
+                    "evidence_type": "directory-reviewer-access",
+                    "channels": reviewer_access,
+                },
+                secret,
             )
         ),
         encoding="utf-8",
@@ -806,6 +835,146 @@ def test_directory_status_is_fail_closed_while_promotions_and_probes_are_pending
     assert all(not channel["ready"] for channel in status["channels"].values())
     assert all(channel["state"] == "draft" for channel in status["channels"].values())
     assert "promotion is not live" in status["channels"]["claude-connector"]["blockers"]
+
+
+def test_reviewer_ready_openai_candidate_can_enter_review_before_broad_admission(
+    tmp_path: Path,
+) -> None:
+    root = copy_hosted_tree(tmp_path / "repo")
+    key_id, secret, receipt = openai_published_receipt(root)
+    admission_path = root / "plugins/hosted/directory/public-admission-evidence.json"
+    admission = json.loads(admission_path.read_text(encoding="utf-8"))
+    admission["admission"]["capacity"] = False
+    admission_path.write_text(json.dumps(signed_evidence(admission, secret)), encoding="utf-8")
+    app_id = "asdk_app_releaseinput123"
+
+    status = hosted_plugins.directory_status(
+        root,
+        openai_app_id=app_id,
+        trusted_key_id=key_id,
+        trusted_secret=secret,
+        deployment_sha256="b" * 64,
+    )["channels"]["openai-plugin"]
+    assert status["submission_ready"]
+    assert status["submission_blockers"] == []
+    assert not status["ready"]
+    assert not status["public"]
+    assert "public admission evidence is incomplete" in status["blockers"]
+
+    record_sha256 = hosted_plugins.directory_record_sha256(root, "openai-plugin")
+    previous_state = "draft"
+    for state in ("submitted", "in_review", "approved"):
+        state_receipt = signed_evidence({**receipt, "state": state}, secret)
+        hosted_plugins.record_directory_state(
+            root,
+            "openai-plugin",
+            state,
+            expected_state=previous_state,
+            expected_record_sha256=record_sha256,
+            receipt=state_receipt,
+            openai_app_id=app_id,
+            trusted_key_id=key_id,
+            trusted_secret=secret,
+            deployment_sha256="b" * 64,
+        )
+        record_sha256 = hosted_plugins.directory_record_sha256(root, "openai-plugin")
+        previous_state = state
+
+    with pytest.raises(ValueError, match="current public readiness"):
+        hosted_plugins.record_directory_state(
+            root,
+            "openai-plugin",
+            "published",
+            expected_state="approved",
+            expected_record_sha256=record_sha256,
+            receipt=signed_evidence({**receipt, "state": "published"}, secret),
+            openai_app_id=app_id,
+            trusted_key_id=key_id,
+            trusted_secret=secret,
+            deployment_sha256="b" * 64,
+        )
+
+
+@pytest.mark.parametrize(
+    ("mutate", "match"),
+    [
+        (
+            lambda evidence: evidence["channels"]["openai-plugin"].update(provider="anthropic"),
+            "provider does not match",
+        ),
+        (
+            lambda evidence: evidence.update(deployment_sha256="c" * 64),
+            "binds a different deployment",
+        ),
+        (
+            lambda evidence: evidence["channels"]["openai-plugin"].update(
+                fixture_version="v999"
+            ),
+            "fixture version is stale",
+        ),
+        (
+            lambda evidence: evidence["channels"]["openai-plugin"].update(
+                credential_expires_at=(datetime.now(UTC) + timedelta(hours=23))
+                .replace(microsecond=0)
+                .isoformat()
+                .replace("+00:00", "Z")
+            ),
+            "expires before the minimum review window",
+        ),
+        (
+            lambda evidence: evidence["channels"]["openai-plugin"].update(
+                credential_identifier="must-not-leak"
+            ),
+            "private material",
+        ),
+    ],
+)
+def test_openai_submission_readiness_requires_bound_secret_free_reviewer_access(
+    tmp_path: Path, mutate: object, match: str
+) -> None:
+    root = copy_hosted_tree(tmp_path / "repo")
+    key_id, secret, _receipt = openai_published_receipt(root)
+    path = root / "plugins/hosted/directory/reviewer-access-evidence.json"
+    evidence = json.loads(path.read_text(encoding="utf-8"))
+    mutate(evidence)
+    path.write_text(json.dumps(signed_evidence(evidence, secret)), encoding="utf-8")
+
+    status = hosted_plugins.directory_status(
+        root,
+        openai_app_id="asdk_app_releaseinput123",
+        trusted_key_id=key_id,
+        trusted_secret=secret,
+        deployment_sha256="b" * 64,
+    )["channels"]["openai-plugin"]
+
+    assert not status["submission_ready"]
+    assert any(match in blocker for blocker in status["submission_blockers"])
+    assert "must-not-leak" not in "\n".join(status["submission_blockers"])
+
+
+def test_openai_submission_readiness_requires_review_recording_prepared(
+    tmp_path: Path,
+) -> None:
+    root = copy_hosted_tree(tmp_path / "repo")
+    key_id, secret, _receipt = openai_published_receipt(root)
+    path = root / "plugins/hosted/directory/prerequisite-evidence.json"
+    evidence = json.loads(path.read_text(encoding="utf-8"))
+    evidence["channels"]["openai-plugin"]["review_recording_prepared"] = False
+    path.write_text(json.dumps(signed_evidence(evidence, secret)), encoding="utf-8")
+
+    status = hosted_plugins.directory_status(
+        root,
+        openai_app_id="asdk_app_releaseinput123",
+        trusted_key_id=key_id,
+        trusted_secret=secret,
+        deployment_sha256="b" * 64,
+    )["channels"]
+
+    assert not status["openai-plugin"]["submission_ready"]
+    assert "operator prerequisite review_recording_prepared is incomplete" in status[
+        "openai-plugin"
+    ]["submission_blockers"]
+    assert status["claude-connector"]["submission_ready"]
 
 
 def test_expired_signed_production_evidence_blocks_directory_readiness(tmp_path: Path) -> None:

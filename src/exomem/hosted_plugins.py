@@ -27,6 +27,7 @@ DIRECTORY_CHANNELS = ("claude-connector", "claude-plugin", "openai-plugin")
 DIRECTORY_STATES = frozenset(
     {"draft", "submitted", "in_review", "approved", "published", "rejected", "withdrawn"}
 )
+DIRECTORY_MINIMUM_REVIEW_WINDOW = timedelta(days=1)
 DEMOTION_REASONS = frozenset(
     {"artifact-withdrawn", "client-regression", "contract-drift", "operator-withdrawal"}
 )
@@ -2413,6 +2414,7 @@ def _load_signed_directory_evidence(
         },
         "directory-prerequisites": {"channels"},
         "directory-public-admission": {"admission"},
+        "directory-reviewer-access": {"channels"},
         "directory-post-install": {
             "channel",
             "submission_sha256",
@@ -2496,7 +2498,11 @@ def _directory_prerequisites(
         "publisher_verified",
         "policy_approved",
         "reviewer_seeded",
-        *({"domain_verified"} if channel == "openai-plugin" else set()),
+        *(
+            {"domain_verified", "review_recording_prepared"}
+            if channel == "openai-plugin"
+            else set()
+        ),
     }
     if (
         not isinstance(requirements, dict)
@@ -2505,6 +2511,71 @@ def _directory_prerequisites(
     ):
         raise ValueError("directory operator prerequisites are incomplete")
     return requirements
+
+
+def _directory_reviewer_access(
+    root: Path,
+    channel: str,
+    *,
+    trusted_key_id: str | None,
+    trusted_secret: str | None,
+    deployment_sha256: str | None,
+) -> None:
+    value = _load_signed_directory_evidence(
+        root,
+        "reviewer-access-evidence",
+        "directory-reviewer-access",
+        trusted_key_id=trusted_key_id,
+        trusted_secret=trusted_secret,
+        deployment_sha256=deployment_sha256,
+    )
+    channels = value.get("channels")
+    if not isinstance(channels, dict) or set(channels) != set(DIRECTORY_CHANNELS):
+        raise ValueError("reviewer access evidence is incomplete")
+    access = channels.get(channel)
+    private_fields = {
+        "username",
+        "password",
+        "credential_id",
+        "credential_identifier",
+        "user_id",
+        "tenant_id",
+        "invitation",
+        "sample_content",
+        "bearer_token",
+    }
+    if isinstance(access, dict) and private_fields.intersection(access):
+        raise ValueError("reviewer access evidence contains private material")
+    expected = {
+        "provider",
+        "feature_enabled",
+        "credential_active",
+        "credential_expires_at",
+        "fixture_version",
+        "payload_sha256",
+    }
+    if not isinstance(access, dict) or set(access) != expected:
+        raise ValueError("reviewer access evidence is incomplete")
+    if access["provider"] != ("openai" if channel == "openai-plugin" else "anthropic"):
+        raise ValueError("reviewer access provider does not match the channel")
+    if access["feature_enabled"] is not True or access["credential_active"] is not True:
+        raise ValueError("reviewer access feature or credential is inactive")
+    credential_expires_at = access["credential_expires_at"]
+    if not isinstance(credential_expires_at, str) or not re.fullmatch(
+        r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z", credential_expires_at
+    ):
+        raise ValueError("reviewer access credential expiry is invalid")
+    try:
+        credential_expiry = datetime.fromisoformat(credential_expires_at.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError("reviewer access credential expiry is invalid") from exc
+    if credential_expiry <= datetime.now(UTC) + DIRECTORY_MINIMUM_REVIEW_WINDOW:
+        raise ValueError("reviewer access credential expires before the minimum review window")
+    fixture = _load_marketplace_review_fixture(root)
+    if access["fixture_version"] != fixture["fixture_version"]:
+        raise ValueError("reviewer access fixture version is stale")
+    if access["payload_sha256"] != fixture["payload_sha256"]:
+        raise ValueError("reviewer access fixture payload digest is stale")
 
 
 def _directory_probe_blockers(
@@ -2697,6 +2768,17 @@ def directory_status(
         except ValueError as exc:
             blockers.append(str(exc))
         try:
+            _directory_reviewer_access(
+                root,
+                channel,
+                trusted_key_id=trusted_key_id,
+                trusted_secret=trusted_secret,
+                deployment_sha256=deployment_sha256,
+            )
+        except ValueError as exc:
+            blockers.append(str(exc))
+        submission_blockers = list(blockers)
+        try:
             admission = _load_signed_directory_evidence(
                 root,
                 "public-admission-evidence",
@@ -2747,6 +2829,8 @@ def directory_status(
         channels[channel] = {
             "state": record["state"] if len(listing_heads) == 1 else None,
             "latest_event_state": record["state"],
+            "submission_ready": not submission_blockers,
+            "submission_blockers": submission_blockers,
             "ready": ready,
             "public": active_record is not None and not blockers,
             "blockers": blockers,
@@ -2843,7 +2927,9 @@ def record_directory_state(
                 trusted_secret=trusted_secret,
                 deployment_sha256=deployment_sha256,
             )["channels"][channel]
-            if not status["ready"]:
+            if state != "published" and not status["submission_ready"]:
+                raise ValueError("directory submission requires current submission readiness")
+            if state == "published" and not status["ready"]:
                 raise ValueError("directory submission requires current public readiness")
             receipt_error = _validate_directory_receipt(
                 root,
