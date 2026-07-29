@@ -292,6 +292,23 @@ RESTRICTED_STEM = "kill-switch-for-risky-releases"
 RESTRICTED_KB_RELATIVE = "Notes/Patterns/kill-switch-for-risky-releases.md"
 
 
+def _read_alias_surface(vault: Path, *, path: str, surface: str) -> object:
+    from exomem import get_frontmatter as get_frontmatter_module
+    from exomem import get_page as get_page_module
+
+    if surface == "get":
+        return commands.op_get(vault, path=path)
+    if surface == "fetch":
+        return commands.op_fetch(vault, id=path)
+    if surface == "frontmatter":
+        return commands.op_get(vault, path=path, frontmatter_only=True)
+    if surface == "get-page":
+        return get_page_module.get_page(vault, path=path)
+    if surface == "get-frontmatter":
+        return get_frontmatter_module.get_frontmatter(vault, path=path)
+    raise AssertionError(f"unexpected read surface: {surface}")
+
+
 @pytest.mark.parametrize(
     ("form", "value"),
     [
@@ -3155,6 +3172,132 @@ def test_direct_read_uses_the_target_it_classified_when_symlink_is_swapped(
         assert out["frontmatter"]["classification"] == "ordinary"
         assert "policy-tree-secret" not in json.dumps(out, default=str)
     assert swapped is True
+
+
+@pytest.mark.parametrize("leaf", ["get", "fetch", "frontmatter"])
+def test_direct_read_uses_the_prepared_ordinary_snapshot_after_target_replacement(
+    vault: Path, leaf: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A post-classification rename cannot substitute the returned bytes."""
+    from exomem import get_frontmatter as get_frontmatter_module
+    from exomem import get_page as get_page_module
+
+    rel = "Knowledge Base/Notes/prepared-snapshot.md"
+    target = vault / rel
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(
+        "---\ntype: source\nclassification: ordinary\n---\nordinary-body\n",
+        encoding="utf-8",
+    )
+    replacement = target.with_name("prepared-snapshot-replacement.md")
+    replacement.write_text(
+        "---\ntype: source\nclassification: replacement\n---\nreplacement-body\n",
+        encoding="utf-8",
+    )
+
+    original_refusal = commands._refuse_policy_tree_read
+    replaced = False
+
+    def _classify_then_replace(*args: object, **kwargs: object) -> None:
+        nonlocal replaced
+        original_refusal(*args, **kwargs)
+        if not replaced:
+            replacement.replace(target)
+            replaced = True
+
+    monkeypatch.setattr(commands, "_refuse_policy_tree_read", _classify_then_replace)
+
+    if leaf == "fetch":
+        out = commands.op_fetch(vault, id=rel)
+        assert "ordinary-body" in out["text"]
+        assert "replacement-body" not in out["text"]
+    elif leaf == "get":
+        out = commands.op_get(vault, path=rel)
+        assert out["frontmatter"]["classification"] == "ordinary"
+        assert out["body"] == "ordinary-body\n"
+    else:
+        prepared = get_page_module.prepare_page_read(vault, path=rel)
+        commands._refuse_policy_tree_read(
+            prepared.resolved_relative, missing_path=prepared.missing_path
+        )
+        out = get_frontmatter_module.get_frontmatter(vault, path=rel, _prepared=prepared)
+        assert out.frontmatter["classification"] == "ordinary"
+
+    assert replaced is True
+
+
+def test_prepare_page_read_refuses_a_target_replaced_while_binding(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Preparation refuses rather than binding bytes from a swapped leaf."""
+    from exomem import get_page as get_page_module
+
+    rel = "Knowledge Base/Notes/preparation-race.md"
+    target = vault / rel
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("---\ntype: source\n---\nordinary-body\n", encoding="utf-8")
+    replacement = target.with_name("preparation-race-replacement.md")
+    replacement.write_text("---\ntype: source\n---\nreplacement-body\n", encoding="utf-8")
+
+    original_open = get_page_module.os.open
+    replaced = False
+
+    def _replace_then_open(path: object, flags: int, *args: object) -> int:
+        nonlocal replaced
+        if not replaced and Path(path) == target:
+            replacement.replace(target)
+            replaced = True
+        return original_open(path, flags, *args)
+
+    monkeypatch.setattr(get_page_module.os, "open", _replace_then_open)
+
+    with pytest.raises(get_page_module.GetError) as exc:
+        get_page_module.prepare_page_read(vault, path=rel)
+
+    assert exc.value.code == "UNREADABLE"
+    assert replaced is True
+
+
+@pytest.mark.parametrize(
+    "surface",
+    ["get", "fetch", "frontmatter", "get-page", "get-frontmatter"],
+)
+def test_direct_read_refuses_an_ordinary_alias_to_an_excluded_target(
+    vault: Path, surface: str
+) -> None:
+    """Direct readers enforce exclusion on the resolved target as well."""
+    from exomem import get_frontmatter as get_frontmatter_module
+    from exomem import get_page as get_page_module
+
+    secret = vault / "Knowledge Base/Private/secret.md"
+    secret.parent.mkdir(parents=True, exist_ok=True)
+    secret.write_text("---\ntype: source\n---\nsecret body\n", encoding="utf-8")
+    (vault / "Knowledge Base/_access.yaml").write_text(
+        "excluded:\n  - Private\n", encoding="utf-8"
+    )
+    rel = "Knowledge Base/Notes/private-alias.md"
+    alias = vault / rel
+    alias.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        alias.symlink_to(secret)
+    except OSError:
+        pytest.skip("symlinks unavailable")
+
+    error_type = {
+        "get": ValueError,
+        "fetch": ValueError,
+        "frontmatter": ValueError,
+        "get-page": get_page_module.GetError,
+        "get-frontmatter": get_frontmatter_module.GetFrontmatterError,
+    }[surface]
+
+    with pytest.raises(error_type) as refused:
+        _read_alias_surface(vault, path=rel, surface=surface)
+    alias.unlink()
+    with pytest.raises(error_type) as missing:
+        _read_alias_surface(vault, path=rel, surface=surface)
+
+    assert str(refused.value) == str(missing.value)
 
 
 # --------------------------------------------------------------------------
