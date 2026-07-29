@@ -1,15 +1,19 @@
 # Distribution: getting Exomem into each client
 
-The scaffold at `src/exomem/_scaffold/_Schema/` is the source of truth. Channel
-artifacts are generated from it; CI fails if a generated copy drifts.
+The scaffold at `src/exomem/_scaffold/_Schema/` is the source of truth for skill
+artifacts. Generated skill copies are checked by CI; hosted definitions,
+marketplace metadata, hooks, fixtures, and promotion records are maintained by
+their own channel contracts.
 
 ## Distribution channels
 
 | Surface | Canonical channel | What users install or connect |
 |---|---|---|
-| Claude Code | This Git repository's Claude Code plugin marketplace | `Artexis10/exomem` plugin (MCP server, skills, and hooks) |
+| Claude Code plugin | This Git repository's Claude Code plugin marketplace | `Artexis10/exomem` plugin (skills and hooks), plus a configured remote or stdio MCP route |
 | Claude.ai, Desktop, Mobile, Code, and Cowork | Claude Connector Directory plus the independent public Claude plugin channel | The hosted connector; the plugin bundle adds skills where the client supports them |
-| ChatGPT and Codex | One universal OpenAI Plugin Directory entry | The hosted OpenAI plugin and its MCP connection |
+| Hosted ChatGPT and Codex | One universal OpenAI Plugin Directory entry | The hosted OpenAI plugin and its MCP connection |
+| Self-hosted/local Claude Code and Codex | `exomem setup` (or explicit `codex mcp add`) | A local or remote MCP route plus disk-installed skills and hooks |
+| Cursor and generic MCP clients | Client MCP configuration | A local stdio or remote HTTP MCP route; `bootstrap()` supplies the portable contract when skills are unavailable |
 
 The generated hosted candidates and directory packets are currently **pending**:
 `plugins/hosted/definition.json` has `distribution_scope: "pending"`, promotion
@@ -26,6 +30,15 @@ metadata to the default branch publishes that Git-repo channel:
 ```text
 /plugin marketplace add Artexis10/exomem
 /plugin install exomem@exomem
+```
+
+The plugin does not create a usable server route when `mcp_url` is blank. After
+installing it, configure one of the supported routes:
+
+```bash
+exomem setup --mcp-url https://<host>/mcp
+# or, for a local server
+exomem setup --stdio
 ```
 
 The plugin tree under `plugins/claude-code/` is generated. Rebuild it when the
@@ -50,10 +63,19 @@ the public bundle; bundled skills apply to Code and Cowork, but cannot force
 skill activation in claude.ai. ChatGPT and Codex share one universal OpenAI
 Plugin Directory entry.
 
+## Self-hosted and generic MCP clients
+
+Self-hosted routes are supported channels, not directory fallbacks. Run
+`exomem setup` for Claude Code or Codex, or register Codex explicitly with
+`codex mcp add` as described in the
+[AI assistant guide](ai-assistant-guide.md#codex-cli). Cursor and other generic
+MCP clients can use either a local stdio command or a remote HTTP endpoint; see
+[remote-quickstart.md](remote-quickstart.md) for the remote path.
+
 ## Fallbacks
 
-Use manual skill archives or custom instructions only when a supported directory
-channel is unavailable. Generate archives with:
+Use manual skill archives or custom instructions when a client has no supported
+skill channel. Generate archives with:
 
 ```bash
 exomem package-skills
@@ -68,14 +90,18 @@ directory listing or for native client skill activation.
 
 ## Release checklist
 
-Release Please handles versioning and PyPI publication. Around a release:
+Release Please handles versioning and the release workflow handles enabled
+publication channels. Around a release:
 
-1. Merge to the default branch; release-please publishes the package and GHCR
-   images.
-2. Regenerate `plugins/claude-code/` if the scaffold changed; CI checks sync.
-3. Upgrade each self-hosted service with `scripts/upgrade.ps1` or
+1. Merge feature and fix PRs to the default branch; Release Please opens or
+   updates a release PR.
+2. After that PR passes CI, merge it. Release Please creates the tag and GitHub
+   Release; the release workflow publishes PyPI and GHCR only when
+   `PYPI_PUBLISH_ENABLED=true` and `GHCR_PUBLISH_ENABLED=true`, respectively.
+3. Regenerate `plugins/claude-code/` if the scaffold changed; CI checks sync.
+4. Upgrade each self-hosted service with `scripts/upgrade.ps1` or
    `scripts/upgrade.sh` and verify its live health version.
-4. Re-upload fallback web-client archives only when `SKILL.md` changed.
+5. Re-upload fallback web-client archives only when `SKILL.md` changed.
 
 ## MCP transport
 
