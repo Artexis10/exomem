@@ -1141,9 +1141,9 @@ def pool_limit(limit: int) -> int:
 def gate_state(vault_root: Path) -> tuple[Policy, bool]:
     """`(policy, needs_overfetch)` — the cheap pre-`find()` probe.
 
-    On an ungoverned vault `policy.load` short-circuits on a single
-    `is_dir()`, so this costs a stat and keeps the empty-policy fast path
-    genuinely fast.
+    On an ungoverned vault this performs only a bounded set of policy-marker,
+    sidecar, and lifecycle probes, independent of corpus size, keeping the
+    empty-policy fast path genuinely fast.
     """
     policy = policy_module.load(Path(vault_root))
     return policy, (not policy.empty or bool(lifecycle.tombstoned_paths(vault_root)))
