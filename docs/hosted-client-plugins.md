@@ -109,14 +109,17 @@ while broad admission stays closed and `ready`/`public` remain false.
 
 ## Marketplace reviewer and operator handoff
 
-Follow the paired Substrate Hosted Alpha operator runbook
-(`substrate/docs/runbooks/exomem-hosted-alpha.md`)
-for the live reviewer flow. It creates a dedicated immutable reviewer-purpose
-tenant, seeds the checked-in generic fixture through normal governed MCP writes,
-and, when the provider credential is issued, atomically seals the temporary
-setup access. The raw credential, reviewer identity, tenant identifiers, invite
-links, and fixture content stay in the approved secret-manager/provider handoff
-and out of Git, logs, and this documentation.
+Follow the paired [Substrate Hosted Alpha operator runbook](https://github.com/substrate-systems/substrate/blob/main/docs/runbooks/exomem-hosted-alpha.md#marketplace-reviewer-access)
+in `substrate-systems/substrate` at
+`docs/runbooks/exomem-hosted-alpha.md`. It creates a dedicated immutable
+reviewer-purpose tenant, seeds the checked-in generic fixture through normal
+governed MCP writes, and, when the provider credential is issued, atomically
+seals the temporary setup access. The fixture payload, version, digest, and
+exact non-sensitive content are intentionally checked in; operators must seed
+that exact fixture. Only raw reviewer credentials, reviewer identities, tenant
+IDs and invites, live tenant exports or content, and content-bearing native
+client acceptance evidence stay in the approved secret-manager/provider handoff
+and out of Git and logs.
 
 The signed, secret-free reviewer-access evidence is distinct from the provider
 credential. It binds the matching provider and deployment, enabled feature
