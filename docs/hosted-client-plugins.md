@@ -9,12 +9,12 @@ Render candidates only with the registered OpenAI app ID supplied by the release
 operator:
 
 ```powershell
-python scripts/hosted-plugin.py render --platform all --openai-app-id asdk_app_<registered-id>
-python scripts/hosted-plugin.py check --platform all --openai-app-id asdk_app_<registered-id>
-python scripts/hosted-plugin.py archive --platform all --openai-app-id asdk_app_<registered-id>
+python scripts/hosted-plugin.py render --platform all --openai-app-id plugin_asdk_app_<registered-id>
+python scripts/hosted-plugin.py check --platform all --openai-app-id plugin_asdk_app_<registered-id>
+python scripts/hosted-plugin.py archive --platform all --openai-app-id plugin_asdk_app_<registered-id>
 ```
 
-The registered `asdk_app_*` value is package-only: it belongs in the OpenAI
+The registered `plugin_asdk_app_*` value is package-only: it belongs in the OpenAI
 `.app.json`, package locks, and promotion evidence. A portal-issued public
 plugin identifier is a separate directory-submission concern. Never replace the
 package registration ID with a directory identifier or add either private value
@@ -83,7 +83,7 @@ not hide an active v1, and withdrawing v1 does not mutate v2.
 
 For an OpenAI receipt, `provider_directory_id_sha256` is the lowercase SHA-256
 of the raw UTF-8 provider-issued directory identity, after trimming outer
-whitespace—the same byte-hash convention used for the registered `asdk_app_*`
+whitespace—the same byte-hash convention used for the registered `plugin_asdk_app_*`
 package identity. The raw directory ID is optional before publication and
 required when an OpenAI revision is published; its hash must match exactly.
 Every signed production and post-install evidence document also carries the

@@ -1486,7 +1486,7 @@ def _package_lock(
 
 def _validate_openai_app_id(value: str | None) -> str:
     clean = str(value or "").strip()
-    if not re.fullmatch(r"asdk_app_[A-Za-z0-9]+", clean):
+    if not re.fullmatch(r"plugin_asdk_app_[A-Za-z0-9]+", clean):
         raise ValueError("OpenAI candidate requires a registered OpenAI app release input")
     return clean
 

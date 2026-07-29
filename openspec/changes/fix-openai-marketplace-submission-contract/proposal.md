@@ -9,7 +9,7 @@ Exomem's Hosted OpenAI package is rendered against the real registered applicati
 - Reject private-alpha, trial, demo, hypothetical, or not-yet-built language from public OpenAI listing fields without changing Exomem's internal broad-launch policy.
 - Replace the stale public listing copy and make positive review cases target a checked-in deterministic generic reviewer fixture with reset semantics.
 - Distinguish provider-submission readiness from broad-public activation: a seeded reviewer account can unblock review, while the existing signed public-admission and fresh non-reviewer checks still gate public activation.
-- Regenerate and verify the universal OpenAI package and directory packet with the existing registered `asdk_app_*` identity.
+- Regenerate and verify the universal OpenAI package and directory packet with the existing registered `plugin_asdk_app_*` technical identity.
 - Require signed, secret-free evidence that provider-matched reviewer access is live and fixture-bound, while leaving raw credentials, portal submission, clean-client evidence, publication receipts, and public activation operator-controlled.
 
 ## Capabilities

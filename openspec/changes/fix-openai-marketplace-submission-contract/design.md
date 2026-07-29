@@ -1,6 +1,6 @@
 ## Context
 
-The Hosted package and marketplace state machine were built against an earlier OpenAI submission surface. The registered `asdk_app_*` package identity is correct, but the canonical definition currently allows a 200-character OpenAI short description and 300-character prompts, carries private-alpha release language, and renders tool annotations without the explanation material the review form asks for. The packet also treats a seeded reviewer and broad ordinary-user admission as one readiness concept, even though provider review can use an existing pre-provisioned account.
+The Hosted package and marketplace state machine were built against an earlier OpenAI submission surface. The package used the legacy bare `asdk_app_*` form instead of the current registered `plugin_asdk_app_*` technical identity, while the canonical definition also allowed a 200-character OpenAI short description and 300-character prompts, carried private-alpha release language, and rendered tool annotations without the explanation material the review form asks for. The packet also treats a seeded reviewer and broad ordinary-user admission as one readiness concept, even though provider review can use an existing pre-provisioned account.
 
 This change is intentionally a release-contract correction. It must not reopen the MCP runtime, command schemas, plugin layout, tenant model, or Claude channel architecture. Operator-held reviewer credentials, raw recording URLs, provider identities, and portal receipts remain outside Git.
 

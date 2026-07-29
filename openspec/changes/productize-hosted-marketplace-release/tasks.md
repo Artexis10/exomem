@@ -1,6 +1,6 @@
 ## 1. Freeze Current Platform Contracts
 
-- [x] 1.1 Add failing tests that preserve registered `asdk_app_*` package identity, reject a directory ID in package fields, keep Claude's `mcpServers` wrapper, and emit the current OpenAI `.mcp.json` connection shape
+- [x] 1.1 Add failing tests that preserve the registered `plugin_asdk_app_*` package technical identity, reject legacy bare IDs in package fields, keep Claude's `mcpServers` wrapper, and emit the current OpenAI `.mcp.json` connection shape
 - [x] 1.2 Update the existing OpenAI candidate renderer and validators without changing package identity or creating a parallel packaging path
 - [x] 1.3 Rerender and verify deterministic candidates and release locks for every affected platform artifact
 

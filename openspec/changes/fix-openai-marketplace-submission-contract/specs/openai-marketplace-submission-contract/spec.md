@@ -99,5 +99,5 @@ The system SHALL preserve one universal OpenAI package for ChatGPT and Codex and
 
 #### Scenario: Corrected artifacts are regenerated
 - **WHEN** the listing contract or review material changes
-- **THEN** the OpenAI package, locks, archive, and directory packet regenerate deterministically against the existing `asdk_app_*` identity
-- **AND** no `plugin_asdk_app_*` value enters the package manifest or lock files
+- **THEN** the OpenAI package, locks, archive, and directory packet regenerate deterministically against the existing `plugin_asdk_app_*` technical identity
+- **AND** no legacy bare `asdk_app_*` value enters the package manifest or lock files

@@ -28,8 +28,8 @@ def test_openai_candidate_requires_registered_app_release_input(tmp_path: Path) 
         )
 
 
-@pytest.mark.parametrize("app_id", ["plugin_asdk_app_public123", "asdk_app_", "placeholder"])
-def test_openai_candidate_rejects_public_or_malformed_registered_app_id(
+@pytest.mark.parametrize("app_id", ["asdk_app_public123", "plugin_asdk_app_", "placeholder"])
+def test_openai_candidate_rejects_legacy_or_malformed_registered_app_id(
     tmp_path: Path, app_id: str
 ) -> None:
     with pytest.raises(ValueError, match="registered OpenAI app"):
@@ -40,6 +40,19 @@ def test_openai_candidate_rejects_public_or_malformed_registered_app_id(
             openai_app_id=app_id,
             staging_root=tmp_path,
         )
+
+
+def test_openai_candidate_uses_the_registered_plugin_technical_id() -> None:
+    app_id = "plugin_asdk_app_public123"
+
+    files = hosted_plugins.candidate_files(
+        REPO_ROOT,
+        platform="openai",
+        openai_app_id=app_id,
+    )
+
+    app = json.loads(files["openai/.app.json"])
+    assert app["apps"]["exomem"]["id"] == app_id
 
 
 def test_claude_candidate_can_render_and_check_without_openai_registration(tmp_path: Path) -> None:
@@ -61,8 +74,8 @@ def test_candidate_file_map_is_deterministic_without_staging_directory() -> None
 
 
 def test_openai_locks_bind_but_do_not_expose_the_registered_app_id() -> None:
-    first_id = "asdk_app_releaseinput123"
-    second_id = "asdk_app_otherrelease456"
+    first_id = "plugin_asdk_app_releaseinput123"
+    second_id = "plugin_asdk_app_otherrelease456"
     first = hosted_plugins.candidate_files(
         REPO_ROOT, platform="openai", openai_app_id=first_id
     )
@@ -86,7 +99,7 @@ def test_openai_check_rejects_a_lock_reused_for_another_registered_app(tmp_path:
     root = copy_hosted_tree(tmp_path / "repo")
     hosted_plugins.render(
         root,
-        openai_app_id="asdk_app_releaseinput123",
+        openai_app_id="plugin_asdk_app_releaseinput123",
         platform="openai",
     )
     app = root / "plugins/hosted/generated/openai/.app.json"
@@ -95,7 +108,7 @@ def test_openai_check_rejects_a_lock_reused_for_another_registered_app(tmp_path:
             {
                 "apps": {
                     "exomem": {
-                        "id": "asdk_app_otherrelease456",
+                        "id": "plugin_asdk_app_otherrelease456",
                         "category": "productivity",
                     }
                 }
@@ -178,7 +191,7 @@ def test_claude_archive_is_deterministic_and_locked(tmp_path: Path) -> None:
 
 def test_openai_archive_blocks_an_interleaved_render(tmp_path: Path, monkeypatch) -> None:
     root = copy_hosted_tree(tmp_path / "repo")
-    first_id = "asdk_app_releaseinput123"
+    first_id = "plugin_asdk_app_releaseinput123"
     hosted_plugins.render(root, openai_app_id=first_id, platform="openai")
     original_archive = hosted_plugins._archive_bytes
 
@@ -186,7 +199,7 @@ def test_openai_archive_blocks_an_interleaved_render(tmp_path: Path, monkeypatch
         with pytest.raises(ValueError, match="another process"):
             hosted_plugins.render(
                 root,
-                openai_app_id="asdk_app_otherrelease456",
+                openai_app_id="plugin_asdk_app_otherrelease456",
                 platform="openai",
             )
         return original_archive(package)
@@ -209,7 +222,7 @@ def test_openai_archive_blocks_an_interleaved_claude_render(
     root = copy_hosted_tree(tmp_path / "repo")
     hosted_plugins.render(
         root,
-        openai_app_id="asdk_app_releaseinput123",
+        openai_app_id="plugin_asdk_app_releaseinput123",
         platform="openai",
     )
     original_archive = hosted_plugins._archive_bytes
@@ -254,7 +267,7 @@ def test_managed_render_blocks_an_interleaved_other_platform_render(
             with pytest.raises(ValueError, match="another process"):
                 hosted_plugins.render(
                     root,
-                    openai_app_id="asdk_app_otherrelease456",
+                    openai_app_id="plugin_asdk_app_otherrelease456",
                     platform="openai",
                 )
         return result
@@ -270,14 +283,14 @@ def test_rendered_packages_are_deterministic_and_remote_only(tmp_path: Path) -> 
     first = hosted_plugins.render(
         REPO_ROOT,
         tmp_path / "first",
-        openai_app_id="asdk_app_releaseinput123",
+        openai_app_id="plugin_asdk_app_releaseinput123",
         platform="all",
         staging_root=tmp_path,
     )
     second = hosted_plugins.render(
         REPO_ROOT,
         tmp_path / "second",
-        openai_app_id="asdk_app_releaseinput123",
+        openai_app_id="plugin_asdk_app_releaseinput123",
         platform="all",
         staging_root=tmp_path,
     )
@@ -307,7 +320,7 @@ def test_rendered_packages_are_deterministic_and_remote_only(tmp_path: Path) -> 
     assert openai_plugin["mcpServers"] == "./.mcp.json"
     assert openai_plugin["apps"] == "./.app.json"
     assert openai_app == {
-        "apps": {"exomem": {"id": "asdk_app_releaseinput123", "category": "productivity"}}
+        "apps": {"exomem": {"id": "plugin_asdk_app_releaseinput123", "category": "productivity"}}
     }
     marketplace = json.loads((first / "openai/marketplace.json").read_text(encoding="utf-8"))
     assert marketplace["plugins"][0] == {

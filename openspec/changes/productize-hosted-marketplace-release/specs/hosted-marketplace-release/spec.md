@@ -4,23 +4,23 @@
 The system SHALL render the Hosted OpenAI candidate with its registered package application identity and current connection schema while keeping any provider-issued directory identity outside the existing deterministic package and compatibility pipeline.
 
 #### Scenario: Registered OpenAI package identity renders
-- **WHEN** an operator supplies a valid registered `asdk_app_*` identifier
+- **WHEN** an operator supplies a valid registered `plugin_asdk_app_*` technical identifier
 - **THEN** the generated OpenAI app configuration and package locks bind that exact identifier to the canonical Hosted endpoint
 - **AND** ChatGPT and Codex are represented as acceptance surfaces of one universal OpenAI plugin
 
 #### Scenario: Malformed package identity is rejected
-- **WHEN** an operator supplies a placeholder, malformed, `plugin_asdk_app_*`, or differently registered package identifier
+- **WHEN** an operator supplies a placeholder, malformed, legacy bare `asdk_app_*`, or differently registered package identifier
 - **THEN** validation fails before a candidate, promotion, or submission packet can be accepted
 
 #### Scenario: Provider issues a directory identity
-- **WHEN** the OpenAI portal assigns a `plugin_asdk_app_*` identity
+- **WHEN** the OpenAI portal assigns a directory identity distinct from the registered package technical ID
 - **THEN** the system records it only on the exact directory submission revision and active publication
 - **AND** it does not change `.app.json`, package locks, compatibility identity, or prior promotion evidence
 
 #### Scenario: Draft packet precedes directory identity
 - **WHEN** an operator renders an OpenAI draft packet before portal submission
 - **THEN** a directory identity is not required
-- **AND** the packet still binds the registered `asdk_app_*` package and endpoint
+- **AND** the packet still binds the registered `plugin_asdk_app_*` technical ID and endpoint
 
 ### Requirement: Canonical marketplace definition
 The system SHALL maintain one canonical public marketplace definition with provider-specific overlays for Claude Connector, Claude Plugin, and OpenAI Plugin, while importing identity-bearing values from the Hosted runtime definition.
@@ -141,8 +141,8 @@ The system SHALL track append-only Claude Connector, Claude public Plugin, and O
 #### Scenario: Publication receipt is recorded
 - **WHEN** an operator records a submitted, in-review, approved, or published provider receipt
 - **THEN** the signed append-only record binds the exact channel, state, version, listing digest, compatibility identity, exact promotion-record digest, applicable package and archive locks, provider identity hash, public HTTPS URL, trusted deployment SHA, and fresh canonical timestamp
-- **AND** a published OpenAI record requires both the registered `asdk_app_*` package binding and the portal-issued `plugin_asdk_app_*` directory identity
-- **AND** its `provider_directory_id_sha256` equals the lowercase SHA-256 of the trimmed raw UTF-8 `plugin_asdk_app_*` identity
+- **AND** a published OpenAI record requires both the registered `plugin_asdk_app_*` package binding and any distinct directory identity issued by the provider
+- **AND** its `provider_directory_id_sha256` equals the lowercase SHA-256 of the trimmed raw UTF-8 provider-issued directory identity
 
 #### Scenario: An update is reviewed while a prior revision remains public
 - **WHEN** a new listing revision is submitted while an older revision is the active publication

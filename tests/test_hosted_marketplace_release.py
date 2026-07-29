@@ -182,8 +182,8 @@ def load_hosted_plugin_cli() -> object:
 
 
 def test_marketplace_packets_are_deterministic_and_provider_shaped() -> None:
-    first = hosted_plugins.directory_packets(REPO_ROOT, openai_app_id="asdk_app_releaseinput123")
-    second = hosted_plugins.directory_packets(REPO_ROOT, openai_app_id="asdk_app_releaseinput123")
+    first = hosted_plugins.directory_packets(REPO_ROOT, openai_app_id="plugin_asdk_app_releaseinput123")
+    second = hosted_plugins.directory_packets(REPO_ROOT, openai_app_id="plugin_asdk_app_releaseinput123")
 
     assert first == second
     assert set(first) == set(hosted_plugins.DIRECTORY_CHANNELS)
@@ -209,7 +209,7 @@ def test_marketplace_packets_are_deterministic_and_provider_shaped() -> None:
     }
     assert "recording_url" not in json.dumps(openai)
     assert all("_" not in tool["annotations"]["title"] for tool in openai["tools"])
-    assert "asdk_app_releaseinput123" not in first["openai-plugin"].decode("utf-8")
+    assert "plugin_asdk_app_releaseinput123" not in first["openai-plugin"].decode("utf-8")
     assert openai["brand_asset"] == {
         "path": "assets/icon.svg",
         "sha256": hosted_plugins._sha256(
@@ -226,7 +226,7 @@ def test_marketplace_packets_are_deterministic_and_provider_shaped() -> None:
 def test_marketplace_packet_preserves_the_complete_live_tool_contract() -> None:
     packet = json.loads(
         hosted_plugins.directory_packets(
-            REPO_ROOT, channel="openai-plugin", openai_app_id="asdk_app_releaseinput123"
+            REPO_ROOT, channel="openai-plugin", openai_app_id="plugin_asdk_app_releaseinput123"
         )["openai-plugin"]
     )
     compatibility = hosted_plugins.compatibility_manifest(REPO_ROOT)
@@ -286,7 +286,7 @@ def test_openai_packet_rejects_missing_boolean_annotation(
     monkeypatch.setattr(hosted_plugins, "compatibility_manifest", incomplete_annotations)
     with pytest.raises(ValueError, match="tool annotations are incomplete"):
         hosted_plugins.directory_packets(
-            root, channel="openai-plugin", openai_app_id="asdk_app_releaseinput123"
+            root, channel="openai-plugin", openai_app_id="plugin_asdk_app_releaseinput123"
         )
 
 
@@ -721,7 +721,7 @@ def _mutate_fixture(root: Path, mutate: object) -> None:
 def test_openai_packet_renders_every_boolean_annotation() -> None:
     packet = json.loads(
         hosted_plugins.directory_packets(
-            REPO_ROOT, channel="openai-plugin", openai_app_id="asdk_app_releaseinput123"
+            REPO_ROOT, channel="openai-plugin", openai_app_id="plugin_asdk_app_releaseinput123"
         )["openai-plugin"]
     )
     assert all(
@@ -735,7 +735,7 @@ def test_openai_packet_renders_every_boolean_annotation() -> None:
 def test_openai_read_only_non_idempotent_explanation_describes_state_variability() -> None:
     packet = json.loads(
         hosted_plugins.directory_packets(
-            REPO_ROOT, channel="openai-plugin", openai_app_id="asdk_app_releaseinput123"
+            REPO_ROOT, channel="openai-plugin", openai_app_id="plugin_asdk_app_releaseinput123"
         )["openai-plugin"]
     )
     tool = next(item for item in packet["tools"] if item["name"] == "ask_memory")
@@ -819,7 +819,7 @@ def test_directory_check_rejects_missing_selected_packet(tmp_path: Path, channel
         hosted_plugins.directory_check(
             root,
             channel=channel,
-            openai_app_id="asdk_app_releaseinput123" if channel == "openai-plugin" else None,
+            openai_app_id="plugin_asdk_app_releaseinput123" if channel == "openai-plugin" else None,
         )
 
 
@@ -846,7 +846,7 @@ def test_reviewer_ready_openai_candidate_can_enter_review_before_broad_admission
     admission = json.loads(admission_path.read_text(encoding="utf-8"))
     admission["admission"]["capacity"] = False
     admission_path.write_text(json.dumps(signed_evidence(admission, secret)), encoding="utf-8")
-    app_id = "asdk_app_releaseinput123"
+    app_id = "plugin_asdk_app_releaseinput123"
 
     status = hosted_plugins.directory_status(
         root,
@@ -959,7 +959,7 @@ def test_openai_submission_readiness_requires_bound_secret_free_reviewer_access(
 
     status = hosted_plugins.directory_status(
         root,
-        openai_app_id="asdk_app_releaseinput123",
+        openai_app_id="plugin_asdk_app_releaseinput123",
         trusted_key_id=key_id,
         trusted_secret=secret,
         deployment_sha256="b" * 64,
@@ -1000,7 +1000,7 @@ def test_openai_submission_readiness_rejects_private_reviewer_fields_anywhere(
 
     status = hosted_plugins.directory_status(
         root,
-        openai_app_id="asdk_app_releaseinput123",
+        openai_app_id="plugin_asdk_app_releaseinput123",
         trusted_key_id=key_id,
         trusted_secret=secret,
         deployment_sha256="b" * 64,
@@ -1043,7 +1043,7 @@ def test_openai_submission_readiness_validates_every_reviewer_channel_entry(
 
     status = hosted_plugins.directory_status(
         root,
-        openai_app_id="asdk_app_releaseinput123",
+        openai_app_id="plugin_asdk_app_releaseinput123",
         trusted_key_id=key_id,
         trusted_secret=secret,
         deployment_sha256="b" * 64,
@@ -1066,7 +1066,7 @@ def test_openai_submission_readiness_allows_inactive_sibling_reviewer_access(tmp
 
     status = hosted_plugins.directory_status(
         root,
-        openai_app_id="asdk_app_releaseinput123",
+        openai_app_id="plugin_asdk_app_releaseinput123",
         trusted_key_id=key_id,
         trusted_secret=secret,
         deployment_sha256="b" * 64,
@@ -1089,7 +1089,7 @@ def test_openai_submission_readiness_rejects_stale_reviewer_evidence(tmp_path: P
 
     status = hosted_plugins.directory_status(
         root,
-        openai_app_id="asdk_app_releaseinput123",
+        openai_app_id="plugin_asdk_app_releaseinput123",
         trusted_key_id=key_id,
         trusted_secret=secret,
         deployment_sha256="b" * 64,
@@ -1119,7 +1119,7 @@ def test_openai_submission_readiness_rejects_malformed_reviewer_signature(
 
     status = hosted_plugins.directory_status(
         root,
-        openai_app_id="asdk_app_releaseinput123",
+        openai_app_id="plugin_asdk_app_releaseinput123",
         trusted_key_id=key_id,
         trusted_secret=secret,
         deployment_sha256="b" * 64,
@@ -1141,7 +1141,7 @@ def test_openai_submission_readiness_requires_review_recording_prepared(
 
     status = hosted_plugins.directory_status(
         root,
-        openai_app_id="asdk_app_releaseinput123",
+        openai_app_id="plugin_asdk_app_releaseinput123",
         trusted_key_id=key_id,
         trusted_secret=secret,
         deployment_sha256="b" * 64,
@@ -1587,7 +1587,7 @@ def test_openai_packet_rejects_sale_language_in_review_material(tmp_path: Path) 
 
     with pytest.raises(ValueError, match="sell or upsell"):
         hosted_plugins.directory_packets(
-            root, channel="openai-plugin", openai_app_id="asdk_app_releaseinput123"
+            root, channel="openai-plugin", openai_app_id="plugin_asdk_app_releaseinput123"
         )
 
 
@@ -1605,7 +1605,7 @@ def test_openai_packet_rejects_sale_language_in_tool_contract(
     monkeypatch.setattr(hosted_plugins, "compatibility_manifest", sale_manifest)
     with pytest.raises(ValueError, match="sell or upsell"):
         hosted_plugins.directory_packets(
-            root, channel="openai-plugin", openai_app_id="asdk_app_releaseinput123"
+            root, channel="openai-plugin", openai_app_id="plugin_asdk_app_releaseinput123"
         )
 
 
@@ -1628,12 +1628,12 @@ def test_directory_packet_rejects_live_credential_schema_literals(
     monkeypatch.setattr(hosted_plugins, "compatibility_manifest", credential_manifest)
     with pytest.raises(ValueError, match="credential value"):
         hosted_plugins.directory_packets(
-            root, channel="openai-plugin", openai_app_id="asdk_app_releaseinput123"
+            root, channel="openai-plugin", openai_app_id="plugin_asdk_app_releaseinput123"
         )
 
 
 def openai_published_receipt(root: Path) -> tuple[str, str, dict[str, object]]:
-    app_id = "asdk_app_releaseinput123"
+    app_id = "plugin_asdk_app_releaseinput123"
     hosted_plugins.render(root, platform="openai", openai_app_id=app_id)
     key_id, secret = ready_directory_evidence(root)
     bindings = hosted_plugins._directory_bindings(root, "openai-plugin", openai_app_id=app_id)
@@ -1742,7 +1742,7 @@ def test_persisted_receipt_timestamp_is_valid_without_submission_ttl(tmp_path: P
         "openai-plugin",
         active_submission_sha256,
         {"listing_version": "v1", "receipt": receipt},
-        openai_app_id="asdk_app_releaseinput123",
+        openai_app_id="plugin_asdk_app_releaseinput123",
         trusted_key_id=key_id,
         trusted_secret=secret,
         deployment_sha256="b" * 64,
@@ -1754,7 +1754,7 @@ def test_persisted_receipt_timestamp_is_valid_without_submission_ttl(tmp_path: P
             "published",
             receipt,
             listing_version="v1",
-            openai_app_id="asdk_app_releaseinput123",
+            openai_app_id="plugin_asdk_app_releaseinput123",
             trusted_key_id=key_id,
             trusted_secret=secret,
             deployment_sha256="b" * 64,
@@ -1779,7 +1779,7 @@ def test_persisted_receipt_timestamp_is_valid_without_submission_ttl(tmp_path: P
             "openai-plugin",
             active_submission_sha256,
             {"listing_version": "v1", "receipt": invalid},
-            openai_app_id="asdk_app_releaseinput123",
+            openai_app_id="plugin_asdk_app_releaseinput123",
             trusted_key_id=key_id,
             trusted_secret=secret,
             deployment_sha256="b" * 64,
@@ -1789,7 +1789,7 @@ def test_persisted_receipt_timestamp_is_valid_without_submission_ttl(tmp_path: P
 
 def test_openai_published_receipt_requires_registered_app_input_to_activate(tmp_path: Path) -> None:
     root = copy_hosted_tree(tmp_path / "repo")
-    app_id = "asdk_app_releaseinput123"
+    app_id = "plugin_asdk_app_releaseinput123"
     key_id, secret, receipt = openai_published_receipt(root)
     record_sha256 = hosted_plugins.directory_record_sha256(root, "openai-plugin")
     previous_state = "draft"
@@ -1827,7 +1827,7 @@ def test_openai_published_receipt_requires_registered_app_input_to_activate(tmp_
             "openai-plugin",
             target_submission_sha256=record_sha256,
             expected_active_submission_sha256=None,
-            openai_app_id="asdk_app_otherrelease456",
+            openai_app_id="plugin_asdk_app_otherrelease456",
             trusted_key_id=key_id,
             trusted_secret=secret,
             deployment_sha256="b" * 64,
@@ -1885,7 +1885,7 @@ def test_persisted_openai_receipt_rejects_each_required_binding(
         "openai-plugin",
         active_submission_sha256,
         {"listing_version": "v1", "receipt": altered},
-        openai_app_id="asdk_app_releaseinput123",
+        openai_app_id="plugin_asdk_app_releaseinput123",
         trusted_key_id=key_id,
         trusted_secret=secret,
         deployment_sha256="b" * 64,
@@ -1897,7 +1897,7 @@ def test_persisted_openai_receipt_rejects_each_required_binding(
 
 def test_openai_receipt_rejects_mismatched_directory_identity_hash(tmp_path: Path) -> None:
     root = copy_hosted_tree(tmp_path / "repo")
-    app_id = "asdk_app_releaseinput123"
+    app_id = "plugin_asdk_app_releaseinput123"
     hosted_plugins.render(root, platform="openai", openai_app_id=app_id)
     key_id, secret = ready_directory_evidence(root)
     bindings = hosted_plugins._directory_bindings(root, "openai-plugin", openai_app_id=app_id)
@@ -2012,12 +2012,12 @@ def test_directory_activate_cli_forwards_openai_app_id(monkeypatch: pytest.Monke
             "--expected-active-submission-sha256",
             "none",
             "--openai-app-id",
-            "asdk_app_releaseinput123",
+            "plugin_asdk_app_releaseinput123",
         ],
     )
 
     assert cli.main() == 0
-    assert captured["openai_app_id"] == "asdk_app_releaseinput123"
+    assert captured["openai_app_id"] == "plugin_asdk_app_releaseinput123"
 
 
 def test_directory_cli_checks_a_claude_channel_without_openai_registration() -> None:
