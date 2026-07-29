@@ -20,6 +20,10 @@ plugin identifier is a separate directory-submission concern. Never replace the
 package registration ID with a directory identifier or add either private value
 to a tracked listing input.
 
+The provider-issued OpenAI directory ID is handoff-only. If a provider assigns
+one, record only its SHA-256 in the signed receipt; never place the raw value in
+a package, lock, archive, documentation, checked-in input, or log.
+
 ## Hosted user journey
 
 Once a channel is actually published, the normal path is deliberately simple:
@@ -78,7 +82,7 @@ reports authoritative per-listing-version heads; an in-review v2 therefore does
 not hide an active v1, and withdrawing v1 does not mutate v2.
 
 For an OpenAI receipt, `provider_directory_id_sha256` is the lowercase SHA-256
-of the raw UTF-8 `plugin_asdk_app_*` directory identity, after trimming outer
+of the raw UTF-8 provider-issued directory identity, after trimming outer
 whitespace—the same byte-hash convention used for the registered `asdk_app_*`
 package identity. The raw directory ID is optional before publication and
 required when an OpenAI revision is published; its hash must match exactly.
@@ -98,18 +102,57 @@ entry covers ChatGPT and Codex. The OpenAI candidate uses the current
 `mcp_servers` connection map; the Claude bundle retains its `mcpServers` map.
 
 The directory packets are drafts, not listings. Each provider submission needs
-an authorized operator, verified publisher, policy approval, domain proof where
-required, and a seeded reviewer account held outside Git. A reviewer account
-contains realistic governed sample data, but its credentials, tenant binding,
-invite links, and identifiers stay in the external secret manager. Do not
-invent screenshots for this non-UI MCP integration.
+an authorized operator, verified publisher, policy approval, and domain proof
+where required. Submission readiness is deliberately narrower than public
+activation: provider-matched reviewer access can unblock a draft submission
+while broad admission stays closed and `ready`/`public` remain false.
 
-A successful friends cohort or reviewer account is not public-launch evidence.
-Before any directory submission, an operator must produce signed evidence that
-ordinary eligible users can acquire access and that capacity, per-user quotas,
-abuse controls, spend alarms, support coverage, and the public pricing decision
-are ready. The OpenAI plugin must never sell or upsell a digital subscription
-inside a plugin interaction.
+## Marketplace reviewer and operator handoff
+
+Follow the paired Substrate Hosted Alpha operator runbook
+(`substrate/docs/runbooks/exomem-hosted-alpha.md`)
+for the live reviewer flow. It creates a dedicated immutable reviewer-purpose
+tenant, seeds the checked-in generic fixture through normal governed MCP writes,
+and, when the provider credential is issued, atomically seals the temporary
+setup access. The raw credential, reviewer identity, tenant identifiers, invite
+links, and fixture content stay in the approved secret-manager/provider handoff
+and out of Git, logs, and this documentation.
+
+The signed, secret-free reviewer-access evidence is distinct from the provider
+credential. It binds the matching provider and deployment, enabled feature
+state, active credential state and bounded expiry, plus the fixture version and
+payload digest. It proves only that the prepared reviewer flow is available; it
+does not substitute for a native client review or make the listing public.
+
+OpenAI has one additional submission handoff: signed prerequisite evidence must
+attest that the walkthrough recording is prepared. The recording URL itself is
+operator-supplied manually in the OpenAI portal and must never be checked in or
+rendered. Claude packets must not inherit that OpenAI-only field, app identity,
+or annotation explanation.
+
+Before a provider submission, run the reviewed cases in clean native clients:
+ChatGPT and Codex for the universal OpenAI entry, and Claude for its independent
+channels. Prove OAuth, discovery, governed recall against the seeded fixture,
+durable capture, later-chat recall, no-capture behavior, and revocation. Keep
+content-bearing proof in the controlled acceptance workflow, not repository
+evidence; validator-only, mocked, OAuth-only, and metadata-only checks are not
+enough.
+
+Provider portal submission, any manual recording upload, provider receipt,
+rejection, approval, publication, smoke test, and withdrawal are operator
+actions. Use `directory-record` only with the exact signed receipt and the
+artifact/listing bindings from release tooling. Do not create a receipt or claim
+portal success until the provider has actually returned one.
+
+A reviewer credential, successful friends cohort, or provider approval is not
+broad public-admission evidence. Before recording publication, operators still
+need signed proof that ordinary eligible users can acquire access and that
+capacity, quotas, abuse controls, spend alarms, support coverage, and the public
+pricing decision are ready. Before activating a published revision, separately
+record fresh non-reviewer install evidence for OAuth, discovery, governed
+recall, durable capture, later-chat recall, no-capture behavior, and revocation.
+The OpenAI plugin must never sell or upsell a digital subscription inside a
+plugin interaction.
 
 Provider submission, rejection, publication, smoke testing, and emergency
 withdrawal are operator actions. Record a provider result only with the exact
