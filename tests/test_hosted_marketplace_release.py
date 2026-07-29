@@ -214,7 +214,13 @@ def test_marketplace_packet_preserves_the_complete_live_tool_contract() -> None:
             ),
             "annotations": {
                 key: entry["mcp_tool"]["annotations"][key]
-                for key in ("title", "readOnlyHint", "destructiveHint", "openWorldHint")
+                for key in (
+                    "title",
+                    "readOnlyHint",
+                    "destructiveHint",
+                    "idempotentHint",
+                    "openWorldHint",
+                )
             },
         }
         for entry in compatibility["agent_contract"]["commands"]
@@ -346,6 +352,27 @@ def test_openai_listing_does_not_reject_words_containing_forbidden_terms(tmp_pat
     hosted_plugins.load_marketplace_definition(root)
 
 
+@pytest.mark.parametrize(
+    "claim",
+    [
+        "This service has not yet been built.",
+        "This service has not-yet-been-built.",
+        "This service has not  yet  been  built.",
+    ],
+)
+def test_openai_listing_rejects_not_yet_been_built_variants(
+    tmp_path: Path, claim: str
+) -> None:
+    root = copy_hosted_tree(tmp_path / "repo")
+    path = root / "plugins/hosted/marketplace-definition.json"
+    definition = json.loads(path.read_text(encoding="utf-8"))
+    definition["common"]["release_notes"] = claim
+    path.write_text(json.dumps(definition), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="release-stage"):
+        hosted_plugins.load_marketplace_definition(root)
+
+
 def test_marketplace_review_cases_bind_the_versioned_generic_fixture() -> None:
     fixture_path = REPO_ROOT / "plugins/hosted/marketplace-review-fixture-v1.json"
     assert fixture_path.is_file(), "the canonical generic reviewer fixture must be checked in"
@@ -406,6 +433,43 @@ def test_marketplace_review_cases_reject_stale_fixture_bindings(
         hosted_plugins.load_marketplace_review_cases(root)
 
 
+@pytest.mark.parametrize("tool", ["observe_memory", "capture_source", "triage_memory", "connect_memory"])
+def test_marketplace_review_cases_require_reset_for_every_write_capable_tool(
+    tmp_path: Path, tool: str
+) -> None:
+    root = copy_hosted_tree(tmp_path / "repo")
+    write_tools = {
+        entry["name"]
+        for entry in hosted_plugins.compatibility_manifest(root)["agent_contract"]["commands"]
+        if not entry["mcp_tool"]["annotations"]["readOnlyHint"]
+    }
+    assert tool in write_tools
+    path = root / "plugins/hosted/marketplace-review-cases.json"
+    cases = json.loads(path.read_text(encoding="utf-8"))
+    cases["positive"][0]["expected_tools"] = [tool]
+    path.write_text(json.dumps(cases), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="fixture reset"):
+        hosted_plugins.load_marketplace_review_cases(root)
+
+
+def test_marketplace_review_fixture_rejects_mismatched_reset_reference_and_key(
+    tmp_path: Path,
+) -> None:
+    root = copy_hosted_tree(tmp_path / "repo")
+    fixture_path = root / "plugins/hosted/marketplace-review-fixture-v1.json"
+    fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
+    fixture["reset"]["disposable_reference"] = "project-brief"
+    fixture_path.write_text(json.dumps(fixture), encoding="utf-8")
+    cases_path = root / "plugins/hosted/marketplace-review-cases.json"
+    cases = json.loads(cases_path.read_text(encoding="utf-8"))
+    cases["positive"][2]["fixture_reset"] = fixture["reset"]
+    cases_path.write_text(json.dumps(cases), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="review fixture reset is invalid"):
+        hosted_plugins.load_marketplace_review_cases(root)
+
+
 def _mutate_review_cases(root: Path, mutate: object) -> None:
     path = root / "plugins/hosted/marketplace-review-cases.json"
     cases = json.loads(path.read_text(encoding="utf-8"))
@@ -418,6 +482,48 @@ def _mutate_fixture(root: Path, mutate: object) -> None:
     fixture = json.loads(path.read_text(encoding="utf-8"))
     mutate(fixture)
     path.write_text(json.dumps(fixture), encoding="utf-8")
+
+
+def test_openai_packet_renders_every_boolean_annotation() -> None:
+    packet = json.loads(
+        hosted_plugins.directory_packets(
+            REPO_ROOT, channel="openai-plugin", openai_app_id="asdk_app_releaseinput123"
+        )["openai-plugin"]
+    )
+    assert all(
+        set(tool["annotations"])
+        == {"title", "readOnlyHint", "destructiveHint", "idempotentHint", "openWorldHint"}
+        and all(isinstance(tool["annotations"][key], bool) for key in tool["annotation_explanations"])
+        for tool in packet["tools"]
+    )
+
+
+def test_openai_read_only_non_idempotent_explanation_describes_state_variability() -> None:
+    packet = json.loads(
+        hosted_plugins.directory_packets(
+            REPO_ROOT, channel="openai-plugin", openai_app_id="asdk_app_releaseinput123"
+        )["openai-plugin"]
+    )
+    tool = next(item for item in packet["tools"] if item["name"] == "ask_memory")
+    explanation = tool["annotation_explanations"]["idempotentHint"].lower()
+
+    assert tool["annotations"]["readOnlyHint"] is True
+    assert tool["annotations"]["idempotentHint"] is False
+    assert "state" in explanation
+    assert "create" not in explanation
+
+
+@pytest.mark.parametrize("channel", ["claude-connector", "claude-plugin"])
+def test_claude_directory_packets_exclude_openai_review_only_fields(channel: str) -> None:
+    packet = json.loads(hosted_plugins.directory_packets(REPO_ROOT, channel=channel)[channel])
+
+    assert "review_recording" not in packet
+    assert all("annotation_explanations" not in tool for tool in packet["tools"])
+    assert all(
+        set(tool["annotations"])
+        == {"title", "readOnlyHint", "destructiveHint", "openWorldHint"}
+        for tool in packet["tools"]
+    )
 
 
 def test_marketplace_definition_rejects_tampered_brand_asset_digest(tmp_path: Path) -> None:

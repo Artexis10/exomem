@@ -537,7 +537,7 @@ _OPENAI_SALE_LANGUAGE = re.compile(
 )
 _OPENAI_RELEASE_STAGE_LANGUAGE = re.compile(
     r"(?i)\bprivate[-\s]+alpha\b|\btrial\b|\bdemo\b|\bhypothetical\b|"
-    r"\bnot[-\s]+yet[-\s]+built\b"
+    r"\bnot[-\s]+yet(?:[-\s]+been)?[-\s]+built\b"
 )
 _OPENAI_BOOLEAN_ANNOTATIONS = (
     "readOnlyHint",
@@ -574,7 +574,11 @@ def _openai_annotation_explanations(annotations: dict[str, Any]) -> dict[str, st
         "idempotentHint": (
             "Repeating the same request produces the same governed result and is safe to retry."
             if annotations["idempotentHint"]
-            else "Repeating this request may create another action, so it is not retried automatically."
+            else (
+                "Repeated reads may return different results as governed state changes, so they are not retried automatically."
+                if annotations["readOnlyHint"]
+                else "Repeating this request may create another action, so it is not retried automatically."
+            )
         ),
         "openWorldHint": (
             "This tool can act beyond the local governed store."
@@ -768,6 +772,10 @@ def _load_marketplace_review_fixture(root: Path) -> dict[str, Any]:
         or set(reset) != {"disposable_reference", "disposable_key", "procedure"}
         or reset["disposable_reference"] not in references
         or reset["disposable_key"] not in keys
+        or next(
+            note["key"] for note in notes if note["reference"] == reset["disposable_reference"]
+        )
+        != reset["disposable_key"]
         or reset["procedure"] != "replace_with_canonical_content"
     ):
         raise ValueError("marketplace review fixture reset is invalid")
@@ -799,16 +807,25 @@ def load_marketplace_review_cases(repo_root: Path | None = None) -> dict[str, An
     if not isinstance(negative, list) or len(negative) < 3:
         raise ValueError("marketplace review cases require at least three negative cases")
     known_references = {note["reference"] for note in fixture["payload"]["notes"]}
+    write_tools = {
+        entry["name"]
+        for entry in compatibility_manifest(root)["agent_contract"]["commands"]
+        if entry["mcp_tool"]["annotations"].get("readOnlyHint") is False
+    }
     for category, cases in (("positive", positive), ("negative", negative)):
         for case in cases:
             if not isinstance(case, dict):
                 raise ValueError(f"marketplace {category} review case is incomplete")
             required = {"prompt", "expected_tools", "expected_outcome"}
+            has_write_tool = False
             if category == "positive":
                 required |= {"fixture_version", "fixture_references"}
-                if "remember" in case.get("expected_tools", []):
+                has_write_tool = bool(write_tools.intersection(case.get("expected_tools", [])))
+                if has_write_tool:
                     required.add("fixture_reset")
             if set(case) != required:
+                if has_write_tool and "fixture_reset" not in case:
+                    raise ValueError("marketplace review case fixture reset is required")
                 raise ValueError(f"marketplace {category} review case is incomplete")
             if not isinstance(case["prompt"], str) or not case["prompt"].strip():
                 raise ValueError(f"marketplace {category} review case prompt is invalid")
@@ -831,7 +848,10 @@ def load_marketplace_review_cases(repo_root: Path | None = None) -> dict[str, An
                     or any(reference not in known_references for reference in references)
                 ):
                     raise ValueError("marketplace review case fixture reference is unknown")
-                if "remember" in case["expected_tools"] and case["fixture_reset"] != fixture["reset"]:
+                if (
+                    write_tools.intersection(case["expected_tools"])
+                    and case["fixture_reset"] != fixture["reset"]
+                ):
                     raise ValueError("marketplace review case fixture reset is invalid")
     negative_text = " ".join(
         f"{case['prompt']} {case['expected_outcome']}" for case in negative
@@ -1012,7 +1032,7 @@ def directory_packets(
     review_cases = load_marketplace_review_cases(root)
     validate_hosted_public_inputs(root, include_generated=False)
     compatibility = compatibility_manifest(root)
-    tools = [
+    tool_entries = [
         {
             "name": entry["name"],
             "description": entry["mcp_tool"]["description"],
@@ -1027,20 +1047,44 @@ def directory_packets(
                 key: entry["mcp_tool"]["annotations"][key]
                 for key in ("title", "readOnlyHint", "destructiveHint", "openWorldHint")
             },
-            "annotation_explanations": _openai_annotation_explanations(
-                entry["mcp_tool"]["annotations"]
-            ),
+            "mcp_annotations": entry["mcp_tool"]["annotations"],
         }
         for entry in compatibility["agent_contract"]["commands"]
     ]
     if any(
         set(tool["annotations"]) != {"title", "readOnlyHint", "destructiveHint", "openWorldHint"}
-        for tool in tools
+        for tool in tool_entries
     ):
         raise ValueError("marketplace packet tool annotations are incomplete")
     packets: dict[str, bytes] = {}
     for selected_channel in selected:
         overlay = definition["channels"][selected_channel]
+        tools = [
+            {key: value for key, value in tool.items() if key != "mcp_annotations"}
+            for tool in tool_entries
+        ]
+        if selected_channel == "openai-plugin":
+            tools = [
+                {
+                    **{
+                        key: value
+                        for key, value in tool.items()
+                        if key != "mcp_annotations"
+                    },
+                    "annotations": {
+                        "title": tool["annotations"]["title"],
+                        **{
+                            key: raw_annotations[key]
+                            for key in _OPENAI_BOOLEAN_ANNOTATIONS
+                            if key in raw_annotations
+                        },
+                    },
+                    "annotation_explanations": _openai_annotation_explanations(raw_annotations),
+                }
+                for tool, raw_annotations in (
+                    (item, item["mcp_annotations"]) for item in tool_entries
+                )
+            ]
         packet = {
             "schema_version": 1,
             "channel": selected_channel,
