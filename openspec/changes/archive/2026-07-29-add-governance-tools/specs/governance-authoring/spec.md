@@ -4,19 +4,33 @@
 
 ### Requirement: Natural-language propose and validated commit
 
-`govern_memory(operation="propose")` SHALL resolve a natural-language intent into
-a deterministic proposal and return the plain-language interpretation, the
-canonical policy it would write, the resolved affected membership, the
-consequences, overlaps with existing rules, the duration, the reversal path, and a
-single-use proposal id. The membership preview SHALL render each affected item at
-its current effective disclosure ceiling and SHALL NOT leak titles or excerpts of
-items that a not-yet-committed rule would restrict. `govern_memory(operation="commit")`
+The client/LLM SHALL interpret natural-language user intent and supply structured
+canonical documents and arguments; Exomem SHALL validate, compile, and resolve
+exact membership and policy facts. It SHALL NOT perform server NLP or query
+planning. `govern_memory(operation="propose")` SHALL return the interpretation,
+canonical policy, resolved affected membership, consequences, overlaps, duration,
+reversal path, and a single-use proposal id. Samples, privacy, consequences, and
+overlaps SHALL derive solely from current plus prospective compiled policy and
+concrete membership. `selector_paths` and `target_ceiling` are compatibility hints
+only: a mismatch SHALL be diagnostic or rejected and SHALL NOT determine privacy,
+direction, or commit identity. The membership preview SHALL render each affected
+item at its current effective disclosure ceiling and SHALL NOT leak titles or
+excerpts of items that a not-yet-committed rule would restrict. `govern_memory(operation="commit")`
 SHALL reserve the proposal id for one deterministic operation id, allow only that
 event to retry, and mark it spent exactly once on successful activation. Exact-
 prior abort SHALL release the reservation, so a crash before policy mutation
-does not destroy the user's confirmed proposal. Commit SHALL refuse when the
-policy fingerprint or any affected item's content fingerprint has changed since
-propose time, writing nothing on refusal. On success it SHALL
+does not destroy the user's confirmed proposal. Commit SHALL compare the policy
+fingerprint and exact affected-item manifest through the final live
+proposal-guard comparison. Drift detected while the event still matches exact
+prior and has no required committed terminal SHALL refuse with a stale-policy
+error, activate no target policy, retain any receipt-first aborted evidence, and
+require a fresh proposal. Drift after target preparation or committed evidence
+SHALL leave the event BLOCKED until exact restoration, then reconciliation SHALL
+activate the same reviewed event without policy replay or a duplicate terminal.
+The final successful guard comparison SHALL be the proposal-validity
+linearization point; an arbitrary external filesystem write strictly after that
+cut SHALL be treated as later content evolution under the newly active dynamic
+policy. On success it SHALL
 write the policy files under the receipt-first activation protocol, archive prior
 versions, and bump the policy fingerprint so the rule is enforced on the next
 call only after durable terminal evidence exists.
@@ -28,15 +42,37 @@ call only after durable terminal evidence exists.
 - **THEN** counts and current-ceiling samples are returned, but no title or
   excerpt of a would-be-restricted page crosses the boundary
 
+#### Scenario: Caller hints cannot change a proposal's facts
+
+- **WHEN** selector or ceiling hints disagree with compiled prospective membership
+- **THEN** the proposal diagnoses or rejects the mismatch and derives its preview,
+  direction, and commit identity from compiled policy and concrete membership
+
 #### Scenario: Commit consumes the nonce once
 
 - **WHEN** a proposal id is committed and then committed again
 - **THEN** the first commit writes the policy and the second is refused as spent
 
-#### Scenario: Commit refuses on drift
+#### Scenario: Exact-prior commit refuses on drift
 
-- **WHEN** the policy or an affected item changed between propose and commit
-- **THEN** the commit refuses with a stale-policy error and writes nothing
+- **WHEN** the policy or an affected item changes after propose while the commit
+  still matches exact prior and no required committed terminal exists
+- **THEN** commit refuses with a stale-policy error, activates no target policy,
+  retains only any receipt-first aborted evidence, and requires a fresh proposal
+
+#### Scenario: Prepared proposal drift blocks without reinterpretation
+
+- **WHEN** affected membership drifts after target preparation or committed
+  terminal evidence exists but before the final live proposal guard succeeds
+- **THEN** the event remains blocked and unspent until exact corpus restoration,
+  then activates with the existing evidence and without policy replay
+
+#### Scenario: Final proposal validation is the concurrency cut
+
+- **WHEN** an uncoordinated filesystem writer changes an affected item strictly
+  after the final live proposal-guard comparison succeeds
+- **THEN** the commit may complete and the change is governed as later dynamic
+  content rather than being attributed to the reviewed proposal snapshot
 
 #### Scenario: Crash after nonce reservation does not spend the proposal
 
@@ -100,11 +136,12 @@ NOT activate over a stale dependent grant.
 ### Requirement: Read-only inspection operations
 
 `govern_memory` `list`, `explain`, and `simulate` SHALL be read-only and SHALL NOT
-write policy or state. `explain` SHALL show the effective policy for an item, scope,
-or audience after layering, with the participating rule chain. `simulate` SHALL
-dry-run a query or item release. Toward an audience below an item's ceiling, these
-operations SHALL return counts and rule ids only, never titles or excerpts of
-restricted items.
+write policy or state. `explain` SHALL resolve one exact canonical path and an
+explicit audience, then show its effective policy and participating rule chain.
+`simulate` SHALL resolve explicit canonical paths and an explicit audience; neither
+operation may silently ignore audience behavior. Toward an audience below an
+item's ceiling, these operations SHALL return counts and rule ids only, never
+titles or excerpts of restricted items.
 
 #### Scenario: Explain shows the effective chain
 
@@ -127,14 +164,16 @@ existing policy SHALL still be enforced.
 ### Requirement: Authorization changes are receipted before activation
 
 Every authorization-affecting `govern_memory` operation — `commit`, `grant`,
-`revoke`, `suspend`, `resume`, `undo`, and `declare` — SHALL append and fsync a
-plaintext-free intent before changing state and SHALL append and fsync exactly
-one terminal receipt per critical event. The operation SHALL compute
-phase-domain-separated canonical prior, prepared, and final-active composite
-digests covering every affected YAML path and authorization-state sidecar row,
-including statuses, proposal consumption, and dependent grants. No final target
-authorization state SHALL activate before its committed terminal evidence
-exists.
+`revoke`, `suspend`, `resume`, `undo`, and `declare` — SHALL first durably create
+an `allocating` journal control row. Policy reads SHALL ignore `allocating`.
+The operation SHALL fsync every actual plaintext-free intent, atomically arm the
+row as `pending`, and only then prepare marker or target state; it SHALL append
+and fsync exactly one terminal receipt per critical event. The operation SHALL
+compute phase-domain-separated canonical prior, prepared, and final-active
+composite digests covering every authorization-bearing YAML path and sidecar row,
+including status, proposal consumption, dependent grants, and purpose state. No
+final target authorization state SHALL activate before its committed terminal
+evidence exists.
 
 Direction SHALL be computed from the resolved before/after effective disclosure
 lattice over affected membership, audiences, purposes, and levels, never from
@@ -144,6 +183,10 @@ proven narrowing MAY install a separate fail-closed overlay, but the target stil
 activates last. Widening/unknown retains prior enforcement warm or BLOCKED cold.
 `propose` SHALL be excluded because storing a pending nonce changes no
 authorization state.
+
+Purpose SHALL use an event-keyed staged target while the prior active purpose
+remains visible. Activation SHALL atomically promote or delete staging, verify the
+final composite, and close the journal.
 
 #### Scenario: Direction follows semantics, not operation name
 
@@ -173,12 +216,15 @@ authorization state.
 
 ### Requirement: Pending YAML mutation blocks hybrid activation
 
-Before replacing active policy documents, Exomem SHALL durably create a reserved,
-plaintext-free pending marker containing the critical event id, operation,
-the three composite digests, and affected relative paths/sidecar-row ids. An
-authoritative pending operation row SHALL guard activation even if the marker was
-already removed. Policy loading SHALL check any pending operation row before
-the marker, compilation, or cache return; it SHALL retain last-good plus any
+Only after an `allocating` row is atomically armed `pending`, and before replacing
+active policy documents, Exomem SHALL durably create a regular non-symlink,
+plaintext-free pending marker. Its exact schema SHALL bind protocol, phase,
+critical event id, operation, all three composite digests, affected ids, and exact
+canonical sorted affected paths. Marker absence is valid only in exact-prior before
+creation or the terminal-backed removal window. An authoritative pending operation
+row SHALL guard activation even if the marker was already removed. Policy loading
+SHALL check any pending operation row before the marker, compilation, or cache
+return; it SHALL retain last-good plus any
 proven-narrowing overlay warm and return the existing BLOCKED L0 floor cold. It
 SHALL NOT compile a partially replaced hybrid. With neither guard, direct manual
 YAML edits SHALL retain their current behavior.
@@ -205,16 +251,21 @@ proposal row logically unspent until the activation transaction.
 
 Before accepting another governance-authoring write, Exomem SHALL reconcile the
 operation row, marker, and every YAML/sidecar component named by its three
-composites. Exact prior SHALL append/recognize aborted terminals and clear
-guards/reservations. Exact prepared with intact intent/chain SHALL append or
-recognize all required committed child terminals and then activate idempotently.
-Activation SHALL remove and directory-fsync the marker while the pending
-operation row still blocks, then atomically change every prepared sidecar row to
-its final encoding, verify the final-active after-image/terminal set, and mark
-the journal `closed`. Exact-prior abort SHALL likewise close the journal after
-clearing guards/reservations. Closed/aborted journals SHALL be retired from live
-component comparison. Any mixed, partial, or other open state SHALL remain
-blocked. Reconciliation SHALL NOT replay the requested semantic mutation.
+composites. An `allocating` row SHALL close as exact-prior and abort only intents
+observed on durable evidence; it SHALL NOT invent a terminal when no intent
+exists. A `pending` row SHALL apply exact prior/prepared/final rules: exact prior
+clears guards/reservations and closes only when none of its required committed
+terminals exists; exact prepared with intact intent/chain appends or recognizes
+required committed terminals then activates idempotently; and final-active is
+accepted only with its terminal set. Any observed required committed terminal
+paired with a state that matches neither prepared nor final SHALL remain blocked
+and SHALL NOT attempt an aborted terminal. Activation SHALL remove
+and directory-fsync the marker while the pending operation row still blocks, then
+atomically promote/delete purpose staging, change prepared sidecar rows to final
+encoding, verify final-active, and mark the journal `closed`. Closed/aborted
+journals SHALL be retired from live component comparison. Any mixed, partial, or
+other open state SHALL remain blocked. Reconciliation SHALL NOT replay the
+requested semantic mutation.
 
 #### Scenario: Crash in exact prepared state completes safely
 
@@ -229,6 +280,13 @@ blocked. Reconciliation SHALL NOT replay the requested semantic mutation.
   pending
 - **THEN** restart reconciliation activates the exact target once and does not
   append a duplicate terminal or reapply the mutation
+
+#### Scenario: Committed terminal contradicting exact prior blocks
+
+- **WHEN** one or more required committed terminals exist but current components
+  match exact prior rather than prepared or final
+- **THEN** reconciliation remains blocked and does not append a conflicting
+  aborted terminal or mutate authorization state
 
 #### Scenario: Third-state recovery blocks
 

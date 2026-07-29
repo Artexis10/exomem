@@ -17,7 +17,12 @@ from exomem.__main__ import _simple_cli_action_names, main
 from exomem.capabilities import ActiveSurfaceDescriptor, active_surface
 
 PROFILES = ("compact", "full", "diagnostics")
-TIER2_PRODUCT_TOOLS = {"manage_memory_file", "query_dataset", "read_media"}
+TIER2_PRODUCT_TOOLS = {
+    "govern_memory",
+    "manage_memory_file",
+    "query_dataset",
+    "read_media",
+}
 KNOWN_CALLABLE_NAMES = (
     set(commands.PRODUCT_PUBLIC_NAMES)
     | {command.name for command in commands.COMMANDS}

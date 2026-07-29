@@ -319,6 +319,24 @@ def test_quiesced_receipt_connections_allow_an_atomic_sidecar_replacement(
     assert second["seq"] == 1
 
 
+def test_receipt_connection_uses_normal_for_buffered_append_and_full_for_critical(
+    vault: Path,
+) -> None:
+    receipts.append_event(vault, event_type="disclosure", payload={"outcomes": []})
+    connection = receipts._RECEIPT_CONNECTIONS[store.sidecar_path(vault).resolve()].connection
+
+    assert connection.execute("PRAGMA synchronous").fetchone() == (1,)
+
+    receipts.append_event(
+        vault,
+        event_type="deletion",
+        payload=_lifecycle_payload(),
+        critical=True,
+    )
+
+    assert connection.execute("PRAGMA synchronous").fetchone() == (2,)
+
+
 def test_warmed_receipt_connection_preserves_an_in_place_future_schema(
     vault: Path,
 ) -> None:
@@ -330,7 +348,7 @@ def test_warmed_receipt_connection_preserves_an_in_place_future_schema(
     external = store.open_connection(vault)
     try:
         external.execute("CREATE TABLE future_receipt_marker(value TEXT)")
-        external.execute("PRAGMA user_version = 3")
+        external.execute("PRAGMA user_version = 4")
         external.commit()
     finally:
         external.close()
@@ -353,7 +371,7 @@ def test_warmed_receipt_connection_preserves_an_in_place_future_schema(
     assert receipts._RECEIPT_CONNECTIONS[path] is not prior
     with pytest.raises(sqlite3.ProgrammingError):
         prior.connection.execute("SELECT 1")
-    assert version == 3
+    assert version == 4
     assert marker == (1,)
 
 

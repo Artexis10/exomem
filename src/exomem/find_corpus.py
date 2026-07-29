@@ -225,6 +225,7 @@ def parse_page(
         body=body,
         title=title,
         mtime=mtime,
+        snapshot_hash=hashlib.sha256(content).hexdigest(),
     )
 
 

@@ -59,7 +59,10 @@ _EVENT_PAYLOAD_FIELDS = {
     ("recovery", "recorded"): frozenset({
         "manifest_digest", "affected_refs", "content_hashes", "exact_state_digest", "causation_id",
     }),
-    ("critical", "intent"): frozenset({"operation", "prior", "target", "affected_ids", "prepared"}),
+    ("critical", "intent"): frozenset({
+        "operation", "prior", "target", "affected_ids", "prepared",
+        "parent_causation_id", "intent_id",
+    }),
     ("critical", "committed"): frozenset({"causation_id", "outcome"}),
     ("critical", "aborted"): frozenset({"causation_id", "outcome"}),
 }
@@ -67,6 +70,7 @@ _OUTCOME_FIELDS = frozenset({
     "ref", "content_hash", "size", "level", "decision", "redaction_count", "count",
     "principal", "audience", "purpose", "policy_fingerprint", "confirmation",
     "scope_ids", "scope_label_digests", "command",
+    "release_grant_id", "release_dependency_digest",
     "membership_digest", "identity_manifest_digest", "principal_set_digest",
     "audience_set_digest", "purpose_set_digest", "policy_set_digest",
     "confirmation_set_digest", "scope_set_digest", "boundary_set_digest",
@@ -675,6 +679,12 @@ def _validate_event(event_type: str, phase: str, payload: Mapping[str, Any]) -> 
             raise ReceiptError("critical prepared fingerprint is invalid")
         if "affected_ids" in payload and not _identifiers(payload["affected_ids"]):
             raise ReceiptError("critical affected ids are invalid")
+        if "parent_causation_id" in payload and not _opaque_causation_id(
+            payload["parent_causation_id"]
+        ):
+            raise ReceiptError("critical parent causation id is invalid")
+        if "intent_id" in payload and not _identifier_value(payload["intent_id"]):
+            raise ReceiptError("critical child intent id is invalid")
     if phase in {"committed", "aborted"}:
         if not _opaque_causation_id(payload.get("causation_id")):
             raise ReceiptError("critical terminal causation id is invalid")
@@ -742,7 +752,14 @@ def _valid_outcome(value: Any) -> bool:
     if not isinstance(value, Mapping) or set(value) - _OUTCOME_FIELDS:
         return False
     for key, item in value.items():
-        if key in {"ref", "principal", "audience", "purpose", "command"} and not _identifier_value(item):
+        if key in {
+            "ref",
+            "principal",
+            "audience",
+            "purpose",
+            "command",
+            "release_grant_id",
+        } and not _identifier_value(item):
             return False
         if key in {
             "content_hash",
@@ -756,6 +773,7 @@ def _valid_outcome(value: Any) -> bool:
             "confirmation_set_digest",
             "scope_set_digest",
             "boundary_set_digest",
+            "release_dependency_digest",
         } and not _hex(item):
             return False
         if key in {"size", "redaction_count", "count"} and not _count(item):
@@ -883,7 +901,7 @@ def _receipt_lock(vault_root: Path):
 
 
 @contextmanager
-def _receipt_connection(vault_root: Path):
+def _receipt_connection(vault_root: Path, *, durable: bool = True):
     """Yield a validated process-local writer while the receipt lock is held."""
     global _RECEIPT_ACTIVE_CONNECTIONS
     path = store.sidecar_path(Path(vault_root)).resolve()
@@ -929,6 +947,9 @@ def _receipt_connection(vault_root: Path):
                 raise
             entry = _ReceiptConnectionEntry(connection=connection, state=state)
             _RECEIPT_CONNECTIONS[path] = entry
+        entry.connection.execute(
+            "PRAGMA synchronous=FULL" if durable else "PRAGMA synchronous=NORMAL"
+        )
         entry.users += 1
         _RECEIPT_ACTIVE_CONNECTIONS += 1
         _RECEIPT_CONNECTIONS.move_to_end(path)
@@ -1095,7 +1116,7 @@ def append_event(
         raise ReceiptError("critical receipts require a deterministic event id")
     timestamp, _parsed = _timestamp(timestamp or _now())
     with _receipt_lock(vault_root):
-        with _receipt_connection(vault_root) as conn:
+        with _receipt_connection(vault_root, durable=critical) as conn:
             instance_id = _instance_id(conn)
             instance_dir = _instance_dir(vault_root, instance_id)
             try:
@@ -1251,11 +1272,23 @@ def begin_event(
     affected_ids: list[str] | tuple[str, ...] = (),
     event_id: str | None = None,
     prepared: Any | None = None,
+    parent_causation_id: str | None = None,
+    intent_id: str | None = None,
 ) -> dict[str, Any]:
-    identity = {"operation": operation, "prior": prior, "target": target, "affected_ids": list(affected_ids)}
+    identity = {
+        "operation": operation,
+        "prior": prior,
+        "prepared": prepared,
+        "target": target,
+        "affected_ids": list(affected_ids),
+    }
     payload: dict[str, Any] = {"operation": operation, "prior": prior, "target": target, "affected_ids": list(affected_ids)}
     if prepared is not None:
         payload["prepared"] = prepared
+    if parent_causation_id is not None:
+        payload["parent_causation_id"] = parent_causation_id
+    if intent_id is not None:
+        payload["intent_id"] = intent_id
     return append_event(
         vault_root,
         event_type="critical",

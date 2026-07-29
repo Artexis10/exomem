@@ -1,12 +1,13 @@
 """The `attention` review surface — one ranked "what needs your review today" list.
 
-Composes the four measurement-only epistemic queues that `audit` already produces —
-`corpus_contradictions`, `stale_review`, `unprocessed_source`, `relation_debt` — into a single ranked
-list. The composition is pure measurement: each queue already emits its findings in
-intra-queue rank order, and this module fuses those ranks with Reciprocal Rank Fusion
+Composes the five default measurement-only queues that `audit` already produces —
+`bridge_review`, `corpus_contradictions`, `stale_review`, `unprocessed_source`, and
+`relation_debt` — into a single ranked list while retaining opt-in registered semantic
+categories. The composition is pure measurement: each queue already emits its findings
+in intra-queue rank order, and this module fuses those ranks with Reciprocal Rank Fusion
 (the same `fusion` utility `find` uses) and dedups by anchor path. No note content is
 read, embedded, or compared here; nothing is mutated; `find` ordering is untouched. The
-brain (Claude) decides what to do with each surfaced item.
+caller decides what to do with each surfaced item.
 
 The line: surfacing + deterministic rank arithmetic over already-computed measurements is
 MEASUREMENT (in bounds, like `find`'s weighted RRF and the contradiction queue's dormancy
@@ -24,9 +25,9 @@ from . import fusion
 from . import review_state as review_state_module
 from .audit import AuditFinding
 
-# The queues this surface composes, in tiebreak-preference order (highest first):
-# a self-contradiction is the most actionable signal, an unprocessed source the least.
+# The default queues in deterministic tiebreak-preference order (highest first).
 DEFAULT_ATTENTION_CATEGORIES: tuple[str, ...] = (
+    "bridge_review",
     "corpus_contradictions",
     "stale_review",
     "unprocessed_source",
@@ -179,6 +180,10 @@ def _rank(
     category_rank = {category: rank for rank, category in enumerate(category_order)}
 
     per_cat: dict[str, list[AuditFinding]] = {c: [] for c in category_order}
+
+    def _anchor(finding: AuditFinding) -> str:
+        partition = str((finding.meta or {}).get("review_partition") or "")
+        return f"{finding.path}\0{partition}" if partition else finding.path
     upstream_truncated = 0
     for f in findings:
         if f.category not in selected:
@@ -195,7 +200,7 @@ def _rank(
     weight_list: list[float] = []
     for c in category_order:
         if c in selected and per_cat[c]:
-            result_lists.append([f.path for f in per_cat[c]])
+            result_lists.append([_anchor(f) for f in per_cat[c]])
             weight_list.append(float(weights.get(c, 1.0)))
 
     # Reuse the house RRF for the scores; an anchor's score uses its best rank per list.
@@ -208,13 +213,16 @@ def _rank(
     # All reasons (every contributing finding) + max severity per anchor path.
     reasons_by_path: dict[str, list[dict]] = {}
     severity_by_path: dict[str, int] = {}
+    display_path: dict[str, str] = {}
     for c in category_order:
         if c not in selected:
             continue
         for rank, f in enumerate(per_cat[c], start=1):
-            reasons_by_path.setdefault(f.path, []).append(_reason(c, rank, f))
-            severity_by_path[f.path] = max(
-                severity_by_path.get(f.path, 0), _SEVERITY_RANK.get(f.severity, 0)
+            anchor = _anchor(f)
+            display_path[anchor] = f.path
+            reasons_by_path.setdefault(anchor, []).append(_reason(c, rank, f))
+            severity_by_path[anchor] = max(
+                severity_by_path.get(anchor, 0), _SEVERITY_RANK.get(f.severity, 0)
             )
 
     # Order: score desc, then category preference of the item's best reason, then path.
@@ -223,6 +231,7 @@ def _rank(
         key=lambda p: (
             -scores[p],
             min(category_rank[r["category"]] for r in reasons_by_path[p]),
+            display_path[p],
             p,
         ),
     )
@@ -237,7 +246,7 @@ def _rank(
         )
         cats = sorted({r["category"] for r in reasons}, key=lambda c: category_rank[c])
         items.append(AttentionItem(
-            path=p,
+            path=display_path[p],
             score=round(scores[p], 6),
             severity=_SEVERITY_BY_RANK[severity_by_path[p]],
             categories=cats,
@@ -388,6 +397,13 @@ def _apply_review_state(
             if identity_namespace
             else target_ref
         )
+        partitions = {
+            str((reason.get("meta") or {}).get("review_partition") or "")
+            for reason in item.reasons
+            if (reason.get("meta") or {}).get("review_partition")
+        }
+        if len(partitions) == 1:
+            identity = f"{identity}:{next(iter(partitions))}"
         review_id = review_state_module.item_id(identity)
         related_paths = sorted(
             {

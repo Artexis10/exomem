@@ -80,6 +80,9 @@ class WithholdClaim:
     fingerprints: tuple[str, ...]
     expires_at: int
     paths: tuple[str, ...] = ()
+    authorization_session: str = ""
+    purpose: str | None = None
+    org_ceiling: int = DISCLOSURE_MAX
 
 
 def clear_key_cache() -> None:
@@ -93,13 +96,6 @@ def clear_key_cache() -> None:
 
 def _open(vault_root: Path) -> sqlite3.Connection:
     conn = store.open_connection(vault_root)
-    conn.execute(
-        f"CREATE TABLE IF NOT EXISTS {TOKENS_TABLE} ("
-        "jti TEXT PRIMARY KEY, audience TEXT NOT NULL, max_level INTEGER NOT NULL, "
-        "fingerprints TEXT NOT NULL, paths TEXT NOT NULL, expires_at INTEGER NOT NULL, "
-        "minted_at REAL NOT NULL, consumed_at REAL)"
-    )
-    conn.commit()
     return conn
 
 
@@ -159,15 +155,18 @@ def content_fingerprint(vault_root: Path, rel_path: str) -> str:
         ) from exc
 
 
-def _sign(
-    key: bytes, *, jti: str, fingerprints: tuple[str, ...], audience: str, expires_at: int
-) -> str:
+def _sign(key: bytes, claim: WithholdClaim) -> str:
     payload = json.dumps(
         {
-            "jti": jti,
-            "fingerprints": sorted(fingerprints),
-            "audience": audience,
-            "exp": expires_at,
+            "jti": claim.jti,
+            "fingerprints": list(claim.fingerprints),
+            "paths": list(claim.paths),
+            "audience": claim.audience,
+            "authorization_session": claim.authorization_session,
+            "purpose": claim.purpose,
+            "max_level": claim.max_level,
+            "org_ceiling": claim.org_ceiling,
+            "exp": claim.expires_at,
         },
         sort_keys=True,
         separators=(",", ":"),
@@ -185,9 +184,13 @@ def _bounds_fingerprint(claim: WithholdClaim) -> str:
         json.dumps(
             {
                 "audience": claim.audience,
-                "fingerprints": sorted(claim.fingerprints),
+                "fingerprints": list(claim.fingerprints),
                 "max_level": claim.max_level,
                 "expires_at": claim.expires_at,
+                "paths": list(claim.paths),
+                "authorization_session": claim.authorization_session,
+                "purpose": claim.purpose,
+                "org_ceiling": claim.org_ceiling,
             },
             sort_keys=True,
             separators=(",", ":"),
@@ -230,6 +233,9 @@ def mint(
     max_level: int,
     ttl_seconds: int = DEFAULT_TTL_SECONDS,
     now: int | None = None,
+    authorization_session: str | None = None,
+    purpose: str | None = None,
+    org_ceiling: int | None = None,
 ) -> str:
     """Mint one escalation token over `paths` for `audience`, bounded at `max_level`.
 
@@ -252,52 +258,72 @@ def mint(
         )
     if not paths:
         raise WithholdTokenError("TOKEN_UNMINTABLE", "no items to bind the token to")
+    ceiling = DISCLOSURE_MAX if org_ceiling is None else int(org_ceiling)
     if not (DISCLOSURE_MIN <= int(max_level) <= DISCLOSURE_MAX):
         raise WithholdTokenError("TOKEN_UNMINTABLE", "max_level is out of range")
+    if not (DISCLOSURE_MIN <= ceiling <= DISCLOSURE_MAX):
+        raise WithholdTokenError("TOKEN_UNMINTABLE", "org_ceiling is out of range")
 
     ordered = tuple(sorted(set(paths)))
     fingerprints = tuple(content_fingerprint(vault_root, p) for p in ordered)
     issued = int(time.time()) if now is None else int(now)
     expires_at = issued + max(1, int(ttl_seconds))
     jti = uuid.uuid4().hex
-    signature = _sign(
-        _hmac_key(vault_root),
+    claim = WithholdClaim(
         jti=jti,
-        fingerprints=fingerprints,
         audience=audience,
+        max_level=min(int(max_level), ceiling),
+        fingerprints=fingerprints,
         expires_at=expires_at,
+        paths=ordered,
+        authorization_session=str(authorization_session or ""),
+        purpose=purpose,
+        org_ceiling=ceiling,
     )
+    signature = _sign(_hmac_key(vault_root), claim)
 
     conn = _open(vault_root)
+    conn.isolation_level = None
+    conn.execute("BEGIN IMMEDIATE")
     try:
         conn.execute(
             f"INSERT INTO {TOKENS_TABLE} "
             "(jti, audience, max_level, fingerprints, paths, expires_at, minted_at, "
-            "consumed_at) VALUES (?, ?, ?, ?, ?, ?, ?, NULL)",
+            "consumed_at, authorization_session, purpose, org_ceiling, status, "
+            "prepared_event_id) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, 'active', NULL)",
             (
                 jti,
                 audience,
-                int(max_level),
+                claim.max_level,
                 json.dumps(list(fingerprints)),
                 json.dumps(list(ordered)),
                 expires_at,
                 float(issued),
+                claim.authorization_session,
+                claim.purpose,
+                claim.org_ceiling,
             ),
         )
         # Opportunistic TTL sweep: piggy-backed on a write we are already
         # making, so expired rows never need a scheduler to disappear.
-        conn.execute(f"DELETE FROM {TOKENS_TABLE} WHERE expires_at < ?", (issued,))
+        pinned = store.pinned_component_keys(vault_root, conn=conn).get(
+            "token", frozenset()
+        )
+        if pinned:
+            placeholders = ",".join("?" for _ in pinned)
+            conn.execute(
+                f"DELETE FROM {TOKENS_TABLE} WHERE expires_at < ? "
+                f"AND jti NOT IN ({placeholders})",
+                (issued, *sorted(pinned)),
+            )
+        else:
+            conn.execute(f"DELETE FROM {TOKENS_TABLE} WHERE expires_at < ?", (issued,))
         conn.commit()
+    except BaseException:
+        conn.execute("ROLLBACK")
+        raise
     finally:
         conn.close()
-    claim = WithholdClaim(
-        jti=jti,
-        audience=audience,
-        max_level=int(max_level),
-        fingerprints=fingerprints,
-        expires_at=expires_at,
-        paths=ordered,
-    )
     try:
         _record_mint(vault_root, claim)
     except (receipts.ReceiptError, OSError, sqlite3.Error) as exc:
@@ -315,6 +341,9 @@ def mint_quietly(
     audience: str,
     max_level: int,
     ttl_seconds: int = DEFAULT_TTL_SECONDS,
+    authorization_session: str | None = None,
+    purpose: str | None = None,
+    org_ceiling: int | None = None,
 ) -> str | None:
     """`mint`, but `None` instead of raising — for notice assembly.
 
@@ -328,6 +357,9 @@ def mint_quietly(
             audience=audience,
             max_level=max_level,
             ttl_seconds=ttl_seconds,
+            authorization_session=authorization_session,
+            purpose=purpose,
+            org_ceiling=org_ceiling,
         )
     except (WithholdTokenError, sqlite3.Error, OSError):
         return None
@@ -340,13 +372,15 @@ def mint_quietly(
 
 def _load_claim(conn: sqlite3.Connection, jti: str) -> tuple[WithholdClaim, float | None]:
     row = conn.execute(
-        f"SELECT audience, max_level, fingerprints, paths, expires_at, consumed_at "
+        f"SELECT audience, max_level, fingerprints, paths, expires_at, consumed_at, "
+        "authorization_session, purpose, org_ceiling "
         f"FROM {TOKENS_TABLE} WHERE jti = ?",
         (jti,),
     ).fetchone()
     if row is None:
         raise WithholdTokenError("TOKEN_UNKNOWN", "no such escalation token")
-    audience, max_level, raw_fp, raw_paths, expires_at, consumed_at = row
+    (audience, max_level, raw_fp, raw_paths, expires_at, consumed_at,
+     authorization_session, purpose, org_ceiling) = row
     claim = WithholdClaim(
         jti=jti,
         audience=str(audience),
@@ -354,26 +388,36 @@ def _load_claim(conn: sqlite3.Connection, jti: str) -> tuple[WithholdClaim, floa
         fingerprints=tuple(json.loads(raw_fp)),
         expires_at=int(expires_at),
         paths=tuple(json.loads(raw_paths)),
+        authorization_session=str(authorization_session or ""),
+        purpose=None if purpose is None else str(purpose),
+        org_ceiling=int(org_ceiling),
     )
     return claim, consumed_at
 
 
 def _check_signature(
-    vault_root: Path, claim: WithholdClaim, *, audience: str, exp: int, signature: str
+    vault_root: Path,
+    claim: WithholdClaim,
+    *,
+    audience: str,
+    exp: int,
+    signature: str,
+    authorization_session: str | None,
+    purpose: str | None,
 ) -> None:
-    expected = _sign(
-        _hmac_key(vault_root),
-        jti=claim.jti,
-        fingerprints=claim.fingerprints,
-        audience=claim.audience,
-        expires_at=claim.expires_at,
-    )
+    expected = _sign(_hmac_key(vault_root), claim)
     if not hmac.compare_digest(expected, signature):
         raise WithholdTokenError("TOKEN_INVALID", "token signature does not verify")
     if exp != claim.expires_at:
         raise WithholdTokenError("TOKEN_INVALID", "token expiry does not match its record")
     if not hmac.compare_digest(claim.audience, audience):
         raise WithholdTokenError("TOKEN_INVALID", "token was issued to a different audience")
+    if not hmac.compare_digest(claim.authorization_session, str(authorization_session or "")):
+        raise WithholdTokenError(
+            "TOKEN_INVALID", "token was issued to a different authorization session"
+        )
+    if claim.purpose != purpose:
+        raise WithholdTokenError("TOKEN_INVALID", "token was issued for a different purpose")
 
 
 def _check_content(vault_root: Path, claim: WithholdClaim) -> None:
@@ -386,7 +430,7 @@ def _check_content(vault_root: Path, claim: WithholdClaim) -> None:
             )
         except OSError:
             current.append("")
-    if sorted(current) != sorted(claim.fingerprints):
+    if tuple(current) != claim.fingerprints:
         raise WithholdTokenError(
             "TOKEN_CONTENT_DRIFT",
             "the item's content changed after this escalation was approved",
@@ -396,7 +440,13 @@ def _check_content(vault_root: Path, claim: WithholdClaim) -> None:
 
 
 def verify(
-    vault_root: Path, token: str, *, audience: str, now: int | None = None
+    vault_root: Path,
+    token: str,
+    *,
+    audience: str,
+    now: int | None = None,
+    authorization_session: str | None = None,
+    purpose: str | None = None,
 ) -> WithholdClaim:
     """Validate a token without consuming it. Raises `WithholdTokenError`."""
     vault_root = Path(vault_root)
@@ -408,7 +458,15 @@ def verify(
         claim, _consumed = _load_claim(conn, jti)
     finally:
         conn.close()
-    _check_signature(vault_root, claim, audience=audience, exp=exp, signature=signature)
+    _check_signature(
+        vault_root,
+        claim,
+        audience=audience,
+        exp=exp,
+        signature=signature,
+        authorization_session=authorization_session,
+        purpose=purpose,
+    )
     moment = int(time.time()) if now is None else int(now)
     if moment > claim.expires_at:
         raise WithholdTokenError(
@@ -420,7 +478,13 @@ def verify(
 
 
 def redeem(
-    vault_root: Path, token: str, *, audience: str, now: int | None = None
+    vault_root: Path,
+    token: str,
+    *,
+    audience: str,
+    now: int | None = None,
+    authorization_session: str | None = None,
+    purpose: str | None = None,
 ) -> WithholdClaim:
     """Validate and consume exactly once.
 
@@ -430,7 +494,14 @@ def redeem(
     destroy an approval.
     """
     vault_root = Path(vault_root)
-    claim = verify(vault_root, token, audience=audience, now=now)
+    claim = verify(
+        vault_root,
+        token,
+        audience=audience,
+        now=now,
+        authorization_session=authorization_session,
+        purpose=purpose,
+    )
     _check_content(vault_root, claim)
 
     # Refuse a retry before beginning another critical operation.  The
@@ -523,12 +594,28 @@ def sweep(vault_root: Path, *, now: int | None = None) -> int:
         return 0
     moment = int(time.time()) if now is None else int(now)
     conn = _open(vault_root)
+    conn.isolation_level = None
+    conn.execute("BEGIN IMMEDIATE")
     try:
-        cursor = conn.execute(
-            f"DELETE FROM {TOKENS_TABLE} WHERE expires_at < ?", (moment,)
+        pinned = store.pinned_component_keys(vault_root, conn=conn).get(
+            "token", frozenset()
         )
+        if pinned:
+            placeholders = ",".join("?" for _ in pinned)
+            cursor = conn.execute(
+                f"DELETE FROM {TOKENS_TABLE} WHERE expires_at < ? "
+                f"AND jti NOT IN ({placeholders})",
+                (moment, *sorted(pinned)),
+            )
+        else:
+            cursor = conn.execute(
+                f"DELETE FROM {TOKENS_TABLE} WHERE expires_at < ?", (moment,)
+            )
         conn.commit()
         return int(cursor.rowcount or 0)
+    except BaseException:
+        conn.execute("ROLLBACK")
+        raise
     finally:
         conn.close()
 

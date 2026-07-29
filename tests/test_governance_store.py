@@ -52,20 +52,39 @@ def test_open_connection_is_idempotent(vault: Path) -> None:
         second.close()
 
 
+def test_existing_v3_sidecar_gets_purpose_staging_table_idempotently(vault: Path) -> None:
+    conn = store.open_connection(vault)
+    conn.execute("DROP TABLE governance_session_purpose_staging")
+    conn.commit()
+    conn.close()
+
+    repaired = store.open_connection(vault)
+    try:
+        tables = {
+            row[0]
+            for row in repaired.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
+    finally:
+        repaired.close()
+    assert "governance_session_purpose_staging" in tables
+
+
 def test_open_connection_preserves_a_newer_sidecar_version(vault: Path) -> None:
     first = store.open_connection(vault)
-    first.execute("PRAGMA user_version = 3")
+    first.execute("PRAGMA user_version = 4")
     first.commit()
     first.close()
 
     second = store.open_connection(vault)
     try:
-        assert second.execute("PRAGMA user_version").fetchone()[0] == 3
+        assert second.execute("PRAGMA user_version").fetchone()[0] == 4
     finally:
         second.close()
 
 
-def test_open_connection_migrates_v1_to_receipt_schema_v2(vault: Path) -> None:
+def test_open_connection_migrates_v1_through_governance_schema_v3(vault: Path) -> None:
     path = store.sidecar_path(vault)
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(path)
@@ -81,7 +100,7 @@ def test_open_connection_migrates_v1_to_receipt_schema_v2(vault: Path) -> None:
 
     migrated = store.open_connection(vault)
     try:
-        assert migrated.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert migrated.execute("PRAGMA user_version").fetchone()[0] == 3
         assert migrated.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='receipts_head'"
         ).fetchone()
@@ -129,7 +148,7 @@ def _sidecar_snapshot(path: Path) -> tuple[bytes, tuple[tuple[object, ...], ...]
     return path.read_bytes(), schema, version
 
 
-@pytest.mark.parametrize("version", [3, 4])
+@pytest.mark.parametrize("version", [4, 5])
 @pytest.mark.parametrize("opener", ["receipt", "token", "policy"])
 def test_older_openers_leave_future_schema_without_v2_locator_state_byte_identical(
     vault: Path, version: int, opener: str

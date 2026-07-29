@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import importlib.util
 import json
 import shutil
 from pathlib import Path
+from types import MappingProxyType
 
 import pytest
 from fastmcp.exceptions import ToolError
@@ -225,6 +227,76 @@ def test_mcp_rest_openapi_and_cli_help_inherit_registry_guidance(
     cli_help = capsys.readouterr().out
     assert "## Observations" in cli_help
     assert "[category] content #tags (context) ^anchor" in cli_help
+
+
+def test_govern_memory_is_tier_two_on_mcp_rest_and_cli(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    mcp = _build_server(tmp_path, monkeypatch)
+    command = _command("govern_memory")
+
+    assert command.tier == 2
+    assert command.cli_writes is True
+    assert {"mcp", "rest", "cli"} <= set(command.surfaces)
+    assert command.name in commands.DESTRUCTIVE_OPS
+    assert _mcp_tools(mcp)["govern_memory"]["annotations"]["destructiveHint"] is True
+
+    client = TestClient(mcp.http_app())
+    response = client.post(
+        "/api/govern_memory",
+        json={"operation": "list"},
+        headers={"Authorization": "Bearer synthetic-test-key"},
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["data"]["enabled"] is False
+
+    code = main(["govern_memory", "list", "--json"])
+    assert code == 0
+    payload = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert payload["data"]["enabled"] is False
+
+
+def test_govern_memory_response_detail_default_is_command_scoped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    mcp = _build_server(tmp_path, monkeypatch)
+    govern_memory = _command("govern_memory")
+    remember = _command("remember")
+
+    assert govern_memory.response_detail == "full"
+    assert remember.response_detail == "compact"
+    assert "full (default)" in _param(govern_memory, "response_detail").help
+    assert "compact (default)" in _param(remember, "response_detail").help
+    tools = _mcp_tools(mcp)
+    assert tools["govern_memory"]["inputSchema"]["properties"]["response_detail"][
+        "default"
+    ] == "full"
+    assert tools["remember"]["inputSchema"]["properties"]["response_detail"][
+        "default"
+    ] == "compact"
+
+
+def test_govern_memory_destructive_annotation_tracks_operation_registry() -> None:
+    from exomem import command_surface
+    from exomem.governance import operations
+
+    assert command_surface.governance_tool_is_destructive()
+    non_destructive = MappingProxyType(
+        {
+            name: dataclasses.replace(
+                spec,
+                destructive=False,
+                variants=tuple(
+                    dataclasses.replace(variant, destructive=False)
+                    for variant in spec.variants
+                ),
+            )
+            for name, spec in operations.OPERATION_SPECS.items()
+        }
+    )
+    assert not command_surface.governance_tool_is_destructive(non_destructive)
 
 
 def test_generated_capability_document_projects_registry_contract() -> None:

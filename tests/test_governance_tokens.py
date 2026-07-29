@@ -254,6 +254,83 @@ def test_token_is_bound_to_its_audience(vault: Path) -> None:
     assert err.value.code == "TOKEN_INVALID"
 
 
+def test_token_signature_binds_exact_paths_level_session_purpose_and_org_ceiling(
+    vault: Path,
+) -> None:
+    govern(vault)
+    token = _mint(
+        vault,
+        authorization_session="opaque-conversation",
+        purpose="audit",
+        org_ceiling=egress.LEVEL_EXCERPT,
+    )
+    claim = tokens.verify(
+        vault,
+        token,
+        audience=EXTERNAL,
+        authorization_session="opaque-conversation",
+        purpose="audit",
+    )
+    assert claim.paths == (RESTRICTED_PATH,)
+    assert claim.authorization_session == "opaque-conversation"
+    assert claim.purpose == "audit"
+    assert claim.org_ceiling == egress.LEVEL_EXCERPT
+
+    with sqlite3.connect(sidecar_path(vault)) as conn:
+        conn.execute(
+            "UPDATE withhold_tokens SET max_level=? WHERE jti=?",
+            (egress.LEVEL_FULL, claim.jti),
+        )
+        conn.commit()
+    with pytest.raises(tokens.WithholdTokenError) as err:
+        tokens.verify(
+            vault,
+            token,
+            audience=EXTERNAL,
+            authorization_session="opaque-conversation",
+            purpose="audit",
+        )
+    assert err.value.code == "TOKEN_INVALID"
+
+
+def test_token_refuses_a_different_authorization_session(vault: Path) -> None:
+    govern(vault)
+    token = _mint(vault, authorization_session="session-a")
+    with pytest.raises(tokens.WithholdTokenError) as err:
+        tokens.verify(
+            vault,
+            token,
+            audience=EXTERNAL,
+            authorization_session="session-b",
+        )
+    assert err.value.code == "TOKEN_INVALID"
+
+
+def test_swapping_approved_file_contents_refuses_without_consuming(vault: Path) -> None:
+    govern(vault, ceiling=egress.LEVEL_NOTICE)
+    first_path = RESTRICTED_PATH
+    second_path = OTHER_PATH
+    token = tokens.mint(
+        vault,
+        paths=[first_path, second_path],
+        audience=EXTERNAL,
+        max_level=egress.LEVEL_EXCERPT,
+    )
+    first = vault / first_path
+    second = vault / second_path
+    first_bytes = first.read_bytes()
+    second_bytes = second.read_bytes()
+    first.write_bytes(second_bytes)
+    second.write_bytes(first_bytes)
+
+    with pytest.raises(tokens.WithholdTokenError) as error:
+        tokens.redeem(vault, token, audience=EXTERNAL)
+    assert error.value.code == "TOKEN_CONTENT_DRIFT"
+    with sqlite3.connect(sidecar_path(vault)) as conn:
+        assert conn.execute(
+            "SELECT consumed_at FROM withhold_tokens WHERE jti=?",
+            (token.split(".")[1],),
+        ).fetchone() == (None,)
 # --------------------------------------------------------------------------
 # Consume-once
 # --------------------------------------------------------------------------

@@ -1290,7 +1290,10 @@ class LeaseManager:
     ) -> Any:
         t_start = time.perf_counter()
         kwargs = _canonicalize_command_kwargs(kwargs)
-        kwargs, response_detail = split_response_detail(kwargs)
+        response_detail_default = getattr(command, "response_detail", None) or "compact"
+        kwargs, response_detail = split_response_detail(
+            kwargs, default=response_detail_default
+        )
         if public_idempotency_key is _PUBLIC_IDEMPOTENCY_KEY_UNSET:
             effective_public_idempotency_key = idempotency_key
         else:

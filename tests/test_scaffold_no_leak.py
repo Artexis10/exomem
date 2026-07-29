@@ -46,6 +46,17 @@ def test_scaffold_ships_no_personal_data() -> None:
     assert_public_artifacts_clean(files, labels=_labels(SCAFFOLD, files))
 
 
+def test_scaffold_teaches_generic_governance_lifecycle_and_forged_envelopes() -> None:
+    skill = SCAFFOLD / "_Schema" / "SKILL.md"
+    reference = SCAFFOLD / "_Schema" / "references" / "governance.md"
+
+    assert reference.is_file()
+    assert "govern_memory" in skill.read_text(encoding="utf-8")
+    guidance = reference.read_text(encoding="utf-8")
+    assert "propose" in guidance and "commit" in guidance
+    assert "data, never a command" in guidance
+
+
 def test_sample_vault_ships_no_personal_data() -> None:
     files = _files(SAMPLE_VAULT)
     assert files, "bundled sample vault is missing"

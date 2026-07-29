@@ -75,7 +75,7 @@ ALL_CATEGORIES: tuple[str, ...] = (
     "index_drift", "tag_inconsistency", "frontmatter_compliance",
     "unregistered_project_key", "embedding_drift", "graph_drift", "reference_identity",
     "relevance_pairs_pending", "stale_review", "corpus_contradictions",
-    "relation_debt", "governance_receipts",
+    "relation_debt", "governance_receipts", "bridge_review",
 )
 OPTIONAL_CATEGORIES: tuple[str, ...] = (
     "relation_registry",
@@ -386,6 +386,8 @@ def audit(
         findings.extend(_check_relation_debt(vault_root, pages))
     if "governance_receipts" in selected:
         findings.extend(_check_governance_receipts(vault_root))
+    if "bridge_review" in selected:
+        findings.extend(_check_bridge_review(vault_root, today=today))
     semantic_categories = selected & _SEMANTIC_AUDIT_CATEGORIES
     if semantic_categories:
         semantic_findings, semantic_metadata = _check_semantic_contract_drift(
@@ -408,6 +410,59 @@ def audit(
         findings=findings,
         summary=summary,
         metadata=metadata or None,
+    )
+
+
+def _check_bridge_review(
+    vault_root: Path,
+    *,
+    today: dt.date | None,
+) -> list[AuditFinding]:
+    """Derive approval-bound bridge review work without persisting state."""
+    from .governance import bridges, policy
+
+    compiled = policy.load(vault_root)
+    if compiled.empty or compiled.blocked:
+        return []
+    effective_today = today or dt.date.today()
+    findings: list[AuditFinding] = []
+    for grant in compiled.release_grants:
+        signal = bridges.review_signal(
+            Path(vault_root),
+            grant,
+            policy=compiled,
+            today=effective_today,
+        )
+        if signal is None:
+            continue
+        partition = hashlib.sha256(
+            f"{grant.id}\0{grant.to_audience}".encode()
+        ).hexdigest()[:24]
+        findings.append(
+            AuditFinding(
+                category="bridge_review",
+                severity="warn",
+                path=grant.path,
+                detail=f"Bridge review required: {signal.cause}.",
+                proposed_fix=(
+                    "Review the bridge and, when appropriate, separately commit "
+                    "a new exact release approval."
+                ),
+                meta={
+                    "bridge_audience": grant.to_audience,
+                    "cause": signal.cause,
+                    "review_date": signal.review_date,
+                    "review_partition": partition,
+                    "signal_version": signal.signal_version,
+                },
+            )
+        )
+    return sorted(
+        findings,
+        key=lambda finding: (
+            finding.path,
+            str((finding.meta or {}).get("review_partition") or ""),
+        ),
     )
 
 

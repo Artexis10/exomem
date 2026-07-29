@@ -11,7 +11,7 @@ import os
 import time
 from pathlib import Path
 
-from exomem.governance import policy, receipts
+from exomem.governance import policy, receipts, store
 
 
 def _write(vault: Path, kind: str, name: str, text: str) -> Path:
@@ -66,6 +66,53 @@ def test_valid_scope_and_rule_compile_clean(vault: Path) -> None:
     assert rule.audience == "external"
     assert rule.ceiling == 2
     assert rule.scope_ids == ("01ARZ3NDEKTSV4RRFFQ69G5FAV",)
+
+
+def test_future_sidecar_blocks_even_with_warm_last_good(vault: Path) -> None:
+    _write(vault, "scopes", "acmeco", _SCOPE_A)
+    _write(vault, "rules", "acmeco-external", _RULE_A)
+    assert not policy.load(vault).blocked
+    conn = store.open_connection(vault)
+    try:
+        conn.execute("PRAGMA user_version=5")
+        conn.commit()
+    finally:
+        conn.close()
+    assert policy.load(vault).blocked
+
+
+def test_corrupt_sidecar_blocks_even_with_warm_last_good(vault: Path) -> None:
+    _write(vault, "scopes", "acmeco", _SCOPE_A)
+    _write(vault, "rules", "acmeco-external", _RULE_A)
+    assert not policy.load(vault).blocked
+    path = store.sidecar_path(vault)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"not-a-sqlite-database")
+    assert policy.load(vault).blocked
+
+
+def test_v3_without_archive_table_is_structurally_blocked(vault: Path) -> None:
+    _write(vault, "scopes", "acmeco", _SCOPE_A)
+    _write(vault, "rules", "acmeco-external", _RULE_A)
+    conn = store.open_connection(vault)
+    try:
+        conn.execute("DROP TABLE governance_policy_archives")
+        conn.commit()
+    finally:
+        conn.close()
+    policy._CACHE.clear()
+    assert policy.load(vault).blocked
+
+
+def test_idle_dev_v3_without_purpose_staging_remains_readable(vault: Path) -> None:
+    conn = store.open_connection(vault)
+    try:
+        conn.execute("DROP TABLE governance_session_purpose_staging")
+        conn.commit()
+    finally:
+        conn.close()
+
+    assert not policy.load(vault).blocked
 
 
 def test_unknown_field_is_a_compile_error_and_keeps_last_good(vault: Path) -> None:

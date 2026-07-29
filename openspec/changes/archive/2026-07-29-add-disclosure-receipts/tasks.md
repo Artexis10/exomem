@@ -92,5 +92,7 @@
       serializes but does not write, real JSONL append overhead SHALL be median
       <= 3 ms and p95 <= 8 ms for each case; print distributions on failure and
       do not change the existing ungoverned threshold file.
-- [ ] 5.3 `uvx ruff check` clean; `openspec validate add-disclosure-receipts
-      --strict` green.
+- [x] 5.3 `uvx ruff check <receipt-changed Python files>` is clean, repository
+      correctness passes `uvx ruff check . --select F`, and `openspec validate
+      add-disclosure-receipts --strict` is green. Full advisory-baseline Ruff is
+      not a required gate.

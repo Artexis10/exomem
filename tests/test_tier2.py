@@ -1052,9 +1052,10 @@ def test_list_inbound_links_returns_empty_for_unreferenced(vault: Path) -> None:
 # ---------------- Tier 2 registration gating (EXOMEM_DISABLE_TIER2) ----------------
 
 # Post-consolidation Tier 2 surface: create_directory folded into create_file
-# Product surface: file/data/media tier-2 behavior is exposed through product
-# commands while canonical filesystem leaves remain implementation details.
-TIER2_TOOLS = {"manage_memory_file", "query_dataset", "read_media"}
+# Product surface: governance administration and file/data/media tier-2 behavior
+# are exposed through product commands while canonical leaves remain implementation
+# details.
+TIER2_TOOLS = {"govern_memory", "manage_memory_file", "query_dataset", "read_media"}
 
 
 def _registered_tool_names(monkeypatch: pytest.MonkeyPatch) -> set[str]:

@@ -10,7 +10,7 @@ import time
 import types
 import typing
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -19,6 +19,7 @@ from mcp.types import ToolAnnotations
 from pydantic import Field, WithJsonSchema
 
 from . import capabilities
+from .governance import operations as governance_operations
 from .mutation_terminal import ResponseDetail
 
 _log = logging.getLogger(__name__)
@@ -222,6 +223,16 @@ _MCP_REQUEST_ID: ContextVar[str | None] = ContextVar(
 )
 
 
+def governance_tool_is_destructive(
+    registry: Mapping[str, governance_operations.OperationSpec] = governance_operations.OPERATION_SPECS,
+) -> bool:
+    """Whether any registered governance operation overwrites policy state."""
+    return any(
+        spec.destructive or any(variant.destructive for variant in spec.variants)
+        for spec in registry.values()
+    )
+
+
 # Write ops whose mutation OVERWRITES or REMOVES existing vault content, as opposed
 # to purely additive writes (add / note / create_file / append_to_file / link /
 # preserve / recover_from_trash / reconcile). Drives the MCP `destructiveHint` so a
@@ -239,6 +250,7 @@ DESTRUCTIVE_OPS: frozenset[str] = frozenset(
         "manage_memory_file",
         "maintain_memory",
         "schema_memory",
+        *({"govern_memory"} if governance_tool_is_destructive() else set()),
     }
 )
 
@@ -280,7 +292,7 @@ class Command:
     product_actions: tuple[str, ...] = ()
     first_run_safe: bool = False
     routes: tuple[str, ...] = ()
-    response_detail: bool = False
+    response_detail: ResponseDetail | None = None
 
     @property
     def doc(self) -> str:
@@ -359,19 +371,16 @@ def bind_vault(
             for parameter in visible
             if parameter.kind is not inspect.Parameter.VAR_KEYWORD
         ]
-    if command is not None and getattr(command, "response_detail", False):
+    default_response_detail = getattr(command, "response_detail", None)
+    if default_response_detail is not None:
+        response_detail_help = help_text["response_detail"]
         response_detail = inspect.Parameter(
             "response_detail",
             kind=inspect.Parameter.KEYWORD_ONLY,
-            default="compact",
+            default=default_response_detail,
             annotation=typing.Annotated[
                 ResponseDetail,
-                Field(
-                    description=(
-                        "Successful committed mutation detail: compact (default), "
-                        "full diagnostics, or legacy raw leaf result."
-                    )
-                ),
+                Field(description=response_detail_help),
             ],
         )
         insert_at = next(

@@ -15,12 +15,13 @@ mismatch). Mixed read/write dispatch: `commands.invocation_is_read_only`
 
 ## Goals / Non-Goals
 
-Goals: one natural-language authoring tool; safe propose→commit that cannot be
+Goals: one client/LLM-natural-language authoring tool with deterministic structured
+arguments; safe propose→commit that cannot be
 replayed or applied against drifted state; zero-friction release-time grants;
 revoke/undo that keep history and dependent grants coherent; a teaching surface
 so any client uses the operations correctly.
 
-Non-Goals: receipt-chain persistence internals (provided by the prerequisite
+Non-Goals: server-side NLP or query planning; receipt-chain persistence internals (provided by the prerequisite
 `add-disclosure-receipts` change), bridges, presets, and a policy UI. No model
 call enters the enforcement or validation path — the LLM proposes, Exomem
 decides.
@@ -34,6 +35,8 @@ via a new `_GOVERN_MEMORY_READ_ONLY_ACTIONS` set in
 `invocation_is_read_only`; `propose`/`commit`/`grant`/`revoke`/`suspend`/
 `resume`/`undo`/`declare` write and ride the lease + idempotency boundary.
 Policy-overwriting operations join `DESTRUCTIVE_OPS` so annotations warn.
+The client SHALL supply an explicit audience whenever an operation's behavior
+depends on one; audience is never silently ignored.
 
 ### D2 — propose stores a drift-bound nonce; commit consumes it
 `propose` writes a pending record to `.governance.sqlite proposals`
@@ -47,18 +50,32 @@ available while prepared; after exact prepared and terminal evidence, D7 removes
 the marker and the one activation transaction marks the proposal spent alongside
 all other final sidecar rows and closes the operation journal.
 The nonce is therefore consumed exactly once on success but not lost to a crash
-before the policy mutation. Commit refuses with `STALE_GOVERNANCE_POLICY` if the
-current policy fingerprint or any affected-item content fingerprint differs from
-propose time. This closes the TOCTOU window: an out-of-band edit or a
-`file_watcher` reindex between propose and commit forces a re-propose rather than
-applying a decision computed against vanished state.
+before the policy mutation. Commit compares the current policy fingerprint and
+exact affected-item manifest through the final live proposal-guard comparison.
+Drift detected while the operation still matches exact prior and has no committed
+terminal aborts with `STALE_GOVERNANCE_POLICY`, leaves no target policy active,
+and requires a fresh proposal. Once target preparation or committed evidence
+exists, the protocol cannot safely reinterpret or roll back the event: manifest
+drift leaves it BLOCKED until the exact reviewed corpus is restored, after which
+reconciliation activates the same event without replay. The final successful
+guard comparison is the proposal-validity linearization point; only the journal
+close and SQLite commit follow. A filesystem write that races strictly after the
+cut is later content evolution governed by the newly active dynamic policy, even
+if the commit acknowledgement has not returned yet. Arbitrary external
+filesystem writers cannot participate in the SQLite activation transaction, so
+moving the final comparison later would only move, not remove, that irreducible
+boundary.
 
-### D3 — propose previews respect current ceilings
-The resolved-membership preview renders counts and samples at each member's
-*current* effective ceiling — a proposal for a scope that would restrict N pages
-must not leak those N titles to the model before the rule exists. `explain` and
-`simulate` toward a sub-ceiling audience return counts + rule-ids only, never
-member titles/excerpts.
+### D3 — Proposals derive facts; inspection has explicit paths and audiences
+Proposal interpretation, samples/privacy, consequences, overlaps, transition
+direction, and commit identity derive only from current and prospective compiled
+policies and their concrete resolved membership. `selector_paths` and
+`target_ceiling` survive only as compatibility hints: disagreement is diagnostic
+or rejected and never drives those facts. The preview renders each member at its
+*current* effective ceiling. `explain` resolves one exact canonical path and an
+explicit audience; `simulate` resolves explicit canonical paths and an explicit
+audience. They return counts/rule ids rather than titles/excerpts toward a
+sub-ceiling audience.
 
 ### D4 — Grants: session in sqlite, standing in YAML
 Release-time `grant` redeems a withhold-token (from `add-release-gate`) and writes
@@ -105,9 +122,11 @@ mutation":
    composite digests over every affected YAML path (content hash or absence) and
    authorization-state sidecar row (table, primary key, row hash, status),
    including proposal consumption and dependent-grant changes;
-2. append and fsync a plaintext-free `intent` with operation, all three composite
-   digests, and content-free affected ids;
-3. create an authoritative pending operation row, then prepare the whole target
+2. durably create an `allocating` control row carrying the event and exact
+   composite binding. It is ignored by the policy read guard; append and fsync
+   each actual plaintext-free intent with operation, all three composite digests,
+   content-free affected ids, and exact canonical sorted affected paths;
+3. atomically arm that row as `pending`, then prepare the marker and whole target
    under the existing writer lease/mutation guard;
 4. append and fsync `committed` while the target is still pending;
 5. activate last, then return a committed mutation terminal.
@@ -123,10 +142,12 @@ widening/unknown pending transition retains prior enforcement (warm) or BLOCKED
 (cold) and never exposes target state early.
 
 YAML policy operations (`commit`, `suspend`, `resume`, `undo`, and standing
-grant/revoke) create a reserved `_Governance/.policy-mutation.pending.json`
-marker before replacing active documents. The marker is content-free and names
-the event id, operation, three composite digests, and affected relative
-paths/sidecar-row ids. The operation row is the authoritative activation guard;
+grant/revoke) create a regular non-symlink `_Governance/.policy-mutation.pending.json`
+marker only after the row is armed. Its exact schema binds protocol and phase,
+event id, operation, all composite digests, affected ids, and exact canonical
+sorted affected paths. Absence is valid only for exact-prior before creation or
+the terminal-backed removal window. The operation row is the authoritative
+activation guard;
 the marker and operation journal are control metadata excluded from logical
 composite inputs because the journal stores those digests and would otherwise be
 self-referential. Reconcile validates them separately by event id, embedded
@@ -137,8 +158,11 @@ any proven-narrowing overlay and a blocking finding; cold start returns the
 existing BLOCKED L0 floor. Direct manual YAML edits remain unchanged when
 neither guard exists.
 
-Session grants, purpose state, proposal consumption, and dependent-grant changes
-have explicit prepared and final statuses keyed by the same event id. The
+Session grants, proposal consumption, and dependent-grant changes have explicit
+prepared and final statuses keyed by the same event id. Purpose uses a separate
+event-keyed staged target while the prior active purpose remains visible. The
+activation transaction atomically promotes or deletes staging, verifies final
+state, and closes the journal. The
 prepared composite hashes the prepared row encodings; final-active hashes their
 post-activation encodings. The evaluator ignores every prepared target row;
 only the separate proven-narrowing overlay may reduce disclosure earlier.
@@ -171,15 +195,20 @@ retired from live composite reconciliation, so later legitimate TTL deletion or
 state evolution cannot invalidate historical final state.
 
 Before any later governance authoring call, reconcile validates the operation
-row/marker and hashes every component named by the three composites. Exact prior
-appends or recognizes `aborted`, clears guards/reservations, and closes the
-journal. Exact prepared appends or recognizes every required committed terminal,
-then runs only the activation-and-close transition above. Closed journals are not
-rechecked against live component rows. Any mixed, partial, or other open state
-remains BLOCKED for manual repair. Reconciliation never repeats the user's
-semantic mutation. The compound grant case above is not replay: token consumption
-and pending-grant creation were one atomic sidecar transition, and reconcile only
-materializes missing evidence and activation.
+row/marker and hashes every component named by the three composites. An
+`allocating` row closes as exact prior and aborts only intents actually observed;
+it creates no terminal when none exists. A `pending` row applies exact
+prior/prepared/final rules: exact prior clears guards/reservations and closes only
+when none of its required committed terminals exists; exact prepared appends or
+recognizes required terminals then only activates and closes; and final-active
+requires its terminal set. Any committed terminal paired with a state that does
+not match prepared or final is contradictory evidence and remains BLOCKED rather
+than attempting a conflicting abort. Closed journals are not rechecked against
+live component rows. Any mixed, partial, or other open state remains BLOCKED for
+manual repair. Reconciliation never repeats the user's semantic mutation. The
+compound grant case above is not replay: token consumption and pending-grant
+creation were one atomic sidecar transition, and reconcile only materializes
+missing evidence and activation.
 
 Registration is last: `_PRODUCT_SPEC`, generated schemas, CLI, and REST exposure
 are not changed until tests prove every authorization-affecting operation has a
