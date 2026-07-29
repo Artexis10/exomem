@@ -319,6 +319,29 @@ def test_openai_listing_limits_allow_exact_boundaries_and_reject_next_character(
 @pytest.mark.parametrize(
     ("field", "value"),
     [
+        (("channels", "openai-plugin", "short_description"), "x" * 30 + " "),
+        (("channels", "openai-plugin", "starter_prompts", 0), "x" * 128 + " "),
+    ],
+)
+def test_openai_listing_rejects_rendered_trailing_whitespace_over_limit(
+    tmp_path: Path, field: tuple[object, ...], value: str
+) -> None:
+    root = copy_hosted_tree(tmp_path / "repo")
+    path = root / "plugins/hosted/marketplace-definition.json"
+    definition = json.loads(path.read_text(encoding="utf-8"))
+    target = definition
+    for key in field[:-1]:
+        target = target[key]
+    target[field[-1]] = value
+    path.write_text(json.dumps(definition), encoding="utf-8")
+
+    with pytest.raises(ValueError, match=field[-2]):
+        hosted_plugins.load_marketplace_definition(root)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
         (("common", "release_notes"), "Private alpha access is available."),
         (("common", "description"), "A trial service for governed knowledge."),
         (("channels", "openai-plugin", "title"), "Exomem demo"),
@@ -386,7 +409,11 @@ def test_marketplace_review_cases_bind_the_versioned_generic_fixture() -> None:
         "fixture_version": fixture["fixture_version"],
         "payload_sha256": fixture["payload_sha256"],
     }
-    references = {note["reference"] for note in fixture["payload"]["notes"]}
+    references = {
+        item["reference"]
+        for group in ("notes", "absent_notes")
+        for item in fixture["payload"][group]
+    }
     assert all(
         case["fixture_version"] == fixture["fixture_version"]
         and set(case["fixture_references"]).issubset(references)
@@ -395,6 +422,77 @@ def test_marketplace_review_cases_bind_the_versioned_generic_fixture() -> None:
     write_cases = [case for case in cases["positive"] if "remember" in case["expected_tools"]]
     assert write_cases
     assert all(case["fixture_reset"] == fixture["reset"] for case in write_cases)
+
+
+def test_marketplace_review_fixture_declares_an_absent_create_only_target() -> None:
+    fixture = json.loads(
+        (REPO_ROOT / "plugins/hosted/marketplace-review-fixture-v1.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert "absent_notes" in fixture["payload"]
+
+    target = fixture["payload"]["absent_notes"][0]
+    assert target == {
+        "reference": "review-durable-capture",
+        "key": "review-durable-capture",
+        "title": "Review durable capture",
+        "create_tool": "remember",
+    }
+    assert target["key"] not in {note["key"] for note in fixture["payload"]["notes"]}
+    assert fixture["reset"] == {
+        "disposable_reference": target["reference"],
+        "disposable_key": target["key"],
+        "disposable_title": target["title"],
+        "create_tool": target["create_tool"],
+        "procedure": "delete_created_note",
+    }
+    cases = hosted_plugins.load_marketplace_review_cases(REPO_ROOT)
+    remember_case = next(case for case in cases["positive"] if "remember" in case["expected_tools"])
+    assert remember_case["fixture_references"] == [target["reference"]]
+    assert target["key"] in remember_case["prompt"]
+    assert target["title"] in remember_case["prompt"]
+    assert "create" in remember_case["expected_outcome"].lower()
+    assert "delete" in remember_case["expected_outcome"].lower()
+
+
+def test_marketplace_review_fixture_rejects_preseeded_create_target(tmp_path: Path) -> None:
+    root = copy_hosted_tree(tmp_path / "repo")
+    fixture_path = root / "plugins/hosted/marketplace-review-fixture-v1.json"
+    fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
+    assert "absent_notes" in fixture["payload"]
+    target = fixture["payload"]["absent_notes"][0]
+    fixture["payload"]["notes"].append(
+        {
+            "reference": target["reference"],
+            "key": target["key"],
+            "title": target["title"],
+            "content": "This collision must be rejected.",
+        }
+    )
+    fixture["payload_sha256"] = hosted_plugins._sha256(
+        hosted_plugins._canonical_json(fixture["payload"])
+    )
+    fixture_path.write_text(json.dumps(fixture), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="absent target"):
+        hosted_plugins.load_marketplace_review_cases(root)
+
+
+def test_marketplace_review_case_rejects_mismatched_create_reset_tool(tmp_path: Path) -> None:
+    root = copy_hosted_tree(tmp_path / "repo")
+    fixture = json.loads(
+        (root / "plugins/hosted/marketplace-review-fixture-v1.json").read_text(encoding="utf-8")
+    )
+    assert "absent_notes" in fixture["payload"]
+    cases_path = root / "plugins/hosted/marketplace-review-cases.json"
+    cases = json.loads(cases_path.read_text(encoding="utf-8"))
+    remember_case = next(case for case in cases["positive"] if "remember" in case["expected_tools"])
+    remember_case["expected_tools"] = ["capture_source"]
+    cases_path.write_text(json.dumps(cases), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="fixture reset tool"):
+        hosted_plugins.load_marketplace_review_cases(root)
 
 
 @pytest.mark.parametrize(

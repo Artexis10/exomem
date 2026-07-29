@@ -523,13 +523,12 @@ def _validate_fresh_utc_timestamp(value: Any, field: str) -> None:
 def _validate_listing_text(value: Any, field: str, maximum: int) -> str:
     if not isinstance(value, str):
         raise ValueError(f"{field} must be a string")
-    text = value.strip()
-    if not text or len(text) > maximum:
+    if not value.strip() or len(value) > maximum:
         raise ValueError(f"{field} must be between 1 and {maximum} characters")
-    lowered = text.lower()
+    lowered = value.lower()
     if "native assistant memory" in lowered or "arbitrary chat history" in lowered:
         raise ValueError(f"{field} makes an unsupported memory claim")
-    return text
+    return value
 
 
 _OPENAI_SALE_LANGUAGE = re.compile(
@@ -745,10 +744,11 @@ def _load_marketplace_review_fixture(root: Path) -> dict[str, Any]:
     if fixture["schema_version"] != 1 or not re.fullmatch(r"v[1-9]\d*", str(fixture["fixture_version"])):
         raise ValueError("marketplace review fixture version is invalid")
     payload = fixture["payload"]
-    if not isinstance(payload, dict) or set(payload) != {"notes"}:
+    if not isinstance(payload, dict) or set(payload) != {"notes", "absent_notes"}:
         raise ValueError("marketplace review fixture payload is invalid")
     notes = payload["notes"]
-    if not isinstance(notes, list) or not notes:
+    absent_notes = payload["absent_notes"]
+    if not isinstance(notes, list) or not notes or not isinstance(absent_notes, list) or not absent_notes:
         raise ValueError("marketplace review fixture notes are invalid")
     references: set[str] = set()
     keys: set[str] = set()
@@ -759,7 +759,24 @@ def _load_marketplace_review_fixture(root: Path) -> dict[str, Any]:
             raise ValueError("marketplace review fixture note is invalid")
         references.add(note["reference"])
         keys.add(note["key"])
-    if len(references) != len(notes) or len(keys) != len(notes):
+    absent_by_reference: dict[str, dict[str, Any]] = {}
+    for target in absent_notes:
+        if not isinstance(target, dict) or set(target) != {"reference", "key", "title", "create_tool"}:
+            raise ValueError("marketplace review fixture absent target is invalid")
+        if any(not isinstance(target[field], str) or not target[field].strip() for field in target):
+            raise ValueError("marketplace review fixture absent target is invalid")
+        if target["create_tool"] != "remember":
+            raise ValueError("marketplace review fixture absent target must use remember")
+        if target["reference"] in references or target["key"] in keys:
+            raise ValueError("marketplace review fixture absent target collides with seeded content")
+        references.add(target["reference"])
+        keys.add(target["key"])
+        absent_by_reference[target["reference"]] = target
+    if (
+        len(references) != len(notes) + len(absent_notes)
+        or len(keys) != len(notes) + len(absent_notes)
+        or len(absent_by_reference) != len(absent_notes)
+    ):
         raise ValueError("marketplace review fixture references must be unique")
     payload_sha256 = fixture["payload_sha256"]
     if not isinstance(payload_sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", payload_sha256):
@@ -769,15 +786,23 @@ def _load_marketplace_review_fixture(root: Path) -> dict[str, Any]:
     reset = fixture["reset"]
     if (
         not isinstance(reset, dict)
-        or set(reset) != {"disposable_reference", "disposable_key", "procedure"}
-        or reset["disposable_reference"] not in references
-        or reset["disposable_key"] not in keys
-        or next(
-            note["key"] for note in notes if note["reference"] == reset["disposable_reference"]
-        )
-        != reset["disposable_key"]
-        or reset["procedure"] != "replace_with_canonical_content"
+        or set(reset)
+        != {
+            "disposable_reference",
+            "disposable_key",
+            "disposable_title",
+            "create_tool",
+            "procedure",
+        }
+        or reset["disposable_reference"] not in absent_by_reference
+        or reset["procedure"] != "delete_created_note"
     ):
+        raise ValueError("marketplace review fixture reset is invalid")
+    target = absent_by_reference[reset["disposable_reference"]]
+    if any(
+        reset[field] != target[field.replace("disposable_", "")]
+        for field in ("disposable_key", "disposable_title")
+    ) or reset["create_tool"] != target["create_tool"]:
         raise ValueError("marketplace review fixture reset is invalid")
     return fixture
 
@@ -806,7 +831,11 @@ def load_marketplace_review_cases(repo_root: Path | None = None) -> dict[str, An
         raise ValueError("marketplace review cases require at least five positive cases")
     if not isinstance(negative, list) or len(negative) < 3:
         raise ValueError("marketplace review cases require at least three negative cases")
-    known_references = {note["reference"] for note in fixture["payload"]["notes"]}
+    known_references = {
+        item["reference"]
+        for group in ("notes", "absent_notes")
+        for item in fixture["payload"][group]
+    }
     write_tools = {
         entry["name"]
         for entry in compatibility_manifest(root)["agent_contract"]["commands"]
@@ -850,7 +879,15 @@ def load_marketplace_review_cases(repo_root: Path | None = None) -> dict[str, An
                     raise ValueError("marketplace review case fixture reference is unknown")
                 if (
                     write_tools.intersection(case["expected_tools"])
-                    and case["fixture_reset"] != fixture["reset"]
+                    and fixture["reset"]["create_tool"] not in case["expected_tools"]
+                ):
+                    raise ValueError("marketplace review case fixture reset tool is invalid")
+                if (
+                    write_tools.intersection(case["expected_tools"])
+                    and (
+                        case["fixture_reset"] != fixture["reset"]
+                        or fixture["reset"]["disposable_reference"] not in references
+                    )
                 ):
                     raise ValueError("marketplace review case fixture reset is invalid")
     negative_text = " ".join(
