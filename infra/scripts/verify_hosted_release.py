@@ -43,6 +43,19 @@ _MAX_LOCK_EVIDENCE_FILES = 32
 _MAX_RUNTIME_CANDIDATE_ASSETS = 32
 _MAX_PROVISIONER_REFERRERS = 32
 _MAX_PULL_FILES = 3
+_OCI_MANIFEST_MEDIA_TYPE = "application/vnd.oci.image.manifest.v1+json"
+_OCI_EMPTY_CONFIG_MEDIA_TYPE = "application/vnd.oci.empty.v1+json"
+_OCI_SUBJECT_MEDIA_TYPES = {
+    "application/vnd.oci.image.manifest.v1+json",
+    "application/vnd.oci.image.index.v1+json",
+    "application/vnd.docker.distribution.manifest.v2+json",
+    "application/vnd.docker.distribution.manifest.list.v2+json",
+}
+_CANDIDATE_MEDIA_TYPE = "application/vnd.exomem.hosted-image-candidate.v1+json"
+_CANDIDATE_BUNDLE_MEDIA_TYPE = "application/vnd.dev.sigstore.bundle.v0.3+json"
+_MAX_OCI_CONFIG_BYTES = 1_024
+_MAX_OCI_ATTACHMENT_BYTES = 128 * 1024 + 16 * 1024 * 1024 + _MAX_OCI_CONFIG_BYTES
+_MAX_DISCOVERED_OCI_BYTES = 64 * 1024 * 1024
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 _CANONICAL_DEPLOYMENT_LOCK_PAIR = _REPOSITORY_ROOT / "infra/contracts/exomem-hosted-deployment-lock-pair-v2.json"
 _CANONICAL_DEPLOYMENT_LOCK_EVIDENCE = _REPOSITORY_ROOT / "infra/contracts/exomem-hosted-deployment-lock-evidence-v2"
@@ -576,7 +589,7 @@ def probe_runtime_contract(image: str, release: dict[str, Any], fixture: dict[st
             _reclaim_runtime_tree(image, root)
 
 
-def _decode_object(raw: bytes, *, label: str) -> dict[str, Any]:
+def _decode_json(raw: bytes, *, label: str) -> Any:
     def reject_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
         value: dict[str, Any] = {}
         for key, item in pairs:
@@ -592,6 +605,11 @@ def _decode_object(raw: bytes, *, label: str) -> dict[str, Any]:
         )
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
         raise ValueError(f"{label} is not strict UTF-8 JSON") from error
+    return value
+
+
+def _decode_object(raw: bytes, *, label: str) -> dict[str, Any]:
+    value = _decode_json(raw, label=label)
     if not isinstance(value, dict):
         raise ValueError(f"{label} is not a JSON object")
     return value
@@ -619,9 +637,9 @@ def _load_script(name: str) -> Any:
     return module
 
 
-def _evidence_file(
+def _evidence_bytes(
     directory: Path, expected_sha256: str, *, label: str, composer: Any
-) -> tuple[Path, dict[str, Any]]:
+) -> tuple[Path, bytes]:
     """Select one bounded, canonical evidence file by its reviewed digest."""
 
     if not _SHA256.fullmatch(expected_sha256):
@@ -654,9 +672,17 @@ def _evidence_file(
     if len(matches) != 1:
         raise ValueError(f"{label} evidence did not yield exactly one reviewed file")
     path, raw = matches[0]
-    value = _decode_object(raw, label=f"{label} evidence")
+    value = _decode_json(raw, label=f"{label} evidence")
     if raw != composer._canonical(value):
         raise ValueError(f"{label} evidence is not canonical JSON")
+    return path, raw
+
+
+def _evidence_file(
+    directory: Path, expected_sha256: str, *, label: str, composer: Any
+) -> tuple[Path, dict[str, Any]]:
+    path, raw = _evidence_bytes(directory, expected_sha256, label=label, composer=composer)
+    value = _decode_object(raw, label=f"{label} evidence")
     return path, value
 
 
@@ -722,7 +748,16 @@ def _verify_lock_evidence(lock: dict[str, Any], directory: Path, composer: Any) 
         composer=composer,
     )
     _validate_legacy_manifest(legacy_manifest, lock)
-    composer._rollback(lock["rollback"])
+    rollback = composer._rollback(lock["rollback"])
+    _, corpus_raw = _evidence_bytes(
+        directory,
+        rollback["v1CorpusSha256"],
+        label="rollback v1 corpus",
+        composer=composer,
+    )
+    corpus = _decode_json(corpus_raw, label="rollback v1 corpus evidence")
+    if not isinstance(corpus, (dict, list)) or not corpus:
+        raise ValueError("rollback v1 corpus evidence is invalid")
     _ = forward_path, authority_path, legacy_manifest_path
 
 
@@ -837,6 +872,229 @@ def _pulled_candidate_paths(directory: Path, loader: Any) -> list[Path]:
     return candidates
 
 
+def _oci_descriptor(
+    value: object,
+    *,
+    label: str,
+    media_type: str,
+    maximum: int,
+    allow_artifact_type: bool = False,
+) -> tuple[str, int]:
+    fields = {"mediaType", "digest", "size", "annotations"}
+    if allow_artifact_type:
+        fields.add("artifactType")
+    if not isinstance(value, dict) or set(value) - fields:
+        raise ValueError(f"{label} descriptor is invalid")
+    digest = value.get("digest")
+    size = value.get("size")
+    annotations = value.get("annotations")
+    if value.get("mediaType") != media_type or not isinstance(digest, str):
+        raise ValueError(f"{label} descriptor media type is invalid")
+    if not re.fullmatch(r"sha256:[0-9a-f]{64}", digest) or not isinstance(size, int):
+        raise ValueError(f"{label} descriptor identity is invalid")
+    if not 1 <= size <= maximum:
+        raise ValueError(f"{label} descriptor exceeds its size contract")
+    if annotations is not None and (
+        not isinstance(annotations, dict)
+        or any(not isinstance(key, str) or not isinstance(item, str) for key, item in annotations.items())
+    ):
+        raise ValueError(f"{label} descriptor annotations are invalid")
+    return digest, size
+
+
+def _validate_oci_candidate_manifest(manifest: object, *, subject_image: str | None = None) -> int:
+    """Reject OCI attachments before their layers are transferred locally."""
+
+    if not isinstance(manifest, dict) or set(manifest) - {
+        "schemaVersion",
+        "mediaType",
+        "artifactType",
+        "config",
+        "layers",
+        "subject",
+        "annotations",
+    }:
+        raise ValueError("provisioner candidate OCI manifest is invalid")
+    if (
+        manifest.get("schemaVersion") != 2
+        or manifest.get("mediaType") != _OCI_MANIFEST_MEDIA_TYPE
+        or manifest.get("artifactType") != _CANDIDATE_MEDIA_TYPE
+    ):
+        raise ValueError("provisioner candidate OCI manifest type is invalid")
+    if subject_image is not None:
+        subject = manifest.get("subject")
+        if not isinstance(subject, dict) or set(subject) - {
+            "mediaType",
+            "digest",
+            "size",
+            "annotations",
+        }:
+            raise ValueError("provisioner candidate OCI subject is invalid")
+        subject_digest = subject.get("digest")
+        subject_size = subject.get("size")
+        if (
+            subject.get("mediaType") not in _OCI_SUBJECT_MEDIA_TYPES
+            or subject_digest != subject_image.rsplit("@", 1)[1]
+            or not isinstance(subject_size, int)
+            or not 1 <= subject_size <= _MAX_FIXTURE_BYTES
+        ):
+            raise ValueError("provisioner candidate OCI subject differs from the locked image")
+    config_digest, config_size = _oci_descriptor(
+        manifest.get("config"),
+        label="provisioner candidate OCI config",
+        media_type=_OCI_EMPTY_CONFIG_MEDIA_TYPE,
+        maximum=_MAX_OCI_CONFIG_BYTES,
+    )
+    if not config_digest or config_size < 1:
+        raise ValueError("provisioner candidate OCI config is invalid")
+    layers = manifest.get("layers")
+    if not isinstance(layers, list) or len(layers) != 2:
+        raise ValueError("provisioner candidate OCI layer count is invalid")
+    seen: set[str] = set()
+    observed: dict[str, int] = {}
+    for expected_type, maximum in (
+        (_CANDIDATE_MEDIA_TYPE, 128 * 1024),
+        (_CANDIDATE_BUNDLE_MEDIA_TYPE, 16 * 1024 * 1024),
+    ):
+        descriptors = [layer for layer in layers if isinstance(layer, dict) and layer.get("mediaType") == expected_type]
+        if len(descriptors) != 1:
+            raise ValueError("provisioner candidate OCI layer media types are invalid")
+        digest, size = _oci_descriptor(
+            descriptors[0],
+            label="provisioner candidate OCI layer",
+            media_type=expected_type,
+            maximum=maximum,
+        )
+        if digest in seen:
+            raise ValueError("provisioner candidate OCI layers are duplicated")
+        seen.add(digest)
+        observed[expected_type] = size
+    if config_size + sum(observed.values()) > _MAX_OCI_ATTACHMENT_BYTES:
+        raise ValueError("provisioner candidate OCI attachment exceeds its size contract")
+    return config_size + sum(observed.values())
+
+
+def _oci_referrer_descriptors(discovered: object) -> list[dict[str, Any]]:
+    manifests = discovered.get("manifests") if isinstance(discovered, dict) else None
+    if not isinstance(manifests, list) or not 1 <= len(manifests) <= _MAX_PROVISIONER_REFERRERS:
+        raise ValueError("provisioner candidate attachment discovery count exceeds its size contract")
+    descriptors: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for manifest in manifests:
+        if not isinstance(manifest, dict) or set(manifest) - {
+            "mediaType",
+            "digest",
+            "size",
+            "artifactType",
+            "annotations",
+        }:
+            raise ValueError("provisioner candidate attachment descriptor is invalid")
+        if manifest.get("artifactType") != _CANDIDATE_MEDIA_TYPE:
+            raise ValueError("provisioner candidate attachment type is invalid")
+        digest, _ = _oci_descriptor(
+            manifest,
+            label="provisioner candidate attachment",
+            media_type=_OCI_MANIFEST_MEDIA_TYPE,
+            maximum=_MAX_OCI_ATTACHMENT_BYTES,
+            allow_artifact_type=True,
+        )
+        if digest in seen:
+            raise ValueError("provisioner candidate attachment descriptors are duplicated")
+        seen.add(digest)
+        descriptors.append(manifest)
+    return descriptors
+
+
+def _verified_provisioner_candidate(
+    *,
+    image: str,
+    source_commit: str,
+    expected_sha256: str | None,
+    directory: Path,
+    candidate_tool: Any,
+    oras_binary: str,
+    gh_binary: str,
+) -> None:
+    repository_name = image.split("@", 1)[0]
+    discovered = json.loads(
+        _run(
+            [
+                oras_binary,
+                "discover",
+                "--artifact-type",
+                _CANDIDATE_MEDIA_TYPE,
+                image,
+                "--format",
+                "json",
+            ]
+        ).stdout
+    )
+    attachments: list[tuple[str, dict[str, Any]]] = []
+    total_size = 0
+    for descriptor in _oci_referrer_descriptors(discovered):
+        digest = descriptor["digest"]
+        manifest = _decode_object(
+            _run([oras_binary, "manifest", "fetch", f"{repository_name}@{digest}"]).stdout.encode(),
+            label="provisioner candidate OCI manifest",
+        )
+        total_size += _validate_oci_candidate_manifest(manifest, subject_image=image)
+        if total_size > _MAX_DISCOVERED_OCI_BYTES:
+            raise ValueError("provisioner candidate OCI discovery exceeds its size contract")
+        attachments.append((digest, manifest))
+    candidate_paths: list[Path] = []
+    for index, (digest, _) in enumerate(attachments):
+        destination = directory / str(index)
+        destination.mkdir(mode=0o700)
+        _run(
+            [
+                oras_binary,
+                "pull",
+                f"{repository_name}@{digest}",
+                "--output",
+                os.fspath(destination),
+            ]
+        )
+        candidate_paths.extend(_pulled_candidate_paths(destination, candidate_tool))
+    component = {"image": image, "sourceCommit": source_commit}
+    matches: list[Path] = []
+    for path in candidate_paths:
+        raw = candidate_tool._read_regular(
+            path, label="candidate", maximum=candidate_tool.MAX_CANDIDATE_BYTES
+        )
+        if expected_sha256 is not None and hashlib.sha256(raw).hexdigest() != expected_sha256:
+            continue
+        candidate = candidate_tool.load_candidate(path)
+        _candidate_matches_lock(candidate, component, kind="provisioner", release=None)
+        matches.append(path)
+    if len(matches) != 1:
+        raise ValueError("provisioner candidate discovery did not yield exactly one locked candidate")
+    candidate = matches[0]
+    candidate_tool.verify_candidate(
+        candidate,
+        bundle_from_oci=True,
+        candidate_bundle=candidate.with_name(
+            candidate.name.removesuffix(".candidate-v1.json") + ".candidate.sigstore.json"
+        ),
+        gh_binary=gh_binary,
+    )
+
+
+def _verify_substrate_v1_consumer(commit: str, gh_binary: str) -> None:
+    observed = _run(
+        [
+            gh_binary,
+            "api",
+            "--method",
+            "GET",
+            f"repos/substrate-systems/substrate/git/commits/{commit}",
+            "--jq",
+            ".sha",
+        ]
+    ).stdout.strip()
+    if observed != commit:
+        raise ValueError("rollback Substrate v1 consumer commit is unavailable")
+
+
 def verify_selected_deployment_lock(
     *, phase: str, repository: Path, oras_binary: str = "oras", gh_binary: str = "gh"
 ) -> dict[str, Any]:
@@ -870,29 +1128,28 @@ def verify_selected_deployment_lock(
         candidate_tool.verify_candidate(runtime_candidate, bundle=runtime_dir / f"{runtime_stem}.sigstore.json", candidate_bundle=runtime_dir / f"{runtime_stem}.candidate.sigstore.json", gh_binary=gh_binary)
         provisioner_dir = root / "provisioner"
         provisioner_dir.mkdir(mode=0o700)
-        image = components["provisioner"]["image"]
-        repository_name = image.split("@", 1)[0]
-        discovered = json.loads(_run([oras_binary, "discover", "--artifact-type", "application/vnd.exomem.hosted-image-candidate.v1+json", image, "--format", "json"]).stdout)
-        manifests = discovered.get("manifests") if isinstance(discovered, dict) else None
-        if not isinstance(manifests, list) or not 1 <= len(manifests) <= _MAX_PROVISIONER_REFERRERS:
-            raise ValueError("provisioner candidate attachment discovery count exceeds its size contract")
-        candidate_paths: list[Path] = []
-        for index, manifest in enumerate(manifests):
-            digest = manifest.get("digest") if isinstance(manifest, dict) else None
-            size = manifest.get("size") if isinstance(manifest, dict) else None
-            if not isinstance(digest, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
-                raise ValueError("provisioner candidate attachment digest is invalid")
-            if not isinstance(size, int) or not 1 <= size <= (
-                candidate_tool.MAX_CANDIDATE_BYTES + candidate_tool.MAX_BUNDLE_BYTES
-            ):
-                raise ValueError("provisioner candidate attachment exceeds its size contract")
-            destination = provisioner_dir / str(index)
-            destination.mkdir(mode=0o700)
-            _run([oras_binary, "pull", f"{repository_name}@{digest}", "--output", os.fspath(destination)])
-            candidate_paths.extend(_pulled_candidate_paths(destination, candidate_tool))
-        provisioner_candidate = _one_candidate(candidate_paths, components["provisioner"]["candidateSha256"], candidate_tool)
-        _candidate_matches_lock(candidate_tool.load_candidate(provisioner_candidate), components["provisioner"], kind="provisioner", release=None)
-        candidate_tool.verify_candidate(provisioner_candidate, bundle_from_oci=True, candidate_bundle=provisioner_candidate.with_name(provisioner_candidate.name.removesuffix(".candidate-v1.json") + ".candidate.sigstore.json"), gh_binary=gh_binary)
+        _verified_provisioner_candidate(
+            image=components["provisioner"]["image"],
+            source_commit=components["provisioner"]["sourceCommit"],
+            expected_sha256=components["provisioner"]["candidateSha256"],
+            directory=provisioner_dir,
+            candidate_tool=candidate_tool,
+            oras_binary=oras_binary,
+            gh_binary=gh_binary,
+        )
+        rollback_dir = root / "rollback-provisioner"
+        rollback_dir.mkdir(mode=0o700)
+        rollback = selected["rollback"]
+        _verified_provisioner_candidate(
+            image=rollback["provisionerImage"],
+            source_commit=rollback["provisionerSourceCommit"],
+            expected_sha256=None,
+            directory=rollback_dir,
+            candidate_tool=candidate_tool,
+            oras_binary=oras_binary,
+            gh_binary=gh_binary,
+        )
+        _verify_substrate_v1_consumer(rollback["substrateV1ConsumerCommit"], gh_binary)
     return selected
 
 

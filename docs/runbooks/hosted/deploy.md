@@ -62,6 +62,8 @@ lock_evidence="infra/contracts/exomem-hosted-deployment-lock-evidence-v2"
 test -d "$lock_evidence" && test ! -L "$lock_evidence" || { echo "canonical deployment lock evidence is missing" >&2; exit 2; }
 : "${EXOMEM_DEPLOYMENT_PHASE:?set expand or contract}"
 case "$EXOMEM_DEPLOYMENT_PHASE" in expand|contract) ;; *) exit 2 ;; esac
+: "${GH_TOKEN:?set a token permitted to verify hosted attestations and the pinned Substrate commit}"
+command -v oras >/dev/null || { echo "oras is required for deployment-lock proof" >&2; exit 2; }
 control_hostname="$(terraform -chdir=infra/terraform/foundation output -raw control_hostname)"
 transfer_hostname="$(terraform -chdir=infra/terraform/foundation output -raw transfer_hostname)"
 infra/scripts/prepare_hosted_release.py \
@@ -70,6 +72,9 @@ infra/scripts/prepare_hosted_release.py \
   --values-output "${deploy_work_dir}/release-values.json" \
   --control-hostname "$control_hostname" \
   --transfer-hostname "$transfer_hostname"
+infra/scripts/verify_hosted_release.py \
+  --phase "$EXOMEM_DEPLOYMENT_PHASE" \
+  --repository .
 
 : "${EXOMEM_B2_S3_ENDPOINT:?set the exact HTTPS B2 S3 origin}"
 : "${EXOMEM_B2_S3_REGION:?set the B2 S3 region}"

@@ -1755,9 +1755,10 @@ def test_release_manifest_is_one_fail_closed_deployment_unit(tmp_path: Path) -> 
     validation_values = yaml.safe_load(
         (INFRA / "helm/platform/values.validation.yaml").read_text(encoding="utf-8")
     )
-    registry = json.loads(validation_values["provisioner"]["releaseManifestJson"])[
-        "commandRegistry"
-    ]
+    assert "releaseManifestJson" not in validation_values["provisioner"]
+    registry = json.loads(
+        (INFRA / "contracts/exomem-hosted-release-v1.json").read_text(encoding="utf-8")
+    )["commandRegistry"]
     manifest = {
         "artifact": "exomem-hosted-release",
         "schemaVersion": 1,
@@ -1786,14 +1787,11 @@ def test_release_manifest_is_one_fail_closed_deployment_unit(tmp_path: Path) -> 
     )
     assert stat.S_IMODE(values_path.stat().st_mode) == 0o600
     values = json.loads(values_path.read_text(encoding="utf-8"))
-    assert values == {
-        "provisioner": {
-            "image": "ghcr.io/artexis10/exomem-provisioner@sha256:" + "e" * 64,
-            "releaseManifestJson": json.dumps(manifest, separators=(",", ":"), sort_keys=True),
-            "controlHostname": "memory.example.test",
-            "transferHostname": "transfer.example.test",
-        },
-    }
+    assert values["provisioner"]["image"] == (
+        "ghcr.io/artexis10/exomem-provisioner@sha256:" + "e" * 64
+    )
+    assert values["provisioner"]["controlHostname"] == "memory.example.test"
+    assert values["provisioner"]["transferHostname"] == "transfer.example.test"
     partial = dict(manifest)
     partial.pop("gatewayContractSha256")
     manifest_path.write_text(json.dumps(partial), encoding="utf-8")

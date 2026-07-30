@@ -149,11 +149,19 @@ def _write_evidence(lock: dict[str, object], directory: Path) -> None:
             {"name": "status", "readOnly": True, "mode": "read", "tier": 1, "capability": "core"}
         ],
     }
-    evidence = [forward, authority, legacy_manifest, *(unit["contract"] for unit in composition["legacyCatalog"])]
+    corpus = [{"request": "frozen-v1", "response": "accepted"}]
+    evidence = [
+        forward,
+        authority,
+        legacy_manifest,
+        corpus,
+        *(unit["contract"] for unit in composition["legacyCatalog"]),
+    ]
     digests = [hashlib.sha256(_canonical(item)).hexdigest() for item in evidence]
     composition["forwardContractSha256"] = digests[0]
     composition["authoritativeLegacyReleaseSetSha256"] = digests[1]
     lock["rollback"]["legacyManifestSha256"] = digests[2]  # type: ignore[index]
+    lock["rollback"]["v1CorpusSha256"] = digests[3]  # type: ignore[index]
     for index, value in enumerate(evidence):
         (directory / f"{index}.json").write_bytes(_canonical(value))
 
@@ -233,6 +241,102 @@ def test_runtime_candidate_listing_rejects_unbounded_assets(monkeypatch: pytest.
 
     with pytest.raises(ValueError, match="count"):
         verifier._release_candidate_assets("gh", "v0.35.1")
+
+
+def test_oci_candidate_manifest_rejects_unexpected_or_unbounded_layers() -> None:
+    verifier = _module(VERIFIER)
+    candidate_media_type = "application/vnd.exomem.hosted-image-candidate.v1+json"
+    bundle_media_type = "application/vnd.dev.sigstore.bundle.v0.3+json"
+
+    def descriptor(media_type: str, digest: str, size: int) -> dict[str, object]:
+        return {
+            "mediaType": media_type,
+            "digest": f"sha256:{digest * 64}",
+            "size": size,
+        }
+
+    manifest = {
+        "schemaVersion": 2,
+        "mediaType": "application/vnd.oci.image.manifest.v1+json",
+        "artifactType": candidate_media_type,
+        "config": descriptor("application/vnd.oci.empty.v1+json", "a", 2),
+        "layers": [
+            descriptor(candidate_media_type, "b", 1),
+            descriptor(bundle_media_type, "c", 1),
+            descriptor(bundle_media_type, "d", 1),
+        ],
+    }
+
+    with pytest.raises(ValueError, match="layer count"):
+        verifier._validate_oci_candidate_manifest(manifest)
+
+
+def test_oci_preflight_rejects_manifest_before_pull(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    verifier = _module(VERIFIER)
+    image = "ghcr.io/artexis10/exomem-provisioner@sha256:" + "a" * 64
+    descriptor = {
+        "mediaType": "application/vnd.oci.image.manifest.v1+json",
+        "digest": "sha256:" + "b" * 64,
+        "size": 1,
+        "artifactType": "application/vnd.exomem.hosted-image-candidate.v1+json",
+    }
+    manifest = {
+        "schemaVersion": 2,
+        "mediaType": "application/vnd.oci.image.manifest.v1+json",
+        "artifactType": "application/vnd.exomem.hosted-image-candidate.v1+json",
+        "config": {
+            "mediaType": "application/vnd.oci.empty.v1+json",
+            "digest": "sha256:" + "c" * 64,
+            "size": 2,
+        },
+        "subject": {
+            "mediaType": "application/vnd.oci.image.manifest.v1+json",
+            "digest": "sha256:" + "a" * 64,
+            "size": 1,
+        },
+        "layers": [],
+    }
+    calls: list[list[str]] = []
+
+    def run(command: list[str], **_kwargs: object) -> SimpleNamespace:
+        calls.append(command)
+        if command[1] == "discover":
+            return SimpleNamespace(stdout=json.dumps({"manifests": [descriptor]}))
+        assert command[1:3] == ["manifest", "fetch"]
+        return SimpleNamespace(stdout=json.dumps(manifest))
+
+    monkeypatch.setattr(verifier, "_run", run)
+    with pytest.raises(ValueError, match="layer count"):
+        verifier._verified_provisioner_candidate(
+            image=image,
+            source_commit="d" * 40,
+            expected_sha256=None,
+            directory=tmp_path,
+            candidate_tool=object(),
+            oras_binary="oras",
+            gh_binary="gh",
+        )
+    assert all(command[1] != "pull" for command in calls)
+
+
+def test_rollback_substrate_consumer_requires_the_exact_pinned_commit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    verifier = _module(VERIFIER)
+    monkeypatch.setattr(verifier, "_run", lambda _: SimpleNamespace(stdout="e" * 40 + "\n"))
+
+    with pytest.raises(ValueError, match="consumer commit"):
+        verifier._verify_substrate_v1_consumer("d" * 40, "gh")
+
+
+def test_deploy_runbook_mandates_the_selected_lock_verifier() -> None:
+    runbook = (ROOT / "docs/runbooks/hosted/deploy.md").read_text(encoding="utf-8")
+
+    assert "infra/scripts/verify_hosted_release.py \\" in runbook
+    assert '--phase "$EXOMEM_DEPLOYMENT_PHASE"' in runbook
+    assert "--repository ." in runbook
 
 
 def test_prepare_v2_derives_all_deploy_inputs_from_one_exact_pair_member(tmp_path: Path) -> None:
