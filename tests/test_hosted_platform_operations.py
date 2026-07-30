@@ -22,31 +22,37 @@ ROOT = Path(__file__).resolve().parents[1]
 INFRA = ROOT / "infra"
 
 _NAMESPACE_OWNED_MARKERS = (
-    *(("labels", marker) for marker in (
-        "exomem.io/tenant-cell",
-        "exomem.io/cell-resource",
-    )),
-    *(("annotations", marker) for marker in (
-        "exomem.io/tenant-id",
-        "exomem.io/cell-id",
-        "exomem.io/operation-id",
-        "exomem.io/tenant-digest",
-        "exomem.io/subject-digest",
-        "exomem.io/operation-digest",
-        "exomem.io/fence",
-        "exomem.io/recovery-envelope",
-        "exomem.io/resource-name",
-        "exomem.io/pvc-name",
-        "exomem.io/credentials-secret-name",
-        "exomem.io/init-request-configmap-name",
-        "exomem.io/provision-mode",
-        "exomem.io/vault-id",
-        "exomem.io/expected-release",
-        "exomem.io/worker-policy-digest",
-        "exomem.io/browser-origin",
-        "exomem.io/transfer-hostname",
-        "exomem.io/runtime-admitted",
-    )),
+    *(
+        ("labels", marker)
+        for marker in (
+            "exomem.io/tenant-cell",
+            "exomem.io/cell-resource",
+        )
+    ),
+    *(
+        ("annotations", marker)
+        for marker in (
+            "exomem.io/tenant-id",
+            "exomem.io/cell-id",
+            "exomem.io/operation-id",
+            "exomem.io/tenant-digest",
+            "exomem.io/subject-digest",
+            "exomem.io/operation-digest",
+            "exomem.io/fence",
+            "exomem.io/recovery-envelope",
+            "exomem.io/resource-name",
+            "exomem.io/pvc-name",
+            "exomem.io/credentials-secret-name",
+            "exomem.io/init-request-configmap-name",
+            "exomem.io/provision-mode",
+            "exomem.io/vault-id",
+            "exomem.io/expected-release",
+            "exomem.io/worker-policy-digest",
+            "exomem.io/browser-origin",
+            "exomem.io/transfer-hostname",
+            "exomem.io/runtime-admitted",
+        )
+    ),
 )
 
 
@@ -114,8 +120,7 @@ def test_hosted_ci_wires_every_static_security_gate() -> None:
     assert 'install -d -m 0755 "$HOME/.local/bin"' in workflow
     assert "${TRIVY_LINUX_AMD64_SHA256}" in workflow
     assert (
-        "TRIVY_LINUX_AMD64_SHA256="
-        "bbb64b9695866ce4a7a8f5c9592002c5961cab378577fa3f8a040df362b9b2ea"
+        "TRIVY_LINUX_AMD64_SHA256=bbb64b9695866ce4a7a8f5c9592002c5961cab378577fa3f8a040df362b9b2ea"
     ) in tool_versions
     parsed = yaml.safe_load(workflow)
     triggers = parsed.get("on", parsed.get(True))
@@ -201,9 +206,7 @@ def test_hosted_provisioner_publish_workflow_is_source_bound_and_smoke_verified(
     assert "--require-published" in workflow
     assert "infra/scripts/hosted_image_candidate.py record" in workflow
     assert "infra/scripts/hosted_image_candidate.py verify" in workflow
-    assert workflow.count(
-        "actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d"
-    ) == 2
+    assert workflow.count("actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d") == 2
     assert "push-to-registry: true" in workflow
     assert workflow.count("create-storage-record: false") == 2
     assert "--candidate-bundle" in workflow
@@ -452,7 +455,7 @@ def test_rotation_retirement_gate_covers_every_independent_rotation(
         "domain": "exomem.rotation-drill-receipt.v1",
         "ttl_seconds": 86400,
         "private_key_custody": "drill-collector-only",
-        "public_key_id": None,
+        "public_key_id": ("e9531f918d57e9b7d8d38c5d111e602cc91c49f551fbf4561c36b3b89a1096df"),
         "verifier_material": "public-key-only",
     }
     receipt_private_key = Ed25519PrivateKey.generate()
@@ -643,9 +646,13 @@ def test_capacity_gate_blocks_unknown_economics_and_seventh_user(tmp_path: Path)
         "capacity_ttl_seconds": 300,
         "economics_ttl_seconds": 2678400,
         "capacity_private_key_custody": "kubernetes-hcloud-collector-only",
-        "capacity_public_key_id": None,
+        "capacity_public_key_id": (
+            "214c7703cb2124763beab43fecc4cbd7827502993af58eb16c68a162e92b5b13"
+        ),
         "economics_private_key_custody": "provider-paddle-collector-only",
-        "economics_public_key_id": None,
+        "economics_public_key_id": (
+            "c91cb6358057dce8e1a4f14a2ab0fac6c14adad128d916722eb2d5cafa19b782"
+        ),
         "gate_material": "public-keys-only",
     }
     contract["live_costs_verified"] = True
@@ -1055,9 +1062,7 @@ def test_operational_receipt_collectors_issue_only_domain_bound_attestations(
                     "exomem.io/operation-id": operation_id,
                     "exomem.io/tenant-digest": hashlib.sha256(tenant_id.encode()).hexdigest(),
                     "exomem.io/subject-digest": hashlib.sha256(cell_id.encode()).hexdigest(),
-                    "exomem.io/operation-digest": hashlib.sha256(
-                        operation_id.encode()
-                    ).hexdigest(),
+                    "exomem.io/operation-digest": hashlib.sha256(operation_id.encode()).hexdigest(),
                     "exomem.io/fence": "1",
                     "exomem.io/resource-name": resource_name,
                     "exomem.io/provision-mode": mode,
@@ -1533,8 +1538,8 @@ def test_production_composition_contract_binds_release_and_operator_actions() ->
             "delivery_gc": "exomem-export-gc",
             "vault_backup": "exomem-durability-backup",
             "database_backup": "exomem-database-backup",
-                "deletion_dispatcher": "exomem-deletion-dispatcher",
-                "deletion_job_template": "exomem-deletion-job-template",
+            "deletion_dispatcher": "exomem-deletion-dispatcher",
+            "deletion_job_template": "exomem-deletion-job-template",
             "volume_lifecycle": "exomem-volume-worker",
         },
         "private_signers": ["exomem-provider-recovery-signer/private-key"],
@@ -1580,12 +1585,12 @@ def test_production_composition_contract_binds_release_and_operator_actions() ->
             "exomem-export-gc",
             "exomem-durability-storage",
         ],
-            "deletion.md": [
-                "/cells/destroy",
-                "X-Exomem-Provisioner-Protocol",
-                "exomem-deletion-dispatcher",
-                "exomem-deletion-worker",
-            ],
+        "deletion.md": [
+            "/cells/destroy",
+            "X-Exomem-Provisioner-Protocol",
+            "exomem-deletion-dispatcher",
+            "exomem-deletion-worker",
+        ],
         "volume-rebind.md": [
             "/cells/restore",
             "VolumeLifecycleWorker.rebind_static",

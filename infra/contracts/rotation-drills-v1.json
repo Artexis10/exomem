@@ -5,7 +5,7 @@
     "domain": "exomem.rotation-drill-receipt.v1",
     "ttl_seconds": 86400,
     "private_key_custody": "drill-collector-only",
-    "public_key_id": null,
+    "public_key_id": "e9531f918d57e9b7d8d38c5d111e602cc91c49f551fbf4561c36b3b89a1096df",
     "verifier_material": "public-key-only"
   },
   "rotations": {

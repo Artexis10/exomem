@@ -10,9 +10,9 @@
     "capacity_ttl_seconds": 300,
     "economics_ttl_seconds": 2678400,
     "capacity_private_key_custody": "kubernetes-hcloud-collector-only",
-    "capacity_public_key_id": null,
+    "capacity_public_key_id": "214c7703cb2124763beab43fecc4cbd7827502993af58eb16c68a162e92b5b13",
     "economics_private_key_custody": "provider-paddle-collector-only",
-    "economics_public_key_id": null,
+    "economics_public_key_id": "c91cb6358057dce8e1a4f14a2ab0fac6c14adad128d916722eb2d5cafa19b782",
     "gate_material": "public-keys-only"
   },
   "limits": {

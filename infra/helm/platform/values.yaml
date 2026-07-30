@@ -48,7 +48,7 @@ observability:
 
 capacityCollector:
   schedule: "* * * * *"
-  contractSha256: 1cbb5f93c71d2e85c6b54ed09fa1da9909c3fc13a588a1968bb1b330698a635e
+  contractSha256: 24103f12c5118ae728cf2d4c9fb7dc38c26cde9e419c2a2a161a48c9c69b4770
   hcloudServerId: 0
   stateConfigMap: exomem-capacity-receipt
   privateKeySecret:
