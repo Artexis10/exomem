@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from types import MappingProxyType
 from typing import Any
 
 from .schemas import (
@@ -17,14 +18,18 @@ from .schemas import (
 WIRE_PROTOCOL_V1 = "exomem-cell-provisioner.v1"
 WIRE_PROTOCOL_V2 = "exomem-cell-provisioner.v2"
 
-REQUEST_MODELS_BY_PROTOCOL: dict[str, dict[str, type[StrictSchema]]] = {
-    WIRE_PROTOCOL_V1: V1_REQUEST_MODELS,
-    WIRE_PROTOCOL_V2: V2_REQUEST_MODELS,
-}
-FINAL_MODELS_BY_PROTOCOL: dict[str, dict[str, type[StrictSchema] | None]] = {
-    WIRE_PROTOCOL_V1: V1_FINAL_MODELS,
-    WIRE_PROTOCOL_V2: V2_FINAL_MODELS,
-}
+REQUEST_MODELS_BY_PROTOCOL: Mapping[str, Mapping[str, type[StrictSchema]]] = MappingProxyType(
+    {
+        WIRE_PROTOCOL_V1: V1_REQUEST_MODELS,
+        WIRE_PROTOCOL_V2: MappingProxyType(dict(V2_REQUEST_MODELS)),
+    }
+)
+FINAL_MODELS_BY_PROTOCOL: Mapping[str, Mapping[str, type[StrictSchema] | None]] = MappingProxyType(
+    {
+        WIRE_PROTOCOL_V1: V1_FINAL_MODELS,
+        WIRE_PROTOCOL_V2: MappingProxyType(dict(V2_FINAL_MODELS)),
+    }
+)
 
 
 def runtime_identity(request: Mapping[str, Any]) -> dict[str, str]:

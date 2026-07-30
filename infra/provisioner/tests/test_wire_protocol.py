@@ -10,7 +10,13 @@ import pytest
 from pydantic import ValidationError
 
 from exomem_provisioner.driver import EffectContext, FakeDriver
-from exomem_provisioner.schemas import FailureResponse, PendingResponse, request_plaintext
+from exomem_provisioner.schemas import (
+    REQUEST_MODELS,
+    FailureResponse,
+    PendingResponse,
+    ProvisionRequest,
+    request_plaintext,
+)
 from exomem_provisioner.wire_protocol import (
     FINAL_MODELS_BY_PROTOCOL,
     REQUEST_MODELS_BY_PROTOCOL,
@@ -96,6 +102,19 @@ def test_v2_has_one_closed_model_per_action_and_explicit_target_free_actions() -
         "fenceGeneration",
         "tenantId",
     }
+
+
+def test_header_selected_v1_maps_are_immutable_snapshots_of_legacy_maps(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    selected = REQUEST_MODELS_BY_PROTOCOL[WIRE_PROTOCOL_V1]
+    original = selected["provision"]
+
+    monkeypatch.setitem(REQUEST_MODELS, "provision", REQUEST_MODELS["health"])
+
+    assert selected["provision"] is original
+    with pytest.raises(TypeError):
+        selected["provision"] = ProvisionRequest  # type: ignore[index]
 
 
 def test_runtime_identity_is_pure_for_legacy_and_v2_request_dictionaries() -> None:
@@ -199,7 +218,30 @@ def test_frozen_wire_corpora_validate_all_request_response_and_failure_shapes(
         FailureResponse.model_validate(failure["body"])
         assert "sentinel" not in json.dumps(failure["body"])
     if protocol == WIRE_PROTOCOL_V2:
+        assert {
+            (failure["status"], failure["body"]["code"], failure["body"]["retryable"])
+            for failure in payload["failures"]
+        } == {
+            (400, "PROVISIONER_REJECTED", False),
+            (409, "CONTROL_PLANE_STATE_CONFLICT", False),
+            (422, "EXPORT_REQUEST_EXPIRED", False),
+            (422, "PROVISIONER_REJECTED", False),
+            (500, "PROVISIONER_RESPONSE_INVALID", False),
+            (503, "PROVISIONER_UNAVAILABLE", True),
+        }
         assert FailureResponse.model_validate(payload["mismatch"]["body"]).code == "PROVISIONER_REJECTED"
         assert FailureResponse.model_validate(payload["replayFailure"]["body"]).code == (
             "CONTROL_PLANE_STATE_CONFLICT"
         )
+
+
+def test_selected_health_final_models_reject_mixed_version_envelopes() -> None:
+    v1 = json.loads((_FIXTURES / "provisioner-wire-v1.json").read_bytes())
+    v2 = json.loads((_FIXTURES / "provisioner-wire-v2.json").read_bytes())
+    v1_health = _substitute_tokens(v1["actions"]["health"]["final"]["body"])
+    v2_health = _substitute_tokens(v2["actions"]["health"]["final"]["body"])
+
+    with pytest.raises(ValidationError):
+        FINAL_MODELS_BY_PROTOCOL[WIRE_PROTOCOL_V2]["health"].model_validate(v1_health)  # type: ignore[union-attr]
+    with pytest.raises(ValidationError):
+        FINAL_MODELS_BY_PROTOCOL[WIRE_PROTOCOL_V1]["health"].model_validate(v2_health)  # type: ignore[union-attr]

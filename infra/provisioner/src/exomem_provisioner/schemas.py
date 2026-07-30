@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
+from types import MappingProxyType
 from typing import Annotated, Literal
 from urllib.parse import urlsplit
 
@@ -390,8 +392,8 @@ FINAL_MODELS: dict[str, type[StrictSchema] | None] = {
     "destroy": TenantDestructionResponse,
 }
 
-V1_REQUEST_MODELS = REQUEST_MODELS
-V1_FINAL_MODELS = FINAL_MODELS
+V1_REQUEST_MODELS: Mapping[str, type[StrictSchema]] = MappingProxyType(dict(REQUEST_MODELS))
+V1_FINAL_MODELS: Mapping[str, type[StrictSchema] | None] = MappingProxyType(dict(FINAL_MODELS))
 
 V2_REQUEST_MODELS: dict[str, type[StrictSchema]] = {
     "provision": V2ProvisionRequest,
