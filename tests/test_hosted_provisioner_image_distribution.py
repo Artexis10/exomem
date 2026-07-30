@@ -97,6 +97,9 @@ def test_provisioner_workflow_is_an_independent_digest_bound_candidate_producer(
     text = (ROOT / ".github/workflows/publish-hosted-provisioner.yml").read_text(
         encoding="utf-8"
     )
+    proof_step = text.split(
+        "\n      - name: Verify the provisioner image and signed candidate\n", 1
+    )[1].split("\n      - name:", 1)[0]
 
     assert 'test "$GITHUB_REF" = "refs/heads/main"' in text
     assert "attestations: write" in text
@@ -108,6 +111,7 @@ def test_provisioner_workflow_is_an_independent_digest_bound_candidate_producer(
     assert text.count("create-storage-record: false") == 2
     assert "infra/scripts/hosted_image_candidate.py record" in text
     assert text.count("infra/scripts/hosted_image_candidate.py verify") >= 2
+    assert "GH_TOKEN: ${{ github.token }}" in proof_step
     assert text.count("--candidate-bundle") >= 2
     assert "--attestation-id" not in text
     assert "--attestation-url" not in text

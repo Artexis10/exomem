@@ -74,6 +74,9 @@ def test_release_workflow_publishes_digest_authoritative_hosted_candidates() -> 
     manual = _workflow_job(text, "publish-existing-image", "publish-existing-pypi")
 
     for job in (automatic, manual):
+        proof_step = job.split(
+            "\n      - name: Verify the hosted runtime image and signed candidate\n", 1
+        )[1].split("\n      - name:", 1)[0]
         assert "contents: write" in job
         assert "packages: write" in job
         assert "id-token: write" in job
@@ -93,6 +96,7 @@ def test_release_workflow_publishes_digest_authoritative_hosted_candidates() -> 
         assert job.count("create-storage-record: false") == 2
         assert "infra/scripts/hosted_image_candidate.py record" in job
         assert "infra/scripts/hosted_image_candidate.py verify" in job
+        assert "GH_TOKEN: ${{ github.token }}" in proof_step
         assert "--candidate-bundle" in job
         assert "candidate.sigstore.json" in job
         assert "--attestation-id" not in job
