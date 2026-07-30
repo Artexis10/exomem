@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 from pathlib import Path
@@ -14,6 +15,12 @@ from exomem_provisioner.production import run_worker
 from exomem_provisioner.volume import run_volume_rebind, run_volume_worker
 
 
+def _canonical_sha256(value: object) -> str:
+    return hashlib.sha256(
+        (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode()
+    ).hexdigest()
+
+
 def _selected_lock(tmp_path: Path) -> Path:
     path = tmp_path / "selected-deployment-lock.json"
     digest = "a" * 64
@@ -23,6 +30,14 @@ def _selected_lock(tmp_path: Path) -> Path:
         "gatewayContractDigest": digest, "commandFingerprint": "c" * 64, "schemaDigest": "d" * 64,
     }
     legacy = {**target, "releaseVersion": "0.22.0", "protocolVersion": "exomem-hosted.v1"}
+    legacy_contract = {
+        **legacy,
+        "runtimeImage": f"ghcr.io/artexis10/exomem@sha256:{digest}",
+        "sourceCommit": commit,
+    }
+    legacy_release_set = [
+        {"releaseVersion": "0.22.0", "protocolVersion": "exomem-hosted.v1"}
+    ]
     path.write_text(json.dumps({
         "artifact": "exomem-hosted-deployment-lock", "schemaVersion": 2, "admissionMode": "expand",
         "components": {
@@ -34,8 +49,8 @@ def _selected_lock(tmp_path: Path) -> Path:
             "commit": commit,
             "sourceClosure": {name: {"candidateCommit": commit, "compositionCommit": commit, "paths": ["src/**"]} for name in ("runtime", "provisioner")},
             "forwardContractSha256": digest, "authoritativeLegacyReleaseSetSha256": "f" * 64,
-            "legacyCatalog": [{"releaseVersion": "0.22.0", "protocolVersion": "exomem-hosted.v1", "runtimeImage": f"ghcr.io/artexis10/exomem@sha256:{digest}", "sourceCommit": commit, "contractSha256": digest, "contract": {**legacy, "runtimeImage": f"ghcr.io/artexis10/exomem@sha256:{digest}", "sourceCommit": commit}}],
-            "legacyReleaseSetSha256": "f" * 64,
+            "legacyCatalog": [{"releaseVersion": "0.22.0", "protocolVersion": "exomem-hosted.v1", "runtimeImage": f"ghcr.io/artexis10/exomem@sha256:{digest}", "sourceCommit": commit, "contractSha256": _canonical_sha256(legacy_contract), "contract": legacy_contract}],
+            "legacyReleaseSetSha256": _canonical_sha256(legacy_release_set),
         },
         "rollback": {"provisionerImage": f"ghcr.io/artexis10/exomem-provisioner@sha256:{'e' * 64}", "provisionerSourceCommit": commit, "v1CorpusSha256": digest, "legacyManifestSha256": digest, "substrateV1ConsumerCommit": commit},
     }), encoding="utf-8")
@@ -96,6 +111,17 @@ def test_startup_loads_the_exact_handed_off_ed25519_seed(
 
     expected = ProviderRecoveryIdentityCodec(b"r" * 32).public_key()
     assert app.state.provider_identity_public_key == expected
+
+
+def test_startup_fails_closed_without_selected_deployment_lock(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _set_production_environment(monkeypatch, tmp_path)
+    monkeypatch.delenv("EXOMEM_PROVISIONER_DEPLOYMENT_LOCK_PATH")
+
+    with pytest.raises(ValueError, match="selected deployment lock is required"):
+        create_app_from_env()
 
 
 def test_startup_fails_closed_when_required_environment_is_absent(
