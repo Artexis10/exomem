@@ -2847,12 +2847,10 @@ def _public_admission_blockers(
     marketplace = load_marketplace_definition(root)["common"]
     if not marketplace["regions"]:
         return []
-    admission_copy = marketplace["user_prerequisites"]["admission"]
-    eligibility = admission_copy["eligibility"].lower()
-    if admission_copy["mode"] != "public" or (
-        "public" not in eligibility
-        or any(term in eligibility for term in ("private", "invite", "alpha", "beta"))
-    ):
+    if marketplace["user_prerequisites"]["admission"] != {
+        "mode": "public",
+        "eligibility": "Public access is available to eligible users.",
+    }:
         return ["marketplace user prerequisites do not advertise public admission"]
     try:
         admission = _load_signed_directory_evidence(

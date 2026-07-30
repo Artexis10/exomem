@@ -171,12 +171,14 @@ def ready_directory_evidence(root: Path) -> tuple[str, str]:
     return "directory-test-key", secret
 
 
-def set_public_admission_copy(root: Path) -> None:
+def set_public_admission_copy(
+    root: Path, eligibility: str = "Public access is available to eligible users."
+) -> None:
     definition_path = root / "plugins/hosted/marketplace-definition.json"
     definition = json.loads(definition_path.read_text(encoding="utf-8"))
     definition["common"]["user_prerequisites"]["admission"] = {
         "mode": "public",
-        "eligibility": "Public access is available to eligible users.",
+        "eligibility": eligibility,
     }
     definition_path.write_text(json.dumps(definition), encoding="utf-8")
 
@@ -966,6 +968,19 @@ def test_public_admission_evidence_requires_coherent_public_listing_copy(tmp_pat
     )
 
 
+def test_negated_public_admission_copy_blocks_public_readiness(tmp_path: Path) -> None:
+    root = copy_hosted_tree(tmp_path / "repo")
+    key_id, secret = ready_directory_evidence(root)
+    set_public_admission_copy(root, "Public access is unavailable.")
+
+    assert hosted_plugins._public_admission_blockers(
+        root,
+        trusted_key_id=key_id,
+        trusted_secret=secret,
+        deployment_sha256="b" * 64,
+    ) == ["marketplace user prerequisites do not advertise public admission"]
+
+
 def test_reviewer_ready_openai_candidate_can_enter_review_before_broad_admission(
     tmp_path: Path,
 ) -> None:
@@ -1009,6 +1024,10 @@ def test_reviewer_ready_openai_candidate_can_enter_review_before_broad_admission
         )
         record_sha256 = hosted_plugins.directory_record_sha256(root, "openai-plugin")
         previous_state = state
+
+    admission["admission"]["capacity"] = True
+    admission_path.write_text(json.dumps(signed_evidence(admission, secret)), encoding="utf-8")
+    set_public_admission_copy(root, "Public access is unavailable.")
 
     with pytest.raises(ValueError, match="current public readiness"):
         hosted_plugins.record_directory_state(
@@ -1942,6 +1961,20 @@ def test_openai_published_receipt_requires_registered_app_input_to_activate(tmp_
         record_sha256 = hosted_plugins.directory_record_sha256(root, "openai-plugin")
         previous_state = state
     _write_openai_post_install_evidence(root, record_sha256, state_receipt, secret)
+
+    set_public_admission_copy(root, "Public access is unavailable.")
+    with pytest.raises(ValueError, match="marketplace user prerequisites do not advertise"):
+        hosted_plugins.activate_directory_submission(
+            root,
+            "openai-plugin",
+            target_submission_sha256=record_sha256,
+            expected_active_submission_sha256=None,
+            openai_app_id=app_id,
+            trusted_key_id=key_id,
+            trusted_secret=secret,
+            deployment_sha256="b" * 64,
+        )
+    set_public_admission_copy(root)
 
     with pytest.raises(ValueError, match="registered OpenAI app"):
         hosted_plugins.activate_directory_submission(
