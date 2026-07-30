@@ -37,7 +37,7 @@ from .provider_identity import (
     decode_hcloud_identity_envelope,
     provider_operation_resource_name,
 )
-from .wire_protocol import runtime_identity
+from .wire_protocol import WIRE_PROTOCOL_V2, runtime_identity
 
 
 class MetadataConflict(RuntimeError):
@@ -187,10 +187,31 @@ class LifecycleConfig:
     browser_origin: str
     release_version: str
     protocol_version: str
-    operator_contract_digest: str
     contract_digest: str
     location: str
     runtime_target: dict[str, str] | None = None
+    legacy_runtime_images: dict[tuple[str, str], str] | None = None
+
+    def matches_runtime_request(self, request: dict[str, Any], *, v2: bool) -> bool:
+        target = runtime_identity(request)
+        if v2:
+            return self.runtime_target is not None and target == self.runtime_target
+        return (
+            self.legacy_runtime_images is not None
+            and (target["releaseVersion"], target["protocolVersion"])
+            in self.legacy_runtime_images
+        )
+
+    def runtime_image_for(self, request: dict[str, Any], *, v2: bool) -> str:
+        if v2:
+            return self.image
+        target = runtime_identity(request)
+        try:
+            return (self.legacy_runtime_images or {})[
+                (target["releaseVersion"], target["protocolVersion"])
+            ]
+        except KeyError as error:
+            raise MetadataConflict("legacy runtime unit is not selected") from error
 
 
 @dataclass(frozen=True, slots=True)
@@ -621,11 +642,11 @@ class LifecyclePlane(Protocol):
         config: LifecycleConfig,
     ) -> bool: ...
     async def health(
-        self, metadata: OpaqueProviderMetadata, request: dict[str, Any]
+        self, metadata: OpaqueProviderMetadata, request: dict[str, Any], *, v2: bool
     ) -> HealthObservation: ...
     async def admit_runtime(self, metadata: OpaqueProviderMetadata) -> None: ...
     def runtime_admitted(self, metadata: OpaqueProviderMetadata) -> bool: ...
-    async def enable_routes(self, metadata: OpaqueProviderMetadata) -> None: ...
+    async def enable_routes(self, metadata: OpaqueProviderMetadata, request: dict[str, Any]) -> None: ...
     async def disable_routes(self, metadata: OpaqueProviderMetadata) -> None: ...
     def routes_enabled(self, metadata: OpaqueProviderMetadata) -> tuple[bool, bool]: ...
     async def prove_external_rejection(
@@ -884,8 +905,9 @@ class HighFidelityProviderPlane:
         return bool(cell and cell.initialized)
 
     async def health(
-        self, metadata: OpaqueProviderMetadata, request: dict[str, Any]
+        self, metadata: OpaqueProviderMetadata, request: dict[str, Any], *, v2: bool
     ) -> HealthObservation:
+        del v2
         cell = self._require_cell(metadata)
         if cell.health is None:
             raise MetadataConflict("runtime health is unavailable")
@@ -901,7 +923,8 @@ class HighFidelityProviderPlane:
         cell = self._cell(metadata)
         return bool(cell and cell.runtime_admitted)
 
-    async def enable_routes(self, metadata: OpaqueProviderMetadata) -> None:
+    async def enable_routes(self, metadata: OpaqueProviderMetadata, request: dict[str, Any]) -> None:
+        del request
         cell = self._require_cell(metadata)
         cell.control_route = True
         cell.transfer_route = True
@@ -1151,7 +1174,7 @@ class HighFidelityProviderPlane:
         await VolumeLifecycleWorker(self, self).register_bound_volume(metadata)
         await self.initialize(metadata, request, config)
         await self.admit_runtime(metadata)
-        await self.enable_routes(metadata)
+        await self.enable_routes(metadata, request)
         cell = self._require_cell(metadata)
         cell.candidate = candidate
         cell.failed = failed
@@ -1436,6 +1459,14 @@ def _fixed_helm_values(
     request: dict[str, Any],
     config: LifecycleConfig,
 ) -> dict[str, Any]:
+    target = (
+        runtime_identity(request)
+        if "runtimeTarget" in request or "releaseVersion" in request
+        else {
+            "protocolVersion": config.protocol_version,
+            "releaseVersion": config.release_version,
+        }
+    )
     worker_policy = json.dumps(
         request["workerPolicy"], sort_keys=True, separators=(",", ":")
     ).encode("utf-8")
@@ -1445,10 +1476,14 @@ def _fixed_helm_values(
         "cellId": metadata.subject_id,
         "credentialsSecretName": "exomem-cell-credentials",
         "credentialsManagedExternally": True,
-        "expectedProtocol": config.protocol_version,
-        "expectedRelease": config.release_version,
+        "expectedProtocol": target["protocolVersion"],
+        "expectedRelease": target["releaseVersion"],
         "featureGrants": "",
-        "image": config.image,
+        "image": (
+            config.runtime_image_for(request, v2="runtimeTarget" in request)
+            if "runtimeTarget" in request or "releaseVersion" in request
+            else config.image
+        ),
         "initOperationId": metadata.operation_id,
         "initRequestId": _deterministic_uuid4(metadata.operation_id + ":init"),
         "pvcSize": "10Gi",
@@ -1513,6 +1548,13 @@ class CellLifecycleDriver:
     async def observed_fence(self, tenant_id: str) -> int:
         return await self._plane.observed_fence(tenant_id)
 
+    def runtime_target_matches(self, request: dict[str, Any], context: EffectContext) -> bool:
+        if "runtimeTarget" not in request and "releaseVersion" not in request:
+            return True
+        return self._config.matches_runtime_request(
+            request, v2=context.wire_protocol == WIRE_PROTOCOL_V2
+        )
+
     async def execute(
         self,
         action: str,
@@ -1520,7 +1562,8 @@ class CellLifecycleDriver:
         context: EffectContext,
     ) -> DriverPending | DriverFinal:
         try:
-            self._validate_static_runtime_target(request)
+            if not self.runtime_target_matches(request, context):
+                raise DriverTerminal("PROVISIONER_RELEASE_UNIT_MISMATCH")
             if await self.observed_fence(context.tenant_id) > context.fence_generation:
                 raise DriverTerminal("PROVISIONER_STALE_FENCE")
             await self._plane.observe_operation(context, request)
@@ -1528,7 +1571,7 @@ class CellLifecycleDriver:
                 return await self._provision(request, context)
             if action == "health":
                 return DriverFinal(
-                    await self._exact_health(_metadata_from_context(context), request)
+                    await self._exact_health(_metadata_from_context(context), request, context)
                 )
             if action in {"quiesce", "stop", "resume", "seal"}:
                 return await self._lifecycle(action, request, context)
@@ -1606,11 +1649,12 @@ class CellLifecycleDriver:
                 return DriverPending("initializing", 2)
             return DriverPending("initialized", 1)
         if not self._plane.runtime_admitted(metadata):
-            await self._exact_health(metadata, request)
+            await self._exact_health(metadata, request, context)
             await self._plane.admit_runtime(metadata)
             return DriverPending("runtime-admitted", 1)
         if self._plane.routes_enabled(metadata) != (True, True):
-            await self._plane.enable_routes(metadata)
+            await self._exact_health(metadata, request, context)
+            await self._plane.enable_routes(metadata, request)
             return DriverPending(
                 "routes-open",
                 1,
@@ -1626,33 +1670,14 @@ class CellLifecycleDriver:
         )
 
     async def _exact_health(
-        self, metadata: OpaqueProviderMetadata, request: dict[str, Any]
+        self, metadata: OpaqueProviderMetadata, request: dict[str, Any], context: EffectContext
     ) -> dict[str, Any]:
-        health = await self._plane.health(metadata, request)
+        v2 = context.wire_protocol == WIRE_PROTOCOL_V2
+        health = await self._plane.health(metadata, request, v2=v2)
         expected = HealthObservation.ready_for(metadata, request, self._config)
         if health != expected:
             raise DriverTerminal("PROVISIONER_RUNTIME_CONTRACT_MISMATCH")
-        return health.flattened(v2="runtimeTarget" in request)
-
-    def _validate_static_runtime_target(self, request: dict[str, Any]) -> None:
-        if "runtimeTarget" not in request and "releaseVersion" not in request:
-            return
-        target = runtime_identity(request)
-        if "runtimeTarget" in request:
-            if self._config.runtime_target is None or target != self._config.runtime_target:
-                raise DriverTerminal("PROVISIONER_RELEASE_UNIT_MISMATCH")
-            if (
-                target["releaseVersion"] != self._config.release_version
-                or target["protocolVersion"] != self._config.protocol_version
-                or target["gatewayContractDigest"] != self._config.contract_digest
-            ):
-                raise DriverTerminal("PROVISIONER_RELEASE_UNIT_MISMATCH")
-            return
-        if (
-            target["protocolVersion"] != self._config.protocol_version
-            or target["releaseVersion"] != self._config.release_version
-        ):
-            raise DriverTerminal("PROVISIONER_RELEASE_UNIT_MISMATCH")
+        return health.flattened(v2=v2)
 
     async def _maintenance_checkpoint(
         self,
@@ -1747,14 +1772,16 @@ class CellLifecycleDriver:
             await self._plane.resume(metadata, request, operation_id)
             return DriverPending("runtime-resumed", 1)
         if context.checkpoint == "runtime-resumed":
-            await self._exact_health(metadata, request)
+            await self._exact_health(metadata, request, context)
             return DriverPending("runtime-admitted", 1)
         if context.checkpoint == "runtime-admitted":
-            await self._plane.enable_routes(metadata)
+            await self._exact_health(metadata, request, context)
+            await self._plane.enable_routes(metadata, request)
             return DriverPending("routes-open", 1)
-        await self._exact_health(metadata, request)
+        await self._exact_health(metadata, request, context)
         if self._plane.routes_enabled(metadata) != (True, True):
-            await self._plane.enable_routes(metadata)
+            await self._exact_health(metadata, request, context)
+            await self._plane.enable_routes(metadata, request)
         await self._plane.release_maintenance(metadata, operation_id)
         return DriverFinal({})
 
@@ -1786,6 +1813,7 @@ class CellLifecycleDriver:
                 raise DriverTerminal("PROVISIONER_PENDING_CREDENTIAL_UNPROVEN")
             return DriverPending("credential-proved", 1)
         if context.checkpoint == "credential-proved" and request["phase"] == "finalize":
+            await self._exact_health(metadata, request, context)
             if not await self._plane.promote_credential(
                 metadata, version, request, context.provider_operation_id
             ):
@@ -1793,6 +1821,7 @@ class CellLifecycleDriver:
             return DriverPending("credential-promoted", 1)
         previous_rejected = False
         if request["phase"] == "finalize":
+            await self._exact_health(metadata, request, context)
             previous_rejected = await self._plane.promote_credential(
                 metadata, version, request, context.provider_operation_id
             )

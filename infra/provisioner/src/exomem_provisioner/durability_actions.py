@@ -63,7 +63,7 @@ from .vault_backup import (
     LiveBackupTargetRegistry,
     VerifiedRouteMaintenancePort,
 )
-from .wire_protocol import runtime_identity
+from .wire_protocol import WIRE_PROTOCOL_V2, runtime_identity
 
 _IMAGE_DIGEST = re.compile(r"^[^\s@]+@sha256:[0-9a-f]{64}$")
 _PRINCIPAL_SCOPE = (
@@ -146,7 +146,6 @@ class DurabilityActionSettings(BaseSettings):
         pattern=r"^[a-z0-9][a-z0-9-]{1,31}$",
         validation_alias="EXOMEM_PROVISIONER_LOCATION",
     )
-    provisioner_image: str = Field(pattern=_IMAGE_DIGEST.pattern)
     scratch_root: Path
     worker_id: str = Field(
         default="durability-actions",
@@ -667,6 +666,7 @@ class _CandidateContext:
     request: dict[str, Any]
     credential: str
     credential_version: str
+    wire_protocol: str
 
 
 class KubernetesRestoreCandidateResolver:
@@ -688,7 +688,6 @@ class KubernetesRestoreCandidateResolver:
         archive_stager: B2PortableArchiveStager,
         http: Any,
         scratch_root: Path,
-        runtime_image: str,
         provisioner_image: str,
     ) -> None:
         self._sessions = sessions
@@ -704,7 +703,6 @@ class KubernetesRestoreCandidateResolver:
         self._stager = archive_stager
         self._http = http
         self._scratch = scratch_root
-        self._runtime_image = runtime_image
         self._provisioner_image = provisioner_image
 
     async def resolve(self, candidate_cell_id: str, *, source_vault_id: str):
@@ -787,7 +785,9 @@ class KubernetesRestoreCandidateResolver:
             candidate_probe=probe,
             archive_stager=self._stager,
             binding=binding,
-            image=self._runtime_image,
+            image=self._config.runtime_image_for(
+                context.request, v2=context.wire_protocol == WIRE_PROTOCOL_V2
+            ),
             staging_image=self._provisioner_image,
             release_version=self._config.release_version,
         )
@@ -854,6 +854,9 @@ class KubernetesRestoreCandidateResolver:
             or request.get("fenceGeneration") != metadata.fence_generation
             or target["protocolVersion"] != self._config.protocol_version
             or target["releaseVersion"] != self._config.release_version
+            or not self._config.matches_runtime_request(
+                request, v2=rows[0].wire_protocol == WIRE_PROTOCOL_V2
+            )
         ):
             raise RestoreJobFailed("restore candidate provision request differs")
         cell = KubernetesCellAdapter(
@@ -866,7 +869,7 @@ class KubernetesRestoreCandidateResolver:
         credential = credentials.get(str(version))
         if version is None or not credential or credential != request.get("serviceCredential"):
             raise RestoreJobFailed("restore candidate credential proof differs")
-        return _CandidateContext(metadata, request, credential, str(version))
+        return _CandidateContext(metadata, request, credential, str(version), rows[0].wire_protocol)
 
 
 class _ProviderMaximumFenceDriver:
@@ -943,10 +946,13 @@ async def _run_durability_actions(settings: DurabilityActionSettings) -> None:
             browser_origin=settings.browser_origin,
             release_version=target.releaseVersion,
             protocol_version=target.protocolVersion,
-            operator_contract_digest=target.gatewayContractDigest,
             contract_digest=target.gatewayContractDigest,
             location=settings.location,
             runtime_target=target.model_dump(mode="json"),
+            legacy_runtime_images={
+                (unit.releaseVersion, unit.protocolVersion): unit.runtimeImage
+                for unit in lock.composition.legacyCatalog
+            },
         )
         helm = HelmCliAdapter(
             binary=settings.helm_binary,
@@ -1047,8 +1053,7 @@ async def _run_durability_actions(settings: DurabilityActionSettings) -> None:
                 archive_stager=B2PortableArchiveStager(export_delivery),
                 http=http,
                 scratch_root=settings.scratch_root,
-                runtime_image=lock.components.runtime.image,
-                provisioner_image=settings.provisioner_image,
+                provisioner_image=lock.components.provisioner.image,
             )
             dynamic_runtime = DynamicKubernetesRestoreRuntime(resolver)
 
@@ -1096,6 +1101,9 @@ async def _run_durability_actions(settings: DurabilityActionSettings) -> None:
                 export_workflow=export_workflow,
                 restore_workflow=restore_workflow,
                 object_service=object_service,
+                runtime_target_validator=lambda request, context: lifecycle_config.matches_runtime_request(
+                    request, v2=context.wire_protocol == WIRE_PROTOCOL_V2
+                ),
             )
             worker = build_durability_operation_worker(
                 repository=operations,

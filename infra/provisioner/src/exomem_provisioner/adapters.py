@@ -740,6 +740,7 @@ class PrivateCellApiAdapter:
         config: LifecycleConfig,
         expected_release: str,
         expected_worker_policy: dict[str, Any],
+        require_runtime_identity: bool = False,
     ) -> HealthObservation:
         live = await self._call(
             "GET",
@@ -779,7 +780,9 @@ class PrivateCellApiAdapter:
         agent_profile: str | None = None
         command_fingerprint: str | None = None
         schema_digest: str | None = None
-        if config.runtime_target is not None:
+        if require_runtime_identity:
+            if config.runtime_target is None:
+                raise MetadataConflict("selected runtime identity is unavailable")
             selected_profile = config.runtime_target["agentProfile"]
             agent_response = await self._request(
                 "GET",

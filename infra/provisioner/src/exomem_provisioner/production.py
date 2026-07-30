@@ -113,6 +113,7 @@ def build_live_routine_action_driver(
         restore_workflow=restore_workflow,
         object_service=object_service,
         deletion_workflow=None,
+        runtime_target_validator=getattr(lifecycle_driver, "runtime_target_matches", None),
     )
 
 
@@ -146,10 +147,13 @@ def build_live_provider_components(
         browser_origin=settings.browser_origin,
         release_version=target.releaseVersion,
         protocol_version=target.protocolVersion,
-        operator_contract_digest=target.gatewayContractDigest,
         contract_digest=target.gatewayContractDigest,
         location=settings.location,
         runtime_target=target.model_dump(mode="json"),
+        legacy_runtime_images={
+            (unit.releaseVersion, unit.protocolVersion): unit.runtimeImage
+            for unit in lock.composition.legacyCatalog
+        },
     )
     cell = KubernetesCellAdapter(
         core_v1=core_v1,

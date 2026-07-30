@@ -597,7 +597,7 @@ class LiveLifecyclePlane:
         return (await self._refresh(metadata)).serving
 
     async def health(
-        self, metadata: OpaqueProviderMetadata, request: dict[str, Any]
+        self, metadata: OpaqueProviderMetadata, request: dict[str, Any], *, v2: bool
     ) -> HealthObservation:
         target = runtime_identity(request)
         return await self._runtime.health(
@@ -607,6 +607,7 @@ class LiveLifecyclePlane:
             config=self._config,
             expected_release=target["releaseVersion"],
             expected_worker_policy=dict(request["workerPolicy"]),
+            require_runtime_identity=v2,
         )
 
     async def admit_runtime(self, metadata: OpaqueProviderMetadata) -> None:
@@ -616,12 +617,10 @@ class LiveLifecyclePlane:
     def runtime_admitted(self, metadata: OpaqueProviderMetadata) -> bool:
         return self._snapshot(metadata).runtime_admitted
 
-    async def enable_routes(self, metadata: OpaqueProviderMetadata) -> None:
+    async def enable_routes(self, metadata: OpaqueProviderMetadata, request: dict[str, Any]) -> None:
         owner = self._owner(metadata)
-        try:
-            request = self._helm_requests[self._key(metadata)]
-        except KeyError as error:
-            raise MetadataConflict("original Helm request was not authenticated") from error
+        if self._key(metadata) not in self._helm_requests:
+            raise MetadataConflict("original Helm request was not authenticated")
         values = _fixed_helm_values(owner, request, self._config)
         values["workloadMode"] = "serve"
         values["routes"]["enabled"] = True

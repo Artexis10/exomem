@@ -42,6 +42,11 @@ def _validate_final(
         raise DriverTerminal("PROVISIONER_DRIVER_INVALID") from error
     if operation.action is OperationAction.HEALTH:
         identity = runtime_identity(request)
+        if (
+            result.get("cellId") != request.get("cellId")
+            or result.get("workerPolicy") != request.get("workerPolicy")
+        ):
+            raise DriverTerminal("PROVISIONER_RUNTIME_CONTRACT_MISMATCH")
         if operation.wire_protocol == WIRE_PROTOCOL_V2:
             if result.get("runtimeIdentity") != identity:
                 raise DriverTerminal("PROVISIONER_RUNTIME_CONTRACT_MISMATCH")
@@ -230,6 +235,7 @@ class ProvisionerWorker:
             fence_generation=operation.fence_generation,
             checkpoint=operation.checkpoint,
             operation_created_at=operation.created_at.isoformat().replace("+00:00", "Z"),
+            wire_protocol=operation.wire_protocol,
         )
         try:
             outcome = await self._driver.execute(operation.action.value, request, context)

@@ -715,9 +715,16 @@ async def test_private_cell_api_uses_fresh_identity_and_exact_lifecycle_routes()
         browser_origin="https://substratesystems.io",
         release_version="0.22.0",
         protocol_version="1",
-        operator_contract_digest="c" * 64,
         contract_digest="b" * 64,
         location="fsn1",
+        runtime_target={
+            "releaseVersion": "0.22.0",
+            "protocolVersion": "1",
+            "agentProfile": "hosted-alpha-agent-v1",
+            "gatewayContractDigest": "b" * 64,
+            "commandFingerprint": "c" * 64,
+            "schemaDigest": "d" * 64,
+        },
     )
     adapter = PrivateCellApiAdapter(
         request=request,
@@ -837,7 +844,6 @@ async def test_private_cell_api_observes_the_selected_agent_contract() -> None:
         browser_origin="https://substratesystems.io",
         release_version="0.22.0",
         protocol_version="1",
-        operator_contract_digest="c" * 64,
         contract_digest="b" * 64,
         location="fsn1",
         runtime_target={
@@ -858,6 +864,7 @@ async def test_private_cell_api_observes_the_selected_agent_contract() -> None:
         config=config,
         expected_release="0.22.0",
         expected_worker_policy={"workerCount": 0, "semantic": False, "media": False},
+        require_runtime_identity=True,
     )
 
     assert health.agent_profile == "hosted-alpha-agent-v1"

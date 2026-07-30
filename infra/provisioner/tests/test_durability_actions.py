@@ -49,7 +49,6 @@ def _settings(**overrides: object) -> DurabilityActionSettings:
         "transfer_hostname": "transfer.example.test",
         "browser_origin": "https://app.example.test",
         "location": "fsn1",
-        "provisioner_image": "ghcr.io/artexis10/exomem-provisioner@sha256:" + "b" * 64,
         "scratch_root": Path.cwd() / "exomem-scratch",
     }
     values.update(overrides)
@@ -63,13 +62,10 @@ def test_action_settings_bind_dedicated_role_buckets_and_immutable_images() -> N
     with pytest.raises(ValueError, match="deployment lock is unavailable"):
         _ = settings.deployment_lock
     assert settings.recovery_bucket != settings.user_export_bucket
-    assert "@sha256:" in settings.provisioner_image
     with pytest.raises(ValueError):
         _settings(user_export_bucket="exomem-recovery-alpha")
     with pytest.raises(ValueError):
         _settings(database_role="another_role")
-    with pytest.raises(ValueError):
-        _settings(provisioner_image="ghcr.io/artexis10/exomem-provisioner:latest")
 
 
 @pytest.mark.asyncio
@@ -328,7 +324,6 @@ async def test_candidate_controller_reconciles_restore_then_private_serve_then_r
             browser_origin="https://app.example.test",
             release_version="0.22.0",
             protocol_version="exomem-hosted.v1",
-            operator_contract_digest="b" * 64,
             contract_digest="c" * 64,
             location="fsn1",
         ),

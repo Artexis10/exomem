@@ -299,7 +299,6 @@ def test_production_factory_wires_the_live_plane_without_a_fake_selection_path(
     assert components.driver._config.release_version == "0.22.0"
     assert components.driver._config.protocol_version == "1"
     assert components.driver._config.contract_digest == "b" * 64
-    assert components.driver._config.operator_contract_digest == "b" * 64
     assert components.driver._plane is components.plane
     assert components.driver._volumes is None
     assert components.capacity is components.plane._capacity
@@ -352,7 +351,7 @@ async def test_live_route_enable_reconciles_the_original_authenticated_helm_rele
     plane._owned[plane._key(metadata)] = metadata
     plane._helm_requests[plane._key(metadata)] = request
 
-    await plane.enable_routes(metadata)
+    await plane.enable_routes(metadata, request)
 
     assert calls[0]["workloadMode"] == "serve"
     assert calls[0]["routes"] == {

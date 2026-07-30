@@ -20,6 +20,7 @@ class EffectContext:
     fence_generation: int
     checkpoint: str = "effect-prepared"
     operation_created_at: str = "1970-01-01T00:00:00Z"
+    wire_protocol: str = "exomem-cell-provisioner.v1"
 
     @property
     def provider_identity(self) -> tuple[str, str, str, str | None, int]:
