@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 from pathlib import Path
@@ -29,6 +30,12 @@ def _settings(**overrides: object) -> ProvisionerSettings:
     return ProvisionerSettings(**values)
 
 
+def _canonical_sha256(value: object) -> str:
+    return hashlib.sha256(
+        (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode()
+    ).hexdigest()
+
+
 def _deployment_lock(*, admission_mode: str = "expand") -> dict[str, object]:
     digest = "a" * 64
     commit = "b" * 40
@@ -41,6 +48,12 @@ def _deployment_lock(*, admission_mode: str = "expand") -> dict[str, object]:
         "schemaDigest": "d" * 64,
     }
     legacy_target = {**target, "releaseVersion": "0.22.0", "protocolVersion": "exomem-hosted.v1"}
+    legacy_contract = {
+        **legacy_target,
+        "runtimeImage": f"ghcr.io/artexis10/exomem@sha256:{digest}",
+        "sourceCommit": commit,
+    }
+    legacy_release_set = [{"releaseVersion": "0.22.0", "protocolVersion": "exomem-hosted.v1"}]
     return {
         "artifact": "exomem-hosted-deployment-lock",
         "schemaVersion": 2,
@@ -73,11 +86,11 @@ def _deployment_lock(*, admission_mode: str = "expand") -> dict[str, object]:
                     "protocolVersion": "exomem-hosted.v1",
                     "runtimeImage": f"ghcr.io/artexis10/exomem@sha256:{digest}",
                     "sourceCommit": commit,
-                    "contractSha256": digest,
-                    "contract": {**legacy_target, "runtimeImage": f"ghcr.io/artexis10/exomem@sha256:{digest}", "sourceCommit": commit},
+                    "contractSha256": _canonical_sha256(legacy_contract),
+                    "contract": legacy_contract,
                 }
             ],
-            "legacyReleaseSetSha256": "f" * 64,
+            "legacyReleaseSetSha256": _canonical_sha256(legacy_release_set),
         },
         "rollback": {
             "provisionerImage": f"ghcr.io/artexis10/exomem-provisioner@sha256:{'e' * 64}",
@@ -102,6 +115,26 @@ def test_selected_deployment_lock_is_strict_and_exposes_admission_inputs(tmp_pat
     assert _settings(deployment_lock_path=str(path)).deployment_lock == lock
 
     path.write_text(json.dumps({"artifact": "exomem-hosted-deployment-lock-pair", "schemaVersion": 2, "locks": []}), encoding="utf-8")
+    with pytest.raises(ValueError):
+        load_deployment_lock(path)
+
+
+@pytest.mark.parametrize("tamper", ("contract", "release_set", "catalog_order"))
+def test_selected_lock_rejects_forged_or_noncanonical_legacy_admission_evidence(
+    tmp_path: Path, tamper: str
+) -> None:
+    lock = _deployment_lock()
+    composition = lock["composition"]
+    assert isinstance(composition, dict)
+    if tamper == "contract":
+        composition["legacyCatalog"][0]["contract"]["schemaDigest"] = "e" * 64  # type: ignore[index]
+    elif tamper == "release_set":
+        composition["legacyReleaseSetSha256"] = "f" * 64
+    else:
+        composition["legacyCatalog"] *= 2
+    path = tmp_path / "selected-lock.json"
+    path.write_text(json.dumps(lock), encoding="utf-8")
+
     with pytest.raises(ValueError):
         load_deployment_lock(path)
 

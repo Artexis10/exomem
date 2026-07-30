@@ -82,9 +82,11 @@ def _admit_submission(
     if policy.mode not in {"expand", "contract"}:
         raise AdmissionRejected("invalid admission mode")
     if wire_protocol == WIRE_PROTOCOL_V1:
-        identity = (str(request.get("releaseVersion")), str(request.get("protocolVersion")))
         if existing is None and policy.mode == "contract":
             raise AdmissionRejected("fresh v1 is not admitted in contract mode")
+        if "releaseVersion" not in request or "protocolVersion" not in request:
+            return
+        identity = (str(request["releaseVersion"]), str(request["protocolVersion"]))
         if existing is None or existing.state is not OperationState.FINAL:
             if identity not in policy.legacy_catalog:
                 raise AdmissionRejected("legacy runtime is not cataloged")

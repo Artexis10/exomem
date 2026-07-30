@@ -120,6 +120,11 @@ def create_app(
         redirect_slashes=False,
     )
     lock = settings.deployment_lock
+    if repository is not None and lock is None:
+        raise ValueError("selected deployment lock is required for serving admission")
+    advertised_wire_protocol = (
+        lock.components.provisioner.wireProtocol if lock is not None else settings.protocol
+    )
     admission = (
         AdmissionPolicy(
             mode=lock.admission_mode,
@@ -183,7 +188,7 @@ def create_app(
 
     @app.get("/health/live")
     async def health_live() -> dict[str, str]:
-        return {"protocol": PROVISIONER_PROTOCOL, "status": "live"}
+        return {"protocol": advertised_wire_protocol, "status": "live"}
 
     @app.get("/health/ready")
     async def health_ready() -> JSONResponse:
@@ -195,7 +200,7 @@ def create_app(
             return _failure("PROVISIONER_UNAVAILABLE", 503, retryable=True)
         return JSONResponse(
             status_code=200,
-            content={"protocol": settings.protocol, "status": "ready"},
+            content={"protocol": advertised_wire_protocol, "status": "ready"},
         )
 
     if repository is None:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import ipaddress
 import json
 import os
@@ -107,6 +108,12 @@ def _reject_duplicate_json_keys(pairs: list[tuple[str, object]]) -> dict[str, ob
             raise ValueError(f"duplicate release manifest field: {key}")
         value[key] = item
     return value
+
+
+def _canonical_json_sha256(value: object) -> str:
+    return hashlib.sha256(
+        (json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False) + "\n").encode("utf-8")
+    ).hexdigest()
 
 
 def load_hosted_release_manifest(path: str | Path) -> HostedReleaseManifest:
@@ -217,8 +224,16 @@ class DeploymentComposition(BaseModel):
     @model_validator(mode="after")
     def validate_unique_legacy_catalog(self) -> DeploymentComposition:
         keys = [(unit.releaseVersion, unit.protocolVersion) for unit in self.legacyCatalog]
-        if len(keys) != len(set(keys)):
-            raise ValueError("legacy runtime catalog contains duplicate identities")
+        if keys != sorted(keys) or len(keys) != len(set(keys)):
+            raise ValueError("legacy runtime catalog is not canonical")
+        for unit in self.legacyCatalog:
+            if _canonical_json_sha256(unit.contract.model_dump(mode="json")) != unit.contractSha256:
+                raise ValueError("legacy runtime contract hash is invalid")
+        release_set = [
+            {"releaseVersion": release, "protocolVersion": protocol} for release, protocol in keys
+        ]
+        if _canonical_json_sha256(release_set) != self.legacyReleaseSetSha256:
+            raise ValueError("legacy runtime release set hash is invalid")
         return self
 
 

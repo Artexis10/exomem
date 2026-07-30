@@ -32,22 +32,19 @@ def _qualified(name: str) -> str:
 
 def upgrade() -> None:
     schema = _schema()
-    op.add_column(
-        "operations",
-        sa.Column(
-            "wire_protocol",
-            sa.String(length=32),
-            nullable=False,
-            server_default=sa.text(f"'{_V1}'"),
-        ),
-        schema=schema,
-    )
-    op.create_check_constraint(
-        "ck_operation_wire_protocol",
-        "operations",
-        f"wire_protocol IN ('{_V1}', '{_V2}')",
-        schema=schema,
-    )
+    with op.batch_alter_table("operations", schema=schema) as batch:
+        batch.add_column(
+            sa.Column(
+                "wire_protocol",
+                sa.String(length=32),
+                nullable=False,
+                server_default=sa.text(f"'{_V1}'"),
+            )
+        )
+        batch.create_check_constraint(
+            "ck_operation_wire_protocol",
+            f"wire_protocol IN ('{_V1}', '{_V2}')",
+        )
     if op.get_bind().dialect.name == "postgresql":
         table = _qualified("operations")
         function = _qualified("prevent_operation_wire_protocol_change")
@@ -77,5 +74,6 @@ def downgrade() -> None:
             )
         )
         op.execute(sa.text(f"DROP FUNCTION IF EXISTS {_qualified('prevent_operation_wire_protocol_change')}()"))
-    op.drop_constraint("ck_operation_wire_protocol", "operations", schema=schema)
-    op.drop_column("operations", "wire_protocol", schema=schema)
+    with op.batch_alter_table("operations", schema=schema) as batch:
+        batch.drop_constraint("ck_operation_wire_protocol", type_="check")
+        batch.drop_column("wire_protocol")
