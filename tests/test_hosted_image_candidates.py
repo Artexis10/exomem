@@ -6,6 +6,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -29,8 +30,8 @@ def _record(kind: str = "runtime") -> dict[str, object]:
     source_ref = "refs/heads/main"
     checkout_ref = "refs/tags/v0.35.1"
     release: object = {"tag": "v0.35.1", "version": "0.35.1"}
-    workflow_path = ".github/workflows/release-please.yml"
-    discovery_tag = f"{COMMIT}-hosted"
+    workflow_path = "Artexis10/exomem/.github/workflows/release-please.yml"
+    discovery_tag = f"{repository}:{COMMIT}-hosted"
     storage: dict[str, str] = {
         "kind": "github-release",
         "subject": f"{repository}@sha256:{DIGEST}",
@@ -40,8 +41,8 @@ def _record(kind: str = "runtime") -> dict[str, object]:
         repository = "ghcr.io/artexis10/exomem-provisioner"
         source_ref = checkout_ref = "refs/heads/main"
         release = None
-        workflow_path = ".github/workflows/publish-hosted-provisioner.yml"
-        discovery_tag = COMMIT
+        workflow_path = "Artexis10/exomem/.github/workflows/publish-hosted-provisioner.yml"
+        discovery_tag = f"{repository}:{COMMIT}"
         storage = {
             "kind": "oci-referrer",
             "subject": f"{repository}@sha256:{DIGEST}",
@@ -213,13 +214,15 @@ def test_verify_uses_exact_gh_policy_and_requires_exact_statement_subject(
         stdout = json.dumps(
             [
                 {
-                    "statement": {
+                    "verificationResult": {
+                        "statement": {
                         "subject": [
                             {
                                 "name": "ghcr.io/artexis10/exomem",
                                 "digest": {"sha256": DIGEST},
                             }
                         ]
+                        }
                     }
                 }
             ]
@@ -238,11 +241,11 @@ def test_verify_uses_exact_gh_policy_and_requires_exact_statement_subject(
             "gh",
             "attestation",
             "verify",
-            f"ghcr.io/artexis10/exomem@sha256:{DIGEST}",
+            f"oci://ghcr.io/artexis10/exomem@sha256:{DIGEST}",
             "--repo",
             "Artexis10/exomem",
             "--signer-workflow",
-            ".github/workflows/release-please.yml",
+            "Artexis10/exomem/.github/workflows/release-please.yml",
             "--signer-digest",
             WORKFLOW_DIGEST,
             "--source-digest",
@@ -271,7 +274,7 @@ def test_verify_rejects_subject_drift_and_supports_oci_bundle_retrieval(
 
     class Result:
         returncode = 0
-        stdout = json.dumps([{"statement": {"subject": []}}])
+        stdout = json.dumps([{"verificationResult": {"statement": {"subject": []}}}])
         stderr = ""
 
     seen: list[list[str]] = []
@@ -284,3 +287,70 @@ def test_verify_rejects_subject_drift_and_supports_oci_bundle_retrieval(
     with pytest.raises(candidate.CandidateError, match="subject"):
         candidate.verify_candidate(candidate_path, bundle_from_oci=True)
     assert "--bundle" not in seen[0]
+    assert "--bundle-from-oci" in seen[0]
+
+
+def test_verify_accepts_multiple_real_gh_results_only_when_every_subject_matches(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bundle = tmp_path / "bundle"
+    record = _record()
+    record["attestation"]["bundleSha256"] = _write_bundle(bundle)  # type: ignore[index]
+    candidate_path = tmp_path / "candidate.json"
+    candidate.record_candidate(record, bundle, candidate_path)
+
+    class Result:
+        returncode = 0
+        stdout = json.dumps(
+            [
+                {
+                    "verificationResult": {
+                        "statement": {
+                            "subject": [
+                                {"name": "ghcr.io/artexis10/exomem", "digest": {"sha256": DIGEST}}
+                            ]
+                        }
+                    }
+                },
+                {
+                    "verificationResult": {
+                        "statement": {
+                            "subject": [
+                                {"name": "ghcr.io/artexis10/exomem", "digest": {"sha256": DIGEST}}
+                            ]
+                        }
+                    }
+                },
+            ]
+        )
+        stderr = ""
+
+    monkeypatch.setattr(candidate.subprocess, "run", lambda *_args, **_kwargs: Result())
+    candidate.verify_candidate(candidate_path, bundle_from_oci=True)
+
+
+@pytest.mark.parametrize("failure", [subprocess.TimeoutExpired(["gh"], 1), OSError("missing gh")])
+def test_verify_fails_cleanly_when_gh_cannot_complete(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: BaseException
+) -> None:
+    bundle = tmp_path / "bundle"
+    record = _record()
+    record["attestation"]["bundleSha256"] = _write_bundle(bundle)  # type: ignore[index]
+    candidate_path = tmp_path / "candidate.json"
+    candidate.record_candidate(record, bundle, candidate_path)
+    monkeypatch.setattr(candidate.subprocess, "run", lambda *_args, **_kwargs: (_ for _ in ()).throw(failure))
+
+    with pytest.raises(candidate.CandidateError, match="unable to complete"):
+        candidate.verify_candidate(candidate_path, bundle=bundle)
+
+
+def test_runtime_storage_uri_must_be_canonical_release_asset(tmp_path: Path) -> None:
+    bundle = tmp_path / "bundle"
+    record = _record()
+    record["attestation"]["bundleSha256"] = _write_bundle(bundle)  # type: ignore[index]
+    record["storage"]["uri"] = (  # type: ignore[index]
+        "https://github.com/Artexis10/exomem/releases/download/v0.35.1/%2e%2e/candidate.json"
+    )
+
+    with pytest.raises(candidate.CandidateError, match="storage"):
+        candidate.record_candidate(record, bundle, tmp_path / "candidate.json")

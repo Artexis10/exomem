@@ -17,9 +17,12 @@ from typing import NoReturn, cast
 
 MAX_BUNDLE_BYTES = 16 * 1024 * 1024
 MAX_CANDIDATE_BYTES = 128 * 1024
+VERIFY_TIMEOUT_SECONDS = 120
 SCHEMA_VERSION = 1
 SOURCE_REPOSITORY = "Artexis10/exomem"
 SLSA_PREDICATE = "https://slsa.dev/provenance/v1"
+RUNTIME_SIGNER_WORKFLOW = f"{SOURCE_REPOSITORY}/.github/workflows/release-please.yml"
+PROVISIONER_SIGNER_WORKFLOW = f"{SOURCE_REPOSITORY}/.github/workflows/publish-hosted-provisioner.yml"
 _COMMIT = re.compile(r"^[0-9a-f]{40}$")
 _DIGEST = re.compile(r"^sha256:([0-9a-f]{64})$")
 _SEMVER = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?$")
@@ -280,7 +283,7 @@ def validate_candidate(value: object) -> dict[str, object]:
         version = _string(release["version"], label="release.version")
         if not _SEMVER.fullmatch(version) or tag != f"v{version}" or tag_match.group(1) != tag:
             _error("runtime release must match source checkout tag")
-        if discovery_tag != f"{source_commit}-hosted":
+        if discovery_tag != f"{repository}:{source_commit}-hosted":
             _error("runtime image.discoveryTag must match source commit")
         if oidc_commit != source_commit:
             _error("runtime OIDC source commit must equal checkout commit")
@@ -288,11 +291,13 @@ def validate_candidate(value: object) -> dict[str, object]:
             _error("runtime push source ref must be refs/heads/main")
         if event == "workflow_dispatch" and oidc_ref != checkout_ref:
             _error("runtime manual source ref must equal checkout tag")
-        if signer_workflow != ".github/workflows/release-please.yml":
+        if signer_workflow != RUNTIME_SIGNER_WORKFLOW:
             _error("runtime signer workflow is not approved")
-        if storage_kind != "github-release" or not storage_uri.startswith(
-            f"https://github.com/{SOURCE_REPOSITORY}/releases/download/{tag}/"
-        ) or "?" in storage_uri or "#" in storage_uri:
+        release_asset_pattern = re.compile(
+            rf"https://github\.com/{re.escape(SOURCE_REPOSITORY)}/releases/download/"
+            rf"{re.escape(tag)}/[A-Za-z0-9][A-Za-z0-9._-]*"
+        )
+        if storage_kind != "github-release" or not release_asset_pattern.fullmatch(storage_uri):
             _error("runtime storage is not approved")
     else:
         expected_repository = "ghcr.io/artexis10/exomem-provisioner"
@@ -304,9 +309,9 @@ def validate_candidate(value: object) -> dict[str, object]:
             _error("provisioner source ref must be refs/heads/main")
         if oidc_commit != source_commit:
             _error("provisioner OIDC source commit must equal checkout commit")
-        if discovery_tag != source_commit:
+        if discovery_tag != f"{repository}:{source_commit}":
             _error("provisioner image.discoveryTag must match source commit")
-        if signer_workflow != ".github/workflows/publish-hosted-provisioner.yml":
+        if signer_workflow != PROVISIONER_SIGNER_WORKFLOW:
             _error("provisioner signer workflow is not approved")
         if (
             storage_kind != "oci-referrer" or storage_uri != f"oci://{repository}@{digest}"
@@ -371,15 +376,21 @@ def load_candidate(path: Path) -> dict[str, object]:
     return validate_candidate(_json_object(path, label="candidate", maximum=MAX_CANDIDATE_BYTES))
 
 
-def _verified_statement(value: object) -> dict[str, object]:
-    if isinstance(value, list) and len(value) == 1 and isinstance(value[0], dict):
-        value = value[0]
-    if not isinstance(value, dict):
-        _error("attestation verification output must contain exactly one statement")
-    statement = value.get("statement", value)
-    if not isinstance(statement, dict):
-        _error("attestation verification output statement is malformed")
-    return cast(dict[str, object], statement)
+def _verified_statements(value: object) -> list[dict[str, object]]:
+    if not isinstance(value, list) or not value:
+        _error("attestation verification output must contain verification results")
+    statements: list[dict[str, object]] = []
+    for entry in value:
+        if not isinstance(entry, dict):
+            _error("attestation verification result is malformed")
+        verification_result = entry.get("verificationResult")
+        if not isinstance(verification_result, dict):
+            _error("attestation verification result is malformed")
+        statement = verification_result.get("statement")
+        if not isinstance(statement, dict):
+            _error("attestation verification output statement is malformed")
+        statements.append(cast(dict[str, object], statement))
+    return statements
 
 
 def _require_verified_subject(statement: dict[str, object], repository: str, digest: str) -> None:
@@ -415,7 +426,7 @@ def verify_candidate(
         gh_binary,
         "attestation",
         "verify",
-        cast(str, image["reference"]),
+        f"oci://{image['reference']}",
         "--repo",
         cast(str, source["repository"]),
         "--signer-workflow",
@@ -432,17 +443,28 @@ def verify_candidate(
     ]
     if bundle is not None:
         command.extend(["--bundle", os.fspath(bundle)])
+    else:
+        command.append("--bundle-from-oci")
     command.extend(["--format", "json"])
-    result = subprocess.run(command, shell=False, check=False, capture_output=True, text=True)
+    try:
+        result = subprocess.run(
+            command,
+            shell=False,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=VERIFY_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        _error(f"unable to complete gh attestation verification: {exc}")
     if result.returncode != 0:
         _error(f"gh attestation verify failed: {result.stderr.strip()}")
     try:
         verified = json.loads(result.stdout, object_pairs_hook=_reject_duplicate_keys)
     except json.JSONDecodeError as exc:
         _error(f"invalid gh attestation verify JSON: {exc}")
-    _require_verified_subject(
-        _verified_statement(verified), cast(str, image["repository"]), cast(str, image["digest"])
-    )
+    for statement in _verified_statements(verified):
+        _require_verified_subject(statement, cast(str, image["repository"]), cast(str, image["digest"]))
 
 
 def _parser() -> argparse.ArgumentParser:
