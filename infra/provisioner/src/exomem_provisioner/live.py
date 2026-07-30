@@ -599,7 +599,7 @@ class LiveLifecyclePlane:
     async def health(
         self, metadata: OpaqueProviderMetadata, request: dict[str, Any], *, v2: bool
     ) -> HealthObservation:
-        target = runtime_identity(request)
+        target = self._config.runtime_target_for(request, v2=v2)
         return await self._runtime.health(
             self._owner(metadata),
             credential=str(request["serviceCredential"]),
@@ -608,6 +608,7 @@ class LiveLifecyclePlane:
             expected_release=target["releaseVersion"],
             expected_worker_policy=dict(request["workerPolicy"]),
             require_runtime_identity=v2,
+            expected_contract_digest=target["gatewayContractDigest"],
         )
 
     async def admit_runtime(self, metadata: OpaqueProviderMetadata) -> None:

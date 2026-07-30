@@ -190,28 +190,30 @@ class LifecycleConfig:
     contract_digest: str
     location: str
     runtime_target: dict[str, str] | None = None
-    legacy_runtime_images: dict[tuple[str, str], str] | None = None
+    legacy_runtime_units: dict[tuple[str, str], dict[str, str]] | None = None
 
-    def matches_runtime_request(self, request: dict[str, Any], *, v2: bool) -> bool:
-        target = runtime_identity(request)
+    def runtime_target_for(self, request: dict[str, Any], *, v2: bool) -> dict[str, str]:
         if v2:
-            return self.runtime_target is not None and target == self.runtime_target
-        return (
-            self.legacy_runtime_images is not None
-            and (target["releaseVersion"], target["protocolVersion"])
-            in self.legacy_runtime_images
-        )
-
-    def runtime_image_for(self, request: dict[str, Any], *, v2: bool) -> str:
-        if v2:
-            return self.image
+            if self.runtime_target is None:
+                raise MetadataConflict("selected runtime target is unavailable")
+            return self.runtime_target
         target = runtime_identity(request)
         try:
-            return (self.legacy_runtime_images or {})[
+            return (self.legacy_runtime_units or {})[
                 (target["releaseVersion"], target["protocolVersion"])
             ]
         except KeyError as error:
             raise MetadataConflict("legacy runtime unit is not selected") from error
+
+    def matches_runtime_request(self, request: dict[str, Any], *, v2: bool) -> bool:
+        try:
+            expected = self.runtime_target_for(request, v2=v2)
+        except MetadataConflict:
+            return False
+        return runtime_identity(request) == expected if v2 else True
+
+    def runtime_image_for(self, request: dict[str, Any], *, v2: bool) -> str:
+        return self.image if v2 else self.runtime_target_for(request, v2=False)["runtimeImage"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -241,7 +243,8 @@ class HealthObservation:
         request: dict[str, Any],
         config: LifecycleConfig,
     ) -> HealthObservation:
-        target = runtime_identity(request)
+        v2 = "runtimeTarget" in request
+        target = config.runtime_target_for(request, v2=v2)
         return cls(
             live=True,
             ready=True,
@@ -254,12 +257,12 @@ class HealthObservation:
             write_admission=True,
             worker_policy=dict(request["workerPolicy"]),
             code="CELL_READY",
-            contract_digest=config.contract_digest,
+            contract_digest=target["gatewayContractDigest"],
             policy_admitted=True,
             admission_admitted=True,
-            agent_profile=target.get("agentProfile"),
-            command_fingerprint=target.get("commandFingerprint"),
-            schema_digest=target.get("schemaDigest"),
+            agent_profile=target.get("agentProfile") if v2 else None,
+            command_fingerprint=target.get("commandFingerprint") if v2 else None,
+            schema_digest=target.get("schemaDigest") if v2 else None,
         )
 
     def replace(self, **changes: Any) -> HealthObservation:
@@ -1459,13 +1462,11 @@ def _fixed_helm_values(
     request: dict[str, Any],
     config: LifecycleConfig,
 ) -> dict[str, Any]:
+    has_runtime_target = "runtimeTarget" in request or "releaseVersion" in request
     target = (
-        runtime_identity(request)
-        if "runtimeTarget" in request or "releaseVersion" in request
-        else {
-            "protocolVersion": config.protocol_version,
-            "releaseVersion": config.release_version,
-        }
+        config.runtime_target_for(request, v2="runtimeTarget" in request)
+        if has_runtime_target
+        else {"protocolVersion": config.protocol_version, "releaseVersion": config.release_version}
     )
     worker_policy = json.dumps(
         request["workerPolicy"], sort_keys=True, separators=(",", ":")
@@ -1481,7 +1482,7 @@ def _fixed_helm_values(
         "featureGrants": "",
         "image": (
             config.runtime_image_for(request, v2="runtimeTarget" in request)
-            if "runtimeTarget" in request or "releaseVersion" in request
+            if has_runtime_target
             else config.image
         ),
         "initOperationId": metadata.operation_id,

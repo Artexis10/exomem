@@ -63,7 +63,7 @@ from .vault_backup import (
     LiveBackupTargetRegistry,
     VerifiedRouteMaintenancePort,
 )
-from .wire_protocol import WIRE_PROTOCOL_V2, runtime_identity
+from .wire_protocol import WIRE_PROTOCOL_V2
 
 _IMAGE_DIGEST = re.compile(r"^[^\s@]+@sha256:[0-9a-f]{64}$")
 _PRINCIPAL_SCOPE = (
@@ -708,6 +708,9 @@ class KubernetesRestoreCandidateResolver:
     async def resolve(self, candidate_cell_id: str, *, source_vault_id: str):
         context = await self._context(candidate_cell_id, source_vault_id=source_vault_id)
         metadata = context.metadata
+        target = self._config.runtime_target_for(
+            context.request, v2=context.wire_protocol == WIRE_PROTOCOL_V2
+        )
         controller = HelmRestoreCandidateController(
             metadata=metadata,
             request=context.request,
@@ -725,8 +728,8 @@ class KubernetesRestoreCandidateResolver:
                     metadata=metadata,
                     credential=context.credential,
                     credential_version=context.credential_version,
-                    protocol_version=self._config.protocol_version,
-                    release_version=self._config.release_version,
+                    protocol_version=target["protocolVersion"],
+                    release_version=target["releaseVersion"],
                     browser_origin=self._config.browser_origin,
                     control_hostname=self._config.control_hostname,
                     transfer_hostname=self._config.transfer_hostname,
@@ -746,8 +749,8 @@ class KubernetesRestoreCandidateResolver:
             metadata=metadata,
             credential=context.credential,
             credential_version=context.credential_version,
-            protocol_version=self._config.protocol_version,
-            release_version=self._config.release_version,
+            protocol_version=target["protocolVersion"],
+            release_version=target["releaseVersion"],
             worker_policy_digest=worker_digest,
             operation_id=str(context.request["operationId"]),
             controller=controller,
@@ -774,7 +777,7 @@ class KubernetesRestoreCandidateResolver:
             runtime_uid=10001,
             runtime_gid=10001,
             active_credential_version=context.credential_version,
-            expected_protocol=self._config.protocol_version,
+            expected_protocol=target["protocolVersion"],
             workload_name=metadata.resource_name,
         )
         return KubernetesOfflineRestoreRuntime(
@@ -789,7 +792,7 @@ class KubernetesRestoreCandidateResolver:
                 context.request, v2=context.wire_protocol == WIRE_PROTOCOL_V2
             ),
             staging_image=self._provisioner_image,
-            release_version=self._config.release_version,
+            release_version=target["releaseVersion"],
         )
 
     async def _context(self, cell_id: str, *, source_vault_id: str) -> _CandidateContext:
@@ -846,14 +849,11 @@ class KubernetesRestoreCandidateResolver:
         if fence != metadata.fence_generation or len(rows) != 1:
             raise RestoreJobFailed("restore candidate ledger identity differs")
         request = await self._operations.load_request(rows[0].id)
-        target = runtime_identity(request)
         if (
             request.get("provisionMode") != "restore-candidate"
             or request.get("tenantId") != metadata.tenant_id
             or request.get("cellId") != metadata.subject_id
             or request.get("fenceGeneration") != metadata.fence_generation
-            or target["protocolVersion"] != self._config.protocol_version
-            or target["releaseVersion"] != self._config.release_version
             or not self._config.matches_runtime_request(
                 request, v2=rows[0].wire_protocol == WIRE_PROTOCOL_V2
             )
@@ -949,10 +949,10 @@ async def _run_durability_actions(settings: DurabilityActionSettings) -> None:
             contract_digest=target.gatewayContractDigest,
             location=settings.location,
             runtime_target=target.model_dump(mode="json"),
-            legacy_runtime_images={
-                (unit.releaseVersion, unit.protocolVersion): unit.runtimeImage
-                for unit in lock.composition.legacyCatalog
-            },
+        legacy_runtime_units={
+            (unit.releaseVersion, unit.protocolVersion): unit.contract.model_dump(mode="json")
+            for unit in lock.composition.legacyCatalog
+        },
         )
         helm = HelmCliAdapter(
             binary=settings.helm_binary,

@@ -150,8 +150,8 @@ def build_live_provider_components(
         contract_digest=target.gatewayContractDigest,
         location=settings.location,
         runtime_target=target.model_dump(mode="json"),
-        legacy_runtime_images={
-            (unit.releaseVersion, unit.protocolVersion): unit.runtimeImage
+        legacy_runtime_units={
+            (unit.releaseVersion, unit.protocolVersion): unit.contract.model_dump(mode="json")
             for unit in lock.composition.legacyCatalog
         },
     )

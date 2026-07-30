@@ -715,7 +715,7 @@ async def test_private_cell_api_uses_fresh_identity_and_exact_lifecycle_routes()
         browser_origin="https://substratesystems.io",
         release_version="0.22.0",
         protocol_version="1",
-        contract_digest="b" * 64,
+        contract_digest="e" * 64,
         location="fsn1",
         runtime_target={
             "releaseVersion": "0.22.0",
@@ -724,6 +724,18 @@ async def test_private_cell_api_uses_fresh_identity_and_exact_lifecycle_routes()
             "gatewayContractDigest": "b" * 64,
             "commandFingerprint": "c" * 64,
             "schemaDigest": "d" * 64,
+        },
+        legacy_runtime_units={
+            ("0.22.0", "1"): {
+                "releaseVersion": "0.22.0",
+                "protocolVersion": "1",
+                "agentProfile": "hosted-alpha-agent-v1",
+                "gatewayContractDigest": "b" * 64,
+                "commandFingerprint": "c" * 64,
+                "schemaDigest": "d" * 64,
+                "runtimeImage": "repo@sha256:" + "a" * 64,
+                "sourceCommit": "a" * 40,
+            }
         },
     )
     adapter = PrivateCellApiAdapter(
@@ -737,6 +749,7 @@ async def test_private_cell_api_uses_fresh_identity_and_exact_lifecycle_routes()
         config=config,
         expected_release="0.22.0",
         expected_worker_policy=worker_policy,
+        expected_contract_digest="b" * 64,
     )
     await adapter.quiesce(
         _metadata(),

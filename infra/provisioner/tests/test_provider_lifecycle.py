@@ -145,7 +145,13 @@ def _config() -> LifecycleConfig:
         protocol_version="1",
         contract_digest="b" * 64,
         location="fsn1",
-        legacy_runtime_images={("0.22.0", "1"): "registry.invalid/exomem@sha256:" + "a" * 64},
+        legacy_runtime_units={
+            ("0.22.0", "1"): {
+                **_runtime_target(),
+                "runtimeImage": "registry.invalid/exomem@sha256:" + "a" * 64,
+                "sourceCommit": "a" * 40,
+            }
+        },
     )
 
 
@@ -205,7 +211,16 @@ async def test_legacy_catalog_unit_selects_its_exact_runtime_image() -> None:
     driver = CellLifecycleDriver(
         plane=plane,
         volume_worker=None,
-        config=replace(_config(), legacy_runtime_images={("0.22.0", "1"): legacy_image}),
+        config=replace(
+            _config(),
+            legacy_runtime_units={
+                ("0.22.0", "1"): {
+                    **_runtime_target(),
+                    "runtimeImage": legacy_image,
+                    "sourceCommit": "a" * 40,
+                }
+            },
+        ),
     )
 
     first = await driver.execute("provision", _request(), _context())

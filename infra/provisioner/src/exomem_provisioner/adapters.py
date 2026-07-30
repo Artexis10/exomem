@@ -741,6 +741,7 @@ class PrivateCellApiAdapter:
         expected_release: str,
         expected_worker_policy: dict[str, Any],
         require_runtime_identity: bool = False,
+        expected_contract_digest: str | None = None,
     ) -> HealthObservation:
         live = await self._call(
             "GET",
@@ -866,7 +867,7 @@ class PrivateCellApiAdapter:
             )
         except (KeyError, TypeError, ValueError) as error:
             raise MetadataConflict("private cell health response is incomplete") from error
-        if observation.contract_digest != config.contract_digest:
+        if observation.contract_digest != (expected_contract_digest or config.contract_digest):
             raise MetadataConflict("private cell contract digest differs")
         return observation
 

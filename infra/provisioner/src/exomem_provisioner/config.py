@@ -278,6 +278,17 @@ class DeploymentLock(BaseModel):
     def authoritative_legacy_release_set_sha256(self) -> str:
         return self.composition.authoritativeLegacyReleaseSetSha256
 
+    def matches_runtime_request(self, request: dict[str, object], *, wire_protocol: str) -> bool:
+        from .wire_protocol import WIRE_PROTOCOL_V2, runtime_identity
+
+        try:
+            target = runtime_identity(request)
+        except (KeyError, ValueError):
+            return False
+        if wire_protocol == WIRE_PROTOCOL_V2:
+            return target == self.runtime_target.model_dump(mode="json")
+        return (target["releaseVersion"], target["protocolVersion"]) in self.legacy_catalog
+
 
 def load_deployment_lock(path: str | Path) -> DeploymentLock:
     """Load one strict selected deployment-lock member, never a pair."""

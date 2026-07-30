@@ -113,6 +113,14 @@ def test_selected_deployment_lock_is_strict_and_exposes_admission_inputs(tmp_pat
     assert lock.legacy_catalog == frozenset({("0.22.0", "exomem-hosted.v1")})
     assert lock.authoritative_legacy_release_set_sha256 == "f" * 64
     assert _settings(deployment_lock_path=str(path)).deployment_lock == lock
+    assert lock.matches_runtime_request(
+        {"releaseVersion": "0.22.0", "protocolVersion": "exomem-hosted.v1"},
+        wire_protocol="exomem-cell-provisioner.v1",
+    )
+    assert not lock.matches_runtime_request(
+        {"releaseVersion": "0.22.1", "protocolVersion": "exomem-hosted.v1"},
+        wire_protocol="exomem-cell-provisioner.v1",
+    )
 
     path.write_text(json.dumps({"artifact": "exomem-hosted-deployment-lock-pair", "schemaVersion": 2, "locks": []}), encoding="utf-8")
     with pytest.raises(ValueError):
