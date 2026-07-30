@@ -8,6 +8,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
 
 from .models import ResourceKind
+from .wire_protocol import runtime_identity
 
 
 @dataclass(frozen=True, slots=True)
@@ -160,12 +161,11 @@ class FakeDriver:
                 "privateEndpoint": f"https://{cell_id}.cells.internal",
             }
         if action == "health":
-            return {
+            identity = runtime_identity(request)
+            result = {
                 "live": True,
                 "ready": True,
                 "cellId": cell_id,
-                "protocolVersion": request["protocolVersion"],
-                "releaseVersion": request["releaseVersion"],
                 "serviceAuthenticated": True,
                 "mutationAuthority": True,
                 "readAdmission": True,
@@ -173,6 +173,11 @@ class FakeDriver:
                 "workerPolicy": request["workerPolicy"],
                 "code": "CELL_READY",
             }
+            if "runtimeTarget" in request:
+                result["runtimeIdentity"] = identity
+            else:
+                result.update(identity)
+            return result
         if action == "rotate-credential":
             return {"previousCredentialRejected": request.get("phase") == "finalize"}
         if action == "export":
