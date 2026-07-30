@@ -183,6 +183,7 @@ def test_hosted_provisioner_publish_workflow_is_source_bound_and_smoke_verified(
     assert "workflow_dispatch" in triggers
     job = parsed["jobs"]["publish"]
     assert job["permissions"] == {
+        "attestations": "write",
         "contents": "read",
         "id-token": "write",
         "packages": "write",
@@ -196,10 +197,17 @@ def test_hosted_provisioner_publish_workflow_is_source_bound_and_smoke_verified(
     assert "steps.build.outputs.digest" in workflow
     assert "infra/scripts/verify_provisioner_image.py" in workflow
     assert "--require-published" in workflow
-    assert "infra/scripts/verify_hosted_release.py" in workflow
-    assert "--fetch-substrate-fixture" in workflow
-    assert "--probe-image" in workflow
-    assert "substrate-gateway-contract-selection-v1.json" in workflow
+    assert "infra/scripts/hosted_image_candidate.py record" in workflow
+    assert "infra/scripts/hosted_image_candidate.py verify" in workflow
+    assert workflow.count(
+        "actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d"
+    ) == 2
+    assert "push-to-registry: true" in workflow
+    assert workflow.count("create-storage-record: false") == 2
+    assert "--candidate-bundle" in workflow
+    assert "infra/scripts/verify_hosted_release.py" not in workflow
+    assert "--fetch-substrate-fixture" not in workflow
+    assert "substrate-gateway-contract-selection-v1.json" not in workflow
     for action_line in (
         line.strip() for line in workflow.splitlines() if line.strip().startswith("- uses:")
     ):
