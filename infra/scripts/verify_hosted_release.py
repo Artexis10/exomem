@@ -7,11 +7,13 @@ import argparse
 import base64
 import copy
 import hashlib
+import importlib.util
 import json
 import os
 import re
 import secrets
 import subprocess
+import sys
 import tempfile
 import time
 import urllib.error
@@ -598,6 +600,91 @@ def _load(path: Path) -> dict[str, Any]:
     return _decode_object(_load_bytes(path, label=str(path)), label=str(path))
 
 
+def _load_script(name: str) -> Any:
+    path = Path(__file__).with_name(name)
+    spec = importlib.util.spec_from_file_location(path.stem, path)
+    if spec is None or spec.loader is None:
+        raise ValueError(f"{name} is unavailable")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _candidate_matches_lock(candidate: dict[str, Any], component: dict[str, Any], *, kind: str, release: str | None) -> None:
+    if candidate.get("kind") != kind:
+        raise ValueError("discovered candidate kind differs from the deployment lock")
+    image = candidate.get("image")
+    source = candidate.get("source")
+    if not isinstance(image, dict) or not isinstance(source, dict):
+        raise ValueError("discovered candidate identity is invalid")
+    if image.get("reference") != component.get("image") or source.get("commit") != component.get("sourceCommit"):
+        raise ValueError("discovered candidate identity differs from the deployment lock")
+    if release is not None:
+        candidate_release = candidate.get("release")
+        if not isinstance(candidate_release, dict) or candidate_release.get("tag") != f"v{release}":
+            raise ValueError("runtime candidate release differs from the deployment lock")
+
+
+def _one_candidate(paths: list[Path], expected_sha256: str, loader: Any) -> Path:
+    matches = [path for path in paths if hashlib.sha256(path.read_bytes()).hexdigest() == expected_sha256]
+    if len(matches) != 1:
+        raise ValueError("candidate discovery did not yield exactly one locked candidate")
+    loader.load_candidate(matches[0])
+    return matches[0]
+
+
+def verify_selected_deployment_lock(
+    *, lock_pair: Path, phase: str, member_sha256: str, repository: Path, oras_binary: str = "oras", gh_binary: str = "gh"
+) -> dict[str, Any]:
+    """Reverify a selected member plus its candidate attestations and source closures."""
+
+    prepare = _load_script("prepare_hosted_release.py")
+    composer = _load_script("hosted_composition_lock.py")
+    candidate_tool = _load_script("hosted_image_candidate.py")
+    selected, selected_sha256 = prepare._select_member(
+        prepare._load_pair(lock_pair), phase=phase, member_sha256=member_sha256
+    )
+    if selected_sha256 != member_sha256:
+        raise ValueError("selected deployment lock SHA-256 drift")
+    components = selected["components"]
+    target = selected["runtimeTarget"]
+    closure = selected["composition"]["sourceClosure"]
+    composer.verify_source_closure(repository, components["runtime"]["sourceCommit"], selected["composition"]["commit"], tuple(closure["runtime"]["paths"]))
+    composer.verify_source_closure(repository, components["provisioner"]["sourceCommit"], selected["composition"]["commit"], tuple(closure["provisioner"]["paths"]))
+    with tempfile.TemporaryDirectory(prefix="exomem-lock-proof-") as directory:
+        root = Path(directory)
+        runtime_dir = root / "runtime"
+        runtime_dir.mkdir(mode=0o700)
+        tag = f"v{target['releaseVersion']}"
+        _run([gh_binary, "release", "download", tag, "--repo", "Artexis10/exomem", "--dir", os.fspath(runtime_dir), "--pattern", "*.candidate-v1.json", "--pattern", "*.sigstore.json"])
+        runtime_candidate = _one_candidate(list(runtime_dir.glob("*.candidate-v1.json")), components["runtime"]["candidateSha256"], candidate_tool)
+        _candidate_matches_lock(candidate_tool.load_candidate(runtime_candidate), components["runtime"], kind="runtime", release=target["releaseVersion"])
+        runtime_stem = runtime_candidate.name.removesuffix(".candidate-v1.json")
+        candidate_tool.verify_candidate(runtime_candidate, bundle=runtime_dir / f"{runtime_stem}.sigstore.json", candidate_bundle=runtime_dir / f"{runtime_stem}.candidate.sigstore.json", gh_binary=gh_binary)
+        provisioner_dir = root / "provisioner"
+        provisioner_dir.mkdir(mode=0o700)
+        image = components["provisioner"]["image"]
+        repository_name = image.split("@", 1)[0]
+        discovered = json.loads(_run([oras_binary, "discover", "--artifact-type", "application/vnd.exomem.hosted-image-candidate.v1+json", image, "--format", "json"]).stdout)
+        manifests = discovered.get("manifests") if isinstance(discovered, dict) else None
+        if not isinstance(manifests, list) or not manifests:
+            raise ValueError("provisioner candidate attachment discovery returned no manifests")
+        candidate_paths: list[Path] = []
+        for index, manifest in enumerate(manifests):
+            digest = manifest.get("digest") if isinstance(manifest, dict) else None
+            if not isinstance(digest, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
+                raise ValueError("provisioner candidate attachment digest is invalid")
+            destination = provisioner_dir / str(index)
+            destination.mkdir(mode=0o700)
+            _run([oras_binary, "pull", f"{repository_name}@{digest}", "--output", os.fspath(destination)])
+            candidate_paths.extend(destination.glob("*.candidate-v1.json"))
+        provisioner_candidate = _one_candidate(candidate_paths, components["provisioner"]["candidateSha256"], candidate_tool)
+        _candidate_matches_lock(candidate_tool.load_candidate(provisioner_candidate), components["provisioner"], kind="provisioner", release=None)
+        candidate_tool.verify_candidate(provisioner_candidate, bundle_from_oci=True, candidate_bundle=provisioner_candidate.with_name(provisioner_candidate.name.removesuffix(".candidate-v1.json") + ".candidate.sigstore.json"), gh_binary=gh_binary)
+    return selected
+
+
 def fetch_selected_gateway_fixture(
     release: dict[str, Any],
     selection: dict[str, Any],
@@ -628,14 +715,36 @@ def fetch_selected_gateway_fixture(
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--manifest", type=Path, required=True)
-    parser.add_argument("--runtime-gate", type=Path, required=True)
-    parser.add_argument("--substrate-selection", type=Path, required=True)
-    fixture_source = parser.add_mutually_exclusive_group(required=True)
+    parser.add_argument("--deployment-lock-pair", type=Path)
+    parser.add_argument("--phase", choices=("expand", "contract"))
+    parser.add_argument("--member-sha256")
+    parser.add_argument("--repository", type=Path)
+    parser.add_argument("--oras-binary", default="oras")
+    parser.add_argument("--manifest", type=Path)
+    parser.add_argument("--runtime-gate", type=Path)
+    parser.add_argument("--substrate-selection", type=Path)
+    fixture_source = parser.add_mutually_exclusive_group(required=False)
     fixture_source.add_argument("--substrate-fixture", type=Path)
     fixture_source.add_argument("--fetch-substrate-fixture", action="store_true")
     parser.add_argument("--probe-image", action="store_true")
     args = parser.parse_args(argv)
+
+    if args.deployment_lock_pair is not None:
+        if any(value is None for value in (args.phase, args.member_sha256, args.repository)):
+            parser.error("--deployment-lock-pair requires --phase, --member-sha256, and --repository")
+        verify_selected_deployment_lock(
+            lock_pair=args.deployment_lock_pair,
+            phase=args.phase,
+            member_sha256=args.member_sha256,
+            repository=args.repository,
+            oras_binary=args.oras_binary,
+        )
+        print("hosted deployment lock verified")
+        return 0
+    if any(value is None for value in (args.manifest, args.runtime_gate, args.substrate_selection)) or not (
+        args.substrate_fixture or args.fetch_substrate_fixture
+    ):
+        parser.error("v1 release proof requires manifest, gate, selection, and one fixture source")
 
     release = _load(args.manifest)
     gate = _load(args.runtime_gate)
