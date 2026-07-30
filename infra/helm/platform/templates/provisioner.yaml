@@ -1,4 +1,7 @@
-{{- $releaseJson := include "exomem.hostedReleaseJson" . -}}
+{{- $lockJson := include "exomem.hostedDeploymentLockJson" . -}}
+{{- $lock := $lockJson | mustFromJson -}}
+{{- $provisionerImage := include "exomem.hostedProvisionerImage" . -}}
+{{- $lockName := include "exomem.hostedDeploymentLockName" . -}}
 {{- $capacityContractRaw := .Files.Get "files/private-alpha-capacity-v1.json" -}}
 {{- if ne .Values.capacityCollector.contractSha256 ($capacityContractRaw | sha256sum) -}}
 {{- fail "provisioner capacity contract SHA-256 mismatch" -}}
@@ -68,7 +71,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: api
-          image: {{ .Values.provisioner.image }}
+          image: {{ $provisionerImage }}
           imagePullPolicy: IfNotPresent
           command: ["exomem-provisioner-api"]
           env:
@@ -158,7 +161,7 @@ spec:
         app.kubernetes.io/name: exomem-provisioner-worker
         app.kubernetes.io/part-of: exomem-hosted
       annotations:
-        exomem.io/release-manifest-sha256: {{ $releaseJson | sha256sum | quote }}
+        exomem.io/deployment-lock-sha256: {{ $lockJson | sha256sum | quote }}
     spec:
       serviceAccountName: exomem-cell-provisioner
       automountServiceAccountToken: true
@@ -167,7 +170,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: worker
-          image: {{ .Values.provisioner.image }}
+          image: {{ $provisionerImage }}
           imagePullPolicy: IfNotPresent
           command: ["exomem-provisioner-worker"]
           env:
@@ -202,8 +205,14 @@ spec:
               value: {{ .Values.provisioner.databaseRole | quote }}
             - name: EXOMEM_PROVISIONER_TRUSTED_PROXY_IPS
               value: {{ .Values.provisioner.trustedProxyIps | quote }}
-            - name: EXOMEM_PROVISIONER_RELEASE_MANIFEST_PATH
-              value: /etc/exomem/release/exomem-hosted-release-v1.json
+            - name: EXOMEM_PROVISIONER_DEPLOYMENT_LOCK_PATH
+              value: /etc/exomem/deployment-lock/exomem-hosted-deployment-lock-v2.json
+            - name: EXOMEM_PROVISIONER_DEPLOYMENT_LOCK_SHA256
+              value: {{ $lockJson | sha256sum | quote }}
+            - name: EXOMEM_PROVISIONER_ADMISSION_MODE
+              value: {{ $lock.admissionMode | quote }}
+            - name: EXOMEM_PROVISIONER_RUNTIME_TARGET_JSON
+              value: {{ $lock.runtimeTarget | toJson | quote }}
             - name: EXOMEM_PROVISIONER_CELL_CHART_PATH
               value: {{ .Values.provisioner.cellChartPath | quote }}
             - name: EXOMEM_PROVISIONER_CELL_CHART_VERSION
@@ -264,8 +273,8 @@ spec:
           volumeMounts:
             - name: temporary
               mountPath: /tmp
-            - name: hosted-release
-              mountPath: /etc/exomem/release
+            - name: deployment-lock
+              mountPath: /etc/exomem/deployment-lock
               readOnly: true
             - name: capacity-contract
               mountPath: /etc/exomem/capacity
@@ -274,12 +283,12 @@ spec:
         - name: temporary
           emptyDir:
             sizeLimit: 64Mi
-        - name: hosted-release
+        - name: deployment-lock
           configMap:
-            name: exomem-hosted-release-v1
+            name: {{ $lockName }}
             items:
-              - key: exomem-hosted-release-v1.json
-                path: exomem-hosted-release-v1.json
+              - key: exomem-hosted-deployment-lock-v2.json
+                path: exomem-hosted-deployment-lock-v2.json
         - name: capacity-contract
           configMap:
             name: exomem-capacity-contract

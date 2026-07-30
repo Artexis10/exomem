@@ -339,6 +339,20 @@ def test_live_contract_probe_uses_the_selected_hosted_protocol(
     assert observed == {"protocol": "2"}
 
 
+def test_runtime_tree_reclaim_has_a_windows_safe_owner_fallback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    verifier = _verifier_module()
+    commands: list[list[str]] = []
+    monkeypatch.delattr(verifier.os, "getuid", raising=False)
+    monkeypatch.delattr(verifier.os, "getgid", raising=False)
+    monkeypatch.setattr(verifier, "_run", lambda command: commands.append(command))
+
+    verifier._reclaim_runtime_tree("example@sha256:" + "a" * 64, tmp_path)
+
+    assert "chown -R 0:0 /work" in commands[0][-1]
+
+
 @pytest.mark.skipif(
     os.environ.get("RUN_HOSTED_RELEASE_IMAGE_TEST") != "1",
     reason="set RUN_HOSTED_RELEASE_IMAGE_TEST=1 for the published-image route drill",

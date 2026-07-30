@@ -5,7 +5,8 @@ cloudflared:
   tokenSecretKey: token
 
 provisioner:
-  image: ""
+  deploymentLockJson: ""
+  deploymentLockSha256: ""
   replicas: 1
   databaseSchema: exomem_provisioner
   databaseRole: exomem_provisioner_runtime
@@ -17,7 +18,6 @@ provisioner:
   controlHostname: ""
   transferHostname: ""
   browserOrigin: https://substratesystems.io
-  releaseManifestJson: ""
   location: fsn1
   internalOrigin: http://{resource}.{namespace}.svc.cluster.local:8765
   pollSeconds: "1"

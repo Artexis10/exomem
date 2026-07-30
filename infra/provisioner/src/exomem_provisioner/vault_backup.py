@@ -23,6 +23,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from .config import DeploymentLock, load_deployment_lock
 from .crypto import AesGcmEnvelopeCodec
 from .database import ProvisionerDatabase
 from .durability import (
@@ -127,7 +128,7 @@ class VaultBackupSettings(BaseSettings):
     recovery_bucket: str = Field(pattern=r"^[a-z0-9-]{6,63}$")
     recovery_upload_key_id: SecretStr = Field(min_length=1, max_length=4096)
     recovery_upload_key: SecretStr = Field(min_length=1, max_length=4096)
-    release_manifest_path: Path = Field(validation_alias="EXOMEM_PROVISIONER_RELEASE_MANIFEST_PATH")
+    deployment_lock_path: Path = Field(validation_alias="EXOMEM_PROVISIONER_DEPLOYMENT_LOCK_PATH")
     max_concurrency: int = Field(default=4, ge=1, le=32)
     scratch_root: Path
     worker_id: str = Field(
@@ -150,12 +151,16 @@ class VaultBackupSettings(BaseSettings):
             raise ValueError("B2 endpoint must be an HTTPS origin")
         return value.rstrip("/")
 
-    @field_validator("release_manifest_path", "scratch_root")
+    @field_validator("deployment_lock_path", "scratch_root")
     @classmethod
     def require_absolute_paths(cls, value: Path) -> Path:
         if not value.is_absolute():
             raise ValueError("vault backup paths must be absolute")
         return value
+
+    @property
+    def deployment_lock(self) -> DeploymentLock:
+        return load_deployment_lock(self.deployment_lock_path)
 
     @model_validator(mode="after")
     def require_exact_trust_root(self) -> VaultBackupSettings:
@@ -637,9 +642,7 @@ class HttpPortableRuntimePort:
 async def run_live_vault_backup(settings: VaultBackupSettings) -> None:
     from kubernetes import client, config
 
-    from .config import load_hosted_release_manifest
-
-    release = load_hosted_release_manifest(settings.release_manifest_path)
+    target = settings.deployment_lock.runtime_target
     database = ProvisionerDatabase(settings)
     api_client: Any | None = None
     try:
@@ -705,8 +708,8 @@ async def run_live_vault_backup(settings: VaultBackupSettings) -> None:
                     custom_objects=custom_objects,
                     identity_verifier=verifier,
                     registry=registry,
-                    protocol_version=release.hostedProtocol,
-                    release_version=release.release,
+                    protocol_version=target.protocolVersion,
+                    release_version=target.releaseVersion,
                 ),
                 workflow=workflow,
                 worker_id=settings.worker_id,

@@ -29,8 +29,10 @@ from .models import (
     Resource,
     ResourceKind,
     TenantFence,
+    WireProtocol,
 )
 from .provider_identity import cell_resource_name
+from .wire_protocol import WIRE_PROTOCOL_V1, WIRE_PROTOCOL_V2
 
 
 class RepositoryConflict(RuntimeError):
@@ -38,6 +40,10 @@ class RepositoryConflict(RuntimeError):
 
 
 class IdempotencyConflict(RepositoryConflict):
+    pass
+
+
+class AdmissionRejected(RepositoryConflict):
     pass
 
 
@@ -51,6 +57,42 @@ class ImmutableMetadataConflict(RepositoryConflict):
 
 class ClaimConflict(RepositoryConflict):
     pass
+
+
+@dataclass(frozen=True, slots=True)
+class AdmissionPolicy:
+    """Immutable deployment admission inputs supplied by the selected lock."""
+
+    mode: str
+    legacy_catalog: frozenset[tuple[str, str]]
+    forward_target: dict[str, str]
+
+
+def _admit_submission(
+    *,
+    policy: AdmissionPolicy | None,
+    wire_protocol: str,
+    request: dict[str, Any],
+    existing: Operation | None,
+) -> None:
+    if wire_protocol not in {WIRE_PROTOCOL_V1, WIRE_PROTOCOL_V2}:
+        raise AdmissionRejected("unsupported wire protocol")
+    if policy is None:
+        return
+    if policy.mode not in {"expand", "contract"}:
+        raise AdmissionRejected("invalid admission mode")
+    if wire_protocol == WIRE_PROTOCOL_V1:
+        if existing is None and policy.mode == "contract":
+            raise AdmissionRejected("fresh v1 is not admitted in contract mode")
+        if "releaseVersion" not in request or "protocolVersion" not in request:
+            return
+        identity = (str(request["releaseVersion"]), str(request["protocolVersion"]))
+        if existing is None or existing.state is not OperationState.FINAL:
+            if identity not in policy.legacy_catalog:
+                raise AdmissionRejected("legacy runtime is not cataloged")
+        return
+    if "runtimeTarget" in request and request["runtimeTarget"] != policy.forward_target:
+        raise AdmissionRejected("runtime target does not match deployment lock")
 
 
 def canonical_request_bytes(request: dict[str, Any]) -> bytes:
@@ -169,6 +211,7 @@ class OperationSnapshot:
     id: str
     action: OperationAction
     idempotency_key: str
+    wire_protocol: str
     canonical_request_sha256: str
     tenant_id: str
     cell_id: str | None
@@ -201,6 +244,7 @@ def _operation_snapshot(operation: Operation) -> OperationSnapshot:
         id=operation.id,
         action=operation.action,
         idempotency_key=operation.idempotency_key,
+        wire_protocol=str(operation.wire_protocol),
         canonical_request_sha256=operation.canonical_request_sha256,
         tenant_id=operation.tenant_id,
         cell_id=operation.cell_id,
@@ -531,6 +575,9 @@ class OperationRepository:
         idempotency_key: str,
         request: dict[str, Any],
         *,
+        wire_protocol: str = WIRE_PROTOCOL_V1,
+        admission: AdmissionPolicy | None = None,
+        fresh_rejection: str | None = None,
         retry_after_seconds: int = 2,
     ) -> OperationSnapshot:
         action_value = OperationAction(action)
@@ -554,10 +601,20 @@ class OperationRepository:
                         )
                         .with_for_update()
                     )
+                    if existing is not None and str(existing.wire_protocol) != wire_protocol:
+                        raise IdempotencyConflict("idempotency key is bound to another wire protocol")
                     if existing is not None and existing.canonical_request_sha256 != digest:
                         raise IdempotencyConflict("idempotency key is bound to another request")
                     if fence is not None and fence_generation < fence.fence_generation:
                         raise StaleFence("request fence is older than durable tenant state")
+                    if existing is None and fresh_rejection is not None:
+                        raise AdmissionRejected(fresh_rejection)
+                    _admit_submission(
+                        policy=admission,
+                        wire_protocol=wire_protocol,
+                        request=request,
+                        existing=existing,
+                    )
                     if existing is not None:
                         return _operation_snapshot(existing)
                     if fence is None:
@@ -572,6 +629,7 @@ class OperationRepository:
                     operation = Operation(
                         action=action_value,
                         idempotency_key=idempotency_key,
+                        wire_protocol=WireProtocol(wire_protocol),
                         canonical_request_sha256=digest,
                         tenant_id=tenant_id,
                         cell_id=(

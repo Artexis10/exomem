@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import ipaddress
 import json
 import os
@@ -26,6 +27,11 @@ _RELEASE_MANIFEST_FILENAME = "exomem-hosted-release-v1.json"
 _CAPACITY_CONTRACT_FILENAME = "private-alpha-capacity-v1.json"
 _RELEASE_MANIFEST_MAX_BYTES = 1_048_576
 _RELEASE_BUILD_TIME = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?Z$")
+_DEPLOYMENT_LOCK_MAX_BYTES = 1_048_576
+_SHA256 = r"^[0-9a-f]{64}$"
+_COMMIT = r"^[0-9a-f]{40}$"
+_RUNTIME_IMAGE = r"^ghcr\.io/artexis10/exomem@sha256:[0-9a-f]{64}$"
+_PROVISIONER_IMAGE = r"^ghcr\.io/artexis10/exomem-provisioner@sha256:[0-9a-f]{64}$"
 
 
 def _is_trusted_proxy_network(network: ipaddress.IPv4Network | ipaddress.IPv6Network) -> bool:
@@ -104,6 +110,12 @@ def _reject_duplicate_json_keys(pairs: list[tuple[str, object]]) -> dict[str, ob
     return value
 
 
+def _canonical_json_sha256(value: object) -> str:
+    return hashlib.sha256(
+        (json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False) + "\n").encode("utf-8")
+    ).hexdigest()
+
+
 def load_hosted_release_manifest(path: str | Path) -> HostedReleaseManifest:
     """Load a bounded, duplicate-free, exact hosted release manifest."""
 
@@ -120,6 +132,186 @@ def load_hosted_release_manifest(path: str | Path) -> HostedReleaseManifest:
     if not isinstance(value, dict):
         raise ValueError("hosted release manifest must be one JSON object")
     return HostedReleaseManifest.model_validate(value)
+
+
+class DeploymentRuntimeTarget(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+
+    releaseVersion: str = Field(min_length=1)
+    protocolVersion: str = Field(min_length=1)
+    agentProfile: str = Field(min_length=1)
+    gatewayContractDigest: str = Field(pattern=_SHA256)
+    commandFingerprint: str = Field(pattern=_SHA256)
+    schemaDigest: str = Field(pattern=_SHA256)
+
+
+class DeploymentRuntimeComponent(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+
+    image: str = Field(pattern=_RUNTIME_IMAGE)
+    sourceCommit: str = Field(pattern=_COMMIT)
+    candidateSha256: str = Field(pattern=_SHA256)
+
+
+class DeploymentProvisionerComponent(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+
+    image: str = Field(pattern=_PROVISIONER_IMAGE)
+    sourceCommit: str = Field(pattern=_COMMIT)
+    candidateSha256: str = Field(pattern=_SHA256)
+    wireProtocol: Literal["exomem-cell-provisioner.v2"]
+
+
+class DeploymentComponents(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+
+    runtime: DeploymentRuntimeComponent
+    provisioner: DeploymentProvisionerComponent
+
+
+class DeploymentSourceClosure(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+
+    candidateCommit: str = Field(pattern=_COMMIT)
+    compositionCommit: str = Field(pattern=_COMMIT)
+    paths: tuple[str, ...] = Field(min_length=1, strict=False)
+
+
+class DeploymentSourceClosures(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+
+    runtime: DeploymentSourceClosure
+    provisioner: DeploymentSourceClosure
+
+
+class DeploymentLegacyContract(DeploymentRuntimeTarget):
+    runtimeImage: str = Field(pattern=_RUNTIME_IMAGE)
+    sourceCommit: str = Field(pattern=_COMMIT)
+
+
+class DeploymentLegacyUnit(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+
+    releaseVersion: str = Field(min_length=1)
+    protocolVersion: str = Field(min_length=1)
+    runtimeImage: str = Field(pattern=_RUNTIME_IMAGE)
+    sourceCommit: str = Field(pattern=_COMMIT)
+    contractSha256: str = Field(pattern=_SHA256)
+    contract: DeploymentLegacyContract
+
+    @model_validator(mode="after")
+    def validate_contract_identity(self) -> DeploymentLegacyUnit:
+        if (
+            self.contract.releaseVersion != self.releaseVersion
+            or self.contract.protocolVersion != self.protocolVersion
+            or self.contract.runtimeImage != self.runtimeImage
+            or self.contract.sourceCommit != self.sourceCommit
+        ):
+            raise ValueError("legacy runtime contract does not match catalog identity")
+        return self
+
+
+class DeploymentComposition(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+
+    commit: str = Field(pattern=_COMMIT)
+    sourceClosure: DeploymentSourceClosures
+    forwardContractSha256: str = Field(pattern=_SHA256)
+    authoritativeLegacyReleaseSetSha256: str = Field(pattern=_SHA256)
+    legacyCatalog: tuple[DeploymentLegacyUnit, ...] = Field(min_length=1, strict=False)
+    legacyReleaseSetSha256: str = Field(pattern=_SHA256)
+
+    @model_validator(mode="after")
+    def validate_unique_legacy_catalog(self) -> DeploymentComposition:
+        keys = [(unit.releaseVersion, unit.protocolVersion) for unit in self.legacyCatalog]
+        if keys != sorted(keys) or len(keys) != len(set(keys)):
+            raise ValueError("legacy runtime catalog is not canonical")
+        for unit in self.legacyCatalog:
+            if _canonical_json_sha256(unit.contract.model_dump(mode="json")) != unit.contractSha256:
+                raise ValueError("legacy runtime contract hash is invalid")
+        release_set = [
+            {"releaseVersion": release, "protocolVersion": protocol} for release, protocol in keys
+        ]
+        if _canonical_json_sha256(release_set) != self.legacyReleaseSetSha256:
+            raise ValueError("legacy runtime release set hash is invalid")
+        return self
+
+
+class DeploymentRollback(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+
+    provisionerImage: str = Field(pattern=_PROVISIONER_IMAGE)
+    provisionerSourceCommit: str = Field(pattern=_COMMIT)
+    v1CorpusSha256: str = Field(pattern=_SHA256)
+    legacyManifestSha256: str = Field(pattern=_SHA256)
+    substrateV1ConsumerCommit: str = Field(pattern=_COMMIT)
+
+
+class DeploymentLock(BaseModel):
+    """One selected, independently composed deployment-lock member."""
+
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+
+    artifact: Literal["exomem-hosted-deployment-lock"]
+    schemaVersion: Literal[2]
+    admissionMode: Literal["expand", "contract"]
+    components: DeploymentComponents
+    runtimeTarget: DeploymentRuntimeTarget
+    composition: DeploymentComposition
+    rollback: DeploymentRollback
+
+    @property
+    def admission_mode(self) -> Literal["expand", "contract"]:
+        return self.admissionMode
+
+    @property
+    def runtime_target(self) -> DeploymentRuntimeTarget:
+        return self.runtimeTarget
+
+    @property
+    def legacy_catalog(self) -> frozenset[tuple[str, str]]:
+        return frozenset(
+            (unit.releaseVersion, unit.protocolVersion) for unit in self.composition.legacyCatalog
+        )
+
+    @property
+    def authoritative_legacy_release_set_sha256(self) -> str:
+        return self.composition.authoritativeLegacyReleaseSetSha256
+
+    def matches_runtime_request(self, request: dict[str, object], *, wire_protocol: str) -> bool:
+        from .wire_protocol import WIRE_PROTOCOL_V2, runtime_identity
+
+        try:
+            target = runtime_identity(request)
+        except (KeyError, ValueError):
+            return False
+        if wire_protocol == WIRE_PROTOCOL_V2:
+            return target == self.runtime_target.model_dump(mode="json")
+        return (target["releaseVersion"], target["protocolVersion"]) in self.legacy_catalog
+
+
+def load_deployment_lock(path: str | Path) -> DeploymentLock:
+    """Load one strict selected deployment-lock member, never a pair."""
+
+    lock_path = Path(path)
+    try:
+        size = lock_path.stat().st_size
+        raw = lock_path.read_bytes()
+    except OSError as error:
+        raise ValueError("deployment lock is unavailable") from error
+    if not 1 <= size <= _DEPLOYMENT_LOCK_MAX_BYTES:
+        raise ValueError("deployment lock has an invalid size")
+    try:
+        decoded = raw.decode("utf-8")
+        value = json.loads(decoded, object_pairs_hook=_reject_duplicate_json_keys)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError("deployment lock is not strict UTF-8 JSON") from error
+    if not isinstance(value, dict):
+        raise ValueError("deployment lock must be one JSON object")
+    try:
+        return DeploymentLock.model_validate(value)
+    except ValueError as error:
+        raise ValueError("deployment lock is invalid") from error
 
 
 class ProvisionerSettings(BaseSettings):
@@ -139,6 +331,7 @@ class ProvisionerSettings(BaseSettings):
     database_role: str = Field(min_length=3, max_length=63)
     trusted_proxy_ips: str = Field(min_length=1, max_length=1024)
     protocol: Literal["exomem-cell-provisioner.v1"] = PROVISIONER_PROTOCOL
+    deployment_lock_path: str | None = Field(default=None, min_length=1, max_length=4096)
     request_max_bytes: int = Field(default=65_536, ge=1024, le=1_048_576)
     response_max_bytes: int = Field(default=1_048_576, ge=1024, le=1_048_576)
     claim_seconds: int = Field(default=30, ge=5, le=300)
@@ -198,6 +391,19 @@ class ProvisionerSettings(BaseSettings):
                 seen.add(canonical)
         return ",".join(normalized)
 
+    @field_validator("deployment_lock_path")
+    @classmethod
+    def validate_deployment_lock_path(cls, value: str | None) -> str | None:
+        if value is not None and not Path(value).is_absolute():
+            raise ValueError("deployment lock path must be absolute")
+        return value
+
+    @property
+    def deployment_lock(self) -> DeploymentLock | None:
+        if self.deployment_lock_path is None:
+            return None
+        return load_deployment_lock(self.deployment_lock_path)
+
     @model_validator(mode="after")
     def validate_independent_secrets(self) -> ProvisionerSettings:
         if secrets_equal(self.bearer, self.envelope_key):
@@ -220,7 +426,7 @@ class ProviderWorkerSettings(BaseSettings):
         populate_by_name=True,
     )
 
-    release_manifest_path: str = Field(min_length=1, max_length=4096)
+    deployment_lock_path: str = Field(min_length=1, max_length=4096)
     cell_chart_path: str = Field(min_length=1, max_length=4096)
     cell_chart_version: str = Field(min_length=1, max_length=64)
     helm_binary: str = Field(min_length=1, max_length=4096)
@@ -256,13 +462,17 @@ class ProviderWorkerSettings(BaseSettings):
     )
     hcloud_server_id: int = Field(gt=0)
 
-    @field_validator("release_manifest_path")
+    @field_validator("deployment_lock_path")
     @classmethod
-    def validate_release_manifest_path(cls, value: str) -> str:
+    def validate_deployment_lock_path(cls, value: str) -> str:
         path = Path(value)
-        if not path.is_absolute() or path.name != _RELEASE_MANIFEST_FILENAME:
-            raise ValueError("release manifest path must be absolute and use the v1 filename")
+        if not path.is_absolute():
+            raise ValueError("deployment lock path must be absolute")
         return value
+
+    @property
+    def deployment_lock(self) -> DeploymentLock:
+        return load_deployment_lock(self.deployment_lock_path)
 
     @field_validator("capacity_contract_path")
     @classmethod

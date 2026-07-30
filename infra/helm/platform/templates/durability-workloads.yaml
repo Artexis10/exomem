@@ -1,4 +1,5 @@
-{{- $releaseJson := include "exomem.hostedReleaseJson" . -}}
+{{- $provisionerImage := include "exomem.hostedProvisionerImage" . -}}
+{{- $lockName := include "exomem.hostedDeploymentLockName" . -}}
 {{- $workloadsRaw := .Files.Get "files/durability-workloads-v1.json" -}}
 {{- $storageRaw := .Files.Get "files/durability-storage-v1.json" -}}
 {{- if ne .Values.durability.contractSha256 ($workloadsRaw | sha256sum) -}}
@@ -320,7 +321,7 @@ spec:
             seccompProfile: {type: RuntimeDefault}
           containers:
             - name: durability-actions
-              image: {{ .Values.provisioner.image }}
+              image: {{ $provisionerImage }}
               imagePullPolicy: IfNotPresent
               command: {{ $actions.command | toJson }}
               env:
@@ -381,10 +382,10 @@ spec:
                 - name: EXOMEM_DURABILITY_USER_EXPORT_DELIVERY_KEY
                   valueFrom:
                     secretKeyRef: {name: exomem-user-export-delivery-key, key: application-key}
-                - name: EXOMEM_PROVISIONER_RELEASE_MANIFEST_PATH
-                  value: /etc/exomem/release/exomem-hosted-release-v1.json
+                - name: EXOMEM_PROVISIONER_DEPLOYMENT_LOCK_PATH
+                  value: /etc/exomem/deployment-lock/exomem-hosted-deployment-lock-v2.json
                 - name: EXOMEM_DURABILITY_PROVISIONER_IMAGE
-                  value: {{ .Values.provisioner.image | quote }}
+                  value: {{ $provisionerImage | quote }}
                 - name: EXOMEM_PROVISIONER_CELL_CHART_PATH
                   value: {{ .Values.provisioner.cellChartPath | quote }}
                 - name: EXOMEM_PROVISIONER_CELL_CHART_VERSION
@@ -423,17 +424,17 @@ spec:
               volumeMounts:
                 - {name: scratch, mountPath: /var/lib/exomem-scratch}
                 - {name: temporary, mountPath: /tmp}
-                - {name: hosted-release, mountPath: /etc/exomem/release, readOnly: true}
+                - {name: deployment-lock, mountPath: /etc/exomem/deployment-lock, readOnly: true}
           volumes:
             - name: scratch
               emptyDir: {sizeLimit: {{ $actions.scratchSize | quote }}}
             - name: temporary
               emptyDir: {sizeLimit: 64Mi}
-            - name: hosted-release
+            - name: deployment-lock
               configMap:
-                name: exomem-hosted-release-v1
+                name: {{ $lockName }}
                 items:
-                  - {key: exomem-hosted-release-v1.json, path: exomem-hosted-release-v1.json}
+                  - {key: exomem-hosted-deployment-lock-v2.json, path: exomem-hosted-deployment-lock-v2.json}
 ---
 apiVersion: batch/v1
 kind: CronJob
@@ -471,7 +472,7 @@ spec:
             seccompProfile: {type: RuntimeDefault}
           containers:
             - name: export-gc
-              image: {{ .Values.provisioner.image }}
+              image: {{ $provisionerImage }}
               imagePullPolicy: IfNotPresent
               command: {{ $delivery.command | toJson }}
               env:
@@ -553,7 +554,7 @@ spec:
             seccompProfile: {type: RuntimeDefault}
           containers:
             - name: vault-backup
-              image: {{ .Values.provisioner.image }}
+              image: {{ $provisionerImage }}
               imagePullPolicy: IfNotPresent
               command: {{ $backup.command | toJson }}
               env:
@@ -587,8 +588,8 @@ spec:
                 - name: EXOMEM_DURABILITY_RECOVERY_UPLOAD_KEY
                   valueFrom:
                     secretKeyRef: {name: exomem-recovery-upload-key, key: application-key}
-                - name: EXOMEM_PROVISIONER_RELEASE_MANIFEST_PATH
-                  value: /etc/exomem/release/exomem-hosted-release-v1.json
+                - name: EXOMEM_PROVISIONER_DEPLOYMENT_LOCK_PATH
+                  value: /etc/exomem/deployment-lock/exomem-hosted-deployment-lock-v2.json
                 - name: EXOMEM_DURABILITY_MAX_CONCURRENCY
                   value: {{ $backup.maxConcurrency | quote }}
                 - name: EXOMEM_DURABILITY_WORKER_ID
@@ -609,17 +610,17 @@ spec:
               volumeMounts:
                 - {name: scratch, mountPath: /var/lib/exomem-scratch}
                 - {name: temporary, mountPath: /tmp}
-                - {name: hosted-release, mountPath: /etc/exomem/release, readOnly: true}
+                - {name: deployment-lock, mountPath: /etc/exomem/deployment-lock, readOnly: true}
           volumes:
             - name: scratch
               emptyDir: {sizeLimit: 6Gi}
             - name: temporary
               emptyDir: {sizeLimit: 64Mi}
-            - name: hosted-release
+            - name: deployment-lock
               configMap:
-                name: exomem-hosted-release-v1
+                name: {{ $lockName }}
                 items:
-                  - {key: exomem-hosted-release-v1.json, path: exomem-hosted-release-v1.json}
+                  - {key: exomem-hosted-deployment-lock-v2.json, path: exomem-hosted-deployment-lock-v2.json}
 ---
 apiVersion: batch/v1
 kind: CronJob
@@ -657,7 +658,7 @@ spec:
             seccompProfile: {type: RuntimeDefault}
           initContainers:
             - name: prepare-pg-files
-              image: {{ .Values.provisioner.image }}
+              image: {{ $provisionerImage }}
               imagePullPolicy: IfNotPresent
               command: ["/bin/sh", "-ec"]
               args:
@@ -678,7 +679,7 @@ spec:
                 - {name: pg-runtime, mountPath: /run/secrets/exomem/database-backup}
           containers:
             - name: database-backup
-              image: {{ .Values.provisioner.image }}
+              image: {{ $provisionerImage }}
               imagePullPolicy: IfNotPresent
               command: {{ $database.command | toJson }}
               env:
@@ -816,7 +817,7 @@ data:
             },
             "containers": [{
               "name": "deletion-worker",
-              "image": {{ .Values.provisioner.image | quote }},
+              "image": {{ $provisionerImage | quote }},
               "imagePullPolicy": "IfNotPresent",
               "command": {{ $deletion.command | toJson }},
               "terminationMessagePath": "/dev/termination-log",
@@ -836,6 +837,7 @@ data:
                 {"name": "EXOMEM_PROVISIONER_RECOVERY_DELETE_KEY", "valueFrom": {"secretKeyRef": {"name": "exomem-recovery-delete-key", "key": "application-key"}}},
                 {"name": "EXOMEM_PROVISIONER_USER_EXPORT_DELETE_KEY_ID", "valueFrom": {"secretKeyRef": {"name": "exomem-user-export-delete-key-id", "key": "application-key-id"}}},
                 {"name": "EXOMEM_PROVISIONER_USER_EXPORT_DELETE_KEY", "valueFrom": {"secretKeyRef": {"name": "exomem-user-export-delete-key", "key": "application-key"}}},
+                {"name": "EXOMEM_PROVISIONER_DEPLOYMENT_LOCK_PATH", "value": "/etc/exomem/deployment-lock/exomem-hosted-deployment-lock-v2.json"},
                 {"name": "EXOMEM_DELETION_BATCH_SIZE", "value": {{ $deletion.maxOperations | quote }}},
                 {"name": "EXOMEM_PROVISIONER_WORKER_ID", "valueFrom": {"fieldRef": {"fieldPath": "metadata.labels['batch.kubernetes.io/job-name']"}}},
                 {"name": "HOME", "value": "/tmp"}
@@ -848,9 +850,15 @@ data:
                 "runAsUser": 10001,
                 "capabilities": {"drop": ["ALL"]}
               },
-              "volumeMounts": [{"name": "temporary", "mountPath": "/tmp"}]
+              "volumeMounts": [
+                {"name": "temporary", "mountPath": "/tmp"},
+                {"name": "deployment-lock", "mountPath": "/etc/exomem/deployment-lock", "readOnly": true}
+              ]
             }],
-            "volumes": [{"name": "temporary", "emptyDir": {"sizeLimit": "64Mi"}}]
+            "volumes": [
+              {"name": "temporary", "emptyDir": {"sizeLimit": "64Mi"}},
+              {"name": "deployment-lock", "configMap": {"name": {{ $lockName | quote }}, "defaultMode": 292, "items": [{"key": "exomem-hosted-deployment-lock-v2.json", "path": "exomem-hosted-deployment-lock-v2.json"}]}}
+            ]
           }
         }
       }
@@ -892,7 +900,7 @@ spec:
             seccompProfile: {type: RuntimeDefault}
           containers:
             - name: deletion-dispatcher
-              image: {{ .Values.provisioner.image }}
+              image: {{ $provisionerImage }}
               imagePullPolicy: IfNotPresent
               command: {{ $dispatcher.command | toJson }}
               env:
@@ -957,7 +965,7 @@ spec:
         seccompProfile: {type: RuntimeDefault}
       containers:
         - name: volume-worker
-          image: {{ .Values.provisioner.image }}
+          image: {{ $provisionerImage }}
           imagePullPolicy: IfNotPresent
           command: {{ $volume.command | toJson }}
           env:

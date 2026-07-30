@@ -1834,6 +1834,189 @@ def test_exact_k3s_scopes_privileged_volume_and_deletion_mutations(k3s: str) -> 
         check=False,
     )
     assert higher_fence.returncode == 0, higher_fence.stderr
+
+
+def test_exact_k3s_deletion_dispatcher_accepts_defaulted_lock_job_and_rejects_other_modes(
+    k3s: str,
+) -> None:
+    namespace = "exomem-platform"
+    platform = _render(PLATFORM, PLATFORM / "values.validation.yaml", namespace)
+    dispatcher_policy = [
+        item
+        for item in platform
+        if item.get("metadata", {}).get("name") == "exomem-deletion-dispatcher-job-scope"
+        and item.get("kind")
+        in {"ValidatingAdmissionPolicy", "ValidatingAdmissionPolicyBinding"}
+    ]
+    assert len(dispatcher_policy) == 2
+    _kubectl(k3s, ["apply", "--filename=-"], documents=dispatcher_policy)
+    _wait_for_policy_typecheck(k3s, "exomem-deletion-dispatcher-job-scope")
+    _kubectl(
+        k3s,
+        ["apply", "--filename=-"],
+        documents=[
+            {"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": namespace}},
+            {
+                "apiVersion": "v1",
+                "kind": "ServiceAccount",
+                "metadata": {"name": "exomem-deletion-dispatcher", "namespace": namespace},
+            },
+            {
+                "apiVersion": "rbac.authorization.k8s.io/v1",
+                "kind": "Role",
+                "metadata": {"name": "deletion-dispatcher-create", "namespace": namespace},
+                "rules": [{"apiGroups": ["batch"], "resources": ["jobs"], "verbs": ["create"]}],
+            },
+            {
+                "apiVersion": "rbac.authorization.k8s.io/v1",
+                "kind": "RoleBinding",
+                "metadata": {"name": "deletion-dispatcher-create", "namespace": namespace},
+                "roleRef": {
+                    "apiGroup": "rbac.authorization.k8s.io",
+                    "kind": "Role",
+                    "name": "deletion-dispatcher-create",
+                },
+                "subjects": [
+                    {
+                        "kind": "ServiceAccount",
+                        "name": "exomem-deletion-dispatcher",
+                        "namespace": namespace,
+                    }
+                ],
+            },
+        ],
+    )
+    template = json.loads(
+        next(
+            item
+            for item in platform
+            if item.get("kind") == "ConfigMap"
+            and item.get("metadata", {}).get("name") == "exomem-deletion-job-template"
+        )["data"]["job-template.json"]
+    )
+
+    def job(name: str) -> dict[str, Any]:
+        candidate = copy.deepcopy(template)
+        candidate["metadata"].pop("generateName")
+        candidate["metadata"].update(
+            {
+                "name": name,
+                "namespace": namespace,
+                "annotations": {"exomem.io/deletion-operation-sha256": "a" * 64},
+            }
+        )
+        return candidate
+
+    dispatcher = "system:serviceaccount:exomem-platform:exomem-deletion-dispatcher"
+    rendered_job = job("exomem-deletion-1111111111111111")
+    accepted = _kubectl(
+        k3s,
+        [
+            "create",
+            "--dry-run=server",
+            "--output=json",
+            "--filename=-",
+            f"--as={dispatcher}",
+        ],
+        documents=[rendered_job],
+        check=False,
+    )
+    assert accepted.returncode == 0, accepted.stdout + accepted.stderr
+    assert json.loads(accepted.stdout)["spec"]["template"]["spec"]["volumes"][1][
+        "configMap"
+    ]["defaultMode"] == 0o444
+
+    omitted_mode = job("exomem-deletion-2222222222222222")
+    omitted_mode["spec"]["template"]["spec"]["volumes"][1]["configMap"].pop(
+        "defaultMode"
+    )
+    server_defaulted = _kubectl(
+        k3s,
+        [
+            "create",
+            "--dry-run=server",
+            "--output=json",
+            "--filename=-",
+            "--as=defaulting-admin",
+            "--as-group=system:masters",
+        ],
+        documents=[omitted_mode],
+        check=False,
+    )
+    assert server_defaulted.returncode == 0, server_defaulted.stdout + server_defaulted.stderr
+    assert json.loads(server_defaulted.stdout)["spec"]["template"]["spec"]["volumes"][1][
+        "configMap"
+    ]["defaultMode"] == 0o644
+
+    defaulted_denied = _kubectl(
+        k3s,
+        ["create", "--dry-run=server", "--filename=-", f"--as={dispatcher}"],
+        documents=[omitted_mode],
+        check=False,
+    )
+    assert defaulted_denied.returncode != 0
+    assert "bounded temporary volume and selected deployment lock" in defaulted_denied.stderr
+
+    wrong_mode = job("exomem-deletion-3333333333333333")
+    wrong_mode["spec"]["template"]["spec"]["volumes"][1]["configMap"]["defaultMode"] = 0o600
+    denied = _kubectl(
+        k3s,
+        ["create", "--dry-run=server", "--filename=-", f"--as={dispatcher}"],
+        documents=[wrong_mode],
+        check=False,
+    )
+    assert denied.returncode != 0
+    assert "bounded temporary volume and selected deployment lock" in denied.stderr
+
+    extra_resource = job("exomem-deletion-4444444444444444")
+    extra_resource["spec"]["template"]["spec"]["containers"][0]["resources"]["requests"][
+        "ephemeral-storage"
+    ] = "1Gi"
+    denied = _kubectl(
+        k3s,
+        ["create", "--dry-run=server", "--filename=-", f"--as={dispatcher}"],
+        documents=[extra_resource],
+        check=False,
+    )
+    assert denied.returncode != 0
+    assert "resources must match the reviewed bounded shape" in denied.stderr
+
+    item_mode = job("exomem-deletion-5555555555555555")
+    item_mode["spec"]["template"]["spec"]["volumes"][1]["configMap"]["items"][0][
+        "mode"
+    ] = 0o600
+    denied = _kubectl(
+        k3s,
+        ["create", "--dry-run=server", "--filename=-", f"--as={dispatcher}"],
+        documents=[item_mode],
+        check=False,
+    )
+    assert denied.returncode != 0
+    assert "bounded temporary volume and selected deployment lock" in denied.stderr
+
+    managed = job("exomem-deletion-6666666666666666")
+    managed["spec"]["managedBy"] = "example.com/deletion-controller"
+    denied = _kubectl(
+        k3s,
+        ["create", "--dry-run=server", "--filename=-", f"--as={dispatcher}"],
+        documents=[managed],
+        check=False,
+    )
+    assert denied.returncode != 0
+    assert "bounded one-shot worker Jobs" in denied.stderr
+
+    pod_deadline = job("exomem-deletion-7777777777777777")
+    pod_deadline["spec"]["template"]["spec"]["activeDeadlineSeconds"] = 60
+    denied = _kubectl(
+        k3s,
+        ["create", "--dry-run=server", "--filename=-", f"--as={dispatcher}"],
+        documents=[pod_deadline],
+        check=False,
+    )
+    assert denied.returncode != 0
+    assert "pod shape may not add scheduling, host, or mutation surfaces" in denied.stderr
+
+
 @pytest.mark.skipif(
     not RUN_RUNTIME,
     reason="set RUN_K3S_RUNTIME_TEST=1 to run the reviewed hosted runtime in exact K3s",

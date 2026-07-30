@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
 
@@ -75,6 +76,7 @@ class DurabilityActionDriver:
         restore_workflow: RestoreWorkflowPort,
         object_service: ExportObjectPort,
         deletion_workflow: OrderedDeletionPort | None = None,
+        runtime_target_validator: Callable[[dict[str, Any], EffectContext], bool] | None = None,
     ) -> None:
         self._delegate = delegate
         self._repository = repository
@@ -82,6 +84,7 @@ class DurabilityActionDriver:
         self._restore_workflow = restore_workflow
         self._object_service = object_service
         self._deletion_workflow = deletion_workflow
+        self._runtime_target_validator = runtime_target_validator
 
     async def observed_fence(self, tenant_id: str) -> int:
         return await self._delegate.observed_fence(tenant_id)
@@ -93,6 +96,12 @@ class DurabilityActionDriver:
         context: EffectContext,
     ) -> DriverPending | DriverFinal:
         try:
+            if (
+                action in {"restore", "discard"}
+                and self._runtime_target_validator is not None
+                and not self._runtime_target_validator(request, context)
+            ):
+                raise DriverTerminal("PROVISIONER_RELEASE_UNIT_MISMATCH")
             if action in self._RUN_ACTIONS:
                 return await self._run_workflow(action, request, context)
             if action == "export-release":

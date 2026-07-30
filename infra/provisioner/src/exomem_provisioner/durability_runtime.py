@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any, Protocol
 from urllib.parse import unquote, urlsplit
 
@@ -13,6 +14,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from .config import DeploymentLock, load_deployment_lock
 from .crypto import AesGcmEnvelopeCodec
 from .database import ProvisionerDatabase
 from .deletion import DeletionVerificationError
@@ -89,6 +91,7 @@ class DeletionRuntimeSettings(BaseSettings):
     recovery_delete_key: SecretStr = Field(min_length=1, max_length=4096)
     user_export_delete_key_id: SecretStr = Field(min_length=1, max_length=4096)
     user_export_delete_key: SecretStr = Field(min_length=1, max_length=4096)
+    deployment_lock_path: Path = Field(validation_alias="EXOMEM_PROVISIONER_DEPLOYMENT_LOCK_PATH")
 
     @field_validator("database_url")
     @classmethod
@@ -104,6 +107,17 @@ class DeletionRuntimeSettings(BaseSettings):
         if parsed.scheme != "https" or not parsed.hostname or parsed.path not in {"", "/"}:
             raise ValueError("B2 endpoint must be an HTTPS origin")
         return value.rstrip("/")
+
+    @field_validator("deployment_lock_path")
+    @classmethod
+    def require_absolute_lock_path(cls, value: Path) -> Path:
+        if not value.is_absolute():
+            raise ValueError("deployment lock path must be absolute")
+        return value
+
+    @property
+    def deployment_lock(self) -> DeploymentLock:
+        return load_deployment_lock(self.deployment_lock_path)
 
     @model_validator(mode="after")
     def validate_boundaries(self) -> DeletionRuntimeSettings:
@@ -348,9 +362,11 @@ class DeletionOnlyDriver:
         *,
         authority: CurrentFenceAuthority,
         workflow: OrderedDeletionPort,
+        runtime_target_validator: Callable[[dict[str, Any], EffectContext], bool] | None = None,
     ) -> None:
         self._authority = authority
         self._workflow = workflow
+        self._runtime_target_validator = runtime_target_validator
 
     async def observed_fence(self, tenant_id: str) -> int:
         return await self._authority.current_fence(tenant_id)
@@ -361,7 +377,12 @@ class DeletionOnlyDriver:
         request: dict[str, Any],
         context: EffectContext,
     ) -> DriverPending | DriverFinal:
-        del request
+        if (
+            action == OperationAction.DISCARD.value
+            and self._runtime_target_validator is not None
+            and not self._runtime_target_validator(request, context)
+        ):
+            raise DriverTerminal("PROVISIONER_RELEASE_UNIT_MISMATCH")
         if action == OperationAction.DISCARD.value:
             operation = self._workflow.discard_candidate(context)
         elif action == OperationAction.DESTROY.value:
@@ -394,10 +415,15 @@ def build_deletion_operation_worker(
     workflow: OrderedDeletionPort,
     authority: CurrentFenceAuthority,
     worker_id: str,
+    runtime_target_validator: Callable[[dict[str, Any], EffectContext], bool] | None = None,
 ) -> ProvisionerWorker:
     return ProvisionerWorker(
         repository,
-        DeletionOnlyDriver(authority=authority, workflow=workflow),
+        DeletionOnlyDriver(
+            authority=authority,
+            workflow=workflow,
+            runtime_target_validator=runtime_target_validator,
+        ),
         worker_id=worker_id,
         allowed_actions=DELETION_OPERATION_ACTIONS,
         resume_claim=True,
@@ -470,6 +496,7 @@ async def live_deletion_worker() -> AsyncIterator[ProvisionerWorker]:
     from .provider_deletion import FencedOrderedDeletionWorkflow
 
     settings = DeletionRuntimeSettings()  # type: ignore[call-arg]
+    lock = settings.deployment_lock
     database = ProvisionerDatabase(settings)  # structurally supplies DB fields
     try:
         if not await database.ready():
@@ -517,6 +544,9 @@ async def live_deletion_worker() -> AsyncIterator[ProvisionerWorker]:
             workflow=FencedOrderedDeletionWorkflow(provider),
             authority=authority,
             worker_id=settings.worker_id,
+            runtime_target_validator=lambda request, context: lock.matches_runtime_request(
+                request, wire_protocol=context.wire_protocol
+            ),
         )
     finally:
         await database.dispose()
