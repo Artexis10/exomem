@@ -77,8 +77,6 @@ def _record(kind: str = "runtime") -> dict[str, object]:
             "predicateType": "https://slsa.dev/provenance/v1",
             "subjectName": repository,
             "subjectDigest": f"sha256:{DIGEST}",
-            "id": "12345",
-            "url": "https://github.com/Artexis10/exomem/attestations/12345",
             "bundleSha256": "",
         },
         "storage": storage,
@@ -88,6 +86,12 @@ def _record(kind: str = "runtime") -> dict[str, object]:
 def _write_bundle(path: Path, data: bytes = b"bundle") -> str:
     path.write_bytes(data)
     return hashlib.sha256(data).hexdigest()
+
+
+def _statement(name: str, sha256: str) -> str:
+    return json.dumps(
+        [{"verificationResult": {"statement": {"subject": [{"name": name, "digest": {"sha256": sha256}}]}}}]
+    )
 
 
 @pytest.mark.parametrize("kind", ["runtime", "provisioner"])
@@ -153,6 +157,20 @@ def test_load_rejects_duplicate_json_keys(tmp_path: Path) -> None:
         candidate.load_candidate(path)
 
 
+def test_candidate_schema_and_record_cli_exclude_attestation_id_and_url() -> None:
+    assert set(_record()["attestation"]) == {"predicateType", "subjectName", "subjectDigest", "bundleSha256"}  # type: ignore[arg-type]
+    record = _record()
+    record["attestation"]["id"] = "12345"  # type: ignore[index]
+    with pytest.raises(candidate.CandidateError, match="unknown"):
+        candidate.validate_candidate(record)
+    parser = candidate._parser()
+    commands = next(action for action in parser._subparsers._group_actions if action.dest == "command")  # type: ignore[union-attr]
+    record_parser = commands.choices["record"]
+    destinations = {action.dest for action in record_parser._actions}
+    assert "attestation_id" not in destinations
+    assert "attestation_url" not in destinations
+
+
 def test_record_rejects_symlink_oversize_and_hash_drift(tmp_path: Path) -> None:
     bundle = tmp_path / "bundle"
     record = _record()
@@ -199,42 +217,33 @@ def test_record_rejects_recorded_bundle_hash_and_malformed_source_commit(tmp_pat
         candidate.record_candidate(record, bundle, tmp_path / "candidate.json")
 
 
-def test_verify_uses_exact_gh_policy_and_requires_exact_statement_subject(
+def test_verify_uses_exact_gh_policy_for_image_and_candidate_bytes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    bundle = tmp_path / "bundle"
+    bundle = tmp_path / "image-bundle"
+    candidate_bundle = tmp_path / "candidate-bundle"
     record = _record()
     record["attestation"]["bundleSha256"] = _write_bundle(bundle)  # type: ignore[index]
     candidate_path = tmp_path / "candidate.json"
     candidate.record_candidate(record, bundle, candidate_path)
+    _write_bundle(candidate_bundle)
     captured: list[list[str]] = []
 
     class Result:
         returncode = 0
-        stdout = json.dumps(
-            [
-                {
-                    "verificationResult": {
-                        "statement": {
-                        "subject": [
-                            {
-                                "name": "ghcr.io/artexis10/exomem",
-                                "digest": {"sha256": DIGEST},
-                            }
-                        ]
-                        }
-                    }
-                }
-            ]
-        )
         stderr = ""
 
     def fake_run(argv: list[str], **_: object) -> Result:
         captured.append(argv)
-        return Result()
+        result = Result()
+        if argv[3].startswith("oci://"):
+            result.stdout = _statement("ghcr.io/artexis10/exomem", DIGEST)
+        else:
+            result.stdout = _statement(candidate_path.name, hashlib.sha256(candidate_path.read_bytes()).hexdigest())
+        return result
 
     monkeypatch.setattr(candidate.subprocess, "run", fake_run)
-    candidate.verify_candidate(candidate_path, bundle=bundle)
+    candidate.verify_candidate(candidate_path, bundle=bundle, candidate_bundle=candidate_bundle)
 
     assert captured == [
         [
@@ -259,18 +268,43 @@ def test_verify_uses_exact_gh_policy_and_requires_exact_statement_subject(
             os.fspath(bundle),
             "--format",
             "json",
-        ]
+        ],
+        [
+            "gh",
+            "attestation",
+            "verify",
+            os.fspath(candidate_path),
+            "--repo",
+            "Artexis10/exomem",
+            "--signer-workflow",
+            "Artexis10/exomem/.github/workflows/release-please.yml",
+            "--signer-digest",
+            WORKFLOW_DIGEST,
+            "--source-digest",
+            COMMIT,
+            "--source-ref",
+            "refs/heads/main",
+            "--predicate-type",
+            "https://slsa.dev/provenance/v1",
+            "--deny-self-hosted-runners",
+            "--bundle",
+            os.fspath(candidate_bundle),
+            "--format",
+            "json",
+        ],
     ]
 
 
-def test_verify_rejects_subject_drift_and_supports_oci_bundle_retrieval(
+def test_verify_rejects_image_subject_drift_and_supports_oci_bundle_retrieval(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     bundle = tmp_path / "bundle"
+    candidate_bundle = tmp_path / "candidate-bundle"
     record = _record()
     record["attestation"]["bundleSha256"] = _write_bundle(bundle)  # type: ignore[index]
     candidate_path = tmp_path / "candidate.json"
     candidate.record_candidate(record, bundle, candidate_path)
+    _write_bundle(candidate_bundle)
 
     class Result:
         returncode = 0
@@ -285,12 +319,88 @@ def test_verify_rejects_subject_drift_and_supports_oci_bundle_retrieval(
 
     monkeypatch.setattr(candidate.subprocess, "run", fake_run)
     with pytest.raises(candidate.CandidateError, match="subject"):
-        candidate.verify_candidate(candidate_path, bundle_from_oci=True)
+        candidate.verify_candidate(candidate_path, bundle_from_oci=True, candidate_bundle=candidate_bundle)
     assert "--bundle" not in seen[0]
     assert "--bundle-from-oci" in seen[0]
 
 
-def test_verify_accepts_multiple_real_gh_results_only_when_every_subject_matches(
+@pytest.mark.parametrize("mismatch", ["name", "digest"])
+def test_verify_rejects_wrong_candidate_subject_or_digest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mismatch: str
+) -> None:
+    bundle = tmp_path / "bundle"
+    candidate_bundle = tmp_path / "candidate-bundle"
+    record = _record()
+    record["attestation"]["bundleSha256"] = _write_bundle(bundle)  # type: ignore[index]
+    candidate_path = tmp_path / "candidate.json"
+    candidate.record_candidate(record, bundle, candidate_path)
+    _write_bundle(candidate_bundle)
+
+    class Result:
+        returncode = 0
+        stderr = ""
+
+    def fake_run(argv: list[str], **_: object) -> Result:
+        result = Result()
+        if argv[3].startswith("oci://"):
+            result.stdout = _statement("ghcr.io/artexis10/exomem", DIGEST)
+        else:
+            name = "wrong-name" if mismatch == "name" else candidate_path.name
+            digest = "0" * 64 if mismatch == "digest" else hashlib.sha256(candidate_path.read_bytes()).hexdigest()
+            result.stdout = _statement(name, digest)
+        return result
+
+    monkeypatch.setattr(candidate.subprocess, "run", fake_run)
+    with pytest.raises(candidate.CandidateError, match="candidate"):
+        candidate.verify_candidate(candidate_path, bundle=bundle, candidate_bundle=candidate_bundle)
+
+
+@pytest.mark.parametrize("field", ["release", "tag", "storage", "metadata"])
+def test_verify_rejects_tampered_candidate_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, field: str
+) -> None:
+    bundle = tmp_path / "bundle"
+    candidate_bundle = tmp_path / "candidate-bundle"
+    record = _record()
+    record["attestation"]["bundleSha256"] = _write_bundle(bundle)  # type: ignore[index]
+    candidate_path = tmp_path / "candidate.json"
+    candidate.record_candidate(record, bundle, candidate_path)
+    original_digest = hashlib.sha256(candidate_path.read_bytes()).hexdigest()
+    _write_bundle(candidate_bundle)
+    tampered = json.loads(candidate_path.read_text(encoding="utf-8"))
+    if field == "release":
+        tampered["release"] = {"tag": "v0.35.2", "version": "0.35.2"}
+        tampered["source"]["checkoutRef"] = "refs/tags/v0.35.2"
+        tampered["storage"]["uri"] = tampered["storage"]["uri"].replace("v0.35.1", "v0.35.2")
+    elif field == "tag":
+        tampered_commit = "d" * 40
+        tampered["source"]["commit"] = tampered_commit
+        tampered["workflow"]["oidcSourceCommit"] = tampered_commit
+        tampered["image"]["discoveryTag"] = f"ghcr.io/artexis10/exomem:{tampered_commit}-hosted"
+    elif field == "storage":
+        tampered["storage"]["uri"] = tampered["storage"]["uri"].replace("candidate-", "replacement-")
+    else:
+        tampered["workflow"]["runId"] = "999999"
+    candidate_path.write_text(json.dumps(tampered, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
+
+    class Result:
+        returncode = 0
+        stderr = ""
+
+    def fake_run(argv: list[str], **_: object) -> Result:
+        result = Result()
+        if argv[3].startswith("oci://"):
+            result.stdout = _statement("ghcr.io/artexis10/exomem", DIGEST)
+        else:
+            result.stdout = _statement(candidate_path.name, original_digest)
+        return result
+
+    monkeypatch.setattr(candidate.subprocess, "run", fake_run)
+    with pytest.raises(candidate.CandidateError, match="candidate"):
+        candidate.verify_candidate(candidate_path, bundle=bundle, candidate_bundle=candidate_bundle)
+
+
+def test_verify_requires_candidate_bundle_and_rejects_unsafe_candidate_bundle(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     bundle = tmp_path / "bundle"
@@ -298,35 +408,29 @@ def test_verify_accepts_multiple_real_gh_results_only_when_every_subject_matches
     record["attestation"]["bundleSha256"] = _write_bundle(bundle)  # type: ignore[index]
     candidate_path = tmp_path / "candidate.json"
     candidate.record_candidate(record, bundle, candidate_path)
+    seen: list[list[str]] = []
+    monkeypatch.setattr(candidate.subprocess, "run", lambda argv, **_kwargs: seen.append(argv))
 
-    class Result:
-        returncode = 0
-        stdout = json.dumps(
-            [
-                {
-                    "verificationResult": {
-                        "statement": {
-                            "subject": [
-                                {"name": "ghcr.io/artexis10/exomem", "digest": {"sha256": DIGEST}}
-                            ]
-                        }
-                    }
-                },
-                {
-                    "verificationResult": {
-                        "statement": {
-                            "subject": [
-                                {"name": "ghcr.io/artexis10/exomem", "digest": {"sha256": DIGEST}}
-                            ]
-                        }
-                    }
-                },
-            ]
-        )
-        stderr = ""
+    with pytest.raises(candidate.CandidateError, match="candidate bundle"):
+        candidate.verify_candidate(candidate_path, bundle=bundle)
 
-    monkeypatch.setattr(candidate.subprocess, "run", lambda *_args, **_kwargs: Result())
-    candidate.verify_candidate(candidate_path, bundle_from_oci=True)
+    missing = tmp_path / "missing-candidate-bundle"
+    with pytest.raises(candidate.CandidateError, match="cannot inspect candidate bundle"):
+        candidate.verify_candidate(candidate_path, bundle=bundle, candidate_bundle=missing)
+
+    oversized = tmp_path / "oversized-candidate-bundle"
+    oversized.write_bytes(b"x" * (candidate.MAX_BUNDLE_BYTES + 1))
+    with pytest.raises(candidate.CandidateError, match="candidate bundle.*maximum"):
+        candidate.verify_candidate(candidate_path, bundle=bundle, candidate_bundle=oversized)
+
+    linked = tmp_path / "linked-candidate-bundle"
+    try:
+        linked.symlink_to(bundle)
+    except OSError:
+        pytest.skip("symlinks unavailable")
+    with pytest.raises(candidate.CandidateError, match="candidate bundle.*symlink"):
+        candidate.verify_candidate(candidate_path, bundle=bundle, candidate_bundle=linked)
+    assert seen == []
 
 
 @pytest.mark.parametrize("failure", [subprocess.TimeoutExpired(["gh"], 1), OSError("missing gh")])
@@ -334,14 +438,16 @@ def test_verify_fails_cleanly_when_gh_cannot_complete(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: BaseException
 ) -> None:
     bundle = tmp_path / "bundle"
+    candidate_bundle = tmp_path / "candidate-bundle"
     record = _record()
     record["attestation"]["bundleSha256"] = _write_bundle(bundle)  # type: ignore[index]
     candidate_path = tmp_path / "candidate.json"
     candidate.record_candidate(record, bundle, candidate_path)
+    _write_bundle(candidate_bundle)
     monkeypatch.setattr(candidate.subprocess, "run", lambda *_args, **_kwargs: (_ for _ in ()).throw(failure))
 
     with pytest.raises(candidate.CandidateError, match="unable to complete"):
-        candidate.verify_candidate(candidate_path, bundle=bundle)
+        candidate.verify_candidate(candidate_path, bundle=bundle, candidate_bundle=candidate_bundle)
 
 
 def test_runtime_storage_uri_must_be_canonical_release_asset(tmp_path: Path) -> None:

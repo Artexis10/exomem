@@ -119,13 +119,6 @@ def _run_number(value: object, *, label: str) -> str:
     return result
 
 
-def _url(value: object, *, label: str) -> str:
-    result = _string(value, label=label)
-    if not result.startswith("https://") or "?" in result or "#" in result or " " in result:
-        _error(f"{label} must be a canonical HTTPS URL")
-    return result
-
-
 def _image_reference(value: object) -> tuple[str, str]:
     reference = _string(value, label="image.reference")
     repository, separator, digest = reference.partition("@")
@@ -174,8 +167,6 @@ def _candidate_from_flags(args: argparse.Namespace) -> dict[str, object]:
             "predicateType": SLSA_PREDICATE,
             "subjectName": repository,
             "subjectDigest": digest,
-            "id": args.attestation_id,
-            "url": args.attestation_url,
             "bundleSha256": "",
         },
         "storage": {
@@ -249,18 +240,12 @@ def validate_candidate(value: object) -> dict[str, object]:
     attestation = _mapping(
         candidate["attestation"],
         label="attestation",
-        fields={"predicateType", "subjectName", "subjectDigest", "id", "url", "bundleSha256"},
+        fields={"predicateType", "subjectName", "subjectDigest", "bundleSha256"},
     )
     if attestation["predicateType"] != SLSA_PREDICATE:
         _error("attestation.predicateType is not approved")
     if attestation["subjectName"] != repository or attestation["subjectDigest"] != digest:
         _error("attestation subject must exactly equal image subject")
-    _run_number(attestation["id"], label="attestation.id")
-    attestation_url = _url(attestation["url"], label="attestation.url")
-    if not attestation_url.startswith(f"https://github.com/{SOURCE_REPOSITORY}/attestations/"):
-        _error("attestation.url is not approved")
-    if not attestation_url.endswith(f"/{attestation['id']}"):
-        _error("attestation.url must identify attestation.id")
     bundle_sha256 = _string(attestation["bundleSha256"], label="attestation.bundleSha256")
     if not re.fullmatch(r"[0-9a-f]{64}", bundle_sha256):
         _error("attestation.bundleSha256 must be a sha256 hex hash")
@@ -320,8 +305,8 @@ def validate_candidate(value: object) -> dict[str, object]:
     return candidate
 
 
-def _bundle_hash(path: Path) -> str:
-    return hashlib.sha256(_read_regular(path, label="bundle", maximum=MAX_BUNDLE_BYTES)).hexdigest()
+def _bundle_hash(path: Path, *, label: str = "bundle") -> str:
+    return hashlib.sha256(_read_regular(path, label=label, maximum=MAX_BUNDLE_BYTES)).hexdigest()
 
 
 def _write_atomic(path: Path, data: bytes) -> None:
@@ -393,17 +378,19 @@ def _verified_statements(value: object) -> list[dict[str, object]]:
     return statements
 
 
-def _require_verified_subject(statement: dict[str, object], repository: str, digest: str) -> None:
+def _require_verified_subject(
+    statement: dict[str, object], name: str, digest: str, *, label: str
+) -> None:
     subjects = statement.get("subject")
     if not isinstance(subjects, list) or len(subjects) != 1 or not isinstance(subjects[0], dict):
         _error("verified statement must contain exactly one subject")
     subject = cast(dict[str, object], subjects[0])
     expected_digest = digest.removeprefix("sha256:")
-    if set(subject) != {"name", "digest"} or subject["name"] != repository:
-        _error("verified statement subject does not equal candidate image")
+    if set(subject) != {"name", "digest"} or subject["name"] != name:
+        _error(f"verified statement subject does not equal {label}")
     subject_digest = subject["digest"]
     if not isinstance(subject_digest, dict) or subject_digest != {"sha256": expected_digest}:
-        _error("verified statement subject digest does not equal candidate image")
+        _error(f"verified statement subject digest does not equal {label}")
 
 
 def verify_candidate(
@@ -411,22 +398,28 @@ def verify_candidate(
     *,
     bundle: Path | None = None,
     bundle_from_oci: bool = False,
+    candidate_bundle: Path | None = None,
     gh_binary: str = "gh",
 ) -> None:
     if (bundle is None and not bundle_from_oci) or (bundle is not None and bundle_from_oci):
         _error("supply exactly one of bundle or bundle_from_oci")
+    if candidate_bundle is None:
+        _error("candidate bundle is required")
     candidate = load_candidate(candidate_path)
+    candidate_sha256 = hashlib.sha256(
+        _read_regular(candidate_path, label="candidate", maximum=MAX_CANDIDATE_BYTES)
+    ).hexdigest()
+    _bundle_hash(candidate_bundle, label="candidate bundle")
     image = cast(dict[str, object], candidate["image"])
     source = cast(dict[str, object], candidate["source"])
     workflow = cast(dict[str, object], candidate["workflow"])
     attestation = cast(dict[str, object], candidate["attestation"])
     if bundle is not None and _bundle_hash(bundle) != attestation["bundleSha256"]:
         _error("bundle hash does not match candidate")
-    command = [
+    command_prefix = [
         gh_binary,
         "attestation",
         "verify",
-        f"oci://{image['reference']}",
         "--repo",
         cast(str, source["repository"]),
         "--signer-workflow",
@@ -442,29 +435,46 @@ def verify_candidate(
         "--deny-self-hosted-runners",
     ]
     if bundle is not None:
-        command.extend(["--bundle", os.fspath(bundle)])
+        image_evidence = ["--bundle", os.fspath(bundle)]
     else:
-        command.append("--bundle-from-oci")
-    command.extend(["--format", "json"])
-    try:
-        result = subprocess.run(
-            command,
-            shell=False,
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=VERIFY_TIMEOUT_SECONDS,
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        _error(f"unable to complete gh attestation verification: {exc}")
-    if result.returncode != 0:
-        _error(f"gh attestation verify failed: {result.stderr.strip()}")
-    try:
-        verified = json.loads(result.stdout, object_pairs_hook=_reject_duplicate_keys)
-    except json.JSONDecodeError as exc:
-        _error(f"invalid gh attestation verify JSON: {exc}")
-    for statement in _verified_statements(verified):
-        _require_verified_subject(statement, cast(str, image["repository"]), cast(str, image["digest"]))
+        image_evidence = ["--bundle-from-oci"]
+    verifications = (
+        (
+            f"oci://{image['reference']}",
+            image_evidence,
+            cast(str, image["repository"]),
+            cast(str, image["digest"]),
+            "candidate image",
+        ),
+        (
+            os.fspath(candidate_path),
+            ["--bundle", os.fspath(candidate_bundle)],
+            candidate_path.name,
+            candidate_sha256,
+            "candidate file",
+        ),
+    )
+    for target, evidence, expected_name, expected_digest, label in verifications:
+        command = command_prefix[:3] + [target] + command_prefix[3:] + evidence + ["--format", "json"]
+        try:
+            result = subprocess.run(
+                command,
+                shell=False,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=VERIFY_TIMEOUT_SECONDS,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            _error(f"unable to complete gh attestation verification: {exc}")
+        if result.returncode != 0:
+            _error(f"gh attestation verify failed: {result.stderr.strip()}")
+        try:
+            verified = json.loads(result.stdout, object_pairs_hook=_reject_duplicate_keys)
+        except json.JSONDecodeError as exc:
+            _error(f"invalid gh attestation verify JSON: {exc}")
+        for statement in _verified_statements(verified):
+            _require_verified_subject(statement, expected_name, expected_digest, label=label)
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -486,14 +496,13 @@ def _parser() -> argparse.ArgumentParser:
     record.add_argument("--producer-event", choices=("push", "workflow_dispatch"), required=True)
     record.add_argument("--run-id", required=True)
     record.add_argument("--run-attempt", required=True)
-    record.add_argument("--attestation-id", required=True)
-    record.add_argument("--attestation-url", required=True)
     record.add_argument("--bundle", type=Path, required=True)
     record.add_argument("--storage-kind", required=True)
     record.add_argument("--storage-uri", required=True)
     record.add_argument("--output", type=Path, required=True)
     verify = commands.add_parser("verify", help="verify one recorded candidate")
     verify.add_argument("--candidate", type=Path, required=True)
+    verify.add_argument("--candidate-bundle", type=Path, required=True)
     evidence = verify.add_mutually_exclusive_group(required=True)
     evidence.add_argument("--bundle", type=Path)
     evidence.add_argument("--bundle-from-oci", action="store_true")
@@ -506,7 +515,12 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "record":
             record_candidate(_candidate_from_flags(args), args.bundle, args.output)
         else:
-            verify_candidate(args.candidate, bundle=args.bundle, bundle_from_oci=args.bundle_from_oci)
+            verify_candidate(
+                args.candidate,
+                bundle=args.bundle,
+                bundle_from_oci=args.bundle_from_oci,
+                candidate_bundle=args.candidate_bundle,
+            )
     except CandidateError as exc:
         print(f"hosted image candidate: {exc}", file=sys.stderr)
         return 2
