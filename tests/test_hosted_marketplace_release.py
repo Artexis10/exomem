@@ -16,8 +16,33 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def copy_hosted_tree(destination: Path) -> Path:
-    shutil.copytree(REPO_ROOT / "plugins" / "hosted", destination / "plugins" / "hosted")
+    shutil.copytree(
+        REPO_ROOT / "plugins" / "hosted",
+        destination / "plugins" / "hosted",
+        ignore=shutil.ignore_patterns(
+            ".claude.promotion.lock", ".openai.promotion.lock"
+        ),
+    )
     return destination
+
+
+def test_copy_hosted_tree_excludes_transient_promotion_locks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source_root = tmp_path / "source"
+    source = source_root / "plugins" / "hosted"
+    source.mkdir(parents=True)
+    (source / "tracked.json").write_text("{}\n", encoding="utf-8")
+    for platform in ("claude", "openai"):
+        (source / f".{platform}.promotion.lock").touch()
+    monkeypatch.setattr(sys.modules[__name__], "REPO_ROOT", source_root)
+
+    copied_root = copy_hosted_tree(tmp_path / "copy")
+    copied = copied_root / "plugins" / "hosted"
+
+    assert (copied / "tracked.json").is_file()
+    assert not (copied / ".claude.promotion.lock").exists()
+    assert not (copied / ".openai.promotion.lock").exists()
 
 
 def signed_evidence(
