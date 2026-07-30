@@ -36,6 +36,12 @@ RELEASE_FIXTURE = Path(__file__).parent / "fixtures/exomem-hosted-release-v1.jso
 IDENTITY_CODEC = ProviderRecoveryIdentityCodec.from_secret("provider-recovery-root")
 
 
+def _canonical_sha256(value: object) -> str:
+    return hashlib.sha256(
+        (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode()
+    ).hexdigest()
+
+
 def _deployment_lock(tmp_path: Path) -> Path:
     path = tmp_path / "selected-deployment-lock.json"
     digest = "a" * 64
@@ -48,6 +54,15 @@ def _deployment_lock(tmp_path: Path) -> Path:
         "commandFingerprint": "c" * 64,
         "schemaDigest": "d" * 64,
     }
+    legacy_contract = {
+        **target,
+        "protocolVersion": "exomem-hosted.v1",
+        "runtimeImage": f"ghcr.io/artexis10/exomem@sha256:{digest}",
+        "sourceCommit": commit,
+    }
+    legacy_release_set = [
+        {"releaseVersion": "0.22.0", "protocolVersion": "exomem-hosted.v1"}
+    ]
     payload = {
         "artifact": "exomem-hosted-deployment-lock",
         "schemaVersion": 2,
@@ -62,8 +77,8 @@ def _deployment_lock(tmp_path: Path) -> Path:
             "sourceClosure": {name: {"candidateCommit": commit, "compositionCommit": commit, "paths": ["src/**"]} for name in ("runtime", "provisioner")},
             "forwardContractSha256": digest,
             "authoritativeLegacyReleaseSetSha256": "f" * 64,
-            "legacyCatalog": [{"releaseVersion": "0.22.0", "protocolVersion": "exomem-hosted.v1", "runtimeImage": f"ghcr.io/artexis10/exomem@sha256:{digest}", "sourceCommit": commit, "contractSha256": digest, "contract": {**target, "protocolVersion": "exomem-hosted.v1", "runtimeImage": f"ghcr.io/artexis10/exomem@sha256:{digest}", "sourceCommit": commit}}],
-            "legacyReleaseSetSha256": "f" * 64,
+            "legacyCatalog": [{"releaseVersion": "0.22.0", "protocolVersion": "exomem-hosted.v1", "runtimeImage": f"ghcr.io/artexis10/exomem@sha256:{digest}", "sourceCommit": commit, "contractSha256": _canonical_sha256(legacy_contract), "contract": legacy_contract}],
+            "legacyReleaseSetSha256": _canonical_sha256(legacy_release_set),
         },
         "rollback": {"provisionerImage": f"ghcr.io/artexis10/exomem-provisioner@sha256:{'e' * 64}", "provisionerSourceCommit": commit, "v1CorpusSha256": digest, "legacyManifestSha256": digest, "substrateV1ConsumerCommit": commit},
     }
