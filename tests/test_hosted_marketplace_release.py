@@ -171,6 +171,16 @@ def ready_directory_evidence(root: Path) -> tuple[str, str]:
     return "directory-test-key", secret
 
 
+def set_public_admission_copy(root: Path) -> None:
+    definition_path = root / "plugins/hosted/marketplace-definition.json"
+    definition = json.loads(definition_path.read_text(encoding="utf-8"))
+    definition["common"]["user_prerequisites"]["admission"] = {
+        "mode": "public",
+        "eligibility": "Public access is available to eligible users.",
+    }
+    definition_path.write_text(json.dumps(definition), encoding="utf-8")
+
+
 def load_hosted_plugin_cli() -> object:
     spec = importlib.util.spec_from_file_location(
         "hosted_plugin_cli", REPO_ROOT / "scripts" / "hosted-plugin.py"
@@ -786,19 +796,29 @@ def test_openai_packet_renders_every_boolean_annotation() -> None:
     )
 
 
-def test_openai_read_only_non_idempotent_explanation_describes_state_variability() -> None:
+def test_hosted_read_only_tools_advertise_safe_retry_semantics() -> None:
     packet = json.loads(
         hosted_plugins.directory_packets(
             REPO_ROOT, channel="openai-plugin", openai_app_id="plugin_asdk_app_releaseinput123"
         )["openai-plugin"]
     )
-    tool = next(item for item in packet["tools"] if item["name"] == "ask_memory")
-    explanation = tool["annotation_explanations"]["idempotentHint"].lower()
+    reads = [tool for tool in packet["tools"] if tool["annotations"]["readOnlyHint"]]
+    writes = [tool for tool in packet["tools"] if not tool["annotations"]["readOnlyHint"]]
 
-    assert tool["annotations"]["readOnlyHint"] is True
-    assert tool["annotations"]["idempotentHint"] is False
-    assert "state" in explanation
-    assert "create" not in explanation
+    assert reads and writes
+    assert all(tool["annotations"]["idempotentHint"] is True for tool in reads)
+    assert all(tool["retry_semantics"] == "idempotent" for tool in reads)
+    assert all(
+        "transient" in tool["annotation_explanations"]["idempotentHint"].lower()
+        and "warming" in tool["annotation_explanations"]["idempotentHint"].lower()
+        for tool in reads
+    )
+    assert all(tool["annotations"]["idempotentHint"] is False for tool in writes)
+    assert all(tool["retry_semantics"] == "do_not_retry" for tool in writes)
+    assert all(
+        "not retried" in tool["annotation_explanations"]["idempotentHint"].lower()
+        for tool in writes
+    )
 
 
 @pytest.mark.parametrize("channel", ["claude-connector", "claude-plugin"])
@@ -908,7 +928,42 @@ def test_advertised_regions_require_public_admission_evidence_for_activation(
         trusted_key_id=None,
         trusted_secret=None,
         deployment_sha256=None,
-    ) == ["public admission evidence is incomplete"]
+    ) == ["marketplace user prerequisites do not advertise public admission"]
+
+
+def test_private_admission_copy_blocks_public_readiness_for_every_directory_channel(
+    tmp_path: Path,
+) -> None:
+    root = copy_hosted_tree(tmp_path / "repo")
+    key_id, secret = ready_directory_evidence(root)
+
+    status = hosted_plugins.directory_status(
+        root,
+        openai_app_id="plugin_asdk_app_releaseinput123",
+        trusted_key_id=key_id,
+        trusted_secret=secret,
+        deployment_sha256="b" * 64,
+    )
+
+    assert all(not channel["ready"] for channel in status["channels"].values())
+    assert all(
+        "marketplace user prerequisites do not advertise public admission"
+        in channel["blockers"]
+        for channel in status["channels"].values()
+    )
+
+
+def test_public_admission_evidence_requires_coherent_public_listing_copy(tmp_path: Path) -> None:
+    root = copy_hosted_tree(tmp_path / "repo")
+    key_id, secret = ready_directory_evidence(root)
+    set_public_admission_copy(root)
+
+    assert not hosted_plugins._public_admission_blockers(
+        root,
+        trusted_key_id=key_id,
+        trusted_secret=secret,
+        deployment_sha256="b" * 64,
+    )
 
 
 def test_reviewer_ready_openai_candidate_can_enter_review_before_broad_admission(
@@ -916,6 +971,7 @@ def test_reviewer_ready_openai_candidate_can_enter_review_before_broad_admission
 ) -> None:
     root = copy_hosted_tree(tmp_path / "repo")
     key_id, secret, receipt = openai_published_receipt(root)
+    set_public_admission_copy(root)
     admission_path = root / "plugins/hosted/directory/public-admission-evidence.json"
     admission = json.loads(admission_path.read_text(encoding="utf-8"))
     admission["admission"]["capacity"] = False
@@ -1332,6 +1388,7 @@ def test_directory_requires_signed_evidence_and_keeps_active_revision_public_dur
 ) -> None:
     root = copy_hosted_tree(tmp_path / "repo")
     key_id, secret = ready_directory_evidence(root)
+    set_public_admission_copy(root)
     status = hosted_plugins.directory_status(
         root, trusted_key_id=key_id, trusted_secret=secret, deployment_sha256="b" * 64
     )
@@ -1865,6 +1922,7 @@ def test_openai_published_receipt_requires_registered_app_input_to_activate(tmp_
     root = copy_hosted_tree(tmp_path / "repo")
     app_id = "plugin_asdk_app_releaseinput123"
     key_id, secret, receipt = openai_published_receipt(root)
+    set_public_admission_copy(root)
     record_sha256 = hosted_plugins.directory_record_sha256(root, "openai-plugin")
     previous_state = "draft"
     for state in ("submitted", "in_review", "approved", "published"):

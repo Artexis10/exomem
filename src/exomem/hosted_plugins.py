@@ -618,12 +618,11 @@ def _openai_annotation_explanations(name: str, annotations: dict[str, Any]) -> d
             else "This tool does not delete or replace governed content."
         ),
         "idempotentHint": (
-            "Repeating the same request produces the same governed result and is safe to retry."
+            "Repeating this side-effect-free request is safe to retry after transient or "
+            "warming failures."
             if annotations["idempotentHint"]
             else (
-                "Repeated reads may return different results as governed state changes, so they are not retried automatically."
-                if annotations["readOnlyHint"]
-                else "Repeating this request may create another action, so it is not retried automatically."
+                "Repeating this request may create another action, so it is not retried automatically."
             )
         ),
         "openWorldHint": (
@@ -2845,8 +2844,16 @@ def _public_admission_blockers(
 ) -> list[str]:
     """Require signed public-admission proof before activating advertised regions."""
 
-    if not load_marketplace_definition(root)["common"]["regions"]:
+    marketplace = load_marketplace_definition(root)["common"]
+    if not marketplace["regions"]:
         return []
+    admission_copy = marketplace["user_prerequisites"]["admission"]
+    eligibility = admission_copy["eligibility"].lower()
+    if admission_copy["mode"] != "public" or (
+        "public" not in eligibility
+        or any(term in eligibility for term in ("private", "invite", "alpha", "beta"))
+    ):
+        return ["marketplace user prerequisites do not advertise public admission"]
     try:
         admission = _load_signed_directory_evidence(
             root,

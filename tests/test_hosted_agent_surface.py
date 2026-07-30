@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from exomem import commands
+from exomem import command_surface, commands
 from exomem import hosted_gateway as gateway
 from exomem.capabilities import active_surface
 
@@ -128,9 +128,13 @@ def test_agent_contract_is_mcp_ready_deterministic_and_additive() -> None:
         assert mcp_tool["name"] == name
         assert mcp_tool["description"] == fixture[name]["description"]
         assert mcp_tool["inputSchema"] == fixture[name]["inputSchema"]
-        assert mcp_tool["annotations"] == canonical_commands[
-            name
-        ].mcp_annotations.model_dump(mode="json", by_alias=True)
+        expected_annotations = command_surface.mcp_tool_annotations(
+            name,
+            read_only=canonical_commands[name].read_only,
+            open_world=True,
+        ).model_dump(mode="json", by_alias=True)
+        assert mcp_tool["annotations"] == expected_annotations
+        assert mcp_tool["annotations"]["idempotentHint"] is canonical_commands[name].read_only
 
 
 def test_hosted_alpha_mcp_tools_omit_absent_optional_fields_without_losing_schema_nulls() -> None:

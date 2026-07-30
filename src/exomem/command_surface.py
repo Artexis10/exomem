@@ -263,7 +263,7 @@ def mcp_tool_annotations(
         title=name.replace("_", " ").title(),
         readOnlyHint=read_only,
         destructiveHint=False if read_only else (name in DESTRUCTIVE_OPS),
-        idempotentHint=False,
+        idempotentHint=read_only,
         openWorldHint=open_world,
     )
 
