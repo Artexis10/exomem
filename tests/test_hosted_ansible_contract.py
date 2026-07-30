@@ -54,6 +54,10 @@ def test_base_role_hardens_ssh_firewall_time_logging_and_disk_support() -> None:
     assert "KbdInteractiveAuthentication no" in ssh
     assert "bantime = 1h" in fail2ban
     assert "SystemMaxUse=512M" in journald
+    journal_directory = "path: /etc/systemd/journald.conf.d"
+    journal_policy = "name: Install bounded journal storage policy"
+    assert journal_directory in tasks
+    assert tasks.index(journal_directory) < tasks.index(journal_policy)
 
 
 def test_k3s_role_pins_binary_and_hardens_single_server_configuration() -> None:
@@ -70,14 +74,14 @@ def test_k3s_role_pins_binary_and_hardens_single_server_configuration() -> None:
     assert 'checksum: "sha256:{{ k3s_sha256_amd64 }}"' in tasks
     assert "cluster-init: true" in config
     assert "secrets-encryption: true" in config
-    assert "write-kubeconfig-mode: \"0640\"" in config
-    assert 'disable:\n  - traefik\n  - servicelb\n  - local-storage' in config
+    assert 'write-kubeconfig-mode: "0640"' in config
+    assert "disable:\n  - traefik\n  - servicelb\n  - local-storage" in config
     assert "service-account-max-token-expiration=24h" in config
     assert "image-gc-high-threshold=75" in config
     assert "container-log-max-size=10Mi" in config
     assert "audit-log-path=/var/lib/rancher/k3s/server/logs/audit.log" in config
     assert "admission-control-config-file=/etc/rancher/k3s/admission-config.yaml" in config
-    assert "etcd-snapshot-schedule-cron: \"*/30 * * * *\"" in config
+    assert 'etcd-snapshot-schedule-cron: "*/30 * * * *"' in config
     assert "etcd-s3: true" in config
     assert "etcd-s3-secret-key:" in config
     assert "ExecStart=/usr/local/bin/k3s server" in service
@@ -88,6 +92,19 @@ def test_k3s_role_pins_binary_and_hardens_single_server_configuration() -> None:
     assert "warn: restricted" in admission
     assert "- exomem-storage-init" in admission
     assert "- exomem-platform" in admission
+
+
+def test_k3s_role_resolves_the_private_interface_from_the_declared_node_ip() -> None:
+    defaults = _read("roles/k3s/defaults/main.yml")
+    tasks = _read("roles/k3s/tasks/main.yml")
+    config = _read("roles/k3s/templates/config.yaml.j2")
+
+    assert 'k3s_private_interface: ""' in defaults
+    assert "k3s_private_interface_candidates" in tasks
+    assert 'selectattr("ipv4.address", "equalto", private_node_ip)' in tasks
+    assert "k3s_private_interface_candidates | length == 1" in tasks
+    assert "k3s_resolved_private_interface" in tasks
+    assert "flannel-iface: {{ k3s_resolved_private_interface | to_json }}" in config
 
 
 def test_inventory_generator_emits_only_non_sensitive_host_coordinates(tmp_path: Path) -> None:
@@ -131,6 +148,13 @@ def test_inventory_generator_emits_only_non_sensitive_host_coordinates(tmp_path:
     assert "alpha-admin" in rendered
     assert "must-never-appear" not in rendered
     assert "secret" not in rendered.lower()
+    parsed = json.loads(rendered)
+    assert "_meta" not in parsed
+    assert parsed["all"]["children"]["hosted_nodes"]["hosts"]["exomem-alpha"] == {
+        "ansible_host": "192.0.2.10",
+        "ansible_user": "alpha-admin",
+        "private_node_ip": "10.50.1.10",
+    }
 
 
 def test_ansible_syntax_with_pinned_binary() -> None:

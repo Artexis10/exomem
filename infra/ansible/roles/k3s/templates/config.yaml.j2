@@ -2,7 +2,7 @@ cluster-init: true
 token: {{ k3s_server_token | to_json }}
 node-ip: {{ private_node_ip | to_json }}
 advertise-address: {{ private_node_ip | to_json }}
-flannel-iface: {{ k3s_private_interface | to_json }}
+flannel-iface: {{ k3s_resolved_private_interface | to_json }}
 secrets-encryption: true
 write-kubeconfig-mode: "0640"
 write-kubeconfig-group: exomem-operators

@@ -1,9 +1,23 @@
 ---
+- name: Discover the interface bound to the declared private node IP
+  ansible.builtin.set_fact:
+    k3s_private_interface_candidates: >-
+      {{
+        ansible_facts["interfaces"]
+        | map("extract", ansible_facts)
+        | selectattr("ipv4", "defined")
+        | selectattr("ipv4.address", "equalto", private_node_ip)
+        | map(attribute="device")
+        | list
+      }}
+  changed_when: false
+
 - name: Validate K3s and off-host snapshot inputs
   ansible.builtin.assert:
     that:
       - ansible_architecture == "x86_64"
       - private_node_ip | length > 0
+      - k3s_private_interface | length > 0 or k3s_private_interface_candidates | length == 1
       - k3s_server_token | length >= 32
       - k3s_etcd_s3_endpoint | length > 0
       - k3s_etcd_s3_region | length > 0
@@ -12,6 +26,16 @@
       - k3s_etcd_s3_secret_key | length > 0
     fail_msg: Pinned x86 K3s and complete encrypted snapshot credentials are required.
   no_log: true
+
+- name: Select the K3s private network interface
+  ansible.builtin.set_fact:
+    k3s_resolved_private_interface: >-
+      {{
+        k3s_private_interface
+        if k3s_private_interface | length > 0
+        else k3s_private_interface_candidates[0]
+      }}
+  changed_when: false
 
 - name: Create K3s configuration and audit directories
   ansible.builtin.file:

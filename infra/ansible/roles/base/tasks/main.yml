@@ -80,6 +80,14 @@
     mode: "0644"
   notify: Restart fail2ban
 
+- name: Create the journald configuration directory
+  ansible.builtin.file:
+    path: /etc/systemd/journald.conf.d
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
 - name: Install bounded journal storage policy
   ansible.builtin.template:
     src: 99-exomem-storage.conf.j2
