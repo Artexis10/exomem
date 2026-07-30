@@ -134,6 +134,7 @@ jobs:
       - name: Verify the provisioner image and signed candidate
         id: candidate-proof
         env:
+          GH_TOKEN: ${{ github.token }}
           CANDIDATE: ${{ steps.candidate.outputs.candidate }}
           IMAGE_BUNDLE: ${{ steps.candidate.outputs.bundle }}
           CANDIDATE_ATTESTATION_BUNDLE: ${{ steps.candidate-attestation.outputs.bundle-path }}
