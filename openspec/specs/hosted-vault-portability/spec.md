@@ -3,9 +3,7 @@
 ## Purpose
 
 Define quiesced, integrity-verifiable export, staged restore, release, and deletion-preparation hooks for canonical Exomem vault data.
-
 ## Requirements
-
 ### Requirement: Portability operations use an explicit quiescence boundary
 
 Source snapshot export and deletion preparation SHALL run only after the serving hosted cell enters explicit quiescence at the shared lifecycle/mutation boundary. Quiescence MUST stop admission of new mutations and transfers, wait for admitted commands, uploads/downloads, and durable background writers to finish, and fail without a success artifact or deletion clearance when bounded drain cannot complete. In-place or live restore SHALL remain forbidden. Offline restore into a new unserved target SHALL not require a nonexistent running lifecycle to quiesce; instead it SHALL require stopped external routing/workload plus an exclusive target lifetime lock shared with server startup and every restore process. Read admission during source quiescence SHALL be explicitly reported and MUST NOT weaken mutation exclusion.
@@ -209,3 +207,36 @@ Export, restore, release, and deletion-preparation hooks SHALL require private o
 - **WHEN** a caller without private operator authority invokes a portability hook
 - **THEN** the request is rejected without changing cell state
 - **AND** the rejection log contains no vault content, secret, or existence oracle for another tenant
+
+### Requirement: Deletion purges media-derived index residue
+
+When a page, media sidecar, or media binary is deleted, the deletion fan-out
+SHALL purge every derived index row for that artifact, including CLIP
+image/frame vectors and scene-frame derivatives, leaving no sidecar through which
+the deleted content remains searchable. Deleting a media binary SHALL trigger the
+same fan-out as deleting a Markdown page. A reconcile pass SHALL heal
+pre-existing orphaned CLIP rows and `.frames/` directories idempotently.
+
+#### Scenario: Deleting an image purges its CLIP rows
+
+- **WHEN** an image (or its sidecar) is deleted
+- **THEN** its CLIP vectors are removed and a subsequent visual search cannot
+  return the deleted image
+
+#### Scenario: Deleting a video clears frame derivatives
+
+- **WHEN** a video is deleted
+- **THEN** its `<video>.frames/` directory, per-frame sidecars, and per-frame
+  CLIP rows are removed
+
+#### Scenario: Deleting a media binary triggers fan-out
+
+- **WHEN** a media binary is deleted directly
+- **THEN** the deletion fan-out runs for it (not skipped as non-Markdown) and all
+  its derived index rows are purged
+
+#### Scenario: Reconcile heals prior orphans
+
+- **WHEN** a vault contains CLIP rows or `.frames/` directories orphaned by a
+  prior deletion and reconcile runs
+- **THEN** the orphans are removed, and running reconcile again changes nothing

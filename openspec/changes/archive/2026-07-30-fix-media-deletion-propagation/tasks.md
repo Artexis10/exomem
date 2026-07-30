@@ -37,6 +37,6 @@
 - [x] 5.1 `PYTHONPATH=src EXOMEM_DISABLE_EMBEDDINGS=1 uv run python -m pytest -q
       tests/test_media_deletion_propagation.py tests/test_index_sync.py
       tests/test_scene_frames.py` green.
-- [ ] 5.2 `uv run python -m pytest tests/test_latency_gate.py -q` green.
+- [x] 5.2 `uv run python -m pytest tests/test_latency_gate.py -q` green.
 - [x] 5.3 `uvx ruff check` clean on changed files; `openspec validate
       fix-media-deletion-propagation --strict` green.
