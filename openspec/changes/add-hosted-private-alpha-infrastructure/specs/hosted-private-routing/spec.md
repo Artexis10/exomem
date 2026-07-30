@@ -1,11 +1,15 @@
 ## ADDED Requirements
 
 ### Requirement: Control routes require two independent credentials
-Cloudflare Tunnel SHALL be the only public ingress to the cluster. The control hostname SHALL require a Cloudflare Access service token held by Vercel/operators and Traefik SHALL expose only provisioner `/cells/*` and versioned private cell-control paths. Provisioner calls SHALL additionally require the provisioner bearer; cell calls SHALL additionally require the per-cell service bearer and exact hosted identity headers. The personal OAuth/public Exomem surface MUST NOT be routed.
+Cloudflare Tunnel SHALL be the only public ingress to the cluster. The control hostname SHALL require a Cloudflare Access service token held by Vercel/operators and Traefik SHALL expose only provisioner `/cells/*` and versioned private cell-control paths. The `/cells/*` routes SHALL multiplex provisioner wire v1 and v2 through the exact provisioner protocol header without creating a second route family. Provisioner calls SHALL additionally require the provisioner bearer; cell calls SHALL additionally require the per-cell service bearer and exact Hosted runtime identity headers. The provisioner wire protocol and the private-cell Hosted runtime protocol SHALL remain independent version axes. Routing MUST NOT supply candidate, compatibility, or client-package authority. The personal OAuth/public Exomem surface MUST NOT be routed.
 
 #### Scenario: Access credential is missing
 - **WHEN** a caller presents a valid cell bearer and headers but no valid Cloudflare Access service token on the control hostname
 - **THEN** the request is rejected at the edge and never reaches the cell
+
+#### Scenario: Provisioner v2 uses the existing route
+- **WHEN** an authenticated caller invokes `/cells/health` with the exact v2 provisioner protocol header
+- **THEN** routing forwards the request to the provisioner without changing the independent `/private/exomem/v1/...` runtime route contract
 
 #### Scenario: Personal route is requested through control ingress
 - **WHEN** an Access-authenticated caller requests a non-private Exomem route
