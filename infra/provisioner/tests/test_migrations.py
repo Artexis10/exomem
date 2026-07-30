@@ -58,7 +58,7 @@ def test_alembic_upgrades_empty_sqlite_database_to_head(tmp_path: Path) -> None:
         "capacity_reservations",
         "capacity_destructive_fences",
     } <= tables
-    assert revision == ("0005_capacity_reservations",)
+    assert revision == ("0006_operation_wire_protocol",)
     assert ledger == [(1, 0)]
     assert {
         "caller_checkpoint",
@@ -67,6 +67,7 @@ def test_alembic_upgrades_empty_sqlite_database_to_head(tmp_path: Path) -> None:
         "claim_token",
         "claim_generation",
         "claim_expires_at",
+        "wire_protocol",
     } <= operation_columns
 
 
@@ -113,7 +114,71 @@ def test_capacity_migration_downgrade_upgrade_round_trip(tmp_path: Path) -> None
                 "capacity_reservations",
                 "capacity_destructive_fences",
             } <= tables
-            assert revision == ("0005_capacity_reservations",)
+            assert revision == ("0006_operation_wire_protocol",)
+
+
+def test_wire_protocol_sqlite_backfill_default_constraint_and_round_trip(tmp_path: Path) -> None:
+    database = tmp_path / "wire-protocol-round-trip.sqlite"
+    root = Path(__file__).parents[1]
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "EXOMEM_PROVISIONER_DATABASE_URL": f"sqlite:///{database}",
+            "EXOMEM_PROVISIONER_DATABASE_SCHEMA": "exomem_provisioner",
+            "EXOMEM_PROVISIONER_DATABASE_ROLE": "exomem_provisioner_runtime",
+        }
+    )
+
+    def migrate(command: str, target: str) -> None:
+        completed = subprocess.run(
+            [sys.executable, "-m", "alembic", "-c", "alembic.ini", command, target],
+            cwd=root,
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert completed.returncode == 0, completed.stdout + completed.stderr
+
+    def insert_legacy(connection: sqlite3.Connection, operation_id: str) -> None:
+        connection.execute(
+            "INSERT INTO operations (id, action, idempotency_key, canonical_request_sha256, "
+            "tenant_id, external_operation_id, fence_generation, provider_operation_id, "
+            "provider_fence_generation, state, caller_checkpoint, checkpoint, progress, "
+            "request_ciphertext, result_redacted, retry_after_seconds, available_at, "
+            "claim_generation, created_at, updated_at) VALUES (?, 'PROVISION', ?, ?, ?, ?, "
+            "1, ?, 1, 'PENDING', 'requested', 'queued', '{}', 'ciphertext', '{}', 2, "
+            "'2026-01-01T00:00:00Z', 0, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+            (operation_id, f"key-{operation_id}", "a" * 64, "tenant", operation_id, operation_id),
+        )
+
+    migrate("upgrade", "0005_capacity_reservations")
+    with sqlite3.connect(database) as connection:
+        insert_legacy(connection, "legacy-before-0006")
+    migrate("upgrade", "head")
+    with sqlite3.connect(database) as connection:
+        assert connection.execute(
+            "SELECT wire_protocol FROM operations WHERE id = 'legacy-before-0006'"
+        ).fetchone() == ("exomem-cell-provisioner.v1",)
+        insert_legacy(connection, "default-after-0006")
+        assert connection.execute(
+            "SELECT wire_protocol FROM operations WHERE id = 'default-after-0006'"
+        ).fetchone() == ("exomem-cell-provisioner.v1",)
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(
+                "UPDATE operations SET wire_protocol = 'exomem-cell-provisioner.v9' "
+                "WHERE id = 'default-after-0006'"
+            )
+    migrate("downgrade", "0005_capacity_reservations")
+    with sqlite3.connect(database) as connection:
+        assert "wire_protocol" not in {
+            row[1] for row in connection.execute("PRAGMA table_info(operations)")
+        }
+    migrate("upgrade", "head")
+    with sqlite3.connect(database) as connection:
+        assert connection.execute(
+            "SELECT DISTINCT wire_protocol FROM operations ORDER BY wire_protocol"
+        ).fetchall() == [("exomem-cell-provisioner.v1",)]
 
 
 @pytest.mark.parametrize(
