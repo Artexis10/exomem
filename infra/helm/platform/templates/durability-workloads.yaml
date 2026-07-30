@@ -857,7 +857,7 @@ data:
             }],
             "volumes": [
               {"name": "temporary", "emptyDir": {"sizeLimit": "64Mi"}},
-              {"name": "deployment-lock", "configMap": {"name": {{ $lockName | quote }}, "items": [{"key": "exomem-hosted-deployment-lock-v2.json", "path": "exomem-hosted-deployment-lock-v2.json"}]}}
+              {"name": "deployment-lock", "configMap": {"name": {{ $lockName | quote }}, "defaultMode": 292, "items": [{"key": "exomem-hosted-deployment-lock-v2.json", "path": "exomem-hosted-deployment-lock-v2.json"}]}}
             ]
           }
         }

@@ -350,6 +350,8 @@ def test_platform_mounts_the_selected_lock_for_every_lock_consuming_workload() -
                 "path": "exomem-hosted-deployment-lock-v2.json",
             }
         ], name
+        if name == "exomem-deletion-worker":
+            assert volume["configMap"]["defaultMode"] == 0o444
 
 
 def test_platform_renders_live_capacity_receipt_collector_with_isolated_keys() -> None:
@@ -936,6 +938,8 @@ def test_deletion_dispatcher_admission_closes_probe_and_container_override_surfa
     assert f"{container}.env[14].value == '/etc/exomem/deployment-lock/exomem-hosted-deployment-lock-v2.json'" in expressions
     assert 'volumes[1].configMap.name == "exomem-hosted-deployment-lock-v2-97c1fc1bf93e0492"' in expressions
     assert "volumes[1].configMap.items[0].key == 'exomem-hosted-deployment-lock-v2.json'" in expressions
+    assert "volumes[1].configMap.defaultMode == 292" in expressions
+    assert "!has(object.spec.template.spec.volumes[1].configMap.defaultMode)" not in expressions
     assert f"{container}.volumeMounts[1].readOnly == true" in expressions
 
 

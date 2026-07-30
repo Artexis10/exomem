@@ -190,7 +190,7 @@ spec:
         size(object.spec.template.spec.volumes[1].configMap.items) == 1 &&
         object.spec.template.spec.volumes[1].configMap.items[0].key == 'exomem-hosted-deployment-lock-v2.json' &&
         object.spec.template.spec.volumes[1].configMap.items[0].path == 'exomem-hosted-deployment-lock-v2.json' &&
-        !has(object.spec.template.spec.volumes[1].configMap.defaultMode) &&
+        object.spec.template.spec.volumes[1].configMap.defaultMode == 292 &&
         !has(object.spec.template.spec.volumes[1].configMap.optional) &&
         size(object.spec.template.spec.containers[0].volumeMounts) == 2 &&
         object.spec.template.spec.containers[0].volumeMounts[0].name == 'temporary' &&
