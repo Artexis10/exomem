@@ -467,6 +467,22 @@ def test_atomic_failure_preserves_existing_pair(tmp_path: Path, monkeypatch: pyt
     assert output.read_bytes() == b"old pair\n"
 
 
+def test_pair_output_rejects_a_missing_nested_parent_under_an_alias(tmp_path: Path) -> None:
+    composer = _module()
+    target = tmp_path / "target"
+    target.mkdir()
+    alias = tmp_path / "alias"
+    try:
+        alias.symlink_to(target, target_is_directory=True)
+    except OSError:
+        pytest.skip("symlinks unavailable")
+    output = alias / "missing" / "lock-pair.json"
+
+    with pytest.raises(composer.CompositionError, match="directory"):
+        composer._write_pair_atomic(output, b"pair\n")
+    assert not (target / "missing").exists()
+
+
 def test_pair_validator_rejects_duplicate_or_divergent_members(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

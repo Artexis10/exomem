@@ -507,6 +507,8 @@ def _validate_output(path: Path) -> None:
         if stat.S_ISLNK(mode) or not stat.S_ISREG(mode):
             _error("lock output must be a regular non-symlink file")
     parent = path.parent
+    if not parent.exists():
+        _error("lock output directory must already exist")
     while parent.exists():
         try:
             information = parent.lstat()
@@ -525,7 +527,6 @@ def _validate_output(path: Path) -> None:
 
 
 def _stage(path: Path, data: bytes) -> Path:
-    path.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
     temporary = Path(temporary_name)
     try:
