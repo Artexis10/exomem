@@ -111,6 +111,22 @@ def _request(module, tmp_path: Path):
     forward_sha = _write_json(forward, _contract(runtime_image))
     legacy_contract = tmp_path / "legacy.json"
     legacy_sha = _write_json(legacy_contract, _contract(runtime_image))
+    authority = tmp_path / "authoritative-release-set.json"
+    authority_sha = _write_json(
+        authority,
+        {
+            "artifact": "exomem-hosted-authoritative-legacy-v1-release-set",
+            "schemaVersion": 1,
+            "units": [
+                {
+                    "releaseVersion": "0.35.1",
+                    "protocolVersion": "1",
+                    "runtimeImage": runtime_image,
+                    "sourceCommit": COMMIT,
+                }
+            ],
+        },
+    )
     catalog = tmp_path / "catalog.json"
     catalog_sha = _write_json(
         catalog,
@@ -161,11 +177,11 @@ def _request(module, tmp_path: Path):
             tmp_path / "provisioner.candidate.bundle",
         ),
         forward_contract=module.HashedInput(forward, forward_sha),
+        authoritative_legacy_release_set=module.HashedInput(authority, authority_sha),
         legacy_catalog=module.HashedInput(catalog, catalog_sha),
         legacy_contracts=(module.HashedInput(legacy_contract, legacy_sha),),
         rollback=module.HashedInput(rollback, rollback_sha),
-        expand_output=tmp_path / "expand.json",
-        contract_output=tmp_path / "contract.json",
+        output=tmp_path / "lock-pair.json",
     )
 
 
@@ -191,13 +207,13 @@ def test_composer_verifies_candidates_and_writes_deterministic_lock_pair(
     )
 
     composer.compose_locks(request)
-    first = (request.expand_output.read_bytes(), request.contract_output.read_bytes())
+    first = request.output.read_bytes()
     composer.compose_locks(request)
 
-    expand = json.loads(first[0])
-    contract = json.loads(first[1])
+    pair = json.loads(first)
+    expand, contract = pair["locks"]
     assert [path.name for path in verified] == [request.runtime.candidate.name, request.provisioner.candidate.name] * 2
-    assert (request.expand_output.read_bytes(), request.contract_output.read_bytes()) == first
+    assert request.output.read_bytes() == first
     assert expand["admissionMode"] == "expand"
     assert contract["admissionMode"] == "contract"
     assert {key: value for key, value in expand.items() if key != "admissionMode"} == {
@@ -270,8 +286,7 @@ def test_composer_rejects_untrusted_catalog_evidence_before_writing(
 
     with pytest.raises(composer.CompositionError):
         composer.compose_locks(request)
-    assert not request.expand_output.exists()
-    assert not request.contract_output.exists()
+    assert not request.output.exists()
 
 
 def test_composer_requires_the_caller_pinned_candidate_bytes(
@@ -287,8 +302,7 @@ def test_composer_requires_the_caller_pinned_candidate_bytes(
 
     with pytest.raises(composer.CompositionError, match="candidate SHA-256"):
         composer.compose_locks(request)
-    assert not request.expand_output.exists()
-    assert not request.contract_output.exists()
+    assert not request.output.exists()
 
 
 @pytest.mark.parametrize(
@@ -320,7 +334,7 @@ def test_lock_validation_rejects_tampered_lineage(
         },
     )
     composer.compose_locks(request)
-    lock = deepcopy(json.loads(request.expand_output.read_text()))
+    lock = deepcopy(json.loads(request.output.read_text())["locks"][0])
     mutation(lock)
 
     with pytest.raises(composer.CompositionError):
@@ -363,12 +377,11 @@ def test_atomic_failure_leaves_no_new_output(tmp_path: Path, monkeypatch: pytest
             "paths": list(paths),
         },
     )
-    monkeypatch.setattr(composer, "_commit_staged_pair", lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("disk")))
+    monkeypatch.setattr(composer.os, "replace", lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("disk")))
 
     with pytest.raises(composer.CompositionError, match="write"):
         composer.compose_locks(request)
-    assert not request.expand_output.exists()
-    assert not request.contract_output.exists()
+    assert not request.output.exists()
 
 
 @pytest.mark.parametrize("change", ["add", "delete", "rename"])
@@ -440,24 +453,59 @@ def test_hashed_evidence_rejects_unsafe_bytes(tmp_path: Path, failure: str) -> N
         composer._load_hashed(composer.HashedInput(path, digest), label="evidence")
 
 
-def test_atomic_failure_restores_existing_pair(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_atomic_failure_preserves_existing_pair(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     composer = _module()
-    expand = tmp_path / "expand.json"
-    contract = tmp_path / "contract.json"
-    expand.write_bytes(b"old expand\n")
-    contract.write_bytes(b"old contract\n")
-    replace = composer.os.replace
-    calls = 0
+    output = tmp_path / "lock-pair.json"
+    output.write_bytes(b"old pair\n")
 
-    def fail_contract(source: Path, target: Path) -> None:
-        nonlocal calls
-        calls += 1
-        if calls == 2:
-            raise OSError("disk")
-        replace(source, target)
+    def fail_publish(source: Path, target: Path) -> None:
+        raise OSError("disk")
 
-    monkeypatch.setattr(composer.os, "replace", fail_contract)
+    monkeypatch.setattr(composer.os, "replace", fail_publish)
     with pytest.raises(composer.CompositionError, match="write"):
-        composer._write_pair_atomic(expand, contract, b"new expand\n", b"new contract\n")
-    assert expand.read_bytes() == b"old expand\n"
-    assert contract.read_bytes() == b"old contract\n"
+        composer._write_pair_atomic(output, b"new pair\n")
+    assert output.read_bytes() == b"old pair\n"
+
+
+def test_pair_validator_rejects_duplicate_or_divergent_members(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    composer = _module()
+    request = _request(composer, tmp_path)
+    monkeypatch.setattr(composer.hosted_image_candidate, "verify_candidate", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        composer,
+        "verify_source_closure",
+        lambda _repository, candidate, composition, paths: {
+            "candidateCommit": candidate,
+            "compositionCommit": composition,
+            "paths": list(paths),
+        },
+    )
+    pair = composer.compose_locks(request)
+    duplicate = deepcopy(pair)
+    duplicate["locks"][1]["admissionMode"] = "expand"
+    with pytest.raises(composer.CompositionError):
+        composer.validate_deployment_lock_pair(duplicate)
+    divergent = deepcopy(pair)
+    divergent["locks"][1]["components"]["runtime"]["candidateSha256"] = "0" * 64
+    with pytest.raises(composer.CompositionError):
+        composer.validate_deployment_lock_pair(divergent)
+
+
+def test_authoritative_release_set_rejects_catalog_omission(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    composer = _module()
+    request = _request(composer, tmp_path)
+    authority = json.loads(request.authoritative_legacy_release_set.path.read_text())
+    authority["units"].append({**authority["units"][0], "releaseVersion": "0.34.0"})
+    request = replace(
+        request,
+        authoritative_legacy_release_set=replace(
+            request.authoritative_legacy_release_set,
+            sha256=_write_json(request.authoritative_legacy_release_set.path, authority),
+        ),
+    )
+    monkeypatch.setattr(composer.hosted_image_candidate, "verify_candidate", lambda *_args, **_kwargs: None)
+    with pytest.raises(composer.CompositionError, match="authoritative"):
+        composer.compose_locks(request)
+    assert not request.output.exists()

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import hashlib
 import importlib.util
 import json
@@ -82,11 +83,11 @@ class CompositionRequest:
     runtime: CandidateInput
     provisioner: CandidateInput
     forward_contract: HashedInput
+    authoritative_legacy_release_set: HashedInput
     legacy_catalog: HashedInput
     legacy_contracts: tuple[HashedInput, ...]
     rollback: HashedInput
-    expand_output: Path
-    contract_output: Path
+    output: Path
 
 
 def _canonical(value: object) -> bytes:
@@ -369,11 +370,44 @@ def verify_source_closure(
 
 def _legacy_catalog(
     catalog: dict[str, Any],
+    authority: dict[str, Any],
     contracts: tuple[HashedInput, ...],
 ) -> tuple[list[dict[str, object]], str]:
     body = _exact_object(catalog, label="legacy catalog", fields={"schemaVersion", "units"})
     if body["schemaVersion"] != 1 or not isinstance(body["units"], list) or not body["units"]:
         _error("legacy catalog is invalid")
+    authority_body = _exact_object(
+        authority,
+        label="authoritative legacy release set",
+        fields={"artifact", "schemaVersion", "units"},
+    )
+    if (
+        authority_body["artifact"] != "exomem-hosted-authoritative-legacy-v1-release-set"
+        or authority_body["schemaVersion"] != 1
+        or not isinstance(authority_body["units"], list)
+        or not authority_body["units"]
+    ):
+        _error("authoritative legacy release set is invalid")
+    authoritative_units: set[tuple[str, str, str, str]] = set()
+    for raw_unit in authority_body["units"]:
+        unit = _exact_object(
+            raw_unit,
+            label="authoritative legacy release unit",
+            fields={"releaseVersion", "protocolVersion", "runtimeImage", "sourceCommit"},
+        )
+        release = unit["releaseVersion"]
+        protocol = unit["protocolVersion"]
+        if not isinstance(release, str) or not release or not isinstance(protocol, str) or not protocol:
+            _error("authoritative legacy release unit identity is invalid")
+        authority_key = (
+            release,
+            protocol,
+            _image(unit["runtimeImage"], label="authoritative legacy image", pattern=_RUNTIME_IMAGE),
+            _commit(unit["sourceCommit"], label="authoritative legacy source"),
+        )
+        if authority_key in authoritative_units:
+            _error("authoritative legacy release set has duplicates")
+        authoritative_units.add(authority_key)
     supplied: dict[str, dict[str, Any]] = {}
     for item in contracts:
         if item.sha256 in supplied:
@@ -395,10 +429,10 @@ def _legacy_catalog(
         protocol = unit["protocolVersion"]
         if not isinstance(release, str) or not release or not isinstance(protocol, str) or not protocol:
             _error("legacy catalog unit identity is invalid")
-        key = (release, protocol)
-        if key in seen:
+        catalog_key = (release, protocol)
+        if catalog_key in seen:
             _error("legacy catalog has duplicate runtime units")
-        seen.add(key)
+        seen.add(catalog_key)
         contract_sha = _sha256(unit["contractSha256"], label="legacy catalog contract")
         contract = supplied.get(contract_sha)
         if contract is None:
@@ -424,6 +458,13 @@ def _legacy_catalog(
         )
     if used != set(supplied):
         _error("legacy contract evidence is not authoritative")
+    catalog_units = {
+        (cast(str, unit["releaseVersion"]), cast(str, unit["protocolVersion"]), cast(str, unit["runtimeImage"]), cast(str, unit["sourceCommit"]))
+        for unit in units
+    }
+    if catalog_units != authoritative_units:
+        _error("legacy catalog does not exactly match the authoritative release set")
+    units.sort(key=lambda unit: (cast(str, unit["releaseVersion"]), cast(str, unit["protocolVersion"])))
     release_set = [{"releaseVersion": release, "protocolVersion": protocol} for release, protocol in sorted(seen)]
     return units, hashlib.sha256(_canonical(release_set)).hexdigest()
 
@@ -465,13 +506,22 @@ def _validate_output(path: Path) -> None:
             raise CompositionError("cannot inspect lock output") from exc
         if stat.S_ISLNK(mode) or not stat.S_ISREG(mode):
             _error("lock output must be a regular non-symlink file")
-    if path.parent.exists():
+    parent = path.parent
+    while parent.exists():
         try:
-            mode = path.parent.lstat().st_mode
+            information = parent.lstat()
         except OSError as exc:
             raise CompositionError("cannot inspect lock output directory") from exc
-        if stat.S_ISLNK(mode) or not stat.S_ISDIR(mode):
+        reparse = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+        if (
+            stat.S_ISLNK(information.st_mode)
+            or not stat.S_ISDIR(information.st_mode)
+            or getattr(information, "st_file_attributes", 0) & reparse
+        ):
             _error("lock output directory is unsafe")
+        if parent.parent == parent:
+            break
+        parent = parent.parent
 
 
 def _stage(path: Path, data: bytes) -> Path:
@@ -490,51 +540,23 @@ def _stage(path: Path, data: bytes) -> Path:
     return temporary
 
 
-def _commit_staged_pair(staged: tuple[tuple[Path, Path], tuple[Path, Path]]) -> None:
-    originals: list[tuple[Path, Path | None]] = []
+def _write_pair_atomic(path: Path, data: bytes) -> None:
+    _validate_output(path)
+    temporary: Path | None = None
     try:
-        for _, target in staged:
-            backup: Path | None = None
-            if target.exists():
-                backup = _stage(target, _read_regular(target, label="existing lock output"))
-            originals.append((target, backup))
-        for temporary, target in staged:
-            os.replace(temporary, target)
-    except OSError as exc:
-        for target, backup in originals:
+        temporary = _stage(path, data)
+        os.replace(temporary, path)
+        if hasattr(os, "O_DIRECTORY"):
+            descriptor = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
             try:
-                if backup is None:
-                    target.unlink(missing_ok=True)
-                else:
-                    os.replace(backup, target)
-            except OSError:
-                pass
-        raise CompositionError("lock pair write failed") from exc
-    finally:
-        for temporary, _ in staged:
-            temporary.unlink(missing_ok=True)
-        for _, backup in originals:
-            if backup is not None:
-                backup.unlink(missing_ok=True)
-
-
-def _write_pair_atomic(expand: Path, contract: Path, expand_bytes: bytes, contract_bytes: bytes) -> None:
-    if expand == contract:
-        _error("expand and contract outputs must differ")
-    _validate_output(expand)
-    _validate_output(contract)
-    staged: tuple[tuple[Path, Path], tuple[Path, Path]] | None = None
-    try:
-        staged = ((_stage(expand, expand_bytes), expand), (_stage(contract, contract_bytes), contract))
-        _commit_staged_pair(staged)
-    except CompositionError:
-        raise
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
     except OSError as exc:
         raise CompositionError("lock pair write failed") from exc
     finally:
-        if staged is not None:
-            for temporary, _ in staged:
-                temporary.unlink(missing_ok=True)
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
 
 
 def validate_deployment_lock(value: object) -> None:
@@ -568,10 +590,11 @@ def validate_deployment_lock(value: object) -> None:
     composition = _exact_object(
         lock["composition"],
         label="composition evidence",
-        fields={"commit", "sourceClosure", "forwardContractSha256", "legacyCatalog", "legacyReleaseSetSha256"},
+        fields={"commit", "sourceClosure", "forwardContractSha256", "authoritativeLegacyReleaseSetSha256", "legacyCatalog", "legacyReleaseSetSha256"},
     )
     _commit(composition["commit"], label="composition commit")
     _sha256(composition["forwardContractSha256"], label="forward contract")
+    _sha256(composition["authoritativeLegacyReleaseSetSha256"], label="authoritative legacy release set")
     _sha256(composition["legacyReleaseSetSha256"], label="legacy release set")
     if not isinstance(composition["legacyCatalog"], list) or not composition["legacyCatalog"]:
         _error("deployment lock legacy catalog is invalid")
@@ -637,7 +660,29 @@ def validate_deployment_lock(value: object) -> None:
         _error("deployment lock contains a placeholder")
 
 
-def compose_locks(request: CompositionRequest) -> tuple[dict[str, object], dict[str, object]]:
+def validate_deployment_lock_pair(value: object) -> None:
+    pair = _exact_object(value, label="deployment lock pair", fields={"artifact", "schemaVersion", "locks"})
+    if pair["artifact"] != "exomem-hosted-deployment-lock-pair" or pair["schemaVersion"] != 2:
+        _error("deployment lock pair identity is invalid")
+    if not isinstance(pair["locks"], list) or len(pair["locks"]) != 2:
+        _error("deployment lock pair must contain exactly two locks")
+    members: dict[str, dict[str, object]] = {}
+    for member in pair["locks"]:
+        validate_deployment_lock(member)
+        lock = cast(dict[str, object], member)
+        mode = cast(str, lock["admissionMode"])
+        if mode in members:
+            _error("deployment lock pair has duplicate admission modes")
+        members[mode] = lock
+    if set(members) != {"expand", "contract"}:
+        _error("deployment lock pair admission modes are invalid")
+    expand = {key: item for key, item in members["expand"].items() if key != "admissionMode"}
+    contract = {key: item for key, item in members["contract"].items() if key != "admissionMode"}
+    if expand != contract:
+        _error("deployment lock pair members differ outside admission mode")
+
+
+def compose_locks(request: CompositionRequest) -> dict[str, object]:
     """Verify all composition evidence and write the deterministic phase-lock pair."""
 
     composition_commit = _commit(request.composition_commit, label="composition commit")
@@ -652,8 +697,9 @@ def compose_locks(request: CompositionRequest) -> tuple[dict[str, object], dict[
     release = runtime_candidate.get("release")
     if not isinstance(release, dict) or release.get("version") != runtime_target["releaseVersion"]:
         _error("runtime candidate release does not match forward contract")
+    authority, _ = _load_hashed(request.authoritative_legacy_release_set, label="authoritative legacy release set")
     catalog, _ = _load_hashed(request.legacy_catalog, label="legacy catalog")
-    legacy_catalog, release_set_sha = _legacy_catalog(catalog, request.legacy_contracts)
+    legacy_catalog, release_set_sha = _legacy_catalog(catalog, authority, request.legacy_contracts)
     rollback_evidence, _ = _load_hashed(request.rollback, label="rollback evidence")
     rollback = _rollback(rollback_evidence)
     closure = {
@@ -685,17 +731,18 @@ def compose_locks(request: CompositionRequest) -> tuple[dict[str, object], dict[
             "commit": composition_commit,
             "sourceClosure": closure,
             "forwardContractSha256": request.forward_contract.sha256,
+            "authoritativeLegacyReleaseSetSha256": request.authoritative_legacy_release_set.sha256,
             "legacyCatalog": legacy_catalog,
             "legacyReleaseSetSha256": release_set_sha,
         },
         "rollback": rollback,
     }
-    expand = {**common, "admissionMode": "expand"}
-    contract = {**common, "admissionMode": "contract"}
-    validate_deployment_lock(expand)
-    validate_deployment_lock(contract)
-    _write_pair_atomic(request.expand_output, request.contract_output, _canonical(expand), _canonical(contract))
-    return expand, contract
+    expand = {**copy.deepcopy(common), "admissionMode": "expand"}
+    contract = {**copy.deepcopy(common), "admissionMode": "contract"}
+    pair = {"artifact": "exomem-hosted-deployment-lock-pair", "schemaVersion": 2, "locks": [expand, contract]}
+    validate_deployment_lock_pair(pair)
+    _write_pair_atomic(request.output, _canonical(pair))
+    return pair
 
 
 def _hashed_argument(value: str) -> HashedInput:
@@ -721,11 +768,11 @@ def main(argv: list[str] | None = None) -> int:
     _candidate_arguments(parser, "runtime")
     _candidate_arguments(parser, "provisioner")
     parser.add_argument("--forward-contract", type=_hashed_argument, required=True)
+    parser.add_argument("--authoritative-legacy-release-set", type=_hashed_argument, required=True)
     parser.add_argument("--legacy-catalog", type=_hashed_argument, required=True)
     parser.add_argument("--legacy-contract", type=_hashed_argument, action="append", required=True)
     parser.add_argument("--rollback", type=_hashed_argument, required=True)
-    parser.add_argument("--expand-output", type=Path, required=True)
-    parser.add_argument("--contract-output", type=Path, required=True)
+    parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args(argv)
     request = CompositionRequest(
         repository=args.repository,
@@ -745,11 +792,11 @@ def main(argv: list[str] | None = None) -> int:
             args.provisioner_bundle_from_oci,
         ),
         forward_contract=args.forward_contract,
+        authoritative_legacy_release_set=args.authoritative_legacy_release_set,
         legacy_catalog=args.legacy_catalog,
         legacy_contracts=tuple(args.legacy_contract),
         rollback=args.rollback,
-        expand_output=args.expand_output,
-        contract_output=args.contract_output,
+        output=args.output,
     )
     try:
         compose_locks(request)

@@ -1,28 +1,35 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://exomem.substratesystems.io/contracts/exomem-hosted-deployment-lock-v2.schema.json",
-  "title": "Exomem Hosted deployment lock v2",
+  "title": "Exomem Hosted deployment lock pair v2",
   "type": "object",
   "additionalProperties": false,
-  "required": ["artifact", "schemaVersion", "admissionMode", "components", "runtimeTarget", "composition", "rollback"],
+  "required": ["artifact", "schemaVersion", "locks"],
   "properties": {
-    "artifact": {"const": "exomem-hosted-deployment-lock"},
+    "artifact": {"const": "exomem-hosted-deployment-lock-pair"},
     "schemaVersion": {"const": 2},
-    "admissionMode": {"enum": ["expand", "contract"]},
-    "components": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["runtime", "provisioner"],
-      "properties": {
-        "runtime": {"$ref": "#/$defs/runtimeComponent"},
-        "provisioner": {"$ref": "#/$defs/provisionerComponent"}
-      }
-    },
-    "runtimeTarget": {"$ref": "#/$defs/runtimeTarget"},
-    "composition": {"$ref": "#/$defs/composition"},
-    "rollback": {"$ref": "#/$defs/rollback"}
+    "locks": {"type": "array", "minItems": 2, "maxItems": 2, "items": {"$ref": "#/$defs/deploymentLock"}}
   },
   "$defs": {
+    "deploymentLock": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["artifact", "schemaVersion", "admissionMode", "components", "runtimeTarget", "composition", "rollback"],
+      "properties": {
+        "artifact": {"const": "exomem-hosted-deployment-lock"},
+        "schemaVersion": {"const": 2},
+        "admissionMode": {"enum": ["expand", "contract"]},
+        "components": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["runtime", "provisioner"],
+          "properties": {"runtime": {"$ref": "#/$defs/runtimeComponent"}, "provisioner": {"$ref": "#/$defs/provisionerComponent"}}
+        },
+        "runtimeTarget": {"$ref": "#/$defs/runtimeTarget"},
+        "composition": {"$ref": "#/$defs/composition"},
+        "rollback": {"$ref": "#/$defs/rollback"}
+      }
+    },
     "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
     "commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
     "runtimeImage": {"type": "string", "pattern": "^ghcr\\.io/artexis10/exomem@sha256:[0-9a-f]{64}$"},
@@ -101,7 +108,7 @@
     "composition": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["commit", "sourceClosure", "forwardContractSha256", "legacyCatalog", "legacyReleaseSetSha256"],
+      "required": ["commit", "sourceClosure", "forwardContractSha256", "authoritativeLegacyReleaseSetSha256", "legacyCatalog", "legacyReleaseSetSha256"],
       "properties": {
         "commit": {"$ref": "#/$defs/commit"},
         "sourceClosure": {
@@ -114,6 +121,7 @@
           }
         },
         "forwardContractSha256": {"$ref": "#/$defs/sha256"},
+        "authoritativeLegacyReleaseSetSha256": {"$ref": "#/$defs/sha256"},
         "legacyCatalog": {"type": "array", "items": {"$ref": "#/$defs/legacyUnit"}, "minItems": 1},
         "legacyReleaseSetSha256": {"$ref": "#/$defs/sha256"}
       }
