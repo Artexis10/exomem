@@ -131,10 +131,12 @@ def test_hosted_ci_wires_every_static_security_gate() -> None:
         "github.event_name == 'schedule' || "
         "(github.event_name == 'workflow_dispatch' && inputs.external_blackbox)"
     )
-    assert "--fetch-substrate-fixture" in workflow
-    assert "--probe-image" in workflow
     assert "--require-published" in workflow
-    assert "substrate-gateway-contract-selection-v1.json" in workflow
+    assert "DEPLOYMENT_LOCK_PAIR: infra/contracts/exomem-hosted-deployment-lock-pair-v2.json" in workflow
+    assert "verify_hosted_release.py" in workflow
+    assert "--phase \"$DEPLOYMENT_PHASE\"" in workflow
+    assert "--deployment-lock-pair" not in workflow
+    assert "--member-sha256" not in workflow
     assert 'uvx --from "ruff==${RUFF_VERSION}"' in validator
     assert 'uvx --from "mypy==${MYPY_VERSION}"' in validator
     assert '(cd "${repo_root}" && uv lock --check)' in validator

@@ -2,7 +2,7 @@
 
 ## Preconditions
 
-The canonical v2 deployment-lock pair, real HCP state locking/recovery proof, static-secret
+The canonical v2 deployment-lock pair and its fixed evidence directory, real HCP state locking/recovery proof, static-secret
 ciphertexts, and owner-only invitation gate must be green. Production mutation
 always uses a saved plan; a second plan is never computed during apply. The
 pair is committed at `infra/contracts/exomem-hosted-deployment-lock-pair-v2.json`.
@@ -58,22 +58,15 @@ jq -e '
 ```bash
 lock_pair="infra/contracts/exomem-hosted-deployment-lock-pair-v2.json"
 test -f "$lock_pair" && test ! -L "$lock_pair" || { echo "canonical deployment lock pair is missing" >&2; exit 2; }
+lock_evidence="infra/contracts/exomem-hosted-deployment-lock-evidence-v2"
+test -d "$lock_evidence" && test ! -L "$lock_evidence" || { echo "canonical deployment lock evidence is missing" >&2; exit 2; }
 : "${EXOMEM_DEPLOYMENT_PHASE:?set expand or contract}"
 case "$EXOMEM_DEPLOYMENT_PHASE" in expand|contract) ;; *) exit 2 ;; esac
-member_sha256="$(python3 - "$lock_pair" "$EXOMEM_DEPLOYMENT_PHASE" <<'PY'
-import hashlib, json, sys
-pair = json.load(open(sys.argv[1], encoding="utf-8"))
-members = [lock for lock in pair["locks"] if lock["admissionMode"] == sys.argv[2]]
-if len(members) != 1: raise SystemExit("selected phase is not unique")
-print(hashlib.sha256((json.dumps(members[0], sort_keys=True, separators=(",", ":")) + "\n").encode()).hexdigest())
-PY
-)"
 control_hostname="$(terraform -chdir=infra/terraform/foundation output -raw control_hostname)"
 transfer_hostname="$(terraform -chdir=infra/terraform/foundation output -raw transfer_hostname)"
 infra/scripts/prepare_hosted_release.py \
   --lock-pair "$lock_pair" \
   --phase "$EXOMEM_DEPLOYMENT_PHASE" \
-  --member-sha256 "$member_sha256" \
   --values-output "${deploy_work_dir}/release-values.json" \
   --control-hostname "$control_hostname" \
   --transfer-hostname "$transfer_hostname"

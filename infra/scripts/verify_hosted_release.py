@@ -12,6 +12,7 @@ import json
 import os
 import re
 import secrets
+import stat
 import subprocess
 import sys
 import tempfile
@@ -38,6 +39,13 @@ _SUBSTRATE_SELECTION_KEYS = {
     "gatewayContractSha256",
 }
 _MAX_FIXTURE_BYTES = 1_048_576
+_MAX_LOCK_EVIDENCE_FILES = 32
+_MAX_RUNTIME_CANDIDATE_ASSETS = 32
+_MAX_PROVISIONER_REFERRERS = 32
+_MAX_PULL_FILES = 3
+_REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
+_CANONICAL_DEPLOYMENT_LOCK_PAIR = _REPOSITORY_ROOT / "infra/contracts/exomem-hosted-deployment-lock-pair-v2.json"
+_CANONICAL_DEPLOYMENT_LOCK_EVIDENCE = _REPOSITORY_ROOT / "infra/contracts/exomem-hosted-deployment-lock-evidence-v2"
 _SUBSTRATE_FIXTURE_SHA256 = "ba3c211377616ba87877947ba7392ffa66e9769a9f631027a141ce5cccc40054"
 _RELEASE_KEYS = {
     "artifact",
@@ -611,6 +619,113 @@ def _load_script(name: str) -> Any:
     return module
 
 
+def _evidence_file(
+    directory: Path, expected_sha256: str, *, label: str, composer: Any
+) -> tuple[Path, dict[str, Any]]:
+    """Select one bounded, canonical evidence file by its reviewed digest."""
+
+    if not _SHA256.fullmatch(expected_sha256):
+        raise ValueError(f"{label} digest is invalid")
+    try:
+        information = directory.lstat()
+    except OSError as error:
+        raise ValueError("canonical deployment-lock evidence directory is unavailable") from error
+    if stat.S_ISLNK(information.st_mode) or not stat.S_ISDIR(information.st_mode):
+        raise ValueError("canonical deployment-lock evidence directory is unsafe")
+    try:
+        entries = list(directory.iterdir())
+    except OSError as error:
+        raise ValueError("canonical deployment-lock evidence directory cannot be read") from error
+    if not 1 <= len(entries) <= _MAX_LOCK_EVIDENCE_FILES:
+        raise ValueError("canonical deployment-lock evidence file count is invalid")
+    matches: list[tuple[Path, bytes]] = []
+    for path in entries:
+        try:
+            entry = path.lstat()
+        except OSError as error:
+            raise ValueError("cannot inspect deployment-lock evidence") from error
+        if stat.S_ISLNK(entry.st_mode) or not stat.S_ISREG(entry.st_mode):
+            raise ValueError("deployment-lock evidence must be regular non-symlink files")
+        raw = composer._read_regular(
+            path, label=f"{label} evidence", maximum=composer.MAX_EVIDENCE_BYTES
+        )
+        if hashlib.sha256(raw).hexdigest() == expected_sha256:
+            matches.append((path, raw))
+    if len(matches) != 1:
+        raise ValueError(f"{label} evidence did not yield exactly one reviewed file")
+    path, raw = matches[0]
+    value = _decode_object(raw, label=f"{label} evidence")
+    if raw != composer._canonical(value):
+        raise ValueError(f"{label} evidence is not canonical JSON")
+    return path, value
+
+
+def _validate_legacy_manifest(manifest: dict[str, Any], lock: dict[str, Any]) -> None:
+    """Bind the reviewed v1 rollback manifest to exactly one embedded legacy unit."""
+
+    validate_release_manifest(manifest, manifest)
+    matches = []
+    for unit in lock["composition"]["legacyCatalog"]:
+        contract = unit["contract"]
+        if (
+            manifest["release"] == contract["releaseVersion"]
+            and manifest["hostedProtocol"] == contract["protocolVersion"]
+            and manifest["runtimeImage"] == contract["runtimeImage"]
+            and manifest["sourceCommit"] == contract["sourceCommit"]
+        ):
+            matches.append(unit)
+    if len(matches) != 1:
+        raise ValueError("rollback manifest does not equal one reviewed legacy runtime identity")
+
+
+def _verify_lock_evidence(lock: dict[str, Any], directory: Path, composer: Any) -> None:
+    """Revalidate every fixed artifact that was used to compose the lock pair."""
+
+    composer.validate_deployment_lock(lock)
+    composition = lock["composition"]
+    components = lock["components"]
+    forward_path, forward = _evidence_file(
+        directory, composition["forwardContractSha256"], label="forward runtime contract", composer=composer
+    )
+    target, image, source = composer._contract(forward, label="forward runtime contract")
+    if target != lock["runtimeTarget"] or image != components["runtime"]["image"] or source != components["runtime"]["sourceCommit"]:
+        raise ValueError("forward runtime contract differs from the selected deployment lock")
+
+    authority_path, authority = _evidence_file(
+        directory,
+        composition["authoritativeLegacyReleaseSetSha256"],
+        label="authoritative legacy release set",
+        composer=composer,
+    )
+    contracts: list[Any] = []
+    catalog_units: list[dict[str, Any]] = []
+    for unit in composition["legacyCatalog"]:
+        contract_path, contract = _evidence_file(
+            directory, unit["contractSha256"], label="legacy contract", composer=composer
+        )
+        if contract != unit["contract"]:
+            raise ValueError("legacy contract differs from the selected deployment lock")
+        contracts.append(composer.HashedInput(contract_path, unit["contractSha256"]))
+        catalog_units.append({key: unit[key] for key in unit if key != "contract"})
+    reconstructed, release_set_sha = composer._legacy_catalog(
+        {"schemaVersion": 1, "units": catalog_units},
+        authority,
+        tuple(contracts),
+    )
+    if reconstructed != composition["legacyCatalog"] or release_set_sha != composition["legacyReleaseSetSha256"]:
+        raise ValueError("reviewed legacy catalog differs from the selected deployment lock")
+
+    legacy_manifest_path, legacy_manifest = _evidence_file(
+        directory,
+        lock["rollback"]["legacyManifestSha256"],
+        label="rollback legacy manifest",
+        composer=composer,
+    )
+    _validate_legacy_manifest(legacy_manifest, lock)
+    composer._rollback(lock["rollback"])
+    _ = forward_path, authority_path, legacy_manifest_path
+
+
 def _candidate_matches_lock(candidate: dict[str, Any], component: dict[str, Any], *, kind: str, release: str | None) -> None:
     if candidate.get("kind") != kind:
         raise ValueError("discovered candidate kind differs from the deployment lock")
@@ -627,26 +742,113 @@ def _candidate_matches_lock(candidate: dict[str, Any], component: dict[str, Any]
 
 
 def _one_candidate(paths: list[Path], expected_sha256: str, loader: Any) -> Path:
-    matches = [path for path in paths if hashlib.sha256(path.read_bytes()).hexdigest() == expected_sha256]
+    if not 1 <= len(paths) <= _MAX_RUNTIME_CANDIDATE_ASSETS:
+        raise ValueError("candidate discovery count exceeds its size contract")
+    matches = [
+        path
+        for path in paths
+        if hashlib.sha256(
+            loader._read_regular(
+                path,
+                label="candidate",
+                maximum=loader.MAX_CANDIDATE_BYTES,
+            )
+        ).hexdigest()
+        == expected_sha256
+    ]
     if len(matches) != 1:
         raise ValueError("candidate discovery did not yield exactly one locked candidate")
     loader.load_candidate(matches[0])
     return matches[0]
 
 
+def _release_candidate_assets(gh_binary: str, tag: str) -> list[str]:
+    listing = json.loads(
+        _run(
+            [
+                gh_binary,
+                "release",
+                "view",
+                tag,
+                "--repo",
+                "Artexis10/exomem",
+                "--json",
+                "assets",
+            ]
+        ).stdout
+    )
+    assets = listing.get("assets") if isinstance(listing, dict) else None
+    if not isinstance(assets, list):
+        raise ValueError("runtime candidate asset listing is invalid")
+    candidate_assets = [
+        asset
+        for asset in assets
+        if isinstance(asset, dict)
+        and isinstance(asset.get("name"), str)
+        and asset["name"].endswith(".candidate-v1.json")
+    ]
+    if not 1 <= len(candidate_assets) <= _MAX_RUNTIME_CANDIDATE_ASSETS:
+        raise ValueError("runtime candidate asset count exceeds its size contract")
+    selected: list[str] = []
+    for asset in candidate_assets:
+        name = asset["name"]
+        size = asset.get("size")
+        if not isinstance(size, int) or not 1 <= size <= 128 * 1024:
+            raise ValueError("runtime candidate asset exceeds its size contract")
+        stem = name.removesuffix(".candidate-v1.json")
+        selected.append(name)
+        for suffix in (".sigstore.json", ".candidate.sigstore.json"):
+            bundle = next(
+                (
+                    item
+                    for item in assets
+                    if isinstance(item, dict) and item.get("name") == f"{stem}{suffix}"
+                ),
+                None,
+            )
+            if not isinstance(bundle, dict) or not isinstance(bundle.get("size"), int):
+                raise ValueError("runtime candidate bundle is unavailable")
+            if not 1 <= bundle["size"] <= 16 * 1024 * 1024:
+                raise ValueError("runtime candidate bundle exceeds its size contract")
+            selected.append(bundle["name"])
+    return selected
+
+
+def _pulled_candidate_paths(directory: Path, loader: Any) -> list[Path]:
+    entries = list(directory.iterdir())
+    if not 1 <= len(entries) <= _MAX_PULL_FILES:
+        raise ValueError("candidate attachment file count exceeds its size contract")
+    candidates: list[Path] = []
+    for path in entries:
+        try:
+            information = path.lstat()
+        except OSError as error:
+            raise ValueError("cannot inspect candidate attachment") from error
+        if stat.S_ISLNK(information.st_mode) or not stat.S_ISREG(information.st_mode):
+            raise ValueError("candidate attachment must be a regular non-symlink file")
+        maximum = (
+            loader.MAX_CANDIDATE_BYTES
+            if path.name.endswith(".candidate-v1.json")
+            else loader.MAX_BUNDLE_BYTES
+        )
+        loader._read_regular(path, label="candidate attachment", maximum=maximum)
+        if path.name.endswith(".candidate-v1.json"):
+            candidates.append(path)
+    return candidates
+
+
 def verify_selected_deployment_lock(
-    *, lock_pair: Path, phase: str, member_sha256: str, repository: Path, oras_binary: str = "oras", gh_binary: str = "gh"
+    *, phase: str, repository: Path, oras_binary: str = "oras", gh_binary: str = "gh"
 ) -> dict[str, Any]:
     """Reverify a selected member plus its candidate attestations and source closures."""
 
     prepare = _load_script("prepare_hosted_release.py")
     composer = _load_script("hosted_composition_lock.py")
     candidate_tool = _load_script("hosted_image_candidate.py")
-    selected, selected_sha256 = prepare._select_member(
-        prepare._load_pair(lock_pair), phase=phase, member_sha256=member_sha256
+    selected, _ = prepare._select_member(
+        prepare._load_pair(_CANONICAL_DEPLOYMENT_LOCK_PAIR), phase=phase, member_sha256=None
     )
-    if selected_sha256 != member_sha256:
-        raise ValueError("selected deployment lock SHA-256 drift")
+    _verify_lock_evidence(selected, _CANONICAL_DEPLOYMENT_LOCK_EVIDENCE, composer)
     components = selected["components"]
     target = selected["runtimeTarget"]
     closure = selected["composition"]["sourceClosure"]
@@ -657,7 +859,11 @@ def verify_selected_deployment_lock(
         runtime_dir = root / "runtime"
         runtime_dir.mkdir(mode=0o700)
         tag = f"v{target['releaseVersion']}"
-        _run([gh_binary, "release", "download", tag, "--repo", "Artexis10/exomem", "--dir", os.fspath(runtime_dir), "--pattern", "*.candidate-v1.json", "--pattern", "*.sigstore.json"])
+        assets = _release_candidate_assets(gh_binary, tag)
+        command = [gh_binary, "release", "download", tag, "--repo", "Artexis10/exomem", "--dir", os.fspath(runtime_dir)]
+        for asset in assets:
+            command.extend(["--pattern", asset])
+        _run(command)
         runtime_candidate = _one_candidate(list(runtime_dir.glob("*.candidate-v1.json")), components["runtime"]["candidateSha256"], candidate_tool)
         _candidate_matches_lock(candidate_tool.load_candidate(runtime_candidate), components["runtime"], kind="runtime", release=target["releaseVersion"])
         runtime_stem = runtime_candidate.name.removesuffix(".candidate-v1.json")
@@ -668,17 +874,22 @@ def verify_selected_deployment_lock(
         repository_name = image.split("@", 1)[0]
         discovered = json.loads(_run([oras_binary, "discover", "--artifact-type", "application/vnd.exomem.hosted-image-candidate.v1+json", image, "--format", "json"]).stdout)
         manifests = discovered.get("manifests") if isinstance(discovered, dict) else None
-        if not isinstance(manifests, list) or not manifests:
-            raise ValueError("provisioner candidate attachment discovery returned no manifests")
+        if not isinstance(manifests, list) or not 1 <= len(manifests) <= _MAX_PROVISIONER_REFERRERS:
+            raise ValueError("provisioner candidate attachment discovery count exceeds its size contract")
         candidate_paths: list[Path] = []
         for index, manifest in enumerate(manifests):
             digest = manifest.get("digest") if isinstance(manifest, dict) else None
+            size = manifest.get("size") if isinstance(manifest, dict) else None
             if not isinstance(digest, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
                 raise ValueError("provisioner candidate attachment digest is invalid")
+            if not isinstance(size, int) or not 1 <= size <= (
+                candidate_tool.MAX_CANDIDATE_BYTES + candidate_tool.MAX_BUNDLE_BYTES
+            ):
+                raise ValueError("provisioner candidate attachment exceeds its size contract")
             destination = provisioner_dir / str(index)
             destination.mkdir(mode=0o700)
             _run([oras_binary, "pull", f"{repository_name}@{digest}", "--output", os.fspath(destination)])
-            candidate_paths.extend(destination.glob("*.candidate-v1.json"))
+            candidate_paths.extend(_pulled_candidate_paths(destination, candidate_tool))
         provisioner_candidate = _one_candidate(candidate_paths, components["provisioner"]["candidateSha256"], candidate_tool)
         _candidate_matches_lock(candidate_tool.load_candidate(provisioner_candidate), components["provisioner"], kind="provisioner", release=None)
         candidate_tool.verify_candidate(provisioner_candidate, bundle_from_oci=True, candidate_bundle=provisioner_candidate.with_name(provisioner_candidate.name.removesuffix(".candidate-v1.json") + ".candidate.sigstore.json"), gh_binary=gh_binary)
@@ -715,9 +926,7 @@ def fetch_selected_gateway_fixture(
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--deployment-lock-pair", type=Path)
     parser.add_argument("--phase", choices=("expand", "contract"))
-    parser.add_argument("--member-sha256")
     parser.add_argument("--repository", type=Path)
     parser.add_argument("--oras-binary", default="oras")
     parser.add_argument("--manifest", type=Path)
@@ -729,13 +938,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--probe-image", action="store_true")
     args = parser.parse_args(argv)
 
-    if args.deployment_lock_pair is not None:
-        if any(value is None for value in (args.phase, args.member_sha256, args.repository)):
-            parser.error("--deployment-lock-pair requires --phase, --member-sha256, and --repository")
+    if args.phase is not None:
+        if args.repository is None:
+            parser.error("--phase requires --repository")
         verify_selected_deployment_lock(
-            lock_pair=args.deployment_lock_pair,
             phase=args.phase,
-            member_sha256=args.member_sha256,
             repository=args.repository,
             oras_binary=args.oras_binary,
         )

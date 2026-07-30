@@ -314,6 +314,34 @@ def test_platform_renders_real_provisioner_composition() -> None:
     assert rule["services"] == [{"name": "exomem-provisioner", "port": 8080}]
 
 
+def test_platform_mounts_the_selected_lock_for_every_lock_consuming_workload() -> None:
+    documents = _render(PLATFORM, PLATFORM / "values.validation.yaml", namespace="exomem-platform")
+    values = yaml.safe_load((PLATFORM / "values.validation.yaml").read_text(encoding="utf-8"))
+    lock_name = "exomem-hosted-deployment-lock-v2-" + values["provisioner"][
+        "deploymentLockSha256"
+    ][:16]
+    workloads = {
+        "exomem-provisioner-worker": _find(documents, "Deployment", "exomem-provisioner-worker")[
+            "spec"
+        ]["template"]["spec"],
+        "exomem-durability-actions": _find(documents, "CronJob", "exomem-durability-actions")[
+            "spec"
+        ]["jobTemplate"]["spec"]["template"]["spec"],
+        "exomem-durability-backup": _find(documents, "CronJob", "exomem-durability-backup")[
+            "spec"
+        ]["jobTemplate"]["spec"]["template"]["spec"],
+    }
+    for name, pod in workloads.items():
+        container = pod["containers"][0]
+        environment = {item["name"]: item for item in container["env"]}
+        assert environment["EXOMEM_PROVISIONER_DEPLOYMENT_LOCK_PATH"]["value"] == (
+            "/etc/exomem/deployment-lock/exomem-hosted-deployment-lock-v2.json"
+        ), name
+        assert any(item["name"] == "deployment-lock" for item in container["volumeMounts"]), name
+        volume = next(item for item in pod["volumes"] if item["name"] == "deployment-lock")
+        assert volume["configMap"]["name"] == lock_name, name
+
+
 def test_platform_renders_live_capacity_receipt_collector_with_isolated_keys() -> None:
     documents = _render(PLATFORM, PLATFORM / "values.validation.yaml", namespace="exomem-platform")
     runtime = _find(documents, "ConfigMap", "exomem-operational-receipt-collector")

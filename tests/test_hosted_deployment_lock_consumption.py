@@ -5,15 +5,17 @@ import importlib.util
 import json
 from copy import deepcopy
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 PREPARE = ROOT / "infra/scripts/prepare_hosted_release.py"
+VERIFIER = ROOT / "infra/scripts/verify_hosted_release.py"
 
 
-def _module():
-    spec = importlib.util.spec_from_file_location("prepare_hosted_release", PREPARE)
+def _module(path: Path = PREPARE):
+    spec = importlib.util.spec_from_file_location(path.stem, path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -110,6 +112,127 @@ def _write_pair(path: Path) -> tuple[dict[str, object], str]:
     pair = _pair()
     path.write_bytes(_canonical(pair))
     return pair, hashlib.sha256(_canonical(pair["locks"][0])).hexdigest()  # type: ignore[index]
+
+
+def _write_evidence(lock: dict[str, object], directory: Path) -> None:
+    directory.mkdir()
+    runtime = lock["components"]["runtime"]  # type: ignore[index]
+    composition = lock["composition"]  # type: ignore[index]
+    forward = {**lock["runtimeTarget"], "runtimeImage": runtime["image"], "sourceCommit": runtime["sourceCommit"]}  # type: ignore[index]
+    authority = {
+        "artifact": "exomem-hosted-authoritative-legacy-v1-release-set",
+        "schemaVersion": 1,
+        "units": [
+            {
+                "releaseVersion": unit["releaseVersion"],
+                "protocolVersion": unit["protocolVersion"],
+                "runtimeImage": unit["runtimeImage"],
+                "sourceCommit": unit["sourceCommit"],
+            }
+            for unit in composition["legacyCatalog"]
+        ],
+    }
+    legacy_contract = composition["legacyCatalog"][0]["contract"]
+    legacy_manifest = {
+        "artifact": "exomem-hosted-release",
+        "schemaVersion": 1,
+        "sourceRepository": "https://github.com/Artexis10/exomem",
+        "sourceCommit": legacy_contract["sourceCommit"],
+        "release": legacy_contract["releaseVersion"],
+        "hostedProtocol": legacy_contract["protocolVersion"],
+        "releaseBuildTime": "2026-07-30T00:00:00Z",
+        "runtimeImage": legacy_contract["runtimeImage"],
+        "publishedTag": f"ghcr.io/artexis10/exomem:{legacy_contract['sourceCommit']}-hosted",
+        "operatorContractSha256": "3" * 64,
+        "gatewayContractSha256": legacy_contract["gatewayContractDigest"],
+        "commandRegistry": [
+            {"name": "status", "readOnly": True, "mode": "read", "tier": 1, "capability": "core"}
+        ],
+    }
+    evidence = [forward, authority, legacy_manifest, *(unit["contract"] for unit in composition["legacyCatalog"])]
+    digests = [hashlib.sha256(_canonical(item)).hexdigest() for item in evidence]
+    composition["forwardContractSha256"] = digests[0]
+    composition["authoritativeLegacyReleaseSetSha256"] = digests[1]
+    lock["rollback"]["legacyManifestSha256"] = digests[2]  # type: ignore[index]
+    for index, value in enumerate(evidence):
+        (directory / f"{index}.json").write_bytes(_canonical(value))
+
+
+def test_fixed_lock_evidence_revalidates_all_reviewed_inputs(tmp_path: Path) -> None:
+    verifier = _module(VERIFIER)
+    pair = _pair()
+    lock = pair["locks"][0]  # type: ignore[index]
+    evidence = tmp_path / "evidence"
+    _write_evidence(lock, evidence)
+
+    verifier._verify_lock_evidence(lock, evidence, verifier._load_script("hosted_composition_lock.py"))
+
+
+def test_fixed_lock_evidence_rejects_duplicate_digest_matches(tmp_path: Path) -> None:
+    verifier = _module(VERIFIER)
+    pair = _pair()
+    lock = pair["locks"][0]  # type: ignore[index]
+    evidence = tmp_path / "evidence"
+    _write_evidence(lock, evidence)
+    forward = next(evidence.glob("0.json"))
+    (evidence / "duplicate.json").write_bytes(forward.read_bytes())
+
+    with pytest.raises(ValueError, match="exactly one"):
+        verifier._verify_lock_evidence(lock, evidence, verifier._load_script("hosted_composition_lock.py"))
+
+
+def test_candidate_selection_uses_the_candidate_verifier_bounded_reader(tmp_path: Path) -> None:
+    verifier = _module(VERIFIER)
+    candidate = tmp_path / "candidate.candidate-v1.json"
+    candidate.write_bytes(b"candidate")
+
+    class CandidateLoader:
+        MAX_CANDIDATE_BYTES = 128
+        reads: list[Path] = []
+
+        @classmethod
+        def _read_regular(cls, path: Path, *, label: str, maximum: int) -> bytes:
+            assert label == "candidate"
+            assert maximum == cls.MAX_CANDIDATE_BYTES
+            cls.reads.append(path)
+            return path.read_bytes()
+
+        @staticmethod
+        def load_candidate(path: Path) -> dict[str, str]:
+            return {"path": str(path)}
+
+    assert verifier._one_candidate(
+        [candidate], hashlib.sha256(candidate.read_bytes()).hexdigest(), CandidateLoader
+    ) == candidate
+    assert CandidateLoader.reads == [candidate]
+
+
+def test_candidate_selection_rejects_unbounded_discovery() -> None:
+    verifier = _module(VERIFIER)
+
+    with pytest.raises(ValueError, match="count"):
+        verifier._one_candidate([], "0" * 64, object())
+
+
+def test_runtime_candidate_listing_rejects_unbounded_assets(monkeypatch: pytest.MonkeyPatch) -> None:
+    verifier = _module(VERIFIER)
+    monkeypatch.setattr(
+        verifier,
+        "_run",
+        lambda _: SimpleNamespace(
+            stdout=json.dumps(
+                {
+                    "assets": [
+                        {"name": f"candidate-{index}.candidate-v1.json", "size": 1}
+                        for index in range(33)
+                    ]
+                }
+            )
+        ),
+    )
+
+    with pytest.raises(ValueError, match="count"):
+        verifier._release_candidate_assets("gh", "v0.35.1")
 
 
 def test_prepare_v2_derives_all_deploy_inputs_from_one_exact_pair_member(tmp_path: Path) -> None:

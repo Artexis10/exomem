@@ -150,27 +150,15 @@ jobs:
           DEPLOYMENT_PHASE: ${{ inputs.deployment_phase }}
         run: |
           test -f "$DEPLOYMENT_LOCK_PAIR" || { echo "canonical deployment lock pair is not committed" >&2; exit 2; }
-          DEPLOYMENT_MEMBER_SHA256="$(python3 - "$DEPLOYMENT_LOCK_PAIR" "$DEPLOYMENT_PHASE" <<'PY'
-          import hashlib, json, sys
-          pair = json.load(open(sys.argv[1], encoding="utf-8"))
-          members = [item for item in pair.get("locks", []) if item.get("admissionMode") == sys.argv[2]]
-          if len(members) != 1:
-              raise SystemExit("canonical deployment lock pair lacks one selected phase")
-          print(hashlib.sha256((json.dumps(members[0], sort_keys=True, separators=(",", ":")) + "\n").encode()).hexdigest())
-          PY
-          )"
           python3 infra/scripts/prepare_hosted_release.py \
             --lock-pair "$DEPLOYMENT_LOCK_PAIR" \
             --phase "$DEPLOYMENT_PHASE" \
-            --member-sha256 "$DEPLOYMENT_MEMBER_SHA256" \
             --control-hostname control.example.invalid \
             --transfer-hostname transfer.example.invalid \
             --values-output /tmp/exomem-hosted-release-values.json
           PROVISIONER_IMAGE="$(python3 -c 'import json; print(json.load(open("/tmp/exomem-hosted-release-values.json"))["provisioner"]["deploymentLockJson"] )' | python3 -c 'import json, sys; print(json.load(sys.stdin)["components"]["provisioner"]["image"])')"
           python3 infra/scripts/verify_hosted_release.py \
-            --deployment-lock-pair "$DEPLOYMENT_LOCK_PAIR" \
             --phase "$DEPLOYMENT_PHASE" \
-            --member-sha256 "$DEPLOYMENT_MEMBER_SHA256" \
             --repository .
           python3 infra/scripts/verify_provisioner_image.py \
             --image "$PROVISIONER_IMAGE" \
