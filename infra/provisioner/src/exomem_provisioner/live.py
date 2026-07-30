@@ -721,6 +721,7 @@ class LiveLifecyclePlane:
         action: str,
         operation_id: str,
         version: str,
+        protocol_version: str,
     ) -> dict[str, Any]:
         expected = int(annotations.get("exomem.io/security-revision", "0"))
         transition = operation_id + ":credential-" + action
@@ -754,7 +755,7 @@ class LiveLifecyclePlane:
             metadata,
             request,
             credential=active_credential,
-            protocol_version=self._config.protocol_version,
+            protocol_version=protocol_version,
         )
         revision = result.get("revision")
         if revision != expected + 1:
@@ -780,6 +781,9 @@ class LiveLifecyclePlane:
                 raise MetadataConflict("pending credential version is immutable")
             return
         credentials[pending] = credential
+        target = self._config.runtime_target_for(
+            request, v2="runtimeTarget" in request
+        )
         result = await self._credential_transition(
             owned,
             credentials=credentials,
@@ -787,6 +791,7 @@ class LiveLifecyclePlane:
             action="stage",
             operation_id=operation_id,
             version=pending,
+            protocol_version=target["protocolVersion"],
         )
         if result.get("phase") != "staged" or result.get("pending_version") != pending:
             raise MetadataConflict("hosted credential did not enter staged overlap")
@@ -818,7 +823,9 @@ class LiveLifecyclePlane:
             return True
         revision = int(annotations.get("exomem.io/security-revision", "0"))
         probe_operation = operation_id + ":credential-probe"
-        target = runtime_identity(request)
+        target = self._config.runtime_target_for(
+            request, v2="runtimeTarget" in request
+        )
         operator_request = {
             "request_id": _deterministic_uuid4(probe_operation),
             "operation_id": probe_operation,
@@ -837,7 +844,7 @@ class LiveLifecyclePlane:
             owned,
             operator_request,
             credential=credential,
-            protocol_version=self._config.protocol_version,
+            protocol_version=target["protocolVersion"],
         )
         proved = (
             result.get("authenticated_credential_version") == pending
@@ -866,7 +873,9 @@ class LiveLifecyclePlane:
         credentials, annotations = await self._cell.read_credential_bundle(owned)
         pending = str(version)
         old_version = annotations.get("exomem.io/active-credential-version")
-        target = runtime_identity(request)
+        target = self._config.runtime_target_for(
+            request, v2="runtimeTarget" in request
+        )
         if old_version == pending and set(credentials) == {pending}:
             return await self._runtime.credential_rejected(
                 owned,
@@ -882,8 +891,9 @@ class LiveLifecyclePlane:
                 credentials=credentials,
                 annotations=annotations,
                 action="promote",
-                operation_id=operation_id,
-                version=pending,
+            operation_id=operation_id,
+            version=pending,
+            protocol_version=target["protocolVersion"],
             )
             if result.get("phase") != "promoted":
                 raise MetadataConflict("hosted credential did not promote")
@@ -902,8 +912,9 @@ class LiveLifecyclePlane:
                 credentials=credentials,
                 annotations=annotations,
                 action="finalize",
-                operation_id=operation_id,
-                version=pending,
+            operation_id=operation_id,
+            version=pending,
+            protocol_version=target["protocolVersion"],
             )
             if result.get("phase") != "stable" or result.get("active_version") != pending:
                 raise MetadataConflict("hosted credential did not finalize")
@@ -925,6 +936,7 @@ class LiveLifecyclePlane:
             config=self._config,
             expected_release=target["releaseVersion"],
             expected_worker_policy=dict(request["workerPolicy"]),
+            expected_contract_digest=target["gatewayContractDigest"],
         )
         old_rejected = await self._runtime.credential_rejected(
             owned,

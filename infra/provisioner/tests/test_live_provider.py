@@ -366,7 +366,7 @@ async def test_credential_operator_requests_keep_physical_cell_and_stable_tenant
     None
 ):
     metadata = _metadata()
-    calls: list[tuple[str, dict[str, object]]] = []
+    calls: list[tuple[str, dict[str, object], str]] = []
 
     class Cell:
         async def write_credential_bundle(self, *args, **kwargs):
@@ -384,7 +384,7 @@ async def test_credential_operator_requests_keep_physical_cell_and_stable_tenant
 
     class Runtime:
         async def operator(self, command, _metadata, request, **kwargs):
-            calls.append((command, dict(request)))
+            calls.append((command, dict(request), kwargs["protocol_version"]))
             if command == "credential":
                 return {"revision": 2}
             return {
@@ -403,7 +403,13 @@ async def test_credential_operator_requests_keep_physical_cell_and_stable_tenant
         maintenance=SimpleNamespace(),  # type: ignore[arg-type]
         capacity=SimpleNamespace(),  # type: ignore[arg-type]
         identity_verifier=IDENTITY_CODEC.verifier(),
-        config=SimpleNamespace(protocol_version="1"),  # type: ignore[arg-type]
+        config=SimpleNamespace(
+            runtime_target_for=lambda _request, **_kwargs: {
+                "releaseVersion": "0.22.0",
+                "protocolVersion": "exomem-hosted.v1",
+                "gatewayContractDigest": "b" * 64,
+            }
+        ),  # type: ignore[arg-type]
     )
 
     await plane._credential_transition(
@@ -416,6 +422,7 @@ async def test_credential_operator_requests_keep_physical_cell_and_stable_tenant
         action="stage",
         operation_id="rotate-alpha",
         version="2",
+        protocol_version="exomem-hosted.v1",
     )
     accepted = await plane.credential_accepted(
         metadata,
@@ -423,16 +430,76 @@ async def test_credential_operator_requests_keep_physical_cell_and_stable_tenant
         "credential-pending",
         {
             "releaseVersion": "0.22.0",
-            "protocolVersion": "1",
+            "protocolVersion": "exomem-hosted.v1",
             "workerPolicy": {"workerCount": 0, "semantic": False, "media": False},
         },
         "rotate-alpha",
     )
 
     assert accepted is True
-    assert [command for command, _ in calls] == ["credential", "probe"]
-    assert all(request["cell_id"] == "cell-alpha" for _, request in calls)
-    assert all(request["vault_id"] == "tenant-alpha" for _, request in calls)
+    assert [command for command, _, _ in calls] == ["credential", "probe"]
+    assert all(request["cell_id"] == "cell-alpha" for _, request, _ in calls)
+    assert all(request["vault_id"] == "tenant-alpha" for _, request, _ in calls)
+    assert [protocol for _, _, protocol in calls] == ["exomem-hosted.v1"] * 2
+
+
+@pytest.mark.asyncio
+async def test_legacy_credential_promotion_uses_the_catalog_unit_after_mutation() -> None:
+    metadata = _metadata()
+    credentials = {"1": "credential-current", "2": "credential-pending"}
+    annotations = {
+        "exomem.io/active-credential-version": "1",
+        "exomem.io/credential-phase": "proved",
+        "exomem.io/security-revision": "2",
+    }
+    protocols: list[str] = []
+
+    class Cell:
+        async def read_credential_bundle(self, _metadata):
+            return dict(credentials), dict(annotations)
+
+        async def write_credential_bundle(self, _metadata, values, *, lifecycle_annotations):
+            credentials.clear()
+            credentials.update(values)
+            annotations.clear()
+            annotations.update(lifecycle_annotations)
+
+    class Runtime:
+        async def operator(self, _command, _metadata, request, *, protocol_version, **_kwargs):
+            protocols.append(protocol_version)
+            if request["action"] == "promote":
+                return {"revision": 3, "phase": "promoted"}
+            return {"revision": 4, "phase": "stable", "active_version": "2"}
+
+        async def health(self, _metadata, *, protocol_version, expected_contract_digest, **_kwargs):
+            protocols.append(protocol_version)
+            assert expected_contract_digest == "e" * 64
+            return SimpleNamespace(ready=True)
+
+        async def credential_rejected(self, _metadata, *, protocol_version, **_kwargs):
+            protocols.append(protocol_version)
+            return True
+
+    target = {
+        "releaseVersion": "0.22.0",
+        "protocolVersion": "exomem-hosted.v1",
+        "gatewayContractDigest": "e" * 64,
+    }
+    plane = LiveLifecyclePlane(
+        repository=SimpleNamespace(), registry=SimpleNamespace(), cell=Cell(), helm=SimpleNamespace(),
+        runtime=Runtime(), routes=SimpleNamespace(), maintenance=SimpleNamespace(),
+        capacity=SimpleNamespace(), identity_verifier=IDENTITY_CODEC.verifier(),
+        config=SimpleNamespace(runtime_target_for=lambda _request, **_kwargs: target),  # type: ignore[arg-type]
+    )
+    request = {
+        "releaseVersion": "0.22.0",
+        "protocolVersion": "exomem-hosted.v1",
+        "serviceCredential": "credential-current",
+        "workerPolicy": {"workerCount": 0, "semantic": False, "media": False},
+    }
+
+    assert await plane.promote_credential(metadata, 2, request, "rotate-legacy") is True
+    assert protocols == ["exomem-hosted.v1"] * 4
 
 
 @pytest.mark.asyncio
