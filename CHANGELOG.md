@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.35.1](https://github.com/Artexis10/exomem/compare/v0.35.0...v0.35.1) (2026-07-30)
+
+
+### Bug Fixes
+
+* **ci:** authenticate hosted candidate verification ([#358](https://github.com/Artexis10/exomem/issues/358)) ([6cc0718](https://github.com/Artexis10/exomem/commit/6cc0718fc6baf294ed313662a889462aad56f164))
+* **hosted:** harden marketplace contract and admission ([07bdc1c](https://github.com/Artexis10/exomem/commit/07bdc1c622fed752e44091b2015bc8c07ea7cb79))
+
 ## [0.35.0](https://github.com/Artexis10/exomem/compare/v0.34.0...v0.35.0) (2026-07-29)
 
 
