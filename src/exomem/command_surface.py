@@ -256,14 +256,14 @@ DESTRUCTIVE_OPS: frozenset[str] = frozenset(
 
 
 def mcp_tool_annotations(
-    name: str, *, read_only: bool, open_world: bool = False
+    name: str, *, read_only: bool, open_world: bool = False, idempotent: bool = False
 ) -> ToolAnnotations:
     """MCP behaviour hints for one tool — what cautious clients render as badges."""
     return ToolAnnotations(
         title=name.replace("_", " ").title(),
         readOnlyHint=read_only,
         destructiveHint=False if read_only else (name in DESTRUCTIVE_OPS),
-        idempotentHint=read_only,
+        idempotentHint=idempotent,
         openWorldHint=open_world,
     )
 

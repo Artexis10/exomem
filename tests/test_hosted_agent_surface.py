@@ -132,6 +132,7 @@ def test_agent_contract_is_mcp_ready_deterministic_and_additive() -> None:
             name,
             read_only=canonical_commands[name].read_only,
             open_world=True,
+            idempotent=canonical_commands[name].read_only,
         ).model_dump(mode="json", by_alias=True)
         assert mcp_tool["annotations"] == expected_annotations
         assert mcp_tool["annotations"]["idempotentHint"] is canonical_commands[name].read_only
