@@ -4,13 +4,12 @@ on:
   push:
     branches: [main]
     paths:
+      - ".dockerignore"
       - "infra/provisioner/**"
       - "infra/helm/cell/**"
-      - "infra/contracts/exomem-hosted-release-v1.json"
-      - "infra/contracts/exomem-hosted-runtime-k3s-gate-v1.json"
-      - "infra/contracts/substrate-gateway-contract-selection-v1.json"
-      - "infra/scripts/verify_hosted_release.py"
+      - "infra/scripts/hosted_image_candidate.py"
       - "infra/scripts/verify_provisioner_image.py"
+      - "infra/tool-versions.env"
       - ".github/workflows/publish-hosted-provisioner.yml"
   workflow_dispatch:
 
@@ -26,7 +25,10 @@ jobs:
       contents: read
       id-token: write
       packages: write
+      attestations: write
     steps:
+      - name: Admit only the canonical main source
+        run: test "$GITHUB_REF" = "refs/heads/main"
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
       - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
@@ -34,6 +36,17 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Install the pinned ORAS client
+        run: |
+          set -euo pipefail
+          source infra/tool-versions.env
+          archive="oras_${ORAS_VERSION}_linux_amd64.tar.gz"
+          curl --fail --location --silent --show-error \
+            --output "$archive" \
+            "https://github.com/oras-project/oras/releases/download/v${ORAS_VERSION}/${archive}"
+          printf '%s  %s\n' "$ORAS_LINUX_AMD64_SHA256" "$archive" | sha256sum --check
+          tar -xzf "$archive" oras
+          sudo install -m 0755 oras /usr/local/bin/oras
       - name: Build and publish the source-bound provisioner image
         id: build
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
@@ -53,21 +66,141 @@ jobs:
       - name: Smoke the immutable published image
         env:
           PROVISIONER_IMAGE: ghcr.io/artexis10/exomem-provisioner@${{ steps.build.outputs.digest }}
-        run: >-
-          python3 infra/scripts/verify_provisioner_image.py
-          --image "$PROVISIONER_IMAGE"
-          --require-published
-      - name: Prove the published runtime against the reviewed Substrate fixture
         run: |
-          python3 infra/scripts/verify_hosted_release.py \
-            --manifest infra/contracts/exomem-hosted-release-v1.json \
-            --runtime-gate infra/contracts/exomem-hosted-runtime-k3s-gate-v1.json \
-            --substrate-selection infra/contracts/substrate-gateway-contract-selection-v1.json \
-            --fetch-substrate-fixture \
-            --probe-image
+          set -euo pipefail
+          python3 infra/scripts/verify_provisioner_image.py \
+            --image "$PROVISIONER_IMAGE" \
+            --require-published
+          observed_revision=$(docker image inspect \
+            --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' \
+            "$PROVISIONER_IMAGE")
+          test "$observed_revision" = "$GITHUB_SHA"
+
+      - name: Attest the exact provisioner image
+        id: attestation
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4
+        with:
+          subject-name: ghcr.io/artexis10/exomem-provisioner
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+          create-storage-record: false
+
+      - name: Record the provisioner candidate
+        id: candidate
+        env:
+          PROVISIONER_DIGEST: ${{ steps.build.outputs.digest }}
+          ATTESTATION_BUNDLE: ${{ steps.attestation.outputs.bundle-path }}
+        run: |
+          set -euo pipefail
+          digest_hex=${PROVISIONER_DIGEST#sha256:}
+          evidence_stem="exomem-hosted-provisioner-${GITHUB_SHA}-${digest_hex}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          candidate="${evidence_stem}.candidate-v1.json"
+          bundle="${evidence_stem}.sigstore.json"
+          cp "$ATTESTATION_BUNDLE" "$bundle"
+          immutable_image="ghcr.io/artexis10/exomem-provisioner@${PROVISIONER_DIGEST}"
+          discovery_tag="ghcr.io/artexis10/exomem-provisioner:${GITHUB_SHA}"
+          python3 infra/scripts/hosted_image_candidate.py record \
+            --component provisioner \
+            --source-repository "$GITHUB_REPOSITORY" \
+            --source-ref "$GITHUB_REF" \
+            --source-commit "$GITHUB_SHA" \
+            --image "$immutable_image" \
+            --discovery-tag "$discovery_tag" \
+            --producer-repository "$GITHUB_REPOSITORY" \
+            --producer-workflow "$GITHUB_REPOSITORY/.github/workflows/publish-hosted-provisioner.yml" \
+            --producer-workflow-commit "$GITHUB_WORKFLOW_SHA" \
+            --producer-oidc-source-ref "$GITHUB_REF" \
+            --producer-oidc-source-commit "$GITHUB_SHA" \
+            --producer-event "$GITHUB_EVENT_NAME" \
+            --run-id "$GITHUB_RUN_ID" \
+            --run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --bundle "$bundle" \
+            --storage-kind oci-referrer \
+            --storage-uri "oci://${immutable_image}" \
+            --output "$candidate"
+          {
+            echo "candidate=$candidate"
+            echo "bundle=$bundle"
+            echo "immutable_image=$immutable_image"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Attest the exact provisioner candidate
+        id: candidate-attestation
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4
+        with:
+          subject-path: ${{ steps.candidate.outputs.candidate }}
+          create-storage-record: false
+
+      - name: Verify the provisioner image and signed candidate
+        id: candidate-proof
+        env:
+          CANDIDATE: ${{ steps.candidate.outputs.candidate }}
+          IMAGE_BUNDLE: ${{ steps.candidate.outputs.bundle }}
+          CANDIDATE_ATTESTATION_BUNDLE: ${{ steps.candidate-attestation.outputs.bundle-path }}
+        run: |
+          set -euo pipefail
+          candidate_bundle="${CANDIDATE%.candidate-v1.json}.candidate.sigstore.json"
+          cp "$CANDIDATE_ATTESTATION_BUNDLE" "$candidate_bundle"
+          python3 infra/scripts/hosted_image_candidate.py verify \
+            --candidate "$CANDIDATE" \
+            --bundle "$IMAGE_BUNDLE" \
+            --candidate-bundle "$candidate_bundle"
+          python3 infra/scripts/hosted_image_candidate.py verify \
+            --candidate "$CANDIDATE" \
+            --bundle-from-oci \
+            --candidate-bundle "$candidate_bundle"
+          echo "candidate_bundle=$candidate_bundle" >> "$GITHUB_OUTPUT"
+
+      - name: Attach and read back the provisioner candidate
+        id: attachment
+        env:
+          CANDIDATE: ${{ steps.candidate.outputs.candidate }}
+          CANDIDATE_BUNDLE: ${{ steps.candidate-proof.outputs.candidate_bundle }}
+          IMMUTABLE_IMAGE: ${{ steps.candidate.outputs.immutable_image }}
+        run: |
+          set -euo pipefail
+          media_type="application/vnd.exomem.hosted-image-candidate.v1+json"
+          bundle_media_type="application/vnd.dev.sigstore.bundle.v0.3+json"
+          attachment_digest=$(oras attach \
+            --artifact-type "$media_type" \
+            "$IMMUTABLE_IMAGE" \
+            "${CANDIDATE}:${media_type}" \
+            "${CANDIDATE_BUNDLE}:${bundle_media_type}" \
+            --format go-template \
+            --template '{{.digest}}')
+          if [[ ! "$attachment_digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "ORAS returned an invalid attachment digest" >&2
+            exit 1
+          fi
+          retrieved="retrieved-candidate"
+          install -d -m 0700 "$retrieved"
+          repository=${IMMUTABLE_IMAGE%@*}
+          oras pull "${repository}@${attachment_digest}" --output "$retrieved"
+          cmp "$CANDIDATE" "$retrieved/$(basename "$CANDIDATE")"
+          cmp "$CANDIDATE_BUNDLE" "$retrieved/$(basename "$CANDIDATE_BUNDLE")"
+          echo "attachment_digest=$attachment_digest" >> "$GITHUB_OUTPUT"
+
+      - name: Upload bounded provisioner candidate workflow evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: hosted-provisioner-candidate-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ steps.candidate.outputs.candidate }}
+            ${{ steps.candidate.outputs.bundle }}
+            ${{ steps.candidate-proof.outputs.candidate_bundle }}
+          if-no-files-found: error
+          retention-days: 30
+
       - name: Record the deploy input
         env:
           PROVISIONER_DIGEST: ${{ steps.build.outputs.digest }}
-        run: >-
-          echo "Provisioner image: ghcr.io/artexis10/exomem-provisioner@${PROVISIONER_DIGEST}"
-          >> "$GITHUB_STEP_SUMMARY"
+          CANDIDATE: ${{ steps.candidate.outputs.candidate }}
+          CANDIDATE_BUNDLE: ${{ steps.candidate-proof.outputs.candidate_bundle }}
+          ATTACHMENT_DIGEST: ${{ steps.attachment.outputs.attachment_digest }}
+        run: |
+          {
+            echo "Provisioner image: ghcr.io/artexis10/exomem-provisioner@${PROVISIONER_DIGEST}"
+            echo "Candidate: ${CANDIDATE}"
+            echo "Candidate attestation bundle: ${CANDIDATE_BUNDLE}"
+            echo "Candidate attachment: ${ATTACHMENT_DIGEST}"
+          } >> "$GITHUB_STEP_SUMMARY"
