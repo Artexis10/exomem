@@ -157,10 +157,17 @@ def test_load_rejects_duplicate_json_keys(tmp_path: Path) -> None:
         candidate.load_candidate(path)
 
 
-def test_candidate_schema_and_record_cli_exclude_attestation_id_and_url() -> None:
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("id", "12345"),
+        ("url", "https://github.com/Artexis10/exomem/attestations/12345"),
+    ],
+)
+def test_candidate_schema_and_record_cli_exclude_attestation_id_and_url(field: str, value: str) -> None:
     assert set(_record()["attestation"]) == {"predicateType", "subjectName", "subjectDigest", "bundleSha256"}  # type: ignore[arg-type]
     record = _record()
-    record["attestation"]["id"] = "12345"  # type: ignore[index]
+    record["attestation"][field] = value  # type: ignore[index]
     with pytest.raises(candidate.CandidateError, match="unknown"):
         candidate.validate_candidate(record)
     parser = candidate._parser()
@@ -352,6 +359,45 @@ def test_verify_rejects_wrong_candidate_subject_or_digest(
 
     monkeypatch.setattr(candidate.subprocess, "run", fake_run)
     with pytest.raises(candidate.CandidateError, match="candidate"):
+        candidate.verify_candidate(candidate_path, bundle=bundle, candidate_bundle=candidate_bundle)
+
+
+@pytest.mark.parametrize("mismatch_target", [None, "image", "candidate"])
+def test_verify_requires_every_gh_result_to_match_its_expected_subject(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mismatch_target: str | None
+) -> None:
+    bundle = tmp_path / "bundle"
+    candidate_bundle = tmp_path / "candidate-bundle"
+    record = _record()
+    record["attestation"]["bundleSha256"] = _write_bundle(bundle)  # type: ignore[index]
+    candidate_path = tmp_path / "candidate.json"
+    candidate.record_candidate(record, bundle, candidate_path)
+    _write_bundle(candidate_bundle)
+    candidate_sha256 = hashlib.sha256(candidate_path.read_bytes()).hexdigest()
+
+    class Result:
+        returncode = 0
+        stderr = ""
+
+    def statements(name: str, digest: str, target: str) -> str:
+        results = [json.loads(_statement(name, digest))[0], json.loads(_statement(name, digest))[0]]
+        if mismatch_target == target:
+            results[-1]["verificationResult"]["statement"]["subject"][0]["digest"] = {"sha256": "0" * 64}
+        return json.dumps(results)
+
+    def fake_run(argv: list[str], **_: object) -> Result:
+        result = Result()
+        if argv[3].startswith("oci://"):
+            result.stdout = statements("ghcr.io/artexis10/exomem", DIGEST, "image")
+        else:
+            result.stdout = statements(candidate_path.name, candidate_sha256, "candidate")
+        return result
+
+    monkeypatch.setattr(candidate.subprocess, "run", fake_run)
+    if mismatch_target is not None:
+        with pytest.raises(candidate.CandidateError, match="candidate"):
+            candidate.verify_candidate(candidate_path, bundle=bundle, candidate_bundle=candidate_bundle)
+    else:
         candidate.verify_candidate(candidate_path, bundle=bundle, candidate_bundle=candidate_bundle)
 
 
