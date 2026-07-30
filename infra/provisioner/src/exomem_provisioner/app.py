@@ -22,15 +22,20 @@ from .provider_identity import (
     cell_resource_name,
     provider_operation_resource_name,
 )
-from .repository import IdempotencyConflict, OperationRepository, StaleFence
+from .repository import (
+    AdmissionPolicy,
+    AdmissionRejected,
+    IdempotencyConflict,
+    OperationRepository,
+    StaleFence,
+)
 from .schemas import (
-    FINAL_MODELS,
-    REQUEST_MODELS,
     FailureCode,
     FailureResponse,
     PendingResponse,
     request_plaintext,
 )
+from .wire_protocol import FINAL_MODELS_BY_PROTOCOL, REQUEST_MODELS_BY_PROTOCOL, runtime_identity
 
 ReadinessProbe = Callable[[], Awaitable[bool]]
 Clock = Callable[[], datetime]
@@ -46,8 +51,9 @@ def _validated_final(
     action: str,
     result: dict[str, Any],
     request_data: dict[str, object],
+    wire_protocol: str,
 ) -> Response:
-    model = FINAL_MODELS[action]
+    model = FINAL_MODELS_BY_PROTOCOL[wire_protocol][action]
     if model is None:
         if result:
             return _failure("PROVISIONER_RESPONSE_INVALID", 500)
@@ -62,16 +68,24 @@ def _validated_final(
         and result.get("previousCredentialRejected") is not True
     ):
         return _failure("PROVISIONER_RESPONSE_INVALID", 500)
-    if action == "health" and any(
-        result.get(response_name) != request_data.get(request_name)
-        for response_name, request_name in (
-            ("cellId", "cellId"),
-            ("protocolVersion", "protocolVersion"),
-            ("releaseVersion", "releaseVersion"),
-            ("workerPolicy", "workerPolicy"),
-        )
-    ):
-        return _failure("PROVISIONER_RESPONSE_INVALID", 500)
+    if action == "health":
+        expected_identity = runtime_identity(request_data)
+        if (
+            result.get("cellId") != request_data.get("cellId")
+            or result.get("workerPolicy") != request_data.get("workerPolicy")
+            or (
+                (result.get("runtimeIdentity") != expected_identity)
+                if wire_protocol.endswith(".v2")
+                else any(
+                    result.get(response_name) != expected_identity.get(request_name)
+                    for response_name, request_name in (
+                        ("protocolVersion", "protocolVersion"),
+                        ("releaseVersion", "releaseVersion"),
+                    )
+                )
+            )
+        ):
+            return _failure("PROVISIONER_RESPONSE_INVALID", 500)
     return JSONResponse(status_code=200, content=value.model_dump(mode="json"))
 
 
@@ -105,6 +119,16 @@ def create_app(
         openapi_url=None,
         redirect_slashes=False,
     )
+    lock = settings.deployment_lock
+    admission = (
+        AdmissionPolicy(
+            mode=lock.admission_mode,
+            legacy_catalog=lock.legacy_catalog,
+            forward_target=lock.runtime_target.model_dump(mode="json"),
+        )
+        if lock is not None
+        else None
+    )
 
     @app.exception_handler(RequestValidationError)
     async def validation_failure(_request: Request, _error: RequestValidationError) -> JSONResponse:
@@ -126,8 +150,10 @@ def create_app(
             return _failure("PROVISIONER_REJECTED", 401)
         if request.url.scheme != "https":
             return _failure("PROVISIONER_REJECTED", 400)
-        if request.headers.get("x-exomem-provisioner-protocol") != settings.protocol:
+        wire_protocol = request.headers.get("x-exomem-provisioner-protocol")
+        if wire_protocol not in REQUEST_MODELS_BY_PROTOCOL:
             return _failure("PROVISIONER_REJECTED", 400)
+        request.state.wire_protocol = wire_protocol
         if request.headers.get("content-type", "").lower() != "application/json":
             return _failure("PROVISIONER_REJECTED", 415)
         idempotency_key = request.headers.get("idempotency-key", "")
@@ -177,9 +203,10 @@ def create_app(
 
     def endpoint_for(action: str) -> Callable[[Request], Awaitable[Response]]:
         async def endpoint(request: Request) -> Response:
+            wire_protocol = request.state.wire_protocol
             try:
                 raw = json.loads((await request.body()).decode("utf-8"))
-                model = REQUEST_MODELS[action].model_validate(raw)
+                model = REQUEST_MODELS_BY_PROTOCOL[wire_protocol][action].model_validate(raw)
             except (UnicodeDecodeError, json.JSONDecodeError, ValidationError):
                 return _failure("PROVISIONER_REJECTED", 422)
             try:
@@ -204,19 +231,17 @@ def create_app(
                     if action == "export"
                     else None
                 )
-                if expiry_rejection is not None:
-                    existing = await repository.get(
-                        action,
-                        request.headers["idempotency-key"],
-                    )
-                    if existing is None:
-                        return _failure(expiry_rejection, 422)
                 operation = await repository.submit(
                     action,
                     request.headers["idempotency-key"],
                     request_data,
+                    wire_protocol=wire_protocol,
+                    admission=admission,
+                    fresh_rejection=expiry_rejection,
                     retry_after_seconds=settings.retry_after_seconds,
                 )
+            except AdmissionRejected:
+                return _failure(expiry_rejection or "PROVISIONER_REJECTED", 422)
             except (IdempotencyConflict, StaleFence):
                 return _failure("CONTROL_PLANE_STATE_CONFLICT", 409)
             if operation.state is OperationState.ERROR:
@@ -225,7 +250,7 @@ def create_app(
                 result = await repository.load_result(operation.id)
                 if result is None:
                     return _failure("PROVISIONER_RESPONSE_INVALID", 500)
-                return _validated_final(action, result, request_data)
+                return _validated_final(action, result, request_data, operation.wire_protocol)
             pending = PendingResponse(
                 operationId=operation.external_operation_id,
                 checkpoint=operation.caller_checkpoint,
@@ -240,7 +265,7 @@ def create_app(
         endpoint.__name__ = f"post_{action.replace('-', '_')}"
         return endpoint
 
-    for action in REQUEST_MODELS:
+    for action in REQUEST_MODELS_BY_PROTOCOL[PROVISIONER_PROTOCOL]:
         app.add_api_route(
             f"/cells/{action}",
             endpoint_for(action),

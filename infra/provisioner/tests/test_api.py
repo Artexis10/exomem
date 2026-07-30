@@ -19,6 +19,7 @@ from exomem_provisioner.provider_identity import ProviderRecoveryIdentityCodec
 from exomem_provisioner.repository import OperationRepository
 from exomem_provisioner.schemas import FailureResponse, ProvisionRequest, TargetRequest
 from exomem_provisioner.volume import build_volume_registration_worker
+from exomem_provisioner.wire_protocol import WIRE_PROTOCOL_V2
 from exomem_provisioner.worker import ProvisionerWorker
 
 _BEARER = "provisioner-bearer-sentinel-000000000000"
@@ -330,6 +331,40 @@ def _headers(idempotency_key: str = "idempotency-api-alpha") -> dict[str, str]:
         "Idempotency-Key": idempotency_key,
         "X-Exomem-Provisioner-Protocol": PROVISIONER_PROTOCOL,
     }
+
+
+@pytest.mark.asyncio
+async def test_exact_header_selects_v2_models_before_operation_creation(
+    api: tuple[httpx.AsyncClient, OperationRepository, Path],
+) -> None:
+    client, repository, _ = api
+    target = {
+        "releaseVersion": "0.35.1",
+        "protocolVersion": "1",
+        "agentProfile": "hosted-alpha-agent-v1",
+        "gatewayContractDigest": "a" * 64,
+        "commandFingerprint": "b" * 64,
+        "schemaDigest": "c" * 64,
+    }
+    body = _base_body(operationId="v2-api")
+    body.pop("releaseVersion")
+    body.pop("protocolVersion")
+    body["runtimeTarget"] = target
+    headers = _headers("v2-api")
+    headers["X-Exomem-Provisioner-Protocol"] = WIRE_PROTOCOL_V2
+
+    accepted = await client.post("/cells/provision", headers=headers, json=body)
+
+    assert accepted.status_code == 202
+    operation = await repository.get("provision", "v2-api")
+    assert operation is not None and operation.wire_protocol == WIRE_PROTOCOL_V2
+    mixed = await client.post(
+        "/cells/provision",
+        headers={**headers, "Idempotency-Key": "v2-mixed"},
+        json={**body, "releaseVersion": "0.35.1"},
+    )
+    assert mixed.status_code == 422
+    assert await repository.get("provision", "v2-mixed") is None
 
 
 @pytest.fixture

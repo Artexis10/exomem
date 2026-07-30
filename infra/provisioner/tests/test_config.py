@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import logging
+from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
@@ -9,6 +11,7 @@ from exomem_provisioner.config import (
     PROVISIONER_PROTOCOL,
     ProvisionerSettings,
     VolumeWorkerSettings,
+    load_deployment_lock,
 )
 from exomem_provisioner.logging import ContentFreeFormatter
 
@@ -24,6 +27,83 @@ def _settings(**overrides: object) -> ProvisionerSettings:
     }
     values.update(overrides)
     return ProvisionerSettings(**values)
+
+
+def _deployment_lock(*, admission_mode: str = "expand") -> dict[str, object]:
+    digest = "a" * 64
+    commit = "b" * 40
+    target = {
+        "releaseVersion": "0.35.1",
+        "protocolVersion": "1",
+        "agentProfile": "hosted-alpha-agent-v1",
+        "gatewayContractDigest": digest,
+        "commandFingerprint": "c" * 64,
+        "schemaDigest": "d" * 64,
+    }
+    legacy_target = {**target, "releaseVersion": "0.22.0", "protocolVersion": "exomem-hosted.v1"}
+    return {
+        "artifact": "exomem-hosted-deployment-lock",
+        "schemaVersion": 2,
+        "admissionMode": admission_mode,
+        "components": {
+            "runtime": {
+                "image": f"ghcr.io/artexis10/exomem@sha256:{digest}",
+                "sourceCommit": commit,
+                "candidateSha256": digest,
+            },
+            "provisioner": {
+                "image": f"ghcr.io/artexis10/exomem-provisioner@sha256:{'e' * 64}",
+                "sourceCommit": commit,
+                "candidateSha256": "e" * 64,
+                "wireProtocol": "exomem-cell-provisioner.v2",
+            },
+        },
+        "runtimeTarget": target,
+        "composition": {
+            "commit": commit,
+            "sourceClosure": {
+                name: {"candidateCommit": commit, "compositionCommit": commit, "paths": ["src/**"]}
+                for name in ("runtime", "provisioner")
+            },
+            "forwardContractSha256": digest,
+            "authoritativeLegacyReleaseSetSha256": "f" * 64,
+            "legacyCatalog": [
+                {
+                    "releaseVersion": "0.22.0",
+                    "protocolVersion": "exomem-hosted.v1",
+                    "runtimeImage": f"ghcr.io/artexis10/exomem@sha256:{digest}",
+                    "sourceCommit": commit,
+                    "contractSha256": digest,
+                    "contract": {**legacy_target, "runtimeImage": f"ghcr.io/artexis10/exomem@sha256:{digest}", "sourceCommit": commit},
+                }
+            ],
+            "legacyReleaseSetSha256": "f" * 64,
+        },
+        "rollback": {
+            "provisionerImage": f"ghcr.io/artexis10/exomem-provisioner@sha256:{'e' * 64}",
+            "provisionerSourceCommit": commit,
+            "v1CorpusSha256": digest,
+            "legacyManifestSha256": digest,
+            "substrateV1ConsumerCommit": commit,
+        },
+    }
+
+
+def test_selected_deployment_lock_is_strict_and_exposes_admission_inputs(tmp_path: Path) -> None:
+    path = tmp_path / "selected-lock.json"
+    path.write_text(json.dumps(_deployment_lock()), encoding="utf-8")
+
+    lock = load_deployment_lock(path)
+
+    assert lock.admission_mode == "expand"
+    assert lock.runtime_target.releaseVersion == "0.35.1"
+    assert lock.legacy_catalog == frozenset({("0.22.0", "exomem-hosted.v1")})
+    assert lock.authoritative_legacy_release_set_sha256 == "f" * 64
+    assert _settings(deployment_lock_path=str(path)).deployment_lock == lock
+
+    path.write_text(json.dumps({"artifact": "exomem-hosted-deployment-lock-pair", "schemaVersion": 2, "locks": []}), encoding="utf-8")
+    with pytest.raises(ValueError):
+        load_deployment_lock(path)
 
 
 def test_settings_require_independent_long_secrets_and_exact_protocol() -> None:
