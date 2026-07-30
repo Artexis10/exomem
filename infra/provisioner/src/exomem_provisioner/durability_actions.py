@@ -19,7 +19,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy import select
 
 from .adapters import HelmCliAdapter, KubernetesCellAdapter
-from .config import load_hosted_release_manifest
+from .config import DeploymentLock, load_deployment_lock
 from .crypto import AesGcmEnvelopeCodec
 from .database import ProvisionerDatabase
 from .durability import ExportBackupWorkflow, ExportObjectService, RestoreWorkflow
@@ -63,6 +63,7 @@ from .vault_backup import (
     LiveBackupTargetRegistry,
     VerifiedRouteMaintenancePort,
 )
+from .wire_protocol import runtime_identity
 
 _IMAGE_DIGEST = re.compile(r"^[^\s@]+@sha256:[0-9a-f]{64}$")
 _PRINCIPAL_SCOPE = (
@@ -105,7 +106,7 @@ class DurabilityActionSettings(BaseSettings):
         max_length=128,
         validation_alias="EXOMEM_PROVIDER_RECOVERY_SIGNING_KEY",
     )
-    release_manifest_path: Path = Field(validation_alias="EXOMEM_PROVISIONER_RELEASE_MANIFEST_PATH")
+    deployment_lock_path: Path = Field(validation_alias="EXOMEM_PROVISIONER_DEPLOYMENT_LOCK_PATH")
     cell_chart_path: str = Field(
         min_length=1,
         max_length=4096,
@@ -168,12 +169,16 @@ class DurabilityActionSettings(BaseSettings):
             raise ValueError("B2 endpoint must be an HTTPS origin")
         return value.rstrip("/")
 
-    @field_validator("release_manifest_path", "scratch_root")
+    @field_validator("deployment_lock_path", "scratch_root")
     @classmethod
     def require_absolute_paths(cls, value: Path) -> Path:
         if not value.is_absolute():
             raise ValueError("durability paths must be absolute")
         return value
+
+    @property
+    def deployment_lock(self) -> DeploymentLock:
+        return load_deployment_lock(self.deployment_lock_path)
 
     @field_validator("control_hostname", "transfer_hostname")
     @classmethod
@@ -841,13 +846,14 @@ class KubernetesRestoreCandidateResolver:
         if fence != metadata.fence_generation or len(rows) != 1:
             raise RestoreJobFailed("restore candidate ledger identity differs")
         request = await self._operations.load_request(rows[0].id)
+        target = runtime_identity(request)
         if (
             request.get("provisionMode") != "restore-candidate"
             or request.get("tenantId") != metadata.tenant_id
             or request.get("cellId") != metadata.subject_id
             or request.get("fenceGeneration") != metadata.fence_generation
-            or request.get("protocolVersion") != self._config.protocol_version
-            or request.get("releaseVersion") != self._config.release_version
+            or target["protocolVersion"] != self._config.protocol_version
+            or target["releaseVersion"] != self._config.release_version
         ):
             raise RestoreJobFailed("restore candidate provision request differs")
         cell = KubernetesCellAdapter(
@@ -901,7 +907,8 @@ def _b2_client(
 async def _run_durability_actions(settings: DurabilityActionSettings) -> None:
     from kubernetes import client, config
 
-    release = load_hosted_release_manifest(settings.release_manifest_path)
+    lock = settings.deployment_lock
+    target = lock.runtime_target
     signer = ProviderRecoveryIdentityCodec.from_encoded_seed(
         settings.provider_recovery_signing_key.get_secret_value()
     )
@@ -927,18 +934,19 @@ async def _run_durability_actions(settings: DurabilityActionSettings) -> None:
         coordination = client.CoordinationV1Api(api_client)
         custom = client.CustomObjectsApi(api_client)
         lifecycle_config = LifecycleConfig(
-            image=release.runtimeImage,
+            image=lock.components.runtime.image,
             chart_path=settings.cell_chart_path,
             chart_version=settings.cell_chart_version,
             helm_version=settings.helm_version,
             control_hostname=settings.control_hostname,
             transfer_hostname=settings.transfer_hostname,
             browser_origin=settings.browser_origin,
-            release_version=release.release,
-            protocol_version=release.hostedProtocol,
-            operator_contract_digest=release.operatorContractSha256,
-            contract_digest=release.gatewayContractSha256,
+            release_version=target.releaseVersion,
+            protocol_version=target.protocolVersion,
+            operator_contract_digest=target.gatewayContractDigest,
+            contract_digest=target.gatewayContractDigest,
             location=settings.location,
+            runtime_target=target.model_dump(mode="json"),
         )
         helm = HelmCliAdapter(
             binary=settings.helm_binary,
@@ -987,8 +995,8 @@ async def _run_durability_actions(settings: DurabilityActionSettings) -> None:
             custom_objects=custom,
             identity_verifier=verifier,
             registry=registry,
-            protocol_version=release.hostedProtocol,
-            release_version=release.release,
+            protocol_version=target.protocolVersion,
+            release_version=target.releaseVersion,
         )
         root_secret = settings.envelope_key.get_secret_value()
         async with httpx.AsyncClient(
@@ -1039,7 +1047,7 @@ async def _run_durability_actions(settings: DurabilityActionSettings) -> None:
                 archive_stager=B2PortableArchiveStager(export_delivery),
                 http=http,
                 scratch_root=settings.scratch_root,
-                runtime_image=release.runtimeImage,
+                runtime_image=lock.components.runtime.image,
                 provisioner_image=settings.provisioner_image,
             )
             dynamic_runtime = DynamicKubernetesRestoreRuntime(resolver)
@@ -1054,7 +1062,7 @@ async def _run_durability_actions(settings: DurabilityActionSettings) -> None:
                     provider_identity_verifier=verifier,
                     provider_bucket=bucket,
                     scratch_root=settings.scratch_root,
-                    release_version=release.release,
+                    release_version=target.releaseVersion,
                 )
 
             restore_workflow = CandidateBoundRestoreWorkflow(

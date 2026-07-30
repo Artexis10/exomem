@@ -18,6 +18,42 @@ from .driver import (
 )
 from .models import OperationAction
 from .repository import ClaimConflict, OperationRepository, OperationSnapshot, StaleFence
+from .wire_protocol import FINAL_MODELS_BY_PROTOCOL, WIRE_PROTOCOL_V2, runtime_identity
+
+
+def _validate_final(
+    operation: OperationSnapshot,
+    request: dict[str, Any],
+    result: dict[str, Any],
+) -> None:
+    """Reject a malformed driver final before it becomes replayable state."""
+
+    try:
+        final_model = FINAL_MODELS_BY_PROTOCOL[operation.wire_protocol][operation.action.value]
+    except KeyError as error:
+        raise DriverTerminal("PROVISIONER_DRIVER_INVALID") from error
+    if final_model is None:
+        if result:
+            raise DriverTerminal("PROVISIONER_DRIVER_INVALID")
+        return
+    try:
+        final_model.model_validate(result)
+    except ValueError as error:
+        raise DriverTerminal("PROVISIONER_DRIVER_INVALID") from error
+    if operation.action is OperationAction.HEALTH:
+        identity = runtime_identity(request)
+        if operation.wire_protocol == WIRE_PROTOCOL_V2:
+            if result.get("runtimeIdentity") != identity:
+                raise DriverTerminal("PROVISIONER_RUNTIME_CONTRACT_MISMATCH")
+        elif (
+            result.get("releaseVersion") != identity["releaseVersion"]
+            or result.get("protocolVersion") != identity["protocolVersion"]
+        ):
+            raise DriverTerminal("PROVISIONER_RUNTIME_CONTRACT_MISMATCH")
+    if operation.action is OperationAction.ROTATE_CREDENTIAL and (
+        result.get("previousCredentialRejected") != (request.get("phase") == "finalize")
+    ):
+        raise DriverTerminal("PROVISIONER_DRIVER_INVALID")
 
 
 class CapacityAdmission(Protocol):
@@ -250,6 +286,16 @@ class ProvisionerWorker:
                 operation.id,
                 self._worker_id,
                 code="PROVISIONER_DRIVER_INVALID",
+                **claim,
+            )
+            return True
+        try:
+            _validate_final(operation, request, outcome.result)
+        except DriverTerminal as error:
+            await self._repository.fail(
+                operation.id,
+                self._worker_id,
+                code=error.code,
                 **claim,
             )
             return True

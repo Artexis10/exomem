@@ -69,6 +69,28 @@ def _request(**overrides: object) -> dict[str, object]:
     return value
 
 
+def _runtime_target(**overrides: object) -> dict[str, object]:
+    value: dict[str, object] = {
+        "releaseVersion": "0.22.0",
+        "protocolVersion": "1",
+        "agentProfile": "hosted-alpha-agent-v1",
+        "gatewayContractDigest": "b" * 64,
+        "commandFingerprint": "c" * 64,
+        "schemaDigest": "d" * 64,
+    }
+    value.update(overrides)
+    return value
+
+
+def _v2_request(**overrides: object) -> dict[str, object]:
+    value = _request()
+    value.pop("releaseVersion")
+    value.pop("protocolVersion")
+    value["runtimeTarget"] = _runtime_target()
+    value.update(overrides)
+    return value
+
+
 def _request_with_provider_identity(**overrides: object) -> dict[str, object]:
     value = _request(**overrides)
     metadata = _metadata(
@@ -132,7 +154,7 @@ async def test_release_unit_mismatch_is_terminal_before_any_provider_effect() ->
     driver = CellLifecycleDriver(
         plane=plane,
         volume_worker=VolumeLifecycleWorker(plane, plane),
-        config=_config(),
+        config=replace(_config(), runtime_target=_runtime_target()),
     )
 
     for override in ({"releaseVersion": "0.22.1"}, {"protocolVersion": "2"}):
@@ -140,6 +162,37 @@ async def test_release_unit_mismatch_is_terminal_before_any_provider_effect() ->
             await driver.execute("provision", _request(**override), _context())
         assert plane._cells == {}
         assert plane._tenant_fences == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "field",
+    (
+        "releaseVersion",
+        "protocolVersion",
+        "agentProfile",
+        "gatewayContractDigest",
+        "commandFingerprint",
+        "schemaDigest",
+    ),
+)
+async def test_v2_runtime_target_mismatch_is_terminal_before_any_provider_effect(
+    field: str,
+) -> None:
+    plane = HighFidelityProviderPlane(location="fsn1")
+    driver = CellLifecycleDriver(
+        plane=plane,
+        volume_worker=VolumeLifecycleWorker(plane, plane),
+        config=replace(_config(), runtime_target=_runtime_target()),
+    )
+    target = _runtime_target()
+    target[field] = "2" if field == "protocolVersion" else "e" * 64
+
+    with pytest.raises(DriverTerminal, match="PROVISIONER_RELEASE_UNIT_MISMATCH"):
+        await driver.execute("provision", _v2_request(runtimeTarget=target), _context())
+
+    assert plane._cells == {}
+    assert plane._tenant_fences == {}
 
 
 def _metadata(**overrides: object) -> OpaqueProviderMetadata:
@@ -786,6 +839,73 @@ async def test_health_flattens_exact_runtime_contract_and_fails_closed_on_drift(
     with pytest.raises(Exception) as rejected:
         await driver.execute("health", _request(), _context())
     assert getattr(rejected.value, "code", None) == "PROVISIONER_RUNTIME_CONTRACT_MISMATCH"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("field", "replacement"),
+    (
+        ("release_version", "0.22.1"),
+        ("protocol_version", "2"),
+        ("agent_profile", "hosted-alpha-agent-v2"),
+        ("contract_digest", "e" * 64),
+        ("command_fingerprint", "e" * 64),
+        ("schema_digest", "e" * 64),
+    ),
+)
+async def test_v2_health_reports_only_the_exact_observed_runtime_identity(
+    field: str,
+    replacement: str,
+) -> None:
+    plane = HighFidelityProviderPlane(location="fsn1")
+    config = replace(_config(), runtime_target=_runtime_target())
+    driver = CellLifecycleDriver(plane=plane, volume_worker=None, config=config)
+    request = _v2_request()
+    await plane.seed_ready_cell(_metadata(), request, config)
+
+    healthy = await driver.execute("health", request, _context())
+    assert isinstance(healthy, DriverFinal)
+    assert healthy.result["runtimeIdentity"] == _runtime_target()
+    assert "releaseVersion" not in healthy.result
+    assert "protocolVersion" not in healthy.result
+
+    plane.set_health(
+        _metadata(),
+        HealthObservation.ready_for(_metadata(), request, config).replace(**{field: replacement}),
+    )
+    with pytest.raises(DriverTerminal, match="PROVISIONER_RUNTIME_CONTRACT_MISMATCH"):
+        await driver.execute("health", request, _context())
+
+
+@pytest.mark.asyncio
+async def test_v2_restore_candidate_does_not_require_a_live_health_probe() -> None:
+    plane = HighFidelityProviderPlane(location="fsn1")
+    codec = ProviderRecoveryIdentityCodec.from_secret("provider-recovery-root")
+    config = replace(_config(), runtime_target=_runtime_target())
+    driver = CellLifecycleDriver(plane=plane, volume_worker=None, config=config)
+    volume_driver = VolumeRegistrationDriver(
+        VolumeLifecycleWorker(plane, plane, identity_codec=codec),
+        identity_verifier=codec.verifier(),
+    )
+    request = _v2_request(provisionMode="restore-candidate")
+    request = _request_with_provider_identity(**request)
+    request.pop("releaseVersion")
+    request.pop("protocolVersion")
+    request["runtimeTarget"] = _runtime_target()
+    context = _context()
+
+    for _ in range(8):
+        selected = volume_driver if context.checkpoint == "volume-registration-required" else driver
+        outcome = await selected.execute("provision", request, context)
+        if isinstance(outcome, DriverFinal):
+            break
+        context = _context(checkpoint=outcome.checkpoint)
+    else:
+        raise AssertionError("restore candidate did not converge")
+
+    assert isinstance(outcome, DriverFinal)
+    assert plane.is_initialized(_metadata()) is False
+    assert plane.routes_enabled(_metadata()) == (False, False)
 
 
 @pytest.mark.asyncio

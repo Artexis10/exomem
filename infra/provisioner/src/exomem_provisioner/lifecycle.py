@@ -37,6 +37,7 @@ from .provider_identity import (
     decode_hcloud_identity_envelope,
     provider_operation_resource_name,
 )
+from .wire_protocol import runtime_identity
 
 
 class MetadataConflict(RuntimeError):
@@ -189,6 +190,7 @@ class LifecycleConfig:
     operator_contract_digest: str
     contract_digest: str
     location: str
+    runtime_target: dict[str, str] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -207,6 +209,9 @@ class HealthObservation:
     contract_digest: str
     policy_admitted: bool
     admission_admitted: bool
+    agent_profile: str | None = None
+    command_fingerprint: str | None = None
+    schema_digest: str | None = None
 
     @classmethod
     def ready_for(
@@ -215,12 +220,13 @@ class HealthObservation:
         request: dict[str, Any],
         config: LifecycleConfig,
     ) -> HealthObservation:
+        target = runtime_identity(request)
         return cls(
             live=True,
             ready=True,
             cell_id=metadata.subject_id,
-            protocol_version=config.protocol_version,
-            release_version=config.release_version,
+            protocol_version=target["protocolVersion"],
+            release_version=target["releaseVersion"],
             service_authenticated=True,
             mutation_authority=True,
             read_admission=True,
@@ -230,18 +236,47 @@ class HealthObservation:
             contract_digest=config.contract_digest,
             policy_admitted=True,
             admission_admitted=True,
+            agent_profile=target.get("agentProfile"),
+            command_fingerprint=target.get("commandFingerprint"),
+            schema_digest=target.get("schemaDigest"),
         )
 
     def replace(self, **changes: Any) -> HealthObservation:
         return replace(self, **changes)
 
-    def flattened(self) -> dict[str, Any]:
+    def flattened(self, *, v2: bool) -> dict[str, Any]:
+        if not v2:
+            return {
+                "live": self.live,
+                "ready": self.ready,
+                "cellId": self.cell_id,
+                "protocolVersion": self.protocol_version,
+                "releaseVersion": self.release_version,
+                "serviceAuthenticated": self.service_authenticated,
+                "mutationAuthority": self.mutation_authority,
+                "readAdmission": self.read_admission,
+                "writeAdmission": self.write_admission,
+                "workerPolicy": self.worker_policy,
+                "code": self.code,
+            }
+        if (
+            self.agent_profile is None
+            or self.command_fingerprint is None
+            or self.schema_digest is None
+        ):
+            raise MetadataConflict("runtime identity is incomplete")
         return {
             "live": self.live,
             "ready": self.ready,
             "cellId": self.cell_id,
-            "protocolVersion": self.protocol_version,
-            "releaseVersion": self.release_version,
+            "runtimeIdentity": {
+                "releaseVersion": self.release_version,
+                "protocolVersion": self.protocol_version,
+                "agentProfile": self.agent_profile,
+                "gatewayContractDigest": self.contract_digest,
+                "commandFingerprint": self.command_fingerprint,
+                "schemaDigest": self.schema_digest,
+            },
             "serviceAuthenticated": self.service_authenticated,
             "mutationAuthority": self.mutation_authority,
             "readAdmission": self.read_admission,
@@ -807,10 +842,12 @@ class HighFidelityProviderPlane:
         cell.replicas = 1
         cell.request_shape = {
             "cellId": str(request["cellId"]),
-            "protocolVersion": str(request["protocolVersion"]),
-            "releaseVersion": str(request["releaseVersion"]),
             "workerPolicy": dict(request["workerPolicy"]),
         }
+        if "runtimeTarget" in request:
+            cell.request_shape["runtimeTarget"] = runtime_identity(request)
+        else:
+            cell.request_shape.update(runtime_identity(request))
         cell.helm_values = json.loads(json.dumps(values))
         cell.volume_handle = handle
         cell.pv_name = pv_name
@@ -1483,11 +1520,7 @@ class CellLifecycleDriver:
         context: EffectContext,
     ) -> DriverPending | DriverFinal:
         try:
-            if ("protocolVersion" in request or "releaseVersion" in request) and (
-                request.get("protocolVersion") != self._config.protocol_version
-                or request.get("releaseVersion") != self._config.release_version
-            ):
-                raise DriverTerminal("PROVISIONER_RELEASE_UNIT_MISMATCH")
+            self._validate_static_runtime_target(request)
             if await self.observed_fence(context.tenant_id) > context.fence_generation:
                 raise DriverTerminal("PROVISIONER_STALE_FENCE")
             await self._plane.observe_operation(context, request)
@@ -1599,7 +1632,27 @@ class CellLifecycleDriver:
         expected = HealthObservation.ready_for(metadata, request, self._config)
         if health != expected:
             raise DriverTerminal("PROVISIONER_RUNTIME_CONTRACT_MISMATCH")
-        return health.flattened()
+        return health.flattened(v2="runtimeTarget" in request)
+
+    def _validate_static_runtime_target(self, request: dict[str, Any]) -> None:
+        if "runtimeTarget" not in request and "releaseVersion" not in request:
+            return
+        target = runtime_identity(request)
+        if "runtimeTarget" in request:
+            if self._config.runtime_target is None or target != self._config.runtime_target:
+                raise DriverTerminal("PROVISIONER_RELEASE_UNIT_MISMATCH")
+            if (
+                target["releaseVersion"] != self._config.release_version
+                or target["protocolVersion"] != self._config.protocol_version
+                or target["gatewayContractDigest"] != self._config.contract_digest
+            ):
+                raise DriverTerminal("PROVISIONER_RELEASE_UNIT_MISMATCH")
+            return
+        if (
+            target["protocolVersion"] != self._config.protocol_version
+            or target["releaseVersion"] != self._config.release_version
+        ):
+            raise DriverTerminal("PROVISIONER_RELEASE_UNIT_MISMATCH")
 
     async def _maintenance_checkpoint(
         self,

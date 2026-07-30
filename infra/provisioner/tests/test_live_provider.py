@@ -36,6 +36,41 @@ RELEASE_FIXTURE = Path(__file__).parent / "fixtures/exomem-hosted-release-v1.jso
 IDENTITY_CODEC = ProviderRecoveryIdentityCodec.from_secret("provider-recovery-root")
 
 
+def _deployment_lock(tmp_path: Path) -> Path:
+    path = tmp_path / "selected-deployment-lock.json"
+    digest = "a" * 64
+    commit = "b" * 40
+    target = {
+        "releaseVersion": "0.22.0",
+        "protocolVersion": "1",
+        "agentProfile": "hosted-alpha-agent-v1",
+        "gatewayContractDigest": "b" * 64,
+        "commandFingerprint": "c" * 64,
+        "schemaDigest": "d" * 64,
+    }
+    payload = {
+        "artifact": "exomem-hosted-deployment-lock",
+        "schemaVersion": 2,
+        "admissionMode": "expand",
+        "components": {
+            "runtime": {"image": f"ghcr.io/artexis10/exomem@sha256:{digest}", "sourceCommit": commit, "candidateSha256": digest},
+            "provisioner": {"image": f"ghcr.io/artexis10/exomem-provisioner@sha256:{'e' * 64}", "sourceCommit": commit, "candidateSha256": "e" * 64, "wireProtocol": "exomem-cell-provisioner.v2"},
+        },
+        "runtimeTarget": target,
+        "composition": {
+            "commit": commit,
+            "sourceClosure": {name: {"candidateCommit": commit, "compositionCommit": commit, "paths": ["src/**"]} for name in ("runtime", "provisioner")},
+            "forwardContractSha256": digest,
+            "authoritativeLegacyReleaseSetSha256": "f" * 64,
+            "legacyCatalog": [{"releaseVersion": "0.22.0", "protocolVersion": "exomem-hosted.v1", "runtimeImage": f"ghcr.io/artexis10/exomem@sha256:{digest}", "sourceCommit": commit, "contractSha256": digest, "contract": {**target, "protocolVersion": "exomem-hosted.v1", "runtimeImage": f"ghcr.io/artexis10/exomem@sha256:{digest}", "sourceCommit": commit}}],
+            "legacyReleaseSetSha256": "f" * 64,
+        },
+        "rollback": {"provisionerImage": f"ghcr.io/artexis10/exomem-provisioner@sha256:{'e' * 64}", "provisionerSourceCommit": commit, "v1CorpusSha256": digest, "legacyManifestSha256": digest, "substrateV1ConsumerCommit": commit},
+    }
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    return path
+
+
 def _capacity_contract(path: Path) -> Path:
     raw_key = base64.urlsafe_b64decode(IDENTITY_CODEC.public_key() + "=")
     contract = {
@@ -65,7 +100,7 @@ def _metadata() -> OpaqueProviderMetadata:
 
 def _settings(**overrides: object) -> ProviderWorkerSettings:
     values: dict[str, object] = {
-        "release_manifest_path": str(RELEASE_FIXTURE),
+        "deployment_lock_path": str(RELEASE_FIXTURE),
         "cell_chart_path": "/opt/exomem/charts/cell",
         "cell_chart_version": "0.1.0",
         "helm_binary": "/opt/exomem/bin/helm",
@@ -78,7 +113,7 @@ def _settings(**overrides: object) -> ProviderWorkerSettings:
         "worker_id": "worker-alpha",
         "provider_recovery_public_key": IDENTITY_CODEC.public_key(),
         "capacity_receipt_public_key": IDENTITY_CODEC.public_key(),
-        "capacity_contract_path": "/etc/exomem/capacity/private-alpha-capacity-v1.json",
+        "capacity_contract_path": str(RELEASE_FIXTURE.parent / "private-alpha-capacity-v1.json"),
         "capacity_receipt_namespace": "exomem-platform",
         "capacity_receipt_config_map": "exomem-capacity-receipt",
         "hcloud_server_id": 101,
@@ -87,16 +122,18 @@ def _settings(**overrides: object) -> ProviderWorkerSettings:
     return ProviderWorkerSettings(**values)  # type: ignore[arg-type]
 
 
-def test_live_worker_settings_require_one_release_manifest_and_bound_internal_origin(
+def test_live_worker_settings_require_one_selected_lock_and_bound_internal_origin(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    assert _settings().release_manifest_path == str(RELEASE_FIXTURE)
+    assert _settings().deployment_lock_path == str(RELEASE_FIXTURE)
     with pytest.raises(ValidationError):
         _settings(cell_image="registry.invalid/exomem:latest")
     with pytest.raises(ValidationError):
         _settings(contract_digest="b" * 64)
     with pytest.raises(ValidationError):
-        _settings(release_manifest_path="/tmp/partial-release.json")
+        _settings(deployment_lock_path="relative-lock.json")
+    with pytest.raises(ValidationError):
+        _settings(release_manifest_path=str(RELEASE_FIXTURE))
     with pytest.raises(ValidationError):
         _settings(internal_origin="http://arbitrary-upstream.invalid")
     with pytest.raises(ValidationError):
@@ -106,6 +143,21 @@ def test_live_worker_settings_require_one_release_manifest_and_bound_internal_or
     monkeypatch.setenv("EXOMEM_PROVISIONER_CELL_IMAGE", "ignored-is-still-forbidden")
     with pytest.raises(ValidationError):
         _settings()
+
+
+def test_live_worker_loads_the_selected_lock_and_rejects_an_unavailable_lock(tmp_path: Path) -> None:
+    settings = _settings(
+        capacity_contract_path=str(_capacity_contract(tmp_path)),
+        deployment_lock_path=str(_deployment_lock(tmp_path)),
+    )
+    assert settings.deployment_lock.runtime_target.releaseVersion == "0.22.0"
+
+    missing = _settings(
+        capacity_contract_path=str(_capacity_contract(tmp_path)),
+        deployment_lock_path=str(tmp_path / "missing-lock.json"),
+    )
+    with pytest.raises(ValueError, match="deployment lock is unavailable"):
+        _ = missing.deployment_lock
 
 
 def test_release_manifest_is_complete_strict_and_immutable(tmp_path: Path) -> None:
@@ -228,7 +280,10 @@ def test_production_factory_wires_the_live_plane_without_a_fake_selection_path(
 
     components = build_live_provider_components(
         repository=SimpleNamespace(session_factory=SimpleNamespace()),  # type: ignore[arg-type]
-        settings=_settings(capacity_contract_path=str(_capacity_contract(tmp_path))),
+        settings=_settings(
+            capacity_contract_path=str(_capacity_contract(tmp_path)),
+            deployment_lock_path=str(_deployment_lock(tmp_path)),
+        ),
         core_v1=SimpleNamespace(),
         apps_v1=SimpleNamespace(),
         batch_v1=SimpleNamespace(),
@@ -240,11 +295,11 @@ def test_production_factory_wires_the_live_plane_without_a_fake_selection_path(
     )
 
     assert isinstance(components.plane, LiveLifecyclePlane)
-    assert components.release.runtimeImage.endswith("a" * 64)
+    assert components.lock.components.runtime.image.endswith("a" * 64)
     assert components.driver._config.release_version == "0.22.0"
     assert components.driver._config.protocol_version == "1"
     assert components.driver._config.contract_digest == "b" * 64
-    assert components.driver._config.operator_contract_digest == "c" * 64
+    assert components.driver._config.operator_contract_digest == "b" * 64
     assert components.driver._plane is components.plane
     assert components.driver._volumes is None
     assert components.capacity is components.plane._capacity

@@ -415,7 +415,7 @@ class ProviderWorkerSettings(BaseSettings):
         populate_by_name=True,
     )
 
-    release_manifest_path: str = Field(min_length=1, max_length=4096)
+    deployment_lock_path: str = Field(min_length=1, max_length=4096)
     cell_chart_path: str = Field(min_length=1, max_length=4096)
     cell_chart_version: str = Field(min_length=1, max_length=64)
     helm_binary: str = Field(min_length=1, max_length=4096)
@@ -451,13 +451,17 @@ class ProviderWorkerSettings(BaseSettings):
     )
     hcloud_server_id: int = Field(gt=0)
 
-    @field_validator("release_manifest_path")
+    @field_validator("deployment_lock_path")
     @classmethod
-    def validate_release_manifest_path(cls, value: str) -> str:
+    def validate_deployment_lock_path(cls, value: str) -> str:
         path = Path(value)
-        if not path.is_absolute() or path.name != _RELEASE_MANIFEST_FILENAME:
-            raise ValueError("release manifest path must be absolute and use the v1 filename")
+        if not path.is_absolute():
+            raise ValueError("deployment lock path must be absolute")
         return value
+
+    @property
+    def deployment_lock(self) -> DeploymentLock:
+        return load_deployment_lock(self.deployment_lock_path)
 
     @field_validator("capacity_contract_path")
     @classmethod

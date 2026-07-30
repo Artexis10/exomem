@@ -40,6 +40,7 @@ from .provider_identity import (
     provider_operation_resource_name,
 )
 from .repository import OperationRepository
+from .wire_protocol import runtime_identity
 
 
 @dataclass(frozen=True, slots=True)
@@ -598,12 +599,13 @@ class LiveLifecyclePlane:
     async def health(
         self, metadata: OpaqueProviderMetadata, request: dict[str, Any]
     ) -> HealthObservation:
+        target = runtime_identity(request)
         return await self._runtime.health(
             self._owner(metadata),
             credential=str(request["serviceCredential"]),
-            protocol_version=str(request["protocolVersion"]),
+            protocol_version=target["protocolVersion"],
             config=self._config,
-            expected_release=str(request["releaseVersion"]),
+            expected_release=target["releaseVersion"],
             expected_worker_policy=dict(request["workerPolicy"]),
         )
 
@@ -670,10 +672,11 @@ class LiveLifecyclePlane:
         request: dict[str, Any],
         operation_id: str,
     ) -> None:
+        target = runtime_identity(request)
         await self._runtime.quiesce(
             self._owner(metadata),
             credential=str(request["serviceCredential"]),
-            protocol_version=str(request["protocolVersion"]),
+            protocol_version=target["protocolVersion"],
             operation_id=operation_id,
         )
 
@@ -686,10 +689,11 @@ class LiveLifecyclePlane:
         request: dict[str, Any],
         operation_id: str,
     ) -> None:
+        target = runtime_identity(request)
         await self._runtime.resume(
             self._owner(metadata),
             credential=str(request["serviceCredential"]),
-            protocol_version=str(request["protocolVersion"]),
+            protocol_version=target["protocolVersion"],
             operation_id=operation_id,
         )
 
@@ -814,6 +818,7 @@ class LiveLifecyclePlane:
             return True
         revision = int(annotations.get("exomem.io/security-revision", "0"))
         probe_operation = operation_id + ":credential-probe"
+        target = runtime_identity(request)
         operator_request = {
             "request_id": _deterministic_uuid4(probe_operation),
             "operation_id": probe_operation,
@@ -821,8 +826,8 @@ class LiveLifecyclePlane:
             "vault_id": owned.tenant_id,
             "state_root": "/var/lib/exomem/state",
             "selected_credential_version": pending,
-            "expected_release": str(request["releaseVersion"]),
-            "expected_protocol": str(request["protocolVersion"]),
+            "expected_release": target["releaseVersion"],
+            "expected_protocol": target["protocolVersion"],
             "expected_worker_policy_digest": self._worker_policy_digest(request),
             "expected_revision": revision,
             "port": 8765,
@@ -861,11 +866,12 @@ class LiveLifecyclePlane:
         credentials, annotations = await self._cell.read_credential_bundle(owned)
         pending = str(version)
         old_version = annotations.get("exomem.io/active-credential-version")
+        target = runtime_identity(request)
         if old_version == pending and set(credentials) == {pending}:
             return await self._runtime.credential_rejected(
                 owned,
                 credential=str(request["serviceCredential"]),
-                protocol_version=str(request["protocolVersion"]),
+                protocol_version=target["protocolVersion"],
             )
         if old_version is None or pending not in credentials:
             raise MetadataConflict("pending credential is absent")
@@ -915,15 +921,15 @@ class LiveLifecyclePlane:
         new_health = await self._runtime.health(
             owned,
             credential=credentials[pending],
-            protocol_version=str(request["protocolVersion"]),
+            protocol_version=target["protocolVersion"],
             config=self._config,
-            expected_release=str(request["releaseVersion"]),
+            expected_release=target["releaseVersion"],
             expected_worker_policy=dict(request["workerPolicy"]),
         )
         old_rejected = await self._runtime.credential_rejected(
             owned,
             credential=str(request["serviceCredential"]),
-            protocol_version=str(request["protocolVersion"]),
+            protocol_version=target["protocolVersion"],
         )
         return new_health.ready and old_rejected
 
@@ -935,10 +941,11 @@ class LiveLifecyclePlane:
         operation_id: str,
         created_at: str,
     ) -> None:
+        target = runtime_identity(request)
         await self._runtime.seal(
             self._owner(metadata),
             credential=str(request["serviceCredential"]),
-            protocol_version=str(request["protocolVersion"]),
+            protocol_version=target["protocolVersion"],
             operation_id=operation_id,
             created_at=created_at,
         )
