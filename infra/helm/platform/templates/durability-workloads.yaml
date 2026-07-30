@@ -1,4 +1,4 @@
-{{- $releaseJson := include "exomem.hostedReleaseJson" . -}}
+{{- $provisionerImage := include "exomem.hostedProvisionerImage" . -}}
 {{- $workloadsRaw := .Files.Get "files/durability-workloads-v1.json" -}}
 {{- $storageRaw := .Files.Get "files/durability-storage-v1.json" -}}
 {{- if ne .Values.durability.contractSha256 ($workloadsRaw | sha256sum) -}}
@@ -320,7 +320,7 @@ spec:
             seccompProfile: {type: RuntimeDefault}
           containers:
             - name: durability-actions
-              image: {{ .Values.provisioner.image }}
+              image: {{ $provisionerImage }}
               imagePullPolicy: IfNotPresent
               command: {{ $actions.command | toJson }}
               env:
@@ -384,7 +384,7 @@ spec:
                 - name: EXOMEM_PROVISIONER_RELEASE_MANIFEST_PATH
                   value: /etc/exomem/release/exomem-hosted-release-v1.json
                 - name: EXOMEM_DURABILITY_PROVISIONER_IMAGE
-                  value: {{ .Values.provisioner.image | quote }}
+                  value: {{ $provisionerImage | quote }}
                 - name: EXOMEM_PROVISIONER_CELL_CHART_PATH
                   value: {{ .Values.provisioner.cellChartPath | quote }}
                 - name: EXOMEM_PROVISIONER_CELL_CHART_VERSION
@@ -471,7 +471,7 @@ spec:
             seccompProfile: {type: RuntimeDefault}
           containers:
             - name: export-gc
-              image: {{ .Values.provisioner.image }}
+              image: {{ $provisionerImage }}
               imagePullPolicy: IfNotPresent
               command: {{ $delivery.command | toJson }}
               env:
@@ -553,7 +553,7 @@ spec:
             seccompProfile: {type: RuntimeDefault}
           containers:
             - name: vault-backup
-              image: {{ .Values.provisioner.image }}
+              image: {{ $provisionerImage }}
               imagePullPolicy: IfNotPresent
               command: {{ $backup.command | toJson }}
               env:
@@ -657,7 +657,7 @@ spec:
             seccompProfile: {type: RuntimeDefault}
           initContainers:
             - name: prepare-pg-files
-              image: {{ .Values.provisioner.image }}
+              image: {{ $provisionerImage }}
               imagePullPolicy: IfNotPresent
               command: ["/bin/sh", "-ec"]
               args:
@@ -678,7 +678,7 @@ spec:
                 - {name: pg-runtime, mountPath: /run/secrets/exomem/database-backup}
           containers:
             - name: database-backup
-              image: {{ .Values.provisioner.image }}
+              image: {{ $provisionerImage }}
               imagePullPolicy: IfNotPresent
               command: {{ $database.command | toJson }}
               env:
@@ -816,7 +816,7 @@ data:
             },
             "containers": [{
               "name": "deletion-worker",
-              "image": {{ .Values.provisioner.image | quote }},
+              "image": {{ $provisionerImage | quote }},
               "imagePullPolicy": "IfNotPresent",
               "command": {{ $deletion.command | toJson }},
               "terminationMessagePath": "/dev/termination-log",
@@ -892,7 +892,7 @@ spec:
             seccompProfile: {type: RuntimeDefault}
           containers:
             - name: deletion-dispatcher
-              image: {{ .Values.provisioner.image }}
+              image: {{ $provisionerImage }}
               imagePullPolicy: IfNotPresent
               command: {{ $dispatcher.command | toJson }}
               env:
@@ -957,7 +957,7 @@ spec:
         seccompProfile: {type: RuntimeDefault}
       containers:
         - name: volume-worker
-          image: {{ .Values.provisioner.image }}
+          image: {{ $provisionerImage }}
           imagePullPolicy: IfNotPresent
           command: {{ $volume.command | toJson }}
           env:

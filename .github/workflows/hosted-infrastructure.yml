@@ -26,9 +26,20 @@ on:
         required: false
         default: false
         type: boolean
-      provisioner_image:
-        description: Exact published ghcr.io/artexis10/exomem-provisioner@sha256 digest
-        required: false
+      deployment_lock_pair:
+        description: Repository-relative canonical v2 deployment-lock pair
+        required: true
+        default: infra/contracts/exomem-hosted-deployment-lock-pair-v2.json
+        type: string
+      deployment_phase:
+        description: Exact reviewed pair member to consume
+        required: true
+        default: expand
+        type: choice
+        options: [expand, contract]
+      deployment_member_sha256:
+        description: SHA-256 of the selected canonical pair member
+        required: true
         type: string
       external_blackbox:
         description: Run the deployed availability, backup-freshness, and scheduler probes
@@ -122,10 +133,20 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
-      - name: Pull and prove both published images against the reviewed release
+      - name: Derive and prove both published images from the reviewed phase lock
         env:
-          PROVISIONER_IMAGE: ${{ inputs.provisioner_image }}
+          DEPLOYMENT_LOCK_PAIR: ${{ inputs.deployment_lock_pair }}
+          DEPLOYMENT_PHASE: ${{ inputs.deployment_phase }}
+          DEPLOYMENT_MEMBER_SHA256: ${{ inputs.deployment_member_sha256 }}
         run: |
+          python3 infra/scripts/prepare_hosted_release.py \
+            --lock-pair "$DEPLOYMENT_LOCK_PAIR" \
+            --phase "$DEPLOYMENT_PHASE" \
+            --member-sha256 "$DEPLOYMENT_MEMBER_SHA256" \
+            --control-hostname control.example.invalid \
+            --transfer-hostname transfer.example.invalid \
+            --values-output /tmp/exomem-hosted-release-values.json
+          PROVISIONER_IMAGE="$(python3 -c 'import json; print(json.load(open("/tmp/exomem-hosted-release-values.json"))["provisioner"]["deploymentLockJson"] )' | python3 -c 'import json, sys; print(json.load(sys.stdin)["components"]["provisioner"]["image"])')"
           python3 infra/scripts/verify_hosted_release.py \
             --manifest infra/contracts/exomem-hosted-release-v1.json \
             --runtime-gate infra/contracts/exomem-hosted-runtime-k3s-gate-v1.json \

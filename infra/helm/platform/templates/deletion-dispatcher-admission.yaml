@@ -1,3 +1,4 @@
+{{- $provisionerImage := include "exomem.hostedProvisionerImage" . -}}
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
 metadata:
@@ -57,7 +58,7 @@ spec:
         !has(object.spec.template.spec.initContainers) &&
         !has(object.spec.template.spec.ephemeralContainers) &&
         object.spec.template.spec.containers[0].name == 'deletion-worker' &&
-        object.spec.template.spec.containers[0].image == {{ .Values.provisioner.image | quote }} &&
+        object.spec.template.spec.containers[0].image == {{ $provisionerImage | quote }} &&
         object.spec.template.spec.containers[0].imagePullPolicy == 'IfNotPresent' &&
         object.spec.template.spec.containers[0].command == ['exomem-deletion-worker'] &&
         object.spec.template.spec.containers[0].terminationMessagePath == '/dev/termination-log' &&

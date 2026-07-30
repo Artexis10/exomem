@@ -1,4 +1,6 @@
-{{- $release := include "exomem.hostedReleaseJson" . | mustFromJson -}}
+{{- $lock := include "exomem.hostedDeploymentLock" . | mustFromJson -}}
+{{- $release := $lock.runtimeTarget -}}
+{{- $provisionerImage := include "exomem.hostedProvisionerImage" . -}}
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
 metadata:
@@ -560,7 +562,7 @@ spec:
         request.resource.resource != 'jobs' || request.operation == 'DELETE' ||
         (variables.target.spec.template.spec.initContainers[0].name == 'fetch-restore-source' &&
           variables.target.spec.template.spec.initContainers[0].image ==
-            {{ .Values.provisioner.image | quote }} &&
+            {{ $provisionerImage | quote }} &&
           variables.target.spec.template.spec.initContainers[0].imagePullPolicy == 'IfNotPresent' &&
           size(variables.target.spec.template.spec.initContainers[0].command) == 11 &&
           variables.target.spec.template.spec.initContainers[0].command[0] == 'exomem-restore-fetch' &&

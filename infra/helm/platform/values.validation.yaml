@@ -1,46 +1,11 @@
 cloudflared:
   replicas: 1
 provisioner:
-  image: ghcr.io/artexis10/exomem-provisioner@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
   controlHostname: control.example.test
   transferHostname: transfer.example.test
-  releaseManifestJson: |-
-    {
-      "artifact": "exomem-hosted-release",
-      "schemaVersion": 1,
-      "sourceRepository": "https://github.com/Artexis10/exomem",
-      "sourceCommit": "54618b931dec8f0ad053dce48dd80cc36c95c549",
-      "release": "0.22.0",
-      "hostedProtocol": "1",
-      "releaseBuildTime": "2026-07-14T03:50:34Z",
-      "runtimeImage": "ghcr.io/artexis10/exomem@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-      "publishedTag": "ghcr.io/artexis10/exomem:54618b931dec8f0ad053dce48dd80cc36c95c549-hosted",
-      "operatorContractSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
-      "gatewayContractSha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
-      "commandRegistry": [
-        {"name": "coordination_status", "readOnly": true, "mode": "read", "tier": 1, "capability": "core"},
-        {"name": "bootstrap", "readOnly": true, "mode": "read", "tier": 1, "capability": "core"},
-        {"name": "ask_memory", "readOnly": true, "mode": "read", "tier": 1, "capability": "core"},
-        {"name": "read_memory", "readOnly": true, "mode": "read", "tier": 1, "capability": "core"},
-        {"name": "browse_memory", "readOnly": true, "mode": "read", "tier": 1, "capability": "core"},
-        {"name": "remember", "readOnly": false, "mode": "write", "tier": 1, "capability": "core"},
-        {"name": "edit_memory", "readOnly": false, "mode": "write", "tier": 1, "capability": "core"},
-        {"name": "replace_memory", "readOnly": false, "mode": "write", "tier": 1, "capability": "core"},
-        {"name": "capture_source", "readOnly": false, "mode": "write", "tier": 1, "capability": "core"},
-        {"name": "compile_source", "readOnly": true, "mode": "read", "tier": 1, "capability": "core"},
-        {"name": "preserve_evidence", "readOnly": false, "mode": "write", "tier": 1, "capability": "core"},
-        {"name": "transfer_artifact", "readOnly": false, "mode": "write", "tier": 1, "capability": "core"},
-        {"name": "review_memory", "readOnly": true, "mode": "read", "tier": 1, "capability": "core"},
-        {"name": "review_item_context", "readOnly": true, "mode": "read", "tier": 1, "capability": "core"},
-        {"name": "triage_memory", "readOnly": false, "mode": "write", "tier": 1, "capability": "core"},
-        {"name": "connect_memory", "readOnly": false, "mode": "write", "tier": 1, "capability": "core"},
-        {"name": "adopt_vault", "readOnly": false, "mode": "write", "tier": 1, "capability": "core"},
-        {"name": "maintain_memory", "readOnly": false, "mode": "write", "tier": 1, "capability": "core"},
-        {"name": "schema_memory", "readOnly": false, "mode": "write", "tier": 1, "capability": "core"},
-        {"name": "manage_memory_file", "readOnly": false, "mode": "write", "tier": 2, "capability": "tier-2"},
-        {"name": "query_dataset", "readOnly": true, "mode": "read", "tier": 2, "capability": "tier-2"}
-      ]
-    }
+  deploymentLockSha256: 97c1fc1bf93e049237b5a64e0a284ad241c77f9065aae40466c060432e0b427e
+  deploymentLockJson: |
+    {"admissionMode":"expand","artifact":"exomem-hosted-deployment-lock","components":{"provisioner":{"candidateSha256":"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee","image":"ghcr.io/artexis10/exomem-provisioner@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","sourceCommit":"cccccccccccccccccccccccccccccccccccccccc","wireProtocol":"exomem-cell-provisioner.v2"},"runtime":{"candidateSha256":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd","image":"ghcr.io/artexis10/exomem@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","sourceCommit":"cccccccccccccccccccccccccccccccccccccccc"}},"composition":{"authoritativeLegacyReleaseSetSha256":"4444444444444444444444444444444444444444444444444444444444444444","commit":"cccccccccccccccccccccccccccccccccccccccc","forwardContractSha256":"3333333333333333333333333333333333333333333333333333333333333333","legacyCatalog":[{"contract":{"agentProfile":"hosted-alpha-agent-v1","commandFingerprint":"7777777777777777777777777777777777777777777777777777777777777777","gatewayContractDigest":"6666666666666666666666666666666666666666666666666666666666666666","protocolVersion":"1","releaseVersion":"0.35.0","runtimeImage":"ghcr.io/artexis10/exomem@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","schemaDigest":"8888888888888888888888888888888888888888888888888888888888888888","sourceCommit":"cccccccccccccccccccccccccccccccccccccccc"},"contractSha256":"2efa97588c7a9cb1eea48db1b5bde7bd2f8ee6e56c25c4718e196c85e4bb473a","protocolVersion":"1","releaseVersion":"0.35.0","runtimeImage":"ghcr.io/artexis10/exomem@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","sourceCommit":"cccccccccccccccccccccccccccccccccccccccc"}],"legacyReleaseSetSha256":"3dcb24f72ef7c2484a3b693e6d9dc50c82a1080467debfd16f95910effe6755f","sourceClosure":{"provisioner":{"candidateCommit":"cccccccccccccccccccccccccccccccccccccccc","compositionCommit":"cccccccccccccccccccccccccccccccccccccccc","paths":["infra/provisioner/Dockerfile","infra/provisioner/pyproject.toml","infra/provisioner/uv.lock","infra/provisioner/README.md","infra/provisioner/alembic.ini","infra/provisioner/src/**","infra/provisioner/alembic/**","infra/helm/cell/**",".dockerignore"]},"runtime":{"candidateCommit":"cccccccccccccccccccccccccccccccccccccccc","compositionCommit":"cccccccccccccccccccccccccccccccccccccccc","paths":["Dockerfile",".dockerignore","pyproject.toml","uv.lock","README.md","LICENSE","src/**"]}}},"rollback":{"legacyManifestSha256":"0000000000000000000000000000000000000000000000000000000000000000","provisionerImage":"ghcr.io/artexis10/exomem-provisioner@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","provisionerSourceCommit":"cccccccccccccccccccccccccccccccccccccccc","substrateV1ConsumerCommit":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","v1CorpusSha256":"9999999999999999999999999999999999999999999999999999999999999999"},"runtimeTarget":{"agentProfile":"hosted-alpha-agent-v1","commandFingerprint":"1111111111111111111111111111111111111111111111111111111111111111","gatewayContractDigest":"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff","protocolVersion":"1","releaseVersion":"0.35.1","schemaDigest":"2222222222222222222222222222222222222222222222222222222222222222"},"schemaVersion":2}
 scheduler:
   contractVersion: 1
 capacityCollector:

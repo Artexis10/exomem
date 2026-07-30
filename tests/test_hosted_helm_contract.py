@@ -71,11 +71,17 @@ def test_platform_dependencies_and_first_party_images_are_immutable() -> None:
         (PLATFORM / "values.validation.yaml").read_text(encoding="utf-8")
     )
     assert "runtime" not in values
-    release = json.loads(validation_values["provisioner"]["releaseManifestJson"])
-    assert release["runtimeImage"] == "ghcr.io/artexis10/exomem@sha256:" + "a" * 64
+    lock = json.loads(validation_values["provisioner"]["deploymentLockJson"])
+    assert lock["components"]["runtime"]["image"] == "ghcr.io/artexis10/exomem@sha256:" + "a" * 64
+    assert lock["components"]["provisioner"]["image"] == (
+        "ghcr.io/artexis10/exomem-provisioner@sha256:" + "b" * 64
+    )
     platform_schema = json.loads((PLATFORM / "values.schema.json").read_text(encoding="utf-8"))
     assert platform_schema["properties"]["runtime"] is False
-    assert "releaseManifestJson" in platform_schema["properties"]["provisioner"]["required"]
+    required = platform_schema["properties"]["provisioner"]["required"]
+    assert "deploymentLockJson" in required
+    assert "deploymentLockSha256" in required
+    assert "image" not in platform_schema["properties"]["provisioner"]["properties"]
     assert values["cloudflared"]["image"].endswith(
         "@sha256:5e49861633763e8933475477c20bae6039ed47f32c1d267a34babc347f28f0df"
     )
@@ -88,7 +94,7 @@ def test_platform_dependencies_and_first_party_images_are_immutable() -> None:
     assert "crypto_LUKS" in provenance
 
 
-def test_platform_rejects_mutable_or_partial_runtime_release_overrides(
+def test_platform_rejects_mutable_or_partial_deployment_lock_overrides(
     tmp_path: Path,
 ) -> None:
     if HELM is None:
@@ -96,14 +102,24 @@ def test_platform_rejects_mutable_or_partial_runtime_release_overrides(
     validation_values = yaml.safe_load(
         (PLATFORM / "values.validation.yaml").read_text(encoding="utf-8")
     )
-    release = json.loads(validation_values["provisioner"]["releaseManifestJson"])
-    mutable = {**release, "runtimeImage": "ghcr.io/artexis10/exomem:latest"}
-    partial = dict(release)
-    partial.pop("gatewayContractSha256")
+    lock = json.loads(validation_values["provisioner"]["deploymentLockJson"])
+    mutable = json.loads(json.dumps(lock))
+    mutable["components"]["runtime"]["image"] = "ghcr.io/artexis10/exomem:latest"
+    partial = dict(lock)
+    partial.pop("runtimeTarget")
     for index, invalid in enumerate((mutable, partial), start=1):
-        override = tmp_path / f"invalid-release-{index}.yaml"
+        override = tmp_path / f"invalid-lock-{index}.yaml"
         override.write_text(
-            yaml.safe_dump({"provisioner": {"releaseManifestJson": json.dumps(invalid)}}),
+            yaml.safe_dump(
+                {
+                    "provisioner": {
+                        "deploymentLockJson": json.dumps(invalid, separators=(",", ":")) + "\n",
+                        "deploymentLockSha256": hashlib.sha256(
+                            (json.dumps(invalid, separators=(",", ":")) + "\n").encode()
+                        ).hexdigest(),
+                    }
+                }
+            ),
             encoding="utf-8",
         )
         result = subprocess.run(
@@ -125,55 +141,28 @@ def test_platform_rejects_mutable_or_partial_runtime_release_overrides(
             text=True,
         )
         assert result.returncode != 0
-        assert "hosted release" in result.stderr
+        assert "deployment lock" in result.stderr
 
 
-def test_platform_rejects_malformed_release_fields_and_noncanonical_registry(
+def test_platform_rejects_deployment_lock_hash_drift(
     tmp_path: Path,
 ) -> None:
     if HELM is None:
         pytest.skip("set HELM_BIN to run pinned Helm rendering")
-    validation_values = yaml.safe_load(
-        (PLATFORM / "values.validation.yaml").read_text(encoding="utf-8")
+    override = tmp_path / "lock-hash-drift.yaml"
+    override.write_text(
+        yaml.safe_dump({"provisioner": {"deploymentLockSha256": "0" * 64}}),
+        encoding="utf-8",
     )
-    release = json.loads(validation_values["provisioner"]["releaseManifestJson"])
-    invalid_releases = []
-    for field, value in (
-        ("schemaVersion", "1"),
-        ("release", {"not": "a version"}),
-        ("hostedProtocol", "999"),
-        ("releaseBuildTime", False),
-        ("releaseBuildTime", "2026-99-99T03:50:34Z"),
-        ("commandRegistry", [None] * 21),
-        ("commandRegistry", list(reversed(release["commandRegistry"]))),
-    ):
-        invalid_releases.append({**release, field: value})
-    for index, invalid in enumerate(invalid_releases, start=1):
-        override = tmp_path / f"malformed-release-{index}.yaml"
-        override.write_text(
-            yaml.safe_dump({"provisioner": {"releaseManifestJson": json.dumps(invalid)}}),
-            encoding="utf-8",
-        )
-        result = subprocess.run(
-            [
-                str(HELM),
-                "template",
-                "exomem-platform",
-                str(PLATFORM),
-                "--namespace",
-                "exomem-platform",
-                "--values",
-                str(PLATFORM / "values.validation.yaml"),
-                "--values",
-                str(override),
-            ],
-            cwd=ROOT,
-            check=False,
-            capture_output=True,
-            text=True,
-        )
-        assert result.returncode != 0, (index, result.stdout)
-        assert "hosted release" in result.stderr
+    result = subprocess.run(
+        [str(HELM), "template", "exomem-platform", str(PLATFORM), "--namespace", "exomem-platform", "--values", str(PLATFORM / "values.validation.yaml"), "--values", str(override)],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode != 0
+    assert "deployment lock SHA-256 mismatch" in result.stderr
 
 
 def test_platform_rejects_wrong_provisioner_image_repository(tmp_path: Path) -> None:
@@ -216,13 +205,13 @@ def test_platform_renders_real_provisioner_composition() -> None:
     validation_values = yaml.safe_load(
         (PLATFORM / "values.validation.yaml").read_text(encoding="utf-8")
     )
-    expected_image = validation_values["provisioner"]["image"]
-    expected_release = json.loads(validation_values["provisioner"]["releaseManifestJson"])
+    expected_lock = json.loads(validation_values["provisioner"]["deploymentLockJson"])
+    expected_image = expected_lock["components"]["provisioner"]["image"]
 
-    release = _find(documents, "ConfigMap", "exomem-hosted-release-v1")
-    assert release["metadata"]["namespace"] == "exomem-platform"
-    assert release.get("immutable") is not True
-    assert json.loads(release["data"]["exomem-hosted-release-v1.json"]) == expected_release
+    lock_config = _find(documents, "ConfigMap", "exomem-hosted-deployment-lock-v2")
+    assert lock_config["metadata"]["namespace"] == "exomem-platform"
+    assert lock_config["immutable"] is True
+    assert json.loads(lock_config["data"]["exomem-hosted-deployment-lock-v2.json"]) == expected_lock
 
     service = _find(documents, "Service", "exomem-provisioner")
     assert service["metadata"]["namespace"] == "exomem-platform"
@@ -257,18 +246,20 @@ def test_platform_renders_real_provisioner_composition() -> None:
         for name in environment
         for privileged_fragment in ("HCLOUD_TOKEN", "B2_", "DELETE_CREDENTIAL")
     )
-    assert environment["EXOMEM_PROVISIONER_RELEASE_MANIFEST_PATH"]["value"] == (
-        "/etc/exomem/release/exomem-hosted-release-v1.json"
+    assert environment["EXOMEM_PROVISIONER_DEPLOYMENT_LOCK_PATH"]["value"] == (
+        "/etc/exomem/deployment-lock/exomem-hosted-deployment-lock-v2.json"
     )
+    assert environment["EXOMEM_PROVISIONER_ADMISSION_MODE"]["value"] == "expand"
+    assert json.loads(environment["EXOMEM_PROVISIONER_RUNTIME_TARGET_JSON"]["value"]) == expected_lock["runtimeTarget"]
     assert {item["name"] for item in worker_container["volumeMounts"]} >= {
-        "hosted-release",
+        "deployment-lock",
         "temporary",
     }
     assert (
-        next(volume for volume in worker_spec["volumes"] if volume["name"] == "hosted-release")[
+        next(volume for volume in worker_spec["volumes"] if volume["name"] == "deployment-lock")[
             "configMap"
         ]["name"]
-        == "exomem-hosted-release-v1"
+        == "exomem-hosted-deployment-lock-v2"
     )
     provisioner_role = _find(documents, "ClusterRole", "exomem-cell-provisioner")
     provisioner_configmaps = next(

@@ -1,5 +1,5 @@
 {{- $runtimeImage := include "exomem.hostedRuntimeImage" . -}}
-{{- $provisionerImage := .Values.provisioner.image -}}
+{{- $provisionerImage := include "exomem.hostedProvisionerImage" . -}}
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
 metadata:
