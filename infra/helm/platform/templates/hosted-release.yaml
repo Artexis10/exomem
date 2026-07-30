@@ -1,8 +1,9 @@
 {{- $lockJson := include "exomem.hostedDeploymentLockJson" . -}}
+{{- $lockName := include "exomem.hostedDeploymentLockName" . -}}
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: exomem-hosted-deployment-lock-v2
+  name: {{ $lockName }}
   namespace: {{ .Release.Namespace }}
   labels:
     app.kubernetes.io/name: exomem-hosted-deployment-lock
@@ -11,5 +12,5 @@ metadata:
     exomem.io/deployment-lock-sha256: {{ $lockJson | sha256sum | quote }}
 immutable: true
 data:
-  exomem-hosted-deployment-lock-v2.json: |-
+  exomem-hosted-deployment-lock-v2.json: |
     {{- $lockJson | nindent 4 }}

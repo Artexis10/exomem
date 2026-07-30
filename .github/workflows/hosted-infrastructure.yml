@@ -26,21 +26,12 @@ on:
         required: false
         default: false
         type: boolean
-      deployment_lock_pair:
-        description: Repository-relative canonical v2 deployment-lock pair
-        required: true
-        default: infra/contracts/exomem-hosted-deployment-lock-pair-v2.json
-        type: string
       deployment_phase:
         description: Exact reviewed pair member to consume
         required: true
         default: expand
         type: choice
         options: [expand, contract]
-      deployment_member_sha256:
-        description: SHA-256 of the selected canonical pair member
-        required: true
-        type: string
       external_blackbox:
         description: Run the deployed availability, backup-freshness, and scheduler probes
         required: false
@@ -49,6 +40,7 @@ on:
 
 permissions:
   contents: read
+  attestations: read
 
 env:
   UV_VERSION: "0.11.28"
@@ -136,6 +128,9 @@ jobs:
     needs: static
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    permissions:
+      contents: read
+      attestations: read
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
@@ -150,10 +145,20 @@ jobs:
           install -m 0755 /tmp/oras /usr/local/bin/oras
       - name: Derive and prove both published images from the reviewed phase lock
         env:
-          DEPLOYMENT_LOCK_PAIR: ${{ inputs.deployment_lock_pair }}
+          GH_TOKEN: ${{ github.token }}
+          DEPLOYMENT_LOCK_PAIR: infra/contracts/exomem-hosted-deployment-lock-pair-v2.json
           DEPLOYMENT_PHASE: ${{ inputs.deployment_phase }}
-          DEPLOYMENT_MEMBER_SHA256: ${{ inputs.deployment_member_sha256 }}
         run: |
+          test -f "$DEPLOYMENT_LOCK_PAIR" || { echo "canonical deployment lock pair is not committed" >&2; exit 2; }
+          DEPLOYMENT_MEMBER_SHA256="$(python3 - "$DEPLOYMENT_LOCK_PAIR" "$DEPLOYMENT_PHASE" <<'PY'
+          import hashlib, json, sys
+          pair = json.load(open(sys.argv[1], encoding="utf-8"))
+          members = [item for item in pair.get("locks", []) if item.get("admissionMode") == sys.argv[2]]
+          if len(members) != 1:
+              raise SystemExit("canonical deployment lock pair lacks one selected phase")
+          print(hashlib.sha256((json.dumps(members[0], sort_keys=True, separators=(",", ":")) + "\n").encode()).hexdigest())
+          PY
+          )"
           python3 infra/scripts/prepare_hosted_release.py \
             --lock-pair "$DEPLOYMENT_LOCK_PAIR" \
             --phase "$DEPLOYMENT_PHASE" \

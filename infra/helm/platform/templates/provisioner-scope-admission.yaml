@@ -1,5 +1,5 @@
 {{- $lock := include "exomem.hostedDeploymentLock" . | mustFromJson -}}
-{{- $release := $lock.runtimeTarget -}}
+{{- $runtimeImage := $lock.components.runtime.image -}}
 {{- $provisionerImage := include "exomem.hostedProvisionerImage" . -}}
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
@@ -177,7 +177,7 @@ spec:
             variables.target.spec.selector.matchLabels &&
           variables.target.spec.template.spec.serviceAccountName == request.namespace &&
           size(variables.target.spec.template.spec.containers) == 1 &&
-          variables.target.spec.template.spec.containers[0].image == '{{ $release.runtimeImage }}')
+          variables.target.spec.template.spec.containers[0].image == '{{ $runtimeImage }}')
       message: The hosted provisioner may manage only the exact pinned single-cell StatefulSet.
     - expression: >-
         request.resource.resource != 'networkpolicies' || request.operation != 'DELETE'
@@ -581,7 +581,7 @@ spec:
     - expression: >-
         request.resource.resource != 'jobs' || request.operation == 'DELETE' ||
         (variables.target.spec.template.spec.containers[0].name == 'restore-candidate' &&
-          variables.target.spec.template.spec.containers[0].image == '{{ $release.runtimeImage }}' &&
+          variables.target.spec.template.spec.containers[0].image == '{{ $runtimeImage }}' &&
           variables.target.spec.template.spec.containers[0].imagePullPolicy == 'IfNotPresent' &&
           variables.target.spec.template.spec.containers[0].command ==
             ['exomem', 'hosted', 'restore-candidate', '--contract-version', '1',
@@ -697,7 +697,7 @@ spec:
           variables.target.spec.template.spec.serviceAccountName == variables.resourceName &&
           variables.target.spec.template.spec.automountServiceAccountToken == false &&
           size(variables.target.spec.template.spec.containers) == 1 &&
-          variables.target.spec.template.spec.containers[0].image == '{{ $release.runtimeImage }}')
+          variables.target.spec.template.spec.containers[0].image == '{{ $runtimeImage }}')
       message: Durability actions may promote only the exact pinned candidate StatefulSet.
     - expression: >-
         request.resource.resource != 'services' ||

@@ -1,6 +1,7 @@
 {{- $lockJson := include "exomem.hostedDeploymentLockJson" . -}}
 {{- $lock := $lockJson | mustFromJson -}}
 {{- $provisionerImage := include "exomem.hostedProvisionerImage" . -}}
+{{- $lockName := include "exomem.hostedDeploymentLockName" . -}}
 {{- $capacityContractRaw := .Files.Get "files/private-alpha-capacity-v1.json" -}}
 {{- if ne .Values.capacityCollector.contractSha256 ($capacityContractRaw | sha256sum) -}}
 {{- fail "provisioner capacity contract SHA-256 mismatch" -}}
@@ -284,7 +285,7 @@ spec:
             sizeLimit: 64Mi
         - name: deployment-lock
           configMap:
-            name: exomem-hosted-deployment-lock-v2
+            name: {{ $lockName }}
             items:
               - key: exomem-hosted-deployment-lock-v2.json
                 path: exomem-hosted-deployment-lock-v2.json

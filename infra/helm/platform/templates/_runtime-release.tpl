@@ -69,3 +69,7 @@
 {{- $lock := include "exomem.hostedDeploymentLock" . | mustFromJson -}}
 {{- $lock.components.provisioner.image -}}
 {{- end -}}
+
+{{- define "exomem.hostedDeploymentLockName" -}}
+{{- printf "exomem-hosted-deployment-lock-v2-%s" (trunc 16 .Values.provisioner.deploymentLockSha256) -}}
+{{- end -}}

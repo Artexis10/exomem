@@ -208,10 +208,17 @@ def test_platform_renders_real_provisioner_composition() -> None:
     expected_lock = json.loads(validation_values["provisioner"]["deploymentLockJson"])
     expected_image = expected_lock["components"]["provisioner"]["image"]
 
-    lock_config = _find(documents, "ConfigMap", "exomem-hosted-deployment-lock-v2")
+    lock_name = "exomem-hosted-deployment-lock-v2-" + validation_values["provisioner"][
+        "deploymentLockSha256"
+    ][:16]
+    lock_config = _find(documents, "ConfigMap", lock_name)
     assert lock_config["metadata"]["namespace"] == "exomem-platform"
     assert lock_config["immutable"] is True
     assert json.loads(lock_config["data"]["exomem-hosted-deployment-lock-v2.json"]) == expected_lock
+    rendered_lock = lock_config["data"]["exomem-hosted-deployment-lock-v2.json"]
+    assert hashlib.sha256(rendered_lock.encode()).hexdigest() == validation_values["provisioner"][
+        "deploymentLockSha256"
+    ]
 
     service = _find(documents, "Service", "exomem-provisioner")
     assert service["metadata"]["namespace"] == "exomem-platform"
@@ -259,7 +266,7 @@ def test_platform_renders_real_provisioner_composition() -> None:
         next(volume for volume in worker_spec["volumes"] if volume["name"] == "deployment-lock")[
             "configMap"
         ]["name"]
-        == "exomem-hosted-deployment-lock-v2"
+        == lock_name
     )
     provisioner_role = _find(documents, "ClusterRole", "exomem-cell-provisioner")
     provisioner_configmaps = next(
@@ -939,9 +946,12 @@ def test_platform_renders_one_shot_durability_actions_and_exact_restore_scope() 
     env = {item["name"]: item for item in container["env"]}
     assert env["EXOMEM_DURABILITY_MAX_OPERATIONS"]["value"] == "1"
     assert env["EXOMEM_DURABILITY_SCRATCH_ROOT"]["value"] == "/var/lib/exomem-scratch"
-    assert env["EXOMEM_PROVISIONER_RELEASE_MANIFEST_PATH"]["value"] == (
-        "/etc/exomem/release/exomem-hosted-release-v1.json"
+    assert env["EXOMEM_PROVISIONER_DEPLOYMENT_LOCK_PATH"]["value"] == (
+        "/etc/exomem/deployment-lock/exomem-hosted-deployment-lock-v2.json"
     )
+    assert next(item for item in pod["volumes"] if item["name"] == "deployment-lock")[
+        "configMap"
+    ]["name"] == "exomem-hosted-deployment-lock-v2-97c1fc1bf93e0492"
     assert env["EXOMEM_DURABILITY_PROVISIONER_IMAGE"]["value"] == (
         "ghcr.io/artexis10/exomem-provisioner@sha256:" + "b" * 64
     )

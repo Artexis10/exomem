@@ -1,4 +1,5 @@
 {{- $provisionerImage := include "exomem.hostedProvisionerImage" . -}}
+{{- $lockName := include "exomem.hostedDeploymentLockName" . -}}
 {{- $workloadsRaw := .Files.Get "files/durability-workloads-v1.json" -}}
 {{- $storageRaw := .Files.Get "files/durability-storage-v1.json" -}}
 {{- if ne .Values.durability.contractSha256 ($workloadsRaw | sha256sum) -}}
@@ -381,8 +382,8 @@ spec:
                 - name: EXOMEM_DURABILITY_USER_EXPORT_DELIVERY_KEY
                   valueFrom:
                     secretKeyRef: {name: exomem-user-export-delivery-key, key: application-key}
-                - name: EXOMEM_PROVISIONER_RELEASE_MANIFEST_PATH
-                  value: /etc/exomem/release/exomem-hosted-release-v1.json
+                - name: EXOMEM_PROVISIONER_DEPLOYMENT_LOCK_PATH
+                  value: /etc/exomem/deployment-lock/exomem-hosted-deployment-lock-v2.json
                 - name: EXOMEM_DURABILITY_PROVISIONER_IMAGE
                   value: {{ $provisionerImage | quote }}
                 - name: EXOMEM_PROVISIONER_CELL_CHART_PATH
@@ -423,17 +424,17 @@ spec:
               volumeMounts:
                 - {name: scratch, mountPath: /var/lib/exomem-scratch}
                 - {name: temporary, mountPath: /tmp}
-                - {name: hosted-release, mountPath: /etc/exomem/release, readOnly: true}
+                - {name: deployment-lock, mountPath: /etc/exomem/deployment-lock, readOnly: true}
           volumes:
             - name: scratch
               emptyDir: {sizeLimit: {{ $actions.scratchSize | quote }}}
             - name: temporary
               emptyDir: {sizeLimit: 64Mi}
-            - name: hosted-release
+            - name: deployment-lock
               configMap:
-                name: exomem-hosted-release-v1
+                name: {{ $lockName }}
                 items:
-                  - {key: exomem-hosted-release-v1.json, path: exomem-hosted-release-v1.json}
+                  - {key: exomem-hosted-deployment-lock-v2.json, path: exomem-hosted-deployment-lock-v2.json}
 ---
 apiVersion: batch/v1
 kind: CronJob
@@ -587,8 +588,8 @@ spec:
                 - name: EXOMEM_DURABILITY_RECOVERY_UPLOAD_KEY
                   valueFrom:
                     secretKeyRef: {name: exomem-recovery-upload-key, key: application-key}
-                - name: EXOMEM_PROVISIONER_RELEASE_MANIFEST_PATH
-                  value: /etc/exomem/release/exomem-hosted-release-v1.json
+                - name: EXOMEM_PROVISIONER_DEPLOYMENT_LOCK_PATH
+                  value: /etc/exomem/deployment-lock/exomem-hosted-deployment-lock-v2.json
                 - name: EXOMEM_DURABILITY_MAX_CONCURRENCY
                   value: {{ $backup.maxConcurrency | quote }}
                 - name: EXOMEM_DURABILITY_WORKER_ID
@@ -609,17 +610,17 @@ spec:
               volumeMounts:
                 - {name: scratch, mountPath: /var/lib/exomem-scratch}
                 - {name: temporary, mountPath: /tmp}
-                - {name: hosted-release, mountPath: /etc/exomem/release, readOnly: true}
+                - {name: deployment-lock, mountPath: /etc/exomem/deployment-lock, readOnly: true}
           volumes:
             - name: scratch
               emptyDir: {sizeLimit: 6Gi}
             - name: temporary
               emptyDir: {sizeLimit: 64Mi}
-            - name: hosted-release
+            - name: deployment-lock
               configMap:
-                name: exomem-hosted-release-v1
+                name: {{ $lockName }}
                 items:
-                  - {key: exomem-hosted-release-v1.json, path: exomem-hosted-release-v1.json}
+                  - {key: exomem-hosted-deployment-lock-v2.json, path: exomem-hosted-deployment-lock-v2.json}
 ---
 apiVersion: batch/v1
 kind: CronJob
