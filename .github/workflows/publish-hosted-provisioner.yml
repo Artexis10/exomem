@@ -118,9 +118,11 @@ jobs:
             --storage-kind oci-referrer \
             --storage-uri "oci://${immutable_image}" \
             --output "$candidate"
-          echo "candidate=$candidate" >> "$GITHUB_OUTPUT"
-          echo "bundle=$bundle" >> "$GITHUB_OUTPUT"
-          echo "immutable_image=$immutable_image" >> "$GITHUB_OUTPUT"
+          {
+            echo "candidate=$candidate"
+            echo "bundle=$bundle"
+            echo "immutable_image=$immutable_image"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Attest the exact provisioner candidate
         id: candidate-attestation
@@ -196,7 +198,9 @@ jobs:
           CANDIDATE_BUNDLE: ${{ steps.candidate-proof.outputs.candidate_bundle }}
           ATTACHMENT_DIGEST: ${{ steps.attachment.outputs.attachment_digest }}
         run: |
-          echo "Provisioner image: ghcr.io/artexis10/exomem-provisioner@${PROVISIONER_DIGEST}" >> "$GITHUB_STEP_SUMMARY"
-          echo "Candidate: ${CANDIDATE}" >> "$GITHUB_STEP_SUMMARY"
-          echo "Candidate attestation bundle: ${CANDIDATE_BUNDLE}" >> "$GITHUB_STEP_SUMMARY"
-          echo "Candidate attachment: ${ATTACHMENT_DIGEST}" >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "Provisioner image: ghcr.io/artexis10/exomem-provisioner@${PROVISIONER_DIGEST}"
+            echo "Candidate: ${CANDIDATE}"
+            echo "Candidate attestation bundle: ${CANDIDATE_BUNDLE}"
+            echo "Candidate attachment: ${ATTACHMENT_DIGEST}"
+          } >> "$GITHUB_STEP_SUMMARY"

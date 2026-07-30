@@ -372,9 +372,11 @@ jobs:
             --storage-kind github-release \
             --storage-uri "$storage_uri" \
             --output "$candidate"
-          echo "candidate=$candidate" >> "$GITHUB_OUTPUT"
-          echo "bundle=$bundle" >> "$GITHUB_OUTPUT"
-          echo "immutable_image=$immutable_image" >> "$GITHUB_OUTPUT"
+          {
+            echo "candidate=$candidate"
+            echo "bundle=$bundle"
+            echo "immutable_image=$immutable_image"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Attest the exact hosted runtime candidate
         id: runtime-candidate-attestation
@@ -436,10 +438,12 @@ jobs:
           BUNDLE: ${{ steps.runtime-candidate.outputs.bundle }}
           CANDIDATE_BUNDLE: ${{ steps.runtime-candidate-proof.outputs.candidate_bundle }}
         run: |
-          echo "Hosted runtime image: ${IMMUTABLE_IMAGE}" >> "$GITHUB_STEP_SUMMARY"
-          echo "Candidate asset: ${CANDIDATE}" >> "$GITHUB_STEP_SUMMARY"
-          echo "Image attestation bundle asset: ${BUNDLE}" >> "$GITHUB_STEP_SUMMARY"
-          echo "Candidate attestation bundle asset: ${CANDIDATE_BUNDLE}" >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "Hosted runtime image: ${IMMUTABLE_IMAGE}"
+            echo "Candidate asset: ${CANDIDATE}"
+            echo "Image attestation bundle asset: ${BUNDLE}"
+            echo "Candidate attestation bundle asset: ${CANDIDATE_BUNDLE}"
+          } >> "$GITHUB_STEP_SUMMARY"
 
   publish-existing-image:
     if: ${{ github.event_name == 'workflow_dispatch' && vars.GHCR_PUBLISH_ENABLED == 'true' }}
@@ -584,9 +588,11 @@ jobs:
             --storage-kind github-release \
             --storage-uri "$storage_uri" \
             --output "$candidate"
-          echo "candidate=$candidate" >> "$GITHUB_OUTPUT"
-          echo "bundle=$bundle" >> "$GITHUB_OUTPUT"
-          echo "immutable_image=$immutable_image" >> "$GITHUB_OUTPUT"
+          {
+            echo "candidate=$candidate"
+            echo "bundle=$bundle"
+            echo "immutable_image=$immutable_image"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Attest the exact hosted runtime candidate
         id: runtime-candidate-attestation
@@ -648,10 +654,12 @@ jobs:
           BUNDLE: ${{ steps.runtime-candidate.outputs.bundle }}
           CANDIDATE_BUNDLE: ${{ steps.runtime-candidate-proof.outputs.candidate_bundle }}
         run: |
-          echo "Hosted runtime image: ${IMMUTABLE_IMAGE}" >> "$GITHUB_STEP_SUMMARY"
-          echo "Candidate asset: ${CANDIDATE}" >> "$GITHUB_STEP_SUMMARY"
-          echo "Image attestation bundle asset: ${BUNDLE}" >> "$GITHUB_STEP_SUMMARY"
-          echo "Candidate attestation bundle asset: ${CANDIDATE_BUNDLE}" >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "Hosted runtime image: ${IMMUTABLE_IMAGE}"
+            echo "Candidate asset: ${CANDIDATE}"
+            echo "Image attestation bundle asset: ${BUNDLE}"
+            echo "Candidate attestation bundle asset: ${CANDIDATE_BUNDLE}"
+          } >> "$GITHUB_STEP_SUMMARY"
 
   publish-existing-pypi:
     if: ${{ github.event_name == 'workflow_dispatch' && vars.PYPI_PUBLISH_ENABLED == 'true' }}
