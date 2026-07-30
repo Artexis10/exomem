@@ -320,6 +320,9 @@ def test_platform_mounts_the_selected_lock_for_every_lock_consuming_workload() -
     lock_name = "exomem-hosted-deployment-lock-v2-" + values["provisioner"][
         "deploymentLockSha256"
     ][:16]
+    deletion_job = json.loads(
+        _find(documents, "ConfigMap", "exomem-deletion-job-template")["data"]["job-template.json"]
+    )
     workloads = {
         "exomem-provisioner-worker": _find(documents, "Deployment", "exomem-provisioner-worker")[
             "spec"
@@ -330,6 +333,7 @@ def test_platform_mounts_the_selected_lock_for_every_lock_consuming_workload() -
         "exomem-durability-backup": _find(documents, "CronJob", "exomem-durability-backup")[
             "spec"
         ]["jobTemplate"]["spec"]["template"]["spec"],
+        "exomem-deletion-worker": deletion_job["spec"]["template"]["spec"],
     }
     for name, pod in workloads.items():
         container = pod["containers"][0]
@@ -340,6 +344,12 @@ def test_platform_mounts_the_selected_lock_for_every_lock_consuming_workload() -
         assert any(item["name"] == "deployment-lock" for item in container["volumeMounts"]), name
         volume = next(item for item in pod["volumes"] if item["name"] == "deployment-lock")
         assert volume["configMap"]["name"] == lock_name, name
+        assert volume["configMap"]["items"] == [
+            {
+                "key": "exomem-hosted-deployment-lock-v2.json",
+                "path": "exomem-hosted-deployment-lock-v2.json",
+            }
+        ], name
 
 
 def test_platform_renders_live_capacity_receipt_collector_with_isolated_keys() -> None:
@@ -922,6 +932,11 @@ def test_deletion_dispatcher_admission_closes_probe_and_container_override_surfa
     assert "metadata.labels['batch.kubernetes.io/job-name']" in expressions
     assert f"{container}.resources.requests.cpu == quantity('25m')" in expressions
     assert f"{container}.resources.limits.memory == quantity('384Mi')" in expressions
+    assert "EXOMEM_PROVISIONER_DEPLOYMENT_LOCK_PATH" in expressions
+    assert f"{container}.env[14].value == '/etc/exomem/deployment-lock/exomem-hosted-deployment-lock-v2.json'" in expressions
+    assert 'volumes[1].configMap.name == "exomem-hosted-deployment-lock-v2-97c1fc1bf93e0492"' in expressions
+    assert "volumes[1].configMap.items[0].key == 'exomem-hosted-deployment-lock-v2.json'" in expressions
+    assert f"{container}.volumeMounts[1].readOnly == true" in expressions
 
 
 def test_platform_renders_one_shot_durability_actions_and_exact_restore_scope() -> None:

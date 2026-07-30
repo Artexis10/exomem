@@ -1,4 +1,5 @@
 {{- $provisionerImage := include "exomem.hostedProvisionerImage" . -}}
+{{- $lockName := include "exomem.hostedDeploymentLockName" . -}}
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
 metadata:
@@ -103,6 +104,7 @@ spec:
           'EXOMEM_PROVISIONER_RECOVERY_DELETE_KEY',
           'EXOMEM_PROVISIONER_USER_EXPORT_DELETE_KEY_ID',
           'EXOMEM_PROVISIONER_USER_EXPORT_DELETE_KEY',
+          'EXOMEM_PROVISIONER_DEPLOYMENT_LOCK_PATH',
           'EXOMEM_DELETION_BATCH_SIZE',
           'EXOMEM_PROVISIONER_WORKER_ID',
           'HOME'
@@ -139,9 +141,10 @@ spec:
         object.spec.template.spec.containers[0].env[13].valueFrom.secretKeyRef.key == 'application-key'
       message: The deletion worker provider inputs must match the reviewed exact references.
     - expression: >-
-        object.spec.template.spec.containers[0].env[14].value == '1' &&
-        object.spec.template.spec.containers[0].env[15].valueFrom.fieldRef.fieldPath == "metadata.labels['batch.kubernetes.io/job-name']" &&
-        object.spec.template.spec.containers[0].env[16].value == '/tmp'
+        object.spec.template.spec.containers[0].env[14].value == '/etc/exomem/deployment-lock/exomem-hosted-deployment-lock-v2.json' &&
+        object.spec.template.spec.containers[0].env[15].value == '1' &&
+        object.spec.template.spec.containers[0].env[16].valueFrom.fieldRef.fieldPath == "metadata.labels['batch.kubernetes.io/job-name']" &&
+        object.spec.template.spec.containers[0].env[17].value == '/tmp'
       message: The deletion worker batch and runtime identity must match the reviewed template.
     - expression: >-
         !has(object.spec.template.spec.containers[0].env[0].value) &&
@@ -171,24 +174,38 @@ spec:
         !has(object.spec.template.spec.containers[0].env[13].value) &&
         !has(object.spec.template.spec.containers[0].env[13].valueFrom.secretKeyRef.optional) &&
         !has(object.spec.template.spec.containers[0].env[14].valueFrom) &&
-        !has(object.spec.template.spec.containers[0].env[15].value) &&
-        !has(object.spec.template.spec.containers[0].env[15].valueFrom.fieldRef.apiVersion) &&
-        !has(object.spec.template.spec.containers[0].env[16].valueFrom)
+        !has(object.spec.template.spec.containers[0].env[15].valueFrom) &&
+        !has(object.spec.template.spec.containers[0].env[16].value) &&
+        !has(object.spec.template.spec.containers[0].env[16].valueFrom.fieldRef.apiVersion) &&
+        !has(object.spec.template.spec.containers[0].env[17].valueFrom)
       message: The deletion worker environment sources may not add alternate or optional inputs.
     - expression: >-
-        size(object.spec.template.spec.volumes) == 1 &&
+        size(object.spec.template.spec.volumes) == 2 &&
         object.spec.template.spec.volumes[0].name == 'temporary' &&
         has(object.spec.template.spec.volumes[0].emptyDir) &&
         object.spec.template.spec.volumes[0].emptyDir.sizeLimit == quantity('64Mi') &&
         !has(object.spec.template.spec.volumes[0].emptyDir.medium) &&
-        size(object.spec.template.spec.containers[0].volumeMounts) == 1 &&
+        object.spec.template.spec.volumes[1].name == 'deployment-lock' &&
+        object.spec.template.spec.volumes[1].configMap.name == {{ $lockName | quote }} &&
+        size(object.spec.template.spec.volumes[1].configMap.items) == 1 &&
+        object.spec.template.spec.volumes[1].configMap.items[0].key == 'exomem-hosted-deployment-lock-v2.json' &&
+        object.spec.template.spec.volumes[1].configMap.items[0].path == 'exomem-hosted-deployment-lock-v2.json' &&
+        !has(object.spec.template.spec.volumes[1].configMap.defaultMode) &&
+        !has(object.spec.template.spec.volumes[1].configMap.optional) &&
+        size(object.spec.template.spec.containers[0].volumeMounts) == 2 &&
         object.spec.template.spec.containers[0].volumeMounts[0].name == 'temporary' &&
         object.spec.template.spec.containers[0].volumeMounts[0].mountPath == '/tmp' &&
         !has(object.spec.template.spec.containers[0].volumeMounts[0].readOnly) &&
         !has(object.spec.template.spec.containers[0].volumeMounts[0].subPath) &&
         !has(object.spec.template.spec.containers[0].volumeMounts[0].subPathExpr) &&
-        !has(object.spec.template.spec.containers[0].volumeMounts[0].mountPropagation)
-      message: The deletion worker may mount only its bounded temporary volume.
+        !has(object.spec.template.spec.containers[0].volumeMounts[0].mountPropagation) &&
+        object.spec.template.spec.containers[0].volumeMounts[1].name == 'deployment-lock' &&
+        object.spec.template.spec.containers[0].volumeMounts[1].mountPath == '/etc/exomem/deployment-lock' &&
+        object.spec.template.spec.containers[0].volumeMounts[1].readOnly == true &&
+        !has(object.spec.template.spec.containers[0].volumeMounts[1].subPath) &&
+        !has(object.spec.template.spec.containers[0].volumeMounts[1].subPathExpr) &&
+        !has(object.spec.template.spec.containers[0].volumeMounts[1].mountPropagation)
+      message: The deletion worker may mount only its bounded temporary volume and selected deployment lock.
     - expression: >-
         object.spec.template.spec.securityContext.runAsNonRoot == true &&
         object.spec.template.spec.securityContext.runAsUser == 10001 &&

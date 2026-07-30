@@ -837,6 +837,7 @@ data:
                 {"name": "EXOMEM_PROVISIONER_RECOVERY_DELETE_KEY", "valueFrom": {"secretKeyRef": {"name": "exomem-recovery-delete-key", "key": "application-key"}}},
                 {"name": "EXOMEM_PROVISIONER_USER_EXPORT_DELETE_KEY_ID", "valueFrom": {"secretKeyRef": {"name": "exomem-user-export-delete-key-id", "key": "application-key-id"}}},
                 {"name": "EXOMEM_PROVISIONER_USER_EXPORT_DELETE_KEY", "valueFrom": {"secretKeyRef": {"name": "exomem-user-export-delete-key", "key": "application-key"}}},
+                {"name": "EXOMEM_PROVISIONER_DEPLOYMENT_LOCK_PATH", "value": "/etc/exomem/deployment-lock/exomem-hosted-deployment-lock-v2.json"},
                 {"name": "EXOMEM_DELETION_BATCH_SIZE", "value": {{ $deletion.maxOperations | quote }}},
                 {"name": "EXOMEM_PROVISIONER_WORKER_ID", "valueFrom": {"fieldRef": {"fieldPath": "metadata.labels['batch.kubernetes.io/job-name']"}}},
                 {"name": "HOME", "value": "/tmp"}
@@ -849,9 +850,15 @@ data:
                 "runAsUser": 10001,
                 "capabilities": {"drop": ["ALL"]}
               },
-              "volumeMounts": [{"name": "temporary", "mountPath": "/tmp"}]
+              "volumeMounts": [
+                {"name": "temporary", "mountPath": "/tmp"},
+                {"name": "deployment-lock", "mountPath": "/etc/exomem/deployment-lock", "readOnly": true}
+              ]
             }],
-            "volumes": [{"name": "temporary", "emptyDir": {"sizeLimit": "64Mi"}}]
+            "volumes": [
+              {"name": "temporary", "emptyDir": {"sizeLimit": "64Mi"}},
+              {"name": "deployment-lock", "configMap": {"name": {{ $lockName | quote }}, "items": [{"key": "exomem-hosted-deployment-lock-v2.json", "path": "exomem-hosted-deployment-lock-v2.json"}]}}
+            ]
           }
         }
       }
