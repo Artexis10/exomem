@@ -24,6 +24,7 @@ from . import commands, hosted_gateway
 PLUGIN_ROOT = Path("plugins/hosted")
 PLATFORMS = ("claude", "openai")
 DIRECTORY_CHANNELS = ("claude-connector", "claude-plugin", "openai-plugin")
+REGISTERED_OPENAI_APP_ID = "plugin_asdk_app_6a5e3d26f2b08191a04424d1c1b33fc0"
 DIRECTORY_STATES = frozenset(
     {"draft", "submitted", "in_review", "approved", "published", "rejected", "withdrawn"}
 )
@@ -558,14 +559,58 @@ def _validate_openai_release_stage_language(fields: Iterable[str]) -> None:
         raise ValueError("openai-plugin listing may not make release-stage claims")
 
 
-def _openai_annotation_explanations(annotations: dict[str, Any]) -> dict[str, str]:
+def _openai_annotation_explanations(name: str, annotations: dict[str, Any]) -> dict[str, str]:
     if any(not isinstance(annotations.get(key), bool) for key in _OPENAI_BOOLEAN_ANNOTATIONS):
         raise ValueError("marketplace packet tool annotations are incomplete")
+    write_explanations = {
+        "remember": (
+            "This tool records a durable conclusion in account-backed governed knowledge. "
+            "Under the installed workflow guidance, a relevant durable conclusion may be "
+            "captured automatically without the user using a magic Exomem command."
+        ),
+        "observe_memory": (
+            "This tool records a durable observation in account-backed governed knowledge. "
+            "Under the installed workflow guidance, a relevant durable outcome may be captured "
+            "automatically without the user using a magic Exomem command."
+        ),
+        "capture_source": (
+            "This tool preserves supplied raw source material; it does not turn that material "
+            "into a durable conclusion automatically."
+        ),
+        "preserve_evidence": (
+            "This tool writes supplied proof material as append-only evidence; it does not "
+            "create a durable conclusion automatically."
+        ),
+        "triage_memory": (
+            "This tool records the selected review decision against the current signal "
+            "fingerprint; it does not capture a durable conclusion automatically."
+        ),
+        "connect_memory": (
+            "This tool writes only an explicitly selected entity or accepted relation; its "
+            "proposal operations remain read-only."
+        ),
+        "maintain_memory": (
+            "This tool applies maintenance only for explicit write-capable modes and flags; "
+            "its audit mode is read-only."
+        ),
+        "adoption_studio": (
+            "This tool applies only an explicitly selected adoption proposal; proposal review "
+            "does not write by itself."
+        ),
+        "transfer_artifact": (
+            "This tool prepares the requested out-of-band artifact transfer and does not "
+            "automatically capture a durable conclusion."
+        ),
+    }
     return {
         "readOnlyHint": (
             "This tool only reads governed knowledge and does not change stored content."
             if annotations["readOnlyHint"]
-            else "This tool may change governed knowledge when the user explicitly requests it."
+            else write_explanations.get(
+                name,
+                "This tool performs only its documented write operation and does not "
+                "automatically capture a durable conclusion.",
+            )
         ),
         "destructiveHint": (
             "This tool can remove or replace governed content when the user explicitly requests it."
@@ -573,16 +618,15 @@ def _openai_annotation_explanations(annotations: dict[str, Any]) -> dict[str, st
             else "This tool does not delete or replace governed content."
         ),
         "idempotentHint": (
-            "Repeating the same request produces the same governed result and is safe to retry."
+            "Repeating this side-effect-free request is safe to retry after transient or "
+            "warming failures."
             if annotations["idempotentHint"]
             else (
-                "Repeated reads may return different results as governed state changes, so they are not retried automatically."
-                if annotations["readOnlyHint"]
-                else "Repeating this request may create another action, so it is not retried automatically."
+                "Repeating this request may create another action, so it is not retried automatically."
             )
         ),
         "openWorldHint": (
-            "This tool can act beyond the local governed store."
+            "This tool interacts with the user's account-backed Hosted Exomem service."
             if annotations["openWorldHint"]
             else "This tool is limited to the local governed store and its configured service."
         ),
@@ -618,6 +662,7 @@ def load_marketplace_definition(repo_root: Path | None = None) -> dict[str, Any]
         "capabilities",
         "regions",
         "release_notes",
+        "user_prerequisites",
     }
     if set(common) != required_common or set(channels) != set(DIRECTORY_CHANNELS):
         raise ValueError("marketplace definition is incomplete")
@@ -670,6 +715,19 @@ def load_marketplace_definition(repo_root: Path | None = None) -> dict[str, Any]
         raise ValueError("marketplace capabilities are incomplete")
     for capability, description in capabilities.items():
         _validate_listing_text(description, f"marketplace {capability} capability", 200)
+    user_prerequisites = common["user_prerequisites"]
+    if (
+        not isinstance(user_prerequisites, dict)
+        or set(user_prerequisites) != {"account", "admission"}
+        or not isinstance(user_prerequisites["account"], str)
+        or not user_prerequisites["account"].strip()
+        or not isinstance(user_prerequisites["admission"], dict)
+        or set(user_prerequisites["admission"]) != {"mode", "eligibility"}
+        or user_prerequisites["admission"].get("mode") not in {"invite_only", "public"}
+        or not isinstance(user_prerequisites["admission"].get("eligibility"), str)
+        or not user_prerequisites["admission"]["eligibility"].strip()
+    ):
+        raise ValueError("marketplace user prerequisites are invalid")
     regions = common["regions"]
     if (
         not isinstance(regions, list)
@@ -867,6 +925,8 @@ def load_marketplace_review_cases(repo_root: Path | None = None) -> dict[str, An
             if not isinstance(case, dict):
                 raise ValueError(f"marketplace {category} review case is incomplete")
             required = {"prompt", "expected_tools", "expected_outcome"}
+            if category == "negative":
+                required.add("rationale")
             has_write_tool = False
             if category == "positive":
                 required |= {"fixture_version", "fixture_references"}
@@ -876,6 +936,8 @@ def load_marketplace_review_cases(repo_root: Path | None = None) -> dict[str, An
             if set(case) != required:
                 if has_write_tool and "fixture_reset" not in case:
                     raise ValueError("marketplace review case fixture reset is required")
+                if category == "negative" and "rationale" not in case:
+                    raise ValueError("marketplace negative review case rationale is required")
                 raise ValueError(f"marketplace {category} review case is incomplete")
             if not isinstance(case["prompt"], str) or not case["prompt"].strip():
                 raise ValueError(f"marketplace {category} review case prompt is invalid")
@@ -884,6 +946,10 @@ def load_marketplace_review_cases(repo_root: Path | None = None) -> dict[str, An
                 or not case["expected_outcome"].strip()
             ):
                 raise ValueError(f"marketplace {category} review case outcome is invalid")
+            if category == "negative" and (
+                not isinstance(case["rationale"], str) or not case["rationale"].strip()
+            ):
+                raise ValueError("marketplace negative review case rationale is invalid")
             if not isinstance(case["expected_tools"], list) or any(
                 tool not in _CANONICAL_CALLABLES for tool in case["expected_tools"]
             ):
@@ -1149,7 +1215,9 @@ def directory_packets(
                             if key in raw_annotations
                         },
                     },
-                    "annotation_explanations": _openai_annotation_explanations(raw_annotations),
+                    "annotation_explanations": _openai_annotation_explanations(
+                        tool["name"], raw_annotations
+                    ),
                 }
                 for tool, raw_annotations in (
                     (item, item["mcp_annotations"]) for item in tool_entries
@@ -1198,6 +1266,7 @@ def directory_packets(
             _validate_openai_sale_free_packet(packet)
         else:
             packet["acceptance_surfaces"] = ["claude"]
+            packet["user_prerequisites"] = definition["common"]["user_prerequisites"]
         _validate_public_json(
             packet,
             Path(f"directory-packet-{selected_channel}.json"),
@@ -1219,6 +1288,11 @@ def directory_render(
     if channel not in (*DIRECTORY_CHANNELS, "all"):
         raise ValueError("unsupported directory channel")
     target = output or _marketplace_path(root, "directory/generated")
+    if (
+        target.resolve() == _marketplace_path(root, "directory/generated").resolve()
+        and channel in ("openai-plugin", "all")
+    ):
+        _validate_repository_openai_app_id(root, openai_app_id)
     packets = directory_packets(root, channel=channel, openai_app_id=openai_app_id)
     target.mkdir(parents=True, exist_ok=True)
     selected = DIRECTORY_CHANNELS if channel == "all" else (channel,)
@@ -1489,6 +1563,15 @@ def _validate_openai_app_id(value: str | None) -> str:
     if not re.fullmatch(r"plugin_asdk_app_[A-Za-z0-9]+", clean):
         raise ValueError("OpenAI candidate requires a registered OpenAI app release input")
     return clean
+
+
+def _validate_repository_openai_app_id(root: Path, value: str | None) -> str:
+    """Keep fixture IDs out of the committed production candidate artifacts."""
+
+    app_id = _validate_openai_app_id(value)
+    if root.resolve() == _repo_root().resolve() and app_id != REGISTERED_OPENAI_APP_ID:
+        raise ValueError("repository OpenAI artifacts may not use a fixture app ID")
+    return app_id
 
 
 def _registered_app_id_sha256(value: str) -> str:
@@ -1872,6 +1955,8 @@ def render(
     if destination.exists() and destination != managed_destination:
         raise ValueError("render output already exists; refuse to replace an unchecked directory")
     selected = PLATFORMS if platform == "all" else (platform,)
+    if destination == managed_destination and "openai" in selected:
+        _validate_repository_openai_app_id(root, openai_app_id)
     with ExitStack() as release_locks:
         if destination == managed_destination:
             for selected_platform in sorted(PLATFORMS):
@@ -1932,6 +2017,7 @@ def check(
     expected = root / PLUGIN_ROOT / "generated"
     if "openai" in selected:
         generated_app_id = _generated_openai_app_id(expected)
+        _validate_repository_openai_app_id(root, generated_app_id)
         if openai_app_id is None:
             openai_app_id = generated_app_id
         elif _validate_openai_app_id(openai_app_id) != generated_app_id:
@@ -2749,6 +2835,48 @@ def _post_install_blockers(
     return []
 
 
+def _public_admission_blockers(
+    root: Path,
+    *,
+    trusted_key_id: str | None,
+    trusted_secret: str | None,
+    deployment_sha256: str | None,
+) -> list[str]:
+    """Require signed public-admission proof before activating advertised regions."""
+
+    marketplace = load_marketplace_definition(root)["common"]
+    if not marketplace["regions"]:
+        return []
+    if marketplace["user_prerequisites"]["admission"] != {
+        "mode": "public",
+        "eligibility": "Public access is available to eligible users.",
+    }:
+        return ["marketplace user prerequisites do not advertise public admission"]
+    try:
+        admission = _load_signed_directory_evidence(
+            root,
+            "public-admission-evidence",
+            "directory-public-admission",
+            trusted_key_id=trusted_key_id,
+            trusted_secret=trusted_secret,
+            deployment_sha256=deployment_sha256,
+        )
+    except ValueError:
+        return ["public admission evidence is incomplete"]
+    required_admission = {
+        "ordinary_acquisition",
+        "capacity",
+        "quotas",
+        "abuse_controls",
+        "spend_alarms",
+        "support_coverage",
+        "pricing_decision",
+    }
+    if admission.get("admission") != {key: True for key in required_admission}:
+        return ["public admission evidence is incomplete"]
+    return []
+
+
 def directory_status(
     repo_root: Path | None = None,
     *,
@@ -2825,28 +2953,14 @@ def directory_status(
         except ValueError as exc:
             blockers.append(str(exc))
         submission_blockers = list(blockers)
-        try:
-            admission = _load_signed_directory_evidence(
+        blockers.extend(
+            _public_admission_blockers(
                 root,
-                "public-admission-evidence",
-                "directory-public-admission",
                 trusted_key_id=trusted_key_id,
                 trusted_secret=trusted_secret,
                 deployment_sha256=deployment_sha256,
             )
-            required_admission = {
-                "ordinary_acquisition",
-                "capacity",
-                "quotas",
-                "abuse_controls",
-                "spend_alarms",
-                "support_coverage",
-                "pricing_decision",
-            }
-            if admission.get("admission") != {key: True for key in required_admission}:
-                blockers.append("public admission evidence is incomplete")
-        except ValueError as exc:
-            blockers.append(str(exc))
+        )
         active_submission_sha256 = publication["active_submission_sha256"]
         active_record = _directory_submissions(root, channel).get(active_submission_sha256)
         if active_submission_sha256 is not None and active_record is None:
@@ -3059,6 +3173,14 @@ def activate_directory_submission(
         record = _directory_submissions(root, channel).get(target_submission_sha256)
         if record is None or record.get("state") != "published":
             raise ValueError("directory activation requires an exact published submission")
+        admission_blockers = _public_admission_blockers(
+            root,
+            trusted_key_id=trusted_key_id,
+            trusted_secret=trusted_secret,
+            deployment_sha256=deployment_sha256,
+        )
+        if admission_blockers:
+            raise ValueError(admission_blockers[0])
         blockers = _post_install_blockers(
             root,
             channel,

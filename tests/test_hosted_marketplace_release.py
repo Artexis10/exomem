@@ -16,8 +16,33 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def copy_hosted_tree(destination: Path) -> Path:
-    shutil.copytree(REPO_ROOT / "plugins" / "hosted", destination / "plugins" / "hosted")
+    shutil.copytree(
+        REPO_ROOT / "plugins" / "hosted",
+        destination / "plugins" / "hosted",
+        ignore=shutil.ignore_patterns(
+            ".claude.promotion.lock", ".openai.promotion.lock"
+        ),
+    )
     return destination
+
+
+def test_copy_hosted_tree_excludes_transient_promotion_locks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source_root = tmp_path / "source"
+    source = source_root / "plugins" / "hosted"
+    source.mkdir(parents=True)
+    (source / "tracked.json").write_text("{}\n", encoding="utf-8")
+    for platform in ("claude", "openai"):
+        (source / f".{platform}.promotion.lock").touch()
+    monkeypatch.setattr(sys.modules[__name__], "REPO_ROOT", source_root)
+
+    copied_root = copy_hosted_tree(tmp_path / "copy")
+    copied = copied_root / "plugins" / "hosted"
+
+    assert (copied / "tracked.json").is_file()
+    assert not (copied / ".claude.promotion.lock").exists()
+    assert not (copied / ".openai.promotion.lock").exists()
 
 
 def signed_evidence(
@@ -171,6 +196,18 @@ def ready_directory_evidence(root: Path) -> tuple[str, str]:
     return "directory-test-key", secret
 
 
+def set_public_admission_copy(
+    root: Path, eligibility: str = "Public access is available to eligible users."
+) -> None:
+    definition_path = root / "plugins/hosted/marketplace-definition.json"
+    definition = json.loads(definition_path.read_text(encoding="utf-8"))
+    definition["common"]["user_prerequisites"]["admission"] = {
+        "mode": "public",
+        "eligibility": eligibility,
+    }
+    definition_path.write_text(json.dumps(definition), encoding="utf-8")
+
+
 def load_hosted_plugin_cli() -> object:
     spec = importlib.util.spec_from_file_location(
         "hosted_plugin_cli", REPO_ROOT / "scripts" / "hosted-plugin.py"
@@ -270,6 +307,60 @@ def test_marketplace_packet_preserves_the_complete_live_tool_contract() -> None:
     tools = {tool["name"]: tool for tool in packet["tools"]}
     assert "draft_token" in tools["remember"]["input_schema"]["properties"]
     assert "transition_token" in tools["observe_memory"]["input_schema"]["properties"]
+
+
+def test_hosted_marketplace_tools_are_account_backed_and_explain_write_side_effects() -> None:
+    packet = json.loads(
+        hosted_plugins.directory_packets(
+            REPO_ROOT, channel="openai-plugin", openai_app_id="plugin_asdk_app_releaseinput123"
+        )["openai-plugin"]
+    )
+
+    assert all(tool["annotations"]["openWorldHint"] is True for tool in packet["tools"])
+    assert all(
+        "account-backed" in tool["annotation_explanations"]["openWorldHint"].lower()
+        for tool in packet["tools"]
+    )
+    explanations = {
+        tool["name"]: tool["annotation_explanations"]["readOnlyHint"].lower()
+        for tool in packet["tools"]
+        if not tool["annotations"]["readOnlyHint"]
+    }
+    assert set(explanations) == {
+        "remember",
+        "observe_memory",
+        "capture_source",
+        "preserve_evidence",
+        "triage_memory",
+        "connect_memory",
+    }
+    for name in ("remember", "observe_memory"):
+        assert "automatic" in explanations[name]
+        assert "magic" in explanations[name]
+    assert "raw source" in explanations["capture_source"]
+    assert "append-only" in explanations["preserve_evidence"]
+    assert "review decision" in explanations["triage_memory"]
+    assert "explicit" in explanations["connect_memory"]
+    for name in ("capture_source", "preserve_evidence", "triage_memory", "connect_memory"):
+        assert "may be captured automatically" not in explanations[name]
+
+
+def test_openai_negative_review_cases_require_and_render_rationale(tmp_path: Path) -> None:
+    root = copy_hosted_tree(tmp_path / "repo")
+    cases_path = root / "plugins/hosted/marketplace-review-cases.json"
+    cases = json.loads(cases_path.read_text(encoding="utf-8"))
+    cases["negative"][0].pop("rationale")
+    cases_path.write_text(json.dumps(cases), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="rationale"):
+        hosted_plugins.load_marketplace_review_cases(root)
+
+    packet = json.loads(
+        hosted_plugins.directory_packets(
+            REPO_ROOT, channel="openai-plugin", openai_app_id="plugin_asdk_app_releaseinput123"
+        )["openai-plugin"]
+    )
+    assert all(case["rationale"].strip() for case in packet["review_cases"]["negative"])
 
 
 def test_openai_packet_rejects_missing_boolean_annotation(
@@ -732,19 +823,29 @@ def test_openai_packet_renders_every_boolean_annotation() -> None:
     )
 
 
-def test_openai_read_only_non_idempotent_explanation_describes_state_variability() -> None:
+def test_hosted_read_only_tools_advertise_safe_retry_semantics() -> None:
     packet = json.loads(
         hosted_plugins.directory_packets(
             REPO_ROOT, channel="openai-plugin", openai_app_id="plugin_asdk_app_releaseinput123"
         )["openai-plugin"]
     )
-    tool = next(item for item in packet["tools"] if item["name"] == "ask_memory")
-    explanation = tool["annotation_explanations"]["idempotentHint"].lower()
+    reads = [tool for tool in packet["tools"] if tool["annotations"]["readOnlyHint"]]
+    writes = [tool for tool in packet["tools"] if not tool["annotations"]["readOnlyHint"]]
 
-    assert tool["annotations"]["readOnlyHint"] is True
-    assert tool["annotations"]["idempotentHint"] is False
-    assert "state" in explanation
-    assert "create" not in explanation
+    assert reads and writes
+    assert all(tool["annotations"]["idempotentHint"] is True for tool in reads)
+    assert all(tool["retry_semantics"] == "idempotent" for tool in reads)
+    assert all(
+        "transient" in tool["annotation_explanations"]["idempotentHint"].lower()
+        and "warming" in tool["annotation_explanations"]["idempotentHint"].lower()
+        for tool in reads
+    )
+    assert all(tool["annotations"]["idempotentHint"] is False for tool in writes)
+    assert all(tool["retry_semantics"] == "do_not_retry" for tool in writes)
+    assert all(
+        "not retried" in tool["annotation_explanations"]["idempotentHint"].lower()
+        for tool in writes
+    )
 
 
 @pytest.mark.parametrize("channel", ["claude-connector", "claude-plugin"])
@@ -752,6 +853,13 @@ def test_claude_directory_packets_exclude_openai_review_only_fields(channel: str
     packet = json.loads(hosted_plugins.directory_packets(REPO_ROOT, channel=channel)[channel])
 
     assert "review_recording" not in packet
+    assert packet["user_prerequisites"] == {
+        "account": "Requires an Exomem Hosted account and authorization.",
+        "admission": {
+            "mode": "invite_only",
+            "eligibility": "Private alpha access is available by invitation.",
+        },
+    }
     assert all("annotation_explanations" not in tool for tool in packet["tools"])
     assert all(
         set(tool["annotations"])
@@ -837,11 +945,73 @@ def test_directory_status_is_fail_closed_while_promotions_and_probes_are_pending
     assert "promotion is not live" in status["channels"]["claude-connector"]["blockers"]
 
 
+def test_advertised_regions_require_public_admission_evidence_for_activation(
+    tmp_path: Path,
+) -> None:
+    root = copy_hosted_tree(tmp_path / "repo")
+
+    assert hosted_plugins._public_admission_blockers(
+        root,
+        trusted_key_id=None,
+        trusted_secret=None,
+        deployment_sha256=None,
+    ) == ["marketplace user prerequisites do not advertise public admission"]
+
+
+def test_private_admission_copy_blocks_public_readiness_for_every_directory_channel(
+    tmp_path: Path,
+) -> None:
+    root = copy_hosted_tree(tmp_path / "repo")
+    key_id, secret = ready_directory_evidence(root)
+
+    status = hosted_plugins.directory_status(
+        root,
+        openai_app_id="plugin_asdk_app_releaseinput123",
+        trusted_key_id=key_id,
+        trusted_secret=secret,
+        deployment_sha256="b" * 64,
+    )
+
+    assert all(not channel["ready"] for channel in status["channels"].values())
+    assert all(
+        "marketplace user prerequisites do not advertise public admission"
+        in channel["blockers"]
+        for channel in status["channels"].values()
+    )
+
+
+def test_public_admission_evidence_requires_coherent_public_listing_copy(tmp_path: Path) -> None:
+    root = copy_hosted_tree(tmp_path / "repo")
+    key_id, secret = ready_directory_evidence(root)
+    set_public_admission_copy(root)
+
+    assert not hosted_plugins._public_admission_blockers(
+        root,
+        trusted_key_id=key_id,
+        trusted_secret=secret,
+        deployment_sha256="b" * 64,
+    )
+
+
+def test_negated_public_admission_copy_blocks_public_readiness(tmp_path: Path) -> None:
+    root = copy_hosted_tree(tmp_path / "repo")
+    key_id, secret = ready_directory_evidence(root)
+    set_public_admission_copy(root, "Public access is unavailable.")
+
+    assert hosted_plugins._public_admission_blockers(
+        root,
+        trusted_key_id=key_id,
+        trusted_secret=secret,
+        deployment_sha256="b" * 64,
+    ) == ["marketplace user prerequisites do not advertise public admission"]
+
+
 def test_reviewer_ready_openai_candidate_can_enter_review_before_broad_admission(
     tmp_path: Path,
 ) -> None:
     root = copy_hosted_tree(tmp_path / "repo")
     key_id, secret, receipt = openai_published_receipt(root)
+    set_public_admission_copy(root)
     admission_path = root / "plugins/hosted/directory/public-admission-evidence.json"
     admission = json.loads(admission_path.read_text(encoding="utf-8"))
     admission["admission"]["capacity"] = False
@@ -879,6 +1049,10 @@ def test_reviewer_ready_openai_candidate_can_enter_review_before_broad_admission
         )
         record_sha256 = hosted_plugins.directory_record_sha256(root, "openai-plugin")
         previous_state = state
+
+    admission["admission"]["capacity"] = True
+    admission_path.write_text(json.dumps(signed_evidence(admission, secret)), encoding="utf-8")
+    set_public_admission_copy(root, "Public access is unavailable.")
 
     with pytest.raises(ValueError, match="current public readiness"):
         hosted_plugins.record_directory_state(
@@ -1258,6 +1432,7 @@ def test_directory_requires_signed_evidence_and_keeps_active_revision_public_dur
 ) -> None:
     root = copy_hosted_tree(tmp_path / "repo")
     key_id, secret = ready_directory_evidence(root)
+    set_public_admission_copy(root)
     status = hosted_plugins.directory_status(
         root, trusted_key_id=key_id, trusted_secret=secret, deployment_sha256="b" * 64
     )
@@ -1791,6 +1966,7 @@ def test_openai_published_receipt_requires_registered_app_input_to_activate(tmp_
     root = copy_hosted_tree(tmp_path / "repo")
     app_id = "plugin_asdk_app_releaseinput123"
     key_id, secret, receipt = openai_published_receipt(root)
+    set_public_admission_copy(root)
     record_sha256 = hosted_plugins.directory_record_sha256(root, "openai-plugin")
     previous_state = "draft"
     for state in ("submitted", "in_review", "approved", "published"):
@@ -1810,6 +1986,20 @@ def test_openai_published_receipt_requires_registered_app_input_to_activate(tmp_
         record_sha256 = hosted_plugins.directory_record_sha256(root, "openai-plugin")
         previous_state = state
     _write_openai_post_install_evidence(root, record_sha256, state_receipt, secret)
+
+    set_public_admission_copy(root, "Public access is unavailable.")
+    with pytest.raises(ValueError, match="marketplace user prerequisites do not advertise"):
+        hosted_plugins.activate_directory_submission(
+            root,
+            "openai-plugin",
+            target_submission_sha256=record_sha256,
+            expected_active_submission_sha256=None,
+            openai_app_id=app_id,
+            trusted_key_id=key_id,
+            trusted_secret=secret,
+            deployment_sha256="b" * 64,
+        )
+    set_public_admission_copy(root)
 
     with pytest.raises(ValueError, match="registered OpenAI app"):
         hosted_plugins.activate_directory_submission(
