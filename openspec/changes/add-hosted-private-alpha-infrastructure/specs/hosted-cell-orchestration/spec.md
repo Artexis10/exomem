@@ -1,11 +1,19 @@
 ## ADDED Requirements
 
-### Requirement: Provisioner v1 authenticates and bounds every call
-The provisioner SHALL expose the 14 `exomem-cell-provisioner.v1` actions expected by Substrate at `/cells/<action>`. Every request MUST use HTTPS, the independent provisioner bearer, exact protocol header, JSON content type, and an idempotency key. It SHALL reject redirects, oversized request/response bodies, unsupported fields, invalid identifiers, and unauthenticated calls without provider side effects.
+### Requirement: Provisioner wire protocols authenticate and bound every call
+The provisioner SHALL expose the 14 actions expected by Substrate at `/cells/<action>` and SHALL select the closed v1 or v2 request and response contract from the exact provisioner protocol header. Every request MUST use HTTPS, the independent provisioner bearer, JSON content type, and an idempotency key. It SHALL reject redirects, oversized request/response bodies, unsupported or mixed-version fields, invalid identifiers, unsupported protocol headers, and unauthenticated calls without operation or provider side effects. During expansion it SHALL dual-serve fresh v1 only for exact verified entries in the bounded authoritative legacy runtime catalog and fresh v2 for the locked forward target. After contraction it SHALL accept fresh v2 operations, exact non-final v1 replay only against a retained verified catalog entry, and exact already-final v1 replay without a catalog entry after current-fence and v1-model validation because that replay performs no runtime or provider effect.
 
 #### Scenario: Invalid protocol is rejected before mutation
 - **WHEN** a provision request has valid JSON and bearer credentials but the wrong provisioner protocol header
 - **THEN** the request receives a terminal contract error and no namespace, operation, or provider resource is created
+
+#### Scenario: Persisted v1 survives contraction
+- **WHEN** an exact v1 action, idempotency key, canonical body, stored wire discriminator, current fence, and retained runtime catalog entry match a non-final persisted operation after contraction
+- **THEN** the provisioner resumes that operation under the unchanged v1 schema without admitting a fresh v1 operation
+
+#### Scenario: Final v1 replay outlives its catalog entry
+- **WHEN** an exact current-fence replay matches an already-final v1 operation whose runtime unit is no longer cataloged
+- **THEN** the provisioner validates and returns the persisted v1 result without runtime or provider effects
 
 ### Requirement: Operations are durably idempotent and tenant-fenced
 Before performing side effects, the provisioner SHALL persist the action, canonical request hash, idempotency key, tenant ID, operation/checkpoint, monotonic fence generation, and progress. Every durable Kubernetes namespace/release/PVC/PV/route, HCloud volume, and B2 export/backup side effect SHALL also carry or authenticate immutable opaque tenant ID, cell/candidate ID, operation ID, and fence generation outside PostgreSQL. Replaying the same key and body SHALL resume or return the same result. Reusing a key with changed input SHALL conflict. A lower fence MUST NOT mutate, recreate, or destroy resources after a higher fence is observed. These guarantees SHALL survive provisioner and database-client restarts.
@@ -75,11 +83,15 @@ Before either the routine lifecycle driver or the dedicated volume-registration 
 - **THEN** destructive completion rolls back rather than releasing or fencing the equal-or-newer reservation
 
 ### Requirement: Provisioner health proves the exact runtime admission contract
-Health SHALL call the authenticated private cell live, ready, and contract routes and SHALL return the exact flattened identity, protocol, release, service-authentication, mutation-authority, read/write admission, worker-policy, and reason fields parsed by Substrate. It MUST NOT substitute TCP success, OAuth metadata, or Helm status for runtime readiness.
+V1 health SHALL preserve the existing authenticated live, ready, and gateway-contract probes and flattened response. V2 health SHALL additionally call the selected authenticated agent-contract route and SHALL return a nested `runtimeIdentity` containing only the observed release, Hosted protocol, agent profile, gateway digest, command fingerprint, and schema digest after all six match the stored target. Compatibility and client-package lineage SHALL remain Substrate-owned and MUST NOT be reported as cell observations. Neither version may substitute TCP success, OAuth metadata, Helm status, a partial contract, or locally assumed values for runtime readiness.
 
 #### Scenario: Contract drift blocks binding
-- **WHEN** the cell image reports a release, protocol, command semantics, or digest different from the frozen Substrate fixture
+- **WHEN** the cell image reports a release, Hosted protocol, profile, gateway digest, command fingerprint, or schema digest different from the stored lifecycle target
 - **THEN** health/binding fails closed and the cell is not routed
+
+#### Scenario: Broken runtime is destroyed
+- **WHEN** a fenced discard or destroy targets a cell whose live contract cannot be observed
+- **THEN** static target fencing remains enforced but the destructive recovery path does not require successful runtime health
 
 ### Requirement: Lifecycle actions preserve runtime ordering
 Quiesce SHALL reject new mutations and drain active work. Stop SHALL quiesce before scaling compute to zero without deleting storage. Resume SHALL start compute if needed, resume the runtime, and require later health admission. Rotate-credential SHALL stage active/pending overlap, prove pending-token health, promote, finalize, and prove the former token rejects. Seal SHALL be terminal and SHALL run only after routing stop and drain.
