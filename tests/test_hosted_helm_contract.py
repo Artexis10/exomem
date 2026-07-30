@@ -932,14 +932,26 @@ def test_deletion_dispatcher_admission_closes_probe_and_container_override_surfa
     assert f"!has({container}.securityContext.privileged)" in expressions
     assert f"!has({container}.securityContext.seccompProfile)" in expressions
     assert "metadata.labels['batch.kubernetes.io/job-name']" in expressions
-    assert f"{container}.resources.requests.cpu == quantity('25m')" in expressions
-    assert f"{container}.resources.limits.memory == quantity('384Mi')" in expressions
+    assert f"{container}.resources.requests.cpu == quantity('25m')" not in expressions
+    assert f"{container}.resources.limits.memory == quantity('384Mi')" not in expressions
+    assert "quantity(dyn(object.spec.template.spec.containers[0].resources).requests['cpu']).compareTo(quantity('25m')) == 0" in expressions
+    assert "quantity(dyn(object.spec.template.spec.containers[0].resources).limits['memory']).compareTo(quantity('384Mi')) == 0" in expressions
     assert "EXOMEM_PROVISIONER_DEPLOYMENT_LOCK_PATH" in expressions
     assert f"{container}.env[14].value == '/etc/exomem/deployment-lock/exomem-hosted-deployment-lock-v2.json'" in expressions
     assert 'volumes[1].configMap.name == "exomem-hosted-deployment-lock-v2-97c1fc1bf93e0492"' in expressions
     assert "volumes[1].configMap.items[0].key == 'exomem-hosted-deployment-lock-v2.json'" in expressions
     assert "volumes[1].configMap.defaultMode == 292" in expressions
     assert "!has(object.spec.template.spec.volumes[1].configMap.defaultMode)" not in expressions
+    assert "quantity(dyn(object.spec.template.spec.volumes[0].emptyDir).sizeLimit).compareTo(quantity('64Mi')) == 0" in expressions
+    assert "!has(dyn(object.spec.template.spec).overhead)" in expressions
+    assert "object.spec.parallelism == 1" in expressions
+    assert "object.spec.completions == 1" in expressions
+    assert "object.spec.completionMode == 'NonIndexed'" in expressions
+    assert "dyn(object.spec).podReplacementPolicy == 'TerminatingOrFailed'" in expressions
+    assert "object.spec.selector.matchLabels['batch.kubernetes.io/controller-uid'] == object.metadata.uid" in expressions
+    assert "object.spec.template.metadata.labels['batch.kubernetes.io/controller-uid'] == object.metadata.uid" in expressions
+    assert "object.spec.template.spec.serviceAccount == 'exomem-deletion-worker'" in expressions
+    assert f"{container}.env[16].valueFrom.fieldRef.apiVersion == 'v1'" in expressions
     assert f"{container}.volumeMounts[1].readOnly == true" in expressions
 
 
