@@ -201,6 +201,19 @@ async def test_completed_export_replays_encrypted_result_without_a_second_effect
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("action", ("restore", "discard"))
+async def test_intercepted_durability_effects_fail_before_work_when_runtime_lock_mismatches(
+    driver_context,
+    action: str,
+) -> None:
+    driver, _, _ = driver_context
+    driver._runtime_target_validator = lambda _request, _context: False
+
+    with pytest.raises(DriverTerminal, match="PROVISIONER_RELEASE_UNIT_MISMATCH"):
+        await driver.execute(action, _request(), _context())
+
+
+@pytest.mark.asyncio
 async def test_driver_renews_durability_claim_during_long_workflow(
     driver_context,
     monkeypatch: pytest.MonkeyPatch,

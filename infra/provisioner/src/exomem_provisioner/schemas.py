@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
+from types import MappingProxyType
 from typing import Annotated, Literal
 from urllib.parse import urlsplit
 
@@ -84,6 +86,15 @@ class WorkerPolicy(StrictSchema):
     workerCount: int = Field(ge=0, le=64)
     semantic: bool
     media: bool
+
+
+class RuntimeTarget(StrictSchema):
+    releaseVersion: ShortLabel
+    protocolVersion: ShortLabel
+    agentProfile: ShortLabel
+    gatewayContractDigest: Sha256
+    commandFingerprint: Sha256
+    schemaDigest: Sha256
 
 
 class ContextRequest(StrictSchema):
@@ -168,6 +179,94 @@ class ExportReferenceRequest(ContextRequest):
 
 
 class DestroyRequest(ContextRequest):
+    pass
+
+
+class V2CellRequest(ContextRequest):
+    cellId: OpaqueId
+    serviceCredential: SecretValue
+    workerPolicy: WorkerPolicy
+    runtimeTarget: RuntimeTarget
+
+
+class V2ProvisionRequest(V2CellRequest):
+    provisionMode: Literal["serve", "restore-candidate"]
+
+
+class V2TargetRequest(V2CellRequest):
+    providerRef: OpaqueReference
+
+
+class V2HealthRequest(V2TargetRequest):
+    pass
+
+
+class V2QuiesceRequest(V2TargetRequest):
+    pass
+
+
+class V2ResumeRequest(V2TargetRequest):
+    pass
+
+
+class V2StopRequest(V2TargetRequest):
+    pass
+
+
+class V2ExportRequest(V2TargetRequest):
+    expiresAt: str = Field(min_length=20, max_length=40)
+
+    @field_validator("expiresAt")
+    @classmethod
+    def validate_expiry(cls, value: str) -> str:
+        return ExportRequest.validate_expiry(value)
+
+
+class V2RotateCredentialRequest(V2TargetRequest):
+    phase: Literal["stage", "finalize"]
+    credentialVersion: int = Field(ge=1, le=2_147_483_647)
+    nextCredential: SecretValue
+
+
+class V2RestoreRequest(V2TargetRequest):
+    restoreRef: SecretStr = Field(min_length=1, max_length=256)
+    sourceCellId: OpaqueReference
+    archiveSha256: Sha256
+    manifestSha256: Sha256
+    archiveSize: int = Field(gt=0, le=9_007_199_254_740_991)
+
+    @field_validator("restoreRef")
+    @classmethod
+    def validate_restore_ref(cls, value: SecretStr) -> SecretStr:
+        return RestoreRequest.validate_restore_ref(value)
+
+
+class V2ReleaseExportRequest(V2TargetRequest):
+    releaseRef: SecretStr = Field(min_length=1, max_length=256)
+
+    @field_validator("releaseRef")
+    @classmethod
+    def validate_release_ref(cls, value: SecretStr) -> SecretStr:
+        return ReleaseExportRequest.validate_release_ref(value)
+
+
+class V2SealRequest(V2TargetRequest):
+    pass
+
+
+class V2DiscardRequest(V2TargetRequest):
+    pass
+
+
+class V2ExportDeleteRequest(ExportReferenceRequest):
+    pass
+
+
+class V2ExportDownloadRequest(ExportReferenceRequest):
+    pass
+
+
+class V2DestroyRequest(DestroyRequest):
     pass
 
 
@@ -291,6 +390,45 @@ FINAL_MODELS: dict[str, type[StrictSchema] | None] = {
     "seal": None,
     "discard": DestructionResponse,
     "destroy": TenantDestructionResponse,
+}
+
+V1_REQUEST_MODELS: Mapping[str, type[StrictSchema]] = MappingProxyType(dict(REQUEST_MODELS))
+V1_FINAL_MODELS: Mapping[str, type[StrictSchema] | None] = MappingProxyType(dict(FINAL_MODELS))
+
+V2_REQUEST_MODELS: dict[str, type[StrictSchema]] = {
+    "provision": V2ProvisionRequest,
+    "health": V2HealthRequest,
+    "rotate-credential": V2RotateCredentialRequest,
+    "quiesce": V2QuiesceRequest,
+    "resume": V2ResumeRequest,
+    "stop": V2StopRequest,
+    "export": V2ExportRequest,
+    "export-release": V2ReleaseExportRequest,
+    "export-delete": V2ExportDeleteRequest,
+    "restore": V2RestoreRequest,
+    "export-download": V2ExportDownloadRequest,
+    "seal": V2SealRequest,
+    "discard": V2DiscardRequest,
+    "destroy": V2DestroyRequest,
+}
+
+
+class V2HealthResponse(StrictSchema):
+    live: bool
+    ready: bool
+    cellId: OpaqueId
+    runtimeIdentity: RuntimeTarget
+    serviceAuthenticated: bool
+    mutationAuthority: bool
+    readAdmission: bool
+    writeAdmission: bool
+    workerPolicy: WorkerPolicy
+    code: ShortLabel
+
+
+V2_FINAL_MODELS: dict[str, type[StrictSchema] | None] = {
+    **FINAL_MODELS,
+    "health": V2HealthResponse,
 }
 
 

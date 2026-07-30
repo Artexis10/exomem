@@ -1,3 +1,4 @@
+{{- $provisionerImage := include "exomem.hostedProvisionerImage" . -}}
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -29,7 +30,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: database-migration
-          image: {{ .Values.provisioner.image }}
+          image: {{ $provisionerImage }}
           imagePullPolicy: IfNotPresent
           {{- if .Release.IsUpgrade }}
           command: ["exomem-provisioner-database-validate"]

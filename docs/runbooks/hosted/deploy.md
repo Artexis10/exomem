@@ -2,13 +2,12 @@
 
 ## Preconditions
 
-The complete application release manifest, real HCP state locking/recovery proof, static-secret
+The canonical v2 deployment-lock pair and its fixed evidence directory, real HCP state locking/recovery proof, static-secret
 ciphertexts, and owner-only invitation gate must be green. Production mutation
 always uses a saved plan; a second plan is never computed during apply. The
-release manifest is the reviewed artifact path exported by the release pipeline
-with the exact `exomem-hosted-release`
-schema: source commit, release, hosted protocol, immutable runtime image,
-published tag, both contract digests, and the ordered 21-command registry.
+pair is committed at `infra/contracts/exomem-hosted-deployment-lock-pair-v2.json`.
+It binds both immutable images, the six-field runtime target, candidate evidence,
+source closures, legacy catalog, admission phase, and D0 rollback tuple.
 
 ```bash
 infra/scripts/validate.sh
@@ -33,13 +32,11 @@ infra/scripts/verify_ansible_convergence.py --inventory "${deploy_work_dir}/inve
   --vars infra/secrets/ansible/etcd-s3-secret-key.v1.sops.json
 ```
 
-Prepare one private Helm-values file from that release unit. The chart renders
-the authoritative `exomem-hosted-release-v1` ConfigMap from the embedded unit;
-the preparer rejects unknown/missing fields, mutable images, a tag/commit
-mismatch, partial overrides, and an invalid command registry. Never set the
-image, release, protocol, registry, or digest independently.
-`EXOMEM_PROVISIONER_IMAGE` is the separately built control-plane artifact, not
-an override for the cell runtime image inside the release manifest.
+Prepare one private Helm-values file from exactly one canonical pair member.
+Choose `expand` for D1 expansion and only choose `contract` after the drain
+preflight; the script derives its member hash and rejects independent image,
+target, catalog, or admission-mode overrides. The content-addressed ConfigMap
+changes name between the reviewed expand and contract members.
 
 The minute capacity collector is also fail-closed. Before rendering, its
 operator contract and chart copy must be byte-identical, the live cost/Paddle
@@ -59,20 +56,25 @@ jq -e '
 ```
 
 ```bash
-: "${EXOMEM_HOSTED_RELEASE_MANIFEST:?set the reviewed release-manifest path from the release pipeline}"
-release_manifest="$EXOMEM_HOSTED_RELEASE_MANIFEST"
-: "${EXOMEM_PROVISIONER_IMAGE:?set the reviewed ghcr.io/artexis10/exomem-provisioner@sha256 digest}"
-infra/scripts/verify_provisioner_image.py --image "$EXOMEM_PROVISIONER_IMAGE"
-test -f "$release_manifest"
-test ! -L "$release_manifest"
+lock_pair="infra/contracts/exomem-hosted-deployment-lock-pair-v2.json"
+test -f "$lock_pair" && test ! -L "$lock_pair" || { echo "canonical deployment lock pair is missing" >&2; exit 2; }
+lock_evidence="infra/contracts/exomem-hosted-deployment-lock-evidence-v2"
+test -d "$lock_evidence" && test ! -L "$lock_evidence" || { echo "canonical deployment lock evidence is missing" >&2; exit 2; }
+: "${EXOMEM_DEPLOYMENT_PHASE:?set expand or contract}"
+case "$EXOMEM_DEPLOYMENT_PHASE" in expand|contract) ;; *) exit 2 ;; esac
+: "${GH_TOKEN:?set a token permitted to verify hosted attestations and the pinned Substrate commit}"
+command -v oras >/dev/null || { echo "oras is required for deployment-lock proof" >&2; exit 2; }
 control_hostname="$(terraform -chdir=infra/terraform/foundation output -raw control_hostname)"
 transfer_hostname="$(terraform -chdir=infra/terraform/foundation output -raw transfer_hostname)"
 infra/scripts/prepare_hosted_release.py \
-  --manifest "$release_manifest" \
+  --lock-pair "$lock_pair" \
+  --phase "$EXOMEM_DEPLOYMENT_PHASE" \
   --values-output "${deploy_work_dir}/release-values.json" \
-  --provisioner-image "$EXOMEM_PROVISIONER_IMAGE" \
   --control-hostname "$control_hostname" \
   --transfer-hostname "$transfer_hostname"
+infra/scripts/verify_hosted_release.py \
+  --phase "$EXOMEM_DEPLOYMENT_PHASE" \
+  --repository .
 
 : "${EXOMEM_B2_S3_ENDPOINT:?set the exact HTTPS B2 S3 origin}"
 : "${EXOMEM_B2_S3_REGION:?set the B2 S3 region}"

@@ -715,9 +715,28 @@ async def test_private_cell_api_uses_fresh_identity_and_exact_lifecycle_routes()
         browser_origin="https://substratesystems.io",
         release_version="0.22.0",
         protocol_version="1",
-        operator_contract_digest="c" * 64,
-        contract_digest="b" * 64,
+        contract_digest="e" * 64,
         location="fsn1",
+        runtime_target={
+            "releaseVersion": "0.22.0",
+            "protocolVersion": "1",
+            "agentProfile": "hosted-alpha-agent-v1",
+            "gatewayContractDigest": "b" * 64,
+            "commandFingerprint": "c" * 64,
+            "schemaDigest": "d" * 64,
+        },
+        legacy_runtime_units={
+            ("0.22.0", "1"): {
+                "releaseVersion": "0.22.0",
+                "protocolVersion": "1",
+                "agentProfile": "hosted-alpha-agent-v1",
+                "gatewayContractDigest": "b" * 64,
+                "commandFingerprint": "c" * 64,
+                "schemaDigest": "d" * 64,
+                "runtimeImage": "repo@sha256:" + "a" * 64,
+                "sourceCommit": "a" * 40,
+            }
+        },
     )
     adapter = PrivateCellApiAdapter(
         request=request,
@@ -730,6 +749,7 @@ async def test_private_cell_api_uses_fresh_identity_and_exact_lifecycle_routes()
         config=config,
         expected_release="0.22.0",
         expected_worker_policy=worker_policy,
+        expected_contract_digest="b" * 64,
     )
     await adapter.quiesce(
         _metadata(),
@@ -776,3 +796,96 @@ async def test_private_cell_api_uses_fresh_identity_and_exact_lifecycle_routes()
     assert calls[-1][1].endswith("/private/exomem/v1/lifecycle/seal")
     assert calls[-1][2]["X-Exomem-Routing-Stopped"] == "true"
     assert calls[-1][3]["created_at"] == "2030-01-01T00:00:00Z"
+
+
+@pytest.mark.asyncio
+async def test_private_cell_api_observes_the_selected_agent_contract() -> None:
+    calls: list[str] = []
+
+    async def request(
+        method: str,
+        url: str,
+        *,
+        headers: dict[str, str],
+        json: object = None,
+    ) -> _Response:
+        del method, headers, json
+        calls.append(url)
+        if url.endswith("/agent/hosted-alpha-agent-v1/contract"):
+            return _Response(
+                200,
+                {
+                    "agent_profile": {
+                        "profile": "hosted-alpha-agent-v1",
+                        "active_capability_sha256": "c" * 64,
+                    },
+                    "digest": {"algorithm": "sha256", "value": "d" * 64},
+                },
+                raw=True,
+            )
+        if url.endswith("/contract"):
+            return _Response(200, {"digest": {"algorithm": "sha256", "value": "b" * 64}}, raw=True)
+        if url.endswith("/ready"):
+            return _Response(
+                200,
+                {
+                    "cell_id": "cell-alpha",
+                    "vault_id": "tenant-alpha",
+                    "exomem_release": "0.22.0",
+                    "hosted_protocol": "1",
+                    "authenticated_credential_version": "1",
+                    "security_revision": 1,
+                    "service_authenticated": True,
+                    "mutation_authority": True,
+                    "admission_phase": "active",
+                    "read_admission": True,
+                    "write_admission": True,
+                    "worker_policy_digest": hashlib.sha256(
+                        b'{"media":false,"semantic":false,"workerCount":0}'
+                    ).hexdigest(),
+                },
+            )
+        return _Response(200, {"live": True, "cell_id": "cell-alpha", "protocol_version": "1"})
+
+    config = LifecycleConfig(
+        image="repo@sha256:" + "a" * 64,
+        chart_path="chart",
+        chart_version="0.1.0",
+        helm_version="3.19.4",
+        control_hostname="control.example.invalid",
+        transfer_hostname="transfer.example.invalid",
+        browser_origin="https://substratesystems.io",
+        release_version="0.22.0",
+        protocol_version="1",
+        contract_digest="b" * 64,
+        location="fsn1",
+        runtime_target={
+            "releaseVersion": "0.22.0",
+            "protocolVersion": "1",
+            "agentProfile": "hosted-alpha-agent-v1",
+            "gatewayContractDigest": "b" * 64,
+            "commandFingerprint": "c" * 64,
+            "schemaDigest": "d" * 64,
+        },
+    )
+    adapter = PrivateCellApiAdapter(request=request, internal_origin="http://cells.invalid")
+
+    health = await adapter.health(
+        _metadata(),
+        credential=_credential(),
+        protocol_version="1",
+        config=config,
+        expected_release="0.22.0",
+        expected_worker_policy={"workerCount": 0, "semantic": False, "media": False},
+        require_runtime_identity=True,
+    )
+
+    assert health.agent_profile == "hosted-alpha-agent-v1"
+    assert health.command_fingerprint == "c" * 64
+    assert health.schema_digest == "d" * 64
+    assert calls == [
+        "http://cells.invalid/private/exomem/v1/live",
+        "http://cells.invalid/private/exomem/v1/ready",
+        "http://cells.invalid/private/exomem/v1/contract",
+        "http://cells.invalid/private/exomem/v1/agent/hosted-alpha-agent-v1/contract",
+    ]

@@ -26,10 +26,12 @@ on:
         required: false
         default: false
         type: boolean
-      provisioner_image:
-        description: Exact published ghcr.io/artexis10/exomem-provisioner@sha256 digest
-        required: false
-        type: string
+      deployment_phase:
+        description: Exact reviewed pair member to consume
+        required: true
+        default: expand
+        type: choice
+        options: [expand, contract]
       external_blackbox:
         description: Run the deployed availability, backup-freshness, and scheduler probes
         required: false
@@ -38,6 +40,7 @@ on:
 
 permissions:
   contents: read
+  attestations: read
 
 env:
   UV_VERSION: "0.11.28"
@@ -92,6 +95,12 @@ jobs:
           echo "8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198  /tmp/shellcheck.tar.xz" | sha256sum --check
           tar --extract --xz --file /tmp/shellcheck.tar.xz --directory /tmp
           install -m 0755 /tmp/shellcheck-v${SHELLCHECK_VERSION}/shellcheck "$HOME/.local/bin/shellcheck"
+          curl --fail --silent --show-error --location \
+            --output /tmp/oras.tar.gz \
+            https://github.com/oras-project/oras/releases/download/v${ORAS_VERSION}/oras_${ORAS_VERSION}_linux_amd64.tar.gz
+          echo "${ORAS_LINUX_AMD64_SHA256}  /tmp/oras.tar.gz" | sha256sum --check
+          tar --extract --gzip --file /tmp/oras.tar.gz --directory /tmp oras
+          install -m 0755 /tmp/oras "$HOME/.local/bin/oras"
           uv venv .venv-hosted-ci
           uv pip install --python .venv-hosted-ci/bin/python \
             ansible-core==${ANSIBLE_CORE_VERSION} ansible-lint==${ANSIBLE_LINT_VERSION} \
@@ -119,19 +128,38 @@ jobs:
     needs: static
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    permissions:
+      contents: read
+      attestations: read
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
-      - name: Pull and prove both published images against the reviewed release
-        env:
-          PROVISIONER_IMAGE: ${{ inputs.provisioner_image }}
+      - name: Install pinned ORAS for locked provisioner evidence discovery
         run: |
+          source infra/tool-versions.env
+          curl --fail --silent --show-error --location \
+            --output /tmp/oras.tar.gz \
+            https://github.com/oras-project/oras/releases/download/v${ORAS_VERSION}/oras_${ORAS_VERSION}_linux_amd64.tar.gz
+          echo "${ORAS_LINUX_AMD64_SHA256}  /tmp/oras.tar.gz" | sha256sum --check
+          tar --extract --gzip --file /tmp/oras.tar.gz --directory /tmp oras
+          install -m 0755 /tmp/oras /usr/local/bin/oras
+      - name: Derive and prove both published images from the reviewed phase lock
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEPLOYMENT_LOCK_PAIR: infra/contracts/exomem-hosted-deployment-lock-pair-v2.json
+          DEPLOYMENT_PHASE: ${{ inputs.deployment_phase }}
+        run: |
+          test -f "$DEPLOYMENT_LOCK_PAIR" || { echo "canonical deployment lock pair is not committed" >&2; exit 2; }
+          python3 infra/scripts/prepare_hosted_release.py \
+            --lock-pair "$DEPLOYMENT_LOCK_PAIR" \
+            --phase "$DEPLOYMENT_PHASE" \
+            --control-hostname control.example.invalid \
+            --transfer-hostname transfer.example.invalid \
+            --values-output /tmp/exomem-hosted-release-values.json
+          PROVISIONER_IMAGE="$(python3 -c 'import json; print(json.load(open("/tmp/exomem-hosted-release-values.json"))["provisioner"]["deploymentLockJson"] )' | python3 -c 'import json, sys; print(json.load(sys.stdin)["components"]["provisioner"]["image"])')"
           python3 infra/scripts/verify_hosted_release.py \
-            --manifest infra/contracts/exomem-hosted-release-v1.json \
-            --runtime-gate infra/contracts/exomem-hosted-runtime-k3s-gate-v1.json \
-            --substrate-selection infra/contracts/substrate-gateway-contract-selection-v1.json \
-            --fetch-substrate-fixture \
-            --probe-image
+            --phase "$DEPLOYMENT_PHASE" \
+            --repository .
           python3 infra/scripts/verify_provisioner_image.py \
             --image "$PROVISIONER_IMAGE" \
             --require-published

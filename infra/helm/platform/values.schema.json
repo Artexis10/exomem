@@ -7,12 +7,10 @@
     "provisioner": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["image", "replicas", "databaseSchema", "databaseRole", "trustedProxyIps", "cellChartPath", "cellChartVersion", "helmBinary", "helmVersion", "controlHostname", "transferHostname", "browserOrigin", "releaseManifestJson", "location", "internalOrigin", "pollSeconds", "providerRecoveryPublicKeySecret", "providerRecoverySigningKeySecret", "capacityReceiptPublicKeySecret"],
+      "required": ["deploymentLockJson", "deploymentLockSha256", "replicas", "databaseSchema", "databaseRole", "trustedProxyIps", "cellChartPath", "cellChartVersion", "helmBinary", "helmVersion", "controlHostname", "transferHostname", "browserOrigin", "location", "internalOrigin", "pollSeconds", "providerRecoveryPublicKeySecret", "providerRecoverySigningKeySecret", "capacityReceiptPublicKeySecret"],
       "properties": {
-        "image": {
-          "type": "string",
-          "pattern": "^ghcr\\.io/artexis10/exomem-provisioner@sha256:[a-f0-9]{64}$"
-        },
+        "deploymentLockJson": {"type": "string", "minLength": 1, "maxLength": 1048576, "contentMediaType": "application/json"},
+        "deploymentLockSha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
         "replicas": {"type": "integer", "minimum": 1, "maximum": 2},
         "databaseSchema": {"type": "string", "pattern": "^[a-z][a-z0-9_]{2,62}$"},
         "databaseRole": {"type": "string", "pattern": "^[a-z][a-z0-9_]{2,62}$"},
@@ -24,7 +22,6 @@
         "controlHostname": {"type": "string", "pattern": "^[a-z0-9](?:[a-z0-9-]{0,62}\\.)+[a-z]{2,63}$"},
         "transferHostname": {"type": "string", "pattern": "^[a-z0-9](?:[a-z0-9-]{0,62}\\.)+[a-z]{2,63}$"},
         "browserOrigin": {"type": "string", "pattern": "^https://[^/]+$"},
-        "releaseManifestJson": {"type": "string", "minLength": 1, "maxLength": 1048576, "contentMediaType": "application/json"},
         "location": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]{1,31}$"},
         "internalOrigin": {"type": "string", "pattern": "^https?://\\{resource\\}\\.\\{namespace\\}\\.svc\\.cluster\\.local:[0-9]{2,5}$"},
         "pollSeconds": {"type": "string", "pattern": "^[1-9][0-9]*$"},

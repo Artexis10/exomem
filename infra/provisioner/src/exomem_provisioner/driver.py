@@ -8,6 +8,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
 
 from .models import ResourceKind
+from .wire_protocol import runtime_identity
 
 
 @dataclass(frozen=True, slots=True)
@@ -19,6 +20,7 @@ class EffectContext:
     fence_generation: int
     checkpoint: str = "effect-prepared"
     operation_created_at: str = "1970-01-01T00:00:00Z"
+    wire_protocol: str = "exomem-cell-provisioner.v1"
 
     @property
     def provider_identity(self) -> tuple[str, str, str, str | None, int]:
@@ -160,12 +162,11 @@ class FakeDriver:
                 "privateEndpoint": f"https://{cell_id}.cells.internal",
             }
         if action == "health":
-            return {
+            identity = runtime_identity(request)
+            result = {
                 "live": True,
                 "ready": True,
                 "cellId": cell_id,
-                "protocolVersion": request["protocolVersion"],
-                "releaseVersion": request["releaseVersion"],
                 "serviceAuthenticated": True,
                 "mutationAuthority": True,
                 "readAdmission": True,
@@ -173,6 +174,11 @@ class FakeDriver:
                 "workerPolicy": request["workerPolicy"],
                 "code": "CELL_READY",
             }
+            if "runtimeTarget" in request:
+                result["runtimeIdentity"] = identity
+            else:
+                result.update(identity)
+            return result
         if action == "rotate-credential":
             return {"previousCredentialRejected": request.get("phase") == "finalize"}
         if action == "export":

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+from pathlib import Path
 from types import SimpleNamespace
 
 import httpx
@@ -39,7 +40,7 @@ def _settings(**overrides: object) -> DurabilityActionSettings:
         "user_export_delivery_key_id": "export-delivery-id",
         "user_export_delivery_key": "export-delivery-key",
         "provider_recovery_signing_key": "cnJycnJycnJycnJycnJycnJycnJycnJycnJycnJycnI",
-        "release_manifest_path": "/opt/exomem/release/exomem-hosted-release-v1.json",
+        "deployment_lock_path": Path.cwd() / "selected-deployment-lock.json",
         "cell_chart_path": "/opt/exomem/charts/cell",
         "cell_chart_version": "0.1.0",
         "helm_binary": "/opt/exomem/bin/helm",
@@ -48,8 +49,7 @@ def _settings(**overrides: object) -> DurabilityActionSettings:
         "transfer_hostname": "transfer.example.test",
         "browser_origin": "https://app.example.test",
         "location": "fsn1",
-        "provisioner_image": "ghcr.io/artexis10/exomem-provisioner@sha256:" + "b" * 64,
-        "scratch_root": "/var/lib/exomem-scratch",
+        "scratch_root": Path.cwd() / "exomem-scratch",
     }
     values.update(overrides)
     return DurabilityActionSettings(**values)
@@ -59,14 +59,13 @@ def test_action_settings_bind_dedicated_role_buckets_and_immutable_images() -> N
     settings = _settings()
 
     assert settings.max_operations == 1
+    with pytest.raises(ValueError, match="deployment lock is unavailable"):
+        _ = settings.deployment_lock
     assert settings.recovery_bucket != settings.user_export_bucket
-    assert "@sha256:" in settings.provisioner_image
     with pytest.raises(ValueError):
         _settings(user_export_bucket="exomem-recovery-alpha")
     with pytest.raises(ValueError):
         _settings(database_role="another_role")
-    with pytest.raises(ValueError):
-        _settings(provisioner_image="ghcr.io/artexis10/exomem-provisioner:latest")
 
 
 @pytest.mark.asyncio
@@ -325,7 +324,6 @@ async def test_candidate_controller_reconciles_restore_then_private_serve_then_r
             browser_origin="https://app.example.test",
             release_version="0.22.0",
             protocol_version="exomem-hosted.v1",
-            operator_contract_digest="b" * 64,
             contract_digest="c" * 64,
             location="fsn1",
         ),

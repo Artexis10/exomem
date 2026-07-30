@@ -40,6 +40,7 @@ from .provider_identity import (
     provider_operation_resource_name,
 )
 from .repository import OperationRepository
+from .wire_protocol import runtime_identity
 
 
 @dataclass(frozen=True, slots=True)
@@ -596,15 +597,18 @@ class LiveLifecyclePlane:
         return (await self._refresh(metadata)).serving
 
     async def health(
-        self, metadata: OpaqueProviderMetadata, request: dict[str, Any]
+        self, metadata: OpaqueProviderMetadata, request: dict[str, Any], *, v2: bool
     ) -> HealthObservation:
+        target = self._config.runtime_target_for(request, v2=v2)
         return await self._runtime.health(
             self._owner(metadata),
             credential=str(request["serviceCredential"]),
-            protocol_version=str(request["protocolVersion"]),
+            protocol_version=target["protocolVersion"],
             config=self._config,
-            expected_release=str(request["releaseVersion"]),
+            expected_release=target["releaseVersion"],
             expected_worker_policy=dict(request["workerPolicy"]),
+            require_runtime_identity=v2,
+            expected_contract_digest=target["gatewayContractDigest"],
         )
 
     async def admit_runtime(self, metadata: OpaqueProviderMetadata) -> None:
@@ -614,12 +618,10 @@ class LiveLifecyclePlane:
     def runtime_admitted(self, metadata: OpaqueProviderMetadata) -> bool:
         return self._snapshot(metadata).runtime_admitted
 
-    async def enable_routes(self, metadata: OpaqueProviderMetadata) -> None:
+    async def enable_routes(self, metadata: OpaqueProviderMetadata, request: dict[str, Any]) -> None:
         owner = self._owner(metadata)
-        try:
-            request = self._helm_requests[self._key(metadata)]
-        except KeyError as error:
-            raise MetadataConflict("original Helm request was not authenticated") from error
+        if self._key(metadata) not in self._helm_requests:
+            raise MetadataConflict("original Helm request was not authenticated")
         values = _fixed_helm_values(owner, request, self._config)
         values["workloadMode"] = "serve"
         values["routes"]["enabled"] = True
@@ -670,10 +672,11 @@ class LiveLifecyclePlane:
         request: dict[str, Any],
         operation_id: str,
     ) -> None:
+        target = runtime_identity(request)
         await self._runtime.quiesce(
             self._owner(metadata),
             credential=str(request["serviceCredential"]),
-            protocol_version=str(request["protocolVersion"]),
+            protocol_version=target["protocolVersion"],
             operation_id=operation_id,
         )
 
@@ -686,10 +689,11 @@ class LiveLifecyclePlane:
         request: dict[str, Any],
         operation_id: str,
     ) -> None:
+        target = runtime_identity(request)
         await self._runtime.resume(
             self._owner(metadata),
             credential=str(request["serviceCredential"]),
-            protocol_version=str(request["protocolVersion"]),
+            protocol_version=target["protocolVersion"],
             operation_id=operation_id,
         )
 
@@ -717,6 +721,7 @@ class LiveLifecyclePlane:
         action: str,
         operation_id: str,
         version: str,
+        protocol_version: str,
     ) -> dict[str, Any]:
         expected = int(annotations.get("exomem.io/security-revision", "0"))
         transition = operation_id + ":credential-" + action
@@ -750,7 +755,7 @@ class LiveLifecyclePlane:
             metadata,
             request,
             credential=active_credential,
-            protocol_version=self._config.protocol_version,
+            protocol_version=protocol_version,
         )
         revision = result.get("revision")
         if revision != expected + 1:
@@ -776,6 +781,9 @@ class LiveLifecyclePlane:
                 raise MetadataConflict("pending credential version is immutable")
             return
         credentials[pending] = credential
+        target = self._config.runtime_target_for(
+            request, v2="runtimeTarget" in request
+        )
         result = await self._credential_transition(
             owned,
             credentials=credentials,
@@ -783,6 +791,7 @@ class LiveLifecyclePlane:
             action="stage",
             operation_id=operation_id,
             version=pending,
+            protocol_version=target["protocolVersion"],
         )
         if result.get("phase") != "staged" or result.get("pending_version") != pending:
             raise MetadataConflict("hosted credential did not enter staged overlap")
@@ -814,6 +823,9 @@ class LiveLifecyclePlane:
             return True
         revision = int(annotations.get("exomem.io/security-revision", "0"))
         probe_operation = operation_id + ":credential-probe"
+        target = self._config.runtime_target_for(
+            request, v2="runtimeTarget" in request
+        )
         operator_request = {
             "request_id": _deterministic_uuid4(probe_operation),
             "operation_id": probe_operation,
@@ -821,8 +833,8 @@ class LiveLifecyclePlane:
             "vault_id": owned.tenant_id,
             "state_root": "/var/lib/exomem/state",
             "selected_credential_version": pending,
-            "expected_release": str(request["releaseVersion"]),
-            "expected_protocol": str(request["protocolVersion"]),
+            "expected_release": target["releaseVersion"],
+            "expected_protocol": target["protocolVersion"],
             "expected_worker_policy_digest": self._worker_policy_digest(request),
             "expected_revision": revision,
             "port": 8765,
@@ -832,7 +844,7 @@ class LiveLifecyclePlane:
             owned,
             operator_request,
             credential=credential,
-            protocol_version=self._config.protocol_version,
+            protocol_version=target["protocolVersion"],
         )
         proved = (
             result.get("authenticated_credential_version") == pending
@@ -861,11 +873,14 @@ class LiveLifecyclePlane:
         credentials, annotations = await self._cell.read_credential_bundle(owned)
         pending = str(version)
         old_version = annotations.get("exomem.io/active-credential-version")
+        target = self._config.runtime_target_for(
+            request, v2="runtimeTarget" in request
+        )
         if old_version == pending and set(credentials) == {pending}:
             return await self._runtime.credential_rejected(
                 owned,
                 credential=str(request["serviceCredential"]),
-                protocol_version=str(request["protocolVersion"]),
+                protocol_version=target["protocolVersion"],
             )
         if old_version is None or pending not in credentials:
             raise MetadataConflict("pending credential is absent")
@@ -876,8 +891,9 @@ class LiveLifecyclePlane:
                 credentials=credentials,
                 annotations=annotations,
                 action="promote",
-                operation_id=operation_id,
-                version=pending,
+            operation_id=operation_id,
+            version=pending,
+            protocol_version=target["protocolVersion"],
             )
             if result.get("phase") != "promoted":
                 raise MetadataConflict("hosted credential did not promote")
@@ -896,8 +912,9 @@ class LiveLifecyclePlane:
                 credentials=credentials,
                 annotations=annotations,
                 action="finalize",
-                operation_id=operation_id,
-                version=pending,
+            operation_id=operation_id,
+            version=pending,
+            protocol_version=target["protocolVersion"],
             )
             if result.get("phase") != "stable" or result.get("active_version") != pending:
                 raise MetadataConflict("hosted credential did not finalize")
@@ -915,15 +932,16 @@ class LiveLifecyclePlane:
         new_health = await self._runtime.health(
             owned,
             credential=credentials[pending],
-            protocol_version=str(request["protocolVersion"]),
+            protocol_version=target["protocolVersion"],
             config=self._config,
-            expected_release=str(request["releaseVersion"]),
+            expected_release=target["releaseVersion"],
             expected_worker_policy=dict(request["workerPolicy"]),
+            expected_contract_digest=target["gatewayContractDigest"],
         )
         old_rejected = await self._runtime.credential_rejected(
             owned,
             credential=str(request["serviceCredential"]),
-            protocol_version=str(request["protocolVersion"]),
+            protocol_version=target["protocolVersion"],
         )
         return new_health.ready and old_rejected
 
@@ -935,10 +953,11 @@ class LiveLifecyclePlane:
         operation_id: str,
         created_at: str,
     ) -> None:
+        target = runtime_identity(request)
         await self._runtime.seal(
             self._owner(metadata),
             credential=str(request["serviceCredential"]),
-            protocol_version=str(request["protocolVersion"]),
+            protocol_version=target["protocolVersion"],
             operation_id=operation_id,
             created_at=created_at,
         )

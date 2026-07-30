@@ -1,3 +1,5 @@
+{{- $provisionerImage := include "exomem.hostedProvisionerImage" . -}}
+{{- $lockName := include "exomem.hostedDeploymentLockName" . -}}
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
 metadata:
@@ -43,12 +45,16 @@ spec:
         object.spec.template.spec.dnsPolicy == 'ClusterFirst' &&
         object.spec.template.spec.schedulerName == 'default-scheduler' &&
         object.spec.template.spec.enableServiceLinks == false &&
-        !has(object.spec.parallelism) &&
-        !has(object.spec.completions) &&
-        !has(object.spec.completionMode) &&
-        !has(object.spec.suspend) &&
-        !has(object.spec.manualSelector) &&
-        !has(object.spec.selector) &&
+        object.spec.parallelism == 1 &&
+        object.spec.completions == 1 &&
+        object.spec.completionMode == 'NonIndexed' &&
+        object.spec.suspend == false &&
+        object.spec.manualSelector == false &&
+        dyn(object.spec).podReplacementPolicy == 'TerminatingOrFailed' &&
+        has(object.spec.selector) &&
+        size(object.spec.selector.matchLabels) == 1 &&
+        object.spec.selector.matchLabels['batch.kubernetes.io/controller-uid'] == object.metadata.uid &&
+        !has(dyn(object.spec).managedBy) &&
         !has(object.spec.podFailurePolicy) &&
         !has(object.spec.successPolicy)
       message: The deletion dispatcher may create only bounded one-shot worker Jobs.
@@ -57,7 +63,7 @@ spec:
         !has(object.spec.template.spec.initContainers) &&
         !has(object.spec.template.spec.ephemeralContainers) &&
         object.spec.template.spec.containers[0].name == 'deletion-worker' &&
-        object.spec.template.spec.containers[0].image == {{ .Values.provisioner.image | quote }} &&
+        object.spec.template.spec.containers[0].image == {{ $provisionerImage | quote }} &&
         object.spec.template.spec.containers[0].imagePullPolicy == 'IfNotPresent' &&
         object.spec.template.spec.containers[0].command == ['exomem-deletion-worker'] &&
         object.spec.template.spec.containers[0].terminationMessagePath == '/dev/termination-log' &&
@@ -80,11 +86,18 @@ spec:
         !has(object.spec.template.spec.containers[0].readinessProbe)
       message: The deletion worker may not add exec, HTTP, TCP, or gRPC probes.
     - expression: >-
-        object.spec.template.spec.containers[0].resources.requests.cpu == quantity('25m') &&
-        object.spec.template.spec.containers[0].resources.requests.memory == quantity('96Mi') &&
-        object.spec.template.spec.containers[0].resources.limits.cpu == quantity('500m') &&
-        object.spec.template.spec.containers[0].resources.limits.memory == quantity('384Mi') &&
-        !has(object.spec.template.spec.containers[0].resources.claims)
+        quantity(dyn(object.spec.template.spec.containers[0].resources).requests['cpu']).compareTo(quantity('25m')) == 0 &&
+        quantity(dyn(object.spec.template.spec.containers[0].resources).requests['memory']).compareTo(quantity('96Mi')) == 0 &&
+        quantity(dyn(object.spec.template.spec.containers[0].resources).limits['cpu']).compareTo(quantity('500m')) == 0 &&
+        quantity(dyn(object.spec.template.spec.containers[0].resources).limits['memory']).compareTo(quantity('384Mi')) == 0 &&
+        size(dyn(object.spec.template.spec.containers[0].resources).requests) == 2 &&
+        'cpu' in dyn(object.spec.template.spec.containers[0].resources).requests &&
+        'memory' in dyn(object.spec.template.spec.containers[0].resources).requests &&
+        size(dyn(object.spec.template.spec.containers[0].resources).limits) == 2 &&
+        'cpu' in dyn(object.spec.template.spec.containers[0].resources).limits &&
+        'memory' in dyn(object.spec.template.spec.containers[0].resources).limits &&
+        !has(object.spec.template.spec.containers[0].resources.claims) &&
+        !has(dyn(object.spec.template.spec).resources)
       message: The deletion worker resources must match the reviewed bounded shape.
     - expression: >-
         object.spec.template.spec.containers[0].env.map(item, item.name) == [
@@ -102,6 +115,7 @@ spec:
           'EXOMEM_PROVISIONER_RECOVERY_DELETE_KEY',
           'EXOMEM_PROVISIONER_USER_EXPORT_DELETE_KEY_ID',
           'EXOMEM_PROVISIONER_USER_EXPORT_DELETE_KEY',
+          'EXOMEM_PROVISIONER_DEPLOYMENT_LOCK_PATH',
           'EXOMEM_DELETION_BATCH_SIZE',
           'EXOMEM_PROVISIONER_WORKER_ID',
           'HOME'
@@ -138,9 +152,10 @@ spec:
         object.spec.template.spec.containers[0].env[13].valueFrom.secretKeyRef.key == 'application-key'
       message: The deletion worker provider inputs must match the reviewed exact references.
     - expression: >-
-        object.spec.template.spec.containers[0].env[14].value == '1' &&
-        object.spec.template.spec.containers[0].env[15].valueFrom.fieldRef.fieldPath == "metadata.labels['batch.kubernetes.io/job-name']" &&
-        object.spec.template.spec.containers[0].env[16].value == '/tmp'
+        object.spec.template.spec.containers[0].env[14].value == '/etc/exomem/deployment-lock/exomem-hosted-deployment-lock-v2.json' &&
+        object.spec.template.spec.containers[0].env[15].value == '1' &&
+        object.spec.template.spec.containers[0].env[16].valueFrom.fieldRef.fieldPath == "metadata.labels['batch.kubernetes.io/job-name']" &&
+        object.spec.template.spec.containers[0].env[17].value == '/tmp'
       message: The deletion worker batch and runtime identity must match the reviewed template.
     - expression: >-
         !has(object.spec.template.spec.containers[0].env[0].value) &&
@@ -170,24 +185,39 @@ spec:
         !has(object.spec.template.spec.containers[0].env[13].value) &&
         !has(object.spec.template.spec.containers[0].env[13].valueFrom.secretKeyRef.optional) &&
         !has(object.spec.template.spec.containers[0].env[14].valueFrom) &&
-        !has(object.spec.template.spec.containers[0].env[15].value) &&
-        !has(object.spec.template.spec.containers[0].env[15].valueFrom.fieldRef.apiVersion) &&
-        !has(object.spec.template.spec.containers[0].env[16].valueFrom)
+        !has(object.spec.template.spec.containers[0].env[15].valueFrom) &&
+        !has(object.spec.template.spec.containers[0].env[16].value) &&
+        object.spec.template.spec.containers[0].env[16].valueFrom.fieldRef.apiVersion == 'v1' &&
+        !has(object.spec.template.spec.containers[0].env[17].valueFrom)
       message: The deletion worker environment sources may not add alternate or optional inputs.
     - expression: >-
-        size(object.spec.template.spec.volumes) == 1 &&
+        size(object.spec.template.spec.volumes) == 2 &&
         object.spec.template.spec.volumes[0].name == 'temporary' &&
         has(object.spec.template.spec.volumes[0].emptyDir) &&
-        object.spec.template.spec.volumes[0].emptyDir.sizeLimit == quantity('64Mi') &&
+        quantity(dyn(object.spec.template.spec.volumes[0].emptyDir).sizeLimit).compareTo(quantity('64Mi')) == 0 &&
         !has(object.spec.template.spec.volumes[0].emptyDir.medium) &&
-        size(object.spec.template.spec.containers[0].volumeMounts) == 1 &&
+        object.spec.template.spec.volumes[1].name == 'deployment-lock' &&
+        object.spec.template.spec.volumes[1].configMap.name == {{ $lockName | quote }} &&
+        size(object.spec.template.spec.volumes[1].configMap.items) == 1 &&
+        object.spec.template.spec.volumes[1].configMap.items[0].key == 'exomem-hosted-deployment-lock-v2.json' &&
+        object.spec.template.spec.volumes[1].configMap.items[0].path == 'exomem-hosted-deployment-lock-v2.json' &&
+        !has(dyn(object.spec.template.spec.volumes[1].configMap.items[0]).mode) &&
+        object.spec.template.spec.volumes[1].configMap.defaultMode == 292 &&
+        !has(object.spec.template.spec.volumes[1].configMap.optional) &&
+        size(object.spec.template.spec.containers[0].volumeMounts) == 2 &&
         object.spec.template.spec.containers[0].volumeMounts[0].name == 'temporary' &&
         object.spec.template.spec.containers[0].volumeMounts[0].mountPath == '/tmp' &&
         !has(object.spec.template.spec.containers[0].volumeMounts[0].readOnly) &&
         !has(object.spec.template.spec.containers[0].volumeMounts[0].subPath) &&
         !has(object.spec.template.spec.containers[0].volumeMounts[0].subPathExpr) &&
-        !has(object.spec.template.spec.containers[0].volumeMounts[0].mountPropagation)
-      message: The deletion worker may mount only its bounded temporary volume.
+        !has(object.spec.template.spec.containers[0].volumeMounts[0].mountPropagation) &&
+        object.spec.template.spec.containers[0].volumeMounts[1].name == 'deployment-lock' &&
+        object.spec.template.spec.containers[0].volumeMounts[1].mountPath == '/etc/exomem/deployment-lock' &&
+        object.spec.template.spec.containers[0].volumeMounts[1].readOnly == true &&
+        !has(object.spec.template.spec.containers[0].volumeMounts[1].subPath) &&
+        !has(object.spec.template.spec.containers[0].volumeMounts[1].subPathExpr) &&
+        !has(object.spec.template.spec.containers[0].volumeMounts[1].mountPropagation)
+      message: The deletion worker may mount only its bounded temporary volume and selected deployment lock.
     - expression: >-
         object.spec.template.spec.securityContext.runAsNonRoot == true &&
         object.spec.template.spec.securityContext.runAsUser == 10001 &&
@@ -217,8 +247,12 @@ spec:
         !has(object.spec.template.spec.containers[0].securityContext.windowsOptions)
       message: The deletion worker security context must remain locked down.
     - expression: >-
-        size(object.spec.template.metadata.labels) == 1 &&
+        size(object.spec.template.metadata.labels) == 5 &&
         object.spec.template.metadata.labels['exomem.io/deletion-job'] == 'true' &&
+        object.spec.template.metadata.labels['batch.kubernetes.io/controller-uid'] == object.metadata.uid &&
+        object.spec.template.metadata.labels['controller-uid'] == object.metadata.uid &&
+        object.spec.template.metadata.labels['batch.kubernetes.io/job-name'] == object.metadata.name &&
+        object.spec.template.metadata.labels['job-name'] == object.metadata.name &&
         !has(object.spec.template.metadata.annotations) &&
         !has(object.spec.template.spec.initContainers) &&
         !has(object.spec.template.spec.ephemeralContainers) &&
@@ -227,7 +261,7 @@ spec:
         !has(object.spec.template.spec.hostPID) &&
         !has(object.spec.template.spec.hostIPC) &&
         !has(object.spec.template.spec.shareProcessNamespace) &&
-        !has(object.spec.template.spec.serviceAccount) &&
+        object.spec.template.spec.serviceAccount == 'exomem-deletion-worker' &&
         !has(object.spec.template.spec.nodeName) &&
         !has(object.spec.template.spec.nodeSelector) &&
         !has(object.spec.template.spec.affinity) &&
@@ -245,7 +279,8 @@ spec:
         !has(object.spec.template.spec.readinessGates) &&
         !has(object.spec.template.spec.resourceClaims) &&
         !has(object.spec.template.spec.schedulingGates) &&
-        !has(object.spec.template.spec.overhead) &&
+        !has(dyn(object.spec.template.spec).overhead) &&
+        !has(dyn(object.spec.template.spec).activeDeadlineSeconds) &&
         !has(object.spec.template.spec.os) &&
         !has(object.spec.template.spec.hostUsers)
       message: The deletion worker pod shape may not add scheduling, host, or mutation surfaces.

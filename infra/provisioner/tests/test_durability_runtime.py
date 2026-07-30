@@ -72,6 +72,7 @@ def _deletion_settings(**overrides: object) -> DeletionRuntimeSettings:
         "recovery_delete_key": "recovery-key-secret",
         "user_export_delete_key_id": "export-key-id",
         "user_export_delete_key": "export-key-secret",
+        "deployment_lock_path": Path.cwd() / "selected-deployment-lock.json",
     }
     values.update(overrides)
     return DeletionRuntimeSettings(**values)
@@ -138,6 +139,35 @@ def test_deletion_settings_are_verifier_only_and_bind_exact_bucket_contract() ->
         _deletion_settings(
             provider_recovery_public_key=public_key,
             user_export_bucket="exomem-recovery-deadbeef",
+        )
+
+
+@pytest.mark.asyncio
+async def test_deletion_discard_rejects_a_runtime_lock_mismatch_before_the_workflow() -> None:
+    class Authority:
+        async def current_fence(self, _tenant_id: str) -> int:
+            return 8
+
+    class Workflow:
+        async def discard_candidate(self, _context: EffectContext):
+            raise AssertionError("runtime mismatch must not reach deletion")
+
+        async def destroy_tenant(self, _context: EffectContext):
+            raise AssertionError("wrong action")
+
+    driver = DeletionOnlyDriver(
+        authority=Authority(),
+        workflow=Workflow(),
+        runtime_target_validator=lambda _request, _context: False,
+    )
+    request = _request(operation_id="discard-alpha", tenant_id="tenant-alpha", cell_id="cell-alpha")
+    request.update(releaseVersion="0.22.0", protocolVersion="exomem-hosted.v1")
+
+    with pytest.raises(DriverTerminal, match="PROVISIONER_RELEASE_UNIT_MISMATCH"):
+        await driver.execute(
+            "discard",
+            request,
+            EffectContext("internal", "discard-alpha", "tenant-alpha", "cell-alpha", 8),
         )
 
 

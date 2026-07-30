@@ -131,10 +131,12 @@ def test_hosted_ci_wires_every_static_security_gate() -> None:
         "github.event_name == 'schedule' || "
         "(github.event_name == 'workflow_dispatch' && inputs.external_blackbox)"
     )
-    assert "--fetch-substrate-fixture" in workflow
-    assert "--probe-image" in workflow
     assert "--require-published" in workflow
-    assert "substrate-gateway-contract-selection-v1.json" in workflow
+    assert "DEPLOYMENT_LOCK_PAIR: infra/contracts/exomem-hosted-deployment-lock-pair-v2.json" in workflow
+    assert "verify_hosted_release.py" in workflow
+    assert "--phase \"$DEPLOYMENT_PHASE\"" in workflow
+    assert "--deployment-lock-pair" not in workflow
+    assert "--member-sha256" not in workflow
     assert 'uvx --from "ruff==${RUFF_VERSION}"' in validator
     assert 'uvx --from "mypy==${MYPY_VERSION}"' in validator
     assert '(cd "${repo_root}" && uv lock --check)' in validator
@@ -1557,7 +1559,8 @@ def test_production_composition_contract_binds_release_and_operator_actions() ->
             "exomem-hosted-release-v1",
             "exomem-provisioner-api",
             "exomem-provisioner-worker",
-            "verify_provisioner_image.py",
+            "exomem-hosted-deployment-lock-pair-v2.json",
+            "verify_hosted_release.py",
             "durability-values.json",
             "recovery_bucket_name",
             "user_export_bucket_name",
@@ -1753,9 +1756,10 @@ def test_release_manifest_is_one_fail_closed_deployment_unit(tmp_path: Path) -> 
     validation_values = yaml.safe_load(
         (INFRA / "helm/platform/values.validation.yaml").read_text(encoding="utf-8")
     )
-    registry = json.loads(validation_values["provisioner"]["releaseManifestJson"])[
-        "commandRegistry"
-    ]
+    assert "releaseManifestJson" not in validation_values["provisioner"]
+    registry = json.loads(
+        (INFRA / "contracts/exomem-hosted-release-v1.json").read_text(encoding="utf-8")
+    )["commandRegistry"]
     manifest = {
         "artifact": "exomem-hosted-release",
         "schemaVersion": 1,
@@ -1784,14 +1788,11 @@ def test_release_manifest_is_one_fail_closed_deployment_unit(tmp_path: Path) -> 
     )
     assert stat.S_IMODE(values_path.stat().st_mode) == 0o600
     values = json.loads(values_path.read_text(encoding="utf-8"))
-    assert values == {
-        "provisioner": {
-            "image": "ghcr.io/artexis10/exomem-provisioner@sha256:" + "e" * 64,
-            "releaseManifestJson": json.dumps(manifest, separators=(",", ":"), sort_keys=True),
-            "controlHostname": "memory.example.test",
-            "transferHostname": "transfer.example.test",
-        },
-    }
+    assert values["provisioner"]["image"] == (
+        "ghcr.io/artexis10/exomem-provisioner@sha256:" + "e" * 64
+    )
+    assert values["provisioner"]["controlHostname"] == "memory.example.test"
+    assert values["provisioner"]["transferHostname"] == "transfer.example.test"
     partial = dict(manifest)
     partial.pop("gatewayContractSha256")
     manifest_path.write_text(json.dumps(partial), encoding="utf-8")

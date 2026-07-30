@@ -7,56 +7,56 @@
 
 ## 2. Add Strict Dual-Protocol Models
 
-- [ ] 2.1 Add failing tests for exact v1 regression, strict six-field v2 targets, v2 health identity, mixed envelopes, unknown fields, and bounded content-free failures
-- [ ] 2.2 Freeze the current v1 request/final maps and add separate header-selected v2 models for all 14 actions, including explicit target-free export-reference and tenant-destroy requests
-- [ ] 2.3 Add one pure runtime-target accessor that reads untouched v1 top-level identity or required v2 `runtimeTarget` without rewriting persisted request bodies
-- [ ] 2.4 Route API validation, pending/final replay, outer health metadata, and worker response validation through the selected exact wire protocol
+- [x] 2.1 Add failing tests for exact v1 regression, strict six-field v2 targets, v2 health identity, mixed envelopes, unknown fields, and bounded content-free failures
+- [x] 2.2 Freeze the current v1 request/final maps and add separate header-selected v2 models for all 14 actions, including explicit target-free export-reference and tenant-destroy requests
+- [x] 2.3 Add one pure runtime-target accessor that reads untouched v1 top-level identity or required v2 `runtimeTarget` without rewriting persisted request bodies
+- [x] 2.4 Route API validation, pending/final replay, outer health metadata, and worker response validation through the selected exact wire protocol
 
 ## 3. Persist Protocol And Enforce Replay Admission
 
-- [ ] 3.1 Add failing repository and PostgreSQL-upgrade tests for v1 backfill/default, protocol immutability, cross-version conflict, atomic replay-only admission, and D0-compatible inserts
-- [ ] 3.2 Add the additive provisioner operation wire-protocol migration with permanent server-side v1 default
-- [ ] 3.3 Include stored wire protocol in operation snapshots and transactional idempotency comparison without changing the canonical v1 request body hash
-- [ ] 3.4 Implement explicit expand and contract modes plus the verified legacy-v1 runtime catalog so current cataloged v1 releases survive expansion and contract mode accepts exact persisted v1 replay only
-- [ ] 3.5 Prove existing monotonic-fence behavior still rejects otherwise exact stale v1 replay
+- [x] 3.1 Add failing repository and PostgreSQL-upgrade tests for v1 backfill/default, protocol immutability, cross-version conflict, atomic replay-only admission, and D0-compatible inserts
+- [x] 3.2 Add the additive provisioner operation wire-protocol migration with permanent server-side v1 default
+- [x] 3.3 Include stored wire protocol in operation snapshots and transactional idempotency comparison without changing the canonical v1 request body hash
+- [x] 3.4 Implement explicit expand and contract modes plus the verified legacy-v1 runtime catalog so current cataloged v1 releases survive expansion and contract mode accepts exact persisted v1 replay only
+- [x] 3.5 Prove existing monotonic-fence behavior still rejects otherwise exact stale v1 replay
 
 ## 4. Validate And Observe Runtime Identity
 
-- [ ] 4.1 Add failing lifecycle tests proving runtime-changing effects require static lock/target match while restore-candidate, salvage, discard, and destroy do not require a live probe
-- [ ] 4.2 Replace direct legacy release/protocol field reads with the pure target accessor across lifecycle, live, durability, and provider paths
-- [ ] 4.3 Extend authenticated private-cell probing to the selected agent-contract route and derive the six observed identity fields without conflating gateway, capability, command, or schema claims
-- [ ] 4.4 Fail readiness, routing, binding, activation, and promotion on every one-field mismatch while preserving the exact flat v1 health response
-- [ ] 4.5 Run focused API, repository, lifecycle, durability, live-provider, and PostgreSQL 17 suites
+- [x] 4.1 Add failing lifecycle tests proving runtime-changing effects require static lock/target match while restore-candidate, salvage, discard, and destroy do not require a live probe
+- [x] 4.2 Replace direct legacy release/protocol field reads with the pure target accessor across lifecycle, live, durability, and provider paths
+- [x] 4.3 Extend authenticated private-cell probing to the selected agent-contract route and derive the six observed identity fields without conflating gateway, capability, command, or schema claims
+- [x] 4.4 Fail readiness, routing, binding, activation, and promotion on every one-field mismatch while preserving the exact flat v1 health response
+- [x] 4.5 Run focused API, repository, lifecycle, durability, live-provider, and PostgreSQL 17 suites
 
 ## 5. Freeze The Cross-Language Contract
 
-- [ ] 5.1 Preserve the canonical v1 corpus bytes and add a separate canonical v2 corpus covering all requests, headers, pending/final responses, mismatches, replay failures, and error envelopes
-- [ ] 5.2 Validate both corpora against the Python Pydantic models and assert the canonical v1 SHA-256
-- [ ] 5.3 Make the paired TypeScript tests consume the exact corpus bytes or a hash-pinned copy and assert header/body agreement plus strict response parsing
+- [x] 5.1 Preserve the canonical v1 corpus bytes and add a separate canonical v2 corpus covering all requests, headers, pending/final responses, mismatches, replay failures, and error envelopes
+- [x] 5.2 Validate both corpora against the Python Pydantic models and assert the canonical v1 SHA-256
+- [x] 5.3 Make the paired TypeScript tests consume the exact corpus bytes or a hash-pinned copy and assert header/body agreement plus strict response parsing
 
 ## 6. Compose Verified Deployment Lineage
 
-- [ ] 6.1 Add failing composition tests for candidate attestation verification, exact candidate-byte hashing, unsafe/stale/duplicate legacy runtime evidence, deterministic expand/contract locks, and atomic private writes
-- [ ] 6.2 Implement fixed no-shell ancestry and source-closure guards for the runtime and provisioner path sets, including add/delete/rename, missing, shallow, and non-ancestor failures
-- [ ] 6.3 Add a strict composer that verifies both candidate records, exact hash-pinned v0.35.1 runtime evidence, and the authoritative bounded legacy-v1 runtime catalog plus canonical release-set digest before producing phase locks
-- [ ] 6.4 Add v2 expand/contract lock verification containing identical component/catalog lineage, the six-field target, immutable admission mode, composition proof, and exact rollback tuple without package or compatibility data
-- [ ] 6.5 Update release preparation and verification so production accepts one exact member of the v2 lock pair, derives both immutable images and admission mode from it, and has no free overrides
-- [ ] 6.6 Update platform Helm templates, values, admission expressions, ConfigMap/path, and tests to consume both images and runtime settings from the selected exact phase lock
-- [ ] 6.7 Rewire hosted-infrastructure release proof to reverify candidate attestations, forward and legacy runtime identity, provisioner smoke, source closure, and the exact phase lock
+- [x] 6.1 Add failing composition tests for candidate attestation verification, exact candidate-byte hashing, unsafe/stale/duplicate legacy runtime evidence, deterministic expand/contract locks, and atomic private writes
+- [x] 6.2 Implement fixed no-shell ancestry and source-closure guards for the runtime and provisioner path sets, including add/delete/rename, missing, shallow, and non-ancestor failures
+- [x] 6.3 Add a strict composer that verifies both candidate records, exact hash-pinned v0.35.1 runtime evidence, and the authoritative bounded legacy-v1 runtime catalog plus canonical release-set digest before producing phase locks
+- [x] 6.4 Add v2 expand/contract lock verification containing identical component/catalog lineage, the six-field target, immutable admission mode, composition proof, and exact rollback tuple without package or compatibility data
+- [x] 6.5 Update release preparation and verification so production accepts one exact member of the v2 lock pair, derives both immutable images and admission mode from it, and has no free overrides
+- [x] 6.6 Update platform Helm templates, values, admission expressions, ConfigMap/path, and tests to consume both images and runtime settings from the selected exact phase lock
+- [x] 6.7 Rewire hosted-infrastructure release proof to reverify candidate attestations, forward and legacy runtime identity, provisioner smoke, source closure, and the exact phase lock
 
 ## 7. Implement The Paired Substrate Consumer
 
-- [ ] 7.1 Add failing TypeScript tests for default-off v1 issuance, explicit v2 issuance, stored retry selection, cross-version idempotency, strict health parsing, and runtime-only identity comparison
-- [ ] 7.2 Add migration 0037 with only the immutable provisioner-wire-protocol discriminator, v1 backfill/default, allowed-value constraint, and no duplicate identity columns
-- [ ] 7.3 Add strict v1/v2 serializers and response parsers while preserving exact v1 bodies and keeping runtime Hosted protocol separate
-- [ ] 7.4 Persist the selected protocol before first issuance; make retries use stored state and let only normalized `true` enable v2 for new operations
-- [ ] 7.5 Snapshot and build v2 `runtimeTarget` for every cell-scoped action from authoritative candidate/cell state, use explicit target-free v2 for export-reference and tenant-destroy actions, and compare only returned `runtimeIdentity`
-- [ ] 7.6 Keep compatibility and Claude/OpenAI package/archive lineage candidate-owned; derive any constraint-required compatibility observation locally rather than from health
-- [ ] 7.7 Run focused Node tests, migration/integration tests, lint, TypeScript checking, and strict Substrate OpenSpec validation
+- [x] 7.1 Add failing TypeScript tests for default-off v1 issuance, explicit v2 issuance, stored retry selection, cross-version idempotency, strict health parsing, and runtime-only identity comparison
+- [x] 7.2 Add migration 0037 with only the immutable provisioner-wire-protocol discriminator, v1 backfill/default, allowed-value constraint, and no duplicate identity columns
+- [x] 7.3 Add strict v1/v2 serializers and response parsers while preserving exact v1 bodies and keeping runtime Hosted protocol separate
+- [x] 7.4 Persist the selected protocol before first issuance; make retries use stored state and let only normalized `true` enable v2 for new operations
+- [x] 7.5 Snapshot and build v2 `runtimeTarget` for every cell-scoped action from authoritative candidate/cell state, use explicit target-free v2 for export-reference and tenant-destroy actions, and compare only returned `runtimeIdentity`
+- [x] 7.6 Keep compatibility and Claude/OpenAI package/archive lineage candidate-owned; derive any constraint-required compatibility observation locally rather than from health
+- [x] 7.7 Run focused Node tests, migration/integration tests, lint, TypeScript checking, and strict Substrate OpenSpec validation
 
 ## 8. Publish D1 And Finalize The Lock
 
-- [ ] 8.1 Integrate and independently review the Exomem implementation without changing guarded root runtime inputs
+- [x] 8.1 Integrate and independently review the Exomem implementation without changing guarded root runtime inputs
 - [ ] 8.2 Merge the Exomem implementation and verify the resulting provisioner producer publishes a new D1 candidate with valid image and candidate attestations
 - [ ] 8.3 Generate and independently verify current v0.35.1 runtime evidence plus every authoritative legacy-v1 runtime unit; reject stale or unreferenced manifests
 - [ ] 8.4 Prove R and D1 source closure, prove D0 fails as the forward candidate, and compose the exact expand/contract lock pair without placeholders
