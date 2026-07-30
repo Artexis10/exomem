@@ -12,6 +12,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 PREPARE = ROOT / "infra/scripts/prepare_hosted_release.py"
 VERIFIER = ROOT / "infra/scripts/verify_hosted_release.py"
+V1_CORPUS = ROOT / "infra/provisioner/tests/fixtures/provisioner-wire-v1.json"
 
 
 def _module(path: Path = PREPARE):
@@ -149,21 +150,21 @@ def _write_evidence(lock: dict[str, object], directory: Path) -> None:
             {"name": "status", "readOnly": True, "mode": "read", "tier": 1, "capability": "core"}
         ],
     }
-    corpus = [{"request": "frozen-v1", "response": "accepted"}]
     evidence = [
         forward,
         authority,
         legacy_manifest,
-        corpus,
         *(unit["contract"] for unit in composition["legacyCatalog"]),
     ]
     digests = [hashlib.sha256(_canonical(item)).hexdigest() for item in evidence]
     composition["forwardContractSha256"] = digests[0]
     composition["authoritativeLegacyReleaseSetSha256"] = digests[1]
     lock["rollback"]["legacyManifestSha256"] = digests[2]  # type: ignore[index]
-    lock["rollback"]["v1CorpusSha256"] = digests[3]  # type: ignore[index]
+    corpus_raw = V1_CORPUS.read_bytes()
+    lock["rollback"]["v1CorpusSha256"] = hashlib.sha256(corpus_raw).hexdigest()  # type: ignore[index]
     for index, value in enumerate(evidence):
         (directory / f"{index}.json").write_bytes(_canonical(value))
+    (directory / "provisioner-wire-v1.json").write_bytes(corpus_raw)
 
 
 def test_fixed_lock_evidence_revalidates_all_reviewed_inputs(tmp_path: Path) -> None:
@@ -174,6 +175,26 @@ def test_fixed_lock_evidence_revalidates_all_reviewed_inputs(tmp_path: Path) -> 
     _write_evidence(lock, evidence)
 
     verifier._verify_lock_evidence(lock, evidence, verifier._load_script("hosted_composition_lock.py"))
+
+
+def test_fixed_lock_evidence_rejects_a_noncanonical_v1_corpus(tmp_path: Path) -> None:
+    verifier = _module(VERIFIER)
+    pair = _pair()
+    lock = pair["locks"][0]  # type: ignore[index]
+    evidence = tmp_path / "evidence"
+    _write_evidence(lock, evidence)
+    forged = b'{"actions":{},"errors":[],"protocol":"exomem-cell-provisioner.v1"}\n'
+    (evidence / "forged-corpus.json").write_bytes(forged)
+    lock["rollback"]["v1CorpusSha256"] = hashlib.sha256(forged).hexdigest()  # type: ignore[index]
+
+    with pytest.raises(ValueError, match="frozen v1 corpus digest"):
+        verifier._verify_lock_evidence(lock, evidence, verifier._load_script("hosted_composition_lock.py"))
+
+
+def test_frozen_v1_corpus_is_validated_through_the_strict_wire_models() -> None:
+    verifier = _module(VERIFIER)
+
+    verifier._validate_frozen_v1_corpus(V1_CORPUS.read_bytes())
 
 
 def test_fixed_lock_evidence_rejects_duplicate_digest_matches(tmp_path: Path) -> None:

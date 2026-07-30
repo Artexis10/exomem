@@ -20,6 +20,7 @@ import time
 import urllib.error
 import urllib.request
 import uuid
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -59,6 +60,8 @@ _MAX_DISCOVERED_OCI_BYTES = 64 * 1024 * 1024
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 _CANONICAL_DEPLOYMENT_LOCK_PAIR = _REPOSITORY_ROOT / "infra/contracts/exomem-hosted-deployment-lock-pair-v2.json"
 _CANONICAL_DEPLOYMENT_LOCK_EVIDENCE = _REPOSITORY_ROOT / "infra/contracts/exomem-hosted-deployment-lock-evidence-v2"
+_FROZEN_V1_CORPUS = _REPOSITORY_ROOT / "infra/provisioner/tests/fixtures/provisioner-wire-v1.json"
+_FROZEN_V1_CORPUS_SHA256 = "ced714a5aa204a837e22cab831262cc0ae4766e44720b2896e61b8c157ddd3b5"
 _SUBSTRATE_FIXTURE_SHA256 = "ba3c211377616ba87877947ba7392ffa66e9769a9f631027a141ce5cccc40054"
 _RELEASE_KEYS = {
     "artifact",
@@ -638,7 +641,12 @@ def _load_script(name: str) -> Any:
 
 
 def _evidence_bytes(
-    directory: Path, expected_sha256: str, *, label: str, composer: Any
+    directory: Path,
+    expected_sha256: str,
+    *,
+    label: str,
+    composer: Any,
+    require_canonical_json: bool = True,
 ) -> tuple[Path, bytes]:
     """Select one bounded, canonical evidence file by its reviewed digest."""
 
@@ -673,7 +681,7 @@ def _evidence_bytes(
         raise ValueError(f"{label} evidence did not yield exactly one reviewed file")
     path, raw = matches[0]
     value = _decode_json(raw, label=f"{label} evidence")
-    if raw != composer._canonical(value):
+    if require_canonical_json and raw != composer._canonical(value):
         raise ValueError(f"{label} evidence is not canonical JSON")
     return path, raw
 
@@ -702,6 +710,103 @@ def _validate_legacy_manifest(manifest: dict[str, Any], lock: dict[str, Any]) ->
             matches.append(unit)
     if len(matches) != 1:
         raise ValueError("rollback manifest does not equal one reviewed legacy runtime identity")
+
+
+def _substitute_v1_corpus_tokens(value: object) -> object:
+    if value == "$ACTIVE_SERVICE_CREDENTIAL":
+        return "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8"
+    if value == "$NEXT_SERVICE_CREDENTIAL":
+        return "ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8"
+    if value == "$NOW_PLUS_86400_SECONDS":
+        return (datetime.now(UTC) + timedelta(days=1)).isoformat().replace("+00:00", "Z")
+    if value == "$NOW_PLUS_600_SECONDS":
+        return (datetime.now(UTC) + timedelta(minutes=10)).isoformat().replace("+00:00", "Z")
+    if isinstance(value, dict):
+        return {name: _substitute_v1_corpus_tokens(item) for name, item in value.items()}
+    if isinstance(value, list):
+        return [_substitute_v1_corpus_tokens(item) for item in value]
+    return value
+
+
+def _validate_frozen_v1_corpus(raw: bytes) -> None:
+    """Require the exact frozen corpus and validate every legacy wire shape."""
+
+    if hashlib.sha256(raw).hexdigest() != _FROZEN_V1_CORPUS_SHA256:
+        raise ValueError("rollback v1 corpus does not have the frozen v1 corpus digest")
+    if _FROZEN_V1_CORPUS.is_symlink() or not _FROZEN_V1_CORPUS.is_file():
+        raise ValueError("repository frozen v1 corpus is unavailable")
+    frozen = _FROZEN_V1_CORPUS.read_bytes()
+    if hashlib.sha256(frozen).hexdigest() != _FROZEN_V1_CORPUS_SHA256 or raw != frozen:
+        raise ValueError("rollback v1 corpus differs from the repository frozen corpus")
+    provisioner_source = os.fspath(_REPOSITORY_ROOT / "infra/provisioner/src")
+    inserted = provisioner_source not in sys.path
+    if inserted:
+        sys.path.insert(0, provisioner_source)
+    try:
+        from exomem_provisioner.schemas import FailureResponse, PendingResponse, request_plaintext
+        from exomem_provisioner.wire_protocol import (
+            FINAL_MODELS_BY_PROTOCOL,
+            REQUEST_MODELS_BY_PROTOCOL,
+            WIRE_PROTOCOL_V1,
+        )
+    except ImportError as error:
+        raise ValueError("strict provisioner wire models are unavailable") from error
+    finally:
+        if inserted:
+            sys.path.remove(provisioner_source)
+    payload = _decode_json(raw, label="rollback v1 corpus")
+    if not isinstance(payload, dict) or set(payload) != {
+        "schemaVersion",
+        "protocol",
+        "actions",
+        "errors",
+    }:
+        raise ValueError("rollback v1 corpus envelope is invalid")
+    if (
+        payload["schemaVersion"] != 1
+        or payload["protocol"] != WIRE_PROTOCOL_V1
+        or not isinstance(payload["actions"], dict)
+    ):
+        raise ValueError("rollback v1 corpus protocol is invalid")
+    request_models = REQUEST_MODELS_BY_PROTOCOL[WIRE_PROTOCOL_V1]
+    final_models = FINAL_MODELS_BY_PROTOCOL[WIRE_PROTOCOL_V1]
+    if set(payload["actions"]) != set(request_models):
+        raise ValueError("rollback v1 corpus action coverage is invalid")
+    try:
+        for action, sample in payload["actions"].items():
+            if not isinstance(sample, dict):
+                raise ValueError("rollback v1 corpus action is invalid")
+            request = _substitute_v1_corpus_tokens(sample["request"])
+            model = request_models[action].model_validate(request)
+            if request_plaintext(model) != request:
+                raise ValueError("rollback v1 corpus request shape is invalid")
+            pending = sample["pending"]
+            if not isinstance(pending, dict) or pending.get("status") != 202 or pending.get("headers") != {
+                "retry-after": "2"
+            }:
+                raise ValueError("rollback v1 corpus pending shape is invalid")
+            PendingResponse.model_validate(pending["body"])
+            final = sample["final"]
+            response_model = final_models[action]
+            if response_model is None:
+                if final != {"status": 204, "body": None}:
+                    raise ValueError("rollback v1 corpus final shape is invalid")
+            else:
+                if not isinstance(final, dict) or final.get("status") != 200:
+                    raise ValueError("rollback v1 corpus final shape is invalid")
+                response_model.model_validate(_substitute_v1_corpus_tokens(final["body"]))
+        failures = payload["errors"]
+        if not isinstance(failures, list) or not failures:
+            raise ValueError("rollback v1 corpus failures are invalid")
+        for failure in failures:
+            if not isinstance(failure, dict) or failure.get("status") not in {400, 409, 422, 500, 503}:
+                raise ValueError("rollback v1 corpus failure status is invalid")
+            body = failure.get("body")
+            FailureResponse.model_validate(body)
+            if "sentinel" in json.dumps(body):
+                raise ValueError("rollback v1 corpus failure body is invalid")
+    except (KeyError, TypeError, ValueError) as error:
+        raise ValueError("rollback v1 corpus does not satisfy strict v1 wire models") from error
 
 
 def _verify_lock_evidence(lock: dict[str, Any], directory: Path, composer: Any) -> None:
@@ -749,15 +854,16 @@ def _verify_lock_evidence(lock: dict[str, Any], directory: Path, composer: Any) 
     )
     _validate_legacy_manifest(legacy_manifest, lock)
     rollback = composer._rollback(lock["rollback"])
+    if rollback["v1CorpusSha256"] != _FROZEN_V1_CORPUS_SHA256:
+        raise ValueError("rollback v1 corpus does not use the frozen v1 corpus digest")
     _, corpus_raw = _evidence_bytes(
         directory,
         rollback["v1CorpusSha256"],
         label="rollback v1 corpus",
         composer=composer,
+        require_canonical_json=False,
     )
-    corpus = _decode_json(corpus_raw, label="rollback v1 corpus evidence")
-    if not isinstance(corpus, (dict, list)) or not corpus:
-        raise ValueError("rollback v1 corpus evidence is invalid")
+    _validate_frozen_v1_corpus(corpus_raw)
     _ = forward_path, authority_path, legacy_manifest_path
 
 
