@@ -1968,6 +1968,54 @@ def test_exact_k3s_deletion_dispatcher_accepts_defaulted_lock_job_and_rejects_ot
     assert denied.returncode != 0
     assert "bounded temporary volume and selected deployment lock" in denied.stderr
 
+    extra_resource = job("exomem-deletion-4444444444444444")
+    extra_resource["spec"]["template"]["spec"]["containers"][0]["resources"]["requests"][
+        "ephemeral-storage"
+    ] = "1Gi"
+    denied = _kubectl(
+        k3s,
+        ["create", "--dry-run=server", "--filename=-", f"--as={dispatcher}"],
+        documents=[extra_resource],
+        check=False,
+    )
+    assert denied.returncode != 0
+    assert "resources must match the reviewed bounded shape" in denied.stderr
+
+    item_mode = job("exomem-deletion-5555555555555555")
+    item_mode["spec"]["template"]["spec"]["volumes"][1]["configMap"]["items"][0][
+        "mode"
+    ] = 0o600
+    denied = _kubectl(
+        k3s,
+        ["create", "--dry-run=server", "--filename=-", f"--as={dispatcher}"],
+        documents=[item_mode],
+        check=False,
+    )
+    assert denied.returncode != 0
+    assert "bounded temporary volume and selected deployment lock" in denied.stderr
+
+    managed = job("exomem-deletion-6666666666666666")
+    managed["spec"]["managedBy"] = "example.com/deletion-controller"
+    denied = _kubectl(
+        k3s,
+        ["create", "--dry-run=server", "--filename=-", f"--as={dispatcher}"],
+        documents=[managed],
+        check=False,
+    )
+    assert denied.returncode != 0
+    assert "bounded one-shot worker Jobs" in denied.stderr
+
+    pod_deadline = job("exomem-deletion-7777777777777777")
+    pod_deadline["spec"]["template"]["spec"]["activeDeadlineSeconds"] = 60
+    denied = _kubectl(
+        k3s,
+        ["create", "--dry-run=server", "--filename=-", f"--as={dispatcher}"],
+        documents=[pod_deadline],
+        check=False,
+    )
+    assert denied.returncode != 0
+    assert "pod shape may not add scheduling, host, or mutation surfaces" in denied.stderr
+
 
 @pytest.mark.skipif(
     not RUN_RUNTIME,

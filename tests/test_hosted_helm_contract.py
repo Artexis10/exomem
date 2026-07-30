@@ -936,18 +936,24 @@ def test_deletion_dispatcher_admission_closes_probe_and_container_override_surfa
     assert f"{container}.resources.limits.memory == quantity('384Mi')" not in expressions
     assert "quantity(dyn(object.spec.template.spec.containers[0].resources).requests['cpu']).compareTo(quantity('25m')) == 0" in expressions
     assert "quantity(dyn(object.spec.template.spec.containers[0].resources).limits['memory']).compareTo(quantity('384Mi')) == 0" in expressions
+    assert "size(dyn(object.spec.template.spec.containers[0].resources).requests) == 2" in expressions
+    assert "size(dyn(object.spec.template.spec.containers[0].resources).limits) == 2" in expressions
+    assert "!has(dyn(object.spec.template.spec).resources)" in expressions
     assert "EXOMEM_PROVISIONER_DEPLOYMENT_LOCK_PATH" in expressions
     assert f"{container}.env[14].value == '/etc/exomem/deployment-lock/exomem-hosted-deployment-lock-v2.json'" in expressions
     assert 'volumes[1].configMap.name == "exomem-hosted-deployment-lock-v2-97c1fc1bf93e0492"' in expressions
     assert "volumes[1].configMap.items[0].key == 'exomem-hosted-deployment-lock-v2.json'" in expressions
     assert "volumes[1].configMap.defaultMode == 292" in expressions
+    assert "!has(dyn(object.spec.template.spec.volumes[1].configMap.items[0]).mode)" in expressions
     assert "!has(object.spec.template.spec.volumes[1].configMap.defaultMode)" not in expressions
     assert "quantity(dyn(object.spec.template.spec.volumes[0].emptyDir).sizeLimit).compareTo(quantity('64Mi')) == 0" in expressions
     assert "!has(dyn(object.spec.template.spec).overhead)" in expressions
+    assert "!has(dyn(object.spec.template.spec).activeDeadlineSeconds)" in expressions
     assert "object.spec.parallelism == 1" in expressions
     assert "object.spec.completions == 1" in expressions
     assert "object.spec.completionMode == 'NonIndexed'" in expressions
     assert "dyn(object.spec).podReplacementPolicy == 'TerminatingOrFailed'" in expressions
+    assert "!has(dyn(object.spec).managedBy)" in expressions
     assert "object.spec.selector.matchLabels['batch.kubernetes.io/controller-uid'] == object.metadata.uid" in expressions
     assert "object.spec.template.metadata.labels['batch.kubernetes.io/controller-uid'] == object.metadata.uid" in expressions
     assert "object.spec.template.spec.serviceAccount == 'exomem-deletion-worker'" in expressions

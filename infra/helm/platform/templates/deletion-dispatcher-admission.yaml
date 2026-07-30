@@ -54,6 +54,7 @@ spec:
         has(object.spec.selector) &&
         size(object.spec.selector.matchLabels) == 1 &&
         object.spec.selector.matchLabels['batch.kubernetes.io/controller-uid'] == object.metadata.uid &&
+        !has(dyn(object.spec).managedBy) &&
         !has(object.spec.podFailurePolicy) &&
         !has(object.spec.successPolicy)
       message: The deletion dispatcher may create only bounded one-shot worker Jobs.
@@ -89,7 +90,14 @@ spec:
         quantity(dyn(object.spec.template.spec.containers[0].resources).requests['memory']).compareTo(quantity('96Mi')) == 0 &&
         quantity(dyn(object.spec.template.spec.containers[0].resources).limits['cpu']).compareTo(quantity('500m')) == 0 &&
         quantity(dyn(object.spec.template.spec.containers[0].resources).limits['memory']).compareTo(quantity('384Mi')) == 0 &&
-        !has(object.spec.template.spec.containers[0].resources.claims)
+        size(dyn(object.spec.template.spec.containers[0].resources).requests) == 2 &&
+        'cpu' in dyn(object.spec.template.spec.containers[0].resources).requests &&
+        'memory' in dyn(object.spec.template.spec.containers[0].resources).requests &&
+        size(dyn(object.spec.template.spec.containers[0].resources).limits) == 2 &&
+        'cpu' in dyn(object.spec.template.spec.containers[0].resources).limits &&
+        'memory' in dyn(object.spec.template.spec.containers[0].resources).limits &&
+        !has(object.spec.template.spec.containers[0].resources.claims) &&
+        !has(dyn(object.spec.template.spec).resources)
       message: The deletion worker resources must match the reviewed bounded shape.
     - expression: >-
         object.spec.template.spec.containers[0].env.map(item, item.name) == [
@@ -193,6 +201,7 @@ spec:
         size(object.spec.template.spec.volumes[1].configMap.items) == 1 &&
         object.spec.template.spec.volumes[1].configMap.items[0].key == 'exomem-hosted-deployment-lock-v2.json' &&
         object.spec.template.spec.volumes[1].configMap.items[0].path == 'exomem-hosted-deployment-lock-v2.json' &&
+        !has(dyn(object.spec.template.spec.volumes[1].configMap.items[0]).mode) &&
         object.spec.template.spec.volumes[1].configMap.defaultMode == 292 &&
         !has(object.spec.template.spec.volumes[1].configMap.optional) &&
         size(object.spec.template.spec.containers[0].volumeMounts) == 2 &&
@@ -271,6 +280,7 @@ spec:
         !has(object.spec.template.spec.resourceClaims) &&
         !has(object.spec.template.spec.schedulingGates) &&
         !has(dyn(object.spec.template.spec).overhead) &&
+        !has(dyn(object.spec.template.spec).activeDeadlineSeconds) &&
         !has(object.spec.template.spec.os) &&
         !has(object.spec.template.spec.hostUsers)
       message: The deletion worker pod shape may not add scheduling, host, or mutation surfaces.
