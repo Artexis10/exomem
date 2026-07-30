@@ -23,7 +23,13 @@
 
 ## 4. Verification and Delivery
 
-- [ ] 4.1 Run the focused candidate, runtime-distribution, and provisioner-distribution suites plus Ruff, targeted mypy, strict OpenSpec validation, and the repository hosted validator.
-- [ ] 4.2 Obtain an independent workflow/security review and an independent exact-HEAD verifier pass before merge.
-- [ ] 4.3 Merge the producer change, observe the first eligible main-branch provisioner candidate and OCI verification, and confirm no runtime candidate is produced before the `0.35.1` release.
-- [ ] 4.4 Allow the `0.35.1` release only after the producer proof is green; retain its exact runtime candidate and release assets before starting aggregate release composition.
+- [x] 4.1 Run the focused candidate, runtime-distribution, and provisioner-distribution suites plus Ruff, targeted mypy, strict OpenSpec validation, and the repository hosted validator.
+- [x] 4.2 Obtain an independent workflow/security review and an independent exact-HEAD verifier pass before merge.
+- [x] 4.3 Merge the producer change, observe the first eligible main-branch provisioner candidate and OCI verification, and confirm no runtime candidate is produced before the `0.35.1` release.
+- [x] 4.4 Allow the `0.35.1` release only after the producer proof is green; retain its exact runtime candidate and release assets before starting aggregate release composition.
+
+Evidence:
+
+- Producer PR #357 merged at `9c2914881341d9444262a90789ba82435c4423ec` after focused tests, Ruff, mypy, strict OpenSpec, hosted validation, independent security review, and exact-head verification passed.
+- Canonical-main provisioner run `30512025964` published and verified `ghcr.io/artexis10/exomem-provisioner@sha256:b3f2f12691207200a57dd193f3669a8f2cd2f7c058105b0d4af691f3057097df`; its OCI candidate attachment `sha256:49092a58f970117ac98dacf5a9f803cc77a1aaa34f00f9db0b37e1b8a344acda` was independently pulled and byte-compared.
+- Release PR #355 merged only after that proof. Release run `30512612543` published `v0.35.1` from `f1472c297d9256a28c9706bb666e249b64cfd804`, retained all three uniquely named runtime evidence assets, and independently verified `ghcr.io/artexis10/exomem@sha256:3264271d7292c713e1f6ba6ae4a11a4b8e8c52a58a1a06e1d13726a515175ca3` from both the release bundle and GHCR.
