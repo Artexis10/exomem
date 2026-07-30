@@ -1,0 +1,134 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://exomem.substratesystems.io/contracts/exomem-hosted-deployment-lock-v2.schema.json",
+  "title": "Exomem Hosted deployment lock v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["artifact", "schemaVersion", "admissionMode", "components", "runtimeTarget", "composition", "rollback"],
+  "properties": {
+    "artifact": {"const": "exomem-hosted-deployment-lock"},
+    "schemaVersion": {"const": 2},
+    "admissionMode": {"enum": ["expand", "contract"]},
+    "components": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["runtime", "provisioner"],
+      "properties": {
+        "runtime": {"$ref": "#/$defs/runtimeComponent"},
+        "provisioner": {"$ref": "#/$defs/provisionerComponent"}
+      }
+    },
+    "runtimeTarget": {"$ref": "#/$defs/runtimeTarget"},
+    "composition": {"$ref": "#/$defs/composition"},
+    "rollback": {"$ref": "#/$defs/rollback"}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "runtimeImage": {"type": "string", "pattern": "^ghcr\\.io/artexis10/exomem@sha256:[0-9a-f]{64}$"},
+    "provisionerImage": {"type": "string", "pattern": "^ghcr\\.io/artexis10/exomem-provisioner@sha256:[0-9a-f]{64}$"},
+    "runtimeTarget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["releaseVersion", "protocolVersion", "agentProfile", "gatewayContractDigest", "commandFingerprint", "schemaDigest"],
+      "properties": {
+        "releaseVersion": {"type": "string", "minLength": 1},
+        "protocolVersion": {"type": "string", "minLength": 1},
+        "agentProfile": {"type": "string", "minLength": 1},
+        "gatewayContractDigest": {"$ref": "#/$defs/sha256"},
+        "commandFingerprint": {"$ref": "#/$defs/sha256"},
+        "schemaDigest": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "runtimeComponent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["image", "sourceCommit", "candidateSha256"],
+      "properties": {
+        "image": {"$ref": "#/$defs/runtimeImage"},
+        "sourceCommit": {"$ref": "#/$defs/commit"},
+        "candidateSha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "provisionerComponent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["image", "sourceCommit", "candidateSha256", "wireProtocol"],
+      "properties": {
+        "image": {"$ref": "#/$defs/provisionerImage"},
+        "sourceCommit": {"$ref": "#/$defs/commit"},
+        "candidateSha256": {"$ref": "#/$defs/sha256"},
+        "wireProtocol": {"const": "exomem-cell-provisioner.v2"}
+      }
+    },
+    "closure": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["candidateCommit", "compositionCommit", "paths"],
+      "properties": {
+        "candidateCommit": {"$ref": "#/$defs/commit"},
+        "compositionCommit": {"$ref": "#/$defs/commit"},
+        "paths": {"type": "array", "items": {"type": "string"}, "minItems": 1}
+      }
+    },
+    "legacyUnit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["releaseVersion", "protocolVersion", "runtimeImage", "sourceCommit", "contractSha256", "contract"],
+      "properties": {
+        "releaseVersion": {"type": "string", "minLength": 1},
+        "protocolVersion": {"type": "string", "minLength": 1},
+        "runtimeImage": {"$ref": "#/$defs/runtimeImage"},
+        "sourceCommit": {"$ref": "#/$defs/commit"},
+        "contractSha256": {"$ref": "#/$defs/sha256"},
+        "contract": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["releaseVersion", "protocolVersion", "agentProfile", "gatewayContractDigest", "commandFingerprint", "schemaDigest", "runtimeImage", "sourceCommit"],
+          "properties": {
+            "releaseVersion": {"type": "string", "minLength": 1},
+            "protocolVersion": {"type": "string", "minLength": 1},
+            "agentProfile": {"type": "string", "minLength": 1},
+            "gatewayContractDigest": {"$ref": "#/$defs/sha256"},
+            "commandFingerprint": {"$ref": "#/$defs/sha256"},
+            "schemaDigest": {"$ref": "#/$defs/sha256"},
+            "runtimeImage": {"$ref": "#/$defs/runtimeImage"},
+            "sourceCommit": {"$ref": "#/$defs/commit"}
+          }
+        }
+      }
+    },
+    "composition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["commit", "sourceClosure", "forwardContractSha256", "legacyCatalog", "legacyReleaseSetSha256"],
+      "properties": {
+        "commit": {"$ref": "#/$defs/commit"},
+        "sourceClosure": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["runtime", "provisioner"],
+          "properties": {
+            "runtime": {"$ref": "#/$defs/closure"},
+            "provisioner": {"$ref": "#/$defs/closure"}
+          }
+        },
+        "forwardContractSha256": {"$ref": "#/$defs/sha256"},
+        "legacyCatalog": {"type": "array", "items": {"$ref": "#/$defs/legacyUnit"}, "minItems": 1},
+        "legacyReleaseSetSha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "rollback": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["provisionerImage", "provisionerSourceCommit", "v1CorpusSha256", "legacyManifestSha256", "substrateV1ConsumerCommit"],
+      "properties": {
+        "provisionerImage": {"$ref": "#/$defs/provisionerImage"},
+        "provisionerSourceCommit": {"$ref": "#/$defs/commit"},
+        "v1CorpusSha256": {"$ref": "#/$defs/sha256"},
+        "legacyManifestSha256": {"$ref": "#/$defs/sha256"},
+        "substrateV1ConsumerCommit": {"$ref": "#/$defs/commit"}
+      }
+    }
+  }
+}

@@ -342,6 +342,8 @@ def _runtime_mounts(root: Path) -> list[str]:
 
 
 def _reclaim_runtime_tree(image: str, root: Path) -> None:
+    uid = getattr(os, "getuid", lambda: 0)()
+    gid = getattr(os, "getgid", lambda: 0)()
     _run(
         [
             "docker",
@@ -355,7 +357,7 @@ def _reclaim_runtime_tree(image: str, root: Path) -> None:
             _docker_mount(root, "/work"),
             image,
             "-euc",
-            f"chown -R {os.getuid()}:{os.getgid()} /work; chmod -R u+rwX /work",
+            f"chown -R {uid}:{gid} /work; chmod -R u+rwX /work",
         ]
     )
 
