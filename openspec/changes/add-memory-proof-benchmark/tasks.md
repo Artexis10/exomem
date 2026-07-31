@@ -56,11 +56,11 @@
 - [x] 8.2 Founder-regression format (`membench/private_regressions.py` committed; data dir gitignored; P0 never leaves the local store) + replayer stub
 - [x] 8.3 Baseline runs complete: full-corpus exomem leaf (236/240 scored, 0 harness failures), T00 wire, Track A smoke (exomem-local ok + baseline-grep; bm-local sandbox-blocked→user-run), Track C suite, Track D J1/J2, blinded judge smoke (12 real-model judgments agreeing with deterministic gates)
 - [x] 8.4 Weaknesses-first report: `docs/memory-proof-benchmark-v01-findings.md` (headline: conjunctive retention gate → NL retrieval ≈0 in lexical profile, confirmed by two harnesses; + gate-limit, isolation, and robustness findings) with exact reproduction commands
-- [ ] 8.5 Exomem KB write-back: benchmark results note verified by read-back — in progress at closeout
+- [ ] 8.5 Exomem KB write-back: BLOCKED this session — the Exomem connector was disconnected at closeout. The compiled results note is drafted at `benchmarks/private/pending-kb-note-benchmark-v01-results.md` (gitignored founder channel); capture via `remember` + read-back on reconnect. The Milestone-1 decision note was written and read-back-verified earlier (2026-07-31).
 
 ## 9. Validation
-- [ ] 9.1 `npm exec --yes @fission-ai/openspec -- validate add-memory-proof-benchmark --strict`
-- [ ] 9.2 `uv run --frozen python -m pytest -q` (lean suite incl. all `tests/test_membench_*.py`, each <60s, no credentials)
-- [ ] 9.3 `uvx ruff check . --select F`
-- [ ] 9.4 Desk-side: `uv run python benchmarks/run.py generate --seed 1 --out benchmarks/corpus/generated/s1` twice + manifest diff; T00 wire-mode run producing a complete `benchmarks/runs/<id>/`
-- [ ] 9.5 `git diff --exit-code tests/fixtures/mcp_tool_schemas.json` (no tool-surface drift); guarded files untouched (`tests/golden/`, gate tests, `.github/`)
+- [x] 9.1 `openspec validate add-memory-proof-benchmark --strict` + `add-terminal-review-surface --strict` both valid; `validate --specs --strict` 31/31 main specs pass (2026-08-01)
+- [ ] 9.2 SANDBOX-BLOCKED → user-run. In-sandbox run: 6097 passed / 738 failed / 64 skipped — every sampled failure reproduces IDENTICALLY on the untouched primary checkout at v0.36.0 (test_write_resolver_reuse: same sqlite "unable to open database file" in the writer-lease idempotency store; test_govern_memory_tool.py: 99 failed/58 passed on BOTH checkouts) — cause is the session sandbox's write allowlist blocking default state dirs under $HOME, not benchmark changes. All 137 `tests/test_membench_*.py` pass (harness isolates state into tmp). User-run verification: `uv run --frozen python -m pytest -q`
+- [ ] 9.3 `uvx ruff check . --select F` — sandbox-blocked (read-only uv cache); user-run
+- [x] 9.4 Two fresh `benchmarks/run.py generate --seed 1` runs byte-identical to each other AND to the committed `benchmarks/corpus/releases/v0.1-seed1.manifest.json`; T00 wire-mode run dir produced under 3.4 (2026-08-01)
+- [x] 9.5 `git diff --exit-code tests/fixtures/mcp_tool_schemas.json` clean; `git diff origin/main..HEAD` over `tests/golden/`, `tests/test_latency_gate.py`, `tests/test_retrieval_golden.py`, `.github/`, `src/exomem/` is empty (2026-08-01)

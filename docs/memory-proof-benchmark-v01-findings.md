@@ -192,3 +192,63 @@ works; scale runs remain desk-side/user-run by design.
 - `EXOMEM_DISABLE_EMBEDDINGS=1 /home/hugoa/projects/exomem/.venv/bin/python benchmarks/run.py run --corpus benchmarks/corpus/generated/s1 --provider exomem-local --mode leaf --label baseline-lexical --top-k 10`
 - Track A smoke: the `bm-bench run retrieval` line above (providers `exomem-local,baseline-grep` in-sandbox; add `bm-local` outside).
 - Determinism check: run `generate` twice into two directories and diff the manifests.
+
+## Addendum — fan-out completion and delegated review (2026-08-01)
+
+The remaining fan-out landed as commit `7ab144c` via a delegated
+implementer/reviewer cycle: provider adapters (`graybox-local` live against
+the sibling checkout at raw-inbox altitude; `basic-memory-local` over an
+injectable `bm` seam, live run user-run; the duck-typed Track-A bridge),
+3-tier health scoring and the multi-hop graph family, the committed
+`v0.1-seed1` release manifest with a byte-identity regeneration test, the
+Track C two-witness join + natural-prompt driver, the Track D J3
+weekly-review journey (planted-queue recall/precision, blind rubric, judge
+handshake wiring), and the Basic Memory journey mapping doc.
+
+Independent review returned two MAJOR findings — both harness-integrity
+holes, both fixed red-first and re-verified by a targeted recheck with
+manual reproductions: (1) damaged witnesses (malformed server trace or
+transcript) could previously collapse into a `not_activated` *product*
+score; either-witness damage is now a `WITNESS_MISMATCH` harness fault
+evaluated before any activation branch; (2) a non-zero `claude -p` exit
+previously became an empty scoreable answer; failed executions are now
+structurally unscorable (`harness_fault=True`, no AnswerRecord).
+
+New product finding from J3 construction: **wall-clock staleness is
+unplantable through Exomem's public write surfaces** — `remember` rejects
+`created`/`updated` overrides and `edit_memory` re-bumps `updated:` — so
+age-dependent behaviour is only testable via the `EXOMEM_STALE_AGE_DAYS`
+gate-edge knob. A test-data backdating seam (or acceptance of this as a
+deliberate boundary) is a product decision worth recording.
+
+Recorded review debt (non-blocking, from the independent review): bridge
+forwards a 200-char excerpt instead of full hit text upstream; graybox
+`sys.path.insert(0)` can shadow top-level names process-wide; inconsistent
+`.score` access in graybox hit handling; `BASIC_MEMORY_*` env not fully
+swept (only HOME/CLOUD_MODE); `bm --version` probe doesn't catch
+`TimeoutExpired`; Jaccard 0.8 boundary unpinned by tests (and misworded as
+"ceiling"); malformed graybox capture line raises raw instead of
+`AdapterEnvironmentError`; J3 `supported` flag hardcoded by mode (a future
+lexical contradiction sweep would read as a regression); J3 triage-burden
+magic number; attention-queue false-surfaces not gated; live J3 summary not
+routed through the judge handshake in tests; graph scorer substring
+containment could mask a wrong-hop when values nest; `run_case` doesn't
+gate `transcript.malformed_lines` at the driver layer (covered downstream
+by the join gate). Release-manifest note: `renderer_versions` pins
+`pymupdf: absent` — regenerating with the media extra installed legitimately
+changes identity; the committed release pins the deterministic CI
+environment.
+
+Validation ledger (group 9): 9.1 `openspec validate --strict` — both new
+changes valid, all 31 main specs pass; 9.4 two fresh CLI generations
+byte-identical to each other and to the committed release manifest; 9.5
+`tests/fixtures/mcp_tool_schemas.json` no-drift, guarded paths
+(`tests/golden/`, gate tests, `.github/`, `src/exomem/`) untouched vs
+origin/main; 9.2 the full lean suite is sandbox-blocked — in-sandbox it
+reports 6097 passed / 738 failed, and every sampled failure reproduces
+identically on the untouched primary checkout at v0.36.0 (writer-lease
+sqlite store and governance families; the sandbox write allowlist blocks
+default state dirs under $HOME), so the 738 are environmental, all 137
+membench tests pass, and outside-sandbox `uv run --frozen python -m pytest
+-q` is the user-run verification; 9.3 `uvx ruff check . --select F` is
+sandbox-blocked (read-only uv cache) — user-run.
