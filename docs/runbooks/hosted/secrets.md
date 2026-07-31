@@ -150,6 +150,60 @@ Generate the provisioner bearer the same way, using
 `vercel.substrate.production.global-cron.active` destination. The matrix has no
 K3s route for it. Dynamic cell credentials have no static handoff route at all.
 
+### Scheduler alert receiver capability
+
+The scheduler alert sender is a fixed contract that carries no `Authorization`
+header, so its capability has to travel inside `ALERT_WEBHOOK_URL`. That splits
+the secret across two matrix entries, and each destination receives only what it
+needs: a leak of either side alone must not yield a forgeable alert.
+
+Generate one token, then hand off the URL and its digest separately. Derive the
+digest locally; never send the token itself to Vercel:
+
+```bash
+token="$(openssl rand -hex 32)"
+printf '%s' "https://substratesystems.io/api/exomem/alerts/${token}" \
+  | infra/scripts/secret_handoff.py \
+    --matrix "$matrix" \
+    --repository-root "$repo_root" \
+    --secret alert_delivery_webhook_url \
+    --version v1 \
+    --destination k3s.alert-delivery.active \
+    --source stdin
+```
+
+```bash
+printf '%s' "$token" | sha256sum | cut -d' ' -f1 \
+  | infra/scripts/secret_handoff.py \
+    --matrix "$matrix" \
+    --repository-root "$repo_root" \
+    --secret alert_receiver_token_digest \
+    --version v1 \
+    --destination vercel.substrate.production.alert-receiver.active \
+    --source stdin \
+    --vercel-project "$substrate_root"
+```
+
+Clear `token` from the shell afterwards.
+
+Rotation uses a two-version receiver overlap against the single-version sender,
+exactly as the hosted-scheduler bearer does. The sender URL can only carry one
+capability, so the receiver is the side that overlaps:
+
+1. Copy the current digest into
+   `vercel.substrate.production.alert-receiver.previous`.
+2. Publish the new digest to
+   `vercel.substrate.production.alert-receiver.active`. Both capabilities are
+   now accepted, so no transition is lost.
+3. Hand the new URL to `k3s.alert-delivery.active` under a new version and let
+   the evaluator pick it up.
+4. Prove the new capability is accepted and confirm a delivered transition.
+5. Only then clear the previous digest, and prove the retired capability now
+   answers `404`.
+
+Retire the previous slot only after that acceptance proof. A malformed value in
+the previous slot is ignored rather than widening the accepted set.
+
 Generate the root wrapping key once and seal the same version for both the
 provisioner workload and offline escrow:
 

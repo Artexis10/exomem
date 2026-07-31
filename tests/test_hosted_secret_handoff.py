@@ -159,6 +159,32 @@ def test_destination_matrix_enforces_named_secret_boundaries() -> None:
     assert set(global_cron) == {"vercel.substrate.production.global-cron.active"}
     assert all(destination["kind"] == "vercel_env" for destination in global_cron.values())
 
+    # The scheduler alert sender carries no bearer, so its capability lives in
+    # the webhook URL. The URL therefore reaches only the K3s sender, and only
+    # the receiver-side digest reaches Vercel: a leak of either destination
+    # alone must not yield a forgeable alert.
+    alert_url = secrets["alert_delivery_webhook_url"]["destinations"]
+    assert set(alert_url) == {"k3s.alert-delivery.active"}
+    assert {destination["kind"] for destination in alert_url.values()} == {"sops_k8s_secret"}
+
+    alert_digest = secrets["alert_receiver_token_digest"]["destinations"]
+    assert set(alert_digest) == {
+        "vercel.substrate.production.alert-receiver.active",
+        "vercel.substrate.production.alert-receiver.previous",
+    }
+    assert alert_digest["vercel.substrate.production.alert-receiver.active"] == {
+        "kind": "vercel_env",
+        "slot": "active",
+        "project": "substrate.production",
+        "environment": "production",
+        "name": "EXOMEM_HOSTED_ALERT_TOKEN_SHA256",
+    }
+    # Two-version receiver overlap against a single-version sender, exactly as
+    # the hosted-scheduler bearer rotates. The sender URL cannot hold two
+    # capabilities, so the receiver is the side that overlaps.
+    assert alert_digest["vercel.substrate.production.alert-receiver.previous"]["slot"] == "previous"
+    assert {destination["kind"] for destination in alert_digest.values()} == {"vercel_env"}
+
     wrapping = secrets["provisioner_wrapping_key"]["destinations"]
     assert set(wrapping) == {
         "escrow.provisioner-wrapping-key.active",
