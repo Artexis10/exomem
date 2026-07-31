@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.36.0](https://github.com/Artexis10/exomem/compare/v0.35.1...v0.36.0) (2026-07-31)
+
+
+### Features
+
+* **hosted:** bind runtime deployment identity ([#361](https://github.com/Artexis10/exomem/issues/361)) ([5dbc34c](https://github.com/Artexis10/exomem/commit/5dbc34cb854e3240d92a6ace3f67c717b6681889))
+
+
+### Bug Fixes
+
+* **media:** stop sidecars nesting copies of themselves ([#363](https://github.com/Artexis10/exomem/issues/363)) ([defd69d](https://github.com/Artexis10/exomem/commit/defd69dc1ce8892168d4940b830d253fa07fabcb))
+
 ## [0.35.1](https://github.com/Artexis10/exomem/compare/v0.35.0...v0.35.1) (2026-07-30)
 
 
