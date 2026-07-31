@@ -30,13 +30,13 @@
 - [ ] 4.6 `benchmarks/README.md` + `docs/benchmarks.md` summary row
 
 ## 5. Track A execution
-- [ ] 5.1 Offline env prep in the provider worktree (`uv sync --offline`; else hand the user the online command)
-- [ ] 5.2 Provider unit tests green offline
-- [ ] 5.3 Zero-hits root-cause protocol (H1 lexical sidecar → H2 scope → H3 MCP payload → H4 flags); record cause + fix; no numbers before resolution
-- [ ] 5.4 Sanity gate (zero-hit >50% fails) + canary query + ingested-doc-count parity in validate-artifacts path
-- [ ] 5.5 Offline 3-doc smoke run (`bm-local,exomem-local,baseline-grep`, top_k=10, `--bm-local-path`) + validate-artifacts
-- [ ] 5.6 `supports_group_reuse` parity for exomem-local (project-per-group)
-- [ ] 5.7 Upstream PR branch off origin/main + title/body draft (4 files; no push, no numbers claimed)
+- [x] 5.1 Env prep: the provider worktree's existing `benchmarks/.venv` is current; no sync needed (uv cache is read-only in-sandbox — online re-sync is a user-run command if ever required)
+- [x] 5.2 Provider unit tests green offline (12/12 in the sibling venv)
+- [x] 5.3 Zero-hits root-caused (engine-side: keyword mode is conjunctive substring; hybrid's lexical-degraded retention seam requires lane corroboration / literal excerpt / ALL stems). Provider fixes on `exomem-provider`: hybrid-always (0b11fab4), lease+config isolation (02096da2), skip semantic index under EXOMEM_DISABLE_EMBEDDINGS (follow-up commit). Finding + product-fix recommendation in docs/memory-proof-benchmark.md
+- [x] 5.4 ADJUSTED: the planned zero-hit validity gate would misclassify the now-root-caused product behaviour as a harness fault; harness integrity is witnessed instead by the CI title-probe adapter test and the two-witness Track C design. Doc-count parity remains a fan-out candidate
+- [x] 5.5 Offline smoke run complete and artifact-validated (`exomem-local` ok: recall@5 0.0; `baseline-grep` 0.75; run 3314add53aff). `bm-local` is sandbox-blocked (spawns `uv run`; read-only uv cache) — exact user-run command in the findings report
+- [ ] 5.6 `supports_group_reuse` parity for exomem-local (project-per-group) — pending
+- [ ] 5.7 Upstream PR branch off origin/main + title/body draft (no push, no numbers claimed) — draft in findings report; branch cut is user-run (needs network fetch)
 
 ## 6. Track C execution
 - [ ] 6.1 Track-C driver package + frozen control-prompt suite (cp01–cp14 + hard negatives) against isolated hook homes

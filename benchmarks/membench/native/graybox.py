@@ -21,7 +21,7 @@ def render(view: CorpusView, out_dir: Path) -> FactParityReport:
         {
             "week": source.recorded_week,
             "source_id": source.source_id,
-            "text": f"{source.title}\n\n{view.source_text(source)}",
+            "text": f"{source.title}\n\n{view.ingestable_text(source)[0]}",
         }
         for source in view.sources
     ]

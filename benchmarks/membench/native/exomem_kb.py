@@ -23,9 +23,13 @@ def render(view: CorpusView, out_dir: Path) -> FactParityReport:
     sources_by_id = {s.source_id: s for s in view.sources}
 
     ops = []
+    binary_sources: set[str] = set()
     for op in schedule:
         if op.source_id and op.source_id in sources_by_id:
             source = sources_by_id[op.source_id]
+            content, is_text = view.ingestable_text(source)
+            if not is_text:
+                binary_sources.add(source.source_id)
             ops.append(
                 {
                     "week": op.week,
@@ -34,7 +38,7 @@ def render(view: CorpusView, out_dir: Path) -> FactParityReport:
                     "source_id": source.source_id,
                     "title": source.title,
                     "source_type": "other",
-                    "content": view.source_text(source),
+                    "content": content,
                 }
             )
     (out_dir / "capture-ops.jsonl").write_text(
@@ -44,9 +48,17 @@ def render(view: CorpusView, out_dir: Path) -> FactParityReport:
 
     for claim in view.claims:
         for assertion in claim.assertions:
-            report.record(
-                f"assert:{claim.claim_id}:{assertion.source_id}", ParityStatus.REPRESENTED
-            )
+            if assertion.source_id in binary_sources:
+                report.record(
+                    f"assert:{claim.claim_id}:{assertion.source_id}",
+                    ParityStatus.DEGRADED,
+                    "asserted only inside a binary artifact; media pipeline not "
+                    "exercised in this profile, so the fact is not text-reachable",
+                )
+            else:
+                report.record(
+                    f"assert:{claim.claim_id}:{assertion.source_id}", ParityStatus.REPRESENTED
+                )
         if claim.supersedes:
             report.record(
                 f"supersedes:{claim.claim_id}:{claim.supersedes}",

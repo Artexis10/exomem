@@ -13,7 +13,9 @@ import enum
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from membench.schema import ClaimRecord, EntityRecord, SourceRecord, load_jsonl
+from membench.schema import ArtifactKind, ClaimRecord, EntityRecord, SourceRecord, load_jsonl
+
+_BINARY_KINDS = frozenset({ArtifactKind.PNG, ArtifactKind.PDF})
 
 
 class ParityStatus(str, enum.Enum):
@@ -56,6 +58,23 @@ class CorpusView:
 
     def source_text(self, source: SourceRecord) -> str:
         return (self.root / source.path).read_text(encoding="utf-8")
+
+    def ingestable_text(self, source: SourceRecord) -> tuple[str, bool]:
+        """(text, is_native_text) for renderers.
+
+        Binary artifacts (PNG/PDF) yield a title-only placeholder WITHOUT the
+        sentinel: the sentinel exists only inside the binary content, and
+        pretending it is text would fake retrievability the profile does not
+        have. Renderers must record such sources as degraded.
+        """
+
+        if source.artifact_kind in _BINARY_KINDS:
+            return (
+                f"{source.title}\n\n[binary {source.artifact_kind.value} artifact; "
+                "content not text-ingestable in this profile]",
+                False,
+            )
+        return self.source_text(source), True
 
     def entities_by_id(self) -> dict[str, EntityRecord]:
         return {e.entity_id: e for e in self.entities}

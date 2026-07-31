@@ -49,8 +49,11 @@ def render(view: CorpusView, out_dir: Path) -> FactParityReport:
         for assertion in claim.assertions:
             claims_by_source.setdefault(assertion.source_id, []).append(claim.claim_id)
 
+    binary_sources: set[str] = set()
     for source in view.sources:
-        body = view.source_text(source)
+        body, is_text = view.ingestable_text(source)
+        if not is_text:
+            binary_sources.add(source.source_id)
         lines = [
             "---",
             f"title: {source.title}",
@@ -68,7 +71,17 @@ def render(view: CorpusView, out_dir: Path) -> FactParityReport:
             subject, sentence = _claim_sentence(view, claim_id)
             lines.append(f"- [fact] {subject} {sentence} #bench")
             related.setdefault(subject)
-            report.record(f"assert:{claim_id}:{source.source_id}", ParityStatus.REPRESENTED)
+            if source.source_id in binary_sources:
+                report.record(
+                    f"assert:{claim_id}:{source.source_id}",
+                    ParityStatus.DEGRADED,
+                    "source is a binary artifact; the observation line restates the "
+                    "fact but the original content is not text-ingested",
+                )
+            else:
+                report.record(
+                    f"assert:{claim_id}:{source.source_id}", ParityStatus.REPRESENTED
+                )
         if related:
             lines.append("")
             lines.append("## Relations")
