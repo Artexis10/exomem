@@ -520,7 +520,16 @@ class ExomemBackend:
 
         try:
             return init_module.init_vault(Path(folder))
-        except (FileExistsError, OSError, ValueError) as exc:
+        except FileExistsError as exc:
+            # Never leak API language ("force=True") into the UI: name the
+            # state and the real next steps.
+            raise BackendError(
+                "VAULT_EXISTS",
+                f"{folder} already holds (part of) a Knowledge Base",
+                "choose 'Use an existing vault' to connect to it, pick an empty "
+                "folder, or overlay an incomplete scaffold with `exomem init --force`",
+            ) from exc
+        except (OSError, ValueError) as exc:
             raise BackendError.from_exception(exc) from exc
 
     def continuations(self) -> list[dict]:

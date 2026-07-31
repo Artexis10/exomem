@@ -165,6 +165,31 @@ async def test_onboarding_create_vault_path(make_app, tmp_path):
         assert backend.runtime_started is True
 
 
+async def test_onboarding_create_on_existing_vault_connects(make_app, tmp_path):
+    # "Create" pointed at a folder that already holds a vault must connect to
+    # it — never an error, never API language about force overlays.
+    existing = tmp_path / "already-a-vault"
+    backend = FakeBackend(initialized=False)
+    backend.existing_vaults.add(str(existing))
+    app = make_app(backend)
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _settle(app, pilot)
+        assert app.screen.SCREEN_TITLE == "Welcome"
+        await pilot.press("down", "enter")
+        await pilot.pause()
+        path_input = app.screen.query_one("#onboarding-path")
+        path_input.value = str(existing)
+        path_input.focus()
+        await pilot.press("enter")
+        await _settle(app, pilot)
+        assert not any(call[0] == "init_vault" for call in backend.calls), (
+            "an existing vault must be connected, not re-initialized"
+        )
+        status = str(app.screen.query_one("#onboarding-status").render())
+        assert "already holds a Knowledge Base" in status
+        assert backend.runtime_started is True
+
+
 async def test_onboarding_skip_lands_home(make_app):
     backend = FakeBackend(initialized=False)
     app = make_app(backend)

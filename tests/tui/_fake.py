@@ -88,6 +88,7 @@ class FakeBackend:
         self.captured: list[dict] = []
         self.triaged: list[dict] = []
         self.selected_packs: list[str] = ["technical", "business"]
+        self.existing_vaults: set[str] = set()
         self._fail: dict[str, BackendError] = {}
         self._release: threading.Event | None = None
 
@@ -119,8 +120,10 @@ class FakeBackend:
 
     def adopt_vault_root(self, root: Path) -> VaultState:
         self._gate("adopt_vault_root", root=str(root))
-        self.initialized = True
-        return VaultState(Path(root), True)
+        if str(root) in self.existing_vaults:
+            self.initialized = True
+            return VaultState(Path(root), True)
+        return VaultState(Path(root), False, "folder holds no Knowledge Base yet")
 
     def start_runtime(self) -> None:
         self.runtime_started = True
@@ -262,6 +265,7 @@ class FakeBackend:
 
     def init_vault(self, folder) -> dict:
         self._gate("init_vault", folder=str(folder))
+        self.existing_vaults.add(str(folder))
         self.initialized = True
         return {"kb": str(Path(folder) / "Knowledge Base"), "created": ["_Schema/SKILL.md"]}
 

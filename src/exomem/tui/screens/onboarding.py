@@ -102,6 +102,10 @@ class OnboardingScreen(ExomemScreen):
         if not raw or self._pending_action is None:
             return
         folder = Path(raw).expanduser()
+        if not folder.is_absolute():
+            # A bare `notes` means cwd/notes — say so instead of acting on an
+            # ambiguous relative path.
+            folder = Path.cwd() / folder
         action = self._pending_action
         if action == "scan":
             self.app.goto("adopt")
@@ -141,15 +145,26 @@ class OnboardingScreen(ExomemScreen):
     def _create_vault(self, folder: Path) -> None:
         backend = self.app.backend
         self.query_one("#onboarding-error", ErrorNotice).show_error(None)
-        self._status(f"initializing {folder}…")
+        self._status(f"checking {folder}…")
 
         def job():
+            # "Create" on a folder that already holds a Knowledge Base means
+            # the user wants THAT vault — connect instead of erroring.
+            state = backend.adopt_vault_root(folder)
+            if state.initialized:
+                return ("connected", state)
             folder.mkdir(parents=True, exist_ok=True)
             backend.init_vault(folder)
-            return backend.adopt_vault_root(folder)
+            return ("created", backend.adopt_vault_root(folder))
 
-        def done(_state) -> None:
-            self._finish(f"Vault created: {folder}")
+        def done(outcome) -> None:
+            kind, _state = outcome
+            if kind == "connected":
+                self._finish(
+                    f"That folder already holds a Knowledge Base — connected: {folder}"
+                )
+            else:
+                self._finish(f"Vault created: {folder}")
 
         self.run_backend(job, done, self._on_error, group="onboarding")
 
