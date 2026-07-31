@@ -191,7 +191,7 @@ ID, then issues an Exomem-owned durable session. Operators can inspect and revok
 those sessions with `exomem auth sessions`, `exomem auth revoke <session-id>`,
 and `exomem auth revoke --all`; session administration is never an MCP tool.
 
-The product model is intentionally simple: built-in AI memory remembers preferences and routing, while Exomem stores durable governed knowledge with sources, proof, history, decisions, records, and review. See [docs/product-model.md](docs/product-model.md) for the full mental model, [docs/review-studio.md](docs/review-studio.md) for the packaged browser review loop, [docs/epistemic-inbox.md](docs/epistemic-inbox.md) for daily review and relation repair, [docs/knowledge-packs.md](docs/knowledge-packs.md) for pack/admin details, and [docs/workflow-skills.md](docs/workflow-skills.md) for the named agent workflows.
+The product model is intentionally simple: built-in AI memory remembers preferences and routing, while Exomem stores durable governed knowledge with sources, proof, history, decisions, records, and review. See [docs/product-model.md](docs/product-model.md) for the full mental model, [docs/tui.md](docs/tui.md) for the interactive terminal UI (`exomem tui`, optional `tui` extra), [docs/review-studio.md](docs/review-studio.md) for the packaged browser review loop, [docs/epistemic-inbox.md](docs/epistemic-inbox.md) for daily review and relation repair, [docs/knowledge-packs.md](docs/knowledge-packs.md) for pack/admin details, and [docs/workflow-skills.md](docs/workflow-skills.md) for the named agent workflows.
 
 For development, or to run the sample vault from a checkout instead of a
 package install:
