@@ -2035,10 +2035,41 @@ def _rewrite_error_attribute(error: BaseException, name: str, value: Any) -> Non
             pass
 
 
+#: Parameters that carry a vault reference BY CONTRACT. The exemption is seeded
+#: from these alone, never from every kwarg.
+#:
+#: Walking all kwargs looks harmless — each value is caller-supplied, which is
+#: the whole safety argument — but it hands the caller a de-anonymisation
+#: channel: put a known path in any free-text field (`why`, `intent`, `title`,
+#: `query`) and a redacted collision list stops rendering it as `[withheld]`,
+#: revealing WHICH slot that path occupies. A list-shaped field turns that from
+#: one probe per candidate into one probe per thousand. Restricting the seed to
+#: reference-typed parameters keeps the justification ("the caller named this AS
+#: a reference") and removes the channel.
+_REFERENCE_KWARGS = frozenset(
+    {
+        "path",
+        "paths",
+        "id",
+        "ids",
+        "ref",
+        "refs",
+        "old_path",
+        "new_path",
+        "source_path",
+        "target_path",
+        "manifest_path",
+        "only_paths",
+        "selector_paths",
+    }
+)
+
+
 def _caller_supplied_references(kwargs: Mapping[str, Any] | None) -> frozenset[str]:
     """Canonical keys for every reference the CALLER put in the request.
 
-    See `postfilter_error` for why these must survive filtering verbatim.
+    See `postfilter_error` for why these must survive filtering verbatim, and
+    `_REFERENCE_KWARGS` for why only reference-typed parameters seed the set.
     """
     if not kwargs:
         return frozenset()
@@ -2049,6 +2080,11 @@ def _caller_supplied_references(kwargs: Mapping[str, Any] | None) -> frozenset[s
             canonical = _canonical_reference(value)
             if canonical is not None:
                 out.add(canonical[0])
+                # Mirror `_withheld_keys`: a supplied `Notes/x.md` and a
+                # volunteered `Knowledge Base/Notes/x.md` are the same item.
+                stripped = _kb_stripped(canonical[0])
+                if stripped:
+                    out.add(stripped)
         elif isinstance(value, Mapping):
             for item in value.values():
                 _walk(item)
@@ -2056,7 +2092,7 @@ def _caller_supplied_references(kwargs: Mapping[str, Any] | None) -> frozenset[s
             for item in value:
                 _walk(item)
 
-    _walk(dict(kwargs))
+    _walk({k: v for k, v in kwargs.items() if k in _REFERENCE_KWARGS})
     return frozenset(out)
 
 
@@ -2912,7 +2948,12 @@ class _ArtifactReferenceGate:
             token = match.group(0)
             if self.exempt:
                 canonical = _canonical_reference(token)
-                if canonical is not None and canonical[0] in self.exempt:
+                # Compare both forms: the caller may have supplied either the
+                # KB-relative or the vault-absolute spelling of the same item.
+                if canonical is not None and (
+                    canonical[0] in self.exempt
+                    or _kb_stripped(canonical[0]) in self.exempt
+                ):
                     # The caller sent this. Echoing it back tells them nothing;
                     # replacing it tells them the item exists.
                     return token

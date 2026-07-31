@@ -2034,7 +2034,20 @@ def op_get(
         stable_ref=snapshot_ref,
     )
     if released is None:
-        raise ValueError(f"NOT_FOUND: file does not exist: {out['path']}")
+        # `result.missing_path` — the EXACT value the genuinely-absent branch
+        # raises (`get_page.py:181,194`), so the two are identical by
+        # construction rather than by two call sites agreeing to stay in step.
+        #
+        # It was `out["path"]`: the server-canonicalised path. That made the
+        # branches disagree before any filter ran — a caller passing a
+        # KB-relative or suffix-less form got their own spelling back when the
+        # item was missing, and the fully resolved path when it existed but was
+        # withheld. Existence AND location, from the branch whose entire purpose
+        # is to be indistinguishable from absence.
+        raise ValueError(
+            "NOT_FOUND: file does not exist: "
+            f"{get_page_module.missing_path_for(path)}"
+        )
     out = released
     if "path" not in out:
         # A sub-floor notice: no path to resolve a memory ref against, and

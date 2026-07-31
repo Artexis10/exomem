@@ -40,6 +40,14 @@ frontmatter provenance fields stripped below full release SHALL include the reve
 citation field that records which compiled items ingested a source, alongside the forward
 citation, evidence, supersession and parent-media fields already covered.
 
+This requirement is scoped to the PROJECTED representation of a page — its parsed
+frontmatter and the fields the projector emits. It deliberately does not claim coverage of
+a surface that returns the raw stored bytes on request: such a surface re-serialises the
+original file, so it reproduces every provenance field and is bounded by no disclosure
+level. That surface is a separate, pre-existing gap and is not closed by this change;
+stating the guarantee narrowly keeps the archived spec true rather than recording a
+promise the code does not keep.
+
 #### Scenario: a released source does not enumerate the compiled items that cited it
 
 - **WHEN** a source item is released to an audience below full level and a compiled item
@@ -52,6 +60,13 @@ citation, evidence, supersession and parent-media fields already covered.
 
 - **WHEN** the same source item is released at full level to a permitted audience
 - **THEN** the reverse citation field is present and complete
+
+#### Scenario: the guarantee is stated over the projected representation
+
+- **WHEN** a caller requests the raw stored bytes of a page alongside its projection
+- **THEN** the projected representation still omits the reverse citation field
+- **AND** the raw-bytes surface is out of scope for this requirement and is governed
+  separately
 
 ### Requirement: Operational Run State Is Not Released As Knowledge
 

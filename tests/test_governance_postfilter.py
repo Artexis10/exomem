@@ -1205,6 +1205,17 @@ ERROR_WITHHELD_STEM = "kill-switch-for-risky-releases"
 # echoed path = absent), which is strictly worse than echoing it back. An
 # earlier revision of these tests used the caller's own path throughout and so
 # asserted the oracle rather than the guarantee.
+# Every spelling a caller may legitimately use for the SAME item. Each must be
+# echoed back identically whether the item exists-and-is-withheld or is absent;
+# a difference in any one of them is an existence oracle for that form.
+_CALLER_INPUT_FORMS = (
+    "Knowledge Base/Notes/Patterns/kill-switch-for-risky-releases.md",
+    "Knowledge Base/Notes/Patterns/kill-switch-for-risky-releases",
+    "Notes/Patterns/kill-switch-for-risky-releases.md",
+    "Notes/Patterns/kill-switch-for-risky-releases",
+    "kill-switch-for-risky-releases",
+)
+
 ERROR_VOLUNTEERED = "Knowledge Base/Notes/Patterns/never-named-by-caller.md"
 ERROR_VOLUNTEERED_STEM = "never-named-by-caller"
 # A caller-supplied path that is NOT the one under test, so the exemption
@@ -1368,30 +1379,40 @@ def test_a_caller_supplied_path_is_echoed_whether_or_not_it_exists(
     Comparing two DIFFERENT paths (as an earlier revision did) cannot fail: the
     error legitimately echoes whichever path the caller asked for, so differing
     inputs are expected to differ. Vary the condition, hold the input fixed."""
+    from exomem import commands
     from exomem import find as find_module
     from exomem.writer_lease import invoke_command
 
     _govern_patterns_shut(vault)
     target = vault / ERROR_WITHHELD
 
-    def _text() -> str:
-        command = _raising_command("get", f"could not read {ERROR_WITHHELD}")
+    def _text(form: str) -> str:
+        """The REAL `get` leaf, not a synthetic raiser.
+
+        A synthetic command builds its message once from a fixed constant, so
+        the two conditions are identical by construction and the test cannot
+        observe the branch asymmetry that only the real leaf produces — which
+        is exactly where the residual oracle lived."""
+        command = {c.name: c for c in commands.COMMANDS}["get"]
         with _external_scope():
             with pytest.raises(ValueError) as excinfo:
-                invoke_command(command, vault, path=ERROR_WITHHELD)
+                invoke_command(command, vault, path=form)
         return str(excinfo.value)
 
     assert target.is_file()
-    present = _text()
+    present = {form: _text(form) for form in _CALLER_INPUT_FORMS}
     target.unlink()
     find_module.clear_cache()
-    absent = _text()
+    absent = {form: _text(form) for form in _CALLER_INPUT_FORMS}
 
-    assert present == absent, (
-        "EXISTENCE ORACLE: the same caller-supplied path yields different text "
-        f"depending on whether it exists\n  present: {present}\n  absent : {absent}"
+    divergent = {f: (present[f], absent[f]) for f in _CALLER_INPUT_FORMS
+                 if present[f] != absent[f]}
+    assert not divergent, (
+        "EXISTENCE ORACLE: a caller-supplied path yields different text "
+        f"depending on whether it exists, for form(s): {divergent}"
     )
-    assert egress.WITHHELD_REFERENCE not in present
+    for form in _CALLER_INPUT_FORMS:
+        assert egress.WITHHELD_REFERENCE not in present[form], form
 
 
 def test_an_ungoverned_vault_keeps_its_error_text(vault: Path) -> None:
