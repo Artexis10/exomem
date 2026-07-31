@@ -1337,3 +1337,57 @@ def install_all_hooks(*, wire: bool = True, timeout: int = 10) -> dict:
                 }
             )
     return {"success": all(row["success"] for row in reports), "clients": reports}
+
+
+def list_continuation_checkpoints(
+    clients: tuple[str, ...] = SUPPORTED_CLIENTS,
+) -> list[dict]:
+    """Read-only listing of local continuation checkpoints for UI surfaces.
+
+    One entry per session state whose `current.json` loads: `{client, session,
+    observed_at_ns, status, checkpoint}`, newest first. Unsafe or corrupt state
+    directories are skipped rather than raised — this is a viewer for the
+    Continue surface, not an auditor (`install-hook --check` owns auditing),
+    and it never writes to the checkpoint store.
+    """
+    from ._hooks import exomem_continuation_checkpoint as safe
+
+    entries: list[dict] = []
+    for client in clients:
+        root = _default_home(client) / ".cache" / "exomem-continuation" / client
+        try:
+            sessions = [
+                item
+                for item in root.iterdir()
+                if not item.is_symlink() and item.is_dir() and not item.name.startswith(".")
+            ]
+        except OSError:
+            continue
+        for session in sessions:
+            try:
+                with safe._open_secure_directory(session, create=False) as handle:
+                    checkpoint, status = safe.load_checkpoint_status_at(handle, "current.json")
+            except OSError:
+                continue
+            if not isinstance(checkpoint, dict):
+                continue
+            observed = checkpoint.get("observed_at_ns")
+            entries.append(
+                {
+                    "client": client,
+                    "session": session.name,
+                    "observed_at_ns": observed if isinstance(observed, int) else None,
+                    "status": status,
+                    "checkpoint": checkpoint,
+                }
+            )
+    entries.sort(key=lambda entry: entry.get("observed_at_ns") or 0, reverse=True)
+    return entries
+
+
+def render_continuation_packet(entry: dict) -> str:
+    """Render one listed checkpoint as the same packet the hooks emit."""
+    from ._hooks import exomem_continuation_checkpoint as safe
+
+    checkpoint = entry.get("checkpoint") or {}
+    return safe.render_continuation(checkpoint, status=str(entry.get("status") or "valid"))

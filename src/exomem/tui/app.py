@@ -17,9 +17,20 @@ from textual.reactive import reactive
 
 from . import theme as theme_module
 from .backend import ExomemBackend, VaultState
-from .screens.ask import AskScreen
+from .screens import (
+    AdoptScreen,
+    AskScreen,
+    CaptureScreen,
+    ContinueScreen,
+    HomeScreen,
+    OnboardingScreen,
+    PacksScreen,
+    ReviewScreen,
+    SettingsScreen,
+    StatusScreen,
+)
 from .screens.base import ExomemScreen
-from .screens.home import DESTINATIONS, HomeScreen
+from .screens.home import DESTINATIONS
 from .widgets import ConfirmModal, HelpModal
 
 GLOBAL_HELP_ROWS: list[tuple[str, str]] = [
@@ -63,7 +74,16 @@ class ExomemTuiApp(App):
 
     context_label: reactive[str] = reactive("", init=False)
 
-    SECTION_FACTORIES: dict[str, type[ExomemScreen]] = {"ask": AskScreen}
+    SECTION_FACTORIES: dict[str, type[ExomemScreen]] = {
+        "continue": ContinueScreen,
+        "ask": AskScreen,
+        "capture": CaptureScreen,
+        "review": ReviewScreen,
+        "adopt": AdoptScreen,
+        "packs": PacksScreen,
+        "status": StatusScreen,
+        "settings": SettingsScreen,
+    }
 
     def __init__(
         self,
@@ -80,6 +100,7 @@ class ExomemTuiApp(App):
         self._sections: dict[str, ExomemScreen] = {}
         self._home = HomeScreen()
         self._vault_state: VaultState | None = None
+        self._onboarding_offered = False
 
     # ------------------------------------------------------------------ #
     # Startup
@@ -105,14 +126,30 @@ class ExomemTuiApp(App):
 
     def _apply_vault_state(self, state: VaultState) -> None:
         self._vault_state = state
+        if state.initialized and state.root is not None:
+            self.context_label = state.root.name
+            return
         if state.root is None:
             self.context_label = "no vault configured"
-            self._home.show_first_run(state.detail)
-        elif not state.initialized:
-            self.context_label = f"{state.root.name} · not initialized"
-            self._home.show_first_run(state.detail)
         else:
-            self.context_label = state.root.name
+            self.context_label = f"{state.root.name} · not initialized"
+        self._home.show_first_run(state.detail)
+        if not self._onboarding_offered:
+            self._onboarding_offered = True
+            self.push_screen(OnboardingScreen())
+
+    def on_vault_ready(self) -> None:
+        """Called by onboarding once a vault is connected or created."""
+
+        def job() -> None:
+            state = self.backend.resolve_vault()
+            self.call_from_thread(self._apply_vault_state, state)
+            if state.initialized:
+                self.backend.start_runtime()
+                sections = self.backend.overview()
+                self.call_from_thread(self._apply_overview, sections)
+
+        self.run_worker(job, thread=True, group="startup", exclusive=True)
 
     def _apply_overview(self, sections: dict) -> None:
         mode_entry = sections.get("mode") or {}
