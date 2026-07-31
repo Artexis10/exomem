@@ -297,7 +297,18 @@ def _build_write_feedback(
             "review related-page suggestions and add accepted note edges under `## Relations`"
         )
     if not sources_norm:
-        next_actions.append("add a source link later if this conclusion came from raw material")
+        if not body_targets:
+            next_actions.append(
+                "connect this page now: cite the `Sources/` page it draws from in "
+                "`sources:`, or link the prior conclusions it builds on — it currently "
+                "has no outbound connection of any kind"
+            )
+        else:
+            next_actions.append(
+                "cite the `Sources/` page this drew from in `sources:` — each entry "
+                "appends this note's wikilink to that source's `ingested_into:`, which "
+                "is what marks the source processed"
+            )
     if relation_debt:
         next_actions.append(
             "review relation debt with `connect_memory(operation='suggest-relations')`"
