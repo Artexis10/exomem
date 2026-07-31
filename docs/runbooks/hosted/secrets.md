@@ -186,6 +186,16 @@ printf '%s' "$token" | sha256sum | cut -d' ' -f1 \
 
 Clear `token` from the shell afterwards.
 
+**Accepted residual.** The capability is a URL path segment, so it appears in
+Vercel's own request logs for every legitimate delivery, at whatever retention
+the plan carries, to anyone with project log access. Storing only the digest
+keeps it out of the receiver's environment and out of the application's event
+stream, and both matrix destinations are separated — but neither control covers
+the platform request log, which holds the forgeable form. Treat project log
+access as equivalent to holding the capability, and rotate if that access
+changes hands. The sender contract permits no `Authorization` header, so there
+is no variant of this design that avoids the exposure.
+
 Rotation uses a two-version receiver overlap against the single-version sender,
 exactly as the hosted-scheduler bearer does. The sender URL can only carry one
 capability, so the receiver is the side that overlaps:

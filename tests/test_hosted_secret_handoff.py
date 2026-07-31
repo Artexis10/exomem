@@ -181,9 +181,17 @@ def test_destination_matrix_enforces_named_secret_boundaries() -> None:
     }
     # Two-version receiver overlap against a single-version sender, exactly as
     # the hosted-scheduler bearer rotates. The sender URL cannot hold two
-    # capabilities, so the receiver is the side that overlaps.
-    assert alert_digest["vercel.substrate.production.alert-receiver.previous"]["slot"] == "previous"
-    assert {destination["kind"] for destination in alert_digest.values()} == {"vercel_env"}
+    # capabilities, so the receiver is the side that overlaps. Asserted in full:
+    # a typo in the previous variable name silently collapses the overlap into a
+    # hard cutover, which 404s every transition between the digest publish and
+    # the sender cutover.
+    assert alert_digest["vercel.substrate.production.alert-receiver.previous"] == {
+        "kind": "vercel_env",
+        "slot": "previous",
+        "project": "substrate.production",
+        "environment": "production",
+        "name": "EXOMEM_HOSTED_ALERT_TOKEN_SHA256_PREVIOUS",
+    }
 
     wrapping = secrets["provisioner_wrapping_key"]["destinations"]
     assert set(wrapping) == {
