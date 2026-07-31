@@ -26,6 +26,8 @@ FAILED = "failed"
 COMPLETED = "completed"
 STATES = (PENDING, RUNNING, BLOCKED, FAILED)
 STATUS_JOB_LIMIT = 100
+# Bump when _key's composition changes so existing stores re-key on next open.
+_JOB_KEY_VERSION = "2"
 DISCOVERY_CURSOR_KEY = "discovery_cursor"
 MAX_SHARING_ATTEMPTS = 3
 _SHARING_WINERRORS = frozenset({5, 32})
@@ -245,20 +247,92 @@ class MediaJobStore:
                     )
                     """
                 )
+                self._migrate_job_key(conn)
         finally:
             conn.close()
+
+    def _migrate_job_key(self, conn: sqlite3.Connection) -> None:
+        """Re-key existing rows onto (binary_rel, media_type), collapsing duplicates.
+
+        `jobs` is created with `CREATE TABLE IF NOT EXISTS`, so a store built by an
+        older version keeps its old three-part `job_key` forever and would keep
+        minting one row per stray sidecar. Runs once, guarded by a `meta` marker.
+        """
+        row = conn.execute(
+            "SELECT value FROM meta WHERE key = 'job_key_version'"
+        ).fetchone()
+        if row is not None and str(row["value"]) == _JOB_KEY_VERSION:
+            return
+
+        survivors: dict[str, Any] = {}
+        for job in conn.execute(
+            """
+            SELECT id, job_key, binary_rel, sidecar_rel, media_type,
+                   do_ocr, do_clip, do_reembed
+            FROM jobs ORDER BY id
+            """
+        ).fetchall():
+            key = self._key(job["binary_rel"], job["media_type"])
+            keeper = survivors.get(key)
+            if keeper is None:
+                survivors[key] = job
+                continue
+            # Fold the loser's stages into the keeper, matching enqueue's
+            # ON CONFLICT DO UPDATE semantics, then drop the duplicate row.
+            conn.execute(
+                """
+                UPDATE jobs SET do_ocr = MAX(do_ocr, ?), do_clip = MAX(do_clip, ?),
+                    do_reembed = MAX(do_reembed, ?), updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    job["do_ocr"],
+                    job["do_clip"],
+                    job["do_reembed"],
+                    time.time(),
+                    keeper["id"],
+                ),
+            )
+            # Prefer the row pointing at the sidecar the binary actually owns, so
+            # collapsing never leaves a stray copy as the survivor's target.
+            canonical = job["binary_rel"] + ".md"
+            if job["sidecar_rel"] == canonical and keeper["sidecar_rel"] != canonical:
+                conn.execute(
+                    "UPDATE jobs SET sidecar_rel = ? WHERE id = ?",
+                    (canonical, keeper["id"]),
+                )
+            conn.execute("DELETE FROM jobs WHERE id = ?", (job["id"],))
+
+        for key, job in survivors.items():
+            if job["job_key"] != key:
+                conn.execute(
+                    "UPDATE jobs SET job_key = ? WHERE id = ?", (key, job["id"])
+                )
+        conn.execute(
+            "INSERT INTO meta (key, value) VALUES ('job_key_version', ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (_JOB_KEY_VERSION,),
+        )
 
     def _relative(self, path: Path) -> str:
         return path.resolve().relative_to(self.vault_root).as_posix()
 
     @staticmethod
-    def _key(binary_rel: str, sidecar_rel: str, media_type: str) -> str:
-        return "\0".join((binary_rel, sidecar_rel, media_type))
+    def _key(binary_rel: str, media_type: str) -> str:
+        """Queue identity: the BINARY, not the sidecar.
+
+        The sidecar used to be part of this key, which made the `ON CONFLICT`
+        dedup per-sidecar: a stray `.md` naming the same `evidence_file` (a
+        Syncthing conflict copy, a manual duplicate) minted a second job for one
+        binary and two workers then extracted it into two different files. A
+        binary owns exactly one sidecar, so it must own exactly one job.
+        """
+        return "\0".join((binary_rel, media_type))
 
     def enqueue(self, job: MediaJob) -> int:
         binary_rel = self._relative(job.binary_path)
         sidecar_rel = self._relative(job.sidecar_path)
-        key = self._key(binary_rel, sidecar_rel, job.media_type)
+        key = self._key(binary_rel, job.media_type)
         now = time.time()
         conn = self._connect()
         try:
@@ -296,8 +370,7 @@ class MediaJobStore:
     def discard(self, job: MediaJob) -> int:
         """Remove the durable row for an artifact already completed in Markdown."""
         binary_rel = self._relative(job.binary_path)
-        sidecar_rel = self._relative(job.sidecar_path)
-        key = self._key(binary_rel, sidecar_rel, job.media_type)
+        key = self._key(binary_rel, job.media_type)
         conn = self._connect()
         try:
             with conn:

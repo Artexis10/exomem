@@ -253,3 +253,66 @@ def test_audit_fix_report_summary_has_expected_keys(vault: Path) -> None:
     assert "proposed" in report.summary
     assert isinstance(report.summary["fixed"], int)
     assert isinstance(report.summary["proposed"], int)
+
+
+_NESTED_SIDECAR = """---
+type: source
+media_type: pdf
+evidence_file: Knowledge Base/Evidence/Case/report.pdf
+extracted_by: pymupdf
+processing_state: completed
+---
+
+# Evidence: report.pdf
+
+Preserved under `Evidence/Case/`.
+
+## Extracted text
+
+## Findings
+The transcript body.
+
+## Preserved notes
+
+# Evidence: report.pdf
+
+Preserved under `Evidence/Case/`.
+
+## Extracted text
+
+## Findings
+The transcript body.
+"""
+
+
+def test_audit_fix_collapses_nested_media_sidecars(vault: Path) -> None:
+    """Evidence/ is append-only, but its sidecars are still repairable.
+
+    The compiled-page passes skip Evidence entirely, and its tier is
+    `append-only` rather than `read-write` — so a read-write-only guard would
+    skip every sidecar and quietly fix nothing.
+    """
+    sidecar = vault / "Knowledge Base" / "Evidence" / "Case" / "report.pdf.md"
+    _seed(sidecar, _NESTED_SIDECAR)
+    _seed(sidecar.with_suffix(""), "binary bytes")
+
+    report = audit_fix_module.audit_fix(vault, dry_run=False, today=TODAY)
+
+    fixed = [f for f in report.fixed if f.category == "duplicated_sidecar"]
+    assert len(fixed) == 1
+    body = sidecar.read_text(encoding="utf-8")
+    assert "## Preserved notes" not in body
+    assert body.count("The transcript body.") == 1
+    assert "## Findings" in body, "an H2 inside the extraction must survive"
+    assert "extracted_by: pymupdf" in body, "frontmatter is untouched"
+
+
+def test_audit_fix_dry_run_leaves_nested_sidecar_on_disk(vault: Path) -> None:
+    sidecar = vault / "Knowledge Base" / "Evidence" / "Case" / "report.pdf.md"
+    _seed(sidecar, _NESTED_SIDECAR)
+    _seed(sidecar.with_suffix(""), "binary bytes")
+
+    report = audit_fix_module.audit_fix(vault, dry_run=True, today=TODAY)
+
+    assert [f for f in report.fixed if f.category == "duplicated_sidecar"]
+    assert sidecar.read_text(encoding="utf-8") == _NESTED_SIDECAR
