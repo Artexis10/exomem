@@ -2243,21 +2243,12 @@ def _print_triage_human(result: dict) -> None:
 
 
 def _core_op_main(argv: list[str]) -> int:
-    from . import capabilities, cli_ops
+    from . import cli_ops, product_invoke
     from . import commands as commands_module
-    from . import schema as schema_module
-    from .vault import resolve_vault
 
     expose_tier2 = _expose_tier2()
     registered_commands = commands_module.product_commands_for("cli", expose_tier2=expose_tier2)
     cmds = {command.name: command for command in registered_commands}
-    surface_descriptor = capabilities.ActiveSurfaceDescriptor(
-        surface="cli",
-        profile="product",
-        tier2_enabled=expose_tier2,
-        product_commands=tuple(command.name for command in registered_commands),
-        exported_aliases=commands_module.simple_action_names(),
-    )
 
     parser = _CLIParser(prog="kb", description=f"Query and write the local {kb_dirname()}.")
     sub = parser.add_subparsers(dest="op", required=True, parser_class=_CLIParser)
@@ -2284,39 +2275,14 @@ def _core_op_main(argv: list[str]) -> int:
             kwargs = cli_ops.coerce(
                 cmd.params, raw, guarded_fields=cmd.guarded_fields, tool=cmd.name, cli=True
             )
-        # Domain-invalid mixed selectors must reach their stable public error
-        # before the lease/egress coverage classifier.  Coverage still rejects
-        # unknown selectors on every executable branch; this is input
-        # validation, not a branch registration.
-        if cmd.name == "process_media" and kwargs.get("operation", "process") not in {
-            "process",
-            "status",
-            "retry",
-        }:
-            raise cli_ops.OpError(
-                "INVALID_MEDIA_OPERATION",
-                "process_media operation must be process, status, or retry",
-            )
-        vault_root = _resolve_core_op_vault(cmd.name, kwargs, resolve_vault)
-        if cmd.needs_schema:
-            injected = (vault_root, schema_module.load_source_schema(vault_root))
-        else:
-            injected = (vault_root,)
-        from .governance import principal as principal_module
-        from .writer_lease import invoke_command
-
-        # The CLI runs in the vault owner's own process: canonical audience is
-        # `owner` (design D5), bound explicitly rather than left to the
-        # unbound-contextvar default so the surface label is accurate.
-        with capabilities.active_surface(
-            surface_descriptor
-        ), principal_module.request_scope(principal_module.owner_principal(surface="cli")):
-            result = invoke_command(
-                cmd,
-                *injected,
-                idempotency_key=os.environ.get("EXOMEM_IDEMPOTENCY_KEY") or None,
-                **kwargs,
-            )
+        # The invocation itself — coercion aside — is the shared CLI-family
+        # seam (`product_invoke`), the same code path the terminal UI drives.
+        result = product_invoke.invoke_prepared(
+            cmd,
+            kwargs,
+            expose_tier2=expose_tier2,
+            idempotency_key=os.environ.get("EXOMEM_IDEMPOTENCY_KEY") or None,
+        )
     except (cli_ops.OpError, ValueError, TypeError, RuntimeError) as e:
         err = cli_ops.error_dict(e)
         if as_json:
@@ -2332,30 +2298,6 @@ def _core_op_main(argv: list[str]) -> int:
     else:
         _print_human(result, op=cmd.name)
     return 1 if isinstance(result, dict) and result.get("strict_failed") else 0
-
-
-def _resolve_core_op_vault(op: str, kwargs: dict, resolve_vault_func) -> Path:
-    """Resolve the CLI vault root, allowing read-only first-run scans pre-init."""
-    try:
-        return resolve_vault_func()
-    except RuntimeError:
-        if not _core_op_allows_uninitialized_vault(op, kwargs):
-            raise
-        override = os.environ.get("EXOMEM_VAULT_PATH")
-        if not override:
-            raise
-        path = Path(override)
-        if not path.is_dir():
-            raise
-        return path
-
-
-def _core_op_allows_uninitialized_vault(op: str, kwargs: dict) -> bool:
-    if op == "browse_memory":
-        return True
-    if op == "adopt_vault":
-        return (kwargs.get("mode") or "scan-only") == "scan-only"
-    return False
 
 
 if __name__ == "__main__":
