@@ -109,13 +109,22 @@ class WriteBackModal(ModalScreen[dict | None]):
     def compose(self) -> ComposeResult:
         with Vertical(id="modal-box"):
             yield Label("Save as durable memory (remember)")
-            yield Static(Text("An insight note, written through the governed path.", style="dim"))
+            yield Static(
+                Text(
+                    "An insight note through the governed path. The Observations "
+                    "line is its semantic unit — edit it to say what you concluded.",
+                    style="dim",
+                )
+            )
             yield Input(value=self._suggested_title, placeholder="title", id="writeback-title")
             yield TextArea(id="writeback-content")
             yield Static(Text("ctrl+s save   esc cancel", style="dim"))
 
     def on_mount(self) -> None:
-        self.query_one("#writeback-content", TextArea).focus()
+        area = self.query_one("#writeback-content", TextArea)
+        if not area.text:
+            area.text = f"\n\n## Observations\n- [conclusion] {self._suggested_title}\n"
+        area.focus()
 
     def action_save(self) -> None:
         title = self.query_one("#writeback-title", Input).value.strip()

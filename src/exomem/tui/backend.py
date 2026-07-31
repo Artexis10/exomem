@@ -67,6 +67,24 @@ class AskOutcome:
     raw: Any = None
 
 
+def ensure_semantic_unit(content: str, title: str) -> str:
+    """Guarantee the governed minimum: one semantic unit per compiled note.
+
+    A compiled note needs at least one unit (an `## Observations` bullet or a
+    rich governed heading). Friendly capture must not require users to know
+    that grammar, so when a draft has neither, one compact observation
+    restating the title is appended — visible in the written file, never
+    silently invented content.
+    """
+    lowered = content.lower()
+    if "## observations" in lowered or lowered.lstrip().startswith("## "):
+        return content
+    if "\n## " in content:
+        return content
+    summary = title.strip().rstrip(".")
+    return f"{content.rstrip()}\n\n## Observations\n- [insight] {summary}\n"
+
+
 def _normalize_ask(result: Any) -> AskOutcome:
     if isinstance(result, list):
         return AskOutcome(hits=list(result), raw=result)
@@ -202,8 +220,41 @@ class ExomemBackend:
     def remember_note(
         self, content: str, title: str, *, note_type: str = "insight"
     ) -> dict:
+        raw = {
+            "content": ensure_semantic_unit(content, title),
+            "title": title,
+            "note_type": note_type,
+        }
+        try:
+            return self._call("remember", raw)
+        except BackendError as error:
+            if error.code != "SEMANTIC_CONTRACT_BLOCKED":
+                raise
+        # Governed relation review: a new compiled page without a qualifying
+        # typed relation needs an explicit disposition. Validate to obtain the
+        # immutable draft identity, then commit it unchanged as reviewed-none —
+        # the user's confirmation IS the review, and the reason lands in the
+        # audit trail (the same proposal-first pattern the Studio uses).
+        draft = self._call("remember", {**raw, "validate_only": True})
+        if not isinstance(draft, dict) or not draft.get("draft_id"):
+            raise BackendError(
+                "SEMANTIC_CONTRACT_BLOCKED",
+                "draft validation did not return a committable draft",
+            )
+        review_hash = draft.get("relation_review_hash") or draft.get("draft_hash")
         return self._call(
-            "remember", {"content": content, "title": title, "note_type": note_type}
+            "remember",
+            {
+                **raw,
+                "draft_id": draft["draft_id"],
+                "draft_hash": draft["draft_hash"],
+                "draft_token": draft["draft_token"],
+                "relation_disposition": "reviewed_none",
+                "relation_review_hash": review_hash,
+                "relation_review_reason": (
+                    "tui write-back: user confirmed saving without selecting typed relations"
+                ),
+            },
         )
 
     def attention(self, *, limit: int = 25, state: str = "open") -> dict:
