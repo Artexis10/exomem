@@ -89,6 +89,8 @@ class ContinueScreen(ExomemScreen):
 
     def on_mount(self) -> None:
         self.query_one("#continue-list", OptionList).display = False
+
+    def on_screen_resume(self) -> None:
         self.action_refresh()
 
     def action_refresh(self) -> None:
@@ -124,10 +126,7 @@ class ContinueScreen(ExomemScreen):
         backend = self.app.backend
 
         def job() -> str:
-            from ... import install_hook
-
-            _ = backend  # packet rendering is local + read-only
-            return install_hook.render_continuation_packet(entry)
+            return backend.continuation_packet(entry)
 
         def done(packet: str) -> None:
             self._packet = packet

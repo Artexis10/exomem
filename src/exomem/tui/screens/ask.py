@@ -20,9 +20,9 @@ from textual.screen import ModalScreen
 from textual.widgets import Footer, Input, Label, OptionList, Static, TextArea
 from textual.widgets.option_list import Option
 
-from ..backend import AskOutcome, BackendError
+from ..backend import AskOutcome, BackendError, RelationReviewRequired
 from ..theme import STYLE_WARN
-from ..widgets import AppHeader, EmptyState, ErrorNotice
+from ..widgets import AppHeader, ConfirmModal, EmptyState, ErrorNotice
 from .base import ExomemScreen
 
 
@@ -219,6 +219,8 @@ class AskScreen(ExomemScreen):
         self._set_status("searching")
         if self._timer is None:
             self._timer = self.set_interval(0.5, self._tick_status)
+        else:
+            self._timer.resume()
         self.query_one("#ask-error", ErrorNotice).show_error(None)
         self.run_backend(
             lambda: backend.ask(query, limit=20, deep=True),
@@ -258,6 +260,8 @@ class AskScreen(ExomemScreen):
 
     def _on_results(self, outcome: AskOutcome) -> None:
         self._running_since = None
+        if self._timer is not None:
+            self._timer.pause()
         self._outcome = outcome
         results = self.query_one("#ask-results", OptionList)
         empty = self.query_one("#ask-empty", EmptyState)
@@ -292,13 +296,17 @@ class AskScreen(ExomemScreen):
 
     def _on_error(self, error: BackendError) -> None:
         self._running_since = None
+        if self._timer is not None:
+            self._timer.pause()
         self._set_status("failed")
         self.query_one("#ask-error", ErrorNotice).show_error(error)
 
     def action_cancel_or_back(self) -> None:
         if self._running_since is not None:
-            self.supersede()
+            self.supersede("ask")
             self._running_since = None
+            if self._timer is not None:
+                self._timer.pause()
             self._set_status("cancelled — the knowledge base was not modified")
             return
         self.app.back()
@@ -382,7 +390,7 @@ class AskScreen(ExomemScreen):
             lines += [f"- {hit.get('title')}  ({hit.get('path')})" for hit in self._outcome.hits]
             packet = "\n".join(lines)
         self.app.copy_to_clipboard(packet)
-        self.app.notify("Context packet copied to the clipboard.")
+        self.app.notify("Context packet copied (needs terminal OSC 52 clipboard support).")
 
     def action_write_back(self) -> None:
         query = self.query_one("#ask-input", Input).value.strip()
@@ -394,17 +402,51 @@ class AskScreen(ExomemScreen):
             backend = self.app.backend
             self._set_status("saving insight")
 
-            def job() -> dict:
-                return backend.remember_note(result["content"], result["title"])
-
             def done(saved: dict) -> None:
                 path = saved.get("path") or saved.get("note") or "saved"
                 self._set_status("")
                 self.app.notify(f"Saved: {path}")
 
-            self.run_backend(job, done, self._on_error, group="writeback")
+            def failed(error: BackendError) -> None:
+                if isinstance(error, RelationReviewRequired):
+                    self._confirm_unlinked(error.draft, done)
+                    return
+                self._set_status("")
+                self._on_error(error)
+
+            self.run_backend(
+                lambda: backend.remember_note(result["content"], result["title"]),
+                done,
+                failed,
+                group="writeback",
+            )
 
         self.app.push_screen(WriteBackModal(suggested), on_close)
+
+    def _confirm_unlinked(self, draft: dict, done) -> None:
+        """The governed relation review, put to the user honestly."""
+        backend = self.app.backend
+
+        def on_close(confirmed: bool | None) -> None:
+            if not confirmed:
+                self._set_status("not saved — nothing was written")
+                return
+            self._set_status("saving insight (unlinked)")
+            self.run_backend(
+                lambda: backend.commit_unlinked_note(draft),
+                done,
+                self._on_error,
+                group="writeback",
+            )
+
+        self.app.push_screen(
+            ConfirmModal(
+                "No typed relation connects this note yet.",
+                "Save it unlinked? Your confirmation is recorded as the relation "
+                "review; connect it later via `exomem connect` or the Review Studio.",
+            ),
+            on_close,
+        )
 
     def action_refresh_caches(self) -> None:
         backend = self.app.backend

@@ -99,6 +99,25 @@ async def test_cancel_drops_late_results(make_app, fake_backend):
         assert app.screen.SCREEN_TITLE == "Ask"
 
 
+async def test_unrelated_group_does_not_cancel_search(make_app, fake_backend):
+    # Regression: generations are per worker group — a cache refresh while a
+    # search is in flight must not drop the search results.
+    release = fake_backend.hold()
+    app = make_app()
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _open_ask(app, pilot)
+        for character in "queue":
+            await pilot.press(character)
+        await pilot.press("enter")
+        await pilot.pause()
+        await pilot.press("u")  # refresh-caches worker, different group
+        release.set()
+        await _settle(app, pilot)
+        results = app.screen.query_one("#ask-results")
+        assert results.display is True
+        assert results.option_count == 3
+
+
 async def test_write_back_uses_governed_remember(make_app, fake_backend):
     app = make_app()
     async with app.run_test(size=(120, 40)) as pilot:

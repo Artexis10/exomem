@@ -96,7 +96,9 @@ class StatusScreen(ExomemScreen):
                 yield Static(Text("loading…", style="dim"), id=f"status-{key}", classes="pane")
         yield Footer()
 
-    def on_mount(self) -> None:
+    def on_screen_resume(self) -> None:
+        # Refresh on every visit, not just first mount — installed screens
+        # keep their instance across navigation.
         self.action_refresh()
 
     def action_refresh(self) -> None:

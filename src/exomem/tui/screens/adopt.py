@@ -107,7 +107,10 @@ class AdoptScreen(ExomemScreen):
         raw = event.value.strip()
         if not raw:
             return
-        folder = Path(raw).expanduser()
+        self.scan_folder(Path(raw).expanduser())
+
+    def scan_folder(self, folder: Path) -> None:
+        """Public entry (also used by onboarding): validate, then scan."""
         if not folder.is_dir():
             self.query_one("#adopt-error", ErrorNotice).show_error(
                 BackendError("NOT_A_FOLDER", f"{folder} is not a directory")
@@ -170,8 +173,10 @@ class AdoptScreen(ExomemScreen):
                 group="adopt-write",
             )
 
+        destination = self.app.backend.vault_root
         detail = (
-            f"Mode: {mode}\nSource: {folder}\nDestination: the governed Knowledge Base layer. "
-            "Original files are never rewritten."
+            f"Mode: {mode}\nSource: {folder}\n"
+            f"Destination: the governed layer of {destination or 'your configured vault'}. "
+            "Original files are never rewritten. Folders outside the vault are refused."
         )
         self.app.push_screen(ConfirmModal(f"Run {mode}?", detail), on_close)

@@ -15,6 +15,7 @@ remediation so screens render actionable errors instead of tracebacks.
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -47,6 +48,24 @@ class BackendError(Exception):
         )
 
 
+class RelationReviewRequired(BackendError):
+    """The governed relation review needs an explicit user decision.
+
+    Raised by `remember_note` when the validated draft has no qualifying typed
+    relation: committing it demands a real reviewed-none decision, so the UI
+    must ask the user before `commit_unlinked_note` runs. Never auto-commit
+    this — fabricating a review the user did not make is a governance defect.
+    """
+
+    def __init__(self, draft: dict):
+        super().__init__(
+            "RELATION_REVIEW_REQUIRED",
+            "no qualifying typed relation connects this note yet",
+            "confirm saving it unlinked, or connect it first",
+        )
+        self.draft = draft
+
+
 @dataclass(frozen=True)
 class VaultState:
     """Where this session points and whether it is a usable vault yet."""
@@ -67,19 +86,34 @@ class AskOutcome:
     raw: Any = None
 
 
+_H2_HEADING = re.compile(r"(?m)^##\s+\S")
+
+
+def _blocking_error(draft: dict) -> BackendError:
+    """Surface the first blocking contract finding as a structured error."""
+    findings = (draft.get("contract_result") or {}).get("blocking_findings") or []
+    for finding in findings:
+        if isinstance(finding, dict):
+            return BackendError(
+                str(finding.get("code") or "SEMANTIC_CONTRACT_BLOCKED"),
+                str(finding.get("detail") or "the draft cannot be committed"),
+                finding.get("remediation"),
+            )
+    return BackendError("SEMANTIC_CONTRACT_BLOCKED", "the draft cannot be committed")
+
+
 def ensure_semantic_unit(content: str, title: str) -> str:
     """Guarantee the governed minimum: one semantic unit per compiled note.
 
     A compiled note needs at least one unit (an `## Observations` bullet or a
     rich governed heading). Friendly capture must not require users to know
-    that grammar, so when a draft has neither, one compact observation
-    restating the title is appended — visible in the written file, never
-    silently invented content.
+    that grammar, so when a draft has no H2 section at all, one compact
+    observation restating the title is appended — visible in the written file,
+    never silently invented content. Drafts that DO carry H2 headings are left
+    untouched: validation judges them, and its structured findings surface
+    with remediations instead of being second-guessed here.
     """
-    lowered = content.lower()
-    if "## observations" in lowered or lowered.lstrip().startswith("## "):
-        return content
-    if "\n## " in content:
+    if _H2_HEADING.search(content):
         return content
     summary = title.strip().rstrip(".")
     return f"{content.rstrip()}\n\n## Observations\n- [insight] {summary}\n"
@@ -131,7 +165,12 @@ class ExomemBackend:
         return VaultState(root, False, "path does not exist")
 
     def adopt_vault_root(self, root: Path) -> VaultState:
-        """Adopt a vault root chosen during onboarding for the whole process."""
+        """Adopt a vault root chosen during onboarding for the whole process.
+
+        Deliberately mutates process-global `EXOMEM_VAULT_PATH` (once, on the
+        app thread) so process-wide consumers like warm-up stay coherent;
+        tests must set it via monkeypatch so it restores.
+        """
         os.environ["EXOMEM_VAULT_PATH"] = str(root)
         self._vault_override = str(root)
         return self.resolve_vault()
@@ -220,27 +259,47 @@ class ExomemBackend:
     def remember_note(
         self, content: str, title: str, *, note_type: str = "insight"
     ) -> dict:
+        """Validate-first governed note write.
+
+        Mirrors the adoption-proposal precedent: validate to obtain the
+        immutable draft, branch on `committable_without_review`, and let every
+        non-review blocker propagate as its own structured finding. When the
+        contract requires a relation disposition, this RAISES
+        `RelationReviewRequired` — the UI must put the question to the user;
+        `commit_unlinked_note` then records that explicit decision.
+        """
         raw = {
             "content": ensure_semantic_unit(content, title),
             "title": title,
             "note_type": note_type,
         }
-        try:
-            return self._call("remember", raw)
-        except BackendError as error:
-            if error.code != "SEMANTIC_CONTRACT_BLOCKED":
-                raise
-        # Governed relation review: a new compiled page without a qualifying
-        # typed relation needs an explicit disposition. Validate to obtain the
-        # immutable draft identity, then commit it unchanged as reviewed-none —
-        # the user's confirmation IS the review, and the reason lands in the
-        # audit trail (the same proposal-first pattern the Studio uses).
         draft = self._call("remember", {**raw, "validate_only": True})
         if not isinstance(draft, dict) or not draft.get("draft_id"):
             raise BackendError(
                 "SEMANTIC_CONTRACT_BLOCKED",
                 "draft validation did not return a committable draft",
             )
+        tokens = {
+            "draft_id": draft["draft_id"],
+            "draft_hash": draft["draft_hash"],
+            "draft_token": draft["draft_token"],
+        }
+        if draft.get("has_non_review_blockers"):
+            raise _blocking_error(draft)
+        if draft.get("committable_without_review"):
+            return self._call("remember", {**raw, **tokens})
+        if not draft.get("committable_after_review"):
+            raise _blocking_error(draft)
+        draft["_raw_args"] = raw
+        raise RelationReviewRequired(draft)
+
+    def commit_unlinked_note(self, draft: dict) -> dict:
+        """Commit a validated draft as explicitly unlinked (reviewed none).
+
+        Only called after the UI asked the user and they chose to save without
+        a relation — the recorded reason states exactly that.
+        """
+        raw = dict(draft.get("_raw_args") or {})
         review_hash = draft.get("relation_review_hash") or draft.get("draft_hash")
         return self._call(
             "remember",
@@ -252,7 +311,8 @@ class ExomemBackend:
                 "relation_disposition": "reviewed_none",
                 "relation_review_hash": review_hash,
                 "relation_review_reason": (
-                    "tui write-back: user confirmed saving without selecting typed relations"
+                    "tui write-back: the dialog stated no typed relation connects this "
+                    "note and the user explicitly chose to save it unlinked"
                 ),
             },
         )
@@ -298,19 +358,61 @@ class ExomemBackend:
         return result if isinstance(result, dict) else {}
 
     def adopt_write(self, folder: Path | str, mode: str, **extra: Any) -> dict:
+        """Adoption write modes always target the SESSION vault.
+
+        The scanned folder must be the vault root or a subtree of it (passed
+        as the scan `path`); anything else is refused honestly — writing into
+        an arbitrary scanned folder's own governed layer is never what the
+        confirm dialog promised.
+        """
         if mode not in {"save-manifest", "copy-as-sources"}:
             raise BackendError(
                 "UNSUPPORTED_ADOPT_MODE", f"adopt mode {mode!r} is not offered by the TUI"
             )
+        if self._vault is None:
+            raise BackendError(
+                "KB_NOT_INITIALIZED",
+                "connect or create a vault before adoption write modes",
+                "use the first-run flow, or exomem init",
+            )
+        vault_root = Path(self._vault).resolve()
+        target = Path(folder).expanduser().resolve()
+        raw: dict[str, Any] = {"mode": mode, **extra}
+        if target != vault_root:
+            try:
+                raw["path"] = str(target.relative_to(vault_root))
+            except ValueError:
+                raise BackendError(
+                    "OUTSIDE_VAULT",
+                    f"{target} is outside the configured vault; adoption write modes "
+                    "copy from inside it",
+                    "move the folder into the vault, or launch with --vault pointed at it",
+                ) from None
         from .. import product_invoke
 
         try:
-            result = product_invoke.invoke_product(
-                "adopt_vault", {"mode": mode, **extra}, vault_root=Path(folder)
-            )
+            result = product_invoke.invoke_product("adopt_vault", raw, vault_root=vault_root)
         except (cli_ops.OpError, ValueError, TypeError, RuntimeError) as exc:
             raise BackendError.from_exception(exc) from exc
-        return result if isinstance(result, dict) else {}
+        if not isinstance(result, dict):
+            return {}
+        # Mutating specialized ops return the commit envelope; the human-facing
+        # report lives under `diagnostics` when present (CLI renderer parity).
+        diagnostics = result.get("diagnostics")
+        return diagnostics if isinstance(diagnostics, dict) else result
+
+    @property
+    def vault_root(self) -> Path | None:
+        """The resolved session vault (attribute read only — no IO)."""
+        return self._vault
+
+    def continuation_packet(self, entry: dict) -> str:
+        from .. import install_hook
+
+        try:
+            return install_hook.render_continuation_packet(entry)
+        except Exception as exc:  # noqa: BLE001 — render must fail soft, not crash
+            raise BackendError("CONTINUATION_RENDER_FAILED", str(exc)) from exc
 
     # ------------------------------------------------------------------ #
     # Supported non-registry services (read-only or config-only)

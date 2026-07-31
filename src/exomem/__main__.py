@@ -465,7 +465,8 @@ def _tui_main(argv: list[str]) -> int:
 
     from . import tui as tui_package
 
-    return tui_package.run(vault=args.vault)
+    vault = str(Path(args.vault).expanduser()) if args.vault else None
+    return tui_package.run(vault=vault)
 
 
 def _backfill_media_main(argv: list[str]) -> int:

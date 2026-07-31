@@ -150,16 +150,20 @@ def invoke_product(
     vault_root: Path | str | None = None,
     expose_tier2: bool | None = None,
     idempotency_key: str | None = None,
-    cli: bool = False,
 ):
-    """Coerce raw arguments and invoke one product command end to end."""
+    """Coerce raw arguments and invoke one product command end to end.
+
+    Coercion runs REST-strict (`cli=False`): in-process callers pass native
+    values, and only the argv-string CLI needs the bare-string JSON
+    relaxation (it coerces for itself before `invoke_prepared`).
+    """
     cmd = product_command(op, expose_tier2=expose_tier2)
     kwargs = cli_ops.coerce(
         cmd.params,
         dict(raw or {}),
         guarded_fields=cmd.guarded_fields,
         tool=cmd.name,
-        cli=cli,
+        cli=False,
     )
     return invoke_prepared(
         cmd,

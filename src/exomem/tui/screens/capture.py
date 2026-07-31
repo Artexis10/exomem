@@ -13,7 +13,7 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.widgets import Footer, Input, RadioButton, RadioSet, Static, TextArea
 
-from ..backend import BackendError
+from ..backend import BackendError, RelationReviewRequired
 from ..theme import STYLE_OK
 from ..widgets import AppHeader, ConfirmModal, ErrorNotice
 from .base import ExomemScreen
@@ -115,12 +115,40 @@ class CaptureScreen(ExomemScreen):
             self.query_one("#capture-content", TextArea).focus()
 
         def failed(error: BackendError) -> None:
+            if isinstance(error, RelationReviewRequired):
+                self._confirm_unlinked(error.draft, done)
+                return
             # The typed content stays exactly where it is — only the status
             # changes, so nothing is lost on failure.
             self.query_one("#capture-result", Static).update("")
             self.query_one("#capture-error", ErrorNotice).show_error(error)
 
         self.run_backend(job, done, failed, group="capture-save")
+
+    def _confirm_unlinked(self, draft: dict, done) -> None:
+        backend = self.app.backend
+
+        def on_close(confirmed: bool | None) -> None:
+            if not confirmed:
+                self.query_one("#capture-result", Static).update(
+                    Text("not saved — your words are still here", style="dim")
+                )
+                return
+            self.run_backend(
+                lambda: backend.commit_unlinked_note(draft),
+                done,
+                lambda error: self.query_one("#capture-error", ErrorNotice).show_error(error),
+                group="capture-save",
+            )
+
+        self.app.push_screen(
+            ConfirmModal(
+                "No typed relation connects this note yet.",
+                "Save it unlinked? Your confirmation is recorded as the relation "
+                "review; connect it later via `exomem connect` or the Review Studio.",
+            ),
+            on_close,
+        )
 
     def action_guarded_back(self) -> None:
         content = self.query_one("#capture-content", TextArea).text.strip()

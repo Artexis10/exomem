@@ -106,7 +106,9 @@ async def test_ask_citation_contradiction_review(vault: Path):
         await _settle(app, pilot)
         assert app.screen.query_one("#ask-detail").has_class("has-content")
 
-        # Introduce a contradictory update via governed write-back.
+        # Introduce a contradictory update via governed write-back. The
+        # relation-review contract fires for an unlinked note: the TUI must
+        # ASK, and only the user's explicit confirmation commits reviewed-none.
         await pilot.press("w")
         await pilot.pause()
         assert app.screen.__class__.__name__ == "WriteBackModal"
@@ -117,8 +119,15 @@ async def test_ask_citation_contradiction_review(vault: Path):
         )
         await pilot.press("ctrl+s")
         await _settle(app, pilot)
+        assert app.screen.__class__.__name__ == "ConfirmModal", (
+            "an unlinked note must trigger the explicit relation-review question"
+        )
         notes = list((vault / "Knowledge Base" / "Notes").rglob("*reversal-test*.md"))
-        assert notes, "write-back must land as a governed note"
+        assert not notes, "nothing may be written before the user confirms"
+        await pilot.press("y")
+        await _settle(app, pilot)
+        notes = list((vault / "Knowledge Base" / "Notes").rglob("*reversal-test*.md"))
+        assert notes, "confirmed write-back must land as a governed note"
 
         # Review the real attention queue and triage one item end-to-end.
         app.goto("review")
@@ -160,3 +169,27 @@ async def test_adopt_scan_only_writes_nothing(vault: Path, tmp_path: Path):
 
     after = sorted(str(p.relative_to(folder)) for p in folder.rglob("*"))
     assert before == after, "scan-only must not create or modify anything"
+
+
+@pytest.mark.timeout(120)
+async def test_adopt_write_targets_session_vault_only(vault: Path, tmp_path: Path):
+    backend = ExomemBackend()
+    backend.resolve_vault()
+
+    # A folder outside the vault is refused, with remediation.
+    outside = tmp_path / "elsewhere"
+    outside.mkdir()
+    from exomem.tui.backend import BackendError
+
+    with pytest.raises(BackendError) as excinfo:
+        backend.adopt_write(outside, "save-manifest")
+    assert excinfo.value.code == "OUTSIDE_VAULT"
+
+    # The vault root itself is a valid target: save-manifest commits only the
+    # governed manifest artifact inside the vault.
+    before = {str(p) for p in vault.rglob("*manifest*")}
+    result = backend.adopt_write(vault, "save-manifest")
+    assert isinstance(result, dict)
+    assert result.get("ok") is True or result.get("manifest") or result.get("mode"), result
+    after = {str(p) for p in vault.rglob("*manifest*")}
+    assert after - before, "save-manifest must write a manifest artifact inside the vault"

@@ -36,11 +36,17 @@ async def test_packs_multi_select_persists(make_app, fake_backend):
         await _settle(app, pilot)
         applied = [c for c in fake_backend.calls if c[0] == "apply_packs"]
         assert applied and "creative" in applied[0][1]["pack_ids"]
-        # reopening shows persisted state
+        # Reopening must land on a LIVE re-mounted screen showing persisted
+        # state (guards against Textual removing popped, uninstalled screens).
+        state_calls_before = len([c for c in fake_backend.calls if c[0] == "packs_state"])
         app.goto("home")
         await pilot.pause()
         app.goto("packs")
         await _settle(app, pilot)
+        revisited = app.screen.query_one("#packs-list")
+        assert revisited.option_count == 3, "revisited screen must be alive and populated"
+        state_calls_after = len([c for c in fake_backend.calls if c[0] == "packs_state"])
+        assert state_calls_after > state_calls_before, "revisit must refresh from the backend"
         assert "creative" in fake_backend.selected_packs
 
 
@@ -112,6 +118,32 @@ async def test_continue_empty_state_names_hook_install(make_app):
         await _open(app, pilot, "continue")
         empty = app.screen.query_one("#continue-empty")
         assert empty.display is True
+
+
+async def test_continue_renders_and_copies_packet(make_app):
+    backend = FakeBackend(
+        checkpoints=[
+            {
+                "client": "claude",
+                "session": "sample-session-1",
+                "observed_at_ns": 1,
+                "status": "valid",
+                "checkpoint": {"structural": {}},
+            }
+        ]
+    )
+    app = make_app(backend)
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _open(app, pilot, "continue")
+        options = app.screen.query_one("#continue-list")
+        assert options.display is True and options.option_count == 1
+        await pilot.press("enter")
+        await _settle(app, pilot)
+        assert any(call[0] == "continuation_packet" for call in backend.calls)
+        detail = app.screen.query_one("#ask-detail")
+        assert detail.has_class("has-content")
+        await pilot.press("y")
+        await pilot.pause()  # copy action must not error without a checkpoint open twice
 
 
 async def test_onboarding_create_vault_path(make_app, tmp_path):

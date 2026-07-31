@@ -123,6 +123,8 @@ class ReviewScreen(ExomemScreen):
 
     def on_mount(self) -> None:
         self.query_one("#review-list", OptionList).display = False
+
+    def on_screen_resume(self) -> None:
         self.action_refresh()
 
     # ------------------------------------------------------------------ #

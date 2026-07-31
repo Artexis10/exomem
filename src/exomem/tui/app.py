@@ -185,6 +185,10 @@ class ExomemTuiApp(App):
         if screen is None:
             screen = factory()
             self._sections[name] = screen
+            # Installed screens survive pop_screen (Textual removes uninstalled
+            # screens on replacement, which would close their message pumps and
+            # leave a revisited instance dead).
+            self.install_screen(screen, name=f"section-{name}")
         if self.screen is screen:
             return
         self._pop_to_home()

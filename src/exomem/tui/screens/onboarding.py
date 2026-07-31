@@ -106,8 +106,10 @@ class OnboardingScreen(ExomemScreen):
         if action == "scan":
             self.app.goto("adopt")
             adopt = self.app.screen
-            if hasattr(adopt, "_scan") and folder.is_dir():
-                adopt._scan(folder)
+            from .adopt import AdoptScreen
+
+            if isinstance(adopt, AdoptScreen):
+                adopt.scan_folder(folder)
             return
         if action == "use":
             self._use_existing(folder)

@@ -75,11 +75,13 @@ class FakeBackend:
         warming: bool = False,
         attention: dict | None = None,
         hooks_ok: bool = True,
+        checkpoints: list[dict] | None = None,
     ):
         self.initialized = initialized
         self.warming = warming
         self.hooks_ok = hooks_ok
         self.attention_payload = SAMPLE_ATTENTION if attention is None else attention
+        self.checkpoints = list(checkpoints or [])
         self.runtime_started = False
         self.calls: list[tuple[str, dict]] = []
         self.remembered: list[dict] = []
@@ -88,6 +90,10 @@ class FakeBackend:
         self.selected_packs: list[str] = ["technical", "business"]
         self._fail: dict[str, BackendError] = {}
         self._release: threading.Event | None = None
+
+    @property
+    def vault_root(self):
+        return Path("/data/sample-vault") if self.initialized else None
 
     # -- test controls ------------------------------------------------- #
     def fail_next(self, method: str, code: str = "OP_ERROR", message: str = "it broke") -> None:
@@ -261,4 +267,26 @@ class FakeBackend:
 
     def continuations(self) -> list[dict]:
         self._gate("continuations")
-        return []
+        return list(self.checkpoints)
+
+    def continuation_packet(self, entry: dict) -> str:
+        self._gate("continuation_packet", session=entry.get("session"))
+        return (
+            "Continuation checkpoint (sample)\n"
+            f"client: {entry.get('client')}\nsession: {entry.get('session')}\n"
+            "Reopen cited artifacts and continue from evidence."
+        )
+
+    def commit_unlinked_note(self, draft: dict) -> dict:
+        self._gate("commit_unlinked_note")
+        raw = dict(draft.get("_raw_args") or {})
+        self.remembered.append(
+            {
+                "content": raw.get("content", ""),
+                "title": raw.get("title", "untitled"),
+                "note_type": raw.get("note_type", "insight"),
+                "unlinked": True,
+            }
+        )
+        title = str(raw.get("title", "untitled"))
+        return {"path": f"Knowledge Base/Notes/Insights/{title.lower().replace(' ', '-')}.md"}

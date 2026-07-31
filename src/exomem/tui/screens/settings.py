@@ -70,9 +70,12 @@ class SettingsScreen(ExomemScreen):
         backend = self.app.backend
 
         def job() -> dict:
-            return backend.mode()
+            # Both reads run off-thread: resolve_vault stats the filesystem,
+            # which can stall on network/WSL mounts.
+            return {"policy": backend.mode(), "vault": backend.resolve_vault()}
 
-        def done(policy: dict) -> None:
+        def done(payload: dict) -> None:
+            policy = payload["policy"]
             mode = str(policy.get("mode") or "normal")
             self._loaded_mode = mode
             button = self.query_one(f"#mode-{mode}", RadioButton)
@@ -81,12 +84,11 @@ class SettingsScreen(ExomemScreen):
             status.append("stored at ", style="dim")
             status.append(str(policy.get("config_path") or ""), style="dim")
             self.query_one("#settings-mode-status", Static).update(status)
-            self._render_vault()
+            self._render_vault(payload["vault"])
 
         self.run_backend(job, done, self._on_error, group="settings")
 
-    def _render_vault(self) -> None:
-        state = self.app.backend.resolve_vault()
+    def _render_vault(self, state) -> None:
         text = Text()
         if state.root is None:
             text.append("No vault configured.\n")
@@ -104,8 +106,9 @@ class SettingsScreen(ExomemScreen):
     def on_radio_set_changed(self, event: RadioSet.Changed) -> None:
         if event.radio_set.id != "settings-mode" or event.pressed is None:
             return
-        mode = str(event.pressed.label)
-        if self._loaded_mode is None or mode == self._loaded_mode:
+        # Persist by stable widget id, never by display label.
+        mode = str(event.pressed.id or "").removeprefix("mode-")
+        if mode not in _MODES or self._loaded_mode is None or mode == self._loaded_mode:
             return
         backend = self.app.backend
 

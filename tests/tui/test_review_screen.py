@@ -31,7 +31,7 @@ async def test_queue_lists_items_with_counts(make_app):
         assert options.display is True
         assert options.option_count == 2
         summary = str(app.screen.query_one("#review-summary").render())
-        assert "2" in summary
+        assert "2 shown of 2 in view, 2 total" in summary
 
 
 async def test_dismiss_sends_fingerprint_and_refreshes(make_app, fake_backend):
