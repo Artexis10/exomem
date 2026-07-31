@@ -6,6 +6,21 @@ is retained verbatim. What is wrong is using that same predicate as the *only* m
 whether a page is connected at all, because the two most common real connections — inline
 body wikilinks and `sources:` provenance — are structurally invisible to it.
 
+The decisive framing is that this is an **inconsistency between subsystems, not a new
+capability**. Verified against a live vault on an active page carrying zero typed
+relations and four prose wikilinks:
+
+- the retrieval graph returns four edges, `relation_type: links_to`, `origin: wikilink`,
+  and lists all four pages in the seed's neighbourhood;
+- the `relation_debt` audit does not flag the page, because it clears on typed relations
+  *or* body wikilinks;
+- the write-time disposition reports it unsatisfied.
+
+Two of the three already agree. This change brings the third into line with them. It does
+not introduce a new edge, relation type, or origin label — all three already exist and are
+already emitted by the graph builder. That is also why the risk is contained: the semantics
+being adopted are in production, only the consumer is new.
+
 ## Goals / Non-Goals
 
 **Goals**

@@ -16,19 +16,26 @@ inactive statuses):
 | Jul W4 | 98 | 2.0 | 19% | 52% | 19% |
 
 The disposition raised typed-relation coverage from 1% to 53% — it did the job it was
-specified to do. But body-wikilink connectivity had already collapsed (6% → 39%
-zero-link) and the disposition could not register the recovery of that surface, because
-a qualifying relation excludes exactly the connections most notes actually carry:
+specified to do. The defect is that it is the one subsystem in the connectivity chain
+that cannot see a body wikilink, while the subsystems on either side of it already can:
 
-- Body wikilinks emit no relation fact at all, so a note with four resolved inline links
-  to governed pages is indistinguishable from an empty note.
-- `sources:` provenance is rejected three separate ways — excluded family `derivation`,
+- The retrieval graph materialises every resolved body wikilink as a `links_to` edge
+  carrying `origin: wikilink`, and surfaces those neighbours in graph context.
+- The `relation_debt` audit clears a page that has *either* typed relations *or* body
+  wikilinks.
+- The write-time disposition derives facts only from typed rows, rich-unit relation
+  metadata, and six frontmatter fields. Body wikilinks produce no fact at all, and
+  `sources:` provenance is rejected three separate ways — excluded family `derivation`,
   non-supersession frontmatter origin, and an ineligible append-only target.
 
-The consequence is not merely a reporting gap. A genuinely well-connected note is
-reported as relation debt and is pushed through a reviewed-none round trip to commit.
-That is friction applied to the correct behaviour, and it teaches an agent that the
-cheapest compliant note is one typed row and nothing else.
+So a page the graph already treats as connected, and the audit already declines to flag,
+is still blocked at write time until it either grows a typed row or is pushed through a
+reviewed-none round trip. That is friction applied to correct behaviour, and it teaches
+an agent that the cheapest compliant note is one typed row and nothing else.
+
+This change does not invent a new notion of connectivity. It teaches the write-time
+contract to recognise the same `links_to` edge, with the same relation type and the same
+`wikilink` origin label, that the graph already builds.
 
 The fix is to widen what the disposition can *see* while leaving what counts as a
 deliberate typed epistemic edge exactly as specified. No floor is raised, no quota is
