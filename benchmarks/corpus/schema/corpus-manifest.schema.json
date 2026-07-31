@@ -1,0 +1,141 @@
+{
+  "$defs": {
+    "ArtifactEntry": {
+      "additionalProperties": false,
+      "properties": {
+        "bytes_sha256": {
+          "title": "Bytes Sha256",
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/ArtifactKind"
+        },
+        "logical_sha256": {
+          "title": "Logical Sha256",
+          "type": "string"
+        },
+        "path": {
+          "title": "Path",
+          "type": "string"
+        },
+        "source_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source Id"
+        }
+      },
+      "required": [
+        "path",
+        "kind",
+        "bytes_sha256",
+        "logical_sha256"
+      ],
+      "title": "ArtifactEntry",
+      "type": "object"
+    },
+    "ArtifactKind": {
+      "enum": [
+        "markdown",
+        "csv",
+        "png",
+        "pdf",
+        "pdf_unavailable",
+        "transcript"
+      ],
+      "title": "ArtifactKind",
+      "type": "string"
+    },
+    "TemplateInfo": {
+      "additionalProperties": false,
+      "properties": {
+        "family": {
+          "title": "Family",
+          "type": "string"
+        },
+        "summary": {
+          "title": "Summary",
+          "type": "string"
+        },
+        "template_id": {
+          "title": "Template Id",
+          "type": "string"
+        },
+        "variants": {
+          "minimum": 1,
+          "title": "Variants",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "template_id",
+        "family",
+        "summary",
+        "variants"
+      ],
+      "title": "TemplateInfo",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "artifacts": {
+      "items": {
+        "$ref": "#/$defs/ArtifactEntry"
+      },
+      "title": "Artifacts",
+      "type": "array"
+    },
+    "counts": {
+      "additionalProperties": {
+        "type": "integer"
+      },
+      "title": "Counts",
+      "type": "object"
+    },
+    "degradations": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Degradations",
+      "type": "array"
+    },
+    "generator_version": {
+      "title": "Generator Version",
+      "type": "string"
+    },
+    "master_seed": {
+      "title": "Master Seed",
+      "type": "integer"
+    },
+    "renderer_versions": {
+      "additionalProperties": {
+        "type": "string"
+      },
+      "title": "Renderer Versions",
+      "type": "object"
+    },
+    "templates": {
+      "items": {
+        "$ref": "#/$defs/TemplateInfo"
+      },
+      "title": "Templates",
+      "type": "array"
+    }
+  },
+  "required": [
+    "generator_version",
+    "master_seed",
+    "templates",
+    "counts",
+    "renderer_versions"
+  ],
+  "title": "CorpusManifest",
+  "type": "object"
+}

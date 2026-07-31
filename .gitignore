@@ -11,6 +11,9 @@ pytest-cache-files-*/
 .bench-*/
 .benchmark-*/
 .semantic-latency-*/
+benchmarks/corpus/generated/
+benchmarks/runs/
+benchmarks/private/
 .codex-manual-cache/
 .python-write-probe/
 .surface-probe/

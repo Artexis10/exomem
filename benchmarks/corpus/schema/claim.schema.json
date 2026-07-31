@@ -1,0 +1,259 @@
+{
+  "$defs": {
+    "Assertion": {
+      "additionalProperties": false,
+      "properties": {
+        "asserted_at": {
+          "format": "date",
+          "title": "Asserted At",
+          "type": "string"
+        },
+        "recorded_week": {
+          "minimum": 0,
+          "title": "Recorded Week",
+          "type": "integer"
+        },
+        "source_id": {
+          "title": "Source Id",
+          "type": "string"
+        },
+        "stance": {
+          "$ref": "#/$defs/Stance"
+        }
+      },
+      "required": [
+        "source_id",
+        "stance",
+        "asserted_at",
+        "recorded_week"
+      ],
+      "title": "Assertion",
+      "type": "object"
+    },
+    "ClaimStatus": {
+      "enum": [
+        "current",
+        "superseded",
+        "partially_superseded",
+        "revoked",
+        "disputed",
+        "tentative",
+        "confirmed",
+        "disproved",
+        "unknown"
+      ],
+      "title": "ClaimStatus",
+      "type": "string"
+    },
+    "SpanCause": {
+      "additionalProperties": false,
+      "properties": {
+        "by": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "By"
+        },
+        "kind": {
+          "$ref": "#/$defs/SpanCauseKind"
+        }
+      },
+      "required": [
+        "kind"
+      ],
+      "title": "SpanCause",
+      "type": "object"
+    },
+    "SpanCauseKind": {
+      "enum": [
+        "initial",
+        "supersession",
+        "retraction",
+        "confirmation",
+        "disproof",
+        "dispute",
+        "expiry",
+        "correction",
+        "late_evidence"
+      ],
+      "title": "SpanCauseKind",
+      "type": "string"
+    },
+    "Stance": {
+      "enum": [
+        "supports",
+        "disputes",
+        "retracts"
+      ],
+      "title": "Stance",
+      "type": "string"
+    },
+    "StatusSpan": {
+      "additionalProperties": false,
+      "properties": {
+        "cause": {
+          "$ref": "#/$defs/SpanCause"
+        },
+        "recorded_week": {
+          "minimum": 0,
+          "title": "Recorded Week",
+          "type": "integer"
+        },
+        "status": {
+          "$ref": "#/$defs/ClaimStatus"
+        },
+        "valid_from": {
+          "format": "date",
+          "title": "Valid From",
+          "type": "string"
+        },
+        "valid_to": {
+          "anyOf": [
+            {
+              "format": "date",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Valid To"
+        }
+      },
+      "required": [
+        "status",
+        "valid_from",
+        "recorded_week",
+        "cause"
+      ],
+      "title": "StatusSpan",
+      "type": "object"
+    },
+    "TypedValue": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "enum": [
+            "text",
+            "quantity",
+            "date",
+            "entity_ref"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "unit": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Unit"
+        },
+        "value": {
+          "title": "Value",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "value"
+      ],
+      "title": "TypedValue",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "assertions": {
+      "items": {
+        "$ref": "#/$defs/Assertion"
+      },
+      "minItems": 1,
+      "title": "Assertions",
+      "type": "array"
+    },
+    "audiences": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Audiences",
+      "type": "array"
+    },
+    "claim_id": {
+      "title": "Claim Id",
+      "type": "string"
+    },
+    "derived_from": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Derived From",
+      "type": "array"
+    },
+    "object": {
+      "$ref": "#/$defs/TypedValue"
+    },
+    "predicate": {
+      "title": "Predicate",
+      "type": "string"
+    },
+    "status_timeline": {
+      "items": {
+        "$ref": "#/$defs/StatusSpan"
+      },
+      "minItems": 1,
+      "title": "Status Timeline",
+      "type": "array"
+    },
+    "subject": {
+      "title": "Subject",
+      "type": "string"
+    },
+    "superseded_by": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Superseded By"
+    },
+    "supersedes": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Supersedes"
+    }
+  },
+  "required": [
+    "claim_id",
+    "subject",
+    "predicate",
+    "object",
+    "assertions",
+    "status_timeline"
+  ],
+  "title": "ClaimRecord",
+  "type": "object"
+}

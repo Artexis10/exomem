@@ -1,0 +1,139 @@
+{
+  "$defs": {
+    "Persona": {
+      "additionalProperties": false,
+      "properties": {
+        "audiences": {
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Audiences",
+          "type": "array"
+        },
+        "persona_id": {
+          "title": "Persona Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "persona_id",
+        "audiences"
+      ],
+      "title": "Persona",
+      "type": "object"
+    },
+    "PolicyRule": {
+      "additionalProperties": false,
+      "properties": {
+        "allow": {
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Allow",
+          "type": "array"
+        },
+        "declassify_at": {
+          "anyOf": [
+            {
+              "format": "date",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Declassify At"
+        },
+        "rule_id": {
+          "title": "Rule Id",
+          "type": "string"
+        },
+        "target_claims": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Target Claims",
+          "type": "array"
+        },
+        "target_sources": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Target Sources",
+          "type": "array"
+        },
+        "withhold_notice": {
+          "default": true,
+          "title": "Withhold Notice",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "rule_id",
+        "allow"
+      ],
+      "title": "PolicyRule",
+      "type": "object"
+    },
+    "TombstoneRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "requested_at": {
+          "format": "date",
+          "title": "Requested At",
+          "type": "string"
+        },
+        "target_sources": {
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Target Sources",
+          "type": "array"
+        }
+      },
+      "required": [
+        "target_sources",
+        "requested_at"
+      ],
+      "title": "TombstoneRequest",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "audiences": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Audiences",
+      "type": "array"
+    },
+    "personas": {
+      "items": {
+        "$ref": "#/$defs/Persona"
+      },
+      "title": "Personas",
+      "type": "array"
+    },
+    "rules": {
+      "items": {
+        "$ref": "#/$defs/PolicyRule"
+      },
+      "title": "Rules",
+      "type": "array"
+    },
+    "tombstones": {
+      "items": {
+        "$ref": "#/$defs/TombstoneRequest"
+      },
+      "title": "Tombstones",
+      "type": "array"
+    }
+  },
+  "title": "PolicySet",
+  "type": "object"
+}
