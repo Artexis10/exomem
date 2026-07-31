@@ -27,7 +27,7 @@
 - [ ] 4.3 `reporting.py` (per-dimension, no aggregate, latency separate, invalid-run rendering)
 - [ ] 4.4 `judge/` backends (none/subagent/claude_cli/openai_compat) + blinding + file handshake + contract tests
 - [ ] 4.5 `basic_memory_local.py` + `graybox_local.py` adapters + `track_a_bridge.py` + conformance tests
-- [ ] 4.6 `benchmarks/README.md` + `docs/benchmarks.md` summary row
+- [x] 4.6 `benchmarks/README.md` + `docs/benchmarks.md` summary pointer
 
 ## 5. Track A execution
 - [x] 5.1 Env prep: the provider worktree's existing `benchmarks/.venv` is current; no sync needed (uv cache is read-only in-sandbox — online re-sync is a user-run command if ever required)

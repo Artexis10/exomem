@@ -41,6 +41,17 @@ result. See
 [Exomem vs Basic Memory: graph-value comparison](comparison-basic-memory-graph.md)
 for exact revisions, gates, limitations, and reproduction commands.
 
+A third, falsification-oriented system — the four-track **memory-proof
+benchmark** (`benchmarks/membench`: deterministic seeded epistemic corpus,
+capability-declaring adapters, deterministic gates a blinded judge cannot
+override, harness-activation and workflow tracks) — is specified in
+[memory-proof-benchmark.md](memory-proof-benchmark.md) with its first
+weaknesses-first baselines in
+[memory-proof-benchmark-v01-findings.md](memory-proof-benchmark-v01-findings.md)
+(headline: in the lexical-degraded profile, natural-language questions
+retrieve nothing — confirmed by two independent harnesses, root-caused to the
+hybrid retention seam).
+
 ## Methodology
 
 - **Harness.** `scripts/eval_retrieval.py --report markdown` runs the golden set
