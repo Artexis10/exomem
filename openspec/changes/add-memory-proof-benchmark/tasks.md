@@ -39,24 +39,24 @@
 - [ ] 5.7 Upstream PR branch off origin/main + title/body draft (no push, no numbers claimed) — draft in findings report; branch cut is user-run (needs network fetch)
 
 ## 6. Track C execution
-- [ ] 6.1 Track-C driver package + frozen control-prompt suite (cp01–cp14 + hard negatives) against isolated hook homes
-- [ ] 6.2 Retrieval-injection ladder tests (CLI rung offline; REST rung loopback attempt else user-run command)
-- [ ] 6.3 Continuation checkpoint round-trips incl. cross-client shared hook home
-- [ ] 6.4 Two-witness activation join tool (server trace × transcript/hook stdout)
-- [ ] 6.5 `claude -p` natural-prompt driver + transcript parser (execution user-run) + subagent propensity simulation (labeled)
+- [x] 6.1 Track-C driver package + frozen 19-case control-prompt suite against isolated hook homes (observed==predeclared for all; measured gate limits recorded: length-bounded control skip, no topicality signal)
+- [x] 6.2 Retrieval-injection ladder: CLI rung offline (fires + degradation floor); REST rung documented user-run stub (loopback not assumed)
+- [x] 6.3 Continuation checkpoint round-trips (7/7 marker recall, 64KiB bound); cross-client restore is impossible by product contract — scored as isolation-respected + per-client recall
+- [ ] 6.4 Two-witness activation join tool (server trace × transcript) — pending (needs the natural-prompt driver's transcripts)
+- [ ] 6.5 `claude -p` natural-prompt driver + subagent propensity simulation — pending (network/user-run execution)
 
 ## 7. Track D execution
-- [ ] 7.1 Journey runner (FlowRunner-derived, event-stream consumer)
-- [ ] 7.2 Journeys J1–J4 + deterministic checks
-- [ ] 7.3 J3 rubric JSON + blind pairwise wiring
-- [ ] 7.4 Basic Memory journey mapping table (doc only)
+- [x] 7.1 Journey runner (FlowRunner-derived) over exomem CLI --json with isolated vaults
+- [x] 7.2 Journeys J1 (longitudinal evolution, 11 checks) + J2 (correction propagation, 12 checks) green; wrong-order variant proves checks bite. J3/J4 pending
+- [ ] 7.3 J3 weekly-review rubric JSON + blind pairwise wiring — pending
+- [ ] 7.4 Basic Memory journey mapping table (doc only) — pending
 
 ## 8. Closeout
-- [ ] 8.1 `docs/hosted-inference-boundary.md` (candidate jobs + measurable thresholds + `reasoning: client|hosted` manifest axis)
-- [ ] 8.2 Founder-regression format under `benchmarks/private/` (gitignored + CI-excluded) + replayer stub
-- [ ] 8.3 Baseline runs: full-corpus exomem (leaf + wire, lexical), Track A smoke, Track C runnable suite, Track D journeys; harness-subagent QA/judge smoke (~30–60 calls, labeled)
-- [ ] 8.4 Weaknesses-first report + exact reproduction command list
-- [ ] 8.5 Exomem KB write-back: benchmark decision note + Gray Box audit note, verified by read-back
+- [x] 8.1 `docs/hosted-inference-boundary.md` (candidate jobs + measurable thresholds + `reasoning: client|hosted` manifest axis)
+- [x] 8.2 Founder-regression format (`membench/private_regressions.py` committed; data dir gitignored; P0 never leaves the local store) + replayer stub
+- [x] 8.3 Baseline runs complete: full-corpus exomem leaf (236/240 scored, 0 harness failures), T00 wire, Track A smoke (exomem-local ok + baseline-grep; bm-local sandbox-blocked→user-run), Track C suite, Track D J1/J2, blinded judge smoke (12 real-model judgments agreeing with deterministic gates)
+- [x] 8.4 Weaknesses-first report: `docs/memory-proof-benchmark-v01-findings.md` (headline: conjunctive retention gate → NL retrieval ≈0 in lexical profile, confirmed by two harnesses; + gate-limit, isolation, and robustness findings) with exact reproduction commands
+- [ ] 8.5 Exomem KB write-back: benchmark results note verified by read-back — in progress at closeout
 
 ## 9. Validation
 - [ ] 9.1 `npm exec --yes @fission-ai/openspec -- validate add-memory-proof-benchmark --strict`
