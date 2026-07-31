@@ -215,6 +215,41 @@ documented in docs/tui.md; goldens pin to the locked Textual version. CI gains
 one `tui` job (`uv run --frozen --extra tui --group tui-dev python -m pytest
 tests/tui -q`), mirroring the `retrieval-eval` extra-install precedent.
 
+### Similarity review vs sibling products (2026-07-31)
+
+An explicit side-by-side check against the recorded distinctiveness
+inventories of Gray Box (MIT, hand-rolled ANSI menu TUI) and Basic Memory
+(AGPL, Typer/Rich CLI, no TUI). No source code, help text, branding, ASCII
+art, or characteristic phrasing was taken from either; Basic Memory's tree was
+treated as read-only reference throughout (AGPL — principles only, no
+derivation). Checked dimensions and outcomes:
+
+- **Branding/composition**: no wordmark/figlet banner, no emoji menu, no
+  pointer-glyph menu rows (highlight is a background bar); Home is a
+  destinations+status two-column dashboard, unlike either product.
+- **Menu set/order**: eight destinations (Continue/Ask/Capture/Review/Adopt/
+  Packs/Status/Settings) — overlaps only in product-generic words; neither
+  sibling's set, order, or icon pairing.
+- **Key bindings**: number-key destinations plus screen-local action letters;
+  neither product uses this scheme. Retained *generic* terminal conventions on
+  usability grounds: arrows/enter/escape, `j/k`, `?` help, `q` quit,
+  `ctrl+p` palette, master-detail layouts, red/yellow/green status colors
+  (always paired with glyph + word, never color alone).
+- **Color/spinner identity**: warm-amber accent (vs their cyan/blue
+  identities); no braille spinner (elapsed-seconds status text instead).
+- **State phrasing**: empty/loading/error strings written fresh; errors render
+  the registry's own code + remediation envelope — exomem's existing product
+  language, unlike Basic Memory's markdown error documents or Gray Box's
+  advisory banners. "Nothing needs attention in this view" matches exomem's
+  own CLI renderer, not a sibling.
+- **Workflows**: capture = editor + auto-title + kind radio (vs prompt-line
+  capture / title+folder-required); ask = measured recall with evidence panel
+  (vs LLM answer with sources / search table).
+- **Runtime side-by-side** was limited to static inspection and their own
+  documentation: both sibling TUIs need a real TTY (and Gray Box's ask needs a
+  configured LLM key) which the test environment does not provide; the
+  recorded inventories were produced from full source audits instead.
+
 ### Known limitation (documented)
 
 A long-lived TUI process runs no file watcher (that is the server's job): out
