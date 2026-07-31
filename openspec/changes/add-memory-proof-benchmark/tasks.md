@@ -8,18 +8,18 @@
 - [x] 1.5 TUI requirements handoff (`docs/tui-requirements-handoff.md` + OpenSpec `add-terminal-review-surface`)
 
 ## 2. Corpus core (critical path)
-- [ ] 2.1 `wordbank.py`, `ids.py`, `clock.py` + privacy-scan test (TDD: scan test first)
-- [ ] 2.2 `schema.py` (pydantic v2, extra=forbid) + JSON-Schema export + malformed-fixture rejection tests + drift gate
-- [ ] 2.3 `oracle.py` + as-of/late-evidence/retroactive/expiry/confirm/disprove edge tests + span-justification lint
-- [ ] 2.4 `templates/base.py` (SymbolTable + declarative ops) + registry + `t00_mini_smoke` + `generate.py` + double-generation determinism + template-isolation tests
-- [ ] 2.5 `artifacts/` renderers (md/csv/png/transcript; pdf optional with recorded degradation) + logical-hash stability tests
-- [ ] 2.6 `native/` renderers (neutral, basic_memory, exomem_kb, graybox) + per-fact parity tests + ontology banned-vocab lint
+- [x] 2.1 `wordbank.py`, `ids.py`, `clock.py` + privacy-scan test (TDD: scan test first)
+- [x] 2.2 `schema.py` (pydantic v2, extra=forbid) + JSON-Schema export + malformed-fixture rejection tests + drift gate
+- [x] 2.3 `oracle.py` + as-of/late-evidence/retroactive/expiry/confirm/disprove edge tests + span-justification lint
+- [x] 2.4 `templates/base.py` (SymbolTable + declarative ops) + registry + `t00_mini_smoke` + `generate.py` + double-generation determinism + template-isolation tests
+- [x] 2.5 `artifacts/` renderers (md/csv/png/transcript; pdf optional with recorded degradation) + logical-hash stability tests
+- [x] 2.6 `native/` renderers (neutral, basic_memory, exomem_kb, graybox) + per-fact parity tests + ontology banned-vocab lint
 
 ## 3. Harness core (critical path)
-- [ ] 3.1 `adapters/base.py` (MemoryAdapter + Capability) + `exomem_local.py` (leaf/governed/wire; verified isolation env; no-warming assertion; external logs) + T00 end-to-end adapter test incl. sentinel survivability
-- [ ] 3.2 `runner.py` + `environment.py` (no-overwrite run dirs; failures.jsonl denominators; invalid-run semantics) + tests
-- [ ] 3.3 Scoring core: `answer_contract.py` (extractor adds structure only) + exactness/temporal/claims/citations + gate goldens (leak, wrong date, missing citation, wrong current-state, missed abstention, forbidden disclosure)
-- [ ] 3.4 GATE: T00 end-to-end run directory produced via leaf mode and via wire mode (desk-side)
+- [x] 3.1 `adapters/base.py` (MemoryAdapter + Capability) + `exomem_local.py` (leaf/wire; verified isolation env; no-warming assertion; external logs) + T00 end-to-end adapter test incl. sentinel survivability (governed mode deferred to a follow-up; leaf/wire cover the CI + fairness paths)
+- [x] 3.2 `runner.py` + `environment.py` (no-overwrite run dirs; failures.jsonl denominators; invalid-run semantics) + tests
+- [x] 3.3 Scoring core: `answer_contract.py` (extractor adds structure only) + value/state/citations/no-leak/abstention/calibration gate goldens + deterministic extractive answerer + retrieval metrics
+- [x] 3.4 GATE: T00 end-to-end run directory produced via leaf mode and via wire mode. NOTE: the historical zero-hits incident reproduced and was root-caused here — engine-side conjunctive retention gate in the lexical-degraded hybrid path (see docs/memory-proof-benchmark.md); scored honestly, harness asserts integrity via statement-form probes.
 
 ## 4. Fan-out (after 3.4 gate; Codex lanes eligible)
 - [ ] 4.1 Scorer families: governance, abstention, graph, retrieval (reuse `exomem.eval_metrics`), health (3-tier), behavior

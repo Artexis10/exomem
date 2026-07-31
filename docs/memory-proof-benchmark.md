@@ -81,11 +81,32 @@ structural to answer them with.
 Known environment facts recorded up front: loading BGE embeddings on this
 WSL2 stack has SIGABRTed before (see [benchmarks.md](benchmarks.md)); all
 default profiles are therefore model-free/lexical, with embeddings as an
-opt-in profile that may fail and is recorded either way. The one prior
-`exomem-local` keyword run returned zero hits for every query; **no Track A
-number may be published until that is root-caused** (ordered protocol lives in
-the OpenSpec tasks; prime suspect: `reconcile` swallows lexical-sidecar build
-failures, and the prior run's logs were destroyed with its temp vault).
+opt-in profile that may fail and is recorded either way.
+
+**Zero-hits incident: root-caused (2026-07-31, in-process reproduction).**
+The historical `exomem-local` run that returned zero hits for every query is
+an engine-side behaviour of the lexical-degraded configuration, not a sidecar
+or harness fault. Evidence chain: ingest 12/12 ok; the BM25 lane returns the
+correct document at rank 1 (raw score 14.7) for the failing natural-language
+question; `find()` still emits 0 hits. Mechanism: the hybrid page path keeps a
+BM25 candidate only if it is corroborated by the vector/graph/CLIP lanes, has
+a literal-substring excerpt, or passes the ALL-stems gate
+(`find_results.stem_tokens_present`, applied at the hybrid retention seam);
+exomem's `keyword` lane is likewise conjunctive (every token a substring).
+With embeddings disabled/unavailable and graph off, an interrogative query
+("How many…", "What is…") always contains stems absent from the stored text,
+so every retention path fails and hybrid returns nothing — strictly fewer
+results than its own BM25 lane. Consequences, all honest: (a) lexical-profile
+NL-question retrieval scores ≈0 for exomem and is published as such with the
+profile label; (b) the recommended profile is embeddings-enabled and is
+attempted only under subprocess isolation on this machine (recorded env
+failure if BGE aborts); (c) statement-form/title probes verify harness
+integrity (sentinels survive capture→retrieve). Product-fix recommendation
+(report scope, not benchmark scope): the relaxed `_any_stem_present` gate
+already used on the outside-KB widening path could serve the in-KB retention
+seam in lexical-degraded mode. Separately, `reconcile` swallowing
+lexical-sidecar build failures remains a robustness gap, but it was not this
+incident's cause.
 
 ## Honest v0.1 run matrix
 
