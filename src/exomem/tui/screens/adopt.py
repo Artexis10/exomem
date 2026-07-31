@@ -83,7 +83,7 @@ class AdoptScreen(ExomemScreen):
     def compose(self) -> ComposeResult:
         yield AppHeader(self.SCREEN_TITLE)
         yield Input(
-            placeholder="folder to scan (nothing is modified by a scan)", id="adopt-path"
+            placeholder="folder to scan (nothing is modified by a scan)", id="adopt-path", classes="line-input"
         )
         yield Static(id="adopt-status", classes="pane")
         error = ErrorNotice(id="adopt-error")

@@ -156,18 +156,42 @@ Screen.-narrow #home-strip {
     padding: 0 1;
 }
 
-#ask-input {
+.line-input {
     margin: 1 1 0 1;
     height: 1;
     border: none;
     background: $surface;
     padding: 0 1;
 }
-#ask-input:focus {
+.line-input:focus {
     background: $surface;
     border: none;
     border-left: thick $accent;
     padding: 0 1 0 0;
+}
+
+#capture-content {
+    margin: 0 1;
+    height: 1fr;
+    min-height: 4;
+    border: round $panel;
+    background: $background;
+}
+#capture-content:focus {
+    border: round $accent;
+}
+#capture-kind {
+    border: none;
+    background: $background;
+    padding: 0 1;
+    height: auto;
+}
+#capture-kind:focus {
+    border: none;
+    background: $surface;
+}
+RadioButton {
+    background: transparent;
 }
 #ask-status {
     height: 1;

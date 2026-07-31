@@ -21,7 +21,7 @@ class ExomemScreen(Screen):
 
     BINDINGS = [
         Binding("escape", "app.back", "back", show=False),
-        Binding("question_mark", "app.help", "help", show=False),
+        Binding("question_mark", "app.help", "help"),
         Binding("f1", "app.help", "help", show=False),
     ]
 

@@ -53,7 +53,7 @@ class CaptureScreen(ExomemScreen):
             classes="pane",
         )
         yield TextArea(id="capture-content")
-        yield Input(placeholder="title (derived from the first line — edit freely)", id="capture-title")
+        yield Input(placeholder="title (derived from the first line — edit freely)", id="capture-title", classes="line-input")
         with RadioSet(id="capture-kind"):
             yield RadioButton("Thought — keep the raw words (immutable source)", value=True, id="kind-thought")
             yield RadioButton("Insight — a compiled conclusion (governed note)", id="kind-insight")

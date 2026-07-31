@@ -173,7 +173,7 @@ class AskScreen(ExomemScreen):
 
     def compose(self) -> ComposeResult:
         yield AppHeader(self.SCREEN_TITLE)
-        yield Input(placeholder="What do you want to recall?", id="ask-input")
+        yield Input(placeholder="What do you want to recall?", id="ask-input", classes="line-input")
         yield Static(id="ask-status")
         yield Static(id="ask-degraded")
         error = ErrorNotice(id="ask-error")

@@ -49,7 +49,8 @@ def test_home_wide(snap_compare):
     assert snap_compare(_app(), terminal_size=(120, 40), run_before=_settle)
 
 
-def test_home_first_run(snap_compare):
+def test_first_run_onboarding(snap_compare):
+    # An unresolved vault opens the Welcome flow on top of Home.
     assert snap_compare(
         _app(FakeBackend(initialized=False)), terminal_size=(80, 24), run_before=_settle
     )
@@ -83,5 +84,71 @@ def test_ask_degraded_marker(snap_compare):
 def test_ask_empty_result(snap_compare):
     async def run_before(pilot) -> None:
         await _ask_flow(pilot, query="nothing")
+
+    assert snap_compare(_app(), terminal_size=(80, 24), run_before=run_before)
+
+
+async def _goto(pilot, name: str) -> None:
+    await _settle(pilot)
+    pilot.app.goto(name)
+    await _settle(pilot)
+
+
+def test_review_wide(snap_compare):
+    async def run_before(pilot) -> None:
+        await _goto(pilot, "review")
+
+    assert snap_compare(_app(), terminal_size=(120, 40), run_before=run_before)
+
+
+def test_review_narrow(snap_compare):
+    async def run_before(pilot) -> None:
+        await _goto(pilot, "review")
+
+    assert snap_compare(_app(), terminal_size=(80, 24), run_before=run_before)
+
+
+def test_capture_narrow(snap_compare):
+    async def run_before(pilot) -> None:
+        await _goto(pilot, "capture")
+
+    assert snap_compare(_app(), terminal_size=(80, 24), run_before=run_before)
+
+
+def test_adopt_report(snap_compare):
+    async def run_before(pilot) -> None:
+        await _goto(pilot, "adopt")
+        path_input = pilot.app.screen.query_one("#adopt-path")
+        path_input.value = "/"
+        await pilot.press("enter")
+        await _settle(pilot)
+
+    assert snap_compare(_app(), terminal_size=(100, 30), run_before=run_before)
+
+
+def test_status_standard(snap_compare):
+    async def run_before(pilot) -> None:
+        await _goto(pilot, "status")
+
+    assert snap_compare(_app(), terminal_size=(100, 30), run_before=run_before)
+
+
+def test_packs_standard(snap_compare):
+    async def run_before(pilot) -> None:
+        await _goto(pilot, "packs")
+
+    assert snap_compare(_app(), terminal_size=(100, 30), run_before=run_before)
+
+
+def test_settings_standard(snap_compare):
+    async def run_before(pilot) -> None:
+        await _goto(pilot, "settings")
+
+    assert snap_compare(_app(), terminal_size=(100, 30), run_before=run_before)
+
+
+def test_continue_empty_narrow(snap_compare):
+    async def run_before(pilot) -> None:
+        await _goto(pilot, "continue")
 
     assert snap_compare(_app(), terminal_size=(80, 24), run_before=run_before)
