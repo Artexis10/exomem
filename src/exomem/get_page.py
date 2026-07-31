@@ -144,9 +144,7 @@ def prepare_page_read(vault_root: Path, *, path: str) -> PreparedPageRead:
     # appended unconditionally, which made e.g. `foo.meta.json` resolve to
     # `foo.meta.json.md` and 404 — surfaced when trying to inspect trash
     # sidecars via `get`.
-    last_segment = rel.rsplit("/", 1)[-1]
-    if "." not in last_segment:
-        rel = rel + ".md"
+    rel = missing_path_for(rel)
     missing_path = rel
 
     candidate = vault_root / rel
@@ -202,6 +200,23 @@ def prepare_page_read(vault_root: Path, *, path: str) -> PreparedPageRead:
         raw=raw,
         mtime=snapshot_stat.st_mtime,
     )
+
+
+def missing_path_for(path: str) -> str:
+    """The spelling a NOT_FOUND names for `path` — the caller's own input,
+    normalized only by the suffix rule.
+
+    Shared so the withheld branch in `op_get` raises the byte-identical string
+    the absent branch raises. Two call sites formatting "the same" path is how
+    a withheld item stops being indistinguishable from a missing one.
+
+    Only auto-append .md when the path has NO extension. Appending
+    unconditionally made e.g. `foo.meta.json` resolve to `foo.meta.json.md`
+    and 404 — surfaced when inspecting trash sidecars via `get`.
+    """
+    rel = path.strip().replace("\\", "/").lstrip("/")
+    last_segment = rel.rsplit("/", 1)[-1]
+    return rel + ".md" if "." not in last_segment else rel
 
 
 def get_page(

@@ -282,6 +282,106 @@ def test_duplicate_and_malformed_ids_are_diagnostic_and_self_healing(tmp_path: P
     assert index.resolve(identity) == "Knowledge Base/Notes/first.md"
 
 
+# --------------------------------------------------------------------------
+# Identity collisions are a path oracle unless the error is content-free
+#
+# Merging or duplicating identities is what manufactures a collision, so a
+# caller can manufacture one and then read the colliding vault paths straight
+# out of the error text — for pages it may hold no release decision over.
+# --------------------------------------------------------------------------
+
+
+def _collide(tmp_path: Path, *names: str) -> tuple[Path, str]:
+    vault = tmp_path / "vault"
+    notes = vault / "Knowledge Base" / "Notes"
+    notes.mkdir(parents=True)
+    identity = memory_refs.new_id()
+    for name in names:
+        target = notes / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(_page(identity), encoding="utf-8")
+    return vault, identity
+
+
+@pytest.mark.parametrize("resolver", ["index", "read_only"])
+def test_ambiguous_reference_carries_a_count_not_the_colliding_paths(
+    tmp_path: Path, resolver: str
+) -> None:
+    vault, identity = _collide(tmp_path, "secret-alpha.md", "secret-beta.md")
+    index = memory_refs.ReferenceIndex(vault)
+    index.rebuild_all()
+
+    with pytest.raises(memory_refs.ReferenceError) as excinfo:
+        if resolver == "index":
+            index.resolve(identity)
+        else:
+            memory_refs.resolve_identifier_read_only(
+                vault, memory_refs.memory_ref(identity)
+            )
+
+    error = excinfo.value
+    assert error.code == "AMBIGUOUS_REFERENCE"
+    text = f"{error.code}: {error.reason}"
+    for leaked in (
+        "secret-alpha",
+        "secret-beta",
+        ".md",
+        "Knowledge Base",
+        "Notes/",
+        "[",
+    ):
+        assert leaked not in text, f"collision error leaked {leaked!r}: {text!r}"
+    assert "2" in text, f"the match COUNT is what an owner needs: {text!r}"
+
+
+@pytest.mark.parametrize("resolver", ["index", "read_only"])
+def test_ambiguous_reference_text_does_not_depend_on_which_pages_collide(
+    tmp_path: Path, resolver: str
+) -> None:
+    """Indistinguishability. Two vaults whose colliding pages share nothing but
+    the identity and the match count must produce byte-identical error text —
+    otherwise the message is an oracle for what is stored where."""
+
+    def _reason(root: Path, *names: str) -> str:
+        vault, identity = _collide(root, *names)
+        # Same identity in both vaults, so only the PATHS differ.
+        index = memory_refs.ReferenceIndex(vault)
+        index.rebuild_all()
+        with pytest.raises(memory_refs.ReferenceError) as excinfo:
+            if resolver == "index":
+                index.resolve(identity)
+            else:
+                memory_refs.resolve_identifier_read_only(
+                    vault, memory_refs.memory_ref(identity)
+                )
+        return excinfo.value.reason.replace(identity, "<id>")
+
+    first = _reason(tmp_path / "a", "Patterns/kill-switch.md", "Patterns/copy.md")
+    second = _reason(tmp_path / "b", "public.md", "Insights/other-name.md")
+    assert first == second
+
+
+def test_backfill_duplicate_refusal_carries_a_count_not_the_identities(
+    tmp_path: Path,
+) -> None:
+    vault, _identity = _collide(tmp_path, "first.md", "second.md")
+    (vault / "Knowledge Base" / "Notes" / "legacy.md").write_text(
+        _page(None), encoding="utf-8"
+    )
+
+    with pytest.raises(memory_refs.ReferenceError) as excinfo:
+        memory_refs.backfill_ids(vault, dry_run=False)
+
+    error = excinfo.value
+    assert error.code == "AMBIGUOUS_REFERENCE"
+    assert "[" not in error.reason, f"identity list leaked: {error.reason!r}"
+    assert "1" in error.reason
+    # The repair detail an owner needs still exists — behind the governed
+    # command, where an audience is resolved and a decision applies.
+    planned = memory_refs.backfill_ids(vault)
+    assert {item["kind"] for item in planned["identity_issues"]} == {"duplicate"}
+
+
 def test_backfill_refuses_existing_duplicate_identity(tmp_path: Path) -> None:
     vault = tmp_path / "vault"
     notes = vault / "Knowledge Base" / "Notes"

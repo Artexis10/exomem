@@ -1179,3 +1179,466 @@ def test_every_surface_adapter_still_routes_through_invoke_command() -> None:
         f"these bypass invoke_command and therefore the postfilter: "
         f"{direct_manager_callers}"
     )
+
+
+# --------------------------------------------------------------------------
+# An error is a payload — the terminal filter applies to it too
+#
+# `postfilter` guards the value a command RETURNS. `_invoke()` is evaluated as
+# an ARGUMENT to it, so a command that raises never reaches the filter and its
+# payload crosses `invoke_command` — the one dispatcher shared by MCP, REST,
+# hosted and CLI — untouched. `AMBIGUOUS_REFERENCE` proved the class reachable
+# by embedding the colliding vault paths in its message.
+# --------------------------------------------------------------------------
+
+ERROR_WITHHELD = "Knowledge Base/Notes/Patterns/kill-switch-for-risky-releases.md"
+ERROR_WITHHELD_STEM = "kill-switch-for-risky-releases"
+
+# A withheld item the CALLER NEVER NAMED. This is the reference class the error
+# filter exists for: the vault volunteered it (a collision list, a resolver's
+# second candidate), so redacting it removes something the caller did not have.
+#
+# Do NOT write these tests against a path the caller also passes as an argument.
+# A reference the caller supplied is exempt from redaction ON PURPOSE — see
+# `egress.postfilter_error`. Substituting a marker for the caller's own input
+# turns `NOT_FOUND` into a binary existence oracle ("[withheld]" = exists,
+# echoed path = absent), which is strictly worse than echoing it back. An
+# earlier revision of these tests used the caller's own path throughout and so
+# asserted the oracle rather than the guarantee.
+# Every spelling a caller may legitimately use for the SAME item. Each must be
+# echoed back identically whether the item exists-and-is-withheld or is absent;
+# a difference in any one of them is an existence oracle for that form.
+_CALLER_INPUT_FORMS = (
+    "Knowledge Base/Notes/Patterns/kill-switch-for-risky-releases.md",
+    "Knowledge Base/Notes/Patterns/kill-switch-for-risky-releases",
+    "Notes/Patterns/kill-switch-for-risky-releases.md",
+    "Notes/Patterns/kill-switch-for-risky-releases",
+    "kill-switch-for-risky-releases",
+)
+
+ERROR_VOLUNTEERED = "Knowledge Base/Notes/Patterns/never-named-by-caller.md"
+ERROR_VOLUNTEERED_STEM = "never-named-by-caller"
+# A caller-supplied path that is NOT the one under test, so the exemption
+# covers only what the request actually named.
+ERROR_CALLER_PATH = "Knowledge Base/Notes/Patterns/caller-asked-for-this.md"
+
+
+def _seed_volunteered(vault: Path) -> None:
+    """The volunteered item must exist, or there is nothing to withhold."""
+    target = vault / ERROR_VOLUNTEERED
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("---\ntype: pattern\n---\nx\n", encoding="utf-8")
+
+
+def _raising_command(name: str, message: str, *, mutating: bool = False):
+    """A real registered command with a leaf that raises.
+
+    A synthetic leaf is the point: no call site has ever gated it, so anything
+    that filters its payload is filtering at the dispatcher.
+    """
+    from dataclasses import replace
+
+    from exomem import commands
+
+    def _leaf(*_args, **_kwargs):
+        raise ValueError(message)
+
+    command = {c.name: c for c in commands.COMMANDS}[name]
+    return replace(command, leaf=_leaf, cli_writes=mutating)
+
+
+def _external_scope():
+    from exomem.governance.principal import RequestPrincipal, request_scope
+
+    return request_scope(RequestPrincipal(audience_id="external", surface="mcp"))
+
+
+# Every way the VOLUNTEERED reference can be written. Each must redact, and
+# each is a form the caller never sent — so the exemption cannot mask a miss.
+ERROR_REFERENCE_FORMS = (
+    ERROR_VOLUNTEERED,
+    "Notes/Patterns/never-named-by-caller.md",
+    "never-named-by-caller.md",
+    f"[[{ERROR_VOLUNTEERED.removesuffix('.md')}]]",
+    f"[[{ERROR_VOLUNTEERED_STEM}]]",
+    "exomem://vault/Knowledge%20Base/Notes/Patterns/"
+    "never-named-by-caller.md",
+)
+
+
+@pytest.mark.parametrize("form", ERROR_REFERENCE_FORMS)
+def test_a_raised_payload_naming_a_withheld_item_is_filtered_at_the_dispatcher(
+    vault: Path, form: str
+) -> None:
+    """Every form the reference can be written in, on the read-only path."""
+    from exomem.writer_lease import invoke_command
+
+    _govern_patterns_shut(vault)
+    _seed_volunteered(vault)
+    command = _raising_command("get", f"could not read {form}")
+
+    with _external_scope():
+        with pytest.raises(ValueError) as excinfo:
+            invoke_command(command, vault, path=ERROR_CALLER_PATH)
+
+    text = str(excinfo.value)
+    assert ERROR_VOLUNTEERED_STEM not in text, (
+        f"{form!r} crossed the boundary: {text!r}"
+    )
+    assert "Knowledge Base/Notes/Patterns/never" not in text
+    assert egress.WITHHELD_REFERENCE in text
+
+
+def test_a_raised_payload_is_filtered_on_the_mutation_path_too(vault: Path) -> None:
+    """The read-only path takes the disclosure boundary and the mutation path
+    does not, so the two are separate returns in the dispatcher — and the
+    mutation path is the one a client reaches through every write command."""
+    from exomem.writer_lease import invoke_command
+
+    _govern_patterns_shut(vault)
+    command = _raising_command("note", f"could not write {ERROR_WITHHELD}", mutating=True)
+
+    with _external_scope():
+        with pytest.raises(Exception) as excinfo:
+            invoke_command(command, vault, title="x", body="y")
+
+    text = str(excinfo.value)
+    assert ERROR_WITHHELD_STEM not in text, f"mutation path leaked: {text!r}"
+    assert egress.WITHHELD_REFERENCE in text
+
+
+def test_a_raised_payload_is_filtered_in_its_structured_details(vault: Path) -> None:
+    """`OpError.details` is merged into the public error dict, so a reference
+    parked there reaches a client without ever appearing in the message."""
+    from dataclasses import replace
+
+    from exomem import commands
+    from exomem.cli_ops import OpError
+    from exomem.writer_lease import invoke_command
+
+    _govern_patterns_shut(vault)
+
+    def _leaf(*_args, **_kwargs):
+        raise OpError(
+            "REFERENCE_NOT_FOUND",
+            "no such page",
+            details={"candidates": [ERROR_VOLUNTEERED]},
+        )
+
+    _seed_volunteered(vault)
+    command = replace({c.name: c for c in commands.COMMANDS}["get"], leaf=_leaf)
+    with _external_scope():
+        with pytest.raises(OpError) as excinfo:
+            invoke_command(command, vault, path=ERROR_CALLER_PATH)
+
+    error = excinfo.value
+    assert error.code == "REFERENCE_NOT_FOUND", "the stable code must survive filtering"
+    assert ERROR_VOLUNTEERED_STEM not in json.dumps(
+        error.as_public_dict(), default=str
+    )
+
+
+def test_two_different_volunteered_items_raise_byte_identical_errors(
+    vault: Path,
+) -> None:
+    """Indistinguishability across volunteered items: if the filtered text
+    differed per item it would still be an oracle for which one the vault hit.
+
+    Both references are ones the caller never named, so both must redact to the
+    same marker. The caller's own path is held constant and is a THIRD path, so
+    the exemption cannot mask the comparison."""
+    from exomem.writer_lease import invoke_command
+
+    _govern_patterns_shut(vault)
+    _seed_volunteered(vault)
+    second = vault / "Knowledge Base" / "Notes" / "Patterns" / "another-private.md"
+    second.write_text("---\ntype: pattern\n---\nx\n", encoding="utf-8")
+
+    def _text(reference: str) -> str:
+        command = _raising_command("get", f"could not read {reference}")
+        with _external_scope():
+            with pytest.raises(ValueError) as excinfo:
+                invoke_command(command, vault, path=ERROR_CALLER_PATH)
+        return str(excinfo.value)
+
+    assert _text(ERROR_VOLUNTEERED) == _text(
+        "Knowledge Base/Notes/Patterns/another-private.md"
+    )
+    assert ERROR_VOLUNTEERED_STEM not in _text(ERROR_VOLUNTEERED)
+
+
+def test_a_caller_supplied_path_is_echoed_whether_or_not_it_exists(
+    vault: Path,
+) -> None:
+    """THE indistinguishability guarantee, stated correctly.
+
+    One path, asked for twice: once while it exists and is withheld, once after
+    deleting it. The caller controls the input, so the ONLY bit that can differ
+    is whether the item exists — and that bit must not be observable.
+
+    Comparing two DIFFERENT paths (as an earlier revision did) cannot fail: the
+    error legitimately echoes whichever path the caller asked for, so differing
+    inputs are expected to differ. Vary the condition, hold the input fixed."""
+    from exomem import commands
+    from exomem import find as find_module
+    from exomem.writer_lease import invoke_command
+
+    _govern_patterns_shut(vault)
+    target = vault / ERROR_WITHHELD
+
+    def _text(form: str) -> str:
+        """The REAL `get` leaf, not a synthetic raiser.
+
+        A synthetic command builds its message once from a fixed constant, so
+        the two conditions are identical by construction and the test cannot
+        observe the branch asymmetry that only the real leaf produces — which
+        is exactly where the residual oracle lived."""
+        command = {c.name: c for c in commands.COMMANDS}["get"]
+        with _external_scope():
+            with pytest.raises(ValueError) as excinfo:
+                invoke_command(command, vault, path=form)
+        return str(excinfo.value)
+
+    assert target.is_file()
+    present = {form: _text(form) for form in _CALLER_INPUT_FORMS}
+    target.unlink()
+    find_module.clear_cache()
+    absent = {form: _text(form) for form in _CALLER_INPUT_FORMS}
+
+    divergent = {f: (present[f], absent[f]) for f in _CALLER_INPUT_FORMS
+                 if present[f] != absent[f]}
+    assert not divergent, (
+        "EXISTENCE ORACLE: a caller-supplied path yields different text "
+        f"depending on whether it exists, for form(s): {divergent}"
+    )
+    for form in _CALLER_INPUT_FORMS:
+        assert egress.WITHHELD_REFERENCE not in present[form], form
+
+
+def test_an_ungoverned_vault_keeps_its_error_text(vault: Path) -> None:
+    """The empty-policy fast path is untouched: no governance tree means no
+    reference gating, and only the always-on scrubber may alter the text."""
+    from exomem.writer_lease import invoke_command
+
+    message = f"could not read {ERROR_WITHHELD}"
+    command = _raising_command("get", message)
+    with pytest.raises(ValueError) as excinfo:
+        invoke_command(command, vault, path=ERROR_WITHHELD)
+    assert str(excinfo.value) == message
+
+
+def test_an_ungoverned_vault_still_scrubs_a_credential_out_of_an_error(
+    vault: Path,
+) -> None:
+    """D7's always-on scrubber is policy-independent, and an error payload is
+    exactly as capable of carrying a leaked key as a result is."""
+    from exomem.writer_lease import invoke_command
+
+    command = _raising_command("get", f"upstream rejected {AWS_KEY}")
+    with pytest.raises(ValueError) as excinfo:
+        invoke_command(command, vault, path=ERROR_WITHHELD)
+    text = str(excinfo.value)
+    assert AWS_KEY not in text
+    assert scrubber.NOTICE in text
+
+
+def test_removing_the_dispatcher_error_filter_reopens_the_leak(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The planted-defect proof. A backstop whose test cannot fail when the
+    backstop is removed is not a backstop: neutralise the dispatcher's error
+    filter and the same probe must leak again."""
+    from exomem.writer_lease import invoke_command
+
+    _govern_patterns_shut(vault)
+    _seed_volunteered(vault)
+    monkeypatch.setattr(
+        egress, "postfilter_error", lambda name, error, root, **_kwargs: error
+    )
+    command = _raising_command("get", f"could not read {ERROR_VOLUNTEERED}")
+
+    with _external_scope():
+        with pytest.raises(ValueError) as excinfo:
+            invoke_command(command, vault, path=ERROR_CALLER_PATH)
+
+    assert ERROR_VOLUNTEERED in str(excinfo.value)
+
+
+def test_the_error_guarantee_does_not_depend_on_the_raise_site(vault: Path) -> None:
+    """The structural claim, stated as a test.
+
+    `memory_refs` is the raise site known to be reachable, but a guarantee that
+    lives there covers exactly one leaf. This drives a leaf that has never been
+    reviewed by anyone and shares no code with `memory_refs`, and it must still
+    be covered — which is only true if the filter sits at the dispatcher.
+    """
+    import inspect
+
+    from exomem import writer_lease
+    from exomem.writer_lease import invoke_command
+
+    _govern_patterns_shut(vault)
+
+    class _NeverReviewedError(RuntimeError):
+        """A brand-new exception type, from a brand-new leaf."""
+
+    def _leaf(*_args, **_kwargs):
+        raise _NeverReviewedError(f"collision at {ERROR_VOLUNTEERED}")
+
+    from dataclasses import replace
+
+    from exomem import commands
+
+    _seed_volunteered(vault)
+    command = replace({c.name: c for c in commands.COMMANDS}["get"], leaf=_leaf)
+    with _external_scope():
+        with pytest.raises(_NeverReviewedError) as excinfo:
+            invoke_command(command, vault, path=ERROR_CALLER_PATH)
+    assert ERROR_VOLUNTEERED_STEM not in str(excinfo.value)
+    assert isinstance(excinfo.value, _NeverReviewedError), "the type must survive"
+    assert "postfilter_error" in inspect.getsource(writer_lease.invoke_command), (
+        "the terminal error filter is no longer on the dispatch path"
+    )
+
+
+def test_a_raised_payload_naming_a_withheld_memory_ref_is_filtered(
+    vault: Path,
+) -> None:
+    """The immutable-reference form. `exomem://memory/<id>` resolves through
+    the reference index, so a payload naming one must be gated exactly as a
+    path is — the same alias set the result path already covers."""
+    from exomem import memory_refs
+    from exomem.writer_lease import invoke_command
+
+    target = vault / ERROR_WITHHELD
+    updated, identity = memory_refs.add_id_to_markdown(
+        target.read_text(encoding="utf-8"), memory_refs.new_id()
+    )
+    target.write_text(updated, encoding="utf-8")
+    _govern_patterns_shut(vault)
+    ref = memory_refs.memory_ref(identity)
+
+    command = _raising_command("get", f"could not read {ref}")
+    with _external_scope():
+        with pytest.raises(ValueError) as excinfo:
+            invoke_command(command, vault, path=ERROR_WITHHELD)
+
+    text = str(excinfo.value)
+    assert identity not in text, f"the immutable ref crossed the boundary: {text!r}"
+    assert egress.WITHHELD_REFERENCE in text
+
+
+def test_an_identity_collision_does_not_name_the_colliding_pages(vault: Path) -> None:
+    """The reachable case, end to end. Duplicating an identity is an ordinary
+    consequence of a merge or a sync copy, so a caller can manufacture the
+    collision and then read the colliding vault paths out of the error."""
+    from exomem import commands, memory_refs
+    from exomem.writer_lease import invoke_command
+
+    patterns = vault / "Knowledge Base" / "Notes" / "Patterns"
+    identity = memory_refs.new_id()
+    for name in ("kill-switch-for-risky-releases.md", "kill-switch-copy.md"):
+        page = patterns / name
+        updated, _ = memory_refs.add_id_to_markdown(
+            page.read_text(encoding="utf-8")
+            if page.exists()
+            else "---\ntype: pattern\n---\nx\n",
+            identity,
+        )
+        page.write_text(updated, encoding="utf-8")
+    _govern_patterns_shut(vault)
+
+    command = {c.name: c for c in commands.COMMANDS}["get"]
+    with _external_scope():
+        with pytest.raises(Exception) as excinfo:
+            invoke_command(command, vault, path=memory_refs.memory_ref(identity))
+
+    text = str(excinfo.value)
+    assert "AMBIGUOUS_REFERENCE" in text, f"the stable code must survive: {text!r}"
+    assert "2" in text, "the match count is what an owner needs"
+    for leaked in ("kill-switch-for-risky-releases", "kill-switch-copy", "Patterns"):
+        assert leaked not in text, f"collision named {leaked!r}: {text!r}"
+
+
+def test_a_blocked_policy_fails_the_error_path_closed(vault: Path) -> None:
+    """The same three-state contract the result path carries: `empty` leaves
+    the text alone, `blocked` (a cold-start compile refusal with no prior good
+    state) cannot trust any decision, so every resolvable reference goes."""
+    from exomem.writer_lease import invoke_command
+
+    gov = vault / "Knowledge Base" / "_Governance"
+    (gov / "rules").mkdir(parents=True, exist_ok=True)
+    (gov / "rules" / "broken.yaml").write_text(
+        "governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FB0\n"
+        'scope_ids: ["01ARZ3NDEKTSV4RRFFQ69G5FAV"]\naudience: external\nceiling: 9\n',
+        encoding="utf-8",
+    )
+    _seed_volunteered(vault)
+    command = _raising_command("get", f"could not read {ERROR_VOLUNTEERED}")
+
+    with _external_scope():
+        with pytest.raises(ValueError) as excinfo:
+            invoke_command(command, vault, path=ERROR_CALLER_PATH)
+
+    text = str(excinfo.value)
+    assert ERROR_VOLUNTEERED_STEM not in text, f"a blocked policy leaked: {text!r}"
+    assert egress.WITHHELD_REFERENCE in text
+
+
+def test_postfilter_error_redacts_the_exception_in_place(vault: Path) -> None:
+    """The load-bearing contract behind the dispatcher's bare `raise`.
+
+    `invoke_command` calls `postfilter_error(...)` and then re-raises the
+    ORIGINAL exception object, discarding the return value — so the redaction
+    only reaches a caller if it happened on that object. An implementation
+    that built a clean COPY and returned it would leave the raised object
+    untouched and silently restore the leak, while every direct unit test of
+    the filter's return value still passed. This pins the object identity and
+    the in-place rewrite together.
+    """
+    _govern_patterns_shut(vault)
+    _seed_volunteered(vault)
+    error = ValueError(f"could not read {ERROR_VOLUNTEERED}")
+
+    returned = egress.postfilter_error("get", error, vault)
+
+    assert returned is error, "the filter must redact in place, not return a copy"
+    # The raised object itself — not a copy — no longer carries the reference.
+    assert ERROR_VOLUNTEERED_STEM not in str(error)
+    assert ERROR_VOLUNTEERED_STEM not in "".join(str(a) for a in error.args)
+    assert egress.WITHHELD_REFERENCE in str(error)
+
+
+def test_a_copying_error_filter_reopens_the_leak_through_the_bare_reraise(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Planted defect for the same contract, driven through the dispatcher.
+
+    Swap in a filter that redacts correctly but returns a NEW exception rather
+    than mutating the one that is travelling. The dispatcher's `raise` still
+    re-raises the original, so the withheld path crosses the boundary — which
+    is exactly the failure mode `test_postfilter_error_redacts_the_exception_
+    in_place` exists to make impossible.
+    """
+    from exomem.writer_lease import invoke_command
+
+    _govern_patterns_shut(vault)
+
+    def _copying_filter(command_name, error, vault_root, **_kwargs):
+        clean = type(error)(
+            egress.redact_withheld_references(vault_root, str(error))
+        )
+        return clean  # never touches `error`
+
+    _seed_volunteered(vault)
+    monkeypatch.setattr(egress, "postfilter_error", _copying_filter)
+    command = _raising_command("get", f"could not read {ERROR_VOLUNTEERED}")
+
+    with _external_scope():
+        with pytest.raises(ValueError) as excinfo:
+            invoke_command(command, vault, path=ERROR_CALLER_PATH)
+
+    assert ERROR_VOLUNTEERED in str(excinfo.value), (
+        "a copying filter must be observably broken, or the in-place contract "
+        "is not actually load-bearing and this test is decoration"
+    )

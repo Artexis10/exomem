@@ -35,7 +35,7 @@ from ..mutation_lock import (
 )
 from ..writer_lease import LeaseConfig
 from . import store
-from .policy import governance_root
+from .policy import governance_root, is_conflict_copy
 
 SCHEMA = "receipt/v1"
 GENESIS_HASH = "0" * 64
@@ -975,8 +975,14 @@ def _receipt_connection(vault_root: Path, *, durable: bool = True):
 
 
 def _conflicted_evidence(instance_dir: Path) -> bool:
+    """Refuse to extend a chain that a sync tool has already forked.
+
+    The policy walk prunes operational state, so a conflict copy in here is
+    invisible to the compile-time conflict refusal — this is the only guard on
+    the append path, and it uses the same filename test as that refusal.
+    """
     root = instance_dir.parent
-    return any("conflicted copy" in path.name.lower() for path in root.rglob("*"))
+    return any(is_conflict_copy(path.name) for path in root.rglob("*"))
 
 
 def _crash_point(_point: str) -> None:
@@ -1507,7 +1513,7 @@ def verify_chain(vault_root: Path) -> dict[str, Any]:
     active_seen = False
     if root.exists():
         for path in root.rglob("*"):
-            if "conflicted copy" in path.name.lower():
+            if is_conflict_copy(path.name):
                 all_issues.append({"code": "evidence_conflict", "path": str(path), "detail": "conflicted receipt evidence"})
         for candidate in sorted(path for path in root.iterdir() if path.is_dir()):
             if active_anchor is not None and candidate.name == active_anchor[0]:

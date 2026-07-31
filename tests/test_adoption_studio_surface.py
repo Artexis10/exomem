@@ -301,3 +301,48 @@ def test_rest_returns_409_for_adoption_source_changed(
     )
     assert status == 409
     assert error["code"] == "ADOPTION_SOURCE_CHANGED"
+
+
+# --- defect 5: operational run state is not released as knowledge ---
+def test_finished_run_manifest_carries_no_per_item_detail_but_status_does(
+    vault: Path,
+) -> None:
+    """The manifest is an ordinary page whose body is never scanned by the
+    artifact-reference gate, so the per-item detail must never be in it. The
+    owner reads that detail through the command that owns the run, where a
+    disclosure decision applies."""
+    _seed_legacy(vault)
+    started = commands.op_adoption_studio(vault, action="start", path="Old Notes")
+    run_id = started["run_id"]
+    commands.op_adoption_studio(
+        vault, action="select", run_id=run_id, include=["Old Notes"]
+    )
+    planned = commands.op_adoption_studio(vault, action="plan", run_id=run_id)
+    applied = commands.op_adoption_studio(
+        vault, action="apply", run_id=run_id, plan_id=planned["plan"]["plan_id"]
+    )
+    finished = commands.op_adoption_studio(vault, action="finish", run_id=run_id)
+
+    outcomes = applied["outcomes"]
+    targets = [o["target_path"] for o in outcomes.values() if o.get("target_path")]
+    hashes = [o["sha256"] for o in outcomes.values() if o.get("sha256")]
+    assert targets and hashes
+
+    manifest_rel = finished["finish"]["manifest_path"]
+    body = (vault / manifest_rel).read_text(encoding="utf-8")
+    leaked = [
+        token
+        for token in ["Old Notes/quarterly-planning.md", *targets, *hashes]
+        if token in body
+    ]
+    assert leaked == [], f"released run manifest names per-item detail: {leaked}"
+    # It still carries the run reference and counts.
+    assert run_id in body
+    assert "Selected:" in body
+
+    # The owner still reads the full per-item detail through the owning command.
+    status = commands.op_adoption_studio(vault, action="status", run_id=run_id)
+    assert "Old Notes/quarterly-planning.md" in status["selection"]["paths"]
+    status_json = json.dumps(status, default=str)
+    assert all(t in status_json for t in targets)
+    assert all(h in status_json for h in hashes)

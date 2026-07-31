@@ -1852,6 +1852,7 @@ def invoke_command(
         emit_boundary_receipt,
         is_vault_root,
         postfilter,
+        postfilter_error,
     )
 
     selector_error: SelectorCoverageError | None = None
@@ -1893,10 +1894,41 @@ def invoke_command(
 
     if not injected or not is_vault_root(injected[0]):
         return _invoke()
+    # An error is a payload. `_invoke()` is evaluated as an ARGUMENT to
+    # `postfilter`, so a raising command never reached the filter and its
+    # message crossed this boundary untouched — `AMBIGUOUS_REFERENCE` embedded
+    # the colliding vault paths and made that a path oracle. Both the
+    # read-only and the mutation return are inside one try, so a future path
+    # through this function cannot open a fresh bypass either.
+    #
+    # `kwargs` goes to the filter so it can tell a reference the CALLER sent
+    # from one the vault volunteered. Only the latter may be redacted; see
+    # `postfilter_error`.
+    #
+    # `BaseException`, not `Exception`: a "terminal" filter that a Cancelled or
+    # a SystemExit walks straight past is not terminal.
     if not read_only:
-        return postfilter(command.name, _invoke(), injected[0])
+        try:
+            return postfilter(command.name, _invoke(), injected[0])
+        except BaseException as error:
+            postfilter_error(
+                command.name, error, injected[0], request_kwargs=kwargs
+            )
+            raise
+    # The try lives INSIDE the boundary so `collector` is still bound when the
+    # filter runs: `disclosure_boundary`'s `finally` resets the contextvar on
+    # the way out, so an except-block outside it records credential blocks into
+    # a collector that is already gone, and emits no receipt for a governed read
+    # that touched withheld items before failing.
     with disclosure_boundary(injected[0], command.name) as collector:
-        result = postfilter(command.name, _invoke(), injected[0])
+        try:
+            result = postfilter(command.name, _invoke(), injected[0])
+        except BaseException as error:
+            postfilter_error(
+                command.name, error, injected[0], request_kwargs=kwargs
+            )
+            emit_boundary_receipt(collector)
+            raise
         emit_boundary_receipt(collector)
         return result
 

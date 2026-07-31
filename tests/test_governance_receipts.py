@@ -2617,3 +2617,26 @@ def test_scene_recovery_is_explicitly_disabled_with_clip(
     assert not any("remains tombstoned" in warning for warning in recovered.warnings)
     assert any(item["event_type"] == "recovery" for item in _receipt_records(vault))
     assert lifecycle.is_tombstoned(vault, rel) is False
+
+
+def test_sync_conflict_evidence_fails_the_append_closed(vault: Path) -> None:
+    """Task 2.3 — a Syncthing conflict copy must not fork the append-only chain.
+
+    The policy walk prunes operational state, so a conflict copy inside the
+    receipt tree is invisible to the compile-time conflict refusal. The append
+    path is the only thing standing between a forked hash chain and the next
+    record, so it has to recognise the same filenames.
+    """
+    first = receipts.append_event(vault, event_type="disclosure", payload={"outcomes": []})
+    instance_dir = receipts._instance_dir(vault, first["instance_id"])
+    conflict = instance_dir / "2026-07.sync-conflict-20260731-120000-ABCDEFG.jsonl"
+    conflict.write_text(json.dumps(first) + "\n", encoding="utf-8")
+
+    with pytest.raises(receipts.ReceiptError, match="conflicted receipt evidence"):
+        receipts.append_event(vault, event_type="disclosure", payload={"outcomes": []})
+
+    assert [record["seq"] for record in receipts.event_records(vault)] == [1]
+    assert any(
+        item["code"] == "evidence_conflict"
+        for item in receipts.verify_chain(vault)["issues"]
+    )
