@@ -1852,6 +1852,7 @@ def invoke_command(
         emit_boundary_receipt,
         is_vault_root,
         postfilter,
+        postfilter_error,
     )
 
     selector_error: SelectorCoverageError | None = None
@@ -1893,12 +1894,22 @@ def invoke_command(
 
     if not injected or not is_vault_root(injected[0]):
         return _invoke()
-    if not read_only:
-        return postfilter(command.name, _invoke(), injected[0])
-    with disclosure_boundary(injected[0], command.name) as collector:
-        result = postfilter(command.name, _invoke(), injected[0])
-        emit_boundary_receipt(collector)
-        return result
+    # An error is a payload. `_invoke()` is evaluated as an ARGUMENT to
+    # `postfilter`, so a raising command never reached the filter and its
+    # message crossed this boundary untouched — `AMBIGUOUS_REFERENCE` embedded
+    # the colliding vault paths and made that a path oracle. Both the
+    # read-only and the mutation return are inside one try, so a future path
+    # through this function cannot open a fresh bypass either.
+    try:
+        if not read_only:
+            return postfilter(command.name, _invoke(), injected[0])
+        with disclosure_boundary(injected[0], command.name) as collector:
+            result = postfilter(command.name, _invoke(), injected[0])
+            emit_boundary_receipt(collector)
+            return result
+    except Exception as error:
+        postfilter_error(command.name, error, injected[0])
+        raise
 
 
 def coordination_status(

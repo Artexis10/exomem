@@ -89,6 +89,15 @@ def excluded_frontmatter_reason(field: str) -> str | None:
 
 
 # When scanning the full vault for inbound wikilinks, skip these.
+#
+# `_Governance` and `_Adoption` are operational state, not knowledge: they name
+# items whose own disclosure decisions may be restrictive, so surfacing them as
+# content would release by the back door what the release plane withholds at the
+# front. `find_corpus.EXCLUDED_DIR_NAMES` already excludes them from the KB
+# corpus; this set is the walker `find(scope="vault")` reaches through
+# (`bm25.py` -> `walk_vault_md`), and the two must not disagree — a name excluded
+# from one walk and indexed by the other is exactly the bypass the exclusion
+# exists to prevent.
 VAULT_SCAN_SKIP_DIRS = frozenset(
     {
         ".obsidian",
@@ -99,6 +108,8 @@ VAULT_SCAN_SKIP_DIRS = frozenset(
         "_archive",
         "_trash",
         "_Schema",
+        "_Governance",
+        "_Adoption",
     }
 )
 
