@@ -282,6 +282,76 @@ def _convert_singular_project_to_plural(fm_text: str) -> tuple[str, str | None]:
     return new_text, value
 
 
+def _plan_sidecar_repairs(
+    vault_root: Path, report: AuditFixReport
+) -> list[PlannedWrite]:
+    """Plan one canonical rewrite per media sidecar that nested copies of itself.
+
+    Safe to auto-apply because the rewrite is a pure function of the sidecar and
+    is refused unless it keeps at least as much transcript as it found — content
+    loss is impossible rather than merely unlikely. Frontmatter is untouched, so a
+    sidecar still marked `pending` stays queued for a real re-extraction and the
+    recovered text is only the fallback if that fails.
+    """
+    from . import sidecar_repair
+
+    writes: list[PlannedWrite] = []
+    for sidecar in sidecar_repair.iter_media_sidecars(vault_root):
+        rel = sidecar.relative_to(vault_root).as_posix()
+        # Evidence/ is `append-only`, not `read-write`, and that is the tier these
+        # sidecars are supposed to have: the extraction worker rewrites them on
+        # every pass through the same write layer. Refuse exactly what the write
+        # layer refuses (excluded/readonly) rather than the stricter read-write
+        # test the compiled-page passes use, or this would skip every sidecar. The
+        # binary itself — the actual evidence — is never touched.
+        if access.access_tier(vault_root, rel) in (
+            access.TIER_EXCLUDED,
+            access.TIER_READONLY,
+        ):
+            report.skipped_readonly += 1
+            continue
+        try:
+            original = sidecar.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        damage = sidecar_repair.analyze(original, sidecar)
+        if damage is None:
+            continue
+        repaired = sidecar_repair.repair(original)
+        if repaired == original:
+            continue
+        if not sidecar_repair.repair_is_safe(original, repaired):
+            report.proposed.append(
+                audit_module.AuditFinding(
+                    category="duplicated_sidecar",
+                    severity="error",
+                    path=rel,
+                    detail=(
+                        f"{damage.depth} nested copies, but the repair would drop "
+                        "transcript — refused, needs a human"
+                    ),
+                )
+            )
+            continue
+        writes.append(PlannedWrite(path=sidecar, content=repaired))
+        report.files_rewritten += 1
+        report.fixed.append(
+            FixedFinding(
+                category="duplicated_sidecar",
+                path=rel,
+                detail=(
+                    f"{damage.depth} nested copies, "
+                    f"{damage.distinct_extractions} distinct extraction(s)"
+                ),
+                action=(
+                    f"kept the longest extraction ({damage.recovered_chars:,} chars), "
+                    f"dropped the nesting, reclaimed {damage.duplicate_chars:,} chars"
+                ),
+            )
+        )
+    return writes
+
+
 def audit_fix(
     vault_root: Path,
     *,
@@ -396,6 +466,11 @@ def audit_fix(
             writes.append(PlannedWrite(path=md, content=new_text))
             pending_paths.append(rel)
             report.files_rewritten += 1
+
+    # ---- Pass 2b: collapse media sidecars that nested copies of themselves ----
+    # Evidence/ is skipped by the compiled-page passes above (append-only), so
+    # this walks the media sidecars directly.
+    writes.extend(_plan_sidecar_repairs(vault_root, report))
 
     # ---- Pass 3: sub-folder index refresh + top-index counts ----
     top_index_path = kb / "index.md"
