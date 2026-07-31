@@ -42,6 +42,14 @@
 - [x] 5.7 Add failing coverage that recall at every scope, including the full-vault scope, reaches neither the run tree nor the governance tree; add both names to the full-vault scan set as well as the corpus exclusion.
 - [x] 5.8 Add failing coverage that the stateless save-manifest report embeds no path enumeration or machine-readable dump; render its human-readable sections only.
 
+## 5b. Review Findings Fixed
+
+- [x] 5b.1 Add failing coverage that one caller-supplied path yields byte-identical errors whether it exists-and-is-withheld or is absent; exempt caller-supplied references from redaction.
+- [x] 5b.2 Repoint the error-boundary tests at a reference the caller never supplied, so they assert the redaction guarantee rather than the oracle.
+- [x] 5b.3 Add failing coverage that a conflict copy refuses policy authoring while reads keep serving the last good policy; gate every authoring operation on a filesystem-only conflict probe.
+- [x] 5b.4 Add coverage that the refused authoring gate creates no sidecar, policy directory, receipt or marker.
+- [x] 5b.5 Catch `BaseException` at the dispatcher and emit the boundary receipt on the error path, with the filter inside the disclosure boundary so the credential counter is live.
+
 ## 6. Verification
 
 - [x] 6.1 Run the focused governance, adoption, and corpus tests with embeddings disabled.

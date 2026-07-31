@@ -709,3 +709,94 @@ def test_policy_document_without_either_conflict_marker_compiles_clean(
     assert pol.blocked is False
     assert not any(f["code"] == "conflicted_copy" for f in pol.findings)
     assert set(pol.scopes) == {"01ARZ3NDEKTSV4RRFFQ69G5FAV"}
+
+
+def test_a_sync_conflict_copy_refuses_policy_AUTHORING_not_reading(vault: Path) -> None:
+    """The other half of conflict handling, and a regression this branch caused.
+
+    Filtering conflict copies out of discovery also filtered them out of
+    `compile_prospective`, so a mutation compiled a CLEAN prospective tree while
+    the live compile still saw the conflict. Both gates passed, the mutation was
+    accepted and receipted, and whichever document the next real compile picked
+    silently decided the outcome. On main the copy reached the temp tree and a
+    `duplicate_id` error refused the mutation by accident; widening detection
+    removed that accident, so the refusal is now deliberate.
+
+    Reads must NOT be refused: flooring a warm vault to L0 because a sync tool
+    dropped a sibling file would be worse than the defect it prevents.
+    """
+    from exomem.governance.tool import op_govern_memory
+
+    _write(vault, "scopes", "client", _SCOPE_A)
+    baseline = policy.load(vault)
+    assert not baseline.blocked and not baseline.empty
+
+    conflict = (
+        vault / "Knowledge Base" / "_Governance" / "scopes"
+        / _sync_conflict_name("client")
+    )
+    conflict.write_text(_SCOPE_A, encoding="utf-8")
+    # Deliberately NOT clearing `_CACHE`: this models a warm runtime, which is
+    # the case that matters. The conflict fallback serves the last in-process
+    # compile, so clearing the cache here would exercise the cold-start path
+    # (correctly `.blocked`) and prove nothing about reads surviving.
+
+    assert policy.has_conflict_copy(vault), "the probe must see the conflict copy"
+    assert policy.load(vault).conflicted
+
+    with pytest.raises(Exception) as excinfo:
+        op_govern_memory(
+            vault,
+            operation="propose",
+            principal=owner_principal(),
+            intent="tighten patterns",
+            documents=_proposal_documents(ceiling=1),
+            selector_paths=[_PATTERN_GLOB],
+            target_ceiling=1,
+            duration="standing",
+        )
+    assert getattr(excinfo.value, "code", "") == "GOVERNANCE_CONFLICTED", (
+        f"authoring proceeded under a sync conflict: {excinfo.value!r}"
+    )
+
+    # Reading is unaffected: the last good policy is still served.
+    served = policy.load(vault)
+    assert not served.blocked, "a conflict must not floor reads to L0"
+    assert served.scopes, "the last good policy must still be served"
+
+
+def test_the_authoring_gate_creates_no_state_when_it_refuses(vault: Path) -> None:
+    """`op_govern_memory` promises a refused operation creates no sidecar,
+    policy directory, receipt or marker. The conflict probe therefore reads the
+    directory listing rather than going through `load()`, which opens the
+    governance sidecar via the guard probe."""
+    from exomem.governance.tool import op_govern_memory
+
+    _write(vault, "scopes", "client", _SCOPE_A)
+    conflict = (
+        vault / "Knowledge Base" / "_Governance" / "scopes"
+        / _sync_conflict_name("client")
+    )
+    conflict.write_text(_SCOPE_A, encoding="utf-8")
+    policy._CACHE.clear()
+
+    def _snapshot() -> dict[str, bytes]:
+        return {
+            str(p.relative_to(vault)): p.read_bytes()
+            for p in sorted(vault.rglob("*"))
+            if p.is_file()
+        }
+
+    before = _snapshot()
+    with pytest.raises(Exception):
+        op_govern_memory(
+            vault,
+            operation="propose",
+            principal=owner_principal(),
+            intent="tighten patterns",
+            documents=_proposal_documents(ceiling=1),
+            selector_paths=[_PATTERN_GLOB],
+            target_ceiling=1,
+            duration="standing",
+        )
+    assert _snapshot() == before, "the refused authoring gate mutated the vault"

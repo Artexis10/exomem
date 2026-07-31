@@ -80,3 +80,36 @@ differently-named policy document, and it MUST NOT be able to reintroduce a dele
 - **WHEN** a policy document has a name that contains neither conflict marker
 - **THEN** it compiles normally
 - **AND** no conflict finding is emitted
+
+### Requirement: A Conflict Copy Refuses Policy Authoring While Reads Continue
+
+A recognised conflict copy leaves the current policy ambiguous: the author cannot know
+which of the two documents a later compile will select, and prospective compilation
+excludes conflict copies from the tree it evaluates, so an authoring operation would be
+validated against a policy the live vault does not have. Every authoring operation SHALL
+therefore be refused while a conflict copy is present under the governance tree.
+
+Reads SHALL NOT be refused on that basis. A warm vault continues to serve its last good
+compiled policy, because flooring every read to the most restrictive level over a
+file-synchronisation artefact is a larger harm than the ambiguity it guards against.
+
+The refusal SHALL NOT create a sidecar, policy directory, receipt, or marker, preserving
+the guarantee that a rejected authoring operation leaves no state behind.
+
+#### Scenario: authoring is refused while a conflict copy is present
+
+- **WHEN** a conflict copy is present under the governance tree and any authoring
+  operation is invoked
+- **THEN** the operation is refused with a distinct conflict code
+- **AND** no policy document, sidecar row, receipt or marker is created
+
+#### Scenario: reads continue to serve the last good policy
+
+- **WHEN** the same vault serves a content read while that conflict copy is present
+- **THEN** the last good compiled policy is applied
+- **AND** the read is not floored to the most restrictive level
+
+#### Scenario: resolving the conflict restores authoring
+
+- **WHEN** the conflict copy is removed and an authoring operation is retried
+- **THEN** the operation proceeds normally

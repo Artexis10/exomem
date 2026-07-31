@@ -258,6 +258,25 @@ class Policy:
         """
         return self.fingerprint == BLOCKED_FINGERPRINT
 
+    @property
+    def conflicted(self) -> bool:
+        """True when a synchronisation conflict copy is present under `_Governance/`.
+
+        Deliberately NOT folded into `.blocked`. A conflict on a warm vault must
+        keep SERVING the last good policy — flooring every read to L0 because a
+        sync tool dropped a sibling file would be worse than the defect. What it
+        must not do is let policy be AUTHORED, because the author cannot see
+        which of the two documents will win, and `compile_prospective` filters
+        conflict copies out of its temp tree — so a mutation would be accepted
+        and receipted while the conflict silently decides the live outcome.
+
+        Before conflict detection was widened, a conflict alongside its original
+        produced a `duplicate_id` error that refused the mutation by accident.
+        Filtering the copy at discovery removed that refusal, so this restores
+        it deliberately and for the right reason.
+        """
+        return any(f.get("code") == "conflicted_copy" for f in self.findings)
+
 
 EMPTY_POLICY = Policy(fingerprint="missing")
 
@@ -293,6 +312,17 @@ def _iter_all_files(root: Path):
     for p in sorted(root.rglob("*")):
         if p.is_file() and not _is_operational_state(root, p):
             yield p
+
+
+def has_conflict_copy(vault_root: Path) -> bool:
+    """Filesystem-only conflict probe for the authoring gate.
+
+    Deliberately does NOT go through `load()`: `op_govern_memory` guarantees a
+    rejected operation creates no sidecar, policy directory, receipt or marker,
+    and `load()` opens the governance sidecar through the guard probe. Reading
+    the directory listing keeps the gate free of that side effect.
+    """
+    return any(is_conflict_copy(p.name) for p in _iter_all_files(governance_root(Path(vault_root))))
 
 
 def _is_operational_state(root: Path, path: Path) -> bool:

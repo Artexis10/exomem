@@ -2392,6 +2392,17 @@ def op_govern_memory(vault_root: Path, operation: str, **kwargs: Any) -> dict[st
     selection = _selected_variant(operation, spec, kwargs)
     if not spec.read_only:
         _authorize_operation(selection, kwargs)
+        # One registry-driven gate for every authoring operation, rather than
+        # thirteen `.blocked` sites. `compile_prospective` filters conflict
+        # copies out of the temp tree it compiles, so without this a mutation
+        # under a sync conflict is accepted, receipted, and silently overridden
+        # by whichever document the next real compile picks.
+        if policy_module.has_conflict_copy(root):
+            raise GovernanceError(
+                "GOVERNANCE_CONFLICTED",
+                "a synchronisation conflict copy is present under _Governance/; "
+                "resolve it before authoring policy",
+            )
     handler = _HANDLER_STRATEGIES.get(selection.handler_key)
     if not callable(handler):
         raise GovernanceError(

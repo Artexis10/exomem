@@ -2035,8 +2035,37 @@ def _rewrite_error_attribute(error: BaseException, name: str, value: Any) -> Non
             pass
 
 
+def _caller_supplied_references(kwargs: Mapping[str, Any] | None) -> frozenset[str]:
+    """Canonical keys for every reference the CALLER put in the request.
+
+    See `postfilter_error` for why these must survive filtering verbatim.
+    """
+    if not kwargs:
+        return frozenset()
+    out: set[str] = set()
+
+    def _walk(value: Any) -> None:
+        if isinstance(value, str):
+            canonical = _canonical_reference(value)
+            if canonical is not None:
+                out.add(canonical[0])
+        elif isinstance(value, Mapping):
+            for item in value.values():
+                _walk(item)
+        elif isinstance(value, (list, tuple, set, frozenset)):
+            for item in value:
+                _walk(item)
+
+    _walk(dict(kwargs))
+    return frozenset(out)
+
+
 def postfilter_error(
-    command_name: str, error: BaseException, vault_root: Path
+    command_name: str,
+    error: BaseException,
+    vault_root: Path,
+    *,
+    request_kwargs: Mapping[str, Any] | None = None,
 ) -> BaseException:
     """The terminal egress filter applied to a RAISED payload.
 
@@ -2046,6 +2075,23 @@ def postfilter_error(
     withheld item is exactly the disclosure a result naming one would be —
     `AMBIGUOUS_REFERENCE` embedding the colliding vault paths proved the class
     reachable rather than theoretical.
+
+    THE CALLER'S OWN REFERENCES ARE EXEMPT, and that exemption is what makes
+    this filter safe rather than actively harmful. Redaction here works by
+    SUBSTITUTION — a withheld reference becomes `[withheld]`. That is correct
+    for a result payload, where the marker sits inside content the caller was
+    already entitled to receive. It is catastrophic for an error whose entire
+    payload IS a path the caller just sent, because then the substitution is
+    itself the answer: `NOT_FOUND: ... [withheld]` means "exists, restricted"
+    while `NOT_FOUND: ... <your path>` means "does not exist". That is a clean
+    binary existence oracle over the whole vault, probeable with a guessed
+    slug, and it is strictly worse than emitting the path — which the caller
+    supplied and therefore already knows.
+
+    So: a reference the caller put in the request is echoed back untouched, and
+    everything else is redacted. The invariant is that an error's text stays a
+    pure function of the caller's own input. Anything else is a distinguishable
+    state, and a distinguishable state is a disclosure.
 
     An error carries free text and nothing structural for the entry filter to
     drop, so the artifact gate scans every string (the `scan_all` shape) and
@@ -2057,7 +2103,12 @@ def postfilter_error(
     """
     del command_name  # an error is free text; there is no per-command shape
     vault_root = Path(vault_root)
-    gate = _ArtifactReferenceGate(vault_root, principal=None, purpose=None)
+    gate = _ArtifactReferenceGate(
+        vault_root,
+        principal=None,
+        purpose=None,
+        exempt=_caller_supplied_references(request_kwargs),
+    )
     scrub = scrubber.enabled(vault_root)
     blocked = False
 
@@ -2711,10 +2762,15 @@ class _ArtifactReferenceGate:
         *,
         principal: RequestPrincipal | None,
         purpose: str | None,
+        exempt: frozenset[str] = frozenset(),
     ) -> None:
         self.vault_root = Path(vault_root)
         self.policy = policy_module.load(self.vault_root)
         self.who = principal if principal is not None else effective_principal()
+        # Canonical keys the caller themselves supplied. Substituting a marker
+        # for one of these would answer a question the caller already knew the
+        # input to, and the answer is "does this exist?" — see `postfilter_error`.
+        self.exempt = exempt
         self.fail_closed = self.policy.blocked or not self.who.resolved
         self.grants_hash = "" if self.fail_closed else _grants_hash(self.policy)
         self.purpose = _declared_purpose(self.vault_root, self.who, purpose)
@@ -2854,6 +2910,12 @@ class _ArtifactReferenceGate:
 
         def _replace_token(match: re.Match[str]) -> str:
             token = match.group(0)
+            if self.exempt:
+                canonical = _canonical_reference(token)
+                if canonical is not None and canonical[0] in self.exempt:
+                    # The caller sent this. Echoing it back tells them nothing;
+                    # replacing it tells them the item exists.
+                    return token
             candidates = self.resolve(token)
             if candidates and not all(self._permits(rel) for rel in candidates):
                 return WITHHELD_REFERENCE

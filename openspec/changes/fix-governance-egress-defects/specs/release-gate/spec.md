@@ -85,3 +85,30 @@ object behind the governed command.
 - **THEN** the full per-item detail is returned
 - **AND** the response is subject to the same disclosure decision as any other governed
   content-returning result
+
+### Requirement: An Error Names Back Only What The Caller Supplied
+
+Filtering an error works by replacing a withheld reference with a marker. That is correct
+where the marker sits inside content the caller was already permitted to receive, and
+wrong where the error's payload IS a reference the caller just sent: the replacement then
+distinguishes an item that exists and is restricted from one that does not exist, which is
+the existence oracle the boundary exists to prevent.
+
+A reference the caller supplied in the request SHALL therefore be echoed back unchanged,
+whether or not it names an existing item and whether or not that item is withheld. A
+reference the caller did not supply SHALL be redacted. An error's text SHALL remain a pure
+function of the caller's own input.
+
+#### Scenario: the same requested path reads identically whether or not it exists
+
+- **WHEN** a caller requests a path that exists but is withheld from them, and later
+  requests the same path after it has been removed
+- **THEN** both errors are byte-identical
+- **AND** neither reveals whether the item existed
+
+#### Scenario: a reference the caller never named is redacted
+
+- **WHEN** an error names a stored item that the caller did not supply in the request, such
+  as a second candidate for an ambiguous identifier
+- **THEN** that reference is replaced before the error crosses the boundary
+- **AND** two different unsupplied references redact to the same text

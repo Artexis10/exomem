@@ -1194,6 +1194,30 @@ def test_every_surface_adapter_still_routes_through_invoke_command() -> None:
 ERROR_WITHHELD = "Knowledge Base/Notes/Patterns/kill-switch-for-risky-releases.md"
 ERROR_WITHHELD_STEM = "kill-switch-for-risky-releases"
 
+# A withheld item the CALLER NEVER NAMED. This is the reference class the error
+# filter exists for: the vault volunteered it (a collision list, a resolver's
+# second candidate), so redacting it removes something the caller did not have.
+#
+# Do NOT write these tests against a path the caller also passes as an argument.
+# A reference the caller supplied is exempt from redaction ON PURPOSE — see
+# `egress.postfilter_error`. Substituting a marker for the caller's own input
+# turns `NOT_FOUND` into a binary existence oracle ("[withheld]" = exists,
+# echoed path = absent), which is strictly worse than echoing it back. An
+# earlier revision of these tests used the caller's own path throughout and so
+# asserted the oracle rather than the guarantee.
+ERROR_VOLUNTEERED = "Knowledge Base/Notes/Patterns/never-named-by-caller.md"
+ERROR_VOLUNTEERED_STEM = "never-named-by-caller"
+# A caller-supplied path that is NOT the one under test, so the exemption
+# covers only what the request actually named.
+ERROR_CALLER_PATH = "Knowledge Base/Notes/Patterns/caller-asked-for-this.md"
+
+
+def _seed_volunteered(vault: Path) -> None:
+    """The volunteered item must exist, or there is nothing to withhold."""
+    target = vault / ERROR_VOLUNTEERED
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("---\ntype: pattern\n---\nx\n", encoding="utf-8")
+
 
 def _raising_command(name: str, message: str, *, mutating: bool = False):
     """A real registered command with a leaf that raises.
@@ -1218,14 +1242,16 @@ def _external_scope():
     return request_scope(RequestPrincipal(audience_id="external", surface="mcp"))
 
 
+# Every way the VOLUNTEERED reference can be written. Each must redact, and
+# each is a form the caller never sent — so the exemption cannot mask a miss.
 ERROR_REFERENCE_FORMS = (
-    ERROR_WITHHELD,
-    "Notes/Patterns/kill-switch-for-risky-releases.md",
-    "kill-switch-for-risky-releases.md",
-    f"[[{ERROR_WITHHELD.removesuffix('.md')}]]",
-    f"[[{ERROR_WITHHELD_STEM}]]",
+    ERROR_VOLUNTEERED,
+    "Notes/Patterns/never-named-by-caller.md",
+    "never-named-by-caller.md",
+    f"[[{ERROR_VOLUNTEERED.removesuffix('.md')}]]",
+    f"[[{ERROR_VOLUNTEERED_STEM}]]",
     "exomem://vault/Knowledge%20Base/Notes/Patterns/"
-    "kill-switch-for-risky-releases.md",
+    "never-named-by-caller.md",
 )
 
 
@@ -1237,15 +1263,18 @@ def test_a_raised_payload_naming_a_withheld_item_is_filtered_at_the_dispatcher(
     from exomem.writer_lease import invoke_command
 
     _govern_patterns_shut(vault)
+    _seed_volunteered(vault)
     command = _raising_command("get", f"could not read {form}")
 
     with _external_scope():
         with pytest.raises(ValueError) as excinfo:
-            invoke_command(command, vault, path=ERROR_WITHHELD)
+            invoke_command(command, vault, path=ERROR_CALLER_PATH)
 
     text = str(excinfo.value)
-    assert ERROR_WITHHELD_STEM not in text, f"{form!r} crossed the boundary: {text!r}"
-    assert "Knowledge Base/Notes/Patterns" not in text
+    assert ERROR_VOLUNTEERED_STEM not in text, (
+        f"{form!r} crossed the boundary: {text!r}"
+    )
+    assert "Knowledge Base/Notes/Patterns/never" not in text
     assert egress.WITHHELD_REFERENCE in text
 
 
@@ -1282,25 +1311,35 @@ def test_a_raised_payload_is_filtered_in_its_structured_details(vault: Path) -> 
         raise OpError(
             "REFERENCE_NOT_FOUND",
             "no such page",
-            details={"candidates": [ERROR_WITHHELD]},
+            details={"candidates": [ERROR_VOLUNTEERED]},
         )
 
+    _seed_volunteered(vault)
     command = replace({c.name: c for c in commands.COMMANDS}["get"], leaf=_leaf)
     with _external_scope():
         with pytest.raises(OpError) as excinfo:
-            invoke_command(command, vault, path=ERROR_WITHHELD)
+            invoke_command(command, vault, path=ERROR_CALLER_PATH)
 
     error = excinfo.value
     assert error.code == "REFERENCE_NOT_FOUND", "the stable code must survive filtering"
-    assert ERROR_WITHHELD_STEM not in json.dumps(error.as_public_dict(), default=str)
+    assert ERROR_VOLUNTEERED_STEM not in json.dumps(
+        error.as_public_dict(), default=str
+    )
 
 
-def test_two_different_withheld_items_raise_byte_identical_errors(vault: Path) -> None:
-    """Indistinguishability: if the filtered text differed per item it would
-    still be an oracle for which item the caller guessed at."""
+def test_two_different_volunteered_items_raise_byte_identical_errors(
+    vault: Path,
+) -> None:
+    """Indistinguishability across volunteered items: if the filtered text
+    differed per item it would still be an oracle for which one the vault hit.
+
+    Both references are ones the caller never named, so both must redact to the
+    same marker. The caller's own path is held constant and is a THIRD path, so
+    the exemption cannot mask the comparison."""
     from exomem.writer_lease import invoke_command
 
     _govern_patterns_shut(vault)
+    _seed_volunteered(vault)
     second = vault / "Knowledge Base" / "Notes" / "Patterns" / "another-private.md"
     second.write_text("---\ntype: pattern\n---\nx\n", encoding="utf-8")
 
@@ -1308,12 +1347,51 @@ def test_two_different_withheld_items_raise_byte_identical_errors(vault: Path) -
         command = _raising_command("get", f"could not read {reference}")
         with _external_scope():
             with pytest.raises(ValueError) as excinfo:
+                invoke_command(command, vault, path=ERROR_CALLER_PATH)
+        return str(excinfo.value)
+
+    assert _text(ERROR_VOLUNTEERED) == _text(
+        "Knowledge Base/Notes/Patterns/another-private.md"
+    )
+    assert ERROR_VOLUNTEERED_STEM not in _text(ERROR_VOLUNTEERED)
+
+
+def test_a_caller_supplied_path_is_echoed_whether_or_not_it_exists(
+    vault: Path,
+) -> None:
+    """THE indistinguishability guarantee, stated correctly.
+
+    One path, asked for twice: once while it exists and is withheld, once after
+    deleting it. The caller controls the input, so the ONLY bit that can differ
+    is whether the item exists — and that bit must not be observable.
+
+    Comparing two DIFFERENT paths (as an earlier revision did) cannot fail: the
+    error legitimately echoes whichever path the caller asked for, so differing
+    inputs are expected to differ. Vary the condition, hold the input fixed."""
+    from exomem import find as find_module
+    from exomem.writer_lease import invoke_command
+
+    _govern_patterns_shut(vault)
+    target = vault / ERROR_WITHHELD
+
+    def _text() -> str:
+        command = _raising_command("get", f"could not read {ERROR_WITHHELD}")
+        with _external_scope():
+            with pytest.raises(ValueError) as excinfo:
                 invoke_command(command, vault, path=ERROR_WITHHELD)
         return str(excinfo.value)
 
-    assert _text(ERROR_WITHHELD) == _text(
-        "Knowledge Base/Notes/Patterns/another-private.md"
+    assert target.is_file()
+    present = _text()
+    target.unlink()
+    find_module.clear_cache()
+    absent = _text()
+
+    assert present == absent, (
+        "EXISTENCE ORACLE: the same caller-supplied path yields different text "
+        f"depending on whether it exists\n  present: {present}\n  absent : {absent}"
     )
+    assert egress.WITHHELD_REFERENCE not in present
 
 
 def test_an_ungoverned_vault_keeps_its_error_text(vault: Path) -> None:
@@ -1352,14 +1430,17 @@ def test_removing_the_dispatcher_error_filter_reopens_the_leak(
     from exomem.writer_lease import invoke_command
 
     _govern_patterns_shut(vault)
-    monkeypatch.setattr(egress, "postfilter_error", lambda name, error, root: error)
-    command = _raising_command("get", f"could not read {ERROR_WITHHELD}")
+    _seed_volunteered(vault)
+    monkeypatch.setattr(
+        egress, "postfilter_error", lambda name, error, root, **_kwargs: error
+    )
+    command = _raising_command("get", f"could not read {ERROR_VOLUNTEERED}")
 
     with _external_scope():
         with pytest.raises(ValueError) as excinfo:
-            invoke_command(command, vault, path=ERROR_WITHHELD)
+            invoke_command(command, vault, path=ERROR_CALLER_PATH)
 
-    assert ERROR_WITHHELD in str(excinfo.value)
+    assert ERROR_VOLUNTEERED in str(excinfo.value)
 
 
 def test_the_error_guarantee_does_not_depend_on_the_raise_site(vault: Path) -> None:
@@ -1381,17 +1462,18 @@ def test_the_error_guarantee_does_not_depend_on_the_raise_site(vault: Path) -> N
         """A brand-new exception type, from a brand-new leaf."""
 
     def _leaf(*_args, **_kwargs):
-        raise _NeverReviewedError(f"collision at {ERROR_WITHHELD}")
+        raise _NeverReviewedError(f"collision at {ERROR_VOLUNTEERED}")
 
     from dataclasses import replace
 
     from exomem import commands
 
+    _seed_volunteered(vault)
     command = replace({c.name: c for c in commands.COMMANDS}["get"], leaf=_leaf)
     with _external_scope():
         with pytest.raises(_NeverReviewedError) as excinfo:
-            invoke_command(command, vault, path=ERROR_WITHHELD)
-    assert ERROR_WITHHELD_STEM not in str(excinfo.value)
+            invoke_command(command, vault, path=ERROR_CALLER_PATH)
+    assert ERROR_VOLUNTEERED_STEM not in str(excinfo.value)
     assert isinstance(excinfo.value, _NeverReviewedError), "the type must survive"
     assert "postfilter_error" in inspect.getsource(writer_lease.invoke_command), (
         "the terminal error filter is no longer on the dispatch path"
@@ -1470,14 +1552,15 @@ def test_a_blocked_policy_fails_the_error_path_closed(vault: Path) -> None:
         'scope_ids: ["01ARZ3NDEKTSV4RRFFQ69G5FAV"]\naudience: external\nceiling: 9\n',
         encoding="utf-8",
     )
-    command = _raising_command("get", f"could not read {ERROR_WITHHELD}")
+    _seed_volunteered(vault)
+    command = _raising_command("get", f"could not read {ERROR_VOLUNTEERED}")
 
     with _external_scope():
         with pytest.raises(ValueError) as excinfo:
-            invoke_command(command, vault, path=ERROR_WITHHELD)
+            invoke_command(command, vault, path=ERROR_CALLER_PATH)
 
     text = str(excinfo.value)
-    assert ERROR_WITHHELD_STEM not in text, f"a blocked policy leaked: {text!r}"
+    assert ERROR_VOLUNTEERED_STEM not in text, f"a blocked policy leaked: {text!r}"
     assert egress.WITHHELD_REFERENCE in text
 
 
@@ -1493,14 +1576,15 @@ def test_postfilter_error_redacts_the_exception_in_place(vault: Path) -> None:
     the in-place rewrite together.
     """
     _govern_patterns_shut(vault)
-    error = ValueError(f"could not read {ERROR_WITHHELD}")
+    _seed_volunteered(vault)
+    error = ValueError(f"could not read {ERROR_VOLUNTEERED}")
 
     returned = egress.postfilter_error("get", error, vault)
 
     assert returned is error, "the filter must redact in place, not return a copy"
     # The raised object itself — not a copy — no longer carries the reference.
-    assert ERROR_WITHHELD_STEM not in str(error)
-    assert ERROR_WITHHELD_STEM not in "".join(str(a) for a in error.args)
+    assert ERROR_VOLUNTEERED_STEM not in str(error)
+    assert ERROR_VOLUNTEERED_STEM not in "".join(str(a) for a in error.args)
     assert egress.WITHHELD_REFERENCE in str(error)
 
 
@@ -1519,20 +1603,21 @@ def test_a_copying_error_filter_reopens_the_leak_through_the_bare_reraise(
 
     _govern_patterns_shut(vault)
 
-    def _copying_filter(command_name, error, vault_root):
+    def _copying_filter(command_name, error, vault_root, **_kwargs):
         clean = type(error)(
             egress.redact_withheld_references(vault_root, str(error))
         )
         return clean  # never touches `error`
 
+    _seed_volunteered(vault)
     monkeypatch.setattr(egress, "postfilter_error", _copying_filter)
-    command = _raising_command("get", f"could not read {ERROR_WITHHELD}")
+    command = _raising_command("get", f"could not read {ERROR_VOLUNTEERED}")
 
     with _external_scope():
         with pytest.raises(ValueError) as excinfo:
-            invoke_command(command, vault, path=ERROR_WITHHELD)
+            invoke_command(command, vault, path=ERROR_CALLER_PATH)
 
-    assert ERROR_WITHHELD in str(excinfo.value), (
+    assert ERROR_VOLUNTEERED in str(excinfo.value), (
         "a copying filter must be observably broken, or the in-place contract "
         "is not actually load-bearing and this test is decoration"
     )
