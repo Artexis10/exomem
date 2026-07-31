@@ -1455,3 +1455,90 @@ def test_retry_all_media_logs_read_only_replica_without_traceback(
     assert record.exc_info is None
     assert "media retry reconciliation" in record.getMessage()
     assert "laptop" in record.getMessage()
+
+
+def _completed(vault: Path, binary: Path, transcript: str) -> Path:
+    """Turn a fresh pending sidecar into a completed one carrying `transcript`."""
+    media_processing = _media_processing()
+    result = media_processing.reconcile_media(vault, binary)
+    sidecar = result.sidecar_path
+    content = sidecar.read_text(encoding="utf-8").replace(
+        "extracted_by: pending", "extracted_by: faster-whisper:test+timed"
+    ).replace("processing_state: pending", "processing_state: completed")
+    sidecar.write_text(f"{content}\n## Extracted text\n\n{transcript}\n", encoding="utf-8")
+    store = media_jobs.MediaJobStore(vault)
+    store.discard(
+        media_jobs.MediaJob(
+            binary_path=binary, sidecar_path=sidecar, media_type="audio"
+        )
+    )
+    return sidecar
+
+
+def test_timestamp_drift_with_matching_hash_heals_without_re_rendering(
+    vault: Path,
+) -> None:
+    """Moving mtime/ctime must not discard a completed transcript.
+
+    Same bytes under the same engine produce the same transcript, so drift is
+    something to heal in place. Treating it as a conflict re-rendered the sidecar
+    as pending and filed the old body under `## Preserved notes` — once per pass,
+    without bound, until the sidecar was a stack of copies of itself.
+    """
+    media_processing = _media_processing()
+    binary = _drop_media(vault, "drifted.m4a")
+    transcript = "[0:00] This transcript must survive a timestamp change."
+    sidecar = _completed(vault, binary, transcript)
+
+    stat = binary.stat()
+    os.utime(binary, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000))
+
+    result = media_processing.reconcile_media(vault, binary)
+
+    body = sidecar.read_text(encoding="utf-8")
+    assert result.state == "completed"
+    assert result.job_id is None
+    assert "## Preserved notes" not in body
+    assert body.count(transcript) == 1
+    assert _job_count(vault) == 0
+    # The drifted field is refreshed, so the next pass sees no drift at all.
+    frontmatter, _ = _frontmatter_and_body(sidecar)
+    assert frontmatter["binary_mtime_ns"] == binary.stat().st_mtime_ns
+
+
+def test_changed_bytes_are_still_a_conflict(vault: Path) -> None:
+    """Only the content hash decides identity — different bytes still re-render."""
+    media_processing = _media_processing()
+    binary = _drop_media(vault, "replaced.m4a")
+    sidecar = _completed(vault, binary, "[0:00] Transcript of the ORIGINAL bytes.")
+
+    binary.write_bytes(b"completely different audio bytes")
+
+    result = media_processing.reconcile_media(vault, binary)
+
+    frontmatter, body = _frontmatter_and_body(sidecar)
+    assert result.state == "pending"
+    assert frontmatter["extracted_by"] == "pending"
+    assert frontmatter["binary_sha256"] == hashlib.sha256(binary.read_bytes()).hexdigest()
+    # The superseded transcript is kept once — it is the only record of it.
+    assert "Transcript of the ORIGINAL bytes." in body
+
+
+def test_repeated_conflicting_re_renders_do_not_nest(vault: Path) -> None:
+    """The unbounded-growth regression, directly.
+
+    Each pass used to wrap the whole sidecar in another `## Preserved notes`
+    layer; the real vault reached 395 copies of one spreadsheet.
+    """
+    media_processing = _media_processing()
+    binary = _drop_media(vault, "repeatedly-replaced.m4a")
+    sidecar = _completed(vault, binary, "[0:00] Original transcript.")
+
+    depths = []
+    for i in range(4):
+        binary.write_bytes(f"distinct audio bytes {i}".encode())
+        media_processing.reconcile_media(vault, binary)
+        depths.append(sidecar.read_text(encoding="utf-8").count("## Preserved notes"))
+
+    assert depths == [1, 1, 1, 1], f"nesting grew: {depths}"
+    assert "Original transcript." in sidecar.read_text(encoding="utf-8")

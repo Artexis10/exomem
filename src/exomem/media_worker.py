@@ -52,6 +52,17 @@ _EVIDENCE_FILE_RE = re.compile(r"(?m)^evidence_file:\s*(.+?)\s*$")
 _PENDING_MARKER = "extracted_by: pending"
 _PARENT_MEDIA_MARKER = "\nparent_media:"
 _MAX_IDENTITY_HASH_BYTES = 8 * 1024 * 1024
+
+
+def _is_canonical_sidecar(sidecar: Path, binary: Path) -> bool:
+    """Whether `sidecar` is the one sidecar `binary` owns (`<binary>.md`, beside it).
+
+    Case-insensitive on the directory because a vault-relative `evidence_file:`
+    need not match the on-disk casing.
+    """
+    if sidecar.name != binary.name + ".md":
+        return False
+    return os.path.normcase(str(sidecar.parent)) == os.path.normcase(str(binary.parent))
 _COMPLETE = "complete"
 _STALE = "stale"
 _BLOCKED_ACTION = "install the required media dependency, then retry"
@@ -684,6 +695,7 @@ class MediaWorker:
         if not kb.is_dir():
             return 0
         n = 0
+        skipped_strays = 0
         pending_parents: dict[str, bool] = {}  # insertion-ordered dedup
         for sidecar in iter_kb_files(kb):
             if sidecar.suffix.lower() != ".md":
@@ -698,6 +710,14 @@ class MediaWorker:
             if not ef:
                 continue
             binary = self._vault_root / ef.group(1).strip()
+            # Enqueue only the sidecar this binary actually owns. A stray copy —
+            # a Syncthing `.sync-conflict-*.md`, a manual duplicate — still carries
+            # `evidence_file:` pointing back here, and queueing it minted a SECOND
+            # job for the same binary (the job key includes the sidecar path), so
+            # two workers extracted one binary into two different sidecars.
+            if not _is_canonical_sidecar(sidecar, binary):
+                skipped_strays += 1
+                continue
             mt_match = _MEDIA_TYPE_RE.search(head)
             media_type = mt_match.group(1) if mt_match else extract.media_type_for(binary)
             if media_type and binary.exists():
@@ -725,6 +745,12 @@ class MediaWorker:
                     n += 1
         if n:
             log.info("media worker: re-enqueued %d pending extraction(s)", n)
+        if skipped_strays:
+            log.warning(
+                "media worker: skipped %d non-canonical sidecar copy/copies "
+                "(duplicate .md alongside a governed binary)",
+                skipped_strays,
+            )
         return n
 
     def _scan_unindexed_images(self) -> int:

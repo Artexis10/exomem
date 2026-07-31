@@ -76,6 +76,7 @@ ALL_CATEGORIES: tuple[str, ...] = (
     "unregistered_project_key", "embedding_drift", "graph_drift", "reference_identity",
     "relevance_pairs_pending", "stale_review", "corpus_contradictions",
     "relation_debt", "governance_receipts", "bridge_review",
+    "duplicated_sidecar",
 )
 OPTIONAL_CATEGORIES: tuple[str, ...] = (
     "relation_registry",
@@ -388,6 +389,8 @@ def audit(
         findings.extend(_check_governance_receipts(vault_root))
     if "bridge_review" in selected:
         findings.extend(_check_bridge_review(vault_root, today=today))
+    if "duplicated_sidecar" in selected:
+        findings.extend(_check_duplicated_sidecars(vault_root))
     semantic_categories = selected & _SEMANTIC_AUDIT_CATEGORIES
     if semantic_categories:
         semantic_findings, semantic_metadata = _check_semantic_contract_drift(
@@ -464,6 +467,49 @@ def _check_bridge_review(
             str((finding.meta or {}).get("review_partition") or ""),
         ),
     )
+
+
+def _check_duplicated_sidecars(vault_root: Path) -> list[AuditFinding]:
+    """Report media sidecars carrying nested copies of themselves.
+
+    Sidecars are chunked and embedded whole, so an N-times duplicated document
+    contributes N near-identical chunks. The distortion tracks how often a file
+    happened to be reprocessed rather than anything about the file, so it
+    arbitrarily suppresses the rest of the corpus in ranked results.
+    """
+    from . import sidecar_repair
+
+    findings: list[AuditFinding] = []
+    for sidecar in sidecar_repair.iter_media_sidecars(vault_root):
+        try:
+            content = sidecar.read_text(encoding="utf-8")
+        except (OSError, UnicodeError):
+            continue
+        damage = sidecar_repair.analyze(content, sidecar)
+        if damage is None:
+            continue
+        rel = sidecar.relative_to(vault_root).as_posix()
+        detail = (
+            f"{damage.depth} nested copies; "
+            f"{damage.duplicate_chars:,} duplicate chars"
+        )
+        if damage.recovery_only:
+            detail += "; extraction survives ONLY in a nested copy"
+        elif damage.distinct_extractions > 1:
+            detail += f"; {damage.distinct_extractions} differing extractions"
+        findings.append(
+            AuditFinding(
+                category="duplicated_sidecar",
+                severity="error" if damage.recovery_only else "warn",
+                path=rel,
+                detail=detail,
+                proposed_fix=(
+                    "maintain_memory(mode='fix') keeps the longest extraction and "
+                    "drops the nesting"
+                ),
+            )
+        )
+    return findings
 
 
 def _check_governance_receipts(vault_root: Path) -> list[AuditFinding]:

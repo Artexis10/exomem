@@ -529,3 +529,88 @@ def test_vault_lock_allows_one_worker(vault: Path) -> None:
         first.release()
     assert second.acquire() is True
     second.release()
+
+
+def test_enqueue_is_idempotent_per_binary_regardless_of_sidecar(vault: Path) -> None:
+    """A stray `.md` beside a binary must not mint a second job for it.
+
+    A Syncthing `.sync-conflict-*.md` copy still carries `evidence_file:` pointing
+    at the same binary; keying the queue on the sidecar let it become a second job,
+    so two workers extracted one binary into two different files.
+    """
+    store = media_jobs.MediaJobStore(vault)
+    job = _job(vault, name="conflicted.mp4")
+    stray = job.sidecar_path.with_name(
+        "conflicted.mp4.sync-conflict-20260728-212129-XEB57HX.md"
+    )
+    stray.write_text("---\nmedia_type: video\n---\n", encoding="utf-8")
+
+    first = store.enqueue(job)
+    second = store.enqueue(
+        media_jobs.MediaJob(
+            binary_path=job.binary_path,
+            sidecar_path=stray,
+            media_type=job.media_type,
+        )
+    )
+
+    assert first == second
+    assert store.counts()["pending"] == 1
+
+
+def test_legacy_store_rekeys_and_collapses_duplicate_rows(vault: Path) -> None:
+    """An existing store keyed on (binary, sidecar, type) is migrated in place.
+
+    `jobs` is created with CREATE TABLE IF NOT EXISTS, so without an explicit
+    migration an older store keeps its three-part key — and its duplicate rows —
+    forever.
+    """
+    store = media_jobs.MediaJobStore(vault)
+    job = _job(vault, name="legacy.mp4", ocr=True, clip=False)
+    keeper = store.enqueue(job)
+    binary_rel = job.binary_path.relative_to(vault).as_posix()
+
+    # Re-create the pre-migration state: an extra row for the same binary under a
+    # stray sidecar, plus the old three-part key on both rows.
+    path = media_jobs.job_store_path(vault)
+    conn = sqlite3.connect(path)
+    stray_rel = binary_rel + ".sync-conflict-20260728-212129-XEB57HX.md"
+    conn.execute(
+        "UPDATE jobs SET job_key = ? WHERE id = ?",
+        ("\0".join((binary_rel, binary_rel + ".md", job.media_type)), keeper),
+    )
+    conn.execute(
+        """
+        INSERT INTO jobs (job_key, binary_rel, sidecar_rel, media_type,
+            do_ocr, do_clip, do_reembed, state, attempts, created_at, updated_at)
+        VALUES (?, ?, ?, ?, 0, 1, 0, 'pending', 0, 0, 0)
+        """,
+        ("\0".join((binary_rel, stray_rel, job.media_type)), binary_rel, stray_rel,
+         job.media_type),
+    )
+    conn.execute("DELETE FROM meta WHERE key = 'job_key_version'")
+    conn.commit()
+    assert conn.execute("SELECT count(*) FROM jobs").fetchone()[0] == 2
+    conn.close()
+
+    migrated = media_jobs.MediaJobStore(vault)
+
+    rows = _rows(path)
+    assert len(rows) == 1, "duplicate rows for one binary must collapse"
+    assert rows[0]["id"] == keeper, "the earliest row survives"
+    assert rows[0]["sidecar_rel"] == binary_rel + ".md", "stray target is not adopted"
+    assert rows[0]["do_ocr"] == 1 and rows[0]["do_clip"] == 1, "stages are folded in"
+    assert rows[0]["job_key"] == "\0".join((binary_rel, job.media_type))
+    # Re-opening must not redo the work.
+    media_jobs.MediaJobStore(vault)
+    assert len(_rows(path)) == 1
+    assert migrated.counts()["pending"] == 1
+
+
+def _rows(path: Path) -> list[dict]:
+    conn = sqlite3.connect(path)
+    conn.row_factory = sqlite3.Row
+    try:
+        return [dict(row) for row in conn.execute("SELECT * FROM jobs ORDER BY id")]
+    finally:
+        conn.close()
