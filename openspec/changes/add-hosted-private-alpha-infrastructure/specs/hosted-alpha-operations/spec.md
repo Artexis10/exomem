@@ -59,6 +59,29 @@ Alerts SHALL cover failed/terminal provisioning, ready-cell unavailability, pend
 - **WHEN** rotating logs approach 128 MiB or PVC free space approaches the reserved 1 GiB
 - **THEN** oldest logs are bounded, an alert is emitted, and canonical writes are not silently crowded out by logs
 
+### Requirement: Alert delivery terminates outside the cluster failure domain
+Scheduler alert transitions SHALL be received by an Exomem-owned endpoint hosted outside K3s, so an alert about an unreachable cluster does not depend on that cluster to arrive. It MUST NOT be delivered to an unrelated third-party automation instance. The receiver SHALL preserve the pinned sender contract exactly: one exact HTTPS target, no redirect, compact sorted JSON, the transition header, and a 2xx inside the sender's ten-second budget. Because the sender carries no `Authorization` header, the capability SHALL travel in the URL, only its digest SHALL reach the receiver's configuration, and the plaintext SHALL reach only the K3s sender. The receiver SHALL authenticate every request, bound and strictly validate the payload, deduplicate transition identity, commit the transition durably before acknowledging, keep notification outside the acknowledgement path, restrict logs to content-free contract labels and opaque digests, and deliver a monitored notification to the operator address. Undelivered transitions SHALL be retried under an exclusive lease with a bounded attempt ceiling, and the remaining backlog SHALL be observable from a signal that does not depend on the cluster.
+
+#### Scenario: Notification provider is slow
+- **WHEN** the mail provider takes longer than the sender's remaining budget
+- **THEN** the transition is already durable, the acknowledgement returns inside the contract, and delivery completes afterwards without consuming the sender's retry attempts
+
+#### Scenario: First attempt commits then dies before notifying
+- **WHEN** the sender retries a transition whose earlier attempt stored the row but never delivered it
+- **THEN** the redelivery is acknowledged and still produces exactly one notification rather than being treated as an already-handled duplicate
+
+#### Scenario: Two invocations overlap on the same transition
+- **WHEN** a retry begins while the previous invocation is still delivering
+- **THEN** only one invocation holds the delivery lease and the operator receives a single notification
+
+#### Scenario: A transition is permanently undeliverable
+- **WHEN** one transition exhausts its attempt ceiling
+- **THEN** it is parked as failed, newer transitions continue to be delivered ahead of it, and the parked count is surfaced for operator action
+
+#### Scenario: An unauthenticated caller probes the endpoint
+- **WHEN** a request presents a wrong capability or uses another method
+- **THEN** the response does not confirm that the route exists and no transition is stored
+
 ### Requirement: Operator runbooks are executable and non-destructive by default
 Versioned runbooks SHALL cover backend bootstrap/recovery, saved-plan review, host/cluster bootstrap, secret handoff/rotation, cell inspection/retry, maintenance gating, suspension/resume, volume rebind, backup/restore, export, ordered deletion, node resize/replacement, and break-glass access. Routine cell creation SHALL require no SSH, database surgery, or manual Kubernetes resource creation.
 
