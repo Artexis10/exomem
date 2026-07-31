@@ -12,6 +12,8 @@ Subcommands:
 - `demo` — the packaged 30-second proof: doctor → find → get → audit against a
   bundled sample vault, no clone/config/vault needed (`uvx exomem demo`)
 - `studio` — print the local Review Studio URL; `--open` launches it explicitly
+- `tui` — launch the interactive terminal UI over the same product commands
+  (requires the optional `tui` extra; needs an interactive terminal)
 - `doctor` — read-only local install/setup preflight
 - `auth sessions|revoke` — operator-only durable MCP session administration
 - `status` — resource posture/residency diagnostics without loading models
@@ -89,6 +91,7 @@ _CLI_ONLY_SUBCOMMANDS: frozenset[str] = frozenset(
         "install-hook",
         "demo",
         "studio",
+        "tui",
         "doctor",
         "install-info",
         "auth",
@@ -170,6 +173,8 @@ def _dispatch_main(raw: list[str]) -> int:
         return demo_main(raw[1:])
     if raw and raw[0] == "studio":
         return _studio_main(raw[1:])
+    if raw and raw[0] == "tui":
+        return _tui_main(raw[1:])
     if raw and raw[0] == "doctor":
         return _doctor_main(raw[1:])
     if raw and raw[0] == "install-info":
@@ -413,6 +418,54 @@ def _studio_main(argv: list[str]) -> int:
         print("Could not open the system browser; use the URL above.", file=sys.stderr)
         return 1
     return 0
+
+
+def _tui_stdio_is_tty() -> bool:
+    """Whether stdin AND stdout are interactive — the TUI needs both."""
+    try:
+        return sys.stdin.isatty() and sys.stdout.isatty()
+    except (AttributeError, ValueError):
+        return False
+
+
+def _tui_main(argv: list[str]) -> int:
+    """`exomem tui` — the interactive terminal UI over the product commands.
+
+    Guards run before any TUI import so a piped invocation or a lean install
+    fails in milliseconds with one actionable line, never a traceback.
+    """
+    parser = argparse.ArgumentParser(
+        prog="exomem tui",
+        description=(
+            "Launch the interactive terminal UI: capture, ask, review, adopt, "
+            "packs, status, and settings over the same product commands as the "
+            "CLI and MCP surfaces. Requires the optional `tui` extra."
+        ),
+    )
+    parser.add_argument(
+        "--vault",
+        default=None,
+        help="vault root override for this session (default: $EXOMEM_VAULT_PATH)",
+    )
+    args = parser.parse_args(argv)
+
+    if not _tui_stdio_is_tty():
+        print(
+            "exomem tui needs an interactive terminal (stdin/stdout is not a TTY).",
+            file=sys.stderr,
+        )
+        return 2
+    if not _module_available("textual"):
+        print(
+            "exomem tui needs the optional TUI stack: run `uv sync --extra tui` "
+            "(source checkout) or `pip install 'exomem[tui]'`, then retry.",
+            file=sys.stderr,
+        )
+        return 1
+
+    from . import tui as tui_package
+
+    return tui_package.run(vault=args.vault)
 
 
 def _backfill_media_main(argv: list[str]) -> int:
