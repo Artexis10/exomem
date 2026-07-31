@@ -1,0 +1,224 @@
+# Design — add-terminal-ui
+
+## Context
+
+Exomem has no terminal UI. The interactive prior art is the browser Review
+Studio (`src/exomem/studio/`, served at `/studio/` by the http transport), two
+`input()`-driven wizards (`setup_wizard.py`, `remote_setup_wizard.py`), and the
+`_print_*_human` renderers in `__main__.py`. The service layer is the unified
+command registry (`commands.py`, 26 product commands) whose single dispatcher —
+`writer_lease.invoke_command` — applies the writer lease, mutation lock,
+idempotency, and the governance egress boundary for MCP, REST, and CLI alike.
+Every leaf is synchronous. The CLI reaches the dispatcher through the inline
+body of `__main__._core_op_main`: coerce (`cli_ops.coerce`) → resolve vault →
+conditional `source_schema` injection → `capabilities.active_surface(...)` +
+`principal.request_scope(owner_principal(surface="cli"))` → `invoke_command`.
+
+Measured constraints that shape this design: one-shot CLI startup costs ~3.1 s
+(WSL2) to ~11–12 s (Windows); warm in-process reads are milliseconds while
+compiled writes are seconds; retrieval reports per-request `degraded`/`warming`
+markers; `review_memory(mode="attention")` runs a full vault audit pass;
+mutation/lease locks can block behind another process and surface structured
+retryable codes.
+
+## Decisions
+
+### TUI framework decision record (2026-07-31): Textual, behind a default-off `tui` extra
+
+Evaluated: **Textual 8.x** (chosen), **prompt_toolkit**, **Rich-only**, and
+**urwid**. prompt_toolkit is a line-editing/layout toolkit, not an application
+framework: screens, focus management, command palette, responsive layout, and a
+headless test story would all be hand-built (the sibling-product audit shows
+where hand-rolled terminal input loops end up: no history, no paste safety, a
+second dispatcher drifting from the CLI). Rich alone has no input loop at all.
+urwid is synchronous-first and has no comparable testing ecosystem. Textual
+provides an async app model with thread workers and cancellation, CSS-like
+responsive styling with container breakpoints, a built-in command palette and
+key-binding/footer system, first-class headless testing (`Pilot`), and SVG
+snapshot testing via `pytest-textual-snapshot`; it is pure-Python, renders on
+Windows Terminal/WSL/macOS/Linux, and builds on `rich`, which is already in the
+lock as a transitive dependency.
+
+Cost and containment: `textual` is a real new dependency (plus
+`markdown-it-py`/`linkify-it-py`/`platformdirs`, all pure Python). It lives
+behind the default-off `[project.optional-dependencies] tui` extra; a lean or
+server install never carries it. `exomem tui` without the extra prints a
+one-line install hint and exits non-zero — the repo's standard default-off +
+soft-fail contract. `pytest-textual-snapshot` lives in the opt-in `tui-dev`
+dependency group so the lean dev matrix is unaffected. No model runs, no
+network is touched: the TUI is presentation over existing measurements, so the
+pure-substrate constraint is untouched.
+
+Kill switch / reversal: the TUI is a leaf client. Removing the extra, the
+`tui` dispatch branch, and `src/exomem/tui/` reverts the product to today's
+surface with no schema or registry impact.
+
+### One shared invocation seam; the seam owns the ambient bindings
+
+The invocation body of `_core_op_main` is extracted to a reusable
+module-level function (same file or a sibling module) with the signature shape
+`invoke_product(command_name, raw_kwargs, *, vault_root: Path | None = None,
+tier2: bool | None = None, idempotency_key: str | None = None)`. It performs,
+in order: registry lookup, `cli_ops.coerce` (CLI-relaxed JSON semantics),
+vault resolution (`resolve_vault()` when `vault_root is None`, replicating the
+pre-init allowance for `browse_memory` and `adopt_vault` scan-only against an
+explicit or env-provided root), conditional `source_schema` injection for
+`needs_schema` commands, the `process_media` operation pre-check, and — inside
+the function itself — the `capabilities.active_surface(...)` +
+`principal.request_scope(owner_principal(surface="cli"))` context binding
+around `writer_lease.invoke_command`.
+
+The binding lives *inside* the seam because ContextVars do not propagate into
+worker threads and an unbound principal fails silently closed (governance
+egress degrades results to empty — indistinguishable from "no knowledge
+found"). With the seam owning the binding, a mis-scheduled call is structurally
+impossible rather than a convention.
+
+Kept CLI-side (not part of the seam): `_normalize_cli_edit` (CLI flag sugar;
+`invoke_command` independently normalizes), the `EXOMEM_IDEMPOTENCY_KEY`
+environment passthrough, and the `strict_failed` exit-code mapping. The CLI is
+re-wired through the seam behavior-identically; existing CLI tests are the
+guard. The extraction lands as its own commit so concurrent branches can
+reconcile against a minimal diff.
+
+### Surface identity: reuse `surface="cli"`
+
+`Command.surfaces` only contains `{"mcp","rest","cli"}`; a `"tui"` surface
+string would make `product_commands_for("tui")` empty and would perturb the
+capability fingerprint for zero user value. The principal's surface string is
+not consumed by receipts/decisions/query logs. The TUI is a local
+owner-process CLI-family surface and binds the exact CLI descriptor; process
+logs already distinguish it (`logging_config` `process="cli"` file logging —
+verified file-only, so it cannot corrupt the screen).
+
+### Concurrency model
+
+- Every seam call runs in a Textual thread worker (`@work(thread=True)` /
+  `run_worker`). The UI thread never blocks on retrieval, audit, or writes.
+- **Single-flight per screen.** Thread workers are cooperatively cancelled:
+  a "cancelled" ask keeps consuming CPU until the leaf returns, so each screen
+  keeps at most one in-flight read; a new submit supersedes (drops) the old
+  result via a per-screen generation counter. Late results from a superseded
+  generation never mutate the UI.
+- Writes are never abandoned: once confirmed they render progress until a
+  terminal success/error. Structured codes (`MUTATION_BUSY`,
+  `WRITER_LEASE_REQUIRED`, `MUTATION_WARMING`, `REVIEW_ITEM_CHANGED`,
+  `PLAN_STALE`, …) map to retry/refresh UI states using the shared
+  `cli_ops.error_dict` envelope — code, message, remediation — never raw
+  tracebacks. Stale-token codes always refresh-and-re-present, never
+  auto-retry.
+- Optimistic concurrency: triage binds `expected_fingerprint` from the listed
+  item; a mismatch reloads the queue.
+- Long-lived process caches (`find` caches, embedding index memos, semantic
+  contract/activation manifest caches) are cleared by the explicit Refresh
+  action and on vault switch — the same reset seams the test fixtures use.
+
+### Startup sequence
+
+`exomem tui` is added to `_CLI_ONLY_SUBCOMMANDS` and dispatched before the
+serve fallthrough; the `exomem.tui` package is imported lazily inside the
+branch (the lazy-import gate gains `textual` in its forbidden-modules list for
+non-TUI invocations). The app paints the shell immediately; the registry
+import (seconds, cold) happens in a worker before the first data fetch. After
+vault resolution the app calls `warmup.start_background(vault_root)` — it
+respects compute mode and `EXOMEM_DISABLE_WARMUP` and soft-fails — so the
+readiness/warming states are real and the first ask does not pay cold load
+inline. Startup also replicates `_configure_local_search_capabilities`'s lean
+probe (disable embeddings/ranking/CLIP for the process when
+torch/sentence-transformers are absent) so a healthy lean install does not
+render false "degraded" alarms. The TUI never imports `exomem.server` (that
+would spawn watchers/warm threads it must not own).
+
+Vault choice: resolved once at startup; `RuntimeError` from `resolve_vault` is
+the first-run detector. Onboarding commit (choose/create/adopt) sets
+`EXOMEM_VAULT_PATH` exactly once on the app thread (precedent: `demo.py`),
+then passes `vault_root` explicitly to every seam call — never per-invocation
+env mutation from workers.
+
+### Screens map to audited capabilities only
+
+| Screen | Backing |
+|---|---|
+| Home | vault resolve state; `mode.resolved()`; bounded attention count (`review_memory` attention, small limit, cached until Refresh); `knowledge_packs.selected_pack_state`; hook status readers; `readiness.snapshot()` |
+| Ask | `ask_memory` (+`deep=True` packed context, `explain` opt-in); preview via `read_memory`; per-request `degraded`/`warming` markers rendered at the results; write-back = editable draft → confirm → `remember`. No generated prose — pure substrate presents measured recall |
+| Capture | thought/paste → `capture_source` (title auto-derived from first line, editable; `source_schema` injected by the seam); insight → `remember`; confirmation names the stored path; errors keep the input |
+| Review | `review_memory` (attention + state views), `review_item_context`; triage = dismiss / snooze(until required) / reopen only (`review_state.VALID_ACTIONS`); Studio pointer includes the http-transport prerequisite |
+| Continue | continuation checkpoints via a small public reader added to `install_hook.py` (wrapping the hook module's state roots + `render_continuation`); read-only; honest empty state naming `exomem install-hook` |
+| Adopt | `adopt_vault mode=scan-only` (pre-init safe, zero writes) → report; save-manifest / copy-as-sources behind explicit confirmation naming mode + destination; Adoption Studio lifecycle stays in the Studio (v2 candidate) |
+| Packs | `list_builtin_packs` / `selected_pack_state` / `write_selected_packs(source="tui")` with `KB_NOT_INITIALIZED` handling; stable IDs |
+| Status | `doctor.doctor` (read-only), `resource_status.collect`, `readiness.snapshot`, `install_hook.check_hooks`, `install_info.report`; remediation on every warn/fail; no secrets; rendering performs no writes/downloads |
+| Settings | compute mode via `mode.write_mode` (config path shown), appearance (theme/ASCII), vault identity; only real persistence paths are editable |
+| First-run | choose path / create (`init_vault`) / adopt-scan; optional packs; hooks visibility; all skippable; lands on Home |
+
+Pack-selection write is the one recorded non-registry write: no registry
+command writes pack selection today and `setup_wizard` calls
+`knowledge_packs.write_selected_packs` directly, which itself goes through
+`vault.batch_atomic_write` (access-tier check, write-fence validation, atomic
+commit). The TUI follows that precedent rather than inventing a registry
+command in this change.
+
+New-pack assessment (brief item): `science-research` overlaps the existing
+`technical` + `business` signal sets substantially; `people-relationships` has
+genuinely distinct signals (people, relationships, meetings) not covered by
+`personal-records`. Verdict: neither is required for v1; if catalog data adds
+cleanly during the Packs work, `people-relationships` is the only candidate —
+otherwise both are recorded as follow-ups, not padded into the list.
+
+### Visual system
+
+Emotional target: calm, trustworthy, fast, precise. Concretely:
+
+- **One accent** (warm amber family) used only for focus, selection, and the
+  active-screen marker — never for status. Status uses the universal
+  green/yellow/red *paired with glyphs and words* (`ok` / `warn` / `fail`), so
+  nothing is conveyed by color alone. Neutrals otherwise; secondary text dim.
+- **Restrained chrome**: a one-line header (product + screen left, vault
+  identity + mode right), content in padded panels with at most one border
+  weight, a footer of key hints (toggleable). No ASCII wordmark, no emoji
+  menus, no decorative rules — deliberate distance from both sibling products'
+  visual identities (checked again at the similarity gate).
+- **Status language**: every warning reads *what → why → next action*, reusing
+  the registry's own remediation strings.
+- **Glyph policy**: Unicode `● ○ ▲ ✓ ×` with automatic ASCII fallback
+  (`* o ! ok x`) when the encoding cannot render them; `NO_COLOR` respected
+  (Textual/rich honor it; verified by test).
+- **Breakpoints**: 80×24 single-column with evidence/detail as overlays;
+  ≥100 columns two-pane (list + detail); ≥120 adds the persistent evidence
+  panel on Ask/Review. No horizontal overflow at 80 columns anywhere.
+- Dark and light terminal themes via Textual's theme system; no hard-coded
+  backgrounds that fight terminal-native palettes.
+
+### Key map (documented in docs/tui.md)
+
+Global: `ctrl+p` command palette · `?`/`f1` help overlay (when not typing) ·
+`esc` back/cancel (guarded when input is non-empty) · `ctrl+q` quit ·
+`r`-less global refresh via palette. Home: `1`–`8` (and letter mnemonics)
+open Continue/Ask/Capture/Review/Adopt/Packs/Status/Settings; `q` quits with
+confirmation. Lists: `↑/↓` and `j/k`, `enter` opens, `/` filters where a
+filter exists. Ask: `enter` submits, `esc` cancels the run, `e` evidence,
+`y` copy context packet, `w` write-back. Review: `enter` context, `d` dismiss,
+`s` snooze, `o` reopen, `u` refresh. Capture: `ctrl+s` saves. Small, coherent,
+screen-local where letters could collide with typing.
+
+### Testing and goldens
+
+`tests/tui/` inherits the autouse lean conftest (module-scope
+`pytest.importorskip("textual")`-style guard so the directory skips without
+the extra). Layers: view-model unit tests; seam tests on a synthetic temp
+vault (fixture-copy pattern) asserting owner-visible reads from a worker
+thread; Pilot navigation tests; snapshot goldens at 80×24 and 120×40 rendered
+**exclusively from the deterministic FakeBackend with synthetic POSIX-style
+paths** — committed SVGs under `tests/` are scanned by the fail-closed
+public-artifact privacy gate, so goldens must never be regenerated against a
+real vault or embed host paths. Regen workflow (`--snapshot-update`) is
+documented in docs/tui.md; goldens pin to the locked Textual version. CI gains
+one `tui` job (`uv run --frozen --extra tui --group tui-dev python -m pytest
+tests/tui -q`), mirroring the `retrieval-eval` extra-install precedent.
+
+### Known limitation (documented)
+
+A long-lived TUI process runs no file watcher (that is the server's job): out
+-of-band edits refresh lexical lanes via mtime-checked caches, but the
+semantic sidecar drifts until a server or `exomem index`/audit pass. The
+Refresh action clears in-process caches; docs/tui.md names the limitation.
+Binary media upload (`/upload`, `process_media` subprocess) stays out of v1.
