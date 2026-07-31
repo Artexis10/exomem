@@ -134,11 +134,23 @@ diarization = [
 vision = [
     "transformers>=4.40",
 ]
+# Interactive terminal UI (`exomem tui`). Optional so lean/server installs never
+# carry a UI stack; the subcommand degrades to a clear install hint when the
+# extra is absent. Textual builds on rich (already an indirect dependency),
+# stays pure-Python, and renders on Windows Terminal, WSL, macOS, and Linux.
+tui = [
+    "textual>=5.0",
+]
 
 [dependency-groups]
 dev = [
     "pytest>=8.0",
     "pytest-timeout>=2.3",
+]
+# TUI snapshot/interaction testing. Separate group: the lean dev matrix must
+# not require the TUI stack; CI opts in explicitly alongside `--extra tui`.
+tui-dev = [
+    "pytest-textual-snapshot>=1.0",
 ]
 
 [project.scripts]
