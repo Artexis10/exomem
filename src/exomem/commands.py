@@ -5209,6 +5209,15 @@ def op_maintain_memory(
     `op_reconcile` itself (idempotent, non-destructive) — so it defaults to
     writing; pass `dry_run=true` to preview instead.
 
+    `mode="fix"` also collapses media sidecars that accumulated nested copies of
+    themselves (audit category `duplicated_sidecar`, reportable on its own via
+    `mode="audit", categories=["duplicated_sidecar"]`). It keeps the longest
+    surviving `## Extracted text` — for a sidecar whose top-level block was
+    blanked by a re-render, that is the one buried in a nested copy — and refuses
+    any rewrite that would leave less transcript than it found. Frontmatter is
+    untouched, so a still-`pending` sidecar is re-extracted normally and the
+    recovered text is only the fallback.
+
     Args:
         mode: audit, fix, reconcile, or backfill-ids.
         categories: Optional audit category filter.
