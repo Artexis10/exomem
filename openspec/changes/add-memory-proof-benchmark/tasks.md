@@ -22,11 +22,11 @@
 - [x] 3.4 GATE: T00 end-to-end run directory produced via leaf mode and via wire mode. NOTE: the historical zero-hits incident reproduced and was root-caused here — engine-side conjunctive retention gate in the lexical-degraded hybrid path (see docs/memory-proof-benchmark.md); scored honestly, harness asserts integrity via statement-form probes.
 
 ## 4. Fan-out (after 3.4 gate; Codex lanes eligible)
-- [ ] 4.1 Scorer families: governance, abstention, graph, retrieval (reuse `exomem.eval_metrics`), health (3-tier), behavior
-- [ ] 4.2 Templates T01..T16+ across the seven families (≥16 templates, ≥4 variants where sensible, ≥200 questions) + release manifest under `benchmarks/corpus/releases/`
-- [ ] 4.3 `reporting.py` (per-dimension, no aggregate, latency separate, invalid-run rendering)
-- [ ] 4.4 `judge/` backends (none/subagent/claude_cli/openai_compat) + blinding + file handshake + contract tests
-- [ ] 4.5 `basic_memory_local.py` + `graybox_local.py` adapters + `track_a_bridge.py` + conformance tests
+- [x] 4.1 Scorer families: governance, abstention, graph, retrieval (reuse `exomem.eval_metrics`), health (3-tier), behavior — governance/abstention/behavior/retrieval landed with 3.3 gates; `scoring/graph.py` (multi-hop, wrong-hop distinct) + `scoring/health.py` (3-tier, unsupported-never-zero) added with `tests/test_membench_scoring_families.py`
+- [x] 4.2 Templates T01..T16+ across the seven families (≥16 templates, ≥4 variants where sensible, ≥200 questions) + release manifest under `benchmarks/corpus/releases/` — 17-template suite landed in 731c106 (240 questions); `v0.1-seed1.manifest.json` committed with a byte-identity regeneration test (`tests/test_membench_release_manifest.py`)
+- [x] 4.3 `reporting.py` (per-dimension, no aggregate, latency separate, invalid-run rendering) — already implemented in commit 6439998
+- [x] 4.4 `judge/` backends (none/subagent/claude_cli/openai_compat) + blinding + file handshake + contract tests — already implemented in commit 6439998
+- [x] 4.5 `basic_memory_local.py` + `graybox_local.py` adapters + `track_a_bridge.py` + conformance tests — graybox live over the read-only sibling checkout (raw-inbox profile), bm via injectable runner seam (live execution user-run), bridge duck-typed to the upstream provider protocol; `tests/test_membench_adapters_contract.py`
 - [x] 4.6 `benchmarks/README.md` + `docs/benchmarks.md` summary pointer
 
 ## 5. Track A execution
@@ -42,14 +42,14 @@
 - [x] 6.1 Track-C driver package + frozen 19-case control-prompt suite against isolated hook homes (observed==predeclared for all; measured gate limits recorded: length-bounded control skip, no topicality signal)
 - [x] 6.2 Retrieval-injection ladder: CLI rung offline (fires + degradation floor); REST rung documented user-run stub (loopback not assumed)
 - [x] 6.3 Continuation checkpoint round-trips (7/7 marker recall, 64KiB bound); cross-client restore is impossible by product contract — scored as isolation-respected + per-client recall
-- [ ] 6.4 Two-witness activation join tool (server trace × transcript) — pending (needs the natural-prompt driver's transcripts)
-- [ ] 6.5 `claude -p` natural-prompt driver + subagent propensity simulation — pending (network/user-run execution)
+- [x] 6.4 Two-witness activation join tool (server trace × transcript) — `trackc/witness_join.py` (documented minimal witness schema {ts, tool, args_digest}; mismatch = harness fault, never a product score) + `tests/test_membench_trackc_join.py`
+- [x] 6.5 `claude -p` natural-prompt driver + subagent propensity simulation — `trackc/natural_prompt_driver.py` builds the fresh-session `--mcp-config`/`--strict-mcp-config`/stream-json invocation and parses transcripts into AnswerRecord + witness inputs; execution user-run (injectable runner covers tests offline)
 
 ## 7. Track D execution
 - [x] 7.1 Journey runner (FlowRunner-derived) over exomem CLI --json with isolated vaults
 - [x] 7.2 Journeys J1 (longitudinal evolution, 11 checks) + J2 (correction propagation, 12 checks) green; wrong-order variant proves checks bite. J3/J4 pending
-- [ ] 7.3 J3 weekly-review rubric JSON + blind pairwise wiring — pending
-- [ ] 7.4 Basic Memory journey mapping table (doc only) — pending
+- [x] 7.3 J3 weekly-review rubric JSON + blind pairwise wiring — `run_j3_weekly_review` live green (planted stale/contradiction/unprocessed/open-loop; contradiction queue honestly unsupported under the lexical profile); `rubrics/j3_weekly_review.rubric.json` + summary routed through the existing judge handshake writer
+- [x] 7.4 Basic Memory journey mapping table (doc only) — `docs/memory-proof-benchmark-trackd-basic-memory-mapping.md` (event → write_note/edit_note/search_notes/recent_activity with unsupported events listed; no BM execution)
 
 ## 8. Closeout
 - [x] 8.1 `docs/hosted-inference-boundary.md` (candidate jobs + measurable thresholds + `reasoning: client|hosted` manifest axis)

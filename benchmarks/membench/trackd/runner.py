@@ -20,11 +20,13 @@ from membench.trackd.journeys import (
     JourneyResult,
     run_j1_longitudinal,
     run_j2_correction,
+    run_j3_weekly_review,
 )
 
 JOURNEYS: dict[str, Callable[[Path], JourneyResult]] = {
     "j1_longitudinal": run_j1_longitudinal,
     "j2_correction": run_j2_correction,
+    "j3_weekly_review": run_j3_weekly_review,
 }
 JOURNEY_ORDER = tuple(JOURNEYS)
 

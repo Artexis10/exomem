@@ -13,6 +13,11 @@ Measures the *shipped* Exomem hook loop exactly as a coding client would run it:
 - ``checkpoint_driver``: PreCompact -> SessionStart continuation-checkpoint
   round trips (same-client recall, cross-client isolation) in a shared
   EXOMEM_HOOK_HOME.
+- ``witness_join``: two-witness activation join (server call-trace ×
+  ``claude -p`` stream-json transcript); a one-sided story is a
+  WITNESS_MISMATCH harness fault, never a product score.
+- ``natural_prompt_driver``: fresh-session ``claude -p`` invocation builder +
+  transcript parser feeding the join (execution user-run).
 
 Everything is deterministic, offline, and isolated: hook homes and vaults are
 benchmark-owned temp directories; no real ``~/.claude`` / ``~/.codex`` / vault

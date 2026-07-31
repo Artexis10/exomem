@@ -599,3 +599,468 @@ def run_j2_correction(workdir: Path) -> JourneyResult:
         manual_interventions=0,
         elapsed_seconds=time.perf_counter() - started,
     )
+
+
+# --------------------------------------------------------------------------- J3
+
+J3_RUBRIC_PATH = (
+    Path(__file__).resolve().parent / "rubrics" / "j3_weekly_review.rubric.json"
+)
+
+
+@dataclass(frozen=True)
+class PlantedItem:
+    """One deliberately planted review item the queues must surface."""
+
+    plant_id: str
+    kind: str  # stale | contradiction | unprocessed | open_loop
+    path: str
+
+    def as_dict(self) -> dict:
+        return {"plant_id": self.plant_id, "kind": self.kind, "path": self.path}
+
+
+@dataclass(frozen=True)
+class QueueObservation:
+    """What one ``review_memory`` mode actually surfaced."""
+
+    mode: str
+    paths: tuple[str, ...]
+    supported: bool = True
+
+
+def score_review_queue(
+    planted: list[PlantedItem] | tuple[PlantedItem, ...],
+    observation: QueueObservation,
+    *,
+    expected_kinds: tuple[str, ...],
+) -> dict:
+    """Deterministic planted-id recall/precision + false-surface rate.
+
+    An unsupported queue (e.g. the contradiction sweep under the lexical
+    profile, which is embeddings-gated) reports every metric as ``None`` —
+    unsupported is NEVER converted to a zero. ``precision`` and
+    ``false_surface_rate`` are ``None`` when nothing surfaced (no claim can
+    be made about an empty list's composition).
+    """
+
+    expected = sorted({p.path for p in planted if p.kind in expected_kinds})
+    surfaced_set = set(observation.paths)
+    base = {
+        "mode": observation.mode,
+        "supported": observation.supported,
+        "expected": expected,
+        "surfaced": list(observation.paths),
+    }
+    if not observation.supported:
+        return {
+            **base,
+            "matched": [],
+            "recall": None,
+            "precision": None,
+            "false_surfaces": [],
+            "false_surface_rate": None,
+        }
+    matched = sorted(surfaced_set & set(expected))
+    false_surfaces = sorted(surfaced_set - set(expected))
+    return {
+        **base,
+        "matched": matched,
+        "recall": (len(matched) / len(expected)) if expected else None,
+        "precision": (len(matched) / len(surfaced_set)) if surfaced_set else None,
+        "false_surfaces": false_surfaces,
+        "false_surface_rate": (
+            len(false_surfaces) / len(surfaced_set) if surfaced_set else None
+        ),
+    }
+
+
+def load_j3_rubric(path: Path = J3_RUBRIC_PATH) -> dict:
+    """Load and validate the J3 blind-pairwise rubric JSON."""
+
+    rubric = json.loads(Path(path).read_text(encoding="utf-8"))
+    if rubric.get("journey") != "j3_weekly_review":
+        raise ValueError("rubric journey must be j3_weekly_review")
+    if rubric.get("pairing") != "blind" or rubric.get("order") != "randomized":
+        raise ValueError("rubric must declare pairing=blind and order=randomized")
+    samples = rubric.get("samples")
+    if not isinstance(samples, int) or samples < 1:
+        raise ValueError("rubric samples must be an int >= 1")
+    criteria = rubric.get("criteria")
+    if not criteria:
+        raise ValueError("rubric criteria must be non-empty")
+    for criterion in criteria:
+        if not criterion.get("id") or not criterion.get("question"):
+            raise ValueError("every criterion needs id and question")
+        anchors = criterion.get("anchors") or {}
+        if set(anchors) != {"1", "2", "3", "4", "5"} or not all(
+            isinstance(v, str) and v for v in anchors.values()
+        ):
+            raise ValueError(
+                f"criterion {criterion.get('id')!r} needs complete 1..5 anchors"
+            )
+    return rubric
+
+
+def write_j3_judge_requests(
+    run_dir: Path,
+    summaries: dict[str, str],
+    *,
+    rubric_path: Path = J3_RUBRIC_PATH,
+    seed: str = "membench-j3",
+) -> Path:
+    """Route J3 summaries through the existing blind judge handshake.
+
+    Reuses :mod:`membench.judge` wholesale: provider identities become
+    deterministic ``system-X`` tokens, summaries are normalized for the judge,
+    line order is the writer's seed-derived permutation (the rubric's
+    ``order: randomized``), each item expands to the rubric's ``samples``,
+    and the fail-closed leakage gate applies to every serialized line.
+    """
+
+    from membench.judge import BlindingMap, RequestItem, write_requests
+    from membench.judge.blinding import normalize_for_judge
+
+    rubric = load_j3_rubric(rubric_path)
+    blinding = BlindingMap.mint(sorted(summaries), f"{seed}:providers")
+    items: list[RequestItem] = []
+    for criterion in rubric["criteria"]:
+        for provider in sorted(summaries):
+            token = blinding.token_for(provider)
+            summary = normalize_for_judge(summaries[provider])
+            anchor_lines = "\n".join(
+                f"{score}: {criterion['anchors'][score]}" for score in ("1", "2", "3", "4", "5")
+            )
+            prompt = (
+                "You are grading one anonymized weekly-review summary from a "
+                "memory system. System identities are blinded; grade only what "
+                "is written.\n\n"
+                f"Criterion: {criterion['question']}\n\n"
+                f"Anchors:\n{anchor_lines}\n\n"
+                f"Summary under review:\n{summary}\n\n"
+                "Reply with STRICT JSON only - one object, no prose:\n"
+                '{"score": 1-5, "reason": "short reason"}\n'
+            )
+            items.append(
+                RequestItem(
+                    item_id=f"j3:{criterion['id']}:{token}",
+                    blinded_provider_token=token,
+                    payload={
+                        "task": "judge",
+                        "journey": "j3_weekly_review",
+                        "criterion_id": criterion["id"],
+                        "question": criterion["question"],
+                        "anchors": criterion["anchors"],
+                        "summary": summary,
+                        "prompt": prompt,
+                    },
+                )
+            )
+    return write_requests(
+        run_dir, "judge", items, samples=rubric["samples"], seed=seed
+    )
+
+
+@dataclass
+class J3Result(JourneyResult):
+    """J1/J2-shaped result plus the planted registry, queue scores, and the
+    judge-facing summary text."""
+
+    planted: list[PlantedItem] = field(default_factory=list)
+    queue_scores: list[dict] = field(default_factory=list)
+    summary_text: str = ""
+
+    def as_dict(self) -> dict:
+        payload = super().as_dict()
+        payload["planted"] = [p.as_dict() for p in self.planted]
+        payload["queue_scores"] = self.queue_scores
+        payload["summary_text"] = self.summary_text
+        return payload
+
+
+def _queue_paths(payload: dict | None) -> tuple[str, ...]:
+    data = _data(payload)
+    items = data.get("items", []) if isinstance(data, dict) else []
+    return tuple(
+        str(item.get("path", ""))
+        for item in items
+        if isinstance(item, dict) and item.get("path")
+    )
+
+
+def run_j3_weekly_review(workdir: Path) -> J3Result:
+    """J3: weekly review over planted stale/contradiction/unprocessed/open-loop
+    items, scored by planted-id recall+precision, false-surface rate, and
+    triage burden (scripted op count).
+
+    Product-contract notes (probed by RUNNING the CLI, 2026-08-01, this
+    worktree):
+
+    - Wall-clock staleness CANNOT be planted through public write surfaces:
+      ``remember`` rejects ``created``/``updated`` fields (UNKNOWN_PARAM) and
+      ``edit_memory`` always re-bumps ``updated:`` to today. The journey
+      therefore collapses the age edge with the product's documented gate-edge
+      knob ``EXOMEM_STALE_AGE_DAYS=0`` (recorded in the journey env), so the
+      stale queue measures the DORMANCY conjunct: an unlinked conclusion is
+      flagged, well-linked decoys (>= 2 inbound wikilinks) are not.
+    - The corpus-contradiction sweep is embeddings-gated and no-ops under
+      ``EXOMEM_DISABLE_EMBEDDINGS`` (the deterministic lexical profile), so
+      the planted contradiction pair is recorded and the queue is scored
+      UNSUPPORTED — never zero.
+    - Compiled pages after the first need a qualifying typed relation
+      (``## Relations`` bullets; ``sources=`` frontmatter maps to the excluded
+      ``derivation`` family and does NOT qualify). The first note commits under
+      the automatic bootstrap disposition and doubles as the planted OPEN-LOOP
+      item: it surfaces as ``relation_debt`` in the attention queue.
+    - A note citing a captured source via ``sources=`` back-fills the source's
+      ``ingested_into``, which is what keeps the decoy capture OUT of the
+      unprocessed-sources queue.
+    """
+
+    started = time.perf_counter()
+    runner = JourneyRunner(workdir)
+    # Declared product config: collapse the stale age edge (see docstring).
+    runner.env["EXOMEM_STALE_AGE_DAYS"] = "0"
+    checks: list[JourneyCheck] = []
+    planted: list[PlantedItem] = []
+
+    init = runner.init_vault()
+    checks.append(JourneyCheck("init vault", init.ok, f"exit={init.returncode}"))
+
+    def capture(title: str, content: str) -> str:
+        run, payload = runner.run(
+            "capture_source",
+            "--content",
+            content,
+            "--source-type",
+            "session",
+            "--title",
+            title,
+            "--why-captured",
+            "membench J3 weekly-review journey",
+            "--json",
+        )
+        data = _data(payload)
+        path = str(data.get("path", "")) if isinstance(data, dict) else ""
+        checks.append(
+            JourneyCheck(
+                f"capture {title!r} commits", run.ok and bool(path), path or run.stderr[-300:]
+            )
+        )
+        return path
+
+    s1 = capture(
+        "Pager duty scribble", "Raw scribble one: rotate the pager duty each sprint."
+    )
+    s2 = capture(
+        "Deploy window scribble", "Raw scribble two: the deploy window opens at nine."
+    )
+    s3 = capture(
+        "Session cap brief", "Compiled brief: the session cap policy needs review."
+    )
+    planted.append(PlantedItem("p-unprocessed-a", "unprocessed", s1))
+    planted.append(PlantedItem("p-unprocessed-b", "unprocessed", s2))
+    # s3 is the decoy: compiled below, so it must NOT surface as unprocessed.
+
+    def remember(title: str, content: str, *fields: str) -> str:
+        args = ["remember", "--title", title, "--content", content]
+        for field_arg in fields:
+            args.extend(["--field", field_arg])
+        args.append("--json")
+        run, payload = runner.run(*args)
+        data = _data(payload)
+        path = str(data.get("path", "")) if isinstance(data, dict) else ""
+        checks.append(
+            JourneyCheck(
+                f"remember {title!r} commits", run.ok and bool(path), path or run.stderr[-300:]
+            )
+        )
+        return path
+
+    # N1 - first note: bootstrap relation disposition = the planted OPEN LOOP
+    # (surfaces as relation_debt); also the well-linked stale-queue decoy.
+    n1 = remember(
+        "Deploy freeze conclusion",
+        (
+            "# Deploy freeze conclusion\n\n## Findings\n\n"
+            "The deploy freeze window covers release week.\n\n"
+            "## Observations\n\n"
+            "- [deploy] The deploy freeze window covers release week #deploy-freeze\n"
+        ),
+        "note_type=research-note",
+        "project=weekly-review",
+    )
+    n1_ref = n1.removesuffix(".md")
+    planted.append(PlantedItem("p-open-loop", "open_loop", n1))
+
+    # N2/N3 - the planted contradiction pair (conflicting session-cap values).
+    n2 = remember(
+        "Session cap conclusion",
+        (
+            "# Session cap conclusion\n\n## Claim\n\n"
+            "The session cap is 20 concurrent sessions.\n\n"
+            "## Observations\n\n"
+            "- [limits] The session cap is 20 concurrent sessions #session-cap\n\n"
+            f"## Relations\n\n- refines [[{n1_ref}]]\n"
+        ),
+        "note_type=insight",
+        f"sources={s3}",
+    )
+    n2_ref = n2.removesuffix(".md")
+    n3 = remember(
+        "Session cap revision",
+        (
+            "# Session cap revision\n\n## Claim\n\n"
+            "The session cap is 50 concurrent sessions.\n\n"
+            f"Background: [[{n1_ref}]].\n\n"
+            "## Observations\n\n"
+            "- [limits] The session cap is 50 concurrent sessions #session-cap\n\n"
+            f"## Relations\n\n- contradicts [[{n2_ref}]]\n"
+        ),
+        "note_type=insight",
+        f"sources={s3}",
+    )
+    n3_ref = n3.removesuffix(".md")
+    planted.append(PlantedItem("p-contradiction-a", "contradiction", n2))
+    planted.append(PlantedItem("p-contradiction-b", "contradiction", n3))
+
+    # N4 - the planted DORMANT conclusion: no inbound links (its outbound
+    # links give N2/N3 inbound degree instead).
+    n4 = remember(
+        "Retry backoff conclusion",
+        (
+            "# Retry backoff conclusion\n\n## Findings\n\n"
+            "Retries use exponential backoff with 3 attempts.\n\n"
+            f"Caps context: [[{n2_ref}]] and [[{n3_ref}]].\n\n"
+            "## Observations\n\n"
+            "- [infra] Retries use exponential backoff with 3 attempts #retry\n\n"
+            f"## Relations\n\n- refines [[{n1_ref}]]\n"
+        ),
+        "note_type=research-note",
+        "project=weekly-review",
+    )
+    planted.append(PlantedItem("p-stale", "stale", n4))
+
+    # H - production-log hub (outside the stale-review type set): links every
+    # decoy note so each carries >= 2 inbound wikilinks.
+    remember(
+        "Weekly ops log",
+        (
+            f"# Weekly ops log\n\nReviewed [[{n1_ref}]], [[{n2_ref}]], "
+            f"[[{n3_ref}]] this week.\n\n"
+            "## Observations\n\n"
+            "- [ops] Weekly ops review completed for deploy and session notes #ops-log\n\n"
+            f"## Relations\n\n- supports [[{n1_ref}]]\n"
+        ),
+        "note_type=production-log",
+        "medium=ops",
+    )
+
+    # ---- the weekly review itself: four queues -------------------------
+    observations: dict[str, QueueObservation] = {}
+    for mode in ("stale", "contradiction", "unprocessed-sources", "attention"):
+        run, payload = runner.run("review_memory", "--mode", mode, "--json")
+        checks.append(
+            JourneyCheck(
+                f"review_memory mode={mode} responds",
+                run.ok and _envelope_ok(payload),
+                f"exit={run.returncode}",
+            )
+        )
+        observations[mode] = QueueObservation(
+            mode=mode,
+            paths=_queue_paths(payload),
+            # The contradiction sweep is embeddings-gated: honestly
+            # unsupported under the lexical profile, never scored zero.
+            supported=(mode != "contradiction"),
+        )
+
+    stale_score = score_review_queue(
+        planted, observations["stale"], expected_kinds=("stale",)
+    )
+    contradiction_score = score_review_queue(
+        planted, observations["contradiction"], expected_kinds=("contradiction",)
+    )
+    unprocessed_score = score_review_queue(
+        planted, observations["unprocessed-sources"], expected_kinds=("unprocessed",)
+    )
+    # Attention = the open-loop union view of everything surfaceable in this
+    # profile (contradictions cannot surface here; see docstring).
+    attention_score = score_review_queue(
+        planted,
+        observations["attention"],
+        expected_kinds=("stale", "unprocessed", "open_loop"),
+    )
+    queue_scores = [stale_score, contradiction_score, unprocessed_score, attention_score]
+
+    checks.append(
+        JourneyCheck(
+            "stale queue surfaces exactly the planted dormant conclusion",
+            stale_score["recall"] == 1.0 and stale_score["false_surface_rate"] == 0.0,
+            f"recall={stale_score['recall']} false={stale_score['false_surfaces']}",
+        )
+    )
+    checks.append(
+        JourneyCheck(
+            "unprocessed queue surfaces exactly the planted raw sources",
+            unprocessed_score["recall"] == 1.0
+            and unprocessed_score["false_surface_rate"] == 0.0,
+            f"recall={unprocessed_score['recall']} false={unprocessed_score['false_surfaces']}",
+        )
+    )
+    checks.append(
+        JourneyCheck(
+            "contradiction queue honestly unsupported in the lexical profile",
+            contradiction_score["supported"] is False
+            and contradiction_score["recall"] is None
+            and not observations["contradiction"].paths,
+            "embeddings-gated sweep; planted pair recorded, metrics None (never zero)",
+        )
+    )
+    checks.append(
+        JourneyCheck(
+            "attention queue covers every surfaceable open loop",
+            attention_score["recall"] == 1.0,
+            f"recall={attention_score['recall']} "
+            f"extra={attention_score['false_surfaces']}",
+        )
+    )
+    burden = runner.steps_count
+    checks.append(
+        JourneyCheck(
+            "triage burden equals the scripted op count",
+            burden == 13,
+            f"burden={burden} scripted ops, 0 manual interventions",
+        )
+    )
+
+    def _fmt_rate(value: float | None) -> str:
+        return "n/a" if value is None else f"{value:.2f}"
+
+    summary_text = (
+        "Weekly review sweep: the dormant-conclusion queue surfaced "
+        f"{len(stale_score['matched'])} of {len(stale_score['expected'])} planted "
+        f"items (false-surface rate {_fmt_rate(stale_score['false_surface_rate'])}); "
+        "the raw-capture backlog queue surfaced "
+        f"{len(unprocessed_score['matched'])} of {len(unprocessed_score['expected'])} "
+        f"planted items (false-surface rate "
+        f"{_fmt_rate(unprocessed_score['false_surface_rate'])}); "
+        "the contradiction sweep is unsupported in this deterministic profile "
+        "and is reported unsupported rather than zero; the combined attention "
+        f"view covered {len(attention_score['matched'])} of "
+        f"{len(attention_score['expected'])} open loops; triage burden was "
+        f"{burden} scripted operations with 0 manual interventions."
+    )
+
+    return J3Result(
+        id="j3_weekly_review",
+        name="J3 weekly review",
+        steps_count=runner.steps_count,
+        checks=checks,
+        commands=runner.commands,
+        manual_interventions=0,
+        elapsed_seconds=time.perf_counter() - started,
+        planted=planted,
+        queue_scores=queue_scores,
+        summary_text=summary_text,
+    )
