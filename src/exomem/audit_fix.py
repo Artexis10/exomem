@@ -25,6 +25,12 @@ Safe categories (auto-applied):
    (the documented frontmatter_compliance finding for cross-project patterns).
 4. **Sub-folder index refresh** — fold in `compute_subindex_writes` so counts
    stay current after backfills + canonicalization.
+5. **`duplicated_sidecar`** — collapse a media sidecar that accumulated nested
+   copies of itself. Keeps the longest surviving `## Extracted text` (for some
+   sidecars a re-render blanked the top-level block and the only copy is a nested
+   one), leaves frontmatter alone so a still-`pending` sidecar is re-extracted
+   normally, and refuses any rewrite that would shorten a transcript. See
+   `sidecar_repair`.
 
 Risky categories (proposed only):
 
