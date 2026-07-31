@@ -80,6 +80,7 @@ ALL_CATEGORIES: tuple[str, ...] = (
 )
 OPTIONAL_CATEGORIES: tuple[str, ...] = (
     "relation_registry",
+    "missing_sources",
     "semantic_contract_drift",
     "semantic_malformed_unit",
     "semantic_category_governance",
@@ -385,6 +386,8 @@ def audit(
         findings.extend(_check_relation_registry(vault_root))
     if "relation_debt" in selected:
         findings.extend(_check_relation_debt(vault_root, pages))
+    if "missing_sources" in selected:
+        findings.extend(_check_missing_sources(vault_root, pages))
     if "governance_receipts" in selected:
         findings.extend(_check_governance_receipts(vault_root))
     if "bridge_review" in selected:
@@ -1605,6 +1608,65 @@ def _check_relation_debt(
                     "typed_relations": typed_count,
                     "body_wikilinks": body_link_count,
                 },
+            )
+        )
+
+    return sorted(findings, key=lambda finding: finding.path)
+
+
+# ---------------- check: missing_sources ----------------
+
+# `_Schema/references/frontmatter.md` marks `sources:` required for these four
+# compiled types. Deliberately NOT expressed through `_REQUIRED_FIELDS_BY_TYPE`:
+# that table is `warn` severity (overstating a chronic, often-honest condition),
+# it would swamp `frontmatter_compliance` — whose job is structural integrity —
+# with hundreds of findings, and `audit_fix` iterates it to backfill inferable
+# values. Provenance is exactly the field that must never be inferred.
+_SOURCES_REQUIRED_TYPES = frozenset(
+    {"research-note", "insight", "failure", "pattern"}
+)
+
+
+def _check_missing_sources(
+    vault_root: Path,
+    pages: list[find_module.ParsedPage],
+) -> list[AuditFinding]:
+    """Surface active compiled pages that should cite provenance and cite none."""
+    findings: list[AuditFinding] = []
+    for page in pages:
+        if page.page_type not in _SOURCES_REQUIRED_TYPES:
+            continue
+        if page.path.name in ("index.md", "log.md"):
+            continue
+        if page.status in ("superseded", "archived", "draft", "dropped"):
+            continue
+        if access.access_tier(vault_root, page.rel_path) != access.TIER_READ_WRITE:
+            continue
+        stem = page.path.stem.lower()
+        if any(stem.endswith(suffix) for suffix in _STALE_SKIP_SLUG_SUFFIXES):
+            continue
+        if _STALE_SKIP_TAGS & set(page.tags):
+            continue
+        if page.frontmatter.get("sources"):
+            continue
+
+        findings.append(
+            AuditFinding(
+                category="missing_sources",
+                severity="info",
+                path=page.rel_path,
+                detail=(
+                    "Active compiled page cites no `sources:`; the raw material it "
+                    "was drawn from is not recoverable from the page itself, and any "
+                    "originating source still counts as unprocessed."
+                ),
+                proposed_fix=(
+                    "If this came from live work with nothing captured, it is an "
+                    "honest empty list — dismiss it. Otherwise cite the `Sources/` "
+                    "page, which also appends this note to that source's "
+                    "`ingested_into:`. Nothing is auto-written or inferred."
+                ),
+                meta={"signal_version": _page_signal_version(page)},
             )
         )
 
