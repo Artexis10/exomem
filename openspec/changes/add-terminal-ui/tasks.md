@@ -116,10 +116,10 @@
 ## 16. Delivery
 
 - [x] 16.1 `docs/tui.md` + README pointer; key map documented.
-- [ ] 16.2 Full lean suite + latency gate + `exomem demo --json` green; TUI
+- [x] 16.2 Full lean suite + latency gate + `exomem demo --json` green; TUI
       suite green with the extra; snapshot goldens committed.
-- [ ] 16.3 Benchmark smoke: `graph_value_benchmark.py`, `product_flow_benchmark
+- [x] 16.3 Benchmark smoke: `graph_value_benchmark.py`, `product_flow_benchmark
       --flow fresh_setup --flow search_recall`, latency gate — no regression.
-- [ ] 16.4 Synthetic dogfood journey executed and recorded; similarity review vs
+- [x] 16.4 Synthetic dogfood journey executed and recorded; similarity review vs
       sibling products recorded; `openspec validate add-terminal-ui --strict`
       green.
