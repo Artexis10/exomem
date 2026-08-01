@@ -122,7 +122,7 @@ async def test_a_write_failure_offers_recoveries_and_changes_nothing(make_app, t
 
 
 async def test_packs_are_optional_and_skipping_leaves_a_line(make_app, tmp_path):
-    app, backend = await _first_run(make_app)
+    app, _backend = await _first_run(make_app)
     async with app.run_test(size=(80, 24)) as pilot:
         await _create_vault(app, pilot, tmp_path / "vault")
         await pilot.press("s")  # skip packs
@@ -169,7 +169,7 @@ async def test_capture_then_ask_closes_with_a_citation(make_app, tmp_path):
 
 
 async def test_esc_rewinds_a_skipped_step_but_stops_at_a_write(make_app, tmp_path):
-    app, backend = await _first_run(make_app)
+    app, _backend = await _first_run(make_app)
     async with app.run_test(size=(80, 24)) as pilot:
         await _create_vault(app, pilot, tmp_path / "vault")
         await pilot.press("s")  # skip packs -> capture

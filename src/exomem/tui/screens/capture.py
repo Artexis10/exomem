@@ -24,7 +24,6 @@ from textual.widgets import Input, OptionList, Static, TextArea
 
 from ..backend import BackendError, RelationReviewRequired
 from ..format import fit, truncate_path
-from ..theme import Skin
 from ..widgets import (
     AppFooter,
     AppHeader,
@@ -290,7 +289,6 @@ class CaptureScreen(ExomemScreen):
         self.set_footer([("enter", "choose")])
 
     def _on_save_error(self, error: BackendError) -> None:
-        skin = self.app.skin
         self._set_receipt(None)
         self.query_one("#capture-recovery", RecoveryPanel).show(
             state="fail",
@@ -305,7 +303,6 @@ class CaptureScreen(ExomemScreen):
             ],
             budget=self.content_budget(),
         )
-        _ = skin
         self.set_footer([("enter", "choose"), ("esc", "keep editing")])
 
     def _set_receipt(self, lines: list[Text] | None) -> None:

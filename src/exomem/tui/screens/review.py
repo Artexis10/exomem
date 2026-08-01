@@ -33,7 +33,6 @@ from ..widgets import (
     BarRow,
     ExomemModal,
     RecoveryPanel,
-    receipt,
 )
 from .base import ExomemScreen
 

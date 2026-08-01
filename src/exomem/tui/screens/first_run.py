@@ -266,7 +266,6 @@ class FirstRunScreen(ExomemScreen):
     def _enter_path(self, mode: str) -> None:
         self._stage = f"path-{mode}"
         self._reset_blocks()
-        skin = self.app.skin
         self._question("vault", "Where?")
         path_input = self.query_one("#path-input", Input)
         path_input.display = True
@@ -420,7 +419,6 @@ class FirstRunScreen(ExomemScreen):
 
     def _on_vault_error(self, error: BackendError) -> None:
         self._reset_blocks()
-        skin = self.app.skin
         if error.code in ("VAULT_EXISTS", "NOT_A_VAULT"):
             state, word = ("warn", "already a vault") if error.code == "VAULT_EXISTS" else (
                 "warn",
@@ -456,7 +454,6 @@ class FirstRunScreen(ExomemScreen):
         )
         self._question("vault", "What next?")
         self.set_footer([("enter", "choose"), ("esc", "back")])
-        _ = skin
 
     # ------------------------------------------------------------------ #
     # Stage: scan (inserted before vault init when asked for)
