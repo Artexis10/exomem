@@ -49,7 +49,11 @@ ACCENT = "#ffb000"
 #: cannot: against cube entry 94 (#875f00), secondary text scores 1.89:1. This
 #: value scores 13.0:1 against body text and 5.0:1 against secondary, so a
 #: selected row reads exactly like an unselected one, only lit.
-SELECTION_BG = "#2a2622"
+#:
+#: It is exactly neutral rather than warm-tinted on purpose. A warm dark grey
+#: still reads as a faint hue to some eyes on a truecolor terminal, and the
+#: accent already has a place to live on this row: the bar.
+SELECTION_BG = "#262626"
 #: The same role on a light terminal.
 LIGHT_SELECTION_BG = "#e8e2d6"
 

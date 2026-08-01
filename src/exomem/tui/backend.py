@@ -575,6 +575,21 @@ class ExomemBackend:
         except (OSError, ValueError) as exc:
             raise BackendError.from_exception(exc) from exc
 
+    def install_hooks(self) -> dict:
+        """Wire the capture/retrieval/continuation hooks into local clients.
+
+        The TUI offered this as a clipboard hint, which made an option labelled
+        "Install agent hooks" the one thing on the screen that did not do what
+        it said. It is an ordinary supported operation; the confirmation the UI
+        shows first is what keeps it honest, not the refusal to run it.
+        """
+        from .. import install_hook
+
+        try:
+            return install_hook.install_all_hooks(wire=True)
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise BackendError.from_exception(exc) from exc
+
     def continuations(self) -> list[dict]:
         from .. import install_hook
 

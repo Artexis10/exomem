@@ -39,6 +39,7 @@ from ..widgets import (
     AppHeader,
     BarOptionList,
     BarRow,
+    ConfirmModal,
     HoverMovesCursor,
     RecoveryPanel,
     continuation,
@@ -865,10 +866,64 @@ class FirstRunScreen(ExomemScreen):
         elif action == "ask":
             self._leave(goto="ask")
         elif action == "hooks":
-            self.app.copy_to_clipboard("exomem install-hook")
-            self.app.notify(
-                "Run `exomem install-hook` in a terminal — the command is on your clipboard."
+            self._install_hooks()
+
+    def _install_hooks(self) -> None:
+        """Install the agent hooks from here, behind a confirmation.
+
+        This wires files under the client config directories, so it is asked
+        for before it runs — but it is asked, not delegated back to the user
+        with a clipboard hint.
+        """
+        backend = self.app.backend
+
+        def on_close(choice: str | None) -> None:
+            if choice != "confirm":
+                return
+            self._set_static(
+                "note",
+                [Text(""), receipt(self.app.skin, "working", "installing", "wiring client hooks")],
             )
+            self.run_backend(backend.install_hooks, self._hooks_done, self._hooks_failed, group="hooks")
+
+        self.app.push_screen(
+            ConfirmModal(
+                "Install agent hooks?",
+                "Adds capture, retrieval and continuation hooks to the Claude Code and "
+                "Codex config on this machine.\nYour vault is not touched.",
+                "Install them now",
+                "Not now — Home stays reachable",
+                "enter choose · esc back — nothing installed yet",
+            ),
+            on_close,
+        )
+
+    def _hooks_done(self, report: dict) -> None:
+        skin = self.app.skin
+        clients = [row for row in report.get("clients") or [] if row.get("success")]
+        names = ", ".join(str(row.get("client")) for row in clients)
+        state, detail = (
+            ("done", f"installed for {names}") if clients else ("warn", "no supported client found")
+        )
+        self._set_static(
+            "note",
+            [Text(""), receipt(skin, state, "hooks", detail, budget=self.content_budget())],
+        )
+        self.app.record_receipt(state, "hooks", detail)
+
+    def _hooks_failed(self, error: BackendError) -> None:
+        skin = self.app.skin
+        self._set_static(
+            "note",
+            [
+                Text(""),
+                receipt(skin, "fail", "not installed", error.message, budget=self.content_budget()),
+                Text(
+                    "     run `exomem install-hook` in a terminal to see the full report",
+                    style=skin.secondary,
+                ),
+            ],
+        )
 
     def _leave(self, goto: str = "home") -> None:
         self.app.finish_first_run(goto)

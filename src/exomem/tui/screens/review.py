@@ -129,9 +129,21 @@ def context_lines(item: dict, context: dict, skin: Skin, budget: int) -> Text:
     text.append("\n\n")
 
     def field(label: str, value: str, *, style_value: str | None = None) -> None:
+        """One labelled row; the value column keeps its own hanging indent."""
         text.append(f"{label:<{CONTEXT_FIELD}}", style=skin.secondary)
         text.append(fit(value, budget - CONTEXT_FIELD), style=style_value or skin.text)
         text.append("\n")
+
+    def prose(label: str, value: str, *, style_value: str | None = None) -> None:
+        """A labelled row whose value is prose: it wraps rather than truncates.
+
+        Truncating "d dismiss · s snooze — bound to the fingerprint" to an
+        ellipsis hid the half of the sentence that says what the action binds
+        to. Only paths are cut, because their tail identifies them.
+        """
+        lines = wrap(value, budget - CONTEXT_FIELD) or [""]
+        for index, line in enumerate(lines):
+            field(label if index == 0 else "", line, style_value=style_value)
 
     why = item_why(item)
     if why:
@@ -159,8 +171,16 @@ def context_lines(item: dict, context: dict, skin: Skin, budget: int) -> Text:
 
     text.append(skin.g("hrule") * max(8, min(budget, 52)), style=skin.dim)
     text.append("\n")
-    field("here", f"d dismiss {skin.g('bullet')} s snooze — bound to the fingerprint", style_value=skin.dim)
-    field("studio", f"supersede or reconcile {skin.g('arrow')} exomem serve http, /studio/", style_value=skin.dim)
+    prose(
+        "here",
+        f"d dismiss {skin.g('bullet')} s snooze — bound to the fingerprint",
+        style_value=skin.secondary,
+    )
+    prose(
+        "studio",
+        f"supersede or reconcile {skin.g('arrow')} exomem serve http, then /studio/",
+        style_value=skin.secondary,
+    )
     return text
 
 

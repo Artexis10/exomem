@@ -72,8 +72,15 @@ def wrap(text: str, budget: int, limit: int | None = None) -> list[str]:
 
 
 def label_field(glyph: str, word: str, width: int = LABEL_FIELD) -> str:
-    """`✓ vault     ` — the glyph + word pair padded to the receipt column."""
-    return f"{glyph} {word}".ljust(width)
+    """`✓ vault     ` — the glyph + word pair padded to the receipt column.
+
+    A status word longer than the column keeps its own separator rather than
+    colliding with the detail behind it: `ljust` is a no-op once the label
+    already exceeds the field, which rendered "not scanned" and its message as
+    one run-on word.
+    """
+    label = f"{glyph} {word}"
+    return label.ljust(max(width, len(label) + 1))
 
 
 def first_words(text: str, budget: int = 34) -> str:

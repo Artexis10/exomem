@@ -108,6 +108,10 @@ class AdoptScreen(ExomemScreen):
         yield AppFooter()
 
     def on_mount(self) -> None:
+        self._show_intro()
+        self.query_one("#adopt-path", Input).focus()
+
+    def _show_intro(self) -> None:
         skin = self.app.skin
         intro = Text()
         for line in wrap(
@@ -115,21 +119,33 @@ class AdoptScreen(ExomemScreen):
             "later — write modes are separate, confirmed steps.",
             self.content_budget() - 2,
         ):
-            intro.append(f"  {line}\n", style=skin.dim)
+            intro.append(f"  {line}\n", style=skin.secondary)
         self.query_one("#adopt-report", Static).update(intro)
-        self.query_one("#adopt-path", Input).focus()
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         if event.input.id != "adopt-path":
             return
         raw = event.value.strip()
         if raw:
-            self.scan_folder(Path(raw).expanduser())
+            self.scan_folder(self.resolve(raw))
+
+    @staticmethod
+    def resolve(raw: str) -> Path:
+        """A bare name means a folder under the working directory, spelled out.
+
+        Reporting "Test is not a directory" left the user guessing which Test
+        was looked for; resolving first means the error names a real path.
+        """
+        folder = Path(raw).expanduser()
+        return folder if folder.is_absolute() else (Path.cwd() / folder)
 
     def scan_folder(self, folder: Path) -> None:
         """Public entry (also used by first run): validate, then scan."""
         if not folder.is_dir():
-            self._on_error(BackendError("NOT_A_FOLDER", f"{folder} is not a directory"))
+            hint = "that path exists but is a file" if folder.exists() else "no folder there"
+            self._on_error(
+                BackendError("NOT_A_FOLDER", f"{folder} — {hint}", "type a folder path, or ~ for your home")
+            )
             return
         self._scan(folder)
 
@@ -155,6 +171,9 @@ class AdoptScreen(ExomemScreen):
         self.run_backend(lambda: backend.adopt_scan(folder), done, self._on_error, group="adopt-scan")
 
     def _on_error(self, error: BackendError) -> None:
+        # The intro is guidance for an empty screen; leaving it under a failure
+        # reads as part of the failure.
+        self.query_one("#adopt-report", Static).update("")
         self.query_one("#adopt-recovery", RecoveryPanel).show(
             state="fail",
             word="not scanned",
@@ -167,6 +186,7 @@ class AdoptScreen(ExomemScreen):
     def on_recovery_panel_chosen(self, event: RecoveryPanel.Chosen) -> None:
         event.stop()
         self.query_one("#adopt-recovery", RecoveryPanel).hide()
+        self._show_intro()
         self.query_one("#adopt-path", Input).focus()
 
     def action_write_mode(self, mode: str) -> None:

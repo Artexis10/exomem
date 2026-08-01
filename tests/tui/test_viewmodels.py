@@ -362,3 +362,46 @@ def test_selected_rows_lift_metadata_out_of_dim():
         "dim recedes past legibility against the lit row"
     )
     assert SKIN.dim in [span.style for span in row.render(SKIN, False).spans]
+
+
+def test_a_long_status_word_never_collides_with_its_detail():
+    """Regression: `✗ not scannedTest is not a directory` on one row.
+
+    `ljust` is a no-op once the label already exceeds the field, so any status
+    word longer than the receipt column ran straight into its own message.
+    """
+    from exomem.tui.format import label_field
+
+    for word in ("vault", "not scanned", "recall failed", "queue unavailable"):
+        assert label_field("✗", word).endswith(" "), f"{word!r} loses its separator"
+    line = receipt(SKIN, "fail", "not scanned", "/tmp/Test — no folder there", budget=76)
+    assert "not scanned /tmp" in line.plain or "not scanned  " in line.plain
+    assert "scannedTest" not in line.plain
+
+
+def test_selection_fill_is_exactly_neutral():
+    """No hue at any depth: the accent lives in the bar, not the fill."""
+    from exomem.tui.theme import SELECTION_BG
+
+    channels = [int(SELECTION_BG[i : i + 2], 16) for i in (1, 3, 5)]
+    assert max(channels) == min(channels), f"{SELECTION_BG} carries a tint"
+    assert _to_256(SELECTION_BG)[1] == SELECTION_BG, "and it survives quantisation unchanged"
+
+
+def test_context_pane_wraps_its_prose_instead_of_cutting_it():
+    """Regression: `bound to the fingerp…` hid what the action binds to."""
+    from exomem.tui.screens.review import context_lines
+
+    item = {
+        "ref": "exomem://review/aa",
+        "categories": ["unprocessed_source"],
+        "reasons": [{"detail": "captured but never compiled into a conclusion"}],
+        "path": "Knowledge Base/Sources/2026/08/a-note.md",
+        "fingerprint": "788e107a99",
+    }
+    rendered = context_lines(item, {"target": {"path": item["path"]}}, SKIN, 54).plain
+    flowed = " ".join(rendered.split())
+    assert "bound to the fingerprint" in flowed, "the binding must survive the column"
+    assert "exomem serve http, then /studio/" in flowed
+    assert "fingerp\u2026" not in rendered, "prose must wrap rather than lose its tail"
+    assert all(len(line) <= 56 for line in rendered.splitlines())

@@ -80,10 +80,16 @@ class ExomemScreen(Screen):
         return max(24, (self.size.width or 80) - self.SIDE_PANE_WIDTH - 4)
 
     def detail_budget(self) -> int:
-        """Cells inside the side pane (or the whole screen when it collapses)."""
+        """Cells inside the side pane (or the whole screen when it collapses).
+
+        Derived from the pane's fixed CSS width minus its own left padding.
+        Measuring the mounted widget instead looks more honest and is worse:
+        the pane reports zero before layout settles, so the budget — and the
+        stored golden frame — depended on when the paint happened.
+        """
         if not self.side_pane_open():
             return self.content_budget()
-        return self.SIDE_PANE_WIDTH - 4
+        return self.SIDE_PANE_WIDTH - 2
 
     def side_pane_open(self) -> bool:
         """True when the layout is wide enough for a persistent side pane."""
