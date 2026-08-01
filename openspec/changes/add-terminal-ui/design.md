@@ -195,7 +195,11 @@ The v1 screens were correct but read as configuration. A dedicated design
 session produced a locked direction — first run as an **accreting ledger**,
 and the daily loop restyled in the same **receipt language** — recorded in
 Exomem as "Exomem TUI redesign locked — ledger first-run and receipt language"
-(project `exomem`). What that changed, and why:
+(project `exomem`). The palette comes from "Substrate Design System v2 —
+tokens locked, per-brand accents, terminal amber confirmed" (project
+`substrate`), which pins Exomem's terminal accent to phosphor amber `#ffb000`
+(256-colour 214, 16-colour yellow 3) on warm near-black with warm off-white
+text, under the same live-state-only rule. What that changed, and why:
 
 - **First run is one screen, not a wizard.** Answered steps collapse into `✓`
   receipt lines; the active question owns the rows below them. The transcript
