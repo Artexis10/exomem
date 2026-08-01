@@ -3624,6 +3624,20 @@ _DECLARED_NOTE = (
 _RANK_DERIVED_SIGNALS = ("bm25_rank", "keyword_rank", "vector_rank", "graph_in_degree")
 
 
+def test_spec_names_the_known_preexisting_relevance_ranking_channel() -> None:
+    spec = (
+        Path(__file__).resolve().parents[1]
+        / "openspec/changes/add-default-deny-scope-cap/specs/governance-kernel/spec.md"
+    ).read_text(encoding="utf-8")
+    scenario = spec.split(
+        "#### Scenario: an audience no rule names receives nothing", 1
+    )[1].split("#### Scenario:", 1)[0]
+
+    assert all(signal in scenario for signal in _RANK_DERIVED_SIGNALS)
+    assert "known pre-existing channel" in scenario
+    assert "tracked separately" in scenario
+
+
 def _strip_rank_signals(payload):
     hits = payload["hits"] if isinstance(payload, dict) else payload
     for hit in hits if isinstance(hits, list) else []:
@@ -3678,15 +3692,15 @@ def _probe_surfaces_present_then_absent(
     return present, absent
 
 
-def test_a_default_denied_item_is_indistinguishable_from_a_missing_one(
+def test_a_default_denied_item_matches_missing_except_known_ranking_signals(
     vault: Path,
 ) -> None:
-    """Spec: the item is indistinguishable from one that does not exist.
+    """Spec: the item matches a missing one outside the named ranking channel.
 
     Same-input/varied-condition: each surface is asked for ONE path twice —
     once while it exists and is denied by the declaration, once after deleting
-    it. The caller controls the input, so the only bit that can differ is
-    whether the item exists, and that bit must not be observable.
+    it. The caller controls the input, so any non-ranking difference would be
+    a new existence oracle introduced by the declaration.
 
     Comparing two DIFFERENT withheld paths cannot isolate that bit: a response
     legitimately echoes whichever path the caller named, so differing inputs
@@ -3724,20 +3738,19 @@ def test_a_default_denied_item_is_indistinguishable_from_a_missing_one(
     assert RESTRICTED_PATH not in returned
 
 
-def test_the_declaration_adds_no_observable_an_explicit_ceiling_0_rule_lacks(
+def test_the_declaration_is_no_worse_than_the_existing_ceiling_0_primitive(
     vault: Path,
 ) -> None:
-    """The assertion this change actually owns, stated as a differential.
+    """The assertion this change owns: it is no worse than the old primitive.
 
     `_RANK_DERIVED_SIGNALS` is excluded from the test above because a withheld
     item still displaces the ranks of the items that survive it, and still
     counts toward their `graph_in_degree` — a corpus-statistics channel that
     predates this change and is identical for an explicit `ceiling: 0` rule
-    (verified against pristine `main`). Excluding it would be hand-waving if
-    nothing pinned it, so this pins it: every surface, INCLUDING the excluded
+    (verified against pristine `main`). This differential keeps the declaration
+    no worse than that existing primitive: every surface, INCLUDING the named
     signals, answers byte-identically whether the item is closed by the
-    declaration or by an authored ceiling-0 rule. The declaration therefore
-    introduces no new observable — it only supplies the default.
+    declaration or by an authored ceiling-0 rule.
     """
     write_scope(vault, default_deny=True)
     declared_present, declared_absent = _probe_surfaces_present_then_absent(

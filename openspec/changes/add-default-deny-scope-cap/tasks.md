@@ -27,4 +27,4 @@
 - [x] 4.3 Run `ruff check`, `git diff --check`, and the scaffold leak gate.
 - [x] 4.4 Run `openspec validate add-default-deny-scope-cap --strict`.
 - [x] 4.5 Run the lean suite, then the full suite.
-- [ ] 4.6 Independent adversarial review of the exact diff, with the reviewer rechecking its own findings after fixes.
+- [x] 4.6 Independent adversarial review of the exact diff, with the reviewer rechecking its own findings after fixes.

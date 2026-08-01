@@ -771,6 +771,25 @@ def _valid_release_time(value: object) -> bool:
     return True
 
 
+def _reject_reserved_audience(
+    value: str | None,
+    rel: str,
+    field_name: str,
+    findings: list[dict[str, str]],
+) -> str | None:
+    """Keep authored policy out of the process-reserved NUL namespace."""
+    if value is not None and "\x00" in value:
+        findings.append(
+            _finding(
+                "invalid_field",
+                f"{rel}:{field_name}",
+                f"{field_name} must not contain NUL; the NUL prefix is reserved",
+            )
+        )
+        return None
+    return value
+
+
 def _parse_scope(data: dict[str, Any], rel: str) -> tuple[Scope | None, list[dict[str, str]]]:
     findings, doc_id = _check_common(data, rel, _SCOPE_ALLOWED_FIELDS)
 
@@ -880,6 +899,7 @@ def _parse_rule(data: dict[str, Any], rel: str) -> tuple[Rule | None, list[dict[
     if not isinstance(audience, str) or not audience.strip():
         findings.append(_finding("missing_field", f"{rel}:audience", "audience is required"))
         audience = None
+    audience = _reject_reserved_audience(audience, rel, "audience", findings)
 
     ceiling = data.get("ceiling")
     if (
@@ -966,6 +986,7 @@ def _parse_grant(
     if not isinstance(audience, str) or not audience.strip():
         findings.append(_finding("missing_field", f"{rel}:audience", "audience is required"))
         audience = None
+    audience = _reject_reserved_audience(audience, rel, "audience", findings)
 
     ceiling = data.get("ceiling")
     if (
@@ -1018,7 +1039,9 @@ def _parse_release_grant(
         findings.append(_finding("invalid_field", f"{rel}:content_hash", "content_hash must be lowercase SHA-256"))
         content_hash = None
 
-    to_audience = required_text("to_audience")
+    to_audience = _reject_reserved_audience(
+        required_text("to_audience"), rel, "to_audience", findings
+    )
     released_at = required_text("released_at")
     if released_at is not None and not _valid_release_time(released_at):
         findings.append(_finding("invalid_field", f"{rel}:released_at", "released_at must be an ISO-8601 timestamp"))

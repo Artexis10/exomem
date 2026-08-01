@@ -282,7 +282,9 @@ def _proposal_analysis(
     current: policy_module.Policy,
     prospective: policy_module.Policy,
     manifest: list[dict[str, str]],
-) -> tuple[dict[str, int], list[str], str, list[str], bool, int | None]:
+) -> tuple[
+    dict[str, int], list[str], str, list[str], bool, int | None, int | None
+]:
     """Evaluate the concrete affected membership, never caller hint paths."""
     audiences = _compared_audiences(current, prospective)
     purposes = sorted(
@@ -292,10 +294,11 @@ def _proposal_analysis(
     before: dict[str, int] = {}
     after: dict[str, int] = {}
     rule_ids: set[str] = set()
-    # `target_ceiling` echoes back the highest level the proposal leaves an
-    # AUTHORED audience at, so the probe — which by construction always sits on
-    # the default — must not raise it to 6 for every open policy.
+    # `target_ceiling` remains the highest level the proposal leaves an
+    # AUTHORED audience at. The default has its own owner-visible ceiling so the
+    # rotation path is explicit without changing that compatibility field.
     named_after: list[int] = []
+    unnamed_after: list[int] = []
     all_open = True
     for row in manifest:
         rel = str(row["path"])
@@ -303,7 +306,15 @@ def _proposal_analysis(
             current_scopes = _memberships_for_path(vault_root, vault_root / rel, current)
             prospective_scopes = _memberships_for_path(vault_root, vault_root / rel, prospective)
         except GovernanceError:
-            return ({"narrowed": 0, "widened": 0, "unchanged": 0}, [], "widening", [], False, None)
+            return (
+                {"narrowed": 0, "widened": 0, "unchanged": 0},
+                [],
+                "widening",
+                [],
+                False,
+                None,
+                None,
+            )
         for audience in audiences:
             for purpose in purposes:
                 key = f"{audience}:{purpose or '-'}:{rel}"
@@ -313,6 +324,8 @@ def _proposal_analysis(
                 after[key] = new.level
                 if audience != UNNAMED_AUDIENCE_PROBE:
                     named_after.append(new.level)
+                else:
+                    unnamed_after.append(new.level)
                 rule_ids.update(old.rule_ids)
                 rule_ids.update(new.rule_ids)
                 rule_ids.update(
@@ -327,7 +340,15 @@ def _proposal_analysis(
     }
     direction = classify_transition_direction(before, after)
     samples = [str(row["path"]) for row in manifest[:5]] if all_open else []
-    return consequences, samples, direction, sorted(rule_ids), all_open, max(named_after, default=None)
+    return (
+        consequences,
+        samples,
+        direction,
+        sorted(rule_ids),
+        all_open,
+        max(named_after, default=None),
+        max(unnamed_after, default=None),
+    )
 
 
 def _purpose_direction(
@@ -399,9 +420,15 @@ def _proposal(vault_root: Path, **kwargs: Any) -> dict[str, Any]:
     target_ceiling = int(kwargs.get("target_ceiling", policy_module.DISCLOSURE_MAX))
     if not policy_module.DISCLOSURE_MIN <= target_ceiling <= policy_module.DISCLOSURE_MAX:
         raise GovernanceError("INVALID_GOVERNANCE_PROPOSAL", "target ceiling is invalid")
-    consequences, samples, direction, overlaps, all_open, derived_ceiling = _proposal_analysis(
-        vault_root, current_policy, prospective, manifest
-    )
+    (
+        consequences,
+        samples,
+        direction,
+        overlaps,
+        all_open,
+        derived_ceiling,
+        unnamed_audience_ceiling,
+    ) = _proposal_analysis(vault_root, current_policy, prospective, manifest)
     hint_diagnostics: list[str] = []
     if patterns:
         hint_diagnostics.append("selector_paths are compatibility hints; concrete membership is authoritative")
@@ -435,7 +462,12 @@ def _proposal(vault_root: Path, **kwargs: Any) -> dict[str, Any]:
         "interpretation": intent,
         "canonical_yaml": documents,
         "membership_preview": {"count": len(manifest), "samples": samples},
-        "consequences": {**consequences, "target_ceiling": derived_ceiling, "direction": direction},
+        "consequences": {
+            **consequences,
+            "target_ceiling": derived_ceiling,
+            "unnamed_audience_ceiling": unnamed_audience_ceiling,
+            "direction": direction,
+        },
         "overlaps": overlaps,
         "hint_diagnostics": hint_diagnostics,
         "duration": kwargs.get("duration"),

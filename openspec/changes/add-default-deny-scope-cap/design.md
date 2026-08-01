@@ -49,18 +49,42 @@ closed unless opened.
 The obvious implementation — inject a ceiling-0 standing rule for declared scopes — is
 wrong, and the reason is worth recording. `standing_min` is a `min` over matched rules, so
 a synthetic 0 would combine with an explicit `ceiling: 3` as `min(3, 0) = 0` and silently
-override the authored allowance. The declaration must apply only when the standing set is
-EMPTY:
+override the authored allowance. Emptiness is resolved PER DECLARING SCOPE: a standing
+rule names only the scopes in that rule, and every declared member it does not name keeps
+its restrictive default:
 
 ```python
-if standing:
-    standing_min = min(r.ceiling for r in standing)
-else:
-    standing_min = DISCLOSURE_MIN if _denied_by_default(...) else DISCLOSURE_MAX
+named_scope_ids = {
+    scope_id for rule in standing for scope_id in rule.scope_ids
+} & item_scope_ids
+default_deny_scope_ids = {
+    scope_id for scope_id in item_scope_ids
+    if policy.scopes[scope_id].default_deny and scope_id not in named_scope_ids
+}
+ceilings = [rule.ceiling for rule in standing]
+if default_deny_scope_ids:
+    ceilings.append(DISCLOSURE_MIN)
+standing_min = min(ceilings, default=DISCLOSURE_MAX)
 ```
 
 Everything downstream then works untouched: `grant_max` still raises off the floor, so
 "unless a grant names them" needs no special case.
+
+### Reserved audience ids stay outside the authored grammar
+
+The evaluator uses a NUL-prefixed audience namespace for the unresolved fail-closed
+identity and the unnamed-audience transition probe. YAML can decode an escaped `\0` into
+that namespace, so every authored audience-bearing field (`audience` and `to_audience`)
+rejects any NUL as an error finding. A rule or grant therefore cannot capture either
+reserved identity or mint a lookalike inside the reserved prefix.
+
+### Transition previews expose the unnamed default separately
+
+`target_ceiling` remains the maximum post-change ceiling among authored audiences for
+compatibility. Proposal consequences also always carry `unnamed_audience_ceiling` (nullable
+when the concrete membership is empty), computed from the post-change unnamed-audience
+probe. Removing `default_deny` can therefore report authored `target_ceiling: 1` and
+`unnamed_audience_ceiling: 6` without hiding the credential-rotation consequence.
 
 ### Owner exemption is by audience identity, at the default site
 

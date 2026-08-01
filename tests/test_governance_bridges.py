@@ -470,6 +470,39 @@ def test_complete_bridge_without_release_approval_is_withheld_everywhere(
     assert simulated["release_reasons"] == ["RELEASE_UNAPPROVED"]
 
 
+def test_default_deny_does_not_hide_a_bridge_release_reason_from_inspection(
+    vault: Path,
+) -> None:
+    """The existence-oracle guard owns pure default denials, not the bridge
+    state's established content-free explanation contract."""
+    _write_bridge_fixture(vault, approval=False)
+    _write_policy(
+        vault,
+        "scopes",
+        "closed-bridge",
+        _scope_document(SCOPE_B, path=BRIDGE_PATH) + "default_deny: true\n",
+    )
+
+    with request_scope(_external()):
+        explained = commands.op_govern_memory(
+            vault,
+            operation="explain",
+            path=BRIDGE_PATH,
+            audience="external",
+        )
+        simulated = commands.op_govern_memory(
+            vault,
+            operation="simulate",
+            paths=[BRIDGE_PATH],
+            audience="external",
+        )
+
+    assert explained["effective_ceiling"] == 0
+    assert explained["release_reason"] == "RELEASE_UNAPPROVED"
+    assert simulated["withheld_count"] == 1
+    assert simulated["release_reasons"] == ["RELEASE_UNAPPROVED"]
+
+
 def test_exact_approved_unchanged_bridge_releases_but_source_stays_withheld(
     vault: Path,
 ) -> None:

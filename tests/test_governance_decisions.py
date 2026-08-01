@@ -11,6 +11,7 @@ from __future__ import annotations
 import dataclasses
 import itertools
 import random
+from pathlib import Path
 
 from exomem.governance.decisions import decide
 from exomem.governance.policy import (
@@ -65,6 +66,31 @@ def _policy(rules=(), grants=(), scopes=()):
         rules=tuple(rules),
         grants=tuple(grants),
     )
+
+
+def _change_contract(name: str) -> str:
+    return (
+        Path(__file__).resolve().parents[1]
+        / "openspec/changes/add-default-deny-scope-cap"
+        / name
+    ).read_text(encoding="utf-8")
+
+
+def test_design_resolves_default_emptiness_per_declaring_scope() -> None:
+    design = _change_contract("design.md")
+
+    assert "if standing:" not in design
+    assert "named_scope_ids" in design
+    assert "default_deny_scope_ids" in design
+
+
+def test_no_disclosure_scenario_excludes_a_matching_grant() -> None:
+    spec = _change_contract("specs/governance-kernel/spec.md")
+    scenario = spec.split(
+        "#### Scenario: an audience no rule names receives nothing", 1
+    )[1].split("#### Scenario:", 1)[0]
+
+    assert "no matching grant applies" in scenario
 
 
 def test_default_is_full_disclosure_when_nothing_matches() -> None:

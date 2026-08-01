@@ -97,6 +97,19 @@ def inspect_operation(
     if operation == "explain":
         rel_path = _canonical_vault_path(vault_root, kwargs.get("path"))
         decision = projected(rel_path)
+        if (
+            not owner
+            and decision is not None
+            and decision.level <= policy_module.DISCLOSURE_MIN
+            and decision.default_deny_scope_ids
+            and decision.release_reason is None
+        ):
+            # Match the exact refusal for a path that does not exist. Returning
+            # a successful default-denial explanation here would disclose that
+            # the caller named an existing item even though it is withheld.
+            raise InspectionError(
+                "INVALID_INSPECTION_PATH", "path must be canonical"
+            )
         level = policy_module.DISCLOSURE_MIN if decision is None else decision.level
         rule_ids = [] if decision is None else list(decision.rule_ids)
         # A scope carrying `default_deny` is invisible until someone is denied:
@@ -131,6 +144,16 @@ def inspect_operation(
         raise InspectionError("INVALID_INSPECTION", "paths must be a list of strings")
     canonical_paths = [_canonical_vault_path(vault_root, path) for path in raw_paths]
     decisions = [projected(path) for path in canonical_paths]
+    if not owner and any(
+        decision is not None
+        and decision.level <= policy_module.DISCLOSURE_MIN
+        and decision.default_deny_scope_ids
+        and decision.release_reason is None
+        for decision in decisions
+    ):
+        # Keep the batch surface on the same success-vs-error boundary as
+        # `explain`; otherwise a valid default-denied path remains an oracle.
+        raise InspectionError("INVALID_INSPECTION_PATH", "path must be canonical")
     withheld = sum(
         decision is None or decision.level < policy_module.DISCLOSURE_MAX
         for decision in decisions

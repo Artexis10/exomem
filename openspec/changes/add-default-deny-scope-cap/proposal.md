@@ -66,8 +66,11 @@ None.
 - Affected code: `governance/policy.py` (scope field, compile, validation),
   `governance/decisions.py` (the standing default), `governance/inspection.py` (explain),
   and focused governance tests.
-- APIs: no request or response shape changes. Policy documents gain one optional scope
-  field; documents that omit it behave exactly as today.
+- APIs: no request-schema changes. Policy documents gain one optional scope field;
+  documents that omit it behave exactly as today. Proposal consequences gain the
+  additive `unnamed_audience_ceiling` field so the default is visible separately from
+  authored-audience `target_ceiling`. Non-owner inspection of a default-denied path now
+  uses the same invalid-path refusal as a missing path.
 - Dependencies and runtime: no new dependency, model, background task, or sidecar
   migration. The empty-policy fast path and its latency budget are unchanged, and the
   declaration costs one lookup per already-resolved scope on the decision path.

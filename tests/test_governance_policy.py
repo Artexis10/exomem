@@ -770,7 +770,7 @@ def test_the_authoring_gate_creates_no_state_when_it_refuses(vault: Path) -> Non
     policy directory, receipt or marker. The conflict probe therefore reads the
     directory listing rather than going through `load()`, which opens the
     governance sidecar via the guard probe."""
-    from exomem.governance.tool import op_govern_memory
+    from exomem.governance.tool import GovernanceError, op_govern_memory
 
     _write(vault, "scopes", "client", _SCOPE_A)
     conflict = (
@@ -788,7 +788,7 @@ def test_the_authoring_gate_creates_no_state_when_it_refuses(vault: Path) -> Non
         }
 
     before = _snapshot()
-    with pytest.raises(Exception):
+    with pytest.raises(GovernanceError):
         op_govern_memory(
             vault,
             operation="propose",
@@ -884,3 +884,73 @@ def test_a_yaml_boolean_spelling_is_accepted(vault: Path) -> None:
     pol = policy.load(vault)
     assert pol.blocked is False
     assert pol.scopes[_SCOPE_A_ID].default_deny is True
+
+
+@pytest.mark.parametrize(
+    "audience_yaml",
+    [r'"\0unnamed"', r'"\0unresolved"', r'"external\0suffix"'],
+)
+@pytest.mark.parametrize(
+    ("kind", "field", "document"),
+    [
+        (
+            "rules",
+            "audience",
+            "governance_version: 1\n"
+            "id: 01ARZ3NDEKTSV4RRFFQ69G5FB0\n"
+            'scope_ids: ["01ARZ3NDEKTSV4RRFFQ69G5FAV"]\n'
+            "audience: {audience}\n"
+            "ceiling: 2\n",
+        ),
+        (
+            "grants",
+            "audience",
+            "governance_version: 1\n"
+            "id: 01ARZ3NDEKTSV4RRFFQ69G5FB1\n"
+            "kind: standing\n"
+            'scope_ids: ["01ARZ3NDEKTSV4RRFFQ69G5FAV"]\n'
+            "audience: {audience}\n"
+            "ceiling: 6\n",
+        ),
+        (
+            "grants",
+            "to_audience",
+            "governance_version: 1\n"
+            "id: 01ARZ3NDEKTSV4RRFFQ69G5FB2\n"
+            "kind: release\n"
+            "path: Knowledge Base/Notes/Patterns/released.md\n"
+            "ref: exomem://memory/00000000-0000-0000-0000-000000000001\n"
+            f"content_hash: {'a' * 64}\n"
+            "to_audience: {audience}\n"
+            "released_at: '2026-07-28T12:00:00Z'\n"
+            "why: Owner reviewed the exact release\n"
+            "bridge_scope: review\n"
+            "bridge_of:\n"
+            "  - ref: exomem://memory/00000000-0000-0000-0000-000000000002\n"
+            "    path: Knowledge Base/Sources/Other/source.md\n"
+            f"    content_hash: {'b' * 64}\n"
+            f"    restriction_signature: {'c' * 64}\n"
+            "options:\n"
+            "  strip_provenance:\n"
+            "    - exomem://memory/00000000-0000-0000-0000-000000000002\n",
+        ),
+    ],
+)
+def test_authored_audiences_cannot_enter_the_reserved_nul_namespace(
+    vault: Path, audience_yaml: str, kind: str, field: str, document: str
+) -> None:
+    _write(vault, "scopes", "acmeco", _SCOPE_A)
+    _write(vault, kind, "reserved-audience", document.format(audience=audience_yaml))
+
+    compiled = policy.load(vault)
+    audience_findings = [
+        finding for finding in compiled.findings
+        if finding["path"].endswith(f":{field}")
+    ]
+
+    assert [finding["code"] for finding in audience_findings] == ["invalid_field"]
+    assert all(finding["severity"] == "error" for finding in audience_findings)
+    assert compiled.blocked is True
+    assert compiled.rules == ()
+    assert compiled.grants == ()
+    assert compiled.release_grants == ()

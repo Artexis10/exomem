@@ -3734,6 +3734,8 @@ def test_a_proposal_removing_default_deny_counts_the_widened_audience(
 
     assert proposal["consequences"]["direction"] == "widening"
     assert proposal["consequences"]["widened"] > 0
+    assert proposal["consequences"]["target_ceiling"] == 1
+    assert proposal["consequences"]["unnamed_audience_ceiling"] == 6
 
 
 def test_a_proposal_adding_default_deny_counts_the_narrowed_audience(
@@ -3758,13 +3760,60 @@ def test_a_proposal_adding_default_deny_counts_the_narrowed_audience(
     assert proposal["consequences"]["widened"] == 0
 
 
-def test_explain_does_not_hand_a_non_owner_the_declaring_scope_id(vault: Path) -> None:
-    """`list` already withholds scope ids from non-owners while disclosing rule
-    ids. A default denial must not become the one place a third party learns
-    the vault's scope structure."""
+@pytest.mark.parametrize(
+    ("operation", "argument"),
+    [("explain", "path"), ("simulate", "paths")],
+)
+def test_non_owner_inspection_cannot_distinguish_default_denied_from_missing(
+    vault: Path, operation: str, argument: str
+) -> None:
+    """Same input, varied condition: the caller asks about one path while it
+    exists behind a declared default, then asks again after it is deleted."""
+    from exomem.governance.tool import GovernanceError, op_govern_memory
+
+    _write_declared_scope(vault)
+    value: object = DECLARED_RESTRICTED if argument == "path" else [DECLARED_RESTRICTED]
+
+    def outcome() -> tuple[str, str, str]:
+        try:
+            result = op_govern_memory(
+                vault,
+                operation=operation,
+                principal=_external(),
+                audience="external",
+                **{argument: value},
+            )
+        except GovernanceError as error:
+            return type(error).__name__, error.code, str(error)
+        return "ok", "", repr(result)
+
+    present = outcome()
+    (vault / DECLARED_RESTRICTED).unlink()
+    missing = outcome()
+
+    assert present == missing
+    assert present == (
+        "GovernanceError",
+        "INVALID_INSPECTION_PATH",
+        "INVALID_INSPECTION_PATH: path must be canonical",
+    )
+
+
+def test_non_owner_inspection_remains_available_when_a_grant_raises_the_default(
+    vault: Path,
+) -> None:
+    """The oracle guard applies only while the declared floor remains L0."""
     from exomem.governance.tool import op_govern_memory
 
     _write_declared_scope(vault)
+    grants = vault / "Knowledge Base" / "_Governance" / "grants"
+    grants.mkdir(parents=True, exist_ok=True)
+    (grants / "external.yaml").write_text(
+        "governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FB1\nkind: standing\n"
+        f'scope_ids: ["{SCOPE_ID}"]\naudience: external\nceiling: 4\n',
+        encoding="utf-8",
+    )
+
     explained = op_govern_memory(
         vault,
         operation="explain",
@@ -3772,5 +3821,13 @@ def test_explain_does_not_hand_a_non_owner_the_declaring_scope_id(vault: Path) -
         audience="external",
         path=DECLARED_RESTRICTED,
     )
-    assert explained["effective_ceiling"] == 0
-    assert "default_deny_scope_ids" not in explained
+    simulated = op_govern_memory(
+        vault,
+        operation="simulate",
+        principal=_external(),
+        audience="external",
+        paths=[DECLARED_RESTRICTED],
+    )
+
+    assert explained["effective_ceiling"] == 4
+    assert simulated["evaluated_count"] == 1

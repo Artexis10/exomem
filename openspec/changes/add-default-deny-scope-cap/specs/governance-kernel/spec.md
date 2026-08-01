@@ -22,12 +22,47 @@ alongside it.
 
 A vault with no governance tree SHALL remain on the empty fast path, unaffected.
 
+Authored audience-bearing fields SHALL NOT enter the evaluator's reserved NUL-prefixed
+namespace. A NUL in `audience` or `to_audience` SHALL produce an ERROR finding and refuse
+the compile, including the values reserved for unresolved principals and the unnamed-
+audience transition probe.
+
+Policy transition previews SHALL expose the post-change ceiling for the unnamed-audience
+default as `unnamed_audience_ceiling`, separately from the authored-audience
+`target_ceiling`. The field SHALL be present and nullable when no concrete membership can
+be evaluated.
+
 #### Scenario: an audience no rule names receives nothing
 
 - **WHEN** an item belongs to a scope carrying the declaration and a request arrives from
-  an audience for which no standing rule matches that scope
+  an audience for which no standing rule matches that scope and no matching grant applies
 - **THEN** the decision is no disclosure
-- **AND** the item is indistinguishable from one that does not exist
+- **AND** outside the relevance-ranking signals `bm25_rank`, `keyword_rank`, `vector_rank`,
+  and `graph_in_degree`, its projected representation is indistinguishable from one that
+  does not exist
+- **AND** those signals reflect corpus position and are a known pre-existing channel
+  tracked separately from this change
+
+#### Scenario: non-owner inspection does not reveal a default-denied path
+
+- **WHEN** a non-owner uses `explain` or `simulate` for one path, first while it exists and
+  is denied at no disclosure and again after the same path is deleted
+- **THEN** both requests receive the same error class and text
+- **AND** owner inspection behaviour is unchanged
+- **AND** an established terminal `release_reason` remains inspectable
+
+#### Scenario: reserved audience ids refuse compilation
+
+- **WHEN** a rule or grant authors an `audience` or `to_audience` containing a NUL
+- **THEN** the compiler emits an ERROR finding
+- **AND** the policy compile is refused
+
+#### Scenario: a transition preview exposes the unnamed default
+
+- **WHEN** a declared scope has an L1 rule for `external` and a proposal removes the
+  declaration
+- **THEN** `target_ceiling` remains 1 for the authored audience
+- **AND** `unnamed_audience_ceiling` is 6 for the post-change default
 
 #### Scenario: a newly minted audience id is denied by default
 
