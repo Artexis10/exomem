@@ -1,8 +1,8 @@
 # Tasks
 
 ## 1. Registry and contracts
-- [ ] 1.1 Family registry module (id, classification, rationale, template binding) + registry test + generation refusal for unregistered families
-- [ ] 1.2 Publish the registry in docs/memory-proof-benchmark.md (coverage table incl. out-of-scope entries)
+- [x] 1.1 Family registry module (benchmarks/membench/families.py: 7 active v0.1 + 8 planned v0.2 + tacit_polanyi out-of-scope; generation-time refusal at the single choke point; taxonomy-membership + integrity guards) — reviewed APPROVE, 16 tests, release-manifest byte-identity unchanged
+- [x] 1.2 Coverage table published in docs/memory-proof-benchmark.md with verbatim no-drift gate
 - [ ] 1.3 Provider onboarding doc + third-party adapter conformance suite (faked runtime seam)
 
 ## 2. Governance wiring (closes the v0.1 gap)

@@ -180,3 +180,37 @@ are never aggregated into published numbers.
 - Every run writes a fresh `benchmarks/runs/<id>/` (never overwritten) whose
   `manifest.json` + `environment.json` pin commits, versions, profiles,
   prompts, seeds, and failures.
+
+## Scenario-family registry
+
+The scenario-family registry (`benchmarks/membench/families.py`) is the
+auditable coverage claim required by OpenSpec change
+`expand-memory-proof-benchmark`: every family is classified as
+deterministic-oracle (expected records fully computable), rubric-track
+(writable but only human/blind-judge assessable, routed to predeclared
+rubrics), or out-of-scope (not digitally writable — the declared Polanyi
+boundary). A template may only register under an **active** family;
+generation fails with a named error for any template whose family is
+unregistered or still `planned`, and out-of-scope families are permanently
+`excluded`. This table is the verbatim output of
+`membench.families.coverage_table_markdown()`;
+`tests/test_membench_families.py` fails if it drifts from the module.
+
+| Family | Classification | Status | Rationale |
+|---|---|---|---|
+| `temporal` | deterministic-oracle | active | Bitemporal ground truth (event vs ingestion time, supersession, expiry, as-of views) is fully computable from the seeded claim timeline. |
+| `epistemics` | deterministic-oracle | active | Authority, dispute, tentative lifecycle, retraction, provenance, and absence-vs-unsupported states are derived by the oracle from recorded assertions. |
+| `query_behavior` | deterministic-oracle | active | Recall, abstention, and clarification behaviour is checked against oracle-derived expected records for every query kind. |
+| `maintenance` | deterministic-oracle | active | Duplicate, contradiction, stale, and orphan pressure is injected by the generation schedule, so corpus-health ground truth is computable. |
+| `identity` | deterministic-oracle | active | Alias and entity-graph resolution targets are declared at generation time; the oracle knows every coreference. |
+| `multimodal` | deterministic-oracle | active | Numeric and table/PDF evidence carries generated sentinel values; retrieval and answer identity are exact-checkable. |
+| `governance` | deterministic-oracle | active | Audience policy and disclosure expectations come from the generated PolicySet; leak vs no-leak is deterministic. |
+| `procedural` | deterministic-oracle | planned | Ordered how-to chains where step order, preconditions, and revisions over time are the ground truth, computable from the authored chain. |
+| `quantitative` | deterministic-oracle | planned | Arithmetic over two or more stored values; the oracle computes the expected value, unit, and tolerance with both contributing sources as required citations. |
+| `negation_counterfactual` | deterministic-oracle | planned | Recorded-as-false vs not-recorded and considered-then-rejected plans score against the existing abstention and current-state gates. |
+| `cross_lingual` | deterministic-oracle | planned | Synthetic non-Latin-script sources queried in English; sentinel citation and value identity are exact-checkable, and profiles declaring no support report unsupported, never zero. |
+| `preference_attribution` | deterministic-oracle | planned | Holder and as-of time of an opinion are the ground truth; an unattributed restatement as objective fact fails the calibration gate. |
+| `source_reliability` | deterministic-oracle | planned | A recurring source's correction track record is derivable from the corpus; weighting is scored behaviourally via required citations and hedging expectations, never numeric confidence. |
+| `long_horizon_entropy` | deterministic-oracle | planned | A 52-week ingestion schedule with recurring duplication, correction, and deletion pressure; health metrics at quarterly snapshots are computable from the schedule. |
+| `multimodal_depth` | deterministic-oracle | planned | Facts existing only inside real PDF, OCR-image, or audio-transcript artifacts; sentinel retrieval under the media profile, degrading with recorded reasons without the extras. |
+| `tacit_polanyi` | out-of-scope | excluded | Tacit knowledge (the Polanyi boundary): skills and know-how that cannot be written down digitally cannot be seeded into a corpus or checked by any oracle or rubric; declared here so the coverage claim states its own limit. |

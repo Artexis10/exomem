@@ -12,7 +12,7 @@ from pathlib import Path
 
 import yaml
 
-from membench import GENERATOR_VERSION, oracle
+from membench import GENERATOR_VERSION, families, oracle
 from membench.artifacts import render_artifact, renderer_versions
 from membench.ids import sentinel as sentinel_token
 from membench.ids import slugify
@@ -131,6 +131,11 @@ def generate_corpus(
 
     for template_id in sorted(selected):
         template = selected[template_id]
+        family_error = families.family_registration_error(
+            template.template_id, template.family
+        )
+        if family_error:
+            raise GenerationError(family_error)
         template_infos.append(
             TemplateInfo(
                 template_id=template.template_id,
