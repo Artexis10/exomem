@@ -128,6 +128,21 @@ class ExomemTuiApp(App):
     # ------------------------------------------------------------------ #
     # Startup
     # ------------------------------------------------------------------ #
+    def get_css_variables(self) -> dict[str, str]:
+        """Expose the selection fill to the stylesheet.
+
+        Theme `variables` are not resolvable when the app's own CSS is parsed
+        — that happens before a custom theme is registered — so this is the
+        supported hook for a `$name` the stylesheet needs from the start.
+        """
+        variables = super().get_css_variables()
+        variables["selection-bg"] = (
+            theme_module.LIGHT_SELECTION_BG
+            if self.theme == "exomem-light"
+            else theme_module.SELECTION_BG
+        )
+        return variables
+
     def get_default_screen(self) -> HomeScreen:
         # Home IS the base of the stack — `_pop_to_home` relies on it.
         return self._home

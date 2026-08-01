@@ -276,7 +276,7 @@ class RecoveryPanel(Vertical):
         for action, label, sublabel in options or []:
             lines = [(1, Text(fit(label, budget - 2), style=skin.text))]
             if sublabel:
-                lines.append((3, Text(fit(sublabel, budget - 4), style=skin.dim)))
+                lines.append((3, Text(fit(sublabel, budget - 4), style=skin.secondary)))
             rows.append(BarRow(action, lines))
         option_list.set_rows(rows)
         option_list.display = bool(rows)

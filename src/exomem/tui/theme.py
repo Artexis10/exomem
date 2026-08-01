@@ -36,6 +36,15 @@ SURFACE = "#14120f"
 #: Phosphor amber, confirmed as Exomem's terminal accent in Substrate Design
 #: System v2 (truecolor #ffb000, 256-color 214, 16-color yellow 3).
 ACCENT = "#ffb000"
+#: Selected-row fill. The design specifies "accent at 12-22%", but a blend that
+#: dark does not survive a 256-color terminal: #3f2d06 rounds into the color
+#: cube at (1,0,0) -- pure dark red -- because the green channel floors to
+#: zero. This value is chosen to land on cube entry 94 (#875f00), a real dark
+#: amber, so the selection reads the same whether the terminal has 16.7M
+#: colors or 256. Verified by test, not by eye.
+SELECTION_BG = "#7a4f0c"
+#: The same role on a light terminal.
+LIGHT_SELECTION_BG = "#f0d9a8"
 
 # Status hues are ANSI slots on purpose — see the module docstring.
 OK = "green"
@@ -183,7 +192,7 @@ EXOMEM_DARK = Theme(
         "chrome-bg": CHROME_BG,
         "block-cursor-background": ACCENT,
         "block-cursor-foreground": BACKGROUND,
-        "input-selection-background": f"{ACCENT} 25%",
+        "input-selection-background": SELECTION_BG,
     },
 )
 
@@ -269,11 +278,11 @@ OptionList {
 }
 OptionList:focus { border: none; }
 OptionList > .option-list--option-highlighted {
-    background: $accent 15%;
+    background: $selection-bg;
     color: $foreground;
 }
 OptionList:focus > .option-list--option-highlighted {
-    background: $accent 22%;
+    background: $selection-bg;
     color: $foreground;
 }
 Screen.-no-color OptionList > .option-list--option-highlighted,
@@ -289,7 +298,7 @@ SelectionList {
 }
 SelectionList > .selection-list--option-highlighted,
 SelectionList > .selection-list--option-highlighted-selected {
-    background: $accent 22%;
+    background: $selection-bg;
     color: $foreground;
 }
 

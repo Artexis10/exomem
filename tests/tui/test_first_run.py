@@ -182,7 +182,9 @@ async def test_esc_rewinds_a_skipped_step_but_stops_at_a_write(make_app, tmp_pat
         await pilot.press("escape")  # the vault line performed a write
         await _settle(app, pilot)
         assert "✓ vault" in _text(app, "#ledger"), "a write cannot be rewound"
-        assert "cannot be rewound" in _text(app, "#note")
+        note = _text(app, "#note")
+        assert "▲ pinned" in note, "a refused rewind must be as visible as any other state"
+        assert "Settings (8)" in note, "and must name where the answer can still change"
 
 
 async def test_esc_from_the_path_step_keeps_the_typing(make_app):
@@ -237,3 +239,23 @@ async def test_first_run_never_reopens_once_a_vault_exists(make_app):
     async with app.run_test(size=(80, 24)) as pilot:
         await _settle(app, pilot)
         assert app.screen.SCREEN_TITLE == "Home"
+
+
+async def test_an_applied_pack_selection_can_still_be_rewound(make_app, tmp_path):
+    """Packs write a manifest, but that is not a one-way door.
+
+    Pinning it refused a rewind the vault never actually forbids, which left
+    the only way back through quitting the flow.
+    """
+    app, _backend = await _first_run(make_app)
+    async with app.run_test(size=(80, 24)) as pilot:
+        await _create_vault(app, pilot, tmp_path / "vault")
+        await pilot.press("enter")  # apply the pre-selected packs
+        await _settle(app, pilot)
+        assert "✓ packs" in _text(app, "#ledger")
+        assert "capture" in _text(app, "#question")
+        await pilot.press("escape")
+        await _settle(app, pilot)
+        assert "packs" in _text(app, "#question"), "the packs answer must be changeable"
+        assert "✓ packs" not in _text(app, "#ledger")
+        assert app.screen.query_one("#packs-choice").display is True

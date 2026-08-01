@@ -245,7 +245,7 @@ class HomeScreen(ExomemScreen):
             line = Text(no_wrap=True)
             line.append(f"{key}  ", style=skin.secondary)
             line.append(f"{title:<{TITLE_FIELD}}", style=skin.text)
-            line.append(fit(description, max(8, budget - TITLE_FIELD - 5)), style=skin.dim)
+            line.append(fit(description, max(8, budget - TITLE_FIELD - 5)), style=skin.secondary)
             rows.append(BarRow(name, [(0, line)]))
         return rows
 

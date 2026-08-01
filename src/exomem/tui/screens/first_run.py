@@ -231,7 +231,7 @@ class FirstRunScreen(ExomemScreen):
     def _prose(self, widget_id: str, text: str, *, gutter: int = 2) -> None:
         skin = self.app.skin
         lines = [
-            Text(line, style=skin.dim)
+            Text(line, style=skin.secondary)
             for line in wrap(text, self.content_budget() - gutter)
         ]
         self._set_static(widget_id, [Text(""), *lines], gutter=gutter)
@@ -252,7 +252,7 @@ class FirstRunScreen(ExomemScreen):
             sub = sub.format(n=self._scaffold_files or "a few")
             lines = [(1, Text(label, style=skin.text))]
             if sub:
-                lines.append((3, Text(sub, style=skin.dim)))
+                lines.append((3, Text(sub, style=skin.secondary)))
             rows.append(BarRow(action, lines))
         choices = self.query_one("#choices", BarOptionList)
         choices.display = True
@@ -592,11 +592,15 @@ class FirstRunScreen(ExomemScreen):
         )
 
     def _packs_saved(self, chosen: list[str]) -> None:
+        # Deliberately NOT pinned. A pack selection rewrites one manifest and
+        # is changeable from Home at any time, so refusing to rewind it would
+        # be a dead end invented by this screen rather than one the vault
+        # actually imposes. Only genuinely irreversible writes pin a line.
         detail = ", ".join(chosen)
         self._add_line(
             "packs",
             [receipt(self.app.skin, "done", "packs", detail, budget=self.content_budget())],
-            pinned=True,
+            pinned=False,
         )
         self.app.record_receipt("done", "packs", detail)
         self._enter_capture()
@@ -684,7 +688,9 @@ class FirstRunScreen(ExomemScreen):
         ask_input = self.query_one("#ask-input", Input)
         ask_input.display = True
         ask_input.value = ""
-        ask_input.placeholder = self._capture_title[:60] or "what did you just write about?"
+        # A placeholder that echoed the capture title read as already-typed
+        # text; a hint has to look like a hint.
+        ask_input.placeholder = "a few words from what you just wrote"
         ask_input.focus()
         self.set_footer([("enter", "ask"), ("esc", "rewind"), ("s", "skip")])
 
@@ -777,7 +783,7 @@ class FirstRunScreen(ExomemScreen):
         for action, label, sub in NEXT_OPTIONS:
             lines = [(1, Text(label, style=skin.text))]
             if sub:
-                lines.append((3, Text(sub, style=skin.dim)))
+                lines.append((3, Text(sub, style=skin.secondary)))
             rows.append(BarRow(action, lines))
         choices = self.query_one("#choices", BarOptionList)
         choices.display = True
@@ -860,18 +866,30 @@ class FirstRunScreen(ExomemScreen):
         self._render_ledger()
         self._reenter(last.step)
 
+    #: Where a pinned step can still be changed, once setup is over.
+    PINNED_NEXT = {
+        "vault": "the vault is on disk now — point elsewhere from Settings (8)",
+        "capture": "the note is saved as an immutable Source — edit it from Review (4)",
+        "scan": "the scan wrote nothing — choose another folder from Adopt (5)",
+    }
+
     def _pinned_notice(self, step: str) -> None:
+        """Say why the rewind stopped, and where the answer can still change.
+
+        This used to be a dim aside, which read as decoration next to a key
+        that had visibly done nothing. A refusal is a state change, so it gets
+        the same glyph-and-word treatment as any other.
+        """
         skin = self.app.skin
+        budget = self.content_budget()
         self._set_static(
             "note",
             [
                 Text(""),
+                receipt(skin, "warn", "pinned", f"{step} recorded a write", budget=budget),
                 Text(
-                    fit(
-                        f"{skin.g('bullet')} that {step} line records a write — it cannot be rewound",
-                        self.content_budget() - 2,
-                    ),
-                    style=skin.dim,
+                    f"     {fit(self.PINNED_NEXT.get(step, 'it can be changed later from Home'), budget - 5)}",
+                    style=skin.secondary,
                 ),
             ],
         )

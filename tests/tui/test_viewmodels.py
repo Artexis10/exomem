@@ -277,3 +277,42 @@ def test_ensure_semantic_unit_appends_only_when_missing():
     assert ensure_semantic_unit(already, "t") == already
     rich = "## Decision\n\nA substantive body.\n"
     assert ensure_semantic_unit(rich, "t") == rich
+
+
+# -- colour depth: the palette has to survive quantisation ------------------- #
+def _to_256(hex_colour: str) -> tuple[int, str]:
+    """The 256-colour cell a truecolour value lands on, and its real value."""
+    from rich.color import Color as RichColor
+    from rich.color_triplet import ColorTriplet
+
+    triplet = ColorTriplet(*(int(hex_colour[index : index + 2], 16) for index in (1, 3, 5)))
+    downgraded = RichColor.from_triplet(triplet).downgrade(2)
+    exact = downgraded.get_truecolor()
+    return downgraded.number, f"#{exact.red:02x}{exact.green:02x}{exact.blue:02x}"
+
+
+def test_selection_fill_stays_amber_on_a_256_colour_terminal():
+    """Regression: a 22% amber blend quantised to pure dark red (#5f0000).
+
+    The colour cube floors each channel independently, so `#3f2d06` — the
+    blend the design's "accent at 12-22%" produces — lost its green entirely
+    and the selected row rendered red on a real terminal. The fill must land
+    on a cell that is still recognisably amber.
+    """
+    from exomem.tui.theme import SELECTION_BG
+
+    number, exact = _to_256(SELECTION_BG)
+    red, green, blue = (int(exact[i : i + 2], 16) for i in (1, 3, 5))
+    assert green > 0, f"{SELECTION_BG} quantises to {exact} (cell {number}) — the green channel died"
+    assert red > green > blue, f"{SELECTION_BG} quantises to {exact}, which is not a warm amber"
+    # the specific blend that caused the bug must still be rejected by this rule
+    assert _to_256("#3f2d06")[1] == "#5f0000"
+
+
+def test_accent_and_text_roles_survive_quantisation():
+    from exomem.tui.theme import ACCENT, SECONDARY, TEXT
+
+    assert _to_256(ACCENT)[0] == 214, "the brand amber must land on ANSI 214"
+    # supporting copy has to stay clearly brighter than the background
+    assert int(_to_256(SECONDARY)[1][1:3], 16) >= 0x80
+    assert int(_to_256(TEXT)[1][1:3], 16) >= 0xC0
