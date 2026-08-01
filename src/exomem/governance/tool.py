@@ -33,7 +33,12 @@ from .operations import (
     operation_variant,
     select_operation,
 )
-from .principal import OWNER_AUDIENCE, RequestPrincipal, effective_principal
+from .principal import (
+    OWNER_AUDIENCE,
+    UNNAMED_AUDIENCE_PROBE,
+    RequestPrincipal,
+    effective_principal,
+)
 from .transaction import GovernanceCrash, GovernanceError, authorization_row, policy_target
 
 PENDING_MARKER = ".policy-mutation.pending.json"
@@ -246,6 +251,32 @@ def _resolved_membership_manifest(
     ]
 
 
+def _compared_audiences(
+    current: policy_module.Policy, prospective: policy_module.Policy
+) -> list[str]:
+    """Every audience a transition can move, including the unnamed default.
+
+    Enumerating rules and grants alone compares only audiences some document
+    names — which is exactly the set a change to the DEFAULT cannot appear in.
+    Removing a scope's `default_deny` then moves an unnamed audience from 0 to
+    6 while every named audience sits still, and the review reports a
+    narrowing. `UNNAMED_AUDIENCE_PROBE` stands in for that audience; no
+    document can name it and no credential can mint it, so it always resolves
+    through the default and never matches a rule or grant.
+
+    It also guarantees a non-empty audience set, so an empty lattice can no
+    longer be mistaken for "nothing to compare".
+    """
+    return sorted(
+        {
+            document.audience
+            for policy in (current, prospective)
+            for document in (*policy.rules, *policy.grants)
+        }
+        | {UNNAMED_AUDIENCE_PROBE}
+    )
+
+
 def _proposal_analysis(
     vault_root: Path,
     current: policy_module.Policy,
@@ -253,22 +284,18 @@ def _proposal_analysis(
     manifest: list[dict[str, str]],
 ) -> tuple[dict[str, int], list[str], str, list[str], bool, int | None]:
     """Evaluate the concrete affected membership, never caller hint paths."""
-    audiences = sorted(
-        {
-            rule.audience
-            for policy in (current, prospective)
-            for rule in (*policy.rules, *policy.grants)
-        }
-    )
+    audiences = _compared_audiences(current, prospective)
     purposes = sorted(
         {rule.purpose for policy in (current, prospective) for rule in policy.rules if rule.purpose}
     )
     purposes = [None, *purposes]
-    if not audiences:
-        return ({"narrowed": 0, "widened": 0, "unchanged": 0}, [], "widening", [], False, None)
     before: dict[str, int] = {}
     after: dict[str, int] = {}
     rule_ids: set[str] = set()
+    # `target_ceiling` echoes back the highest level the proposal leaves an
+    # AUTHORED audience at, so the probe — which by construction always sits on
+    # the default — must not raise it to 6 for every open policy.
+    named_after: list[int] = []
     all_open = True
     for row in manifest:
         rel = str(row["path"])
@@ -284,6 +311,8 @@ def _proposal_analysis(
                 new = decisions.decide(prospective_scopes, audience=audience, purpose=purpose, policy=prospective)
                 before[key] = old.level
                 after[key] = new.level
+                if audience != UNNAMED_AUDIENCE_PROBE:
+                    named_after.append(new.level)
                 rule_ids.update(old.rule_ids)
                 rule_ids.update(new.rule_ids)
                 rule_ids.update(
@@ -298,7 +327,7 @@ def _proposal_analysis(
     }
     direction = classify_transition_direction(before, after)
     samples = [str(row["path"]) for row in manifest[:5]] if all_open else []
-    return consequences, samples, direction, sorted(rule_ids), all_open, max(after.values(), default=None)
+    return consequences, samples, direction, sorted(rule_ids), all_open, max(named_after, default=None)
 
 
 def _purpose_direction(
@@ -1398,13 +1427,7 @@ def _effective_transition_direction(
         return "widening"
     try:
         manifest = _membership_manifest(vault_root, current, prospective, set(documents))
-        audiences = sorted(
-            {
-                document.audience
-                for policy in (current, prospective)
-                for document in (*policy.rules, *policy.grants)
-            }
-        )
+        audiences = _compared_audiences(current, prospective)
         purposes = [
             None,
             *sorted(

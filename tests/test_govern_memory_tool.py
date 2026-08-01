@@ -3651,6 +3651,113 @@ def test_explain_reports_no_declaring_scope_when_a_rule_decided(vault: Path) -> 
     assert "default_deny_scope_ids" not in explained
 
 
+def _scope_document(*, default_deny: bool) -> str:
+    return (
+        f"governance_version: 1\nid: {SCOPE_ID}\nname: Confidential patterns\n"
+        f'paths: ["{PATTERN_GLOB}"]\n'
+        + ("default_deny: true\n" if default_deny else "")
+    )
+
+
+def _write_declared_scope_with_a_rule(vault: Path, *, default_deny: bool) -> None:
+    """A declared scope PLUS an unrelated authored audience.
+
+    The rule is what makes the failure visible rather than vacuous: with a
+    named audience in the policy the lattice is non-empty, so a direction is
+    computed from it — and the audience whose ceiling actually moved is the one
+    no document names.
+    """
+    governance = vault / "Knowledge Base" / "_Governance"
+    (governance / "scopes").mkdir(parents=True, exist_ok=True)
+    (governance / "rules").mkdir(parents=True, exist_ok=True)
+    (governance / "scopes" / "patterns.yaml").write_text(
+        _scope_document(default_deny=default_deny), encoding="utf-8"
+    )
+    (governance / "rules" / "patterns.yaml").write_text(
+        f"governance_version: 1\nid: {RULE_ID}\n"
+        f'scope_ids: ["{SCOPE_ID}"]\naudience: external\nceiling: 1\n',
+        encoding="utf-8",
+    )
+
+
+def test_removing_default_deny_is_classified_as_a_widening(vault: Path) -> None:
+    """The owner's only review signal before committing must not misreport the
+    exact edit that undoes this feature.
+
+    The declaration names no audience, so enumerating audiences from rules and
+    grants alone never evaluates the one whose ceiling moves 0 -> 6. The
+    default itself has to be in the compared lattice.
+    """
+    from exomem.governance.tool import _effective_transition_direction
+
+    _write_declared_scope_with_a_rule(vault, default_deny=True)
+
+    direction = _effective_transition_direction(
+        vault, {"scopes/patterns.yaml": _scope_document(default_deny=False)}
+    )
+
+    assert direction == "widening"
+
+
+def test_adding_default_deny_is_classified_as_a_narrowing(vault: Path) -> None:
+    """The other half of the pair: the declaration is a restriction, and the
+    lattice it is measured in must be able to see that."""
+    from exomem.governance.tool import _effective_transition_direction
+
+    _write_declared_scope_with_a_rule(vault, default_deny=False)
+
+    direction = _effective_transition_direction(
+        vault, {"scopes/patterns.yaml": _scope_document(default_deny=True)}
+    )
+
+    assert direction == "narrowing"
+
+
+def test_a_proposal_removing_default_deny_counts_the_widened_audience(
+    vault: Path,
+) -> None:
+    """`propose` reports the consequences the owner reviews. A removal that
+    reopens every unnamed audience must not read as `widened: 0`."""
+    from exomem.governance.tool import op_govern_memory
+
+    _write_declared_scope_with_a_rule(vault, default_deny=True)
+
+    proposal = op_govern_memory(
+        vault,
+        operation="propose",
+        principal=owner_principal(),
+        intent="Stop denying audiences the policy does not name",
+        documents={"scopes/patterns.yaml": _scope_document(default_deny=False)},
+        selector_paths=[],
+        target_ceiling=6,
+    )
+
+    assert proposal["consequences"]["direction"] == "widening"
+    assert proposal["consequences"]["widened"] > 0
+
+
+def test_a_proposal_adding_default_deny_counts_the_narrowed_audience(
+    vault: Path,
+) -> None:
+    from exomem.governance.tool import op_govern_memory
+
+    _write_declared_scope_with_a_rule(vault, default_deny=False)
+
+    proposal = op_govern_memory(
+        vault,
+        operation="propose",
+        principal=owner_principal(),
+        intent="Deny audiences the policy does not name",
+        documents={"scopes/patterns.yaml": _scope_document(default_deny=True)},
+        selector_paths=[],
+        target_ceiling=0,
+    )
+
+    assert proposal["consequences"]["direction"] == "narrowing"
+    assert proposal["consequences"]["narrowed"] > 0
+    assert proposal["consequences"]["widened"] == 0
+
+
 def test_explain_does_not_hand_a_non_owner_the_declaring_scope_id(vault: Path) -> None:
     """`list` already withholds scope ids from non-owners while disclosing rule
     ids. A default denial must not become the one place a third party learns

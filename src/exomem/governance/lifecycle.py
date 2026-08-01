@@ -269,18 +269,34 @@ def _scope_ids(vault_root: Path, item: ManifestItem, policy: policy_module.Polic
     return membership.evaluate_snapshot(page, policy, content_hash=item.content_hash)
 
 
+def _restricting_scope_ids(policy: policy_module.Policy) -> set[str]:
+    """Every scope whose membership makes an item governed material.
+
+    A scope restricts either because a rule lowers its ceiling for someone, or
+    because it DECLARES that audiences it does not name receive nothing — the
+    declaration names no rule, so enumerating rules alone leaves a
+    declaration-only item looking ungoverned. That misclassification is a
+    disclosure bug, not a bookkeeping one: an ungoverned deletion writes no
+    tombstone, so `is_tombstoned` stays False and the path can no longer be
+    withheld once the item itself is gone.
+    """
+    return {
+        scope_id
+        for rule in policy.rules
+        if rule.ceiling < policy_module.DISCLOSURE_MAX
+        for scope_id in rule.scope_ids
+    } | {
+        scope_id for scope_id, scope in policy.scopes.items() if scope.default_deny
+    }
+
+
 def _is_governed(vault_root: Path, manifest: tuple[ManifestItem, ...]) -> bool:
     policy = policy_module.load(vault_root)
     if policy.blocked:
         return True
     if policy.empty:
         return False
-    restricting_scope_ids = {
-        scope_id
-        for rule in policy.rules
-        if rule.ceiling < policy_module.DISCLOSURE_MAX
-        for scope_id in rule.scope_ids
-    }
+    restricting_scope_ids = _restricting_scope_ids(policy)
     for item in manifest:
         try:
             scope_ids = _scope_ids(vault_root, item, policy)
@@ -1080,9 +1096,7 @@ def _is_governed_for_restore(vault_root: Path, manifest: tuple[ManifestItem, ...
         return True
     if policy.empty:
         return False
-    restricting = {
-        sid for rule in policy.rules if rule.ceiling < policy_module.DISCLOSURE_MAX for sid in rule.scope_ids
-    }
+    restricting = _restricting_scope_ids(policy)
     for item in manifest:
         if not item.source_path.lower().endswith(".md"):
             if restricting.intersection(
