@@ -1,4 +1,4 @@
-"""Packs, Status, Settings, Adopt, Continue, Onboarding, NO_COLOR."""
+"""Packs, Status, Settings, Adopt, Continue, layout breakpoints, NO_COLOR."""
 
 from __future__ import annotations
 
@@ -23,64 +23,94 @@ async def _open(app, pilot, name: str):
     await _settle(app, pilot)
 
 
-async def test_packs_multi_select_persists(make_app, fake_backend):
+def _text(app, selector: str) -> str:
+    return str(app.screen.query_one(selector).render())
+
+
+# -- Packs ------------------------------------------------------------------ #
+async def test_packs_multi_select_persists_across_visits(make_app, fake_backend):
     app = make_app()
     async with app.run_test(size=(100, 30)) as pilot:
         await _open(app, pilot, "packs")
         selection_list = app.screen.query_one("#packs-list")
         assert selection_list.option_count == 3
         assert sorted(selection_list.selected) == ["business", "technical"]
-        # toggle creative on via keyboard
-        await pilot.press("down", "down", "down", "space")
+        await pilot.press("down", "down", "down", "space")  # toggle creative on
         await pilot.press("a")
         await _settle(app, pilot)
-        applied = [c for c in fake_backend.calls if c[0] == "apply_packs"]
+        applied = [call for call in fake_backend.calls if call[0] == "apply_packs"]
         assert applied and "creative" in applied[0][1]["pack_ids"]
+        assert "✓ packs" in _text(app, "#packs-status")
+
         # Reopening must land on a LIVE re-mounted screen showing persisted
         # state (guards against Textual removing popped, uninstalled screens).
-        state_calls_before = len([c for c in fake_backend.calls if c[0] == "packs_state"])
+        before = len([call for call in fake_backend.calls if call[0] == "packs_state"])
         app.goto("home")
         await pilot.pause()
         app.goto("packs")
         await _settle(app, pilot)
         revisited = app.screen.query_one("#packs-list")
-        assert revisited.option_count == 3, "revisited screen must be alive and populated"
-        state_calls_after = len([c for c in fake_backend.calls if c[0] == "packs_state"])
-        assert state_calls_after > state_calls_before, "revisit must refresh from the backend"
+        assert revisited.option_count == 3, "the revisited screen must be alive"
+        after = len([call for call in fake_backend.calls if call[0] == "packs_state"])
+        assert after > before, "a revisit must re-read from the backend"
         assert "creative" in fake_backend.selected_packs
 
 
-async def test_packs_error_surfaces(make_app, fake_backend):
-    fake_backend.fail_next("apply_packs", code="KB_NOT_INITIALIZED", message="no KB yet")
+async def test_packs_error_recovers(make_app, fake_backend):
+    fake_backend.fail_next("apply_packs", code="KB_NOT_INITIALIZED", message="no vault yet")
     app = make_app()
     async with app.run_test(size=(100, 30)) as pilot:
         await _open(app, pilot, "packs")
         await pilot.press("space", "a")
         await _settle(app, pilot)
-        assert app.screen.query_one("#packs-error").display is True
+        recovery = app.screen.query_one("#packs-recovery")
+        assert recovery.has_class("visible")
+        assert "Nothing was changed" in str(recovery.query_one("#recovery-fact").render())
 
 
-async def test_status_sections_render(make_app):
+# -- Status ----------------------------------------------------------------- #
+async def test_status_sections_render_as_receipts(make_app):
     app = make_app()
     async with app.run_test(size=(100, 30)) as pilot:
         await _open(app, pilot, "status")
-        doctor = str(app.screen.query_one("#status-doctor").render())
-        assert "python" in doctor
-        hooks = str(app.screen.query_one("#status-hooks").render())
-        assert "hook" in hooks.lower()
+        doctor = _text(app, "#status-doctor")
+        assert "python" in doctor and doctor.lstrip().startswith("●")
+        assert "hooks" in _text(app, "#status-hooks")
+        assert "warm" in _text(app, "#status-readiness")
 
 
+async def test_status_hook_gap_names_the_command(make_app):
+    app = make_app(FakeBackend(hooks_ok=False))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _open(app, pilot, "status")
+        assert "install-hook" in _text(app, "#status-hooks")
+
+
+# -- Settings --------------------------------------------------------------- #
 async def test_settings_mode_switch_persists(make_app, fake_backend):
     app = make_app()
     async with app.run_test(size=(100, 30)) as pilot:
         await _open(app, pilot, "settings")
-        quiet = app.screen.query_one("#mode-quiet")
-        quiet.value = True
+        modes = app.screen.query_one("#settings-mode")
+        assert modes.option_count == 3
+        assert modes.highlighted == 1, "the current mode starts under the cursor"
+        await pilot.press("up", "enter")  # move to 'quiet' and apply
         await _settle(app, pilot)
         assert any(call == ("set_mode", {"value": "quiet"}) for call in fake_backend.calls)
+        assert "✓ mode" in _text(app, "#settings-mode-status")
 
 
-async def test_adopt_scan_and_gated_write(make_app, fake_backend, tmp_path):
+async def test_settings_names_the_real_ways_to_change_the_vault(make_app):
+    app = make_app()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _open(app, pilot, "settings")
+        vault = _text(app, "#settings-vault")
+        assert "sample-vault" in vault
+        assert "EXOMEM_VAULT_PATH" in vault
+
+
+# -- Adopt ------------------------------------------------------------------ #
+async def test_adopt_scan_is_read_only_and_write_is_gated(make_app, fake_backend, tmp_path):
     folder = tmp_path / "old-notes"
     folder.mkdir()
     app = make_app()
@@ -90,37 +120,53 @@ async def test_adopt_scan_and_gated_write(make_app, fake_backend, tmp_path):
         path_input.value = str(folder)
         await pilot.press("enter")
         await _settle(app, pilot)
-        report = str(app.screen.query_one("#adopt-report").render())
-        assert "24 files" in report
+        report = _text(app, "#adopt-report")
+        assert "✓ scanned" in report and "24 files" in report
         assert any(call[0] == "adopt_scan" for call in fake_backend.calls)
-        # write mode is gated behind an explicit confirmation
+        assert not any(call[0] == "adopt_write" for call in fake_backend.calls)
+
         await pilot.press("c")
         await pilot.pause()
         assert app.screen.__class__.__name__ == "ConfirmModal"
-        await pilot.press("y")
+        body = " ".join(str(child.render()) for child in app.screen.query("Static"))
+        assert "never rewritten" in body and "nothing written yet" in body
+        await pilot.press("enter")
         await _settle(app, pilot)
-        writes = [c for c in fake_backend.calls if c[0] == "adopt_write"]
+        writes = [call for call in fake_backend.calls if call[0] == "adopt_write"]
         assert writes and writes[0][1]["mode"] == "copy-as-sources"
 
 
-async def test_adopt_write_without_scan_refused(make_app, fake_backend):
+async def test_adopt_write_without_a_scan_is_refused(make_app, fake_backend):
     app = make_app()
     async with app.run_test(size=(100, 30)) as pilot:
         await _open(app, pilot, "adopt")
         await pilot.press("c")
         await _settle(app, pilot)
-        assert not [c for c in fake_backend.calls if c[0] == "adopt_write"]
+        assert not [call for call in fake_backend.calls if call[0] == "adopt_write"]
 
 
-async def test_continue_empty_state_names_hook_install(make_app):
+async def test_adopt_bad_folder_recovers(make_app):
     app = make_app()
     async with app.run_test(size=(100, 30)) as pilot:
+        await _open(app, pilot, "adopt")
+        app.screen.query_one("#adopt-path").value = "/definitely/not/here"
+        await pilot.press("enter")
+        await _settle(app, pilot)
+        assert app.screen.query_one("#adopt-recovery").has_class("visible")
+
+
+# -- Continue --------------------------------------------------------------- #
+async def test_continue_empty_state_names_hook_install(make_app):
+    app = make_app()
+    async with app.run_test(size=(80, 24)) as pilot:
         await _open(app, pilot, "continue")
-        empty = app.screen.query_one("#continue-empty")
-        assert empty.display is True
+        recovery = app.screen.query_one("#continue-recovery")
+        assert recovery.has_class("visible")
+        options = recovery.query_one("#recovery-options")
+        assert "exomem install-hook" in str(options.get_option_at_index(0).prompt)
 
 
-async def test_continue_renders_and_copies_packet(make_app):
+async def test_continue_renders_and_copies_a_packet(make_app):
     backend = FakeBackend(
         checkpoints=[
             {
@@ -140,70 +186,71 @@ async def test_continue_renders_and_copies_packet(make_app):
         await pilot.press("enter")
         await _settle(app, pilot)
         assert any(call[0] == "continuation_packet" for call in backend.calls)
-        detail = app.screen.query_one("#ask-detail")
-        assert detail.has_class("has-content")
+        assert app.screen.query_one("#continue-detail").has_class("has-content")
         await pilot.press("y")
-        await pilot.pause()  # copy action must not error without a checkpoint open twice
-
-
-async def test_onboarding_create_vault_path(make_app, tmp_path):
-    backend = FakeBackend(initialized=False)
-    app = make_app(backend)
-    async with app.run_test(size=(100, 30)) as pilot:
-        await _settle(app, pilot)
-        assert app.screen.SCREEN_TITLE == "Welcome"
-        # choose "Create a fresh vault"
-        await pilot.press("down", "enter")
         await pilot.pause()
-        path_input = app.screen.query_one("#onboarding-path")
-        assert path_input.display is True
-        path_input.value = str(tmp_path / "new-vault")
-        path_input.focus()
-        await pilot.press("enter")
+
+
+# -- layout and accessibility ------------------------------------------------ #
+@pytest.mark.parametrize("size", [(80, 24), (100, 30), (120, 40)])
+async def test_every_screen_survives_every_design_target(make_app, size):
+    from exomem.tui.screens.home import DESTINATIONS
+
+    app = make_app()
+    async with app.run_test(size=size) as pilot:
         await _settle(app, pilot)
-        assert any(call[0] == "init_vault" for call in backend.calls)
-        assert backend.runtime_started is True
+        for name, _key, title, _description in DESTINATIONS:
+            await _open(app, pilot, name)
+            assert app.screen.SCREEN_TITLE == title
 
 
-async def test_onboarding_create_on_existing_vault_connects(make_app, tmp_path):
-    # "Create" pointed at a folder that already holds a vault must connect to
-    # it — never an error, never API language about force overlays.
-    existing = tmp_path / "already-a-vault"
-    backend = FakeBackend(initialized=False)
-    backend.existing_vaults.add(str(existing))
-    app = make_app(backend)
-    async with app.run_test(size=(100, 30)) as pilot:
-        await _settle(app, pilot)
-        assert app.screen.SCREEN_TITLE == "Welcome"
-        await pilot.press("down", "enter")
-        await pilot.pause()
-        path_input = app.screen.query_one("#onboarding-path")
-        path_input.value = str(existing)
-        path_input.focus()
-        await pilot.press("enter")
-        await _settle(app, pilot)
-        assert not any(call[0] == "init_vault" for call in backend.calls), (
-            "an existing vault must be connected, not re-initialized"
-        )
-        status = str(app.screen.query_one("#onboarding-status").render())
-        assert "already holds a Knowledge Base" in status
-        assert backend.runtime_started is True
-
-
-async def test_onboarding_skip_lands_home(make_app):
-    backend = FakeBackend(initialized=False)
-    app = make_app(backend)
-    async with app.run_test(size=(100, 30)) as pilot:
-        await _settle(app, pilot)
-        assert app.screen.SCREEN_TITLE == "Welcome"
-        await pilot.press("escape")
-        await pilot.pause()
-        assert app.screen.SCREEN_TITLE == "Home"
-
-
-async def test_no_color_env_does_not_crash(make_app, monkeypatch):
-    monkeypatch.setenv("NO_COLOR", "1")
+async def test_side_pane_is_hidden_below_the_breakpoint(make_app):
     app = make_app()
     async with app.run_test(size=(80, 24)) as pilot:
         await _settle(app, pilot)
+        assert app.screen.side_pane_open() is False
+        assert app.screen.query_one("#home-status").display is True, (
+            "narrow layouts carry health in the status block instead"
+        )
+
+
+async def test_side_pane_replaces_the_status_block_when_wide(make_app):
+    app = make_app()
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _settle(app, pilot)
+        assert app.screen.side_pane_open() is True
+        assert app.screen.query_one("#home-status").display is False
+        assert app.screen.query_one("#home-now").has_class("has-content")
+
+
+async def test_no_color_keeps_every_status_legible(make_app, monkeypatch):
+    from exomem.tui.app import ExomemTuiApp
+    from exomem.tui.theme import GLYPHS_ASCII
+
+    monkeypatch.setenv("NO_COLOR", "1")
+    app = ExomemTuiApp(FakeBackend(), glyphs=GLYPHS_ASCII, color=False)
+    async with app.run_test(size=(80, 24)) as pilot:
+        await _settle(app, pilot)
         assert app.screen.SCREEN_TITLE == "Home"
+        assert app.screen.has_class("-no-color")
+        status = _text(app, "#home-status")
+        assert "* ready" in status, "the ASCII glyph plus the word must carry the state"
+        assert "!" in status or "review" in status
+
+
+async def test_theme_toggle_restyles_everything_it_had_drawn(make_app):
+    app = make_app()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _open(app, pilot, "settings")
+        assert app.theme == "exomem-dark"
+        dark_menu = str(app.screen.query_one("#settings-mode").get_option_at_index(0).prompt)
+        await pilot.press("t")
+        await _settle(app, pilot)
+        assert app.theme == "exomem-light"
+        assert app.skin.accent != dark_menu, "the skin must follow the theme"
+        # the screen is rebuilt, not left painted in the previous palette
+        assert app.screen.SCREEN_TITLE == "Settings"
+        rebuilt = app.screen.query_one("#settings-mode")
+        assert rebuilt.option_count == 3
+        home_menu = app._home.query_one("#home-menu")
+        assert home_menu.option_count == 8

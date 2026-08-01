@@ -124,7 +124,7 @@ async def test_ask_citation_contradiction_review(vault: Path):
         )
         notes = list((vault / "Knowledge Base" / "Notes").rglob("*reversal-test*.md"))
         assert not notes, "nothing may be written before the user confirms"
-        await pilot.press("y")
+        await pilot.press("enter")  # 'Save unlinked — records your review'
         await _settle(app, pilot)
         notes = list((vault / "Knowledge Base" / "Notes").rglob("*reversal-test*.md"))
         assert notes, "confirmed write-back must land as a governed note"
@@ -139,7 +139,7 @@ async def test_ask_citation_contradiction_review(vault: Path):
             state_file = vault / "Knowledge Base" / ".review-state.json"
             assert state_file.exists(), "triage must persist through the governed path"
         else:
-            assert app.screen.query_one("#review-empty").display is True
+            assert app.screen.query_one("#review-recovery").has_class("visible")
 
         # Status renders real diagnostics without writing anything.
         app.goto("status")

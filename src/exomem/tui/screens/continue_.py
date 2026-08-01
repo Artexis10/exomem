@@ -1,9 +1,9 @@
 """Continue: pick up recent work from local continuation checkpoints.
 
-Read-only over the client hooks' checkpoint store, via the public reader in
-`install_hook`. A selected checkpoint renders as the exact resume packet the
-hooks themselves emit, ready to copy into a fresh session. Honest empty state
-when hooks are not installed or nothing was recorded.
+Read-only over the client hooks' checkpoint store. A selected checkpoint
+renders as the exact resume packet the hooks emit — structural pointers, not
+remembered content — ready to paste into a fresh session. When no hooks are
+installed the empty state says so and names the one command that changes it.
 """
 
 from __future__ import annotations
@@ -14,12 +14,12 @@ from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
-from textual.widgets import Footer, OptionList, Static
-from textual.widgets.option_list import Option
+from textual.widgets import OptionList, Static
 
 from ..backend import BackendError
-from ..widgets import AppHeader, EmptyState, ErrorNotice
-from .ask import fit
+from ..format import fit, wrap
+from ..theme import Skin
+from ..widgets import AppFooter, AppHeader, BarOptionList, BarRow, RecoveryPanel
 from .base import ExomemScreen
 
 
@@ -35,26 +35,34 @@ def checkpoint_age(observed_at_ns: int | None, now_ns: int | None = None) -> str
     return f"{seconds // 86400}d ago"
 
 
-def checkpoint_row(entry: dict, budget: int = 76) -> Text:
-    client = str(entry.get("client") or "?")
-    session = str(entry.get("session") or "?")
-    status = str(entry.get("status") or "")
-    row = Text()
-    row.append(fit(f"{client}  {session}", budget), style="bold")
-    detail = checkpoint_age(entry.get("observed_at_ns"))
-    if status and status != "valid":
-        detail += f" · {status}"
-    row.append(f"\n  {fit(detail, budget - 2)}", style="dim")
-    return row
+def checkpoint_rows(entries: list[dict], skin: Skin, budget: int) -> list[BarRow]:
+    rows: list[BarRow] = []
+    for index, entry in enumerate(entries):
+        client = str(entry.get("client") or "?")
+        session = str(entry.get("session") or "?")
+        status = str(entry.get("status") or "")
+        head = Text(no_wrap=True)
+        head.append(fit(f"{client}  {session}", budget - 2), style=skin.text)
+        detail = checkpoint_age(entry.get("observed_at_ns"))
+        if status and status != "valid":
+            detail += f" {skin.g('bullet')} {status}"
+        rows.append(
+            BarRow(
+                f"ckpt-{index}",
+                [(1, head), (3, Text(fit(detail, budget - 4), style=skin.dim))],
+            )
+        )
+    return rows
 
 
 class ContinueScreen(ExomemScreen):
     SCREEN_TITLE = "Continue"
 
+    FOOTER_KEYS = (("enter", "open"), ("y", "copy packet"), ("u", "refresh"))
+
     BINDINGS = [
         *ExomemScreen.BINDINGS,
         Binding("y", "copy_packet", "copy packet"),
-        Binding("u", "refresh", "refresh"),
     ]
 
     def __init__(self) -> None:
@@ -64,86 +72,108 @@ class ContinueScreen(ExomemScreen):
 
     def compose(self) -> ComposeResult:
         yield AppHeader(self.SCREEN_TITLE)
-        yield Static(
-            Text(
-                "Checkpoints recorded by the client hooks at compaction and session end. "
-                "Structural pointers, not memory — resume from evidence.",
-                style="dim",
-            ),
-            classes="pane",
-        )
-        error = ErrorNotice(id="continue-error")
-        error.display = False
-        yield error
-        with Horizontal(id="ask-body"):
-            with Vertical(id="continue-list-pane"):
-                yield OptionList(id="continue-list")
-                yield EmptyState(
-                    "No continuation checkpoints on this machine.",
-                    "They appear once the client hooks are installed: exomem install-hook",
-                    id="continue-empty",
-                )
-            with VerticalScroll(id="ask-detail"):
-                yield Static(id="continue-detail-body")
-        yield Footer()
+        with Vertical(id="body", classes="-flush"):
+            yield Static(id="continue-intro")
+            with Horizontal(classes="split"):
+                with Vertical(classes="split-left"):
+                    yield BarOptionList(id="continue-list")
+                with VerticalScroll(classes="split-right", id="continue-detail"):
+                    yield Static(id="continue-detail-body")
+            yield RecoveryPanel(id="continue-recovery")
+        yield AppFooter()
 
     def on_mount(self) -> None:
-        self.query_one("#continue-list", OptionList).display = False
+        skin = self.app.skin
+        intro = Text()
+        for line in wrap(
+            "Checkpoints recorded by the client hooks at compaction and session end. "
+            "Structural pointers, not memory — resume from evidence.",
+            self.content_budget() - 2,
+        ):
+            intro.append(f"  {line}\n", style=skin.dim)
+        self.query_one("#continue-intro", Static).update(intro)
+        self.query_one("#continue-list", BarOptionList).display = False
 
     def on_screen_resume(self) -> None:
-        self.action_refresh()
+        self.refresh_data()
 
-    def action_refresh(self) -> None:
+    def refresh_data(self) -> None:
         backend = self.app.backend
+        self.query_one("#continue-recovery", RecoveryPanel).hide()
         self.run_backend(backend.continuations, self._on_entries, self._on_error, group="continue")
 
     def _on_entries(self, entries: list[dict]) -> None:
         self._entries = list(entries or [])
-        options = self.query_one("#continue-list", OptionList)
-        empty = self.query_one("#continue-empty", EmptyState)
-        options.clear_options()
+        options = self.query_one("#continue-list", BarOptionList)
+        recovery = self.query_one("#continue-recovery", RecoveryPanel)
         if self._entries:
-            budget = max(24, (options.size.width or self.size.width) - 4)
-            for index, entry in enumerate(self._entries):
-                options.add_option(Option(checkpoint_row(entry, budget), id=f"ckpt-{index}"))
+            recovery.hide()
+            options.set_rows(checkpoint_rows(self._entries, self.app.skin, self.list_budget()))
             options.display = True
-            empty.display = False
-            options.highlighted = 0
             options.focus()
         else:
             options.display = False
-            empty.display = True
+            recovery.show(
+                state="idle",
+                word="no checkpoints",
+                what="nothing has been recorded on this machine yet",
+                facts=[
+                    "They appear once the client hooks are installed and a session ends.",
+                ],
+                options=[
+                    ("hooks", "Copy the install command", "exomem install-hook"),
+                    ("refresh", "Look again", "u does the same thing"),
+                ],
+                budget=self.content_budget(),
+            )
 
     def _on_error(self, error: BackendError) -> None:
-        self.query_one("#continue-error", ErrorNotice).show_error(error)
+        self.query_one("#continue-recovery", RecoveryPanel).show(
+            state="fail",
+            word="not readable",
+            what=error.message,
+            facts=["Nothing was changed."],
+            options=[("refresh", "Try again", "")],
+            budget=self.content_budget(),
+        )
+
+    def on_recovery_panel_chosen(self, event: RecoveryPanel.Chosen) -> None:
+        event.stop()
+        if event.action == "hooks":
+            self.app.copy_to_clipboard("exomem install-hook")
+            self.app.notify("`exomem install-hook` copied — run it in a terminal.")
+        else:
+            self.refresh_data()
 
     def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
         if event.option_list.id != "continue-list":
             return
+        event.stop()
         if event.option_index >= len(self._entries):
             return
         entry = self._entries[event.option_index]
         backend = self.app.backend
 
-        def job() -> str:
-            return backend.continuation_packet(entry)
-
         def done(packet: str) -> None:
+            skin = self.app.skin
             self._packet = packet
             text = Text()
-            text.append("resume packet — y copies it\n\n", style="dim")
-            text.append(packet)
-            detail = self.query_one("#ask-detail")
+            text.append(f"{skin.g('pointer')} resume packet", style=skin.accent)
+            text.append("  y copies it\n\n", style=skin.dim)
+            text.append(packet, style=skin.text)
+            detail = self.query_one("#continue-detail")
             body = self.query_one("#continue-detail-body", Static)
-            if self.has_class("-wide"):
+            if self.side_pane_open():
                 body.update(text)
                 detail.add_class("has-content")
             else:
-                from .ask import PreviewModal
+                from .ask import DetailModal
 
-                self.app.push_screen(PreviewModal("resume packet", text))
+                self.app.push_screen(DetailModal("Resume packet", text))
 
-        self.run_backend(job, done, self._on_error, group="continue-packet")
+        self.run_backend(
+            lambda: backend.continuation_packet(entry), done, self._on_error, group="continue-packet"
+        )
 
     def action_copy_packet(self) -> None:
         if not self._packet:

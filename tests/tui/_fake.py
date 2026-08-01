@@ -10,7 +10,12 @@ from __future__ import annotations
 import threading
 from pathlib import Path
 
-from exomem.tui.backend import AskOutcome, BackendError, VaultState
+from exomem.tui.backend import (
+    AskOutcome,
+    BackendError,
+    RelationReviewRequired,
+    VaultState,
+)
 
 SAMPLE_HITS: list[dict] = [
     {
@@ -89,6 +94,8 @@ class FakeBackend:
         self.triaged: list[dict] = []
         self.selected_packs: list[str] = ["technical", "business"]
         self.existing_vaults: set[str] = set()
+        #: When true, remember_note demands the governed relation review first.
+        self.require_relation_review = False
         self._fail: dict[str, BackendError] = {}
         self._release: threading.Event | None = None
 
@@ -131,6 +138,14 @@ class FakeBackend:
     def refresh_caches(self) -> None:
         self._gate("refresh_caches")
 
+    @staticmethod
+    def scaffold_file_count() -> int:
+        return 28
+
+    def corpus_size(self) -> dict:
+        self._gate("corpus_size")
+        return {"notes": 132, "sources": 41, "known": self.initialized}
+
     # -- registry ------------------------------------------------------- #
     def ask(self, query: str, **kwargs) -> AskOutcome:
         self._gate("ask", query=query, **kwargs)
@@ -159,7 +174,18 @@ class FakeBackend:
 
     def remember_note(self, content: str, title: str, *, note_type: str = "insight") -> dict:
         self._gate("remember_note", title=title)
-        record = {"content": content, "title": title, "note_type": note_type}
+        if self.require_relation_review and "[[" not in content:
+            # Mirrors the real validate-first path: the draft exists, but the
+            # governed relation review has to be answered by a human.
+            raise RelationReviewRequired(
+                {
+                    "draft_id": "draft-1",
+                    "draft_hash": "hash-1",
+                    "draft_token": "token-1",
+                    "_raw_args": {"content": content, "title": title, "note_type": note_type},
+                }
+            )
+        record = {"content": content, "title": title, "note_type": note_type, "unlinked": False}
         self.remembered.append(record)
         return {"path": f"Knowledge Base/Notes/Insights/{title.lower().replace(' ', '-')}.md"}
 
@@ -168,11 +194,17 @@ class FakeBackend:
         return dict(self.attention_payload)
 
     def item_context(self, ref: str) -> dict:
+        # Mirrors the real review-context envelope: target page + related set.
         self._gate("item_context", ref=ref)
         return {
             "ref": ref,
-            "body": SAMPLE_PAGE,
-            "related": [SAMPLE_HITS[1]["path"]],
+            "target": {
+                "path": SAMPLE_HITS[0]["path"],
+                "title": SAMPLE_HITS[0]["title"],
+                "body": SAMPLE_PAGE,
+                "mtime": "2026-07-31",
+            },
+            "related": {"items": [{"path": SAMPLE_HITS[1]["path"]}]},
         }
 
     def triage(self, ref: str, action: str, **kwargs) -> dict:
@@ -210,6 +242,7 @@ class FakeBackend:
             "readiness": {"ok": True, "data": readiness},
             "hooks": {"ok": True, "data": {"success": self.hooks_ok}},
             "attention": {"ok": True, "data": dict(self.attention_payload)},
+            "corpus": {"ok": True, "data": self.corpus_size()},
         }
 
     def mode(self) -> dict:

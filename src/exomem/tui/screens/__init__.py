@@ -6,8 +6,8 @@ from .adopt import AdoptScreen
 from .ask import AskScreen
 from .capture import CaptureScreen
 from .continue_ import ContinueScreen
+from .first_run import FirstRunScreen
 from .home import HomeScreen
-from .onboarding import OnboardingScreen
 from .packs import PacksScreen
 from .review import ReviewScreen
 from .settings import SettingsScreen
@@ -18,8 +18,8 @@ __all__ = [
     "AskScreen",
     "CaptureScreen",
     "ContinueScreen",
+    "FirstRunScreen",
     "HomeScreen",
-    "OnboardingScreen",
     "PacksScreen",
     "ReviewScreen",
     "SettingsScreen",

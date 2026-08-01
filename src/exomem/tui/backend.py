@@ -230,6 +230,7 @@ class ExomemBackend:
         projects: list[str] | None = None,
         types: list[str] | None = None,
         prefer_active: bool = True,
+        scope: str | None = None,
     ) -> AskOutcome:
         raw: dict[str, Any] = {
             "query": query,
@@ -238,6 +239,10 @@ class ExomemBackend:
         }
         if deep:
             raw["deep"] = True
+        # scope="vault" widens recall past the compiled layer into raw sources;
+        # the default ("kb") is what every other surface uses.
+        if scope and scope != "kb":
+            raw["scope"] = scope
         if projects:
             raw["projects"] = projects
         if types:
@@ -437,7 +442,29 @@ class ExomemBackend:
         gather("readiness", self.readiness)
         gather("hooks", self.hook_status)
         gather("attention", lambda: self.attention(limit=5))
+        gather("corpus", self.corpus_size)
         return sections
+
+    def corpus_size(self) -> dict:
+        """How many compiled notes and captured sources exist, by file count.
+
+        Home states "{n} notes" and must not invent it. This counts markdown
+        files in the governed layer — the same thing a user counts in their
+        file browser — rather than running a corpus scan on every launch.
+        """
+        if self._vault is None:
+            return {"notes": 0, "sources": 0, "known": False}
+        kb = Path(self._vault) / "Knowledge Base"
+        if not kb.is_dir():
+            return {"notes": 0, "sources": 0, "known": False}
+
+        def count(name: str) -> int:
+            folder = kb / name
+            if not folder.is_dir():
+                return 0
+            return sum(1 for path in folder.rglob("*.md") if path.name != "index.md")
+
+        return {"notes": count("Notes"), "sources": count("Sources"), "known": True}
 
     def mode(self) -> dict:
         from .. import mode as mode_module
@@ -514,6 +541,22 @@ class ExomemBackend:
         from .. import install_hook
 
         return install_hook.check_hooks(clients=install_hook.SUPPORTED_CLIENTS)
+
+    @staticmethod
+    def scaffold_file_count() -> int:
+        """How many files `init` writes — the preview must not guess.
+
+        The first-run preview promises a file count before anything is
+        written; counting the packaged scaffold keeps that promise true as the
+        scaffold grows instead of freezing a number into the copy.
+        """
+        import exomem
+
+        package = Path(exomem.__file__ or "").parent
+        root = package / "_scaffold"
+        if not root.is_dir():
+            return 0
+        return sum(1 for path in root.rglob("*") if path.is_file())
 
     def init_vault(self, folder: Path | str) -> dict:
         from .. import init as init_module

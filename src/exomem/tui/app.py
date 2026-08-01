@@ -2,12 +2,20 @@
 
 The app paints immediately and talks to the backend only through worker
 threads; the first data fetch (vault resolution + overview) happens after the
-first frame so launch is never blocked on the registry import or a cold cache.
+first frame, so launch is never blocked on a registry import or a cold cache.
+
+It also owns the two pieces of state that belong to the session rather than to
+any one screen: the rendering skin (glyph set + color roles, chosen once from
+the terminal's encoding and `NO_COLOR`), and the session receipt log — the
+`✓`/`▸` lines Home shows under "This session". Receipts are process state, not
+vault state, and say so on screen.
 """
 
 from __future__ import annotations
 
 import sys
+import time
+from dataclasses import dataclass, replace
 from functools import partial
 
 from textual.app import App
@@ -22,8 +30,8 @@ from .screens import (
     AskScreen,
     CaptureScreen,
     ContinueScreen,
+    FirstRunScreen,
     HomeScreen,
-    OnboardingScreen,
     PacksScreen,
     ReviewScreen,
     SettingsScreen,
@@ -34,11 +42,21 @@ from .screens.home import DESTINATIONS
 from .widgets import ConfirmModal, HelpModal
 
 GLOBAL_HELP_ROWS: list[tuple[str, str]] = [
-    ("ctrl+p", "command palette"),
-    ("?", "this help overlay"),
-    ("esc", "back (never discards typed input silently)"),
-    ("ctrl+q", "quit"),
+    ("^p", "command palette"),
+    ("?", "this overlay"),
+    ("u", "refresh this screen"),
+    ("esc", "back — never discards typed input silently"),
+    ("^q", "quit"),
 ]
+
+
+@dataclass(frozen=True)
+class SessionReceipt:
+    """One thing that happened in this process, as a readable line."""
+
+    state: str
+    word: str
+    detail: str
 
 
 class GotoCommands(Provider):
@@ -46,9 +64,7 @@ class GotoCommands(Provider):
 
     async def discover(self) -> Hits:
         for name, _key, title, description in DESTINATIONS:
-            yield DiscoveryHit(
-                f"Go to {title}", partial(self.app.goto, name), help=description
-            )
+            yield DiscoveryHit(f"Go to {title}", partial(self.app.goto, name), help=description)
 
     async def search(self, query: str) -> Hits:
         matcher = self.matcher(query)
@@ -91,16 +107,23 @@ class ExomemTuiApp(App):
         *,
         vault: str | None = None,
         glyphs: dict[str, str] | None = None,
+        color: bool | None = None,
     ):
         super().__init__()
         self.backend = backend if backend is not None else ExomemBackend(vault)
         if glyphs is None:
             glyphs = theme_module.pick_glyphs(getattr(sys.stdout, "encoding", None))
+        if color is None:
+            color = not theme_module.no_color_requested()
         self.glyphs = glyphs
+        self.skin = theme_module.make_skin(glyphs, color=color)
+        self.session_receipts: list[SessionReceipt] = []
+        #: Snapshot tests pin this so stored frames do not diff on timing.
+        self.fixed_elapsed_ms: float | None = None
         self._sections: dict[str, ExomemScreen] = {}
         self._home = HomeScreen()
         self._vault_state: VaultState | None = None
-        self._onboarding_offered = False
+        self._first_run_offered = False
 
     # ------------------------------------------------------------------ #
     # Startup
@@ -134,12 +157,14 @@ class ExomemTuiApp(App):
         else:
             self.context_label = f"{state.root.name} · not initialized"
         self._home.show_first_run(state.detail)
-        if not self._onboarding_offered:
-            self._onboarding_offered = True
-            self.push_screen(OnboardingScreen())
+        # First run never re-runs once a vault is connected; this is the only
+        # place it is offered, and only when there is genuinely nothing yet.
+        if not self._first_run_offered:
+            self._first_run_offered = True
+            self.push_screen(FirstRunScreen())
 
     def on_vault_ready(self) -> None:
-        """Called by onboarding once a vault is connected or created."""
+        """Called by first run once a vault is connected or created."""
 
         def job() -> None:
             state = self.backend.resolve_vault()
@@ -168,6 +193,25 @@ class ExomemTuiApp(App):
         self.run_worker(job, thread=True, group="overview", exclusive=True)
 
     # ------------------------------------------------------------------ #
+    # Session receipts
+    # ------------------------------------------------------------------ #
+    def record_receipt(self, state: str, word: str, detail: str) -> None:
+        """Log something that happened, for Home's "This session" block."""
+        self.session_receipts.append(SessionReceipt(state, word, detail))
+        if self._home.is_attached:
+            self._home.refresh_session_receipts()
+
+    def elapsed_ms(self, started: float) -> float:
+        """How long a measured call actually took.
+
+        Routed through the app so golden snapshots can pin it: a timing that
+        varies by a millisecond would make every stored frame a false diff.
+        """
+        if self.fixed_elapsed_ms is not None:
+            return self.fixed_elapsed_ms
+        return (time.perf_counter() - started) * 1000
+
+    # ------------------------------------------------------------------ #
     # Navigation
     # ------------------------------------------------------------------ #
     def goto(self, name: str) -> None:
@@ -176,10 +220,7 @@ class ExomemTuiApp(App):
             return
         factory = self.SECTION_FACTORIES.get(name)
         if factory is None:
-            self.notify(
-                f"{name.capitalize()} is not wired up yet in this build.",
-                severity="warning",
-            )
+            self.notify(f"{name.capitalize()} is not part of this build.", severity="warning")
             return
         screen = self._sections.get(name)
         if screen is None:
@@ -193,6 +234,19 @@ class ExomemTuiApp(App):
             return
         self._pop_to_home()
         self.push_screen(screen)
+
+    def ask_for(self, query: str) -> None:
+        """Open Ask with a query already in the field, and run it."""
+        self.goto("ask")
+        screen = self._sections.get("ask")
+        if isinstance(screen, AskScreen) and query:
+            # push_screen resolves on the next refresh; prefill after it.
+            self.call_after_refresh(screen.prefill, query)
+
+    def finish_first_run(self, goto: str = "home") -> None:
+        self._pop_to_home()
+        if goto != "home":
+            self.goto(goto)
 
     def _pop_to_home(self) -> None:
         while len(self.screen_stack) > 1:
@@ -217,15 +271,45 @@ class ExomemTuiApp(App):
         rows.extend(GLOBAL_HELP_ROWS)
         self.push_screen(HelpModal(title, rows))
 
+    def toggle_theme(self) -> None:
+        """Switch dark/light for this session — completely, not cosmetically.
+
+        Styled text is built from the skin at render time, so a theme swap has
+        to rebuild what has already been drawn. Cached section screens are
+        dropped and the current one is reopened; leaving half the UI in the
+        previous palette would be a toggle that only pretends to work.
+        """
+        if self.theme == "exomem-dark":
+            self.theme = "exomem-light"
+            self.skin = replace(self.skin, **theme_module.LIGHT_SKIN_OVERRIDES)
+        else:
+            self.theme = "exomem-dark"
+            self.skin = theme_module.make_skin(self.glyphs, color=self.skin.color)
+
+        current = next(
+            (name for name, screen in self._sections.items() if screen is self.screen), None
+        )
+        self._pop_to_home()
+        for name in list(self._sections):
+            self.uninstall_screen(f"section-{name}")
+        self._sections.clear()
+        self._home.repaint()
+        if current is not None:
+            self.goto(current)
+
     def action_confirm_quit(self) -> None:
-        def on_close(confirmed: bool | None) -> None:
-            if confirmed:
+        def on_close(choice: str | None) -> None:
+            if choice == "confirm":
                 self.exit(0)
 
         self.push_screen(
             ConfirmModal(
                 "Quit exomem?",
-                "Atomic writes protect the vault; anything still typing here is lost.",
+                "Everything saved is already written to your vault.\n"
+                "Anything still being typed here is not.",
+                "Quit",
+                "Stay",
+                "enter choose · esc back — nothing is written either way",
             ),
             on_close,
         )

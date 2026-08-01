@@ -1,4 +1,4 @@
-"""Base classes shared by TUI screens: breakpoints, chrome, worker discipline."""
+"""Base screen: breakpoints, chrome, cell budgets, and worker discipline."""
 
 from __future__ import annotations
 
@@ -9,25 +9,85 @@ from textual.binding import Binding
 from textual.screen import Screen
 
 from ..backend import BackendError
+from ..widgets import AppFooter
 
 
 class ExomemScreen(Screen):
-    """Responsive base: breakpoint classes + back/help chrome + safe workers."""
+    """Responsive base for every screen.
 
-    # 80 columns must stay fully usable; panels appear with real width.
+    Breakpoints follow the drawn frames: below 100 columns everything is a
+    single column and detail opens full-screen; at 100+ a side pane appears
+    beside the list. 80×24 stays fully usable — it is the base target, not a
+    degraded mode.
+    """
+
     HORIZONTAL_BREAKPOINTS = [(0, "-narrow"), (100, "-standard"), (120, "-wide")]
 
     SCREEN_TITLE = ""
+    #: Default footer keys; states may replace them via `set_footer`.
+    FOOTER_KEYS: tuple[tuple[str, str], ...] = ()
 
     BINDINGS = [
         Binding("escape", "app.back", "back", show=False),
-        Binding("question_mark", "app.help", "help"),
+        Binding("question_mark", "app.help", "help", show=False),
         Binding("f1", "app.help", "help", show=False),
+        Binding("u", "refresh", "refresh", show=False),
     ]
 
     def __init__(self) -> None:
         super().__init__()
         self._generations: dict[str, int] = {}
+        self._footer_set = False
+
+    # ------------------------------------------------------------------ #
+    # Chrome
+    # ------------------------------------------------------------------ #
+    def on_mount(self) -> None:
+        """Base chrome.
+
+        Textual dispatches mount handlers to every class in the MRO — the
+        subclass first, then this one — so screens must not chain up
+        explicitly, and the default footer must not clobber one a subclass
+        already chose.
+        """
+        if not self.app.skin.color:
+            self.add_class("-no-color")
+        if not self._footer_set:
+            self.set_footer(list(self.FOOTER_KEYS))
+
+    def set_footer(self, keys: list[tuple[str, str]]) -> None:
+        self._footer_set = True
+        footer = self.query(AppFooter)
+        if footer:
+            footer.first(AppFooter).set_keys(keys)
+
+    #: Width of the side pane in the CSS; budgets are derived from it.
+    SIDE_PANE_WIDTH = 58
+
+    def content_budget(self) -> int:
+        """Cells available to content: screen width minus padding and gutter."""
+        return max(24, (self.size.width or 80) - 4)
+
+    def list_budget(self) -> int:
+        """Cells for the left list — narrower once a side pane is showing.
+
+        Budgeting against the screen when a pane is open is what makes rows
+        wrap, and a wrapped list row destroys the alignment the queue depends
+        on. Every list therefore fits to the column it actually occupies.
+        """
+        if not self.side_pane_open():
+            return self.content_budget()
+        return max(24, (self.size.width or 80) - self.SIDE_PANE_WIDTH - 4)
+
+    def detail_budget(self) -> int:
+        """Cells inside the side pane (or the whole screen when it collapses)."""
+        if not self.side_pane_open():
+            return self.content_budget()
+        return self.SIDE_PANE_WIDTH - 4
+
+    def side_pane_open(self) -> bool:
+        """True when the layout is wide enough for a persistent side pane."""
+        return self.has_class("-standard") or self.has_class("-wide")
 
     # ------------------------------------------------------------------ #
     # Worker discipline: single-flight per group + late-result drop.
@@ -84,11 +144,19 @@ class ExomemScreen(Screen):
             return
         callback(payload)
 
-    # Help overlay content: the screen's own visible bindings, deduplicated
-    # (a screen may override an inherited key with a priority binding).
+    # ------------------------------------------------------------------ #
+    # Refresh (`u` is standardized on every data screen)
+    # ------------------------------------------------------------------ #
+    def action_refresh(self) -> None:
+        self.refresh_data()
+
+    def refresh_data(self) -> None:
+        """Re-read this screen's data. No-op on screens that hold none."""
+
+    # Help overlay content: this screen's own footer keys, then its bindings.
     def help_rows(self) -> list[tuple[str, str]]:
-        rows: dict[str, str] = {}
+        rows: dict[str, str] = {key: verb for key, verb in self.FOOTER_KEYS}
         for binding in self.BINDINGS:
             if isinstance(binding, Binding) and binding.description:
-                rows[binding.key] = binding.description
+                rows.setdefault(binding.key, binding.description)
         return list(rows.items())
