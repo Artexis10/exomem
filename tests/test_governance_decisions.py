@@ -8,6 +8,7 @@ authoring/insertion order.
 
 from __future__ import annotations
 
+import dataclasses
 import itertools
 import random
 
@@ -526,3 +527,65 @@ def test_no_declaring_scope_is_recorded_when_a_rule_decided_the_outcome() -> Non
 def test_no_declaring_scope_is_recorded_for_the_owner() -> None:
     pol = _policy(scopes=[_scope(default_deny=True)])
     assert decide([SCOPE], audience=OWNER_AUDIENCE, policy=pol).default_deny_scope_ids == ()
+
+
+def test_a_grant_on_a_sibling_scope_still_raises_a_declared_scope_as_it_does_a_ceiling_0_rule() -> None:
+    """The declaration does NOT close the grant lane, and must not pretend to.
+
+    `grant_max = max(grant_ceilings + [standing_min])` and `_grant_matches` tests
+    scope INTERSECTION, so a grant naming an audience for S2 raises an item that
+    is also in a closed S1 — the compartment crossover, via grants rather than
+    rules. Measured L0 -> L6.
+
+    This is pinned as an EQUIVALENCE, not as an approval. The authored
+    `ceiling: 0` spelling behaves identically, so the behaviour is a pre-existing
+    property of the lattice and not something the declaration introduced. The
+    test exists so the two spellings cannot silently diverge while the real fix
+    (scoping a grant's raise to the scopes it names) is out of scope here.
+    """
+    s1 = "01ARZ3NDEKTSV4RRFFQ69G5FA1"
+    s2 = "01ARZ3NDEKTSV4RRFFQ69G5FA2"
+    both = [s1, s2]
+    grant = StandingGrant(
+        id="01ARZ3NDEKTSV4RRFFQ69G5FB1",
+        source="grants/g.yaml",
+        scope_ids=(s2,),
+        audience="partner-x",
+        ceiling=6,
+    )
+
+    declared = Policy(
+        fingerprint="p",
+        scopes={
+            s1: Scope(id=s1, source="scopes/s1.yaml", default_deny=True),
+            s2: Scope(id=s2, source="scopes/s2.yaml"),
+        },
+    )
+    authored = Policy(
+        fingerprint="p",
+        scopes={
+            s1: Scope(id=s1, source="scopes/s1.yaml"),
+            s2: Scope(id=s2, source="scopes/s2.yaml"),
+        },
+        rules=(
+            Rule(
+                id="01ARZ3NDEKTSV4RRFFQ69G5FB0",
+                source="rules/r.yaml",
+                scope_ids=(s1,),
+                audience="partner-x",
+                ceiling=0,
+            ),
+        ),
+    )
+
+    # Closed identically without a grant.
+    assert decide(both, audience="partner-x", policy=declared).level == DISCLOSURE_MIN
+    assert decide(both, audience="partner-x", policy=authored).level == DISCLOSURE_MIN
+
+    # And raised identically by a grant that names only the sibling scope.
+    declared_granted = dataclasses.replace(declared, grants=(grant,))
+    authored_granted = dataclasses.replace(authored, grants=(grant,))
+    assert (
+        decide(both, audience="partner-x", policy=declared_granted).level
+        == decide(both, audience="partner-x", policy=authored_granted).level
+    ), "the declaration must not be weaker OR stronger than an authored ceiling-0 here"
