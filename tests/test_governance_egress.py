@@ -864,6 +864,137 @@ def test_annotate_page_strips_provenance_naming_a_withheld_item(vault: Path) -> 
 
 
 # --------------------------------------------------------------------------
+# Reverse provenance — `ingested_into` (release-gate task 4)
+#
+# Provenance runs both ways. `sources` names what a compiled note cited;
+# `ingested_into` names every compiled note that cited a source (note.py
+# appends the new note's wikilink to each cited source on every compile). A
+# source released to an audience that cannot see those notes therefore
+# enumerates them — the release channel running in reverse.
+# --------------------------------------------------------------------------
+
+SOURCE_SCOPE_ID = "01ARZ3NDEKTSV4RRFFQ69G5FC0"
+SOURCE_RULE_ID = "01ARZ3NDEKTSV4RRFFQ69G5FC1"
+INGESTED_SOURCE_PATH = (
+    "Knowledge Base/Sources/Articles/2026-06-02-postgres-autovacuum-tuning.md"
+)
+RESTRICTED_TITLE = "Kill switch for risky releases"
+
+
+def _write_sources_scope_and_rule(vault: Path, *, ceiling: int) -> None:
+    """A SECOND scope/rule pair, so the cited source and the compiled note that
+    cites it can sit at different ceilings — the shape the leak needs."""
+    scopes = _gov_dir(vault) / "scopes"
+    scopes.mkdir(parents=True, exist_ok=True)
+    (scopes / "sources.yaml").write_text(
+        f"governance_version: 1\nid: {SOURCE_SCOPE_ID}\nname: Sources\n"
+        'paths: ["Sources/**"]\n',
+        encoding="utf-8",
+    )
+    rules = _gov_dir(vault) / "rules"
+    rules.mkdir(parents=True, exist_ok=True)
+    (rules / "sources-external.yaml").write_text(
+        f"governance_version: 1\nid: {SOURCE_RULE_ID}\n"
+        f'scope_ids: ["{SOURCE_SCOPE_ID}"]\n'
+        f"audience: {EXTERNAL}\nceiling: {ceiling}\n",
+        encoding="utf-8",
+    )
+
+
+def _plant_reverse_citation(vault: Path, entry: str) -> None:
+    """Write the exact back-ref `note.py` appends to every cited source."""
+    target = vault / INGESTED_SOURCE_PATH
+    original = target.read_text(encoding="utf-8")
+    updated = original.replace("ingested_into: []", f'ingested_into:\n  - "{entry}"')
+    assert updated != original, "fixture no longer carries an empty ingested_into"
+    target.write_text(updated, encoding="utf-8")
+
+
+#: Every form the back-ref can be written in. `note.py` writes the wikilink
+#: forms; the `.md` path form is what a hand-edited or migrated vault carries.
+REVERSE_CITATION_FORMS = (
+    f"[[{RESTRICTED_PATH.removesuffix('.md')}]]",
+    f"[[{RESTRICTED_KB_RELATIVE.removesuffix('.md')}]]",
+    f"[[{RESTRICTED_STEM}]]",
+    RESTRICTED_PATH,
+)
+
+
+@pytest.mark.parametrize("entry", REVERSE_CITATION_FORMS)
+def test_released_source_does_not_enumerate_the_notes_that_ingested_it(
+    vault: Path, entry: str
+) -> None:
+    """A source released BELOW full to an audience that cannot see the note
+    compiled from it must not name that note in any reference form."""
+    write_scope(vault)
+    write_rule(vault, ceiling=egress.LEVEL_NONE)
+    _write_sources_scope_and_rule(vault, ceiling=egress.LEVEL_EXCERPT)
+    _plant_reverse_citation(vault, entry)
+    _reset_caches()
+
+    with request_scope(_external()):
+        out = commands.op_get(vault, path=INGESTED_SOURCE_PATH)
+
+    assert out is not None, "the source itself is released; only its back-ref is not"
+    blob = json.dumps(out, default=str)
+    assert "ingested_into" not in json.dumps(
+        out.get("frontmatter") or {}, default=str
+    ), f"reverse citation survived release for form {entry!r}"
+    for form in (
+        RESTRICTED_PATH,
+        RESTRICTED_KB_RELATIVE,
+        RESTRICTED_STEM,
+        RESTRICTED_TITLE,
+    ):
+        assert form not in blob, f"{form!r} leaked through ingested_into ({entry!r})"
+
+
+def test_released_source_keeps_a_reverse_citation_to_a_permitted_note(
+    vault: Path,
+) -> None:
+    """The strip is a release decision, not a blanket deletion: when the note
+    that ingested the source is itself permitted, the field survives intact."""
+    write_scope(vault)
+    write_rule(vault, ceiling=egress.LEVEL_FULL)
+    _write_sources_scope_and_rule(vault, ceiling=egress.LEVEL_FULL)
+    _plant_reverse_citation(vault, f"[[{RESTRICTED_PATH.removesuffix('.md')}]]")
+    _reset_caches()
+
+    with request_scope(_external()):
+        out = commands.op_get(vault, path=INGESTED_SOURCE_PATH)
+
+    assert out is not None
+    ingested = (out.get("frontmatter") or {}).get("ingested_into")
+    assert ingested == [f"[[{RESTRICTED_PATH.removesuffix('.md')}]]"]
+
+
+def test_reverse_citation_is_in_the_frontmatter_provenance_strip_set() -> None:
+    """Structural: the field set is what `_strip_page_provenance` iterates, so
+    a reverse citation that is not in it is never even considered."""
+    assert "ingested_into" in egress._FRONTMATTER_PROVENANCE_FIELDS
+
+
+def test_reverse_citation_leak_is_closed_on_the_real_dispatch_path(
+    vault: Path,
+) -> None:
+    """The production path. MCP, REST, hosted and CLI all reach `op_get`
+    through `writer_lease.invoke_command`, and the wikilink form the vault
+    actually writes cleared every gate on that path before this change — the
+    dispatcher backstop included."""
+    write_scope(vault)
+    write_rule(vault, ceiling=egress.LEVEL_NONE)
+    _write_sources_scope_and_rule(vault, ceiling=egress.LEVEL_EXCERPT)
+    _plant_reverse_citation(vault, f"[[{RESTRICTED_PATH.removesuffix('.md')}]]")
+    _reset_caches()
+
+    with request_scope(_external()):
+        out = _through_dispatcher(vault, "get", path=INGESTED_SOURCE_PATH)
+
+    assert out is not None
+    assert RESTRICTED_STEM not in json.dumps(out, default=str)
+
+
+# --------------------------------------------------------------------------
 # graph lane — guard_seed (task 4.1)
 # --------------------------------------------------------------------------
 
