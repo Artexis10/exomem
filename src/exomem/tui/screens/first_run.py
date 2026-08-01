@@ -39,6 +39,7 @@ from ..widgets import (
     AppHeader,
     BarOptionList,
     BarRow,
+    HoverMovesCursor,
     RecoveryPanel,
     continuation,
     receipt,
@@ -105,7 +106,7 @@ class LedgerChoices(TopEdgeRewind, BarOptionList):
     """The answer list for a first-run question."""
 
 
-class PacksChoice(TopEdgeRewind, SelectionList):
+class PacksChoice(TopEdgeRewind, HoverMovesCursor, SelectionList):
     """A SelectionList where space toggles and enter means "done choosing".
 
     The inherited `enter` binding also toggles, which would leave the step with

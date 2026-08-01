@@ -86,6 +86,11 @@ class ExomemTuiApp(App):
     COMMANDS = App.COMMANDS | {GotoCommands}
     BINDINGS = [
         Binding("ctrl+q", "confirm_quit", "quit", show=False, priority=True),
+        # Terminal multiplexers commonly claim ctrl+q for themselves (Zellij
+        # binds it to quitting Zellij), which would leave a user inside a
+        # session with no working exit. Quitting is confirmed either way, so
+        # a second escape hatch costs nothing.
+        Binding("ctrl+c", "confirm_quit", "quit", show=False, priority=True),
     ]
 
     context_label: reactive[str] = reactive("", init=False)

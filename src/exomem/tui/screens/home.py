@@ -194,7 +194,7 @@ def status_lines(sections: dict[str, Any], skin: Skin, budget: int) -> list[Text
 class HomeScreen(ExomemScreen):
     SCREEN_TITLE = "Home"
 
-    FOOTER_KEYS = (("1-8", "open"), ("enter", "open"), ("u", "refresh"))
+    FOOTER_KEYS = (("1-8", "open"), ("enter", "open"), ("u", "refresh"), ("q", "quit"))
 
     BINDINGS = [
         *ExomemScreen.BINDINGS,
@@ -203,6 +203,7 @@ class HomeScreen(ExomemScreen):
             for name, key, title, _ in DESTINATIONS
         ],
         Binding("escape", "app.confirm_quit", "quit", show=False),
+        Binding("q", "app.confirm_quit", "quit", show=False),
     ]
 
     def __init__(self) -> None:

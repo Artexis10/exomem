@@ -79,21 +79,53 @@ class AppFooter(Horizontal):
     def on_mount(self) -> None:
         self._paint()
 
+    def on_resize(self, _event) -> None:
+        self._paint()
+
     def set_keys(self, keys: list[tuple[str, str]]) -> None:
         self._keys = list(keys)
         if self.is_mounted:
             self._paint()
 
+    @staticmethod
+    def _fit(groups: list[tuple[str, str]], budget: int) -> list[tuple[str, str]]:
+        """Shed whole key groups rather than cut one mid-word.
+
+        `? help` is appended last, so a plain ellipsis eats it first — which
+        is precisely the hint a stuck user needs. Screen keys give way from
+        the end instead, and help always survives.
+        """
+
+        def width(entries: list[tuple[str, str]]) -> int:
+            return sum(len(key) + len(verb) + 1 for key, verb in entries) + 3 * (
+                len(entries) - 1
+            )
+
+        keys, help_group = list(groups[:-1]), groups[-1]
+        while keys and width([*keys, help_group]) > budget:
+            keys.pop()
+        return [*keys, help_group]
+
     def _paint(self) -> None:
         skin: Skin = self.app.skin
+        has_own_quit = any(verb == "quit" for _key, verb in self._keys)
+        right_width = 10 if has_own_quit else 21
+        budget = (self.size.width or self.app.size.width or 80) - 2 - right_width - 3
         left = Text(no_wrap=True, overflow="ellipsis")
-        for index, (key, verb) in enumerate([*self._keys, ("?", "help")]):
+        for index, (key, verb) in enumerate(self._fit([*self._keys, ("?", "help")], budget)):
             if index:
                 left.append("   ")
             left.append(key, style=skin.secondary)
             if verb:
                 left.append(f" {verb}", style=skin.dim)
+        # Quit lives in the chrome, not only in the help overlay: a user who
+        # cannot find the exit is trapped however many keys exist. Screens
+        # that already advertise their own quit key do not repeat it.
         right = Text(no_wrap=True)
+        if not any(verb == "quit" for _key, verb in self._keys):
+            right.append("^q", style=skin.secondary)
+            right.append(" quit", style=skin.dim)
+            right.append("   ")
         right.append("^p", style=skin.secondary)
         right.append(" palette", style=skin.dim)
         self.query_one(".footer-left", Static).update(left)
@@ -187,7 +219,23 @@ def row(row_id: str, *lines: tuple[int, Text]) -> BarRow:
     return BarRow(row_id, list(lines))
 
 
-class BarOptionList(OptionList):
+class HoverMovesCursor:
+    """Mixin: pointing at a row makes it the row `enter` will act on.
+
+    Textual tracks the hovered option for styling but leaves the keyboard
+    cursor where it was, so a mouse user can point at one row and act on
+    another. This only fires on real pointer movement, so it never disturbs
+    someone driving by keyboard.
+    """
+
+    def _on_mouse_move(self, event) -> None:
+        super()._on_mouse_move(event)
+        hovered = event.style.meta.get("option")
+        if hovered is not None and hovered != self.highlighted:
+            self.highlighted = hovered
+
+
+class BarOptionList(HoverMovesCursor, OptionList):
     """An OptionList that keeps an accent bar in the selected row's first cell."""
 
     def __init__(self, *args, **kwargs):
