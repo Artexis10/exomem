@@ -611,7 +611,11 @@ def semantic_finding_group(item: dict) -> str | None:
     resolved_rule = tuple(str(value) for value in (item.get("resolved_rule") or ()))
     namespace = resolved_rule[0] if resolved_rule else ""
     rule = resolved_rule[2] if len(resolved_rule) >= 3 else ""
-    if code in {"RELATION_DISPOSITION_MISSING", "RELATION_DISPOSITION_STALE"}:
+    if code in {
+        "RELATION_DISPOSITION_MISSING",
+        "RELATION_DISPOSITION_STALE",
+        "RELATION_TYPED_EDGE_ABSENT",
+    }:
         return "semantic_relation_disposition"
     if rule == "syntax":
         return "semantic_malformed_unit"
