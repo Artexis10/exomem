@@ -1078,6 +1078,11 @@ def build_page_state(
     # Collected here, where the body is already in scope, so fact derivation
     # never re-reads the file. Deduped by normalized target and capped, because
     # a pathological page would otherwise inflate the corpus fact graph.
+    # Every authored relation row covers its own line, registered or not. An
+    # unregistered label is deliberately NOT degraded into a generic wikilink:
+    # it stays a retained relation so it keeps surfacing for promotion through
+    # `schema_memory(subject="relations")`. Converting it to a link would connect
+    # the page at the cost of hiding the very signal that needs review.
     typed_lines = {relation.line for relation in document.note_relations} | {
         relation.line for unit in document.rich_units for relation in unit.relations
     }

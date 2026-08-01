@@ -895,6 +895,20 @@ the edge belongs to a specific claim, finding, or piece of evidence. Ordinary
 inline wikilinks remain useful generic `links_to` connections. Never turn a
 semantic suggestion into a typed relation without reviewing its meaning.
 
+**Relation labels are governed; categories and tags are not.** Categories are open
+vocabulary — invent one whenever it fits. Relation labels come from a registry, so
+an unregistered label (`- inspired_by [[X]]`) is *retained and surfaced* but does
+not yet count as a graph edge, and does not connect the page. That is deliberate:
+the label stays visible as review debt instead of being silently downgraded to a
+generic link.
+
+So the vocabulary is extensible, not fixed. When a label recurs and earns its
+place, promote it: `schema_memory(subject="relations", operation="infer")` to see
+what recurs, then `save=true` (with `expected_hash` when overwriting) to register
+it for the vault. Registered labels immediately become real typed edges everywhere
+— gate, graph, and review queues. Prefer an existing registered relation when one
+genuinely fits; promote when none does, rather than forcing a poor match.
+
 **The writer normalizes on your behalf.** Exomem's writers run every wikilink
 through `vault.normalize_wikilink()` before writing — bare names, KB-relative
 paths, `.md` suffixes, and stale paths get rewritten to canonical full form. You

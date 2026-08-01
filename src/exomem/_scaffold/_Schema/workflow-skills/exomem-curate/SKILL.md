@@ -18,6 +18,7 @@ Use when the user asks to clean up, organize, link, tidy, or improve a set of Ex
 3. Use `edit_memory` for small compiled-note fixes.
 4. Use `replace_memory` for substantial rewrites or changed conclusions.
 5. Leave raw `Sources/` and `Evidence/` untouched except for metadata the core contract explicitly allows.
+6. Check `review_memory(mode="audit", categories=["unregistered_relation"])` for relation labels that recur but are not registered; promote the ones that have earned it with `schema_memory(subject="relations")`, which turns them into real typed edges instead of standing review debt.
 
 ## Output contract
 Summarize changes made or proposed, citing affected paths. Flag risky changes instead of applying them silently.

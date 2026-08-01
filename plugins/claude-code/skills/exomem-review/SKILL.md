@@ -21,7 +21,8 @@ or inspect stale, contradictory, disconnected, or unprocessed material.
    `suggest-links`; write accepted note edges under `## Relations`, never from
    semantic proximity alone.
 5. For stale or contradictory compiled notes, read the relevant pages with `read_memory` and decide keep, `edit_memory`, `replace_memory`, `maintain_memory`, or leave alone.
-6. Use `triage_memory` only after an explicit decision to dismiss, snooze, or reopen an Inbox item.
+6. For recurring unregistered relation labels, propose promotion with `schema_memory(subject="relations")` rather than rewriting the notes that use them.
+7. Use `triage_memory` only after an explicit decision to dismiss, snooze, or reopen an Inbox item.
 7. Propose risky actions before mutating.
 
 ## Output contract
