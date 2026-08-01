@@ -81,7 +81,31 @@ class LedgerLine:
     pinned: bool = False
 
 
-class PacksChoice(SelectionList):
+class RewindRequest(Message):
+    """The cursor tried to move above the first row of the active block."""
+
+
+class TopEdgeRewind:
+    """Mixin: `up` past the first row leaves the block instead of wrapping.
+
+    The ledger and the active question read as one column, so a user holding
+    `up` expects to arrive back at the previous answer. Wrapping to the bottom
+    of the list instead is what made rewinding feel unreachable — `esc` was in
+    the footer, but the arrow key is what people actually try.
+    """
+
+    def action_cursor_up(self) -> None:
+        if self.highlighted in (0, None):
+            self.post_message(RewindRequest())
+            return
+        super().action_cursor_up()
+
+
+class LedgerChoices(TopEdgeRewind, BarOptionList):
+    """The answer list for a first-run question."""
+
+
+class PacksChoice(TopEdgeRewind, SelectionList):
     """A SelectionList where space toggles and enter means "done choosing".
 
     The inherited `enter` binding also toggles, which would leave the step with
@@ -127,7 +151,7 @@ class FirstRunScreen(ExomemScreen):
             yield Static(id="ledger")
             yield Static(id="intro")
             yield Static(id="question")
-            yield BarOptionList(id="choices")
+            yield LedgerChoices(id="choices")
             path_input = Input(id="path-input", classes="line-input")
             path_input.display = False
             yield path_input
@@ -254,7 +278,7 @@ class FirstRunScreen(ExomemScreen):
             if sub:
                 lines.append((3, Text(sub, style=skin.secondary)))
             rows.append(BarRow(action, lines))
-        choices = self.query_one("#choices", BarOptionList)
+        choices = self.query_one("#choices", LedgerChoices)
         choices.display = True
         choices.set_rows(rows)
         choices.focus()
@@ -408,10 +432,13 @@ class FirstRunScreen(ExomemScreen):
             )
         else:
             detail = self._receipt_detail("connected", state.root, "— opened as it stands")
+        # Only a vault we actually created is a one-way door. Connecting to
+        # one that already existed wrote nothing, so refusing to rewind it
+        # would strand the user on a choice they can still change freely.
         self._add_line(
             "vault",
             [receipt(skin, "done", "vault", detail, budget=self.content_budget())],
-            pinned=True,
+            pinned=kind == "created",
         )
         self.app.record_receipt("done", "vault", detail)
         self.app.on_vault_ready()
@@ -567,9 +594,11 @@ class FirstRunScreen(ExomemScreen):
             prompt.append(str(pack.get("name") or pack_id), style=skin.text)
             description = str(pack.get("description") or "")
             if description:
-                prompt.append(f" — {description}", style=skin.dim)
+                prompt.append(f" — {description}", style=skin.secondary)
             selection.add_option(Selection(prompt, pack_id, pack_id in selected))
         selection.display = True
+        if selection.option_count:
+            selection.highlighted = 0
         selection.focus()
 
     def _on_packs_error(self, error: BackendError) -> None:
@@ -785,7 +814,7 @@ class FirstRunScreen(ExomemScreen):
             if sub:
                 lines.append((3, Text(sub, style=skin.secondary)))
             rows.append(BarRow(action, lines))
-        choices = self.query_one("#choices", BarOptionList)
+        choices = self.query_one("#choices", LedgerChoices)
         choices.display = True
         choices.set_rows(rows)
         choices.focus()
@@ -846,6 +875,17 @@ class FirstRunScreen(ExomemScreen):
     # ------------------------------------------------------------------ #
     # Rewind and skip
     # ------------------------------------------------------------------ #
+    def on_rewind_request(self, event: RewindRequest) -> None:
+        """Arrow-driven rewind stops at the top; it never leaves setup.
+
+        `esc` at the first question is a deliberate "take me out of here", but
+        holding `up` is navigation — it must not quit the flow by accident.
+        """
+        event.stop()
+        if not self._ledger and self._stage == "welcome":
+            return
+        self.action_rewind()
+
     def action_rewind(self) -> None:
         # Inside a step, esc steps back within it and keeps what was typed.
         if self._stage in ("path-create", "path-existing", "path-scan"):

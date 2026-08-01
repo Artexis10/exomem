@@ -259,3 +259,59 @@ async def test_an_applied_pack_selection_can_still_be_rewound(make_app, tmp_path
         assert "packs" in _text(app, "#question"), "the packs answer must be changeable"
         assert "✓ packs" not in _text(app, "#ledger")
         assert app.screen.query_one("#packs-choice").display is True
+
+
+async def test_up_arrow_walks_back_up_the_ledger(make_app):
+    """The ledger and the active question are one column to the eye.
+
+    `esc` was in the footer, but `up` is what people reach for, and wrapping
+    to the bottom of the list made rewinding feel unreachable.
+    """
+    backend = FakeBackend(initialized=False)
+    backend.existing_vaults.add("/data/sample-vault")
+    app = make_app(backend)
+    async with app.run_test(size=(80, 24)) as pilot:
+        await _settle(app, pilot)
+        await pilot.press("down", "enter")  # 'Use an existing vault'
+        await pilot.pause()
+        path_input = app.screen.query_one("#path-input")
+        path_input.value = "/data/sample-vault"
+        path_input.focus()
+        await pilot.press("enter")
+        await _settle(app, pilot)
+        packs = app.screen.query_one("#packs-choice")
+        assert packs.highlighted == 0, "the list must open with a cursor to move"
+
+        await pilot.press("up")  # already at the top row -> leave the block
+        await _settle(app, pilot)
+        assert "Where should your memory live?" in _text(app, "#question")
+        assert "vault" not in _text(app, "#ledger")
+
+        # ...but it never walks out of setup entirely
+        await pilot.press("up")
+        await pilot.press("up")
+        await _settle(app, pilot)
+        assert app.screen.SCREEN_TITLE == "First run"
+
+
+async def test_connecting_to_an_existing_vault_is_not_pinned(make_app):
+    """Connecting wrote nothing, so the answer is still changeable."""
+    backend = FakeBackend(initialized=False)
+    backend.existing_vaults.add("/data/sample-vault")
+    app = make_app(backend)
+    async with app.run_test(size=(80, 24)) as pilot:
+        await _settle(app, pilot)
+        await pilot.press("down", "enter")
+        await pilot.pause()
+        path_input = app.screen.query_one("#path-input")
+        path_input.value = "/data/sample-vault"
+        path_input.focus()
+        await pilot.press("enter")
+        await _settle(app, pilot)
+        assert "✓ vault" in _text(app, "#ledger")
+        await pilot.press("escape")
+        await _settle(app, pilot)
+        assert "vault" not in _text(app, "#ledger"), (
+            "a connect performed no write and must rewind like any other answer"
+        )
+        assert "pinned" not in _text(app, "#note")

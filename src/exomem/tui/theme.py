@@ -36,15 +36,22 @@ SURFACE = "#14120f"
 #: Phosphor amber, confirmed as Exomem's terminal accent in Substrate Design
 #: System v2 (truecolor #ffb000, 256-color 214, 16-color yellow 3).
 ACCENT = "#ffb000"
-#: Selected-row fill. The design specifies "accent at 12-22%", but a blend that
-#: dark does not survive a 256-color terminal: #3f2d06 rounds into the color
-#: cube at (1,0,0) -- pure dark red -- because the green channel floors to
-#: zero. This value is chosen to land on cube entry 94 (#875f00), a real dark
-#: amber, so the selection reads the same whether the terminal has 16.7M
-#: colors or 256. Verified by test, not by eye.
-SELECTION_BG = "#7a4f0c"
+#: Selected-row fill: a warm near-neutral, with the amber bar carrying the
+#: accent. Two constraints decide this value rather than taste.
+#:
+#: It must survive 256-color quantization. The design's "accent at 12-22%"
+#: blends to #3f2d06, which rounds into the color cube at (1,0,0) -- pure dark
+#: red -- because each channel floors independently and the green dies. A
+#: near-neutral lands on the GREYSCALE ramp instead of the cube, where no such
+#: hue collapse is possible.
+#:
+#: And it must leave the row's own text hierarchy readable. A saturated fill
+#: cannot: against cube entry 94 (#875f00), secondary text scores 1.89:1. This
+#: value scores 13.0:1 against body text and 5.0:1 against secondary, so a
+#: selected row reads exactly like an unselected one, only lit.
+SELECTION_BG = "#2a2622"
 #: The same role on a light terminal.
-LIGHT_SELECTION_BG = "#f0d9a8"
+LIGHT_SELECTION_BG = "#e8e2d6"
 
 # Status hues are ANSI slots on purpose — see the module docstring.
 OK = "green"

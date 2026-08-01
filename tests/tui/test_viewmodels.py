@@ -291,22 +291,28 @@ def _to_256(hex_colour: str) -> tuple[int, str]:
     return downgraded.number, f"#{exact.red:02x}{exact.green:02x}{exact.blue:02x}"
 
 
-def test_selection_fill_stays_amber_on_a_256_colour_terminal():
+def test_selection_fill_gains_no_hue_it_was_not_given():
     """Regression: a 22% amber blend quantised to pure dark red (#5f0000).
 
     The colour cube floors each channel independently, so `#3f2d06` — the
     blend the design's "accent at 12-22%" produces — lost its green entirely
-    and the selected row rendered red on a real terminal. The fill must land
-    on a cell that is still recognisably amber.
+    and the selected row rendered red. The fill must therefore land somewhere
+    that cannot invent a hue: a near-neutral resolves against the greyscale
+    ramp, where channel collapse is impossible by construction.
     """
     from exomem.tui.theme import SELECTION_BG
 
+    def spread(hex_colour: str) -> int:
+        channels = [int(hex_colour[i : i + 2], 16) for i in (1, 3, 5)]
+        return max(channels) - min(channels)
+
     number, exact = _to_256(SELECTION_BG)
-    red, green, blue = (int(exact[i : i + 2], 16) for i in (1, 3, 5))
-    assert green > 0, f"{SELECTION_BG} quantises to {exact} (cell {number}) — the green channel died"
-    assert red > green > blue, f"{SELECTION_BG} quantises to {exact}, which is not a warm amber"
-    # the specific blend that caused the bug must still be rejected by this rule
+    assert spread(exact) <= 16, (
+        f"{SELECTION_BG} quantises to {exact} (cell {number}) — a hue the fill never had"
+    )
+    # the blend that caused the bug is still caught by exactly this rule
     assert _to_256("#3f2d06")[1] == "#5f0000"
+    assert spread(_to_256("#3f2d06")[1]) > 16
 
 
 def test_accent_and_text_roles_survive_quantisation():
@@ -316,3 +322,43 @@ def test_accent_and_text_roles_survive_quantisation():
     # supporting copy has to stay clearly brighter than the background
     assert int(_to_256(SECONDARY)[1][1:3], 16) >= 0x80
     assert int(_to_256(TEXT)[1][1:3], 16) >= 0xC0
+
+
+def test_selection_fill_leaves_the_row_readable():
+    """A saturated fill destroyed the row's own text hierarchy.
+
+    Cube entry 94 (#875f00) scored 1.89:1 against secondary text, which is
+    what made selected rows look muddy. The fill has to stay legible against
+    every foreground role it can sit behind.
+    """
+    from exomem.tui.theme import SECONDARY, SELECTION_BG, TEXT
+
+    def luminance(hex_colour: str) -> float:
+        def channel(index: int) -> float:
+            value = int(hex_colour[index : index + 2], 16) / 255
+            return value / 12.92 if value <= 0.03928 else ((value + 0.055) / 1.055) ** 2.4
+
+        return 0.2126 * channel(1) + 0.7152 * channel(3) + 0.0722 * channel(5)
+
+    def contrast(a: str, b: str) -> float:
+        high, low = sorted((luminance(a), luminance(b)), reverse=True)
+        return (high + 0.05) / (low + 0.05)
+
+    fill = _to_256(SELECTION_BG)[1]
+    assert contrast(fill, _to_256(TEXT)[1]) >= 7.0
+    assert contrast(fill, _to_256(SECONDARY)[1]) >= 4.5
+    # the saturated fill this replaced must still fail the same rule
+    assert contrast("#875f00", _to_256(SECONDARY)[1]) < 3.0
+
+
+def test_selected_rows_lift_metadata_out_of_dim():
+    from rich.text import Text
+
+    from exomem.tui.widgets import BarRow
+
+    row = BarRow("x", [(1, Text("title", style=SKIN.text)), (3, Text("meta", style=SKIN.dim))])
+    selected = row.render(SKIN, True)
+    assert SKIN.dim not in [span.style for span in selected.spans], (
+        "dim recedes past legibility against the lit row"
+    )
+    assert SKIN.dim in [span.style for span in row.render(SKIN, False).spans]

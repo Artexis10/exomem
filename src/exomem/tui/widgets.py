@@ -160,8 +160,27 @@ class BarRow:
                 out.append("\n")
             out.append(bar, style=skin.accent if selected else "")
             out.append(" " * indent)
-            out.append_text(content)
+            out.append_text(lift(content, skin) if selected else content)
         return out
+
+
+def lift(content: Text, skin: Skin) -> Text:
+    """Promote `dim` spans one step for a row sitting on the selection fill.
+
+    `dim` is calibrated to recede against the page background; against the
+    lit row it recedes past legibility. Nothing else changes, so the row's
+    internal hierarchy survives selection instead of flattening.
+    """
+    if not skin.color:
+        return content
+    lifted = content.copy()
+    lifted.spans = [
+        span._replace(style=skin.secondary) if span.style == skin.dim else span
+        for span in lifted.spans
+    ]
+    if lifted.style == skin.dim:
+        lifted.style = skin.secondary
+    return lifted
 
 
 def row(row_id: str, *lines: tuple[int, Text]) -> BarRow:
