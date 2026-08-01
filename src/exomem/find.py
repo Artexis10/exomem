@@ -2612,6 +2612,31 @@ def _find_semantic(
     clip_set: set[str] = set(clip_ranking)
     graph_set = set(graph_ranking)
     vector_paths: set[str] = set(vector_ranking)
+    # Degraded-corroboration retention flag — LANE-level, never per-page. When
+    # the vector and CLIP lanes produced no candidate at all for this query,
+    # no vector evidence exists for ANY candidate. Either the lane never ran —
+    # embeddings disabled (EXOMEM_DISABLE_EMBEDDINGS), the model warming/
+    # unavailable/failed, or an absent/empty embedding index — or a HEALTHY
+    # lane legitimately returned nothing because none of the eligible pages
+    # have indexed chunks (`available_nonmatching`: the allowed-paths search
+    # had no vectors to score). The relaxed gate deliberately covers that
+    # second case too: for these candidates, vector corroboration is
+    # unsatisfiable either way. In that state the all-stems veto below would
+    # drop every BM25-only candidate for interrogative phrasing ("How many…",
+    # "What is…") whose question words never appear in stored text, returning
+    # nothing even when BM25 ranks the correct page first. Retention then
+    # relaxes to a STRICT MAJORITY of the query's whitespace words being
+    # present, at least one of them a content word (see _stem_word_coverage):
+    # question words may be missing, but half-matched two-word queries,
+    # partially-matched exact-marker compounds, and function-word-only
+    # overlap against long prose all stay vetoed. With the vector lane live,
+    # the strict all-stems veto is unchanged.
+    semantic_lanes_absent = not vector_paths and not clip_set
+    # Loop-invariant for the relaxed gate: tokenize/classify the query's words
+    # once per query, not once per candidate page.
+    degraded_query_words = (
+        _query_word_stem_groups(query_norm) if semantic_lanes_absent else []
+    )
 
     # Resolve fused paths back to ParsedPage, filter, build hits in fused order.
     # BM25-only candidates must still satisfy the keyword all-tokens-present
@@ -2665,8 +2690,20 @@ def _find_semantic(
         ):
             # No literal match, not a graph hop, not vector-ranked, not in
             # the keyword scan. Try stem match before dropping — recovers
-            # morphology ("regulation" matching a "regulator" page).
-            if not _stem_tokens_present(page, query_norm):
+            # morphology ("regulation" matching a "regulator" page). With the
+            # semantic lanes absent (see flag above) the gate relaxes from
+            # all-stems to a strict majority of the query's words anchored by
+            # at least one content word, so BM25's own top-ranked evidence
+            # survives interrogative phrasing without function-word overlap
+            # alone retaining junk.
+            if semantic_lanes_absent:
+                present, total, content_present = _stem_word_coverage(
+                    page, degraded_query_words
+                )
+                stems_ok = 2 * present > total and content_present > 0
+            else:
+                stems_ok = _stem_tokens_present(page, query_norm)
+            if not stems_ok:
                 continue
             keyword_excerpt = _stem_anchored_excerpt(page, query_norm)
         elif (
@@ -3085,6 +3122,95 @@ def _any_stem_present(page: ParsedPage, query_norm: str) -> bool:
     from . import bm25 as bm25_module
 
     return any(qs in page.stem_set for qs in bm25_module.tokenize(query_norm))
+
+
+# Function words that must never, on their own, carry the degraded-retention
+# majority: articles/determiners, quantifiers, pronouns, wh-words,
+# prepositions/conjunctions, auxiliaries, negation. Surface forms; matched in
+# stem space via _function_word_stems() so classification consumes the same
+# tokenize() output presence checks use. (claims.py keeps a private
+# _STOPWORDS lexicon for contradiction topic-overlap, but it has no wh-words
+# and its own tokenizer — retention gating keeps an independent frozen set so
+# unrelated lexicon edits cannot reshape retrieval.)
+_FUNCTION_WORDS = frozenset(
+    """a an the this that these those all any some each no not
+    i we you he she it they me us them my our your their his her its
+    what which who whom whose when where why how
+    of in on at to for from by with about as into over under
+    and or but if then than so
+    is are was were be been being am
+    do does did done doing have has had having
+    can could will would shall should may might must""".split()
+)
+_FUNCTION_WORD_STEMS: frozenset[str] | None = None
+
+
+def _function_word_stems() -> frozenset[str]:
+    """Stem-space view of `_FUNCTION_WORDS`, built lazily (bm25 owns the
+    stemmer) and memoized — the set is tiny and the computation idempotent."""
+    global _FUNCTION_WORD_STEMS
+    if _FUNCTION_WORD_STEMS is None:
+        from . import bm25 as bm25_module
+
+        _FUNCTION_WORD_STEMS = frozenset(
+            bm25_module.stem_word(word) for word in _FUNCTION_WORDS
+        )
+    return _FUNCTION_WORD_STEMS
+
+
+def _query_word_stem_groups(query_norm: str) -> list[tuple[list[str], bool]]:
+    """Per whitespace word: (BM25 subtoken stems, is_function_word).
+
+    Loop-invariant precompute for `_stem_word_coverage` — the query is
+    tokenized and classified once per query, not once per candidate page. A
+    word is a function word only when EVERY subtoken stem is a function-word
+    stem, so a compound like `state-of-the-art` stays a content word. Words
+    with no `[a-z0-9]` content tokenize to nothing and are skipped; the
+    tokenizer is ASCII-only, so non-ASCII words drop out of the denominator
+    (known limit: mixed-script queries are gated more permissively than
+    v0.36.0's all-stems veto).
+    """
+    from . import bm25 as bm25_module
+
+    function_stems = _function_word_stems()
+    groups: list[tuple[list[str], bool]] = []
+    for word in query_norm.split():
+        subtoken_stems = bm25_module.tokenize(word)
+        if not subtoken_stems:
+            continue
+        groups.append(
+            (subtoken_stems, all(s in function_stems for s in subtoken_stems))
+        )
+    return groups
+
+
+def _stem_word_coverage(
+    page: ParsedPage, word_stem_groups: list[tuple[list[str], bool]]
+) -> tuple[int, int, int]:
+    """(present, total, content_present) coverage over precomputed word groups.
+
+    The coverage unit is the WHOLE whitespace word (see
+    `_query_word_stem_groups`), and a word counts as present only when EVERY
+    one of its BM25 subtoken stems appears in title+body: a compound like
+    `alpha-beta-gamma` needs all three parts (so exact-marker queries stay
+    precise), while trailing punctuation (`measure?` → `measur`) cannot mask
+    a real match. `content_present` counts present words that are NOT
+    function words: the degraded-corroboration gate requires a strict
+    majority present (2 * present > total) AND at least one content word
+    among them, so "what is the … of the …" phrasing cannot ride its
+    function words into retention against long prose. Sits between
+    `_any_stem_present` (>=1 stem anywhere) and `_stem_tokens_present` (ALL
+    whitespace tokens, whole-token stems).
+    """
+    text_stems = page.stem_set
+    present = 0
+    content_present = 0
+    for subtoken_stems, is_function in word_stem_groups:
+        if all(stem in text_stems for stem in subtoken_stems):
+            present += 1
+            if not is_function:
+                content_present += 1
+    return present, len(word_stem_groups), content_present
 
 
 def _outside_kb_keyword_paths(vault_root: Path, query_norm: str) -> list[str]:
