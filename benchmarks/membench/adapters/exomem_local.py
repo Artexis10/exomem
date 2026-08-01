@@ -62,6 +62,24 @@ def lexical_profile(name: str = "neutral-lexical") -> Profile:
     )
 
 
+def embeddings_profile(name: str = "recommended-embeddings") -> Profile:
+    """Recommended profile: vector lane on; identical pins otherwise.
+
+    CLIP/media stay off (image evidence is not CLIP-scored in v0.1) and every
+    other determinism pin matches the lexical profile. Machine-specific model
+    environment (HF_HOME, CUDA_VISIBLE_DEVICES, EXOMEM_DEVICE) is supplied by
+    the caller's process env, never baked into the profile.
+    """
+
+    base = lexical_profile(name=name)
+    settings = dict(base.settings)
+    # exomem's disable flags are plain string-truthiness checks
+    # (os.environ.get(...)): "0" would still DISABLE. Empty string is falsy,
+    # which is the only way to express "enabled" through a set-only env seam.
+    settings["EXOMEM_DISABLE_EMBEDDINGS"] = ""
+    return Profile(name=name, settings=settings)
+
+
 class ExomemLocalAdapter:
     """Drives exomem through public boundaries only (op leaves or MCP tools)."""
 

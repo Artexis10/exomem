@@ -41,15 +41,16 @@ def _cmd_catalog(args: argparse.Namespace) -> int:
 
 def _cmd_run(args: argparse.Namespace) -> int:
     from membench.adapters import create_adapter
-    from membench.adapters.exomem_local import lexical_profile
+    from membench.adapters.exomem_local import embeddings_profile, lexical_profile
     from membench.runner import RunSpec, execute_run
 
+    profile = embeddings_profile() if args.profile == "embeddings" else lexical_profile()
     adapter = create_adapter(args.provider, mode=args.mode, search_style=args.search_style)
     result = execute_run(
         RunSpec(
             corpus_dir=Path(args.corpus),
             adapter=adapter,
-            profile=lexical_profile(),
+            profile=profile,
             runs_root=Path(args.runs_root),
             top_k=args.top_k,
             label=args.label,
@@ -87,6 +88,7 @@ def main(argv: list[str] | None = None) -> int:
     p_run.add_argument(
         "--search-style", default="neutral", choices=["neutral", "product-default"]
     )
+    p_run.add_argument("--profile", default="lexical", choices=["lexical", "embeddings"])
     p_run.add_argument("--top-k", type=int, default=10)
     p_run.add_argument("--runs-root", default=str(_BENCH_ROOT / "runs"))
     p_run.add_argument("--label", default=None)
