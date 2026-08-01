@@ -3893,6 +3893,10 @@ def op_remember(
     experiments, and production logs. Raw material belongs in `capture_source`;
     proof artifacts belong in `preserve_evidence`.
 
+    For each `sources:` wikilink, this appends the new note's wikilink to that
+    source's `ingested_into:` frontmatter, maintaining the source-to-note graph
+    and taking the source out of the unprocessed backlog.
+
     Args:
         content: Full markdown body to write after frontmatter.
         title: Unicode display title stored in frontmatter and the H1.
@@ -3900,7 +3904,13 @@ def op_remember(
         note_type: research-note, insight, failure, pattern, experiment, or production-log.
         project: Required for research-note. __PROJECT_KEYS_HINT__
         projects: Optional project keys for cross-project notes. __PROJECT_KEYS_HINT__
-        sources: Source/evidence paths this conclusion draws from.
+        sources: Vault-relative wikilinks to existing pages this conclusion draws
+            from, e.g. ["Knowledge Base/Sources/Articles/2026-05-18-example"].
+            Brackets and the leading `Knowledge Base/` are both tolerated. Each
+            entry appends this note's wikilink to that source's `ingested_into:`.
+            Expected for research-note, insight, failure, and pattern; omitting it
+            returns a warning rather than failing the write, because a conclusion
+            drawn from live work with nothing captured is an honest empty list.
         tags: Lowercase tags.
         status: Optional status override.
         severity: Failure severity.
