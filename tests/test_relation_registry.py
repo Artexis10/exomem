@@ -16,7 +16,7 @@ def test_core_is_single_source_for_parser_and_graph() -> None:
     from exomem import epistemic_graph
 
     core = relation_registry.core_registry()
-    assert len(core.core) == 25
+    assert len(core.core) == 28
     assert markdown_relations.RELATION_TYPES == core.keys
     assert semantic_blocks.RELATION_TYPES == core.keys
     assert epistemic_graph.RELATION_TYPES == core.keys

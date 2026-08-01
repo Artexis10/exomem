@@ -141,6 +141,25 @@ def test_qualify_relation_still_rejects_every_excluded_family(
     assert "excluded_family" in qualified.reasons
 
 
+@pytest.mark.parametrize("kind", ("part_of", "contains", "extends"))
+def test_composition_relations_qualify_as_typed_edges(
+    tmp_path: Path, kind: str
+) -> None:
+    """Structural relations are real epistemic edges, not excluded families."""
+    page = _state(
+        tmp_path,
+        "Knowledge Base/Notes/Insights/page.md",
+        _source(body=f"## Relations\n- {kind} [[Knowledge Base/Notes/Patterns/target]]\n"),
+    )
+
+    result = _disposition(tmp_path, page, _target(tmp_path))
+
+    assert result.relation_disposition.satisfied is True
+    assert result.relation_disposition.qualifying_signal == "typed"
+    codes = {finding.code for finding in result.findings}
+    assert "RELATION_TYPED_EDGE_ABSENT" not in codes
+
+
 def test_qualify_connectivity_accepts_what_the_typed_lane_excludes(
     tmp_path: Path,
 ) -> None:

@@ -65,6 +65,13 @@ one relation voluntarily, so a minimum count would only manufacture edges — th
   category. Neither blocks a write.
 - Restore the `remember` documentation for `sources:` — its wikilink form and the
   `ingested_into:` back-reference mechanic — which the product-surface redesign dropped.
+- Add the missing structural relations to the core registry: `part_of` and `contains`
+  (family `composition`, mutual inverses) and `extends` (family `specialization`). The
+  vocabulary had no way to express mereology or specialization at all, so those edges
+  could not be authored even when they were the accurate description. They are ordinary
+  typed edges — not excluded families — and flow into the `all` traversal profile
+  automatically. The curated epistemic, provenance, causal, and decision profiles are
+  left alone, because structure is not an epistemic lens.
 
 ## Capabilities
 
