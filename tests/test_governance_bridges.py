@@ -470,6 +470,39 @@ def test_complete_bridge_without_release_approval_is_withheld_everywhere(
     assert simulated["release_reasons"] == ["RELEASE_UNAPPROVED"]
 
 
+def test_default_deny_does_not_hide_a_bridge_release_reason_from_inspection(
+    vault: Path,
+) -> None:
+    """The existence-oracle guard owns pure default denials, not the bridge
+    state's established content-free explanation contract."""
+    _write_bridge_fixture(vault, approval=False)
+    _write_policy(
+        vault,
+        "scopes",
+        "closed-bridge",
+        _scope_document(SCOPE_B, path=BRIDGE_PATH) + "default_deny: true\n",
+    )
+
+    with request_scope(_external()):
+        explained = commands.op_govern_memory(
+            vault,
+            operation="explain",
+            path=BRIDGE_PATH,
+            audience="external",
+        )
+        simulated = commands.op_govern_memory(
+            vault,
+            operation="simulate",
+            paths=[BRIDGE_PATH],
+            audience="external",
+        )
+
+    assert explained["effective_ceiling"] == 0
+    assert explained["release_reason"] == "RELEASE_UNAPPROVED"
+    assert simulated["withheld_count"] == 1
+    assert simulated["release_reasons"] == ["RELEASE_UNAPPROVED"]
+
+
 def test_exact_approved_unchanged_bridge_releases_but_source_stays_withheld(
     vault: Path,
 ) -> None:
@@ -1041,6 +1074,71 @@ def test_restriction_signature_preserves_typed_nested_option_keys() -> None:
     ) != bridges.restriction_signature(
         {SCOPE_A}, policy=string_key, audience="external"
     )
+
+
+def test_restriction_signature_moves_when_a_scope_declares_default_deny() -> None:
+    """An approved bridge stales when the restriction behind its source moves.
+
+    Differential against the equivalent authored `ceiling: 0`: declaring
+    `default_deny` on the source scope closes it to every audience no rule
+    names, so it must stale the approved abstraction exactly as writing the
+    ceiling-0 rule does. Blind to the declaration, a previously approved
+    abstraction of a private source keeps flowing after the owner locks the
+    scope.
+    """
+
+    def signature(*, default_deny: bool = False, ceiling: int | None = None) -> str:
+        compiled = policy.Policy(
+            fingerprint="test",
+            scopes={
+                SCOPE_A: policy.Scope(
+                    id=SCOPE_A, source="scopes/private.yaml", default_deny=default_deny
+                )
+            },
+            rules=()
+            if ceiling is None
+            else (
+                policy.Rule(
+                    id=RULE_ID,
+                    source="rules/private.yaml",
+                    scope_ids=(SCOPE_A,),
+                    audience="external",
+                    ceiling=ceiling,
+                ),
+            ),
+        )
+        return bridges.restriction_signature(
+            {SCOPE_A}, policy=compiled, audience="external"
+        )
+
+    open_scope = signature()
+    # The control: authoring the equivalent restriction as a rule moves it.
+    assert signature(ceiling=0) != open_scope
+    # The declaration owes the same.
+    assert signature(default_deny=True) != open_scope
+    # ...and REMOVING it moves the signature back, so an owner who unlocks the
+    # scope cannot leave a stale approval looking fresh either.
+    assert signature(default_deny=False) == open_scope
+
+
+def test_restriction_signature_ignores_a_declaration_on_an_unrelated_scope() -> None:
+    """Only the source's own scopes bind the signature; a declaration on a
+    scope the source is not a member of must not churn every approval."""
+    def signature(*, default_deny: bool) -> str:
+        compiled = policy.Policy(
+            fingerprint="test",
+            scopes={
+                SCOPE_A: policy.Scope(id=SCOPE_A, source="scopes/private.yaml"),
+                SCOPE_B: policy.Scope(
+                    id=SCOPE_B, source="scopes/other.yaml", default_deny=default_deny
+                ),
+            },
+        )
+        return bridges.restriction_signature(
+            {SCOPE_A}, policy=compiled, audience="external"
+        )
+
+    assert signature(default_deny=True) == signature(default_deny=False)
 
 
 def test_restriction_signature_preserves_container_types() -> None:
