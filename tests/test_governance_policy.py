@@ -800,3 +800,87 @@ def test_the_authoring_gate_creates_no_state_when_it_refuses(vault: Path) -> Non
             duration="standing",
         )
     assert _snapshot() == before, "the refused authoring gate mutated the vault"
+
+
+# ---------------------------------------------------------------------------
+# A scope may declare that unnamed audiences get nothing
+# (add-default-deny-scope-cap, task 1)
+# ---------------------------------------------------------------------------
+
+_SCOPE_A_ID = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+
+
+def test_a_scope_may_declare_a_default_deny(vault: Path) -> None:
+    _write(vault, "scopes", "acmeco", _SCOPE_A + "default_deny: true\n")
+    _write(vault, "rules", "acmeco-external", _RULE_A)
+    pol = policy.load(vault)
+    assert pol.blocked is False
+    assert [f for f in pol.findings if f["severity"] == "error"] == []
+    assert pol.scopes[_SCOPE_A_ID].default_deny is True
+
+
+def test_a_scope_declaring_false_is_the_same_as_omitting_it(vault: Path) -> None:
+    """Not just "is False" — the two documents must compile to the same scope,
+    so `default_deny: false` is a no-op an author can write to be explicit."""
+    _write(vault, "scopes", "acmeco", _SCOPE_A + "default_deny: false\n")
+    _write(vault, "rules", "acmeco-external", _RULE_A)
+    explicit = policy.load(vault).scopes[_SCOPE_A_ID]
+
+    policy._CACHE.clear()
+    _write(vault, "scopes", "acmeco", _SCOPE_A)
+    omitted = policy.load(vault).scopes[_SCOPE_A_ID]
+
+    assert explicit == omitted
+    assert explicit.default_deny is False
+
+
+def test_a_scope_omitting_the_declaration_compiles_exactly_as_before(vault: Path) -> None:
+    """The change is opt-in: an untouched document must compile clean, keep its
+    content fingerprint, and carry the permissive value."""
+    _write(vault, "scopes", "acmeco", _SCOPE_A)
+    _write(vault, "rules", "acmeco-external", _RULE_A)
+    pol = policy.load(vault)
+    assert pol.blocked is False
+    assert pol.findings == ()
+    assert pol.scopes[_SCOPE_A_ID].default_deny is False
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        '"true"',      # a quoted string is not a boolean
+        "1",           # an int is not a boolean
+        "[true]",      # a list is not a boolean
+        "{}",          # a mapping is not a boolean
+        "",            # `default_deny:` with the value forgotten -> YAML null
+        "deny",        # a bare word that is not a YAML boolean
+    ],
+)
+def test_a_malformed_declaration_is_an_error_finding_not_a_silent_default(
+    vault: Path, value: str
+) -> None:
+    """A confidentiality control must never fall back to permissive because the
+    author mistyped it. The finding is an ERROR, so the compile is refused.
+
+    The code has to be `invalid_field`, not `unknown_field`: before the field
+    existed every one of these values was rejected merely because the compiler
+    had never heard of the key. That accident would keep this test green while
+    the recognised field silently accepted a non-boolean."""
+    _write(vault, "scopes", "acmeco", _SCOPE_A + f"default_deny:{f' {value}' if value else ''}\n")
+    _write(vault, "rules", "acmeco-external", _RULE_A)
+    pol = policy.load(vault)
+    findings = [f for f in pol.findings if f["path"].endswith(":default_deny")]
+    assert findings, f"no finding for default_deny: {value!r}"
+    assert [f["code"] for f in findings] == ["invalid_field"]
+    assert all(f["severity"] == "error" for f in findings)
+    # Cold start with no prior good compile -> the fail-closed floor, not open.
+    assert pol.blocked is True
+
+
+def test_a_yaml_boolean_spelling_is_accepted(vault: Path) -> None:
+    """`yes` is a YAML 1.1 boolean, so it must not be reported as malformed."""
+    _write(vault, "scopes", "acmeco", _SCOPE_A + "default_deny: yes\n")
+    _write(vault, "rules", "acmeco-external", _RULE_A)
+    pol = policy.load(vault)
+    assert pol.blocked is False
+    assert pol.scopes[_SCOPE_A_ID].default_deny is True

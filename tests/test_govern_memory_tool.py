@@ -3589,3 +3589,81 @@ def test_multi_grant_revoke_receipt_uses_sorted_component_identity_hashes(
         if record.get("event_id") == revoked["event_id"]
     )
     assert intent["affected_ids"] == expected == sorted(set(expected))
+
+
+# ---------------------------------------------------------------------------
+# `explain` for a default denial (add-default-deny-scope-cap, task 3)
+# ---------------------------------------------------------------------------
+
+DECLARED_RESTRICTED = "Knowledge Base/Notes/Patterns/kill-switch-for-risky-releases.md"
+
+
+def _write_declared_scope(vault: Path, *, default_deny: bool = True) -> None:
+    """A scope carrying the declaration and NO rule naming `external`."""
+    scopes = vault / "Knowledge Base" / "_Governance" / "scopes"
+    scopes.mkdir(parents=True, exist_ok=True)
+    (scopes / "patterns.yaml").write_text(
+        f"governance_version: 1\nid: {SCOPE_ID}\nname: Confidential patterns\n"
+        f'paths: ["{PATTERN_GLOB}"]\n'
+        + ("default_deny: true\n" if default_deny else ""),
+        encoding="utf-8",
+    )
+
+
+def test_explain_names_the_declaring_scope_for_a_default_denial(vault: Path) -> None:
+    """Spec: the explanation identifies the declaring scope, and does NOT
+    attribute the outcome to a standing rule that does not exist.
+
+    A declared scope with no rules is invisible until someone is denied, so
+    `explain` reporting a bare "nothing matched" would leave the owner unable
+    to tell a default denial from a missing item."""
+    from exomem.governance.tool import op_govern_memory
+
+    _write_declared_scope(vault)
+    explained = op_govern_memory(
+        vault,
+        operation="explain",
+        principal=owner_principal(),
+        audience="external",
+        path=DECLARED_RESTRICTED,
+    )
+    assert explained["effective_ceiling"] == 0
+    # No rule was invented to carry the outcome.
+    assert explained["rule_ids"] == []
+    assert explained["participating_chain"] == []
+    assert explained["default_deny_scope_ids"] == [SCOPE_ID]
+
+
+def test_explain_reports_no_declaring_scope_when_a_rule_decided(vault: Path) -> None:
+    """The distinguishing half: an authored denial must not be dressed up as a
+    default one, or the field means nothing."""
+    from exomem.governance.tool import op_govern_memory
+
+    _committed_policy(vault)
+    explained = op_govern_memory(
+        vault,
+        operation="explain",
+        principal=owner_principal(),
+        audience="external",
+        path=DECLARED_RESTRICTED,
+    )
+    assert explained["rule_ids"] == [RULE_ID]
+    assert "default_deny_scope_ids" not in explained
+
+
+def test_explain_does_not_hand_a_non_owner_the_declaring_scope_id(vault: Path) -> None:
+    """`list` already withholds scope ids from non-owners while disclosing rule
+    ids. A default denial must not become the one place a third party learns
+    the vault's scope structure."""
+    from exomem.governance.tool import op_govern_memory
+
+    _write_declared_scope(vault)
+    explained = op_govern_memory(
+        vault,
+        operation="explain",
+        principal=_external(),
+        audience="external",
+        path=DECLARED_RESTRICTED,
+    )
+    assert explained["effective_ceiling"] == 0
+    assert "default_deny_scope_ids" not in explained

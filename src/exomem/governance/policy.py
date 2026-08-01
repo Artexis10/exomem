@@ -108,6 +108,7 @@ _SCOPE_ALLOWED_FIELDS = frozenset(
         "name",
         "exclude",
         "constraint",
+        "default_deny",
         *_SCOPE_SELECTOR_FIELDS,
     }
 )
@@ -162,6 +163,11 @@ class Scope:
     source: str
     name: str | None = None
     constraint: str | None = None
+    #: When true, an audience that no standing rule names receives NOTHING for
+    #: an item in this scope, instead of full release. It inverts one default;
+    #: it is not a rule and never lowers an authored ceiling (see
+    #: `decisions._decide_at`). The owner is never subject to it.
+    default_deny: bool = False
     paths: tuple[str, ...] = ()
     projects: tuple[str, ...] = ()
     tags: tuple[str, ...] = ()
@@ -794,6 +800,25 @@ def _parse_scope(data: dict[str, Any], rel: str) -> tuple[Scope | None, list[dic
         )
         constraint = None
 
+    # Presence-checked rather than `.get() is not None`: `default_deny:` with
+    # the value forgotten parses as YAML null, and for a confidentiality
+    # control the permissive reading of a typo is the whole failure mode this
+    # field exists to close. Any non-boolean is an ERROR, which refuses the
+    # compile — the scope is never quietly left open.
+    default_deny = False
+    if "default_deny" in data:
+        raw_default_deny = data["default_deny"]
+        if isinstance(raw_default_deny, bool):
+            default_deny = raw_default_deny
+        else:
+            findings.append(
+                _finding(
+                    "invalid_field",
+                    f"{rel}:default_deny",
+                    "default_deny must be a boolean",
+                )
+            )
+
     if doc_id is None:
         return None, findings
 
@@ -802,6 +827,7 @@ def _parse_scope(data: dict[str, Any], rel: str) -> tuple[Scope | None, list[dic
         source=rel,
         name=name,
         constraint=constraint,
+        default_deny=default_deny,
         paths=_as_str_tuple(data.get("paths"), rel, "paths", findings),
         projects=_as_str_tuple(data.get("projects"), rel, "projects", findings),
         tags=_as_str_tuple(data.get("tags"), rel, "tags", findings),

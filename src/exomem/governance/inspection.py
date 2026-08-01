@@ -99,11 +99,24 @@ def inspect_operation(
         decision = projected(rel_path)
         level = policy_module.DISCLOSURE_MIN if decision is None else decision.level
         rule_ids = [] if decision is None else list(decision.rule_ids)
+        # A scope carrying `default_deny` is invisible until someone is denied:
+        # no rule matched, so `rule_ids` is legitimately empty and a bare
+        # "nothing matched" would read as a missing item. Name the declaring
+        # scope instead of attributing the outcome to a rule that does not
+        # exist. Owner-only, matching `list`, which already withholds scope ids
+        # from a non-owner while disclosing rule ids — a default denial must
+        # not become the one place a third party learns the scope structure.
+        declaring_scopes = [] if decision is None else list(decision.default_deny_scope_ids)
         return {
             "enabled": True,
             "effective_ceiling": level,
             "rule_ids": rule_ids,
             "participating_chain": rule_ids,
+            **(
+                {"default_deny_scope_ids": declaring_scopes}
+                if owner and declaring_scopes
+                else {}
+            ),
             **(
                 {"release_reason": decision.release_reason}
                 if decision is not None and decision.release_reason
