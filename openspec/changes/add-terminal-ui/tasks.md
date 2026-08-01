@@ -123,3 +123,30 @@
 - [x] 16.4 Synthetic dogfood journey executed and recorded; similarity review vs
       sibling products recorded; `openspec validate add-terminal-ui --strict`
       green.
+
+## 17. Design pass 2 — ledger first run + receipt language
+
+- [x] 17.1 Shared vocabulary: `format.py` (cell budgets, left-truncating paths,
+      wrapping, label field) and a `Skin` (glyphs + color roles) that pure
+      renderers take, so the `NO_COLOR` path is asserted rather than assumed.
+- [x] 17.2 Chrome widgets: written header/footer rows, receipt renderer, bar
+      option list with the selection bar in column zero, one recovery panel,
+      one modal base with a single dismissal point.
+- [x] 17.3 First run rebuilt as the accreting ledger: preview before every
+      write, pinned write lines, `esc` rewind, `s` skip, scan step, error
+      recovery in place, closing receipt that cites the user's own capture.
+- [x] 17.4 Home, Ask, Capture, Review restyled in the receipt language, with
+      the recovery template for every failure/empty/degraded state and the Now
+      pane plus session receipts at the side-pane breakpoint.
+- [x] 17.5 Supporting screens (Adopt, Packs, Status, Settings, Continue) moved
+      onto the same chrome, receipts, and recovery template.
+- [x] 17.6 Keymap additions only: global `u`, Home `enter`, Ask `u`/staged
+      `esc`, Capture `tab`/`e`, first-run `esc`/`s`.
+- [x] 17.7 Tests rewritten around the new surfaces: 131 tests including pure
+      renderers, keyboard journeys, governed-review paths, layout breakpoints,
+      `NO_COLOR`, and the real-backend dogfood journey.
+- [x] 17.8 26 golden frames regenerated from the deterministic fake with pinned
+      retrieval timing; `scripts/tui_frames.py` added for text-grid review.
+- [x] 17.9 Spec deltas recorded (ledger first run, receipt language, session
+      receipts, recovery template, retrieval header) and `openspec validate
+      add-terminal-ui --strict` green.

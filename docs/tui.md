@@ -33,9 +33,32 @@ with status 2.
     exomem tui                       # uses $EXOMEM_VAULT_PATH
     exomem tui --vault /path/to/vault
 
-With no resolvable vault the Welcome flow opens: point at an existing vault,
-create a fresh one (init), or scan a folder read-only first. Every step is
-skippable; everything stays reachable from Home afterwards.
+With no resolvable vault, first run opens.
+
+## First run is a ledger
+
+Setup is a short conversation on one screen. Each answer collapses into a line
+you can read back — `✓ vault  created ~/Exomem — 28 files, plain markdown` —
+and the active question sits below the lines already recorded. Four steps:
+vault, packs, a first capture, and asking for what you just captured. Under two
+minutes, and the last step is the product demo built from your own words.
+
+Three promises the screen keeps:
+
+- **Nothing is written until a line says so.** Creating a vault shows exactly
+  what will be created — the folder, its governed layer, the file count — and
+  writes only after you choose it.
+- **`esc` rewinds one line.** Lines that recorded a write are pinned: you
+  cannot un-create a folder, and the screen says so instead of pretending.
+- **Everything but the vault is skippable** (`s`), and skipping leaves its own
+  line. "Skip for now" on the first question lands on a working, vault-less
+  Home where every path stays reachable.
+
+Pointing "Create a fresh vault" at a folder that already holds a Knowledge Base
+connects to it rather than failing. Choosing "Scan a folder first" inserts a
+read-only report before any decision.
+
+First run never reopens once a vault is connected.
 
 ## Screens
 
@@ -54,16 +77,35 @@ Ask presents *measurements*, not generated prose: Exomem is a pure substrate —
 the server measures, your model reasons. The copyable context packet exists
 precisely to hand that evidence to a reasoning model.
 
+## How to read the screen
+
+Everything that happened reads as a **receipt**: a glyph, a word, then what
+actually happened — `● ready`, `▲ warming`, `✓ saved`, `✗ not saved`. Status is
+always a glyph *and* a word, so nothing depends on color; `NO_COLOR` and
+ASCII-only terminals lose nothing but hue.
+
+Amber marks live state only — the current step, the `▸ retrieved` header, live
+wikilinks in a preview, the cursor, focus, and the selected row's `▌` bar. It
+is never decoration and never an error.
+
+Anything that fails, comes back empty, or runs degraded renders the same way:
+what happened, a dim line stating what was and was not changed, then a list of
+next actions you can select. No screen dead-ends, and no traceback reaches the
+terminal.
+
 ## Key map
 
-Global: `ctrl+p` command palette · `?` help overlay · `esc` back (guarded —
-non-empty input is never silently discarded) · `ctrl+q` quit (confirmed).
-Home: `1`–`8` open screens · `u` refresh · `q` quit. Lists: arrows and `j/k` ·
-`enter` opens · highlighted rows show focus. Ask: `enter` submit · `esc`
-cancel the run · `e` evidence preview · `y` copy context packet · `w` save an
-insight. Review: `d` dismiss · `s` snooze · `o` reopen · `v` cycle state view
-· `u` refresh. Capture: `ctrl+s` save. Adopt: `m` save manifest · `c` copy as
-sources (both confirmed).
+Global: `ctrl+p` command palette · `?` help overlay · `u` refresh this screen ·
+`esc` back (guarded — non-empty input is never silently discarded) · `ctrl+q`
+quit (confirmed). Home: `1`–`8` open screens · `enter` opens the highlighted
+row. Lists: arrows and `j/k` · `enter` opens · the selected row carries `▌`.
+Ask: `enter` submit · `u` re-run · `esc` steps back one layer (results → the
+query, which is kept → back) · `e` evidence preview · `y` copy context packet ·
+`w` save an insight. Capture: `ctrl+s` save · `tab` cycle thought/insight ·
+`e` edit the derived title · `esc` back with your typing kept. Review: `enter`
+context · `d` dismiss · `s` snooze · `o` reopen · `v` cycle state view. Adopt:
+`m` save manifest · `c` copy as sources (both confirmed). First run: `esc`
+rewind one line · `s` skip an optional step.
 
 ## Governed write-back
 
@@ -124,6 +166,11 @@ are scanned by the public-artifact privacy gate — never regenerate them
 against a real vault). Intentional regeneration:
 
     uv run --frozen --extra tui --group tui-dev python -m pytest tests/tui/test_snapshots.py --snapshot-update
+
+To review layout as a character grid without a terminal (development aid; it
+drives the same deterministic fake):
+
+    uv run --extra tui python scripts/tui_frames.py home first-run ask
 
 The lean matrix (no `tui` extra) skips `tests/tui` entirely; `tests/test_tui_entry.py`
 and `tests/test_product_invoke.py` run everywhere.

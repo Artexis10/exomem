@@ -179,14 +179,78 @@ Emotional target: calm, trustworthy, fast, precise. Concretely:
   visual identities (checked again at the similarity gate).
 - **Status language**: every warning reads *what → why → next action*, reusing
   the registry's own remediation strings.
-- **Glyph policy**: Unicode `● ○ ▲ ✓ ×` with automatic ASCII fallback
-  (`* o ! ok x`) when the encoding cannot render them; `NO_COLOR` respected
-  (Textual/rich honor it; verified by test).
+- **Glyph policy**: Unicode `● ○ ▲ ✗ ✓ ▸ ▌ │ ─ → …` with an automatic ASCII
+  fallback of identical arity (`* o ! x + > > | - -> ...`) when the encoding
+  cannot render them; `NO_COLOR` selects a monochrome skin that keeps hierarchy
+  in dim/bold/reverse. Both paths are asserted by test rather than assumed.
 - **Breakpoints**: 80×24 single-column with evidence/detail as overlays;
   ≥100 columns two-pane (list + detail); ≥120 adds the persistent evidence
   panel on Ask/Review. No horizontal overflow at 80 columns anywhere.
 - Dark and light terminal themes via Textual's theme system; no hard-coded
   backgrounds that fight terminal-native palettes.
+
+### Design pass 2 (2026-08-01): the ledger and the receipt language
+
+The v1 screens were correct but read as configuration. A dedicated design
+session produced a locked direction — first run as an **accreting ledger**,
+and the daily loop restyled in the same **receipt language** — recorded in
+Exomem as "Exomem TUI redesign locked — ledger first-run and receipt language"
+(project `exomem`). What that changed, and why:
+
+- **First run is one screen, not a wizard.** Answered steps collapse into `✓`
+  receipt lines; the active question owns the rows below them. The transcript
+  *is* the progress indicator, so the rail widget a stepped wizard would need
+  never has to claim a state the screen cannot prove. `esc` rewinds one line
+  and stops at any line that recorded a write, because a folder that exists
+  cannot be un-created and a UI that implies otherwise is lying.
+- **Receipts are the shared vocabulary.** `glyph + word` padded to a fixed
+  label column, then the detail. The same shape renders setup steps, save
+  confirmations, health lines, and Home's session log, so the language of the
+  first run is the language of the daily loop.
+- **One recovery template.** Failure, empty, and degraded states all render as
+  status line → what happened → dim statement of what was and was not changed →
+  a *selectable* list of next actions with the best pre-selected. This replaced
+  three ad-hoc shapes (an error notice widget, a prose empty state, and a
+  notification toast) with one, and it is why no state can dead-end.
+- **The accent boundary became a rule, not a habit.** Amber lights only live or
+  confirmed state — the current step, `▸ retrieved`, live wikilinks, the
+  cursor, focus, the selection bar. It is never chrome and never an error, so
+  the eye can trust it. Errors are red-with-a-glyph-and-a-word.
+- **Selection is a bar in column zero**, rendered into the option prompt rather
+  than drawn by the widget, so it survives multi-line rows, ASCII terminals,
+  and `NO_COLOR` (where it becomes reverse video plus `>`).
+- **A `Skin` object replaced scattered style literals.** Rich spans cannot
+  resolve Textual CSS variables, so styled text is built from one object
+  carrying the glyph set and the color roles. That is what makes the `NO_COLOR`
+  path testable instead of aspirational: the mono skin is a value you can pass
+  to a pure renderer and assert on.
+
+Where the drawn frames and the backend disagreed, the backend won and the
+deviation is recorded here rather than papered over:
+
+- **Paths truncate from the left** (`…/Insights/…limits.md`), including in
+  result rows where the frame showed a right-truncated path. The filename is
+  the identifying part; the spec's own overflow rule says so, and behavior
+  beats layout when they conflict.
+- **The file count in the first-run preview is measured**, not the literal
+  "14 files" in the copy deck: it counts the packaged scaffold, so the promise
+  stays true as the scaffold grows.
+- **Snooze does not offer "after the next sweep."** The triage contract takes a
+  date; an option the backend cannot express is exactly the fake affordance the
+  rest of the screen refuses to draw.
+- **The Review context pane labels what the payload actually contains**
+  (`what` / `page` / `related` / `measured`) instead of the frame's
+  `newer` / `older`. The review-context envelope does not label which side of a
+  contradiction is newer, and guessing would be fabrication.
+- **Retrieval timing is routed through the app** (`elapsed_ms`) so snapshots
+  can pin it; a golden that diffs by a millisecond is a golden nobody trusts.
+
+Two Textual behaviors shaped the implementation and are worth stating because
+both produced real bugs before they were understood: message handlers are
+dispatched to **every class in the MRO** (so screens must not chain
+`super().on_mount()`, and only one class in a modal's hierarchy may call
+`dismiss`), and `Widget._render` / `MessagePump._running` are framework
+attributes that a screen must not shadow.
 
 ### Key map (documented in docs/tui.md)
 
@@ -199,6 +263,18 @@ filter exists. Ask: `enter` submits, `esc` cancels the run, `e` evidence,
 `y` copy context packet, `w` write-back. Review: `enter` context, `d` dismiss,
 `s` snooze, `o` reopen, `u` refresh. Capture: `ctrl+s` saves. Small, coherent,
 screen-local where letters could collide with typing.
+
+Pass 2 added keys only; nothing was removed or re-pointed. `u` refresh is now
+standardized on every data screen. Home's list is focusable, so `enter` opens
+the highlighted row. Ask gains `u` (re-run) and an `esc` that unwinds one layer
+at a time — results → the query (kept) → back. Capture gains `tab` (cycle
+kind) and `e` (edit the derived title). First run uses `esc` to rewind one
+ledger line and `s` to skip an optional step.
+
+`e` on Capture is gated by `check_action` so it types an "e" while the text
+area has focus and is the shortcut everywhere else; `shift+tab` moves focus out
+of the text area, which is how the shortcut stays reachable without stealing a
+character from the writer.
 
 ### Testing and goldens
 
