@@ -42,15 +42,20 @@ _TARGET_STATUSES = frozenset({"resolved", "unresolved", "ambiguous"})
 _EXCLUDED_FAMILIES = frozenset(
     {"link", "citation", "derivation", "evidence", "mention", "observation", "provenance"}
 )
-# Origins that can carry a connectivity signal. Superset of the typed-lane
-# origins: adds `frontmatter` for any family (so cited provenance counts) and
-# `wikilink` (the origin the retrieval graph already stamps on body links).
+# Origins that can carry a connectivity signal, chosen to mirror
+# `audit._check_relation_debt` exactly: it clears a page on authored relation rows
+# or body wikilinks, and ignores `sources:`.
+#
+# `frontmatter` is deliberately absent. Provenance is a vertical edge to raw
+# material; it says nothing about how this conclusion relates to other
+# conclusions, and every adoption-compiled note has it by construction — so
+# counting it would make the gate a no-op for exactly the bulk-import case that
+# most needs review, and would make the gate more permissive than the audit.
 _CONNECTIVITY_ORIGINS = frozenset(
     {
         "markdown_relation",
         "semantic_relation",
         "semantic_block",
-        "frontmatter",
         "wikilink",
     }
 )
@@ -2473,24 +2478,6 @@ def _derive_relation_facts(
                         "reverse": reverse,
                     }
                 )
-        # Body wikilinks as `links_to`/`origin: wikilink` — the same edge the
-        # retrieval graph already materialises. They never qualify as a typed
-        # epistemic edge; they exist so the connectivity lane can see them.
-        for link_target, link_line in state.body_wikilinks:
-            raw_facts.append(
-                {
-                    "authored": state,
-                    "raw_relation": "links_to",
-                    "raw_target": link_target,
-                    "line": link_line,
-                    "anchor": None,
-                    "element_identity": f"wikilink:{link_target.casefold()}",
-                    "source_kind": "file",
-                    "origin": "wikilink",
-                    "reverse": False,
-                }
-            )
-
     occurrences: Counter[tuple[str, str, str, str, str, str]] = Counter()
     facts: list[RelationFact] = []
     for raw in raw_facts:

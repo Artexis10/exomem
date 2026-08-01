@@ -47,8 +47,10 @@ one relation voluntarily, so a minimum count would only manufacture edges — th
 
 - Add a second, explicitly weaker connectivity predicate beside the typed-relation
   predicate. The typed predicate is unchanged. Resolved outbound body wikilinks and
-  non-empty `sources:` to connectable governed pages satisfy the disposition when no
-  typed edge exists, and the disposition reports which signal satisfied it.
+  authored relation rows of any family satisfy the disposition when no typed edge
+  exists, and the disposition reports which signal satisfied it. Frontmatter
+  provenance deliberately does not count, so the disposition stays aligned with the
+  relation-debt measurement, which also ignores `sources:`.
 - Emit `wikilink`-origin relation facts from body links, deduplicated by normalized
   target and capped per page. The `links_to` registry entry already permits this origin.
 - Add a connectable-target set (governed compiled types, entities, and append-only

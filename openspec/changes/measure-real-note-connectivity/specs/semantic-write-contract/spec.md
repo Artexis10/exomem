@@ -21,11 +21,18 @@ the active successor.
 When no typed edge qualifies, the disposition MAY be satisfied by an **outbound
 connectivity signal**: an authored outbound connection whose target resolves unambiguously
 to a connectable governed page, whose canonical registry entry is active and scope-valid,
-and whose origin is `wikilink`, `frontmatter`, `markdown_relation`, `semantic_relation`, or
+and whose origin is `wikilink`, `markdown_relation`, `semantic_relation`, or
 `semantic_block`, irrespective of registry family. The connectable set SHALL be the
 eligible governed set widened to admit append-only `Sources/` material, and SHALL be
 computed separately from the eligible governed set so that the empty-corpus bootstrap
 disposition is unaffected by captured sources.
+
+Frontmatter origin SHALL NOT satisfy connectivity. This keeps the disposition aligned with
+the relation-debt measurement, which clears a page on authored relation rows or body
+wikilinks and ignores `sources:`. Provenance is a vertical edge to raw material and carries
+no claim about how a conclusion relates to other conclusions; because every
+adoption-compiled note cites a source by construction, counting it would make the
+disposition a no-op for exactly the bulk-import case that most needs review.
 
 Inbound edges MUST NOT satisfy connectivity. Unresolved or ambiguous forward targets MUST
 NOT satisfy either lane. A disposition satisfied by connectivity SHALL report that signal
@@ -63,16 +70,26 @@ imposed in either lane.
 - **WHEN** a second eligible compiled page is added after the first page received an automatic bootstrap disposition
 - **THEN** the first page's bootstrap disposition becomes stale and enters ordinary relation review
 
-#### Scenario: Resolved body wikilinks satisfy connectivity without a typed edge
-- **WHEN** an active compiled page carries no typed relation but one or more resolved outbound body wikilinks to connectable governed pages
+#### Scenario: Excluded-family relation satisfies connectivity without a typed edge
+- **WHEN** an active compiled page carries no qualifying typed relation but one or more authored relation rows of an excluded family resolving to connectable governed pages
 - **THEN** its relation disposition is satisfied and reports the connectivity signal rather than a typed edge
 - **AND** a typed-edge-absent warning is emitted at warning severity
 - **AND** the write is not blocked
 
-#### Scenario: Cited provenance satisfies connectivity
-- **WHEN** an active compiled page carries no typed relation but names existing `Sources/` pages in its `sources:` frontmatter
+#### Scenario: Body wikilinks are measured but not yet a disposition signal
+- **WHEN** an active compiled page carries only body wikilinks and no authored relation row
+- **THEN** the links are recorded on page state for measurement
+- **AND** the disposition remains unsatisfied, because emitting them as relation facts regressed the semantic write-latency gate and the fact emission was withdrawn pending a cheaper resolution path
+
+#### Scenario: Cited provenance alone does not satisfy the disposition
+- **WHEN** an active compiled page carries no typed relation and no body wikilink, but names existing `Sources/` pages in its `sources:` frontmatter
+- **THEN** the disposition remains unsatisfied and enters ordinary relation review
+- **AND** an adoption-compiled page, which always cites a source, still receives relation review
+
+#### Scenario: A body wikilink to a Source does satisfy connectivity
+- **WHEN** an active compiled page links a `Sources/` page from its body rather than only from frontmatter
 - **THEN** the disposition is satisfied by the connectivity signal
-- **AND** the same target is not required to be an eligible governed page
+- **AND** the target is not required to be an eligible governed page
 
 #### Scenario: Inbound links and provenance back-references never satisfy connectivity
 - **WHEN** a compiled page has no outbound connection of any kind, but a `Sources/` page links to it and its own `ingested_into:` back-reference names it

@@ -1,11 +1,16 @@
 """The connectivity lane — a weaker sibling of the typed-relation predicate.
 
-The write-time disposition was the only subsystem in the chain that could not see
-a body wikilink: the retrieval graph already materialises them as
-`links_to`/`origin: wikilink`, and the relation-debt audit already clears a page
-that has them. These tests pin the third subsystem into line, and pin the three
-things that must not break while doing it — the typed predicate's meaning, the
-empty-corpus bootstrap carve-out, and non-vacuity.
+A weaker lane runs when no typed edge qualifies, so an authored relation of any
+family connects a page instead of forcing a reviewed-none round trip.
+
+Two boundaries are deliberate. Frontmatter provenance does not count, mirroring
+the relation-debt audit, which also ignores `sources:` — otherwise every
+adoption-compiled note would satisfy the gate by construction. And body wikilinks
+are collected but not yet a signal: emitting them as relation facts blew the
+write-latency gate at 8k pages, so that half is withdrawn pending a cheaper check.
+
+These also pin the three things that must not break — the typed predicate's
+meaning, the empty-corpus bootstrap carve-out, and non-vacuity.
 """
 
 from __future__ import annotations
@@ -180,48 +185,8 @@ def test_qualify_connectivity_accepts_what_the_typed_lane_excludes(
 
 
 # --------------------------------------------------------------------------
-# Body wikilinks become facts and satisfy the weaker lane.
+# What the weaker lane does and does not count.
 # --------------------------------------------------------------------------
-
-
-def test_body_wikilink_emits_a_links_to_fact_with_wikilink_origin(
-    tmp_path: Path,
-) -> None:
-    page = _state(
-        tmp_path,
-        "Knowledge Base/Notes/Insights/page.md",
-        _source(body=_OBS + "This builds on [[Knowledge Base/Notes/Patterns/target]].\n"),
-    )
-    corpus = _corpus(tmp_path, page, _target(tmp_path))
-
-    facts = corpus.outbound[page.path]
-    assert [fact.origin for fact in facts] == ["wikilink"]
-    assert facts[0].canonical_relation == "links_to"
-
-
-def test_body_wikilink_satisfies_as_connectivity_without_blocking(
-    tmp_path: Path,
-) -> None:
-    page = _state(
-        tmp_path,
-        "Knowledge Base/Notes/Insights/page.md",
-        _source(body=_OBS + "This builds on [[Knowledge Base/Notes/Patterns/target]].\n"),
-    )
-
-    result = _disposition(tmp_path, page, _target(tmp_path))
-
-    assert result.relation_disposition.kind == "qualifying_relation"
-    assert result.relation_disposition.satisfied is True
-    assert result.relation_disposition.qualifying_signal == "connectivity"
-    assert result.should_block is False
-
-    codes = {finding.code for finding in result.findings}
-    assert "RELATION_DISPOSITION_MISSING" not in codes
-    warning = next(
-        finding for finding in result.findings
-        if finding.code == "RELATION_TYPED_EDGE_ABSENT"
-    )
-    assert warning.severity == "warning"
 
 
 def test_typed_relation_reports_typed_and_emits_no_typed_edge_warning(
@@ -240,9 +205,16 @@ def test_typed_relation_reports_typed_and_emits_no_typed_edge_warning(
     assert "RELATION_TYPED_EDGE_ABSENT" not in codes
 
 
-def test_cited_provenance_satisfies_connectivity_via_the_connectable_set(
+def test_cited_provenance_alone_does_not_satisfy_the_disposition(
     tmp_path: Path,
 ) -> None:
+    """Connectivity mirrors the relation-debt audit, which ignores `sources:`.
+
+    Provenance is a vertical edge to raw material and says nothing about how a
+    conclusion relates to other conclusions. Every adoption-compiled note carries
+    it by construction, so counting it would make the gate a no-op for exactly the
+    bulk-import case that most needs review.
+    """
     captured = _captured_source(tmp_path)
     page = _state(
         tmp_path,
@@ -251,14 +223,41 @@ def test_cited_provenance_satisfies_connectivity_via_the_connectable_set(
     )
     corpus = _corpus(tmp_path, page, captured)
 
-    # The Source is a legal connectivity target but never an eligible governed
-    # page — that separation is what protects the bootstrap carve-out.
+    # The Source stays a legal connectivity *target* — that separation is what
+    # protects the bootstrap carve-out — but frontmatter origin does not qualify.
     assert captured.path in corpus.connectable_target_paths
     assert captured.path not in corpus.eligible_governed_paths
 
     result = _disposition(tmp_path, page, captured)
-    assert result.relation_disposition.satisfied is True
-    assert result.relation_disposition.qualifying_signal == "connectivity"
+    assert result.relation_disposition.satisfied is False
+    assert result.relation_disposition.kind == "missing"
+
+
+def test_body_wikilinks_are_collected_but_do_not_yet_satisfy(
+    tmp_path: Path,
+) -> None:
+    """Body links are measured on page state, but are not yet a disposition signal.
+
+    Emitting them as relation facts blew the semantic write-latency gate at 8k
+    pages (commit median 1259ms against a 750ms threshold, scaling 4.7x where
+    ~2.75x is allowed), so the fact emission was withdrawn. The collected
+    `body_wikilinks` remain, ready for a cheaper set-membership check that does not
+    route every link through full fact construction and target resolution.
+    """
+    page = _state(
+        tmp_path,
+        "Knowledge Base/Notes/Insights/page.md",
+        _source(body=_OBS + "This builds on [[Knowledge Base/Notes/Patterns/target]].\n"),
+    )
+    corpus = _corpus(tmp_path, page, _target(tmp_path))
+
+    assert [target for target, _ in page.body_wikilinks] == [
+        "Knowledge Base/Notes/Patterns/target"
+    ]
+    assert corpus.outbound.get(page.path, ()) == ()
+
+    result = _disposition(tmp_path, page, _target(tmp_path))
+    assert result.relation_disposition.satisfied is False
 
 
 # --------------------------------------------------------------------------
