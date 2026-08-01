@@ -252,3 +252,79 @@ default state dirs under $HOME), so the 738 are environmental, all 137
 membench tests pass, and outside-sandbox `uv run --frozen python -m pytest
 -q` is the user-run verification; 9.3 `uvx ruff check . --select F` is
 sandbox-blocked (read-only uv cache) — user-run.
+
+## Addendum — retrieval fix delta and recommended-profile results (2026-08-01)
+
+**The headline weakness is fixed and measured.** Product fix `91b016f` on
+branch `fix/lexical-degraded-retention` (worktree
+`~/projects/exomem-lexical-fix`, base v0.36.0): when the semantic lanes are
+structurally absent, the in-KB retention seam now retains a BM25 candidate on
+a strict majority of query words present PLUS at least one non-function
+content word, instead of the all-stems veto. Fable-delegate review chain:
+any-stem branch proven unsatisfiable against five pinned precision contracts
+→ coverage-fraction implementation → independent review found stopword-
+majority false retention (HIGH, demonstrated at paragraph length) →
+content-anchor guard → targeted recheck ALL FIXED; 46 retrieval-family tests
+green, latency gate green throughout, active-lane behavior byte-identical.
+
+Three runs over the identical seed-1 corpus and 236-query denominator:
+
+| Dimension (pass/fail) | lexical pre-fix | lexical post-fix (91b016f) | embeddings (pre-fix source) |
+|---|---|---|---|
+| factual_qa | 0 / 180 | **99 / 81** | **157 / 23** |
+| provenance | 0 / 180 | 91 / 89 | 142 / 38 |
+| temporal | 28 / 180 | 88 / 120 | 131 / 77 |
+| abstention | 52 / 184 | 136 / 100 | 180 / 56 |
+| contradiction_uncertainty | 0 / 20 | 0 / 20 | 0 / 20 |
+| governance (no-leak) | 16 / 16* | 0 / 16 | 0 / 16 |
+
+\* trivially satisfied by empty answers. With real retrieval the 16
+governance fails measure an **ungoverned vault**: the adapter does not yet
+translate corpus `policies.yaml` into exomem's opt-in `_Governance/` policy
+and the runner does not thread persona identity, so this quantifies the
+default-open leak surface, not the shipped governance engine. Wiring
+policy translation + per-persona principals (declaring `GOVERNED_VIEWS`) is
+the named follow-up lane. The 0/20 contradiction row and the temporal fails
+are the ABSENT capability families (disputed state, bitemporal as-of) doing
+exactly the discriminating work the corpus was built for. Runs:
+`20260731T163452Z…baseline-lexical`, `20260801T115138Z…postfix-lexical-v2`,
+`20260801T073130Z…recommended-embeddings-v2`.
+
+**Environment findings that gated these measurements (all root-caused):**
+
+1. **WSL2 "embeddings crash" = CUDA context initialization segfault** in the
+   venv's torch cu132 build — a bare `torch.randn(4,4).to('cuda')` segfaults,
+   and even `torch.cuda.is_available()` (called by sentence-transformers
+   during device resolution) kills nominally-CPU runs, which retroactively
+   explains the recorded "SIGABRT on CPU". Workaround that unblocked
+   everything: `CUDA_VISIBLE_DEVICES=` (hide the GPU) + CPU inference. GPU
+   proper needs a torch/driver alignment on the host.
+2. **`~/.cache/huggingface` and the venv console scripts are stale-state
+   hazards**: the HF dir was root-owned (sandbox-era remnant; bypassed via
+   `HF_HOME`), and the venv's `exomem` entry point + dist-metadata date from
+   an old 0.22.0 install while the editable module code is current 0.36.0 —
+   version *strings* in provider metadata are wrong until `uv sync` refreshes
+   the install.
+3. **Exomem disable-flags are string-truthy**: `EXOMEM_DISABLE_EMBEDDINGS=0`
+   *disables* embeddings ("0" is a non-empty string). The membench embeddings
+   profile therefore sets the EMPTY string, and a factory test pins that
+   exactly one knob differs from the lexical profile. Two mislabeled runs
+   (`…baseline-embeddings…`, `…recommended-embeddings-29a546`) measured
+   lexical again and are superseded; their dimension-identical scores across
+   independent processes are retained as a determinism replication.
+4. **A/B measurement trap**: `benchmarks/run.py` inserts the repo's own
+   `src` at `sys.path[0]`, silently overriding a `PYTHONPATH` source
+   override; fixed-source delta runs must bypass the launcher
+   (`python -c "from membench.cli import main; …"` with
+   `PYTHONPATH=<fix>/src:<bench>` — the first postfix run measured pre-fix
+   code this way and was superseded by `postfix-lexical-v2`).
+
+**Track A integration state:** provider-side fixes committed on the
+`exomem-provider` branch (`0b11fab4` hybrid-always, `02096da2` state
+isolation, `72e01eb5` skip semantic index when embeddings disabled,
+`463191d0` let BM pick search_type and fail loudly on search guidance
+strings). The bm-local zeros in runs `ee278ae61cde` (semantic path stalling
+~42 s/query) and `66bb0ab040f4` (forced hybrid with semantic disabled) are
+integration artifacts, not Basic Memory retrieval quality; the empty-index
+diagnosis and verified three-way rerun are in flight and no comparative
+Basic Memory number is publishable until that lands green.
