@@ -10,7 +10,7 @@ Exomem can preserve knowledge and query raw datasets, but it has no first-class 
 - Add one multiplexed `record_memory` product command with five actions—`inspect`, `create`, `query`, `append`, and `update`—and expose it consistently through MCP, REST, CLI, and bootstrap. Existing `maintain_memory` remains the owner of derived-index repair.
 - Preserve `type: tracker` and existing manual/Obsidian workflows. Manifest-less trackers remain discoverable and inspectable at collection level; item query or mutation requires an explicit adjacent manifest with a complete adapter descriptor. Stable IDs are introduced prospectively without rewriting history.
 - Let manifests reference ordinary Markdown templates and update existing knowledge-pack guidance without making templates hidden schema truth, adding silent pack activation, or adding an Obsidian runtime dependency.
-- Keep raw high-volume items out of ordinary semantic recall by default while making collection manifests discoverable and records accessible through explicit structured queries.
+- Keep raw high-volume items and all non-manifest descendants out of ordinary semantic recall while making strictly valid collection manifests discoverable and records accessible through explicit structured queries. On-demand JSON/Markdown/CSV outputs are derived, never persisted or promoted automatically; persisted summary recall is deferred pending governed materialization and source-authorization closure.
 - Apply governance before every record reduction or aggregate, serialize same-vault agent mutations through the existing writer boundary, and return stale/ambiguous refusals plus auditable mutation receipts.
 - Prove the abstraction with the current X3 newest-first training log, an unrelated one-file-per-item vehicle-maintenance collection, and a query-only dataset fixture. Round-trip an opaque Planning reference plus bounded Records query descriptor without resolving Planning or comparing planned and recorded state.
 - Defer the complete Planning product, dashboard/calendar/board UI, general spreadsheet/database behavior, advanced analytics, task execution, and automatic interpretation of record meaning.
@@ -26,7 +26,7 @@ Exomem can preserve knowledge and query raw datasets, but it has no first-class 
 
 - `command-surface`: Add one consistently generated Records front door without exposing a family of storage-specific tools.
 - `governance-kernel`: Gate releasable manifests and record items before pagination totals, aggregates, profiles, and derived observed-state reductions, with path/item provenance preserved through egress.
-- `find-recall-efficiency`: Discover collection-level summaries while preventing repetitive raw record items from flooding ordinary recall.
+- `find-recall-efficiency`: Discover strictly valid collection manifests while preventing repetitive raw or derived Record items from flooding ordinary recall.
 - `agent-bootstrap-contract`: Teach the Records boundary, natural capture/query routing, template behavior, and Planning-versus-Records distinction.
 
 ## Impact
