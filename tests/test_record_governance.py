@@ -518,6 +518,47 @@ def test_schema_link_projection_handles_anchors_forward_refs_and_hidden_targets(
     assert projected == {"receipt": "[[Future evidence]]"}
 
 
+def test_schema_link_projection_supports_exact_paths_and_caches_normalized_targets(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fixture = copy_vehicle_maintenance_fixture(tmp_path)
+    manifest_path = fixture / "_collection.md"
+    manifest_path.write_text(
+        manifest_path.read_text(encoding="utf-8").replace(
+            "items:\n        type: string", "items:\n        type: link"
+        ),
+        encoding="utf-8",
+    )
+    manifest = collections.load_manifest(tmp_path, manifest_path)
+    secret = tmp_path / "Knowledge Base" / "Evidence" / "Secret.md"
+    secret.parent.mkdir(parents=True)
+    secret.write_text("hidden", encoding="utf-8")
+    _write_l6_rule(tmp_path, ceiling=6, paths="Records/**")
+    _write_l0_rule(tmp_path, name="secret", paths="Evidence/**")
+
+    calls: list[str] = []
+    original = record_governance._authorize
+
+    def watched(root: Path, relative: str, *, receipt: bool = False) -> bool:
+        calls.append(relative)
+        return original(root, relative, receipt=receipt)
+
+    monkeypatch.setattr(record_governance, "_authorize", watched)
+    with request_scope(RequestPrincipal(audience_id=EXTERNAL, surface="mcp")):
+        projected = record_governance._project_links(
+            tmp_path,
+            manifest,
+            {
+                "asset": "Knowledge Base/Evidence/Secret",
+                "receipt": "[[Knowledge Base/Evidence/Secret.md#receipt|Secret]]",
+                "services": ["Knowledge Base/Evidence/Future.md", "not a path"],
+            },
+        )
+
+    assert projected == {"services": ["Knowledge Base/Evidence/Future.md"]}
+    assert calls.count("Knowledge Base/Evidence/Secret.md") == 1
+
+
 def test_precommit_refusal_leaves_canonical_and_manifest_unchanged(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

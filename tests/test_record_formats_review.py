@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 
 import pytest
-from record_fixtures import copy_vehicle_maintenance_fixture
+from record_fixtures import copy_dataset_fixture, copy_vehicle_maintenance_fixture
 
 from exomem import query_data, record_formats
 from exomem import structured_collections as collections
@@ -26,6 +26,88 @@ def test_markdown_items_snapshot_binds_authorized_non_record_markdown(tmp_path: 
     relative = readme.relative_to(tmp_path).as_posix()
     assert relative in {path for path, _kind, _digest in first.source_inventory}
     assert first.snapshot != second.snapshot
+
+
+def test_markdown_items_hides_candidates_from_public_caps_but_keeps_authorized_inventory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fixture = copy_vehicle_maintenance_fixture(tmp_path)
+    manifest = collections.load_manifest(tmp_path, fixture / "_collection.md")
+    events = fixture / "Events"
+    hidden = events / "hidden"
+    hidden.mkdir()
+    for number in range(4):
+        (hidden / f"{number}.bin").write_bytes(b"hidden")
+    readme = events / "README.md"
+    readme.write_text("context", encoding="utf-8")
+    monkeypatch.setattr(record_formats, "_MAX_ITEM_FILES", 3)
+    monkeypatch.setattr(record_formats, "_MAX_RAW_ITEM_ENTRIES", 16)
+
+    def authorized(path: str) -> bool:
+        return "/hidden/" not in f"/{path}" and "/withheld/" not in f"/{path}"
+
+    first = record_formats.load_adapter(tmp_path, manifest, authorize_path=authorized).read()
+    assert len(first.records) == 2
+    assert readme.relative_to(tmp_path).as_posix() in {
+        path for path, _kind, _digest in first.source_inventory
+    }
+    assert not any("/hidden/" in f"/{path}" for path, _kind, _digest in first.source_inventory)
+
+    readme.write_text("direct edit", encoding="utf-8")
+    second = record_formats.load_adapter(tmp_path, manifest, authorize_path=authorized).read()
+    assert second.snapshot != first.snapshot
+
+    (events / "authorized.bin").write_bytes(b"public")
+    with pytest.raises(collections.CollectionError, match="too many item files"):
+        record_formats.load_adapter(tmp_path, manifest, authorize_path=authorized).read()
+
+
+def test_markdown_items_raw_ceiling_is_independent_of_public_file_cap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fixture = copy_vehicle_maintenance_fixture(tmp_path)
+    manifest = collections.load_manifest(tmp_path, fixture / "_collection.md")
+    monkeypatch.setattr(record_formats, "_MAX_RAW_ITEM_ENTRIES", 2)
+
+    with pytest.raises(collections.CollectionError, match="too many item entries"):
+        record_formats.load_adapter(
+            tmp_path, manifest, authorize_path=lambda path: path == manifest.storage.source
+        ).read()
+
+
+def test_hidden_link_field_does_not_remove_dataset_row_from_identity_or_query(
+    tmp_path: Path,
+) -> None:
+    fixture = copy_dataset_fixture(tmp_path)
+    manifest = collections.load_manifest(tmp_path, fixture / "_collection.md")
+    target = fixture / "readings.csv"
+    target.write_text(
+        target.read_text(encoding="utf-8").replace("electricity", "[[Evidence/Secret]]", 1),
+        encoding="utf-8",
+    )
+    manifest_path = fixture / "_collection.md"
+    manifest_path.write_text(
+        manifest_path.read_text(encoding="utf-8")
+        .replace("  key: reading_id\n", "")
+        .replace("natural_key: [reading_id]", "natural_key: [category]")
+        .replace("    category:\n      type: string", "    category:\n      type: link"),
+        encoding="utf-8",
+    )
+    manifest = collections.load_manifest(tmp_path, manifest_path)
+
+    result = record_formats.query_collection(
+        tmp_path,
+        manifest,
+        project_values=lambda values: {
+            key: value
+            for key, value in values.items()
+            if not (key == "category" and value == "[[Evidence/Secret]]")
+        },
+    )
+
+    assert result.total_matched == 72
+    assert len(result.rows) == 72
+    assert sum("category" not in row for row in result.rows) == 1
 
 
 def _log_manifest() -> str:

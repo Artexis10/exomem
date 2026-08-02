@@ -291,7 +291,6 @@ class MarkdownLogAdapter(_BaseAdapter):
             if children:
                 values[child_container] = [child.values for child in children]
             self._validate_values(values)
-            values = self._project_values(values)
             marker_match = _marker_outside_fences(block)
             marker = None
             if marker_match:
@@ -301,6 +300,7 @@ class MarkdownLogAdapter(_BaseAdapter):
                         "INVALID_RECORD_ID", "markdown marker is not a UUID"
                     )
             identity = self._identity(values, marker)
+            values = self._project_values(values)
             records.append(
                 Record(
                     identity=identity,
@@ -454,10 +454,11 @@ class MarkdownItemsAdapter(_BaseAdapter):
                 if name not in {"type", "collection_id", "record_id", "schema_version"}
             }
             self._validate_values(values)
+            identity = collections.ItemIdentity(collection_id, record_id)
             values = self._project_values(values)
             records.append(
                 Record(
-                    identity=collections.ItemIdentity(collection_id, record_id),
+                    identity=identity,
                     values=values,
                     source=collections.SourceVersion(path=rel, hash=digest),
                     span=SourceSpan(0, len(data)),
@@ -535,7 +536,6 @@ class DatasetAdapter(_BaseAdapter):
                 {name: _json_value(value) for name, value in row.items()}, self.manifest
             )
             self._validate_values(values)
-            values = self._project_values(values)
             if key_name is not None:
                 key = str(values.get(str(key_name), ""))
                 if not key:
@@ -545,6 +545,7 @@ class DatasetAdapter(_BaseAdapter):
                 identity = collections.ItemIdentity(self.manifest.collection_id, key)
             else:
                 identity = self._identity(values, None)
+            values = self._project_values(values)
             records.append(
                 Record(
                     identity=identity,
