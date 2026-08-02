@@ -23,6 +23,7 @@ _HEADING = re.compile(rb"^(#{1,6})\s+(.+?)\s*(?:\r?\n|$)")
 _FENCE_OPEN = re.compile(rb"^ {0,3}((?:`{3,}|~{3,}))[^\r\n]*(?:\r?\n|$)")
 _MAX_LOG_BYTES = 2 * 1024 * 1024
 _MAX_ITEM_FILES = 2_000
+_MAX_RAW_ITEM_ENTRIES = 10_000
 _MAX_ITEM_BYTES = 512 * 1024
 _MAX_COLLECTION_BYTES = 8 * 1024 * 1024
 _MAX_TOKEN_PAYLOAD_BYTES = 4 * 1024
@@ -345,7 +346,7 @@ class MarkdownItemsAdapter(_BaseAdapter):
             raise collections.CollectionError("COLLECTION_NOT_FOUND", "collection was not found")
         try:
             root_guard = vault.DirectoryCensusGuard.capture(
-                self.vault_root, source_relative, max_entries=_MAX_ITEM_FILES
+                self.vault_root, source_relative, max_entries=_MAX_RAW_ITEM_ENTRIES
             )
         except vault.PathGuardError as error:
             if error.code == "PATH_GUARD_LIMIT":
@@ -375,24 +376,26 @@ class MarkdownItemsAdapter(_BaseAdapter):
             directory_guard = pending.pop()
             for entry in directory_guard.entries:
                 candidates += 1
-                if candidates > _MAX_ITEM_FILES:
+                if candidates > _MAX_RAW_ITEM_ENTRIES:
                     raise collections.CollectionError(
                         "RECORD_ITEM_LIMIT", "collection has too many item entries"
                     )
                 if stat.S_ISDIR(entry.mode):
-                    if self.authorize_path is None or self.authorize_path(entry.relative_path):
+                    authorized = self._require_authorized(entry.relative_path)
+                    if authorized:
                         inventory.append((entry.relative_path, "directory", ""))
                     try:
                         child_guard = vault.DirectoryCensusGuard.capture(
-                            self.vault_root, entry.relative_path, max_entries=_MAX_ITEM_FILES
+                            self.vault_root, entry.relative_path, max_entries=_MAX_RAW_ITEM_ENTRIES
                         )
                     except vault.PathGuardError as error:
                         raise collections.CollectionError(
                             "INVALID_RECORD_ITEM_PATH", "item inventory changed while it was read"
                         ) from error
-                    directory_guards_list.append(child_guard)
+                    if authorized:
+                        directory_guards_list.append(child_guard)
                     pending.append(child_guard)
-                else:
+                elif self._require_authorized(entry.relative_path):
                     paths.append(entry.relative_path)
         if len(paths) > _MAX_ITEM_FILES:
             raise collections.CollectionError(
@@ -417,12 +420,16 @@ class MarkdownItemsAdapter(_BaseAdapter):
                 ) from error
             rel = relative
             digest = hashlib.sha256(data).hexdigest()
+            path_guards.append(file_guard)
+            total_bytes += len(data)
+            if total_bytes > _MAX_COLLECTION_BYTES:
+                raise collections.CollectionError(
+                    "RECORD_SOURCE_TOO_LARGE", "collection exceeds the byte limit"
+                )
+            versions.append((rel, digest))
+            source_bytes.append((rel, data))
+            inventory.append((rel, "file", digest))
             if Path(rel).suffix != ".md":
-                path_guards.append(file_guard)
-                total_bytes += len(data)
-                versions.append((rel, digest))
-                source_bytes.append((rel, data))
-                inventory.append((rel, "file", digest))
                 continue
             text = _decode_item_bytes(data)
             try:
@@ -448,15 +455,6 @@ class MarkdownItemsAdapter(_BaseAdapter):
             }
             self._validate_values(values)
             values = self._project_values(values)
-            path_guards.append(file_guard)
-            total_bytes += len(data)
-            if total_bytes > _MAX_COLLECTION_BYTES:
-                raise collections.CollectionError(
-                    "RECORD_SOURCE_TOO_LARGE", "collection exceeds the byte limit"
-                )
-            versions.append((rel, digest))
-            source_bytes.append((rel, data))
-            inventory.append((rel, "file", digest))
             records.append(
                 Record(
                     identity=collections.ItemIdentity(collection_id, record_id),

@@ -496,6 +496,28 @@ def test_manifest_projection_requires_l6_for_source_and_templates(tmp_path: Path
     assert raised.value.code == "COLLECTION_NOT_FOUND"
 
 
+def test_schema_link_projection_handles_anchors_forward_refs_and_hidden_targets(tmp_path: Path) -> None:
+    fixture = copy_vehicle_maintenance_fixture(tmp_path)
+    manifest = collections.load_manifest(tmp_path, fixture / "_collection.md")
+    secret = tmp_path / "Knowledge Base" / "Evidence" / "Secret.md"
+    secret.parent.mkdir(parents=True)
+    secret.write_text("hidden", encoding="utf-8")
+    _write_l6_rule(tmp_path, ceiling=6, paths="Records/**")
+    _write_l0_rule(tmp_path, name="secret", paths="Evidence/**")
+
+    with request_scope(RequestPrincipal(audience_id=EXTERNAL, surface="mcp")):
+        projected = record_governance._project_links(
+            tmp_path,
+            manifest,
+            {
+                "asset": "[[Knowledge Base/Evidence/Secret.md#receipt|Secret]]",
+                "receipt": "[[Future evidence]]",
+            },
+        )
+
+    assert projected == {"receipt": "[[Future evidence]]"}
+
+
 def test_precommit_refusal_leaves_canonical_and_manifest_unchanged(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -87,34 +87,85 @@ def _authorize(root: Path, relative: str, *, receipt: bool = False) -> bool:
     )
 
 
+@dataclass(slots=True)
+class _LinkProjector:
+    root: Path
+    manifest: collections.CollectionManifest
+    resolver: vault.WikilinkResolver
+    verdicts: dict[str, bool]
+
+    @classmethod
+    def create(cls, root: Path, manifest: collections.CollectionManifest) -> _LinkProjector:
+        return cls(root, manifest, vault.WikilinkResolver(root), {})
+
+    def __call__(self, values: Mapping[str, Any]) -> dict[str, Any]:
+        projected = dict(values)
+        for name, spec in self.manifest.schema.fields.items():
+            if name not in projected:
+                continue
+            value = self._project_value(projected[name], spec)
+            if value is None or (spec.type == "array" and not value):
+                projected.pop(name)
+            else:
+                projected[name] = value
+        return projected
+
+    def _project_value(self, value: Any, spec: collections.FieldSpec) -> Any:
+        if spec.type == "array" and spec.items is not None and isinstance(value, list | tuple):
+            return [result for item in value if (result := self._project_value(item, spec.items)) is not None]
+        if spec.type != "link" or type(value) is not str:
+            return value
+        return value if self._allowed(value) else None
+
+    def _allowed(self, value: str) -> bool:
+        if value in self.verdicts:
+            return self.verdicts[value]
+        raw = value.strip()
+        try:
+            if raw.lower().startswith(memory_refs.REF_PREFIX):
+                identity = memory_refs.parse_memory_ref(raw)
+                if identity is None or raw != memory_refs.memory_ref(identity):
+                    return self._remember(value, False)
+                try:
+                    target = memory_refs.resolve_identifier_read_only(self.root, raw)
+                except memory_refs.ReferenceError as error:
+                    return self._remember(value, error.code == "REFERENCE_NOT_FOUND")
+            elif raw.lower().startswith(("exomem://vault/", "exomem://source/")):
+                target = memory_refs.resolve_identifier_read_only(self.root, raw)
+            elif (match := re.fullmatch(r"\[\[([^\[\]]+)\]\]", raw)) is not None:
+                inner = match.group(1).strip()
+                if not inner or inner.count("|") > 1:
+                    return self._remember(value, False)
+                try:
+                    canonical, _warning = vault.normalize_wikilink(
+                        inner.split("|", 1)[0].strip(), self.root, resolver=self.resolver, strict=True
+                    )
+                except vault.UnresolvedWikilinkError:
+                    return self._remember(value, True)
+                except vault.WikilinkError:
+                    return self._remember(value, False)
+                target = canonical.split("#", 1)[0] + ".md"
+            else:
+                return self._remember(value, False)
+            _path, relative = vault.resolve_under_vault(
+                self.root, target, must_exist=True, must_be_file=True
+            )
+            vault.PathGuard.capture(self.root, relative, leaf_policy="stable")
+        except vault.VaultPathError as error:
+            return self._remember(value, error.code == "NOT_FOUND")
+        except (memory_refs.ReferenceError, vault.PathGuardError):
+            return self._remember(value, False)
+        return self._remember(value, _authorize(self.root, relative, receipt=True))
+
+    def _remember(self, value: str, allowed: bool) -> bool:
+        self.verdicts[value] = allowed
+        return allowed
+
+
 def _project_links(
     root: Path, manifest: collections.CollectionManifest, values: Mapping[str, Any]
 ) -> dict[str, Any]:
-    """Gate only schema-declared link fields whose targets are vault artifacts."""
-
-    def allowed_value(value: Any, spec: collections.FieldSpec) -> Any:
-        if spec.type == "array" and spec.items is not None and isinstance(value, list | tuple):
-            return [item for item in value if allowed_value(item, spec.items) is not None]
-        if spec.type != "link" or not isinstance(value, str):
-            return value
-        target = value.strip().removeprefix("[[").removesuffix("]]").split("|", 1)[0]
-        candidates = (target, f"{vault.kb_dirname()}/{target}")
-        for candidate in candidates:
-            path = root / candidate
-            if path.is_file() and not _authorize(root, candidate, receipt=True):
-                return None
-        return value
-
-    projected = dict(values)
-    for name, spec in manifest.schema.fields.items():
-        if name not in projected:
-            continue
-        value = allowed_value(projected[name], spec)
-        if value is None or (spec.type == "array" and not value):
-            projected.pop(name)
-        else:
-            projected[name] = value
-    return projected
+    return _LinkProjector.create(root, manifest)(values)
 
 
 def resolve_collection(
@@ -152,11 +203,12 @@ def query_collection(
             root, manifest.storage.source, receipt=True
         ):
             raise collections.CollectionError("COLLECTION_NOT_FOUND", "collection was not found")
+        links = _LinkProjector.create(root, manifest)
         result = record_formats.query_collection(
             root,
             manifest,
             authorize_path=lambda path: _authorize(root, path, receipt=True),
-            project_values=lambda values: _project_links(root, manifest, values),
+            project_values=links,
             **kwargs,
         )
         egress.emit_boundary_receipt(collector)

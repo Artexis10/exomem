@@ -5,11 +5,27 @@ import json
 from pathlib import Path
 
 import pytest
+from record_fixtures import copy_vehicle_maintenance_fixture
 
 from exomem import query_data, record_formats
 from exomem import structured_collections as collections
 
 COLLECTION_ID = "9ba8d1cf-d1e7-4309-95ae-cb28d7a6eea8"
+
+
+def test_markdown_items_snapshot_binds_authorized_non_record_markdown(tmp_path: Path) -> None:
+    fixture = copy_vehicle_maintenance_fixture(tmp_path)
+    manifest = collections.load_manifest(tmp_path, fixture / "_collection.md")
+    readme = fixture / "Events" / "README.md"
+    readme.write_text("human context", encoding="utf-8")
+
+    first = record_formats.load_adapter(tmp_path, manifest).read()
+    readme.write_text("direct edit", encoding="utf-8")
+    second = record_formats.load_adapter(tmp_path, manifest).read()
+
+    relative = readme.relative_to(tmp_path).as_posix()
+    assert relative in {path for path, _kind, _digest in first.source_inventory}
+    assert first.snapshot != second.snapshot
 
 
 def _log_manifest() -> str:
