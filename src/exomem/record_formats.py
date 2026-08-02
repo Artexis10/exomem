@@ -114,7 +114,7 @@ class _BaseAdapter:
     vault_root: Path
     manifest: collections.CollectionManifest
     authorize_path: Callable[[str], bool] | None = None
-    authorize_links: Callable[[Mapping[str, Any]], bool] | None = None
+    project_values: Callable[[Mapping[str, Any]], dict[str, Any]] | None = None
     mutable: bool = field(init=False, default=False)
 
     def __post_init__(self) -> None:
@@ -163,8 +163,8 @@ class _BaseAdapter:
             )
         self.manifest.schema.validate(values)
 
-    def _links_are_authorized(self, values: Mapping[str, Any]) -> bool:
-        return self.authorize_links is None or self.authorize_links(values)
+    def _project_values(self, values: Mapping[str, Any]) -> dict[str, Any]:
+        return dict(values) if self.project_values is None else self.project_values(values)
 
     def _identity(self, values: dict[str, Any], marker: str | None) -> collections.ItemIdentity:
         if marker is not None:
@@ -290,6 +290,7 @@ class MarkdownLogAdapter(_BaseAdapter):
             if children:
                 values[child_container] = [child.values for child in children]
             self._validate_values(values)
+            values = self._project_values(values)
             marker_match = _marker_outside_fences(block)
             marker = None
             if marker_match:
@@ -446,8 +447,7 @@ class MarkdownItemsAdapter(_BaseAdapter):
                 if name not in {"type", "collection_id", "record_id", "schema_version"}
             }
             self._validate_values(values)
-            if not self._links_are_authorized(values):
-                continue
+            values = self._project_values(values)
             path_guards.append(file_guard)
             total_bytes += len(data)
             if total_bytes > _MAX_COLLECTION_BYTES:
@@ -537,6 +537,7 @@ class DatasetAdapter(_BaseAdapter):
                 {name: _json_value(value) for name, value in row.items()}, self.manifest
             )
             self._validate_values(values)
+            values = self._project_values(values)
             if key_name is not None:
                 key = str(values.get(str(key_name), ""))
                 if not key:
@@ -578,15 +579,15 @@ def load_adapter(
     manifest: collections.CollectionManifest,
     *,
     authorize_path: Callable[[str], bool] | None = None,
-    authorize_links: Callable[[Mapping[str, Any]], bool] | None = None,
+    project_values: Callable[[Mapping[str, Any]], dict[str, Any]] | None = None,
 ) -> CollectionAdapter:
     """Return the declared canonical adapter without inferring domain grammar."""
     if manifest.storage.strategy == "markdown-log":
-        return MarkdownLogAdapter(Path(vault_root), manifest, authorize_path, authorize_links)
+        return MarkdownLogAdapter(Path(vault_root), manifest, authorize_path, project_values)
     if manifest.storage.strategy == "markdown-items":
-        return MarkdownItemsAdapter(Path(vault_root), manifest, authorize_path, authorize_links)
+        return MarkdownItemsAdapter(Path(vault_root), manifest, authorize_path, project_values)
     if manifest.storage.strategy == "dataset":
-        return DatasetAdapter(Path(vault_root), manifest, authorize_path, authorize_links)
+        return DatasetAdapter(Path(vault_root), manifest, authorize_path, project_values)
     raise collections.CollectionError("UNSUPPORTED_STORAGE", "collection storage is unsupported")
 
 
@@ -849,11 +850,11 @@ def query_collection(
     continuation: str | None = None,
     output_format: str = "json",
     authorize_path: Callable[[str], bool] | None = None,
-    authorize_links: Callable[[Mapping[str, Any]], bool] | None = None,
+    project_values: Callable[[Mapping[str, Any]], dict[str, Any]] | None = None,
 ) -> RecordQueryResult:
     """Query a fresh canonical adapter snapshot with a snapshot-bound cursor."""
     adapter = load_adapter(
-        vault_root, manifest, authorize_path=authorize_path, authorize_links=authorize_links
+        vault_root, manifest, authorize_path=authorize_path, project_values=project_values
     )
     parsed = adapter.read()
     query = {

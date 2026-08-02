@@ -85,29 +85,34 @@ def _authorize(root: Path, relative: str, *, receipt: bool = False) -> bool:
     )
 
 
-def _links_authorized(
+def _project_links(
     root: Path, manifest: collections.CollectionManifest, values: Mapping[str, Any]
-) -> bool:
+) -> dict[str, Any]:
     """Gate only schema-declared link fields whose targets are vault artifacts."""
 
-    def allowed_value(value: Any, spec: collections.FieldSpec) -> bool:
+    def allowed_value(value: Any, spec: collections.FieldSpec) -> Any:
         if spec.type == "array" and spec.items is not None and isinstance(value, list | tuple):
-            return all(allowed_value(item, spec.items) for item in value)
+            return [item for item in value if allowed_value(item, spec.items) is not None]
         if spec.type != "link" or not isinstance(value, str):
-            return True
+            return value
         target = value.strip().removeprefix("[[").removesuffix("]]").split("|", 1)[0]
         candidates = (target, f"{vault.kb_dirname()}/{target}")
         for candidate in candidates:
             path = root / candidate
             if path.is_file() and not _authorize(root, candidate, receipt=True):
-                return False
-        return True
+                return None
+        return value
 
-    return all(
-        allowed_value(values[name], spec)
-        for name, spec in manifest.schema.fields.items()
-        if name in values
-    )
+    projected = dict(values)
+    for name, spec in manifest.schema.fields.items():
+        if name not in projected:
+            continue
+        value = allowed_value(projected[name], spec)
+        if value is None or (spec.type == "array" and not value):
+            projected.pop(name)
+        else:
+            projected[name] = value
+    return projected
 
 
 def resolve_collection(
@@ -149,7 +154,7 @@ def query_collection(
             root,
             manifest,
             authorize_path=lambda path: _authorize(root, path, receipt=True),
-            authorize_links=lambda values: _links_authorized(root, manifest, values),
+            project_values=lambda values: _project_links(root, manifest, values),
             **kwargs,
         )
         egress.emit_boundary_receipt(collector)
