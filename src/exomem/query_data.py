@@ -26,6 +26,7 @@ tables are the sweet spot.
 from __future__ import annotations
 
 import csv
+import io
 import itertools
 import json
 import logging
@@ -118,6 +119,13 @@ def _bounded_response_rows(rows: list[dict]) -> tuple[list[dict], bool]:
     return bounded, False
 
 
+def _bounded_aggregate(value: Any) -> tuple[Any, bool]:
+    encoded = json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    if len(encoded) <= MAX_RESPONSE_BYTES:
+        return value, False
+    return {"truncated": True, "reason": "aggregate exceeds response size cap"}, True
+
+
 def _get_field(row: Any, dotted: str) -> Any:
     """Nested access via dotted key — dicts by key, lists by integer index."""
     cur = row
@@ -195,10 +203,28 @@ def load_rows(abs_path: Path, record_path: str | None = None) -> tuple[str, list
             "TOO_LARGE",
             f"file is {size} bytes (> {MAX_FILE_BYTES} limit); pre-split or filter upstream",
         )
+    try:
+        data = abs_path.read_bytes()
+    except OSError as error:
+        raise QueryDataError("NOT_FOUND", "dataset could not be read") from error
+    return load_rows_bytes(data, suffix, record_path)
+
+
+def load_rows_bytes(
+    data: bytes, suffix: str, record_path: str | None = None
+) -> tuple[str, list[dict], list[str], list[str]]:
+    """Parse one already-read canonical dataset snapshot without a second file read."""
+    suffix = suffix.lower()
+    if len(data) > MAX_FILE_BYTES:
+        raise QueryDataError("TOO_LARGE", "dataset exceeds the byte limit")
     warnings: list[str] = []
     if suffix in (".csv", ".tsv"):
         delimiter = "\t" if suffix == ".tsv" else ","
-        with abs_path.open(encoding="utf-8", newline="") as f:
+        try:
+            text = data.decode("utf-8")
+        except UnicodeDecodeError as error:
+            raise QueryDataError("INVALID_DATASET_ENCODING", "dataset is not UTF-8") from error
+        with io.StringIO(text, newline="") as f:
             reader = csv.DictReader(f, delimiter=delimiter)
             rows = [dict(r) for r in itertools.islice(reader, MAX_PARSED_ROWS + 1)]
             cols = list(reader.fieldnames or [])
@@ -207,10 +233,10 @@ def load_rows(abs_path: Path, record_path: str | None = None) -> tuple[str, list
         return ("tsv" if suffix == ".tsv" else "csv"), rows, cols, warnings
     if suffix == ".json":
         try:
-            data = json.loads(abs_path.read_text(encoding="utf-8"))
-        except json.JSONDecodeError as e:
+            payload = json.loads(data.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as e:
             raise QueryDataError("BAD_JSON", f"could not parse JSON: {e}") from None
-        arr = _locate_array(data, record_path, warnings)
+        arr = _locate_array(payload, record_path, warnings)
         if len(arr) > MAX_PARSED_ROWS:
             raise QueryDataError("TOO_MANY_ROWS", "dataset exceeds the parsed row limit")
         rows = [r if isinstance(r, dict) else {"value": r} for r in arr]
@@ -303,6 +329,16 @@ def _aggregate(matched: list[dict], spec: str, date_col: str | None) -> dict:
                 if len(out) < PROFILE_MAX_DISTINCT:
                     out.append(v)
         return {"distinct": out, "n": total, "truncated": total > len(out)}
+    if func == "group":
+        counts: dict[str, tuple[Any, int]] = {}
+        for row in matched:
+            value = _get_field(row, col)
+            key = json.dumps(value, sort_keys=True, ensure_ascii=False)
+            prior = counts.get(key)
+            counts[key] = (value, 1 if prior is None else prior[1] + 1)
+        ordered = sorted(counts.values(), key=lambda pair: json.dumps(pair[0], ensure_ascii=False))
+        groups = [{"value": value, "count": count} for value, count in ordered[:PROFILE_MAX_DISTINCT]]
+        return {"groups": groups, "n": len(counts), "truncated": len(counts) > len(groups)}
     if func == "latest":
         order_col = date_col or col
         best, best_key = None, None
@@ -369,16 +405,14 @@ def _profile_column(name: str, values: list[Any], *, max_distinct: int = PROFILE
     n = len(non_null)
     seen: list[Any] = []
     seen_keys: set[str] = set()
-    distinct_truncated = False
     for v in non_null:
         k = str(v)
         if k not in seen_keys:
+            seen_keys.add(k)
             if len(seen) < max_distinct:
-                seen_keys.add(k)
                 seen.append(v)
-            else:
-                distinct_truncated = True
-    distinct = len(seen) + int(distinct_truncated)
+    distinct = len(seen_keys)
+    distinct_truncated = distinct > len(seen)
 
     nums = [x for v in non_null if (x := _coerce_num(v)) is not None]
     date_like = sum(1 for v in non_null if _DATE_LIKE.search(str(v)))
@@ -605,11 +639,14 @@ def evaluate_rows(
             agg: Any = _profile_payload(matched, cols, format, path)
         else:
             agg = _aggregate(matched, aggregate, date_col)
+        agg, aggregate_truncated = _bounded_aggregate(agg)
+        if aggregate_truncated:
+            warnings.append("response size cap truncated aggregate")
         return QueryDataResult(
             path=path, format=format, total_rows=total_rows, total_matched=total_matched,
             returned=0, columns=cols, rows=[],
             aggregate=agg,
-            truncated=False, warnings=warnings,
+            truncated=aggregate_truncated, warnings=warnings,
         )
 
     if sort_by:

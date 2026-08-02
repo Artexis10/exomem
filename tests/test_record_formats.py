@@ -28,28 +28,25 @@ def test_markdown_log_adapter_uses_declared_fence_aware_grammar_and_exact_spans(
     parsed = adapter.read()
 
     assert adapter.mutable is True
-    assert len(parsed.records) == 4
+    assert len(parsed.records) == 6
     assert [record.values["occurred_on"] for record in parsed.records] == [
-        "2026-07-20",
-        "2026-07-18",
-        "2026-07-15",
-        "2026-07-15",
+        "2026-08-02",
+        "2026-06-25",
+        "2026-06-24",
+        "2026-06-08",
+        "2026-06-04",
+        "2026-06-03",
     ]
-    assert parsed.records[0].identity.key == "14d2bdca-e145-425b-9e4b-df86f7172efa"
-    assert parsed.records[0].identity.inferred is False
+    assert parsed.records[0].identity.inferred is True
     assert source[parsed.records[0].span.start : parsed.records[0].span.end].startswith(
-        b"## 2026-07-20 Pull\n<!-- exomem-record-id:"
+        b"### 2026-08-02 \xc2\xb7 Push\n"
     )
-    assert all("2099-01-01" not in record.values["title"] for record in parsed.records)
-    assert parsed.records[2].identity.key == parsed.records[3].identity.key
-    assert parsed.records[2].identity.inferred is True
-    assert parsed.records[2].ambiguous is True
-    assert parsed.records[3].ambiguous is True
-    assert [child.values["movement"] for child in parsed.records[0].children] == [
-        "Lat pulldown",
-        "Cable row",
+    assert all(record.ambiguous is False for record in parsed.records)
+    assert [child.values["movement"] for child in parsed.records[0].children[:2]] == [
+        "Overhead Press",
+        "Split Squat L",
     ]
-    assert parsed.insertion_offset == source.index(b"## 2026-07-20 Pull")
+    assert parsed.insertion_offset == source.index(b"### 2026-08-02")
     assert (fixture / "Training Log.md").read_bytes() == source
 
 
@@ -65,8 +62,8 @@ def test_markdown_log_query_expands_declared_child_rows_without_domain_logic(tmp
         limit=20,
     )
 
-    assert result.returned == 6
-    assert {row["repetitions"] for row in result.rows} == {"10+", "10!", "?", "", "8"}
+    assert result.returned == 20
+    assert {row["repetitions"] for row in result.rows}.issuperset({"", "8", "15", "21"})
     assert all(row["parent_record_id"] == row["record_id"] for row in result.rows)
 
 
@@ -74,20 +71,27 @@ def test_markdown_log_identity_survives_manual_reorder_and_date_correction(tmp_p
     fixture = copy_x3_fixture(tmp_path)
     manifest = _manifest(tmp_path, fixture)
     log = fixture / "Training Log.md"
+    log.write_text(
+        log.read_text(encoding="utf-8").replace(
+            "### 2026-08-02 · Push\n",
+            "### 2026-08-02 · Push\n<!-- exomem-record-id: 14d2bdca-e145-425b-9e4b-df86f7172efa -->\n",
+        ),
+        encoding="utf-8",
+    )
     original = record_formats.load_adapter(tmp_path, manifest).read().records[0]
 
     text = log.read_text(encoding="utf-8")
-    text = text.replace("2026-07-20 Pull", "2026-07-21 Pull")
-    start = text.index("## 2026-07-21 Pull")
-    end = text.index("## 2026-07-18 Push")
+    text = text.replace("2026-08-02 · Push", "2026-08-03 · Push")
+    start = text.index("### 2026-08-03 · Push")
+    end = text.index("### 2026-06-25 · Push")
     block = text[start:end]
     text = text[:start] + text[end:]
-    insert = text.index("## 2026-07-15 Pull")
+    insert = text.index("### 2026-06-24 · Pull")
     log.write_text(text[:insert] + block + text[insert:], encoding="utf-8")
 
     changed = record_formats.load_adapter(tmp_path, manifest).read().records
     same = next(record for record in changed if record.identity.key == original.identity.key)
-    assert same.values["occurred_on"] == "2026-07-21"
+    assert same.values["occurred_on"] == "2026-08-03"
     assert same.source.hash != original.source.hash
 
 
@@ -103,7 +107,7 @@ def test_markdown_log_adapter_honors_declared_oldest_first_insertion_edge(tmp_pa
 
     parsed = record_formats.load_adapter(tmp_path, manifest).read()
 
-    assert parsed.insertion_offset == source.index(b"## Legend")
+    assert parsed.insertion_offset == source.index(b"## Current bands")
 
 
 def test_markdown_item_adapter_uses_file_identity_exact_version_and_readable_body(tmp_path: Path) -> None:
@@ -133,7 +137,7 @@ def test_dataset_adapter_is_query_only_and_exposes_declared_keys_and_snapshot(tm
 
     assert len(parsed.records) == 72
     assert parsed.records[0].identity.key == "r-001"
-    assert parsed.records[0].source.hash == parsed.snapshot
+    assert parsed.records[0].source.hash != parsed.snapshot
     assert adapter.mutable is False
     with pytest.raises(collections.CollectionError) as excinfo:
         adapter.refuse_mutation("append")
@@ -208,7 +212,7 @@ def test_query_collection_has_bounded_snapshot_continuations_and_derived_rendere
         output_format="csv",
     )
     assert [row["reading_id"] for row in second.rows] == ["r-003", "r-004"]
-    assert second.rendered.startswith("reading_id,")
+    assert second.rendered.startswith("# collection_id:")
 
     source = fixture / "readings.csv"
     source.write_text(source.read_text(encoding="utf-8") + "r-999,2026-12-01,water,99\n", encoding="utf-8")

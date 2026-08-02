@@ -10,13 +10,16 @@ storage:
   strategy: markdown-log
   source: Training Log.md
   format_version: 1
-  heading:
+  section:
     level: 2
-    date_format: "%Y-%m-%d"
-  section: Sessions (newest first)
+    title: Sessions (newest first)
+  item_heading:
+    level: 3
+    pattern: '^(?P<occurred_on>\d{4}-\d{2}-\d{2}) · (?P<title>[^()]+?)(?: \((?P<note>[^)]*)\))?$'
   insertion: newest-first
   archive: Historical Reps (undated).md
   child_rows:
+    prefix: "- "
     delimiter: "|"
     fields: [movement, band, repetitions]
 item_schema:
@@ -36,8 +39,8 @@ item_schema:
       items:
         type: object
 templates:
-  - path: Push.md
-  - path: Pull.md
+  - path: X3 Push.md
+  - path: X3 Pull.md
 links:
   plans:
     - reference: exomem://memory/81947000-4c22-46e4-9874-23fed028314b
