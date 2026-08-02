@@ -16,8 +16,17 @@ Use when the user asks to ingest, add, import, process, or preserve an external 
 1. Identify the artifact type: text, article, PDF, dataset, image, audio, video, or mixed media.
 2. Preserve the raw source first with `capture_source`, `preserve_evidence`, or `transfer_artifact`.
 3. Media processing is automatic; use `process_media` for immediate reconciliation, actionable status, or retry, then inspect via `read_media`, extracted text/OCR/transcripts, or media-aware `ask_memory`.
-4. If the source is worth distilling, use `compile_source` for planning and `remember` for the compiled note.
+4. If the source is worth distilling, use `compile_source` for planning and `remember` for the compiled note — passing the path preserved in step 2 as `sources:`. That is what links the note back to the raw artifact and marks the source processed; omit it and the source stays in the unprocessed backlog forever.
 5. Link related prior notes with `connect_memory(operation="suggest-links")`.
+
+## Output contract
+Report the stored source/evidence path, any compiled note path, and what remains unprocessed.
+
+## Save rules
+Raw artifacts stay in `Sources/` or `Evidence/`. Distilled conclusions go in typed compiled notes with source links.
+
+## Mistakes to avoid
+Do not skip raw preservation. Do not paste large raw artifacts into compiled notes. Do not claim media content was inspected unless an extraction, frame, transcript, OCR, or artifact view was actually used.
 
 <!-- exomem-semantic-authoring:v4 sha256:837b03b15c3d83f6c6eeb50771f4eaa04e4beaaae0f7d54be249be40ce7685f7 -->
 ## Semantic authoring contract
@@ -67,12 +76,3 @@ Rich example:
 
 Commit to a fixed 6am training block on weekdays so consistency compounds and health stays the durable lens for this decision.
 ```
-
-## Output contract
-Report the stored source/evidence path, any compiled note path, and what remains unprocessed.
-
-## Save rules
-Raw artifacts stay in `Sources/` or `Evidence/`. Distilled conclusions go in typed compiled notes with source links.
-
-## Mistakes to avoid
-Do not skip raw preservation. Do not paste large raw artifacts into compiled notes. Do not claim media content was inspected unless an extraction, frame, transcript, OCR, or artifact view was actually used.

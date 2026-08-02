@@ -397,6 +397,7 @@ def op_bootstrap(
                 "ask_memory for relevant prior notes and sources",
                 "read_memory enough context; use ask_memory(deep=true) for synthesis",
                 "draft the smallest durable compiled conclusion",
+                "identify the Sources/ or Evidence/ pages this conclusion draws from; they become `sources:` and each receives an `ingested_into:` back-reference",
                 "run connect_memory(operation='suggest-links') and, when directional meaning matters, 'suggest-relations' on the draft",
                 "write accepted note-level edges under `## Relations` as `- relation_type [[Target]]`",
                 "write with remember, observe_memory, edit_memory, replace_memory, capture_source, preserve_evidence, or connect_memory as appropriate",
@@ -408,6 +409,7 @@ def op_bootstrap(
                 "raw_material": "capture_source",
                 "raw_evidence_or_artifact": "preserve_evidence or transfer_artifact",
                 "new_durable_conclusion": "remember",
+                "conclusion_drawn_from_captured_material": "remember(sources=[...]) naming those pages, which links the conclusion to its provenance and marks the source processed",
                 "small_correction": "edit_memory",
                 "semantic_unit_mutation": "observe_memory",
                 "substantial_rewrite": "replace_memory",
@@ -3904,6 +3906,10 @@ def op_remember(
     experiments, and production logs. Raw material belongs in `capture_source`;
     proof artifacts belong in `preserve_evidence`.
 
+    For each `sources:` wikilink, this appends the new note's wikilink to that
+    source's `ingested_into:` frontmatter, maintaining the source-to-note graph
+    and taking the source out of the unprocessed backlog.
+
     Args:
         content: Full markdown body to write after frontmatter.
         title: Unicode display title stored in frontmatter and the H1.
@@ -3911,7 +3917,13 @@ def op_remember(
         note_type: research-note, insight, failure, pattern, experiment, or production-log.
         project: Required for research-note. __PROJECT_KEYS_HINT__
         projects: Optional project keys for cross-project notes. __PROJECT_KEYS_HINT__
-        sources: Source/evidence paths this conclusion draws from.
+        sources: Vault-relative wikilinks to existing pages this conclusion draws
+            from, e.g. ["Knowledge Base/Sources/Articles/2026-05-18-example"].
+            Brackets and the leading `Knowledge Base/` are both tolerated. Each
+            entry appends this note's wikilink to that source's `ingested_into:`.
+            Expected for research-note, insight, failure, and pattern; omitting it
+            returns a warning rather than failing the write, because a conclusion
+            drawn from live work with nothing captured is an honest empty list.
         tags: Lowercase tags.
         status: Optional status override.
         severity: Failure severity.

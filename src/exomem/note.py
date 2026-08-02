@@ -188,6 +188,24 @@ STATUS_PRODUCTION = (
     "planned", "recorded", "edited", "published", "reflected", "dropped", "archived",
 )
 
+# Types whose frontmatter spec marks `sources:` required. Omitting provenance on
+# one of these returns a warning, never an error: a conclusion drawn from live
+# work with nothing captured is an honest empty list, and inventing a source to
+# silence a gate would be strictly worse than leaving it empty.
+SOURCES_REQUIRED_TYPES = ("research-note", "insight", "failure", "pattern")
+
+
+def _empty_sources_warning(note_type: str) -> str | None:
+    """Warn when a type that should cite provenance cites none."""
+    if note_type not in SOURCES_REQUIRED_TYPES:
+        return None
+    return (
+        f"no `sources:` cited — frontmatter marks provenance required for "
+        f"{note_type}. If this came from live work with nothing captured, that is "
+        f"an honest empty list; otherwise cite the `Sources/` page it draws from "
+        f"(each entry also appends this note to that source's `ingested_into:`)."
+    )
+
 
 @dataclass
 class NoteResult:
@@ -297,7 +315,18 @@ def _build_write_feedback(
             "review related-page suggestions and add accepted note edges under `## Relations`"
         )
     if not sources_norm:
-        next_actions.append("add a source link later if this conclusion came from raw material")
+        if not body_targets:
+            next_actions.append(
+                "connect this page now: cite the `Sources/` page it draws from in "
+                "`sources:`, or link the prior conclusions it builds on — it currently "
+                "has no outbound connection of any kind"
+            )
+        else:
+            next_actions.append(
+                "cite the `Sources/` page this drew from in `sources:` — each entry "
+                "appends this note's wikilink to that source's `ingested_into:`, which "
+                "is what marks the source processed"
+            )
     if relation_debt:
         next_actions.append(
             "review relation debt with `connect_memory(operation='suggest-relations')`"
@@ -319,6 +348,8 @@ def _build_write_feedback(
         "sources": {
             "cited": len(sources_norm),
             "backrefs_planned": backrefs_planned,
+            "required": note_type in SOURCES_REQUIRED_TYPES,
+            "missing": note_type in SOURCES_REQUIRED_TYPES and not sources_norm,
         },
         "links": {
             "body_wikilinks": len(body_targets),
@@ -627,6 +658,10 @@ def _legacy_note(
         + list(dup_warnings)
         + list(contradiction_warnings)
     )
+    if not sources_norm:
+        provenance_warning = _empty_sources_warning(note_type)
+        if provenance_warning is not None:
+            warnings.append(provenance_warning)
     # Back-refs: append the new note's wikilink to each cited source's ingested_into.
     backrefs_planned = 0
     for src in sources_norm:
@@ -1629,6 +1664,10 @@ def note(
     if draft_hash is not None and preflight.draft_hash != draft_hash:
         raise NoteError("DRAFT_HASH_MISMATCH", ["draft_hash"], "draft requires fresh validation")
     warnings = list(slug_warnings) + list(source_warnings) + list(body_warnings)
+    if not sources_norm:
+        provenance_warning = _empty_sources_warning(note_type)
+        if provenance_warning is not None:
+            warnings.append(provenance_warning)
     for item in key_plan.introductions:
         warnings.append(
             f"Auto-registered project key {item.key!r} (folder: {item.folder!r}, "

@@ -16,8 +16,18 @@ Use when the user asks to find media evidence, look inside a recording, inspect 
 1. Search with media-aware filters or artifact terms using `ask_memory`.
 2. Use artifact-specific product tools: extracted text/OCR/transcripts, `process_media` status/retry, `read_media`, `transfer_artifact`, upload metadata, or preserved evidence paths.
 3. Cite raw artifact paths and timestamps/pages/frames when available.
-4. Compile textual conclusions with `remember` only when there is a durable finding.
+4. Compile textual conclusions with `remember` only when there is a durable finding, naming the artifact path from step 2 or 5 in `sources:` so the note points back at the artifact it describes.
 5. Preserve new raw artifacts with `capture_source`, `preserve_evidence`, or `transfer_artifact` before analyzing them.
+6. Run `connect_memory(operation="suggest-links")` before writing a compiled note, and accept the links that genuinely clarify context.
+
+## Output contract
+Return matching artifacts, what was inspected, citations, and any compiled conclusion path.
+
+## Save rules
+Raw media belongs in `Sources/` or `Evidence/`; textual notes should summarize conclusions and link back to artifacts.
+
+## Mistakes to avoid
+Do not claim visual/audio evidence from filenames alone. Do not discard raw media after extracting text. Do not over-transcribe when a cited artifact path is the durable evidence.
 
 <!-- exomem-semantic-authoring:v4 sha256:837b03b15c3d83f6c6eeb50771f4eaa04e4beaaae0f7d54be249be40ce7685f7 -->
 ## Semantic authoring contract
@@ -67,12 +77,3 @@ Rich example:
 
 Commit to a fixed 6am training block on weekdays so consistency compounds and health stays the durable lens for this decision.
 ```
-
-## Output contract
-Return matching artifacts, what was inspected, citations, and any compiled conclusion path.
-
-## Save rules
-Raw media belongs in `Sources/` or `Evidence/`; textual notes should summarize conclusions and link back to artifacts.
-
-## Mistakes to avoid
-Do not claim visual/audio evidence from filenames alone. Do not discard raw media after extracting text. Do not over-transcribe when a cited artifact path is the durable evidence.
