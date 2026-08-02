@@ -158,6 +158,17 @@ class MarkdownLogAdapter(_BaseAdapter):
         manifest_version = self._manifest_version()
         source = self.source_path
         data = _read_bounded(source, _MAX_LOG_BYTES, "markdown log")
+        return self.read_bytes(data, manifest_version=manifest_version)
+
+    def read_bytes(
+        self, data: bytes, *, manifest_version: collections.SourceVersion | None = None
+    ) -> AdapterSnapshot:
+        """Parse caller-held canonical bytes without reopening the log source."""
+        if len(data) > _MAX_LOG_BYTES:
+            raise collections.CollectionError(
+                "RECORD_SOURCE_TOO_LARGE", "markdown log exceeds the byte limit"
+            )
+        manifest_version = manifest_version or self.manifest.manifest_version
         descriptor = self.manifest.storage.descriptor
         section = descriptor.get("section")
         item_heading = descriptor.get("item_heading")
@@ -431,6 +442,152 @@ def load_adapter(vault_root: Path, manifest: collections.CollectionManifest) -> 
     if manifest.storage.strategy == "dataset":
         return DatasetAdapter(Path(vault_root), manifest)
     raise collections.CollectionError("UNSUPPORTED_STORAGE", "collection storage is unsupported")
+
+
+def render_markdown_log_item(
+    manifest: collections.CollectionManifest,
+    values: Mapping[str, Any],
+    item_key: str,
+    newline: str,
+) -> str:
+    """Render one declared log block without reading or rewriting its container."""
+    if newline not in {"\n", "\r\n"}:
+        raise collections.CollectionError("INVALID_RECORD_SOURCE", "unsupported newline sequence")
+    descriptor = manifest.storage.descriptor
+    heading = descriptor.get("item_heading")
+    if not isinstance(heading, Mapping):
+        raise collections.CollectionError(
+            "INVALID_STORAGE_DESCRIPTOR", "item heading grammar is invalid"
+        )
+    grammar = _heading_grammar(heading)
+    prefix, delimiter, fields, container = _child_grammar(
+        descriptor.get("child_rows"), manifest.schema
+    )
+    parts: list[str] = []
+    for heading_field in grammar.fields:
+        value = values.get(heading_field.name)
+        if heading_field.type == "string":
+            rendered = value
+        elif heading_field.type == "date":
+            rendered = dt.date.fromisoformat(str(value)).strftime(heading_field.format or "")
+        else:
+            rendered = dt.datetime.fromisoformat(str(value).replace("Z", "+00:00")).strftime(
+                heading_field.format or ""
+            )
+        if (
+            not isinstance(rendered, str)
+            or not rendered
+            or "\r" in rendered
+            or "\n" in rendered
+            or grammar.separator in rendered
+        ):
+            raise collections.CollectionError(
+                "UNREPRESENTABLE_RECORD_VALUE", "heading value cannot render"
+            )
+        parts.append(rendered)
+    title = grammar.separator.join(parts)
+    if grammar.note is not None:
+        note = values.get(grammar.note.field)
+        if note is not None:
+            if (
+                not isinstance(note, str)
+                or not note.strip()
+                or "\r" in note
+                or "\n" in note
+                or grammar.note.open in note
+                or grammar.note.close in note
+            ):
+                raise collections.CollectionError(
+                    "UNREPRESENTABLE_RECORD_VALUE", "note cannot render"
+                )
+            title += f"{grammar.note.open}{note.strip()}{grammar.note.close}"
+    derived = _status_values(descriptor, values.get(grammar.note.field) if grammar.note else None)
+    for name, value in derived.items():
+        if values.get(name) != value:
+            raise collections.CollectionError(
+                "INVALID_RECORD_STATUS", "derived status is inconsistent"
+            )
+    rows = values.get(container, [])
+    if not isinstance(rows, list):
+        raise collections.CollectionError(
+            "UNREPRESENTABLE_RECORD_VALUE", "child rows cannot render"
+        )
+    rendered_rows: list[str] = []
+    for row in rows:
+        if not isinstance(row, Mapping) or set(row) != set(fields):
+            raise collections.CollectionError(
+                "UNREPRESENTABLE_RECORD_VALUE", "child row cannot render"
+            )
+        cells = []
+        for row_field in fields:
+            value = row[row_field]
+            if not isinstance(value, str) or any(
+                token in value for token in ("\r", "\n", delimiter)
+            ):
+                raise collections.CollectionError(
+                    "UNREPRESENTABLE_RECORD_VALUE", "child row cannot render"
+                )
+            cells.append(value)
+        rendered_rows.append(prefix + f" {delimiter} ".join(cells))
+    marker = collections.ItemIdentity(manifest.collection_id, item_key).key
+    lines = [
+        "#" * grammar.level + " " + title,
+        f"<!-- exomem-record-id: {marker} -->",
+        *rendered_rows,
+        "",
+    ]
+    return newline.join(lines) + newline
+
+
+def render_markdown_item(
+    manifest: collections.CollectionManifest,
+    values: Mapping[str, Any],
+    item_key: str,
+    body: str = "",
+) -> str:
+    """Render a new ordinary record item from bounded structured values."""
+    frontmatter: dict[str, Any] = {
+        "type": "record",
+        "collection_id": manifest.collection_id,
+        "record_id": collections.ItemIdentity(manifest.collection_id, item_key).key,
+        "schema_version": manifest.schema.version,
+    }
+    frontmatter.update(values)
+    text = "---\n" + vault.serialize_frontmatter(frontmatter) + "\n---\n"
+    return text + ("\n" + body if body else "")
+
+
+def render_markdown_item_update(source: str, changes: Mapping[str, Any]) -> str:
+    """Replace only requested frontmatter fields, retaining BOM, body, and line endings."""
+    bom = "\ufeff" if source.startswith("\ufeff") else ""
+    text = source[len(bom) :]
+    frontmatter, _body, marker = vault.parse_frontmatter(text, strict=True)
+    if marker is None:
+        raise collections.CollectionError("INVALID_RECORD_ITEM", "item requires frontmatter")
+    newline = "\r\n" if "\r\n" in text else "\n"
+    close = re.search(r"(?m)^---\r?$", text[len("---") :])
+    if close is None:
+        raise collections.CollectionError("INVALID_RECORD_ITEM", "item frontmatter is invalid")
+    # Locate the closing fence using the parsed marker's exact leading range.
+    prefix_end = text.find("---", 3)
+    if prefix_end < 0:
+        raise collections.CollectionError("INVALID_RECORD_ITEM", "item frontmatter is invalid")
+    head = text[:prefix_end]
+    tail = text[prefix_end:]
+    for name, value in changes.items():
+        rendered = (
+            f"{name}: {vault.yaml_scalar(value)}"
+            if not isinstance(value, list)
+            else vault.serialize_frontmatter({name: value})
+        )
+        pattern = re.compile(rf"(?m)^{re.escape(name)}:[^\r\n]*(?:\r?\n|$)")
+        match = pattern.search(head)
+        if match is None:
+            head += ("" if head.endswith(("\n", "\r")) else newline) + rendered + newline
+        else:
+            ending = newline if match.group(0).endswith(("\n", "\r")) else ""
+            head = head[: match.start()] + rendered + ending + head[match.end() :]
+    return bom + head + tail
 
 
 @dataclass(frozen=True, slots=True)

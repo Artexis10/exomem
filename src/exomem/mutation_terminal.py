@@ -10,6 +10,19 @@ ResponseDetail = Literal["compact", "full", "legacy"]
 _TERMINAL_MARKER = "exomem.mutation-terminal"
 _TERMINAL_VERSION = 1
 _RESPONSE_DETAILS = frozenset({"compact", "full", "legacy"})
+_RECORD_RECEIPT_FIELDS = (
+    "operation",
+    "collection_id",
+    "item_key",
+    "before_item_hash",
+    "after_item_hash",
+    "before_container_hash",
+    "after_container_hash",
+    "affected_paths",
+    "payload_hash",
+    "outcome",
+    "audit_correlation",
+)
 
 
 def _warning_count(result: Any) -> int:
@@ -37,9 +50,7 @@ def _path_projection(result: Any) -> dict[str, Any]:
     if isinstance(path, str):
         return {"path": path}
     paths = result.get("paths")
-    if isinstance(paths, (list, tuple)) and all(
-        isinstance(item, str) for item in paths
-    ):
+    if isinstance(paths, (list, tuple)) and all(isinstance(item, str) for item in paths):
         return {"paths": list(paths)}
     source = result.get("source")
     if isinstance(source, Mapping) and isinstance(source.get("path"), str):
@@ -54,8 +65,7 @@ def _path_projection(result: Any) -> dict[str, Any]:
             copied_paths = [
                 item["source_path"]
                 for item in copied_sources
-                if isinstance(item, Mapping)
-                and isinstance(item.get("source_path"), str)
+                if isinstance(item, Mapping) and isinstance(item.get("source_path"), str)
             ]
             return {"paths": copied_paths}
     compile_plan = result.get("compile_plan")
@@ -65,8 +75,7 @@ def _path_projection(result: Any) -> dict[str, Any]:
             copied_paths = [
                 item["source_path"]
                 for item in copied_sources
-                if isinstance(item, Mapping)
-                and isinstance(item.get("source_path"), str)
+                if isinstance(item, Mapping) and isinstance(item.get("source_path"), str)
             ]
             return {"paths": copied_paths}
     old_path = result.get("old_path")
@@ -115,9 +124,7 @@ def split_response_detail(
     payload = dict(kwargs)
     detail = payload.pop("response_detail", default)
     if not isinstance(detail, str) or detail not in _RESPONSE_DETAILS:
-        raise ValueError(
-            "response_detail must be one of: compact, full, legacy"
-        )
+        raise ValueError("response_detail must be one of: compact, full, legacy")
     return payload, detail
 
 
@@ -141,6 +148,9 @@ def project_terminal(result: Any, detail: ResponseDetail = "compact") -> Any:
     }
     if "idempotency_key" in result:
         compact["idempotency_key"] = result["idempotency_key"]
+    leaf = result["leaf_result"]
+    if isinstance(leaf, Mapping) and leaf.get("operation") in {"create", "append", "update"}:
+        compact.update({key: leaf[key] for key in _RECORD_RECEIPT_FIELDS if key in leaf})
     compact["warnings_count"] = result["warnings_count"]
     if detail == "full":
         compact["diagnostics"] = result["leaf_result"]

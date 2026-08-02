@@ -135,6 +135,39 @@ def test_compound_source_result_uses_its_explicit_nested_path_and_warnings() -> 
     assert projected["warnings_count"] == 1
 
 
+def test_compact_record_receipt_uses_the_content_free_whitelist() -> None:
+    mutation_terminal = _terminal_module()
+    raw = {
+        "operation": "append",
+        "collection_id": "11111111-1111-4111-8111-111111111111",
+        "item_key": "22222222-2222-4222-8222-222222222222",
+        "before_item_hash": None,
+        "after_item_hash": "a" * 64,
+        "before_container_hash": "b" * 64,
+        "after_container_hash": "c" * 64,
+        "affected_paths": ["Knowledge Base/Records/example.md"],
+        "payload_hash": "d" * 64,
+        "outcome": "committed",
+        "audit_correlation": "audit-1",
+        "why": "private rationale",
+        "values": {"secret": "canonical item value"},
+    }
+
+    projected = mutation_terminal.project_terminal(
+        mutation_terminal.committed_terminal(
+            raw,
+            request_id="11111111-1111-4111-8111-111111111111",
+            receipt_id=None,
+            idempotency_key=None,
+        )
+    )
+
+    assert projected["collection_id"] == raw["collection_id"]
+    assert projected["after_item_hash"] == raw["after_item_hash"]
+    assert "why" not in projected
+    assert "values" not in projected
+
+
 @pytest.mark.parametrize(
     ("raw", "expected"),
     [
@@ -191,16 +224,8 @@ def test_explicit_multi_path_restore_and_safe_fallback_adapters(raw, expected) -
             {
                 "compile_plan": {
                     "copied_sources": [
-                        {
-                            "source_path": (
-                                "Knowledge Base/Sources/Imported/compiled-one.md"
-                            )
-                        },
-                        {
-                            "source_path": (
-                                "Knowledge Base/Sources/Imported/compiled-two.md"
-                            )
-                        },
+                        {"source_path": ("Knowledge Base/Sources/Imported/compiled-one.md")},
+                        {"source_path": ("Knowledge Base/Sources/Imported/compiled-two.md")},
                     ]
                 }
             },
@@ -247,9 +272,7 @@ def test_one_committed_identity_projects_compact_full_and_legacy_without_rerun(
         return raw
 
     command = SimpleNamespace(name="remember", leaf=leaf, read_only=False)
-    manager = writer_lease.LeaseManager(
-        writer_lease.LeaseConfig(state_dir=tmp_path / "state")
-    )
+    manager = writer_lease.LeaseManager(writer_lease.LeaseConfig(state_dir=tmp_path / "state"))
     first_request_id = "11111111-1111-4111-8111-111111111111"
     compact = manager.invoke(
         command,
@@ -301,9 +324,7 @@ def test_internal_replay_key_is_separate_from_public_terminal_identity(
         return {"path": "Knowledge Base/hosted.md", "warnings": []}
 
     command = SimpleNamespace(name="remember", leaf=leaf, read_only=False)
-    manager = writer_lease.LeaseManager(
-        writer_lease.LeaseConfig(state_dir=tmp_path / "state")
-    )
+    manager = writer_lease.LeaseManager(writer_lease.LeaseConfig(state_dir=tmp_path / "state"))
     internal_key = "hosted:" + "a" * 64
 
     terminal = manager.invoke(
@@ -335,9 +356,7 @@ def test_structured_errors_use_only_the_public_idempotency_key(
         ),
         read_only=False,
     )
-    manager = writer_lease.LeaseManager(
-        writer_lease.LeaseConfig(state_dir=tmp_path / "state")
-    )
+    manager = writer_lease.LeaseManager(writer_lease.LeaseConfig(state_dir=tmp_path / "state"))
     internal_key = "hosted:" + "b" * 64
 
     with pytest.raises(OpError) as caught:
@@ -415,9 +434,7 @@ def test_result_without_active_commit_marker_keeps_its_existing_shape(tmp_path) 
         return raw
 
     command = SimpleNamespace(name="edit_memory", leaf=preview, read_only=False)
-    manager = writer_lease.LeaseManager(
-        writer_lease.LeaseConfig(state_dir=tmp_path / "state")
-    )
+    manager = writer_lease.LeaseManager(writer_lease.LeaseConfig(state_dir=tmp_path / "state"))
 
     result = manager.invoke(
         command,
@@ -438,9 +455,7 @@ def test_preupgrade_completed_receipt_replays_raw_without_leaf_execution(tmp_pat
         leaf=lambda *_args, **_kwargs: pytest.fail("legacy receipt reran the leaf"),
         read_only=False,
     )
-    manager = writer_lease.LeaseManager(
-        writer_lease.LeaseConfig(state_dir=tmp_path / "state")
-    )
+    manager = writer_lease.LeaseManager(writer_lease.LeaseConfig(state_dir=tmp_path / "state"))
     payload = {"value": 3}
     digest = writer_lease._command_digest(command, payload)
     key, _, _ = writer_lease._effective_idempotency_key(
@@ -469,9 +484,7 @@ def test_mutation_response_detail_is_declared_once_for_every_shared_surface() ->
     from exomem import cli_ops, command_surface
     from exomem.commands import product_commands_for
 
-    command = next(
-        item for item in product_commands_for("mcp") if item.name == "remember"
-    )
+    command = next(item for item in product_commands_for("mcp") if item.name == "remember")
     [parameter] = [item for item in command.params if item.name == "response_detail"]
     bound = command_surface.bind_vault(
         command.leaf,

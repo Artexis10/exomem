@@ -205,6 +205,44 @@ def load_manifest(vault_root: Path, path: Path | str) -> CollectionManifest:
     )
 
 
+def parse_manifest_bytes(vault_root: Path, path: Path | str, data: bytes) -> CollectionManifest:
+    """Parse a manifest from caller-held bytes bound by a guarded read."""
+    root = Path(vault_root)
+    manifest_path = Path(path)
+    if not manifest_path.is_absolute():
+        manifest_path = root / manifest_path
+    try:
+        rel = manifest_path.relative_to(root).as_posix()
+    except ValueError as error:
+        raise CollectionError(
+            "INVALID_COLLECTION_PATH", "collection path is outside the governed vault"
+        ) from error
+    if not rel.startswith(f"{vault.kb_dirname()}/") or _unsafe_relative(rel):
+        raise CollectionError(
+            "INVALID_COLLECTION_PATH", "collection path is outside the governed vault"
+        )
+    if manifest_path.name != "_collection.md":
+        raise CollectionError(
+            "INVALID_COLLECTION_MANIFEST", "manifest must be named _collection.md"
+        )
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise CollectionError("INVALID_COLLECTION_MANIFEST", "manifest is not UTF-8") from error
+    try:
+        frontmatter, _body, marker = vault.parse_frontmatter(text, strict=True)
+    except vault.FrontmatterError as error:
+        raise CollectionError(error.code, error.reason) from error
+    if marker is None:
+        raise CollectionError("INVALID_COLLECTION_MANIFEST", "manifest requires YAML frontmatter")
+    return _manifest_from_frontmatter(
+        root,
+        rel,
+        frontmatter,
+        SourceVersion(path=rel, hash=hashlib.sha256(data).hexdigest()),
+    )
+
+
 def discover_collections(
     vault_root: Path,
     *,
