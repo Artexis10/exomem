@@ -42,11 +42,18 @@ def _gov_dir(vault: Path) -> Path:
     return vault / "Knowledge Base" / "_Governance"
 
 
-def write_scope(vault: Path, *, paths: str = PATTERNS_GLOB, name: str = "Patterns") -> None:
+def write_scope(
+    vault: Path,
+    *,
+    paths: str = PATTERNS_GLOB,
+    name: str = "Patterns",
+    default_deny: bool = False,
+) -> None:
     target = _gov_dir(vault) / "scopes" / "patterns.yaml"
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(
-        f"governance_version: 1\nid: {SCOPE_ID}\nname: {name}\npaths: [\"{paths}\"]\n",
+        f"governance_version: 1\nid: {SCOPE_ID}\nname: {name}\npaths: [\"{paths}\"]\n"
+        + ("default_deny: true\n" if default_deny else ""),
         encoding="utf-8",
     )
 
@@ -861,6 +868,137 @@ def test_annotate_page_strips_provenance_naming_a_withheld_item(vault: Path) -> 
     out = egress.annotate_page(vault, page, principal=_external())
     assert out is not None
     assert RESTRICTED_PATH not in str(out)
+
+
+# --------------------------------------------------------------------------
+# Reverse provenance — `ingested_into` (release-gate task 4)
+#
+# Provenance runs both ways. `sources` names what a compiled note cited;
+# `ingested_into` names every compiled note that cited a source (note.py
+# appends the new note's wikilink to each cited source on every compile). A
+# source released to an audience that cannot see those notes therefore
+# enumerates them — the release channel running in reverse.
+# --------------------------------------------------------------------------
+
+SOURCE_SCOPE_ID = "01ARZ3NDEKTSV4RRFFQ69G5FC0"
+SOURCE_RULE_ID = "01ARZ3NDEKTSV4RRFFQ69G5FC1"
+INGESTED_SOURCE_PATH = (
+    "Knowledge Base/Sources/Articles/2026-06-02-postgres-autovacuum-tuning.md"
+)
+RESTRICTED_TITLE = "Kill switch for risky releases"
+
+
+def _write_sources_scope_and_rule(vault: Path, *, ceiling: int) -> None:
+    """A SECOND scope/rule pair, so the cited source and the compiled note that
+    cites it can sit at different ceilings — the shape the leak needs."""
+    scopes = _gov_dir(vault) / "scopes"
+    scopes.mkdir(parents=True, exist_ok=True)
+    (scopes / "sources.yaml").write_text(
+        f"governance_version: 1\nid: {SOURCE_SCOPE_ID}\nname: Sources\n"
+        'paths: ["Sources/**"]\n',
+        encoding="utf-8",
+    )
+    rules = _gov_dir(vault) / "rules"
+    rules.mkdir(parents=True, exist_ok=True)
+    (rules / "sources-external.yaml").write_text(
+        f"governance_version: 1\nid: {SOURCE_RULE_ID}\n"
+        f'scope_ids: ["{SOURCE_SCOPE_ID}"]\n'
+        f"audience: {EXTERNAL}\nceiling: {ceiling}\n",
+        encoding="utf-8",
+    )
+
+
+def _plant_reverse_citation(vault: Path, entry: str) -> None:
+    """Write the exact back-ref `note.py` appends to every cited source."""
+    target = vault / INGESTED_SOURCE_PATH
+    original = target.read_text(encoding="utf-8")
+    updated = original.replace("ingested_into: []", f'ingested_into:\n  - "{entry}"')
+    assert updated != original, "fixture no longer carries an empty ingested_into"
+    target.write_text(updated, encoding="utf-8")
+
+
+#: Every form the back-ref can be written in. `note.py` writes the wikilink
+#: forms; the `.md` path form is what a hand-edited or migrated vault carries.
+REVERSE_CITATION_FORMS = (
+    f"[[{RESTRICTED_PATH.removesuffix('.md')}]]",
+    f"[[{RESTRICTED_KB_RELATIVE.removesuffix('.md')}]]",
+    f"[[{RESTRICTED_STEM}]]",
+    RESTRICTED_PATH,
+)
+
+
+@pytest.mark.parametrize("entry", REVERSE_CITATION_FORMS)
+def test_released_source_does_not_enumerate_the_notes_that_ingested_it(
+    vault: Path, entry: str
+) -> None:
+    """A source released BELOW full to an audience that cannot see the note
+    compiled from it must not name that note in any reference form."""
+    write_scope(vault)
+    write_rule(vault, ceiling=egress.LEVEL_NONE)
+    _write_sources_scope_and_rule(vault, ceiling=egress.LEVEL_EXCERPT)
+    _plant_reverse_citation(vault, entry)
+    _reset_caches()
+
+    with request_scope(_external()):
+        out = commands.op_get(vault, path=INGESTED_SOURCE_PATH)
+
+    assert out is not None, "the source itself is released; only its back-ref is not"
+    blob = json.dumps(out, default=str)
+    assert "ingested_into" not in json.dumps(
+        out.get("frontmatter") or {}, default=str
+    ), f"reverse citation survived release for form {entry!r}"
+    for form in (
+        RESTRICTED_PATH,
+        RESTRICTED_KB_RELATIVE,
+        RESTRICTED_STEM,
+        RESTRICTED_TITLE,
+    ):
+        assert form not in blob, f"{form!r} leaked through ingested_into ({entry!r})"
+
+
+def test_released_source_keeps_a_reverse_citation_to_a_permitted_note(
+    vault: Path,
+) -> None:
+    """The strip is a release decision, not a blanket deletion: when the note
+    that ingested the source is itself permitted, the field survives intact."""
+    write_scope(vault)
+    write_rule(vault, ceiling=egress.LEVEL_FULL)
+    _write_sources_scope_and_rule(vault, ceiling=egress.LEVEL_FULL)
+    _plant_reverse_citation(vault, f"[[{RESTRICTED_PATH.removesuffix('.md')}]]")
+    _reset_caches()
+
+    with request_scope(_external()):
+        out = commands.op_get(vault, path=INGESTED_SOURCE_PATH)
+
+    assert out is not None
+    ingested = (out.get("frontmatter") or {}).get("ingested_into")
+    assert ingested == [f"[[{RESTRICTED_PATH.removesuffix('.md')}]]"]
+
+
+def test_reverse_citation_is_in_the_frontmatter_provenance_strip_set() -> None:
+    """Structural: the field set is what `_strip_page_provenance` iterates, so
+    a reverse citation that is not in it is never even considered."""
+    assert "ingested_into" in egress._FRONTMATTER_PROVENANCE_FIELDS
+
+
+def test_reverse_citation_leak_is_closed_on_the_real_dispatch_path(
+    vault: Path,
+) -> None:
+    """The production path. MCP, REST, hosted and CLI all reach `op_get`
+    through `writer_lease.invoke_command`, and the wikilink form the vault
+    actually writes cleared every gate on that path before this change — the
+    dispatcher backstop included."""
+    write_scope(vault)
+    write_rule(vault, ceiling=egress.LEVEL_NONE)
+    _write_sources_scope_and_rule(vault, ceiling=egress.LEVEL_EXCERPT)
+    _plant_reverse_citation(vault, f"[[{RESTRICTED_PATH.removesuffix('.md')}]]")
+    _reset_caches()
+
+    with request_scope(_external()):
+        out = _through_dispatcher(vault, "get", path=INGESTED_SOURCE_PATH)
+
+    assert out is not None
+    assert RESTRICTED_STEM not in json.dumps(out, default=str)
 
 
 # --------------------------------------------------------------------------
@@ -3341,3 +3479,330 @@ def test_a_percent_literal_filename_resolves_to_itself(vault: Path) -> None:
         vault, {"entries": [{"path": "Knowledge Base/Notes/Patterns/a%20b.md"}]}
     )
     assert out["entries"] == [], "the percent-literal file resolved to its decoded twin"
+
+
+# --------------------------------------------------------------------------
+# A scope may deny audiences it does not name (add-default-deny-scope-cap)
+#
+# Wave 0's finding, at the surfaces: audiences are matched by EXACT id, and
+# for a non-OAuth MCP client the subject derives from the bearer credential —
+# so rotating a credential mints an audience id no rule names, and the vault
+# falls open to it. These pin the closed default end to end.
+# --------------------------------------------------------------------------
+
+DECLARED_VIDEO = "Knowledge Base/Notes/Patterns/board-briefing.mp4"
+
+
+def _audience_for(credential: str) -> str:
+    """The audience id a bearer credential resolves to, as the MCP surface
+    mints it — the thing a rotation changes."""
+    from exomem.governance.principal import normalize_audience
+
+    return normalize_audience(subject=credential, issuer="mcp-bearer")
+
+
+def _as(audience: str) -> RequestPrincipal:
+    return RequestPrincipal(audience_id=audience, surface="mcp")
+
+
+def test_a_declared_scope_denies_an_unnamed_audience_end_to_end(vault: Path) -> None:
+    """No rule document at all: the scope alone closes the item."""
+    write_scope(vault, default_deny=True)
+    _reset_caches()
+    with request_scope(_external()):
+        with pytest.raises(ValueError, match="NOT_FOUND"):
+            commands.op_get(vault, path=RESTRICTED_PATH)
+
+
+def test_the_same_scope_without_the_declaration_still_releases(vault: Path) -> None:
+    """The control for the test above — the change is opt-in, so an identical
+    scope carrying no declaration keeps today's full release."""
+    write_scope(vault)
+    _reset_caches()
+    with request_scope(_external()):
+        page = commands.op_get(vault, path=RESTRICTED_PATH)
+    assert "Kill switch" in page["body"]
+
+
+def test_a_rotated_credential_minting_an_unnamed_audience_id_is_denied(
+    vault: Path,
+) -> None:
+    """Spec: a newly minted audience id is denied by default.
+
+    The rule names the audience the ORIGINAL credential resolves to. Rotating
+    the credential produces a different id that appears in no document — the
+    precondition the owner cannot enforce and will not remember."""
+    before = _audience_for("bearer-token-v1")
+    after = _audience_for("bearer-token-v2")
+    never_named = _audience_for("some-assistant-that-was-never-authored")
+    assert len({before, after, never_named}) == 3
+
+    write_scope(vault, default_deny=True)
+    write_rule(vault, ceiling=egress.LEVEL_FULL, audience=before)
+    _reset_caches()
+
+    with request_scope(_as(before)):
+        page = commands.op_get(vault, path=RESTRICTED_PATH)
+    assert "Kill switch" in page["body"]
+
+    def _denied(audience: str) -> str:
+        _reset_caches()
+        with request_scope(_as(audience)):
+            with pytest.raises(ValueError) as excinfo:
+                commands.op_get(vault, path=RESTRICTED_PATH)
+        return str(excinfo.value)
+
+    # …and the rotated id is denied identically to one that was never authored.
+    assert _denied(after) == _denied(never_named)
+    assert _denied(after) == f"NOT_FOUND: file does not exist: {RESTRICTED_PATH}"
+
+
+def test_a_rotated_credential_falls_open_without_the_declaration(vault: Path) -> None:
+    """The defect the declaration exists to close, pinned as the control: the
+    same policy WITHOUT the declaration serves the rotated credential in full."""
+    before = _audience_for("bearer-token-v1")
+    after = _audience_for("bearer-token-v2")
+    write_scope(vault)
+    write_rule(vault, ceiling=egress.LEVEL_NONE, audience=before)
+    _reset_caches()
+    with request_scope(_as(after)):
+        page = commands.op_get(vault, path=RESTRICTED_PATH)
+    assert "Kill switch" in page["body"]
+
+
+def test_a_grant_still_reaches_an_unnamed_audience_in_a_declared_scope(
+    vault: Path,
+) -> None:
+    """Spec: a grant still raises above the default, with no special case."""
+    audience = _audience_for("bearer-token-v2")
+    write_scope(vault, default_deny=True)
+    grant = _gov_dir(vault) / "grants" / "rotated.yaml"
+    grant.parent.mkdir(parents=True, exist_ok=True)
+    grant.write_text(
+        f"governance_version: 1\nid: {GRANT_ID}\nkind: standing\n"
+        f'scope_ids: ["{SCOPE_ID}"]\naudience: {audience}\n'
+        f"ceiling: {egress.LEVEL_FULL}\n",
+        encoding="utf-8",
+    )
+    _reset_caches()
+    with request_scope(_as(audience)):
+        page = commands.op_get(vault, path=RESTRICTED_PATH)
+    assert "Kill switch" in page["body"]
+
+
+def test_the_owner_still_reads_a_declared_scope(vault: Path) -> None:
+    """Spec: the owner reads a declared scope at full release. A scope the
+    owner cannot read is a vault that has lost its own contents."""
+    write_scope(vault, default_deny=True)
+    _reset_caches()
+    with request_scope(RequestPrincipal(audience_id="owner", surface="cli")):
+        page = commands.op_get(vault, path=RESTRICTED_PATH)
+    assert "Kill switch" in page["body"]
+
+
+def test_an_ungoverned_vault_is_untouched_by_the_declaration(vault: Path) -> None:
+    """No governance tree still means the empty fast path."""
+    baseline = commands.op_get(vault, path=RESTRICTED_PATH)
+    _reset_caches()
+    with request_scope(_external()):
+        governed = commands.op_get(vault, path=RESTRICTED_PATH)
+    assert governed == baseline
+
+
+#: Deterministic stand-in for the fixture note, so the two probes below differ
+#: only in whether the item exists.
+_DECLARED_NOTE = (
+    "---\ntype: pattern\ntitle: Kill switch for risky releases\n---\n"
+    "A kill switch limits the blast radius of a risky release.\n"
+)
+
+#: Corpus-statistics fields a withheld item still moves on the items that
+#: SURVIVE it: it displaces their ranks and counts toward their in-degree.
+#: This channel predates the change and is identical for an authored
+#: `ceiling: 0` rule — pinned by the differential test below rather than
+#: assumed here, so excluding it is a proven property and not hand-waving.
+_RANK_DERIVED_SIGNALS = ("bm25_rank", "keyword_rank", "vector_rank", "graph_in_degree")
+
+
+def test_spec_names_the_known_preexisting_relevance_ranking_channel() -> None:
+    spec = (
+        Path(__file__).resolve().parents[1]
+        / "openspec/changes/add-default-deny-scope-cap/specs/governance-kernel/spec.md"
+    ).read_text(encoding="utf-8")
+    scenario = spec.split(
+        "#### Scenario: an audience no rule names receives nothing", 1
+    )[1].split("#### Scenario:", 1)[0]
+
+    assert all(signal in scenario for signal in _RANK_DERIVED_SIGNALS)
+    assert "known pre-existing channel" in scenario
+    assert "tracked separately" in scenario
+
+
+def _strip_rank_signals(payload):
+    hits = payload["hits"] if isinstance(payload, dict) else payload
+    for hit in hits if isinstance(hits, list) else []:
+        signals = hit.get("signals") if isinstance(hit, dict) else None
+        if isinstance(signals, dict):
+            for key in _RANK_DERIVED_SIGNALS:
+                signals.pop(key, None)
+    return payload
+
+
+def _probe_surfaces_present_then_absent(
+    vault: Path, *, keep_rank_signals: bool = False
+) -> tuple[dict[str, str], dict[str, str]]:
+    """Ask every surface for the same two paths twice: present, then deleted.
+
+    Returns `(present, absent)` keyed by surface. The caller supplies the
+    policy, so the only thing that varies between the two dicts is whether the
+    items exist on disk.
+    """
+    md = vault / RESTRICTED_PATH
+    video = vault / DECLARED_VIDEO
+    md.parent.mkdir(parents=True, exist_ok=True)
+    md.write_text(_DECLARED_NOTE, encoding="utf-8")
+    # The bytes are never reached: the release gate refuses before extraction.
+    video.write_bytes(PNG_1X1)
+
+    surfaces = {
+        "get": lambda: commands.op_get(vault, path=RESTRICTED_PATH),
+        "fetch": lambda: commands.op_fetch(vault, id=RESTRICTED_PATH),
+        "read_media": lambda: commands.op_get_video_frames(vault, path=DECLARED_VIDEO),
+        "recall": lambda: commands.op_find(
+            vault, query="kill switch risky releases", limit=10
+        ),
+        "graph": lambda: commands.op_graph_context(vault, path=RESTRICTED_PATH),
+    }
+
+    def _probe(name: str, call) -> str:
+        _reset_caches()
+        with request_scope(_external()):
+            try:
+                payload = call()
+            except ValueError as error:
+                return f"raised:{error}"
+        if name == "recall" and not keep_rank_signals:
+            payload = _strip_rank_signals(payload)
+        return f"ok:{json.dumps(payload, default=str, sort_keys=True)}"
+
+    present = {name: _probe(name, call) for name, call in surfaces.items()}
+    md.unlink()
+    video.unlink()
+    absent = {name: _probe(name, call) for name, call in surfaces.items()}
+    return present, absent
+
+
+def test_a_default_denied_item_matches_missing_except_known_ranking_signals(
+    vault: Path,
+) -> None:
+    """Spec: the item matches a missing one outside the named ranking channel.
+
+    Same-input/varied-condition: each surface is asked for ONE path twice —
+    once while it exists and is denied by the declaration, once after deleting
+    it. The caller controls the input, so any non-ranking difference would be
+    a new existence oracle introduced by the declaration.
+
+    Comparing two DIFFERENT withheld paths cannot isolate that bit: a response
+    legitimately echoes whichever path the caller named, so differing inputs
+    are expected to differ. A prior round of this work shipped an existence
+    oracle for exactly that reason.
+    """
+    write_scope(vault, default_deny=True)
+    present, absent = _probe_surfaces_present_then_absent(vault)
+
+    divergent = {
+        name: (present[name], absent[name])
+        for name in present
+        if present[name] != absent[name]
+    }
+    assert not divergent, (
+        "EXISTENCE ORACLE: a default-denied item answers differently from a "
+        f"missing one on surface(s): {sorted(divergent)}"
+    )
+    # `recall` is the one surface the caller did not name the item on, so the
+    # item must not come back as a hit there.
+    #
+    # Deliberately NOT "the stem appears nowhere in the payload": a PERMITTED
+    # note's own prose may link to the closed one, and that excerpt reads the
+    # same whether the target exists or not — the assertion above already
+    # proved it byte-identical, so it carries no existence bit. Reference
+    # FIELDS (provenance, relations, graph seeds) are stripped, which
+    # `test_a_withheld_path_is_recognised_in_every_reference_form` covers.
+    # The probe deletes the item on its way out, so restore it before asking.
+    (vault / RESTRICTED_PATH).write_text(_DECLARED_NOTE, encoding="utf-8")
+    _reset_caches()
+    with request_scope(_external()):
+        hits = commands.op_find(vault, query="kill switch risky releases", limit=10)
+    returned = [hit.get("path") for hit in (hits["hits"] if isinstance(hits, dict) else hits)]
+    assert (vault / RESTRICTED_PATH).is_file()
+    assert RESTRICTED_PATH not in returned
+
+
+def test_the_declaration_is_no_worse_than_the_existing_ceiling_0_primitive(
+    vault: Path,
+) -> None:
+    """The assertion this change owns: it is no worse than the old primitive.
+
+    `_RANK_DERIVED_SIGNALS` is excluded from the test above because a withheld
+    item still displaces the ranks of the items that survive it, and still
+    counts toward their `graph_in_degree` — a corpus-statistics channel that
+    predates this change and is identical for an explicit `ceiling: 0` rule
+    (verified against pristine `main`). This differential keeps the declaration
+    no worse than that existing primitive: every surface, INCLUDING the named
+    signals, answers byte-identically whether the item is closed by the
+    declaration or by an authored ceiling-0 rule.
+    """
+    write_scope(vault, default_deny=True)
+    declared_present, declared_absent = _probe_surfaces_present_then_absent(
+        vault, keep_rank_signals=True
+    )
+
+    # Same vault, same items, closed the already-supported way instead.
+    write_scope(vault)
+    write_rule(vault, ceiling=egress.LEVEL_NONE)
+    authored_present, authored_absent = _probe_surfaces_present_then_absent(
+        vault, keep_rank_signals=True
+    )
+
+    assert declared_present == authored_present
+    assert declared_absent == authored_absent
+
+
+def test_a_broad_undeclared_scope_cannot_reopen_a_declared_one(vault: Path) -> None:
+    """Spec: one declared scope denies across an overlapping undeclared scope.
+
+    The attack this closes: if membership in ANY undeclared scope re-opened the
+    item, the declaration would be defeatable by authoring a broad scope
+    alongside it — and authoring a broad scope is the ordinary thing an owner
+    does next. Proven through real membership resolution, not just the lattice.
+    """
+    write_scope(vault, default_deny=True)  # Notes/Patterns/** , declared
+    broad = _gov_dir(vault) / "scopes" / "everything.yaml"
+    broad.write_text(
+        "governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FB2\nname: Everything\n"
+        'paths: ["Notes/**"]\n',
+        encoding="utf-8",
+    )
+    _reset_caches()
+
+    from exomem.governance import policy as policy_module
+
+    pol = policy_module.load(vault)
+    decision = egress._decide_path(
+        vault,
+        RESTRICTED_PATH,
+        policy=pol,
+        audience=EXTERNAL,
+        purpose=None,
+        grants_hash=egress._grants_hash(pol),
+    )
+    assert decision is not None
+    # Both scopes really do contain the item — otherwise the test proves nothing.
+    assert len(decision.scope_ids) == 2
+    assert decision.level == 0
+    assert decision.default_deny_scope_ids == (SCOPE_ID,)
+
+    _reset_caches()
+    with request_scope(_external()):
+        with pytest.raises(ValueError, match="NOT_FOUND"):
+            commands.op_get(vault, path=RESTRICTED_PATH)

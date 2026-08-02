@@ -18,6 +18,16 @@ Use when the user asks to defrag a topic, reconcile notes, resolve contradiction
 3. Read candidate pages with `read_memory`, including history when needed.
 4. Use `replace_memory` for changed conclusions and `edit_memory` only for minor corrections.
 5. Preserve raw sources and evidence; keep superseded history visible.
+6. When you supersede or merge, carry the merged notes' `sources:` and outbound links onto the survivor — a merge that drops edges loses graph value the superseded page can no longer carry. Check `review_memory(mode="relation-debt")` on the survivor afterwards.
+
+## Output contract
+Return the reconciliation decision for each candidate and the paths changed or left alone.
+
+## Save rules
+Only mutate when the correct action is clear. Use supersession for meaningful changes.
+
+## Mistakes to avoid
+Do not auto-delete memory. Do not treat semantic proximity as contradiction by itself. Do not merge notes that answer different questions.
 
 <!-- exomem-semantic-authoring:v4 sha256:837b03b15c3d83f6c6eeb50771f4eaa04e4beaaae0f7d54be249be40ce7685f7 -->
 ## Semantic authoring contract
@@ -67,12 +77,3 @@ Rich example:
 
 Commit to a fixed 6am training block on weekdays so consistency compounds and health stays the durable lens for this decision.
 ```
-
-## Output contract
-Return the reconciliation decision for each candidate and the paths changed or left alone.
-
-## Save rules
-Only mutate when the correct action is clear. Use supersession for meaningful changes.
-
-## Mistakes to avoid
-Do not auto-delete memory. Do not treat semantic proximity as contradiction by itself. Do not merge notes that answer different questions.

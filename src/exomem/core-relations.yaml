@@ -25,3 +25,6 @@ relations:
   cites: {description: Cites, family: citation, direction: directed, origins: [semantic_relation]}
   tests: {description: Tests, family: testing, direction: directed, origins: [semantic_relation]}
   owns: {description: Owns, family: ownership, direction: directed, origins: [semantic_relation]}
+  part_of: {description: Is a part of, family: composition, direction: directed, inverse: contains, origins: [semantic_relation]}
+  contains: {description: Contains as a part, family: composition, direction: directed, inverse: part_of, origins: [semantic_relation]}
+  extends: {description: Extends or specializes, family: specialization, direction: directed, origins: [semantic_relation]}

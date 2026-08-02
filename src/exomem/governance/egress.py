@@ -543,6 +543,34 @@ _WIKILINK_ANYWHERE = re.compile(r"\[\[([^\[\]]+)\]\]")
 _EXOMEM_PATH_PREFIXES = ("exomem://vault/", "exomem://source/")
 
 
+def _unwrap_reference(raw: str) -> tuple[str, bool]:
+    """`(path-ish text, explicitly-a-reference)` for one reference string.
+
+    Shared by the withheld-key comparison and by the reference COLLECTION in
+    `annotate_page`, so both read a wikilink, an `exomem://` ref and a plain
+    path exactly the same way.
+    """
+    text = raw.strip()
+    if not text:
+        return "", False
+    explicit = False
+    if text.startswith("[[") and text.endswith("]]"):
+        text = text[2:-2].strip()
+        explicit = True
+    lowered = text.lower()
+    for prefix in _EXOMEM_PATH_PREFIXES:
+        if lowered.startswith(prefix):
+            text = unquote(text[len(prefix) :])
+            explicit = True
+            break
+    # Wikilink display alias (`[[target|label]]`) and heading anchor
+    # (`path.md#Section`) are presentation, not identity.
+    text = text.split("|", 1)[0]
+    text = text.split("#", 1)[0]
+    text = text.replace("\\", "/").strip().strip("/")
+    return text, explicit
+
+
 def _canonical_reference(raw: str) -> tuple[str, bool] | None:
     """`(canonical key, compare-against-stems)` for one reference string.
 
@@ -559,24 +587,7 @@ def _canonical_reference(raw: str) -> tuple[str, bool] | None:
       so an ordinary title (`Overview`) is not stripped because a withheld
       page happens to be named `overview.md`.
     """
-    text = raw.strip()
-    if not text:
-        return None
-    explicit = False
-    if text.startswith("[[") and text.endswith("]]"):
-        text = text[2:-2].strip()
-        explicit = True
-    lowered = text.lower()
-    for prefix in _EXOMEM_PATH_PREFIXES:
-        if lowered.startswith(prefix):
-            text = unquote(text[len(prefix) :])
-            explicit = True
-            break
-    # Wikilink display alias (`[[target|label]]`) and heading anchor
-    # (`path.md#Section`) are presentation, not identity.
-    text = text.split("|", 1)[0]
-    text = text.split("#", 1)[0]
-    text = text.replace("\\", "/").strip().strip("/")
+    text, explicit = _unwrap_reference(raw)
     if not text:
         return None
     key = text.casefold()
@@ -1484,6 +1495,11 @@ def guard_graph_context(
 #: Page fields whose values may name other vault items. Scanned so a permitted
 #: page cannot act as an existence oracle for a withheld one.
 _PAGE_PROVENANCE_FIELDS = ("links", "history", "relations", "sources", "neighborhood")
+#: Provenance runs in BOTH directions. `sources` records what a compiled item
+#: cited; `ingested_into` records every compiled item that cited a source —
+#: `note.py` appends the new note's wikilink to each cited source on every
+#: compile. A source released to an audience that cannot see those notes
+#: therefore enumerated them, which is the forward leak running backwards.
 _FRONTMATTER_PROVENANCE_FIELDS = (
     "superseded_by",
     "supersedes",
@@ -1491,6 +1507,7 @@ _FRONTMATTER_PROVENANCE_FIELDS = (
     "source",
     "evidence",
     "parent_media",
+    "ingested_into",
 )
 
 
@@ -1693,11 +1710,21 @@ def annotate_page(
     # sub-notice item (D3 applies the strip at EVERY level, not just below
     # full), so decide the items this page points at before answering.
     referenced: set[str] = set()
+    bare_stems: set[str] = set()
     frontmatter = page.get("frontmatter")
     if isinstance(frontmatter, Mapping):
+        targets: set[str] = set()
         for name in _FRONTMATTER_PROVENANCE_FIELDS:
-            referenced.update(_iter_path_strings(frontmatter.get(name)))
-    bare_stems: set[str] = set()
+            value = frontmatter.get(name)
+            referenced.update(_iter_path_strings(value))
+            # These fields are reference containers by definition, exactly
+            # like `_PAGE_PROVENANCE_FIELDS`, and the vault writes them as
+            # wikilinks — so collecting only `.md`-suffixed strings decided
+            # nothing for the form the vault actually stores.
+            targets.update(_iter_reference_targets(value))
+            bare_stems.update(_iter_reference_stems(value))
+        if targets:
+            referenced.update(_resolve_reference_targets(vault_root, targets))
     for name in _PAGE_PROVENANCE_FIELDS:
         referenced.update(_iter_path_strings(page.get(name)))
         # These fields store BARE stems (`links.outbound` is a wikilink list)
@@ -1747,9 +1774,14 @@ def annotate_page(
 
 
 def _iter_reference_stems(value: Any) -> Iterable[str]:
-    """Bare, non-path strings inside a reference container."""
+    """Bare, non-path strings inside a reference container.
+
+    Unwrapped first: a reference field stores `[[stem]]` at least as often as
+    a bare `stem`, and the bracketed form was compared against filename stems
+    with its brackets still attached, so it never matched anything.
+    """
     if isinstance(value, str):
-        candidate = value.strip()
+        candidate, _ = _unwrap_reference(value)
         if candidate and "/" not in candidate and not candidate.lower().endswith(".md"):
             yield candidate
     elif isinstance(value, Mapping):
@@ -1758,6 +1790,51 @@ def _iter_reference_stems(value: Any) -> Iterable[str]:
     elif isinstance(value, (list, tuple, set, frozenset)):
         for item in value:
             yield from _iter_reference_stems(item)
+
+
+def _iter_reference_targets(value: Any) -> Iterable[str]:
+    """Directory-carrying reference tokens inside a reference container.
+
+    Frontmatter provenance stores WIKILINKS (`[[Knowledge Base/Notes/x]]`,
+    `[[Notes/x]]`), which carry no `.md` suffix, so `_iter_path_strings`
+    yielded nothing for them and the item they name was never decided —
+    leaving `_strip_page_provenance` with an empty withheld set and the
+    reference in the clear.
+    """
+    if isinstance(value, str):
+        token, _ = _unwrap_reference(value)
+        if token and "/" in token:
+            yield token
+    elif isinstance(value, Mapping):
+        for item in value.values():
+            yield from _iter_reference_targets(item)
+    elif isinstance(value, (list, tuple, set, frozenset)):
+        for item in value:
+            yield from _iter_reference_targets(item)
+
+
+def _resolve_reference_targets(vault_root: Path, targets: Iterable[str]) -> set[str]:
+    """Map directory-carrying references onto the vault paths they name.
+
+    A wikilink is written either vault-relative or Knowledge-Base-relative, so
+    both are tried against the filesystem — two `is_file()` calls per
+    reference, versus the whole-vault walk a stem lookup would cost on every
+    page carrying provenance. An unresolvable reference is kept verbatim so
+    `_decide_path` fails it closed rather than silently dropping it from the
+    set of things that must be decided.
+    """
+    out: set[str] = set()
+    kb_prefix = f"{kb_dirname()}/"
+    for token in targets:
+        candidate = token if token.lower().endswith(".md") else f"{token}.md"
+        if (vault_root / candidate).is_file():
+            out.add(candidate)
+            continue
+        prefixed = (
+            candidate if candidate.startswith(kb_prefix) else kb_prefix + candidate
+        )
+        out.add(prefixed if (vault_root / prefixed).is_file() else candidate)
+    return out
 
 
 def _resolve_reference_stems(vault_root: Path, stems: Iterable[str]) -> set[str]:
@@ -1933,6 +2010,168 @@ def postfilter(command_name: str, result: Any, vault_root: Path) -> Any:
     if blocked:
         _record_credential_block()
     return cleaned
+
+
+#: An error's human-readable payload, wherever the codebase parks it —
+#: `OpError.message`/`.remediation`, `memory_refs.ReferenceError.reason`.
+#: `code` is deliberately absent: a stable error code is the contract a client
+#: branches on, and it names no vault item.
+_ERROR_TEXT_ATTRIBUTES = ("message", "reason", "remediation")
+
+
+def _rewrite_error_attribute(error: BaseException, name: str, value: Any) -> None:
+    """Rewrite in place so the exception keeps its type, code and traceback.
+
+    Rebuilding an arbitrary exception is not possible in general — signatures
+    differ, and `memory_refs.ReferenceError` is a frozen dataclass — so the
+    payload is replaced on the object that is already travelling.
+    """
+    try:
+        setattr(error, name, value)
+    except (AttributeError, TypeError, ValueError):
+        try:  # frozen dataclass exceptions
+            object.__setattr__(error, name, value)
+        except (AttributeError, TypeError, ValueError):  # pragma: no cover
+            pass
+
+
+#: Parameters that carry a vault reference BY CONTRACT. The exemption is seeded
+#: from these alone, never from every kwarg.
+#:
+#: Walking all kwargs looks harmless — each value is caller-supplied, which is
+#: the whole safety argument — but it hands the caller a de-anonymisation
+#: channel: put a known path in any free-text field (`why`, `intent`, `title`,
+#: `query`) and a redacted collision list stops rendering it as `[withheld]`,
+#: revealing WHICH slot that path occupies. A list-shaped field turns that from
+#: one probe per candidate into one probe per thousand. Restricting the seed to
+#: reference-typed parameters keeps the justification ("the caller named this AS
+#: a reference") and removes the channel.
+_REFERENCE_KWARGS = frozenset(
+    {
+        "path",
+        "paths",
+        "id",
+        "ids",
+        "ref",
+        "refs",
+        "old_path",
+        "new_path",
+        "source_path",
+        "target_path",
+        "manifest_path",
+        "only_paths",
+        "selector_paths",
+    }
+)
+
+
+def _caller_supplied_references(kwargs: Mapping[str, Any] | None) -> frozenset[str]:
+    """Canonical keys for every reference the CALLER put in the request.
+
+    See `postfilter_error` for why these must survive filtering verbatim, and
+    `_REFERENCE_KWARGS` for why only reference-typed parameters seed the set.
+    """
+    if not kwargs:
+        return frozenset()
+    out: set[str] = set()
+
+    def _walk(value: Any) -> None:
+        if isinstance(value, str):
+            canonical = _canonical_reference(value)
+            if canonical is not None:
+                out.add(canonical[0])
+                # Mirror `_withheld_keys`: a supplied `Notes/x.md` and a
+                # volunteered `Knowledge Base/Notes/x.md` are the same item.
+                stripped = _kb_stripped(canonical[0])
+                if stripped:
+                    out.add(stripped)
+        elif isinstance(value, Mapping):
+            for item in value.values():
+                _walk(item)
+        elif isinstance(value, (list, tuple, set, frozenset)):
+            for item in value:
+                _walk(item)
+
+    _walk({k: v for k, v in kwargs.items() if k in _REFERENCE_KWARGS})
+    return frozenset(out)
+
+
+def postfilter_error(
+    command_name: str,
+    error: BaseException,
+    vault_root: Path,
+    *,
+    request_kwargs: Mapping[str, Any] | None = None,
+) -> BaseException:
+    """The terminal egress filter applied to a RAISED payload.
+
+    `postfilter` guards the value a command returns; this guards the value it
+    raises. Both leave through `writer_lease.invoke_command`, the ONE
+    dispatcher shared by MCP, REST, hosted and CLI, and an error that names a
+    withheld item is exactly the disclosure a result naming one would be —
+    `AMBIGUOUS_REFERENCE` embedding the colliding vault paths proved the class
+    reachable rather than theoretical.
+
+    THE CALLER'S OWN REFERENCES ARE EXEMPT, and that exemption is what makes
+    this filter safe rather than actively harmful. Redaction here works by
+    SUBSTITUTION — a withheld reference becomes `[withheld]`. That is correct
+    for a result payload, where the marker sits inside content the caller was
+    already entitled to receive. It is catastrophic for an error whose entire
+    payload IS a path the caller just sent, because then the substitution is
+    itself the answer: `NOT_FOUND: ... [withheld]` means "exists, restricted"
+    while `NOT_FOUND: ... <your path>` means "does not exist". That is a clean
+    binary existence oracle over the whole vault, probeable with a guessed
+    slug, and it is strictly worse than emitting the path — which the caller
+    supplied and therefore already knows.
+
+    So: a reference the caller put in the request is echoed back untouched, and
+    everything else is redacted. The invariant is that an error's text stays a
+    pure function of the caller's own input. Anything else is a distinguishable
+    state, and a distinguishable state is a disclosure.
+
+    An error carries free text and nothing structural for the entry filter to
+    drop, so the artifact gate scans every string (the `scan_all` shape) and
+    the always-on scrubber runs exactly as it does for results. The gate's own
+    empty-policy short circuit keeps an ungoverned vault's text byte-identical.
+
+    Mutates in place and returns the same object, so the caller re-raises with
+    its original type, error code and traceback intact.
+    """
+    del command_name  # an error is free text; there is no per-command shape
+    vault_root = Path(vault_root)
+    gate = _ArtifactReferenceGate(
+        vault_root,
+        principal=None,
+        purpose=None,
+        exempt=_caller_supplied_references(request_kwargs),
+    )
+    scrub = scrubber.enabled(vault_root)
+    blocked = False
+
+    def _clean(value: Any) -> Any:
+        nonlocal blocked
+        cleaned = gate.gate_payload(value, scan_strings=True)
+        if scrub:
+            cleaned, hit = scrubber.scrub_value(cleaned)
+            blocked = blocked or hit
+        return cleaned
+
+    code = getattr(error, "code", None)
+    args = tuple(error.args or ())
+    if args:
+        rewritten = tuple(arg if arg == code else _clean(arg) for arg in args)
+        if rewritten != args:
+            _rewrite_error_attribute(error, "args", rewritten)
+    for name in (*_ERROR_TEXT_ATTRIBUTES, "details"):
+        value = getattr(error, name, None)
+        if value is None or value == code:
+            continue
+        cleaned = _clean(value)
+        if cleaned != value:
+            _rewrite_error_attribute(error, name, cleaned)
+    if blocked:
+        _record_credential_block()
+    return error
 
 
 # ---------------------------------------------------------------------------
@@ -2559,10 +2798,15 @@ class _ArtifactReferenceGate:
         *,
         principal: RequestPrincipal | None,
         purpose: str | None,
+        exempt: frozenset[str] = frozenset(),
     ) -> None:
         self.vault_root = Path(vault_root)
         self.policy = policy_module.load(self.vault_root)
         self.who = principal if principal is not None else effective_principal()
+        # Canonical keys the caller themselves supplied. Substituting a marker
+        # for one of these would answer a question the caller already knew the
+        # input to, and the answer is "does this exist?" — see `postfilter_error`.
+        self.exempt = exempt
         self.fail_closed = self.policy.blocked or not self.who.resolved
         self.grants_hash = "" if self.fail_closed else _grants_hash(self.policy)
         self.purpose = _declared_purpose(self.vault_root, self.who, purpose)
@@ -2702,6 +2946,17 @@ class _ArtifactReferenceGate:
 
         def _replace_token(match: re.Match[str]) -> str:
             token = match.group(0)
+            if self.exempt:
+                canonical = _canonical_reference(token)
+                # Compare both forms: the caller may have supplied either the
+                # KB-relative or the vault-absolute spelling of the same item.
+                if canonical is not None and (
+                    canonical[0] in self.exempt
+                    or _kb_stripped(canonical[0]) in self.exempt
+                ):
+                    # The caller sent this. Echoing it back tells them nothing;
+                    # replacing it tells them the item exists.
+                    return token
             candidates = self.resolve(token)
             if candidates and not all(self._permits(rel) for rel in candidates):
                 return WITHHELD_REFERENCE

@@ -51,6 +51,12 @@ _COMPILED_PAGE_TYPES = frozenset(
         "production-log",
     }
 )
+# Valid *targets* of a connectivity signal. Wider than `_ELIGIBLE_TYPES` because
+# citing a captured Source is a real connection. Kept deliberately separate:
+# `eligible_governed_paths` gates the empty-corpus bootstrap disposition, so
+# folding `source` into that set would let one captured Source destroy the
+# carve-out for a user's very first compiled note.
+_CONNECTABLE_TYPES = _ELIGIBLE_TYPES | {"source"}
 _INACTIVE_STATUSES = frozenset({"superseded", "archived", "draft", "planned", "dropped"})
 _SKIP_SLUG_SUFFIXES = ("-architecture", "-snapshot", "-catalog-snapshot")
 _SKIP_TAGS = frozenset({"hub", "snapshot"})
@@ -165,6 +171,22 @@ def is_eligible_compiled_page(vault_root: Path, page: Any) -> bool:
     return _eligible_for_types(vault_root, page, page_types=_COMPILED_PAGE_TYPES)
 
 
+def is_connectable_target(vault_root: Path, page: Any) -> bool:
+    """Return whether ``page`` may be the *target* of a connectivity signal.
+
+    Shares every eligibility rule with :func:`is_eligible_governed_page` except
+    two: append-only material qualifies (a cited Source is a real connection),
+    and the `source` page type is admitted.  This is a target-side predicate
+    only — the authoring page must still be an eligible governed page.
+    """
+    return _eligible_for_types(
+        vault_root,
+        page,
+        page_types=_CONNECTABLE_TYPES,
+        tiers=frozenset({access.TIER_READ_WRITE, access.TIER_APPEND_ONLY}),
+    )
+
+
 def is_managed_governed_path(vault_root: Path, path: Path | str) -> bool:
     """Return whether ``path`` resolves inside the configured governed subtree."""
     root = Path(vault_root)
@@ -186,7 +208,11 @@ def normalized_page_type(value: object) -> str | None:
 
 
 def _eligible_for_types(
-    vault_root: Path, page: Any, *, page_types: frozenset[str]
+    vault_root: Path,
+    page: Any,
+    *,
+    page_types: frozenset[str],
+    tiers: frozenset[str] = frozenset({access.TIER_READ_WRITE}),
 ) -> bool:
     if not is_managed_governed_path(vault_root, page.path):
         return False
@@ -200,7 +226,7 @@ def _eligible_for_types(
     )
     if normalized_status in _INACTIVE_STATUSES:
         return False
-    if access.access_tier(vault_root, page.rel_path) != access.TIER_READ_WRITE:
+    if access.access_tier(vault_root, page.rel_path) not in tiers:
         return False
     stem = page.path.stem.lower()
     if any(stem.endswith(suffix) for suffix in _SKIP_SLUG_SUFFIXES):

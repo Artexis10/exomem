@@ -205,9 +205,16 @@ class ReferenceIndex:
         if not rows:
             rows = self._scan_paths_for_id(normalized)
         if len(rows) > 1:
+            # A COUNT, never the paths. Merging or duplicating identities is
+            # what manufactures a collision, so a caller can manufacture one
+            # and read the colliding vault paths straight out of this message
+            # — for pages it may hold no release decision over. The count is
+            # what an owner needs to know a repair is due; the paths are
+            # reachable through the governed surfaces that resolve an audience
+            # (`backfill_ids(dry_run=True)`, `issues()`).
             raise ReferenceError(
                 "AMBIGUOUS_REFERENCE",
-                f"memory id {normalized} appears in multiple pages: {rows}",
+                f"memory id {normalized} appears in {len(rows)} pages",
             )
         if not rows:
             raise ReferenceError("REFERENCE_NOT_FOUND", f"memory id not found: {normalized}")
@@ -386,9 +393,10 @@ def resolve_identifier_read_only(vault_root: Path, value: str) -> str:
             raise ReferenceError("INVALID_REFERENCE", f"invalid memory reference: {raw!r}")
         rows = ReferenceIndex(vault_root)._scan_paths_for_id(memory_id)
         if len(rows) > 1:
+            # Content-free, for the reason given at `ReferenceIndex.resolve`.
             raise ReferenceError(
                 "AMBIGUOUS_REFERENCE",
-                f"memory id {memory_id} appears in multiple pages: {rows}",
+                f"memory id {memory_id} appears in {len(rows)} pages",
             )
         if not rows:
             raise ReferenceError(
@@ -455,9 +463,14 @@ def backfill_ids(vault_root: Path, *, dry_run: bool = True) -> dict:
     duplicates = [item for item in identity_issues if item["kind"] == "duplicate"]
     if duplicates and not dry_run:
         duplicate_ids = sorted({item["value"] for item in duplicates})
+        # A count, not the identities: an `exomem_id` is a reference to a
+        # stored page, and the caller did not supply these. The per-identity
+        # detail is in this same function's `dry_run` result, which leaves
+        # through the dispatcher where a disclosure decision applies.
         raise ReferenceError(
             "AMBIGUOUS_REFERENCE",
-            f"cannot backfill while duplicate exomem_id values exist: {duplicate_ids}",
+            f"cannot backfill while {len(duplicate_ids)} duplicate exomem_id "
+            "values exist",
         )
     if writes and not dry_run:
         vault_module.batch_atomic_write(writes, vault_root=vault_root)

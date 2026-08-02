@@ -11,7 +11,10 @@ import os
 import time
 from pathlib import Path
 
-from exomem.governance import policy, receipts, store
+import pytest
+
+from exomem.governance import egress, policy, receipts, store
+from exomem.governance.principal import RequestPrincipal, owner_principal
 
 
 def _write(vault: Path, kind: str, name: str, text: str) -> Path:
@@ -385,3 +388,569 @@ def test_scope_with_a_path_selector_emits_no_media_warning(vault: Path) -> None:
     assert not [
         f for f in pol.findings if f.get("code") == "SCOPE_CANNOT_SELECT_MEDIA"
     ]
+
+
+# --------------------------------------------------------------------------
+# DEFECT 1 — the last-good cache must never be able to serve an OPEN policy
+# --------------------------------------------------------------------------
+
+_PATTERN_GLOB = "Knowledge Base/Notes/Patterns/**"
+_PATTERN_PATH = "Knowledge Base/Notes/Patterns/kill-switch-for-risky-releases.md"
+# Deliberately distinct from `_SCOPE_A`/`_RULE_A` so a proposal can be layered
+# over a vault that already carries a hand-written policy.
+_PROPOSAL_SCOPE_ID = "01ARZ3NDEKTSV4RRFFQ69G5FC0"
+_PROPOSAL_RULE_ID = "01ARZ3NDEKTSV4RRFFQ69G5FC1"
+
+
+def _proposal_documents(*, ceiling: int = 1) -> dict[str, str]:
+    return {
+        "scopes/confidential-patterns.yaml": (
+            "governance_version: 1\n"
+            f"id: {_PROPOSAL_SCOPE_ID}\n"
+            "name: Confidential patterns\n"
+            f'paths: ["{_PATTERN_GLOB}"]\n'
+        ),
+        "rules/confidential-patterns.yaml": (
+            "governance_version: 1\n"
+            f"id: {_PROPOSAL_RULE_ID}\n"
+            f'scope_ids: ["{_PROPOSAL_SCOPE_ID}"]\n'
+            "audience: external\n"
+            f"ceiling: {ceiling}\n"
+        ),
+    }
+
+
+def _external() -> RequestPrincipal:
+    return RequestPrincipal(
+        audience_id="external", surface="mcp", authorization_session_id="conversation-a"
+    )
+
+
+def _propose(vault: Path, *, ceiling: int = 1) -> dict:
+    from exomem.governance.tool import op_govern_memory
+
+    return op_govern_memory(
+        vault,
+        operation="propose",
+        principal=owner_principal(),
+        intent="Treat pattern notes as confidential for the external audience",
+        documents=_proposal_documents(ceiling=ceiling),
+        selector_paths=[_PATTERN_GLOB],
+        target_ceiling=ceiling,
+        duration="standing",
+    )
+
+
+def _pending_first_policy_commit(vault: Path) -> None:
+    """Leave the vault's FIRST governance mutation pending mid-activation.
+
+    Same crash seam `test_govern_memory_tool` drives: the commit writes its
+    target document and dies before activation, so the sidecar journal stays
+    `pending` and every later `policy.load` takes the guarded fallback.
+    """
+    from exomem.governance.tool import GovernanceCrash, op_govern_memory
+
+    proposal = _propose(vault)
+    with pytest.raises(GovernanceCrash):
+        op_govern_memory(
+            vault,
+            operation="commit",
+            principal=owner_principal(),
+            proposal_id=proposal["proposal_id"],
+            crash_at="after_target_write:1",
+        )
+
+
+def _disclosure_decision(vault: Path) -> dict | None:
+    """One content-returning surface's decision for one item and audience."""
+    return egress.annotate_page(
+        vault, {"path": _PATTERN_PATH, "body": "hello", "frontmatter": {}},
+        principal=_external(),
+    )
+
+
+def test_pending_mutation_on_a_previously_open_vault_fails_closed(vault: Path) -> None:
+    """Task 1.1 — a warm cache seeded by an OPEN load must not reopen the vault.
+
+    A long-lived process that served this vault before governance existed has
+    `EMPTY_POLICY` in `_LAST_GOOD`. Once the first policy mutation is pending,
+    the guarded fallback must reach the fail-closed floor, not hand back an
+    empty-looking (and therefore fully open) policy.
+    """
+    policy._CACHE.clear()
+    policy._LAST_GOOD.clear()
+    assert policy.load(vault) is policy.EMPTY_POLICY  # process predates governance
+
+    _pending_first_policy_commit(vault)
+
+    pol = policy.load(vault)
+    assert any(f["code"] == "governance_mutation_pending" for f in pol.findings), (
+        f"the guarded fallback was not reached: {pol.findings}"
+    )
+    assert pol.empty is False, "the guarded fallback served the OPEN empty singleton"
+    assert pol.blocked is True
+    assert _disclosure_decision(vault) is None
+
+
+def test_empty_open_singleton_is_never_retained_as_last_good(vault: Path) -> None:
+    """Task 1.2 — a load resolving to the open singleton leaves the cache alone."""
+    policy._CACHE.clear()
+    policy._LAST_GOOD.clear()
+    (vault / "Knowledge Base" / "_Governance").mkdir(parents=True, exist_ok=True)
+
+    assert policy.load(vault) is policy.EMPTY_POLICY
+
+    key = str(policy.governance_root(vault))
+    assert key not in policy._LAST_GOOD, (
+        "the open singleton was retained as a policy worth falling back to"
+    )
+
+
+def test_warm_and_cold_caches_agree_during_a_pending_first_mutation(vault: Path) -> None:
+    """Task 1.3 — process uptime must not change the disclosure decision.
+
+    The warm side is a process that has served this vault since before
+    governance existed; the cold side is a freshly started one. The defect is
+    process-state dependent, so both halves are exercised here and their
+    decisions compared, rather than asserting the invariant once.
+    """
+    policy._CACHE.clear()
+    policy._LAST_GOOD.clear()
+    assert policy.load(vault) is policy.EMPTY_POLICY  # warm process, pre-governance
+
+    _pending_first_policy_commit(vault)
+
+    warm_policy = policy.load(vault)
+    warm_decision = _disclosure_decision(vault)
+
+    # A freshly started process: no `_CACHE`, no `_LAST_GOOD`, same vault on disk.
+    policy._CACHE.clear()
+    policy._LAST_GOOD.clear()
+    egress.clear_decision_memo()
+    cold_policy = policy.load(vault)
+    cold_decision = _disclosure_decision(vault)
+
+    assert cold_policy.blocked is True  # the cold process already fails closed today
+    assert (warm_policy.empty, warm_policy.blocked) == (
+        cold_policy.empty,
+        cold_policy.blocked,
+    ), "process uptime changed the policy state for the same vault"
+    assert warm_decision == cold_decision, (
+        "process uptime changed the disclosure decision for the same item"
+    )
+
+
+def test_governed_last_good_is_still_served_through_the_guard(vault: Path) -> None:
+    """Task 1.4 — a real compiled policy still survives a pending mutation."""
+    policy._CACHE.clear()
+    policy._LAST_GOOD.clear()
+    _write(vault, "scopes", "acmeco", _SCOPE_A)
+    _write(vault, "rules", "acmeco-external", _RULE_A)
+    good = policy.load(vault)
+    assert good.empty is False and good.blocked is False
+
+    _pending_first_policy_commit(vault)
+
+    guarded = policy.load(vault)
+    assert any(f["code"] == "governance_mutation_pending" for f in guarded.findings)
+    assert guarded.blocked is False
+    assert guarded.empty is False
+    assert guarded.fingerprint == good.fingerprint
+    assert guarded.scopes == good.scopes
+    assert guarded.rules == good.rules
+    assert guarded.grants == good.grants
+    assert guarded.release_grants == good.release_grants
+
+
+def test_ungoverned_vault_never_reaches_the_guarded_fallback(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Task 1.6 — no `_Governance/` tree keeps the byte-identical fast path."""
+    policy._CACHE.clear()
+    policy._LAST_GOOD.clear()
+    assert not (vault / "Knowledge Base" / "_Governance").exists()
+
+    calls: list[str] = []
+    real = policy._guarded_policy
+    monkeypatch.setattr(
+        policy,
+        "_guarded_policy",
+        lambda *a, **kw: (calls.append(a[1]), real(*a, **kw))[1],
+    )
+
+    for _ in range(3):
+        assert policy.load(vault) is policy.EMPTY_POLICY
+
+    assert calls == []
+
+
+# --------------------------------------------------------------------------
+# DEFECT 2 — a synchronisation conflict copy must never act as policy
+# --------------------------------------------------------------------------
+
+_GRANT_A = (
+    "governance_version: 1\n"
+    "id: 01ARZ3NDEKTSV4RRFFQ69G5FB1\n"
+    "kind: standing\n"
+    "scope_ids: [\"01ARZ3NDEKTSV4RRFFQ69G5FAV\"]\n"
+    "audience: external\n"
+    "ceiling: 6\n"
+)
+
+
+def _sync_conflict_name(stem: str) -> str:
+    """Syncthing's conflict-copy filename for `<stem>.yaml`."""
+    return f"{stem}.sync-conflict-20260731-120000-ABCDEFG.yaml"
+
+
+def test_sync_conflict_copy_of_a_deleted_grant_does_not_restore_access(
+    vault: Path,
+) -> None:
+    """Task 2.1 — deleting a grant revokes it; a conflict copy must not undo that."""
+    policy._CACHE.clear()
+    policy._LAST_GOOD.clear()
+    _write(vault, "scopes", "acmeco", _SCOPE_A)
+    _write(vault, "rules", "acmeco-external", _RULE_A)
+    grant_path = _write(vault, "grants", "acmeco-external", _GRANT_A)
+    assert len(policy.load(vault).grants) == 1
+
+    grant_path.unlink()  # revoke by deletion
+    time.sleep(0.01)
+    revoked = policy.load(vault)
+    assert revoked.grants == ()
+    assert revoked.blocked is False
+
+    # Syncthing lands the deleted document back under a conflict-copy name.
+    resurrected = grant_path.parent / _sync_conflict_name("acmeco-external")
+    resurrected.write_text(_GRANT_A, encoding="utf-8")
+    time.sleep(0.01)
+
+    pol = policy.load(vault)
+    assert any(f["code"] == "conflicted_copy" for f in pol.findings), (
+        f"the sync-conflict copy was not recognised as a conflict: {pol.findings}"
+    )
+    assert pol.grants == (), "a revoked grant was resurrected by a sync-conflict copy"
+    # The last good governed policy stays in effect (design D3).
+    assert pol.empty is False
+    assert pol.blocked is False
+    assert pol.fingerprint == revoked.fingerprint
+    assert pol.scopes == revoked.scopes
+    assert pol.rules == revoked.rules
+
+
+def test_sync_conflict_copy_beside_its_original_is_a_conflict_not_a_duplicate(
+    vault: Path,
+) -> None:
+    """Task 2.2 — the conflict is detected before duplicate-id compilation.
+
+    A `duplicate_id` error reads as an authoring typo and drops the load onto
+    the last in-process compile, which during a tightening operation is the
+    pre-lockdown policy. The refusal must name the real problem instead, and
+    must not fall back below the last good governed policy.
+    """
+    policy._CACHE.clear()
+    policy._LAST_GOOD.clear()
+    _write(vault, "scopes", "acmeco", _SCOPE_A)
+    rule_path = _write(vault, "rules", "acmeco-external", _RULE_A)
+    weaker = policy.load(vault)
+    assert weaker.rules[0].ceiling == 2
+
+    # The owner tightens the ceiling; Syncthing lands a copy of the old revision
+    # beside it before the tightened document is ever compiled.
+    rule_path.write_text(_RULE_A.replace("ceiling: 2", "ceiling: 0"), encoding="utf-8")
+    (rule_path.parent / _sync_conflict_name("acmeco-external")).write_text(
+        _RULE_A, encoding="utf-8"
+    )
+    time.sleep(0.01)
+
+    pol = policy.load(vault)
+    assert any(f["code"] == "conflicted_copy" for f in pol.findings), (
+        f"the sync-conflict copy was not recognised as a conflict: {pol.findings}"
+    )
+    assert not any(f["code"] == "duplicate_id" for f in pol.findings), (
+        "duplicate-identifier compilation ran on a conflict copy"
+    )
+    # Refused, but never below the last good governed policy — and never open.
+    assert pol.empty is False
+    assert pol.blocked is False
+    assert pol.scopes == weaker.scopes
+    assert pol.rules == weaker.rules
+
+
+def test_cold_start_sync_conflict_copy_is_blocked_not_open(vault: Path) -> None:
+    """Task 2.2 — the same refusal with no prior compile hits the closed floor."""
+    policy._CACHE.clear()
+    policy._LAST_GOOD.clear()
+    _write(vault, "scopes", "acmeco", _SCOPE_A)
+    (vault / "Knowledge Base" / "_Governance" / "scopes" / _sync_conflict_name("acmeco")).write_text(
+        _SCOPE_A, encoding="utf-8"
+    )
+
+    pol = policy.load(vault)
+
+    assert pol.empty is False
+    assert pol.blocked is True
+    assert not pol.scopes
+    assert any(f["code"] == "conflicted_copy" for f in pol.findings)
+    assert not any(f["code"] == "duplicate_id" for f in pol.findings)
+
+
+def test_policy_document_without_either_conflict_marker_compiles_clean(
+    vault: Path,
+) -> None:
+    """Task 2.4 — a merely conflict-ish filename is an ordinary document."""
+    policy._CACHE.clear()
+    policy._LAST_GOOD.clear()
+    _write(vault, "scopes", "acmeco-conflict-resolution", _SCOPE_A)
+
+    pol = policy.load(vault)
+
+    assert pol.empty is False
+    assert pol.blocked is False
+    assert not any(f["code"] == "conflicted_copy" for f in pol.findings)
+    assert set(pol.scopes) == {"01ARZ3NDEKTSV4RRFFQ69G5FAV"}
+
+
+def test_a_sync_conflict_copy_refuses_policy_AUTHORING_not_reading(vault: Path) -> None:
+    """The other half of conflict handling, and a regression this branch caused.
+
+    Filtering conflict copies out of discovery also filtered them out of
+    `compile_prospective`, so a mutation compiled a CLEAN prospective tree while
+    the live compile still saw the conflict. Both gates passed, the mutation was
+    accepted and receipted, and whichever document the next real compile picked
+    silently decided the outcome. On main the copy reached the temp tree and a
+    `duplicate_id` error refused the mutation by accident; widening detection
+    removed that accident, so the refusal is now deliberate.
+
+    Reads must NOT be refused: flooring a warm vault to L0 because a sync tool
+    dropped a sibling file would be worse than the defect it prevents.
+    """
+    from exomem.governance.tool import op_govern_memory
+
+    _write(vault, "scopes", "client", _SCOPE_A)
+    baseline = policy.load(vault)
+    assert not baseline.blocked and not baseline.empty
+
+    conflict = (
+        vault / "Knowledge Base" / "_Governance" / "scopes"
+        / _sync_conflict_name("client")
+    )
+    conflict.write_text(_SCOPE_A, encoding="utf-8")
+    # Deliberately NOT clearing `_CACHE`: this models a warm runtime, which is
+    # the case that matters. The conflict fallback serves the last in-process
+    # compile, so clearing the cache here would exercise the cold-start path
+    # (correctly `.blocked`) and prove nothing about reads surviving.
+
+    assert policy.has_conflict_copy(vault), "the probe must see the conflict copy"
+    assert policy.load(vault).conflicted
+
+    with pytest.raises(Exception) as excinfo:
+        op_govern_memory(
+            vault,
+            operation="propose",
+            principal=owner_principal(),
+            intent="tighten patterns",
+            documents=_proposal_documents(ceiling=1),
+            selector_paths=[_PATTERN_GLOB],
+            target_ceiling=1,
+            duration="standing",
+        )
+    assert getattr(excinfo.value, "code", "") == "GOVERNANCE_CONFLICTED", (
+        f"authoring proceeded under a sync conflict: {excinfo.value!r}"
+    )
+
+    # Reading is unaffected: the last good policy is still served.
+    served = policy.load(vault)
+    assert not served.blocked, "a conflict must not floor reads to L0"
+    assert served.scopes, "the last good policy must still be served"
+
+
+def test_the_authoring_gate_creates_no_state_when_it_refuses(vault: Path) -> None:
+    """`op_govern_memory` promises a refused operation creates no sidecar,
+    policy directory, receipt or marker. The conflict probe therefore reads the
+    directory listing rather than going through `load()`, which opens the
+    governance sidecar via the guard probe."""
+    from exomem.governance.tool import GovernanceError, op_govern_memory
+
+    _write(vault, "scopes", "client", _SCOPE_A)
+    conflict = (
+        vault / "Knowledge Base" / "_Governance" / "scopes"
+        / _sync_conflict_name("client")
+    )
+    conflict.write_text(_SCOPE_A, encoding="utf-8")
+    policy._CACHE.clear()
+
+    def _snapshot() -> dict[str, bytes]:
+        return {
+            str(p.relative_to(vault)): p.read_bytes()
+            for p in sorted(vault.rglob("*"))
+            if p.is_file()
+        }
+
+    before = _snapshot()
+    with pytest.raises(GovernanceError):
+        op_govern_memory(
+            vault,
+            operation="propose",
+            principal=owner_principal(),
+            intent="tighten patterns",
+            documents=_proposal_documents(ceiling=1),
+            selector_paths=[_PATTERN_GLOB],
+            target_ceiling=1,
+            duration="standing",
+        )
+    assert _snapshot() == before, "the refused authoring gate mutated the vault"
+
+
+# ---------------------------------------------------------------------------
+# A scope may declare that unnamed audiences get nothing
+# (add-default-deny-scope-cap, task 1)
+# ---------------------------------------------------------------------------
+
+_SCOPE_A_ID = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+
+
+def test_a_scope_may_declare_a_default_deny(vault: Path) -> None:
+    _write(vault, "scopes", "acmeco", _SCOPE_A + "default_deny: true\n")
+    _write(vault, "rules", "acmeco-external", _RULE_A)
+    pol = policy.load(vault)
+    assert pol.blocked is False
+    assert [f for f in pol.findings if f["severity"] == "error"] == []
+    assert pol.scopes[_SCOPE_A_ID].default_deny is True
+
+
+def test_a_scope_declaring_false_is_the_same_as_omitting_it(vault: Path) -> None:
+    """Not just "is False" — the two documents must compile to the same scope,
+    so `default_deny: false` is a no-op an author can write to be explicit."""
+    _write(vault, "scopes", "acmeco", _SCOPE_A + "default_deny: false\n")
+    _write(vault, "rules", "acmeco-external", _RULE_A)
+    explicit = policy.load(vault).scopes[_SCOPE_A_ID]
+
+    policy._CACHE.clear()
+    _write(vault, "scopes", "acmeco", _SCOPE_A)
+    omitted = policy.load(vault).scopes[_SCOPE_A_ID]
+
+    assert explicit == omitted
+    assert explicit.default_deny is False
+
+
+def test_a_scope_omitting_the_declaration_compiles_exactly_as_before(vault: Path) -> None:
+    """The change is opt-in: an untouched document must compile clean, keep its
+    content fingerprint, and carry the permissive value."""
+    _write(vault, "scopes", "acmeco", _SCOPE_A)
+    _write(vault, "rules", "acmeco-external", _RULE_A)
+    pol = policy.load(vault)
+    assert pol.blocked is False
+    assert pol.findings == ()
+    assert pol.scopes[_SCOPE_A_ID].default_deny is False
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        '"true"',      # a quoted string is not a boolean
+        "1",           # an int is not a boolean
+        "[true]",      # a list is not a boolean
+        "{}",          # a mapping is not a boolean
+        "",            # `default_deny:` with the value forgotten -> YAML null
+        "deny",        # a bare word that is not a YAML boolean
+    ],
+)
+def test_a_malformed_declaration_is_an_error_finding_not_a_silent_default(
+    vault: Path, value: str
+) -> None:
+    """A confidentiality control must never fall back to permissive because the
+    author mistyped it. The finding is an ERROR, so the compile is refused.
+
+    The code has to be `invalid_field`, not `unknown_field`: before the field
+    existed every one of these values was rejected merely because the compiler
+    had never heard of the key. That accident would keep this test green while
+    the recognised field silently accepted a non-boolean."""
+    _write(vault, "scopes", "acmeco", _SCOPE_A + f"default_deny:{f' {value}' if value else ''}\n")
+    _write(vault, "rules", "acmeco-external", _RULE_A)
+    pol = policy.load(vault)
+    findings = [f for f in pol.findings if f["path"].endswith(":default_deny")]
+    assert findings, f"no finding for default_deny: {value!r}"
+    assert [f["code"] for f in findings] == ["invalid_field"]
+    assert all(f["severity"] == "error" for f in findings)
+    # Cold start with no prior good compile -> the fail-closed floor, not open.
+    assert pol.blocked is True
+
+
+def test_a_yaml_boolean_spelling_is_accepted(vault: Path) -> None:
+    """`yes` is a YAML 1.1 boolean, so it must not be reported as malformed."""
+    _write(vault, "scopes", "acmeco", _SCOPE_A + "default_deny: yes\n")
+    _write(vault, "rules", "acmeco-external", _RULE_A)
+    pol = policy.load(vault)
+    assert pol.blocked is False
+    assert pol.scopes[_SCOPE_A_ID].default_deny is True
+
+
+@pytest.mark.parametrize(
+    "audience_yaml",
+    [r'"\0unnamed"', r'"\0unresolved"', r'"external\0suffix"'],
+)
+@pytest.mark.parametrize(
+    ("kind", "field", "document"),
+    [
+        (
+            "rules",
+            "audience",
+            "governance_version: 1\n"
+            "id: 01ARZ3NDEKTSV4RRFFQ69G5FB0\n"
+            'scope_ids: ["01ARZ3NDEKTSV4RRFFQ69G5FAV"]\n'
+            "audience: {audience}\n"
+            "ceiling: 2\n",
+        ),
+        (
+            "grants",
+            "audience",
+            "governance_version: 1\n"
+            "id: 01ARZ3NDEKTSV4RRFFQ69G5FB1\n"
+            "kind: standing\n"
+            'scope_ids: ["01ARZ3NDEKTSV4RRFFQ69G5FAV"]\n'
+            "audience: {audience}\n"
+            "ceiling: 6\n",
+        ),
+        (
+            "grants",
+            "to_audience",
+            "governance_version: 1\n"
+            "id: 01ARZ3NDEKTSV4RRFFQ69G5FB2\n"
+            "kind: release\n"
+            "path: Knowledge Base/Notes/Patterns/released.md\n"
+            "ref: exomem://memory/00000000-0000-0000-0000-000000000001\n"
+            f"content_hash: {'a' * 64}\n"
+            "to_audience: {audience}\n"
+            "released_at: '2026-07-28T12:00:00Z'\n"
+            "why: Owner reviewed the exact release\n"
+            "bridge_scope: review\n"
+            "bridge_of:\n"
+            "  - ref: exomem://memory/00000000-0000-0000-0000-000000000002\n"
+            "    path: Knowledge Base/Sources/Other/source.md\n"
+            f"    content_hash: {'b' * 64}\n"
+            f"    restriction_signature: {'c' * 64}\n"
+            "options:\n"
+            "  strip_provenance:\n"
+            "    - exomem://memory/00000000-0000-0000-0000-000000000002\n",
+        ),
+    ],
+)
+def test_authored_audiences_cannot_enter_the_reserved_nul_namespace(
+    vault: Path, audience_yaml: str, kind: str, field: str, document: str
+) -> None:
+    _write(vault, "scopes", "acmeco", _SCOPE_A)
+    _write(vault, kind, "reserved-audience", document.format(audience=audience_yaml))
+
+    compiled = policy.load(vault)
+    audience_findings = [
+        finding for finding in compiled.findings
+        if finding["path"].endswith(f":{field}")
+    ]
+
+    assert [finding["code"] for finding in audience_findings] == ["invalid_field"]
+    assert all(finding["severity"] == "error" for finding in audience_findings)
+    assert compiled.blocked is True
+    assert compiled.rules == ()
+    assert compiled.grants == ()
+    assert compiled.release_grants == ()
