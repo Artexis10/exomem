@@ -292,9 +292,13 @@ def test_nested_item_inventory_race_refuses_before_publication(
     monkeypatch.setattr(vault, "batch_atomic_write", inject_then_commit)
     with pytest.raises(collections.CollectionError, match="STALE_RECORD"):
         records.update_record(
-            tmp_path, manifest.path, item_key=record.identity.key,
-            changes={"status": "scheduled"}, expected_container_hash=parsed.snapshot,
-            expected_item_version=record.source.hash, why="reject nested inventory race",
+            tmp_path,
+            manifest.path,
+            item_key=record.identity.key,
+            changes={"status": "scheduled"},
+            expected_container_hash=parsed.snapshot,
+            expected_item_version=record.source.hash,
+            why="reject nested inventory race",
         )
     assert nested.read_bytes() == before[0]
     assert (fixture / "_collection.md").read_bytes() == before[1]

@@ -602,7 +602,9 @@ item_schema:
         )
 
 
-@pytest.mark.parametrize("field,value", [("canonical_path", "outside.md"), ("item_key", "not-a-uuid")])
+@pytest.mark.parametrize(
+    "field,value", [("canonical_path", "outside.md"), ("item_key", "not-a-uuid")]
+)
 def test_create_transition_requires_null_item_and_declared_source(
     tmp_path: Path, field: str, value: str
 ) -> None:
@@ -652,9 +654,12 @@ def test_audit_marker_sources_are_bounded_after_adapter_read(
     manifest = collections.load_manifest(tmp_path, fixture / "_collection.md")
     snapshot = record_formats.load_adapter(tmp_path, manifest).read()
     records.append_record(
-        tmp_path, manifest.path, item=_item("2026-08-03", "Pull"),
+        tmp_path,
+        manifest.path,
+        item=_item("2026-08-03", "Pull"),
         item_key="12121212-1212-4212-8212-121212121212",
-        expected_container_hash=snapshot.source_versions[-1].hash, why="audit swap fixture",
+        expected_container_hash=snapshot.source_versions[-1].hash,
+        why="audit swap fixture",
     )
     source = fixture / "Training Log.md"
     outside = tmp_path / "outside.md"
@@ -690,9 +695,12 @@ def test_post_adapter_marker_source_failures_are_incomplete(
     manifest = collections.load_manifest(tmp_path, fixture / "_collection.md")
     snapshot = record_formats.load_adapter(tmp_path, manifest).read()
     records.append_record(
-        tmp_path, manifest.path, item=_item("2026-08-03", "Pull"),
+        tmp_path,
+        manifest.path,
+        item=_item("2026-08-03", "Pull"),
         item_key="34343434-3434-4434-8434-343434343434",
-        expected_container_hash=snapshot.source_versions[-1].hash, why="audit source fixture",
+        expected_container_hash=snapshot.source_versions[-1].hash,
+        why="audit source fixture",
     )
     source = fixture / "Training Log.md"
     real_read, changed = record_formats.MarkdownLogAdapter.read, False
@@ -716,7 +724,8 @@ def test_post_adapter_marker_source_failures_are_incomplete(
 
     monkeypatch.setattr(record_formats.MarkdownLogAdapter, "read", replace_after_read)
     assert records.inspect_audit_gap(tmp_path, manifest.path) == {
-        "status": "history_incomplete", "gaps": []
+        "status": "history_incomplete",
+        "gaps": [],
     }
 
 
