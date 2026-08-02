@@ -27,6 +27,16 @@ def test_markdown_items_refuse_a_symlinked_source_directory(tmp_path: Path) -> N
         record_formats.load_adapter(tmp_path, manifest).read()
 
 
+def test_markdown_items_count_empty_directories_against_the_global_cap(tmp_path: Path) -> None:
+    fixture = copy_vehicle_maintenance_fixture(tmp_path)
+    manifest = collections.load_manifest(tmp_path, fixture / "_collection.md")
+    for index in range(2_001):
+        (fixture / "Events" / f"empty-{index:04d}").mkdir()
+
+    with pytest.raises(collections.CollectionError, match="RECORD_ITEM_LIMIT"):
+        record_formats.load_adapter(tmp_path, manifest).read()
+
+
 def test_manifest_audit_head_is_semantic_and_renderer_preserves_its_style(tmp_path: Path) -> None:
     source = """---
 # retain this comment
@@ -42,7 +52,7 @@ type: collection
     assert "record_audit: {head: fedcba9876543210fedcba98, version: 1}" in rendered
 
 
-def test_valid_create_receipt_is_projected_but_malformed_create_is_not() -> None:
+def test_log_create_receipt_with_item_hash_is_projected_but_malformed_create_is_not() -> None:
     receipt = {
         "_record_receipt": "exomem.records-mutation",
         "receipt_version": 1,
@@ -66,7 +76,15 @@ def test_valid_create_receipt_is_projected_but_malformed_create_is_not() -> None
     )
 
     assert mutation_terminal.project_terminal(terminal)["operation"] == "create"
-    malformed = dict(receipt, after_item_hash="c" * 64)
+    log_create = dict(receipt, after_item_hash="c" * 64)
+    log_terminal = mutation_terminal.committed_terminal(
+        log_create,
+        request_id="11111111-1111-4111-8111-111111111111",
+        receipt_id=None,
+        idempotency_key=None,
+    )
+    assert mutation_terminal.project_terminal(log_terminal)["after_item_hash"] == "c" * 64
+    malformed = dict(receipt, after_item_hash="not-a-hash")
     malformed_terminal = mutation_terminal.committed_terminal(
         malformed,
         request_id="11111111-1111-4111-8111-111111111111",

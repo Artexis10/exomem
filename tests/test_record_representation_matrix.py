@@ -250,15 +250,17 @@ def test_audit_chain_reconstructs_rotations_and_rejects_fork(tmp_path: Path) -> 
     events = [line for line in log.read_text(encoding="utf-8").splitlines() if "audit-v1" in line]
     archive = tmp_path / "Knowledge Base/_archive/logs"
     archive.mkdir(parents=True)
-    (archive / "log-z.md").write_text("\n".join(reversed(events)) + "\n", encoding="utf-8")
-    (archive / "log-a.md").write_text(events[0] + "\n", encoding="utf-8")
+    (archive / "log-11111111111111111111.md").write_text(
+        "\n".join(reversed(events)) + "\n", encoding="utf-8"
+    )
+    (archive / "log-22222222222222222222.md").write_text(events[0] + "\n", encoding="utf-8")
     log.write_text("# Activity\n", encoding="utf-8")
     assert records.inspect_audit_gap(tmp_path, current.path)["status"] == "ok"
 
     fork = json.loads(events[0].removeprefix("Records audit-v1 "))
     fork["transition_id"] = "999999999999999999999999"
     fork["after_container_hash"] = "0" * 64
-    (archive / "log-fork.md").write_text(
+    (archive / "log-33333333333333333333.md").write_text(
         "Records audit-v1 " + json.dumps(fork, sort_keys=True) + "\n", encoding="utf-8"
     )
     assert records.inspect_audit_gap(tmp_path, current.path)["status"] == "gap"

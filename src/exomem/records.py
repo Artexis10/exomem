@@ -69,8 +69,7 @@ def append_record(
         directory_guards: tuple[vault.DirectoryCensusGuard, ...] = ()
         if manifest.storage.strategy == "markdown-log":
             source_path = root / manifest.storage.source
-            source_text, source_guard = vault.read_guarded_text(root, source_path)
-            source_bytes = source_text.encode("utf-8")
+            source_bytes, source_guard = _read_record_bytes(root, manifest.storage.source)
             snapshot = adapter.read_bytes(  # type: ignore[attr-defined]
                 source_bytes, manifest_version=manifest.manifest_version
             )
@@ -80,7 +79,6 @@ def append_record(
             directory_guards = snapshot.directory_guards
             current_hash = snapshot.snapshot
             source_path = root / manifest.storage.source
-            source_text = ""
             source_bytes = b""
             source_guard = None
         if expected_container_hash is not None:
@@ -114,7 +112,7 @@ def append_record(
         after_manifest = collections.parse_manifest_bytes(
             root, root / manifest.path, after_manifest_text.encode("utf-8")
         )
-        parent = _manifest_audit_head(manifest_text) or "baseline"
+        parent = manifest.audit_head or "baseline"
         if manifest.storage.strategy == "markdown-log":
             offset = snapshot.insertion_offset
             if offset is None:
@@ -131,7 +129,7 @@ def append_record(
             canonical_path = source_path
             canonical_guard = source_guard
         else:
-            canonical_path, new_item_guards = _new_item_path(root, manifest, key)
+            canonical_path, new_item_guards = _new_item_path(root, manifest, key, snapshot)
             directory_guards = (*directory_guards, *new_item_guards)
             replacement = record_formats.render_markdown_item(
                 manifest, values, key, body, audit_correlation
@@ -229,9 +227,8 @@ def update_record(
         _require_activity_log(root)
         directory_guards: tuple[vault.DirectoryCensusGuard, ...] = ()
         if manifest.storage.strategy == "markdown-log":
-            canonical_source = root / manifest.storage.source
-            source_text, source_guard = vault.read_guarded_text(root, canonical_source)
-            source_bytes = source_text.encode("utf-8")
+            source_bytes, source_guard = _read_record_bytes(root, manifest.storage.source)
+            source_text = source_bytes.decode("utf-8")
             snapshot = adapter.read_bytes(source_bytes, manifest_version=manifest.manifest_version)  # type: ignore[attr-defined]
             _expect_hash(
                 expected_container_hash,
@@ -252,8 +249,8 @@ def update_record(
         record = matches[0]
         source_path = root / record.source.path
         if manifest.storage.strategy != "markdown-log":
-            source_text, source_guard = vault.read_guarded_text(root, source_path)
-            source_bytes = source_text.encode("utf-8")
+            source_bytes, source_guard = _read_record_bytes(root, record.source.path)
+            source_text = source_bytes.decode("utf-8")
         current_hash = hashlib.sha256(source_bytes).hexdigest()
         current_item_hash = (
             hashlib.sha256(source_bytes[record.span.start : record.span.end]).hexdigest()
@@ -277,7 +274,7 @@ def update_record(
         after_manifest = collections.parse_manifest_bytes(
             root, root / manifest.path, after_manifest_text.encode("utf-8")
         )
-        parent = _manifest_audit_head(manifest_text) or "baseline"
+        parent = manifest.audit_head or "baseline"
         if manifest.storage.strategy == "markdown-log":
             replacement = record_formats.render_markdown_log_item(
                 manifest, values, item_key, _newline(source_bytes), audit_correlation
@@ -489,7 +486,6 @@ def inspect_audit_gap(
         history_guard = vault.DirectoryCensusGuard.capture(
             root, f"{vault.kb_prefix()}_archive/logs", max_entries=128
         )
-        history_stamps = _directory_entry_stamps(root, history_guard)
     except vault.PathGuardError:
         return {"status": "history_incomplete", "gaps": []}
     manifest = _resolve_outside(root, collection)
@@ -499,8 +495,10 @@ def inspect_audit_gap(
     if manifest_bytes is None:
         return {"status": "history_incomplete", "gaps": []}
     try:
-        head = _manifest_audit_head(manifest_bytes.decode("utf-8-sig"))
-    except UnicodeDecodeError:
+        head = collections.parse_manifest_bytes(
+            root, root / manifest.path, manifest_bytes
+        ).audit_head
+    except (UnicodeDecodeError, collections.CollectionError):
         return {"status": "history_incomplete", "gaps": []}
     try:
         snapshot = record_formats.load_adapter(root, manifest).read()
@@ -523,9 +521,7 @@ def inspect_audit_gap(
     markers = _audit_markers(root, manifest, snapshot)
     if markers is None:
         return {"status": "history_incomplete", "gaps": []}
-    events, complete = _audit_events(
-        root, history_guard=history_guard, history_stamps=history_stamps
-    )
+    events, complete = _audit_events(root, history_guard=history_guard)
     relevant = [event for event in events if event.get("collection_id") == manifest.collection_id]
     if head is None and not markers and not relevant:
         return {"status": "baseline" if complete else "history_incomplete", "gaps": []}
@@ -746,20 +742,21 @@ def _audit_events(
             candidates.extend(
                 entry.relative_path
                 for entry in entries
-                if Path(entry.relative_path).name.startswith("log-")
-                and Path(entry.relative_path).suffix == ".md"
+                if re.fullmatch(r"log-[0-9a-f]{20}\.md", Path(entry.relative_path).name)
             )
     except vault.PathGuardError:
         return [], False
     events: list[dict[str, Any]] = []
+    file_guards: list[vault.PathGuard] = []
     total = 0
     for relative in candidates:
         try:
-            data, _guard = vault.read_bounded_guarded_bytes(root, relative, limit=2_000_000)
+            data, file_guard = vault.read_bounded_guarded_bytes(root, relative, limit=2_000_000)
             text = data.decode("utf-8")
         except (vault.PathGuardError, UnicodeDecodeError):
             return [], False
         total += len(data)
+        file_guards.append(file_guard)
         if total > 8_000_000:
             return [], False
         for line in text.splitlines():
@@ -777,24 +774,11 @@ def _audit_events(
     try:
         if archive_guard is not None:
             archive_guard.recheck(root)
-            if (
-                history_stamps is not None
-                and _directory_entry_stamps(root, archive_guard) != history_stamps
-            ):
-                return [], False
+        for file_guard in file_guards:
+            file_guard.recheck(root)
     except vault.PathGuardError:
         return [], False
     return events, True
-
-
-def _directory_entry_stamps(
-    root: Path, guard: vault.DirectoryCensusGuard
-) -> tuple[tuple[str, int, int], ...]:
-    stamps: list[tuple[str, int, int]] = []
-    for entry in guard.entries:
-        info = (root / entry.relative_path).lstat()
-        stamps.append((entry.relative_path, info.st_size, info.st_mtime_ns))
-    return tuple(stamps)
 
 
 def _valid_audit_event(event: Any) -> bool:
@@ -811,7 +795,7 @@ def _valid_audit_event(event: Any) -> bool:
             and event["after_container_hash"] is not None
             and event["payload_hash"] is None
         )
-    if _validate_audit_item_key(event["item_key"] or "") is None:
+    if event["parent_id"] == "absent" or _validate_audit_item_key(event["item_key"] or "") is None:
         return False
     if event["operation"] == "append":
         return (
@@ -875,16 +859,16 @@ def _audit_event_syntax(event: Any) -> bool:
         and re.fullmatch(r"[0-9a-f]{24}", event["transition_id"]) is not None
         and parent_is_valid
         and event["operation"] in {"append", "update", "create"}
+        and _validate_audit_item_key(event["collection_id"]) is not None
         and all(
-            isinstance(event[name], str) and event[name]
-            for name in (
-                "collection_id",
-                "manifest_path",
-                "source_path",
-                "canonical_path",
-                "rationale",
-            )
+            _safe_audit_path(event[name])
+            for name in ("manifest_path", "source_path", "canonical_path")
         )
+        and type(event["rationale"]) is str
+        and bool(event["rationale"].strip())
+        and "\n" not in event["rationale"]
+        and "\r" not in event["rationale"]
+        and len(event["rationale"].encode("utf-8")) <= _MAX_WHY_BYTES
         and (event["item_key"] is None or isinstance(event["item_key"], str))
         and all(
             value is None or (isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value))
@@ -893,6 +877,19 @@ def _audit_event_syntax(event: Any) -> bool:
         )
     )
     return common
+
+
+def _safe_audit_path(value: Any) -> bool:
+    if not isinstance(value, str) or not value or len(value.encode("utf-8")) > 1024:
+        return False
+    parts = value.split("/")
+    return (
+        not value.startswith("/")
+        and re.match(r"^[A-Za-z]:", value) is None
+        and "\\" not in value
+        and "\0" not in value
+        and all(part not in {"", ".", ".."} for part in parts)
+    )
 
 
 def _resolve_outside(
@@ -910,8 +907,14 @@ def _load_guarded_manifest(
 ) -> tuple[collections.CollectionManifest, str, vault.PathGuard]:
     resolved = _resolve_outside(root, collection)
     path = root / resolved.path
-    text, guard = vault.read_guarded_text(root, path)
-    parsed = collections.parse_manifest_bytes(root, path, text.encode("utf-8"))
+    data, guard = _read_record_bytes(root, resolved.path)
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise collections.CollectionError(
+            "INVALID_COLLECTION_MANIFEST", "manifest is not UTF-8"
+        ) from error
+    parsed = collections.parse_manifest_bytes(root, path, data)
     if isinstance(collection, collections.CollectionManifest) and (
         collection.path != parsed.path
         or collection.collection_id != parsed.collection_id
@@ -1022,19 +1025,25 @@ def _newline(data: bytes) -> str:
 
 
 def _new_item_path(
-    root: Path, manifest: collections.CollectionManifest, key: str
+    root: Path,
+    manifest: collections.CollectionManifest,
+    key: str,
+    snapshot: record_formats.AdapterSnapshot,
 ) -> tuple[Path, tuple[vault.DirectoryCensusGuard, ...]]:
     source = root / manifest.storage.source
-    if not source.is_dir():
+    source_guard = next(
+        (guard for guard in snapshot.directory_guards if guard.target == manifest.storage.source),
+        None,
+    )
+    if source_guard is None or source_guard.directory_identity is None:
         raise collections.CollectionError("SOURCE_NOT_FOUND", "item directory could not be read")
     target = source / f"{key}.md"
-    if target.exists() or _casefold_alias(target):
+    target_name = target.name.casefold()
+    if any(
+        Path(entry.relative_path).name.casefold() == target_name for entry in source_guard.entries
+    ):
         raise collections.CollectionError("RECORD_ID_CONFLICT", "item path already exists")
-    return target, (
-        vault.DirectoryCensusGuard.capture(
-            root, manifest.storage.source, max_entries=_MAX_ITEM_FILES
-        ),
-    )
+    return target, (source_guard,)
 
 
 def _item_directory_guards(
@@ -1219,15 +1228,14 @@ def _transition_id() -> str:
     return uuid.uuid4().hex[:24]
 
 
-def _manifest_audit_head(text: str) -> str | None:
-    match = re.search(r"(?m)^record_audit:\s*\{version:\s*1,\s*head:\s*([0-9a-f]{24})\}\s*$", text)
-    if match is not None:
-        return match.group(1)
-    match = re.search(
-        r"(?m)^record_audit:[ \t]*\r?\n(?:[ \t]+version:\s*1\s*\r?\n)?[ \t]+head:\s*([0-9a-f]{24})\s*$",
-        text,
-    )
-    return match.group(1) if match is not None else None
+def _read_record_bytes(root: Path, relative: str) -> tuple[bytes, vault.PathGuard]:
+    """Read mutable record state through the bounded descriptor-rooted reader."""
+    try:
+        return vault.read_bounded_guarded_bytes(root, relative, limit=_MAX_AUDIT_SOURCE_BYTES)
+    except vault.PathGuardError as error:
+        raise collections.CollectionError(
+            "SOURCE_NOT_FOUND", "canonical record source could not be read"
+        ) from error
 
 
 def _items_container_hash(

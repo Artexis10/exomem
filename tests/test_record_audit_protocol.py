@@ -127,7 +127,7 @@ def test_audit_history_rejects_conflicting_duplicate_and_unsafe_archive(tmp_path
     archive = tmp_path / "Knowledge Base/_archive/logs"
     archive.mkdir(parents=True)
     try:
-        (archive / "log-unsafe.md").symlink_to(log)
+        (archive / "log-00000000000000000000.md").symlink_to(log)
     except OSError:
         pytest.skip("symlink creation is unavailable")
     assert records.inspect_audit_gap(tmp_path, manifest.path)["status"] == "history_incomplete"
@@ -164,8 +164,10 @@ def test_audit_chain_is_archive_order_independent_and_exact_duplicates_dedupe(
     events = [line for line in log.read_text(encoding="utf-8").splitlines() if "audit-v1" in line]
     archive = tmp_path / "Knowledge Base/_archive/logs"
     archive.mkdir(parents=True)
-    (archive / "log-z.md").write_text("\n".join(reversed(events)) + "\n", encoding="utf-8")
-    (archive / "log-a.md").write_text(events[0] + "\n", encoding="utf-8")
+    (archive / "log-11111111111111111111.md").write_text(
+        "\n".join(reversed(events)) + "\n", encoding="utf-8"
+    )
+    (archive / "log-22222222222222222222.md").write_text(events[0] + "\n", encoding="utf-8")
     log.write_text("# Activity\n", encoding="utf-8")
     assert records.inspect_audit_gap(tmp_path, refreshed.path)["status"] == "ok"
 
@@ -193,12 +195,12 @@ def test_history_caps_and_unsafe_archive_are_bounded_incomplete(
     if unsafe == "fifo":
         if not hasattr(os, "mkfifo"):
             pytest.skip("FIFOs are unsupported")
-        os.mkfifo(archive / "log-fifo.md")
+        os.mkfifo(archive / "log-00000000000000000000.md")
     elif unsafe == "oversize":
-        (archive / "log-large.md").write_bytes(b"x" * 2_000_001)
+        (archive / "log-00000000000000000000.md").write_bytes(b"x" * 2_000_001)
     else:
         for index in range(129):
-            (archive / f"log-{index:03d}.md").write_text("# inert\n", encoding="utf-8")
+            (archive / f"log-{index:020x}.md").write_text("# inert\n", encoding="utf-8")
     report = records.inspect_audit_gap(tmp_path, manifest.path)
     assert report["status"] == "history_incomplete"
     assert len(report["gaps"]) <= 32
@@ -223,22 +225,17 @@ def test_history_descriptor_drift_is_incomplete(
     )
     archive = tmp_path / "Knowledge Base/_archive/logs"
     archive.mkdir(parents=True)
-    drifting = archive / "log-drift.md"
+    drifting = archive / "log-00000000000000000000.md"
     drifting.write_text("# inert\n", encoding="utf-8")
-    real_read = records.os.read
-    reads = 0
+    real_read = vault.read_bounded_guarded_bytes
 
-    def drift(descriptor: int, size: int) -> bytes:
-        nonlocal reads
-        reads += 1
-        value = real_read(descriptor, size)
-        if reads == 2:
-            drifting.write_text("# inert\n", encoding="utf-8")
-            info = drifting.stat()
-            os.utime(drifting, ns=(info.st_atime_ns, info.st_mtime_ns + 1_000_000_000))
-        return value
+    def drift(root: Path, relative: str, **kwargs):
+        result = real_read(root, relative, **kwargs)
+        if relative == "Knowledge Base/_archive/logs/log-00000000000000000000.md":
+            drifting.write_text("# changed\n", encoding="utf-8")
+        return result
 
-    monkeypatch.setattr(records.os, "read", drift)
+    monkeypatch.setattr(vault, "read_bounded_guarded_bytes", drift)
     assert records.inspect_audit_gap(tmp_path, manifest.path)["status"] == "history_incomplete"
 
 

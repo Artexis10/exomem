@@ -332,6 +332,10 @@ class MarkdownItemsAdapter(_BaseAdapter):
                 self.vault_root, source_relative, max_entries=_MAX_ITEM_FILES
             )
         except vault.PathGuardError as error:
+            if error.code == "PATH_GUARD_LIMIT":
+                raise collections.CollectionError(
+                    "RECORD_ITEM_LIMIT", "collection has too many item entries"
+                ) from error
             raise collections.CollectionError(
                 "SOURCE_NOT_FOUND", "canonical item directory could not be read"
             ) from error
@@ -346,23 +350,34 @@ class MarkdownItemsAdapter(_BaseAdapter):
         ]
         total_bytes = 0
         paths: list[Path] = []
-        directories: list[Path] = [source]
+        directory_guards_list: list[vault.DirectoryCensusGuard] = [root_guard]
         path_guards: list[vault.PathGuard] = []
         source_bytes: list[tuple[str, bytes]] = []
-        for path in source.rglob("*"):
-            try:
-                info = path.lstat()
-            except OSError as error:
-                raise collections.CollectionError(
-                    "INVALID_RECORD_ITEM_PATH", "item inventory could not be read"
-                ) from error
-            if stat.S_ISDIR(info.st_mode):
-                inventory.append((path.relative_to(self.vault_root).as_posix(), "directory", ""))
-                directories.append(path)
-                continue
-            paths.append(path)
-            if len(paths) > _MAX_ITEM_FILES:
-                break
+        pending = [root_guard]
+        candidates = 0
+        while pending:
+            directory_guard = pending.pop()
+            for entry in directory_guard.entries:
+                candidates += 1
+                if candidates > _MAX_ITEM_FILES:
+                    raise collections.CollectionError(
+                        "RECORD_ITEM_LIMIT", "collection has too many item entries"
+                    )
+                path = self.vault_root / entry.relative_path
+                if stat.S_ISDIR(entry.mode):
+                    inventory.append((entry.relative_path, "directory", ""))
+                    try:
+                        child_guard = vault.DirectoryCensusGuard.capture(
+                            self.vault_root, entry.relative_path, max_entries=_MAX_ITEM_FILES
+                        )
+                    except vault.PathGuardError as error:
+                        raise collections.CollectionError(
+                            "INVALID_RECORD_ITEM_PATH", "item inventory changed while it was read"
+                        ) from error
+                    directory_guards_list.append(child_guard)
+                    pending.append(child_guard)
+                else:
+                    paths.append(path)
         if len(paths) > _MAX_ITEM_FILES:
             raise collections.CollectionError(
                 "RECORD_ITEM_LIMIT", "collection has too many item files"
@@ -382,7 +397,7 @@ class MarkdownItemsAdapter(_BaseAdapter):
                     "INVALID_RECORD_ITEM_PATH", "item file escapes collection"
                 ) from error
             try:
-                data, guard = vault.read_bounded_guarded_bytes(
+                data, file_guard = vault.read_bounded_guarded_bytes(
                     self.vault_root,
                     path.relative_to(self.vault_root).as_posix(),
                     limit=_MAX_ITEM_BYTES,
@@ -391,7 +406,7 @@ class MarkdownItemsAdapter(_BaseAdapter):
                 raise collections.CollectionError(
                     "SOURCE_NOT_FOUND", "canonical item file could not be read"
                 ) from error
-            path_guards.append(guard)
+            path_guards.append(file_guard)
             total_bytes += len(data)
             if total_bytes > _MAX_COLLECTION_BYTES:
                 raise collections.CollectionError(
@@ -437,23 +452,7 @@ class MarkdownItemsAdapter(_BaseAdapter):
                 )
             )
         known = {path for path, _kind, _digest in inventory}
-        directory_guards: tuple[vault.DirectoryCensusGuard, ...]
-        try:
-            directory_guards = (
-                root_guard,
-                *(
-                    vault.DirectoryCensusGuard.capture(
-                        self.vault_root,
-                        directory.relative_to(self.vault_root).as_posix(),
-                        max_entries=_MAX_ITEM_FILES,
-                    )
-                    for directory in directories[1:]
-                ),
-            )
-        except vault.PathGuardError as error:
-            raise collections.CollectionError(
-                "INVALID_RECORD_ITEM_PATH", "item inventory changed while it was read"
-            ) from error
+        directory_guards = tuple(directory_guards_list)
         if any(
             entry.relative_path not in known
             for directory_guard in directory_guards
@@ -503,11 +502,15 @@ class DatasetAdapter(_BaseAdapter):
                 "INVALID_STORAGE_DESCRIPTOR", "dataset record path must be a non-empty string"
             )
         try:
-            source_bytes = query_data.read_dataset_bytes(source)
+            source_bytes, source_guard = vault.read_bounded_guarded_bytes(
+                self.vault_root,
+                self.manifest.storage.source,
+                limit=_MAX_COLLECTION_BYTES,
+            )
             _format, rows, _columns, _warnings = query_data.load_rows_bytes(
                 source_bytes, source.suffix, record_path
             )
-        except query_data.QueryDataError as error:
+        except (query_data.QueryDataError, vault.PathGuardError) as error:
             raise collections.CollectionError(error.code, error.reason) from error
         digest = hashlib.sha256(source_bytes).hexdigest()
         key_name = self.manifest.storage.descriptor.get("key")
@@ -548,6 +551,8 @@ class DatasetAdapter(_BaseAdapter):
             ),
             diagnostics=diagnostics,
             source_versions=(manifest_version, source_version),
+            path_guards=(source_guard,),
+            source_bytes=((self.manifest.storage.source, source_bytes),),
         )
 
 

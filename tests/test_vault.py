@@ -279,3 +279,36 @@ def test_vault_creation_lock_timeout_covers_thread_wait(tmp_path: Path) -> None:
         thread.join(5)
 
     assert not thread.is_alive()
+
+
+def test_guarded_reader_dispatches_to_the_windows_descriptor_branch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: list[tuple[Path, tuple[str, ...], str, int]] = []
+    expected = vault.PathGuard("entry.md", (), (), None, "content", "a" * 64)
+
+    def windows(root: Path, parts: tuple[str, ...], target: str, limit: int):
+        captured.append((root, parts, target, limit))
+        return b"", expected
+
+    monkeypatch.setattr(vault.os, "name", "nt")
+    monkeypatch.setattr(vault, "_read_bounded_windows_snapshot", windows)
+
+    data, guard = vault._read_bounded_guarded_snapshot(tmp_path, "entry.md", 64)
+
+    assert data == b""
+    assert guard is expected
+    assert len(captured) == 1
+    assert captured[0][0].as_posix() == tmp_path.as_posix()
+    assert captured[0][1:] == (("entry.md",), "entry.md", 64)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires native Windows descriptors")
+def test_guarded_reader_uses_windows_descriptor_branch_for_regular_files(tmp_path: Path) -> None:
+    target = tmp_path / "entry.md"
+    target.write_bytes(b"safe")
+
+    data, guard = vault.read_bounded_guarded_bytes(tmp_path, "entry.md", limit=16)
+
+    assert data == b"safe"
+    guard.recheck(tmp_path)

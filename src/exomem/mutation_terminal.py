@@ -184,7 +184,9 @@ def _is_record_receipt(value: Any) -> bool:
             value.get("item_key") is not None
             or outcome != "committed"
             or value.get("before_item_hash") is not None
-            or value.get("after_item_hash") is not None
+            or (
+                value.get("after_item_hash") is not None and not _hash(value.get("after_item_hash"))
+            )
             or value.get("before_container_hash") is not None
             or value.get("payload_hash") is not None
             or not _hash(value.get("after_container_hash"))
