@@ -1,0 +1,223 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+from record_fixtures import (
+    copy_dataset_fixture,
+    copy_vehicle_maintenance_fixture,
+    copy_x3_fixture,
+)
+
+from exomem import record_formats
+from exomem import structured_collections as collections
+
+
+def _manifest(vault: Path, fixture: Path) -> collections.CollectionManifest:
+    return collections.load_manifest(vault, fixture / "_collection.md")
+
+
+def test_markdown_log_adapter_uses_declared_fence_aware_grammar_and_exact_spans(
+    tmp_path: Path,
+) -> None:
+    fixture = copy_x3_fixture(tmp_path)
+    manifest = _manifest(tmp_path, fixture)
+    source = (fixture / "Training Log.md").read_bytes()
+
+    adapter = record_formats.load_adapter(tmp_path, manifest)
+    parsed = adapter.read()
+
+    assert adapter.mutable is True
+    assert len(parsed.records) == 4
+    assert [record.values["occurred_on"] for record in parsed.records] == [
+        "2026-07-20",
+        "2026-07-18",
+        "2026-07-15",
+        "2026-07-15",
+    ]
+    assert parsed.records[0].identity.key == "14d2bdca-e145-425b-9e4b-df86f7172efa"
+    assert parsed.records[0].identity.inferred is False
+    assert source[parsed.records[0].span.start : parsed.records[0].span.end].startswith(
+        b"## 2026-07-20 Pull\n<!-- exomem-record-id:"
+    )
+    assert all("2099-01-01" not in record.values["title"] for record in parsed.records)
+    assert parsed.records[2].identity.key == parsed.records[3].identity.key
+    assert parsed.records[2].identity.inferred is True
+    assert parsed.records[2].ambiguous is True
+    assert parsed.records[3].ambiguous is True
+    assert [child.values["movement"] for child in parsed.records[0].children] == [
+        "Lat pulldown",
+        "Cable row",
+    ]
+    assert parsed.insertion_offset == source.index(b"## 2026-07-20 Pull")
+    assert (fixture / "Training Log.md").read_bytes() == source
+
+
+def test_markdown_log_query_expands_declared_child_rows_without_domain_logic(tmp_path: Path) -> None:
+    fixture = copy_x3_fixture(tmp_path)
+    manifest = _manifest(tmp_path, fixture)
+
+    result = record_formats.query_collection(
+        tmp_path,
+        manifest,
+        expand_children=True,
+        sort_by="movement",
+        limit=20,
+    )
+
+    assert result.returned == 6
+    assert {row["repetitions"] for row in result.rows} == {"10+", "10!", "?", "", "8"}
+    assert all(row["parent_record_id"] == row["record_id"] for row in result.rows)
+
+
+def test_markdown_log_identity_survives_manual_reorder_and_date_correction(tmp_path: Path) -> None:
+    fixture = copy_x3_fixture(tmp_path)
+    manifest = _manifest(tmp_path, fixture)
+    log = fixture / "Training Log.md"
+    original = record_formats.load_adapter(tmp_path, manifest).read().records[0]
+
+    text = log.read_text(encoding="utf-8")
+    text = text.replace("2026-07-20 Pull", "2026-07-21 Pull")
+    start = text.index("## 2026-07-21 Pull")
+    end = text.index("## 2026-07-18 Push")
+    block = text[start:end]
+    text = text[:start] + text[end:]
+    insert = text.index("## 2026-07-15 Pull")
+    log.write_text(text[:insert] + block + text[insert:], encoding="utf-8")
+
+    changed = record_formats.load_adapter(tmp_path, manifest).read().records
+    same = next(record for record in changed if record.identity.key == original.identity.key)
+    assert same.values["occurred_on"] == "2026-07-21"
+    assert same.source.hash != original.source.hash
+
+
+def test_markdown_log_adapter_honors_declared_oldest_first_insertion_edge(tmp_path: Path) -> None:
+    fixture = copy_x3_fixture(tmp_path)
+    manifest_path = fixture / "_collection.md"
+    manifest_path.write_text(
+        manifest_path.read_text(encoding="utf-8").replace("insertion: newest-first", "insertion: oldest-first"),
+        encoding="utf-8",
+    )
+    manifest = _manifest(tmp_path, fixture)
+    source = (fixture / "Training Log.md").read_bytes()
+
+    parsed = record_formats.load_adapter(tmp_path, manifest).read()
+
+    assert parsed.insertion_offset == source.index(b"## Legend")
+
+
+def test_markdown_item_adapter_uses_file_identity_exact_version_and_readable_body(tmp_path: Path) -> None:
+    fixture = copy_vehicle_maintenance_fixture(tmp_path)
+    manifest = _manifest(tmp_path, fixture)
+
+    adapter = record_formats.load_adapter(tmp_path, manifest)
+    parsed = adapter.read()
+
+    assert adapter.mutable is True
+    assert len(parsed.records) == 2
+    released = next(record for record in parsed.records if record.identity.key.startswith("a8d391a5"))
+    assert released.identity.collection_id == manifest.collection_id
+    assert released.values["services"] == ["oil change", "filter replacement"]
+    assert released.body == "Directly corrected odometer remains human-editable.\n"
+    assert released.source.hash
+    assert released.span.start == 0
+    assert released.span.end == len((fixture / "Events/released/2026-06-01-oil.md").read_bytes())
+
+
+def test_dataset_adapter_is_query_only_and_exposes_declared_keys_and_snapshot(tmp_path: Path) -> None:
+    fixture = copy_dataset_fixture(tmp_path)
+    manifest = _manifest(tmp_path, fixture)
+    adapter = record_formats.load_adapter(tmp_path, manifest)
+
+    parsed = adapter.read()
+
+    assert len(parsed.records) == 72
+    assert parsed.records[0].identity.key == "r-001"
+    assert parsed.records[0].source.hash == parsed.snapshot
+    assert adapter.mutable is False
+    with pytest.raises(collections.CollectionError) as excinfo:
+        adapter.refuse_mutation("append")
+    assert excinfo.value.code == "UNSUPPORTED_RECORD_MUTATION"
+
+
+def test_dataset_adapter_uses_declared_json_record_path(tmp_path: Path) -> None:
+    collection = tmp_path / "Knowledge Base/Records/JSON"
+    collection.mkdir(parents=True)
+    (collection / "readings.json").write_text(
+        '{"payload":{"readings":[{"reading_id":"json-1","value":1}]}}', encoding="utf-8"
+    )
+    (collection / "_collection.md").write_text(
+        """---
+type: collection
+exomem_id: 4b90b34f-319f-4d8d-8c92-e45124501870
+title: JSON readings
+semantic_profile: records
+collection_version: 1
+schema_version: 1
+lifecycle: active
+storage:
+  strategy: dataset
+  source: readings.json
+  format_version: 1
+  record_path: payload.readings
+  key: reading_id
+item_schema:
+  natural_key: [reading_id]
+  fields:
+    reading_id:
+      type: string
+      required: true
+    value:
+      type: number
+      required: true
+---
+""",
+        encoding="utf-8",
+    )
+    manifest = collections.load_manifest(tmp_path, collection / "_collection.md")
+
+    parsed = record_formats.load_adapter(tmp_path, manifest).read()
+
+    assert [record.identity.key for record in parsed.records] == ["json-1"]
+
+
+def test_query_collection_has_bounded_snapshot_continuations_and_derived_renderers(tmp_path: Path) -> None:
+    fixture = copy_dataset_fixture(tmp_path)
+    manifest = _manifest(tmp_path, fixture)
+
+    first = record_formats.query_collection(
+        tmp_path,
+        manifest,
+        sort_by="reading_id",
+        limit=2,
+        output_format="markdown",
+    )
+    assert first.returned == 2
+    assert first.truncated is True
+    assert first.continuation
+    assert first.derived is True
+    assert manifest.collection_id in first.rendered
+    assert "derived: true" in first.rendered
+
+    second = record_formats.query_collection(
+        tmp_path,
+        manifest,
+        sort_by="reading_id",
+        limit=2,
+        continuation=first.continuation,
+        output_format="csv",
+    )
+    assert [row["reading_id"] for row in second.rows] == ["r-003", "r-004"]
+    assert second.rendered.startswith("reading_id,")
+
+    source = fixture / "readings.csv"
+    source.write_text(source.read_text(encoding="utf-8") + "r-999,2026-12-01,water,99\n", encoding="utf-8")
+    with pytest.raises(collections.CollectionError) as excinfo:
+        record_formats.query_collection(
+            tmp_path,
+            manifest,
+            sort_by="reading_id",
+            limit=2,
+            continuation=first.continuation,
+        )
+    assert excinfo.value.code == "STALE_RECORD_SNAPSHOT"

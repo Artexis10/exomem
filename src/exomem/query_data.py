@@ -26,6 +26,7 @@ tables are the sweet spot.
 from __future__ import annotations
 
 import csv
+import itertools
 import json
 import logging
 import re
@@ -43,6 +44,8 @@ MAX_FILE_BYTES = 25 * 1024 * 1024  # 25 MB guard — KB datasets are small
 HARD_ROW_CAP = 1000
 DEFAULT_LIMIT = 100
 PROFILE_MAX_DISTINCT = 20  # categorical/text columns expose up to this many distinct values
+MAX_RESPONSE_BYTES = 64 * 1024
+MAX_PARSED_ROWS = 10_000
 _COMMON_RECORD_KEYS = ("result", "results", "data", "rows", "items", "entries")
 _OPS = frozenset({
     "eq", "ne", "gt", "gte", "lt", "lte",
@@ -88,6 +91,31 @@ class QueryDataResult:
             "truncated": self.truncated,
             "warnings": self.warnings,
         }
+
+
+def _bounded_limit(value: int | None) -> int:
+    """Keep every row response within the documented positive hard cap."""
+    if value is None:
+        return DEFAULT_LIMIT
+    try:
+        limit = int(value)
+    except (TypeError, ValueError) as error:
+        raise QueryDataError("BAD_LIMIT", "limit must be an integer") from error
+    return min(limit, HARD_ROW_CAP) if limit > 0 else DEFAULT_LIMIT
+
+
+def _bounded_response_rows(rows: list[dict]) -> tuple[list[dict], bool]:
+    """Keep serialized query data within a modest, explicit response budget."""
+    size = 2  # JSON list brackets
+    bounded: list[dict] = []
+    for row in rows:
+        row_size = len(json.dumps(row, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+        separator = 1 if bounded else 0
+        if size + separator + row_size > MAX_RESPONSE_BYTES:
+            return bounded, True
+        bounded.append(row)
+        size += separator + row_size
+    return bounded, False
 
 
 def _get_field(row: Any, dotted: str) -> Any:
@@ -159,7 +187,7 @@ def _infer_columns(rows: list[dict]) -> list[str]:
     return cols
 
 
-def _load_rows(abs_path: Path, record_path: str | None) -> tuple[str, list[dict], list[str], list[str]]:
+def load_rows(abs_path: Path, record_path: str | None = None) -> tuple[str, list[dict], list[str], list[str]]:
     suffix = abs_path.suffix.lower()
     size = abs_path.stat().st_size
     if size > MAX_FILE_BYTES:
@@ -172,8 +200,10 @@ def _load_rows(abs_path: Path, record_path: str | None) -> tuple[str, list[dict]
         delimiter = "\t" if suffix == ".tsv" else ","
         with abs_path.open(encoding="utf-8", newline="") as f:
             reader = csv.DictReader(f, delimiter=delimiter)
-            rows = [dict(r) for r in reader]
+            rows = [dict(r) for r in itertools.islice(reader, MAX_PARSED_ROWS + 1)]
             cols = list(reader.fieldnames or [])
+        if len(rows) > MAX_PARSED_ROWS:
+            raise QueryDataError("TOO_MANY_ROWS", "dataset exceeds the parsed row limit")
         return ("tsv" if suffix == ".tsv" else "csv"), rows, cols, warnings
     if suffix == ".json":
         try:
@@ -181,6 +211,8 @@ def _load_rows(abs_path: Path, record_path: str | None) -> tuple[str, list[dict]
         except json.JSONDecodeError as e:
             raise QueryDataError("BAD_JSON", f"could not parse JSON: {e}") from None
         arr = _locate_array(data, record_path, warnings)
+        if len(arr) > MAX_PARSED_ROWS:
+            raise QueryDataError("TOO_MANY_ROWS", "dataset exceeds the parsed row limit")
         rows = [r if isinstance(r, dict) else {"value": r} for r in arr]
         return "json", rows, _infer_columns(rows), warnings
     raise QueryDataError("UNSUPPORTED_FORMAT", f"only {list(ALLOWED_SUFFIXES)} supported, got {suffix!r}")
@@ -211,35 +243,40 @@ def _match(row: dict, filt: dict) -> bool:
 
     # eq / ne / gt / gte / lt / lte — numeric when both coerce; string otherwise.
     an, bn = _coerce_num(actual), _coerce_num(val)
-    both_num = an is not None and bn is not None
 
     if op in ("eq", "ne"):
-        if both_num:
-            a, b = an, bn
-        else:
-            a = "" if actual is None else str(actual)
-            b = "" if val is None else str(val)
+        if an is not None and bn is not None:
+            return (an == bn) if op == "eq" else (an != bn)
+        a = "" if actual is None else str(actual)
+        b = "" if val is None else str(val)
         return (a == b) if op == "eq" else (a != b)
 
     # Ordering (gt/gte/lt/lte): compare numerically when both coerce, or as
     # strings when NEITHER does (e.g. ISO dates). If exactly one side is
     # numeric the values aren't comparable — exclude the row rather than fall
     # back to a misleading lexicographic compare (e.g. "100,2 nmol/l" < 50).
-    if both_num:
-        a, b = an, bn
+    if an is not None and bn is not None:
+        if op == "gt":
+            return an > bn
+        if op == "gte":
+            return an >= bn
+        if op == "lt":
+            return an < bn
+        if op == "lte":
+            return an <= bn
     elif an is None and bn is None:
-        a = "" if actual is None else str(actual)
-        b = "" if val is None else str(val)
+        string_actual = "" if actual is None else str(actual)
+        string_value = "" if val is None else str(val)
+        if op == "gt":
+            return string_actual > string_value
+        if op == "gte":
+            return string_actual >= string_value
+        if op == "lt":
+            return string_actual < string_value
+        if op == "lte":
+            return string_actual <= string_value
     else:
         return False
-    if op == "gt":
-        return a > b
-    if op == "gte":
-        return a >= b
-    if op == "lt":
-        return a < b
-    if op == "lte":
-        return a <= b
     raise QueryDataError("BAD_OP", f"unknown filter op {op!r}; allowed: {sorted(_OPS)}")
 
 
@@ -256,13 +293,16 @@ def _aggregate(matched: list[dict], spec: str, date_col: str | None) -> dict:
     if func == "distinct":
         out: list[Any] = []
         seen: set[str] = set()
+        total = 0
         for r in matched:
             v = _get_field(r, col)
             key = json.dumps(v, sort_keys=True, ensure_ascii=False) if isinstance(v, (dict, list)) else str(v)
             if key not in seen:
                 seen.add(key)
-                out.append(v)
-        return {"distinct": out, "n": len(out)}
+                total += 1
+                if len(out) < PROFILE_MAX_DISTINCT:
+                    out.append(v)
+        return {"distinct": out, "n": total, "truncated": total > len(out)}
     if func == "latest":
         order_col = date_col or col
         best, best_key = None, None
@@ -308,6 +348,7 @@ class ColumnProfile:
     earliest: str | None = None
     latest: str | None = None
     top_values: list[Any] | None = None
+    distinct_truncated: bool = False
 
     def as_dict(self) -> dict:
         d: dict[str, Any] = {
@@ -318,6 +359,8 @@ class ColumnProfile:
             v = getattr(self, k)
             if v is not None:
                 d[k] = v
+        if self.distinct_truncated:
+            d["distinct_truncated"] = True
         return d
 
 
@@ -326,12 +369,16 @@ def _profile_column(name: str, values: list[Any], *, max_distinct: int = PROFILE
     n = len(non_null)
     seen: list[Any] = []
     seen_keys: set[str] = set()
+    distinct_truncated = False
     for v in non_null:
         k = str(v)
         if k not in seen_keys:
-            seen_keys.add(k)
-            seen.append(v)
-    distinct = len(seen)
+            if len(seen) < max_distinct:
+                seen_keys.add(k)
+                seen.append(v)
+            else:
+                distinct_truncated = True
+    distinct = len(seen) + int(distinct_truncated)
 
     nums = [x for v in non_null if (x := _coerce_num(v)) is not None]
     date_like = sum(1 for v in non_null if _DATE_LIKE.search(str(v)))
@@ -341,14 +388,30 @@ def _profile_column(name: str, values: list[Any], *, max_distinct: int = PROFILE
     # column is predominantly plain numbers (guards a numeric col named "...date").
     if n and ("date" in name_l or date_like >= 0.6 * n) and len(nums) < 0.6 * n:
         svals = [str(v) for v in non_null]
-        return ColumnProfile(name, "date", n, distinct, earliest=min(svals), latest=max(svals))
+        return ColumnProfile(
+            name,
+            "date",
+            n,
+            distinct,
+            earliest=min(svals),
+            latest=max(svals),
+            distinct_truncated=distinct_truncated,
+        )
     if n and len(nums) >= 0.6 * n:
         return ColumnProfile(
             name, "numeric", n, distinct,
             min=min(nums), max=max(nums), sum=sum(nums), avg=sum(nums) / len(nums),
+            distinct_truncated=distinct_truncated,
         )
     kind = "categorical" if distinct <= max_distinct else "text"
-    return ColumnProfile(name, kind, n, distinct, top_values=seen[:max_distinct])
+    return ColumnProfile(
+        name,
+        kind,
+        n,
+        distinct,
+        top_values=seen,
+        distinct_truncated=distinct_truncated,
+    )
 
 
 def profile_data(
@@ -372,7 +435,7 @@ def profile_data(
         raise QueryDataError(e.code, e.reason) from None
     if abs_path.suffix.lower() not in ALLOWED_SUFFIXES:
         raise QueryDataError("UNSUPPORTED_FORMAT", f"only {list(ALLOWED_SUFFIXES)} supported")
-    fmt, rows, cols, warnings = _load_rows(abs_path, record_path)
+    fmt, rows, cols, warnings = load_rows(abs_path, record_path)
     profiles = [
         _profile_column(c, [_get_field(r, c) for r in rows], max_distinct=max_distinct).as_dict()
         for c in cols
@@ -475,7 +538,47 @@ def query_data(
     if abs_path.suffix.lower() not in ALLOWED_SUFFIXES:
         raise QueryDataError("UNSUPPORTED_FORMAT", f"only {list(ALLOWED_SUFFIXES)} supported")
 
-    fmt, rows, cols, warnings = _load_rows(abs_path, record_path)
+    fmt, rows, cols, warnings = load_rows(abs_path, record_path)
+    return evaluate_rows(
+        rows,
+        path=rel,
+        format=fmt,
+        columns_available=cols,
+        warnings=warnings,
+        filters=filters,
+        columns=columns,
+        sort_by=sort_by,
+        descending=descending,
+        limit=limit,
+        offset=offset,
+        aggregate=aggregate,
+        date_from=date_from,
+        date_to=date_to,
+        date_column=date_column,
+    )
+
+
+def evaluate_rows(
+    rows: list[dict],
+    *,
+    path: str,
+    format: str,
+    columns_available: list[str] | None = None,
+    warnings: list[str] | None = None,
+    filters: list[dict] | None = None,
+    columns: list[str] | None = None,
+    sort_by: str | None = None,
+    descending: bool = False,
+    limit: int | None = DEFAULT_LIMIT,
+    offset: int = 0,
+    aggregate: str | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    date_column: str | None = None,
+) -> QueryDataResult:
+    """Apply the dataset query contract to already-loaded adapter rows."""
+    cols = list(columns_available or _infer_columns(rows))
+    warnings = list(warnings or ())
     total_rows = len(rows)
 
     flt: list[dict] = []
@@ -499,11 +602,11 @@ def query_data(
 
     if aggregate:
         if aggregate.strip() == "profile":
-            agg: Any = _profile_payload(matched, cols, fmt, rel)
+            agg: Any = _profile_payload(matched, cols, format, path)
         else:
             agg = _aggregate(matched, aggregate, date_col)
         return QueryDataResult(
-            path=rel, format=fmt, total_rows=total_rows, total_matched=total_matched,
+            path=path, format=format, total_rows=total_rows, total_matched=total_matched,
             returned=0, columns=cols, rows=[],
             aggregate=agg,
             truncated=False, warnings=warnings,
@@ -516,9 +619,9 @@ def query_data(
             return (0, n, "") if n is not None else (1, 0.0, "" if v is None else str(v))
         matched.sort(key=_key, reverse=descending)
 
-    limit = max(0, min(int(limit), HARD_ROW_CAP))
+    limit = _bounded_limit(limit)
     offset = max(0, int(offset))
-    window = matched[offset: offset + limit] if limit else matched[offset:]
+    window = matched[offset : offset + limit]
     truncated = (offset + len(window)) < total_matched
 
     if columns:
@@ -527,9 +630,13 @@ def query_data(
     else:
         out_rows = window
         out_cols = cols
+    out_rows, response_truncated = _bounded_response_rows(out_rows)
+    if response_truncated:
+        warnings.append("response size cap truncated returned rows")
+    truncated = truncated or response_truncated
 
     return QueryDataResult(
-        path=rel, format=fmt, total_rows=total_rows, total_matched=total_matched,
+        path=path, format=format, total_rows=total_rows, total_matched=total_matched,
         returned=len(out_rows), columns=out_cols, rows=out_rows,
         aggregate=None, truncated=truncated, warnings=warnings,
     )

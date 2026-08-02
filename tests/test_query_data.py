@@ -9,7 +9,6 @@ import pytest
 
 from exomem import query_data as qd
 
-
 CSV = (
     "date,analyte,value,unit,ref_range\n"
     "2016-03,IGF-1,276,ng/ml,111 - 551\n"
@@ -95,6 +94,16 @@ def test_csv_limit_offset_truncation(vault: Path) -> None:
     assert r.returned == 2 and r.total_matched == 5 and r.truncated is True
 
 
+@pytest.mark.parametrize("limit", [0, -1, None, 10_000])
+def test_csv_invalid_or_excessive_limit_remains_bounded(vault: Path, limit: int | None) -> None:
+    csv = "value\n" + "".join(f"{number}\n" for number in range(qd.HARD_ROW_CAP + 25))
+    rel = _write(vault, "Knowledge Base/Evidence/Test/labs.csv", csv)
+    r = qd.query_data(vault, path=rel, limit=limit)  # type: ignore[arg-type]
+    expected = qd.DEFAULT_LIMIT if limit in {0, -1, None} else qd.HARD_ROW_CAP
+    assert r.returned == expected
+    assert r.returned <= qd.HARD_ROW_CAP
+
+
 def test_csv_aggregate_count_max_latest_distinct(vault: Path) -> None:
     rel = _write(vault, "Knowledge Base/Evidence/Test/labs.csv", CSV)
     assert qd.query_data(vault, path=rel, aggregate="count").aggregate == {"count": 5}
@@ -106,6 +115,44 @@ def test_csv_aggregate_count_max_latest_distinct(vault: Path) -> None:
 
     distinct = qd.query_data(vault, path=rel, aggregate="distinct:analyte").aggregate
     assert distinct["n"] == 3 and set(distinct["distinct"]) == {"IGF-1", "CRP", "Hb"}
+
+
+def test_distinct_and_profile_results_are_capped(vault: Path) -> None:
+    rows = "category,value\n" + "".join(f"category-{number},{number}\n" for number in range(100))
+    rel = _write(vault, "Knowledge Base/Evidence/Test/categories.csv", rows)
+
+    distinct = qd.query_data(vault, path=rel, aggregate="distinct:category").aggregate
+    profile = qd.query_data(vault, path=rel, aggregate="profile").aggregate["profile"]
+
+    assert distinct["n"] == 100
+    assert len(distinct["distinct"]) == qd.PROFILE_MAX_DISTINCT
+    assert distinct["truncated"] is True
+    category = next(column for column in profile["columns"] if column["name"] == "category")
+    assert len(category["top_values"]) == qd.PROFILE_MAX_DISTINCT
+
+
+def test_response_size_cap_refuses_an_oversized_row(vault: Path) -> None:
+    rel = _write(
+        vault,
+        "Knowledge Base/Evidence/Test/oversized.csv",
+        "value\n" + "x" * 100_000 + "\n",
+    )
+
+    result = qd.query_data(vault, path=rel)
+
+    assert result.returned == 0
+    assert result.truncated is True
+    assert "response size cap" in result.warnings[0]
+
+
+def test_dataset_row_cap_refuses_high_cardinality_input(vault: Path) -> None:
+    csv = "value\n" + "".join(f"{number}\n" for number in range(qd.MAX_PARSED_ROWS + 1))
+    rel = _write(vault, "Knowledge Base/Evidence/Test/too-many.csv", csv)
+
+    with pytest.raises(qd.QueryDataError) as excinfo:
+        qd.query_data(vault, path=rel)
+
+    assert excinfo.value.code == "TOO_MANY_ROWS"
 
 
 # ---------------- JSON ----------------

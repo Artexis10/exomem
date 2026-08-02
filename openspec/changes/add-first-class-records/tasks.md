@@ -4,7 +4,7 @@
 - [x] 1.2 Add a one-Markdown-file-per-item vehicle-maintenance fixture with duplicate dates, arrays, amounts/currencies, nullable due values, Evidence links, mixed governance, and direct-edit correction cases.
 - [x] 1.3 Add an unrelated query-only dataset fixture with declared keys, time/category/numeric fields, deterministic expected rows, high-cardinality values, and direct-edit pagination invalidation.
 - [x] 1.4 Write failing manifest/discovery/schema tests for supported and future versions, collection-scoped identity, canonical natural-key serialization, bounded governed UUID lookup, withheld duplicates, symlink/path escape, unknown profiles, template independence, and manifest-less tracker inspection-only behavior.
-- [ ] 1.5 Write failing adapter tests for fence-aware exact-span parsing, insertion edge, explicit/inferred/ambiguous item keys, reorder/date correction, child-row expansion, byte preservation, and query-only dataset refusal.
+- [x] 1.5 Write failing adapter tests for fence-aware exact-span parsing, insertion edge, explicit/inferred/ambiguous item keys, reorder/date correction, child-row expansion, byte preservation, and query-only dataset refusal.
 
 ## 2. Structured Collection Core
 
@@ -17,13 +17,13 @@
 
 ## 3. Storage Adapters And Shared Query Evaluation
 
-- [ ] 3.1 Implement the adapter protocol plus the declarative fence-aware Markdown-log adapter with exact byte spans, section/heading/row grammar, insertion direction, explicit markers, compatibility keys, and ambiguity reporting without domain conditionals.
-- [ ] 3.2 Implement the Markdown-item adapter over ordinary typed YAML properties and optional readable bodies, using `(collection_id, record_id)` identity and exact-file source versions.
-- [ ] 3.3 Refactor `query_data.py` pure row filtering, projection, deterministic sorting, aggregation, and bounded distinct/profile evaluation so dataset and Record adapters share one evaluator without changing existing query behavior.
-- [ ] 3.4 Implement the query-only CSV/TSV/JSON adapter with optional declared keys, source snapshots, deterministic pagination, hard row/cardinality/response caps, and explicit append/update refusal.
-- [ ] 3.5 Implement snapshot-bound continuation tokens and `json`, provenance-bearing `markdown`, and derived `csv` query output without writing or promoting exports.
-- [ ] 3.6 Fix the existing `limit=0` unbounded-tail behavior and add regression coverage for zero, negative, omitted, and excessive limits plus unbounded distinct/profile results.
-- [ ] 3.7 Run adapter and existing dataset-query tests, including the exact X3 and dataset fixture expectations.
+- [x] 3.1 Implement the adapter protocol plus the declarative fence-aware Markdown-log adapter with exact byte spans, section/heading/row grammar, insertion direction, explicit markers, compatibility keys, and ambiguity reporting without domain conditionals.
+- [x] 3.2 Implement the Markdown-item adapter over ordinary typed YAML properties and optional readable bodies, using `(collection_id, record_id)` identity and exact-file source versions.
+- [x] 3.3 Refactor `query_data.py` pure row filtering, projection, deterministic sorting, aggregation, and bounded distinct/profile evaluation so dataset and Record adapters share one evaluator without changing existing query behavior.
+- [x] 3.4 Implement the query-only CSV/TSV/JSON adapter with optional declared keys, source snapshots, deterministic pagination, hard row/cardinality/response caps, and explicit append/update refusal.
+- [x] 3.5 Implement snapshot-bound continuation tokens and `json`, provenance-bearing `markdown`, and derived `csv` query output without writing or promoting exports.
+- [x] 3.6 Fix the existing `limit=0` unbounded-tail behavior and add regression coverage for zero, negative, omitted, and excessive limits plus unbounded distinct/profile results.
+- [x] 3.7 Run adapter and existing dataset-query tests, including the exact X3 and dataset fixture expectations.
 
 ## 4. Guarded Markdown Mutation And Agent Audit
 
