@@ -131,7 +131,7 @@ def in_excluded_scan_dir(rel_path: str) -> bool:
 
 # `[[Target]]` or `[[Target|Alias]]`.
 _WIKILINK_PATTERN = re.compile(r"\[\[([^\]\|\n]+?)(?:\|[^\]\n]*)?\]\]")
-_FM_PATTERN = re.compile(r"^---\n(.*?)\n---\n?(.*)", re.DOTALL)
+_FM_PATTERN = re.compile(r"^---\r?\n(.*?)\r?\n---(?:\r?\n)?(.*)", re.DOTALL)
 _LOCK_NAMESPACES = frozenset(
     {"activation-manifest", "semantic-creation", "lexical-catalog-publication"}
 )
@@ -374,9 +374,7 @@ class _InterprocessFileLock:
 @contextmanager
 def vault_creation_lock(
     vault_root: Path,
-    namespace: Literal[
-        "activation-manifest", "semantic-creation", "lexical-catalog-publication"
-    ],
+    namespace: Literal["activation-manifest", "semantic-creation", "lexical-catalog-publication"],
     *,
     timeout: float = 30.0,
 ):
@@ -499,9 +497,7 @@ class BatchWriteError(ValueError):
         self.affected_count = summary.affected_count
         self.targets = summary.targets
         self.omitted_target_count = summary.omitted_target_count
-        self.remediation = (
-            _BATCH_COMMITTED_REMEDIATION if committed else _BATCH_RETRY_REMEDIATION
-        )
+        self.remediation = _BATCH_COMMITTED_REMEDIATION if committed else _BATCH_RETRY_REMEDIATION
         self._diagnostics = tuple(diagnostics)
         ValueError.__init__(self, self.__str__())
 
@@ -584,11 +580,7 @@ def _safe_guard_target(target: str) -> tuple[str, ...]:
 
 
 def _leaf_hash(path: Path, expected: PathIdentity) -> str:
-    flags = (
-        os.O_RDONLY
-        | getattr(os, "O_BINARY", 0)
-        | getattr(os, "O_NOFOLLOW", 0)
-    )
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
         descriptor = os.open(path, flags)
     except OSError as error:
@@ -757,9 +749,7 @@ class PathGuard:
 
 def _same_captured_identity(first: PathIdentity, second: PathIdentity) -> bool:
     return (
-        first.device == second.device
-        and first.inode == second.inode
-        and first.mode == second.mode
+        first.device == second.device and first.inode == second.inode and first.mode == second.mode
     )
 
 
@@ -1092,9 +1082,7 @@ class _BatchWorkspace:
                 raise PathGuardError("PATH_GUARD_IO", "batch workspace allocation failed")
             workspace_path = absolute_parent / name
             if os.stat in getattr(os, "supports_dir_fd", set()):
-                workspace_path_info = os.stat(
-                    name, dir_fd=parent_descriptor, follow_symlinks=False
-                )
+                workspace_path_info = os.stat(name, dir_fd=parent_descriptor, follow_symlinks=False)
             else:  # pragma: no cover - Windows fallback
                 workspace_path_info = workspace_path.lstat()
             if (
@@ -1305,9 +1293,7 @@ class _BatchWorkspace:
                 if os.path.lexists(artifact.path):
                     descriptor = os.open(
                         artifact.path,
-                        os.O_RDWR
-                        | getattr(os, "O_BINARY", 0)
-                        | getattr(os, "O_NOFOLLOW", 0),
+                        os.O_RDWR | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0),
                     )
                     try:
                         descriptor_info = os.fstat(descriptor)
@@ -1347,8 +1333,7 @@ class _BatchWorkspace:
                 not stat.S_ISREG(descriptor_info.st_mode)
                 or _is_reparse(descriptor_info)
                 or not _same_identity(artifact.identity, descriptor_info)
-                or _descriptor_hash(artifact.descriptor, artifact.identity)
-                != artifact.content_hash
+                or _descriptor_hash(artifact.descriptor, artifact.identity) != artifact.content_hash
                 or not stat.S_ISREG(final_info.st_mode)
                 or stat.S_ISLNK(final_info.st_mode)
                 or _is_reparse(final_info)
@@ -1416,11 +1401,7 @@ class _BatchWorkspace:
 
 
 def _open_bound_artifact(artifact: _BatchArtifactGuard) -> int:
-    flags = (
-        os.O_RDONLY
-        | getattr(os, "O_BINARY", 0)
-        | getattr(os, "O_NOFOLLOW", 0)
-    )
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
         descriptor = os.open(artifact.path, flags)
     except OSError as error:
@@ -1442,9 +1423,7 @@ def _open_bound_artifact(artifact: _BatchArtifactGuard) -> int:
 
 def _capture_batch_snapshot(path: Path) -> tuple[_BatchSnapshot, _BatchArtifactGuard]:
     absolute = Path(os.path.abspath(path))
-    stable_guard = PathGuard.capture(
-        absolute.parent, absolute.name, leaf_policy="stable"
-    )
+    stable_guard = PathGuard.capture(absolute.parent, absolute.name, leaf_policy="stable")
     stable_artifact = _BatchArtifactGuard(absolute.parent, stable_guard)
     source_descriptor = _open_bound_artifact(stable_artifact)
     try:
@@ -1508,9 +1487,7 @@ def _restore_bound_source_timestamps(
     elif os.utime in getattr(os, "supports_follow_symlinks", set()):
         os.utime(source.path, ns=(atime_ns, mtime_ns), follow_symlinks=False)
     elif os.name == "nt":
-        _set_windows_path_timestamps(
-            source.path, source.identity, atime_ns, mtime_ns
-        )
+        _set_windows_path_timestamps(source.path, source.identity, atime_ns, mtime_ns)
     else:  # pragma: no cover - supported Python platforms expose one safe form
         raise PathGuardError("PATH_GUARD_IO", "batch timestamp restore is unavailable")
     restored = os.fstat(descriptor)
@@ -1549,9 +1526,7 @@ def _apply_workspace_mode(artifact: _WorkspaceArtifact, mode: int) -> None:
     artifact.refresh_identity()
 
 
-def _apply_workspace_timestamps(
-    artifact: _WorkspaceArtifact, atime_ns: int, mtime_ns: int
-) -> None:
+def _apply_workspace_timestamps(artifact: _WorkspaceArtifact, atime_ns: int, mtime_ns: int) -> None:
     descriptor = artifact.descriptor
     if os.utime in getattr(os, "supports_fd", set()):
         os.utime(descriptor, ns=(atime_ns, mtime_ns))
@@ -1569,17 +1544,13 @@ def _apply_workspace_timestamps(
             follow_symlinks=False,
         )
     elif os.name == "nt":
-        _set_windows_path_timestamps(
-            artifact.path, artifact.identity, atime_ns, mtime_ns
-        )
+        _set_windows_path_timestamps(artifact.path, artifact.identity, atime_ns, mtime_ns)
     else:  # pragma: no cover - platform has no exact path-based utime
         raise PathGuardError("PATH_GUARD_IO", "batch timestamp restore is unavailable")
     artifact.refresh_identity()
 
 
-def _apply_snapshot_metadata(
-    artifact: _WorkspaceArtifact, snapshot: _BatchSnapshot
-) -> None:
+def _apply_snapshot_metadata(artifact: _WorkspaceArtifact, snapshot: _BatchSnapshot) -> None:
     artifact.recheck()
     descriptor = artifact.descriptor
     _apply_workspace_mode(artifact, snapshot.mode)
@@ -1599,9 +1570,7 @@ def _apply_snapshot_metadata(
     info = os.fstat(descriptor)
     if stat.S_IMODE(info.st_mode) != snapshot.mode:
         raise PathGuardError("PATH_GUARD_CHANGED", "batch metadata restore changed")
-    if (
-        info.st_atime_ns != snapshot.atime_ns or info.st_mtime_ns != snapshot.mtime_ns
-    ):
+    if info.st_atime_ns != snapshot.atime_ns or info.st_mtime_ns != snapshot.mtime_ns:
         raise PathGuardError("PATH_GUARD_CHANGED", "batch metadata restore changed")
     if snapshot.xattrs is not None and _capture_descriptor_xattrs(descriptor) != snapshot.xattrs:
         raise PathGuardError("PATH_GUARD_CHANGED", "batch metadata restore changed")
@@ -1640,12 +1609,8 @@ def _reset_restored_timestamps(
             parent_descriptor = _open_directory_path(path.parent)
             try:
                 parent_info = path.parent.lstat()
-                if not _same_identity(
-                    _identity(".", parent_info), os.fstat(parent_descriptor)
-                ):
-                    raise PathGuardError(
-                        "PATH_GUARD_CHANGED", "restored batch parent changed"
-                    )
+                if not _same_identity(_identity(".", parent_info), os.fstat(parent_descriptor)):
+                    raise PathGuardError("PATH_GUARD_CHANGED", "restored batch parent changed")
                 os.utime(
                     path.name,
                     ns=(snapshot.atime_ns, snapshot.mtime_ns),
@@ -1654,9 +1619,7 @@ def _reset_restored_timestamps(
             finally:
                 os.close(parent_descriptor)
         else:  # pragma: no cover - platform has no exact timestamp operation
-            raise PathGuardError(
-                "PATH_GUARD_IO", "batch timestamp restore is unavailable"
-            )
+            raise PathGuardError("PATH_GUARD_IO", "batch timestamp restore is unavailable")
         restored = os.fstat(descriptor)
         restored_path = path.lstat()
         if (
@@ -1792,9 +1755,7 @@ def _scan_batch_residue_children(
     iterator = None
     child_names: list[str] = []
     try:
-        iterator = os.scandir(
-            workspace_descriptor if descriptor_relative else workspace_path
-        )
+        iterator = os.scandir(workspace_descriptor if descriptor_relative else workspace_path)
         for child in iterator:
             child_names.append(child.name)
             if len(child_names) > _BATCH_RESIDUE_CHILD_LIMIT:
@@ -1887,10 +1848,7 @@ def _classify_batch_residue(
             or (noatime_active and final_descriptor_info.st_atime_ns != opened.st_atime_ns)
             or final_path_info.st_mtime_ns != workspace_info.st_mtime_ns
             or final_path_info.st_ctime_ns != workspace_info.st_ctime_ns
-            or (
-                noatime_active
-                and final_path_info.st_atime_ns != workspace_info.st_atime_ns
-            )
+            or (noatime_active and final_path_info.st_atime_ns != workspace_info.st_atime_ns)
         )
         if (
             not _same_identity(workspace_identity, final_descriptor_info)
@@ -1980,9 +1938,7 @@ def _bounded_directory_entries(
         for name in sorted(residue_names):
             _classify_batch_residue(path, descriptor, name)
         if len(ordinary_names) > max_entries:
-            raise PathGuardError(
-                "PATH_GUARD_LIMIT", "guarded directory exceeds its entry limit"
-            )
+            raise PathGuardError("PATH_GUARD_LIMIT", "guarded directory exceeds its entry limit")
 
         entries: list[PathIdentity] = []
         for name in sorted(ordinary_names):
@@ -1993,9 +1949,7 @@ def _bounded_directory_entries(
                     "PATH_GUARD_UNSAFE", "guarded directory entry is unsafe"
                 ) from error
             if not name or name in {".", ".."} or "/" in name or "\\" in name or b"\0" in encoded:
-                raise PathGuardError(
-                    "PATH_GUARD_UNSAFE", "guarded directory entry is unsafe"
-                )
+                raise PathGuardError("PATH_GUARD_UNSAFE", "guarded directory entry is unsafe")
             if len(entries) >= max_entries:
                 raise PathGuardError(
                     "PATH_GUARD_LIMIT", "guarded directory exceeds its entry limit"
@@ -2020,6 +1974,19 @@ def _bounded_directory_entries(
             iterator.close()
         os.close(descriptor)
     return tuple(sorted(entries, key=lambda item: item.relative_path.encode("utf-8")))
+
+
+def _allowed_census_names(directory: Path, allowed_changes: Iterable[Path]) -> frozenset[str]:
+    directory_path = Path(os.path.abspath(directory))
+    names: set[str] = set()
+    for change in allowed_changes:
+        try:
+            relative = Path(os.path.abspath(change)).relative_to(directory_path)
+        except ValueError:
+            continue
+        if relative.parts:
+            names.add(relative.parts[0])
+    return frozenset(names)
 
 
 @dataclass(frozen=True, slots=True)
@@ -2133,20 +2100,12 @@ class DirectoryCensusGuard:
                     or stat.S_ISLNK(info.st_mode)
                     or _is_reparse(info)
                 ):
-                    raise PathGuardError(
-                        "PATH_GUARD_CHANGED", "guarded directory ancestor changed"
-                    )
+                    raise PathGuardError("PATH_GUARD_CHANGED", "guarded directory ancestor changed")
             if self.missing_paths and os.path.lexists(root / self.missing_paths[-1]):
                 directory = root / self.target
-                allowed_names = frozenset(
-                    path.name
-                    for path in allowed_changes
-                    if os.path.abspath(path.parent) == os.path.abspath(directory)
-                )
+                allowed_names = _allowed_census_names(directory, allowed_changes)
                 if not allowed_names:
-                    raise PathGuardError(
-                        "PATH_GUARD_CHANGED", "guarded directory appeared"
-                    )
+                    raise PathGuardError("PATH_GUARD_CHANGED", "guarded directory appeared")
                 try:
                     info = directory.lstat()
                 except OSError as error:
@@ -2158,9 +2117,7 @@ class DirectoryCensusGuard:
                     or stat.S_ISLNK(info.st_mode)
                     or _is_reparse(info)
                 ):
-                    raise PathGuardError(
-                        "PATH_GUARD_CHANGED", "guarded directory changed"
-                    )
+                    raise PathGuardError("PATH_GUARD_CHANGED", "guarded directory changed")
                 current = _bounded_directory_entries(
                     directory,
                     relative=self.target,
@@ -2169,9 +2126,7 @@ class DirectoryCensusGuard:
                     ignored_names=allowed_names,
                 )
                 if current:
-                    raise PathGuardError(
-                        "PATH_GUARD_CHANGED", "guarded directory census changed"
-                    )
+                    raise PathGuardError("PATH_GUARD_CHANGED", "guarded directory census changed")
             return
         directory = root / self.target
         try:
@@ -2185,11 +2140,7 @@ class DirectoryCensusGuard:
             or _is_reparse(info)
         ):
             raise PathGuardError("PATH_GUARD_CHANGED", "guarded directory changed")
-        allowed_names = frozenset(
-            path.name
-            for path in allowed_changes
-            if os.path.abspath(path.parent) == os.path.abspath(directory)
-        )
+        allowed_names = _allowed_census_names(directory, allowed_changes)
         current = _bounded_directory_entries(
             directory,
             relative=self.target,
@@ -2198,9 +2149,7 @@ class DirectoryCensusGuard:
             ignored_names=allowed_names,
         )
         expected = tuple(
-            entry
-            for entry in self.entries
-            if Path(entry.relative_path).name not in allowed_names
+            entry for entry in self.entries if Path(entry.relative_path).name not in allowed_names
         )
         if current != expected:
             raise PathGuardError("PATH_GUARD_CHANGED", "guarded directory census changed")
@@ -2593,9 +2542,7 @@ def post_commit_batch_fanout(
         )
         if index_reports is not None:
             try:
-                index_reports.append(
-                    failed_index_sync.failed_upsert_report(vault_root, replaced)
-                )
+                index_reports.append(failed_index_sync.failed_upsert_report(vault_root, replaced))
             except Exception:  # noqa: BLE001 — failure feedback remains best-effort
                 logging.getLogger(__name__).exception(
                     "failed to construct bounded index degradation feedback"
@@ -2611,8 +2558,7 @@ class ContentHashMismatchError(RuntimeError):
         self.actual_hash = actual_hash
         actual = actual_hash or "<missing>"
         super().__init__(
-            f"content changed before commit: {path} "
-            f"(expected {expected_hash}, found {actual})"
+            f"content changed before commit: {path} (expected {expected_hash}, found {actual})"
         )
 
 
@@ -2723,22 +2669,15 @@ def _batch_atomic_write_locked(
                 not (expected_missing and actual_hash is None)
                 and actual_hash != write.expected_hash
             ):
-                raise ContentHashMismatchError(
-                    write.path, write.expected_hash, actual_hash
-                )
+                raise ContentHashMismatchError(write.path, write.expected_hash, actual_hash)
     all_required_guards = tuple(required_guards)
     if any(
-        not isinstance(guard, (PathGuard, DirectoryCensusGuard))
-        for guard in all_required_guards
+        not isinstance(guard, (PathGuard, DirectoryCensusGuard)) for guard in all_required_guards
     ):
         raise PathGuardError("PATH_GUARD_INVALID", "unsupported required guard")
-    read_only_guards = tuple(
-        guard for guard in all_required_guards if isinstance(guard, PathGuard)
-    )
+    read_only_guards = tuple(guard for guard in all_required_guards if isinstance(guard, PathGuard))
     directory_guards = tuple(
-        guard
-        for guard in all_required_guards
-        if isinstance(guard, DirectoryCensusGuard)
+        guard for guard in all_required_guards if isinstance(guard, DirectoryCensusGuard)
     )
     # Access-tier backstop: check before staging and again immediately before
     # every destination replace so a live `_access.yaml` change cannot race a
@@ -2747,9 +2686,7 @@ def _batch_atomic_write_locked(
         _validate_batch_write_access(Path(vault_root), writes)
     target_summary = _summarize_batch_targets(writes, vault_root)
     if (
-        read_only_guards
-        or directory_guards
-        or any(write.guard is not None for write in writes)
+        read_only_guards or directory_guards or any(write.guard is not None for write in writes)
     ) and vault_root is None:
         raise PathGuardError("PATH_GUARD_ROOT", "guarded writes require vault_root")
     created_dirs: list[Path] = []
@@ -2843,6 +2780,7 @@ def _batch_atomic_write_locked(
 
     allowed_census_changes = (
         *(write.path for write in writes),
+        *(directory for write in writes for directory in write.ensure_directories),
         *(item.path for item in workspace_by_parent.values()),
     )
     replaced: list[Path] = []
@@ -2865,16 +2803,12 @@ def _batch_atomic_write_locked(
                 source_guard = source_guards[pending_index]
                 if source_guard is None:
                     if os.path.lexists(staged[pending_index][0]):
-                        raise PathGuardError(
-                            "PATH_GUARD_CHANGED", "batch destination appeared"
-                        )
+                        raise PathGuardError("PATH_GUARD_CHANGED", "batch destination appeared")
                 else:
                     source_guard.recheck()
                     snapshot = snapshots[pending_index]
                     if snapshot is None:  # pragma: no cover - guard implies a snapshot
-                        raise PathGuardError(
-                            "PATH_GUARD_CHANGED", "batch snapshot is unavailable"
-                        )
+                        raise PathGuardError("PATH_GUARD_CHANGED", "batch snapshot is unavailable")
                     _reset_restored_timestamps(
                         staged[pending_index][0], source_guard.identity, snapshot
                     )
@@ -4507,10 +4441,7 @@ def _plan_log_content(
     starts: list[int] = []
     if rotate and sep_idx != -1:
         head_end = sep_idx + len(separator)
-        starts = [
-            match.start()
-            for match in _LOG_ENTRY_START_RE.finditer(log_text[head_end:])
-        ]
+        starts = [match.start() for match in _LOG_ENTRY_START_RE.finditer(log_text[head_end:])]
     if rotate and sep_idx != -1 and len(starts) > LOG_ROTATE_KEEP_ENTRIES:
         head_end = sep_idx + len(separator)
         entries_text = log_text[head_end:]
@@ -4560,9 +4491,7 @@ def plan_log_writes(
     """Purely plan one idempotent log entry and any deterministic rotation."""
     log_file = kb_root(vault_root) / "log.md"
     if not log_file.is_file():
-        return LogWritePlan(
-            (), warning=f"{kb_prefix()}log.md missing; skipped log entry"
-        )
+        return LogWritePlan((), warning=f"{kb_prefix()}log.md missing; skipped log entry")
     current, live_guard = read_guarded_text(vault_root, log_file)
     updated = prepend_log_entry(
         current,
@@ -4606,9 +4535,8 @@ def rotate_log_if_needed(vault_root: Path) -> str | None:
             vault_root,
             log_text=text,
             live_guard=live_guard,
-            operation_token="standalone-rotation:" + hashlib.sha256(
-                text.encode("utf-8")
-            ).hexdigest(),
+            operation_token="standalone-rotation:"
+            + hashlib.sha256(text.encode("utf-8")).hexdigest(),
         )
         if plan.rotation_note is None:
             return None

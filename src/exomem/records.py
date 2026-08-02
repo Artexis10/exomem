@@ -74,12 +74,8 @@ def append_record(
             )
             current_hash = hashlib.sha256(source_bytes).hexdigest()
         else:
-            directory_guards = (
-                vault.DirectoryCensusGuard.capture(
-                    root, manifest.storage.source, max_entries=_MAX_ITEM_FILES
-                ),
-            )
             snapshot = adapter.read()
+            directory_guards = _item_directory_guards(root, manifest, snapshot)
             current_hash = snapshot.snapshot
             source_path = root / manifest.storage.source
             source_text = ""
@@ -241,12 +237,8 @@ def update_record(
                 "container",
             )
         else:
-            directory_guards = (
-                vault.DirectoryCensusGuard.capture(
-                    root, manifest.storage.source, max_entries=_MAX_ITEM_FILES
-                ),
-            )
             snapshot = adapter.read()
+            directory_guards = _item_directory_guards(root, manifest, snapshot)
             source_text = ""
             source_bytes = b""
             source_guard = None
@@ -462,7 +454,11 @@ def create_collection(
         )
         log_plan = _plan_required_audit(root, manifest, "collection", audit, after_container_hash)
         try:
-            vault.batch_atomic_write([*writes, *log_plan.writes], vault_root=root)
+            vault.batch_atomic_write(
+                [*writes, *log_plan.writes],
+                vault_root=root,
+                required_guards=_portable_absence_guards(root, path, source),
+            )
         except (vault.PathGuardError, vault.CreateOnlyConflict, OSError, ValueError) as error:
             raise _publication_error(error) from error
         return _result(
@@ -885,6 +881,21 @@ def _new_item_path(
     )
 
 
+def _item_directory_guards(
+    root: Path,
+    manifest: collections.CollectionManifest,
+    snapshot: record_formats.AdapterSnapshot,
+) -> tuple[vault.DirectoryCensusGuard, ...]:
+    directories = {manifest.storage.source}
+    directories.update(
+        Path(version.path).parent.as_posix() for version in snapshot.source_versions[1:]
+    )
+    return tuple(
+        vault.DirectoryCensusGuard.capture(root, directory, max_entries=_MAX_ITEM_FILES)
+        for directory in sorted(directories)
+    )
+
+
 def _casefold_alias(path: Path) -> bool:
     if not path.parent.is_dir():
         return False
@@ -918,6 +929,20 @@ def _assert_portable_absent(root: Path, target: Path) -> None:
                 "CREATE_ONLY_CONFLICT", "target conflicts with a portable path alias"
             )
         current /= component
+
+
+def _portable_absence_guards(root: Path, *targets: Path) -> tuple[vault.DirectoryCensusGuard, ...]:
+    directories: set[str] = set()
+    for target in targets:
+        relative = target.relative_to(root)
+        for index in range(1, len(relative.parts)):
+            directory = root.joinpath(*relative.parts[:index])
+            if directory.is_dir():
+                directories.add(directory.relative_to(root).as_posix())
+    return tuple(
+        vault.DirectoryCensusGuard.capture(root, directory, max_entries=_MAX_ITEM_FILES)
+        for directory in sorted(directories)
+    )
 
 
 def _require_activity_log(root: Path) -> None:
