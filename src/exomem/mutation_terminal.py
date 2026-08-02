@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Mapping
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 ResponseDetail = Literal["compact", "full", "legacy"]
 
@@ -128,7 +128,7 @@ def split_response_detail(
     detail = payload.pop("response_detail", default)
     if not isinstance(detail, str) or detail not in _RESPONSE_DETAILS:
         raise ValueError("response_detail must be one of: compact, full, legacy")
-    return payload, detail
+    return payload, cast(ResponseDetail, detail)
 
 
 def project_terminal(result: Any, detail: ResponseDetail = "compact") -> Any:

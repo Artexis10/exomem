@@ -598,11 +598,15 @@ def _audit_markers(
             matches += len(found)
             if matches > _MAX_AUDIT_MARKERS:
                 return None
-            markers.extend(_AuditMarker(match, manifest.storage.source, record.identity.key) for match in found)
+            markers.extend(
+                _AuditMarker(match, manifest.storage.source, record.identity.key) for match in found
+            )
         return tuple(markers)
     markers = []
     for record in snapshot.records:
-        data = _safe_audit_read(root, record.source.path, record.source.hash, _MAX_AUDIT_SOURCE_BYTES)
+        data = _safe_audit_read(
+            root, record.source.path, record.source.hash, _MAX_AUDIT_SOURCE_BYTES
+        )
         if data is None:
             return None
         try:
@@ -611,7 +615,9 @@ def _audit_markers(
             return None
         if len(markers) + len(found) > _MAX_AUDIT_MARKERS:
             return None
-        markers.extend(_AuditMarker(match, record.source.path, record.identity.key) for match in found)
+        markers.extend(
+            _AuditMarker(match, record.source.path, record.identity.key) for match in found
+        )
     return tuple(markers)
 
 
@@ -673,14 +679,21 @@ def _safe_audit_read(root: Path, relative: str, expected_hash: str, limit: int) 
         if any(part in {"", ".", ".."} for part in relative_path.parts):
             return None
         before = candidate.lstat()
-        if not stat.S_ISREG(before.st_mode) or stat.S_ISLNK(before.st_mode) or before.st_size > limit:
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or stat.S_ISLNK(before.st_mode)
+            or before.st_size > limit
+        ):
             return None
         descriptor = os.open(candidate, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
     except (OSError, ValueError):
         return None
     try:
         opened = os.fstat(descriptor)
-        if not stat.S_ISREG(opened.st_mode) or (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino):
+        if not stat.S_ISREG(opened.st_mode) or (opened.st_dev, opened.st_ino) != (
+            before.st_dev,
+            before.st_ino,
+        ):
             return None
         with os.fdopen(os.dup(descriptor), "rb", closefd=True) as stream:
             data = stream.read(before.st_size + 1)
@@ -1024,7 +1037,9 @@ def _assert_portable_absent(root: Path, target: Path) -> None:
         try:
             info = current.lstat()
         except OSError as error:
-            raise collections.CollectionError("INVALID_COLLECTION_PATH", "target parent is unreadable") from error
+            raise collections.CollectionError(
+                "INVALID_COLLECTION_PATH", "target parent is unreadable"
+            ) from error
         if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
             raise collections.CollectionError("INVALID_COLLECTION_PATH", "target parent is unsafe")
         wanted = unicodedata.normalize("NFC", component).casefold()
@@ -1039,7 +1054,9 @@ def _assert_portable_absent(root: Path, target: Path) -> None:
                     if unicodedata.normalize("NFC", child.name).casefold() == wanted:
                         aliases.append(child.name)
         except OSError as error:
-            raise collections.CollectionError("INVALID_COLLECTION_PATH", "target parent is unreadable") from error
+            raise collections.CollectionError(
+                "INVALID_COLLECTION_PATH", "target parent is unreadable"
+            ) from error
         if aliases and component not in aliases:
             raise collections.CollectionError(
                 "CREATE_ONLY_CONFLICT", "target conflicts with a portable path alias"
@@ -1176,9 +1193,7 @@ def _items_container_hash(
     snapshot: record_formats.AdapterSnapshot,
     replacement: collections.SourceVersion,
 ) -> str:
-    inventory = [
-        entry for entry in snapshot.source_inventory if entry[0] != replacement.path
-    ]
+    inventory = [entry for entry in snapshot.source_inventory if entry[0] != replacement.path]
     inventory.append((replacement.path, "file", replacement.hash))
     inventory.sort()
     pairs = [(manifest.manifest_version.path, manifest.manifest_version.hash)] + [

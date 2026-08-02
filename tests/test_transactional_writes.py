@@ -1938,15 +1938,21 @@ def test_batch_staging_keyboard_interrupt_cleans_created_parents_and_workspaces(
             raise KeyboardInterrupt("stop during staging")
         return real_create_artifact(self, name, content)
 
-    monkeypatch.setattr(vault_module._BatchWorkspace, "create_artifact", interrupt_after_parent)
+    monkeypatch.setattr(
+        vault_module._BatchWorkspace, "create_artifact", interrupt_after_parent
+    )
     with pytest.raises(KeyboardInterrupt, match="stop during staging"):
         vault_module.batch_atomic_write([vault_module.PlannedWrite(target, "new")])
     assert not target.exists()
     assert not (tmp_path / "new").exists()
     assert not list(tmp_path.rglob(".exomem-batch-*"))
 
-    monkeypatch.setattr(vault_module._BatchWorkspace, "create_artifact", real_create_artifact)
-    assert vault_module.batch_atomic_write([vault_module.PlannedWrite(target, "new")]) == [target]
+    monkeypatch.setattr(
+        vault_module._BatchWorkspace, "create_artifact", real_create_artifact
+    )
+    assert vault_module.batch_atomic_write(
+        [vault_module.PlannedWrite(target, "new")]
+    ) == [target]
 
 
 @pytest.mark.parametrize("nested", [False, True])
