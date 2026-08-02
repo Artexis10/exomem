@@ -28,11 +28,11 @@ V01_ACTIVE_FAMILIES = {
 # v0.2 families flipped active by their implementing change (task 3.x lanes).
 V02_ACTIVE_FAMILIES = {
     "procedural",
+    "quantitative",
     "negation_counterfactual",
 }
 
 V02_PLANNED_FAMILIES = {
-    "quantitative",
     "cross_lingual",
     "preference_attribution",
     "source_reliability",
@@ -138,8 +138,8 @@ def test_unregistered_family_refuses_generation(tmp_path: Path) -> None:
 
 
 def test_planned_family_refuses_generation(tmp_path: Path) -> None:
-    probe = _probe_template("quantitative")
-    with pytest.raises(GenerationError, match=r"t98_family_probe.*quantitative.*planned"):
+    probe = _probe_template("cross_lingual")
+    with pytest.raises(GenerationError, match=r"t98_family_probe.*cross_lingual.*planned"):
         generate_corpus(1, tmp_path / "corpus", templates={probe.template_id: probe})
 
 

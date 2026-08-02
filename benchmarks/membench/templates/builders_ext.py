@@ -8,7 +8,7 @@ raise :class:`GenerationError` so an inconsistent corpus refuses to generate.
 
 from __future__ import annotations
 
-from membench import oracle
+from membench import oracle, quant
 from membench.schema import (
     ClaimRecord,
     ClaimStatus,
@@ -255,6 +255,65 @@ def expect_converted_value(
             required_claims=[claim.claim_id],
             required_citations=list(citations),
             gates=["current_state", "citations", "unit_conversion"],
+        )
+
+    return build
+
+
+def expect_derived_quantity(
+    a: ClaimRecord,
+    b: ClaimRecord,
+    op: str,
+    *,
+    unit: str | None = None,
+    places: int | None = None,
+) -> ExpectationBuilder:
+    """Quantitative-family answer: the oracle computes ``op`` over the two
+    stored quantities via :mod:`membench.quant` and requires BOTH contributing
+    sources as citations (the transitive ``derived_from`` rule stays intact
+    because citations come from :func:`oracle.required_citations`)."""
+
+    def build(ctx: OracleCtx, query: QueryRecord) -> ExpectedRecord:
+        views = []
+        for claim in (a, b):
+            view = _view_for(ctx, claim, query)
+            if not view.is_active or view.value is None:
+                raise GenerationError(
+                    f"{query.query_id}: derived quantity needs an active value "
+                    f"for {claim.claim_id}, got {view.status.value}"
+                )
+            views.append(view)
+        try:
+            derived = quant.derive(
+                op, views[0].value, views[1].value, unit=unit, places=places
+            )
+        except quant.QuantityError as exc:
+            raise GenerationError(f"{query.query_id}: {exc}") from exc
+        ordered: dict[str, None] = {}
+        for claim, view in zip((a, b), views):
+            for source_id in _citations_for(ctx, claim, view, query):
+                ordered.setdefault(source_id)
+        if len(ordered) < 2:
+            raise GenerationError(
+                f"{query.query_id}: derived quantity needs two contributing "
+                f"sources, got {sorted(ordered)}"
+            )
+        gates = ["derived_value", "citations"]
+        operand_units = {views[0].value.unit, views[1].value.unit}
+        if len(operand_units) > 1 or (
+            derived.unit is not None and derived.unit not in operand_units
+        ):
+            gates.append("unit_conversion")
+        return ExpectedRecord(
+            query_id=query.query_id,
+            answer=ExpectedAnswer(
+                kind="value",
+                values=[derived.value],
+                unit=derived.unit,
+                tolerance=float(derived.tolerance),
+            ),
+            required_citations=list(ordered),
+            gates=gates,
         )
 
     return build

@@ -123,7 +123,7 @@ _V02_FAMILIES: tuple[Family, ...] = (
     Family(
         family_id="quantitative",
         classification="deterministic-oracle",
-        status="planned",
+        status="active",
         rationale=(
             "Arithmetic over two or more stored values; the oracle computes "
             "the expected value, unit, and tolerance with both contributing "

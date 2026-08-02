@@ -11,9 +11,9 @@
 - [ ] 2.3 Re-run the governance family wired; record wired-vs-default-open delta in the findings doc
 
 ## 3. New families (fable lanes after 1.1; red-first per family)
-- [ ] 3.1 Procedural/how-to chains (ordered steps, preconditions, revisions)
-- [ ] 3.2 Quantitative reasoning (unit-aware arithmetic oracle over stored values)
-- [ ] 3.3 Negation & counterfactuals (recorded-false vs not-recorded; rejected plans)
+- [x] 3.1 Procedural/how-to chains — t17 + membench/procedural.py; delegated lane, independent review APPROVE (no HIGH/MEDIUM); integrated 0f1e4d3
+- [x] 3.2 Quantitative reasoning — t18 + membench/quant.py (Decimal-only, unit table, tolerance); delegated lane, review APPROVE (no blocking); integrated with this commit
+- [x] 3.3 Negation & counterfactuals — t19 over existing DISPROVED/REVOKED; delegated lane, review APPROVE (no HIGH/MEDIUM); integrated ff2d324
 - [ ] 3.4 Cross-lingual facts (non-Latin syllabary wordbank extension; unsupported-not-zero profile handling)
 - [ ] 3.5 Preference attribution + source-reliability (behavioural hedging, correction-history citations)
 - [ ] 3.6 Long-horizon 52-week entropy release + quarterly health snapshots
