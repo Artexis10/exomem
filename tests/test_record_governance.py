@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -258,7 +259,7 @@ def test_precommit_refusal_leaves_canonical_and_manifest_unchanged(
     before_manifest = (fixture / "_collection.md").read_bytes()
     before_items = sorted(path.read_bytes() for path in (fixture / "Events").rglob("*.md"))
 
-    def refuse(*_args: object) -> None:
+    def refuse(*_args: object, **_kwargs: object) -> None:
         raise collections.CollectionError("COLLECTION_NOT_FOUND", "collection was not found")
 
     monkeypatch.setattr(record_governance, "precommit_authorize_mutation", refuse)
@@ -346,7 +347,7 @@ def test_precommit_runs_before_publication_and_publication_failure_is_not_refusa
     manifest = collections.load_manifest(tmp_path, fixture / "_collection.md")
     order: list[str] = []
 
-    def authorized(*_args: object) -> None:
+    def authorized(*_args: object, **_kwargs: object) -> None:
         order.append("precommit")
 
     def publication_failure(*_args: object, **_kwargs: object) -> None:
@@ -375,3 +376,45 @@ def test_precommit_runs_before_publication_and_publication_failure_is_not_refusa
         )
     assert raised.value.code == "RECORD_PUBLICATION_FAILED"
     assert order == ["precommit", "publish"]
+
+
+def test_governed_append_records_authorization_without_claiming_commit(tmp_path: Path) -> None:
+    fixture = copy_vehicle_maintenance_fixture(tmp_path)
+    (tmp_path / "Knowledge Base" / "log.md").write_text("# Activity\n", encoding="utf-8")
+    manifest = collections.load_manifest(tmp_path, fixture / "_collection.md")
+    _write_l6_rule(tmp_path, ceiling=6, paths="Records/**")
+
+    with request_scope(RequestPrincipal(audience_id=EXTERNAL, surface="mcp")):
+        receipt = records.append_record(
+            tmp_path,
+            manifest,
+            item={
+                "occurred_on": "2026-07-01",
+                "asset": "[[Assets/Vehicle]]",
+                "odometer": 46000,
+                "provider": "Workshop",
+                "services": ["oil"],
+                "amount": 20,
+                "currency": "GBP",
+                "status": "completed",
+                "next_due_on": None,
+                "next_due_odometer": None,
+            },
+            why="governed append",
+        )
+
+    assert receipt["outcome"] == "committed"
+    events = list((tmp_path / "Knowledge Base" / "_Governance" / "events").rglob("*.jsonl"))
+    payloads = [
+        json.loads(line)
+        for event in events
+        for line in event.read_text(encoding="utf-8").splitlines()
+    ]
+    outcomes = [
+        outcome
+        for payload in payloads
+        if payload.get("event_type") == "disclosure"
+        for outcome in payload.get("outcomes", [])
+    ]
+    assert any(outcome.get("decision") == "release_authorized" for outcome in outcomes)
+    assert all("committed" not in outcome.values() for outcome in outcomes)

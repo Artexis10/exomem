@@ -255,6 +255,7 @@ def discover_collections(
     *,
     authorize_path: Callable[[str], bool] | None = None,
     max_candidates: int = _MAX_DISCOVERY_CANDIDATES,
+    max_raw_candidates: int = _MAX_DISCOVERY_CANDIDATES,
     reject_duplicates: bool = True,
 ) -> tuple[CollectionManifest, ...]:
     """Discover releasable manifests, authorizing each candidate before parsing it."""
@@ -266,14 +267,22 @@ def discover_collections(
         raise CollectionError(
             "INVALID_DISCOVERY_LIMIT", "discovery limit is outside supported bounds"
         )
+    if (
+        type(max_raw_candidates) is not int
+        or max_raw_candidates < 1
+        or max_raw_candidates > _MAX_DISCOVERY_CANDIDATES
+    ):
+        raise CollectionError(
+            "INVALID_DISCOVERY_LIMIT", "discovery limit is outside supported bounds"
+        )
     root = Path(vault_root)
     kb = vault.kb_root(root)
     if not kb.is_dir():
         return ()
     authorize = authorize_path or (lambda _path: True)
     manifests: list[CollectionManifest] = []
-    candidates = list(itertools.islice(kb.rglob("_collection.md"), max_candidates + 1))
-    if len(candidates) > max_candidates:
+    candidates = list(itertools.islice(kb.rglob("_collection.md"), max_raw_candidates + 1))
+    if len(candidates) > max_raw_candidates:
         raise CollectionError(
             "COLLECTION_DISCOVERY_LIMIT", "too many collection manifests to inspect"
         )
@@ -285,6 +294,10 @@ def discover_collections(
         if not authorize(rel):
             continue
         manifests.append(load_manifest(root, candidate))
+        if len(manifests) > max_candidates:
+            raise CollectionError(
+                "COLLECTION_DISCOVERY_LIMIT", "too many collection manifests to inspect"
+            )
     if reject_duplicates:
         _raise_duplicate_ids(manifests)
     return tuple(manifests)
@@ -316,7 +329,13 @@ def resolve_collection(
         return matches[0]
 
     root = Path(vault_root)
-    path, rel = _safe_existing_path(root, raw)
+    try:
+        path, rel = _safe_existing_path(root, raw)
+    except CollectionError as error:
+        normalized = raw.replace("\\", "/")
+        if normalized.startswith(f"{vault.kb_dirname()}/") and not _unsafe_relative(normalized):
+            raise CollectionError("COLLECTION_NOT_FOUND", "collection was not found") from error
+        raise
     if not authorize(rel):
         raise CollectionError("COLLECTION_NOT_FOUND", "collection was not found")
     return load_manifest(root, path)

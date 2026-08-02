@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import stat
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -72,13 +72,58 @@ def full_release_filter(vault_root: Path) -> Callable[[str], bool]:
     return allowed
 
 
+def _authorize(root: Path, relative: str, *, receipt: bool = False) -> bool:
+    if access.refuse_if_excluded(root, relative):
+        return False
+    return (
+        egress.release_level_for_path_only(
+            root,
+            relative,
+            receipt_decision="release_authorized" if receipt else None,
+        )
+        == egress.LEVEL_FULL
+    )
+
+
+def _links_authorized(
+    root: Path, manifest: collections.CollectionManifest, values: Mapping[str, Any]
+) -> bool:
+    """Gate only schema-declared link fields whose targets are vault artifacts."""
+
+    def allowed_value(value: Any, spec: collections.FieldSpec) -> bool:
+        if spec.type == "array" and spec.items is not None and isinstance(value, list | tuple):
+            return all(allowed_value(item, spec.items) for item in value)
+        if spec.type != "link" or not isinstance(value, str):
+            return True
+        target = value.strip().removeprefix("[[").removesuffix("]]").split("|", 1)[0]
+        candidates = (target, f"{vault.kb_dirname()}/{target}")
+        for candidate in candidates:
+            path = root / candidate
+            if path.is_file() and not _authorize(root, candidate, receipt=True):
+                return False
+        return True
+
+    return all(
+        allowed_value(values[name], spec)
+        for name, spec in manifest.schema.fields.items()
+        if name in values
+    )
+
+
 def resolve_collection(
     vault_root: Path, selector: str | Path | collections.CollectionManifest
 ) -> collections.CollectionManifest:
     """Resolve only a fully released manifest, treating every other case as absent."""
     root = Path(vault_root)
     path = selector.path if isinstance(selector, collections.CollectionManifest) else selector
-    return collections.resolve_collection(root, path, authorize_path=full_release_filter(root))
+    with egress.disclosure_boundary(root, "record_resolve") as collector:
+        manifest = collections.resolve_collection(
+            root, path, authorize_path=full_release_filter(root)
+        )
+        if not _authorize(root, manifest.path, receipt=True):
+            raise collections.CollectionError("COLLECTION_NOT_FOUND", "collection was not found")
+        egress.emit_boundary_receipt(collector)
+        return manifest
 
 
 def query_collection(
@@ -88,11 +133,27 @@ def query_collection(
 ) -> record_formats.RecordQueryResult:
     """Query released Records only; authorization happens before adapter parsing."""
     root = Path(vault_root)
-    manifest = resolve_collection(root, collection)
-    allowed = full_release_filter(root)
-    if not allowed(manifest.storage.source):
-        raise collections.CollectionError("COLLECTION_NOT_FOUND", "collection was not found")
-    return record_formats.query_collection(root, manifest, authorize_path=allowed, **kwargs)
+    with egress.disclosure_boundary(root, "record_query") as collector:
+        manifest = collections.resolve_collection(
+            root,
+            collection.path
+            if isinstance(collection, collections.CollectionManifest)
+            else collection,
+            authorize_path=full_release_filter(root),
+        )
+        if not _authorize(root, manifest.path, receipt=True) or not _authorize(
+            root, manifest.storage.source, receipt=True
+        ):
+            raise collections.CollectionError("COLLECTION_NOT_FOUND", "collection was not found")
+        result = record_formats.query_collection(
+            root,
+            manifest,
+            authorize_path=lambda path: _authorize(root, path, receipt=True),
+            authorize_links=lambda values: _links_authorized(root, manifest, values),
+            **kwargs,
+        )
+        egress.emit_boundary_receipt(collector)
+        return result
 
 
 def project_query_result(result: record_formats.RecordQueryResult) -> dict[str, Any]:
@@ -146,7 +207,9 @@ def project_manifest(
     root = Path(vault_root)
     manifest = resolve_collection(root, collection)
     allowed = full_release_filter(root)
-    if any(not allowed(template.path) for template in manifest.templates):
+    if not allowed(manifest.storage.source) or any(
+        not allowed(template.path) for template in manifest.templates
+    ):
         raise collections.CollectionError("COLLECTION_NOT_FOUND", "collection was not found")
     payload = _RecordEnvelope(
         {
@@ -180,23 +243,37 @@ def read_template(
 ) -> bytes:
     """Return an explicitly declared template only after its L6 path decision."""
     root = Path(vault_root)
-    manifest = resolve_collection(root, collection)
-    declared = {template.path for template in manifest.templates}
-    if template_path not in declared or not full_release_filter(root)(template_path):
-        raise collections.CollectionError("COLLECTION_NOT_FOUND", "collection was not found")
-    try:
-        data, _guard = vault.read_bounded_guarded_bytes(root, template_path, limit=512 * 1024)
-    except vault.PathGuardError as error:
-        raise collections.CollectionError(
-            "COLLECTION_NOT_FOUND", "collection was not found"
-        ) from error
-    return data
+    with egress.disclosure_boundary(root, "record_template") as collector:
+        manifest = collections.resolve_collection(
+            root,
+            collection.path
+            if isinstance(collection, collections.CollectionManifest)
+            else collection,
+            authorize_path=full_release_filter(root),
+        )
+        declared = {template.path for template in manifest.templates}
+        if (
+            not _authorize(root, manifest.path, receipt=True)
+            or template_path not in declared
+            or not _authorize(root, template_path, receipt=True)
+        ):
+            raise collections.CollectionError("COLLECTION_NOT_FOUND", "collection was not found")
+        try:
+            data, _guard = vault.read_bounded_guarded_bytes(root, template_path, limit=512 * 1024)
+        except vault.PathGuardError as error:
+            raise collections.CollectionError(
+                "COLLECTION_NOT_FOUND", "collection was not found"
+            ) from error
+        egress.emit_boundary_receipt(collector)
+        return data
 
 
 def precommit_authorize_mutation(
     vault_root: Path,
     manifest: collections.CollectionManifest,
     snapshot: record_formats.AdapterSnapshot | None,
+    *,
+    planned_paths: Iterable[str] = (),
 ) -> None:
     """Record a pre-publication authorization decision for the complete CAS set.
 
@@ -205,28 +282,30 @@ def precommit_authorize_mutation(
     not a committed write.
     """
     root = Path(vault_root)
-    require_mutation_visibility(root, manifest)
-    paths = {manifest.path, manifest.storage.source}
+    paths = {manifest.path, manifest.storage.source, *planned_paths}
+    require_mutation_visibility(root, manifest, planned_paths=paths)
     if snapshot is not None:
         paths.update(version.path for version in snapshot.source_versions)
         paths.update(path for path, kind, _digest in snapshot.source_inventory if kind == "file")
     with egress.disclosure_boundary(root, "record_mutation_precommit") as collector:
         for path in sorted(paths):
-            if (
-                egress.release_level_for(root, path, receipt_decision="record_mutation_authorized")
-                != egress.LEVEL_FULL
-            ):
+            if not _authorize(root, path, receipt=True):
                 raise collections.CollectionError(
                     "COLLECTION_NOT_FOUND", "collection was not found"
                 )
         egress.emit_boundary_receipt(collector)
 
 
-def require_mutation_visibility(vault_root: Path, manifest: collections.CollectionManifest) -> None:
+def require_mutation_visibility(
+    vault_root: Path,
+    manifest: collections.CollectionManifest,
+    *,
+    planned_paths: Iterable[str] = (),
+) -> None:
     """Refuse before parsing when a mutation cannot see the entire CAS set."""
     root = Path(vault_root)
     allowed = full_release_filter(root)
-    if not allowed(manifest.path) or not allowed(manifest.storage.source):
+    if not all(allowed(path) for path in (manifest.path, manifest.storage.source, *planned_paths)):
         raise collections.CollectionError("COLLECTION_NOT_FOUND", "collection was not found")
     if manifest.storage.strategy != "markdown-items":
         return

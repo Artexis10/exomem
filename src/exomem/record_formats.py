@@ -114,6 +114,7 @@ class _BaseAdapter:
     vault_root: Path
     manifest: collections.CollectionManifest
     authorize_path: Callable[[str], bool] | None = None
+    authorize_links: Callable[[Mapping[str, Any]], bool] | None = None
     mutable: bool = field(init=False, default=False)
 
     def __post_init__(self) -> None:
@@ -161,6 +162,9 @@ class _BaseAdapter:
                 "RESERVED_RECORD_FIELD", "schema uses a reserved record field"
             )
         self.manifest.schema.validate(values)
+
+    def _links_are_authorized(self, values: Mapping[str, Any]) -> bool:
+        return self.authorize_links is None or self.authorize_links(values)
 
     def _identity(self, values: dict[str, Any], marker: str | None) -> collections.ItemIdentity:
         if marker is not None:
@@ -410,18 +414,14 @@ class MarkdownItemsAdapter(_BaseAdapter):
                 raise collections.CollectionError(
                     "SOURCE_NOT_FOUND", "canonical item file could not be read"
                 ) from error
-            path_guards.append(file_guard)
-            total_bytes += len(data)
-            if total_bytes > _MAX_COLLECTION_BYTES:
-                raise collections.CollectionError(
-                    "RECORD_SOURCE_TOO_LARGE", "collection exceeds the byte limit"
-                )
             rel = relative
             digest = hashlib.sha256(data).hexdigest()
-            versions.append((rel, digest))
-            source_bytes.append((rel, data))
-            inventory.append((rel, "file", digest))
             if Path(rel).suffix != ".md":
+                path_guards.append(file_guard)
+                total_bytes += len(data)
+                versions.append((rel, digest))
+                source_bytes.append((rel, data))
+                inventory.append((rel, "file", digest))
                 continue
             text = _decode_item_bytes(data)
             try:
@@ -446,6 +446,17 @@ class MarkdownItemsAdapter(_BaseAdapter):
                 if name not in {"type", "collection_id", "record_id", "schema_version"}
             }
             self._validate_values(values)
+            if not self._links_are_authorized(values):
+                continue
+            path_guards.append(file_guard)
+            total_bytes += len(data)
+            if total_bytes > _MAX_COLLECTION_BYTES:
+                raise collections.CollectionError(
+                    "RECORD_SOURCE_TOO_LARGE", "collection exceeds the byte limit"
+                )
+            versions.append((rel, digest))
+            source_bytes.append((rel, data))
+            inventory.append((rel, "file", digest))
             records.append(
                 Record(
                     identity=collections.ItemIdentity(collection_id, record_id),
@@ -567,14 +578,15 @@ def load_adapter(
     manifest: collections.CollectionManifest,
     *,
     authorize_path: Callable[[str], bool] | None = None,
+    authorize_links: Callable[[Mapping[str, Any]], bool] | None = None,
 ) -> CollectionAdapter:
     """Return the declared canonical adapter without inferring domain grammar."""
     if manifest.storage.strategy == "markdown-log":
-        return MarkdownLogAdapter(Path(vault_root), manifest, authorize_path)
+        return MarkdownLogAdapter(Path(vault_root), manifest, authorize_path, authorize_links)
     if manifest.storage.strategy == "markdown-items":
-        return MarkdownItemsAdapter(Path(vault_root), manifest, authorize_path)
+        return MarkdownItemsAdapter(Path(vault_root), manifest, authorize_path, authorize_links)
     if manifest.storage.strategy == "dataset":
-        return DatasetAdapter(Path(vault_root), manifest, authorize_path)
+        return DatasetAdapter(Path(vault_root), manifest, authorize_path, authorize_links)
     raise collections.CollectionError("UNSUPPORTED_STORAGE", "collection storage is unsupported")
 
 
@@ -837,9 +849,12 @@ def query_collection(
     continuation: str | None = None,
     output_format: str = "json",
     authorize_path: Callable[[str], bool] | None = None,
+    authorize_links: Callable[[Mapping[str, Any]], bool] | None = None,
 ) -> RecordQueryResult:
     """Query a fresh canonical adapter snapshot with a snapshot-bound cursor."""
-    adapter = load_adapter(vault_root, manifest, authorize_path=authorize_path)
+    adapter = load_adapter(
+        vault_root, manifest, authorize_path=authorize_path, authorize_links=authorize_links
+    )
     parsed = adapter.read()
     query = {
         "filters": filters or [],

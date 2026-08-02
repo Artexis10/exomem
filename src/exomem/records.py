@@ -99,6 +99,12 @@ def append_record(
                     raise collections.CollectionError(
                         "RECORD_ID_CONFLICT", "record ID lacks a correlated append transition"
                     )
+                record_governance.precommit_authorize_mutation(
+                    root,
+                    manifest,
+                    snapshot,
+                    planned_paths=(existing[0].source.path,),
+                )
                 return _result(
                     operation="append",
                     manifest=manifest,
@@ -185,7 +191,12 @@ def append_record(
             vault.PlannedWrite(root / manifest.path, after_manifest_text, guard=manifest_guard),
             *log_plan.writes,
         ]
-        record_governance.precommit_authorize_mutation(root, manifest, snapshot)
+        record_governance.precommit_authorize_mutation(
+            root,
+            manifest,
+            snapshot,
+            planned_paths=(canonical_path.relative_to(root).as_posix(),),
+        )
         try:
             vault.batch_atomic_write(
                 writes,
@@ -333,7 +344,12 @@ def update_record(
             why=why,
         )
         log_plan = _plan_required_audit(root, manifest, item_key, audit, after_container_hash)
-        record_governance.precommit_authorize_mutation(root, manifest, snapshot)
+        record_governance.precommit_authorize_mutation(
+            root,
+            manifest,
+            snapshot,
+            planned_paths=(record.source.path,),
+        )
         try:
             vault.batch_atomic_write(
                 [
@@ -479,6 +495,12 @@ def create_collection(
             why=why,
         )
         log_plan = _plan_required_audit(root, manifest, "collection", audit, after_container_hash)
+        record_governance.precommit_authorize_mutation(
+            root,
+            manifest,
+            None,
+            planned_paths=affected,
+        )
         try:
             vault.batch_atomic_write(
                 [*writes, *log_plan.writes],
