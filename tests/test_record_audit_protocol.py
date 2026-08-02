@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -167,6 +168,78 @@ def test_audit_chain_is_archive_order_independent_and_exact_duplicates_dedupe(
     (archive / "log-a.md").write_text(events[0] + "\n", encoding="utf-8")
     log.write_text("# Activity\n", encoding="utf-8")
     assert records.inspect_audit_gap(tmp_path, refreshed.path)["status"] == "ok"
+
+
+@pytest.mark.parametrize("unsafe", ["fifo", "oversize", "over-cap"])
+def test_history_caps_and_unsafe_archive_are_bounded_incomplete(
+    tmp_path: Path, unsafe: str
+) -> None:
+    from exomem import records
+
+    fixture = copy_x3_fixture(tmp_path)
+    _activity_log(tmp_path)
+    manifest = collections.load_manifest(tmp_path, fixture / "_collection.md")
+    snapshot = record_formats.load_adapter(tmp_path, manifest).read()
+    records.append_record(
+        tmp_path,
+        manifest.path,
+        item=_item("2026-08-03", "Pull"),
+        item_key="56565656-5656-4565-8565-565656565656",
+        expected_container_hash=snapshot.source_versions[-1].hash,
+        why="record bounded history fixture",
+    )
+    archive = tmp_path / "Knowledge Base/_archive/logs"
+    archive.mkdir(parents=True)
+    if unsafe == "fifo":
+        if not hasattr(os, "mkfifo"):
+            pytest.skip("FIFOs are unsupported")
+        os.mkfifo(archive / "log-fifo.md")
+    elif unsafe == "oversize":
+        (archive / "log-large.md").write_bytes(b"x" * 2_000_001)
+    else:
+        for index in range(129):
+            (archive / f"log-{index:03d}.md").write_text("# inert\n", encoding="utf-8")
+    report = records.inspect_audit_gap(tmp_path, manifest.path)
+    assert report["status"] == "history_incomplete"
+    assert len(report["gaps"]) <= 32
+
+
+def test_history_descriptor_drift_is_incomplete(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import records
+
+    fixture = copy_x3_fixture(tmp_path)
+    _activity_log(tmp_path)
+    manifest = collections.load_manifest(tmp_path, fixture / "_collection.md")
+    snapshot = record_formats.load_adapter(tmp_path, manifest).read()
+    records.append_record(
+        tmp_path,
+        manifest.path,
+        item=_item("2026-08-03", "Pull"),
+        item_key="78787878-7878-4787-8787-787878787878",
+        expected_container_hash=snapshot.source_versions[-1].hash,
+        why="record drift fixture",
+    )
+    archive = tmp_path / "Knowledge Base/_archive/logs"
+    archive.mkdir(parents=True)
+    drifting = archive / "log-drift.md"
+    drifting.write_text("# inert\n", encoding="utf-8")
+    real_read = records.os.read
+    reads = 0
+
+    def drift(descriptor: int, size: int) -> bytes:
+        nonlocal reads
+        reads += 1
+        value = real_read(descriptor, size)
+        if reads == 2:
+            drifting.write_text("# inert\n", encoding="utf-8")
+            info = drifting.stat()
+            os.utime(drifting, ns=(info.st_atime_ns, info.st_mtime_ns + 1_000_000_000))
+        return value
+
+    monkeypatch.setattr(records.os, "read", drift)
+    assert records.inspect_audit_gap(tmp_path, manifest.path)["status"] == "history_incomplete"
 
 
 def test_caught_and_abrupt_publication_prefixes_leave_rollback_or_gap(

@@ -606,7 +606,13 @@ def _audit_events(root: Path) -> tuple[list[dict[str, Any]], bool]:
                 if not stat.S_ISREG(opened.st_mode) or opened.st_ino != info.st_ino:
                     return [], False
                 data = os.read(descriptor, info.st_size + 1)
-                if len(data) > info.st_size or os.fstat(descriptor).st_size != info.st_size:
+                ended = os.fstat(descriptor)
+                if len(data) > info.st_size or (
+                    ended.st_dev,
+                    ended.st_ino,
+                    ended.st_size,
+                    ended.st_mtime_ns,
+                ) != (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns):
                     return [], False
             finally:
                 os.close(descriptor)
