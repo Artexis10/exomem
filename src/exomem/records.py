@@ -5,7 +5,9 @@ from __future__ import annotations
 import datetime as dt
 import hashlib
 import json
+import os
 import re
+import stat
 import unicodedata
 import uuid
 from collections.abc import Mapping
@@ -47,7 +49,7 @@ def append_record(
             "UNREPRESENTABLE_RECORD_BODY", "markdown-log storage cannot represent item bodies"
         )
     with writer_lease.active_manager().mutation_guard(root, operation="record_append"):
-        manifest, manifest_guard = _load_guarded_manifest(root, collection)
+        manifest, manifest_text, manifest_guard = _load_guarded_manifest(root, collection)
         values = _validate_values(manifest, item)
         adapter = record_formats.load_adapter(root, manifest)
         if not adapter.mutable:
@@ -74,10 +76,10 @@ def append_record(
             source_text = ""
             source_bytes = b""
             source_guard = None
-        _expect_hash(expected_container_hash, current_hash, "container")
+        if expected_container_hash is not None:
+            _expect_hash(expected_container_hash, current_hash, "container")
         existing = [record for record in snapshot.records if record.identity.key == key]
         payload_hash = _payload_hash(manifest, key, values, body)
-        audit_correlation = _audit_correlation(manifest.collection_id, key, payload_hash)
         if existing:
             if len(existing) != 1 or existing[0].ambiguous:
                 raise collections.CollectionError("AMBIGUOUS_RECORD", "record key is ambiguous")
@@ -98,6 +100,14 @@ def append_record(
             raise collections.CollectionError(
                 "RECORD_ID_CONFLICT", "record ID already has different data"
             )
+        audit_correlation = _transition_id()
+        after_manifest_text = record_formats.render_manifest_audit_head(
+            manifest_text, audit_correlation
+        )
+        after_manifest = collections.parse_manifest_bytes(
+            root, root / manifest.path, after_manifest_text.encode("utf-8")
+        )
+        parent = _manifest_audit_head(manifest_text) or "baseline"
         if manifest.storage.strategy == "markdown-log":
             offset = snapshot.insertion_offset
             if offset is None:
@@ -128,23 +138,26 @@ def append_record(
             hashlib.sha256(after_text.encode("utf-8")).hexdigest()
             if manifest.storage.strategy == "markdown-log"
             else _items_container_hash(
-                manifest,
+                after_manifest,
                 snapshot,
                 collections.SourceVersion(canonical_path.relative_to(root).as_posix(), item_hash),
             )
         )
         audit = _audit_body(
-            "append",
-            manifest.collection_id,
-            key,
-            None,
-            item_hash,
-            current_hash,
-            after_hash,
-            payload_hash,
-            why,
-            canonical_path.relative_to(root).as_posix(),
-            audit_correlation,
+            transition_id=audit_correlation,
+            parent_id=parent,
+            operation="append",
+            manifest=manifest,
+            item_key=key,
+            canonical_path=canonical_path.relative_to(root).as_posix(),
+            before_manifest_hash=manifest.manifest_version.hash,
+            after_manifest_hash=after_manifest.manifest_version.hash,
+            before_item_hash=None,
+            after_item_hash=item_hash,
+            before_container_hash=current_hash,
+            after_container_hash=after_hash,
+            payload_hash=payload_hash,
+            why=why,
         )
         log_plan = _plan_required_audit(root, manifest, key, audit, after_hash)
         writes = [
@@ -154,6 +167,7 @@ def append_record(
                 create_only=manifest.storage.strategy == "markdown-items",
                 guard=canonical_guard,
             ),
+            vault.PlannedWrite(root / manifest.path, after_manifest_text, guard=manifest_guard),
             *log_plan.writes,
         ]
         try:
@@ -161,7 +175,6 @@ def append_record(
                 writes,
                 vault_root=root,
                 required_guards=(
-                    manifest_guard,
                     *directory_guards,
                     *_item_snapshot_guards(root, manifest, snapshot),
                 ),
@@ -202,7 +215,7 @@ def update_record(
             "INVALID_RECORD_CHANGES", "changes must be a non-empty object"
         )
     with writer_lease.active_manager().mutation_guard(root, operation="record_update"):
-        manifest, manifest_guard = _load_guarded_manifest(root, collection)
+        manifest, manifest_text, manifest_guard = _load_guarded_manifest(root, collection)
         adapter = record_formats.load_adapter(root, manifest)
         if not adapter.mutable:
             adapter.refuse_mutation("update")
@@ -254,9 +267,14 @@ def update_record(
         merged = dict(record.values)
         merged.update(changes)
         values = _validate_values(manifest, merged)
-        audit_correlation = _audit_correlation(
-            manifest.collection_id, item_key, _payload_hash(manifest, item_key, values, record.body)
+        audit_correlation = _transition_id()
+        after_manifest_text = record_formats.render_manifest_audit_head(
+            manifest_text, audit_correlation
         )
+        after_manifest = collections.parse_manifest_bytes(
+            root, root / manifest.path, after_manifest_text.encode("utf-8")
+        )
+        parent = _manifest_audit_head(manifest_text) or "baseline"
         if manifest.storage.strategy == "markdown-log":
             replacement = record_formats.render_markdown_log_item(
                 manifest, values, item_key, _newline(source_bytes), audit_correlation
@@ -277,7 +295,7 @@ def update_record(
             canonical_path = source_path
             before_container_hash = snapshot.snapshot
             after_container_hash = _items_container_hash(
-                manifest,
+                after_manifest,
                 snapshot,
                 collections.SourceVersion(
                     record.source.path, hashlib.sha256(after_text.encode("utf-8")).hexdigest()
@@ -285,28 +303,33 @@ def update_record(
             )
         after_item_hash = hashlib.sha256(replacement.encode("utf-8")).hexdigest()
         audit = _audit_body(
-            "update",
-            manifest.collection_id,
-            item_key,
-            record.source.hash,
-            after_item_hash,
-            before_container_hash,
-            after_container_hash,
-            None,
-            why,
-            record.source.path,
-            audit_correlation,
+            transition_id=audit_correlation,
+            parent_id=parent,
+            operation="update",
+            manifest=manifest,
+            item_key=item_key,
+            canonical_path=record.source.path,
+            before_manifest_hash=manifest.manifest_version.hash,
+            after_manifest_hash=after_manifest.manifest_version.hash,
+            before_item_hash=record.source.hash,
+            after_item_hash=after_item_hash,
+            before_container_hash=before_container_hash,
+            after_container_hash=after_container_hash,
+            payload_hash=None,
+            why=why,
         )
         log_plan = _plan_required_audit(root, manifest, item_key, audit, after_container_hash)
         try:
             vault.batch_atomic_write(
                 [
                     vault.PlannedWrite(canonical_path, after_text, guard=source_guard),
+                    vault.PlannedWrite(
+                        root / manifest.path, after_manifest_text, guard=manifest_guard
+                    ),
                     *log_plan.writes,
                 ],
                 vault_root=root,
                 required_guards=(
-                    manifest_guard,
                     *directory_guards,
                     *_item_snapshot_guards(
                         root, manifest, snapshot, exclude_path=record.source.path
@@ -360,8 +383,15 @@ def create_collection(
             raise collections.CollectionError(
                 "INVALID_COLLECTION_MANIFEST", "manifest must be _collection.md"
             )
-        manifest = collections.parse_manifest_bytes(root, path, manifest_text.encode("utf-8"))
+        collections.parse_manifest_bytes(root, path, manifest_text.encode("utf-8"))
         _require_activity_log(root)
+        audit_correlation = _transition_id()
+        marked_manifest_text = record_formats.render_manifest_audit_head(
+            manifest_text, audit_correlation
+        )
+        manifest = collections.parse_manifest_bytes(
+            root, path, marked_manifest_text.encode("utf-8")
+        )
         source = root / manifest.storage.source
         _assert_portable_absent(root, source)
         if source.exists() or _casefold_alias(source):
@@ -371,7 +401,7 @@ def create_collection(
         writes = [
             vault.PlannedWrite(
                 path,
-                manifest_text,
+                marked_manifest_text,
                 create_only=True,
                 guard=manifest_guard,
                 ensure_directories=(source,)
@@ -394,25 +424,34 @@ def create_collection(
             affected.append(manifest.storage.source)
         elif scaffold and manifest.storage.strategy == "markdown-items":
             affected.append(manifest.storage.source)
-        audit_correlation = _audit_correlation(
-            manifest.collection_id, "collection", manifest.manifest_version.hash
-        )
+        if scaffold and manifest.storage.strategy == "markdown-log":
+            after_item_hash = hashlib.sha256(
+                f"{'#' * manifest.storage.descriptor['section']['level']} {manifest.storage.descriptor['section']['title']}\n".encode()
+            ).hexdigest()
+            after_container_hash = after_item_hash
+        elif manifest.storage.strategy == "markdown-items":
+            after_item_hash = None
+            after_container_hash = _empty_items_container_hash(manifest)
+        else:
+            after_item_hash = None
+            after_container_hash = manifest.manifest_version.hash
         audit = _audit_body(
-            "create",
-            manifest.collection_id,
-            "collection",
-            None,
-            None,
-            None,
-            None,
-            None,
-            why,
-            manifest.path,
-            audit_correlation,
+            transition_id=audit_correlation,
+            parent_id="absent",
+            operation="create",
+            manifest=manifest,
+            item_key=None,
+            canonical_path=manifest.storage.source,
+            before_manifest_hash=None,
+            after_manifest_hash=manifest.manifest_version.hash,
+            before_item_hash=None,
+            after_item_hash=after_item_hash,
+            before_container_hash=None,
+            after_container_hash=after_container_hash,
+            payload_hash=None,
+            why=why,
         )
-        log_plan = _plan_required_audit(
-            root, manifest, "collection", audit, manifest.manifest_version.hash
-        )
+        log_plan = _plan_required_audit(root, manifest, "collection", audit, after_container_hash)
         try:
             vault.batch_atomic_write([*writes, *log_plan.writes], vault_root=root)
         except (vault.PathGuardError, vault.CreateOnlyConflict, OSError, ValueError) as error:
@@ -420,11 +459,11 @@ def create_collection(
         return _result(
             operation="create",
             manifest=manifest,
-            key="collection",
+            key=None,
             before_item_hash=None,
-            after_item_hash=None,
+            after_item_hash=after_item_hash,
             before_container_hash=None,
-            after_container_hash=None,
+            after_container_hash=after_container_hash,
             affected_paths=affected,
             payload_hash=None,
             outcome="committed",
@@ -435,36 +474,72 @@ def create_collection(
 def inspect_audit_gap(
     vault_root: Path, collection: str | Path | collections.CollectionManifest
 ) -> dict[str, Any]:
-    """Report whether current canonical bytes are evidenced by Records activity history."""
+    """Report, without repair, whether current bytes prove an audit transition chain."""
     root = Path(vault_root)
     manifest = _resolve_outside(root, collection)
-    snapshot = record_formats.load_adapter(root, manifest).read()
+    head = _manifest_audit_head((root / manifest.path).read_text(encoding="utf-8"))
+    try:
+        snapshot = record_formats.load_adapter(root, manifest).read()
+    except collections.CollectionError:
+        if head is not None:
+            return {"status": "gap", "gaps": ["canonical-source-unavailable"]}
+        return {"status": "history_incomplete", "gaps": []}
     current_hash = (
         snapshot.source_versions[-1].hash
         if manifest.storage.strategy == "markdown-log"
         else snapshot.snapshot
     )
-    paths = [root / vault.kb_prefix() / "log.md"]
-    paths.extend(sorted((root / vault.kb_prefix() / "_archive/logs").glob("log-*.md")))
-    history = "".join(path.read_text(encoding="utf-8") for path in paths if path.is_file())
     markers = _audit_markers(root, manifest, snapshot)
-    if not markers:
-        return {"status": "baseline", "gaps": []}
-    if not history:
-        return {"status": "history_unavailable", "gaps": list(markers)}
-    evidence = {
-        correlation: digest
-        for digest, correlation in re.findall(
-            rf"collection_id={re.escape(manifest.collection_id)} .*?after_container_hash=([0-9a-f]{{64}}).*?audit_correlation=([0-9a-f]{{24}})",
-            history,
-        )
-    }
-    gaps = (
-        []
-        if any(evidence.get(correlation) == current_hash for correlation in markers)
-        else sorted(markers)
-    )
-    return {"status": "gap" if gaps else "ok", "gaps": gaps}
+    events, complete = _audit_events(root)
+    relevant = [event for event in events if event.get("collection_id") == manifest.collection_id]
+    if head is None and not markers and not relevant:
+        return {"status": "baseline" if complete else "history_incomplete", "gaps": []}
+    if not complete:
+        return {"status": "history_incomplete", "gaps": sorted(markers)[:32]}
+    by_id: dict[str, dict[str, Any]] = {}
+    gaps: list[str] = []
+    for event in relevant:
+        transition = event["transition_id"]
+        old = by_id.get(transition)
+        if old is None:
+            by_id[transition] = event
+        elif old != event:
+            gaps.append("conflicting-transition:" + transition)
+    if head is None:
+        gaps.append("missing-manifest-head")
+    current = by_id.get(head or "")
+    if current is None:
+        gaps.append("missing-head-event")
+    else:
+        if current["after_container_hash"] != current_hash:
+            gaps.append("current-container-mismatch")
+        if current["after_manifest_hash"] != manifest.manifest_version.hash:
+            gaps.append("current-manifest-mismatch")
+        cursor = current
+        depth = 0
+        while cursor["parent_id"] not in {"baseline", "absent"}:
+            depth += 1
+            if depth > 2048:
+                gaps.append("chain-depth")
+                break
+            parent = by_id.get(cursor["parent_id"])
+            if parent is None:
+                gaps.append("missing-parent:" + cursor["parent_id"])
+                break
+            if (
+                cursor["before_container_hash"] != parent["after_container_hash"]
+                or cursor["before_manifest_hash"] != parent["after_manifest_hash"]
+            ):
+                gaps.append("transition-discontinuity:" + cursor["transition_id"])
+                break
+            cursor = parent
+    for marker in markers:
+        marker_event = by_id.get(marker)
+        if marker_event is None or marker_event["canonical_path"] not in _canonical_paths(
+            manifest, snapshot
+        ):
+            gaps.append("unmatched-marker:" + marker)
+    return {"status": "gap" if gaps else "ok", "gaps": sorted(set(gaps))[:32]}
 
 
 def _audit_markers(
@@ -481,6 +556,134 @@ def _audit_markers(
     return found
 
 
+def _canonical_paths(
+    manifest: collections.CollectionManifest, snapshot: record_formats.AdapterSnapshot
+) -> set[str]:
+    if manifest.storage.strategy == "markdown-log":
+        return {manifest.storage.source}
+    return {version.path for version in snapshot.source_versions[1:]}
+
+
+def _audit_events(root: Path) -> tuple[list[dict[str, Any]], bool]:
+    """Read bounded ordinary log segments without following untrusted archive entries."""
+    log_root = root / vault.kb_prefix()
+    live = log_root / "log.md"
+    archive = log_root / "_archive" / "logs"
+    candidates = [live]
+    complete = True
+    try:
+        if archive.exists():
+            info = archive.lstat()
+            if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode):
+                return [], False
+            entries = sorted(archive.iterdir(), key=lambda path: path.name)
+            if len(entries) > 128:
+                return [], False
+            candidates.extend(
+                path for path in entries if path.name.startswith("log-") and path.suffix == ".md"
+            )
+    except OSError:
+        return [], False
+    events: list[dict[str, Any]] = []
+    total = 0
+    for path in candidates:
+        try:
+            info = path.lstat()
+        except FileNotFoundError:
+            complete = False
+            continue
+        except OSError:
+            return [], False
+        if not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode) or info.st_size > 2_000_000:
+            return [], False
+        total += info.st_size
+        if total > 8_000_000:
+            return [], False
+        try:
+            descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+            try:
+                opened = os.fstat(descriptor)
+                if not stat.S_ISREG(opened.st_mode) or opened.st_ino != info.st_ino:
+                    return [], False
+                data = os.read(descriptor, info.st_size + 1)
+                if len(data) > info.st_size or os.fstat(descriptor).st_size != info.st_size:
+                    return [], False
+            finally:
+                os.close(descriptor)
+            text = data.decode("utf-8")
+        except (OSError, UnicodeDecodeError):
+            return [], False
+        for line in text.splitlines():
+            if not line.startswith("Records audit-v1 "):
+                continue
+            try:
+                event = json.loads(line.removeprefix("Records audit-v1 "))
+            except json.JSONDecodeError:
+                return [], False
+            if not _valid_audit_event(event):
+                return [], False
+            events.append(event)
+            if len(events) > 10_000:
+                return [], False
+    return events, complete
+
+
+def _valid_audit_event(event: Any) -> bool:
+    if not isinstance(event, dict) or set(event) != {
+        "version",
+        "transition_id",
+        "parent_id",
+        "operation",
+        "collection_id",
+        "manifest_path",
+        "source_path",
+        "canonical_path",
+        "item_key",
+        "before_manifest_hash",
+        "after_manifest_hash",
+        "before_item_hash",
+        "after_item_hash",
+        "before_container_hash",
+        "after_container_hash",
+        "payload_hash",
+        "rationale",
+    }:
+        return False
+    hashes = (
+        "before_manifest_hash",
+        "after_manifest_hash",
+        "before_item_hash",
+        "after_item_hash",
+        "before_container_hash",
+        "after_container_hash",
+        "payload_hash",
+    )
+    return (
+        type(event["version"]) is int
+        and event["version"] == 1
+        and isinstance(event["transition_id"], str)
+        and re.fullmatch(r"[0-9a-f]{24}", event["transition_id"]) is not None
+        and isinstance(event["parent_id"], str)
+        and event["operation"] in {"append", "update", "create"}
+        and all(
+            isinstance(event[name], str) and event[name]
+            for name in (
+                "collection_id",
+                "manifest_path",
+                "source_path",
+                "canonical_path",
+                "rationale",
+            )
+        )
+        and (event["item_key"] is None or isinstance(event["item_key"], str))
+        and all(
+            value is None or (isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value))
+            for name in hashes
+            for value in (event[name],)
+        )
+    )
+
+
 def _resolve_outside(
     root: Path, collection: str | Path | collections.CollectionManifest
 ) -> collections.CollectionManifest:
@@ -493,7 +696,7 @@ def _resolve_outside(
 
 def _load_guarded_manifest(
     root: Path, collection: str | Path | collections.CollectionManifest
-) -> tuple[collections.CollectionManifest, vault.PathGuard]:
+) -> tuple[collections.CollectionManifest, str, vault.PathGuard]:
     resolved = _resolve_outside(root, collection)
     path = root / resolved.path
     text, guard = vault.read_guarded_text(root, path)
@@ -506,7 +709,7 @@ def _load_guarded_manifest(
         raise collections.CollectionError(
             "STALE_COLLECTION_MANIFEST", "caller collection manifest changed before mutation"
         )
-    return parsed, guard
+    return parsed, text, guard
 
 
 def _validate_values(
@@ -688,32 +891,45 @@ def _plan_required_audit(
 
 
 def _audit_body(
+    *,
+    transition_id: str,
+    parent_id: str,
     operation: str,
-    collection_id: str,
-    key: str,
+    manifest: collections.CollectionManifest,
+    item_key: str | None,
+    canonical_path: str,
+    before_manifest_hash: str | None,
+    after_manifest_hash: str | None,
     before_item_hash: str | None,
     after_item_hash: str | None,
     before_container_hash: str | None,
     after_container_hash: str | None,
     payload_hash: str | None,
     why: str,
-    canonical_path: str,
-    audit_correlation: str,
 ) -> str:
-    fields = {
+    """Render one strict, content-free activity event."""
+    event = {
+        "version": 1,
+        "transition_id": transition_id,
+        "parent_id": parent_id,
         "operation": operation,
-        "collection_id": collection_id,
-        "item_key": key,
-        "before_item_hash": before_item_hash or "-",
-        "after_item_hash": after_item_hash or "-",
-        "before_container_hash": before_container_hash or "-",
-        "after_container_hash": after_container_hash or "-",
-        "payload_hash": payload_hash or "-",
+        "collection_id": manifest.collection_id,
+        "manifest_path": manifest.path,
+        "source_path": manifest.storage.source,
         "canonical_path": canonical_path,
-        "audit_correlation": audit_correlation,
-        "rationale": json.dumps(why, ensure_ascii=False),
+        "item_key": item_key,
+        "before_manifest_hash": before_manifest_hash,
+        "after_manifest_hash": after_manifest_hash,
+        "before_item_hash": before_item_hash,
+        "after_item_hash": after_item_hash,
+        "before_container_hash": before_container_hash,
+        "after_container_hash": after_container_hash,
+        "payload_hash": payload_hash,
+        "rationale": why,
     }
-    return "Records " + " ".join(f"{name}={value}" for name, value in fields.items())
+    return "Records audit-v1 " + json.dumps(
+        event, ensure_ascii=False, separators=(",", ":"), allow_nan=False, sort_keys=True
+    )
 
 
 def _payload_hash(
@@ -738,8 +954,13 @@ def _normalize_json(value: Any) -> Any:
     return value
 
 
-def _audit_correlation(collection_id: str, key: str, container_hash: str) -> str:
-    return hashlib.sha256(f"{collection_id}\0{key}\0{container_hash}".encode()).hexdigest()[:24]
+def _transition_id() -> str:
+    return uuid.uuid4().hex[:24]
+
+
+def _manifest_audit_head(text: str) -> str | None:
+    match = re.search(r"(?m)^record_audit:\s*\{version:\s*1,\s*head:\s*([0-9a-f]{24})\}\s*$", text)
+    return match.group(1) if match is not None else None
 
 
 def _items_container_hash(
@@ -757,6 +978,16 @@ def _items_container_hash(
     ]
     return hashlib.sha256(
         json.dumps(pairs, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    ).hexdigest()
+
+
+def _empty_items_container_hash(manifest: collections.CollectionManifest) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            [(manifest.manifest_version.path, manifest.manifest_version.hash)],
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode("utf-8")
     ).hexdigest()
 
 
@@ -785,7 +1016,7 @@ def _result(
     *,
     operation: str,
     manifest: collections.CollectionManifest,
-    key: str,
+    key: str | None,
     before_item_hash: str | None,
     after_item_hash: str | None,
     before_container_hash: str | None,

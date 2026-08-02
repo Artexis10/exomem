@@ -10,7 +10,7 @@ import json
 import math
 import re
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -124,6 +124,19 @@ class _BaseAdapter:
     def _manifest_version(self) -> collections.SourceVersion:
         current = collections.source_version(self.vault_root / self.manifest.path)
         if current.hash != self.manifest.manifest_version.hash:
+            current_text = (self.vault_root / self.manifest.path).read_text(encoding="utf-8")
+            if not re.search(
+                r"(?m)^record_audit:\s*\{version:\s*1,\s*head:\s*[0-9a-f]{24}\}\s*$",
+                current_text,
+            ):
+                raise collections.CollectionError(
+                    "STALE_COLLECTION_MANIFEST", "collection manifest changed after it was loaded"
+                )
+            refreshed = collections.load_manifest(
+                self.vault_root, self.vault_root / self.manifest.path
+            )
+            if replace(self.manifest, manifest_version=refreshed.manifest_version) == refreshed:
+                return current
             raise collections.CollectionError(
                 "STALE_COLLECTION_MANIFEST", "collection manifest changed after it was loaded"
             )
@@ -612,6 +625,35 @@ def render_markdown_item_update(
     updated_yaml = re.sub(r"(?m)^# exomem-record-audit: [0-9a-f]{24}\r?\n?", "", updated_yaml)
     audit_line = f"# exomem-record-audit: {audit_correlation}{newline}" if audit_correlation else ""
     return bom + text[: opening.end()] + updated_yaml + audit_line + text[close_start:]
+
+
+def render_manifest_audit_head(source: str, transition_id: str) -> str:
+    """Replace only the ordinary manifest audit state while retaining all other bytes."""
+    if not re.fullmatch(r"[0-9a-f]{24}", transition_id):
+        raise collections.CollectionError("INVALID_RECORD_AUDIT", "audit transition is invalid")
+    bom = "\ufeff" if source.startswith("\ufeff") else ""
+    text = source[len(bom) :]
+    opening = re.match(r"\A---\r?\n", text)
+    if opening is None:
+        raise collections.CollectionError(
+            "INVALID_COLLECTION_MANIFEST", "manifest requires frontmatter"
+        )
+    closing = re.search(r"(?m)^---\r?$", text[opening.end() :])
+    if closing is None:
+        raise collections.CollectionError(
+            "INVALID_COLLECTION_MANIFEST", "manifest requires frontmatter"
+        )
+    newline = "\r\n" if "\r\n" in text else "\n"
+    start = opening.end()
+    end = start + closing.start()
+    frontmatter = text[start:end]
+    rendered = f"record_audit: {{version: 1, head: {transition_id}}}{newline}"
+    match = re.search(r"(?m)^record_audit:[^\r\n]*(?:\r?\n)?", frontmatter)
+    if match is None:
+        frontmatter += rendered
+    else:
+        frontmatter = frontmatter[: match.start()] + rendered + frontmatter[match.end() :]
+    return bom + text[:start] + frontmatter + text[end:]
 
 
 @dataclass(frozen=True, slots=True)

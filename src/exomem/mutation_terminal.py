@@ -163,18 +163,25 @@ def project_terminal(result: Any, detail: ResponseDetail = "compact") -> Any:
 def _is_record_receipt(value: Any) -> bool:
     if not isinstance(value, Mapping):
         return False
+    operation = value.get("operation")
     if (
         value.get("_record_receipt") != _RECORD_RECEIPT_MARKER
         or type(value.get("receipt_version")) is not int
         or value.get("receipt_version") != _RECORD_RECEIPT_VERSION
-        or value.get("operation") not in {"create", "append", "update"}
+        or operation not in {"create", "append", "update"}
         or not _normalized_uuid(value.get("collection_id"))
-        or not _normalized_uuid(value.get("item_key"))
         or not isinstance(value.get("affected_paths"), list)
         or len(value["affected_paths"]) > 16
-        or not all(isinstance(path, str) for path in value["affected_paths"])
+        or not all(
+            isinstance(path, str) and 0 < len(path) <= 1024 for path in value["affected_paths"]
+        )
         or value.get("outcome") not in {"committed", "replayed"}
     ):
+        return False
+    if operation == "create":
+        if value.get("item_key") is not None or value.get("outcome") != "committed":
+            return False
+    elif not _normalized_uuid(value.get("item_key")):
         return False
     for name in (
         "before_item_hash",
@@ -191,6 +198,8 @@ def _is_record_receipt(value: Any) -> bool:
         ):
             return False
     correlation = value.get("audit_correlation")
+    if operation == "create" and value.get("after_container_hash") is None:
+        return False
     return correlation is None or (
         isinstance(correlation, str)
         and len(correlation) == 24

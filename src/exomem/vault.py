@@ -1338,7 +1338,7 @@ class _BatchWorkspace:
                     expected_identity=artifact.identity,
                 )
                 installed.recheck()
-                self.artifacts.pop(artifact.name)
+                self.artifacts.pop(artifact.name, None)
                 self.recheck()
                 return artifact.identity
             descriptor_info = os.fstat(artifact.descriptor)
