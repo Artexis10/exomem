@@ -37,7 +37,9 @@ def test_x3_fixture_matches_the_read_only_current_vault_files(tmp_path: Path) ->
     }
 
     assert {
-        path.name: hashlib.sha256(path.read_bytes()).hexdigest() for path in fixture.glob("*.md") if path.name in expected
+        path.name: hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in fixture.glob("*.md")
+        if path.name in expected
     } == expected
 
 

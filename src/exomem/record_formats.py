@@ -7,6 +7,7 @@ import csv
 import datetime as dt
 import hashlib
 import json
+import math
 import re
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -30,6 +31,10 @@ _CURSOR_DOMAIN = b"exomem.record-continuation.v1\0"
 _MAX_HEADING_FIELDS = 8
 _MAX_GRAMMAR_LITERAL_BYTES = 128
 _MAX_NOTE_RULES = 32
+_MAX_MARKDOWN_HEADINGS = 10_000
+_MAX_RECORDS = 10_000
+_MAX_CHILD_ROWS = 10_000
+_MAX_CHILD_FIELDS = 16
 _SYSTEM_FIELDS = frozenset(
     {"collection_id", "record_id", "item_version", "inferred", "ambiguous", "parent_record_id"}
 )
@@ -117,7 +122,12 @@ class _BaseAdapter:
         return self.vault_root / self.manifest.storage.source
 
     def _manifest_version(self) -> collections.SourceVersion:
-        return collections.source_version(self.vault_root / self.manifest.path)
+        current = collections.source_version(self.vault_root / self.manifest.path)
+        if current.hash != self.manifest.manifest_version.hash:
+            raise collections.CollectionError(
+                "STALE_COLLECTION_MANIFEST", "collection manifest changed after it was loaded"
+            )
+        return self.manifest.manifest_version
 
     def _validate_values(self, values: dict[str, Any]) -> None:
         if _SYSTEM_FIELDS.intersection(self.manifest.schema.fields):
@@ -145,6 +155,7 @@ class _BaseAdapter:
 
 class MarkdownLogAdapter(_BaseAdapter):
     def read(self) -> AdapterSnapshot:
+        manifest_version = self._manifest_version()
         source = self.source_path
         data = _read_bounded(source, _MAX_LOG_BYTES, "markdown log")
         descriptor = self.manifest.storage.descriptor
@@ -170,22 +181,7 @@ class MarkdownLogAdapter(_BaseAdapter):
             raise collections.CollectionError(
                 "INVALID_STORAGE_DESCRIPTOR", "markdown log needs an insertion direction"
             )
-        child_spec = descriptor.get("child_rows", {})
-        if not isinstance(child_spec, Mapping):
-            raise collections.CollectionError(
-                "INVALID_STORAGE_DESCRIPTOR", "child_rows must be an object"
-            )
-        prefix = child_spec.get("prefix", "")
-        delimiter = child_spec.get("delimiter", "")
-        if not isinstance(prefix, str) or not isinstance(delimiter, str):
-            raise collections.CollectionError(
-                "INVALID_STORAGE_DESCRIPTOR", "child row grammar is invalid"
-            )
-        child_fields = tuple(str(value) for value in child_spec.get("fields", ()))
-        if not child_fields or _SYSTEM_FIELDS.intersection(child_fields):
-            raise collections.CollectionError(
-                "INVALID_STORAGE_DESCRIPTOR", "child row fields are invalid"
-            )
+        prefix, delimiter, child_fields = _child_grammar(descriptor.get("child_rows"))
 
         headings = _headings_outside_fences(data)
         section_heading = next(
@@ -208,14 +204,20 @@ class MarkdownLogAdapter(_BaseAdapter):
             ),
             len(data),
         )
-        entries = [
-            item
-            for item in headings
-            if section_heading.end <= item.start < section_end
-            and item.level == grammar.level
-            and _log_values(item.title, grammar) is not None
-        ]
+        entries: list[_Heading] = []
+        for item in headings:
+            if (
+                section_heading.end <= item.start < section_end
+                and item.level == grammar.level
+                and _log_values(item.title, grammar) is not None
+            ):
+                if len(entries) >= _MAX_RECORDS:
+                    raise collections.CollectionError(
+                        "RECORD_LIMIT", "markdown log has too many parsed records"
+                    )
+                entries.append(item)
         records: list[Record] = []
+        child_count = 0
         for index, item in enumerate(entries):
             end = entries[index + 1].start if index + 1 < len(entries) else section_end
             block = data[item.start : end]
@@ -225,7 +227,10 @@ class MarkdownLogAdapter(_BaseAdapter):
                     "INVALID_RECORD_HEADING", "record heading does not match its manifest grammar"
                 )
             values.update(_status_values(descriptor, values.get("note")))
-            children = _child_rows(block, item.start, prefix, delimiter, child_fields)
+            children = _child_rows(
+                block, item.start, prefix, delimiter, child_fields, _MAX_CHILD_ROWS - child_count
+            )
+            child_count += len(children)
             if children:
                 values["movements"] = [child.values for child in children]
             self._validate_values(values)
@@ -251,7 +256,6 @@ class MarkdownLogAdapter(_BaseAdapter):
                 )
             )
         records, diagnostics = _mark_ambiguous(records)
-        manifest_version = self._manifest_version()
         source_version = collections.SourceVersion(
             path=self.manifest.storage.source, hash=hashlib.sha256(data).hexdigest()
         )
@@ -276,6 +280,7 @@ class MarkdownLogAdapter(_BaseAdapter):
 
 class MarkdownItemsAdapter(_BaseAdapter):
     def read(self) -> AdapterSnapshot:
+        manifest_version = self._manifest_version()
         source = self.source_path
         if not source.is_dir():
             raise collections.CollectionError(
@@ -349,7 +354,6 @@ class MarkdownItemsAdapter(_BaseAdapter):
                 )
             )
         records, diagnostics = _mark_ambiguous(records)
-        manifest_version = self._manifest_version()
         source_versions = (manifest_version,) + tuple(
             collections.SourceVersion(path=path, hash=digest) for path, digest in versions
         )
@@ -365,6 +369,7 @@ class DatasetAdapter(_BaseAdapter):
     mutable = False
 
     def read(self) -> AdapterSnapshot:
+        manifest_version = self._manifest_version()
         source = self.source_path
         record_path = self.manifest.storage.descriptor.get("record_path")
         if record_path is not None and (not isinstance(record_path, str) or not record_path):
@@ -406,7 +411,6 @@ class DatasetAdapter(_BaseAdapter):
                 )
             )
         records, diagnostics = _mark_ambiguous(records)
-        manifest_version = self._manifest_version()
         source_version = collections.SourceVersion(path=self.manifest.storage.source, hash=digest)
         return AdapterSnapshot(
             tuple(records),
@@ -579,6 +583,10 @@ def _headings_outside_fences(data: bytes) -> list[_Heading]:
                 raise collections.CollectionError(
                     "INVALID_RECORD_SOURCE", "markdown log is not UTF-8"
                 ) from error
+            if len(headings) >= _MAX_MARKDOWN_HEADINGS:
+                raise collections.CollectionError(
+                    "RECORD_HEADING_LIMIT", "markdown log has too many headings"
+                )
             headings.append(
                 _Heading(
                     level=len(match.group(1)),
@@ -596,6 +604,8 @@ def _opens_fence(line: bytes) -> tuple[bytes, int] | None:
     if match is None:
         return None
     marker = match.group(1)
+    if marker.startswith(b"`") and b"`" in line[match.end(1) :]:
+        return None
     return marker[:1], len(marker)
 
 
@@ -772,11 +782,61 @@ def _status_values(descriptor: Mapping[str, Any], note: object) -> dict[str, Any
     return values
 
 
+def _child_grammar(value: object) -> tuple[str, str, tuple[str, ...]]:
+    if not isinstance(value, Mapping) or set(value) != {"prefix", "delimiter", "fields"}:
+        raise collections.CollectionError(
+            "INVALID_STORAGE_DESCRIPTOR", "child row grammar is invalid"
+        )
+    prefix, delimiter, raw_fields = value.get("prefix"), value.get("delimiter"), value.get("fields")
+    if (
+        not isinstance(prefix, str)
+        or not _bounded_inline_literal(prefix)
+        or not isinstance(delimiter, str)
+        or not _bounded_inline_literal(delimiter)
+    ):
+        raise collections.CollectionError(
+            "INVALID_STORAGE_DESCRIPTOR", "child row grammar is invalid"
+        )
+    if not isinstance(raw_fields, Sequence) or isinstance(raw_fields, (str, bytes)):
+        raise collections.CollectionError(
+            "INVALID_STORAGE_DESCRIPTOR", "child row fields are invalid"
+        )
+    if not 1 <= len(raw_fields) <= _MAX_CHILD_FIELDS:
+        raise collections.CollectionError(
+            "INVALID_STORAGE_DESCRIPTOR", "child row fields are invalid"
+        )
+    fields: list[str] = []
+    for name in raw_fields:
+        if (
+            not isinstance(name, str)
+            or not _bounded_inline_literal(name)
+            or name in fields
+            or name in _SYSTEM_FIELDS
+        ):
+            raise collections.CollectionError(
+                "INVALID_STORAGE_DESCRIPTOR", "child row fields are invalid"
+            )
+        fields.append(name)
+    return prefix, delimiter, tuple(fields)
+
+
+def _bounded_inline_literal(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and _bounded_literal(value)
+        and "\r" not in value
+        and "\n" not in value
+    )
+
+
 def _child_rows(
-    block: bytes, block_start: int, prefix: str, delimiter: str, fields: tuple[str, ...]
+    block: bytes,
+    block_start: int,
+    prefix: str,
+    delimiter: str,
+    fields: tuple[str, ...],
+    remaining: int,
 ) -> tuple[ChildRow, ...]:
-    if not delimiter or not fields:
-        return ()
     rows: list[ChildRow] = []
     offset = block_start
     fence: tuple[bytes, int] | None = None
@@ -795,6 +855,10 @@ def _child_rows(
         elif line.startswith(prefix):
             values = [part.strip() for part in line[len(prefix) :].split(delimiter)]
             if len(values) == len(fields):
+                if len(rows) >= remaining:
+                    raise collections.CollectionError(
+                        "RECORD_CHILD_ROW_LIMIT", "markdown log has too many child rows"
+                    )
                 rows.append(
                     ChildRow(
                         dict(zip(fields, values, strict=True)),
@@ -920,9 +984,24 @@ def _schema_values(
     for name, spec in manifest.schema.fields.items():
         value = values.get(name)
         if isinstance(value, str) and spec.type == "integer" and value:
-            values[name] = int(value)
+            try:
+                values[name] = int(value)
+            except (ValueError, OverflowError) as error:
+                raise collections.CollectionError(
+                    "INVALID_DATASET_FIELD", f"invalid integer dataset field: {name}"
+                ) from error
         elif isinstance(value, str) and spec.type == "number" and value:
-            values[name] = float(value)
+            try:
+                parsed = float(value)
+            except (ValueError, OverflowError) as error:
+                raise collections.CollectionError(
+                    "INVALID_DATASET_FIELD", f"invalid number dataset field: {name}"
+                ) from error
+            if not math.isfinite(parsed):
+                raise collections.CollectionError(
+                    "INVALID_DATASET_FIELD", f"invalid number dataset field: {name}"
+                )
+            values[name] = parsed
     return values
 
 

@@ -50,7 +50,9 @@ def test_markdown_log_adapter_uses_declared_fence_aware_grammar_and_exact_spans(
     assert (fixture / "Training Log.md").read_bytes() == source
 
 
-def test_markdown_log_query_expands_declared_child_rows_without_domain_logic(tmp_path: Path) -> None:
+def test_markdown_log_query_expands_declared_child_rows_without_domain_logic(
+    tmp_path: Path,
+) -> None:
     fixture = copy_x3_fixture(tmp_path)
     manifest = _manifest(tmp_path, fixture)
 
@@ -99,7 +101,9 @@ def test_markdown_log_adapter_honors_declared_oldest_first_insertion_edge(tmp_pa
     fixture = copy_x3_fixture(tmp_path)
     manifest_path = fixture / "_collection.md"
     manifest_path.write_text(
-        manifest_path.read_text(encoding="utf-8").replace("insertion: newest-first", "insertion: oldest-first"),
+        manifest_path.read_text(encoding="utf-8").replace(
+            "insertion: newest-first", "insertion: oldest-first"
+        ),
         encoding="utf-8",
     )
     manifest = _manifest(tmp_path, fixture)
@@ -110,7 +114,9 @@ def test_markdown_log_adapter_honors_declared_oldest_first_insertion_edge(tmp_pa
     assert parsed.insertion_offset == source.index(b"## Current bands")
 
 
-def test_markdown_item_adapter_uses_file_identity_exact_version_and_readable_body(tmp_path: Path) -> None:
+def test_markdown_item_adapter_uses_file_identity_exact_version_and_readable_body(
+    tmp_path: Path,
+) -> None:
     fixture = copy_vehicle_maintenance_fixture(tmp_path)
     manifest = _manifest(tmp_path, fixture)
 
@@ -119,7 +125,9 @@ def test_markdown_item_adapter_uses_file_identity_exact_version_and_readable_bod
 
     assert adapter.mutable is True
     assert len(parsed.records) == 2
-    released = next(record for record in parsed.records if record.identity.key.startswith("a8d391a5"))
+    released = next(
+        record for record in parsed.records if record.identity.key.startswith("a8d391a5")
+    )
     assert released.identity.collection_id == manifest.collection_id
     assert released.values["services"] == ["oil change", "filter replacement"]
     assert released.body == "Directly corrected odometer remains human-editable.\n"
@@ -128,7 +136,9 @@ def test_markdown_item_adapter_uses_file_identity_exact_version_and_readable_bod
     assert released.span.end == len((fixture / "Events/released/2026-06-01-oil.md").read_bytes())
 
 
-def test_dataset_adapter_is_query_only_and_exposes_declared_keys_and_snapshot(tmp_path: Path) -> None:
+def test_dataset_adapter_is_query_only_and_exposes_declared_keys_and_snapshot(
+    tmp_path: Path,
+) -> None:
     fixture = copy_dataset_fixture(tmp_path)
     manifest = _manifest(tmp_path, fixture)
     adapter = record_formats.load_adapter(tmp_path, manifest)
@@ -185,7 +195,9 @@ item_schema:
     assert [record.identity.key for record in parsed.records] == ["json-1"]
 
 
-def test_query_collection_has_bounded_snapshot_continuations_and_derived_renderers(tmp_path: Path) -> None:
+def test_query_collection_has_bounded_snapshot_continuations_and_derived_renderers(
+    tmp_path: Path,
+) -> None:
     fixture = copy_dataset_fixture(tmp_path)
     manifest = _manifest(tmp_path, fixture)
 
@@ -215,7 +227,9 @@ def test_query_collection_has_bounded_snapshot_continuations_and_derived_rendere
     assert second.rendered.startswith("# collection_id:")
 
     source = fixture / "readings.csv"
-    source.write_text(source.read_text(encoding="utf-8") + "r-999,2026-12-01,water,99\n", encoding="utf-8")
+    source.write_text(
+        source.read_text(encoding="utf-8") + "r-999,2026-12-01,water,99\n", encoding="utf-8"
+    )
     with pytest.raises(collections.CollectionError) as excinfo:
         record_formats.query_collection(
             tmp_path,

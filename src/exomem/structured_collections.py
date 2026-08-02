@@ -124,6 +124,7 @@ class CollectionManifest:
     collection_version: int
     lifecycle: str
     path: str
+    manifest_version: SourceVersion
     storage: StorageSpec
     schema: ItemSchema
     templates: tuple[TemplateSpec, ...] = ()
@@ -179,10 +180,16 @@ def load_manifest(vault_root: Path, path: Path | str) -> CollectionManifest:
             "INVALID_COLLECTION_MANIFEST", "manifest must be named _collection.md"
         )
     try:
-        text = manifest_path.read_text(encoding="utf-8")
+        data = manifest_path.read_bytes()
     except OSError as error:
         raise CollectionError(
             "COLLECTION_NOT_FOUND", "collection manifest could not be read"
+        ) from error
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise CollectionError(
+            "INVALID_COLLECTION_MANIFEST", "collection manifest is not UTF-8"
         ) from error
     try:
         frontmatter, _body, marker = vault.parse_frontmatter(text, strict=True)
@@ -190,7 +197,12 @@ def load_manifest(vault_root: Path, path: Path | str) -> CollectionManifest:
         raise CollectionError(error.code, error.reason) from error
     if marker is None:
         raise CollectionError("INVALID_COLLECTION_MANIFEST", "manifest requires YAML frontmatter")
-    return _manifest_from_frontmatter(root, rel, frontmatter)
+    return _manifest_from_frontmatter(
+        root,
+        rel,
+        frontmatter,
+        SourceVersion(path=rel, hash=hashlib.sha256(data).hexdigest()),
+    )
 
 
 def discover_collections(
@@ -381,7 +393,10 @@ def inspect_legacy_tracker(vault_root: Path, path: Path | str) -> LegacyCollecti
 
 
 def _manifest_from_frontmatter(
-    root: Path, manifest_rel: str, frontmatter: Mapping[str, Any]
+    root: Path,
+    manifest_rel: str,
+    frontmatter: Mapping[str, Any],
+    manifest_version: SourceVersion,
 ) -> CollectionManifest:
     if frontmatter.get("type") != "collection":
         raise CollectionError("INVALID_COLLECTION_MANIFEST", "manifest type must be collection")
@@ -412,6 +427,7 @@ def _manifest_from_frontmatter(
         collection_version=version,
         lifecycle=lifecycle,
         path=manifest_rel,
+        manifest_version=manifest_version,
         storage=storage,
         schema=schema,
         templates=templates,

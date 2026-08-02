@@ -135,9 +135,10 @@ def test_continuation_binds_manifest_bytes_and_refuses_tampering(tmp_path: Path)
         manifest_path.read_text(encoding="utf-8") + "\nChanged descriptor context.\n",
         encoding="utf-8",
     )
+    changed_manifest = collections.load_manifest(tmp_path, manifest_path)
     with pytest.raises(collections.CollectionError) as excinfo:
         record_formats.query_collection(
-            tmp_path, manifest, limit=1, continuation=first.continuation
+            tmp_path, changed_manifest, limit=1, continuation=first.continuation
         )
     assert excinfo.value.code == "STALE_RECORD_SNAPSHOT"
 

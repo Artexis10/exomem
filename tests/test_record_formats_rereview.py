@@ -208,3 +208,182 @@ def test_truncated_aggregate_is_returned_even_without_row_progress(
     result = record_formats.query_collection(tmp_path, manifest, aggregate="latest:title")
 
     assert result.aggregate == {"truncated": True}
+
+
+def test_adapter_refuses_manifest_bytes_that_drift_after_loading(tmp_path: Path) -> None:
+    manifest = _collection(tmp_path, "## Sessions\n\n### 2026-08-02 · Alpha\n")
+    adapter = record_formats.load_adapter(tmp_path, manifest)
+    manifest_path = tmp_path / manifest.path
+    manifest_path.write_text(
+        manifest_path.read_text(encoding="utf-8") + "\nChanged.\n", encoding="utf-8"
+    )
+
+    with pytest.raises(collections.CollectionError) as excinfo:
+        adapter.read()
+
+    assert excinfo.value.code == "STALE_COLLECTION_MANIFEST"
+
+
+def test_dataset_key_change_stales_second_page_but_fresh_manifest_works(tmp_path: Path) -> None:
+    root = tmp_path / "Knowledge Base/Records/Paged"
+    root.mkdir(parents=True)
+    (root / "rows.csv").write_text(
+        "id,replacement,value\nold-1,new-1,1\nold-2,new-2,2\n", encoding="utf-8"
+    )
+    manifest_path = root / "_collection.md"
+    manifest_path.write_text(
+        f"""---
+type: collection
+exomem_id: {COLLECTION_ID}
+title: Paged dataset
+semantic_profile: records
+collection_version: 1
+schema_version: 1
+lifecycle: active
+storage:
+  strategy: dataset
+  source: rows.csv
+  format_version: 1
+  key: id
+item_schema:
+  natural_key: [id]
+  fields:
+    id:
+      type: string
+      required: true
+    replacement:
+      type: string
+      required: true
+    value:
+      type: integer
+      required: true
+---
+""",
+        encoding="utf-8",
+    )
+    first_manifest = collections.load_manifest(tmp_path, manifest_path)
+    first_page = record_formats.query_collection(tmp_path, first_manifest, limit=1)
+    assert first_page.continuation
+
+    manifest_path.write_text(
+        manifest_path.read_text(encoding="utf-8").replace("key: id", "key: replacement"),
+        encoding="utf-8",
+    )
+    fresh_manifest = collections.load_manifest(tmp_path, manifest_path)
+
+    with pytest.raises(collections.CollectionError) as excinfo:
+        record_formats.query_collection(
+            tmp_path, fresh_manifest, limit=1, continuation=first_page.continuation
+        )
+    assert excinfo.value.code == "STALE_RECORD_SNAPSHOT"
+    assert (
+        record_formats.query_collection(tmp_path, fresh_manifest, limit=1).rows[0]["record_id"]
+        == "new-1"
+    )
+
+
+def test_markdown_log_refuses_twenty_thousand_headings_within_the_byte_cap(tmp_path: Path) -> None:
+    manifest = _collection(tmp_path, "## Sessions\n" + "### skipped\n" * 20_000)
+
+    with pytest.raises(collections.CollectionError) as excinfo:
+        record_formats.load_adapter(tmp_path, manifest).read()
+
+    assert excinfo.value.code == "RECORD_HEADING_LIMIT"
+
+
+def test_markdown_log_refuses_twenty_thousand_child_rows_within_the_byte_cap(
+    tmp_path: Path,
+) -> None:
+    manifest = _collection(
+        tmp_path, "## Sessions\n\n### 2026-08-02 · Alpha\n" + "- Press | grey | 10\n" * 20_000
+    )
+
+    with pytest.raises(collections.CollectionError) as excinfo:
+        record_formats.load_adapter(tmp_path, manifest).read()
+
+    assert excinfo.value.code == "RECORD_CHILD_ROW_LIMIT"
+
+
+@pytest.mark.parametrize(
+    ("cell", "field", "expected"),
+    [("not-an-integer", "count", "INTEGER"), ("1e100000", "amount", "NUMBER")],
+)
+def test_dataset_coercion_refuses_invalid_typed_cells(
+    tmp_path: Path, cell: str, field: str, expected: str
+) -> None:
+    root = tmp_path / "Knowledge Base/Records/Typed"
+    root.mkdir(parents=True)
+    row = f"row,{cell},1" if field == "count" else f"row,1,{cell}"
+    (root / "rows.csv").write_text(f"id,count,amount\n{row}\n", encoding="utf-8")
+    (root / "_collection.md").write_text(
+        f"""---
+type: collection
+exomem_id: {COLLECTION_ID}
+title: Typed dataset
+semantic_profile: records
+collection_version: 1
+schema_version: 1
+lifecycle: active
+storage:
+  strategy: dataset
+  source: rows.csv
+  format_version: 1
+  key: id
+item_schema:
+  natural_key: [id]
+  fields:
+    id:
+      type: string
+      required: true
+    count:
+      type: integer
+      required: true
+    amount:
+      type: number
+      required: true
+---
+""",
+        encoding="utf-8",
+    )
+    manifest = collections.load_manifest(tmp_path, root / "_collection.md")
+
+    with pytest.raises(collections.CollectionError) as excinfo:
+        record_formats.load_adapter(tmp_path, manifest).read()
+
+    assert excinfo.value.code == "INVALID_DATASET_FIELD"
+    assert expected.lower() in excinfo.value.reason
+
+
+def test_backtick_info_string_with_backtick_does_not_open_a_fence() -> None:
+    headings = record_formats._headings_outside_fences(
+        b"``` label ` invalid\n### visible\n```\n~~~ label ` valid\n### hidden\n~~~\n"
+    )
+
+    assert [heading.title for heading in headings] == ["visible"]
+
+
+@pytest.mark.parametrize(
+    "child_rows",
+    [
+        'child_rows:\n    prefix: ""\n    delimiter: "|"\n    fields: [movement, load, repetitions]',
+        'child_rows:\n    prefix: "- \\n"\n    delimiter: "|"\n    fields: [movement, load, repetitions]',
+        'child_rows:\n    prefix: "- "\n    delimiter: "|"\n    fields: movement',
+        'child_rows:\n    prefix: "- "\n    delimiter: "|"\n    fields: [movement, movement, repetitions]',
+        'child_rows:\n    prefix: "- "\n    delimiter: "|"\n    fields: [movement, record_id, repetitions]',
+        'child_rows:\n    prefix: "- "\n    delimiter: "|"\n    fields: [movement, load, repetitions]\n    extra: true',
+        'child_rows:\n    prefix: "- "\n    delimiter: "|"\n    fields: [a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p, q]',
+    ],
+)
+def test_child_row_descriptor_refuses_invalid_grammar(tmp_path: Path, child_rows: str) -> None:
+    manifest = _collection(tmp_path, "## Sessions\n\n### 2026-08-02 · Alpha\n")
+    path = tmp_path / manifest.path
+    original = 'child_rows:\n    prefix: "- "\n    delimiter: "|"\n    fields: [movement, load, repetitions]'
+    path.write_text(
+        path.read_text(encoding="utf-8").replace(original, child_rows), encoding="utf-8"
+    )
+    manifest = collections.load_manifest(tmp_path, path)
+
+    with pytest.raises(collections.CollectionError) as excinfo:
+        record_formats.load_adapter(tmp_path, manifest).read()
+
+    assert excinfo.value.code == "INVALID_STORAGE_DESCRIPTOR"

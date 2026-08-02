@@ -28,6 +28,7 @@ def _write(vault: Path, rel: str, text: str) -> str:
 
 # ---------------- CSV ----------------
 
+
 def test_csv_loads_rows_and_columns(vault: Path) -> None:
     rel = _write(vault, "Knowledge Base/Evidence/Test/labs.csv", CSV)
     r = qd.query_data(vault, path=rel)
@@ -39,7 +40,9 @@ def test_csv_loads_rows_and_columns(vault: Path) -> None:
 
 def test_csv_filter_eq(vault: Path) -> None:
     rel = _write(vault, "Knowledge Base/Evidence/Test/labs.csv", CSV)
-    r = qd.query_data(vault, path=rel, filters=[{"column": "analyte", "op": "eq", "value": "IGF-1"}])
+    r = qd.query_data(
+        vault, path=rel, filters=[{"column": "analyte", "op": "eq", "value": "IGF-1"}]
+    )
     assert r.total_matched == 2
     assert {row["value"] for row in r.rows} == {"276", "77"}
 
@@ -47,20 +50,28 @@ def test_csv_filter_eq(vault: Path) -> None:
 def test_csv_numeric_gt_with_comma_and_lab_operator(vault: Path) -> None:
     rel = _write(vault, "Knowledge Base/Evidence/Test/labs.csv", CSV)
     # CRP "<0,4" -> 0.4 ; 0.42 -> 0.42. value < 0.41 keeps only the "<0,4" row.
-    r = qd.query_data(vault, path=rel, filters=[
-        {"column": "analyte", "op": "eq", "value": "CRP"},
-        {"column": "value", "op": "lt", "value": 0.41},
-    ])
+    r = qd.query_data(
+        vault,
+        path=rel,
+        filters=[
+            {"column": "analyte", "op": "eq", "value": "CRP"},
+            {"column": "value", "op": "lt", "value": 0.41},
+        ],
+    )
     assert r.total_matched == 1
     assert r.rows[0]["value"] == "<0,4"
 
 
 def test_csv_numeric_gt(vault: Path) -> None:
     rel = _write(vault, "Knowledge Base/Evidence/Test/labs.csv", CSV)
-    r = qd.query_data(vault, path=rel, filters=[
-        {"column": "analyte", "op": "eq", "value": "IGF-1"},
-        {"column": "value", "op": "gt", "value": 100},
-    ])
+    r = qd.query_data(
+        vault,
+        path=rel,
+        filters=[
+            {"column": "analyte", "op": "eq", "value": "IGF-1"},
+            {"column": "value", "op": "gt", "value": 100},
+        ],
+    )
     assert r.total_matched == 1 and r.rows[0]["value"] == "276"
 
 
@@ -81,9 +92,11 @@ def test_csv_columns_projection(vault: Path) -> None:
 def test_csv_sort_numeric_descending(vault: Path) -> None:
     rel = _write(vault, "Knowledge Base/Evidence/Test/labs.csv", CSV)
     r = qd.query_data(
-        vault, path=rel,
+        vault,
+        path=rel,
         filters=[{"column": "analyte", "op": "eq", "value": "IGF-1"}],
-        sort_by="value", descending=True,
+        sort_by="value",
+        descending=True,
     )
     assert [row["value"] for row in r.rows] == ["276", "77"]
 
@@ -109,7 +122,9 @@ def test_csv_aggregate_count_max_latest_distinct(vault: Path) -> None:
     assert qd.query_data(vault, path=rel, aggregate="count").aggregate == {"count": 5}
 
     igf = [{"column": "analyte", "op": "eq", "value": "IGF-1"}]
-    assert qd.query_data(vault, path=rel, filters=igf, aggregate="max:value").aggregate["max"] == 276.0
+    assert (
+        qd.query_data(vault, path=rel, filters=igf, aggregate="max:value").aggregate["max"] == 276.0
+    )
     latest = qd.query_data(vault, path=rel, filters=igf, aggregate="latest:value").aggregate
     assert latest["row"]["value"] == "77"  # 2024-07 is later than 2016-03
 
@@ -157,23 +172,34 @@ def test_dataset_row_cap_refuses_high_cardinality_input(vault: Path) -> None:
 
 # ---------------- JSON ----------------
 
+
 def test_json_top_level_array(vault: Path) -> None:
-    data = [{"date": "2024-07-26", "analyte": "IGF-1", "value": 77},
-            {"date": "2025-05-21", "analyte": "B12", "value": 392}]
+    data = [
+        {"date": "2024-07-26", "analyte": "IGF-1", "value": 77},
+        {"date": "2025-05-21", "analyte": "B12", "value": 392},
+    ]
     rel = _write(vault, "Knowledge Base/Evidence/Test/labs.json", json.dumps(data))
-    r = qd.query_data(vault, path=rel, filters=[{"column": "analyte", "op": "eq", "value": "IGF-1"}])
+    r = qd.query_data(
+        vault, path=rel, filters=[{"column": "analyte", "op": "eq", "value": "IGF-1"}]
+    )
     assert r.format == "json" and r.total_rows == 2 and r.total_matched == 1
     assert r.rows[0]["value"] == 77
 
 
 def test_json_nested_record_path_and_dotted_column(vault: Path) -> None:
-    data = {"sections": {"log": [
-        {"performer": {"name": "Confido"}, "dt": "2024"},
-        {"performer": {"name": "Alex"}, "dt": "2025"},
-    ]}}
+    data = {
+        "sections": {
+            "log": [
+                {"performer": {"name": "Confido"}, "dt": "2024"},
+                {"performer": {"name": "Alex"}, "dt": "2025"},
+            ]
+        }
+    }
     rel = _write(vault, "Knowledge Base/Evidence/Test/log.json", json.dumps(data))
     r = qd.query_data(
-        vault, path=rel, record_path="sections.log",
+        vault,
+        path=rel,
+        record_path="sections.log",
         filters=[{"column": "performer.name", "op": "eq", "value": "Confido"}],
         columns=["performer.name", "dt"],
     )
@@ -182,7 +208,9 @@ def test_json_nested_record_path_and_dotted_column(vault: Path) -> None:
 
 
 def test_json_common_key_autodetect(vault: Path) -> None:
-    rel = _write(vault, "Knowledge Base/Evidence/Test/r.json", json.dumps({"result": [{"a": 1}, {"a": 2}]}))
+    rel = _write(
+        vault, "Knowledge Base/Evidence/Test/r.json", json.dumps({"result": [{"a": 1}, {"a": 2}]})
+    )
     r = qd.query_data(vault, path=rel)
     assert r.total_rows == 2
     assert any("auto-detected" in w for w in r.warnings)
@@ -196,6 +224,7 @@ def test_json_bad_record_path(vault: Path) -> None:
 
 
 # ---------------- errors / safety ----------------
+
 
 def test_not_found(vault: Path) -> None:
     with pytest.raises(qd.QueryDataError) as e:
@@ -270,9 +299,9 @@ def test_build_dataset_card_carries_frontmatter_and_content(vault: Path) -> None
     assert "type: dataset" in card
     assert f"data_file: {rel}" in card
     # Salient content the card must expose so `find` can hit it semantically:
-    assert "Ugreen" in card            # a vendor (categorical top value)
+    assert "Ugreen" in card  # a vendor (categorical top value)
     assert "Nexode 100W charger" in card  # an item value
-    assert "2025-07-01" in card        # date range floor
+    assert "2025-07-01" in card  # date range floor
     # A prose placeholder for Claude's "what this holds" summary:
     assert "what this holds" in card.lower()
 
@@ -293,6 +322,7 @@ def test_raw_data_files_are_never_embeddable() -> None:
     # The never-embed-rows invariant: CSV/JSON are NOT part of the embedding
     # corpus (only the markdown dataset card is). Locks the noise concern.
     from exomem import embeddings
+
     assert embeddings._is_embeddable_path(Path("Knowledge Base/Finance/x.csv")) is False
     assert embeddings._is_embeddable_path(Path("Knowledge Base/Finance/x.json")) is False
     assert embeddings._is_embeddable_path(Path("Knowledge Base/Finance/x.md")) is True
