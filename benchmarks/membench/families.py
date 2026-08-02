@@ -133,7 +133,7 @@ _V02_FAMILIES: tuple[Family, ...] = (
     Family(
         family_id="negation_counterfactual",
         classification="deterministic-oracle",
-        status="planned",
+        status="active",
         rationale=(
             "Recorded-as-false vs not-recorded and considered-then-rejected "
             "plans score against the existing abstention and current-state "

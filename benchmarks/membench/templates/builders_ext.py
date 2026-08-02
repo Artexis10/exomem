@@ -338,3 +338,53 @@ def expect_value_guarded(
         )
 
     return build
+
+
+def expect_recorded_false(
+    rejection: ClaimRecord, rejected: ClaimRecord, rejecting_source: SourceRecord
+) -> ExpectationBuilder:
+    """Recorded-false is not unknown: state the rejection with its citation.
+
+    The rejected proposal/plan must hold a DISPROVED or REVOKED span while the
+    rejection-decision claim stays active. The expected answer asserts the
+    rejection (so an abstention fails the abstention gate) and forbids the
+    rejected claim's active framing (so an answer treating the proposal as
+    live fails the current-state gate).
+    """
+
+    def build(ctx: OracleCtx, query: QueryRecord) -> ExpectedRecord:
+        rejection_view = _view_for(ctx, rejection, query)
+        if not rejection_view.is_active or rejection_view.value is None:
+            raise GenerationError(
+                f"{query.query_id}: rejection claim {rejection.claim_id} must be "
+                f"active with a value, got {rejection_view.status.value}"
+            )
+        rejected_view = _view_for(ctx, rejected, query)
+        if rejected_view.status not in (ClaimStatus.DISPROVED, ClaimStatus.REVOKED):
+            raise GenerationError(
+                f"{query.query_id}: rejected claim {rejected.claim_id} must be "
+                f"DISPROVED or REVOKED, got {rejected_view.status.value}"
+            )
+        if rejected.object.value in rejection_view.value.value:
+            raise GenerationError(
+                f"{query.query_id}: rejection phrasing embeds the rejected value "
+                f"{rejected.object.value!r}, so the current-state gate could "
+                "never pass"
+            )
+        citations = _citations_for(ctx, rejection, rejection_view, query)
+        if rejecting_source.source_id not in citations:
+            raise GenerationError(
+                f"{query.query_id}: rejecting source {rejecting_source.source_id} "
+                "missing from oracle citations"
+            )
+        return ExpectedRecord(
+            query_id=query.query_id,
+            answer=_answer_from_value(rejection_view.value),
+            required_claims=[rejection.claim_id],
+            forbidden_claims=[rejected.claim_id],
+            required_citations=list(citations),
+            abstain=False,
+            gates=["current_state", "citations", "abstention"],
+        )
+
+    return build

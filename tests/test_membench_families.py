@@ -28,11 +28,11 @@ V01_ACTIVE_FAMILIES = {
 # v0.2 families flipped active by their implementing change (task 3.x lanes).
 V02_ACTIVE_FAMILIES = {
     "procedural",
+    "negation_counterfactual",
 }
 
 V02_PLANNED_FAMILIES = {
     "quantitative",
-    "negation_counterfactual",
     "cross_lingual",
     "preference_attribution",
     "source_reliability",
