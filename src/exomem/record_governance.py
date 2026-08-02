@@ -668,6 +668,7 @@ def _project_schema_values(
     values: Mapping[str, Any],
     *,
     template_metadata: bool = False,
+    links: _LinkProjector | None = None,
 ) -> dict[str, Any] | None:
     valid, normalized = _normalize_manifest_value(values)
     if not valid or not isinstance(normalized, dict):
@@ -690,11 +691,11 @@ def _project_schema_values(
                 or (name == "record_id" and type(value) is str and memory_refs.normalize_id(value))
             ):
                 projected[name] = value
-    return _project_links(root, manifest, projected)
+    return (links or _LinkProjector.create(root, manifest))(projected)
 
 
 def _project_manifest_query(
-    root: Path, manifest: collections.CollectionManifest, query: Mapping[str, Any]
+    root: Path, manifest: collections.CollectionManifest, query: Mapping[str, Any], *, links: _LinkProjector | None = None
 ) -> dict[str, Any] | None:
     valid, normalized = _normalize_manifest_value(query)
     if not valid or not isinstance(normalized, dict) or set(normalized) - {"filters", "limit"}:
@@ -707,7 +708,7 @@ def _project_manifest_query(
         return None
     if any(name not in manifest.schema.fields for name in filters):
         return None
-    projected_filters = _project_schema_values(root, manifest, filters)
+    projected_filters = _project_schema_values(root, manifest, filters, links=links)
     if projected_filters is None:
         return None
     result: dict[str, Any] = {"limit": limit}
@@ -717,7 +718,7 @@ def _project_manifest_query(
 
 
 def _project_plan_link(
-    root: Path, manifest: collections.CollectionManifest, plan: collections.PlanLink
+    root: Path, manifest: collections.CollectionManifest, plan: collections.PlanLink, *, links: _LinkProjector | None = None
 ) -> dict[str, Any] | None:
     reference = plan.reference
     if type(reference) is not str or not 1 <= len(reference.encode("utf-8")) <= 2_048:
@@ -748,11 +749,11 @@ def _project_plan_link(
             return None
         if not _authorize(root, target, receipt=True):
             return None
-    query = _project_manifest_query(root, manifest, plan.query)
+    query = _project_manifest_query(root, manifest, plan.query, links=links)
     return {"reference": reference, "query": query} if query is not None else None
 
 
-def _project_views(root: Path, manifest: collections.CollectionManifest) -> dict[str, Any]:
+def _project_views(root: Path, manifest: collections.CollectionManifest, *, links: _LinkProjector | None = None) -> dict[str, Any]:
     projected: dict[str, Any] = {}
     if len(manifest.views) > 32:
         return projected
@@ -763,7 +764,7 @@ def _project_views(root: Path, manifest: collections.CollectionManifest) -> dict
         if not valid or not isinstance(normalized, dict):
             continue
         if set(normalized) == {"query"} and isinstance(normalized["query"], dict):
-            query = _project_manifest_query(root, manifest, normalized["query"])
+            query = _project_manifest_query(root, manifest, normalized["query"], links=links)
             if query is not None:
                 projected[name] = {"query": query}
         elif set(normalized) == {"sort"} and isinstance(normalized["sort"], list):
@@ -812,9 +813,10 @@ def project_manifest(
     ):
         raise collections.CollectionError("COLLECTION_NOT_FOUND", "collection was not found")
     templates: list[dict[str, Any]] = []
+    links = _LinkProjector.create(root, manifest)
     for template in manifest.templates:
         defaults = _project_schema_values(
-            root, manifest, template.default_properties, template_metadata=True
+            root, manifest, template.default_properties, template_metadata=True, links=links
         )
         if defaults is None:
             continue
@@ -833,9 +835,9 @@ def project_manifest(
             "plans": [
                 projected
                 for plan in manifest.links.plans
-                if (projected := _project_plan_link(root, manifest, plan)) is not None
+                if (projected := _project_plan_link(root, manifest, plan, links=links)) is not None
             ],
-            "views": _project_views(root, manifest),
+            "views": _project_views(root, manifest, links=links),
             "governance": _project_governance(manifest.governance),
         }
     )
