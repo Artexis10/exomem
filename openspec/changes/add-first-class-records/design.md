@@ -46,11 +46,11 @@ Alternatives rejected:
 
 `structured_collections.py` owns manifest/schema/identity/query-neutral types. `record_formats.py` owns an adapter protocol and three adapters:
 
-- `markdown-log`: a declared section and fence-aware heading/block grammar plus optional delimited child rows. It parses current blocks without rewriting them, inserts at the declared newest/oldest edge, and returns exact source spans.
+- `markdown-log`: a declared section and fence-aware heading/block grammar plus optional delimited child rows. Child rows declare their destination `container_field`, which must be an array-of-objects field in the item schema. It parses current blocks without rewriting them, inserts at the declared newest/oldest edge, and returns exact source spans.
 - `markdown-items`: one file per item, with `type: record`, `record_id`, `collection_id`, schema version, domain fields, and optional body.
 - `dataset`: query-only CSV/TSV/JSON using shared `query_data` loading/coercion/evaluation. A declared stable-key column improves references and deterministic ordering, but append/update is deferred until a format-specific preservation contract exists.
 
-The Markdown-log grammar is declarative (heading level/pattern, section, insertion direction, child delimiter/fields), so the generic core does not contain X3 conditionals. X3 fixture configuration maps dated headings and `movement | band | reps` rows. Raw notation such as `+`, blanks, `!`, or `?` remains data rather than being normalized into a judgment.
+The Markdown-log grammar is declarative (heading level/fields, section, insertion direction, child delimiter/fields/container), so the generic core does not contain X3 conditionals. X3 fixture configuration maps dated headings and `movement | band | reps` rows. Raw notation such as `+`, blanks, `!`, or `?` remains data rather than being normalized into a judgment. Markdown-item reads accept one leading UTF-8 BOM for frontmatter parsing while preserving the complete original bytes for source hashes, spans, body behavior, and any later guarded rewrite.
 
 The X3 fixture supplies an adjacent manifest whose descriptor maps dated headings and `movement | band | reps` rows while leaving `Training Log.md` byte-identical before the first requested mutation. A third fixture proves bounded dataset querying without claiming byte-preserving dataset mutation.
 

@@ -54,6 +54,7 @@ storage:
     prefix: "- "
     delimiter: "|"
     fields: [movement, load, repetitions]
+    container_field: movements
 item_schema:
   natural_key: [occurred_on, title]
   fields:
@@ -365,19 +366,21 @@ def test_backtick_info_string_with_backtick_does_not_open_a_fence() -> None:
 @pytest.mark.parametrize(
     "child_rows",
     [
-        'child_rows:\n    prefix: ""\n    delimiter: "|"\n    fields: [movement, load, repetitions]',
-        'child_rows:\n    prefix: "- \\n"\n    delimiter: "|"\n    fields: [movement, load, repetitions]',
-        'child_rows:\n    prefix: "- "\n    delimiter: "|"\n    fields: movement',
-        'child_rows:\n    prefix: "- "\n    delimiter: "|"\n    fields: [movement, movement, repetitions]',
-        'child_rows:\n    prefix: "- "\n    delimiter: "|"\n    fields: [movement, record_id, repetitions]',
-        'child_rows:\n    prefix: "- "\n    delimiter: "|"\n    fields: [movement, load, repetitions]\n    extra: true',
-        'child_rows:\n    prefix: "- "\n    delimiter: "|"\n    fields: [a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p, q]',
+        'child_rows:\n    prefix: ""\n    delimiter: "|"\n    fields: [movement, load, repetitions]\n    container_field: movements',
+        'child_rows:\n    prefix: "- \\n"\n    delimiter: "|"\n    fields: [movement, load, repetitions]\n    container_field: movements',
+        'child_rows:\n    prefix: "- "\n    delimiter: "|"\n    fields: movement\n    container_field: movements',
+        'child_rows:\n    prefix: "- "\n    delimiter: "|"\n    fields: [movement, movement, repetitions]\n    container_field: movements',
+        'child_rows:\n    prefix: "- "\n    delimiter: "|"\n    fields: [movement, record_id, repetitions]\n    container_field: movements',
+        'child_rows:\n    prefix: "- "\n    delimiter: "|"\n    fields: [movement, load, repetitions]\n    container_field: movements\n    extra: true',
+        'child_rows:\n    prefix: "- "\n    delimiter: "|"\n    fields: [a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p, q]\n    container_field: movements',
+        'child_rows:\n    prefix: "- "\n    delimiter: "|"\n    fields: [movement, load, repetitions]\n    container_field: status',
+        'child_rows:\n    prefix: "- "\n    delimiter: "|"\n    fields: [movement, load, repetitions]\n    container_field: [entries]',
     ],
 )
 def test_child_row_descriptor_refuses_invalid_grammar(tmp_path: Path, child_rows: str) -> None:
     manifest = _collection(tmp_path, "## Sessions\n\n### 2026-08-02 · Alpha\n")
     path = tmp_path / manifest.path
-    original = 'child_rows:\n    prefix: "- "\n    delimiter: "|"\n    fields: [movement, load, repetitions]'
+    original = 'child_rows:\n    prefix: "- "\n    delimiter: "|"\n    fields: [movement, load, repetitions]\n    container_field: movements'
     path.write_text(
         path.read_text(encoding="utf-8").replace(original, child_rows), encoding="utf-8"
     )
@@ -387,3 +390,83 @@ def test_child_row_descriptor_refuses_invalid_grammar(tmp_path: Path, child_rows
         record_formats.load_adapter(tmp_path, manifest).read()
 
     assert excinfo.value.code == "INVALID_STORAGE_DESCRIPTOR"
+
+
+def test_markdown_log_uses_declared_non_domain_child_container(tmp_path: Path) -> None:
+    manifest = _collection(tmp_path, "## Sessions\n\n### 2026-08-02 · Alpha\n- Item | grey | 10\n")
+    path = tmp_path / manifest.path
+    path.write_text(
+        path.read_text(encoding="utf-8")
+        .replace(
+            "fields: [movement, load, repetitions]\n    container_field: movements",
+            "fields: [item, load, repetitions]\n    container_field: entries",
+        )
+        .replace("    movements:\n", "    entries:\n"),
+        encoding="utf-8",
+    )
+    manifest = collections.load_manifest(tmp_path, path)
+
+    values = record_formats.load_adapter(tmp_path, manifest).read().records[0].values
+
+    assert values["entries"] == [{"item": "Item", "load": "grey", "repetitions": "10"}]
+    assert "movements" not in values
+
+
+def test_markdown_item_accepts_one_bom_without_changing_raw_identity(tmp_path: Path) -> None:
+    root = tmp_path / "Knowledge Base/Records/Items"
+    root.mkdir(parents=True)
+    (root / "_collection.md").write_text(
+        f"""---
+type: collection
+exomem_id: {COLLECTION_ID}
+title: BOM item
+semantic_profile: records
+collection_version: 1
+schema_version: 1
+lifecycle: active
+storage:
+  strategy: markdown-items
+  source: Events
+  format_version: 1
+item_schema:
+  natural_key: [name]
+  fields:
+    name:
+      type: string
+      required: true
+---
+""",
+        encoding="utf-8",
+    )
+    item = root / "Events/bom.md"
+    raw = (
+        b"\xef\xbb\xbf---\n"
+        + f"type: record\ncollection_id: {COLLECTION_ID}\nrecord_id: 14d2bdca-e145-425b-9e4b-df86f7172efa\nschema_version: 1\nname: BOM\n---\n\nBody stays exact.\n".encode()
+    )
+    item.parent.mkdir()
+    item.write_bytes(raw)
+    manifest = collections.load_manifest(tmp_path, root / "_collection.md")
+
+    record = record_formats.load_adapter(tmp_path, manifest).read().records[0]
+
+    assert record.body == "Body stays exact.\n"
+    assert record.source.hash == __import__("hashlib").sha256(raw).hexdigest()
+    assert record.span.end == len(raw)
+
+
+def test_markdown_item_refuses_double_bom(tmp_path: Path) -> None:
+    root = tmp_path / "Knowledge Base/Records/Items"
+    root.mkdir(parents=True)
+    (root / "_collection.md").write_text(
+        _manifest().replace("markdown-log", "markdown-items").replace("log.md", "Events"),
+        encoding="utf-8",
+    )
+    item = root / "Events/double.md"
+    item.parent.mkdir()
+    item.write_bytes(b"\xef\xbb\xbf\xef\xbb\xbf---\n")
+    manifest = collections.load_manifest(tmp_path, root / "_collection.md")
+
+    with pytest.raises(collections.CollectionError) as excinfo:
+        record_formats.load_adapter(tmp_path, manifest).read()
+
+    assert excinfo.value.code == "INVALID_RECORD_ITEM"

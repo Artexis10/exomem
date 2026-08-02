@@ -46,6 +46,7 @@ storage:
     prefix: "- "
     delimiter: "|"
     fields: [movement, band, repetitions]
+    container_field: movements
 item_schema:
   natural_key: [occurred_on, title]
   fields:
@@ -152,7 +153,7 @@ def test_dataset_duplicate_keys_are_ambiguous_and_rows_hide_item_versions(tmp_pa
         .replace("markdown-log", "dataset")
         .replace("log.md", "rows.csv")
         .replace(
-            '  section:\n    level: 2\n    title: Sessions\n  item_heading:\n    level: 3\n    fields:\n      - name: occurred_on\n        type: date\n        format: "%Y-%m-%d"\n      - name: title\n        type: string\n    separator: " · "\n    note:\n      field: note\n      open: " ("\n      close: ")"\n  insertion: newest-first\n  child_rows:\n    prefix: "- "\n    delimiter: "|"\n    fields: [movement, band, repetitions]\n',
+            '  section:\n    level: 2\n    title: Sessions\n  item_heading:\n    level: 3\n    fields:\n      - name: occurred_on\n        type: date\n        format: "%Y-%m-%d"\n      - name: title\n        type: string\n    separator: " · "\n    note:\n      field: note\n      open: " ("\n      close: ")"\n  insertion: newest-first\n  child_rows:\n    prefix: "- "\n    delimiter: "|"\n    fields: [movement, band, repetitions]\n    container_field: movements\n',
             "  key: id\n",
         )
         .replace("natural_key: [occurred_on, title]", "natural_key: [id]")

@@ -38,6 +38,7 @@ storage:
     prefix: "- "
     delimiter: "|"
     fields: [movement, band, repetitions]
+    container_field: movements
 item_schema:
   natural_key: [occurred_on, title]
   fields:

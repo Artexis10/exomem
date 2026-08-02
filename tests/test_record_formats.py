@@ -124,7 +124,7 @@ def test_markdown_item_adapter_uses_file_identity_exact_version_and_readable_bod
     parsed = adapter.read()
 
     assert adapter.mutable is True
-    assert len(parsed.records) == 2
+    assert len(parsed.records) == 3
     released = next(
         record for record in parsed.records if record.identity.key.startswith("a8d391a5")
     )
@@ -134,6 +134,12 @@ def test_markdown_item_adapter_uses_file_identity_exact_version_and_readable_bod
     assert released.source.hash
     assert released.span.start == 0
     assert released.span.end == len((fixture / "Events/released/2026-06-01-oil.md").read_bytes())
+
+    bom_item = next(
+        record for record in parsed.records if record.identity.key.startswith("14d2bdca")
+    )
+    assert (fixture / "Events/released/2026-06-02-bom.md").read_bytes().startswith(b"\xef\xbb\xbf")
+    assert bom_item.body == "BOM-bearing item body remains readable.\n"
 
 
 def test_dataset_adapter_is_query_only_and_exposes_declared_keys_and_snapshot(

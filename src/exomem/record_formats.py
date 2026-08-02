@@ -181,7 +181,9 @@ class MarkdownLogAdapter(_BaseAdapter):
             raise collections.CollectionError(
                 "INVALID_STORAGE_DESCRIPTOR", "markdown log needs an insertion direction"
             )
-        prefix, delimiter, child_fields = _child_grammar(descriptor.get("child_rows"))
+        prefix, delimiter, child_fields, child_container = _child_grammar(
+            descriptor.get("child_rows"), self.manifest.schema
+        )
 
         headings = _headings_outside_fences(data)
         section_heading = next(
@@ -232,7 +234,7 @@ class MarkdownLogAdapter(_BaseAdapter):
             )
             child_count += len(children)
             if children:
-                values["movements"] = [child.values for child in children]
+                values[child_container] = [child.values for child in children]
             self._validate_values(values)
             marker_match = _marker_outside_fences(block)
             marker = None
@@ -313,12 +315,7 @@ class MarkdownItemsAdapter(_BaseAdapter):
                 raise collections.CollectionError(
                     "RECORD_SOURCE_TOO_LARGE", "collection exceeds the byte limit"
                 )
-            try:
-                text = data.decode("utf-8")
-            except UnicodeDecodeError as error:
-                raise collections.CollectionError(
-                    "INVALID_RECORD_ITEM", "record item is not UTF-8"
-                ) from error
+            text = _decode_item_bytes(data)
             try:
                 frontmatter, body, marker = vault.parse_frontmatter(text, strict=True)
             except vault.FrontmatterError as error:
@@ -782,12 +779,24 @@ def _status_values(descriptor: Mapping[str, Any], note: object) -> dict[str, Any
     return values
 
 
-def _child_grammar(value: object) -> tuple[str, str, tuple[str, ...]]:
-    if not isinstance(value, Mapping) or set(value) != {"prefix", "delimiter", "fields"}:
+def _child_grammar(
+    value: object, schema: collections.ItemSchema
+) -> tuple[str, str, tuple[str, ...], str]:
+    if not isinstance(value, Mapping) or set(value) != {
+        "prefix",
+        "delimiter",
+        "fields",
+        "container_field",
+    }:
         raise collections.CollectionError(
             "INVALID_STORAGE_DESCRIPTOR", "child row grammar is invalid"
         )
-    prefix, delimiter, raw_fields = value.get("prefix"), value.get("delimiter"), value.get("fields")
+    prefix, delimiter, raw_fields, container_field = (
+        value.get("prefix"),
+        value.get("delimiter"),
+        value.get("fields"),
+        value.get("container_field"),
+    )
     if (
         not isinstance(prefix, str)
         or not _bounded_inline_literal(prefix)
@@ -817,7 +826,22 @@ def _child_grammar(value: object) -> tuple[str, str, tuple[str, ...]]:
                 "INVALID_STORAGE_DESCRIPTOR", "child row fields are invalid"
             )
         fields.append(name)
-    return prefix, delimiter, tuple(fields)
+    container_spec = (
+        schema.fields.get(container_field) if isinstance(container_field, str) else None
+    )
+    if (
+        not isinstance(container_field, str)
+        or not _bounded_inline_literal(container_field)
+        or container_field in _SYSTEM_FIELDS
+        or container_spec is None
+        or container_spec.type != "array"
+        or container_spec.items is None
+        or container_spec.items.type != "object"
+    ):
+        raise collections.CollectionError(
+            "INVALID_STORAGE_DESCRIPTOR", "child row container field is invalid"
+        )
+    return prefix, delimiter, tuple(fields), container_field
 
 
 def _bounded_inline_literal(value: object) -> bool:
@@ -929,6 +953,20 @@ def _read_bounded(path: Path, limit: int, kind: str) -> bytes:
             "RECORD_SOURCE_TOO_LARGE", f"{kind} exceeds the byte limit"
         )
     return data
+
+
+def _decode_item_bytes(data: bytes) -> str:
+    bom = b"\xef\xbb\xbf"
+    if data.startswith(bom + bom):
+        raise collections.CollectionError(
+            "INVALID_RECORD_ITEM", "record item has multiple UTF-8 BOMs"
+        )
+    try:
+        return data[len(bom) :].decode("utf-8") if data.startswith(bom) else data.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise collections.CollectionError(
+            "INVALID_RECORD_ITEM", "record item is not UTF-8"
+        ) from error
 
 
 def _mark_ambiguous(

@@ -33,6 +33,8 @@ The collection substrate SHALL keep collection mechanics independent from semant
 ### Requirement: Three portable canonical storage strategies
 The substrate SHALL support chronological Markdown logs, one Markdown file per item, and CSV, TSV, or JSON datasets as declared canonical storage. Canonical data SHALL remain in those human-owned files; any SQLite state, cache, index, export, summary, or generated view SHALL be derived and rebuildable.
 
+Chronological-log child rows SHALL declare a bounded `container_field` in addition to their delimiter and fields; that container SHALL be a declared array-of-object item-schema field, so adapters do not impose domain field names. Markdown-item reads SHALL accept exactly one leading UTF-8 BOM for frontmatter parsing while retaining the complete original byte sequence for source hashes, spans, body/newline behavior, and guarded-write preservation.
+
 #### Scenario: Chronological Markdown stays canonical
 - **WHEN** a log-backed collection is queried or safely mutated
 - **THEN** the declared Markdown log remains the sole canonical item history and no generated dataset is promoted implicitly
