@@ -32,6 +32,9 @@ storage:
     - equals: "Stopped, didn't feel like it, circadian and recovery"
       values:
         status: aborted
+    - equals: "Partial"
+      values:
+        status: partial
   insertion: newest-first
   archive: Historical Reps (undated).md
   child_rows:

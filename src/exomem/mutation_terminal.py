@@ -23,6 +23,8 @@ _RECORD_RECEIPT_FIELDS = (
     "outcome",
     "audit_correlation",
 )
+_RECORD_RECEIPT_MARKER = "exomem.records-mutation"
+_RECORD_RECEIPT_VERSION = 1
 
 
 def _warning_count(result: Any) -> int:
@@ -149,9 +151,40 @@ def project_terminal(result: Any, detail: ResponseDetail = "compact") -> Any:
     if "idempotency_key" in result:
         compact["idempotency_key"] = result["idempotency_key"]
     leaf = result["leaf_result"]
-    if isinstance(leaf, Mapping) and leaf.get("operation") in {"create", "append", "update"}:
+    if _is_record_receipt(leaf):
         compact.update({key: leaf[key] for key in _RECORD_RECEIPT_FIELDS if key in leaf})
     compact["warnings_count"] = result["warnings_count"]
     if detail == "full":
         compact["diagnostics"] = result["leaf_result"]
     return compact
+
+
+def _is_record_receipt(value: Any) -> bool:
+    if not isinstance(value, Mapping):
+        return False
+    if (
+        value.get("_record_receipt") != _RECORD_RECEIPT_MARKER
+        or value.get("receipt_version") != _RECORD_RECEIPT_VERSION
+        or value.get("operation") not in {"create", "append", "update"}
+        or not isinstance(value.get("collection_id"), str)
+        or not isinstance(value.get("item_key"), str)
+        or not isinstance(value.get("affected_paths"), list)
+        or not all(isinstance(path, str) for path in value["affected_paths"])
+        or value.get("outcome") not in {"committed", "replayed"}
+    ):
+        return False
+    for name in (
+        "before_item_hash",
+        "after_item_hash",
+        "before_container_hash",
+        "after_container_hash",
+        "payload_hash",
+    ):
+        hash_value = value.get(name)
+        if hash_value is not None and (
+            not isinstance(hash_value, str)
+            or len(hash_value) != 64
+            or any(character not in "0123456789abcdef" for character in hash_value)
+        ):
+            return False
+    return isinstance(value.get("audit_correlation"), str | type(None))

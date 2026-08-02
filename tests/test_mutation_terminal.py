@@ -138,6 +138,8 @@ def test_compound_source_result_uses_its_explicit_nested_path_and_warnings() -> 
 def test_compact_record_receipt_uses_the_content_free_whitelist() -> None:
     mutation_terminal = _terminal_module()
     raw = {
+        "_record_receipt": "exomem.records-mutation",
+        "receipt_version": 1,
         "operation": "append",
         "collection_id": "11111111-1111-4111-8111-111111111111",
         "item_key": "22222222-2222-4222-8222-222222222222",
@@ -166,6 +168,28 @@ def test_compact_record_receipt_uses_the_content_free_whitelist() -> None:
     assert projected["after_item_hash"] == raw["after_item_hash"]
     assert "why" not in projected
     assert "values" not in projected
+
+
+def test_record_projection_requires_an_owned_validated_receipt_sentinel() -> None:
+    mutation_terminal = _terminal_module()
+    raw = {
+        "operation": "append",
+        "collection_id": "11111111-1111-4111-8111-111111111111",
+        "item_key": "22222222-2222-4222-8222-222222222222",
+        "after_item_hash": "a" * 64,
+        "after_container_hash": "b" * 64,
+        "affected_paths": ["Knowledge Base/Records/example.md"],
+        "outcome": "committed",
+    }
+    projected = mutation_terminal.project_terminal(
+        mutation_terminal.committed_terminal(
+            raw,
+            request_id="11111111-1111-4111-8111-111111111111",
+            receipt_id=None,
+            idempotency_key=None,
+        )
+    )
+    assert "collection_id" not in projected
 
 
 @pytest.mark.parametrize(

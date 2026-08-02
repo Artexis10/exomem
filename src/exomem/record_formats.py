@@ -449,6 +449,7 @@ def render_markdown_log_item(
     values: Mapping[str, Any],
     item_key: str,
     newline: str,
+    audit_correlation: str | None = None,
 ) -> str:
     """Render one declared log block without reading or rewriting its container."""
     if newline not in {"\n", "\r\n"}:
@@ -533,6 +534,11 @@ def render_markdown_log_item(
     lines = [
         "#" * grammar.level + " " + title,
         f"<!-- exomem-record-id: {marker} -->",
+        *(
+            [f"<!-- exomem-record-audit: {audit_correlation} -->"]
+            if audit_correlation is not None
+            else []
+        ),
         *rendered_rows,
         "",
     ]
@@ -544,6 +550,7 @@ def render_markdown_item(
     values: Mapping[str, Any],
     item_key: str,
     body: str = "",
+    audit_correlation: str | None = None,
 ) -> str:
     """Render a new ordinary record item from bounded structured values."""
     frontmatter: dict[str, Any] = {
@@ -553,41 +560,60 @@ def render_markdown_item(
         "schema_version": manifest.schema.version,
     }
     frontmatter.update(values)
-    text = "---\n" + vault.serialize_frontmatter(frontmatter) + "\n---\n"
+    audit_line = f"# exomem-record-audit: {audit_correlation}\n" if audit_correlation else ""
+    text = "---\n" + vault.serialize_frontmatter(frontmatter) + "\n" + audit_line + "---\n"
     return text + ("\n" + body if body else "")
 
 
-def render_markdown_item_update(source: str, changes: Mapping[str, Any]) -> str:
-    """Replace only requested frontmatter fields, retaining BOM, body, and line endings."""
+def render_markdown_item_update(
+    source: str, changes: Mapping[str, Any], audit_correlation: str | None = None
+) -> str:
+    """Replace complete top-level YAML nodes while retaining unrelated source bytes."""
     bom = "\ufeff" if source.startswith("\ufeff") else ""
     text = source[len(bom) :]
-    frontmatter, _body, marker = vault.parse_frontmatter(text, strict=True)
+    _frontmatter, _body, marker = vault.parse_frontmatter(text, strict=True)
     if marker is None:
         raise collections.CollectionError("INVALID_RECORD_ITEM", "item requires frontmatter")
     newline = "\r\n" if "\r\n" in text else "\n"
-    close = re.search(r"(?m)^---\r?$", text[len("---") :])
-    if close is None:
+    opening = re.match(r"\A---\r?\n", text)
+    if opening is None:
         raise collections.CollectionError("INVALID_RECORD_ITEM", "item frontmatter is invalid")
-    # Locate the closing fence using the parsed marker's exact leading range.
-    prefix_end = text.find("---", 3)
-    if prefix_end < 0:
+    closing = re.search(r"(?m)^---\r?$", text[opening.end() :])
+    if closing is None:
         raise collections.CollectionError("INVALID_RECORD_ITEM", "item frontmatter is invalid")
-    head = text[:prefix_end]
-    tail = text[prefix_end:]
+    close_start = opening.end() + closing.start()
+    yaml_text = text[opening.end() : close_start]
+    try:
+        document = vault.yaml.compose(yaml_text)
+    except vault.yaml.YAMLError as error:
+        raise collections.CollectionError(
+            "INVALID_RECORD_ITEM", "item frontmatter is invalid"
+        ) from error
+    if not isinstance(document, vault.yaml.nodes.MappingNode):
+        raise collections.CollectionError("INVALID_RECORD_ITEM", "item frontmatter is invalid")
+    spans: dict[str, tuple[int, int]] = {}
+    for key_node, value_node in document.value:
+        if not isinstance(key_node, vault.yaml.nodes.ScalarNode):
+            raise collections.CollectionError("INVALID_RECORD_ITEM", "item frontmatter is invalid")
+        if key_node.value in spans:
+            raise collections.CollectionError("DUPLICATE_FRONTMATTER_KEY", "item key is duplicated")
+        spans[key_node.value] = (key_node.start_mark.index, value_node.end_mark.index)
+    replacements: list[tuple[int, int, str]] = []
     for name, value in changes.items():
-        rendered = (
-            f"{name}: {vault.yaml_scalar(value)}"
-            if not isinstance(value, list)
-            else vault.serialize_frontmatter({name: value})
-        )
-        pattern = re.compile(rf"(?m)^{re.escape(name)}:[^\r\n]*(?:\r?\n|$)")
-        match = pattern.search(head)
-        if match is None:
-            head += ("" if head.endswith(("\n", "\r")) else newline) + rendered + newline
-        else:
-            ending = newline if match.group(0).endswith(("\n", "\r")) else ""
-            head = head[: match.start()] + rendered + ending + head[match.end() :]
-    return bom + head + tail
+        span = spans.get(name)
+        if span is None:
+            raise collections.CollectionError("INVALID_RECORD_ITEM", "item field is missing")
+        rendered = vault.serialize_frontmatter({name: value}).replace("\n", newline)
+        replacements.append((*span, rendered))
+    updated_yaml = yaml_text
+    for start, end, rendered in sorted(replacements, reverse=True):
+        updated_yaml = updated_yaml[:start] + rendered + updated_yaml[end:]
+    audit_line = (
+        f"# exomem-record-audit: {audit_correlation}{newline}"
+        if audit_correlation and "exomem-record-audit:" not in updated_yaml
+        else ""
+    )
+    return bom + text[: opening.end()] + updated_yaml + audit_line + text[close_start:]
 
 
 @dataclass(frozen=True, slots=True)
