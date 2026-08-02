@@ -21,3 +21,19 @@ def test_live_recall_checkpoint_reuses_projected_map_without_rewalking(
     )
 
     assert freshness.recall_checkpoint(tmp_path, "kb") == first
+
+
+def test_raw_event_moves_broad_cursor_not_live_recall_projection(tmp_path: Path) -> None:
+    raw = tmp_path / "Knowledge Base" / "Records" / "raw.md"
+    raw.parent.mkdir(parents=True)
+    raw.write_text("raw", encoding="utf-8")
+    freshness.seed(tmp_path, "kb", [(str(raw), freshness.stat_signature(raw))])
+    before = freshness.recall_checkpoint(tmp_path, "kb")
+    broad_before = freshness.consumer_checkpoint(tmp_path, "kb")
+
+    raw.write_text("changed", encoding="utf-8")
+    freshness.on_files_changed(tmp_path, changed=[raw])
+
+    assert freshness.consumer_checkpoint(tmp_path, "kb").generation > broad_before.generation
+    after = freshness.recall_checkpoint(tmp_path, "kb")
+    assert (after.triple, after.generation) == (before.triple, before.generation)

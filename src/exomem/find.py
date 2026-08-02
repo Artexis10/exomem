@@ -266,6 +266,7 @@ class FreshnessSnapshot:
         self._root = vault_root
         self._kb: tuple[int, int, str] | None = None
         self._vault: tuple[int, int, str] | None = None
+        self._recall: dict[str, freshness.RecallFreshnessCheckpoint] = {}
 
     def kb(self) -> tuple[int, int, str]:
         if self._kb is None:
@@ -295,9 +296,19 @@ class FreshnessSnapshot:
         resolver and inbound-link consumers.  Recall ignores raw Records edits
         and binds every cache/sidecar key to the policy identity.
         """
-        checkpoint = freshness.recall_checkpoint(self._root, scope)
+        return self.recall_checkpoint(scope).triple
+
+    def recall_checkpoint(self, scope: str) -> freshness.RecallFreshnessCheckpoint:
+        checkpoint = self._recall.get(scope)
+        if checkpoint is None:
+            checkpoint = freshness.recall_checkpoint(self._root, scope)
+            self._recall[scope] = checkpoint
+        return checkpoint
+
+    def projection_key(self, scope: str) -> tuple:
+        checkpoint = self.recall_checkpoint(scope)
         return (
-            *checkpoint.triple,
+            checkpoint.triple,
             checkpoint.policy_version,
             checkpoint.access_policy_fingerprint,
         )
@@ -361,9 +372,9 @@ def _freshness_key(
             )
         )
     if scope in ("kb", "kb-only"):
-        parts.append(("kb", *snapshot.kb()))
+        parts.append(("kb", *snapshot.projection_key("kb")))
     if scope == "vault" or (scope == "kb" and query_norm):
-        parts.append(("vault", *snapshot.vault()))
+        parts.append(("vault", *snapshot.projection_key("vault")))
     if mode in ("hybrid", "vector"):
         from . import embeddings
 

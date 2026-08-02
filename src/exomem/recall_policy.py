@@ -7,6 +7,7 @@ ingress can make the same decision before opening a candidate page.
 
 from __future__ import annotations
 
+import os
 import stat
 from collections.abc import Iterable, Iterator
 from pathlib import Path
@@ -76,7 +77,7 @@ def recall_policy_identity(vault_root: Path) -> tuple[str, str]:
 
 def _vault_relative(root: Path, path: Path | str) -> str | None:
     raw = str(path)
-    if "\\" in raw or "\x00" in raw:
+    if ("\\" in raw and os.name != "nt") or "\x00" in raw:
         return None
     candidate = Path(path)
     if not candidate.is_absolute():

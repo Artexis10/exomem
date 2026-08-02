@@ -1453,9 +1453,9 @@ class LexicalStore:
     # -------------------------------------------------------------- freshness
 
     def _scope_triple(self, scope: str) -> tuple:
-        from . import bm25 as bm25_module
+        from . import freshness
 
-        return bm25_module.corpus_key(self.vault_root, scope)
+        return freshness.recall_triple(self.vault_root, scope)
 
     def _stored_count_max(self, conn: sqlite3.Connection, scope: str) -> tuple[int, int]:
         col = "in_vault" if scope == "vault" else "in_kb"
@@ -1750,8 +1750,8 @@ class LexicalStore:
         registry isn't live (kill-switched, or a scope never seeded)."""
         from . import freshness as freshness_module
 
-        kb = freshness_module.live_entries(self.vault_root, "kb")
-        vault = freshness_module.live_entries(self.vault_root, "vault")
+        kb = freshness_module.live_recall_entries(self.vault_root, "kb")
+        vault = freshness_module.live_recall_entries(self.vault_root, "vault")
         if kb is None or vault is None:
             return self._walk_entries()
         members: dict[Path, list[bool]] = {}
@@ -2021,6 +2021,7 @@ class LexicalStore:
     def _upsert_paths_locked(self, paths: list[Path]) -> bool:
         """`upsert_paths` body with the publication barrier already held."""
         from . import freshness as freshness_module
+        from . import recall_policy
 
         if not self.path.exists():
             return False
@@ -2029,10 +2030,14 @@ class LexicalStore:
             if not self._schema_is_current(conn):
                 return False
             prepared: list[tuple[Path, str, tuple[int, int, int], bool, bool]] = []
+            suppressed: list[str] = []
             for path in paths:
                 try:
                     rel = path.resolve().relative_to(self.vault_root.resolve()).as_posix()
                 except ValueError:
+                    continue
+                if not recall_policy.is_recall_candidate(self.vault_root, path):
+                    suppressed.append(rel)
                     continue
                 # Validate every requested source before deleting any existing row.
                 # A path disappearing mid-request is an incomplete snapshot, not a
@@ -2041,6 +2046,12 @@ class LexicalStore:
                 in_kb, in_vault = self._membership(path)
                 prepared.append((path, rel, signature, in_kb, in_vault))
             with conn:
+                for rel in suppressed:
+                    row = conn.execute("SELECT rowid FROM pages WHERE path = ?", (rel,)).fetchone()
+                    if row is not None:
+                        self._delete_rowid(conn, row[0])
+                    else:
+                        self._delete_semantic_units(conn, rel)
                 for path, rel, signature, in_kb, in_vault in prepared:
                     row = conn.execute("SELECT rowid FROM pages WHERE path = ?", (rel,)).fetchone()
                     if row is not None:

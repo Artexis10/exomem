@@ -107,12 +107,21 @@ class FreshnessCheckpoint(NamedTuple):
 
 
 class RecallFreshnessCheckpoint(NamedTuple):
-    """Snapshot for semantic recall, distinct from broad identity freshness."""
+    """Independent event stream for the policy-projected recall corpus."""
 
+    instance_id: str
+    generation: int
     triple: tuple[int, int, str]
     policy_version: str
     access_policy_fingerprint: str
-    generation: int
+
+
+class RecallDelta(NamedTuple):
+    from_: RecallFreshnessCheckpoint
+    to: RecallFreshnessCheckpoint
+    complete: bool
+    changed: frozenset[str]
+    deleted: frozenset[str]
 
 
 class ConsumerDelta(NamedTuple):
@@ -170,6 +179,9 @@ _history: dict[tuple[str, str], list[tuple[int, int, frozenset[str]]]] = {}
 _recall_maps: dict[tuple[str, str], dict[str, FileSignature]] = {}
 _recall_triples: dict[tuple[str, str], tuple[int, int, str] | None] = {}
 _recall_generations: dict[tuple[str, str], int] = {}
+_recall_identities: dict[tuple[str, str], tuple[str, str]] = {}
+_recall_live: set[tuple[str, str]] = set()
+_recall_history: dict[tuple[str, str], list[tuple[int, int, frozenset[str]]]] = {}
 
 
 def _next_gen() -> int:
@@ -193,6 +205,17 @@ def _record_event(key: tuple[str, str], paths: set[str]) -> None:
     overflow = len(hist) - DELTA_HISTORY_LIMIT
     if overflow > 0:
         del hist[:overflow]
+
+
+def _record_recall_event(key: tuple[str, str], paths: set[str]) -> None:
+    previous = _recall_generations.get(key, 0)
+    current = _next_gen()
+    _recall_generations[key] = current
+    history = _recall_history.setdefault(key, [])
+    history.append((previous, current, frozenset(paths)))
+    overflow = len(history) - DELTA_HISTORY_LIMIT
+    if overflow > 0:
+        del history[:overflow]
 
 
 def event_indexes_enabled() -> bool:
@@ -261,7 +284,7 @@ def recall_triple(vault_root: Path, scope: str) -> tuple[int, int, str]:
     root = Path(vault_root)
     key = _key(root, scope)
     with _lock:
-        if event_indexes_enabled() and key in _live:
+        if event_indexes_enabled() and key in _recall_live:
             cached = _recall_triples.get(key)
             if cached is None:
                 cached = triple_from_entries(_recall_maps.get(key, {}).items())
@@ -289,12 +312,80 @@ def recall_checkpoint(vault_root: Path, scope: str) -> RecallFreshnessCheckpoint
     from . import recall_policy
 
     policy_version, access_fingerprint = recall_policy.recall_policy_identity(vault_root)
+    key = _key(vault_root, scope)
+    identity = (policy_version, access_fingerprint)
+    while True:
+        with _lock:
+            live = event_indexes_enabled() and key in _recall_live
+            if not live or _recall_identities.get(key) == identity:
+                triple = recall_triple(vault_root, scope)
+                generation = _recall_generations.get(key, 0)
+                break
+            broad_generation = _generations.get(key, 0)
+            broad_entries = dict(_maps.get(key, {}))
+        # Content reads are deliberately outside the global freshness lock.
+        projected = {
+            path: signature
+            for path, signature in broad_entries.items()
+            if recall_policy.is_recall_candidate(vault_root, Path(path))
+        }
+        with _lock:
+            if _generations.get(key, 0) != broad_generation:
+                continue
+            if _recall_identities.get(key) == identity:
+                continue
+            _recall_maps[key] = projected
+            _recall_triples[key] = None
+            _recall_identities[key] = identity
+            _recall_generations[key] = _next_gen()
+            _recall_history[key] = []
     return RecallFreshnessCheckpoint(
-        recall_triple(vault_root, scope),
+        _instance_id,
+        generation,
+        triple,
         policy_version,
         access_fingerprint,
-        _recall_generations.get(_key(vault_root, scope), 0),
     )
+
+
+def live_recall_entries(vault_root: Path, scope: str) -> dict[str, FileSignature] | None:
+    """Projected live rows for lexical repair; never exposes broad raw Records."""
+    # Refresh identity first: access-policy edits have no Markdown event.
+    recall_checkpoint(vault_root, scope)
+    with _lock:
+        key = _key(vault_root, scope)
+        if not event_indexes_enabled() or key not in _recall_live:
+            return None
+        return dict(_recall_maps.get(key, {}))
+
+
+def recall_delta_since(
+    vault_root: Path, scope: str, checkpoint: RecallFreshnessCheckpoint
+) -> RecallDelta:
+    """Coalesced projected changes, refusing foreign/reprojected history."""
+    current = recall_checkpoint(vault_root, scope)
+    key = _key(vault_root, scope)
+    with _lock:
+        if checkpoint.instance_id != _instance_id or checkpoint.generation > current.generation:
+            return RecallDelta(checkpoint, current, False, frozenset(), frozenset())
+        if checkpoint.generation == current.generation:
+            return RecallDelta(checkpoint, current, True, frozenset(), frozenset())
+        history = _recall_history.get(key, [])
+        if not history or checkpoint.generation < history[0][0]:
+            return RecallDelta(checkpoint, current, False, frozenset(), frozenset())
+        changed: set[str] = set()
+        deleted: set[str] = set()
+        for _before, _after, paths in history:
+            if _after <= checkpoint.generation:
+                continue
+            for path in paths:
+                if path in _recall_maps.get(key, {}):
+                    changed.add(path)
+                    deleted.discard(path)
+                else:
+                    deleted.add(path)
+                    changed.discard(path)
+        return RecallDelta(checkpoint, current, True, frozenset(changed), frozenset(deleted))
 
 
 def scopes_for(vault_root: Path, path: Path) -> tuple[bool, bool]:
@@ -359,6 +450,7 @@ def seed(vault_root: Path, scope: str, entries: Iterable[tuple[str, SignatureLik
         for sp, signature in raw_entries
         if recall_policy.is_recall_candidate(vault_root, Path(sp))
     }
+    recall_identity = recall_policy.recall_policy_identity(vault_root)
     key = _key(vault_root, scope)
     with _lock:
         _maps[key] = dict(raw_entries)
@@ -371,6 +463,9 @@ def seed(vault_root: Path, scope: str, entries: Iterable[tuple[str, SignatureLik
         _recall_maps[key] = recall_entries
         _recall_triples[key] = None
         _recall_generations[key] = _next_gen()
+        _recall_identities[key] = recall_identity
+        _recall_live.add(key)
+        _recall_history[key] = []
 
 
 def reconcile(
@@ -394,6 +489,7 @@ def reconcile(
         for sp, signature in fresh.items()
         if recall_policy.is_recall_candidate(vault_root, Path(sp))
     }
+    recall_identity = recall_policy.recall_policy_identity(vault_root)
     with _lock:
         old = _maps.get(key)
         # The map swap and the drift generation/history transition happen in ONE
@@ -408,8 +504,11 @@ def reconcile(
         old_recall = _recall_maps.get(key)
         _recall_maps[key] = recall_fresh
         _recall_triples[key] = None
+        _recall_identities[key] = recall_identity
         if old_recall != recall_fresh:
             _recall_generations[key] = _next_gen()
+            _recall_history[key] = []
+        _recall_live.add(key)
         if old is None:
             # First initialization of this scope from a walk. Like `seed`, this is
             # a fresh registry baseline that NO prior checkpoint can bridge across:
@@ -654,6 +753,7 @@ def on_files_changed(
         # generation exactly once per scope and the retained event records the
         # target-state identities the delta will coalesce over.
         touched: dict[tuple[str, str], set[str]] = {}
+        recall_touched: dict[tuple[str, str], set[str]] = {}
         for sp, in_kb, in_vault in del_items:
             for scope, member in (("kb", in_kb), ("vault", in_vault)):
                 self_key = _key(vault_root, scope)
@@ -665,7 +765,7 @@ def on_files_changed(
                     recall = _recall_maps.get(self_key)
                     if recall is not None and recall.pop(sp, None) is not None:
                         _recall_triples[self_key] = None
-                        _recall_generations[self_key] = _next_gen()
+                        recall_touched.setdefault(self_key, set()).add(sp)
         for sp, signature, in_kb, in_vault, is_recall in chg_items:
             for scope, member in (("kb", in_kb), ("vault", in_vault)):
                 self_key = _key(vault_root, scope)
@@ -686,13 +786,15 @@ def on_files_changed(
                     if previous != signature:
                         recall[sp] = signature
                         _recall_triples[self_key] = None
-                        _recall_generations[self_key] = _next_gen()
+                        recall_touched.setdefault(self_key, set()).add(sp)
                 elif previous is not None:
                     recall.pop(sp, None)
                     _recall_triples[self_key] = None
-                    _recall_generations[self_key] = _next_gen()
+                    recall_touched.setdefault(self_key, set()).add(sp)
         for self_key, paths in touched.items():
             _record_event(self_key, paths)
+        for self_key, paths in recall_touched.items():
+            _record_recall_event(self_key, paths)
 
 
 def invalidate(vault_root: Path | None = None) -> None:
@@ -711,6 +813,9 @@ def invalidate(vault_root: Path | None = None) -> None:
             _recall_maps.clear()
             _recall_triples.clear()
             _recall_generations.clear()
+            _recall_identities.clear()
+            _recall_live.clear()
+            _recall_history.clear()
             return
         root = _canon(vault_root)
         for scope in SCOPES:
@@ -723,6 +828,9 @@ def invalidate(vault_root: Path | None = None) -> None:
             _recall_maps.pop(key, None)
             _recall_triples.pop(key, None)
             _recall_generations.pop(key, None)
+            _recall_identities.pop(key, None)
+            _recall_live.discard(key)
+            _recall_history.pop(key, None)
 
 
 def rebaseline(vault_root: Path) -> dict[str, bool]:

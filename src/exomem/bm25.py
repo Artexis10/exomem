@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Any
 
 from . import find as find_module
-from . import recall_policy
+from . import freshness, recall_policy
 from .kbdir import kb_dirname
 
 log = logging.getLogger(__name__)
@@ -147,17 +147,18 @@ class BM25Index:
         """
         if freshness is None:
             freshness = corpus_key(vault_root, scope)
+        cache_identity = (*freshness, *recall_policy.recall_policy_identity(vault_root))
         cache_key = (vault_root, scope)
         cached = self._cache.get(cache_key)
-        if cached is None or cached[0] != freshness:
+        if cached is None or cached[0] != cache_identity:
             with self._build_lock:
                 # Double-check: a concurrent builder may have stored a fresh
                 # corpus while this thread waited on the lock.
                 cached = self._cache.get(cache_key)
-                if cached is None or cached[0] != freshness:
+                if cached is None or cached[0] != cache_identity:
                     log.debug("bm25: rebuilding index for %s scope=%s", vault_root, scope)
                     bm25, paths = self._build(vault_root, scope)
-                    cached = (freshness, bm25, paths)
+                    cached = (cache_identity, bm25, paths)
                     self._cache[cache_key] = cached
         return cached[1], cached[2]
 
@@ -257,8 +258,8 @@ class BM25Index:
 
 
 def corpus_key(vault_root: Path, scope: str) -> tuple:
-    """Projected recall identity for a scope (one policy-filtered stat walk)."""
-    return (*find_module._walk_freshness_key(_recall_walk(vault_root, scope)), *recall_policy.recall_policy_identity(vault_root))
+    """Projected three-field recall triple for lexical sidecars."""
+    return freshness.recall_triple(vault_root, scope)
 
 
 def _recall_walk(vault_root: Path, scope: str):
