@@ -1,0 +1,279 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pytest
+from record_fixtures import (
+    copy_dataset_fixture,
+    copy_vehicle_maintenance_fixture,
+    copy_x3_fixture,
+)
+
+from exomem import memory_refs
+from exomem import structured_collections as collections
+
+COLLECTION_ID = "bf7d5ef7-2e68-4b5f-8e4e-f0f58eb9ccaf"
+
+
+def _manifest(
+    collection_id: str = COLLECTION_ID,
+    *,
+    profile: str = "records",
+    source: str = "events.md",
+    version: int = 1,
+) -> str:
+    return f"""---
+type: collection
+exomem_id: {collection_id}
+title: Maintenance events
+semantic_profile: {profile}
+collection_version: {version}
+schema_version: 2
+lifecycle: active
+storage:
+  strategy: markdown-items
+  source: {source}
+  format_version: 1
+item_schema:
+  natural_key: [occurred_on, title]
+  fields:
+    occurred_on:
+      type: date
+      required: true
+    title:
+      type: string
+      required: true
+    mileage:
+      type: integer
+    evidence:
+      type: array
+      items:
+        type: link
+templates:
+  - path: Templates/maintenance.md
+    default_properties:
+      status: planned
+views:
+  latest:
+    sort: [occurred_on, desc]
+links:
+  plans:
+    - reference: exomem://memory/99f6fa8b-5d6e-43f8-8cdf-e30767e8f4d7
+      query:
+        filters:
+          asset: car
+        limit: 12
+---
+
+Human-readable contract.
+"""
+
+
+def _write_manifest(vault: Path, relative: str, content: str | None = None) -> Path:
+    path = vault / relative
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content or _manifest(), encoding="utf-8")
+    return path
+
+
+def test_load_manifest_keeps_profile_neutral_contract_and_opaque_plan_link(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    path = _write_manifest(vault, "Knowledge Base/Records/Maintenance/_collection.md")
+
+    manifest = collections.load_manifest(vault, path)
+
+    assert manifest.collection_id == COLLECTION_ID
+    assert manifest.semantic_profile == "records"
+    assert manifest.storage.strategy == "markdown-items"
+    assert manifest.storage.source == "Knowledge Base/Records/Maintenance/events.md"
+    assert manifest.schema.natural_key == ("occurred_on", "title")
+    assert manifest.schema.validate({"occurred_on": "2026-07-01", "title": "Service"}) == {
+        "occurred_on": "2026-07-01",
+        "title": "Service",
+    }
+    assert manifest.templates[0].path == (
+        "Knowledge Base/Records/Maintenance/Templates/maintenance.md"
+    )
+    assert manifest.links.plans[0].reference == (
+        "exomem://memory/99f6fa8b-5d6e-43f8-8cdf-e30767e8f4d7"
+    )
+    assert manifest.links.plans[0].query == {"filters": {"asset": "car"}, "limit": 12}
+
+
+def test_load_manifest_allows_future_planning_but_rejects_unknown_profiles(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    planning = _write_manifest(
+        vault,
+        "Knowledge Base/Planning/Initiatives/_collection.md",
+        _manifest(profile="planning"),
+    )
+    assert collections.load_manifest(vault, planning).semantic_profile == "planning"
+
+    unknown = _write_manifest(
+        vault,
+        "Knowledge Base/Records/Unknown/_collection.md",
+        _manifest(profile="forecast"),
+    )
+    with pytest.raises(collections.CollectionError) as excinfo:
+        collections.load_manifest(vault, unknown)
+    assert excinfo.value.code == "UNSUPPORTED_COLLECTION_PROFILE"
+
+
+@pytest.mark.parametrize(
+    ("replacement", "code"),
+    [
+        ("collection_version: 2", "UNSUPPORTED_COLLECTION_VERSION"),
+        ("format_version: 2", "UNSUPPORTED_STORAGE_FORMAT_VERSION"),
+        ("source: ../outside.md", "INVALID_COLLECTION_PATH"),
+    ],
+)
+def test_load_manifest_refuses_unsupported_versions_and_path_escapes(
+    tmp_path: Path, replacement: str, code: str
+) -> None:
+    vault = tmp_path / "vault"
+    original = (
+        "collection_version: 1"
+        if replacement.startswith("collection")
+        else "format_version: 1"
+        if replacement.startswith("format")
+        else "source: events.md"
+    )
+    path = _write_manifest(
+        vault,
+        "Knowledge Base/Records/Maintenance/_collection.md",
+        _manifest().replace(original, replacement),
+    )
+
+    with pytest.raises(collections.CollectionError) as excinfo:
+        collections.load_manifest(vault, path)
+    assert excinfo.value.code == code
+
+
+def test_discovery_authorizes_paths_before_parsing_and_only_releasable_duplicates_are_ambiguous(
+    tmp_path: Path,
+) -> None:
+    vault = tmp_path / "vault"
+    released = _write_manifest(vault, "Knowledge Base/Records/Released/_collection.md")
+    withheld = _write_manifest(
+        vault,
+        "Knowledge Base/Records/Withheld/_collection.md",
+        "---\nthis is: [not valid yaml\n---\n",
+    )
+
+    discovered = collections.discover_collections(
+        vault,
+        authorize_path=lambda path: path != withheld.relative_to(vault).as_posix(),
+    )
+    assert [item.path for item in discovered] == [released.relative_to(vault).as_posix()]
+
+    duplicate = _write_manifest(vault, "Knowledge Base/Records/Duplicate/_collection.md")
+    with pytest.raises(collections.CollectionError) as excinfo:
+        collections.resolve_collection(
+            vault,
+            COLLECTION_ID,
+            authorize_path=lambda path: path != withheld.relative_to(vault).as_posix(),
+        )
+    assert excinfo.value.code == "AMBIGUOUS_COLLECTION"
+    assert str(duplicate) not in excinfo.value.reason
+
+
+def test_discovery_skips_symlink_escape_and_resolves_memory_reference(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    path = _write_manifest(vault, "Knowledge Base/Records/Maintenance/_collection.md")
+    outside = tmp_path / "outside.md"
+    outside.write_text(_manifest(), encoding="utf-8")
+    escaped = vault / "Knowledge Base" / "Records" / "escaped" / "_collection.md"
+    escaped.parent.mkdir(parents=True)
+    try:
+        escaped.symlink_to(outside)
+    except OSError:
+        pytest.skip("symlinks unavailable")
+
+    resolved = collections.resolve_collection(vault, memory_refs.memory_ref(COLLECTION_ID))
+    assert resolved.path == path.relative_to(vault).as_posix()
+    assert collections.discover_collections(vault) == (resolved,)
+
+
+def test_collection_scoped_record_reference_and_natural_key_are_canonical() -> None:
+    fields = {
+        "occurred_on": "2026-07-01",
+        "title": "cafe\u0301",
+        "repetitions": None,
+        "load": 12.5,
+        "completed": True,
+    }
+
+    serialized = collections.natural_key_serialization(
+        2,
+        ("occurred_on", "title", "repetitions", "load", "completed"),
+        fields,
+        field_types={"occurred_on": "date"},
+    )
+    assert json.loads(serialized) == [
+        2,
+        [
+            ["occurred_on", "2026-07-01"],
+            ["title", "café"],
+            ["repetitions", None],
+            ["load", 12.5],
+            ["completed", True],
+        ],
+    ]
+
+    key = collections.inferred_item_key(COLLECTION_ID, serialized)
+    ref = collections.record_ref(COLLECTION_ID, "service / 2026-07-01")
+    assert collections.parse_record_ref(ref) == (COLLECTION_ID, "service / 2026-07-01")
+    assert collections.ItemIdentity(COLLECTION_ID, key, inferred=True).reference().endswith(key)
+
+
+def test_advisory_schema_inference_has_provenance_and_never_writes(tmp_path: Path) -> None:
+    source = tmp_path / "events.md"
+    source.write_text("manual source\n", encoding="utf-8")
+    before = source.read_bytes()
+
+    proposal = collections.infer_schema(
+        [
+            {"occurred_on": "2026-07-01", "mileage": 12000, "status": "completed"},
+            {"occurred_on": "2026-07-02", "mileage": 12100, "status": "scheduled"},
+        ],
+        source_paths=[source],
+    )
+
+    assert proposal.advisory is True
+    assert proposal.sample_count == 2
+    assert proposal.provenance == (str(source),)
+    assert proposal.fields["occurred_on"].type == "date"
+    assert proposal.fields["mileage"].type == "integer"
+    assert source.read_bytes() == before
+
+
+def test_manifestless_tracker_is_inspection_only_compatibility_surface(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    tracker = vault / "Knowledge Base/Records/Training Log.md"
+    tracker.parent.mkdir(parents=True)
+    tracker.write_text("---\ntype: tracker\n---\n\n# Training\n", encoding="utf-8")
+
+    legacy = collections.inspect_legacy_tracker(vault, tracker)
+
+    assert legacy.inspect_only is True
+    assert legacy.path == "Knowledge Base/Records/Training Log.md"
+    assert legacy.collection_id.startswith("legacy-")
+
+
+def test_acceptance_fixtures_cover_log_item_and_query_only_dataset_storage(tmp_path: Path) -> None:
+    x3 = copy_x3_fixture(tmp_path / "x3")
+    vehicle = copy_vehicle_maintenance_fixture(tmp_path / "vehicle")
+    dataset = copy_dataset_fixture(tmp_path / "dataset")
+
+    assert collections.load_manifest(tmp_path / "x3", x3 / "_collection.md").storage.strategy == (
+        "markdown-log"
+    )
+    assert (
+        collections.load_manifest(tmp_path / "vehicle", vehicle / "_collection.md").storage.strategy
+        == "markdown-items"
+    )
+    assert (
+        collections.load_manifest(tmp_path / "dataset", dataset / "_collection.md").storage.strategy
+        == "dataset"
+    )

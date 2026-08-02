@@ -1,19 +1,19 @@
 ## 1. Acceptance Fixtures And Red Contracts
 
-- [ ] 1.1 Add dedicated per-test X3 fixture files for the canonical newest-first log, adjacent declarative manifest, undated archive, Push/Pull templates, opaque Planning link/query descriptor, completed/partial/aborted sessions, duplicate legacy keys, explicit markers, special repetition notation, fenced decoys, CRLF, and no-final-newline variants.
-- [ ] 1.2 Add a one-Markdown-file-per-item vehicle-maintenance fixture with duplicate dates, arrays, amounts/currencies, nullable due values, Evidence links, mixed governance, and direct-edit correction cases.
-- [ ] 1.3 Add an unrelated query-only dataset fixture with declared keys, time/category/numeric fields, deterministic expected rows, high-cardinality values, and direct-edit pagination invalidation.
-- [ ] 1.4 Write failing manifest/discovery/schema tests for supported and future versions, collection-scoped identity, canonical natural-key serialization, bounded governed UUID lookup, withheld duplicates, symlink/path escape, unknown profiles, template independence, and manifest-less tracker inspection-only behavior.
+- [x] 1.1 Add dedicated per-test X3 fixture files for the canonical newest-first log, adjacent declarative manifest, undated archive, Push/Pull templates, opaque Planning link/query descriptor, completed/partial/aborted sessions, duplicate legacy keys, explicit markers, special repetition notation, fenced decoys, CRLF, and no-final-newline variants.
+- [x] 1.2 Add a one-Markdown-file-per-item vehicle-maintenance fixture with duplicate dates, arrays, amounts/currencies, nullable due values, Evidence links, mixed governance, and direct-edit correction cases.
+- [x] 1.3 Add an unrelated query-only dataset fixture with declared keys, time/category/numeric fields, deterministic expected rows, high-cardinality values, and direct-edit pagination invalidation.
+- [x] 1.4 Write failing manifest/discovery/schema tests for supported and future versions, collection-scoped identity, canonical natural-key serialization, bounded governed UUID lookup, withheld duplicates, symlink/path escape, unknown profiles, template independence, and manifest-less tracker inspection-only behavior.
 - [ ] 1.5 Write failing adapter tests for fence-aware exact-span parsing, insertion edge, explicit/inferred/ambiguous item keys, reorder/date correction, child-row expansion, byte preservation, and query-only dataset refusal.
 
 ## 2. Structured Collection Core
 
-- [ ] 2.1 Implement immutable collection, storage, schema, link/query-descriptor, item identity, source-version, and diagnostic models in a profile-neutral module.
-- [ ] 2.2 Implement strict human-readable `_collection.md` parsing and validation with version checks, canonical vault-relative path validation, bounded schemas, templates, saved views, and opaque Planning descriptor round-trip.
-- [ ] 2.3 Implement bounded symlink-safe manifest discovery and resolution by path, memory ref, or UUID, authorizing candidate paths before parsing identity-bearing content and detecting ambiguity only among releasable candidates.
-- [ ] 2.4 Implement canonical collection-scoped record references and natural-key serialization with declared field order, schema-version binding, Unicode NFC, typed JSON scalars, ISO date/datetime normalization, explicit nulls, and collision diagnostics.
-- [ ] 2.5 Implement bounded advisory schema inference that returns provenance and never writes a manifest or canonical item.
-- [ ] 2.6 Run the focused core tests and correct all contract failures before adapter work proceeds.
+- [x] 2.1 Implement immutable collection, storage, schema, link/query-descriptor, item identity, source-version, and diagnostic models in a profile-neutral module.
+- [x] 2.2 Implement strict human-readable `_collection.md` parsing and validation with version checks, canonical vault-relative path validation, bounded schemas, templates, saved views, and opaque Planning descriptor round-trip.
+- [x] 2.3 Implement bounded symlink-safe manifest discovery and resolution by path, memory ref, or UUID, authorizing candidate paths before parsing identity-bearing content and detecting ambiguity only among releasable candidates.
+- [x] 2.4 Implement canonical collection-scoped record references and natural-key serialization with declared field order, schema-version binding, Unicode NFC, typed JSON scalars, ISO date/datetime normalization, explicit nulls, and collision diagnostics.
+- [x] 2.5 Implement bounded advisory schema inference that returns provenance and never writes a manifest or canonical item.
+- [x] 2.6 Run the focused core tests and correct all contract failures before adapter work proceeds.
 
 ## 3. Storage Adapters And Shared Query Evaluation
 
