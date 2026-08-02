@@ -37,11 +37,11 @@
 
 ## 5. Governance Before Reduction
 
-- [ ] 5.1 Write failing governance tests for L0–L6 disclosure (full Records require L6), withheld manifests, authorized-first UUID discovery with separate raw/public caps, file-per-item mixed release decisions, hidden malformed/cap-consuming items, hidden-only continuation stability, whole-log/dataset granularity, withheld values excluded before totals/latest/distinct/profile/pagination, safe conflict shapes, templates, Planning descriptors, and receipts.
-- [ ] 5.2 Implement Records authorization and egress projection so manifest/source/template paths are governed before parse/return and an immediate adapter callback authorizes each file-per-item candidate before public counts, caps, ordering, parsing, snapshots, diagnostics, pagination, or reduction.
-- [ ] 5.3 Implement default-deny typed Records envelopes and recursively project schema-declared links, Planning descriptors, templates, provenance, paths, identities, hashes, audit/conflict/continuation/count fields before reduction or rendering; do not release arbitrary nested `rows` through a top-level allowlist.
-- [ ] 5.4 Prove aggregates cannot reveal withheld rows, document that one log/dataset is an all-or-nothing governance artifact, and refuse mixed-release mutation when the caller cannot receive the complete canonical CAS snapshot.
-- [ ] 5.5 Run focused governance, excluded-tier, graph/reference release, receipt, and Records reduction tests.
+- [x] 5.1 Write failing governance tests for L0–L6 disclosure (full Records require L6), withheld manifests, authorized-first UUID discovery with separate raw/public caps, file-per-item mixed release decisions, hidden malformed/cap-consuming items, hidden-only continuation stability, whole-log/dataset granularity, withheld values excluded before totals/latest/distinct/profile/pagination, safe conflict shapes, templates, Planning descriptors, and receipts.
+- [x] 5.2 Implement Records authorization and egress projection so manifest/source/template paths are governed before parse/return and an immediate adapter callback authorizes each file-per-item candidate before public counts, caps, ordering, parsing, snapshots, diagnostics, pagination, or reduction.
+- [x] 5.3 Implement default-deny typed Records envelopes and recursively project schema-declared links, Planning descriptors, templates, provenance, paths, identities, hashes, audit/conflict/continuation/count fields before reduction or rendering; do not release arbitrary nested `rows` through a top-level allowlist.
+- [x] 5.4 Prove aggregates cannot reveal withheld rows, document that one log/dataset is an all-or-nothing governance artifact, and refuse mixed-release mutation when the caller cannot receive the complete canonical CAS snapshot.
+- [x] 5.5 Run focused governance, excluded-tier, graph/reference release, receipt, and Records reduction tests.
 
 ## 6. Retrieval Isolation And Manual-Edit Repair
 
