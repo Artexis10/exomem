@@ -37,17 +37,17 @@
 
 ## 5. Governance Before Reduction
 
-- [ ] 5.1 Write failing governance tests for withheld manifests, authorized-first UUID discovery, file-per-item mixed release decisions, whole-log/dataset granularity, withheld values excluded before totals/latest/distinct/profile/pagination, safe conflict shapes, templates, Planning descriptors, and receipts.
-- [ ] 5.2 Implement Records authorization and egress projection so manifest/source/template paths are governed before parse/return and file-per-item authorization occurs before every filter, sort, pagination, or reduction.
-- [ ] 5.3 Register every path-, identity-, relation-, provenance-, audit-, conflict-, and count-bearing response field with the release plane and preserve indistinguishable-from-missing behavior.
-- [ ] 5.4 Prove aggregates cannot reveal withheld rows and document that one log/dataset is an all-or-nothing governance artifact in this delivery.
+- [ ] 5.1 Write failing governance tests for L0–L6 disclosure (full Records require L6), withheld manifests, authorized-first UUID discovery with separate raw/public caps, file-per-item mixed release decisions, hidden malformed/cap-consuming items, hidden-only continuation stability, whole-log/dataset granularity, withheld values excluded before totals/latest/distinct/profile/pagination, safe conflict shapes, templates, Planning descriptors, and receipts.
+- [ ] 5.2 Implement Records authorization and egress projection so manifest/source/template paths are governed before parse/return and an immediate adapter callback authorizes each file-per-item candidate before public counts, caps, ordering, parsing, snapshots, diagnostics, pagination, or reduction.
+- [ ] 5.3 Implement default-deny typed Records envelopes and recursively project schema-declared links, Planning descriptors, templates, provenance, paths, identities, hashes, audit/conflict/continuation/count fields before reduction or rendering; do not release arbitrary nested `rows` through a top-level allowlist.
+- [ ] 5.4 Prove aggregates cannot reveal withheld rows, document that one log/dataset is an all-or-nothing governance artifact, and refuse mixed-release mutation when the caller cannot receive the complete canonical CAS snapshot.
 - [ ] 5.5 Run focused governance, excluded-tier, graph/reference release, receipt, and Records reduction tests.
 
 ## 6. Retrieval Isolation And Manual-Edit Repair
 
-- [ ] 6.1 Write failing high-cardinality tests proving one thousand raw Record item files and canonical log rows produce no ordinary recall flood while manifests/explicit summaries remain discoverable and structured queries remain complete within caps.
-- [ ] 6.2 Implement one shared corpus/path predicate for `Knowledge Base/Records/**` raw canonical material and reuse it across current/incremental lexical, vector, graph, filter-only, auto-widen, move/delete, and reconcile paths without suppressing stable collection-aware resolution.
-- [ ] 6.3 Extend existing maintenance reconciliation to remove stale raw-record sidecar rows after create, edit, move, delete, or policy change; keep `record_memory(action="inspect")` report-only.
+- [ ] 6.1 Write failing high-cardinality tests proving one thousand raw Record item files and canonical log rows produce no ordinary recall flood while manifests and valid exact `_summary.md` files remain discoverable, malformed/oversized/aliased summaries stay suppressed, stale summaries remain explicitly historical, Records outside the exact layer refuse, and structured queries remain complete within caps.
+- [ ] 6.2 Implement one shared two-stage corpus policy for `Knowledge Base/Records/**`, plus recall-projected freshness and policy identity, and reuse it across current/incremental lexical, semantic-unit, vector, graph, claim, filter-only, relation, auto-widen, warmup, watcher, move/delete, audit, and final-candidate paths without suppressing stable collection-aware resolution.
+- [ ] 6.3 Split identity upsert, recall upsert, and semantic-only purge; extend maintenance reconciliation to remove policy-stale lexical/unit/vector/graph/claim/deferred rows after create, edit, move, delete, or policy change even with embeddings disabled, without deleting canonical or identity state; keep `record_memory(action="inspect")` report-only.
 - [ ] 6.4 Prove fresh Records queries immediately observe direct Markdown and dataset edits, snapshot continuations refuse after drift, and canonical files are never rewritten by inspection or maintenance.
 - [ ] 6.5 Run recall, find, index-sync, graph, watcher, reconciliation, memory-ref, and Records scale tests with embeddings disabled.
 

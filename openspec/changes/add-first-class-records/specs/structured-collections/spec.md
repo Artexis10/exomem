@@ -22,6 +22,8 @@ The system SHALL represent each explicit structured collection with an ordinary,
 ### Requirement: Separate semantic profiles over shared mechanics
 The collection substrate SHALL keep collection mechanics independent from semantic meaning. `records` SHALL mean observed facts or events and `planning` SHALL mean intended future state; adding another profile SHALL NOT require a fork of identity, schema, storage, mutation, query, audit, rendering, or direct-edit inspection code.
 
+For this first delivery, an explicit `records` manifest and every canonical source it declares SHALL be contained by the exact `Knowledge Base/Records/` layer after portable, symlink-safe path resolution. This profile-specific placement rule makes structured-only recall classification deterministic; it does not constrain future `planning` collections, template locations, or links to governed artifacts elsewhere in the vault.
+
 #### Scenario: Future Planning manifest resolves through the same loader
 - **WHEN** a valid manifest declares `semantic_profile: planning`
 - **THEN** the generic collection loader can inspect its identity, schema, storage, links, and views without treating its items as Records
@@ -30,10 +32,14 @@ The collection substrate SHALL keep collection mechanics independent from semant
 - **WHEN** a manifest declares an unsupported semantic profile
 - **THEN** the substrate reports that profile as unsupported and does not silently apply Records semantics
 
+#### Scenario: Records source outside the Records layer refuses
+- **WHEN** a `records` manifest or its declared canonical source resolves outside exact `Knowledge Base/Records/` path segments, including through case, separator, dot-segment, or symlink aliases
+- **THEN** validation refuses the collection before reading canonical item contents, while a generic future profile remains free to define its own governed placement rule
+
 ### Requirement: Three portable canonical storage strategies
 The substrate SHALL support chronological Markdown logs, one Markdown file per item, and CSV, TSV, or JSON datasets as declared canonical storage. Canonical data SHALL remain in those human-owned files; any SQLite state, cache, index, export, summary, or generated view SHALL be derived and rebuildable.
 
-Chronological-log child rows SHALL declare a bounded `container_field` in addition to their delimiter and fields; that container SHALL be a declared array-of-object item-schema field, so adapters do not impose domain field names. Markdown-item reads SHALL accept exactly one leading UTF-8 BOM for frontmatter parsing while retaining the complete original byte sequence for source hashes, spans, body/newline behavior, and guarded-write preservation.
+Chronological-log child rows SHALL declare a bounded `container_field` in addition to their delimiter and fields; that container SHALL be a declared array-of-object item-schema field, so adapters do not impose domain field names. Markdown-item reads SHALL accept exactly one leading UTF-8 BOM for frontmatter parsing while retaining the complete original byte sequence for source hashes, spans, body/newline behavior, and guarded-write preservation. A Markdown-item container snapshot SHALL cover the marked manifest plus the complete bounded recursive source inventory as ordered `(path, kind, exact-byte hash-or-null)` entries, including the canonical source directory, nested empty directories, unexpected regular files, and all item files; a missing source and an empty source SHALL differ.
 
 #### Scenario: Chronological Markdown stays canonical
 - **WHEN** a log-backed collection is queried or safely mutated
@@ -42,6 +48,10 @@ Chronological-log child rows SHALL declare a bounded `container_field` in additi
 #### Scenario: File-per-item collection uses ordinary properties
 - **WHEN** a Markdown-item collection stores a record
 - **THEN** the record is an ordinary Markdown file with stable item and collection identifiers plus typed YAML properties and an optional readable body
+
+#### Scenario: Recursive inventory drift invalidates mutation snapshot
+- **WHEN** a direct edit adds, removes, or changes a nested file or empty directory after a caller read a Markdown-item collection
+- **THEN** the collection snapshot changes and the commit-bound recursive census refuses a mutation carrying the prior container hash, including when the intended item is deeper in the same ancestor tree
 
 #### Scenario: Dataset stays directly editable
 - **WHEN** a dataset-backed collection uses CSV, TSV, or JSON
@@ -120,7 +130,7 @@ The substrate SHALL make exact append retries idempotent where a stable item ide
 - **THEN** it refuses as missing or stale and does not update an item with similar text or fields
 
 ### Requirement: Auditable agent mutations and receipts
-Every agent mutation SHALL require a concise reason and SHALL return a bounded receipt containing collection identity, item identity (null for create), operation, before and after item/container hashes, affected canonical paths, committed outcome, and a transition correlation. The ordinary manifest SHALL carry `record_audit: {version: 1, head: <transition-id>}` and every agent-touched canonical block/item SHALL carry exactly its latest content-free transition ID. The existing activity log SHALL contain one strict versioned machine-parseable event per transition with its ID, predecessor, operation, collection/manifest/source/item correlation, before/after manifest/item/container hashes, replay payload hash where relevant, and sanitized rationale, without copying canonical item values. Inspection SHALL reconstruct the predecessor chain from the manifest head, deduplicate exact events, refuse forks/conflicts as gaps, and distinguish `baseline`, `ok`, positive `gap`, and bounded `history_incomplete`; direct human edits remain visible across later successful mutations. It SHALL use bounded descriptor-bound regular-file history reads and SHALL never repair or invent history. Operational journals and governance receipts SHALL retain their existing distinct roles.
+Every agent mutation SHALL require a concise reason and SHALL return a bounded receipt containing collection identity, item identity (null for create), operation-specific required before and after item/container hashes, affected canonical paths, committed outcome, and a transition correlation. The ordinary manifest SHALL carry the YAML mapping `record_audit: {version: 1, head: <transition-id>}` in either ordinary flow or block style, and every agent-touched canonical block/item SHALL carry exactly its latest content-free transition ID. The existing activity log SHALL contain one strict versioned machine-parseable event per transition with its ID, predecessor, operation, collection/manifest/source/item correlation, before/after manifest/item/container hashes, replay payload hash where relevant, and sanitized rationale, without copying canonical item values. Create events SHALL have a null item key and name the declared source; append/update events SHALL have a normalized item UUID and a canonical item path valid for the declared storage strategy. Inspection SHALL validate those rules for every reachable transition, reconstruct the predecessor chain from the manifest head, deduplicate exact events, refuse forks/conflicts as gaps, and distinguish `baseline`, `ok`, positive `gap`, and bounded `history_incomplete`; direct human edits remain visible across later successful mutations. It SHALL use bounded descriptor-bound no-follow regular-file reads for the manifest, canonical marker sources, and activity history, bind markers to the same snapshot being inspected, cap markers, and SHALL never repair or invent history. Operational journals and governance receipts SHALL retain their existing distinct roles.
 
 #### Scenario: Successful normal update records one audit event
 - **WHEN** a guarded item update commits
@@ -133,6 +143,14 @@ Every agent mutation SHALL require a concise reason and SHALL return a bounded r
 #### Scenario: Abrupt interruption exposes an audit gap
 - **WHEN** a process terminates after canonical replacement but before the activity-log replacement
 - **THEN** canonical Records remain truth, report-only inspection detects the hash/audit mismatch, and Exomem does not invent or silently hide a history event
+
+#### Scenario: Pre-publication interruption leaves no canonical-looking scaffold
+- **WHEN** a simulated `BaseException` interrupts staging before the first canonical replacement during collection creation
+- **THEN** Exomem removes its empty created directories and batch workspaces, rethrows the original exception without normalization, and an exact retry is not wedged by tool-owned residue
+
+#### Scenario: Human audit-mapping reformat remains mutable
+- **WHEN** a user reformats a valid manifest `record_audit` flow mapping into an equivalent YAML block mapping
+- **THEN** the next mutation replaces that complete mapping node while preserving unrelated manifest bytes and produces valid YAML
 
 ### Requirement: Bounded structured query and stable snapshots
 The substrate SHALL support field and relation filters, date ranges, projection, deterministic sort, bounded pagination, count and bounded numeric/categorical aggregates, and grouped observed-state renderings over adapter-produced rows. Every response SHALL identify the collection and canonical source snapshot. Limits SHALL have a positive hard cap; zero or omitted limits SHALL never bypass that cap. A continuation SHALL refuse or restart explicitly when its source snapshot changed.
