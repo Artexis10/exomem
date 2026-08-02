@@ -1,10 +1,16 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
-from record_fixtures import copy_vehicle_maintenance_fixture
+from record_fixtures import (
+    copy_dataset_fixture,
+    copy_vehicle_maintenance_fixture,
+    copy_x3_fixture,
+)
 
 from exomem import record_formats, record_governance, records
 from exomem import structured_collections as collections
@@ -189,6 +195,92 @@ def test_records_egress_envelopes_are_default_deny_and_never_use_l5_rows() -> No
         egress.LEVEL_EXCERPT,
         kind="record_query",
     ) == {"withheld": True, "reason": "records_requires_full_release"}
+
+
+@pytest.mark.parametrize(
+    ("fixture_copy", "output_format", "aggregate"),
+    (
+        (copy_vehicle_maintenance_fixture, "json", None),
+        (copy_x3_fixture, "markdown", None),
+        (copy_dataset_fixture, "csv", "count"),
+    ),
+)
+def test_query_projection_rebuilds_each_rendered_format_from_typed_result(
+    tmp_path: Path,
+    fixture_copy: Callable[[Path], Path],
+    output_format: str,
+    aggregate: str | None,
+) -> None:
+    fixture = fixture_copy(tmp_path)
+    manifest = collections.load_manifest(tmp_path, fixture / "_collection.md")
+    result = record_formats.query_collection(
+        tmp_path, manifest, output_format=output_format, aggregate=aggregate, limit=3
+    )
+
+    projected = record_governance.project_query_result(
+        replace(result, rendered="forged renderer input"), manifest, output_format=output_format
+    )
+
+    assert projected["collection_id"] == manifest.collection_id
+    assert projected["aggregate"] == result.aggregate
+    assert "forged renderer input" not in projected["rendered"]
+    if output_format == "json":
+        assert json.loads(projected["rendered"])["rows"] == result.rows
+    elif output_format == "markdown":
+        assert projected["rendered"].startswith("---\ncollection_id: ")
+    else:
+        assert projected["rendered"].startswith("# collection_id: ")
+
+
+def test_query_projection_withholds_forged_query_system_source_and_aggregate_fields(
+    tmp_path: Path,
+) -> None:
+    fixture = copy_vehicle_maintenance_fixture(tmp_path)
+    manifest = collections.load_manifest(tmp_path, fixture / "_collection.md")
+    result = record_formats.query_collection(tmp_path, manifest, limit=1)
+    forged_row = dict(result.rows[0])
+    forged_row.pop("item_version")
+
+    for forged in (
+        replace(result, query={**result.query, "unexpected": "secret"}),
+        replace(result, rows=[forged_row]),
+        replace(result, continuation="forged"),
+        replace(result, source_versions=(collections.SourceVersion("../secret", "0" * 64),)),
+        replace(
+            record_formats.query_collection(tmp_path, manifest, aggregate="count"),
+            aggregate={"count": 1, "secret": "must not escape"},
+        ),
+    ):
+        assert record_governance.project_query_result(forged, manifest) == {
+            "withheld": True,
+            "reason": "invalid_record_query",
+        }
+
+
+@pytest.mark.parametrize(
+    "aggregate",
+    ("count", "sum:amount", "max:odometer", "latest:odometer", "distinct:provider", "profile", "group:status"),
+)
+def test_query_projection_accepts_every_supported_aggregate_shape(
+    tmp_path: Path, aggregate: str
+) -> None:
+    fixture = copy_vehicle_maintenance_fixture(tmp_path)
+    manifest = collections.load_manifest(tmp_path, fixture / "_collection.md")
+    result = record_formats.query_collection(tmp_path, manifest, aggregate=aggregate)
+
+    projected = record_governance.project_query_result(result, manifest)
+
+    assert projected["aggregate"] == result.aggregate
+
+
+def test_query_projection_accepts_manifest_declared_expanded_child_fields(tmp_path: Path) -> None:
+    fixture = copy_x3_fixture(tmp_path)
+    manifest = collections.load_manifest(tmp_path, fixture / "_collection.md")
+    result = record_formats.query_collection(tmp_path, manifest, expand_children=True, limit=3)
+
+    projected = record_governance.project_query_result(result, manifest)
+
+    assert projected["rows"] == result.rows
 
 
 def test_manifest_projector_round_trips_opaque_plan_descriptor_without_resolution(

@@ -831,6 +831,7 @@ class RecordQueryResult:
     aggregate: Any = None
     query: Mapping[str, Any] = field(default_factory=dict)
     source_versions: tuple[collections.SourceVersion, ...] = ()
+    columns: tuple[str, ...] = ()
 
 
 def query_collection(
@@ -915,19 +916,7 @@ def query_collection(
                 "offset": next_offset,
             }
         )
-    rendered = _render_query(
-        result,
-        manifest.collection_id,
-        parsed.snapshot,
-        query,
-        parsed.source_versions,
-        output_format,
-    )
-    if len(rendered.encode("utf-8")) > query_data.MAX_RESPONSE_BYTES:
-        raise collections.CollectionError(
-            "RECORD_RESPONSE_TOO_LARGE", "rendered query exceeds the response cap"
-        )
-    return RecordQueryResult(
+    response = RecordQueryResult(
         collection_id=manifest.collection_id,
         snapshot=parsed.snapshot,
         rows=result.rows,
@@ -936,11 +925,18 @@ def query_collection(
         truncated=result.truncated,
         continuation=next_token,
         derived=True,
-        rendered=rendered,
+        rendered="",
         aggregate=result.aggregate,
         query=query,
         source_versions=parsed.source_versions,
+        columns=tuple(result.columns),
     )
+    rendered = render_query_result(response, output_format=output_format)
+    if len(rendered.encode("utf-8")) > query_data.MAX_RESPONSE_BYTES:
+        raise collections.CollectionError(
+            "RECORD_RESPONSE_TOO_LARGE", "rendered query exceeds the response cap"
+        )
+    return replace(response, rendered=rendered)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1601,4 +1597,29 @@ def _render_query(
         return "".join(output)
     raise collections.CollectionError(
         "INVALID_QUERY_OUTPUT", "output format must be json, markdown, or csv"
+    )
+
+
+def render_query_result(result: RecordQueryResult, *, output_format: str) -> str:
+    """Render a typed Records query result without trusting a prior rendering."""
+    columns = list(result.columns)
+    if not columns:
+        columns = list(dict.fromkeys(key for row in result.rows for key in row))
+    return _render_query(
+        query_data.QueryDataResult(
+            path="",
+            format="",
+            total_rows=result.total_matched,
+            total_matched=result.total_matched,
+            returned=result.returned,
+            columns=columns,
+            rows=result.rows,
+            aggregate=result.aggregate,
+            truncated=result.truncated,
+        ),
+        result.collection_id,
+        result.snapshot,
+        result.query,
+        result.source_versions,
+        output_format,
     )

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import re
 import stat
 from collections.abc import Callable, Iterable, Mapping
@@ -10,7 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import access, mutation_terminal, record_formats, vault
+from . import access, memory_refs, mutation_terminal, record_formats, vault
 from . import structured_collections as collections
 from .governance import egress
 
@@ -163,16 +162,287 @@ def query_collection(
         return result
 
 
+_QUERY_KEYS = frozenset(
+    {
+        "filters",
+        "columns",
+        "sort_by",
+        "descending",
+        "aggregate",
+        "date_from",
+        "date_to",
+        "date_column",
+        "expand_children",
+    }
+)
+_SYSTEM_FIELDS = frozenset(
+    {"collection_id", "record_id", "item_version", "inferred", "ambiguous", "parent_record_id"}
+)
+_QUERY_OPS = frozenset(
+    {"eq", "ne", "gt", "gte", "lt", "lte", "contains", "icontains", "startswith", "in", "nin", "exists", "missing"}
+)
+_MAX_QUERY_DEPTH = 8
+_MAX_QUERY_NODES = 4_096
+
+
+def _withheld_query() -> dict[str, Any]:
+    return {"withheld": True, "reason": "invalid_record_query"}
+
+
+def _json_value(value: Any, *, depth: int = 0, nodes: list[int] | None = None) -> bool:
+    """Accept only bounded JSON values; rendering must never coerce arbitrary objects."""
+    nodes = [0] if nodes is None else nodes
+    nodes[0] += 1
+    if nodes[0] > _MAX_QUERY_NODES or depth > _MAX_QUERY_DEPTH:
+        return False
+    if value is None or type(value) in {bool, int}:
+        return True
+    if type(value) is float:
+        return value == value and value not in {float("inf"), float("-inf")}
+    if type(value) is str:
+        return len(value.encode("utf-8")) <= 16 * 1024
+    if isinstance(value, list):
+        return all(_json_value(item, depth=depth + 1, nodes=nodes) for item in value)
+    if isinstance(value, Mapping):
+        return all(
+            type(key) is str
+            and len(key.encode("utf-8")) <= 512
+            and _json_value(item, depth=depth + 1, nodes=nodes)
+            for key, item in value.items()
+        )
+    return False
+
+
+def _query_value_fields(manifest: collections.CollectionManifest) -> set[str]:
+    """Return schema fields plus the manifest-declared markdown-log projections."""
+    fields = set(manifest.schema.fields)
+    if manifest.storage.strategy != "markdown-log":
+        return fields
+    descriptor = manifest.storage.descriptor
+    heading = descriptor.get("item_heading")
+    if isinstance(heading, Mapping):
+        note = heading.get("note")
+        if isinstance(note, Mapping) and type(note.get("field")) is str:
+            fields.add(note["field"])
+    children = descriptor.get("child_rows")
+    if isinstance(children, Mapping) and isinstance(children.get("fields"), (list, tuple)):
+        fields.update(field for field in children["fields"] if type(field) is str)
+    return fields
+
+
+def _valid_query_descriptor(query: Mapping[str, Any], manifest: collections.CollectionManifest) -> bool:
+    if set(query) != _QUERY_KEYS:
+        return False
+    columns = _query_value_fields(manifest) | _SYSTEM_FIELDS
+    filters = query["filters"]
+    if not isinstance(filters, list) or len(filters) > 128:
+        return False
+    for raw in filters:
+        if not isinstance(raw, Mapping) or set(raw) - {"column", "op", "value"}:
+            return False
+        if type(raw.get("column")) is not str or raw["column"] not in columns:
+            return False
+        if "op" in raw and raw["op"] not in _QUERY_OPS:
+            return False
+        if "value" in raw and not _json_value(raw["value"]):
+            return False
+    requested = query["columns"]
+    if requested is not None and (
+        not isinstance(requested, list)
+        or len(requested) > len(columns)
+        or any(type(column) is not str or column not in columns for column in requested)
+    ):
+        return False
+    for key in ("sort_by", "date_column"):
+        if query[key] is not None and (type(query[key]) is not str or query[key] not in columns):
+            return False
+    if type(query["descending"]) is not bool or type(query["expand_children"]) is not bool:
+        return False
+    if any(query[key] is not None and type(query[key]) is not str for key in ("date_from", "date_to")):
+        return False
+    aggregate = query["aggregate"]
+    if aggregate is None:
+        return True
+    if type(aggregate) is not str:
+        return False
+    aggregate = aggregate.strip()
+    if aggregate in {"count", "profile"}:
+        return True
+    if ":" not in aggregate:
+        return False
+    function, column = (piece.strip() for piece in aggregate.split(":", 1))
+    return function in {"min", "max", "sum", "avg", "latest", "distinct", "group"} and column in columns
+
+
+def _valid_row(
+    row: Any,
+    manifest: collections.CollectionManifest,
+    query: Mapping[str, Any],
+    *,
+    require_item_version: bool,
+) -> dict[str, Any] | None:
+    query_fields = _query_value_fields(manifest)
+    if not isinstance(row, dict) or set(row) - query_fields - _SYSTEM_FIELDS:
+        return None
+    required = {"collection_id", "record_id", "inferred", "ambiguous"}
+    if require_item_version:
+        required.add("item_version")
+    if not required <= set(row) or (not require_item_version and "item_version" in row):
+        return None
+    if row["collection_id"] != manifest.collection_id or type(row["record_id"]) is not str:
+        return None
+    try:
+        if manifest.storage.strategy == "dataset":
+            collections._validate_item_key(row["record_id"])
+        elif memory_refs.normalize_id(row["record_id"]) is None:
+            return None
+    except ValueError:
+        return None
+    if type(row["inferred"]) is not bool or type(row["ambiguous"]) is not bool:
+        return None
+    if require_item_version and (
+        type(row["item_version"]) is not str
+        or not re.fullmatch(r"[0-9a-f]{64}", row["item_version"])
+    ):
+        return None
+    if "parent_record_id" in row and (
+        query["expand_children"] is not True
+        or type(row["parent_record_id"]) is not str
+        or row["parent_record_id"] != row["record_id"]
+    ):
+        return None
+    values = {name: value for name, value in row.items() if name in manifest.schema.fields}
+    try:
+        for name, value in values.items():
+            collections._validate_field_value(name, value, manifest.schema.fields[name])
+    except (collections.CollectionError, TypeError, ValueError):
+        return None
+    if any(
+        name not in manifest.schema.fields and not _json_value(value)
+        for name, value in row.items()
+        if name not in _SYSTEM_FIELDS
+    ) or not _json_value(row):
+        return None
+    return dict(row)
+
+
+def _valid_aggregate(
+    aggregate: Any,
+    query: Mapping[str, Any],
+    manifest: collections.CollectionManifest,
+    total_matched: int,
+    *,
+    require_item_version: bool,
+) -> bool:
+    specification = query["aggregate"]
+    if specification is None:
+        return aggregate is None
+    if not isinstance(aggregate, Mapping) or not _json_value(aggregate):
+        return False
+    specification = specification.strip()
+    if specification == "count":
+        return set(aggregate) == {"count"} and type(aggregate["count"]) is int and aggregate["count"] == total_matched
+    if specification == "profile":
+        profile = aggregate.get("profile")
+        return (
+            set(aggregate) == {"profile", "dataset_card"}
+            and type(aggregate["dataset_card"]) is str
+            and isinstance(profile, Mapping)
+            and set(profile) == {"path", "format", "total_rows", "columns"}
+            and profile["path"] == manifest.storage.source
+            and profile["format"] == manifest.storage.strategy
+            and type(profile["total_rows"]) is int
+            and profile["total_rows"] == total_matched
+            and isinstance(profile["columns"], list)
+        )
+    function, column = (piece.strip() for piece in specification.split(":", 1))
+    if function in {"min", "max", "sum", "avg"}:
+        allowed = {function, "n"} if aggregate.get("n") else {function, "n", "note"}
+        return (
+            set(aggregate) == allowed
+            and type(aggregate.get("n")) is int
+            and 0 <= aggregate["n"] <= total_matched
+            and (aggregate[function] is None or type(aggregate[function]) in {int, float})
+            and ("note" not in aggregate or type(aggregate["note"]) is str)
+        )
+    if function == "distinct":
+        return (
+            set(aggregate) == {"distinct", "n", "truncated"}
+            and isinstance(aggregate["distinct"], list)
+            and type(aggregate["n"]) is int
+            and aggregate["n"] >= len(aggregate["distinct"])
+            and type(aggregate["truncated"]) is bool
+        )
+    if function == "group":
+        return (
+            set(aggregate) == {"groups", "n", "truncated"}
+            and isinstance(aggregate["groups"], list)
+            and all(
+                isinstance(group, Mapping)
+                and set(group) == {"value", "count"}
+                and type(group["count"]) is int
+                and group["count"] >= 0
+                for group in aggregate["groups"]
+            )
+            and type(aggregate["n"]) is int
+            and aggregate["n"] >= len(aggregate["groups"])
+            and type(aggregate["truncated"]) is bool
+        )
+    if function == "latest":
+        expected_column = query["date_column"] or column
+        latest = aggregate.get("row")
+        return (
+            set(aggregate) == {"latest_by", "row"}
+            and aggregate["latest_by"] == expected_column
+            and (latest is None or _valid_row(latest, manifest, query, require_item_version=require_item_version) is not None)
+        )
+    return False
+
+
+def _valid_source_versions(
+    versions: tuple[collections.SourceVersion, ...], manifest: collections.CollectionManifest
+) -> tuple[collections.SourceVersion, ...] | None:
+    source_prefix = manifest.storage.source.rstrip("/") + "/"
+    seen: set[str] = set()
+    projected: list[collections.SourceVersion] = []
+    found_manifest = False
+    for version in versions:
+        if (
+            not isinstance(version, collections.SourceVersion)
+            or type(version.path) is not str
+            or version.path in seen
+            or version.path.startswith("/")
+            or ".." in version.path.split("/")
+            or not re.fullmatch(r"[0-9a-f]{64}", version.hash)
+        ):
+            return None
+        if version.path == manifest.manifest_version.path:
+            if version.hash != manifest.manifest_version.hash:
+                return None
+            found_manifest = True
+        elif manifest.storage.strategy != "markdown-items" and version.path != manifest.storage.source:
+            return None
+        elif manifest.storage.strategy == "markdown-items" and not version.path.startswith(source_prefix):
+            return None
+        seen.add(version.path)
+        projected.append(collections.SourceVersion(version.path, version.hash))
+    return tuple(projected) if found_manifest else None
+
+
 def project_query_result(
     result: record_formats.RecordQueryResult,
     manifest: collections.CollectionManifest,
     *,
     output_format: str = "json",
 ) -> dict[str, Any]:
-    """Default-deny wire envelope for an already L6-authorized query result."""
+    """Default-deny wire envelope reconstructed from a typed query contract."""
     if (
         result.collection_id != manifest.collection_id
+        or type(result.snapshot) is not str
         or not re.fullmatch(r"[0-9a-f]{64}", result.snapshot)
+        or not isinstance(result.rows, list)
+        or not isinstance(result.source_versions, tuple)
+        or not isinstance(result.columns, tuple)
         or type(result.returned) is not int
         or type(result.total_matched) is not int
         or type(result.truncated) is not bool
@@ -181,52 +451,73 @@ def project_query_result(
         or result.total_matched < result.returned
         or output_format not in {"json", "markdown", "csv"}
         or not isinstance(result.query, Mapping)
+        or not _valid_query_descriptor(result.query, manifest)
         or result.derived is not True
-        or (result.continuation is not None and not record_formats.validate_continuation(
-            result.continuation, collection_id=result.collection_id, snapshot=result.snapshot, query=result.query
+        or (result.continuation is not None and type(result.continuation) is not str)
+        or (isinstance(result.continuation, str) and not record_formats.validate_continuation(
+            result.continuation,
+            collection_id=result.collection_id,
+            snapshot=result.snapshot,
+            query=result.query,
         ))
     ):
-        return {"withheld": True, "reason": "invalid_record_query"}
-    system = {"collection_id", "record_id", "item_version", "inferred", "ambiguous", "parent_record_id"}
-    rows: list[dict[str, Any]] = []
-    for row in result.rows:
-        if not isinstance(row, dict) or set(row) - set(manifest.schema.fields) - system:
-            return {"withheld": True, "reason": "invalid_record_query"}
-        values = {name: value for name, value in row.items() if name in manifest.schema.fields}
-        try:
-            manifest.schema.validate(values)
-        except collections.CollectionError:
-            return {"withheld": True, "reason": "invalid_record_query"}
-        if row.get("collection_id") != manifest.collection_id or not isinstance(row.get("record_id"), str):
-            return {"withheld": True, "reason": "invalid_record_query"}
-        rows.append({key: row[key] for key in row})
-    versions: list[dict[str, str]] = []
-    seen: set[str] = set()
-    for version in result.source_versions:
-        if (
-            not isinstance(version.path, str)
-            or version.path in seen
-            or version.path.startswith("/")
-            or ".." in version.path.split("/")
-            or not re.fullmatch(r"[0-9a-f]{64}", version.hash)
-        ):
-            return {"withheld": True, "reason": "invalid_record_query"}
-        seen.add(version.path)
-        versions.append({"path": version.path, "hash": version.hash})
-    payload_data = {
-        "collection_id": result.collection_id, "snapshot": result.snapshot, "rows": rows,
-        "returned": result.returned, "total_matched": result.total_matched,
-        "truncated": result.truncated, "continuation": result.continuation,
-        "derived": result.derived, "aggregate": result.aggregate, "query": dict(result.query),
-        "source_versions": versions,
-    }
+        return _withheld_query()
+    columns = tuple(result.columns)
+    allowed_columns = _query_value_fields(manifest) | _SYSTEM_FIELDS
+    if not columns or len(columns) != len(set(columns)) or any(
+        type(column) is not str or column not in allowed_columns for column in columns
+    ):
+        return _withheld_query()
+    require_item_version = manifest.storage.strategy != "dataset"
+    rows = [
+        _valid_row(row, manifest, result.query, require_item_version=require_item_version)
+        for row in result.rows
+    ]
+    if any(row is None or set(row) - set(columns) for row in rows):
+        return _withheld_query()
+    source_versions = _valid_source_versions(result.source_versions, manifest)
+    if source_versions is None or not _valid_aggregate(
+        result.aggregate,
+        result.query,
+        manifest,
+        result.total_matched,
+        require_item_version=require_item_version,
+    ):
+        return _withheld_query()
+    typed = record_formats.RecordQueryResult(
+        collection_id=result.collection_id,
+        snapshot=result.snapshot,
+        rows=[row for row in rows if row is not None],
+        returned=result.returned,
+        total_matched=result.total_matched,
+        truncated=result.truncated,
+        continuation=result.continuation,
+        derived=True,
+        rendered="",
+        aggregate=dict(result.aggregate) if isinstance(result.aggregate, Mapping) else result.aggregate,
+        query=dict(result.query),
+        source_versions=source_versions,
+        columns=columns,
+    )
     try:
-        rendered = json.dumps(payload_data, sort_keys=True, separators=(",", ":"), allow_nan=False)
-    except (TypeError, ValueError):
-        return {"withheld": True, "reason": "invalid_record_query"}
+        rendered = record_formats.render_query_result(typed, output_format=output_format)
+    except (collections.CollectionError, TypeError, ValueError):
+        return _withheld_query()
     payload = _RecordEnvelope(
         {
-            **payload_data,
+            "collection_id": typed.collection_id,
+            "snapshot": typed.snapshot,
+            "rows": typed.rows,
+            "returned": typed.returned,
+            "total_matched": typed.total_matched,
+            "truncated": typed.truncated,
+            "continuation": typed.continuation,
+            "derived": typed.derived,
+            "aggregate": typed.aggregate,
+            "query": typed.query,
+            "source_versions": [
+                {"path": version.path, "hash": version.hash} for version in typed.source_versions
+            ],
             "rendered": rendered,
         }
     )
