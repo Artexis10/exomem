@@ -2293,7 +2293,10 @@ def _read_bounded_windows_snapshot(
                 "PATH_GUARD_UNSAFE", "guarded content is not a bounded regular file"
             )
         leaf = _open_windows_path_descriptor(
-            leaf_path, desired_access=0, attributes=0x00200000, crt_flags=os.O_RDONLY
+            leaf_path,
+            desired_access=0x80000000,
+            attributes=0x00200000,
+            crt_flags=os.O_RDONLY | getattr(os, "O_BINARY", 0),
         )
         descriptors.append(leaf)
         opened = os.fstat(leaf)
