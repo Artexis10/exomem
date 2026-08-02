@@ -1498,6 +1498,21 @@ def _decode_continuation(value: str) -> dict[str, Any]:
     return payload
 
 
+def validate_continuation(value: str, *, collection_id: str, snapshot: str, query: Mapping[str, Any]) -> bool:
+    """Validate a bounded v1 continuation without treating it as trusted output."""
+    try:
+        payload = _decode_continuation(value)
+    except collections.CollectionError:
+        return False
+    return (
+        payload.get("collection_id") == collection_id
+        and payload.get("snapshot") == snapshot
+        and payload.get("query") == query
+        and type(payload.get("offset")) is int
+        and payload["offset"] >= 0
+    )
+
+
 def _render_query(
     result: query_data.QueryDataResult,
     collection_id: str,

@@ -181,6 +181,10 @@ def project_query_result(
         or result.total_matched < result.returned
         or output_format not in {"json", "markdown", "csv"}
         or not isinstance(result.query, Mapping)
+        or result.derived is not True
+        or (result.continuation is not None and not record_formats.validate_continuation(
+            result.continuation, collection_id=result.collection_id, snapshot=result.snapshot, query=result.query
+        ))
     ):
         return {"withheld": True, "reason": "invalid_record_query"}
     system = {"collection_id", "record_id", "item_version", "inferred", "ambiguous", "parent_record_id"}
@@ -216,7 +220,10 @@ def project_query_result(
         "derived": result.derived, "aggregate": result.aggregate, "query": dict(result.query),
         "source_versions": versions,
     }
-    rendered = json.dumps(payload_data, sort_keys=True, separators=(",", ":"), default=str)
+    try:
+        rendered = json.dumps(payload_data, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    except (TypeError, ValueError):
+        return {"withheld": True, "reason": "invalid_record_query"}
     payload = _RecordEnvelope(
         {
             **payload_data,
