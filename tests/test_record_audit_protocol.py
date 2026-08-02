@@ -307,6 +307,114 @@ def test_caught_and_abrupt_publication_prefixes_leave_rollback_or_gap(
     assert records.inspect_audit_gap(tmp_path, manifest.path)["status"] == "gap"
 
 
+@pytest.mark.parametrize("prefix", [1, 2, 3])
+def test_later_log_update_publication_prefixes_roll_back_or_report_gap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, prefix: int
+) -> None:
+    from exomem import records
+
+    fixture = copy_x3_fixture(tmp_path)
+    _activity_log(tmp_path)
+    manifest = collections.load_manifest(tmp_path, fixture / "_collection.md")
+    first_snapshot = record_formats.load_adapter(tmp_path, manifest).read()
+    first = records.append_record(
+        tmp_path,
+        manifest.path,
+        item=_item("2026-08-03", "Pull"),
+        item_key="abababab-abab-4aba-8aba-abababababab",
+        expected_container_hash=first_snapshot.source_versions[-1].hash,
+        why="establish later transition",
+    )
+    current = collections.load_manifest(tmp_path, fixture / "_collection.md")
+    record = next(
+        item
+        for item in record_formats.load_adapter(tmp_path, current).read().records
+        if item.identity.key == "abababab-abab-4aba-8aba-abababababab"
+    )
+    source = fixture / "Training Log.md"
+    before = (
+        source.read_bytes(),
+        (fixture / "_collection.md").read_bytes(),
+        (tmp_path / "Knowledge Base/log.md").read_bytes(),
+    )
+    real_replace = vault._BatchWorkspace.replace_artifact
+    calls = 0
+
+    def fail(workspace, artifact, target):
+        nonlocal calls
+        calls += 1
+        if calls == prefix:
+            raise PermissionError(13, "Access is denied", str(target))
+        return real_replace(workspace, artifact, target)
+
+    monkeypatch.setattr(vault._BatchWorkspace, "replace_artifact", fail)
+    with pytest.raises(collections.CollectionError, match="RECORD_PUBLICATION_FAILED"):
+        records.update_record(
+            tmp_path,
+            current.path,
+            item_key=record.identity.key,
+            changes={"title": "Push"},
+            expected_container_hash=first["after_container_hash"],
+            expected_item_version=record.source.hash,
+            why="exercise later rollback",
+        )
+    assert (
+        source.read_bytes(),
+        (fixture / "_collection.md").read_bytes(),
+        (tmp_path / "Knowledge Base/log.md").read_bytes(),
+    ) == before
+
+
+@pytest.mark.parametrize("prefix", [1, 2, 3])
+def test_later_log_update_abrupt_prefixes_are_not_normalized(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, prefix: int
+) -> None:
+    from exomem import records
+
+    fixture = copy_x3_fixture(tmp_path)
+    _activity_log(tmp_path)
+    manifest = collections.load_manifest(tmp_path, fixture / "_collection.md")
+    initial = record_formats.load_adapter(tmp_path, manifest).read()
+    first = records.append_record(
+        tmp_path,
+        manifest.path,
+        item=_item("2026-08-03", "Pull"),
+        item_key="cdcdcdcd-cdcd-4cdc-8cdc-cdcdcdcdcdcd",
+        expected_container_hash=initial.source_versions[-1].hash,
+        why="establish abrupt transition",
+    )
+    current = collections.load_manifest(tmp_path, fixture / "_collection.md")
+    record = next(
+        item
+        for item in record_formats.load_adapter(tmp_path, current).read().records
+        if item.identity.key == "cdcdcdcd-cdcd-4cdc-8cdc-cdcdcdcdcdcd"
+    )
+    real_replace = vault._BatchWorkspace.replace_artifact
+    calls = 0
+
+    def interrupt(workspace, artifact, target):
+        nonlocal calls
+        result = real_replace(workspace, artifact, target)
+        calls += 1
+        if calls == prefix:
+            raise KeyboardInterrupt("later abrupt prefix")
+        return result
+
+    monkeypatch.setattr(vault._BatchWorkspace, "replace_artifact", interrupt)
+    with pytest.raises(KeyboardInterrupt, match="later abrupt prefix"):
+        records.update_record(
+            tmp_path,
+            current.path,
+            item_key=record.identity.key,
+            changes={"title": "Push"},
+            expected_container_hash=first["after_container_hash"],
+            expected_item_version=record.source.hash,
+            why="exercise later abrupt prefix",
+        )
+    report = records.inspect_audit_gap(tmp_path, current.path)
+    assert report["status"] == ("ok" if prefix == 3 else "gap")
+
+
 def test_create_rolls_back_caught_failure_and_exposes_abrupt_manifest_residue(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
