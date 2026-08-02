@@ -342,6 +342,160 @@ One ordinary""",
     assert raised.value.code == "COLLECTION_NOT_FOUND"
 
 
+def _write_l0_rule(vault: Path, *, name: str, paths: str) -> None:
+    root = vault / "Knowledge Base" / "_Governance"
+    suffix = {"private": ("C1", "C2"), "secret": ("C3", "C4"), "blocked": ("C5", "C6")}[name]
+    (root / "scopes" / f"{name}.yaml").write_text(
+        "governance_version: 1\n"
+        f"id: 01ARZ3NDEKTSV4RRFFQ69G5F{suffix[0]}\n"
+        f"name: {name}\n"
+        f'paths: ["{paths}"]\n',
+        encoding="utf-8",
+    )
+    (root / "rules" / f"{name}.yaml").write_text(
+        "governance_version: 1\n"
+        f"id: 01ARZ3NDEKTSV4RRFFQ69G5F{suffix[1]}\n"
+        f'scope_ids: ["01ARZ3NDEKTSV4RRFFQ69G5F{suffix[0]}"]\n'
+        "audience: external\nceiling: 0\n",
+        encoding="utf-8",
+    )
+
+
+def test_manifest_projection_omits_hidden_links_and_unknown_nested_metadata(tmp_path: Path) -> None:
+    fixture = copy_vehicle_maintenance_fixture(tmp_path)
+    manifest_path = fixture / "_collection.md"
+    private = tmp_path / "Knowledge Base" / "Planning" / "private.md"
+    private.parent.mkdir(parents=True)
+    private.write_text(
+        "---\nexomem_id: 81947000-4c22-46e4-9874-23fed028314b\n---\nprivate", encoding="utf-8"
+    )
+    secret = tmp_path / "Knowledge Base" / "Evidence" / "Secret.md"
+    secret.parent.mkdir(parents=True)
+    secret.write_text("private", encoding="utf-8")
+    manifest_path.write_text(
+        manifest_path.read_text(encoding="utf-8")
+        .replace("items:\n        type: string", "items:\n        type: link")
+        .replace(
+            "\n---\n\nOne ordinary",
+            """
+templates:
+  - path: Templates/project.md
+    default_properties:
+      asset: "[[Knowledge Base/Evidence/Secret.md]]"
+      services: ["[[Knowledge Base/Evidence/Secret.md]]"]
+      provider: Northside Garage
+      unknown: must-not-escape
+links:
+  plans:
+    - reference: exomem://memory/81947000-4c22-46e4-9874-23fed028314b
+      query: {filters: {asset: "[[Knowledge Base/Evidence/Secret.md]]", status: completed}, limit: 12}
+    - reference: exomem://vault/Planning/private.md
+      query: {limit: 12}
+    - reference: exomem://memory/99f6fa8b-5d6e-43f8-8cdf-e30767e8f4d7
+      query: {limit: 12}
+views:
+  current:
+    query: {filters: {asset: "[[Knowledge Base/Evidence/Secret.md]]", status: completed}, limit: 12}
+  latest: {sort: [occurred_on, desc]}
+  malformed: {secret: must-not-escape}
+governance:
+  classification: internal
+  release: {tiers: [internal]}
+  secret_path: Knowledge Base/Evidence/Secret.md
+---
+
+One ordinary""",
+        ),
+        encoding="utf-8",
+    )
+    (fixture / "Templates").mkdir()
+    (fixture / "Templates" / "project.md").write_text("template", encoding="utf-8")
+    manifest = collections.load_manifest(tmp_path, manifest_path)
+    _write_l6_rule(tmp_path, ceiling=6, paths="Records/**")
+    _write_l0_rule(tmp_path, name="private", paths="Planning/**")
+    _write_l0_rule(tmp_path, name="secret", paths="Evidence/**")
+
+    with request_scope(RequestPrincipal(audience_id=EXTERNAL, surface="mcp")):
+        projected = record_governance.project_manifest(tmp_path, manifest)
+
+    assert projected["templates"] == [
+        {"path": manifest.templates[0].path, "default_properties": {"provider": "Northside Garage"}}
+    ]
+    assert projected["plans"] == [
+        {
+            "reference": "exomem://memory/99f6fa8b-5d6e-43f8-8cdf-e30767e8f4d7",
+            "query": {"limit": 12},
+        }
+    ]
+    assert projected["views"] == {
+        "current": {"query": {"filters": {"status": "completed"}, "limit": 12}},
+        "latest": {"sort": ["occurred_on", "desc"]},
+    }
+    assert projected["governance"] == {
+        "classification": "internal",
+        "release": {"tiers": ["internal"]},
+    }
+
+
+def test_manifest_projection_omits_malformed_plan_and_view_descriptors(tmp_path: Path) -> None:
+    fixture = copy_vehicle_maintenance_fixture(tmp_path)
+    manifest_path = fixture / "_collection.md"
+    manifest_path.write_text(
+        manifest_path.read_text(encoding="utf-8").replace(
+            "\n---\n\nOne ordinary",
+            """
+links:
+  plans:
+    - reference: exomem://memory/99f6fa8b-5d6e-43f8-8cdf-e30767e8f4d7
+      query: {filters: {unknown: secret}, limit: 0}
+views:
+  malformed: {query: {filters: {unknown: secret}, limit: 0}}
+---
+
+One ordinary""",
+        ),
+        encoding="utf-8",
+    )
+    manifest = collections.load_manifest(tmp_path, manifest_path)
+
+    projected = record_governance.project_manifest(tmp_path, manifest)
+
+    assert projected["plans"] == []
+    assert projected["views"] == {}
+
+
+def test_manifest_projection_json_normalizes_frozen_nested_values(tmp_path: Path) -> None:
+    fixture = copy_x3_fixture(tmp_path)
+    manifest = collections.load_manifest(tmp_path, fixture / "_collection.md")
+
+    projected = record_governance.project_manifest(tmp_path, manifest)
+
+    assert json.loads(json.dumps(projected))["plans"] == projected["plans"]
+
+
+@pytest.mark.parametrize("target", ("Events", "Templates/**"))
+def test_manifest_projection_requires_l6_for_source_and_templates(tmp_path: Path, target: str) -> None:
+    fixture = copy_vehicle_maintenance_fixture(tmp_path)
+    manifest_path = fixture / "_collection.md"
+    manifest_path.write_text(
+        manifest_path.read_text(encoding="utf-8").replace(
+            "\n---\n\nOne ordinary", "\ntemplates: [{path: Templates/project.md}]\n---\n\nOne ordinary"
+        ),
+        encoding="utf-8",
+    )
+    (fixture / "Templates").mkdir()
+    (fixture / "Templates" / "project.md").write_text("template", encoding="utf-8")
+    manifest = collections.load_manifest(tmp_path, manifest_path)
+    _write_l6_rule(tmp_path, ceiling=6, paths="Records/**")
+    _write_l0_rule(tmp_path, name="blocked", paths=f"Records/vehicle-maintenance/{target}")
+
+    with request_scope(RequestPrincipal(audience_id=EXTERNAL, surface="mcp")):
+        with pytest.raises(collections.CollectionError) as raised:
+            record_governance.project_manifest(tmp_path, manifest)
+
+    assert raised.value.code == "COLLECTION_NOT_FOUND"
+
+
 def test_precommit_refusal_leaves_canonical_and_manifest_unchanged(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -6,10 +6,11 @@ import re
 import stat
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
+from math import isfinite
 from pathlib import Path
 from typing import Any
 
-from . import access, memory_refs, mutation_terminal, record_formats, vault
+from . import access, memory_refs, mutation_terminal, query_data, record_formats, vault
 from . import structured_collections as collections
 from .governance import egress
 
@@ -547,6 +548,206 @@ def project_mutation_receipt(receipt: Mapping[str, Any]) -> dict[str, Any]:
     return egress.project(_RecordEnvelope(allowed), egress.LEVEL_FULL, kind="record_mutation") or {}
 
 
+_MAX_MANIFEST_VALUE_DEPTH = 8
+_MAX_MANIFEST_VALUE_NODES = 256
+_MAX_MANIFEST_VALUE_BYTES = 16 * 1024
+_TEMPLATE_METADATA = frozenset({"type", "collection_id", "schema_version", "record_id"})
+
+
+def _normalize_manifest_value(
+    value: Any,
+    *,
+    depth: int = 0,
+    nodes: list[int] | None = None,
+    active: set[int] | None = None,
+) -> tuple[bool, Any]:
+    """Return a bounded plain JSON value without coercing arbitrary objects."""
+    nodes = [0] if nodes is None else nodes
+    active = set() if active is None else active
+    nodes[0] += 1
+    if nodes[0] > _MAX_MANIFEST_VALUE_NODES or depth > _MAX_MANIFEST_VALUE_DEPTH:
+        return False, None
+    if value is None or type(value) in {bool, int}:
+        return True, value
+    if type(value) is float:
+        return (True, value) if isfinite(value) else (False, None)
+    if type(value) is str:
+        return (True, value) if len(value.encode("utf-8")) <= _MAX_MANIFEST_VALUE_BYTES else (False, None)
+    if isinstance(value, Mapping):
+        if id(value) in active:
+            return False, None
+        active.add(id(value))
+        try:
+            normalized: dict[str, Any] = {}
+            for key, item in value.items():
+                if type(key) is not str or len(key.encode("utf-8")) > 512:
+                    return False, None
+                valid, projected = _normalize_manifest_value(
+                    item, depth=depth + 1, nodes=nodes, active=active
+                )
+                if not valid:
+                    return False, None
+                normalized[key] = projected
+            return True, normalized
+        finally:
+            active.remove(id(value))
+    if isinstance(value, (list, tuple)):
+        if id(value) in active:
+            return False, None
+        active.add(id(value))
+        try:
+            normalized_items: list[Any] = []
+            for item in value:
+                valid, projected = _normalize_manifest_value(
+                    item, depth=depth + 1, nodes=nodes, active=active
+                )
+                if not valid:
+                    return False, None
+                normalized_items.append(projected)
+            return True, normalized_items
+        finally:
+            active.remove(id(value))
+    return False, None
+
+
+def _project_schema_values(
+    root: Path,
+    manifest: collections.CollectionManifest,
+    values: Mapping[str, Any],
+    *,
+    template_metadata: bool = False,
+) -> dict[str, Any] | None:
+    valid, normalized = _normalize_manifest_value(values)
+    if not valid or not isinstance(normalized, dict):
+        return None
+    projected: dict[str, Any] = {}
+    for name, value in normalized.items():
+        spec = manifest.schema.fields.get(name)
+        if spec is not None:
+            try:
+                collections._validate_field_value(name, value, spec)
+            except collections.CollectionError:
+                return None
+            projected[name] = value
+            continue
+        if template_metadata and name in _TEMPLATE_METADATA:
+            if (
+                (name == "type" and value == manifest.semantic_profile.removesuffix("s"))
+                or (name == "collection_id" and value == manifest.collection_id)
+                or (name == "schema_version" and value == manifest.schema.version)
+                or (name == "record_id" and type(value) is str and memory_refs.normalize_id(value))
+            ):
+                projected[name] = value
+    return _project_links(root, manifest, projected)
+
+
+def _project_manifest_query(
+    root: Path, manifest: collections.CollectionManifest, query: Mapping[str, Any]
+) -> dict[str, Any] | None:
+    valid, normalized = _normalize_manifest_value(query)
+    if not valid or not isinstance(normalized, dict) or set(normalized) - {"filters", "limit"}:
+        return None
+    limit = normalized.get("limit")
+    if type(limit) is not int or not 1 <= limit <= query_data.HARD_ROW_CAP:
+        return None
+    filters = normalized.get("filters", {})
+    if not isinstance(filters, dict) or len(filters) > len(manifest.schema.fields):
+        return None
+    if any(name not in manifest.schema.fields for name in filters):
+        return None
+    projected_filters = _project_schema_values(root, manifest, filters)
+    if projected_filters is None:
+        return None
+    result: dict[str, Any] = {"limit": limit}
+    if projected_filters:
+        result = {"filters": projected_filters, **result}
+    return result
+
+
+def _project_plan_link(
+    root: Path, manifest: collections.CollectionManifest, plan: collections.PlanLink
+) -> dict[str, Any] | None:
+    reference = plan.reference
+    if type(reference) is not str or not 1 <= len(reference.encode("utf-8")) <= 2_048:
+        return None
+    lower = reference.lower()
+    stable_id = memory_refs.parse_memory_ref(reference)
+    if lower.startswith(memory_refs.REF_PREFIX):
+        if stable_id is None or reference != memory_refs.memory_ref(stable_id):
+            return None
+        try:
+            target = memory_refs.resolve_identifier_read_only(root, reference)
+        except memory_refs.ReferenceError as error:
+            if error.code == "REFERENCE_NOT_FOUND":
+                target = None
+            else:
+                return None
+    elif lower.startswith(("exomem://vault/", "exomem://source/")):
+        try:
+            target = memory_refs.resolve_identifier_read_only(root, reference)
+        except memory_refs.ReferenceError:
+            return None
+    else:
+        return None
+    if target is not None:
+        try:
+            _path, target = vault.resolve_under_vault(root, target, must_exist=True, must_be_file=True)
+        except vault.VaultPathError:
+            return None
+        if not _authorize(root, target, receipt=True):
+            return None
+    query = _project_manifest_query(root, manifest, plan.query)
+    return {"reference": reference, "query": query} if query is not None else None
+
+
+def _project_views(root: Path, manifest: collections.CollectionManifest) -> dict[str, Any]:
+    projected: dict[str, Any] = {}
+    if len(manifest.views) > 32:
+        return projected
+    for name, view in manifest.views.items():
+        if type(name) is not str or not name or len(name.encode("utf-8")) > 128:
+            continue
+        valid, normalized = _normalize_manifest_value(view)
+        if not valid or not isinstance(normalized, dict):
+            continue
+        if set(normalized) == {"query"} and isinstance(normalized["query"], dict):
+            query = _project_manifest_query(root, manifest, normalized["query"])
+            if query is not None:
+                projected[name] = {"query": query}
+        elif set(normalized) == {"sort"} and isinstance(normalized["sort"], list):
+            sort = normalized["sort"]
+            if (
+                len(sort) == 2
+                and type(sort[0]) is str
+                and sort[0] in manifest.schema.fields
+                and sort[1] in {"asc", "desc"}
+            ):
+                projected[name] = {"sort": sort}
+    return projected
+
+
+def _project_governance(value: Mapping[str, Any]) -> dict[str, Any]:
+    valid, normalized = _normalize_manifest_value(value)
+    if not valid or not isinstance(normalized, dict):
+        return {}
+    projected: dict[str, Any] = {}
+    classification = normalized.get("classification")
+    if type(classification) in {str, int, bool} and (
+        type(classification) is not str or 1 <= len(classification.encode("utf-8")) <= 128
+    ):
+        projected["classification"] = classification
+    release = normalized.get("release")
+    if (
+        isinstance(release, dict)
+        and set(release) == {"tiers"}
+        and isinstance(release["tiers"], list)
+        and len(release["tiers"]) <= 16
+        and all(type(tier) is str and 1 <= len(tier.encode("utf-8")) <= 128 for tier in release["tiers"])
+    ):
+        projected["release"] = {"tiers": release["tiers"]}
+    return projected
+
+
 def project_manifest(
     vault_root: Path, collection: str | Path | collections.CollectionManifest
 ) -> dict[str, Any]:
@@ -558,6 +759,14 @@ def project_manifest(
         not allowed(template.path) for template in manifest.templates
     ):
         raise collections.CollectionError("COLLECTION_NOT_FOUND", "collection was not found")
+    templates: list[dict[str, Any]] = []
+    for template in manifest.templates:
+        defaults = _project_schema_values(
+            root, manifest, template.default_properties, template_metadata=True
+        )
+        if defaults is None:
+            continue
+        templates.append({"path": template.path, "default_properties": defaults})
     payload = _RecordEnvelope(
         {
             "collection_id": manifest.collection_id,
@@ -568,16 +777,14 @@ def project_manifest(
                 "source": manifest.storage.source,
                 "format_version": manifest.storage.format_version,
             },
-            "templates": [
-                {"path": template.path, "default_properties": dict(template.default_properties)}
-                for template in manifest.templates
-            ],
+            "templates": templates,
             "plans": [
-                {"reference": plan.reference, "query": dict(plan.query)}
+                projected
                 for plan in manifest.links.plans
+                if (projected := _project_plan_link(root, manifest, plan)) is not None
             ],
-            "views": dict(manifest.views),
-            "governance": dict(manifest.governance),
+            "views": _project_views(root, manifest),
+            "governance": _project_governance(manifest.governance),
         }
     )
     return egress.project(payload, egress.LEVEL_FULL, kind="record_manifest") or {}
