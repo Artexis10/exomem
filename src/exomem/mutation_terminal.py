@@ -160,7 +160,7 @@ def project_terminal(result: Any, detail: ResponseDetail = "compact") -> Any:
     return compact
 
 
-def _is_record_receipt(value: Any) -> bool:
+def valid_record_receipt(value: Any) -> bool:
     if not isinstance(value, Mapping):
         return False
     operation = value.get("operation")
@@ -242,6 +242,9 @@ def _is_record_receipt(value: Any) -> bool:
     if operation == "create":
         return True
     return False
+
+
+_is_record_receipt = valid_record_receipt
 
 
 def _hash(value: Any) -> bool:

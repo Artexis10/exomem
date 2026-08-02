@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import access, record_formats, vault
+from . import access, mutation_terminal, record_formats, vault
 from . import structured_collections as collections
 from .governance import egress
 
@@ -186,6 +186,8 @@ def project_query_result(result: record_formats.RecordQueryResult) -> dict[str, 
 
 def project_mutation_receipt(receipt: Mapping[str, Any]) -> dict[str, Any]:
     """Default-deny terminal mutation receipt without arbitrary nested payloads."""
+    if not mutation_terminal.valid_record_receipt(receipt):
+        return {"withheld": True, "reason": "invalid_record_receipt"}
     allowed = {
         key: receipt[key]
         for key in (
