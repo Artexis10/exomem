@@ -1,0 +1,210 @@
+from __future__ import annotations
+
+import importlib
+from pathlib import Path
+
+import pytest
+
+from exomem import query_data, record_formats
+from exomem import structured_collections as collections
+
+COLLECTION_ID = "c537f2c4-672a-4ddd-afcd-8d99e25f4019"
+
+
+def _manifest() -> str:
+    return f"""---
+type: collection
+exomem_id: {COLLECTION_ID}
+title: Finite grammar
+semantic_profile: records
+collection_version: 1
+schema_version: 1
+lifecycle: active
+storage:
+  strategy: markdown-log
+  source: log.md
+  format_version: 1
+  section:
+    level: 2
+    title: Sessions
+  item_heading:
+    level: 3
+    fields:
+      - name: occurred_on
+        type: date
+        format: "%Y-%m-%d"
+      - name: title
+        type: string
+    separator: " · "
+    note:
+      field: note
+      open: " ("
+      close: ")"
+  defaults:
+    status: completed
+  note_rules:
+    - equals: Interrupted
+      values:
+        status: aborted
+    - equals: Incomplete
+      values:
+        status: partial
+  insertion: newest-first
+  child_rows:
+    prefix: "- "
+    delimiter: "|"
+    fields: [movement, load, repetitions]
+item_schema:
+  natural_key: [occurred_on, title]
+  fields:
+    occurred_on:
+      type: date
+      required: true
+    title:
+      type: string
+      required: true
+    status:
+      type: enum
+      enum: [completed, partial, aborted]
+    movements:
+      type: array
+      items:
+        type: object
+---
+"""
+
+
+def _collection(tmp_path: Path, body: str) -> collections.CollectionManifest:
+    root = tmp_path / "Knowledge Base/Records/Finite"
+    root.mkdir(parents=True)
+    (root / "_collection.md").write_text(_manifest(), encoding="utf-8")
+    (root / "log.md").write_text(body, encoding="utf-8")
+    return collections.load_manifest(tmp_path, root / "_collection.md")
+
+
+def test_finite_heading_grammar_and_manifest_status_rules_are_generic(tmp_path: Path) -> None:
+    manifest = _collection(
+        tmp_path,
+        """## Sessions
+
+### 2026-08-02 · Alpha
+- Press | grey | 10+
+
+### 2026-08-01 · Beta (Interrupted)
+- Row | grey | ?
+
+### 2026-07-31 · Gamma (Incomplete)
+- Row | grey |
+
+## Other
+""",
+    )
+
+    parsed = record_formats.load_adapter(tmp_path, manifest).read()
+
+    assert [record.values["status"] for record in parsed.records] == [
+        "completed",
+        "aborted",
+        "partial",
+    ]
+    assert parsed.records[1].values["note"] == "Interrupted"
+
+
+def test_marker_must_be_unique_first_nonblank_content_after_heading(tmp_path: Path) -> None:
+    manifest = _collection(
+        tmp_path,
+        """## Sessions
+
+### 2026-08-02 · Alpha
+- Press | grey | 10
+<!-- exomem-record-id: 14d2bdca-e145-425b-9e4b-df86f7172efa -->
+
+## Other
+""",
+    )
+
+    with pytest.raises(collections.CollectionError) as excinfo:
+        record_formats.load_adapter(tmp_path, manifest).read()
+
+    assert excinfo.value.code == "INVALID_RECORD_MARKER"
+
+
+def test_heading_grammar_rejects_the_removed_pattern_key(tmp_path: Path) -> None:
+    manifest = _collection(
+        tmp_path,
+        """## Sessions
+
+### 2026-08-02 · Alpha
+""",
+    )
+    path = tmp_path / manifest.path
+    path.write_text(
+        path.read_text(encoding="utf-8").replace('separator: " · "', "pattern: '.*'"),
+        encoding="utf-8",
+    )
+    manifest = collections.load_manifest(tmp_path, path)
+
+    with pytest.raises(collections.CollectionError) as excinfo:
+        record_formats.load_adapter(tmp_path, manifest).read()
+
+    assert excinfo.value.code == "INVALID_STORAGE_DESCRIPTOR"
+
+
+def test_commonmark_fence_closer_rejects_info_string_false_close() -> None:
+    headings = record_formats._headings_outside_fences(
+        b"```python\n```` not-a-close\n### hidden\n```\n"
+    )
+
+    assert headings == []
+
+
+def test_versioned_checksum_cursor_survives_module_reload_and_rejects_tampering() -> None:
+    token = record_formats._encode_continuation(
+        {"collection_id": COLLECTION_ID, "offset": 1, "query": {}}
+    )
+    reloaded = importlib.reload(record_formats)
+
+    assert reloaded._decode_continuation(token)["offset"] == 1
+    with pytest.raises(collections.CollectionError) as excinfo:
+        reloaded._decode_continuation(token[:-1] + ("0" if token[-1] != "0" else "1"))
+    assert excinfo.value.code == "INVALID_RECORD_CONTINUATION"
+
+
+def test_continuation_payload_and_envelope_caps_round_trip_at_the_boundary() -> None:
+    payload = {
+        "collection_id": COLLECTION_ID,
+        "offset": 1,
+        "query": {"columns": ["x" * (record_formats._MAX_TOKEN_PAYLOAD_BYTES - 128)]},
+    }
+
+    token = record_formats._encode_continuation(payload)
+
+    assert len(token.encode("utf-8")) <= record_formats._MAX_TOKEN_ENVELOPE_BYTES
+    assert record_formats._decode_continuation(token) == payload
+
+
+def test_truncated_aggregate_is_returned_even_without_row_progress(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manifest = _collection(tmp_path, "## Sessions\n\n### 2026-08-02 · Alpha\n")
+
+    def truncated_aggregate(
+        _rows: list[dict[object, object]], **kwargs: object
+    ) -> query_data.QueryDataResult:
+        return query_data.QueryDataResult(
+            path="log.md",
+            format="markdown-log",
+            total_rows=1,
+            total_matched=1,
+            returned=0,
+            columns=[],
+            rows=[],
+            aggregate={"truncated": True},
+            truncated=True,
+        )
+
+    monkeypatch.setattr(record_formats.query_data, "evaluate_rows", truncated_aggregate)
+
+    result = record_formats.query_collection(tmp_path, manifest, aggregate="latest:title")
+
+    assert result.aggregate == {"truncated": True}

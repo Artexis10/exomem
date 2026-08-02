@@ -30,7 +30,17 @@ storage:
     title: Sessions
   item_heading:
     level: 3
-    pattern: '^(?P<occurred_on>\\d{{4}}-\\d{{2}}-\\d{{2}}) · (?P<title>[^()]+?)(?: \\((?P<note>[^)]*)\\))?$'
+    fields:
+      - name: occurred_on
+        type: date
+        format: "%Y-%m-%d"
+      - name: title
+        type: string
+    separator: " · "
+    note:
+      field: note
+      open: " ("
+      close: ")"
   insertion: newest-first
   child_rows:
     prefix: "- "
@@ -97,23 +107,38 @@ def test_generic_manifest_declares_real_heading_and_bullet_row_grammar(tmp_path:
 def test_continuation_binds_manifest_bytes_and_refuses_tampering(tmp_path: Path) -> None:
     manifest = _log_collection(tmp_path)
     log = tmp_path / manifest.storage.source
-    log.write_text(log.read_text(encoding="utf-8").replace("```markdown", "### 2026-08-01 · Pull\n- Row | grey | !\n\n```markdown"), encoding="utf-8")
+    log.write_text(
+        log.read_text(encoding="utf-8").replace(
+            "```markdown", "### 2026-08-01 · Pull\n- Row | grey | !\n\n```markdown"
+        ),
+        encoding="utf-8",
+    )
 
     first = record_formats.query_collection(tmp_path, manifest, limit=1)
     assert first.continuation
     assert "source_hashes" in first.rendered
-    token_payload, _signature = first.continuation.split(".", 1)
+    _version, token_payload, checksum = first.continuation.split(".")
     forged = json.loads(base64.urlsafe_b64decode(token_payload + "=" * (-len(token_payload) % 4)))
     forged["offset"] = 999
-    altered = base64.urlsafe_b64encode(json.dumps(forged).encode()).decode().rstrip("=") + "." + _signature
+    altered = (
+        "v1."
+        + base64.urlsafe_b64encode(json.dumps(forged).encode()).decode().rstrip("=")
+        + "."
+        + checksum
+    )
     with pytest.raises(collections.CollectionError) as excinfo:
         record_formats.query_collection(tmp_path, manifest, limit=1, continuation=altered)
     assert excinfo.value.code == "INVALID_RECORD_CONTINUATION"
 
     manifest_path = tmp_path / manifest.path
-    manifest_path.write_text(manifest_path.read_text(encoding="utf-8") + "\nChanged descriptor context.\n", encoding="utf-8")
+    manifest_path.write_text(
+        manifest_path.read_text(encoding="utf-8") + "\nChanged descriptor context.\n",
+        encoding="utf-8",
+    )
     with pytest.raises(collections.CollectionError) as excinfo:
-        record_formats.query_collection(tmp_path, manifest, limit=1, continuation=first.continuation)
+        record_formats.query_collection(
+            tmp_path, manifest, limit=1, continuation=first.continuation
+        )
     assert excinfo.value.code == "STALE_RECORD_SNAPSHOT"
 
 
@@ -126,11 +151,14 @@ def test_dataset_duplicate_keys_are_ambiguous_and_rows_hide_item_versions(tmp_pa
         .replace("markdown-log", "dataset")
         .replace("log.md", "rows.csv")
         .replace(
-            "  section:\n    level: 2\n    title: Sessions\n  item_heading:\n    level: 3\n    pattern: '^(?P<occurred_on>\\d{4}-\\d{2}-\\d{2}) · (?P<title>[^()]+?)(?: \\((?P<note>[^)]*)\\))?$'\n  insertion: newest-first\n  child_rows:\n    prefix: \"- \"\n    delimiter: \"|\"\n    fields: [movement, band, repetitions]\n",
+            '  section:\n    level: 2\n    title: Sessions\n  item_heading:\n    level: 3\n    fields:\n      - name: occurred_on\n        type: date\n        format: "%Y-%m-%d"\n      - name: title\n        type: string\n    separator: " · "\n    note:\n      field: note\n      open: " ("\n      close: ")"\n  insertion: newest-first\n  child_rows:\n    prefix: "- "\n    delimiter: "|"\n    fields: [movement, band, repetitions]\n',
             "  key: id\n",
         )
         .replace("natural_key: [occurred_on, title]", "natural_key: [id]")
-        .replace("    occurred_on:\n      type: date\n      required: true\n    title:\n      type: string\n      required: true\n    movements:\n      type: array\n      items:\n        type: object\n", "    id:\n      type: string\n      required: true\n    value:\n      type: number\n      required: true\n"),
+        .replace(
+            "    occurred_on:\n      type: date\n      required: true\n    title:\n      type: string\n      required: true\n    movements:\n      type: array\n      items:\n        type: object\n",
+            "    id:\n      type: string\n      required: true\n    value:\n      type: number\n      required: true\n",
+        ),
         encoding="utf-8",
     )
     manifest = collections.load_manifest(tmp_path, collection / "_collection.md")
@@ -143,13 +171,19 @@ def test_dataset_duplicate_keys_are_ambiguous_and_rows_hide_item_versions(tmp_pa
     assert all("item_version" not in row for row in result.rows)
 
 
-def test_query_profiles_keep_exact_cardinality_and_group_and_aggregate_rendering_bounded(tmp_path: Path) -> None:
+def test_query_profiles_keep_exact_cardinality_and_group_and_aggregate_rendering_bounded(
+    tmp_path: Path,
+) -> None:
     rows = [{"category": f"category-{number}", "value": number} for number in range(100)]
 
     profile = query_data.evaluate_rows(rows, path="rows", format="dataset", aggregate="profile")
-    grouped = query_data.evaluate_rows(rows, path="rows", format="dataset", aggregate="group:category")
+    grouped = query_data.evaluate_rows(
+        rows, path="rows", format="dataset", aggregate="group:category"
+    )
 
-    category = next(column for column in profile.aggregate["profile"]["columns"] if column["name"] == "category")
+    category = next(
+        column for column in profile.aggregate["profile"]["columns"] if column["name"] == "category"
+    )
     assert category["distinct"] == 100
     assert len(category["top_values"]) == query_data.PROFILE_MAX_DISTINCT
     assert grouped.aggregate["truncated"] is True

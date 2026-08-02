@@ -48,12 +48,25 @@ PROFILE_MAX_DISTINCT = 20  # categorical/text columns expose up to this many dis
 MAX_RESPONSE_BYTES = 64 * 1024
 MAX_PARSED_ROWS = 10_000
 _COMMON_RECORD_KEYS = ("result", "results", "data", "rows", "items", "entries")
-_OPS = frozenset({
-    "eq", "ne", "gt", "gte", "lt", "lte",
-    "contains", "icontains", "startswith", "in", "nin", "exists", "missing",
-})
+_OPS = frozenset(
+    {
+        "eq",
+        "ne",
+        "gt",
+        "gte",
+        "lt",
+        "lte",
+        "contains",
+        "icontains",
+        "startswith",
+        "in",
+        "nin",
+        "exists",
+        "missing",
+    }
+)
 _NUM_PREFIX = re.compile(r"^[<>≤≥=~\s]+")
-_DATE_LIKE = re.compile(r"\d{1,4}[-/]\d")        # 2024-07, 9/2024 → not a number
+_DATE_LIKE = re.compile(r"\d{1,4}[-/]\d")  # 2024-07, 9/2024 → not a number
 _LEADING_NUM = re.compile(r"[+-]?\d+(?:[.,]\d+)?")  # leading number, comma or dot decimal
 
 
@@ -70,8 +83,8 @@ class QueryDataError(Exception):
 class QueryDataResult:
     path: str
     format: str
-    total_rows: int       # rows in the dataset
-    total_matched: int    # rows matching the filters (before limit/offset)
+    total_rows: int  # rows in the dataset
+    total_matched: int  # rows matching the filters (before limit/offset)
     returned: int
     columns: list[str]
     rows: list[dict]
@@ -195,19 +208,29 @@ def _infer_columns(rows: list[dict]) -> list[str]:
     return cols
 
 
-def load_rows(abs_path: Path, record_path: str | None = None) -> tuple[str, list[dict], list[str], list[str]]:
+def load_rows(
+    abs_path: Path, record_path: str | None = None
+) -> tuple[str, list[dict], list[str], list[str]]:
     suffix = abs_path.suffix.lower()
-    size = abs_path.stat().st_size
-    if size > MAX_FILE_BYTES:
-        raise QueryDataError(
-            "TOO_LARGE",
-            f"file is {size} bytes (> {MAX_FILE_BYTES} limit); pre-split or filter upstream",
-        )
+    data = read_dataset_bytes(abs_path)
+    return load_rows_bytes(data, suffix, record_path)
+
+
+def read_dataset_bytes(abs_path: Path) -> bytes:
+    """Read at most the dataset cap plus one byte to avoid unbounded allocation."""
     try:
-        data = abs_path.read_bytes()
+        if abs_path.stat().st_size > MAX_FILE_BYTES:
+            raise QueryDataError(
+                "TOO_LARGE",
+                f"dataset exceeds the {MAX_FILE_BYTES} byte limit; pre-split or filter upstream",
+            )
+        with abs_path.open("rb") as handle:
+            data = handle.read(MAX_FILE_BYTES + 1)
     except OSError as error:
         raise QueryDataError("NOT_FOUND", "dataset could not be read") from error
-    return load_rows_bytes(data, suffix, record_path)
+    if len(data) > MAX_FILE_BYTES:
+        raise QueryDataError("TOO_LARGE", "dataset exceeds the byte limit")
+    return data
 
 
 def load_rows_bytes(
@@ -241,7 +264,9 @@ def load_rows_bytes(
             raise QueryDataError("TOO_MANY_ROWS", "dataset exceeds the parsed row limit")
         rows = [r if isinstance(r, dict) else {"value": r} for r in arr]
         return "json", rows, _infer_columns(rows), warnings
-    raise QueryDataError("UNSUPPORTED_FORMAT", f"only {list(ALLOWED_SUFFIXES)} supported, got {suffix!r}")
+    raise QueryDataError(
+        "UNSUPPORTED_FORMAT", f"only {list(ALLOWED_SUFFIXES)} supported, got {suffix!r}"
+    )
 
 
 def _match(row: dict, filt: dict) -> bool:
@@ -322,7 +347,11 @@ def _aggregate(matched: list[dict], spec: str, date_col: str | None) -> dict:
         total = 0
         for r in matched:
             v = _get_field(r, col)
-            key = json.dumps(v, sort_keys=True, ensure_ascii=False) if isinstance(v, (dict, list)) else str(v)
+            key = (
+                json.dumps(v, sort_keys=True, ensure_ascii=False)
+                if isinstance(v, (dict, list))
+                else str(v)
+            )
             if key not in seen:
                 seen.add(key)
                 total += 1
@@ -337,7 +366,9 @@ def _aggregate(matched: list[dict], spec: str, date_col: str | None) -> dict:
             prior = counts.get(key)
             counts[key] = (value, 1 if prior is None else prior[1] + 1)
         ordered = sorted(counts.values(), key=lambda pair: json.dumps(pair[0], ensure_ascii=False))
-        groups = [{"value": value, "count": count} for value, count in ordered[:PROFILE_MAX_DISTINCT]]
+        groups = [
+            {"value": value, "count": count} for value, count in ordered[:PROFILE_MAX_DISTINCT]
+        ]
         return {"groups": groups, "n": len(counts), "truncated": len(counts) > len(groups)}
     if func == "latest":
         order_col = date_col or col
@@ -354,8 +385,10 @@ def _aggregate(matched: list[dict], spec: str, date_col: str | None) -> dict:
         if not nums:
             return {func: None, "n": 0, "note": f"no numeric values in {col!r}"}
         value = {
-            "min": min(nums), "max": max(nums),
-            "sum": sum(nums), "avg": sum(nums) / len(nums),
+            "min": min(nums),
+            "max": max(nums),
+            "sum": sum(nums),
+            "avg": sum(nums) / len(nums),
         }[func]
         return {func: value, "n": len(nums)}
     raise QueryDataError("BAD_AGGREGATE", f"unknown aggregate func {func!r}")
@@ -374,7 +407,7 @@ class ColumnProfile:
     """
 
     name: str
-    kind: str            # numeric | date | categorical | text
+    kind: str  # numeric | date | categorical | text
     non_null: int
     distinct: int
     min: float | None = None
@@ -388,8 +421,10 @@ class ColumnProfile:
 
     def as_dict(self) -> dict:
         d: dict[str, Any] = {
-            "name": self.name, "kind": self.kind,
-            "non_null": self.non_null, "distinct": self.distinct,
+            "name": self.name,
+            "kind": self.kind,
+            "non_null": self.non_null,
+            "distinct": self.distinct,
         }
         for k in ("min", "max", "sum", "avg", "earliest", "latest", "top_values"):
             v = getattr(self, k)
@@ -400,7 +435,9 @@ class ColumnProfile:
         return d
 
 
-def _profile_column(name: str, values: list[Any], *, max_distinct: int = PROFILE_MAX_DISTINCT) -> ColumnProfile:
+def _profile_column(
+    name: str, values: list[Any], *, max_distinct: int = PROFILE_MAX_DISTINCT
+) -> ColumnProfile:
     non_null = [v for v in values if v not in (None, "")]
     n = len(non_null)
     seen: list[Any] = []
@@ -433,8 +470,14 @@ def _profile_column(name: str, values: list[Any], *, max_distinct: int = PROFILE
         )
     if n and len(nums) >= 0.6 * n:
         return ColumnProfile(
-            name, "numeric", n, distinct,
-            min=min(nums), max=max(nums), sum=sum(nums), avg=sum(nums) / len(nums),
+            name,
+            "numeric",
+            n,
+            distinct,
+            min=min(nums),
+            max=max(nums),
+            sum=sum(nums),
+            avg=sum(nums) / len(nums),
             distinct_truncated=distinct_truncated,
         )
     kind = "categorical" if distinct <= max_distinct else "text"
@@ -475,8 +518,11 @@ def profile_data(
         for c in cols
     ]
     return {
-        "path": rel, "format": fmt, "total_rows": len(rows),
-        "columns": profiles, "warnings": warnings,
+        "path": rel,
+        "format": fmt,
+        "total_rows": len(rows),
+        "columns": profiles,
+        "warnings": warnings,
     }
 
 
@@ -535,10 +581,10 @@ def build_dataset_card(profile: dict, *, title: str | None = None) -> str:
 def _profile_payload(rows: list[dict], cols: list[str], fmt: str, rel: str) -> dict:
     """Profile already-loaded rows and render a card — the `aggregate="profile"` result."""
     profile = {
-        "path": rel, "format": fmt, "total_rows": len(rows),
-        "columns": [
-            _profile_column(c, [_get_field(r, c) for r in rows]).as_dict() for c in cols
-        ],
+        "path": rel,
+        "format": fmt,
+        "total_rows": len(rows),
+        "columns": [_profile_column(c, [_get_field(r, c) for r in rows]).as_dict() for c in cols],
     }
     return {"profile": profile, "dataset_card": build_dataset_card(profile)}
 
@@ -643,17 +689,25 @@ def evaluate_rows(
         if aggregate_truncated:
             warnings.append("response size cap truncated aggregate")
         return QueryDataResult(
-            path=path, format=format, total_rows=total_rows, total_matched=total_matched,
-            returned=0, columns=cols, rows=[],
+            path=path,
+            format=format,
+            total_rows=total_rows,
+            total_matched=total_matched,
+            returned=0,
+            columns=cols,
+            rows=[],
             aggregate=agg,
-            truncated=aggregate_truncated, warnings=warnings,
+            truncated=aggregate_truncated,
+            warnings=warnings,
         )
 
     if sort_by:
+
         def _key(r: dict):
             v = _get_field(r, sort_by)
             n = _coerce_num(v)
             return (0, n, "") if n is not None else (1, 0.0, "" if v is None else str(v))
+
         matched.sort(key=_key, reverse=descending)
 
     limit = _bounded_limit(limit)
@@ -673,7 +727,14 @@ def evaluate_rows(
     truncated = truncated or response_truncated
 
     return QueryDataResult(
-        path=path, format=format, total_rows=total_rows, total_matched=total_matched,
-        returned=len(out_rows), columns=out_cols, rows=out_rows,
-        aggregate=None, truncated=truncated, warnings=warnings,
+        path=path,
+        format=format,
+        total_rows=total_rows,
+        total_matched=total_matched,
+        returned=len(out_rows),
+        columns=out_cols,
+        rows=out_rows,
+        aggregate=None,
+        truncated=truncated,
+        warnings=warnings,
     )

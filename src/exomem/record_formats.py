@@ -6,11 +6,9 @@ import base64
 import csv
 import datetime as dt
 import hashlib
-import hmac
 import json
 import re
-import secrets
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
@@ -20,13 +18,18 @@ from . import structured_collections as collections
 
 _MARKER = re.compile(rb"<!--\s*exomem-record-id:\s*([0-9a-fA-F-]{36})\s*-->")
 _HEADING = re.compile(rb"^(#{1,6})\s+(.+?)\s*(?:\r?\n|$)")
-_FENCE = re.compile(rb"^ {0,3}(`{3,}|~{3,})[^`~\r\n]*?(?:\r?\n|$)")
+_FENCE_OPEN = re.compile(rb"^ {0,3}((?:`{3,}|~{3,}))[^\r\n]*(?:\r?\n|$)")
 _MAX_LOG_BYTES = 2 * 1024 * 1024
 _MAX_ITEM_FILES = 2_000
 _MAX_ITEM_BYTES = 512 * 1024
 _MAX_COLLECTION_BYTES = 8 * 1024 * 1024
-_MAX_TOKEN_BYTES = 4 * 1024
-_TOKEN_KEY = secrets.token_bytes(32)  # cursors are process-local integrity envelopes, not authority.
+_MAX_TOKEN_PAYLOAD_BYTES = 4 * 1024
+_MAX_TOKEN_ENVELOPE_BYTES = 6 * 1024
+_CURSOR_VERSION = "v1"
+_CURSOR_DOMAIN = b"exomem.record-continuation.v1\0"
+_MAX_HEADING_FIELDS = 8
+_MAX_GRAMMAR_LITERAL_BYTES = 128
+_MAX_NOTE_RULES = 32
 _SYSTEM_FIELDS = frozenset(
     {"collection_id", "record_id", "item_version", "inferred", "ambiguous", "parent_record_id"}
 )
@@ -64,6 +67,28 @@ class AdapterSnapshot:
     source_versions: tuple[collections.SourceVersion, ...] = ()
 
 
+@dataclass(frozen=True, slots=True)
+class _HeadingField:
+    name: str
+    type: str
+    format: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class _HeadingNote:
+    field: str
+    open: str
+    close: str
+
+
+@dataclass(frozen=True, slots=True)
+class _HeadingGrammar:
+    level: int
+    fields: tuple[_HeadingField, ...]
+    separator: str
+    note: _HeadingNote | None
+
+
 class CollectionAdapter(Protocol):
     mutable: bool
 
@@ -96,7 +121,9 @@ class _BaseAdapter:
 
     def _validate_values(self, values: dict[str, Any]) -> None:
         if _SYSTEM_FIELDS.intersection(self.manifest.schema.fields):
-            raise collections.CollectionError("RESERVED_RECORD_FIELD", "schema uses a reserved record field")
+            raise collections.CollectionError(
+                "RESERVED_RECORD_FIELD", "schema uses a reserved record field"
+            )
         self.manifest.schema.validate(values)
 
     def _identity(self, values: dict[str, Any], marker: str | None) -> collections.ItemIdentity:
@@ -117,33 +144,27 @@ class _BaseAdapter:
 
 
 class MarkdownLogAdapter(_BaseAdapter):
-
     def read(self) -> AdapterSnapshot:
         source = self.source_path
-        try:
-            data = source.read_bytes()
-        except OSError as error:
-            raise collections.CollectionError("SOURCE_NOT_FOUND", "canonical source could not be read") from error
-        if len(data) > _MAX_LOG_BYTES:
-            raise collections.CollectionError("RECORD_SOURCE_TOO_LARGE", "markdown log exceeds the byte limit")
+        data = _read_bounded(source, _MAX_LOG_BYTES, "markdown log")
         descriptor = self.manifest.storage.descriptor
         section = descriptor.get("section")
         item_heading = descriptor.get("item_heading")
         if not isinstance(section, Mapping) or not isinstance(item_heading, Mapping):
-            raise collections.CollectionError("INVALID_STORAGE_DESCRIPTOR", "markdown log needs section and item heading grammar")
+            raise collections.CollectionError(
+                "INVALID_STORAGE_DESCRIPTOR", "markdown log needs section and item heading grammar"
+            )
         section_level, section_title = section.get("level"), section.get("title")
-        item_level, pattern = item_heading.get("level"), item_heading.get("pattern")
         if (
             type(section_level) is not int
-            or not isinstance(section_title, str)
-            or type(item_level) is not int
-            or not isinstance(pattern, str)
+            or not 1 <= section_level <= 6
+            or not _bounded_literal(section_title)
         ):
-            raise collections.CollectionError("INVALID_STORAGE_DESCRIPTOR", "markdown log grammar is invalid")
-        try:
-            item_pattern = re.compile(pattern)
-        except re.error as error:
-            raise collections.CollectionError("INVALID_STORAGE_DESCRIPTOR", "item heading pattern is invalid") from error
+            raise collections.CollectionError(
+                "INVALID_STORAGE_DESCRIPTOR", "markdown log grammar is invalid"
+            )
+        grammar = _heading_grammar(item_heading)
+        _status_values(descriptor, None)
         insertion = descriptor.get("insertion")
         if insertion not in {"newest-first", "oldest-first"}:
             raise collections.CollectionError(
@@ -151,27 +172,39 @@ class MarkdownLogAdapter(_BaseAdapter):
             )
         child_spec = descriptor.get("child_rows", {})
         if not isinstance(child_spec, Mapping):
-            raise collections.CollectionError("INVALID_STORAGE_DESCRIPTOR", "child_rows must be an object")
+            raise collections.CollectionError(
+                "INVALID_STORAGE_DESCRIPTOR", "child_rows must be an object"
+            )
         prefix = child_spec.get("prefix", "")
         delimiter = child_spec.get("delimiter", "")
         if not isinstance(prefix, str) or not isinstance(delimiter, str):
-            raise collections.CollectionError("INVALID_STORAGE_DESCRIPTOR", "child row grammar is invalid")
+            raise collections.CollectionError(
+                "INVALID_STORAGE_DESCRIPTOR", "child row grammar is invalid"
+            )
         child_fields = tuple(str(value) for value in child_spec.get("fields", ()))
         if not child_fields or _SYSTEM_FIELDS.intersection(child_fields):
-            raise collections.CollectionError("INVALID_STORAGE_DESCRIPTOR", "child row fields are invalid")
+            raise collections.CollectionError(
+                "INVALID_STORAGE_DESCRIPTOR", "child row fields are invalid"
+            )
 
         headings = _headings_outside_fences(data)
         section_heading = next(
-            (item for item in headings if item.level == section_level and item.title == section_title), None
+            (
+                item
+                for item in headings
+                if item.level == section_level and item.title == section_title
+            ),
+            None,
         )
         if section_heading is None:
-            raise collections.CollectionError("COLLECTION_SECTION_NOT_FOUND", "declared markdown section was not found")
+            raise collections.CollectionError(
+                "COLLECTION_SECTION_NOT_FOUND", "declared markdown section was not found"
+            )
         section_end = next(
             (
                 item.start
                 for item in headings
-                if item.start > section_heading.start
-                and item.level <= section_level
+                if item.start > section_heading.start and item.level <= section_level
             ),
             len(data),
         )
@@ -179,14 +212,19 @@ class MarkdownLogAdapter(_BaseAdapter):
             item
             for item in headings
             if section_heading.end <= item.start < section_end
-            and item.level == item_level
-            and item_pattern.fullmatch(item.title)
+            and item.level == grammar.level
+            and _log_values(item.title, grammar) is not None
         ]
         records: list[Record] = []
         for index, item in enumerate(entries):
             end = entries[index + 1].start if index + 1 < len(entries) else section_end
-            block = data[item.start:end]
-            values = _log_values(item.title, item_pattern)
+            block = data[item.start : end]
+            values = _log_values(item.title, grammar)
+            if values is None:
+                raise collections.CollectionError(
+                    "INVALID_RECORD_HEADING", "record heading does not match its manifest grammar"
+                )
+            values.update(_status_values(descriptor, values.get("note")))
             children = _child_rows(block, item.start, prefix, delimiter, child_fields)
             if children:
                 values["movements"] = [child.values for child in children]
@@ -196,7 +234,9 @@ class MarkdownLogAdapter(_BaseAdapter):
             if marker_match:
                 marker = memory_refs.normalize_id(marker_match.group(1).decode("ascii"))
                 if marker is None:
-                    raise collections.CollectionError("INVALID_RECORD_ID", "markdown marker is not a UUID")
+                    raise collections.CollectionError(
+                        "INVALID_RECORD_ID", "markdown marker is not a UUID"
+                    )
             identity = self._identity(values, marker)
             records.append(
                 Record(
@@ -222,7 +262,12 @@ class MarkdownLogAdapter(_BaseAdapter):
         )
         return AdapterSnapshot(
             records=tuple(records),
-            snapshot=_snapshot([(manifest_version.path, manifest_version.hash), (source_version.path, source_version.hash)]),
+            snapshot=_snapshot(
+                [
+                    (manifest_version.path, manifest_version.hash),
+                    (source_version.path, source_version.hash),
+                ]
+            ),
             insertion_offset=insertion_offset,
             diagnostics=diagnostics,
             source_versions=(manifest_version, source_version),
@@ -230,35 +275,45 @@ class MarkdownLogAdapter(_BaseAdapter):
 
 
 class MarkdownItemsAdapter(_BaseAdapter):
-
     def read(self) -> AdapterSnapshot:
         source = self.source_path
         if not source.is_dir():
-            raise collections.CollectionError("SOURCE_NOT_FOUND", "canonical item directory could not be read")
+            raise collections.CollectionError(
+                "SOURCE_NOT_FOUND", "canonical item directory could not be read"
+            )
         records: list[Record] = []
         versions: list[tuple[str, str]] = []
         total_bytes = 0
-        paths = sorted(source.rglob("*.md"))
+        paths = list(_bounded_paths(source.rglob("*.md"), _MAX_ITEM_FILES))
         if len(paths) > _MAX_ITEM_FILES:
-            raise collections.CollectionError("RECORD_ITEM_LIMIT", "collection has too many item files")
+            raise collections.CollectionError(
+                "RECORD_ITEM_LIMIT", "collection has too many item files"
+            )
+        paths.sort()
         source_root = source.resolve()
         for path in paths:
             if path.is_symlink():
-                raise collections.CollectionError("INVALID_RECORD_ITEM_PATH", "item files cannot be symlinks")
+                raise collections.CollectionError(
+                    "INVALID_RECORD_ITEM_PATH", "item files cannot be symlinks"
+                )
             try:
                 path.resolve().relative_to(source_root)
             except ValueError as error:
-                raise collections.CollectionError("INVALID_RECORD_ITEM_PATH", "item file escapes collection") from error
-            data = path.read_bytes()
-            if len(data) > _MAX_ITEM_BYTES:
-                raise collections.CollectionError("RECORD_SOURCE_TOO_LARGE", "item file exceeds the byte limit")
+                raise collections.CollectionError(
+                    "INVALID_RECORD_ITEM_PATH", "item file escapes collection"
+                ) from error
+            data = _read_bounded(path, _MAX_ITEM_BYTES, "item file")
             total_bytes += len(data)
             if total_bytes > _MAX_COLLECTION_BYTES:
-                raise collections.CollectionError("RECORD_SOURCE_TOO_LARGE", "collection exceeds the byte limit")
+                raise collections.CollectionError(
+                    "RECORD_SOURCE_TOO_LARGE", "collection exceeds the byte limit"
+                )
             try:
                 text = data.decode("utf-8")
             except UnicodeDecodeError as error:
-                raise collections.CollectionError("INVALID_RECORD_ITEM", "record item is not UTF-8") from error
+                raise collections.CollectionError(
+                    "INVALID_RECORD_ITEM", "record item is not UTF-8"
+                ) from error
             try:
                 frontmatter, body, marker = vault.parse_frontmatter(text, strict=True)
             except vault.FrontmatterError as error:
@@ -268,9 +323,13 @@ class MarkdownItemsAdapter(_BaseAdapter):
             collection_id = memory_refs.normalize_id(str(frontmatter.get("collection_id", "")))
             record_id = memory_refs.normalize_id(str(frontmatter.get("record_id", "")))
             if collection_id != self.manifest.collection_id or record_id is None:
-                raise collections.CollectionError("INVALID_RECORD_ITEM", "record item identity is invalid")
+                raise collections.CollectionError(
+                    "INVALID_RECORD_ITEM", "record item identity is invalid"
+                )
             if frontmatter.get("schema_version") != self.manifest.schema.version:
-                raise collections.CollectionError("UNSUPPORTED_ITEM_SCHEMA_VERSION", "item schema version differs")
+                raise collections.CollectionError(
+                    "UNSUPPORTED_ITEM_SCHEMA_VERSION", "item schema version differs"
+                )
             values = {
                 name: _json_value(value)
                 for name, value in frontmatter.items()
@@ -313,7 +372,7 @@ class DatasetAdapter(_BaseAdapter):
                 "INVALID_STORAGE_DESCRIPTOR", "dataset record path must be a non-empty string"
             )
         try:
-            source_bytes = source.read_bytes()
+            source_bytes = query_data.read_dataset_bytes(source)
             _format, rows, _columns, _warnings = query_data.load_rows_bytes(
                 source_bytes, source.suffix, record_path
             )
@@ -323,12 +382,16 @@ class DatasetAdapter(_BaseAdapter):
         key_name = self.manifest.storage.descriptor.get("key")
         records: list[Record] = []
         for index, row in enumerate(rows):
-            values = _schema_values({name: _json_value(value) for name, value in row.items()}, self.manifest)
+            values = _schema_values(
+                {name: _json_value(value) for name, value in row.items()}, self.manifest
+            )
             self._validate_values(values)
             if key_name is not None:
                 key = str(values.get(str(key_name), ""))
                 if not key:
-                    raise collections.CollectionError("INVALID_DATASET_KEY", "declared dataset key is missing")
+                    raise collections.CollectionError(
+                        "INVALID_DATASET_KEY", "declared dataset key is missing"
+                    )
                 identity = collections.ItemIdentity(self.manifest.collection_id, key)
             else:
                 identity = self._identity(values, None)
@@ -336,7 +399,9 @@ class DatasetAdapter(_BaseAdapter):
                 Record(
                     identity=identity,
                     values=values,
-                    source=collections.SourceVersion(path=self.manifest.storage.source, hash=digest),
+                    source=collections.SourceVersion(
+                        path=self.manifest.storage.source, hash=digest
+                    ),
                     span=SourceSpan(index, index + 1),
                 )
             )
@@ -345,7 +410,12 @@ class DatasetAdapter(_BaseAdapter):
         source_version = collections.SourceVersion(path=self.manifest.storage.source, hash=digest)
         return AdapterSnapshot(
             tuple(records),
-            _snapshot([(manifest_version.path, manifest_version.hash), (source_version.path, source_version.hash)]),
+            _snapshot(
+                [
+                    (manifest_version.path, manifest_version.hash),
+                    (source_version.path, source_version.hash),
+                ]
+            ),
             diagnostics=diagnostics,
             source_versions=(manifest_version, source_version),
         )
@@ -413,7 +483,9 @@ def query_collection(
     if continuation:
         token = _decode_continuation(continuation)
         if token.get("collection_id") != manifest.collection_id or token.get("query") != query:
-            raise collections.CollectionError("INVALID_RECORD_CONTINUATION", "continuation does not match query")
+            raise collections.CollectionError(
+                "INVALID_RECORD_CONTINUATION", "continuation does not match query"
+            )
         if token.get("snapshot") != parsed.snapshot:
             raise collections.CollectionError("STALE_RECORD_SNAPSHOT", "canonical source changed")
         offset = token["offset"]
@@ -439,8 +511,10 @@ def query_collection(
         date_to=date_to,
         date_column=date_column,
     )
-    if result.truncated and result.returned == 0:
-        raise collections.CollectionError("RECORD_RESPONSE_TOO_LARGE", "first result row exceeds the response cap")
+    if aggregate is None and result.truncated and result.returned == 0:
+        raise collections.CollectionError(
+            "RECORD_RESPONSE_TOO_LARGE", "first result row exceeds the response cap"
+        )
     next_offset = offset + result.returned
     next_token = None
     if result.truncated:
@@ -461,7 +535,9 @@ def query_collection(
         output_format,
     )
     if len(rendered.encode("utf-8")) > query_data.MAX_RESPONSE_BYTES:
-        raise collections.CollectionError("RECORD_RESPONSE_TOO_LARGE", "rendered query exceeds the response cap")
+        raise collections.CollectionError(
+            "RECORD_RESPONSE_TOO_LARGE", "rendered query exceeds the response cap"
+        )
     return RecordQueryResult(
         collection_id=manifest.collection_id,
         snapshot=parsed.snapshot,
@@ -489,20 +565,24 @@ class _Heading:
 def _headings_outside_fences(data: bytes) -> list[_Heading]:
     headings: list[_Heading] = []
     offset = 0
-    fence: bytes | None = None
+    fence: tuple[bytes, int] | None = None
     for line in data.splitlines(keepends=True):
-        fence_match = _FENCE.match(line)
-        if fence_match:
-            marker = fence_match.group(1)
-            if fence is None:
-                fence = marker
-            elif marker[:1] == fence[:1] and len(marker) >= len(fence):
+        if fence is not None:
+            if _closes_fence(line, fence):
                 fence = None
-        elif fence is None and (match := _HEADING.match(line)):
+        elif (opened := _opens_fence(line)) is not None:
+            fence = opened
+        elif match := _HEADING.match(line):
+            try:
+                title = match.group(2).decode("utf-8").strip()
+            except UnicodeDecodeError as error:
+                raise collections.CollectionError(
+                    "INVALID_RECORD_SOURCE", "markdown log is not UTF-8"
+                ) from error
             headings.append(
                 _Heading(
                     level=len(match.group(1)),
-                    title=match.group(2).decode("utf-8").strip(),
+                    title=title,
                     start=offset,
                     end=offset + len(line),
                 )
@@ -511,11 +591,185 @@ def _headings_outside_fences(data: bytes) -> list[_Heading]:
     return headings
 
 
-def _log_values(title: str, pattern: re.Pattern[str]) -> dict[str, Any]:
-    match = pattern.fullmatch(title)
+def _opens_fence(line: bytes) -> tuple[bytes, int] | None:
+    match = _FENCE_OPEN.match(line)
     if match is None:
-        raise collections.CollectionError("INVALID_RECORD_HEADING", "record heading does not match its manifest grammar")
-    return {name: value.strip() if isinstance(value, str) else value for name, value in match.groupdict().items()}
+        return None
+    marker = match.group(1)
+    return marker[:1], len(marker)
+
+
+def _closes_fence(line: bytes, fence: tuple[bytes, int]) -> bool:
+    marker, minimum = fence
+    if len(line) - len(line.lstrip(b" ")) > 3:
+        return False
+    stripped = line.lstrip(b" ")
+    count = 0
+    while count < len(stripped) and stripped[count : count + 1] == marker:
+        count += 1
+    return count >= minimum and stripped[count:].strip() == b""
+
+
+def _heading_grammar(value: Mapping[str, Any]) -> _HeadingGrammar:
+    if set(value) != {"level", "fields", "separator", "note"} and set(value) != {
+        "level",
+        "fields",
+        "separator",
+    }:
+        raise collections.CollectionError(
+            "INVALID_STORAGE_DESCRIPTOR", "item heading grammar has unknown keys"
+        )
+    level = value.get("level")
+    fields_value = value.get("fields")
+    separator = value.get("separator")
+    if (
+        type(level) is not int
+        or not 1 <= level <= 6
+        or not isinstance(fields_value, Sequence)
+        or isinstance(fields_value, (str, bytes))
+    ):
+        raise collections.CollectionError(
+            "INVALID_STORAGE_DESCRIPTOR", "item heading grammar is invalid"
+        )
+    if (
+        not 1 <= len(fields_value) <= _MAX_HEADING_FIELDS
+        or not isinstance(separator, str)
+        or not _bounded_literal(separator)
+    ):
+        raise collections.CollectionError(
+            "INVALID_STORAGE_DESCRIPTOR", "item heading grammar is invalid"
+        )
+    fields: list[_HeadingField] = []
+    names: set[str] = set()
+    for item in fields_value:
+        if not isinstance(item, Mapping) or set(item) - {"name", "type", "format"}:
+            raise collections.CollectionError(
+                "INVALID_STORAGE_DESCRIPTOR", "item heading field is invalid"
+            )
+        name, type_name, format_value = item.get("name"), item.get("type"), item.get("format")
+        if (
+            not isinstance(name, str)
+            or not _bounded_literal(name)
+            or name in names
+            or type_name not in {"string", "date", "datetime"}
+        ):
+            raise collections.CollectionError(
+                "INVALID_STORAGE_DESCRIPTOR", "item heading field is invalid"
+            )
+        if type_name == "string":
+            if format_value is not None:
+                raise collections.CollectionError(
+                    "INVALID_STORAGE_DESCRIPTOR", "string heading field cannot have a format"
+                )
+        elif not isinstance(format_value, str) or not _bounded_literal(format_value):
+            raise collections.CollectionError(
+                "INVALID_STORAGE_DESCRIPTOR", "dated heading field needs a format"
+            )
+        names.add(name)
+        fields.append(_HeadingField(name, type_name, format_value))
+    note_value = value.get("note")
+    note: _HeadingNote | None = None
+    if note_value is not None:
+        if not isinstance(note_value, Mapping) or set(note_value) != {"field", "open", "close"}:
+            raise collections.CollectionError(
+                "INVALID_STORAGE_DESCRIPTOR", "heading note grammar is invalid"
+            )
+        field_name, opening, closing = (
+            note_value.get("field"),
+            note_value.get("open"),
+            note_value.get("close"),
+        )
+        if (
+            not isinstance(field_name, str)
+            or not _bounded_literal(field_name)
+            or field_name in names
+            or not isinstance(opening, str)
+            or not _bounded_literal(opening)
+            or not isinstance(closing, str)
+            or not _bounded_literal(closing)
+        ):
+            raise collections.CollectionError(
+                "INVALID_STORAGE_DESCRIPTOR", "heading note grammar is invalid"
+            )
+        note = _HeadingNote(field_name, opening, closing)
+    return _HeadingGrammar(level, tuple(fields), separator, note)
+
+
+def _bounded_literal(value: object) -> bool:
+    return isinstance(value, str) and 0 < len(value.encode("utf-8")) <= _MAX_GRAMMAR_LITERAL_BYTES
+
+
+def _log_values(title: str, grammar: _HeadingGrammar) -> dict[str, Any] | None:
+    core = title
+    values: dict[str, Any] = {}
+    if grammar.note is not None:
+        note = grammar.note
+        if core.endswith(note.close):
+            opening = core.rfind(note.open, 0, len(core) - len(note.close))
+            if opening < 0:
+                return None
+            note_value = core[opening + len(note.open) : -len(note.close)].strip()
+            if not note_value:
+                return None
+            values[note.field] = note_value
+            core = core[:opening]
+        else:
+            values[note.field] = None
+    parts = [part.strip() for part in core.split(grammar.separator)]
+    if len(parts) != len(grammar.fields) or any(not part for part in parts):
+        return None
+    for heading_field, part in zip(grammar.fields, parts, strict=True):
+        if heading_field.type == "string":
+            values[heading_field.name] = part
+            continue
+        try:
+            parsed = dt.datetime.strptime(part, heading_field.format or "")
+        except ValueError:
+            return None
+        values[heading_field.name] = (
+            parsed.date().isoformat() if heading_field.type == "date" else parsed.isoformat()
+        )
+    return values
+
+
+def _status_values(descriptor: Mapping[str, Any], note: object) -> dict[str, Any]:
+    defaults = descriptor.get("defaults", {})
+    rules = descriptor.get("note_rules", [])
+    if (
+        not isinstance(defaults, Mapping)
+        or not isinstance(rules, Sequence)
+        or isinstance(rules, (str, bytes))
+    ):
+        raise collections.CollectionError(
+            "INVALID_STORAGE_DESCRIPTOR", "record status rules are invalid"
+        )
+    if len(defaults) > _MAX_HEADING_FIELDS or len(rules) > _MAX_NOTE_RULES:
+        raise collections.CollectionError(
+            "INVALID_STORAGE_DESCRIPTOR", "record status rules exceed the limit"
+        )
+    values = dict(defaults)
+    for rule in rules:
+        if not isinstance(rule, Mapping) or set(rule) != {"equals", "values"}:
+            raise collections.CollectionError(
+                "INVALID_STORAGE_DESCRIPTOR", "record status rule is invalid"
+            )
+        expected, replacements = rule.get("equals"), rule.get("values")
+        if (
+            not _bounded_literal(expected)
+            or not isinstance(replacements, Mapping)
+            or len(replacements) > _MAX_HEADING_FIELDS
+        ):
+            raise collections.CollectionError(
+                "INVALID_STORAGE_DESCRIPTOR", "record status rule is invalid"
+            )
+        for name in replacements:
+            if not isinstance(name, str) or not _bounded_literal(name) or name in _SYSTEM_FIELDS:
+                raise collections.CollectionError(
+                    "INVALID_STORAGE_DESCRIPTOR", "record status rule is invalid"
+                )
+        if note == expected:
+            values.update(replacements)
+    return values
 
 
 def _child_rows(
@@ -525,33 +779,58 @@ def _child_rows(
         return ()
     rows: list[ChildRow] = []
     offset = block_start
-    fence: bytes | None = None
+    fence: tuple[bytes, int] | None = None
     for raw in block.splitlines(keepends=True):
-        line = raw.decode("utf-8").strip()
-        fence_match = _FENCE.match(raw)
-        if fence_match:
-            marker = fence_match.group(1)
-            fence = marker if fence is None else None if marker[:1] == fence[:1] and len(marker) >= len(fence) else fence
-        elif fence is None and line.startswith(prefix):
+        try:
+            line = raw.decode("utf-8").strip()
+        except UnicodeDecodeError as error:
+            raise collections.CollectionError(
+                "INVALID_RECORD_SOURCE", "markdown log is not UTF-8"
+            ) from error
+        if fence is not None:
+            if _closes_fence(raw, fence):
+                fence = None
+        elif (opened := _opens_fence(raw)) is not None:
+            fence = opened
+        elif line.startswith(prefix):
             values = [part.strip() for part in line[len(prefix) :].split(delimiter)]
             if len(values) == len(fields):
                 rows.append(
-                    ChildRow(dict(zip(fields, values, strict=True)), SourceSpan(offset, offset + len(raw)))
+                    ChildRow(
+                        dict(zip(fields, values, strict=True)),
+                        SourceSpan(offset, offset + len(raw)),
+                    )
                 )
         offset += len(raw)
     return tuple(rows)
 
 
 def _marker_outside_fences(block: bytes) -> re.Match[bytes] | None:
-    fence: bytes | None = None
-    for raw in block.splitlines(keepends=True):
-        fence_match = _FENCE.match(raw)
-        if fence_match:
-            marker = fence_match.group(1)
-            fence = marker if fence is None else None if marker[:1] == fence[:1] and len(marker) >= len(fence) else fence
-        elif fence is None and (match := _MARKER.search(raw)):
-            return match
-    return None
+    fence: tuple[bytes, int] | None = None
+    marker: re.Match[bytes] | None = None
+    seen_content = False
+    for raw in block.splitlines(keepends=True)[1:]:
+        if fence is not None:
+            if _closes_fence(raw, fence):
+                fence = None
+            continue
+        if (opened := _opens_fence(raw)) is not None:
+            seen_content = True
+            fence = opened
+            continue
+        if not raw.strip():
+            continue
+        match = _MARKER.fullmatch(raw.strip())
+        if match is not None and not seen_content and marker is None:
+            marker = match
+            seen_content = True
+            continue
+        if match is not None:
+            raise collections.CollectionError(
+                "INVALID_RECORD_MARKER", "record marker must be unique and first"
+            )
+        seen_content = True
+    return marker
 
 
 def _first_content_offset(data: bytes, start: int, end: int) -> int:
@@ -559,15 +838,50 @@ def _first_content_offset(data: bytes, start: int, end: int) -> int:
     return start + match.start() if match else end
 
 
-def _mark_ambiguous(records: list[Record]) -> tuple[list[Record], tuple[collections.CollectionDiagnostic, ...]]:
+def _bounded_paths(paths: Iterable[Path], limit: int) -> Iterable[Path]:
+    for path in paths:
+        yield path
+        limit -= 1
+        if limit < 0:
+            return
+
+
+def _read_bounded(path: Path, limit: int, kind: str) -> bytes:
+    try:
+        if path.stat().st_size > limit:
+            raise collections.CollectionError(
+                "RECORD_SOURCE_TOO_LARGE", f"{kind} exceeds the byte limit"
+            )
+        with path.open("rb") as handle:
+            data = handle.read(limit + 1)
+    except collections.CollectionError:
+        raise
+    except OSError as error:
+        raise collections.CollectionError(
+            "SOURCE_NOT_FOUND", "canonical source could not be read"
+        ) from error
+    if len(data) > limit:
+        raise collections.CollectionError(
+            "RECORD_SOURCE_TOO_LARGE", f"{kind} exceeds the byte limit"
+        )
+    return data
+
+
+def _mark_ambiguous(
+    records: list[Record],
+) -> tuple[list[Record], tuple[collections.CollectionDiagnostic, ...]]:
     counts: dict[str, int] = {}
     for record in records:
         counts[record.identity.key] = counts.get(record.identity.key, 0) + 1
     ambiguous = {key for key, count in counts.items() if count > 1}
     diagnostics = tuple(
         collections.CollectionDiagnostic(
-            "AMBIGUOUS_RECORD_KEY" if any(record.identity.inferred and record.identity.key == key for record in records) else "DUPLICATE_RECORD_ID",
-            "legacy natural key is not unique" if any(record.identity.inferred and record.identity.key == key for record in records) else "explicit record key is duplicated",
+            "AMBIGUOUS_RECORD_KEY"
+            if any(record.identity.inferred and record.identity.key == key for record in records)
+            else "DUPLICATE_RECORD_ID",
+            "legacy natural key is not unique"
+            if any(record.identity.inferred and record.identity.key == key for record in records)
+            else "explicit record key is duplicated",
         )
         for key in sorted(ambiguous)
     )
@@ -600,7 +914,9 @@ def _json_value(value: Any) -> Any:
     return value
 
 
-def _schema_values(values: dict[str, Any], manifest: collections.CollectionManifest) -> dict[str, Any]:
+def _schema_values(
+    values: dict[str, Any], manifest: collections.CollectionManifest
+) -> dict[str, Any]:
     for name, spec in manifest.schema.fields.items():
         value = values.get(name)
         if isinstance(value, str) and spec.type == "integer" and value:
@@ -626,35 +942,61 @@ def _query_rows(
         base = {**record.values, **system}
         if expand_children:
             for child in record.children:
-                rows.append({**base, **child.values, "parent_record_id": record.identity.key, **system})
+                rows.append(
+                    {**base, **child.values, "parent_record_id": record.identity.key, **system}
+                )
         else:
             rows.append(base)
     return rows
 
 
 def _encode_continuation(payload: dict[str, Any]) -> str:
-    encoded = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
-    if len(encoded) > _MAX_TOKEN_BYTES:
-        raise collections.CollectionError("INVALID_RECORD_CONTINUATION", "query continuation is too large")
-    signature = hmac.new(_TOKEN_KEY, encoded, hashlib.sha256).digest()
-    return base64.urlsafe_b64encode(encoded).decode("ascii").rstrip("=") + "." + base64.urlsafe_b64encode(signature).decode("ascii").rstrip("=")
+    """Encode an integrity checksum, not an authority token.
+
+    Each request reloads the canonical snapshot and re-evaluates governance, so
+    a cursor cannot grant access or bypass current policy.
+    """
+    raw = json.dumps(payload, separators=(",", ":"), ensure_ascii=False, sort_keys=True).encode(
+        "utf-8"
+    )
+    if len(raw) > _MAX_TOKEN_PAYLOAD_BYTES:
+        raise collections.CollectionError(
+            "INVALID_RECORD_CONTINUATION", "query continuation is too large"
+        )
+    encoded = base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+    checksum = hashlib.sha256(_CURSOR_DOMAIN + raw).hexdigest()
+    token = f"{_CURSOR_VERSION}.{encoded}.{checksum}"
+    if len(token.encode("utf-8")) > _MAX_TOKEN_ENVELOPE_BYTES:
+        raise collections.CollectionError(
+            "INVALID_RECORD_CONTINUATION", "query continuation is too large"
+        )
+    return token
 
 
 def _decode_continuation(value: str) -> dict[str, Any]:
-    if len(value.encode("utf-8")) > _MAX_TOKEN_BYTES or value.count(".") != 1:
+    if len(value.encode("utf-8")) > _MAX_TOKEN_ENVELOPE_BYTES or value.count(".") != 2:
         raise collections.CollectionError("INVALID_RECORD_CONTINUATION", "continuation is invalid")
     try:
-        encoded, signature = value.split(".", 1)
+        version, encoded, checksum = value.split(".", 2)
+        if version != _CURSOR_VERSION or len(checksum) != 64:
+            raise ValueError
         padded = encoded + "=" * (-len(encoded) % 4)
         raw = base64.urlsafe_b64decode(padded)
-        expected = hmac.new(_TOKEN_KEY, raw, hashlib.sha256).digest()
-        observed = base64.urlsafe_b64decode(signature + "=" * (-len(signature) % 4))
-        if not hmac.compare_digest(observed, expected):
+        if len(raw) > _MAX_TOKEN_PAYLOAD_BYTES:
+            raise ValueError
+        expected = hashlib.sha256(_CURSOR_DOMAIN + raw).hexdigest()
+        if checksum != expected:
             raise ValueError
         payload = json.loads(raw.decode("utf-8"))
     except (ValueError, UnicodeDecodeError, json.JSONDecodeError) as error:
-        raise collections.CollectionError("INVALID_RECORD_CONTINUATION", "continuation is invalid") from error
-    if not isinstance(payload, dict) or type(payload.get("offset")) is not int or payload["offset"] < 0:
+        raise collections.CollectionError(
+            "INVALID_RECORD_CONTINUATION", "continuation is invalid"
+        ) from error
+    if (
+        not isinstance(payload, dict)
+        or type(payload.get("offset")) is not int
+        or payload["offset"] < 0
+    ):
         raise collections.CollectionError("INVALID_RECORD_CONTINUATION", "continuation is invalid")
     return payload
 
@@ -709,17 +1051,29 @@ def _render_query(
                 for row in result.rows
             )
         if result.aggregate is not None:
-            lines.extend(["", "## Aggregate", "", "```json", json.dumps(result.aggregate, ensure_ascii=False), "```"])
+            lines.extend(
+                [
+                    "",
+                    "## Aggregate",
+                    "",
+                    "```json",
+                    json.dumps(result.aggregate, ensure_ascii=False),
+                    "```",
+                ]
+            )
         return "\n".join(lines) + "\n"
     if output_format == "csv":
         output: list[str] = [
             f"# collection_id: {collection_id}\n",
             f"# snapshot: {snapshot}\n",
-            "# source_hashes: " + json.dumps(source_hashes, ensure_ascii=False, sort_keys=True) + "\n",
+            "# source_hashes: "
+            + json.dumps(source_hashes, ensure_ascii=False, sort_keys=True)
+            + "\n",
             f"# query: {query_json}\n",
             f"# generated_at: {generated_at}\n",
             "# derived: true\n",
         ]
+
         class _Writer:
             def write(self, value: str) -> int:
                 output.append(value)
@@ -733,4 +1087,6 @@ def _render_query(
             writer.writeheader()
             writer.writerows(result.rows)
         return "".join(output)
-    raise collections.CollectionError("INVALID_QUERY_OUTPUT", "output format must be json, markdown, or csv")
+    raise collections.CollectionError(
+        "INVALID_QUERY_OUTPUT", "output format must be json, markdown, or csv"
+    )

@@ -15,7 +15,23 @@ storage:
     title: Sessions (newest first)
   item_heading:
     level: 3
-    pattern: '^(?P<occurred_on>\d{4}-\d{2}-\d{2}) · (?P<title>[^()]+?)(?: \((?P<note>[^)]*)\))?$'
+    fields:
+      - name: occurred_on
+        type: date
+        format: "%Y-%m-%d"
+      - name: title
+        type: string
+    separator: " · "
+    note:
+      field: note
+      open: " ("
+      close: ")"
+  defaults:
+    status: completed
+  note_rules:
+    - equals: "Stopped, didn't feel like it, circadian and recovery"
+      values:
+        status: aborted
   insertion: newest-first
   archive: Historical Reps (undated).md
   child_rows:
