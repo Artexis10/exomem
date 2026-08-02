@@ -143,7 +143,7 @@ def collect_candidates(
     capture_trace: bool = False,
 ) -> CandidateBundle:
     """Collect vector/BM25/keyword/CLIP/graph/temporal lanes and fuse them."""
-    from . import bm25, embeddings, epistemic_graph, fusion, readiness
+    from . import bm25, embeddings, epistemic_graph, fusion, readiness, recall_policy
 
     usage_map: dict[str, float] = {}
     if prefer_used:
@@ -157,9 +157,12 @@ def collect_candidates(
     )
 
     def _eligible(ranking: list[str]) -> list[str]:
-        if eligible_paths is None:
-            return ranking
-        return [path for path in ranking if path in eligible_paths]
+        return [
+            path
+            for path in ranking
+            if (eligible_paths is None or path in eligible_paths)
+            and recall_policy.is_recall_candidate(vault_root, vault_root / path)
+        ]
     frame_attribution: dict[str, tuple[str, float | None]] = {}
     lane_statuses: dict[str, dict[str, Any]] = {}
 

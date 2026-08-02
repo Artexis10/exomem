@@ -481,6 +481,9 @@ def _manifest_from_frontmatter(
     if type(schema_version) is not int or schema_version < 1:
         raise CollectionError("INVALID_SCHEMA_VERSION", "schema_version must be a positive integer")
     storage = _parse_storage(root, manifest_rel, frontmatter.get("storage"))
+    if profile == "records":
+        _require_records_layer(manifest_rel, "manifest")
+        _require_records_layer(storage.source, "storage.source")
     if _portable_path_key(storage.source) == _portable_path_key(manifest_rel):
         raise CollectionError(
             "INVALID_COLLECTION_PATH", "storage.source must not alias the collection manifest"
@@ -912,6 +915,15 @@ def _vault_relative_path(root: Path, manifest_rel: str, value: object, name: str
     if not _is_safe_vault_target(root, target):
         raise CollectionError("INVALID_COLLECTION_PATH", f"{name} must not traverse a symlink")
     return rel
+
+
+def _require_records_layer(path: str, name: str) -> None:
+    """Keep Records paths in the exact portable layer used by recall policy."""
+    parts = path.split("/")
+    if len(parts) < 3 or parts[0] != vault.kb_dirname() or parts[1] != "Records":
+        raise CollectionError(
+            "INVALID_COLLECTION_PATH", f"{name} must stay under Knowledge Base/Records"
+        )
 
 
 def _portable_path_key(path: str) -> str:

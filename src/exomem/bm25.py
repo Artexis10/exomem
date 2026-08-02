@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Any
 
 from . import find as find_module
+from . import recall_policy
 from .kbdir import kb_dirname
 
 log = logging.getLogger(__name__)
@@ -111,13 +112,7 @@ class BM25Index:
         # Lazy import — rank_bm25 isn't on the keyword-only hot path.
         from rank_bm25 import BM25Okapi
 
-        if scope == "vault":
-            from .vault import walk_vault_md
-
-            walk = walk_vault_md(vault_root)
-        else:
-            kb = vault_root / kb_dirname()
-            walk = find_module._walk_md(kb)
+        walk = _recall_walk(vault_root, scope)
 
         self.last_tokenized = 0
         self.last_reused = 0
@@ -262,7 +257,11 @@ class BM25Index:
 
 
 def corpus_key(vault_root: Path, scope: str) -> tuple:
-    """Digest-strength corpus freshness key for a scope (one stat walk)."""
+    """Projected recall identity for a scope (one policy-filtered stat walk)."""
+    return (*find_module._walk_freshness_key(_recall_walk(vault_root, scope)), *recall_policy.recall_policy_identity(vault_root))
+
+
+def _recall_walk(vault_root: Path, scope: str):
     if scope == "vault":
         from .vault import walk_vault_md
 
@@ -270,9 +269,9 @@ def corpus_key(vault_root: Path, scope: str) -> tuple:
     else:
         kb = vault_root / kb_dirname()
         if not kb.is_dir():
-            return (0, 0, "")
+            return ()
         walk = find_module._walk_md(kb)
-    return find_module._walk_freshness_key(walk)
+    return recall_policy.iter_recall_markdown(vault_root, walk)
 
 
 _INDEX = BM25Index()

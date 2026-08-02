@@ -79,7 +79,7 @@ def warm_caches(
     if not preload_cpu_caches:
         log.info("cache warm-up skipped by resource mode")
         return {}
-    from . import bm25, find
+    from . import bm25, find, recall_policy
 
     durations: dict[str, float] = {}
 
@@ -97,6 +97,8 @@ def warm_caches(
         if not kb.is_dir():
             return
         for p in find._walk_md(kb):
+            if not recall_policy.is_recall_candidate(vault_root, p):
+                continue
             find._CACHE.get(p, vault_root)
 
     _step("pages", _warm_pages)

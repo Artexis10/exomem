@@ -29,6 +29,7 @@ from . import (
     find_results,
     find_types,
     freshness,
+    recall_policy,
     structured_filters,
 )
 from . import ranking_config as _ranking_config
@@ -288,7 +289,18 @@ class FreshnessSnapshot:
         return self._vault
 
     def for_scope(self, scope: str) -> tuple[int, int, str]:
-        return self.vault() if scope == "vault" else self.kb()
+        """Projected freshness for ordinary recall only.
+
+        Generic ``kb``/``vault`` freshness above remains the identity source for
+        resolver and inbound-link consumers.  Recall ignores raw Records edits
+        and binds every cache/sidecar key to the policy identity.
+        """
+        checkpoint = freshness.recall_checkpoint(self._root, scope)
+        return (
+            *checkpoint.triple,
+            checkpoint.policy_version,
+            checkpoint.access_policy_fingerprint,
+        )
 
 
 def _freshness_key(
@@ -1130,6 +1142,8 @@ def _eligible_unit_records(
     eligible: dict[str, tuple[ParsedPage, Any, int]] = {}
     for path in walk:
         if path.name.lower() in _NAVIGATION_BASENAMES:
+            continue
+        if not recall_policy.is_recall_candidate(vault_root, path):
             continue
         page = _CACHE.get(path, vault_root)
         if page is None or not _passes_filters(
@@ -1988,6 +2002,8 @@ def _eligible_filter_paths(
     for path in walk:
         if path.name.lower() in _NAVIGATION_BASENAMES:
             continue
+        if not recall_policy.is_recall_candidate(vault_root, path):
+            continue
         page = _CACHE.get(path, vault_root)
         if page is not None:
             pages[page.rel_path] = page
@@ -2396,6 +2412,8 @@ def _find_keyword(
     by_path: dict[str, Hit] = {}
     for path in walk:
         if path.name.lower() in _NAVIGATION_BASENAMES:
+            continue
+        if not recall_policy.is_recall_candidate(vault_root, path):
             continue
         page = _CACHE.get(path, vault_root)
         if page is None:
@@ -3236,6 +3254,8 @@ def _keyword_match_paths(
     matches: list[tuple[str, str]] = []  # (updated, rel_path)
     for path in walk:
         if path.name.lower() in _NAVIGATION_BASENAMES:
+            continue
+        if not recall_policy.is_recall_candidate(vault_root, path):
             continue
         page = _CACHE.get(path, vault_root)
         if page is None:

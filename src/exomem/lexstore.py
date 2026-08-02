@@ -1662,14 +1662,19 @@ class LexicalStore:
         """One pass over both walks: membership flags + file signatures."""
         from . import find as find_module
         from . import freshness as freshness_module
+        from . import recall_policy
         from .vault import walk_vault_md
 
         kb = self.vault_root / kb_dirname()
         members: dict[Path, list[bool]] = {}  # abs path -> [in_kb, in_vault]
         if kb.is_dir():
             for p in find_module._walk_md(kb):
+                if not recall_policy.is_recall_candidate(self.vault_root, p):
+                    continue
                 members.setdefault(p, [False, False])[0] = True
         for p in walk_vault_md(self.vault_root):
+            if not recall_policy.is_recall_candidate(self.vault_root, p):
+                continue
             members.setdefault(p, [False, False])[1] = True
         signatures: dict[Path, freshness_module.FileSignature] = {}
         for p in list(members):
