@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import threading
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -310,8 +311,8 @@ def test_windows_guarded_reader_bounds_reads_and_rechecks_ancestor_identity(
     guarded.mkdir()
     leaf_path = guarded / "entry.md"
     leaf_path.write_bytes(b"safe")
-    displaced = tmp_path / "guarded-displaced"
     real_read = os.read
+    real_lstat = Path.lstat
     reads: list[int] = []
     swapped = False
 
@@ -324,14 +325,23 @@ def test_windows_guarded_reader_bounds_reads_and_rechecks_ancestor_identity(
         data = real_read(descriptor, size)
         if not swapped:
             swapped = True
-            guarded.rename(displaced)
-            guarded.mkdir()
-            os.link(displaced / "entry.md", leaf_path)
         return data
+
+    def lstat_after_read(path: Path):
+        info = real_lstat(path)
+        if swapped and path == guarded:
+            return SimpleNamespace(
+                st_mode=info.st_mode,
+                st_dev=info.st_dev,
+                st_ino=info.st_ino + 1,
+                st_file_attributes=getattr(info, "st_file_attributes", 0),
+            )
+        return info
 
     if os.name != "nt":
         monkeypatch.setattr(vault, "_open_windows_path_descriptor", open_leaf)
     monkeypatch.setattr(vault.os, "read", read_and_swap)
+    monkeypatch.setattr(Path, "lstat", lstat_after_read)
 
     with pytest.raises(vault.PathGuardError) as excinfo:
         vault._read_bounded_windows_snapshot(
