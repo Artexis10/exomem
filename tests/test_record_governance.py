@@ -424,6 +424,8 @@ One ordinary""",
         "exomem://vault/Planning/../private.md",
         "exomem://vault/Planning%2Fprivate.md",
         "exomem://source/Planning//private",
+        "exomem://vault/C%3A/Windows/secret.md",
+        "exomem://vault/C%3a/Windows/secret.md",
     ),
 )
 def test_opaque_plan_reference_rejects_noncanonical_or_unsafe_uris(reference: str) -> None:

@@ -768,6 +768,7 @@ def _opaque_plan_reference(reference: object) -> str | None:
             not encoded
             or quote(decoded, safe="/") != encoded
             or decoded.startswith("/")
+            or re.match(r"^[A-Za-z]:", decoded) is not None
             or "\\" in decoded
             or "\0" in decoded
             or any(part in {"", ".", ".."} for part in decoded.split("/"))
