@@ -22,6 +22,7 @@ from membench.templates import t16_governance_audiences  # noqa: F401  (registra
 from membench.templates import t17_procedural_chains  # noqa: F401  (registration)
 from membench.templates import t18_quantitative  # noqa: F401  (registration)
 from membench.templates import t19_negation_counterfactual  # noqa: F401  (registration)
+from membench.templates import t20_cross_lingual  # noqa: F401  (registration)
 from membench.templates.base import Template, registry
 
 __all__ = ["Template", "registry"]

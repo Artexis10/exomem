@@ -143,7 +143,7 @@ _V02_FAMILIES: tuple[Family, ...] = (
     Family(
         family_id="cross_lingual",
         classification="deterministic-oracle",
-        status="planned",
+        status="active",
         rationale=(
             "Synthetic non-Latin-script sources queried in English; sentinel "
             "citation and value identity are exact-checkable, and profiles "

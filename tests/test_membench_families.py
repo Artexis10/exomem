@@ -30,10 +30,10 @@ V02_ACTIVE_FAMILIES = {
     "procedural",
     "quantitative",
     "negation_counterfactual",
+    "cross_lingual",
 }
 
 V02_PLANNED_FAMILIES = {
-    "cross_lingual",
     "preference_attribution",
     "source_reliability",
     "long_horizon_entropy",
@@ -138,8 +138,10 @@ def test_unregistered_family_refuses_generation(tmp_path: Path) -> None:
 
 
 def test_planned_family_refuses_generation(tmp_path: Path) -> None:
-    probe = _probe_template("cross_lingual")
-    with pytest.raises(GenerationError, match=r"t98_family_probe.*cross_lingual.*planned"):
+    probe = _probe_template("preference_attribution")
+    with pytest.raises(
+        GenerationError, match=r"t98_family_probe.*preference_attribution.*planned"
+    ):
         generate_corpus(1, tmp_path / "corpus", templates={probe.template_id: probe})
 
 

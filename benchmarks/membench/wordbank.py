@@ -62,3 +62,96 @@ def product_name(rng: Random) -> str:
 
 def noun(rng: Random) -> str:
     return _pick(rng, _NOUNS)
+
+
+_CYR_FIRST_START = (
+    ("Жа", "Zha"),
+    ("Ке", "Ke"),
+    ("Фи", "Fi"),
+    ("Цо", "Tso"),
+    ("Рю", "Ryu"),
+    ("Шэ", "She"),
+    ("Ля", "Lya"),
+    ("Дзо", "Dzo"),
+)
+_CYR_FIRST_END = (
+    ("вара", "vara"),
+    ("нело", "nelo"),
+    ("мири", "miri"),
+    ("таля", "talya"),
+    ("сэна", "sena"),
+    ("кори", "kori"),
+)
+_CYR_LAST_START = (
+    ("Брэ", "Bre"),
+    ("Вэ", "Ve"),
+    ("Гро", "Gro"),
+    ("Кша", "Ksha"),
+    ("Мю", "Myu"),
+    ("Тре", "Tre"),
+)
+_CYR_LAST_END = (
+    ("дал", "dal"),
+    ("мир", "mir"),
+    ("сэн", "sen"),
+    ("вик", "vik"),
+    ("лар", "lar"),
+    ("нов", "nov"),
+)
+_CYR_ORG_STEM = (
+    ("Жавэ", "Zhave"),
+    ("Керю", "Keryu"),
+    ("Фицо", "Fitso"),
+    ("Шэля", "Shelya"),
+    ("Дзомю", "Dzomyu"),
+    ("Трекша", "Treksha"),
+)
+_CYR_ORG_SUFFIX = (
+    ("Тара", "Tara"),
+    ("Вэна", "Vena"),
+    ("Миро", "Miro"),
+    ("Сэла", "Sela"),
+    ("Корю", "Koryu"),
+    ("Люма", "Lyuma"),
+)
+_CYR_DISCRIMINATOR = (
+    ("Жэ", "Zhe"),
+    ("Кю", "Kyu"),
+    ("Фра", "Fra"),
+    ("Цэ", "Tse"),
+)
+
+
+def _pick_pair(rng: Random, pool: tuple[tuple[str, str], ...]) -> tuple[str, str]:
+    return pool[rng.randrange(len(pool))]
+
+
+def person_name_cyr(rng: Random) -> tuple[str, str]:
+    """Return one synthetic ``(Cyrillic name, Latin alias)`` from shared draws."""
+
+    first_start, first_start_latin = _pick_pair(rng, _CYR_FIRST_START)
+    first_end, first_end_latin = _pick_pair(rng, _CYR_FIRST_END)
+    last_start, last_start_latin = _pick_pair(rng, _CYR_LAST_START)
+    last_end, last_end_latin = _pick_pair(rng, _CYR_LAST_END)
+    native = f"{first_start}{first_end} {last_start}{last_end}"
+    latin = f"{first_start_latin}{first_end_latin} {last_start_latin}{last_end_latin}"
+    return native, latin
+
+
+def org_name_cyr(
+    rng: Random, *, discriminator: int | None = None
+) -> tuple[str, str]:
+    """Return one synthetic ``(Cyrillic name, Latin alias)`` from shared draws."""
+
+    stem, stem_latin = _pick_pair(rng, _CYR_ORG_STEM)
+    suffix, suffix_latin = _pick_pair(rng, _CYR_ORG_SUFFIX)
+    native = f"{stem} {suffix}"
+    latin = f"{stem_latin} {suffix_latin}"
+    if discriminator is not None:
+        try:
+            marker, marker_latin = _CYR_DISCRIMINATOR[discriminator]
+        except IndexError as exc:
+            raise ValueError("Cyrillic name discriminator is out of range") from exc
+        native = f"{native} {marker}"
+        latin = f"{latin} {marker_latin}"
+    return native, latin

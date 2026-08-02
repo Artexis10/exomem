@@ -9,10 +9,28 @@ silently dropped.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from membench.ids import slugify
 from membench.native import CorpusView, FactParityReport, ParityStatus, corpus_facts
+
+_ASCII_ALNUM = re.compile(r"[a-z0-9]")
+
+
+def _identity_stem(name: str, identifier: str) -> str:
+    """Filename/permalink stem that stays unique for non-Latin names.
+
+    ``slugify`` drops every non-ASCII character, so a fully non-Latin name
+    (the cross-lingual family) collapses to its shared fallback stem: all such
+    notes would overwrite one another and share one permalink — the identity
+    key in this product's grammar — silently losing facts. Falling back to the
+    record's own ASCII id keeps identity intact; Latin names are unaffected.
+    """
+
+    if _ASCII_ALNUM.search(name.lower()):
+        return slugify(name)
+    return slugify(identifier)
 
 
 def _claim_sentence(view: CorpusView, claim_id: str) -> tuple[str, str]:
@@ -29,20 +47,19 @@ def render(view: CorpusView, out_dir: Path) -> FactParityReport:
     entities_by_id = view.entities_by_id()
 
     for entity in view.entities:
+        stem = _identity_stem(entity.canonical_name, entity.entity_id)
         note = [
             "---",
             f"title: {entity.canonical_name}",
             f"type: {entity.kind}",
-            f"permalink: {slugify(entity.canonical_name)}",
+            f"permalink: {stem}",
             f"tags: [{entity.domain}]",
             "---",
             "",
             f"# {entity.canonical_name}",
             "",
         ]
-        (out_dir / f"{slugify(entity.canonical_name)}.md").write_text(
-            "\n".join(note) + "\n", encoding="utf-8"
-        )
+        (out_dir / f"{stem}.md").write_text("\n".join(note) + "\n", encoding="utf-8")
 
     claims_by_source: dict[str, list[str]] = {}
     for claim in view.claims:
@@ -58,7 +75,7 @@ def render(view: CorpusView, out_dir: Path) -> FactParityReport:
             "---",
             f"title: {source.title}",
             "type: note",
-            f"permalink: {slugify(source.title)}",
+            f"permalink: {_identity_stem(source.title, source.source_id)}",
             f"tags: [{source.authority.value}]",
             "---",
             "",
