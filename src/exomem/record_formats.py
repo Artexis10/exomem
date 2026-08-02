@@ -372,6 +372,7 @@ class MarkdownItemsAdapter(_BaseAdapter):
         source_bytes: list[tuple[str, bytes]] = []
         pending = [root_guard]
         candidates = 0
+        public_candidates = 0
         while pending:
             directory_guard = pending.pop()
             for entry in directory_guard.entries:
@@ -383,6 +384,11 @@ class MarkdownItemsAdapter(_BaseAdapter):
                 if stat.S_ISDIR(entry.mode):
                     authorized = self._require_authorized(entry.relative_path)
                     if authorized:
+                        public_candidates += 1
+                        if public_candidates > _MAX_ITEM_FILES:
+                            raise collections.CollectionError(
+                                "RECORD_ITEM_LIMIT", "collection has too many item files"
+                            )
                         inventory.append((entry.relative_path, "directory", ""))
                     try:
                         child_guard = vault.DirectoryCensusGuard.capture(
@@ -396,11 +402,12 @@ class MarkdownItemsAdapter(_BaseAdapter):
                         directory_guards_list.append(child_guard)
                     pending.append(child_guard)
                 elif self._require_authorized(entry.relative_path):
+                    public_candidates += 1
+                    if public_candidates > _MAX_ITEM_FILES:
+                        raise collections.CollectionError(
+                            "RECORD_ITEM_LIMIT", "collection has too many item files"
+                        )
                     paths.append(entry.relative_path)
-        if len(paths) > _MAX_ITEM_FILES:
-            raise collections.CollectionError(
-                "RECORD_ITEM_LIMIT", "collection has too many item files"
-            )
         paths.sort()
         for relative in paths:
             # The raw walk ceiling above is deliberately separate from public

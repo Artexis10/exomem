@@ -40,11 +40,11 @@ def test_markdown_items_hides_candidates_from_public_caps_but_keeps_authorized_i
         (hidden / f"{number}.bin").write_bytes(b"hidden")
     readme = events / "README.md"
     readme.write_text("context", encoding="utf-8")
-    monkeypatch.setattr(record_formats, "_MAX_ITEM_FILES", 3)
+    monkeypatch.setattr(record_formats, "_MAX_ITEM_FILES", 4)
     monkeypatch.setattr(record_formats, "_MAX_RAW_ITEM_ENTRIES", 16)
 
     def authorized(path: str) -> bool:
-        return "/hidden/" not in f"/{path}" and "/withheld/" not in f"/{path}"
+        return not {"hidden", "withheld"}.intersection(path.split("/"))
 
     first = record_formats.load_adapter(tmp_path, manifest, authorize_path=authorized).read()
     assert len(first.records) == 2
