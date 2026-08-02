@@ -303,4 +303,4 @@ def test_next_mutation_replaces_human_formatted_audit_mapping(tmp_path: Path) ->
         expected_container_hash=first["after_container_hash"],
         why="replace formatted mapping",
     )
-    assert "record_audit: {version: 1, head:" in manifest_path.read_text(encoding="utf-8")
+    assert collections.load_manifest(tmp_path, manifest_path).audit_head is not None

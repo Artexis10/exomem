@@ -77,7 +77,7 @@ def append_record(
             current_hash = hashlib.sha256(source_bytes).hexdigest()
         else:
             snapshot = adapter.read()
-            directory_guards = _item_directory_guards(root, manifest, snapshot)
+            directory_guards = snapshot.directory_guards
             current_hash = snapshot.snapshot
             source_path = root / manifest.storage.source
             source_text = ""
@@ -102,7 +102,7 @@ def append_record(
                     affected_paths=[existing[0].source.path],
                     payload_hash=payload_hash,
                     outcome="replayed",
-                    audit_correlation=_record_audit_correlation(root, manifest, existing[0]),
+                    audit_correlation=_record_audit_correlation(snapshot, existing[0]),
                 )
             raise collections.CollectionError(
                 "RECORD_ID_CONFLICT", "record ID already has different data"
@@ -183,7 +183,7 @@ def append_record(
                 vault_root=root,
                 required_guards=(
                     *directory_guards,
-                    *_item_snapshot_guards(root, manifest, snapshot),
+                    *snapshot.path_guards,
                 ),
             )
         except (vault.PathGuardError, vault.CreateOnlyConflict, OSError, ValueError) as error:
@@ -240,7 +240,7 @@ def update_record(
             )
         else:
             snapshot = adapter.read()
-            directory_guards = _item_directory_guards(root, manifest, snapshot)
+            directory_guards = snapshot.directory_guards
             source_text = ""
             source_bytes = b""
             source_guard = None
@@ -334,8 +334,10 @@ def update_record(
                 vault_root=root,
                 required_guards=(
                     *directory_guards,
-                    *_item_snapshot_guards(
-                        root, manifest, snapshot, exclude_path=record.source.path
+                    *(
+                        guard
+                        for guard in snapshot.path_guards
+                        if guard.target != record.source.path
                     ),
                 ),
             )
@@ -483,6 +485,13 @@ def inspect_audit_gap(
 ) -> dict[str, Any]:
     """Report, without repair, whether current bytes prove an audit transition chain."""
     root = Path(vault_root)
+    try:
+        history_guard = vault.DirectoryCensusGuard.capture(
+            root, f"{vault.kb_prefix()}_archive/logs", max_entries=128
+        )
+        history_stamps = _directory_entry_stamps(root, history_guard)
+    except vault.PathGuardError:
+        return {"status": "history_incomplete", "gaps": []}
     manifest = _resolve_outside(root, collection)
     manifest_bytes = _safe_audit_read(
         root, manifest.path, manifest.manifest_version.hash, _MAX_AUDIT_SOURCE_BYTES
@@ -504,10 +513,19 @@ def inspect_audit_gap(
         if manifest.storage.strategy == "markdown-log"
         else snapshot.snapshot
     )
+    try:
+        for path_guard in snapshot.path_guards:
+            path_guard.recheck(root)
+        for directory_guard in snapshot.directory_guards:
+            directory_guard.recheck(root)
+    except vault.PathGuardError:
+        return {"status": "history_incomplete", "gaps": []}
     markers = _audit_markers(root, manifest, snapshot)
     if markers is None:
         return {"status": "history_incomplete", "gaps": []}
-    events, complete = _audit_events(root)
+    events, complete = _audit_events(
+        root, history_guard=history_guard, history_stamps=history_stamps
+    )
     relevant = [event for event in events if event.get("collection_id") == manifest.collection_id]
     if head is None and not markers and not relevant:
         return {"status": "baseline" if complete else "history_incomplete", "gaps": []}
@@ -516,15 +534,20 @@ def inspect_audit_gap(
             "status": "history_incomplete",
             "gaps": sorted(marker.transition_id for marker in markers)[:32],
         }
-    by_id: dict[str, dict[str, Any]] = {}
+    all_by_id: dict[str, dict[str, Any]] = {}
     gaps: list[str] = []
-    for event in relevant:
+    for event in events:
         transition = event["transition_id"]
-        old = by_id.get(transition)
+        old = all_by_id.get(transition)
         if old is None:
-            by_id[transition] = event
+            all_by_id[transition] = event
         elif old != event:
             gaps.append("conflicting-transition:" + transition)
+    by_id = {
+        transition: event
+        for transition, event in all_by_id.items()
+        if event["collection_id"] == manifest.collection_id
+    }
     children: dict[str, set[str]] = {}
     for event in by_id.values():
         children.setdefault(event["parent_id"], set()).add(event["transition_id"])
@@ -568,6 +591,15 @@ def inspect_audit_gap(
                 gaps.append("transition-discontinuity:" + cursor["transition_id"])
                 break
             cursor = predecessor
+    for transition in by_id:
+        if transition not in reachable:
+            gaps.append("unreachable-transition:" + transition)
+    for transition, event in all_by_id.items():
+        if (
+            event["collection_id"] != manifest.collection_id
+            and event["parent_id"] in reachable
+        ):
+            gaps.append("foreign-child:" + transition)
     for marker in markers:
         marker_event = by_id.get(marker.transition_id)
         if (
@@ -588,8 +620,8 @@ def _audit_markers(
 ) -> tuple[_AuditMarker, ...] | None:
     if manifest.storage.strategy == "markdown-log":
         source = snapshot.source_versions[-1]
-        data = _safe_audit_read(root, source.path, source.hash, _MAX_AUDIT_SOURCE_BYTES)
-        if data is None:
+        data = next((data for path, data in snapshot.source_bytes if path == source.path), None)
+        if data is None or hashlib.sha256(data).hexdigest() != source.hash:
             return None
         matches = 0
         markers: list[_AuditMarker] = []
@@ -604,10 +636,10 @@ def _audit_markers(
         return tuple(markers)
     markers = []
     for record in snapshot.records:
-        data = _safe_audit_read(
-            root, record.source.path, record.source.hash, _MAX_AUDIT_SOURCE_BYTES
+        data = next(
+            (data for path, data in snapshot.source_bytes if path == record.source.path), None
         )
-        if data is None:
+        if data is None or hashlib.sha256(data).hexdigest() != record.source.hash:
             return None
         try:
             found = _AUDIT_MARKER.findall(data.decode("utf-8-sig"))
@@ -634,7 +666,7 @@ def _event_matches_collection(
 def _event_matches_transition(
     event: Mapping[str, Any], manifest: collections.CollectionManifest
 ) -> bool:
-    if not _event_matches_collection(event, manifest):
+    if not _valid_audit_event(event) or not _event_matches_collection(event, manifest):
         return False
     source = manifest.storage.source
     operation = event["operation"]
@@ -673,114 +705,65 @@ def _validate_audit_item_key(value: str) -> str | None:
 
 def _safe_audit_read(root: Path, relative: str, expected_hash: str, limit: int) -> bytes | None:
     """Read one canonical audit source once, bounded and without following a swap."""
-    candidate = root / relative
     try:
-        relative_path = candidate.relative_to(root)
-        if any(part in {"", ".", ".."} for part in relative_path.parts):
-            return None
-        before = candidate.lstat()
-        if (
-            not stat.S_ISREG(before.st_mode)
-            or stat.S_ISLNK(before.st_mode)
-            or before.st_size > limit
-        ):
-            return None
-        descriptor = os.open(candidate, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
-    except (OSError, ValueError):
+        return vault.read_bounded_guarded_bytes(
+            root, relative, limit=limit, expected_hash=expected_hash
+        )[0]
+    except vault.PathGuardError:
         return None
-    try:
-        opened = os.fstat(descriptor)
-        if not stat.S_ISREG(opened.st_mode) or (opened.st_dev, opened.st_ino) != (
-            before.st_dev,
-            before.st_ino,
-        ):
-            return None
-        with os.fdopen(os.dup(descriptor), "rb", closefd=True) as stream:
-            data = stream.read(before.st_size + 1)
-        after = os.fstat(descriptor)
-        if (
-            len(data) != before.st_size
-            or (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
-            != (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns)
-            or hashlib.sha256(data).hexdigest() != expected_hash
-        ):
-            return None
-        return data
-    except OSError:
-        return None
-    finally:
-        os.close(descriptor)
 
 
 def _record_audit_correlation(
-    root: Path, manifest: collections.CollectionManifest, record: record_formats.Record
+    snapshot: record_formats.AdapterSnapshot, record: record_formats.Record
 ) -> str | None:
-    if manifest.storage.strategy == "markdown-log":
-        text = (
-            (root / manifest.storage.source)
-            .read_bytes()[record.span.start : record.span.end]
-            .decode("utf-8")
-        )
-    else:
-        text = (root / record.source.path).read_text(encoding="utf-8-sig")
+    data = next((data for path, data in snapshot.source_bytes if path == record.source.path), None)
+    if data is None:
+        return None
+    try:
+        text = data[record.span.start : record.span.end].decode("utf-8-sig")
+    except UnicodeDecodeError:
+        return None
     markers = _AUDIT_MARKER.findall(text)
     return markers[0] if len(markers) == 1 else None
 
 
-def _audit_events(root: Path) -> tuple[list[dict[str, Any]], bool]:
+def _audit_events(
+    root: Path,
+    *,
+    history_guard: vault.DirectoryCensusGuard | None = None,
+    history_stamps: tuple[tuple[str, int, int], ...] | None = None,
+) -> tuple[list[dict[str, Any]], bool]:
     """Read bounded ordinary log segments without following untrusted archive entries."""
-    log_root = root / vault.kb_prefix()
-    live = log_root / "log.md"
-    archive = log_root / "_archive" / "logs"
+    live = f"{vault.kb_prefix()}log.md"
+    archive = f"{vault.kb_prefix()}_archive/logs"
     candidates = [live]
-    complete = True
+    archive_guard: vault.DirectoryCensusGuard | None = None
     try:
-        if archive.exists():
-            info = archive.lstat()
-            if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode):
-                return [], False
-            entries = sorted(archive.iterdir(), key=lambda path: path.name)
+        archive_guard = history_guard or vault.DirectoryCensusGuard.capture(
+            root, archive, max_entries=128
+        )
+        if archive_guard.directory_identity is not None:
+            entries = archive_guard.entries
             if len(entries) > 128:
                 return [], False
             candidates.extend(
-                path for path in entries if path.name.startswith("log-") and path.suffix == ".md"
+                entry.relative_path
+                for entry in entries
+                if Path(entry.relative_path).name.startswith("log-")
+                and Path(entry.relative_path).suffix == ".md"
             )
-    except OSError:
+    except vault.PathGuardError:
         return [], False
     events: list[dict[str, Any]] = []
     total = 0
-    for path in candidates:
+    for relative in candidates:
         try:
-            info = path.lstat()
-        except FileNotFoundError:
-            complete = False
-            continue
-        except OSError:
-            return [], False
-        if not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode) or info.st_size > 2_000_000:
-            return [], False
-        total += info.st_size
-        if total > 8_000_000:
-            return [], False
-        try:
-            descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
-            try:
-                opened = os.fstat(descriptor)
-                if not stat.S_ISREG(opened.st_mode) or opened.st_ino != info.st_ino:
-                    return [], False
-                data = os.read(descriptor, info.st_size + 1)
-                ended = os.fstat(descriptor)
-                if len(data) > info.st_size or (
-                    ended.st_dev,
-                    ended.st_ino,
-                    ended.st_size,
-                    ended.st_mtime_ns,
-                ) != (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns):
-                    return [], False
-            finally:
-                os.close(descriptor)
+            data, _guard = vault.read_bounded_guarded_bytes(root, relative, limit=2_000_000)
             text = data.decode("utf-8")
-        except (OSError, UnicodeDecodeError):
+        except (vault.PathGuardError, UnicodeDecodeError):
+            return [], False
+        total += len(data)
+        if total > 8_000_000:
             return [], False
         for line in text.splitlines():
             if not line.startswith("Records audit-v1 "):
@@ -789,15 +772,69 @@ def _audit_events(root: Path) -> tuple[list[dict[str, Any]], bool]:
                 event = json.loads(line.removeprefix("Records audit-v1 "))
             except json.JSONDecodeError:
                 return [], False
-            if not _valid_audit_event(event):
+            if not _audit_event_syntax(event):
                 return [], False
             events.append(event)
             if len(events) > 10_000:
                 return [], False
-    return events, complete
+    try:
+        if archive_guard is not None:
+            archive_guard.recheck(root)
+            if history_stamps is not None and _directory_entry_stamps(root, archive_guard) != history_stamps:
+                return [], False
+    except vault.PathGuardError:
+        return [], False
+    return events, True
+
+
+def _directory_entry_stamps(
+    root: Path, guard: vault.DirectoryCensusGuard
+) -> tuple[tuple[str, int, int], ...]:
+    stamps: list[tuple[str, int, int]] = []
+    for entry in guard.entries:
+        info = (root / entry.relative_path).lstat()
+        stamps.append((entry.relative_path, info.st_size, info.st_mtime_ns))
+    return tuple(stamps)
 
 
 def _valid_audit_event(event: Any) -> bool:
+    if not _audit_event_syntax(event):
+        return False
+    if event["operation"] == "create":
+        return (
+            event["parent_id"] == "absent"
+            and event["item_key"] is None
+            and event["before_manifest_hash"] is None
+            and event["before_item_hash"] is None
+            and event["before_container_hash"] is None
+            and event["after_manifest_hash"] is not None
+            and event["after_container_hash"] is not None
+            and event["payload_hash"] is None
+        )
+    if _validate_audit_item_key(event["item_key"] or "") is None:
+        return False
+    if event["operation"] == "append":
+        return (
+            event["before_item_hash"] is None
+            and event["after_item_hash"] is not None
+            and event["before_manifest_hash"] is not None
+            and event["after_manifest_hash"] is not None
+            and event["before_container_hash"] is not None
+            and event["after_container_hash"] is not None
+            and event["payload_hash"] is not None
+        )
+    return (
+        event["before_item_hash"] is not None
+        and event["after_item_hash"] is not None
+        and event["before_manifest_hash"] is not None
+        and event["after_manifest_hash"] is not None
+        and event["before_container_hash"] is not None
+        and event["after_container_hash"] is not None
+        and event["payload_hash"] is None
+    )
+
+
+def _audit_event_syntax(event: Any) -> bool:
     if not isinstance(event, dict) or set(event) != {
         "version",
         "transition_id",
@@ -827,22 +864,20 @@ def _valid_audit_event(event: Any) -> bool:
         "after_container_hash",
         "payload_hash",
     )
-    return (
+    parent_is_valid = isinstance(event["parent_id"], str) and (
+        event["parent_id"] in {"baseline", "absent"}
+        or re.fullmatch(r"[0-9a-f]{24}", event["parent_id"]) is not None
+    )
+    common = (
         type(event["version"]) is int
         and event["version"] == 1
         and isinstance(event["transition_id"], str)
         and re.fullmatch(r"[0-9a-f]{24}", event["transition_id"]) is not None
-        and isinstance(event["parent_id"], str)
+        and parent_is_valid
         and event["operation"] in {"append", "update", "create"}
         and all(
             isinstance(event[name], str) and event[name]
-            for name in (
-                "collection_id",
-                "manifest_path",
-                "source_path",
-                "canonical_path",
-                "rationale",
-            )
+            for name in ("collection_id", "manifest_path", "source_path", "canonical_path", "rationale")
         )
         and (event["item_key"] is None or isinstance(event["item_key"], str))
         and all(
@@ -851,6 +886,7 @@ def _valid_audit_event(event: Any) -> bool:
             for value in (event[name],)
         )
     )
+    return common
 
 
 def _resolve_outside(
@@ -1207,7 +1243,10 @@ def _items_container_hash(
 def _empty_items_container_hash(manifest: collections.CollectionManifest) -> str:
     return hashlib.sha256(
         json.dumps(
-            [(manifest.manifest_version.path, manifest.manifest_version.hash)],
+            [
+                (manifest.manifest_version.path, manifest.manifest_version.hash),
+                (f"directory:{manifest.storage.source}", ""),
+            ],
             separators=(",", ":"),
             ensure_ascii=False,
         ).encode("utf-8")

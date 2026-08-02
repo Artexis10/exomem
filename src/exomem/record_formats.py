@@ -74,6 +74,9 @@ class AdapterSnapshot:
     # Markdown-item collections also bind directory-only paths: an empty nested
     # directory is canonical state even though it has no file version.
     source_inventory: tuple[tuple[str, str, str], ...] = ()
+    path_guards: tuple[vault.PathGuard, ...] = ()
+    directory_guards: tuple[vault.DirectoryCensusGuard, ...] = ()
+    source_bytes: tuple[tuple[str, bytes], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -128,18 +131,17 @@ class _BaseAdapter:
     def _manifest_version(self) -> collections.SourceVersion:
         current = collections.source_version(self.vault_root / self.manifest.path)
         if current.hash != self.manifest.manifest_version.hash:
-            current_text = (self.vault_root / self.manifest.path).read_text(encoding="utf-8")
-            if not re.search(
-                r"(?m)^record_audit:\s*\{version:\s*1,\s*head:\s*[0-9a-f]{24}\}\s*$",
-                current_text,
-            ):
-                raise collections.CollectionError(
-                    "STALE_COLLECTION_MANIFEST", "collection manifest changed after it was loaded"
-                )
             refreshed = collections.load_manifest(
                 self.vault_root, self.vault_root / self.manifest.path
             )
-            if replace(self.manifest, manifest_version=refreshed.manifest_version) == refreshed:
+            if (
+                replace(
+                    self.manifest,
+                    manifest_version=refreshed.manifest_version,
+                    audit_head=refreshed.audit_head,
+                )
+                == refreshed
+            ):
                 return current
             raise collections.CollectionError(
                 "STALE_COLLECTION_MANIFEST", "collection manifest changed after it was loaded"
@@ -174,8 +176,19 @@ class MarkdownLogAdapter(_BaseAdapter):
     def read(self) -> AdapterSnapshot:
         manifest_version = self._manifest_version()
         source = self.source_path
-        data = _read_bounded(source, _MAX_LOG_BYTES, "markdown log")
-        return self.read_bytes(data, manifest_version=manifest_version)
+        try:
+            data, guard = vault.read_bounded_guarded_bytes(
+                self.vault_root,
+                source.relative_to(self.vault_root).as_posix(),
+                limit=_MAX_LOG_BYTES,
+            )
+        except vault.PathGuardError as error:
+            raise collections.CollectionError(
+                "SOURCE_NOT_FOUND", "canonical source could not be read"
+            ) from error
+        return replace(
+            self.read_bytes(data, manifest_version=manifest_version), path_guards=(guard,)
+        )
 
     def read_bytes(
         self, data: bytes, *, manifest_version: collections.SourceVersion | None = None
@@ -305,6 +318,7 @@ class MarkdownLogAdapter(_BaseAdapter):
             insertion_offset=insertion_offset,
             diagnostics=diagnostics,
             source_versions=(manifest_version, source_version),
+            source_bytes=((self.manifest.storage.source, data),),
         )
 
 
@@ -312,7 +326,16 @@ class MarkdownItemsAdapter(_BaseAdapter):
     def read(self) -> AdapterSnapshot:
         manifest_version = self._manifest_version()
         source = self.source_path
-        if not source.is_dir():
+        source_relative = source.relative_to(self.vault_root).as_posix()
+        try:
+            root_guard = vault.DirectoryCensusGuard.capture(
+                self.vault_root, source_relative, max_entries=_MAX_ITEM_FILES
+            )
+        except vault.PathGuardError as error:
+            raise collections.CollectionError(
+                "SOURCE_NOT_FOUND", "canonical item directory could not be read"
+            ) from error
+        if root_guard.directory_identity is None:
             raise collections.CollectionError(
                 "SOURCE_NOT_FOUND", "canonical item directory could not be read"
             )
@@ -323,6 +346,9 @@ class MarkdownItemsAdapter(_BaseAdapter):
         ]
         total_bytes = 0
         paths: list[Path] = []
+        directories: list[Path] = [source]
+        path_guards: list[vault.PathGuard] = []
+        source_bytes: list[tuple[str, bytes]] = []
         for path in source.rglob("*"):
             try:
                 info = path.lstat()
@@ -332,6 +358,7 @@ class MarkdownItemsAdapter(_BaseAdapter):
                 ) from error
             if stat.S_ISDIR(info.st_mode):
                 inventory.append((path.relative_to(self.vault_root).as_posix(), "directory", ""))
+                directories.append(path)
                 continue
             paths.append(path)
             if len(paths) > _MAX_ITEM_FILES:
@@ -354,7 +381,17 @@ class MarkdownItemsAdapter(_BaseAdapter):
                 raise collections.CollectionError(
                     "INVALID_RECORD_ITEM_PATH", "item file escapes collection"
                 ) from error
-            data = _read_bounded(path, _MAX_ITEM_BYTES, "item file")
+            try:
+                data, guard = vault.read_bounded_guarded_bytes(
+                    self.vault_root,
+                    path.relative_to(self.vault_root).as_posix(),
+                    limit=_MAX_ITEM_BYTES,
+                )
+            except vault.PathGuardError as error:
+                raise collections.CollectionError(
+                    "SOURCE_NOT_FOUND", "canonical item file could not be read"
+                ) from error
+            path_guards.append(guard)
             total_bytes += len(data)
             if total_bytes > _MAX_COLLECTION_BYTES:
                 raise collections.CollectionError(
@@ -363,6 +400,7 @@ class MarkdownItemsAdapter(_BaseAdapter):
             rel = path.relative_to(self.vault_root).as_posix()
             digest = hashlib.sha256(data).hexdigest()
             versions.append((rel, digest))
+            source_bytes.append((rel, data))
             inventory.append((rel, "file", digest))
             if path.suffix != ".md":
                 continue
@@ -398,6 +436,41 @@ class MarkdownItemsAdapter(_BaseAdapter):
                     body=body,
                 )
             )
+        known = {path for path, _kind, _digest in inventory}
+        directory_guards: tuple[vault.DirectoryCensusGuard, ...]
+        try:
+            directory_guards = (
+                root_guard,
+                *(
+                    vault.DirectoryCensusGuard.capture(
+                        self.vault_root,
+                        directory.relative_to(self.vault_root).as_posix(),
+                        max_entries=_MAX_ITEM_FILES,
+                    )
+                    for directory in directories[1:]
+                ),
+            )
+        except vault.PathGuardError as error:
+            raise collections.CollectionError(
+                "INVALID_RECORD_ITEM_PATH", "item inventory changed while it was read"
+            ) from error
+        if any(
+            entry.relative_path not in known
+            for directory_guard in directory_guards
+            for entry in directory_guard.entries
+        ):
+            raise collections.CollectionError(
+                "INVALID_RECORD_ITEM_PATH", "item inventory changed while it was read"
+            )
+        try:
+            for path_guard in path_guards:
+                path_guard.recheck(self.vault_root)
+            for directory_guard in directory_guards:
+                directory_guard.recheck(self.vault_root)
+        except vault.PathGuardError as error:
+            raise collections.CollectionError(
+                "INVALID_RECORD_ITEM_PATH", "item inventory changed while it was read"
+            ) from error
         records, diagnostics = _mark_ambiguous(records)
         source_versions = (manifest_version,) + tuple(
             collections.SourceVersion(path=path, hash=digest) for path, digest in versions
@@ -412,6 +485,9 @@ class MarkdownItemsAdapter(_BaseAdapter):
             diagnostics=diagnostics,
             source_versions=source_versions,
             source_inventory=tuple(inventory),
+            path_guards=tuple(path_guards),
+            directory_guards=directory_guards,
+            source_bytes=tuple(source_bytes),
         )
 
 
@@ -673,17 +749,43 @@ def render_manifest_audit_head(source: str, transition_id: str) -> str:
     start = opening.end()
     end = start + closing.start()
     frontmatter = text[start:end]
-    rendered = f"record_audit: {{version: 1, head: {transition_id}}}{newline}"
-    match = re.search(
-        r"(?m)^record_audit:[ \t]*(?:\r?\n(?:[ \t]+(?:version|head):[^\r\n]*(?:\r?\n|$))){2}",
-        frontmatter,
-    )
-    if match is None:
-        match = re.search(r"(?m)^record_audit:[^\r\n]*(?:\r?\n)?", frontmatter)
-    if match is None:
-        frontmatter += rendered
+    try:
+        parsed, _body, marker = vault.parse_frontmatter(bom + text, strict=True)
+        document = vault.yaml.compose(frontmatter)
+    except (vault.FrontmatterError, vault.yaml.YAMLError) as error:
+        raise collections.CollectionError(
+            "INVALID_COLLECTION_MANIFEST", "manifest requires valid frontmatter"
+        ) from error
+    if marker is None or not isinstance(document, vault.yaml.nodes.MappingNode):
+        raise collections.CollectionError("INVALID_COLLECTION_MANIFEST", "manifest requires frontmatter")
+    audit_nodes: list[vault.yaml.nodes.Node] = []
+    for key_node, value_node in document.value:
+        if not isinstance(key_node, vault.yaml.nodes.ScalarNode):
+            raise collections.CollectionError("INVALID_COLLECTION_MANIFEST", "manifest keys are invalid")
+        if key_node.value == "record_audit":
+            audit_nodes.append(value_node)
+    if len(audit_nodes) > 1:
+        raise collections.CollectionError("INVALID_RECORD_AUDIT", "record audit state is duplicated")
+    collections.record_audit_head(parsed)
+    if not audit_nodes:
+        frontmatter += f"record_audit: {{version: 1, head: {transition_id}}}{newline}"
     else:
-        frontmatter = frontmatter[: match.start()] + rendered + frontmatter[match.end() :]
+        audit_node = audit_nodes[0]
+        if not isinstance(audit_node, vault.yaml.nodes.MappingNode):
+            raise collections.CollectionError("INVALID_RECORD_AUDIT", "record audit state is invalid")
+        heads = [
+            value_node
+            for key_node, value_node in audit_node.value
+            if isinstance(key_node, vault.yaml.nodes.ScalarNode) and key_node.value == "head"
+        ]
+        if len(heads) != 1:
+            raise collections.CollectionError("INVALID_RECORD_AUDIT", "record audit head is invalid")
+        head = heads[0]
+        frontmatter = (
+            frontmatter[: head.start_mark.index]
+            + transition_id
+            + frontmatter[head.end_mark.index :]
+        )
     return bom + text[:start] + frontmatter + text[end:]
 
 

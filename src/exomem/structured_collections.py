@@ -127,6 +127,8 @@ class CollectionManifest:
     manifest_version: SourceVersion
     storage: StorageSpec
     schema: ItemSchema
+    audit_head: str | None = None
+    manifest_stable_hash: str = ""
     templates: tuple[TemplateSpec, ...] = ()
     views: Mapping[str, Any] = field(default_factory=lambda: MappingProxyType({}))
     governance: Mapping[str, Any] = field(default_factory=lambda: MappingProxyType({}))
@@ -202,6 +204,7 @@ def load_manifest(vault_root: Path, path: Path | str) -> CollectionManifest:
         rel,
         frontmatter,
         SourceVersion(path=rel, hash=hashlib.sha256(data).hexdigest()),
+        manifest_stable_hash=_manifest_stable_hash(text),
     )
 
 
@@ -240,6 +243,7 @@ def parse_manifest_bytes(vault_root: Path, path: Path | str, data: bytes) -> Col
         rel,
         frontmatter,
         SourceVersion(path=rel, hash=hashlib.sha256(data).hexdigest()),
+        manifest_stable_hash=_manifest_stable_hash(text),
     )
 
 
@@ -435,6 +439,7 @@ def _manifest_from_frontmatter(
     manifest_rel: str,
     frontmatter: Mapping[str, Any],
     manifest_version: SourceVersion,
+    manifest_stable_hash: str = "",
 ) -> CollectionManifest:
     if frontmatter.get("type") != "collection":
         raise CollectionError("INVALID_COLLECTION_MANIFEST", "manifest type must be collection")
@@ -456,6 +461,7 @@ def _manifest_from_frontmatter(
         raise CollectionError("INVALID_SCHEMA_VERSION", "schema_version must be a positive integer")
     storage = _parse_storage(root, manifest_rel, frontmatter.get("storage"))
     schema = _parse_schema(schema_version, frontmatter.get("item_schema"))
+    audit_head = record_audit_head(frontmatter)
     templates = _parse_templates(root, manifest_rel, frontmatter.get("templates", []))
     links = _parse_links(frontmatter.get("links", {}))
     return CollectionManifest(
@@ -468,11 +474,62 @@ def _manifest_from_frontmatter(
         manifest_version=manifest_version,
         storage=storage,
         schema=schema,
+        audit_head=audit_head,
+        manifest_stable_hash=manifest_stable_hash,
         templates=templates,
         views=_freeze_mapping(frontmatter.get("views", {}), "views"),
         governance=_freeze_mapping(frontmatter.get("governance", {}), "governance"),
         links=links,
     )
+
+
+def record_audit_head(frontmatter: Mapping[str, Any]) -> str | None:
+    """Validate the optional manifest audit mapping and return its head."""
+    audit = frontmatter.get("record_audit")
+    if audit is None:
+        return None
+    if not isinstance(audit, Mapping) or set(audit) != {"version", "head"}:
+        raise CollectionError("INVALID_RECORD_AUDIT", "record audit state is invalid")
+    head = audit.get("head")
+    if type(audit.get("version")) is not int or audit["version"] != 1 or not isinstance(head, str):
+        raise CollectionError("INVALID_RECORD_AUDIT", "record audit state is invalid")
+    if re.fullmatch(r"[0-9a-f]{24}", head) is None:
+        raise CollectionError("INVALID_RECORD_AUDIT", "record audit head is invalid")
+    return head
+
+
+def _manifest_stable_hash(text: str) -> str:
+    """Hash manifest bytes with only its optional audit mapping removed."""
+    opening = re.match(r"\A---\r?\n", text)
+    if opening is None:
+        return hashlib.sha256(text.encode("utf-8")).hexdigest()
+    closing = re.search(r"(?m)^---\r?$", text[opening.end() :])
+    if closing is None:
+        return hashlib.sha256(text.encode("utf-8")).hexdigest()
+    start = opening.end()
+    end = start + closing.start()
+    frontmatter = text[start:end]
+    try:
+        document = vault.yaml.compose(frontmatter)
+    except vault.yaml.YAMLError:
+        return hashlib.sha256(text.encode("utf-8")).hexdigest()
+    if not isinstance(document, vault.yaml.nodes.MappingNode):
+        return hashlib.sha256(text.encode("utf-8")).hexdigest()
+    matches = [
+        (key, value)
+        for key, value in document.value
+        if isinstance(key, vault.yaml.nodes.ScalarNode) and key.value == "record_audit"
+    ]
+    if len(matches) != 1:
+        return hashlib.sha256(text.encode("utf-8")).hexdigest()
+    key, value = matches[0]
+    remove_end = value.end_mark.index
+    if frontmatter[remove_end : remove_end + 2] == "\r\n":
+        remove_end += 2
+    elif frontmatter[remove_end : remove_end + 1] == "\n":
+        remove_end += 1
+    stable = text[:start] + frontmatter[: key.start_mark.index] + frontmatter[remove_end:] + text[end:]
+    return hashlib.sha256(stable.encode("utf-8")).hexdigest()
 
 
 def _parse_storage(root: Path, manifest_rel: str, value: object) -> StorageSpec:

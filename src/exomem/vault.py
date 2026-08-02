@@ -2211,6 +2211,75 @@ class DirectoryCensusGuard:
             raise PathGuardError("PATH_GUARD_CHANGED", "guarded directory census changed")
 
 
+def read_bounded_guarded_bytes(
+    vault_root: Path,
+    target: str,
+    *,
+    limit: int,
+    expected_hash: str | None = None,
+) -> tuple[bytes, PathGuard]:
+    """Read one regular vault file through no-follow descriptors and bind its bytes."""
+    parts = _safe_guard_target(target)
+    if type(limit) is not int or limit < 0:
+        raise PathGuardError("PATH_GUARD_INVALID", "guarded read limit is invalid")
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    root_flags = flags | getattr(os, "O_DIRECTORY", 0)
+    descriptors: list[int] = []
+    try:
+        root = Path(vault_root)
+        root_info = root.lstat()
+        if not stat.S_ISDIR(root_info.st_mode) or stat.S_ISLNK(root_info.st_mode) or _is_reparse(root_info):
+            raise PathGuardError("PATH_GUARD_ROOT", "vault root is unsafe")
+        descriptor = os.open(root, root_flags)
+        descriptors.append(descriptor)
+        opened_root = os.fstat(descriptor)
+        if not stat.S_ISDIR(opened_root.st_mode) or not _same_identity(_identity(".", root_info), opened_root):
+            raise PathGuardError("PATH_GUARD_ROOT", "vault root changed")
+        for part in parts[:-1]:
+            child_flags = root_flags | getattr(os, "O_NONBLOCK", 0)
+            child = os.open(part, child_flags, dir_fd=descriptor)
+            descriptors.append(child)
+            info = os.fstat(child)
+            if not stat.S_ISDIR(info.st_mode):
+                raise PathGuardError("PATH_GUARD_UNSAFE", "guard ancestor is unsafe")
+            descriptor = child
+        leaf = os.open(parts[-1], flags | getattr(os, "O_NONBLOCK", 0), dir_fd=descriptor)
+        descriptors.append(leaf)
+        before = os.fstat(leaf)
+        if not stat.S_ISREG(before.st_mode) or before.st_size > limit:
+            raise PathGuardError("PATH_GUARD_UNSAFE", "guarded content is not a bounded regular file")
+        chunks: list[bytes] = []
+        remaining = limit + 1
+        while remaining:
+            chunk = os.read(leaf, min(65536, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        data = b"".join(chunks)
+        after = os.fstat(leaf)
+        if len(data) > limit or not _same_identity(_identity(target, before), after) or before.st_size != len(data):
+            raise PathGuardError("PATH_GUARD_CHANGED", "guarded content changed")
+        digest = hashlib.sha256(data).hexdigest()
+        if expected_hash is not None and digest != expected_hash:
+            raise PathGuardError("PATH_GUARD_CONTENT", "guarded content changed")
+        guard = PathGuard.capture(
+            root,
+            target,
+            leaf_policy="content",
+            expected_content_hash=digest,
+        )
+        guard.recheck(root)
+        return data, guard
+    except PathGuardError:
+        raise
+    except OSError as error:
+        raise PathGuardError("PATH_GUARD_IO", "guarded content could not be opened") from error
+    finally:
+        for descriptor in reversed(descriptors):
+            os.close(descriptor)
+
+
 def read_guarded_text(vault_root: Path, path: Path) -> tuple[str, PathGuard]:
     """Read UTF-8 text once and bind a guard to those exact source bytes."""
     root = Path(vault_root)
