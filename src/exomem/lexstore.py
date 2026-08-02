@@ -1754,6 +1754,14 @@ class LexicalStore:
         except ValueError:
             return None
 
+    def _live_event_path(self, path: Path) -> str | None:
+        """The canonical path key the live freshness registry records."""
+        try:
+            rel = path.resolve().relative_to(self.vault_root.resolve())
+        except (OSError, ValueError):
+            return None
+        return str(self.vault_root / rel)
+
     def _walk_matches_rows(self, conn: sqlite3.Connection, scope: str) -> bool:
         """Exact (path, mtime_ns) comparison of the scope's current set vs stored
         rows — reads the live freshness registry when available (no filesystem
@@ -2123,11 +2131,17 @@ class LexicalStore:
                 return False
             witness_targets = {
                 scope: (
-                    freshness_module.recall_checkpoint(self.vault_root, scope)
+                    (
+                        freshness_module.recall_checkpoint(self.vault_root, scope),
+                        self._meta_checkpoint(conn, scope),
+                    )
                     if freshness_module.recall_is_live(self.vault_root, scope)
-                    else None
+                    else (None, None)
                 )
                 for scope in ("kb", "vault")
+            }
+            requested_paths = {
+                key for path in paths if (key := self._live_event_path(path)) is not None
             }
             prepared: list[tuple[Path, str, tuple[int, int, int], bool, bool]] = []
             suppressed: list[str] = []
@@ -2171,7 +2185,7 @@ class LexicalStore:
                         or self._membership(path) != (in_kb, in_vault)
                     ):
                         raise OSError(f"source changed during bounded upsert: {path.name}")
-            self._remember_live_witnesses(witness_targets)
+            self._remember_live_witnesses(witness_targets, requested_paths)
             return True
         finally:
             conn.close()
@@ -2210,11 +2224,19 @@ class LexicalStore:
                 return False
             witness_targets = {
                 scope: (
-                    freshness_module.recall_checkpoint(self.vault_root, scope)
+                    (
+                        freshness_module.recall_checkpoint(self.vault_root, scope),
+                        self._meta_checkpoint(conn, scope),
+                    )
                     if freshness_module.recall_is_live(self.vault_root, scope)
-                    else None
+                    else (None, None)
                 )
                 for scope in ("kb", "vault")
+            }
+            requested_paths = {
+                key
+                for rel in rel_paths
+                if (key := self._live_event_path(self.vault_root / rel)) is not None
             }
             with conn:
                 for rel in rel_paths:
@@ -2223,27 +2245,45 @@ class LexicalStore:
                         self._delete_rowid(conn, row[0])
                     else:
                         self._delete_semantic_units(conn, rel)
-            self._remember_live_witnesses(witness_targets)
+            self._remember_live_witnesses(witness_targets, requested_paths)
             return True
         finally:
             conn.close()
 
-    def _remember_live_witnesses(self, targets: dict[str, object | None]) -> None:
+    def _remember_live_witnesses(
+        self,
+        targets: dict[str, tuple[object | None, object | None]],
+        requested_paths: set[str],
+    ) -> None:
         """Remember only the exact watcher-maintained corpus just applied.
 
-        Without a live registry there is no race-free corpus attestation, so
-        the next read takes the conservative verify/rebuild path.
+        A bounded operation can attest a live checkpoint only when its requested
+        paths cover every projected delta from the catalog's stored checkpoint.
+        Without that proof (or without a live registry), the next read takes the
+        conservative verify/rebuild path.
         """
         from . import freshness as freshness_module
 
         for scope in ("kb", "vault"):
-            checkpoint = targets[scope]
+            checkpoint, stored = targets[scope]
             if checkpoint is None or freshness_module.recall_checkpoint(
                 self.vault_root, scope
             ) != checkpoint:
                 self._witnessed.pop(scope, None)
-            else:
+            elif stored == checkpoint:
                 self._witnessed[scope] = checkpoint
+            elif stored is None:
+                self._witnessed.pop(scope, None)
+            else:
+                delta = freshness_module.recall_delta_since(self.vault_root, scope, stored)
+                if (
+                    not delta.complete
+                    or delta.to != checkpoint
+                    or not (set(delta.changed) | set(delta.deleted)) <= requested_paths
+                ):
+                    self._witnessed.pop(scope, None)
+                else:
+                    self._witnessed[scope] = checkpoint
 
     def ensure_fresh(self) -> None:
         """Reconcile both scopes against their walks, PARANOIDLY: verified
