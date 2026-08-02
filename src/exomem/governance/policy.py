@@ -108,6 +108,7 @@ _SCOPE_ALLOWED_FIELDS = frozenset(
         "name",
         "exclude",
         "constraint",
+        "default_deny",
         *_SCOPE_SELECTOR_FIELDS,
     }
 )
@@ -162,6 +163,11 @@ class Scope:
     source: str
     name: str | None = None
     constraint: str | None = None
+    #: When true, an audience that no standing rule names receives NOTHING for
+    #: an item in this scope, instead of full release. It inverts one default;
+    #: it is not a rule and never lowers an authored ceiling (see
+    #: `decisions._decide_at`). The owner is never subject to it.
+    default_deny: bool = False
     paths: tuple[str, ...] = ()
     projects: tuple[str, ...] = ()
     tags: tuple[str, ...] = ()
@@ -765,6 +771,25 @@ def _valid_release_time(value: object) -> bool:
     return True
 
 
+def _reject_reserved_audience(
+    value: str | None,
+    rel: str,
+    field_name: str,
+    findings: list[dict[str, str]],
+) -> str | None:
+    """Keep authored policy out of the process-reserved NUL namespace."""
+    if value is not None and "\x00" in value:
+        findings.append(
+            _finding(
+                "invalid_field",
+                f"{rel}:{field_name}",
+                f"{field_name} must not contain NUL; the NUL prefix is reserved",
+            )
+        )
+        return None
+    return value
+
+
 def _parse_scope(data: dict[str, Any], rel: str) -> tuple[Scope | None, list[dict[str, str]]]:
     findings, doc_id = _check_common(data, rel, _SCOPE_ALLOWED_FIELDS)
 
@@ -794,6 +819,25 @@ def _parse_scope(data: dict[str, Any], rel: str) -> tuple[Scope | None, list[dic
         )
         constraint = None
 
+    # Presence-checked rather than `.get() is not None`: `default_deny:` with
+    # the value forgotten parses as YAML null, and for a confidentiality
+    # control the permissive reading of a typo is the whole failure mode this
+    # field exists to close. Any non-boolean is an ERROR, which refuses the
+    # compile — the scope is never quietly left open.
+    default_deny = False
+    if "default_deny" in data:
+        raw_default_deny = data["default_deny"]
+        if isinstance(raw_default_deny, bool):
+            default_deny = raw_default_deny
+        else:
+            findings.append(
+                _finding(
+                    "invalid_field",
+                    f"{rel}:default_deny",
+                    "default_deny must be a boolean",
+                )
+            )
+
     if doc_id is None:
         return None, findings
 
@@ -802,6 +846,7 @@ def _parse_scope(data: dict[str, Any], rel: str) -> tuple[Scope | None, list[dic
         source=rel,
         name=name,
         constraint=constraint,
+        default_deny=default_deny,
         paths=_as_str_tuple(data.get("paths"), rel, "paths", findings),
         projects=_as_str_tuple(data.get("projects"), rel, "projects", findings),
         tags=_as_str_tuple(data.get("tags"), rel, "tags", findings),
@@ -854,6 +899,7 @@ def _parse_rule(data: dict[str, Any], rel: str) -> tuple[Rule | None, list[dict[
     if not isinstance(audience, str) or not audience.strip():
         findings.append(_finding("missing_field", f"{rel}:audience", "audience is required"))
         audience = None
+    audience = _reject_reserved_audience(audience, rel, "audience", findings)
 
     ceiling = data.get("ceiling")
     if (
@@ -940,6 +986,7 @@ def _parse_grant(
     if not isinstance(audience, str) or not audience.strip():
         findings.append(_finding("missing_field", f"{rel}:audience", "audience is required"))
         audience = None
+    audience = _reject_reserved_audience(audience, rel, "audience", findings)
 
     ceiling = data.get("ceiling")
     if (
@@ -992,7 +1039,9 @@ def _parse_release_grant(
         findings.append(_finding("invalid_field", f"{rel}:content_hash", "content_hash must be lowercase SHA-256"))
         content_hash = None
 
-    to_audience = required_text("to_audience")
+    to_audience = _reject_reserved_audience(
+        required_text("to_audience"), rel, "to_audience", findings
+    )
     released_at = required_text("released_at")
     if released_at is not None and not _valid_release_time(released_at):
         findings.append(_finding("invalid_field", f"{rel}:released_at", "released_at must be an ISO-8601 timestamp"))

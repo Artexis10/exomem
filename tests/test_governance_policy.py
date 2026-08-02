@@ -770,7 +770,7 @@ def test_the_authoring_gate_creates_no_state_when_it_refuses(vault: Path) -> Non
     policy directory, receipt or marker. The conflict probe therefore reads the
     directory listing rather than going through `load()`, which opens the
     governance sidecar via the guard probe."""
-    from exomem.governance.tool import op_govern_memory
+    from exomem.governance.tool import GovernanceError, op_govern_memory
 
     _write(vault, "scopes", "client", _SCOPE_A)
     conflict = (
@@ -788,7 +788,7 @@ def test_the_authoring_gate_creates_no_state_when_it_refuses(vault: Path) -> Non
         }
 
     before = _snapshot()
-    with pytest.raises(Exception):
+    with pytest.raises(GovernanceError):
         op_govern_memory(
             vault,
             operation="propose",
@@ -800,3 +800,157 @@ def test_the_authoring_gate_creates_no_state_when_it_refuses(vault: Path) -> Non
             duration="standing",
         )
     assert _snapshot() == before, "the refused authoring gate mutated the vault"
+
+
+# ---------------------------------------------------------------------------
+# A scope may declare that unnamed audiences get nothing
+# (add-default-deny-scope-cap, task 1)
+# ---------------------------------------------------------------------------
+
+_SCOPE_A_ID = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+
+
+def test_a_scope_may_declare_a_default_deny(vault: Path) -> None:
+    _write(vault, "scopes", "acmeco", _SCOPE_A + "default_deny: true\n")
+    _write(vault, "rules", "acmeco-external", _RULE_A)
+    pol = policy.load(vault)
+    assert pol.blocked is False
+    assert [f for f in pol.findings if f["severity"] == "error"] == []
+    assert pol.scopes[_SCOPE_A_ID].default_deny is True
+
+
+def test_a_scope_declaring_false_is_the_same_as_omitting_it(vault: Path) -> None:
+    """Not just "is False" — the two documents must compile to the same scope,
+    so `default_deny: false` is a no-op an author can write to be explicit."""
+    _write(vault, "scopes", "acmeco", _SCOPE_A + "default_deny: false\n")
+    _write(vault, "rules", "acmeco-external", _RULE_A)
+    explicit = policy.load(vault).scopes[_SCOPE_A_ID]
+
+    policy._CACHE.clear()
+    _write(vault, "scopes", "acmeco", _SCOPE_A)
+    omitted = policy.load(vault).scopes[_SCOPE_A_ID]
+
+    assert explicit == omitted
+    assert explicit.default_deny is False
+
+
+def test_a_scope_omitting_the_declaration_compiles_exactly_as_before(vault: Path) -> None:
+    """The change is opt-in: an untouched document must compile clean, keep its
+    content fingerprint, and carry the permissive value."""
+    _write(vault, "scopes", "acmeco", _SCOPE_A)
+    _write(vault, "rules", "acmeco-external", _RULE_A)
+    pol = policy.load(vault)
+    assert pol.blocked is False
+    assert pol.findings == ()
+    assert pol.scopes[_SCOPE_A_ID].default_deny is False
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        '"true"',      # a quoted string is not a boolean
+        "1",           # an int is not a boolean
+        "[true]",      # a list is not a boolean
+        "{}",          # a mapping is not a boolean
+        "",            # `default_deny:` with the value forgotten -> YAML null
+        "deny",        # a bare word that is not a YAML boolean
+    ],
+)
+def test_a_malformed_declaration_is_an_error_finding_not_a_silent_default(
+    vault: Path, value: str
+) -> None:
+    """A confidentiality control must never fall back to permissive because the
+    author mistyped it. The finding is an ERROR, so the compile is refused.
+
+    The code has to be `invalid_field`, not `unknown_field`: before the field
+    existed every one of these values was rejected merely because the compiler
+    had never heard of the key. That accident would keep this test green while
+    the recognised field silently accepted a non-boolean."""
+    _write(vault, "scopes", "acmeco", _SCOPE_A + f"default_deny:{f' {value}' if value else ''}\n")
+    _write(vault, "rules", "acmeco-external", _RULE_A)
+    pol = policy.load(vault)
+    findings = [f for f in pol.findings if f["path"].endswith(":default_deny")]
+    assert findings, f"no finding for default_deny: {value!r}"
+    assert [f["code"] for f in findings] == ["invalid_field"]
+    assert all(f["severity"] == "error" for f in findings)
+    # Cold start with no prior good compile -> the fail-closed floor, not open.
+    assert pol.blocked is True
+
+
+def test_a_yaml_boolean_spelling_is_accepted(vault: Path) -> None:
+    """`yes` is a YAML 1.1 boolean, so it must not be reported as malformed."""
+    _write(vault, "scopes", "acmeco", _SCOPE_A + "default_deny: yes\n")
+    _write(vault, "rules", "acmeco-external", _RULE_A)
+    pol = policy.load(vault)
+    assert pol.blocked is False
+    assert pol.scopes[_SCOPE_A_ID].default_deny is True
+
+
+@pytest.mark.parametrize(
+    "audience_yaml",
+    [r'"\0unnamed"', r'"\0unresolved"', r'"external\0suffix"'],
+)
+@pytest.mark.parametrize(
+    ("kind", "field", "document"),
+    [
+        (
+            "rules",
+            "audience",
+            "governance_version: 1\n"
+            "id: 01ARZ3NDEKTSV4RRFFQ69G5FB0\n"
+            'scope_ids: ["01ARZ3NDEKTSV4RRFFQ69G5FAV"]\n'
+            "audience: {audience}\n"
+            "ceiling: 2\n",
+        ),
+        (
+            "grants",
+            "audience",
+            "governance_version: 1\n"
+            "id: 01ARZ3NDEKTSV4RRFFQ69G5FB1\n"
+            "kind: standing\n"
+            'scope_ids: ["01ARZ3NDEKTSV4RRFFQ69G5FAV"]\n'
+            "audience: {audience}\n"
+            "ceiling: 6\n",
+        ),
+        (
+            "grants",
+            "to_audience",
+            "governance_version: 1\n"
+            "id: 01ARZ3NDEKTSV4RRFFQ69G5FB2\n"
+            "kind: release\n"
+            "path: Knowledge Base/Notes/Patterns/released.md\n"
+            "ref: exomem://memory/00000000-0000-0000-0000-000000000001\n"
+            f"content_hash: {'a' * 64}\n"
+            "to_audience: {audience}\n"
+            "released_at: '2026-07-28T12:00:00Z'\n"
+            "why: Owner reviewed the exact release\n"
+            "bridge_scope: review\n"
+            "bridge_of:\n"
+            "  - ref: exomem://memory/00000000-0000-0000-0000-000000000002\n"
+            "    path: Knowledge Base/Sources/Other/source.md\n"
+            f"    content_hash: {'b' * 64}\n"
+            f"    restriction_signature: {'c' * 64}\n"
+            "options:\n"
+            "  strip_provenance:\n"
+            "    - exomem://memory/00000000-0000-0000-0000-000000000002\n",
+        ),
+    ],
+)
+def test_authored_audiences_cannot_enter_the_reserved_nul_namespace(
+    vault: Path, audience_yaml: str, kind: str, field: str, document: str
+) -> None:
+    _write(vault, "scopes", "acmeco", _SCOPE_A)
+    _write(vault, kind, "reserved-audience", document.format(audience=audience_yaml))
+
+    compiled = policy.load(vault)
+    audience_findings = [
+        finding for finding in compiled.findings
+        if finding["path"].endswith(f":{field}")
+    ]
+
+    assert [finding["code"] for finding in audience_findings] == ["invalid_field"]
+    assert all(finding["severity"] == "error" for finding in audience_findings)
+    assert compiled.blocked is True
+    assert compiled.rules == ()
+    assert compiled.grants == ()
+    assert compiled.release_grants == ()
