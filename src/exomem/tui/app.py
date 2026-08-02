@@ -161,7 +161,7 @@ class ExomemTuiApp(App):
         return self._home
 
     def on_mount(self) -> None:
-        self.register_theme(theme_module.EXOMEM_DARK)
+        self.register_theme(theme_module.dark_theme(truecolor=self.truecolor))
         self.register_theme(theme_module.EXOMEM_LIGHT)
         self.theme = "exomem-dark"
         if not self.mouse:

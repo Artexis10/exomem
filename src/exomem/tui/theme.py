@@ -208,27 +208,40 @@ def no_color_requested(environ: Mapping[str, str] | None = None) -> bool:
     return "NO_COLOR" in env
 
 
-EXOMEM_DARK = Theme(
-    name="exomem-dark",
-    primary=ACCENT,
-    secondary=SECONDARY,
-    accent=ACCENT,
-    warning="yellow",
-    error="red",
-    success="green",
-    foreground=TEXT,
-    background=BACKGROUND,
-    surface=SURFACE,
-    panel=CHROME_BG,
-    dark=True,
-    variables={
-        "dim": DIM,
-        "chrome-bg": CHROME_BG,
-        "block-cursor-background": ACCENT,
-        "block-cursor-foreground": BACKGROUND,
-        "input-selection-background": SELECTION_BG,
-    },
-)
+def dark_theme(*, truecolor: bool = True) -> Theme:
+    """The dark theme, with a foreground the terminal can actually render.
+
+    The Skin covers text this package styles itself, but every widget that
+    takes its colour from CSS reads the THEME instead — and Textual derives a
+    whole family from `foreground`: the footer, button labels, the input
+    cursor, the blurred block cursor, `$foreground` on Screen and on the
+    highlighted option row. Leaving the authored off-white here meant fixing
+    the Skin turned most text neutral and left those pink.
+    """
+    return Theme(
+        name="exomem-dark",
+        primary=ACCENT,
+        secondary=SECONDARY,
+        accent=ACCENT,
+        warning="yellow",
+        error="red",
+        success="green",
+        foreground=TEXT if truecolor else QUANTIZED_SAFE["text"],
+        background=BACKGROUND,
+        surface=SURFACE,
+        panel=CHROME_BG,
+        dark=True,
+        variables={
+            "dim": DIM,
+            "chrome-bg": CHROME_BG,
+            "block-cursor-background": ACCENT,
+            "block-cursor-foreground": BACKGROUND,
+            "input-selection-background": SELECTION_BG,
+        },
+    )
+
+
+EXOMEM_DARK = dark_theme()
 
 EXOMEM_LIGHT = Theme(
     name="exomem-light",

@@ -30,6 +30,12 @@ def _app(backend: FakeBackend | None = None, *, color: bool = True):
         backend or FakeBackend(),
         glyphs=GLYPHS_UNICODE if color else GLYPHS_ASCII,
         color=color,
+        # Pinned, not detected: the palette adapts to what the terminal can
+        # render, so leaving this to the machine would make every stored frame
+        # depend on whether CI advertised COLORTERM. Goldens capture the
+        # authored design; the 256-colour substitutions are asserted directly
+        # in the view-model tests instead.
+        truecolor=True,
     )
     app.fixed_elapsed_ms = 38.0
     return app

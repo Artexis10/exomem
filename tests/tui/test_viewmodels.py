@@ -439,3 +439,43 @@ def test_every_neutral_role_stays_neutral_at_256_colours():
         assert max(channels) - min(channels) <= 4, f"{role} ({value}) picks up a hue"
     # the accent is warm on purpose and must NOT be neutralised
     assert _to_256(skin.accent)[0] == 214
+
+
+def _spread(hex_colour: str) -> int:
+    channels = [int(hex_colour[i : i + 2], 16) for i in (1, 3, 5)]
+    return max(channels) - min(channels)
+
+
+def test_no_neutral_theme_variable_acquires_a_hue_at_256_colours():
+    """The whole theme, not a list of names someone remembered to check.
+
+    Fixing the Skin left every CSS-styled widget pink, because Textual derives
+    a family from the theme's `foreground` — the footer, button labels, the
+    input cursor, `$foreground` on Screen and on the highlighted row. The rule
+    that catches all of them: a value authored near-neutral must still be
+    near-neutral after the terminal quantises it. Warm-by-design roles are
+    excluded by the same rule, since their authored value is already warm.
+    """
+    from exomem.tui.theme import dark_theme
+
+    offenders = []
+    for name, value in dark_theme(truecolor=False).to_color_system().generate().items():
+        value = str(value)
+        if not (value.startswith("#") and len(value) == 7):
+            continue
+        if _spread(value) > 12:
+            continue  # authored with a hue; keeping it is the point
+        quantised = _to_256(value)[1]
+        if _spread(quantised) > 12:
+            offenders.append(f"{name}: {value} -> {quantised}")
+    assert not offenders, "neutral roles that gain a hue at 256 colours:\n" + "\n".join(offenders)
+
+
+def test_the_authored_theme_is_the_one_that_would_have_failed():
+    """Pins the bug: the truecolor theme is exactly what breaks when quantised."""
+    from exomem.tui.theme import dark_theme
+
+    authored = str(dark_theme(truecolor=True).to_color_system().generate()["foreground"])
+    assert _spread(authored) <= 12, "the authored foreground is a near-neutral"
+    assert _spread(_to_256(authored)[1]) > 12, "...that quantises to a hue"
+    assert _to_256(authored)[1] == "#ffd7d7"
