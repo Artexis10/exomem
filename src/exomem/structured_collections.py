@@ -528,7 +528,9 @@ def _manifest_stable_hash(text: str) -> str:
         remove_end += 2
     elif frontmatter[remove_end : remove_end + 1] == "\n":
         remove_end += 1
-    stable = text[:start] + frontmatter[: key.start_mark.index] + frontmatter[remove_end:] + text[end:]
+    stable = (
+        text[:start] + frontmatter[: key.start_mark.index] + frontmatter[remove_end:] + text[end:]
+    )
     return hashlib.sha256(stable.encode("utf-8")).hexdigest()
 
 

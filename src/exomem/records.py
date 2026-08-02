@@ -595,10 +595,7 @@ def inspect_audit_gap(
         if transition not in reachable:
             gaps.append("unreachable-transition:" + transition)
     for transition, event in all_by_id.items():
-        if (
-            event["collection_id"] != manifest.collection_id
-            and event["parent_id"] in reachable
-        ):
+        if event["collection_id"] != manifest.collection_id and event["parent_id"] in reachable:
             gaps.append("foreign-child:" + transition)
     for marker in markers:
         marker_event = by_id.get(marker.transition_id)
@@ -780,7 +777,10 @@ def _audit_events(
     try:
         if archive_guard is not None:
             archive_guard.recheck(root)
-            if history_stamps is not None and _directory_entry_stamps(root, archive_guard) != history_stamps:
+            if (
+                history_stamps is not None
+                and _directory_entry_stamps(root, archive_guard) != history_stamps
+            ):
                 return [], False
     except vault.PathGuardError:
         return [], False
@@ -877,7 +877,13 @@ def _audit_event_syntax(event: Any) -> bool:
         and event["operation"] in {"append", "update", "create"}
         and all(
             isinstance(event[name], str) and event[name]
-            for name in ("collection_id", "manifest_path", "source_path", "canonical_path", "rationale")
+            for name in (
+                "collection_id",
+                "manifest_path",
+                "source_path",
+                "canonical_path",
+                "rationale",
+            )
         )
         and (event["item_key"] is None or isinstance(event["item_key"], str))
         and all(

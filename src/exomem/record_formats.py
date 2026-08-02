@@ -757,29 +757,39 @@ def render_manifest_audit_head(source: str, transition_id: str) -> str:
             "INVALID_COLLECTION_MANIFEST", "manifest requires valid frontmatter"
         ) from error
     if marker is None or not isinstance(document, vault.yaml.nodes.MappingNode):
-        raise collections.CollectionError("INVALID_COLLECTION_MANIFEST", "manifest requires frontmatter")
+        raise collections.CollectionError(
+            "INVALID_COLLECTION_MANIFEST", "manifest requires frontmatter"
+        )
     audit_nodes: list[vault.yaml.nodes.Node] = []
     for key_node, value_node in document.value:
         if not isinstance(key_node, vault.yaml.nodes.ScalarNode):
-            raise collections.CollectionError("INVALID_COLLECTION_MANIFEST", "manifest keys are invalid")
+            raise collections.CollectionError(
+                "INVALID_COLLECTION_MANIFEST", "manifest keys are invalid"
+            )
         if key_node.value == "record_audit":
             audit_nodes.append(value_node)
     if len(audit_nodes) > 1:
-        raise collections.CollectionError("INVALID_RECORD_AUDIT", "record audit state is duplicated")
+        raise collections.CollectionError(
+            "INVALID_RECORD_AUDIT", "record audit state is duplicated"
+        )
     collections.record_audit_head(parsed)
     if not audit_nodes:
         frontmatter += f"record_audit: {{version: 1, head: {transition_id}}}{newline}"
     else:
         audit_node = audit_nodes[0]
         if not isinstance(audit_node, vault.yaml.nodes.MappingNode):
-            raise collections.CollectionError("INVALID_RECORD_AUDIT", "record audit state is invalid")
+            raise collections.CollectionError(
+                "INVALID_RECORD_AUDIT", "record audit state is invalid"
+            )
         heads = [
             value_node
             for key_node, value_node in audit_node.value
             if isinstance(key_node, vault.yaml.nodes.ScalarNode) and key_node.value == "head"
         ]
         if len(heads) != 1:
-            raise collections.CollectionError("INVALID_RECORD_AUDIT", "record audit head is invalid")
+            raise collections.CollectionError(
+                "INVALID_RECORD_AUDIT", "record audit head is invalid"
+            )
         head = heads[0]
         frontmatter = (
             frontmatter[: head.start_mark.index]

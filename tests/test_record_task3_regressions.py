@@ -21,7 +21,9 @@ def test_markdown_items_refuse_a_symlinked_source_directory(tmp_path: Path) -> N
     except OSError:
         pytest.skip("symlink creation is unavailable")
 
-    with pytest.raises(collections.CollectionError, match="SOURCE_NOT_FOUND|INVALID_RECORD_ITEM_PATH"):
+    with pytest.raises(
+        collections.CollectionError, match="SOURCE_NOT_FOUND|INVALID_RECORD_ITEM_PATH"
+    ):
         record_formats.load_adapter(tmp_path, manifest).read()
 
 
@@ -84,16 +86,23 @@ def test_audit_detects_a_descendant_left_after_manifest_and_source_rollback(tmp_
     initial = record_formats.load_adapter(tmp_path, manifest).read()
     item = {"occurred_on": "2026-08-03", "title": "Pull", "status": "completed", "movements": []}
     first = records.append_record(
-        tmp_path, manifest.path, item=item, item_key="11111111-1111-4111-8111-111111111111",
-        expected_container_hash=initial.source_versions[-1].hash, why="first transition"
+        tmp_path,
+        manifest.path,
+        item=item,
+        item_key="11111111-1111-4111-8111-111111111111",
+        expected_container_hash=initial.source_versions[-1].hash,
+        why="first transition",
     )
     source, manifest_path = fixture / "Training Log.md", fixture / "_collection.md"
     first_bytes = (source.read_bytes(), manifest_path.read_bytes())
     current = collections.load_manifest(tmp_path, manifest_path)
     records.append_record(
-        tmp_path, current.path, item=dict(item, occurred_on="2026-08-04"),
-        item_key="22222222-2222-4222-8222-222222222222", expected_container_hash=first["after_container_hash"],
-        why="second transition"
+        tmp_path,
+        current.path,
+        item=dict(item, occurred_on="2026-08-04"),
+        item_key="22222222-2222-4222-8222-222222222222",
+        expected_container_hash=first["after_container_hash"],
+        why="second transition",
     )
     source.write_bytes(first_bytes[0])
     manifest_path.write_bytes(first_bytes[1])
@@ -114,10 +123,12 @@ def test_audit_rejects_operation_relabel_and_global_transition_conflict(tmp_path
     manifest = collections.load_manifest(tmp_path, fixture / "_collection.md")
     snapshot = record_formats.load_adapter(tmp_path, manifest).read()
     records.append_record(
-        tmp_path, manifest.path,
+        tmp_path,
+        manifest.path,
         item={"occurred_on": "2026-08-03", "title": "Pull", "status": "completed", "movements": []},
-        item_key="33333333-3333-4333-8333-333333333333", expected_container_hash=snapshot.source_versions[-1].hash,
-        why="audit fixture"
+        item_key="33333333-3333-4333-8333-333333333333",
+        expected_container_hash=snapshot.source_versions[-1].hash,
+        why="audit fixture",
     )
     lines = log.read_text(encoding="utf-8").splitlines()
     index = next(i for i, line in enumerate(lines) if "audit-v1" in line)

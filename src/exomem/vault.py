@@ -2202,12 +2202,12 @@ class DirectoryCensusGuard:
             max_entries=self.max_entries,
             ignored_names=allowed_names,
         )
-        expected = tuple(
+        expected_entries = tuple(
             entry
             for entry in self.entries
             if Path(entry.relative_path).name not in allowed_names
         )
-        if current != expected:
+        if current != expected_entries:
             raise PathGuardError("PATH_GUARD_CHANGED", "guarded directory census changed")
 
 
