@@ -42,6 +42,8 @@ _SUPPORTED_FIELD_TYPES = frozenset(
 _MAX_DISCOVERY_CANDIDATES = 512
 _MAX_SCHEMA_FIELDS = 128
 _MAX_SCHEMA_DEPTH = 8
+_MAX_FROZEN_VALUES = 256
+_MAX_INFERENCE_PROVENANCE = 32
 _MAX_PATH_BYTES = 1024
 _MAX_ITEM_KEY_BYTES = 512
 
@@ -333,12 +335,21 @@ def infer_schema(
     if type(max_rows) is not int or max_rows < 1 or max_rows > 1024:
         raise ValueError("max_rows is outside supported bounds")
     samples = list(itertools.islice(rows, max_rows))
+    provenance = list(itertools.islice(source_paths, _MAX_INFERENCE_PROVENANCE + 1))
+    if len(provenance) > _MAX_INFERENCE_PROVENANCE:
+        raise CollectionError(
+            "SCHEMA_INFERENCE_PROVENANCE_LIMIT", "schema inference has too many source paths"
+        )
     observed: dict[str, list[Any]] = {}
     for row in samples:
         if not isinstance(row, Mapping):
             raise ValueError("schema inference rows must be objects")
         for name, value in row.items():
             if type(name) is str and name:
+                if name not in observed and len(observed) >= _MAX_SCHEMA_FIELDS:
+                    raise CollectionError(
+                        "SCHEMA_INFERENCE_FIELD_LIMIT", "schema inference has too many fields"
+                    )
                 observed.setdefault(name, []).append(value)
     fields = {
         name: FieldSpec(type=_infer_type(values)) for name, values in sorted(observed.items())
@@ -346,7 +357,7 @@ def infer_schema(
     return SchemaInference(
         fields=MappingProxyType(fields),
         sample_count=len(samples),
-        provenance=tuple(str(path) for path in source_paths),
+        provenance=tuple(str(path) for path in provenance),
     )
 
 
@@ -518,10 +529,8 @@ def _parse_links(value: object) -> CollectionLinks:
     for raw in plans:
         link = _mapping(raw, "plan link")
         reference = _nonempty_string(link.get("reference"), "plan link reference")
-        query = _mapping(link.get("query"), "plan link query")
-        if _nested_size(query) > 128:
-            raise CollectionError("INVALID_COLLECTION_LINKS", "plan query is too large")
-        result.append(PlanLink(reference, _freeze_mapping(query)))
+        query = _freeze_mapping(link.get("query"), "plan link query")
+        result.append(PlanLink(reference, query))
     return CollectionLinks(tuple(result))
 
 
@@ -729,14 +738,46 @@ def _mapping(value: object, name: str) -> Mapping[str, Any]:
 
 def _freeze_mapping(value: object, name: str = "value") -> Mapping[str, Any]:
     mapping = _mapping(value, name)
-    return MappingProxyType({key: _freeze(item) for key, item in mapping.items()})
+    frozen = _freeze(mapping, active=set(), count=[0])
+    assert isinstance(frozen, Mapping)
+    return frozen
 
 
-def _freeze(value: Any) -> Any:
+def _freeze(value: Any, *, active: set[int], count: list[int], depth: int = 0) -> Any:
+    count[0] += 1
+    if count[0] > _MAX_FROZEN_VALUES:
+        raise CollectionError("INVALID_COLLECTION_MANIFEST", "manifest value is too large")
+    if depth > _MAX_SCHEMA_DEPTH:
+        raise CollectionError("INVALID_COLLECTION_MANIFEST", "manifest value is too deep")
     if isinstance(value, Mapping):
-        return MappingProxyType({key: _freeze(item) for key, item in value.items()})
+        identity = id(value)
+        if identity in active:
+            raise CollectionError(
+                "INVALID_COLLECTION_MANIFEST", "manifest value contains an alias cycle"
+            )
+        active.add(identity)
+        try:
+            return MappingProxyType(
+                {
+                    key: _freeze(item, active=active, count=count, depth=depth + 1)
+                    for key, item in value.items()
+                }
+            )
+        finally:
+            active.remove(identity)
     if isinstance(value, list | tuple):
-        return tuple(_freeze(item) for item in value)
+        identity = id(value)
+        if identity in active:
+            raise CollectionError(
+                "INVALID_COLLECTION_MANIFEST", "manifest value contains an alias cycle"
+            )
+        active.add(identity)
+        try:
+            return tuple(
+                _freeze(item, active=active, count=count, depth=depth + 1) for item in value
+            )
+        finally:
+            active.remove(identity)
     return value
 
 

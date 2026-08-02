@@ -4,6 +4,7 @@ from pathlib import Path
 from types import MappingProxyType
 
 import pytest
+import yaml
 
 from exomem import memory_refs
 from exomem import structured_collections as collections
@@ -176,6 +177,38 @@ def test_manifest_nested_data_is_deeply_immutable_and_schema_values_are_strict(
     with pytest.raises(collections.CollectionError) as excinfo:
         collections.load_manifest(vault, malformed)
     assert excinfo.value.code == "INVALID_ITEM_SCHEMA"
+
+
+def test_manifest_freeze_refuses_yaml_alias_cycles_deep_values_and_large_values(
+    tmp_path: Path,
+) -> None:
+    del tmp_path
+    cycle = yaml.safe_load("&cycle {self: *cycle}")
+    deep: dict[str, object] = {"leaf": "value"}
+    for number in range(12):
+        deep = {f"level_{number}": deep}
+    large = {"values": list(range(257))}
+
+    for value in (cycle, deep, large):
+        with pytest.raises(collections.CollectionError) as excinfo:
+            collections._freeze_mapping(value)
+        assert excinfo.value.code == "INVALID_COLLECTION_MANIFEST"
+
+
+def test_schema_inference_refuses_field_and_provenance_overflow_without_overreading() -> None:
+    fields = {f"field_{number}": number for number in range(129)}
+    with pytest.raises(collections.CollectionError) as excinfo:
+        collections.infer_schema([fields])
+    assert excinfo.value.code == "SCHEMA_INFERENCE_FIELD_LIMIT"
+
+    def provenance():
+        for number in range(collections._MAX_INFERENCE_PROVENANCE + 1):
+            yield Path(f"source-{number}.md")
+        raise AssertionError("provenance consumed past its cap probe")
+
+    with pytest.raises(collections.CollectionError) as excinfo:
+        collections.infer_schema([{"value": 1}], source_paths=provenance())
+    assert excinfo.value.code == "SCHEMA_INFERENCE_PROVENANCE_LIMIT"
 
 
 def test_uuid_resolution_ignores_unrelated_duplicate_collection_ids(tmp_path: Path) -> None:
