@@ -11,26 +11,36 @@ storage:
   source: Events
   format_version: 1
 item_schema:
-  natural_key: [occurred_on, service]
+  natural_key: [occurred_on, asset, provider]
   fields:
     occurred_on:
       type: date
       required: true
-    service:
-      type: string
+    asset:
+      type: link
       required: true
-    mileage:
+    odometer:
       type: integer
-    due_mileage:
-      type: integer
+    provider:
+      type: string
+    services:
+      type: array
+      items:
+        type: string
     amount:
       type: number
     currency:
-      type: string
-    evidence:
-      type: array
-      items:
-        type: link
+      type: enum
+      enum: [GBP, EUR]
+    status:
+      type: enum
+      enum: [scheduled, completed]
+    receipt:
+      type: link
+    next_due_on:
+      type: date
+    next_due_odometer:
+      type: integer
 ---
 
 One ordinary Markdown file per maintenance event.

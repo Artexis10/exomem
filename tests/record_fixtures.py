@@ -9,7 +9,7 @@ FIXTURES = Path(__file__).with_name("fixtures") / "records"
 
 
 def copy_x3_fixture(destination: Path) -> Path:
-    target = _copy_fixture("x3", destination)
+    target = _copy_fixture_at("x3", destination, "Health/X3")
     crlf_variant = target / "Training Log CRLF no final newline.md"
     crlf_variant.write_bytes(
         (target / "Training Log.md").read_bytes().replace(b"\n", b"\r\n").rstrip(b"\r\n")
@@ -26,6 +26,10 @@ def copy_dataset_fixture(destination: Path) -> Path:
 
 
 def _copy_fixture(name: str, destination: Path) -> Path:
-    target = destination / "Knowledge Base" / "Records" / name
+    return _copy_fixture_at(name, destination, name)
+
+
+def _copy_fixture_at(name: str, destination: Path, target_name: str) -> Path:
+    target = destination / "Knowledge Base" / "Records" / target_name
     shutil.copytree(FIXTURES / name, target)
     return target

@@ -1,7 +1,7 @@
 ---
 type: collection
 exomem_id: 9ba8d1cf-d1e7-4309-95ae-cb28d7a6eea8
-title: Training sessions
+title: X3 training sessions
 semantic_profile: records
 collection_version: 1
 schema_version: 1
@@ -13,8 +13,9 @@ storage:
   heading:
     level: 2
     date_format: "%Y-%m-%d"
-  section: Sessions
+  section: Sessions (newest first)
   insertion: newest-first
+  archive: Historical Reps (undated).md
   child_rows:
     delimiter: "|"
     fields: [movement, band, repetitions]
@@ -46,4 +47,4 @@ links:
         limit: 24
 ---
 
-A human-owned training-log contract. The log remains ordinary Markdown.
+A human-owned X3 training-log contract. The log remains ordinary Markdown.

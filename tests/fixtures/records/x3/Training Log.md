@@ -1,11 +1,11 @@
 ---
 type: tracker
-title: Training Log
+title: X3 Full Reps
 ---
 
-# Training Log
+# X3 Full Reps
 
-## Sessions
+## Sessions (newest first)
 
 ## 2026-07-20 Pull
 <!-- exomem-record-id: 14d2bdca-e145-425b-9e4b-df86f7172efa -->
@@ -25,6 +25,11 @@ Lat pulldown | 8-12 | 8
 ## 2026-07-15 Pull
 status: completed
 Lat pulldown | 8-12 | 8
+
+## Legend
+
+`+` means the upper repetition target was exceeded; `!` records a notable set;
+`?` means the value was not reconstructed; a blank repetition stays blank.
 
 ```markdown
 ## 2099-01-01 Decoy

@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import datetime as dt
 import hashlib
+import itertools
 import json
+import math
 import re
 import stat
 import unicodedata
@@ -135,8 +137,10 @@ class ItemIdentity:
     inferred: bool = False
 
     def __post_init__(self) -> None:
-        if memory_refs.normalize_id(self.collection_id) is None:
+        normalized = memory_refs.normalize_id(self.collection_id)
+        if normalized is None:
             raise ValueError("collection_id must be a UUID")
+        object.__setattr__(self, "collection_id", normalized)
         _validate_item_key(self.key)
 
     def reference(self) -> str:
@@ -192,6 +196,7 @@ def discover_collections(
     *,
     authorize_path: Callable[[str], bool] | None = None,
     max_candidates: int = _MAX_DISCOVERY_CANDIDATES,
+    reject_duplicates: bool = True,
 ) -> tuple[CollectionManifest, ...]:
     """Discover releasable manifests, authorizing each candidate before parsing it."""
     if (
@@ -208,12 +213,12 @@ def discover_collections(
         return ()
     authorize = authorize_path or (lambda _path: True)
     manifests: list[CollectionManifest] = []
-    candidates = sorted(kb.rglob("_collection.md"))
+    candidates = list(itertools.islice(kb.rglob("_collection.md"), max_candidates + 1))
     if len(candidates) > max_candidates:
         raise CollectionError(
             "COLLECTION_DISCOVERY_LIMIT", "too many collection manifests to inspect"
         )
-    for candidate in candidates:
+    for candidate in sorted(candidates):
         safe = _safe_candidate_rel(root, candidate)
         if safe is None:
             continue
@@ -221,7 +226,8 @@ def discover_collections(
         if not authorize(rel):
             continue
         manifests.append(load_manifest(root, candidate))
-    _raise_duplicate_ids(manifests)
+    if reject_duplicates:
+        _raise_duplicate_ids(manifests)
     return tuple(manifests)
 
 
@@ -240,7 +246,9 @@ def resolve_collection(
     if identity is not None:
         matches = [
             manifest
-            for manifest in discover_collections(vault_root, authorize_path=authorize)
+            for manifest in discover_collections(
+                vault_root, authorize_path=authorize, reject_duplicates=False
+            )
             if manifest.collection_id == identity
         ]
         if not matches:
@@ -324,7 +332,7 @@ def infer_schema(
 ) -> SchemaInference:
     if type(max_rows) is not int or max_rows < 1 or max_rows > 1024:
         raise ValueError("max_rows is outside supported bounds")
-    samples = list(rows)[:max_rows]
+    samples = list(itertools.islice(rows, max_rows))
     observed: dict[str, list[Any]] = {}
     for row in samples:
         if not isinstance(row, Mapping):
@@ -396,8 +404,8 @@ def _manifest_from_frontmatter(
         storage=storage,
         schema=schema,
         templates=templates,
-        views=_mapping(frontmatter.get("views", {}), "views"),
-        governance=_mapping(frontmatter.get("governance", {}), "governance"),
+        views=_freeze_mapping(frontmatter.get("views", {}), "views"),
+        governance=_freeze_mapping(frontmatter.get("governance", {}), "governance"),
         links=links,
     )
 
@@ -418,7 +426,7 @@ def _parse_storage(root: Path, manifest_rel: str, value: object) -> StorageSpec:
         for key, value in storage.items()
         if key not in {"strategy", "source", "format_version"}
     }
-    return StorageSpec(strategy, source, format_version, MappingProxyType(descriptor))
+    return StorageSpec(strategy, source, format_version, _freeze_mapping(descriptor))
 
 
 def _parse_schema(version: int, value: object) -> ItemSchema:
@@ -460,6 +468,10 @@ def _parse_field_spec(value: object, depth: int = 0) -> FieldSpec:
     enum = tuple(enum_raw)
     if any(type(value) not in {str, int, float, bool} for value in enum):
         raise CollectionError("INVALID_ITEM_SCHEMA", "enum values must be scalar")
+    if kind == "enum" and not enum:
+        raise CollectionError("INVALID_ITEM_SCHEMA", "enum fields require values")
+    if kind != "enum" and enum:
+        raise CollectionError("INVALID_ITEM_SCHEMA", "only enum fields may declare values")
     items = _parse_field_spec(raw["items"], depth + 1) if "items" in raw else None
     if kind == "array" and items is None:
         raise CollectionError("INVALID_ITEM_SCHEMA", "array field requires an items schema")
@@ -487,7 +499,7 @@ def _parse_templates(root: Path, manifest_rel: str, value: object) -> tuple[Temp
                 path=_vault_relative_path(
                     root, manifest_rel, template.get("path"), "template.path"
                 ),
-                default_properties=_mapping(
+                default_properties=_freeze_mapping(
                     template.get("default_properties", {}), "template.default_properties"
                 ),
             )
@@ -509,18 +521,22 @@ def _parse_links(value: object) -> CollectionLinks:
         query = _mapping(link.get("query"), "plan link query")
         if _nested_size(query) > 128:
             raise CollectionError("INVALID_COLLECTION_LINKS", "plan query is too large")
-        result.append(PlanLink(reference, query))
+        result.append(PlanLink(reference, _freeze_mapping(query)))
     return CollectionLinks(tuple(result))
 
 
 def _validate_field_value(name: str, value: Any, spec: FieldSpec) -> None:
     if value is None:
         return
+    if spec.type not in _SUPPORTED_FIELD_TYPES:
+        raise CollectionError("SCHEMA_FIELD_TYPE", f"field has unsupported type: {name}")
     if spec.type == "string" and type(value) is not str:
         raise CollectionError("SCHEMA_FIELD_TYPE", f"field has wrong type: {name}")
     if spec.type == "integer" and (type(value) is not int):
         raise CollectionError("SCHEMA_FIELD_TYPE", f"field has wrong type: {name}")
-    if spec.type == "number" and type(value) not in {int, float}:
+    if spec.type == "number" and (
+        type(value) not in {int, float} or (type(value) is float and not math.isfinite(value))
+    ):
         raise CollectionError("SCHEMA_FIELD_TYPE", f"field has wrong type: {name}")
     if spec.type == "boolean" and type(value) is not bool:
         raise CollectionError("SCHEMA_FIELD_TYPE", f"field has wrong type: {name}")
@@ -534,11 +550,13 @@ def _validate_field_value(name: str, value: Any, spec: FieldSpec) -> None:
         assert spec.items is not None
         for item in value:
             _validate_field_value(name, item, spec.items)
-    if spec.type == "object" and not isinstance(value, Mapping):
+    if spec.type == "object" and (not isinstance(value, Mapping) or not _is_json_value(value)):
         raise CollectionError("SCHEMA_FIELD_TYPE", f"field has wrong type: {name}")
     if spec.type == "link" and type(value) is not str:
         raise CollectionError("SCHEMA_FIELD_TYPE", f"field has wrong type: {name}")
-    if spec.enum and value not in spec.enum:
+    if spec.enum and not any(
+        type(value) is type(option) and value == option for option in spec.enum
+    ):
         raise CollectionError("SCHEMA_ENUM", f"field is outside its enum: {name}")
 
 
@@ -551,6 +569,8 @@ def _natural_key_value(value: Any, field_type: str | None) -> Any:
         return _normalize_datetime(value)
     if type(value) is str:
         return unicodedata.normalize("NFC", value)
+    if type(value) is float and not math.isfinite(value):
+        raise ValueError("natural key numbers must be finite")
     if type(value) in {int, float, bool}:
         return value
     if type(value) is dt.datetime:
@@ -667,7 +687,7 @@ def _vault_relative_path(root: Path, manifest_rel: str, value: object, name: str
             "INVALID_COLLECTION_PATH", f"{name} must stay under the Knowledge Base"
         )
     target = root / rel
-    if target.exists() and not _is_safe_vault_target(root, target):
+    if not _is_safe_vault_target(root, target):
         raise CollectionError("INVALID_COLLECTION_PATH", f"{name} must not traverse a symlink")
     return rel
 
@@ -678,7 +698,11 @@ def _is_safe_vault_target(root: Path, target: Path) -> bool:
         current = root
         for part in rel.parts:
             current /= part
-            if stat.S_ISLNK(current.lstat().st_mode):
+            try:
+                info = current.lstat()
+            except FileNotFoundError:
+                return True
+            if stat.S_ISLNK(info.st_mode):
                 return False
         return True
     except (OSError, ValueError):
@@ -701,6 +725,31 @@ def _mapping(value: object, name: str) -> Mapping[str, Any]:
     if len(value) > _MAX_SCHEMA_FIELDS:
         raise CollectionError("INVALID_COLLECTION_MANIFEST", f"{name} is too large")
     return MappingProxyType(dict(value))
+
+
+def _freeze_mapping(value: object, name: str = "value") -> Mapping[str, Any]:
+    mapping = _mapping(value, name)
+    return MappingProxyType({key: _freeze(item) for key, item in mapping.items()})
+
+
+def _freeze(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return MappingProxyType({key: _freeze(item) for key, item in value.items()})
+    if isinstance(value, list | tuple):
+        return tuple(_freeze(item) for item in value)
+    return value
+
+
+def _is_json_value(value: Any) -> bool:
+    if value is None or type(value) in {str, int, bool}:
+        return True
+    if type(value) is float:
+        return math.isfinite(value)
+    if isinstance(value, list | tuple):
+        return all(_is_json_value(item) for item in value)
+    if isinstance(value, Mapping):
+        return all(type(key) is str and _is_json_value(item) for key, item in value.items())
+    return False
 
 
 def _nonempty_string(value: object, name: str) -> str:
