@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import record_formats, vault, writer_lease
+from . import record_formats, record_governance, vault, writer_lease
 from . import structured_collections as collections
 
 _MAX_WHY_BYTES = 512
@@ -51,7 +51,7 @@ def append_record(
     """Append one structured item, or return a content-identical replay."""
     root = Path(vault_root)
     _validate_why(why)
-    supplied_manifest = _resolve_outside(root, collection)
+    supplied_manifest = record_governance.resolve_collection(root, collection)
     if supplied_manifest.storage.strategy == "dataset":
         record_formats.load_adapter(root, supplied_manifest).refuse_mutation("append")
     key = _validate_item_key(item_key or str(uuid.uuid4()))
@@ -64,6 +64,7 @@ def append_record(
     with writer_lease.active_manager().mutation_guard(root, operation="record_append"):
         manifest, manifest_text, manifest_guard = _load_guarded_manifest(root, collection)
         values = _validate_values(manifest, item)
+        record_governance.require_mutation_visibility(root, manifest)
         adapter = record_formats.load_adapter(root, manifest)
         if not adapter.mutable:
             adapter.refuse_mutation("append")
@@ -184,6 +185,7 @@ def append_record(
             vault.PlannedWrite(root / manifest.path, after_manifest_text, guard=manifest_guard),
             *log_plan.writes,
         ]
+        record_governance.precommit_authorize_mutation(root, manifest, snapshot)
         try:
             vault.batch_atomic_write(
                 writes,
@@ -232,6 +234,7 @@ def update_record(
         )
     with writer_lease.active_manager().mutation_guard(root, operation="record_update"):
         manifest, manifest_text, manifest_guard = _load_guarded_manifest(root, collection)
+        record_governance.require_mutation_visibility(root, manifest)
         adapter = record_formats.load_adapter(root, manifest)
         if not adapter.mutable:
             adapter.refuse_mutation("update")
@@ -330,6 +333,7 @@ def update_record(
             why=why,
         )
         log_plan = _plan_required_audit(root, manifest, item_key, audit, after_container_hash)
+        record_governance.precommit_authorize_mutation(root, manifest, snapshot)
         try:
             vault.batch_atomic_write(
                 [
@@ -991,7 +995,7 @@ def _resolve_outside(
 def _load_guarded_manifest(
     root: Path, collection: str | Path | collections.CollectionManifest
 ) -> tuple[collections.CollectionManifest, str, vault.PathGuard]:
-    resolved = _resolve_outside(root, collection)
+    resolved = record_governance.resolve_collection(root, collection)
     path = root / resolved.path
     data, guard = _read_record_bytes(root, resolved.path)
     try:

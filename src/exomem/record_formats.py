@@ -10,7 +10,7 @@ import json
 import math
 import re
 import stat
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Protocol
@@ -113,6 +113,7 @@ class CollectionAdapter(Protocol):
 class _BaseAdapter:
     vault_root: Path
     manifest: collections.CollectionManifest
+    authorize_path: Callable[[str], bool] | None = None
     mutable: bool = field(init=False, default=False)
 
     def __post_init__(self) -> None:
@@ -148,6 +149,12 @@ class _BaseAdapter:
             )
         return self.manifest.manifest_version
 
+    def _require_authorized(self, relative: str) -> bool:
+        """Authorize before a canonical path can affect any public state."""
+        if self.authorize_path is None or self.authorize_path(relative):
+            return True
+        return False
+
     def _validate_values(self, values: dict[str, Any]) -> None:
         if _SYSTEM_FIELDS.intersection(self.manifest.schema.fields):
             raise collections.CollectionError(
@@ -176,6 +183,8 @@ class MarkdownLogAdapter(_BaseAdapter):
     def read(self) -> AdapterSnapshot:
         manifest_version = self._manifest_version()
         source = self.source_path
+        if not self._require_authorized(self.manifest.storage.source):
+            raise collections.CollectionError("COLLECTION_NOT_FOUND", "collection was not found")
         try:
             data, guard = vault.read_bounded_guarded_bytes(
                 self.vault_root,
@@ -327,6 +336,8 @@ class MarkdownItemsAdapter(_BaseAdapter):
         manifest_version = self._manifest_version()
         source = self.source_path
         source_relative = source.relative_to(self.vault_root).as_posix()
+        if not self._require_authorized(source_relative):
+            raise collections.CollectionError("COLLECTION_NOT_FOUND", "collection was not found")
         try:
             root_guard = vault.DirectoryCensusGuard.capture(
                 self.vault_root, source_relative, max_entries=_MAX_ITEM_FILES
@@ -364,7 +375,8 @@ class MarkdownItemsAdapter(_BaseAdapter):
                         "RECORD_ITEM_LIMIT", "collection has too many item entries"
                     )
                 if stat.S_ISDIR(entry.mode):
-                    inventory.append((entry.relative_path, "directory", ""))
+                    if self.authorize_path is None or self.authorize_path(entry.relative_path):
+                        inventory.append((entry.relative_path, "directory", ""))
                     try:
                         child_guard = vault.DirectoryCensusGuard.capture(
                             self.vault_root, entry.relative_path, max_entries=_MAX_ITEM_FILES
@@ -383,6 +395,11 @@ class MarkdownItemsAdapter(_BaseAdapter):
             )
         paths.sort()
         for relative in paths:
+            # The raw walk ceiling above is deliberately separate from public
+            # file/byte limits. Never open an unreleased candidate merely to
+            # discover whether it is malformed or large.
+            if not self._require_authorized(relative):
+                continue
             try:
                 data, file_guard = vault.read_bounded_guarded_bytes(
                     self.vault_root,
@@ -440,7 +457,7 @@ class MarkdownItemsAdapter(_BaseAdapter):
             )
         known = {path for path, _kind, _digest in inventory}
         directory_guards = tuple(directory_guards_list)
-        if any(
+        if self.authorize_path is None and any(
             entry.relative_path not in known
             for directory_guard in directory_guards
             for entry in directory_guard.entries
@@ -483,6 +500,8 @@ class DatasetAdapter(_BaseAdapter):
     def read(self) -> AdapterSnapshot:
         manifest_version = self._manifest_version()
         source = self.source_path
+        if not self._require_authorized(self.manifest.storage.source):
+            raise collections.CollectionError("COLLECTION_NOT_FOUND", "collection was not found")
         record_path = self.manifest.storage.descriptor.get("record_path")
         if record_path is not None and (not isinstance(record_path, str) or not record_path):
             raise collections.CollectionError(
@@ -543,14 +562,19 @@ class DatasetAdapter(_BaseAdapter):
         )
 
 
-def load_adapter(vault_root: Path, manifest: collections.CollectionManifest) -> CollectionAdapter:
+def load_adapter(
+    vault_root: Path,
+    manifest: collections.CollectionManifest,
+    *,
+    authorize_path: Callable[[str], bool] | None = None,
+) -> CollectionAdapter:
     """Return the declared canonical adapter without inferring domain grammar."""
     if manifest.storage.strategy == "markdown-log":
-        return MarkdownLogAdapter(Path(vault_root), manifest)
+        return MarkdownLogAdapter(Path(vault_root), manifest, authorize_path)
     if manifest.storage.strategy == "markdown-items":
-        return MarkdownItemsAdapter(Path(vault_root), manifest)
+        return MarkdownItemsAdapter(Path(vault_root), manifest, authorize_path)
     if manifest.storage.strategy == "dataset":
-        return DatasetAdapter(Path(vault_root), manifest)
+        return DatasetAdapter(Path(vault_root), manifest, authorize_path)
     raise collections.CollectionError("UNSUPPORTED_STORAGE", "collection storage is unsupported")
 
 
@@ -812,9 +836,10 @@ def query_collection(
     expand_children: bool = False,
     continuation: str | None = None,
     output_format: str = "json",
+    authorize_path: Callable[[str], bool] | None = None,
 ) -> RecordQueryResult:
     """Query a fresh canonical adapter snapshot with a snapshot-bound cursor."""
-    adapter = load_adapter(vault_root, manifest)
+    adapter = load_adapter(vault_root, manifest, authorize_path=authorize_path)
     parsed = adapter.read()
     query = {
         "filters": filters or [],
