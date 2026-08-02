@@ -19,6 +19,7 @@ import stat
 import tempfile
 import threading
 import time
+import unicodedata
 from collections.abc import Iterable, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -2466,15 +2467,17 @@ def _prepare_path_guards(
             ),
             created_dirs=created_dirs,
         )
-        return tuple(
-            PathGuard.capture(
+        prepared: list[PathGuard] = []
+        for guard in original:
+            rebound = PathGuard.capture(
                 vault_root,
                 guard.target,
                 leaf_policy=guard.leaf_policy,
                 expected_content_hash=guard.expected_content_hash,
             )
-            for guard in original
-        )
+            object.__setattr__(rebound, "expected_content_size", guard.expected_content_size)
+            prepared.append(rebound)
+        return tuple(prepared)
     except BaseException:
         if created_dirs is not None:
             _remove_empty_created_dirs(created_dirs)
@@ -2858,13 +2861,16 @@ def _batch_atomic_write_locked(
     opt-in ``index_reports`` collector receives the report from that same
     fan-out; requesting feedback never dispatches indexes a second time.
     """
-    # Several high-level writers independently refresh the same navigation
-    # file in one logical batch. Preserve the original destination order but
-    # commit only the last planned content for each path.
-    deduped: dict[Path, PlannedWrite] = {}
+    writes = list(writes)
+    destinations: set[str] = set()
     for write in writes:
-        deduped[write.path] = write
-    writes = list(deduped.values())
+        destination = os.path.abspath(write.path)
+        portable_destination = "/".join(
+            unicodedata.normalize("NFC", part).casefold() for part in Path(destination).parts
+        )
+        if portable_destination in destinations:
+            raise PathGuardError("PATH_GUARD_TARGET", "batch destinations collide")
+        destinations.add(portable_destination)
     for write in writes:
         absolute_parts = Path(os.path.abspath(write.path)).parts
         if any(part.startswith(_BATCH_RESIDUE_PREFIX) for part in absolute_parts):

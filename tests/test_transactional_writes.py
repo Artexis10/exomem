@@ -201,9 +201,8 @@ def test_batch_atomic_write_uses_private_workspaces_and_fans_out_once(
 
     replaced = vault_module.batch_atomic_write(
         [
-            vault_module.PlannedWrite(existing, "superseded"),
-            vault_module.PlannedWrite(created, "created\nexact"),
             vault_module.PlannedWrite(existing, "existing\nexact"),
+            vault_module.PlannedWrite(created, "created\nexact"),
         ],
         vault_root=tmp_path,
         index_reports=reports,
@@ -459,12 +458,13 @@ def test_batch_write_error_public_payload_and_pickle_are_sanitized(
     assert restored._diagnostics == ()
 
 
-def test_batch_cleanup_outcome_summarizes_deduped_commit_order(
+def test_batch_cleanup_outcome_summarizes_commit_order(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     first = tmp_path / "first.md"
     second = tmp_path / "second.md"
+    third = tmp_path / "third.md"
     raw = PermissionError("private workspace initialization failure")
 
     def fail_workspace_create(cls, parent: Path):
@@ -486,7 +486,7 @@ def test_batch_cleanup_outcome_summarizes_deduped_commit_order(
             [
                 vault_module.PlannedWrite(first, "first draft"),
                 vault_module.PlannedWrite(second, "second"),
-                vault_module.PlannedWrite(first, "first final"),
+                vault_module.PlannedWrite(third, "third"),
             ],
             vault_root=tmp_path,
         )
@@ -496,8 +496,8 @@ def test_batch_cleanup_outcome_summarizes_deduped_commit_order(
         "kind": "cleanup_incomplete",
         "committed": False,
         "incomplete": True,
-        "affected_count": 2,
-        "targets": ["first.md", "second.md"],
+        "affected_count": 3,
+        "targets": ["first.md", "second.md", "third.md"],
         "omitted_target_count": 0,
     }
     assert incomplete.value.__cause__ is raw

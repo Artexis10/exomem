@@ -24,7 +24,9 @@ _MAX_ITEM_FILES = 2_000
 _SYSTEM_FIELDS = frozenset({"type", "collection_id", "record_id", "schema_version", "item_version"})
 _RECEIPT_MARKER = "exomem.records-mutation"
 _RECEIPT_VERSION = 1
-_AUDIT_MARKER = re.compile(r"exomem-record-audit:\s*([0-9a-f]{24})")
+_LOG_RECORD_ID_MARKER = re.compile(rb"<!--\s*exomem-record-id:\s*([0-9a-f-]{36})\s*-->")
+_LOG_AUDIT_MARKER = re.compile(rb"<!--\s*exomem-record-audit:\s*([0-9a-f]{24})\s*-->")
+_ITEM_AUDIT_MARKER = re.compile(rb"#\s*exomem-record-audit:\s*([0-9a-f]{24})\s*")
 _MAX_AUDIT_SOURCE_BYTES = 2 * 1024 * 1024
 _MAX_AUDIT_MARKERS = 10_000
 
@@ -89,6 +91,13 @@ def append_record(
             if len(existing) != 1 or existing[0].ambiguous:
                 raise collections.CollectionError("AMBIGUOUS_RECORD", "record key is ambiguous")
             if _payload_hash(manifest, key, existing[0].values, existing[0].body) == payload_hash:
+                correlation = _replay_audit_correlation(
+                    root, manifest, snapshot, existing[0], payload_hash
+                )
+                if correlation is None:
+                    raise collections.CollectionError(
+                        "RECORD_ID_CONFLICT", "record ID lacks a correlated append transition"
+                    )
                 return _result(
                     operation="append",
                     manifest=manifest,
@@ -100,7 +109,7 @@ def append_record(
                     affected_paths=[existing[0].source.path],
                     payload_hash=payload_hash,
                     outcome="replayed",
-                    audit_correlation=_record_audit_correlation(snapshot, existing[0]),
+                    audit_correlation=correlation,
                 )
             raise collections.CollectionError(
                 "RECORD_ID_CONFLICT", "record ID already has different data"
@@ -184,6 +193,8 @@ def append_record(
                     *snapshot.path_guards,
                 ),
             )
+        except vault.BatchWriteError:
+            raise
         except (vault.PathGuardError, vault.CreateOnlyConflict, OSError, ValueError) as error:
             raise _publication_error(error) from error
         return _result(
@@ -338,6 +349,8 @@ def update_record(
                     ),
                 ),
             )
+        except vault.BatchWriteError:
+            raise
         except (vault.PathGuardError, vault.CreateOnlyConflict, OSError, ValueError) as error:
             raise _publication_error(error) from error
         return _result(
@@ -386,6 +399,44 @@ def create_collection(
                 "INVALID_COLLECTION_MANIFEST", "manifest must be _collection.md"
             )
         collections.parse_manifest_bytes(root, path, manifest_text.encode("utf-8"))
+        if not scaffold:
+            manifest = collections.parse_manifest_bytes(root, path, manifest_text.encode("utf-8"))
+            source = root / manifest.storage.source
+            _assert_portable_absent(root, source)
+            if source.exists() or _casefold_alias(source):
+                raise collections.CollectionError(
+                    "CREATE_ONLY_CONFLICT", "canonical source already exists"
+                )
+            source_guard = vault.PathGuard.capture(
+                root, manifest.storage.source, leaf_policy="absent"
+            )
+            try:
+                vault.batch_atomic_write(
+                    [
+                        vault.PlannedWrite(
+                            path, manifest_text, create_only=True, guard=manifest_guard
+                        )
+                    ],
+                    vault_root=root,
+                    required_guards=(*_portable_absence_guards(root, path, source), source_guard),
+                )
+            except vault.BatchWriteError:
+                raise
+            except (vault.PathGuardError, vault.CreateOnlyConflict, OSError, ValueError) as error:
+                raise _publication_error(error) from error
+            return _result(
+                operation="create",
+                manifest=manifest,
+                key=None,
+                before_item_hash=None,
+                after_item_hash=None,
+                before_container_hash=None,
+                after_container_hash=None,
+                affected_paths=[manifest.path],
+                payload_hash=None,
+                outcome="committed",
+                audit_correlation=None,
+            )
         _require_activity_log(root)
         audit_correlation = _transition_id()
         marked_manifest_text = record_formats.render_manifest_audit_head(
@@ -460,6 +511,8 @@ def create_collection(
                 vault_root=root,
                 required_guards=_portable_absence_guards(root, path, source),
             )
+        except vault.BatchWriteError:
+            raise
         except (vault.PathGuardError, vault.CreateOnlyConflict, OSError, ValueError) as error:
             raise _publication_error(error) from error
         return _result(
@@ -505,6 +558,11 @@ def inspect_audit_gap(
     except collections.CollectionError:
         if head is not None:
             return {"status": "gap", "gaps": ["canonical-source-unavailable"]}
+        events, complete = _audit_events(root, history_guard=history_guard)
+        if complete and not any(
+            event.get("collection_id") == manifest.collection_id for event in events
+        ):
+            return {"status": "baseline", "gaps": []}
         return {"status": "history_incomplete", "gaps": []}
     current_hash = (
         snapshot.source_versions[-1].hash
@@ -619,13 +677,12 @@ def _audit_markers(
         matches = 0
         markers: list[_AuditMarker] = []
         for record in snapshot.records:
-            found = _AUDIT_MARKER.findall(data[record.span.start : record.span.end].decode("utf-8"))
-            matches += len(found)
-            if matches > _MAX_AUDIT_MARKERS:
-                return None
-            markers.extend(
-                _AuditMarker(match, manifest.storage.source, record.identity.key) for match in found
-            )
+            marker = _structural_audit_marker(manifest, data, record)
+            if marker is not None:
+                matches += 1
+                if matches > _MAX_AUDIT_MARKERS:
+                    return None
+                markers.append(_AuditMarker(marker, manifest.storage.source, record.identity.key))
         return tuple(markers)
     markers = []
     for record in snapshot.records:
@@ -634,15 +691,11 @@ def _audit_markers(
         )
         if data is None or hashlib.sha256(data).hexdigest() != record.source.hash:
             return None
-        try:
-            found = _AUDIT_MARKER.findall(data.decode("utf-8-sig"))
-        except UnicodeDecodeError:
-            return None
-        if len(markers) + len(found) > _MAX_AUDIT_MARKERS:
-            return None
-        markers.extend(
-            _AuditMarker(match, record.source.path, record.identity.key) for match in found
-        )
+        marker = _structural_audit_marker(manifest, data, record)
+        if marker is not None:
+            if len(markers) >= _MAX_AUDIT_MARKERS:
+                return None
+            markers.append(_AuditMarker(marker, record.source.path, record.identity.key))
     return tuple(markers)
 
 
@@ -707,17 +760,72 @@ def _safe_audit_read(root: Path, relative: str, expected_hash: str, limit: int) 
 
 
 def _record_audit_correlation(
-    snapshot: record_formats.AdapterSnapshot, record: record_formats.Record
+    manifest: collections.CollectionManifest,
+    snapshot: record_formats.AdapterSnapshot,
+    record: record_formats.Record,
 ) -> str | None:
     data = next((data for path, data in snapshot.source_bytes if path == record.source.path), None)
     if data is None:
         return None
-    try:
-        text = data[record.span.start : record.span.end].decode("utf-8-sig")
-    except UnicodeDecodeError:
+    return _structural_audit_marker(manifest, data, record)
+
+
+def _structural_audit_marker(
+    manifest: collections.CollectionManifest, data: bytes, record: record_formats.Record
+) -> str | None:
+    if manifest.storage.strategy == "markdown-log":
+        lines = data[record.span.start : record.span.end].splitlines()
+        if len(lines) < 3:
+            return None
+        identifier = _LOG_RECORD_ID_MARKER.fullmatch(lines[1].strip())
+        audit = _LOG_AUDIT_MARKER.fullmatch(lines[2].strip())
+        if (
+            identifier is None
+            or audit is None
+            or identifier.group(1).decode("ascii") != record.identity.key
+        ):
+            return None
+        return audit.group(1).decode("ascii")
+    item = data.removeprefix(b"\xef\xbb\xbf")
+    opening = re.match(rb"\A---\r?\n", item)
+    if opening is None:
         return None
-    markers = _AUDIT_MARKER.findall(text)
-    return markers[0] if len(markers) == 1 else None
+    closing = re.search(rb"(?m)^---\r?$", item[opening.end() :])
+    if closing is None:
+        return None
+    frontmatter = item[opening.end() : opening.end() + closing.start()]
+    lines = frontmatter.splitlines()
+    if not lines:
+        return None
+    audit = _ITEM_AUDIT_MARKER.fullmatch(lines[-1].strip())
+    return audit.group(1).decode("ascii") if audit is not None else None
+
+
+def _replay_audit_correlation(
+    root: Path,
+    manifest: collections.CollectionManifest,
+    snapshot: record_formats.AdapterSnapshot,
+    record: record_formats.Record,
+    payload_hash: str,
+) -> str | None:
+    correlation = _record_audit_correlation(manifest, snapshot, record)
+    if correlation is None:
+        return None
+    events, complete = _audit_events(root)
+    if not complete:
+        return None
+    matching = [
+        event
+        for event in events
+        if event.get("transition_id") == correlation
+        and _event_matches_transition(event, manifest)
+        and event["operation"] == "append"
+        and event["item_key"] == record.identity.key
+        and event["canonical_path"] == record.source.path
+        and event["after_item_hash"] == record.source.hash
+        and event["payload_hash"] == payload_hash
+    ]
+    return correlation if len(matching) == 1 else None
 
 
 def _audit_events(

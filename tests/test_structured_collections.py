@@ -101,6 +101,36 @@ def test_load_manifest_keeps_profile_neutral_contract_and_opaque_plan_link(tmp_p
     assert manifest.links.plans[0].query == {"filters": {"asset": "car"}, "limit": 12}
 
 
+def test_load_manifest_uses_the_bounded_descriptor_reader(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault = tmp_path / "vault"
+    path = _write_manifest(vault, "Knowledge Base/Records/Maintenance/_collection.md")
+
+    monkeypatch.setattr(
+        Path, "read_bytes", lambda _self: (_ for _ in ()).throw(AssertionError("unguarded read"))
+    )
+
+    assert (
+        collections.load_manifest(vault, path).path
+        == "Knowledge Base/Records/Maintenance/_collection.md"
+    )
+
+
+def test_load_manifest_refuses_a_source_alias_of_its_own_manifest(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    path = _write_manifest(
+        vault,
+        "Knowledge Base/Records/Maintenance/_collection.md",
+        _manifest(source="_COLLECTION.md"),
+    )
+
+    with pytest.raises(collections.CollectionError) as raised:
+        collections.load_manifest(vault, path)
+
+    assert raised.value.code == "INVALID_COLLECTION_PATH"
+
+
 def test_load_manifest_allows_future_planning_but_rejects_unknown_profiles(tmp_path: Path) -> None:
     vault = tmp_path / "vault"
     planning = _write_manifest(

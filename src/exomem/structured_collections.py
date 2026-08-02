@@ -46,6 +46,7 @@ _MAX_FROZEN_VALUES = 256
 _MAX_INFERENCE_PROVENANCE = 32
 _MAX_PATH_BYTES = 1024
 _MAX_ITEM_KEY_BYTES = 512
+_MAX_MANIFEST_BYTES = 512 * 1024
 
 
 @dataclass(slots=True)
@@ -182,8 +183,8 @@ def load_manifest(vault_root: Path, path: Path | str) -> CollectionManifest:
             "INVALID_COLLECTION_MANIFEST", "manifest must be named _collection.md"
         )
     try:
-        data = manifest_path.read_bytes()
-    except OSError as error:
+        data, _guard = vault.read_bounded_guarded_bytes(root, rel, limit=_MAX_MANIFEST_BYTES)
+    except vault.PathGuardError as error:
         raise CollectionError(
             "COLLECTION_NOT_FOUND", "collection manifest could not be read"
         ) from error
@@ -462,6 +463,10 @@ def _manifest_from_frontmatter(
     if type(schema_version) is not int or schema_version < 1:
         raise CollectionError("INVALID_SCHEMA_VERSION", "schema_version must be a positive integer")
     storage = _parse_storage(root, manifest_rel, frontmatter.get("storage"))
+    if _portable_path_key(storage.source) == _portable_path_key(manifest_rel):
+        raise CollectionError(
+            "INVALID_COLLECTION_PATH", "storage.source must not alias the collection manifest"
+        )
     schema = _parse_schema(schema_version, frontmatter.get("item_schema"))
     audit_head = record_audit_head(frontmatter)
     templates = _parse_templates(root, manifest_rel, frontmatter.get("templates", []))
@@ -857,6 +862,10 @@ def _vault_relative_path(root: Path, manifest_rel: str, value: object, name: str
     if not _is_safe_vault_target(root, target):
         raise CollectionError("INVALID_COLLECTION_PATH", f"{name} must not traverse a symlink")
     return rel
+
+
+def _portable_path_key(path: str) -> str:
+    return "/".join(unicodedata.normalize("NFC", part).casefold() for part in path.split("/"))
 
 
 def _is_safe_vault_target(root: Path, target: Path) -> bool:

@@ -170,6 +170,37 @@ def test_compact_record_receipt_uses_the_content_free_whitelist() -> None:
     assert "values" not in projected
 
 
+def test_compact_record_receipt_accepts_manifest_only_create_without_audit_claim() -> None:
+    mutation_terminal = _terminal_module()
+    raw = {
+        "_record_receipt": "exomem.records-mutation",
+        "receipt_version": 1,
+        "operation": "create",
+        "collection_id": "11111111-1111-4111-8111-111111111111",
+        "item_key": None,
+        "before_item_hash": None,
+        "after_item_hash": None,
+        "before_container_hash": None,
+        "after_container_hash": None,
+        "affected_paths": ["Knowledge Base/Records/example/_collection.md"],
+        "payload_hash": None,
+        "outcome": "committed",
+        "audit_correlation": None,
+    }
+
+    projected = mutation_terminal.project_terminal(
+        mutation_terminal.committed_terminal(
+            raw,
+            request_id="11111111-1111-4111-8111-111111111111",
+            receipt_id=None,
+            idempotency_key=None,
+        )
+    )
+
+    assert projected["collection_id"] == raw["collection_id"]
+    assert projected["audit_correlation"] is None
+
+
 @pytest.mark.parametrize("operation", ["append", "update"])
 def test_compact_record_projection_rejects_missing_required_mutation_hashes(
     operation: str,

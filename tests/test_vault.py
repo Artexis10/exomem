@@ -138,6 +138,31 @@ def test_path_guards_share_new_parent_chain_safely(tmp_path: Path) -> None:
     assert [path.read_text(encoding="utf-8") for path in paths] == ["one", "two"]
 
 
+def test_preparing_a_bounded_content_guard_preserves_its_read_limit(tmp_path: Path) -> None:
+    target = tmp_path / "guarded.md"
+    target.write_bytes(b"bounded bytes")
+    _data, guard = vault.read_bounded_guarded_bytes(tmp_path, "guarded.md", limit=64)
+
+    prepared = vault._prepare_path_guards(tmp_path, (guard,))
+
+    assert prepared[0].expected_content_size == len(b"bounded bytes")
+
+
+def test_batch_write_refuses_portably_colliding_destinations(tmp_path: Path) -> None:
+    with pytest.raises(vault.PathGuardError) as raised:
+        vault.batch_atomic_write(
+            [
+                vault.PlannedWrite(tmp_path / "Record.md", "first"),
+                vault.PlannedWrite(tmp_path / "record.md", "second"),
+            ],
+            vault_root=tmp_path,
+        )
+
+    assert raised.value.code == "PATH_GUARD_TARGET"
+    assert not (tmp_path / "Record.md").exists()
+    assert not (tmp_path / "record.md").exists()
+
+
 @pytest.mark.skipif(os.name != "nt", reason="Windows binary-read regression")
 def test_read_guarded_text_preserves_crlf_bytes_on_windows(tmp_path: Path) -> None:
     target = tmp_path / "guarded.md"

@@ -335,6 +335,135 @@ item_schema:
         records.create_collection(tmp_path, manifest_path, manifest, why="retry creation")
 
 
+def test_create_collection_without_scaffold_is_an_honest_manifest_only_baseline(
+    tmp_path: Path,
+) -> None:
+    from exomem import records
+
+    _activity_log(tmp_path)
+    manifest_path = "Knowledge Base/Records/Manifest Only/_collection.md"
+    manifest = """---
+type: collection
+exomem_id: 55555555-5555-4555-8555-555555555555
+title: Manifest only records
+semantic_profile: records
+collection_version: 1
+schema_version: 1
+lifecycle: active
+storage:
+  strategy: markdown-items
+  source: Events
+  format_version: 1
+item_schema:
+  natural_key: [occurred_on]
+  fields:
+    occurred_on:
+      type: date
+      required: true
+---
+"""
+
+    result = records.create_collection(
+        tmp_path, manifest_path, manifest, why="create only the collection contract", scaffold=False
+    )
+
+    created = tmp_path / manifest_path
+    assert result["audit_correlation"] is None
+    assert "record_audit:" not in created.read_text(encoding="utf-8")
+    assert not (created.parent / "Events").exists()
+    assert records.inspect_audit_gap(tmp_path, manifest_path) == {"status": "baseline", "gaps": []}
+
+
+def test_append_preserves_committed_batch_publication_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import records, vault
+
+    fixture = copy_x3_fixture(tmp_path)
+    _activity_log(tmp_path)
+    manifest = _manifest(tmp_path, fixture)
+    parsed = record_formats.load_adapter(tmp_path, manifest).read()
+    committed = vault.BatchWriteError(
+        "BATCH_CLEANUP_INCOMPLETE",
+        vault.BatchTargetSummary(affected_count=3, targets=("a.md",), omitted_target_count=2),
+        committed=True,
+    )
+    monkeypatch.setattr(
+        records.vault,
+        "batch_atomic_write",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(committed),
+    )
+
+    with pytest.raises(vault.BatchWriteError) as raised:
+        records.append_record(
+            tmp_path,
+            manifest.path,
+            item={
+                "occurred_on": "2026-08-03",
+                "title": "Pull",
+                "status": "completed",
+                "movements": [],
+            },
+            item_key="12121212-1212-4121-8121-121212121212",
+            expected_container_hash=parsed.source_versions[-1].hash,
+            why="preserve the committed batch outcome",
+        )
+
+    assert raised.value is committed
+    assert raised.value.committed is True
+
+
+def test_append_refuses_manual_equal_item_without_a_correlated_transition(tmp_path: Path) -> None:
+    from exomem import records
+
+    fixture = copy_vehicle_maintenance_fixture(tmp_path)
+    _activity_log(tmp_path)
+    manifest = _manifest(tmp_path, fixture)
+    parsed = record_formats.load_adapter(tmp_path, manifest).read()
+    manual = parsed.records[0]
+
+    with pytest.raises(collections.CollectionError) as raised:
+        records.append_record(
+            tmp_path,
+            manifest.path,
+            item=manual.values,
+            item_key=manual.identity.key,
+            expected_container_hash=parsed.snapshot,
+            why="do not label a manual item as replayed",
+            body=manual.body,
+        )
+
+    assert raised.value.code == "RECORD_ID_CONFLICT"
+
+
+def test_item_body_audit_shaped_prose_does_not_forge_an_audit_marker(tmp_path: Path) -> None:
+    from exomem import records
+
+    fixture = copy_vehicle_maintenance_fixture(tmp_path)
+    _activity_log(tmp_path)
+    manifest = _manifest(tmp_path, fixture)
+    parsed = record_formats.load_adapter(tmp_path, manifest).read()
+    records.append_record(
+        tmp_path,
+        manifest.path,
+        item={
+            "occurred_on": "2026-08-03",
+            "asset": "[[Assets/Vehicle]]",
+            "provider": "Northside Garage",
+            "services": ["oil change"],
+            "amount": 95.0,
+            "currency": "GBP",
+            "status": "completed",
+        },
+        item_key="13131313-1313-4131-8131-131313131313",
+        expected_container_hash=parsed.snapshot,
+        why="record a body marker example",
+        body="Example prose: exomem-record-audit: deadbeefdeadbeefdeadbeef",
+    )
+
+    assert records.inspect_audit_gap(tmp_path, manifest.path) == {"status": "ok", "gaps": []}
+
+
 def test_mutable_record_ids_are_normalized_uuids_and_dataset_stays_unsupported(
     tmp_path: Path,
 ) -> None:
