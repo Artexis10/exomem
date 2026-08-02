@@ -315,9 +315,6 @@ def test_windows_guarded_reader_bounds_reads_and_rechecks_ancestor_identity(
     reads: list[int] = []
     swapped = False
 
-    def open_directory(path: Path) -> int:
-        return os.open(path, os.O_RDONLY)
-
     def open_leaf(path: Path, **_kwargs: object) -> int:
         return os.open(path, os.O_RDONLY)
 
@@ -332,8 +329,8 @@ def test_windows_guarded_reader_bounds_reads_and_rechecks_ancestor_identity(
             os.link(displaced / "entry.md", leaf_path)
         return data
 
-    monkeypatch.setattr(vault, "_open_directory_path", open_directory)
-    monkeypatch.setattr(vault, "_open_windows_path_descriptor", open_leaf)
+    if os.name != "nt":
+        monkeypatch.setattr(vault, "_open_windows_path_descriptor", open_leaf)
     monkeypatch.setattr(vault.os, "read", read_and_swap)
 
     with pytest.raises(vault.PathGuardError) as excinfo:
