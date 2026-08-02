@@ -600,3 +600,168 @@ item_schema:
         records.create_collection(
             tmp_path, "Knowledge Base/Records/New/_collection.md", text, why="reject alias"
         )
+
+
+@pytest.mark.parametrize("field,value", [("canonical_path", "outside.md"), ("item_key", "not-a-uuid")])
+def test_create_transition_requires_null_item_and_declared_source(
+    tmp_path: Path, field: str, value: str
+) -> None:
+    from exomem import records
+
+    _activity_log(tmp_path)
+    manifest_path = "Knowledge Base/Records/New/_collection.md"
+    text = """---
+type: collection
+exomem_id: 11111111-1111-4111-8111-111111111111
+title: New records
+semantic_profile: records
+collection_version: 1
+schema_version: 1
+lifecycle: active
+storage:
+  strategy: markdown-items
+  source: Events
+  format_version: 1
+item_schema:
+  natural_key: [occurred_on]
+  fields:
+    occurred_on:
+      type: date
+      required: true
+---
+"""
+    records.create_collection(tmp_path, manifest_path, text, why="create audit fixture")
+    log = tmp_path / "Knowledge Base/log.md"
+    lines = log.read_text(encoding="utf-8").splitlines()
+    index = next(index for index, line in enumerate(lines) if "audit-v1" in line)
+    event = json.loads(lines[index].removeprefix("Records audit-v1 "))
+    event[field] = value
+    lines[index] = "Records audit-v1 " + json.dumps(event)
+    log.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    assert records.inspect_audit_gap(tmp_path, manifest_path)["status"] == "gap"
+
+
+def test_audit_marker_sources_are_bounded_after_adapter_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A post-adapter source swap never leaks markers or blocks inspection."""
+    from exomem import records
+
+    fixture = copy_x3_fixture(tmp_path)
+    _activity_log(tmp_path)
+    manifest = collections.load_manifest(tmp_path, fixture / "_collection.md")
+    snapshot = record_formats.load_adapter(tmp_path, manifest).read()
+    records.append_record(
+        tmp_path, manifest.path, item=_item("2026-08-03", "Pull"),
+        item_key="12121212-1212-4212-8212-121212121212",
+        expected_container_hash=snapshot.source_versions[-1].hash, why="audit swap fixture",
+    )
+    source = fixture / "Training Log.md"
+    outside = tmp_path / "outside.md"
+    outside.write_text("<!-- exomem-record-audit: ffffffffffffffffffffffff -->", encoding="utf-8")
+    real_read = record_formats.MarkdownLogAdapter.read
+    swapped = False
+
+    def swap(self):  # noqa: ANN001
+        nonlocal swapped
+        value = real_read(self)
+        if not swapped:
+            swapped = True
+            source.unlink()
+            try:
+                source.symlink_to(outside)
+            except OSError:
+                pytest.skip("symlinks unavailable")
+        return value
+
+    monkeypatch.setattr(record_formats.MarkdownLogAdapter, "read", swap)
+    report = records.inspect_audit_gap(tmp_path, manifest.path)
+    assert report == {"status": "history_incomplete", "gaps": []}
+
+
+@pytest.mark.parametrize("replacement", ["fifo", "oversize", "marker-cap"])
+def test_post_adapter_marker_source_failures_are_incomplete(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, replacement: str
+) -> None:
+    from exomem import records
+
+    fixture = copy_x3_fixture(tmp_path)
+    _activity_log(tmp_path)
+    manifest = collections.load_manifest(tmp_path, fixture / "_collection.md")
+    snapshot = record_formats.load_adapter(tmp_path, manifest).read()
+    records.append_record(
+        tmp_path, manifest.path, item=_item("2026-08-03", "Pull"),
+        item_key="34343434-3434-4434-8434-343434343434",
+        expected_container_hash=snapshot.source_versions[-1].hash, why="audit source fixture",
+    )
+    source = fixture / "Training Log.md"
+    real_read, changed = record_formats.MarkdownLogAdapter.read, False
+
+    def replace_after_read(self):  # noqa: ANN001
+        nonlocal changed
+        value = real_read(self)
+        if not changed:
+            changed = True
+            if replacement == "marker-cap":
+                monkeypatch.setattr(records, "_MAX_AUDIT_MARKERS", 0)
+            else:
+                source.unlink()
+                if replacement == "fifo":
+                    if not hasattr(os, "mkfifo"):
+                        pytest.skip("FIFOs are unsupported")
+                    os.mkfifo(source)
+                else:
+                    source.write_bytes(b"x" * (records._MAX_AUDIT_SOURCE_BYTES + 1))
+        return value
+
+    monkeypatch.setattr(record_formats.MarkdownLogAdapter, "read", replace_after_read)
+    assert records.inspect_audit_gap(tmp_path, manifest.path) == {
+        "status": "history_incomplete", "gaps": []
+    }
+
+
+def test_record_create_staging_interrupt_leaves_no_residue_and_retries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import records
+
+    _activity_log(tmp_path)
+    manifest_path = "Knowledge Base/Records/New/_collection.md"
+    text = """---
+type: collection
+exomem_id: 22222222-2222-4222-8222-222222222222
+title: New records
+semantic_profile: records
+collection_version: 1
+schema_version: 1
+lifecycle: active
+storage:
+  strategy: markdown-items
+  source: Events
+  format_version: 1
+item_schema:
+  natural_key: [occurred_on]
+  fields:
+    occurred_on:
+      type: date
+      required: true
+---
+"""
+    real_create = vault._BatchWorkspace.create_artifact
+    calls = 0
+
+    def interrupt(workspace, name, content):  # noqa: ANN001
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise KeyboardInterrupt("stop creating record collection")
+        return real_create(workspace, name, content)
+
+    monkeypatch.setattr(vault._BatchWorkspace, "create_artifact", interrupt)
+    with pytest.raises(KeyboardInterrupt, match="stop creating record collection"):
+        records.create_collection(tmp_path, manifest_path, text, why="interrupt collection staging")
+    assert not (tmp_path / manifest_path).exists()
+    assert not (tmp_path / "Knowledge Base/Records/New/Events").exists()
+    assert not list(tmp_path.rglob(".exomem-batch-*"))
+    monkeypatch.setattr(vault._BatchWorkspace, "create_artifact", real_create)
+    assert records.create_collection(tmp_path, manifest_path, text, why="retry collection")

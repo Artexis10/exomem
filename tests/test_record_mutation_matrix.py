@@ -266,6 +266,41 @@ def test_item_update_rejects_snapshot_races_without_publication(
     assert log.read_bytes() == before[2]
 
 
+@pytest.mark.parametrize("race", ["ancestor-sibling", "empty-directory"])
+def test_nested_item_inventory_race_refuses_before_publication(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, race: str
+) -> None:
+    from exomem import records
+
+    fixture, manifest, record, log = _item_update_context(tmp_path)
+    original = tmp_path / record.source.path
+    nested = fixture / "Events/released/a/b/item.md"
+    nested.parent.mkdir(parents=True)
+    original.replace(nested)
+    parsed = record_formats.load_adapter(tmp_path, manifest).read()
+    record = next(item for item in parsed.records if item.identity.key == record.identity.key)
+    before = (nested.read_bytes(), (fixture / "_collection.md").read_bytes(), log.read_bytes())
+    real_batch = vault.batch_atomic_write
+
+    def inject_then_commit(writes, **kwargs):  # noqa: ANN001
+        if race == "ancestor-sibling":
+            (fixture / "Events/released/a/sibling.md").write_bytes(nested.read_bytes())
+        else:
+            (fixture / "Events/released/a/b/empty").mkdir()
+        return real_batch(writes, **kwargs)
+
+    monkeypatch.setattr(vault, "batch_atomic_write", inject_then_commit)
+    with pytest.raises(collections.CollectionError, match="STALE_RECORD"):
+        records.update_record(
+            tmp_path, manifest.path, item_key=record.identity.key,
+            changes={"status": "scheduled"}, expected_container_hash=parsed.snapshot,
+            expected_item_version=record.source.hash, why="reject nested inventory race",
+        )
+    assert nested.read_bytes() == before[0]
+    assert (fixture / "_collection.md").read_bytes() == before[1]
+    assert log.read_bytes() == before[2]
+
+
 @pytest.mark.parametrize("alias", ["new", "nfc-source"])
 def test_create_rechecks_portable_aliases_at_commit(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, alias: str
@@ -313,6 +348,37 @@ item_schema:
     with pytest.raises(collections.CollectionError, match="STALE_RECORD"):
         records.create_collection(tmp_path, manifest_path, proposed, why="reject commit-time alias")
     assert not (tmp_path / manifest_path).exists()
+
+
+@pytest.mark.parametrize("target_kind", ["dot", "symlink"])
+def test_create_rejects_unsafe_paths_before_outside_enumeration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, target_kind: str
+) -> None:
+    from exomem import records
+
+    _activity_log(tmp_path)
+    records_root = tmp_path / "Knowledge Base/Records"
+    records_root.mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    if target_kind == "symlink":
+        try:
+            (records_root / "Link").symlink_to(outside, target_is_directory=True)
+        except OSError:
+            pytest.skip("symlinks unavailable")
+        path = "Knowledge Base/Records/Link/_collection.md"
+    else:
+        path = "../outside/_collection.md"
+    real_scandir = records.os.scandir
+
+    def refuse_outside(path):  # noqa: ANN001
+        if Path(path) == outside:
+            raise AssertionError("outside directory was enumerated")
+        return real_scandir(path)
+
+    monkeypatch.setattr(records.os, "scandir", refuse_outside)
+    with pytest.raises(collections.CollectionError, match="INVALID_COLLECTION_PATH"):
+        records.create_collection(tmp_path, path, "not a manifest", why="reject unsafe path")
 
 
 @pytest.mark.parametrize("target_kind", ["item", "manifest", "live", "archive"])
