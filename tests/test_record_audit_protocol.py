@@ -7,7 +7,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
-from record_fixtures import copy_x3_fixture
+from record_fixtures import copy_vehicle_maintenance_fixture, copy_x3_fixture
 
 from exomem import record_formats, vault
 from exomem import structured_collections as collections
@@ -413,6 +413,57 @@ def test_later_log_update_abrupt_prefixes_are_not_normalized(
         )
     report = records.inspect_audit_gap(tmp_path, current.path)
     assert report["status"] == ("ok" if prefix == 3 else "gap")
+
+
+@pytest.mark.parametrize("prefix", [1, 2, 3])
+def test_item_append_caught_prefixes_restore_exact_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, prefix: int
+) -> None:
+    from exomem import records
+
+    fixture = copy_vehicle_maintenance_fixture(tmp_path)
+    _activity_log(tmp_path)
+    manifest = collections.load_manifest(tmp_path, fixture / "_collection.md")
+    snapshot = record_formats.load_adapter(tmp_path, manifest).read()
+    before = (
+        (fixture / "_collection.md").read_bytes(),
+        (tmp_path / "Knowledge Base/log.md").read_bytes(),
+    )
+    real_replace = vault._BatchWorkspace.replace_artifact
+    calls = 0
+
+    def deny(workspace, artifact, target):
+        nonlocal calls
+        calls += 1
+        if calls == prefix:
+            raise PermissionError(13, "Access is denied", str(target))
+        return real_replace(workspace, artifact, target)
+
+    monkeypatch.setattr(vault._BatchWorkspace, "replace_artifact", deny)
+    key = "98989898-9898-4989-8989-989898989898"
+    with pytest.raises(collections.CollectionError, match="RECORD_PUBLICATION_FAILED"):
+        records.append_record(
+            tmp_path,
+            manifest.path,
+            item={
+                "occurred_on": "2026-08-03",
+                "asset": "[[Assets/Vehicle]]",
+                "provider": "Garage",
+                "services": ["oil change"],
+                "amount": 95.0,
+                "currency": "GBP",
+                "status": "completed",
+                "next_due_on": None,
+            },
+            item_key=key,
+            expected_container_hash=snapshot.snapshot,
+            why="exercise item rollback",
+        )
+    assert not (fixture / "Events" / f"{key}.md").exists()
+    assert (
+        (fixture / "_collection.md").read_bytes(),
+        (tmp_path / "Knowledge Base/log.md").read_bytes(),
+    ) == before
 
 
 def test_create_rolls_back_caught_failure_and_exposes_abrupt_manifest_residue(
