@@ -10,6 +10,10 @@ Publication contract enforced here:
   any deterministic gate failed, the query is annotated
   ``gate_conflict (deterministic verdict stands)``; the deterministic
   verdict is final.
+- Governance dimensions are three-state: only runs measured against WIRED
+  governance show comparable counts; a run against an explicitly ungoverned
+  vault renders its default-open label (and ``unsupported`` likewise) and is
+  excluded from the comparative governance row — a label, never a number.
 """
 
 from __future__ import annotations
@@ -27,6 +31,19 @@ from membench.judge.handshake import PairedResponse, append_failure, load_reques
 JUDGE_SCORES_NAME = "judge-scores.json"
 GATE_CONFLICT_NOTE = "gate_conflict (deterministic verdict stands)"
 _STATUS_KEYS = ("pass", "fail", "not_applicable", "unsupported")
+
+#: Dimensions whose comparative cells are meaningful only against wired
+#: governance (spec: "Governed Views Are Wired, Not Simulated").
+GOVERNANCE_DIMENSIONS = frozenset({"governance"})
+#: The query FAMILY whose rows (all their gate items, not just the governance
+#: dimension) are excluded from comparative tables for non-wired runs — a
+#: default-open run's vacuous abstention/temporal passes on governance-family
+#: queries must never sit next to a wired run's numbers.
+GOVERNANCE_FAMILY = "governance"
+_GOVERNANCE_STATE_LABELS = {
+    "default_open": "default-open",
+    "unsupported": "unsupported",
+}
 
 
 def merge_judge_scores(run_dir: Path, paired: Sequence[PairedResponse]) -> Path:
@@ -135,6 +152,7 @@ class _RunView:
     latencies: list[float]
     judge: dict | None
     failure_lines: int
+    governance_state: str = "default_open"
 
 
 def _load_run(run_dir: Path) -> _RunView:
@@ -179,6 +197,9 @@ def _load_run(run_dir: Path) -> _RunView:
         latencies=latencies,
         judge=judge,
         failure_lines=failure_lines,
+        # Runs recorded before the three-state contract carry no field; they
+        # were by construction measured against the default-open surface.
+        governance_state=str(manifest.get("governance_state", "default_open")),
     )
 
 
@@ -203,21 +224,74 @@ def _fmt(value: float | None, digits: int = 3) -> str:
     return "n/a" if value is None else f"{value:.{digits}f}"
 
 
-def _dimension_cell(run: _RunView, dimension: str) -> str:
-    if run.invalid:
-        return "INVALID"
-    counts = run.dimensions.get(dimension)
-    if not isinstance(counts, dict):
-        return "—"
+def _governance_exclusion_label(run: _RunView) -> str:
+    label = _GOVERNANCE_STATE_LABELS.get(run.governance_state, run.governance_state)
+    return f"{label} (excluded from comparison)"
+
+
+def _comparable_rows(run: _RunView) -> list[dict]:
+    """Per-query rows admissible in comparative tables for this run.
+
+    Wired runs compare everything; non-wired runs drop governance-FAMILY rows
+    entirely (all their gate items — the abstention-escape guard). Rows from
+    runs recorded before family tagging carry no ``family`` key and are kept.
+    """
+
+    if run.governance_state == "wired":
+        return run.per_query
+    return [row for row in run.per_query if row.get("family") != GOVERNANCE_FAMILY]
+
+
+def _has_governance_family_rows(run: _RunView) -> bool:
+    return any(row.get("family") == GOVERNANCE_FAMILY for row in run.per_query)
+
+
+def _format_counts(counts: dict) -> str:
     return " · ".join(
         f"{key.replace('not_applicable', 'n/a')}={counts.get(key, 0)}" for key in _STATUS_KEYS
     )
 
 
-def _retrieval_stats(run: _RunView) -> dict[str, float | int] | None:
+def _recomputed_dimension_counts(rows: list[dict], dimension: str) -> dict | None:
+    """Per-dimension tallies over the given rows' gate items; None if absent."""
+
+    counts = {key: 0 for key in _STATUS_KEYS}
+    found = False
+    for row in rows:
+        for gate in row.get("gates") or []:
+            if gate.get("dimension") == dimension and gate.get("status") in counts:
+                counts[gate["status"]] += 1
+                found = True
+    return counts if found else None
+
+
+def _dimension_cell(run: _RunView, dimension: str) -> str:
+    if run.invalid:
+        return "INVALID"
+    if run.governance_state != "wired":
+        if dimension in GOVERNANCE_DIMENSIONS:
+            # Three-state contract: an ungoverned (or unsupported) measurement
+            # is labelled and EXCLUDED from the comparative governance row —
+            # its counts never sit next to a wired run's counts.
+            return _governance_exclusion_label(run)
+        if _has_governance_family_rows(run):
+            counts = _recomputed_dimension_counts(_comparable_rows(run), dimension)
+            if counts is not None:
+                return _format_counts(counts)
+            if isinstance(run.dimensions.get(dimension), dict):
+                # The dimension existed only through excluded rows.
+                return _governance_exclusion_label(run)
+            return "—"
+    counts = run.dimensions.get(dimension)
+    if not isinstance(counts, dict):
+        return "—"
+    return _format_counts(counts)
+
+
+def _retrieval_stats(rows: Sequence[dict]) -> dict[str, float | int] | None:
     blocks = [
         row["retrieval"]
-        for row in run.per_query
+        for row in rows
         if isinstance(row.get("retrieval"), dict)
     ]
     if not blocks:
@@ -306,6 +380,13 @@ def build_comparison_report(run_dirs: Sequence[Path], out_path: Path) -> Path:
             "",
             "## Dimensions (deterministic; judge values never incorporated)",
             "",
+            "Governance dimensions are comparable only between runs measured",
+            "against wired governance; default-open and unsupported runs are",
+            "labelled and excluded from that row. For those runs every",
+            "governance-FAMILY query row (all its gate items) is excluded from",
+            "the comparative counts — cells that would consist only of such",
+            "rows render the label instead.",
+            "",
             "| dimension | " + " | ".join(labels) + " |",
             "| --- |" + " --- |" * len(runs),
         ]
@@ -331,21 +412,39 @@ def build_comparison_report(run_dirs: Sequence[Path], out_path: Path) -> Path:
             "| --- |" + " --- |" * len(runs),
         ]
     )
-    retrieval = [None if run.invalid else _retrieval_stats(run) for run in runs]
+    retrieval = [
+        None if run.invalid else _retrieval_stats(_comparable_rows(run)) for run in runs
+    ]
+
+    def _all_retrieval_excluded(run: _RunView, stats: dict | None) -> bool:
+        """Exclusion (not absence) emptied this run's comparative retrieval."""
+
+        return (
+            stats is None
+            and run.governance_state != "wired"
+            and any(isinstance(row.get("retrieval"), dict) for row in run.per_query)
+        )
+
     for metric in ("mean_recall_at_5", "mean_recall_at_10", "mean_mrr"):
         cells = []
         for run, stats in zip(runs, retrieval, strict=True):
             if run.invalid:
                 cells.append("INVALID")
+            elif _all_retrieval_excluded(run, stats):
+                cells.append(_governance_exclusion_label(run))
             elif stats is None:
                 cells.append("n/a")
             else:
                 cells.append(_fmt(float(stats[metric])))
         lines.append(f"| {metric} | " + " | ".join(cells) + " |")
-    applicable_cells = [
-        "INVALID" if run.invalid else str(stats["applicable_queries"] if stats else 0)
-        for run, stats in zip(runs, retrieval, strict=True)
-    ]
+    applicable_cells = []
+    for run, stats in zip(runs, retrieval, strict=True):
+        if run.invalid:
+            applicable_cells.append("INVALID")
+        elif _all_retrieval_excluded(run, stats):
+            applicable_cells.append(_governance_exclusion_label(run))
+        else:
+            applicable_cells.append(str(stats["applicable_queries"] if stats else 0))
     lines.append("| applicable_queries | " + " | ".join(applicable_cells) + " |")
 
     lines.extend(

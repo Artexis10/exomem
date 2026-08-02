@@ -87,6 +87,10 @@ def _make_run_dir(
         "profile": {"name": profile, "settings": {}},
         "top_k": 10,
         "corpus_dir": "corpus/s1",
+        # Wired keeps governance dimensions comparable in these fixtures
+        # (matching runner.py, which always records governance_state); the
+        # default-open exclusion path has its own tests in the wiring suite.
+        "governance_state": "wired",
         "started_utc": "20260101T000000Z",
         "ended_utc": "20260101T000001Z",
         "invalid": invalid,

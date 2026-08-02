@@ -6,12 +6,40 @@ vault. Determinism knobs are pinned explicitly and recorded in the profile;
 a scored response carrying warming/degraded markers raises
 :class:`AdapterEnvironmentError` (environment fault, never a contender loss).
 Diagnostic logs go OUTSIDE the disposable vault so evidence survives cleanup.
+
+Governance wiring (``governance="wired"``, leaf mode only) goes through PUBLIC
+product surfaces exclusively — the harness never simulates governance:
+
+- The corpus ``PolicySet`` is translated into the vault's opt-in
+  ``_Governance/`` YAML policy (the documented authoring format: strict
+  schema-v1 scope/rule documents compiled by exomem's own loader, which
+  validates the result).
+- Query personas map onto exomem's canonical principal space at the CLI/leaf
+  surface boundary: the ``owner`` persona is the vault operator
+  (``owner_principal``) and every other persona becomes a
+  ``normalize_audience`` principal, bound per call with ``request_scope`` —
+  the same set/reset shape the MCP and REST surfaces use.
+- Enforcement is exomem's release plane (egress), untouched: a translated
+  ceiling-0 rule silently withholds the governed page from the restricted
+  principal while the owner keeps full disclosure.
+
+Translation happens at the end of ``ingest`` because scope selectors need the
+real vault paths that only exist after capture; the vault is governed before
+the first scored search. Corpus rules with a ``declassify_at`` on or before
+the corpus knowledge horizon (``clock.end_of_window()``) are declassified and
+not restricted — exomem's policy schema has no time-conditioned rules, so the
+translation snapshots the policy at the same "now" the ingested vault state
+represents. Corpus tombstones translate to ceiling-0 rules for EVERY declared
+persona including the owner (the oracle's "removed from all future release"),
+keeping the wiring inside the release plane rather than destroying content.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import re
 import time
 from pathlib import Path
 
@@ -25,7 +53,9 @@ from membench.adapters.base import (
     StateExportPage,
     register_adapter,
 )
+from membench.clock import end_of_window
 from membench.ids import sentinels_in
+from membench.schema import ClaimRecord, PolicyRule, PolicySet, load_jsonl
 
 _NEUTRAL_SEARCH_KWARGS = {
     "scope": "kb",
@@ -38,6 +68,29 @@ _NEUTRAL_SEARCH_KWARGS = {
 }
 
 _PRODUCT_DEFAULT_SEARCH_KWARGS: dict[str, object] = {"scope": "kb", "detail": "full"}
+
+# Stable issuer for the persona → principal mapping. Rules authored by the
+# translation and principals bound at search time both derive the audience id
+# through exomem's canonical ``normalize_audience(subject, issuer)``, so the
+# two sides can only ever agree or both be wrong — never silently diverge.
+_PERSONA_ISSUER = "membench-persona"
+
+_CROCKFORD_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
+
+
+def _document_ulid(key: str) -> str:
+    """Deterministic 26-char Crockford-base32 document id for authored YAML."""
+
+    digest = hashlib.sha256(key.encode("utf-8")).digest()
+    return "".join(_CROCKFORD_ALPHABET[byte & 31] for byte in digest[:26])
+
+
+def _document_slug(key: str) -> str:
+    """Filesystem-safe, collision-suffixed filename stem for a policy doc."""
+
+    cleaned = re.sub(r"[^a-z0-9]+", "-", key.lower()).strip("-")[:60]
+    suffix = hashlib.sha256(key.encode("utf-8")).hexdigest()[:8]
+    return f"{cleaned}-{suffix}" if cleaned else suffix
 
 
 def lexical_profile(name: str = "neutral-lexical") -> Profile:
@@ -86,25 +139,53 @@ class ExomemLocalAdapter:
     name = "exomem-local"
     supports_group_reuse = False
 
-    def __init__(self, *, mode: str = "leaf", search_style: str = "neutral") -> None:
+    def __init__(
+        self,
+        *,
+        mode: str = "leaf",
+        search_style: str = "neutral",
+        governance: str = "off",
+    ) -> None:
         if mode not in {"leaf", "wire"}:
             raise ValueError(f"unknown mode {mode!r}")
         if search_style not in {"neutral", "product-default"}:
             raise ValueError(f"unknown search_style {search_style!r}")
+        if governance not in {"off", "wired"}:
+            raise ValueError(f"unknown governance {governance!r}")
+        if governance == "wired" and mode != "leaf":
+            # The in-process wire transport has no per-request identity seam
+            # (an unauthenticated stdio-shaped call always resolves to the
+            # owner), so personas cannot be threaded there. Refuse loudly
+            # rather than silently downgrading a requested wiring to
+            # default-open.
+            raise ValueError("governance wiring requires leaf mode")
         self.mode = mode
         self.search_style = search_style
+        self.governance = governance
         self._workdir: Path | None = None
         self._vault: Path | None = None
         self._schema: object | None = None
         self._mcp: object | None = None
         self._saved_env: dict[str, str | None] = {}
         self._profile: Profile | None = None
+        # source_id → ALL captured vault paths (a source may be captured more
+        # than once, e.g. duplicate ops); scope selectors cover every one.
+        self._source_paths: dict[str, list[str]] = {}
 
     # -- lifecycle --------------------------------------------------------
+    @property
+    def governance_state(self) -> str:
+        """Three-state governance measurement label for this configuration."""
+
+        return "wired" if self.governance == "wired" else "default_open"
+
     def capabilities(self) -> frozenset[Capability]:
-        return frozenset(
-            {Capability.INGEST_API, Capability.SEARCH, Capability.STATE_EXPORT}
-        )
+        base = {Capability.INGEST_API, Capability.SEARCH, Capability.STATE_EXPORT}
+        # Declared ONLY when the wiring is active (spec: "Governed Views Are
+        # Wired, Not Simulated") — never from the product's mere ability.
+        if self.governance == "wired":
+            base.add(Capability.GOVERNED_VIEWS)
+        return frozenset(base)
 
     def _set_env(self, values: dict[str, str]) -> None:
         for key, value in values.items():
@@ -151,6 +232,7 @@ class ExomemLocalAdapter:
                 os.environ[key] = previous
         self._saved_env.clear()
         self._mcp = None
+        self._source_paths.clear()
         try:
             from exomem import find as find_module
 
@@ -198,13 +280,18 @@ class ExomemLocalAdapter:
                     ok = bool(payload) and not payload.get("error")
                     detail = None if ok else json.dumps(payload.get("error"))
                 else:
-                    commands.op_capture_source(
+                    captured = commands.op_capture_source(
                         self._vault,
                         self._schema,
                         content=op["content"],
                         title=op["title"],
                         source_type=op.get("source_type", "other"),
                     )
+                    if self.governance == "wired":
+                        source = captured.get("source") if isinstance(captured, dict) else None
+                        path = source.get("path") if isinstance(source, dict) else None
+                        if isinstance(path, str) and op.get("source_id"):
+                            self._source_paths.setdefault(str(op["source_id"]), []).append(path)
                     ok, detail = True, None
             except Exception as exc:  # recorded, stays in denominators
                 ok, detail = False, f"{type(exc).__name__}: {exc}"
@@ -218,8 +305,237 @@ class ExomemLocalAdapter:
                     detail=detail,
                 )
             )
+        if self.governance == "wired":
+            # After capture (scope selectors need the real vault paths) and
+            # before the first scored search: the run measures a governed
+            # vault end to end.
+            self._wire_governance(Path(corpus_dir))
         find_module.clear_cache()
         return results
+
+    # -- governance wiring (public surfaces only) --------------------------
+    def _audience_id(self, persona_id: str) -> str:
+        """Persona → exomem's canonical audience id at the CLI/leaf surface."""
+
+        from exomem.governance import principal as principal_module
+
+        if persona_id == "owner":
+            return principal_module.OWNER_AUDIENCE
+        return principal_module.normalize_audience(
+            subject=persona_id, issuer=_PERSONA_ISSUER
+        )
+
+    def _principal_for(self, persona: str | None):
+        """A bound-per-call request principal; ``None`` means the operator."""
+
+        from exomem.governance import principal as principal_module
+
+        if persona is None or persona == "owner":
+            return principal_module.owner_principal(surface="cli")
+        # Enforcement is audience-id-based; the surface tag is audit-trail
+        # cosmetics only (release decisions never branch on it).
+        return principal_module.RequestPrincipal(
+            audience_id=self._audience_id(persona), surface="cli", resolved=True
+        )
+
+    def _rule_paths(
+        self, rule: PolicyRule, claims_by_id: dict[str, ClaimRecord]
+    ) -> list[str]:
+        """Vault paths a corpus rule covers: targeted sources plus the
+        recorded provenance (assertion sources) of targeted claims — every
+        captured path for each source, not just the last."""
+
+        source_ids = set(rule.target_sources)
+        for claim_id in rule.target_claims:
+            claim = claims_by_id.get(claim_id)
+            if claim is not None:
+                source_ids.update(a.source_id for a in claim.assertions)
+        return sorted(
+            {
+                path
+                for sid in source_ids
+                for path in self._source_paths.get(sid, [])
+            }
+        )
+
+    def _governance_documents(
+        self, policy: PolicySet, claims_by_id: dict[str, ClaimRecord]
+    ) -> tuple[dict[str, dict], list[dict]]:
+        """Corpus PolicySet → strict `_Governance/` schema-v1 documents,
+        plus the record of what the translation could NOT represent.
+
+        Ceiling 0 is exomem's silent withhold (L0): the restricted principal
+        never sees the page. Audiences with no matching rule keep full
+        disclosure — exactly the corpus semantics where only personas outside
+        a rule's ``allow`` list are restricted. Only personas DECLARED by the
+        corpus are translated; v0.1 corpora never query undeclared personas
+        (generation enforces expectation consistency).
+
+        A rule declassified inside the knowledge horizon is DROPPED (the
+        vault is the final-state snapshot and exomem policy v1 has no
+        time-conditioned rules) and recorded in the returned ``dropped``
+        list; the runner turns the affected queries' governance gates into
+        UNSUPPORTED — a translation gap is never scored as pass or fail.
+        """
+
+        documents: dict[str, dict] = {}
+        dropped: list[dict] = []
+        horizon = end_of_window()
+
+        def add_scope(key: str, name: str, paths: list[str], audiences: set[str]) -> None:
+            if not paths or not audiences:
+                return
+            scope_id = _document_ulid(f"membench:scope:{key}")
+            documents[f"scopes/{_document_slug(key)}.yaml"] = {
+                "governance_version": 1,
+                "id": scope_id,
+                "name": name,
+                "refs": list(paths),
+            }
+            for audience in sorted(audiences):
+                rule_key = f"{key}:{audience}"
+                documents[f"rules/{_document_slug(rule_key)}.yaml"] = {
+                    "governance_version": 1,
+                    "id": _document_ulid(f"membench:rule:{rule_key}"),
+                    "scope_ids": [scope_id],
+                    "audience": audience,
+                    "ceiling": 0,
+                }
+
+        for rule in policy.rules:
+            if rule.declassify_at is not None and horizon >= rule.declassify_at:
+                dropped.append(
+                    {
+                        "rule_id": rule.rule_id,
+                        "declassify_at": rule.declassify_at.isoformat(),
+                        "target_sources": sorted(rule.target_sources),
+                        "target_claims": sorted(rule.target_claims),
+                        "reason": (
+                            "exomem policy v1 has no time-conditioned rules; the "
+                            "translation snapshots the policy at the corpus "
+                            "knowledge horizon, where this rule is declassified"
+                        ),
+                    }
+                )
+                continue
+            restricted = {
+                self._audience_id(persona.persona_id)
+                for persona in policy.personas
+                if not set(persona.audiences) & set(rule.allow)
+            }
+            add_scope(
+                f"rule:{rule.rule_id}",
+                f"membench {rule.rule_id}",
+                self._rule_paths(rule, claims_by_id),
+                restricted,
+            )
+
+        everyone = {
+            self._audience_id(persona.persona_id) for persona in policy.personas
+        }
+        everyone.add(self._audience_id("owner"))
+        for index, tombstone in enumerate(policy.tombstones):
+            if horizon < tombstone.requested_at:
+                continue
+            paths = sorted(
+                {
+                    path
+                    for sid in tombstone.target_sources
+                    for path in self._source_paths.get(sid, [])
+                }
+            )
+            add_scope(
+                f"tombstone:{index}:{'+'.join(sorted(tombstone.target_sources))}",
+                f"membench tombstone {index}",
+                paths,
+                set(everyone),
+            )
+        return documents, dropped
+
+    def _write_translation_report(
+        self, documents: dict[str, dict], dropped: list[dict], note: str | None
+    ) -> None:
+        """The wired-translation report — ALWAYS written for a wired run.
+
+        Lands in the adapter workdir (``<run_dir>/provider/``); the runner
+        surfaces it at the run root and joins ``dropped_rules`` onto the
+        affected queries' gates.
+        """
+
+        if self._workdir is None:
+            raise AdapterEnvironmentError("adapter not set up")
+        payload = {
+            "schema": "membench-governance-translation/v1",
+            "provider": self.name,
+            "governance": self.governance_state,
+            "documents_authored": sorted(documents),
+            "dropped_rules": dropped,
+            "note": note,
+        }
+        (self._workdir / "governance-translation.json").write_text(
+            json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
+
+    def _wire_governance(self, corpus_dir: Path) -> None:
+        """Author the vault's opt-in policy and let exomem's compiler judge it."""
+
+        import yaml
+        from pydantic import ValidationError
+
+        from exomem.governance import policy as governance_policy_module
+
+        policy_file = corpus_dir / "policies.yaml"
+        if not policy_file.is_file():
+            self._write_translation_report(
+                {},
+                [],
+                "corpus has no policies.yaml; vault remains ungoverned (default-open)",
+            )
+            return
+        try:
+            policy = PolicySet.model_validate(
+                yaml.safe_load(policy_file.read_text(encoding="utf-8")) or {}
+            )
+        except (yaml.YAMLError, ValidationError) as exc:
+            # A wired run against an unreadable policy set must invalidate the
+            # run — never crash raw and never measure silently ungoverned.
+            raise AdapterEnvironmentError(
+                f"malformed corpus policy set {policy_file}: {exc}"
+            ) from exc
+        claims_file = corpus_dir / "claims.jsonl"
+        claims_by_id: dict[str, ClaimRecord] = {}
+        if claims_file.is_file():
+            claims_by_id = {c.claim_id: c for c in load_jsonl(ClaimRecord, claims_file)}
+        documents, dropped = self._governance_documents(policy, claims_by_id)
+        if not documents:
+            self._write_translation_report(
+                documents,
+                dropped,
+                "corpus policy set contains nothing translatable; vault remains "
+                "ungoverned (default-open)",
+            )
+            return
+        if self._vault is None:
+            raise AdapterEnvironmentError("adapter not set up")
+        root = governance_policy_module.governance_root(self._vault)
+        for relative, document in sorted(documents.items()):
+            target = root / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(
+                yaml.safe_dump(document, sort_keys=True), encoding="utf-8"
+            )
+        compiled = governance_policy_module.load(self._vault)
+        errors = [
+            finding
+            for finding in compiled.findings
+            if finding.get("severity") == "error"
+        ]
+        if compiled.empty or compiled.blocked or errors:
+            raise AdapterEnvironmentError(
+                "authored governance policy failed to compile: "
+                f"empty={compiled.empty} blocked={compiled.blocked} findings={errors!r}"
+            )
+        self._write_translation_report(documents, dropped, None)
 
     # -- search -----------------------------------------------------------
     def _search_kwargs(self) -> dict:
@@ -264,12 +580,29 @@ class ExomemLocalAdapter:
         hits = getattr(payload, "hits", None)
         return list(hits) if hits is not None else []
 
-    def search(self, query: str, limit: int) -> list[Hit]:
+    def search(self, query: str, limit: int, *, persona: str | None = None) -> list[Hit]:
+        """Search the vault; ``persona`` is honored only under active wiring.
+
+        Without wiring the vault is the explicitly ungoverned default-open
+        surface: a persona has no effect there by definition, and the call
+        path is byte-identical to the pre-governance adapter.
+        """
+
         kwargs = self._search_kwargs()
         if self.mode == "wire":
             payload: object = self._call_tool(
                 "ask_memory", {"query": query, "limit": limit, **kwargs}
             )
+        elif self.governance == "wired":
+            from exomem import commands
+            from exomem.governance import principal as principal_module
+
+            # The surface-boundary binding every exomem surface uses: resolve
+            # the canonical principal once, bind it for exactly this call.
+            with principal_module.request_scope(self._principal_for(persona)):
+                payload = commands.op_ask_memory(
+                    self._vault, query=query, limit=limit, **kwargs
+                )
         else:
             from exomem import commands
 

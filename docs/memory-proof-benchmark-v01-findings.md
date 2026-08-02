@@ -284,7 +284,8 @@ translate corpus `policies.yaml` into exomem's opt-in `_Governance/` policy
 and the runner does not thread persona identity, so this quantifies the
 default-open leak surface, not the shipped governance engine. Wiring
 policy translation + per-persona principals (declaring `GOVERNED_VIEWS`) is
-the named follow-up lane. The 0/20 contradiction row and the temporal fails
+the named follow-up lane (landed 2026-08-02 — see the governance-wiring
+addendum below). The 0/20 contradiction row and the temporal fails
 are the ABSENT capability families (disputed state, bitemporal as-of) doing
 exactly the discriminating work the corpus was built for. Runs:
 `20260731T163452Z…baseline-lexical`, `20260801T115138Z…postfix-lexical-v2`,
@@ -328,3 +329,94 @@ strings). The bm-local zeros in runs `ee278ae61cde` (semantic path stalling
 integration artifacts, not Basic Memory retrieval quality; the empty-index
 diagnosis and verified three-way rerun are in flight and no comparative
 Basic Memory number is publishable until that lands green.
+
+## Addendum — governance wiring: wired vs default-open (2026-08-02)
+
+The v0.1 governance gap is closed adapter-side, through public product
+surfaces only: the exomem adapter (leaf mode, `governance="wired"`)
+translates the corpus `policies.yaml` into the vault's opt-in
+`_Governance/` schema-v1 YAML (validated by exomem's own policy compiler),
+the runner threads each query's persona to the adapter as a canonical
+principal (`owner` = the vault operator; every other persona a
+`normalize_audience` principal bound per call with `request_scope`), and
+`GOVERNED_VIEWS` is declared only while that wiring is active. Enforcement
+is exomem's untouched egress release plane (translated ceiling-0 rules =
+silent L0 withhold). Every run now records a three-state
+`governance_state` — `wired` / `default_open` / `unsupported` — in
+`manifest.json` and `deterministic-scores.json`, and comparative reporting
+excludes non-wired runs' governance-family rows (label instead of numbers).
+
+**Wired vs default-open, t16-only seed-1 corpus, leaf mode, lexical
+profile** (runs `20260802T103947Z-…-t23-wired-bd2831` and
+`20260802T103953Z-…-t23-default-open-bd2efc`, 24 queries, 0 harness
+failures, both valid):
+
+| Dimension | wired (pass/fail/n.a./unsupported) | default-open (pass/fail/n.a./unsupported) |
+|---|---|---|
+| governance (no-leak) | 12 / 0 / 8 / **4** | 16 / 0 / 8 / 0 — labelled, excluded |
+| abstention | 8 / 12 / 0 / **4** | 12 / 12 / 0 / 0 — labelled, excluded |
+| factual_qa | 0 / 12 / 12 / 0 | 0 / 12 / 12 / 0 — labelled, excluded |
+| temporal | 4 / 12 / 8 / 0 | 4 / 12 / 8 / 0 — labelled, excluded |
+| provenance | 0 / 12 / 12 / 0 | 0 / 12 / 12 / 0 — labelled, excluded |
+| contradiction_uncertainty | 0 / 0 / 24 / 0 | 0 / 0 / 24 / 0 — labelled, excluded |
+| behavior | 0 / 0 / 24 / 0 | 0 / 0 / 24 / 0 — labelled, excluded |
+
+**Load-bearing caveat: these tables are near-identical because lexical NL
+retrieval is vacuous for every persona.** The headline retention finding
+means the corpus's natural-language prompts retrieve zero hits wired or
+not, so every query abstains and the default-open run's 16/0 governance
+column is the empty-answer artifact already flagged above — which is
+exactly why non-wired governance-family rows are now labelled and excluded
+from comparative tables instead of rendering as numbers. The only
+deliberate deltas are the four `unsupported` markings (next subsection).
+Enforcement itself is real and isolable the moment retrieval surfaces
+pages — same title-probe query, only the persona varying:
+
+| governed source (variant 0) | persona | default-open | wired |
+| --- | --- | --- | --- |
+| exec-only compensation memo | owner | retrieved | retrieved |
+| exec-only compensation memo | assistant | retrieved | **withheld** |
+| board digest (declassified wk8) | owner | retrieved | retrieved |
+| board digest (declassified wk8) | assistant | retrieved | retrieved |
+| tombstoned standby memo (wk6) | owner | retrieved | **withheld** |
+| tombstoned standby memo (wk6) | assistant | retrieved | **withheld** |
+| open facilities circular | owner | retrieved | retrieved |
+| open facilities circular | assistant | retrieved | retrieved |
+
+Audience restriction, horizon declassification, tombstone-for-everyone
+(owner included), and untouched open content each show distinctly. A
+wired-vs-default-open rerun with working retrieval (embeddings profile or
+the retention fix) is the next measurement of interest.
+
+### Wired governance — known divergence: no time-conditioned rules
+
+**Product finding:** exomem's governance policy v1 has no time-conditioned
+rules — nothing in the public `_Governance/` schema (or `govern_memory`)
+can express "restricted until date D, open after". The corpus's
+`declassify_at` embargo is therefore untranslatable: the wiring snapshots
+the policy at the corpus knowledge horizon (the same "now" the fully
+ingested vault state represents), which drops t16's board-digest rule
+(declassifies week 8 < horizon week 12) and leaves the week-7
+pre-declassification withhold expectation with no faithful vault to
+measure against.
+
+**Disposition (never a silent lossy snapshot):** every wired run emits
+`governance-translation.json` (run root and `provider/`) listing the
+documents authored and each dropped rule with `rule_id`, `declassify_at`,
+targets, and the reason; the runner joins dropped rules onto the queries
+whose forbidden expectations trace to their targets and marks those
+queries' `no_leak`/`abstention` gate items **unsupported** with evidence
+naming the rule — unsupported-never-zero, never scored pass or fail. That
+is the `4` in the wired table's unsupported columns (one week-7 board
+query per variant). The week-9 post-declassification queries remain
+measured: at the horizon the embargo has lapsed, so the open vault is the
+faithful final state. Making the week-7 class measurable requires a
+time-conditioned rule (or as-of policy evaluation) through a public exomem
+surface — a product decision, recorded here, not a harness simulation.
+
+**Reproduction (single-line commands):**
+
+- `EXOMEM_DISABLE_EMBEDDINGS=1 /home/hugoa/projects/exomem/.venv/bin/python benchmarks/run.py generate --seed 1 --out benchmarks/corpus/generated/s1-t16 --template t16_governance_audiences`
+- `EXOMEM_DISABLE_EMBEDDINGS=1 /home/hugoa/projects/exomem/.venv/bin/python benchmarks/run.py run --corpus benchmarks/corpus/generated/s1-t16 --governance wired --label t23-wired --top-k 10`
+- `EXOMEM_DISABLE_EMBEDDINGS=1 /home/hugoa/projects/exomem/.venv/bin/python benchmarks/run.py run --corpus benchmarks/corpus/generated/s1-t16 --label t23-default-open --top-k 10`
+- Wiring gate suite: `EXOMEM_DISABLE_EMBEDDINGS=1 PYTHONPATH=src /home/hugoa/projects/exomem/.venv/bin/python -m pytest -q tests/test_membench_governance_wiring.py`

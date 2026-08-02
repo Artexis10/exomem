@@ -6,9 +6,9 @@
 - [ ] 1.3 Provider onboarding doc + third-party adapter conformance suite (faked runtime seam)
 
 ## 2. Governance wiring (closes the v0.1 gap)
-- [ ] 2.1 PolicySet → `_Governance/` translation in the exomem adapter via public surfaces; persona threading in the runner; GOVERNED_VIEWS declared when wired
-- [ ] 2.2 Three-state governance reporting (wired / default-open-labelled / unsupported) + tests incl. restricted-vs-owner persona round-trip
-- [ ] 2.3 Re-run the governance family wired; record wired-vs-default-open delta in the findings doc
+- [x] 2.1 PolicySet → `_Governance/` translation via public surfaces (validated by exomem's own policy compiler), persona→principal threading, GOVERNED_VIEWS iff wired; wired-translation report with dropped-rule accounting — delegated lane + correction round; targeted recheck: RECHECK PASS
+- [x] 2.2 Three-state reporting (wired / default-open-labelled / unsupported) with family-tagged rows and full comparative exclusion of default-open governance-family rows; malformed policy → INVALID run; `--governance` CLI switch
+- [x] 2.3 Wired vs default-open rerun recorded in the findings doc (tables, vacuity caveat, title-probe enforcement matrix, dropped-rule unsupported markings, repro commands) + "no time-conditioned rules" product finding with STOP disposition
 
 ## 3. New families (fable lanes after 1.1; red-first per family)
 - [x] 3.1 Procedural/how-to chains — t17 + membench/procedural.py; delegated lane, independent review APPROVE (no HIGH/MEDIUM); integrated 0f1e4d3

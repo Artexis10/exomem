@@ -30,6 +30,15 @@ class Capability(str, enum.Enum):
     HOOK_ACTIVATION = "hook_activation"
 
 
+#: Three-state governance measurement vocabulary (spec: "Governed Views Are
+#: Wired, Not Simulated"). An adapter MAY expose a ``governance_state``
+#: attribute with one of these values; absence means ``default_open`` — an
+#: explicitly ungoverned vault measured as the default-open surface. "wired"
+#: is legitimate ONLY when the adapter also declares
+#: :attr:`Capability.GOVERNED_VIEWS`; the runner enforces that equivalence.
+GOVERNANCE_STATES = frozenset({"wired", "default_open", "unsupported"})
+
+
 class AdapterUnsupported(RuntimeError):
     """The provider does not support this capability (an honest result)."""
 
@@ -89,7 +98,10 @@ class MemoryAdapter(Protocol):
 
     def ingest(self, corpus_dir: Path, native_dir: Path) -> list[OpResult]: ...
 
-    def search(self, query: str, limit: int) -> list[Hit]: ...
+    # ``persona`` is additive and optional: the runner passes it ONLY to
+    # adapters declaring :attr:`Capability.GOVERNED_VIEWS`, so an adapter
+    # written against the two-argument shape keeps working unchanged.
+    def search(self, query: str, limit: int, *, persona: str | None = None) -> list[Hit]: ...
 
     def export_state(self) -> StateExport: ...
 

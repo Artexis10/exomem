@@ -45,7 +45,23 @@ def _cmd_run(args: argparse.Namespace) -> int:
     from membench.runner import RunSpec, execute_run
 
     profile = embeddings_profile() if args.profile == "embeddings" else lexical_profile()
-    adapter = create_adapter(args.provider, mode=args.mode, search_style=args.search_style)
+    adapter_kwargs: dict[str, object] = {
+        "mode": args.mode,
+        "search_style": args.search_style,
+    }
+    if args.governance != "off":
+        # Governance wiring is an exomem-local seam; other providers must
+        # never receive an unknown kwarg — and a requested wiring must never
+        # silently degrade to a default-open run.
+        if args.provider != "exomem-local":
+            print(
+                f"--governance {args.governance} is only supported by the "
+                "exomem-local provider",
+                file=sys.stderr,
+            )
+            return 2
+        adapter_kwargs["governance"] = args.governance
+    adapter = create_adapter(args.provider, **adapter_kwargs)
     result = execute_run(
         RunSpec(
             corpus_dir=Path(args.corpus),
@@ -89,6 +105,16 @@ def main(argv: list[str] | None = None) -> int:
         "--search-style", default="neutral", choices=["neutral", "product-default"]
     )
     p_run.add_argument("--profile", default="lexical", choices=["lexical", "embeddings"])
+    p_run.add_argument(
+        "--governance",
+        default="off",
+        choices=["off", "wired"],
+        help=(
+            "exomem-local only: translate the corpus policy set into the "
+            "vault's opt-in _Governance/ policy and thread query personas "
+            "(three-state reporting: wired / default_open / unsupported)"
+        ),
+    )
     p_run.add_argument("--top-k", type=int, default=10)
     p_run.add_argument("--runs-root", default=str(_BENCH_ROOT / "runs"))
     p_run.add_argument("--label", default=None)
