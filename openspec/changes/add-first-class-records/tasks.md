@@ -27,13 +27,13 @@
 
 ## 4. Guarded Markdown Mutation And Agent Audit
 
-- [ ] 4.1 Write failing append/update tests for schema refusal, create-only collection creation, exact replay, identity conflict, missing/ambiguous targets, container/item staleness, same-vault serialization, separate-vault independence, and no fuzzy fallback.
-- [ ] 4.2 Implement `create`, Markdown-log/Markdown-item `append`, and targeted `update` as structured operations that re-read and re-resolve inside the existing writer boundary and publish through guarded planned writes.
-- [ ] 4.3 Preserve untouched bytes, UTF-8 BOM, CRLF/LF choice, whitespace, and final-newline state; add case-insensitive collision, open-file replacement failure, caught-error rollback, and unrelated-file preservation regressions.
-- [ ] 4.4 Separate exact-source item/container hashes from canonical-payload replay hashes; require both current container hash and item version for targeted update.
-- [ ] 4.5 Add the defined agent-mutation activity entry and bounded terminal receipt fields without copying canonical item values or conflating governance receipts, operational journals, and activity history.
-- [ ] 4.6 Detect and report canonical/audit gaps caused by direct edits or simulated abrupt partial publication while keeping canonical Records authoritative and repair explicit.
-- [ ] 4.7 Run mutation, writer-lease, transactional-write, idempotency, and Windows-path focused tests.
+- [x] 4.1 Write failing append/update tests for schema refusal, create-only collection creation, exact replay, identity conflict, missing/ambiguous targets, container/item staleness, same-vault serialization, separate-vault independence, and no fuzzy fallback.
+- [x] 4.2 Implement `create`, Markdown-log/Markdown-item `append`, and targeted `update` as structured operations that re-read and re-resolve inside the existing writer boundary and publish through guarded planned writes.
+- [x] 4.3 Preserve untouched bytes, UTF-8 BOM, CRLF/LF choice, whitespace, and final-newline state; add case-insensitive collision, open-file replacement failure, caught-error rollback, and unrelated-file preservation regressions.
+- [x] 4.4 Separate exact-source item/container hashes from canonical-payload replay hashes; require both current container hash and item version for targeted update.
+- [x] 4.5 Add the defined agent-mutation activity entry and bounded terminal receipt fields without copying canonical item values or conflating governance receipts, operational journals, and activity history.
+- [x] 4.6 Detect and report canonical/audit gaps caused by direct edits or simulated abrupt partial publication while keeping canonical Records authoritative and repair explicit.
+- [x] 4.7 Run mutation, writer-lease, transactional-write, idempotency, and Windows-path focused tests.
 
 ## 5. Governance Before Reduction
 
