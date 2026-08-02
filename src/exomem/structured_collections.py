@@ -942,6 +942,10 @@ def _is_safe_vault_target(root: Path, target: Path) -> bool:
                 return True
             if stat.S_ISLNK(info.st_mode):
                 return False
+            if getattr(info, "st_file_attributes", 0) & getattr(
+                stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0
+            ):
+                return False
         return True
     except (OSError, ValueError):
         return False

@@ -96,12 +96,18 @@ def collapse_frame_children(
         return ranking
     out: list[str] = []
     seen: set[str] = set()
+    from . import recall_policy
+
     for rel in ranking:
+        if not recall_policy.is_recall_candidate(vault_root, vault_root / rel):
+            continue
         page = page_of(rel)
         parent = page.parent_media if page is not None else None
         if parent:
             parent_sidecar = parent + ".md"
-            if (vault_root / parent_sidecar).exists():
+            if recall_policy.is_recall_candidate(vault_root, vault_root / parent_sidecar) and (
+                vault_root / parent_sidecar
+            ).exists():
                 attribution.setdefault(parent_sidecar, (page.media_file or rel, page.frame_ts))
                 for m in aux_maps:
                     if rel in m:

@@ -122,6 +122,7 @@ class RecallDelta(NamedTuple):
     complete: bool
     changed: frozenset[str]
     deleted: frozenset[str]
+    target_signatures: tuple[tuple[str, FileSignature], ...] = ()
 
 
 class ConsumerDelta(NamedTuple):
@@ -329,6 +330,10 @@ def recall_checkpoint(vault_root: Path, scope: str) -> RecallFreshnessCheckpoint
             for path, signature in broad_entries.items()
             if recall_policy.is_recall_candidate(vault_root, Path(path))
         }
+        if recall_policy.recall_policy_identity(vault_root) != identity:
+            policy_version, access_fingerprint = recall_policy.recall_policy_identity(vault_root)
+            identity = (policy_version, access_fingerprint)
+            continue
         with _lock:
             if _generations.get(key, 0) != broad_generation:
                 continue
@@ -369,7 +374,8 @@ def recall_delta_since(
         if checkpoint.instance_id != _instance_id or checkpoint.generation > current.generation:
             return RecallDelta(checkpoint, current, False, frozenset(), frozenset())
         if checkpoint.generation == current.generation:
-            return RecallDelta(checkpoint, current, True, frozenset(), frozenset())
+            complete = checkpoint == current
+            return RecallDelta(checkpoint, current, complete, frozenset(), frozenset())
         history = _recall_history.get(key, [])
         if not history or checkpoint.generation < history[0][0]:
             return RecallDelta(checkpoint, current, False, frozenset(), frozenset())
@@ -385,7 +391,15 @@ def recall_delta_since(
                 else:
                     deleted.add(path)
                     changed.discard(path)
-        return RecallDelta(checkpoint, current, True, frozenset(changed), frozenset(deleted))
+        signatures = _recall_maps.get(key, {})
+        return RecallDelta(
+            checkpoint,
+            current,
+            True,
+            frozenset(changed),
+            frozenset(deleted),
+            tuple(sorted((path, signatures[path]) for path in changed if path in signatures)),
+        )
 
 
 def scopes_for(vault_root: Path, path: Path) -> tuple[bool, bool]:
@@ -502,10 +516,11 @@ def reconcile(
         _triples[key] = None
         _live.add(key)
         old_recall = _recall_maps.get(key)
+        old_identity = _recall_identities.get(key)
         _recall_maps[key] = recall_fresh
         _recall_triples[key] = None
         _recall_identities[key] = recall_identity
-        if old_recall != recall_fresh:
+        if old_recall != recall_fresh or old_identity != recall_identity:
             _recall_generations[key] = _next_gen()
             _recall_history[key] = []
         _recall_live.add(key)
@@ -722,6 +737,11 @@ def on_files_changed(
         if in_kb or in_vault:
             del_items.append((str(p), in_kb, in_vault))
     from . import recall_policy
+
+    # Reproject policy-only changes before classifying an event; never merge
+    # event admission judged under a new access snapshot into an old projection.
+    for _scope in SCOPES:
+        recall_checkpoint(vault_root, _scope)
 
     chg_items: list[tuple[str, FileSignature | None, bool, bool, bool]] = []
     for path in changed:
