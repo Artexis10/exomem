@@ -600,10 +600,14 @@ item_schema:
 
 
 @pytest.mark.parametrize(
-    "field,value", [("canonical_path", "outside.md"), ("item_key", "not-a-uuid")]
+    "field,value,status",
+    [
+        ("canonical_path", "outside.md", "gap"),
+        ("item_key", "not-a-uuid", "history_incomplete"),
+    ],
 )
 def test_create_transition_requires_null_item_and_declared_source(
-    tmp_path: Path, field: str, value: str
+    tmp_path: Path, field: str, value: str, status: str
 ) -> None:
     from exomem import records
 
@@ -637,7 +641,7 @@ item_schema:
     event[field] = value
     lines[index] = "Records audit-v1 " + json.dumps(event)
     log.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    assert records.inspect_audit_gap(tmp_path, manifest_path)["status"] == "gap"
+    assert records.inspect_audit_gap(tmp_path, manifest_path)["status"] == status
 
 
 def test_audit_marker_sources_are_bounded_after_adapter_read(

@@ -2302,7 +2302,15 @@ def _read_bounded_windows_snapshot(
         opened = os.fstat(leaf)
         if not _same_identity(_identity(target, before), opened):
             raise PathGuardError("PATH_GUARD_CHANGED", "guarded content changed")
-        data = b"".join(iter(lambda: os.read(leaf, 65536), b""))
+        chunks: list[bytes] = []
+        remaining = limit + 1
+        while remaining:
+            chunk = os.read(leaf, min(65536, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        data = b"".join(chunks)
         after = os.fstat(leaf)
         if (
             len(data) > limit
@@ -2313,6 +2321,16 @@ def _read_bounded_windows_snapshot(
         # Check the named path too: a replacement after open must not be bound.
         if not _same_identity(_identity(target, before), leaf_path.lstat()):
             raise PathGuardError("PATH_GUARD_CHANGED", "guarded content changed")
+        for ancestor in ancestors:
+            ancestor_path = root if ancestor.relative_path == "." else root / ancestor.relative_path
+            current_info = ancestor_path.lstat()
+            if (
+                not stat.S_ISDIR(current_info.st_mode)
+                or stat.S_ISLNK(current_info.st_mode)
+                or _is_reparse(current_info)
+                or not _same_identity(ancestor, current_info)
+            ):
+                raise PathGuardError("PATH_GUARD_CHANGED", "guard ancestor changed")
         guard = PathGuard(
             target,
             tuple(ancestors),

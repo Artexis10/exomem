@@ -766,7 +766,7 @@ def _audit_events(
                 event = json.loads(line.removeprefix("Records audit-v1 "))
             except json.JSONDecodeError:
                 return [], False
-            if not _audit_event_syntax(event):
+            if not _valid_audit_event(event):
                 return [], False
             events.append(event)
             if len(events) > 10_000:

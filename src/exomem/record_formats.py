@@ -349,7 +349,7 @@ class MarkdownItemsAdapter(_BaseAdapter):
             (source.relative_to(self.vault_root).as_posix(), "directory", "")
         ]
         total_bytes = 0
-        paths: list[Path] = []
+        paths: list[str] = []
         directory_guards_list: list[vault.DirectoryCensusGuard] = [root_guard]
         path_guards: list[vault.PathGuard] = []
         source_bytes: list[tuple[str, bytes]] = []
@@ -363,7 +363,6 @@ class MarkdownItemsAdapter(_BaseAdapter):
                     raise collections.CollectionError(
                         "RECORD_ITEM_LIMIT", "collection has too many item entries"
                     )
-                path = self.vault_root / entry.relative_path
                 if stat.S_ISDIR(entry.mode):
                     inventory.append((entry.relative_path, "directory", ""))
                     try:
@@ -377,29 +376,17 @@ class MarkdownItemsAdapter(_BaseAdapter):
                     directory_guards_list.append(child_guard)
                     pending.append(child_guard)
                 else:
-                    paths.append(path)
+                    paths.append(entry.relative_path)
         if len(paths) > _MAX_ITEM_FILES:
             raise collections.CollectionError(
                 "RECORD_ITEM_LIMIT", "collection has too many item files"
             )
         paths.sort()
-        source_root = source.resolve()
-        for path in paths:
-            info = path.lstat()
-            if path.is_symlink() or not stat.S_ISREG(info.st_mode):
-                raise collections.CollectionError(
-                    "INVALID_RECORD_ITEM_PATH", "item files cannot be symlinks"
-                )
-            try:
-                path.resolve().relative_to(source_root)
-            except ValueError as error:
-                raise collections.CollectionError(
-                    "INVALID_RECORD_ITEM_PATH", "item file escapes collection"
-                ) from error
+        for relative in paths:
             try:
                 data, file_guard = vault.read_bounded_guarded_bytes(
                     self.vault_root,
-                    path.relative_to(self.vault_root).as_posix(),
+                    relative,
                     limit=_MAX_ITEM_BYTES,
                 )
             except vault.PathGuardError as error:
@@ -412,12 +399,12 @@ class MarkdownItemsAdapter(_BaseAdapter):
                 raise collections.CollectionError(
                     "RECORD_SOURCE_TOO_LARGE", "collection exceeds the byte limit"
                 )
-            rel = path.relative_to(self.vault_root).as_posix()
+            rel = relative
             digest = hashlib.sha256(data).hexdigest()
             versions.append((rel, digest))
             source_bytes.append((rel, data))
             inventory.append((rel, "file", digest))
-            if path.suffix != ".md":
+            if Path(rel).suffix != ".md":
                 continue
             text = _decode_item_bytes(data)
             try:
@@ -754,6 +741,7 @@ def render_manifest_audit_head(source: str, transition_id: str) -> str:
     start = opening.end()
     end = start + closing.start()
     frontmatter = text[start:end]
+    audit_node = collections._validate_record_audit_source(text)
     try:
         parsed, _body, marker = vault.parse_frontmatter(bom + text, strict=True)
         document = vault.yaml.compose(frontmatter)
@@ -765,27 +753,15 @@ def render_manifest_audit_head(source: str, transition_id: str) -> str:
         raise collections.CollectionError(
             "INVALID_COLLECTION_MANIFEST", "manifest requires frontmatter"
         )
-    audit_nodes: list[vault.yaml.nodes.Node] = []
-    for key_node, value_node in document.value:
+    for key_node, _value_node in document.value:
         if not isinstance(key_node, vault.yaml.nodes.ScalarNode):
             raise collections.CollectionError(
                 "INVALID_COLLECTION_MANIFEST", "manifest keys are invalid"
             )
-        if key_node.value == "record_audit":
-            audit_nodes.append(value_node)
-    if len(audit_nodes) > 1:
-        raise collections.CollectionError(
-            "INVALID_RECORD_AUDIT", "record audit state is duplicated"
-        )
     collections.record_audit_head(parsed)
-    if not audit_nodes:
+    if audit_node is None:
         frontmatter += f"record_audit: {{version: 1, head: {transition_id}}}{newline}"
     else:
-        audit_node = audit_nodes[0]
-        if not isinstance(audit_node, vault.yaml.nodes.MappingNode):
-            raise collections.CollectionError(
-                "INVALID_RECORD_AUDIT", "record audit state is invalid"
-            )
         heads = [
             value_node
             for key_node, value_node in audit_node.value

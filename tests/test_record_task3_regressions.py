@@ -37,6 +37,45 @@ def test_markdown_items_count_empty_directories_against_the_global_cap(tmp_path:
         record_formats.load_adapter(tmp_path, manifest).read()
 
 
+def test_markdown_items_guarded_read_refuses_a_self_symlink_swap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fixture = copy_vehicle_maintenance_fixture(tmp_path)
+    manifest = collections.load_manifest(tmp_path, fixture / "_collection.md")
+    source = fixture / "Events"
+    real_read = record_formats.vault.read_bounded_guarded_bytes
+    real_resolve = Path.resolve
+    swapped = False
+
+    def swap_after_census(root: Path, relative: str, **kwargs: object):
+        nonlocal swapped
+        if not swapped and relative.startswith(source.relative_to(root).as_posix() + "/"):
+            swapped = True
+            source.rename(tmp_path / "outside-events")
+            source.symlink_to(source, target_is_directory=True)
+        return real_read(root, relative, **kwargs)
+
+    monkeypatch.setattr(record_formats.vault, "read_bounded_guarded_bytes", swap_after_census)
+    monkeypatch.setattr(
+        Path,
+        "resolve",
+        lambda path, *args, **kwargs: (
+            (_ for _ in ()).throw(OSError("ELOOP"))
+            if path == source
+            else real_resolve(path, *args, **kwargs)
+        ),
+    )
+
+    try:
+        with pytest.raises(collections.CollectionError) as excinfo:
+            record_formats.load_adapter(tmp_path, manifest).read()
+    except OSError:
+        pytest.skip("symlink creation is unavailable")
+
+    assert excinfo.value.code == "SOURCE_NOT_FOUND"
+    assert not isinstance(excinfo.value.__cause__, OSError)
+
+
 def test_manifest_audit_head_is_semantic_and_renderer_preserves_its_style(tmp_path: Path) -> None:
     source = """---
 # retain this comment
@@ -50,6 +89,40 @@ type: collection
     assert "# retain this comment" in rendered
     assert "# retain this too" in rendered
     assert "record_audit: {head: fedcba9876543210fedcba98, version: 1}" in rendered
+
+
+@pytest.mark.parametrize(
+    "audit,accepted",
+    [
+        ("record_audit: {head: 0123456789abcdef01234567, version: 1}", True),
+        ("record_audit:\n  head: 0123456789abcdef01234567\n  version: 1", True),
+        ("record_audit: {<<: {version: 1, head: 0123456789abcdef01234567}}", False),
+        (
+            "record_audit: {<<: {version: 1, head: 0123456789abcdef01234567}, version: 1}",
+            False,
+        ),
+        ("record_audit: {version: 1, head: 0123456789abcdef01234567, extra: nope}", False),
+    ],
+)
+def test_manifest_audit_mapping_requires_explicit_exact_authored_keys(
+    tmp_path: Path, audit: str, accepted: bool
+) -> None:
+    fixture = copy_x3_fixture(tmp_path)
+    path = fixture / "_collection.md"
+    source = path.read_text(encoding="utf-8").replace(
+        "type: collection", f"type: collection\n{audit}"
+    )
+
+    if accepted:
+        manifest = collections.parse_manifest_bytes(tmp_path, path, source.encode("utf-8"))
+        rendered = record_formats.render_manifest_audit_head(source, "fedcba9876543210fedcba98")
+        assert manifest.audit_head == "0123456789abcdef01234567"
+        assert "fedcba9876543210fedcba98" in rendered
+    else:
+        with pytest.raises(collections.CollectionError, match="INVALID_RECORD_AUDIT"):
+            collections.parse_manifest_bytes(tmp_path, path, source.encode("utf-8"))
+        with pytest.raises(collections.CollectionError, match="INVALID_RECORD_AUDIT"):
+            record_formats.render_manifest_audit_head(source, "fedcba9876543210fedcba98")
 
 
 def test_log_create_receipt_with_item_hash_is_projected_but_malformed_create_is_not() -> None:
@@ -157,4 +230,38 @@ def test_audit_rejects_operation_relabel_and_global_transition_conflict(tmp_path
     lines.append("Records audit-v1 " + json.dumps(conflict))
     log.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
-    assert records.inspect_audit_gap(tmp_path, manifest.path)["status"] == "gap"
+    assert records.inspect_audit_gap(tmp_path, manifest.path)["status"] == "history_incomplete"
+
+
+def test_audit_refuses_foreign_event_with_an_invalid_operation_matrix(tmp_path: Path) -> None:
+    from exomem import records
+
+    fixture = copy_x3_fixture(tmp_path)
+    log = tmp_path / "Knowledge Base/log.md"
+    log.parent.mkdir(parents=True, exist_ok=True)
+    log.write_text("# Activity\n", encoding="utf-8")
+    manifest = collections.load_manifest(tmp_path, fixture / "_collection.md")
+    snapshot = record_formats.load_adapter(tmp_path, manifest).read()
+    records.append_record(
+        tmp_path,
+        manifest.path,
+        item={"occurred_on": "2026-08-03", "title": "Pull", "status": "completed", "movements": []},
+        item_key="33333333-3333-4333-8333-333333333333",
+        expected_container_hash=snapshot.source_versions[-1].hash,
+        why="audit fixture",
+    )
+    event_line = next(
+        line for line in log.read_text(encoding="utf-8").splitlines() if "audit-v1" in line
+    )
+    foreign = json.loads(event_line.removeprefix("Records audit-v1 "))
+    foreign.update(
+        collection_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        transition_id="fedcba9876543210fedcba98",
+        parent_id="absent",
+    )
+    log.write_text(
+        log.read_text(encoding="utf-8") + "Records audit-v1 " + json.dumps(foreign) + "\n",
+        encoding="utf-8",
+    )
+
+    assert records.inspect_audit_gap(tmp_path, manifest.path)["status"] == "history_incomplete"

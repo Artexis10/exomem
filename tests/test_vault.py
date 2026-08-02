@@ -303,6 +303,49 @@ def test_guarded_reader_dispatches_to_the_windows_descriptor_branch(
     assert captured[0][1:] == (("entry.md",), "entry.md", 64)
 
 
+def test_windows_guarded_reader_bounds_reads_and_rechecks_ancestor_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    guarded = tmp_path / "guarded"
+    guarded.mkdir()
+    leaf_path = guarded / "entry.md"
+    leaf_path.write_bytes(b"safe")
+    displaced = tmp_path / "guarded-displaced"
+    real_read = os.read
+    reads: list[int] = []
+    swapped = False
+
+    def open_directory(path: Path) -> int:
+        return os.open(path, os.O_RDONLY)
+
+    def open_leaf(path: Path, **_kwargs: object) -> int:
+        return os.open(path, os.O_RDONLY)
+
+    def read_and_swap(descriptor: int, size: int) -> bytes:
+        nonlocal swapped
+        reads.append(size)
+        data = real_read(descriptor, size)
+        if not swapped:
+            swapped = True
+            guarded.rename(displaced)
+            guarded.mkdir()
+            os.link(displaced / "entry.md", leaf_path)
+        return data
+
+    monkeypatch.setattr(vault, "_open_directory_path", open_directory)
+    monkeypatch.setattr(vault, "_open_windows_path_descriptor", open_leaf)
+    monkeypatch.setattr(vault.os, "read", read_and_swap)
+
+    with pytest.raises(vault.PathGuardError) as excinfo:
+        vault._read_bounded_windows_snapshot(
+            tmp_path, ("guarded", "entry.md"), "guarded/entry.md", 4
+        )
+
+    assert excinfo.value.code == "PATH_GUARD_CHANGED"
+    assert max(reads) == 5
+    assert all(size <= 5 for size in reads)
+
+
 @pytest.mark.skipif(os.name != "nt", reason="requires native Windows descriptors")
 def test_guarded_reader_uses_windows_descriptor_branch_for_regular_files(tmp_path: Path) -> None:
     target = tmp_path / "entry.md"

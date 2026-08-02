@@ -193,6 +193,7 @@ def load_manifest(vault_root: Path, path: Path | str) -> CollectionManifest:
         raise CollectionError(
             "INVALID_COLLECTION_MANIFEST", "collection manifest is not UTF-8"
         ) from error
+    _validate_record_audit_source(text)
     try:
         frontmatter, _body, marker = vault.parse_frontmatter(text, strict=True)
     except vault.FrontmatterError as error:
@@ -232,6 +233,7 @@ def parse_manifest_bytes(vault_root: Path, path: Path | str, data: bytes) -> Col
         text = data.decode("utf-8")
     except UnicodeDecodeError as error:
         raise CollectionError("INVALID_COLLECTION_MANIFEST", "manifest is not UTF-8") from error
+    _validate_record_audit_source(text)
     try:
         frontmatter, _body, marker = vault.parse_frontmatter(text, strict=True)
     except vault.FrontmatterError as error:
@@ -496,6 +498,49 @@ def record_audit_head(frontmatter: Mapping[str, Any]) -> str | None:
     if re.fullmatch(r"[0-9a-f]{24}", head) is None:
         raise CollectionError("INVALID_RECORD_AUDIT", "record audit head is invalid")
     return head
+
+
+def _validate_record_audit_source(text: str) -> vault.yaml.nodes.MappingNode | None:
+    """Require an audit mapping's keys to be authored rather than YAML-merged."""
+    text = text.removeprefix("\ufeff")
+    opening = re.match(r"\A---\r?\n", text)
+    if opening is None:
+        return None
+    closing = re.search(r"(?m)^---\r?$", text[opening.end() :])
+    if closing is None:
+        return None
+    try:
+        document = vault.yaml.compose(text[opening.end() : opening.end() + closing.start()])
+    except vault.yaml.YAMLError as error:
+        raise CollectionError(
+            "INVALID_COLLECTION_MANIFEST", "manifest requires valid frontmatter"
+        ) from error
+    if not isinstance(document, vault.yaml.nodes.MappingNode):
+        return None
+    return _validate_record_audit_document(document)
+
+
+def _validate_record_audit_document(
+    document: vault.yaml.nodes.MappingNode,
+) -> vault.yaml.nodes.MappingNode | None:
+    matches = [
+        value
+        for key, value in document.value
+        if isinstance(key, vault.yaml.nodes.ScalarNode) and key.value == "record_audit"
+    ]
+    if len(matches) > 1:
+        raise CollectionError("INVALID_RECORD_AUDIT", "record audit state is duplicated")
+    if not matches:
+        return None
+    audit = matches[0]
+    if not isinstance(audit, vault.yaml.nodes.MappingNode):
+        raise CollectionError("INVALID_RECORD_AUDIT", "record audit state is invalid")
+    keys = [
+        key.value for key, _value in audit.value if isinstance(key, vault.yaml.nodes.ScalarNode)
+    ]
+    if len(keys) != 2 or set(keys) != {"version", "head"}:
+        raise CollectionError("INVALID_RECORD_AUDIT", "record audit state is invalid")
+    return audit
 
 
 def _manifest_stable_hash(text: str) -> str:
