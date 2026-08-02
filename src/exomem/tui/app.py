@@ -113,6 +113,8 @@ class ExomemTuiApp(App):
         vault: str | None = None,
         glyphs: dict[str, str] | None = None,
         color: bool | None = None,
+        truecolor: bool | None = None,
+        mouse: bool = True,
     ):
         super().__init__()
         self.backend = backend if backend is not None else ExomemBackend(vault)
@@ -120,8 +122,14 @@ class ExomemTuiApp(App):
             glyphs = theme_module.pick_glyphs(getattr(sys.stdout, "encoding", None))
         if color is None:
             color = not theme_module.no_color_requested()
+        if truecolor is None:
+            # Rich has already worked this out from COLORTERM/TERM; asking it
+            # is more reliable than re-deriving the rules here.
+            truecolor = self.console.color_system == "truecolor"
         self.glyphs = glyphs
-        self.skin = theme_module.make_skin(glyphs, color=color)
+        self.truecolor = truecolor
+        self.skin = theme_module.make_skin(glyphs, color=color, truecolor=truecolor)
+        self.mouse = mouse
         self.session_receipts: list[SessionReceipt] = []
         #: Snapshot tests pin this so stored frames do not diff on timing.
         self.fixed_elapsed_ms: float | None = None
@@ -156,7 +164,24 @@ class ExomemTuiApp(App):
         self.register_theme(theme_module.EXOMEM_DARK)
         self.register_theme(theme_module.EXOMEM_LIGHT)
         self.theme = "exomem-dark"
+        if not self.mouse:
+            self._release_mouse()
         self.run_worker(self._startup, thread=True, group="startup", exclusive=True)
+
+    def _release_mouse(self) -> None:
+        """Hand click-drag selection back to the terminal.
+
+        A full-screen app that reports mouse events owns them, which is why
+        selecting text needs shift held down. Textual exposes no public switch,
+        so this uses the driver hook and soft-fails: losing the option is
+        acceptable, crashing the UI over it is not.
+        """
+        release = getattr(self._driver, "_disable_mouse_support", None)
+        if callable(release):
+            try:
+                release()
+            except Exception:  # noqa: BLE001 — a cosmetic option, never fatal
+                pass
 
     def _startup(self) -> None:
         state = self.backend.resolve_vault()
@@ -304,7 +329,9 @@ class ExomemTuiApp(App):
             self.skin = replace(self.skin, **theme_module.LIGHT_SKIN_OVERRIDES)
         else:
             self.theme = "exomem-dark"
-            self.skin = theme_module.make_skin(self.glyphs, color=self.skin.color)
+            self.skin = theme_module.make_skin(
+                self.glyphs, color=self.skin.color, truecolor=self.truecolor
+            )
 
         current = next(
             (name for name, screen in self._sections.items() if screen is self.screen), None
@@ -335,7 +362,7 @@ class ExomemTuiApp(App):
         )
 
 
-def run_tui(*, vault: str | None = None) -> int:
-    app = ExomemTuiApp(vault=vault)
+def run_tui(*, vault: str | None = None, mouse: bool = True) -> int:
+    app = ExomemTuiApp(vault=vault, mouse=mouse)
     app.run()
     return app.return_code or 0

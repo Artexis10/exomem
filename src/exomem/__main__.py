@@ -447,6 +447,14 @@ def _tui_main(argv: list[str]) -> int:
         default=None,
         help="vault root override for this session (default: $EXOMEM_VAULT_PATH)",
     )
+    parser.add_argument(
+        "--no-mouse",
+        action="store_true",
+        help=(
+            "do not capture the mouse, so the terminal keeps its own click-drag "
+            "selection (otherwise selecting text needs shift held down)"
+        ),
+    )
     args = parser.parse_args(argv)
 
     if not _tui_stdio_is_tty():
@@ -466,7 +474,7 @@ def _tui_main(argv: list[str]) -> int:
     from . import tui as tui_package
 
     vault = str(Path(args.vault).expanduser()) if args.vault else None
-    return tui_package.run(vault=vault)
+    return tui_package.run(vault=vault, mouse=not args.no_mouse)
 
 
 def _backfill_media_main(argv: list[str]) -> int:

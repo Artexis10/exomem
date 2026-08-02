@@ -8,8 +8,8 @@ inside `run` so probing the package never pays the UI import cost.
 from __future__ import annotations
 
 
-def run(*, vault: str | None = None) -> int:
+def run(*, vault: str | None = None, mouse: bool = True) -> int:
     """Launch the TUI application; returns a process exit code."""
     from .app import run_tui
 
-    return run_tui(vault=vault)
+    return run_tui(vault=vault, mouse=mouse)

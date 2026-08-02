@@ -151,12 +151,35 @@ class Skin:
         return self.g(glyph_key), style
 
 
-def make_skin(glyphs: Mapping[str, str], *, color: bool = True) -> Skin:
-    """The color skin, or the `NO_COLOR` one where hierarchy replaces hue."""
+#: Roles whose authored value acquires a hue it never had once a 256-color
+#: terminal quantizes it, with a replacement that does not.
+#:
+#: `#ece9e2` is the worst case and the reason this table exists: the warm
+#: off-white the design specifies for ALL primary text snaps to cube entry 224
+#: (#ffd7d7) — pink — because the channels round apart (236->255, 233->215,
+#: 226->215). Every label and every receipt rendered pink. The replacement
+#: keeps the same warmth at truecolor and lands on the neutral greyscale ramp
+#: when the terminal cannot show it.
+#:
+#: Roles absent here already quantize neutrally, and `accent` is warm on
+#: purpose. Verified by test against the real downgrade, not by eye.
+QUANTIZED_SAFE: dict[str, str] = {
+    "text": "#eae8e4",
+}
+
+
+def make_skin(
+    glyphs: Mapping[str, str], *, color: bool = True, truecolor: bool = True
+) -> Skin:
+    """The color skin, or the `NO_COLOR` one where hierarchy replaces hue.
+
+    `truecolor=False` swaps in values that survive the 256-color cube. The
+    authored tokens stay exact wherever the terminal can actually show them.
+    """
     if color:
         return Skin(
             glyphs=glyphs,
-            text=TEXT,
+            text=TEXT if truecolor else QUANTIZED_SAFE["text"],
             secondary=SECONDARY,
             dim=DIM,
             struck=f"{STRUCK} strike",

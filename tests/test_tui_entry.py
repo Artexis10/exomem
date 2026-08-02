@@ -45,14 +45,22 @@ def test_tty_with_extra_launches_lazily(monkeypatch: pytest.MonkeyPatch):
 
     import exomem.tui as tui_pkg
 
-    def fake_run(*, vault=None):
+    def fake_run(*, vault=None, mouse=True):
         calls["vault"] = vault
+        calls["mouse"] = mouse
         return 0
 
     monkeypatch.setattr(tui_pkg, "run", fake_run)
     rc = main(["tui", "--vault", "/tmp/some-vault"])
     assert rc == 0
     assert calls["vault"] == "/tmp/some-vault"
+    assert calls["mouse"] is True
+
+    rc = main(["tui", "--no-mouse"])
+    assert rc == 0
+    assert calls["mouse"] is False, (
+        "--no-mouse hands click-drag selection back to the terminal"
+    )
 
 
 def test_importing_tui_package_does_not_import_textual():

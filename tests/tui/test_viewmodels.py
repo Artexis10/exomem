@@ -405,3 +405,37 @@ def test_context_pane_wraps_its_prose_instead_of_cutting_it():
     assert "exomem serve http, then /studio/" in flowed
     assert "fingerp\u2026" not in rendered, "prose must wrap rather than lose its tail"
     assert all(len(line) <= 56 for line in rendered.splitlines())
+
+
+def test_primary_text_never_quantises_to_a_hue():
+    """Regression: every label on every screen rendered pink at 256 colours.
+
+    `#ece9e2` — the design's warm off-white for ALL primary text — snaps to
+    cube entry 224 (#ffd7d7) because the channels round apart: 236 to 255,
+    233 to 215, 226 to 215. The authored token is correct and stays exact
+    where the terminal can show it; the 256-colour skin substitutes a value
+    that lands on the neutral greyscale ramp.
+    """
+    from exomem.tui.theme import GLYPHS_UNICODE, TEXT, make_skin
+
+    def cast(hex_colour: str) -> int:
+        _number, exact = _to_256(hex_colour)
+        red, blue = (int(exact[i : i + 2], 16) for i in (1, 5))
+        return red - blue
+
+    assert cast(TEXT) > 30, "the authored token is exactly the one that fails"
+    assert cast(make_skin(GLYPHS_UNICODE, truecolor=False).text) == 0
+    assert make_skin(GLYPHS_UNICODE, truecolor=True).text == TEXT
+
+
+def test_every_neutral_role_stays_neutral_at_256_colours():
+    from exomem.tui.theme import GLYPHS_UNICODE, make_skin
+
+    skin = make_skin(GLYPHS_UNICODE, truecolor=False)
+    for role in ("text", "secondary", "dim"):
+        value = getattr(skin, role)
+        _number, exact = _to_256(value)
+        channels = [int(exact[i : i + 2], 16) for i in (1, 3, 5)]
+        assert max(channels) - min(channels) <= 4, f"{role} ({value}) picks up a hue"
+    # the accent is warm on purpose and must NOT be neutralised
+    assert _to_256(skin.accent)[0] == 214

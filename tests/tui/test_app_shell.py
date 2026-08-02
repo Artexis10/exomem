@@ -199,3 +199,31 @@ async def test_pointing_at_a_row_makes_it_the_one_enter_acts_on(make_app):
         await pilot.press("enter")
         await _settle(app, pilot)
         assert app.screen.SCREEN_TITLE == "Review"
+
+
+async def test_the_app_picks_its_palette_from_what_the_terminal_can_show(make_app):
+    from exomem.tui.app import ExomemTuiApp
+    from exomem.tui.theme import TEXT, GLYPHS_UNICODE
+    from _fake import FakeBackend
+
+    exact = ExomemTuiApp(FakeBackend(), glyphs=GLYPHS_UNICODE, truecolor=True)
+    async with exact.run_test(size=(80, 24)) as pilot:
+        await _settle(exact, pilot)
+        assert exact.skin.text == TEXT
+
+    safe = ExomemTuiApp(FakeBackend(), glyphs=GLYPHS_UNICODE, truecolor=False)
+    async with safe.run_test(size=(80, 24)) as pilot:
+        await _settle(safe, pilot)
+        assert safe.skin.text != TEXT, "a 256-colour terminal needs the safe token"
+
+
+async def test_mouse_capture_can_be_released_for_native_selection(make_app):
+    from exomem.tui.app import ExomemTuiApp
+    from exomem.tui.theme import GLYPHS_UNICODE
+    from _fake import FakeBackend
+
+    app = ExomemTuiApp(FakeBackend(), glyphs=GLYPHS_UNICODE, mouse=False)
+    async with app.run_test(size=(80, 24)) as pilot:
+        await _settle(app, pilot)
+        assert app.mouse is False
+        assert app.screen.SCREEN_TITLE == "Home", "releasing the mouse must not break the UI"
