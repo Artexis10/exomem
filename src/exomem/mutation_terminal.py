@@ -178,8 +178,15 @@ def _is_record_receipt(value: Any) -> bool:
         or value.get("outcome") not in {"committed", "replayed"}
     ):
         return False
+    outcome = value.get("outcome")
     if operation == "create":
-        if value.get("item_key") is not None or value.get("outcome") != "committed":
+        if (
+            value.get("item_key") is not None
+            or outcome != "committed"
+            or value.get("before_item_hash") is not None
+            or value.get("before_container_hash") is not None
+            or not _hash(value.get("after_container_hash"))
+        ):
             return False
     elif not _normalized_uuid(value.get("item_key")):
         return False
@@ -198,12 +205,44 @@ def _is_record_receipt(value: Any) -> bool:
         ):
             return False
     correlation = value.get("audit_correlation")
-    if operation == "create" and value.get("after_container_hash") is None:
-        return False
-    return correlation is None or (
+    if not (
         isinstance(correlation, str)
         and len(correlation) == 24
         and all(character in "0123456789abcdef" for character in correlation)
+    ):
+        return False
+    if operation == "append" and outcome == "committed":
+        return (
+            value.get("before_item_hash") is None
+            and _hash(value.get("after_item_hash"))
+            and _hash(value.get("before_container_hash"))
+            and _hash(value.get("after_container_hash"))
+            and _hash(value.get("payload_hash"))
+        )
+    if operation == "update" and outcome == "committed":
+        return (
+            _hash(value.get("before_item_hash"))
+            and _hash(value.get("after_item_hash"))
+            and _hash(value.get("before_container_hash"))
+            and _hash(value.get("after_container_hash"))
+            and value.get("payload_hash") is None
+        )
+    if operation == "append" and outcome == "replayed":
+        return (
+            _hash(value.get("before_item_hash"))
+            and _hash(value.get("after_item_hash"))
+            and _hash(value.get("before_container_hash"))
+            and _hash(value.get("after_container_hash"))
+            and _hash(value.get("payload_hash"))
+        )
+    return False
+
+
+def _hash(value: Any) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
     )
 
 

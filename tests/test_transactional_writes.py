@@ -1923,6 +1923,32 @@ def test_batch_atomic_write_retries_with_fresh_workspace_beside_residue(
     assert (stale / "stage-0.tmp").read_bytes() == stale_bytes
 
 
+def test_batch_staging_keyboard_interrupt_cleans_created_parents_and_workspaces(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A pre-publication interrupt is neither normalized nor allowed to leave staging residue."""
+    target = tmp_path / "new" / "nested" / "target.md"
+    real_create_artifact = vault_module._BatchWorkspace.create_artifact
+    calls = 0
+
+    def interrupt_after_parent(self, name: str, content: bytes):  # noqa: ANN001
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise KeyboardInterrupt("stop during staging")
+        return real_create_artifact(self, name, content)
+
+    monkeypatch.setattr(vault_module._BatchWorkspace, "create_artifact", interrupt_after_parent)
+    with pytest.raises(KeyboardInterrupt, match="stop during staging"):
+        vault_module.batch_atomic_write([vault_module.PlannedWrite(target, "new")])
+    assert not target.exists()
+    assert not (tmp_path / "new").exists()
+    assert not list(tmp_path.rglob(".exomem-batch-*"))
+
+    monkeypatch.setattr(vault_module._BatchWorkspace, "create_artifact", real_create_artifact)
+    assert vault_module.batch_atomic_write([vault_module.PlannedWrite(target, "new")]) == [target]
+
+
 @pytest.mark.parametrize("nested", [False, True])
 def test_batch_atomic_write_rejects_reserved_logical_target_before_staging(
     tmp_path: Path,

@@ -71,6 +71,9 @@ class AdapterSnapshot:
     insertion_offset: int | None = None
     diagnostics: tuple[collections.CollectionDiagnostic, ...] = ()
     source_versions: tuple[collections.SourceVersion, ...] = ()
+    # Markdown-item collections also bind directory-only paths: an empty nested
+    # directory is canonical state even though it has no file version.
+    source_inventory: tuple[tuple[str, str, str], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -315,6 +318,9 @@ class MarkdownItemsAdapter(_BaseAdapter):
             )
         records: list[Record] = []
         versions: list[tuple[str, str]] = []
+        inventory: list[tuple[str, str, str]] = [
+            (source.relative_to(self.vault_root).as_posix(), "directory", "")
+        ]
         total_bytes = 0
         paths: list[Path] = []
         for path in source.rglob("*"):
@@ -325,6 +331,7 @@ class MarkdownItemsAdapter(_BaseAdapter):
                     "INVALID_RECORD_ITEM_PATH", "item inventory could not be read"
                 ) from error
             if stat.S_ISDIR(info.st_mode):
+                inventory.append((path.relative_to(self.vault_root).as_posix(), "directory", ""))
                 continue
             paths.append(path)
             if len(paths) > _MAX_ITEM_FILES:
@@ -356,6 +363,7 @@ class MarkdownItemsAdapter(_BaseAdapter):
             rel = path.relative_to(self.vault_root).as_posix()
             digest = hashlib.sha256(data).hexdigest()
             versions.append((rel, digest))
+            inventory.append((rel, "file", digest))
             if path.suffix != ".md":
                 continue
             text = _decode_item_bytes(data)
@@ -394,11 +402,16 @@ class MarkdownItemsAdapter(_BaseAdapter):
         source_versions = (manifest_version,) + tuple(
             collections.SourceVersion(path=path, hash=digest) for path, digest in versions
         )
+        inventory.sort()
         return AdapterSnapshot(
             tuple(records),
-            _snapshot([(version.path, version.hash) for version in source_versions]),
+            _snapshot(
+                [(manifest_version.path, manifest_version.hash)]
+                + [(f"{kind}:{path}", digest) for path, kind, digest in inventory]
+            ),
             diagnostics=diagnostics,
             source_versions=source_versions,
+            source_inventory=tuple(inventory),
         )
 
 
@@ -661,7 +674,12 @@ def render_manifest_audit_head(source: str, transition_id: str) -> str:
     end = start + closing.start()
     frontmatter = text[start:end]
     rendered = f"record_audit: {{version: 1, head: {transition_id}}}{newline}"
-    match = re.search(r"(?m)^record_audit:[^\r\n]*(?:\r?\n)?", frontmatter)
+    match = re.search(
+        r"(?m)^record_audit:[ \t]*(?:\r?\n(?:[ \t]+(?:version|head):[^\r\n]*(?:\r?\n|$))){2}",
+        frontmatter,
+    )
+    if match is None:
+        match = re.search(r"(?m)^record_audit:[^\r\n]*(?:\r?\n)?", frontmatter)
     if match is None:
         frontmatter += rendered
     else:

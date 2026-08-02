@@ -2826,7 +2826,11 @@ def _batch_atomic_write_locked(
             snapshot, source_guard = _capture_batch_snapshot(final)
             snapshots.append(snapshot)
             source_guards.append(source_guard)
-    except Exception as stage_error:
+    except BaseException as stage_error:
+        if not isinstance(stage_error, Exception):
+            _cleanup_batch_workspaces(workspace_by_parent.values())
+            _remove_empty_created_dirs(created_dirs)
+            raise
         retained_during_init = isinstance(stage_error, _BatchCleanupRetained)
         cause = stage_error.__cause__ if retained_during_init else stage_error
         if cause is not None and not isinstance(cause, Exception):

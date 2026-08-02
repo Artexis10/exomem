@@ -262,3 +262,45 @@ def test_audit_chain_reconstructs_rotations_and_rejects_fork(tmp_path: Path) -> 
         "Records audit-v1 " + json.dumps(fork, sort_keys=True) + "\n", encoding="utf-8"
     )
     assert records.inspect_audit_gap(tmp_path, current.path)["status"] == "gap"
+
+
+def test_markdown_item_snapshot_includes_empty_nested_directories(tmp_path: Path) -> None:
+    """A directory-only out-of-band change is part of the canonical item inventory."""
+    fixture = copy_vehicle_maintenance_fixture(tmp_path)
+    manifest = collections.load_manifest(tmp_path, fixture / "_collection.md")
+    before = record_formats.load_adapter(tmp_path, manifest).read()
+    (fixture / "Events" / "released" / "a" / "b").mkdir(parents=True)
+    after = record_formats.load_adapter(tmp_path, manifest).read()
+    assert after.snapshot != before.snapshot
+
+
+def test_next_mutation_replaces_human_formatted_audit_mapping(tmp_path: Path) -> None:
+    fixture = copy_x3_fixture(tmp_path)
+    _activity_log(tmp_path)
+    manifest_path = fixture / "_collection.md"
+    manifest = collections.load_manifest(tmp_path, manifest_path)
+    initial = record_formats.load_adapter(tmp_path, manifest).read()
+    first = records.append_record(
+        tmp_path,
+        manifest.path,
+        item=_item("2026-08-03", "Pull"),
+        item_key="98989898-aaaa-4989-8989-989898989898",
+        expected_container_hash=initial.source_versions[-1].hash,
+        why="establish formatted audit mapping",
+    )
+    text = manifest_path.read_text(encoding="utf-8")
+    text = text.replace(
+        f"record_audit: {{version: 1, head: {first['audit_correlation']}}}",
+        f"record_audit:\n  version: 1\n  head: {first['audit_correlation']}",
+    )
+    manifest_path.write_text(text, encoding="utf-8")
+    refreshed = collections.load_manifest(tmp_path, manifest_path)
+    records.append_record(
+        tmp_path,
+        refreshed.path,
+        item=_item("2026-08-04", "Push"),
+        item_key="79797979-aaaa-4979-8979-979797979797",
+        expected_container_hash=first["after_container_hash"],
+        why="replace formatted mapping",
+    )
+    assert "record_audit: {version: 1, head:" in manifest_path.read_text(encoding="utf-8")
