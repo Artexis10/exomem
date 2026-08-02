@@ -51,7 +51,7 @@ def append_record(
     """Append one structured item, or return a content-identical replay."""
     root = Path(vault_root)
     _validate_why(why)
-    supplied_manifest = record_governance.resolve_collection(root, collection)
+    supplied_manifest = record_governance.resolve_collection_for_mutation(root, collection)
     if supplied_manifest.storage.strategy == "dataset":
         record_formats.load_adapter(root, supplied_manifest).refuse_mutation("append")
     key = _validate_item_key(item_key or str(uuid.uuid4()))
@@ -195,7 +195,7 @@ def append_record(
             root,
             manifest,
             snapshot,
-            planned_paths=(canonical_path.relative_to(root).as_posix(),),
+            planned_paths=tuple(write.path.relative_to(root).as_posix() for write in writes),
         )
         try:
             vault.batch_atomic_write(
@@ -348,7 +348,10 @@ def update_record(
             root,
             manifest,
             snapshot,
-            planned_paths=(record.source.path,),
+            planned_paths=(
+                record.source.path,
+                *(write.path.relative_to(root).as_posix() for write in log_plan.writes),
+            ),
         )
         try:
             vault.batch_atomic_write(
@@ -499,7 +502,10 @@ def create_collection(
             root,
             manifest,
             None,
-            planned_paths=affected,
+            planned_paths=(
+                *affected,
+                *(write.path.relative_to(root).as_posix() for write in log_plan.writes),
+            ),
         )
         try:
             vault.batch_atomic_write(
@@ -1017,7 +1023,7 @@ def _resolve_outside(
 def _load_guarded_manifest(
     root: Path, collection: str | Path | collections.CollectionManifest
 ) -> tuple[collections.CollectionManifest, str, vault.PathGuard]:
-    resolved = record_governance.resolve_collection(root, collection)
+    resolved = record_governance.resolve_collection_for_mutation(root, collection)
     path = root / resolved.path
     data, guard = _read_record_bytes(root, resolved.path)
     try:

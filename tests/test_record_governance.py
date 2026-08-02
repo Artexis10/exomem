@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import uuid
 from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
@@ -14,7 +15,7 @@ from record_fixtures import (
 
 from exomem import record_formats, record_governance, records
 from exomem import structured_collections as collections
-from exomem.governance import egress
+from exomem.governance import egress, receipts
 from exomem.governance.principal import RequestPrincipal, request_scope
 
 EXTERNAL = "external"
@@ -38,6 +39,16 @@ def _write_l6_rule(vault: Path, *, ceiling: int, paths: str) -> None:
         "audience: external\n"
         f"ceiling: {ceiling}\n",
         encoding="utf-8",
+    )
+
+
+def _disclosure_count(vault: Path) -> int:
+    events = vault / "Knowledge Base" / "_Governance" / "events"
+    return sum(
+        1
+        for event in events.rglob("*.jsonl")
+        for line in event.read_text(encoding="utf-8").splitlines()
+        if json.loads(line).get("event_type") == "disclosure"
     )
 
 
@@ -175,20 +186,40 @@ def test_authorized_rows_are_the_only_input_to_every_reduction_and_renderer(
 
 
 def test_records_egress_envelopes_are_default_deny_and_never_use_l5_rows() -> None:
+    valid = {
+        "_record_receipt": "exomem.records-mutation",
+        "receipt_version": 1,
+        "operation": "update",
+        "collection_id": "49622075-9ff4-4660-9ab7-414854b5bca2",
+        "item_key": "14d2bdca-7309-4852-9e1f-2fd1c9e60273",
+        "before_item_hash": "a" * 64,
+        "after_item_hash": "b" * 64,
+        "before_container_hash": "c" * 64,
+        "after_container_hash": "d" * 64,
+        "payload_hash": None,
+        "affected_paths": ["Knowledge Base/Records/vehicle-maintenance/Events/released/a.md"],
+        "outcome": "committed",
+        "audit_correlation": "e" * 24,
+        "rows": [{"secret": "must not escape"}],
+    }
     receipt = record_governance.project_mutation_receipt(
-        {
-            "operation": "update",
-            "collection_id": "49622075-9ff4-4660-9ab7-414854b5bca2",
-            "affected_paths": ["Knowledge Base/Records/vehicle-maintenance/Events/released/a.md"],
-            "outcome": "committed",
-            "rows": [{"secret": "must not escape"}],
-        }
+        valid
     )
     assert receipt == {
         "operation": "update",
         "collection_id": "49622075-9ff4-4660-9ab7-414854b5bca2",
+        "item_key": "14d2bdca-7309-4852-9e1f-2fd1c9e60273",
+        "before_item_hash": "a" * 64,
+        "after_item_hash": "b" * 64,
+        "before_container_hash": "c" * 64,
+        "after_container_hash": "d" * 64,
         "affected_paths": ["Knowledge Base/Records/vehicle-maintenance/Events/released/a.md"],
         "outcome": "committed",
+        "audit_correlation": "e" * 24,
+    }
+    assert record_governance.project_mutation_receipt({"operation": "update"}) == {
+        "withheld": True,
+        "reason": "invalid_record_receipt",
     }
     assert egress.project(
         record_governance._RecordEnvelope({"rows": [{"secret": "must not escape"}]}),
@@ -727,3 +758,359 @@ def test_governed_append_records_authorization_without_claiming_commit(tmp_path:
     ]
     assert any(outcome.get("decision") == "release_authorized" for outcome in outcomes)
     assert all("committed" not in outcome.values() for outcome in outcomes)
+
+
+def test_governed_append_emits_one_disclosure_receipt_at_precommit_only(tmp_path: Path) -> None:
+    fixture = copy_vehicle_maintenance_fixture(tmp_path)
+    (tmp_path / "Knowledge Base" / "log.md").write_text("# Activity\n", encoding="utf-8")
+    manifest = collections.load_manifest(tmp_path, fixture / "_collection.md")
+    _write_l6_rule(tmp_path, ceiling=6, paths="Records/**")
+
+    with request_scope(RequestPrincipal(audience_id=EXTERNAL, surface="mcp")):
+        records.append_record(
+            tmp_path,
+            manifest,
+            item={
+                "occurred_on": "2026-07-01",
+                "asset": "[[Assets/Vehicle]]",
+                "odometer": 46000,
+                "provider": "Workshop",
+                "services": ["oil"],
+                "amount": 20,
+                "currency": "GBP",
+                "status": "completed",
+                "next_due_on": None,
+                "next_due_odometer": None,
+            },
+            why="one final authorization receipt",
+        )
+
+    payloads = [
+        json.loads(line)
+        for event in (tmp_path / "Knowledge Base" / "_Governance" / "events").rglob("*.jsonl")
+        for line in event.read_text(encoding="utf-8").splitlines()
+    ]
+    disclosures = [payload for payload in payloads if payload.get("event_type") == "disclosure"]
+    assert len(disclosures) == 1
+    assert {outcome["command"] for outcome in disclosures[0]["outcomes"]} == {
+        "record_mutation_precommit"
+    }
+
+
+@pytest.mark.parametrize("operation", ("resolve", "query", "manifest", "template"))
+def test_governed_public_records_operations_emit_one_receipt(
+    tmp_path: Path, operation: str
+) -> None:
+    fixture = copy_vehicle_maintenance_fixture(tmp_path)
+    manifest_path = fixture / "_collection.md"
+    manifest_path.write_text(
+        manifest_path.read_text(encoding="utf-8").replace(
+            "\n---\n\nOne ordinary", "\ntemplates: [{path: Templates/project.md}]\n---\n\nOne ordinary"
+        ),
+        encoding="utf-8",
+    )
+    template = fixture / "Templates/project.md"
+    template.parent.mkdir()
+    template.write_text("template", encoding="utf-8")
+    manifest = collections.load_manifest(tmp_path, manifest_path)
+    _write_l6_rule(tmp_path, ceiling=6, paths="Records/**")
+
+    with request_scope(RequestPrincipal(audience_id=EXTERNAL, surface="mcp")):
+        if operation == "resolve":
+            record_governance.resolve_collection(tmp_path, manifest)
+        elif operation == "query":
+            record_governance.query_collection(tmp_path, manifest, limit=1)
+        elif operation == "manifest":
+            record_governance.project_manifest(tmp_path, manifest)
+        else:
+            assert record_governance.read_template(tmp_path, manifest, manifest.templates[0].path) == b"template"
+
+    payloads = [
+        json.loads(line)
+        for event in (tmp_path / "Knowledge Base" / "_Governance" / "events").rglob("*.jsonl")
+        for line in event.read_text(encoding="utf-8").splitlines()
+    ]
+    assert len([payload for payload in payloads if payload.get("event_type") == "disclosure"]) == 1
+
+
+def test_governed_records_query_reuses_an_ambient_disclosure_boundary(tmp_path: Path) -> None:
+    fixture = copy_vehicle_maintenance_fixture(tmp_path)
+    manifest = collections.load_manifest(tmp_path, fixture / "_collection.md")
+    _write_l6_rule(tmp_path, ceiling=6, paths="Records/**")
+
+    with request_scope(RequestPrincipal(audience_id=EXTERNAL, surface="mcp")):
+        with egress.disclosure_boundary(tmp_path, "outer_records_command") as collector:
+            record_governance.query_collection(tmp_path, manifest, limit=1)
+            egress.emit_boundary_receipt(collector)
+
+    payloads = [
+        json.loads(line)
+        for event in (tmp_path / "Knowledge Base" / "_Governance" / "events").rglob("*.jsonl")
+        for line in event.read_text(encoding="utf-8").splitlines()
+    ]
+    disclosures = [payload for payload in payloads if payload.get("event_type") == "disclosure"]
+    assert len(disclosures) == 1
+    assert {outcome["command"] for outcome in disclosures[0]["outcomes"]} == {"outer_records_command"}
+
+
+def test_disclosure_boundary_rejects_a_nested_different_vault(tmp_path: Path) -> None:
+    other = tmp_path / "other"
+    with egress.disclosure_boundary(tmp_path, "outer"):
+        with pytest.raises(RuntimeError, match="different vault"):
+            with egress.disclosure_boundary(other, "inner"):
+                pass
+
+
+@pytest.mark.parametrize("explicit_key", (True, False))
+def test_governed_append_refuses_an_l0_future_item_before_writing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, explicit_key: bool
+) -> None:
+    fixture = copy_vehicle_maintenance_fixture(tmp_path)
+    activity = tmp_path / "Knowledge Base" / "log.md"
+    activity.write_text("# Activity\n", encoding="utf-8")
+    manifest = collections.load_manifest(tmp_path, fixture / "_collection.md")
+    key = "ed6854be-c236-4cf6-9c90-18dfb8ac2544"
+    target = f"Records/vehicle-maintenance/Events/{key}.md"
+    _write_l6_rule(tmp_path, ceiling=6, paths="Records/**")
+    _write_l0_rule(tmp_path, name="blocked", paths=target)
+    before = ((fixture / "_collection.md").read_bytes(), activity.read_bytes())
+    if not explicit_key:
+        monkeypatch.setattr(records.uuid, "uuid4", lambda: uuid.UUID(key))
+
+    with request_scope(RequestPrincipal(audience_id=EXTERNAL, surface="mcp")):
+        with pytest.raises(collections.CollectionError) as raised:
+            records.append_record(
+                tmp_path,
+                manifest,
+                item={
+                    "occurred_on": "2026-07-01",
+                    "asset": "[[Assets/Vehicle]]",
+                    "odometer": 46000,
+                    "provider": "Workshop",
+                    "services": ["oil"],
+                    "amount": 20,
+                    "currency": "GBP",
+                    "status": "completed",
+                    "next_due_on": None,
+                    "next_due_odometer": None,
+                },
+                item_key=key if explicit_key else None,
+                why="future item must be authorized before publication",
+            )
+
+    assert raised.value.code == "COLLECTION_NOT_FOUND"
+    assert ((fixture / "_collection.md").read_bytes(), activity.read_bytes()) == before
+    assert not (fixture / "Events" / f"{key}.md").exists()
+
+
+def test_governed_create_refuses_an_l0_future_source_before_writing(tmp_path: Path) -> None:
+    fixture = copy_vehicle_maintenance_fixture(tmp_path)
+    activity = tmp_path / "Knowledge Base" / "log.md"
+    activity.write_text("# Activity\n", encoding="utf-8")
+    manifest_path = "Knowledge Base/Records/future/_collection.md"
+    manifest_text = (fixture / "_collection.md").read_text(encoding="utf-8")
+    _write_l6_rule(tmp_path, ceiling=6, paths="Records/**")
+    _write_l0_rule(tmp_path, name="blocked", paths="Records/future/Events")
+    before = activity.read_bytes()
+
+    with request_scope(RequestPrincipal(audience_id=EXTERNAL, surface="mcp")):
+        with pytest.raises(collections.CollectionError) as raised:
+            records.create_collection(
+                tmp_path,
+                manifest_path,
+                manifest_text,
+                why="future source must be authorized before create publication",
+            )
+
+    assert raised.value.code == "COLLECTION_NOT_FOUND"
+    assert activity.read_bytes() == before
+    assert not (tmp_path / manifest_path).exists()
+    assert not (tmp_path / "Knowledge Base/Records/future/Events").exists()
+
+
+def test_governed_append_authorizes_the_activity_log_before_publication(tmp_path: Path) -> None:
+    fixture = copy_vehicle_maintenance_fixture(tmp_path)
+    activity = tmp_path / "Knowledge Base" / "log.md"
+    activity.write_text("# Activity\n", encoding="utf-8")
+    manifest = collections.load_manifest(tmp_path, fixture / "_collection.md")
+    _write_l6_rule(tmp_path, ceiling=6, paths="Records/**")
+    _write_l0_rule(tmp_path, name="blocked", paths="log.md")
+    before = ((fixture / "_collection.md").read_bytes(), activity.read_bytes())
+
+    with request_scope(RequestPrincipal(audience_id=EXTERNAL, surface="mcp")):
+        with pytest.raises(collections.CollectionError) as raised:
+            records.append_record(
+                tmp_path,
+                manifest,
+                item={
+                    "occurred_on": "2026-07-01",
+                    "asset": "[[Assets/Vehicle]]",
+                    "odometer": 46000,
+                    "provider": "Workshop",
+                    "services": ["oil"],
+                    "amount": 20,
+                    "currency": "GBP",
+                    "status": "completed",
+                    "next_due_on": None,
+                    "next_due_odometer": None,
+                },
+                why="audit publication target must be authorized",
+            )
+
+    assert raised.value.code == "COLLECTION_NOT_FOUND"
+    assert ((fixture / "_collection.md").read_bytes(), activity.read_bytes()) == before
+    assert _disclosure_count(tmp_path) == 0
+
+
+def test_governed_replay_and_update_each_emit_one_final_receipt(tmp_path: Path) -> None:
+    fixture = copy_vehicle_maintenance_fixture(tmp_path)
+    (tmp_path / "Knowledge Base" / "log.md").write_text("# Activity\n", encoding="utf-8")
+    manifest = collections.load_manifest(tmp_path, fixture / "_collection.md")
+    _write_l6_rule(tmp_path, ceiling=6, paths="Records/**")
+    item = {
+        "occurred_on": "2026-07-01",
+        "asset": "[[Assets/Vehicle]]",
+        "odometer": 46000,
+        "provider": "Workshop",
+        "services": ["oil"],
+        "amount": 20,
+        "currency": "GBP",
+        "status": "completed",
+        "next_due_on": None,
+        "next_due_odometer": None,
+    }
+    key = "ed6854be-c236-4cf6-9c90-18dfb8ac2544"
+
+    with request_scope(RequestPrincipal(audience_id=EXTERNAL, surface="mcp")):
+        appended = records.append_record(tmp_path, manifest, item=item, item_key=key, why="append")
+        assert _disclosure_count(tmp_path) == 1
+        replayed = records.append_record(tmp_path, manifest.path, item=item, item_key=key, why="replay")
+        assert replayed["outcome"] == "replayed"
+        assert _disclosure_count(tmp_path) == 2
+        records.update_record(
+            tmp_path,
+            manifest.path,
+            item_key=key,
+            changes={"status": "scheduled"},
+            expected_container_hash=appended["after_container_hash"],
+            expected_item_version=appended["after_item_hash"],
+            why="update",
+        )
+
+    assert _disclosure_count(tmp_path) == 3
+
+
+def test_governed_create_emits_one_final_receipt(tmp_path: Path) -> None:
+    fixture = copy_vehicle_maintenance_fixture(tmp_path)
+    (tmp_path / "Knowledge Base" / "log.md").write_text("# Activity\n", encoding="utf-8")
+    _write_l6_rule(tmp_path, ceiling=6, paths="Records/**")
+
+    with request_scope(RequestPrincipal(audience_id=EXTERNAL, surface="mcp")):
+        records.create_collection(
+            tmp_path,
+            "Knowledge Base/Records/new/_collection.md",
+            (fixture / "_collection.md").read_text(encoding="utf-8"),
+            why="create",
+        )
+
+    assert _disclosure_count(tmp_path) == 1
+
+
+def test_governed_validation_and_cas_failures_emit_no_receipt(tmp_path: Path) -> None:
+    fixture = copy_vehicle_maintenance_fixture(tmp_path)
+    (tmp_path / "Knowledge Base" / "log.md").write_text("# Activity\n", encoding="utf-8")
+    manifest = collections.load_manifest(tmp_path, fixture / "_collection.md")
+    _write_l6_rule(tmp_path, ceiling=6, paths="Records/**")
+    item = {
+        "occurred_on": "2026-07-01",
+        "asset": "[[Assets/Vehicle]]",
+        "odometer": 46000,
+        "provider": "Workshop",
+        "services": ["oil"],
+        "amount": 20,
+        "currency": "GBP",
+        "status": "completed",
+        "next_due_on": None,
+        "next_due_odometer": None,
+    }
+
+    with request_scope(RequestPrincipal(audience_id=EXTERNAL, surface="mcp")):
+        with pytest.raises(collections.CollectionError, match="SCHEMA_UNKNOWN_FIELD"):
+            records.append_record(tmp_path, manifest, item={**item, "unknown": "no"}, why="validate")
+        with pytest.raises(collections.CollectionError, match="STALE_RECORD"):
+            records.append_record(
+                tmp_path,
+                manifest,
+                item=item,
+                expected_container_hash="0" * 64,
+                why="cas",
+            )
+
+    assert _disclosure_count(tmp_path) == 0
+
+
+def test_failed_create_receipt_leaves_all_publication_targets_unchanged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fixture = copy_vehicle_maintenance_fixture(tmp_path)
+    activity = tmp_path / "Knowledge Base" / "log.md"
+    activity.write_text("# Activity\n", encoding="utf-8")
+    _write_l6_rule(tmp_path, ceiling=6, paths="Records/**")
+    target = tmp_path / "Knowledge Base/Records/new/_collection.md"
+    source = target.parent / "Events"
+    before = activity.read_bytes()
+
+    def receipt_failure(*_args: object, **_kwargs: object) -> None:
+        raise receipts.ReceiptError("simulated receipt outage")
+
+    monkeypatch.setattr(egress.receipts, "append_event", receipt_failure)
+    with request_scope(RequestPrincipal(audience_id=EXTERNAL, surface="mcp")):
+        with pytest.raises(egress.ReceiptUnavailableError):
+            records.create_collection(
+                tmp_path,
+                target.relative_to(tmp_path),
+                (fixture / "_collection.md").read_text(encoding="utf-8"),
+                why="receipt failure before create publication",
+            )
+
+    assert activity.read_bytes() == before
+    assert not target.exists()
+    assert not source.exists()
+
+
+def test_receipt_publication_failure_prevents_append_publication(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fixture = copy_vehicle_maintenance_fixture(tmp_path)
+    activity = tmp_path / "Knowledge Base" / "log.md"
+    activity.write_text("# Activity\n", encoding="utf-8")
+    manifest = collections.load_manifest(tmp_path, fixture / "_collection.md")
+    _write_l6_rule(tmp_path, ceiling=6, paths="Records/**")
+    before = ((fixture / "_collection.md").read_bytes(), activity.read_bytes())
+
+    def receipt_failure(*_args: object, **_kwargs: object) -> None:
+        raise receipts.ReceiptError("simulated receipt outage")
+
+    monkeypatch.setattr(egress.receipts, "append_event", receipt_failure)
+    with request_scope(RequestPrincipal(audience_id=EXTERNAL, surface="mcp")):
+        with pytest.raises(egress.ReceiptUnavailableError):
+            records.append_record(
+                tmp_path,
+                manifest,
+                item={
+                    "occurred_on": "2026-07-01",
+                    "asset": "[[Assets/Vehicle]]",
+                    "odometer": 46000,
+                    "provider": "Workshop",
+                    "services": ["oil"],
+                    "amount": 20,
+                    "currency": "GBP",
+                    "status": "completed",
+                    "next_due_on": None,
+                    "next_due_odometer": None,
+                },
+                why="receipt failure precedes publication",
+            )
+
+    assert ((fixture / "_collection.md").read_bytes(), activity.read_bytes()) == before
+    assert not list((fixture / "Events").glob("*.md"))

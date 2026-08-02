@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from types import MappingProxyType
 
@@ -88,6 +89,49 @@ def test_manifest_refuses_nonexistent_canonical_leaf_below_symlinked_ancestor(
     assert excinfo.value.code == "INVALID_COLLECTION_PATH"
 
 
+@pytest.mark.parametrize("kind", ("directory", "fifo", "symlink"))
+def test_resolve_keeps_unsafe_collection_filesystem_forms_distinct_from_absence(
+    tmp_path: Path, kind: str
+) -> None:
+    vault = tmp_path / "vault"
+    records = vault / "Knowledge Base/Records"
+    records.mkdir(parents=True)
+    target = records / "unsafe" / "_collection.md"
+    target.parent.mkdir()
+    if kind == "directory":
+        target.mkdir()
+    elif kind == "fifo":
+        if not hasattr(os, "mkfifo"):
+            pytest.skip("FIFOs are not supported on this platform")
+        os.mkfifo(target)
+    else:
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        try:
+            (records / "unsafe").unlink()
+            (records / "unsafe").symlink_to(outside, target_is_directory=True)
+        except OSError:
+            pytest.skip("symlinks/reparse points are unavailable")
+
+    with pytest.raises(collections.CollectionError) as excinfo:
+        collections.resolve_collection(vault, target.relative_to(vault))
+
+    assert excinfo.value.code == "INVALID_COLLECTION_PATH"
+
+
+def test_resolve_normalizes_safe_absence_like_an_authorized_withheld_selector(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    missing = "Knowledge Base/Records/missing/_collection.md"
+    existing = _write_manifest(vault, "Knowledge Base/Records/existing/_collection.md", _manifest())
+
+    with pytest.raises(collections.CollectionError) as absent:
+        collections.resolve_collection(vault, missing)
+    with pytest.raises(collections.CollectionError) as withheld:
+        collections.resolve_collection(vault, existing.relative_to(vault), authorize_path=lambda _path: False)
+
+    assert (absent.value.code, absent.value.reason) == (withheld.value.code, withheld.value.reason)
+
+
 def test_discovery_stops_after_cap_plus_one_candidates(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -105,7 +149,28 @@ def test_discovery_stops_after_cap_plus_one_candidates(
     monkeypatch.setattr(Path, "rglob", bounded_candidates)
 
     with pytest.raises(collections.CollectionError) as excinfo:
-        collections.discover_collections(vault, max_candidates=2)
+        collections.discover_collections(vault, max_candidates=2, max_raw_candidates=2)
+
+    assert excinfo.value.code == "COLLECTION_DISCOVERY_LIMIT"
+
+
+def test_discovery_counts_only_authorized_candidates_before_parsing_the_next_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault = tmp_path / "vault"
+    for name in ("first", "second", "third"):
+        _write_manifest(vault, f"Knowledge Base/Records/{name}/_collection.md", _manifest())
+
+    third = vault / "Knowledge Base/Records/third/_collection.md"
+    original = collections.load_manifest
+
+    def no_third_parse(root: Path, path: Path | str):
+        assert Path(path) != third
+        return original(root, path)
+
+    monkeypatch.setattr(collections, "load_manifest", no_third_parse)
+    with pytest.raises(collections.CollectionError) as excinfo:
+        collections.discover_collections(vault, max_candidates=2, max_raw_candidates=3)
 
     assert excinfo.value.code == "COLLECTION_DISCOVERY_LIMIT"
 

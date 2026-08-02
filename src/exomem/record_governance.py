@@ -194,15 +194,34 @@ def resolve_collection(
 ) -> collections.CollectionManifest:
     """Resolve only a fully released manifest, treating every other case as absent."""
     root = Path(vault_root)
-    path = selector.path if isinstance(selector, collections.CollectionManifest) else selector
     with egress.disclosure_boundary(root, "record_resolve") as collector:
-        manifest = collections.resolve_collection(
-            root, path, authorize_path=full_release_filter(root)
-        )
-        if not _authorize(root, manifest.path, receipt=True):
-            raise collections.CollectionError("COLLECTION_NOT_FOUND", "collection was not found")
+        manifest = _resolve_released_collection(root, selector, receipt=True)
         egress.emit_boundary_receipt(collector)
         return manifest
+
+
+def resolve_collection_for_mutation(
+    vault_root: Path, selector: str | Path | collections.CollectionManifest
+) -> collections.CollectionManifest:
+    """Resolve a mutable collection without disclosing provisional decisions."""
+    return _resolve_released_collection(Path(vault_root), selector, receipt=False)
+
+
+def _resolve_released_collection(
+    root: Path,
+    selector: str | Path | collections.CollectionManifest,
+    *,
+    receipt: bool,
+) -> collections.CollectionManifest:
+    path = selector.path if isinstance(selector, collections.CollectionManifest) else selector
+    manifest = collections.resolve_collection(
+        root,
+        path,
+        authorize_path=lambda relative: _authorize(root, relative, receipt=receipt),
+    )
+    if not _authorize(root, manifest.path, receipt=receipt):
+        raise collections.CollectionError("COLLECTION_NOT_FOUND", "collection was not found")
+    return manifest
 
 
 def query_collection(
@@ -213,14 +232,8 @@ def query_collection(
     """Query released Records only; authorization happens before adapter parsing."""
     root = Path(vault_root)
     with egress.disclosure_boundary(root, "record_query") as collector:
-        manifest = collections.resolve_collection(
-            root,
-            collection.path
-            if isinstance(collection, collections.CollectionManifest)
-            else collection,
-            authorize_path=full_release_filter(root),
-        )
-        if not _authorize(root, manifest.path, receipt=True) or not _authorize(
+        manifest = _resolve_released_collection(root, collection, receipt=True)
+        if not _authorize(
             root, manifest.storage.source, receipt=True
         ):
             raise collections.CollectionError("COLLECTION_NOT_FOUND", "collection was not found")
@@ -830,42 +843,44 @@ def project_manifest(
 ) -> dict[str, Any]:
     """Project a manifest only after every returned template target is released."""
     root = Path(vault_root)
-    manifest = resolve_collection(root, collection)
-    allowed = full_release_filter(root)
-    if not allowed(manifest.storage.source) or any(
-        not allowed(template.path) for template in manifest.templates
-    ):
-        raise collections.CollectionError("COLLECTION_NOT_FOUND", "collection was not found")
-    templates: list[dict[str, Any]] = []
-    links = _LinkProjector.create(root, manifest)
-    for template in manifest.templates:
-        defaults = _project_schema_values(
-            root, manifest, template.default_properties, template_metadata=True, links=links
+    with egress.disclosure_boundary(root, "record_manifest") as collector:
+        manifest = _resolve_released_collection(root, collection, receipt=True)
+        if not _authorize(root, manifest.storage.source, receipt=True) or any(
+            not _authorize(root, template.path, receipt=True) for template in manifest.templates
+        ):
+            raise collections.CollectionError("COLLECTION_NOT_FOUND", "collection was not found")
+        templates: list[dict[str, Any]] = []
+        links = _LinkProjector.create(root, manifest)
+        for template in manifest.templates:
+            defaults = _project_schema_values(
+                root, manifest, template.default_properties, template_metadata=True, links=links
+            )
+            if defaults is None:
+                continue
+            templates.append({"path": template.path, "default_properties": defaults})
+        payload = _RecordEnvelope(
+            {
+                "collection_id": manifest.collection_id,
+                "path": manifest.path,
+                "title": manifest.title,
+                "storage": {
+                    "strategy": manifest.storage.strategy,
+                    "source": manifest.storage.source,
+                    "format_version": manifest.storage.format_version,
+                },
+                "templates": templates,
+                "plans": [
+                    projected
+                    for plan in manifest.links.plans
+                    if (projected := _project_plan_link(root, manifest, plan, links=links)) is not None
+                ],
+                "views": _project_views(root, manifest, links=links),
+                "governance": _project_governance(manifest.governance),
+            }
         )
-        if defaults is None:
-            continue
-        templates.append({"path": template.path, "default_properties": defaults})
-    payload = _RecordEnvelope(
-        {
-            "collection_id": manifest.collection_id,
-            "path": manifest.path,
-            "title": manifest.title,
-            "storage": {
-                "strategy": manifest.storage.strategy,
-                "source": manifest.storage.source,
-                "format_version": manifest.storage.format_version,
-            },
-            "templates": templates,
-            "plans": [
-                projected
-                for plan in manifest.links.plans
-                if (projected := _project_plan_link(root, manifest, plan, links=links)) is not None
-            ],
-            "views": _project_views(root, manifest, links=links),
-            "governance": _project_governance(manifest.governance),
-        }
-    )
-    return egress.project(payload, egress.LEVEL_FULL, kind="record_manifest") or {}
+        projected = egress.project(payload, egress.LEVEL_FULL, kind="record_manifest") or {}
+        egress.emit_boundary_receipt(collector)
+        return projected
 
 
 def read_template(
@@ -876,13 +891,7 @@ def read_template(
     """Return an explicitly declared template only after its L6 path decision."""
     root = Path(vault_root)
     with egress.disclosure_boundary(root, "record_template") as collector:
-        manifest = collections.resolve_collection(
-            root,
-            collection.path
-            if isinstance(collection, collections.CollectionManifest)
-            else collection,
-            authorize_path=full_release_filter(root),
-        )
+        manifest = _resolve_released_collection(root, collection, receipt=True)
         declared = {template.path for template in manifest.templates}
         if (
             not _authorize(root, manifest.path, receipt=True)

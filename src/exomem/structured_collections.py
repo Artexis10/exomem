@@ -293,11 +293,11 @@ def discover_collections(
         _candidate_path, rel = safe
         if not authorize(rel):
             continue
-        manifests.append(load_manifest(root, candidate))
-        if len(manifests) > max_candidates:
+        if len(manifests) >= max_candidates:
             raise CollectionError(
                 "COLLECTION_DISCOVERY_LIMIT", "too many collection manifests to inspect"
             )
+        manifests.append(load_manifest(root, candidate))
     if reject_duplicates:
         _raise_duplicate_ids(manifests)
     return tuple(manifests)
@@ -332,8 +332,7 @@ def resolve_collection(
     try:
         path, rel = _safe_existing_path(root, raw)
     except CollectionError as error:
-        normalized = raw.replace("\\", "/")
-        if normalized.startswith(f"{vault.kb_dirname()}/") and not _unsafe_relative(normalized):
+        if _genuinely_absent_collection_path(root, raw):
             raise CollectionError("COLLECTION_NOT_FOUND", "collection was not found") from error
         raise
     if not authorize(rel):
@@ -842,6 +841,34 @@ def _safe_existing_path(root: Path, path: Path | str) -> tuple[Path, str]:
             "INVALID_COLLECTION_PATH", "collection path is outside the governed vault"
         )
     return safe
+
+
+def _genuinely_absent_collection_path(root: Path, raw: str) -> bool:
+    """Recognize only a safe, missing leaf as an absent collection selector."""
+    candidate = Path(raw)
+    if candidate.is_absolute():
+        return False
+    normalized = raw.replace("\\", "/")
+    if not normalized.startswith(f"{vault.kb_dirname()}/") or _unsafe_relative(normalized):
+        return False
+    current = root
+    parts = Path(normalized).parts
+    for index, part in enumerate(parts):
+        current /= part
+        try:
+            info = current.lstat()
+        except FileNotFoundError:
+            return True
+        except OSError:
+            return False
+        attributes = getattr(info, "st_file_attributes", 0)
+        if stat.S_ISLNK(info.st_mode) or attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0):
+            return False
+        if index < len(parts) - 1 and not stat.S_ISDIR(info.st_mode):
+            return False
+        if index == len(parts) - 1 and not stat.S_ISREG(info.st_mode):
+            return False
+    return False
 
 
 def _safe_candidate_rel(root: Path, candidate: Path) -> tuple[Path, str] | None:

@@ -100,17 +100,30 @@ class DisclosureCollector:
 _DISCLOSURE_COLLECTOR: ContextVar[DisclosureCollector | None] = ContextVar(
     "exomem_disclosure_collector", default=None
 )
+_DISCLOSURE_BOUNDARY_OWNERS: ContextVar[tuple[bool, ...]] = ContextVar(
+    "exomem_disclosure_boundary_owners", default=()
+)
 
 
 @contextmanager
 def disclosure_boundary(vault_root: Path, command_name: str):
     """Collect one top-level read's decisions and emit only on its success."""
-    collector = DisclosureCollector(Path(vault_root), uuid.uuid4().hex, command_name)
-    token = _DISCLOSURE_COLLECTOR.set(collector)
+    existing = _collector()
+    root = Path(vault_root)
+    if existing is not None and existing.vault_root != root:
+        raise RuntimeError("nested disclosure boundary cannot use a different vault")
+    owns_collector = existing is None
+    collector = existing or DisclosureCollector(root, uuid.uuid4().hex, command_name)
+    token = _DISCLOSURE_COLLECTOR.set(collector) if owns_collector else None
+    owners = _DISCLOSURE_BOUNDARY_OWNERS.set(
+        (*_DISCLOSURE_BOUNDARY_OWNERS.get(), owns_collector)
+    )
     try:
         yield collector
     finally:
-        _DISCLOSURE_COLLECTOR.reset(token)
+        _DISCLOSURE_BOUNDARY_OWNERS.reset(owners)
+        if token is not None:
+            _DISCLOSURE_COLLECTOR.reset(token)
 
 
 def _collector() -> DisclosureCollector | None:
@@ -224,6 +237,9 @@ def _outcome_for_decision(
 
 def emit_boundary_receipt(collector: DisclosureCollector) -> None:
     """Synchronously append evidence after the final representation is fixed."""
+    owners = _DISCLOSURE_BOUNDARY_OWNERS.get()
+    if not owners or not owners[-1]:
+        return
     try:
         if collector.credential_redactions:
             receipts.append_event(
