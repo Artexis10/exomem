@@ -466,6 +466,23 @@ def is_live(vault_root: Path, scope: str) -> bool:
         return _key(vault_root, scope) in _live
 
 
+def _project_recall_entries(
+    vault_root: Path, entries: Iterable[tuple[str, FileSignature]]
+) -> tuple[dict[str, FileSignature], tuple[str, str]]:
+    """Project entries against one stable recall-policy snapshot."""
+    from . import recall_policy
+
+    while True:
+        identity = recall_policy.recall_policy_identity(vault_root)
+        projected = {
+            sp: signature
+            for sp, signature in entries
+            if recall_policy.is_recall_candidate(vault_root, Path(sp))
+        }
+        if recall_policy.recall_policy_identity(vault_root) == identity:
+            return projected, identity
+
+
 def seed(vault_root: Path, scope: str, entries: Iterable[tuple[str, SignatureLike]]) -> None:
     """Install the full `(path_str, signature)` set for a scope and mark it live.
 
@@ -474,14 +491,7 @@ def seed(vault_root: Path, scope: str, entries: Iterable[tuple[str, SignatureLik
     uses, so the live triple equals the walk triple on an unchanged tree.
     """
     raw_entries = [(sp, _normalize_signature(signature)) for sp, signature in entries]
-    from . import recall_policy
-
-    recall_entries = {
-        sp: signature
-        for sp, signature in raw_entries
-        if recall_policy.is_recall_candidate(vault_root, Path(sp))
-    }
-    recall_identity = recall_policy.recall_policy_identity(vault_root)
+    recall_entries, recall_identity = _project_recall_entries(vault_root, raw_entries)
     key = _key(vault_root, scope)
     with _lock:
         _maps[key] = dict(raw_entries)
@@ -513,14 +523,7 @@ def reconcile(
     """
     key = _key(vault_root, scope)
     fresh = {sp: _normalize_signature(signature) for sp, signature in entries}
-    from . import recall_policy
-
-    recall_fresh = {
-        sp: signature
-        for sp, signature in fresh.items()
-        if recall_policy.is_recall_candidate(vault_root, Path(sp))
-    }
-    recall_identity = recall_policy.recall_policy_identity(vault_root)
+    recall_fresh, recall_identity = _project_recall_entries(vault_root, fresh.items())
     with _lock:
         old = _maps.get(key)
         # The map swap and the drift generation/history transition happen in ONE

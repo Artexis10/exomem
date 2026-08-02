@@ -169,21 +169,6 @@ def _checkpoint_state(checkpoint) -> tuple | None:
     )
 
 
-def _access_reprojection(before, after) -> bool:
-    """True only for a same-policy local access transition.
-
-    Parser/schema/policy-version changes still require a rebuild.  An access
-    fingerprint change has an exact projected delta in the live registry and is
-    safe to apply without reopening the full corpus.
-    """
-    return (
-        before is not None
-        and after is not None
-        and before.policy_version == after.policy_version
-        and before.access_policy_fingerprint != after.access_policy_fingerprint
-    )
-
-
 CATALOG_RETRY_AFTER_MS = 250
 
 
@@ -328,16 +313,16 @@ def lexical_path(vault_root: Path) -> Path:
     return vault_root / kb_dirname() / ".lexical.sqlite"
 
 
-_CATALOG_IDENTITY_SCHEMA = "exomem.semantic-catalog.projection-identity.v2"
+_CATALOG_IDENTITY_SCHEMA = "exomem.semantic-catalog.row-identity.v3"
 _REGISTRY_ABSENT_MARKER = "absent"
 
 
 def catalog_semantic_identity(vault_root: Path) -> str:
-    """Return the content-addressed identity of the semantic-catalog projection.
+    """Return the content-addressed identity of parsed semantic-catalog rows.
 
     The identity is a compound of the components that make an already-built
-    catalog complete for a given corpus, so any of them changing invalidates a
-    projection even when no note Markdown changed:
+    catalog's parsed rows correct for a given corpus, so any of them changing
+    invalidates those rows even when no note Markdown changed:
 
     * this slice's catalog/schema version (``SCHEMA_VERSION``);
     * the semantic-unit ``semantic_index.PARSER_VERSION``;
@@ -347,12 +332,14 @@ def catalog_semantic_identity(vault_root: Path) -> str:
       ``semantic_language_registry.registry_path`` (an explicit stable marker
       when the registry is absent).
 
+    Recall policy and access membership deliberately do not participate here:
+    ``RecallFreshnessCheckpoint`` attests that independent projection boundary.
     Serialization is a canonical, sorted, separator-fixed JSON payload hashed
     with SHA-256. No Markdown corpus is walked, no YAML is interpreted, and no
     file is mutated; the registry is read only to hash its bytes, so neither
     personal vocabulary nor raw registry bytes appear in the returned identity.
     """
-    from . import recall_policy, semantic_authoring, semantic_index, semantic_language_registry
+    from . import semantic_authoring, semantic_index, semantic_language_registry
 
     contract = semantic_authoring.get_semantic_authoring_contract()
     registry_file = semantic_language_registry.registry_path(Path(vault_root))
@@ -371,9 +358,6 @@ def catalog_semantic_identity(vault_root: Path) -> str:
         "authoring_contract_version": contract.version,
         "authoring_contract_digest": contract.content_digest,
         "extension_registry_hash": registry_marker,
-        # This catalog is a projected ordinary-recall corpus.  A policy or local
-        # access change invalidates it even when no Markdown changed.
-        "recall_policy": recall_policy.recall_policy_identity(Path(vault_root)),
     }
     canonical = json.dumps(
         payload,
@@ -2137,6 +2121,14 @@ class LexicalStore:
         try:
             if not self._schema_is_current(conn):
                 return False
+            witness_targets = {
+                scope: (
+                    freshness_module.recall_checkpoint(self.vault_root, scope)
+                    if freshness_module.recall_is_live(self.vault_root, scope)
+                    else None
+                )
+                for scope in ("kb", "vault")
+            }
             prepared: list[tuple[Path, str, tuple[int, int, int], bool, bool]] = []
             suppressed: list[str] = []
             for path in paths:
@@ -2179,7 +2171,7 @@ class LexicalStore:
                         or self._membership(path) != (in_kb, in_vault)
                     ):
                         raise OSError(f"source changed during bounded upsert: {path.name}")
-            self._remember_live_witnesses()
+            self._remember_live_witnesses(witness_targets)
             return True
         finally:
             conn.close()
@@ -2208,12 +2200,22 @@ class LexicalStore:
 
     def _delete_rel_paths_locked(self, rel_paths: list[str]) -> bool:
         """`delete_rel_paths` body with the publication barrier already held."""
+        from . import freshness as freshness_module
+
         if not self.path.exists():
             return False
         conn = self._connect()
         try:
             if not self._schema_is_current(conn):
                 return False
+            witness_targets = {
+                scope: (
+                    freshness_module.recall_checkpoint(self.vault_root, scope)
+                    if freshness_module.recall_is_live(self.vault_root, scope)
+                    else None
+                )
+                for scope in ("kb", "vault")
+            }
             with conn:
                 for rel in rel_paths:
                     row = conn.execute("SELECT rowid FROM pages WHERE path = ?", (rel,)).fetchone()
@@ -2221,12 +2223,12 @@ class LexicalStore:
                         self._delete_rowid(conn, row[0])
                     else:
                         self._delete_semantic_units(conn, rel)
-            self._remember_live_witnesses()
+            self._remember_live_witnesses(witness_targets)
             return True
         finally:
             conn.close()
 
-    def _remember_live_witnesses(self) -> None:
+    def _remember_live_witnesses(self, targets: dict[str, object | None]) -> None:
         """Remember only the exact watcher-maintained corpus just applied.
 
         Without a live registry there is no race-free corpus attestation, so
@@ -2235,8 +2237,10 @@ class LexicalStore:
         from . import freshness as freshness_module
 
         for scope in ("kb", "vault"):
-            checkpoint = freshness_module.recall_checkpoint(self.vault_root, scope)
-            if checkpoint.triple is None:
+            checkpoint = targets[scope]
+            if checkpoint is None or freshness_module.recall_checkpoint(
+                self.vault_root, scope
+            ) != checkpoint:
                 self._witnessed.pop(scope, None)
             else:
                 self._witnessed[scope] = checkpoint
@@ -2612,10 +2616,7 @@ class LexicalStore:
                             "delta is not bound to the stored catalog checkpoint"
                         )
                     captured_identity = catalog_semantic_identity(self.vault_root)
-                    if (
-                        self._meta_catalog_identity(conn) != captured_identity
-                        and not _access_reprojection(stored, delta.to)
-                    ):
+                    if self._meta_catalog_identity(conn) != captured_identity:
                         raise ValueError(
                             "catalog identity changed before foreground delta apply"
                         )

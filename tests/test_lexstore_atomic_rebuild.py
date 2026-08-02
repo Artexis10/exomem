@@ -136,7 +136,7 @@ def test_edit_after_start_is_replayed_and_target_checkpoint_is_exact(
     _seed(tmp_path, [a, b])
     lexstore.ensure_fresh(tmp_path)
     store = lexstore.get_store(tmp_path)
-    pre_gen = freshness.consumer_checkpoint(tmp_path, "kb").generation
+    pre_gen = freshness.recall_checkpoint(tmp_path, "kb").generation
 
     real_walk = lexstore.LexicalStore._walk_entries
     state = {"injected": False}
@@ -162,8 +162,7 @@ def test_edit_after_start_is_replayed_and_target_checkpoint_is_exact(
     assert not any("beforeedit" in c for c in contents)
 
     stored = store.catalog_checkpoint("kb")
-    assert stored.triple == freshness.triple(tmp_path, "kb")
-    assert stored.generation == freshness.consumer_checkpoint(tmp_path, "kb").generation
+    assert stored == freshness.recall_checkpoint(tmp_path, "kb")
     assert stored.generation > pre_gen
 
 
@@ -181,15 +180,15 @@ def test_incomplete_delta_discards_temp_and_preserves_live(
     store = lexstore.get_store(tmp_path)
     before = store.catalog_checkpoint("kb")
 
-    real_delta = freshness.delta_since
+    real_delta = freshness.recall_delta_since
 
     def incomplete(vault: Path, scope: str, checkpoint: Any) -> Any:
         real_delta(vault, scope, checkpoint)  # non-destructive read, then force incomplete
-        return freshness.ConsumerDelta(
+        return freshness.RecallDelta(
             checkpoint, checkpoint, False, frozenset(), frozenset()
         )
 
-    monkeypatch.setattr(freshness, "delta_since", incomplete)
+    monkeypatch.setattr(freshness, "recall_delta_since", incomplete)
     assert store.rebuild_atomic() is False
     monkeypatch.undo()
 
@@ -297,8 +296,18 @@ def test_malformed_checkpoint_is_warming_and_atomic_rebuild_recovers(
     try:
         with conn:
             conn.execute(
-                "UPDATE meta SET value = ? WHERE key = 'checkpoint:kb'",
-                (repr(("instance", "not-an-int", (1, 2, "digest"))),),
+                "UPDATE meta SET value = ? WHERE key = 'recall_checkpoint:kb'",
+                (
+                    repr(
+                        (
+                            "instance",
+                            "not-an-int",
+                            (1, 2, "digest"),
+                            "policy-v1",
+                            "access-fingerprint",
+                        )
+                    ),
+                ),
             )
     finally:
         conn.close()
@@ -325,8 +334,14 @@ def test_foreign_instance_publication_aborts_incomparable_older_build(
     _seed(tmp_path, [a])
     lexstore.ensure_fresh(tmp_path)
     store = lexstore.get_store(tmp_path)
-    triple = freshness.triple(tmp_path, "kb")
-    foreign = freshness.FreshnessCheckpoint("foreign-process", 1, triple)
+    current = freshness.recall_checkpoint(tmp_path, "kb")
+    foreign = freshness.RecallFreshnessCheckpoint(
+        "foreign-process",
+        1,
+        current.triple,
+        current.policy_version,
+        current.access_policy_fingerprint,
+    )
 
     # Isolate the cross-instance checkpoint proof from the DB-set token defense.
     monkeypatch.setattr(store, "_db_set_generation_token", lambda: ("stable",))
@@ -493,7 +508,7 @@ def test_foreground_delta_never_negotiates_journal_mode(
     a.write_text(_page_text("a", "- [config] patched ^u1"), encoding="utf-8")
     _touch_future(a)
     freshness.on_files_changed(tmp_path, changed=[a])
-    delta = freshness.delta_since(tmp_path, "kb", before)
+    delta = freshness.recall_delta_since(tmp_path, "kb", before)
     assert delta.complete is True
 
     def forbidden(*_a: Any, **_k: Any) -> Any:
@@ -513,7 +528,9 @@ def test_foreground_delta_never_negotiates_journal_mode(
     store.apply_catalog_delta("kb", delta)
     monkeypatch.undo()
 
-    assert store.catalog_checkpoint("kb").triple == freshness.triple(tmp_path, "kb")
+    assert store.catalog_checkpoint("kb").triple == freshness.recall_triple(
+        tmp_path, "kb"
+    )
     assert not any("journal_mode" in s.lower() for s in statements)
 
 
@@ -775,7 +792,7 @@ def test_foreground_delta_after_temp_target_aborts_replacement(
             a.write_text(_page_text("a", "- [config] newercontent ^u1"), encoding="utf-8")
             _touch_future(a)
             freshness.on_files_changed(tmp_path, changed=[a])
-            newer = freshness.triple(tmp_path, "kb")
+            newer = freshness.recall_triple(tmp_path, "kb")
             state["newer"] = newer
             readiness = store.catalog_readiness("kb", newer)
             assert readiness.status == "available" and readiness.complete
@@ -805,7 +822,8 @@ def test_readiness_and_query_stay_snapshot_consistent_across_replacement(
     _seed(tmp_path, [a])
     lexstore.ensure_fresh(tmp_path)
     store = lexstore.get_store(tmp_path)
-    fresh = freshness.triple(tmp_path, "kb")
+    current = freshness.recall_checkpoint(tmp_path, "kb")
+    fresh = current.triple
 
     def _regress() -> None:
         # Simulate a concurrent publication that swaps in a DIFFERENT (regressed)
@@ -815,9 +833,19 @@ def test_readiness_and_query_stay_snapshot_consistent_across_replacement(
             conn.execute("DELETE FROM semantic_units")
             conn.execute("DELETE FROM pages")
             conn.execute(
-                "INSERT INTO meta(key, value) VALUES('checkpoint:kb', ?) "
+                "INSERT INTO meta(key, value) VALUES('recall_checkpoint:kb', ?) "
                 "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                (repr((freshness._instance_id, 10**9, (0, 0, "regressed"))),),
+                (
+                    repr(
+                        (
+                            freshness._instance_id,
+                            10**9,
+                            (0, 0, "regressed"),
+                            current.policy_version,
+                            current.access_policy_fingerprint,
+                        )
+                    ),
+                ),
             )
             conn.execute(
                 "INSERT INTO meta(key, value) VALUES('triple:kb', ?) "
@@ -1221,7 +1249,7 @@ def test_foreground_delta_rolls_back_when_semantic_identity_changes_mid_replay(
     a.write_text(_page_text("a", "- [rule] candidate ^u1"), encoding="utf-8")
     _touch_future(a)
     freshness.on_files_changed(tmp_path, changed=[a])
-    delta = freshness.delta_since(tmp_path, "kb", before)
+    delta = freshness.recall_delta_since(tmp_path, "kb", before)
     real_apply_rows = store._apply_delta_rows
     state = {"flipped": False}
 
@@ -1263,12 +1291,12 @@ def test_foreground_delta_rejects_later_registered_generation(
     a.write_text(_page_text("a", "- [rule] target_b ^u1"), encoding="utf-8")
     _touch_future(a)
     freshness.on_files_changed(tmp_path, changed=[a])
-    delta_b = freshness.delta_since(tmp_path, "kb", before)
+    delta_b = freshness.recall_delta_since(tmp_path, "kb", before)
 
     a.write_text(_page_text("a", "- [design] later_c ^u1"), encoding="utf-8")
     _touch_future(a)
     freshness.on_files_changed(tmp_path, changed=[a])
-    assert freshness.consumer_checkpoint(tmp_path, "kb") != delta_b.to
+    assert freshness.recall_checkpoint(tmp_path, "kb") != delta_b.to
 
     with pytest.raises(ValueError, match="target"):
         store.apply_catalog_delta("kb", delta_b)
@@ -1295,8 +1323,8 @@ def test_foreground_delta_rejects_unobserved_source_drift_after_target(
     a.write_text(_page_text("a", "- [rule] target_b ^u1"), encoding="utf-8")
     _touch_future(a)
     freshness.on_files_changed(tmp_path, changed=[a])
-    delta_b = freshness.delta_since(tmp_path, "kb", before)
-    assert freshness.consumer_checkpoint(tmp_path, "kb") == delta_b.to
+    delta_b = freshness.recall_delta_since(tmp_path, "kb", before)
+    assert freshness.recall_checkpoint(tmp_path, "kb") == delta_b.to
 
     if unobserved_change == "edit":
         a.write_text(_page_text("a", "- [design] unobserved_c ^u1"), encoding="utf-8")

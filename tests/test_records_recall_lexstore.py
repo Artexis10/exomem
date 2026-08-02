@@ -3,6 +3,8 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
+import pytest
+
 from exomem import freshness, lexstore
 
 
@@ -120,3 +122,85 @@ def test_missing_projected_metadata_fails_closed_then_repair_converges(tmp_path:
     assert not store.catalog_readiness("kb", None).complete
     store.ensure_fresh()
     assert store.catalog_readiness("kb", None).complete
+
+
+def test_access_reprojection_applies_when_row_identity_is_unchanged(tmp_path: Path) -> None:
+    page = tmp_path / "Knowledge Base" / "Notes" / "page.md"
+    page.parent.mkdir(parents=True)
+    page.write_text("- [config] stable row ^config\n", encoding="utf-8")
+    entry = (str(page), freshness.stat_signature(page))
+    freshness.seed(tmp_path, "kb", [entry])
+    freshness.seed(tmp_path, "vault", [entry])
+    lexstore.ensure_fresh(tmp_path)
+    store = lexstore.get_store(tmp_path)
+    before = store.catalog_checkpoint("kb")
+    before_identity = lexstore.catalog_semantic_identity(tmp_path)
+
+    (tmp_path / "Knowledge Base" / "_access.yaml").write_text(
+        "readonly: []\n", encoding="utf-8"
+    )
+    target = freshness.recall_checkpoint(tmp_path, "kb")
+
+    assert target != before
+    assert lexstore.catalog_semantic_identity(tmp_path) == before_identity
+    assert store.catalog_readiness("kb", target.triple).complete
+    assert store.catalog_checkpoint("kb") == target
+    with sqlite3.connect(store.path) as conn:
+        assert conn.execute(
+            "SELECT category FROM semantic_units WHERE category = 'config'"
+        ).fetchall() == [("config",)]
+
+
+def test_access_reprojection_cannot_bless_rows_parsed_under_old_registry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An access change may patch membership, never launder stale parsed rows."""
+    kb = tmp_path / "Knowledge Base"
+    note = kb / "Notes" / "runtime.md"
+    note.parent.mkdir(parents=True)
+    note.write_text("- [runtime_configuration] old parse ^runtime\n", encoding="utf-8")
+    entry = (str(note), freshness.stat_signature(note))
+    freshness.seed(tmp_path, "kb", [entry])
+    freshness.seed(tmp_path, "vault", [entry])
+    lexstore.ensure_fresh(tmp_path)
+    store = lexstore.get_store(tmp_path)
+
+    with sqlite3.connect(store.path) as conn:
+        assert conn.execute(
+            "SELECT category FROM semantic_units WHERE category = 'runtime_configuration'"
+        ).fetchall() == [("runtime_configuration",)]
+
+    registry = kb / "_Schema" / "semantic-language-registry.yaml"
+    registry.parent.mkdir(parents=True)
+    registry.write_text(
+        "schema_version: 1\n"
+        "categories:\n"
+        "  config:\n"
+        "    description: Configuration facts\n"
+        "    aliases: [runtime_configuration]\n"
+        "kinds: {}\n",
+        encoding="utf-8",
+    )
+    # Change access identity in the same observation window without changing
+    # this note's eligibility. The projected delta is therefore complete and
+    # empty, but it cannot make the semantic-registry change safe to fast-patch.
+    (kb / "_access.yaml").write_text("readonly: []\n", encoding="utf-8")
+    target = freshness.recall_checkpoint(tmp_path, "kb")
+
+    scheduled: list[Path] = []
+    monkeypatch.setattr(lexstore, "_schedule_repair", scheduled.append)
+    readiness = store.catalog_readiness("kb", target.triple)
+
+    assert readiness.complete is False
+    assert readiness.status == "stale"
+    assert scheduled == [tmp_path]
+    with sqlite3.connect(store.path) as conn:
+        assert conn.execute(
+            "SELECT category FROM semantic_units WHERE category = 'runtime_configuration'"
+        ).fetchall() == [("runtime_configuration",)]
+
+    store.ensure_fresh()
+    with sqlite3.connect(store.path) as conn:
+        assert conn.execute(
+            "SELECT category FROM semantic_units WHERE category = 'config'"
+        ).fetchall() == [("config",)]

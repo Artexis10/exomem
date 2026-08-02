@@ -5,6 +5,78 @@ from pathlib import Path
 from exomem import freshness, recall_policy
 
 
+def test_seed_retries_projection_when_access_policy_changes_during_admission(
+    tmp_path: Path, monkeypatch
+) -> None:
+    page = tmp_path / "Knowledge Base" / "Notes" / "page.md"
+    page.parent.mkdir(parents=True)
+    page.write_text("page", encoding="utf-8")
+    state = {"fingerprint": "before", "switch": True}
+
+    monkeypatch.setattr(
+        recall_policy,
+        "recall_policy_identity",
+        lambda _root: ("test-policy", state["fingerprint"]),
+    )
+
+    def candidate(_root: Path, _path: Path) -> bool:
+        eligible = state["fingerprint"] == "before"
+        if state["switch"]:
+            state["fingerprint"] = "after"
+            state["switch"] = False
+        return eligible
+
+    monkeypatch.setattr(recall_policy, "is_recall_candidate", candidate)
+
+    freshness.seed(tmp_path, "kb", [(str(page), freshness.stat_signature(page))])
+
+    checkpoint = freshness.recall_checkpoint(tmp_path, "kb")
+    assert checkpoint.access_policy_fingerprint == "after"
+    assert freshness.live_recall_entries(tmp_path, "kb") == {}
+    assert checkpoint.triple == freshness.triple_from_entries(())
+    delta = freshness.recall_delta_since(tmp_path, "kb", checkpoint)
+    assert delta.complete
+    assert delta.to == checkpoint
+
+
+def test_reconcile_retries_projection_when_access_policy_changes_during_admission(
+    tmp_path: Path, monkeypatch
+) -> None:
+    page = tmp_path / "Knowledge Base" / "Notes" / "page.md"
+    page.parent.mkdir(parents=True)
+    page.write_text("page", encoding="utf-8")
+    state = {"fingerprint": "before", "switch": False}
+
+    monkeypatch.setattr(
+        recall_policy,
+        "recall_policy_identity",
+        lambda _root: ("test-policy", state["fingerprint"]),
+    )
+
+    def candidate(_root: Path, _path: Path) -> bool:
+        eligible = state["fingerprint"] == "before"
+        if state["switch"]:
+            state["fingerprint"] = "after"
+            state["switch"] = False
+        return eligible
+
+    monkeypatch.setattr(recall_policy, "is_recall_candidate", candidate)
+    entries = [(str(page), freshness.stat_signature(page))]
+    freshness.seed(tmp_path, "kb", entries)
+    before = freshness.recall_checkpoint(tmp_path, "kb")
+
+    state["switch"] = True
+    freshness.reconcile(tmp_path, "kb", entries)
+
+    checkpoint = freshness.recall_checkpoint(tmp_path, "kb")
+    assert checkpoint.access_policy_fingerprint == "after"
+    assert freshness.live_recall_entries(tmp_path, "kb") == {}
+    assert checkpoint.triple == freshness.triple_from_entries(())
+    delta = freshness.recall_delta_since(tmp_path, "kb", before)
+    assert not delta.complete
+    assert delta.to == checkpoint
+
+
 def test_live_recall_checkpoint_reuses_projected_map_without_rewalking(
     tmp_path: Path, monkeypatch
 ) -> None:

@@ -206,6 +206,102 @@ def test_live_witness_does_not_bless_later_preserved_mtime_replacement(tmp_path)
         freshness.clear()
 
 
+def test_bounded_upsert_witness_does_not_bless_event_during_preparation(tmp_path, monkeypatch):
+    """B changing while A is prepared cannot enter A's witness target."""
+    from exomem import freshness, recall_policy
+    from exomem import vault as vault_module
+
+    freshness.clear()
+    try:
+        a = _write_page(tmp_path, "Knowledge Base/a.md", "craggyapricotold")
+        b = _write_page(tmp_path, "Knowledge Base/b.md", "plumfizzstale")
+        assert lexstore.search_bm25(tmp_path, "plumfizzstale", k=3, scope="kb")
+
+        kb_dir = tmp_path / "Knowledge Base"
+        freshness.seed(
+            tmp_path,
+            "kb",
+            ((str(p), freshness.stat_signature(p)) for p in find_module._walk_md(kb_dir)),
+        )
+        freshness.seed(
+            tmp_path,
+            "vault",
+            ((str(p), freshness.stat_signature(p)) for p in vault_module.walk_vault_md(tmp_path)),
+        )
+
+        _write_page(tmp_path, "Knowledge Base/a.md", "craggyapricotnew")
+        freshness.on_files_changed(tmp_path, changed=[a])
+        store = lexstore.get_store(tmp_path)
+        candidate = recall_policy.is_recall_candidate
+        fired = False
+
+        def _interleave_b(vault_root, path):
+            nonlocal fired
+            allowed = candidate(vault_root, path)
+            if not fired and Path(path) == a:
+                fired = True
+                before = b.stat()
+                _write_page(tmp_path, "Knowledge Base/b.md", "plumfizzfresh")
+                os.utime(b, ns=(before.st_atime_ns, before.st_mtime_ns))
+                freshness.on_files_changed(tmp_path, changed=[b])
+            return allowed
+
+        monkeypatch.setattr(recall_policy, "is_recall_candidate", _interleave_b)
+        assert store.upsert_paths([a])
+        assert fired
+
+        hits = lexstore.search_bm25(tmp_path, "plumfizzfresh", k=3, scope="kb")
+        assert hits and hits[0][0] == "Knowledge Base/b.md"
+        assert lexstore.search_bm25(tmp_path, "plumfizzstale", k=3, scope="kb") == []
+    finally:
+        freshness.clear()
+
+
+def test_bounded_delete_witness_does_not_bless_interleaved_live_event(tmp_path, monkeypatch):
+    """The delete seam uses the same exact-checkpoint witness rule as upsert."""
+    from exomem import freshness
+    from exomem import vault as vault_module
+
+    freshness.clear()
+    try:
+        a = _write_page(tmp_path, "Knowledge Base/a.md", "mossyquartzold")
+        b = _write_page(tmp_path, "Knowledge Base/b.md", "nectarspinstale")
+        assert lexstore.search_bm25(tmp_path, "nectarspinstale", k=3, scope="kb")
+
+        kb_dir = tmp_path / "Knowledge Base"
+        freshness.seed(
+            tmp_path,
+            "kb",
+            ((str(p), freshness.stat_signature(p)) for p in find_module._walk_md(kb_dir)),
+        )
+        freshness.seed(
+            tmp_path,
+            "vault",
+            ((str(p), freshness.stat_signature(p)) for p in vault_module.walk_vault_md(tmp_path)),
+        )
+
+        a.unlink()
+        freshness.on_files_changed(tmp_path, deleted=[a])
+        store = lexstore.get_store(tmp_path)
+        remember = store._remember_live_witnesses
+
+        def _interleave_b(*args, **kwargs):
+            before = b.stat()
+            _write_page(tmp_path, "Knowledge Base/b.md", "nectarspinfresh")
+            os.utime(b, ns=(before.st_atime_ns, before.st_mtime_ns))
+            freshness.on_files_changed(tmp_path, changed=[b])
+            remember(*args, **kwargs)
+
+        monkeypatch.setattr(store, "_remember_live_witnesses", _interleave_b)
+        assert store.delete_rel_paths(["Knowledge Base/a.md"])
+
+        hits = lexstore.search_bm25(tmp_path, "nectarspinfresh", k=3, scope="kb")
+        assert hits and hits[0][0] == "Knowledge Base/b.md"
+        assert lexstore.search_bm25(tmp_path, "nectarspinstale", k=3, scope="kb") == []
+    finally:
+        freshness.clear()
+
+
 def test_restart_with_no_changes_skips_the_walk_verify(tmp_path):
     """Steady state across restarts: the meta-blessed triple lets a fresh
     store trust the sidecar without an exact verify (no rebuild)."""
