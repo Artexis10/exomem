@@ -75,3 +75,4 @@ infra/provisioner/.pytest_cache/
 infra/provisioner/*.sqlite*
 .refs.sqlite
 .lexical.sqlite*
+snapshot_report.html

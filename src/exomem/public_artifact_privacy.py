@@ -173,6 +173,11 @@ _TEXT_SUFFIXES = frozenset(
         ".ps1",
         ".py",
         ".pyi",
+        # Terminal-UI snapshot goldens: pytest-textual-snapshot writes SVG
+        # under a .raw name. They are exactly the artifacts most able to leak a
+        # host path, so they are scanned as the text they are rather than
+        # waved through as an opaque binary format.
+        ".raw",
         ".rst",
         ".rego",
         ".service",
