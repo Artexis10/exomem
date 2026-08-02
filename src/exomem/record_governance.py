@@ -126,8 +126,8 @@ class _LinkProjector:
                     return False
                 try:
                     target = memory_refs.resolve_identifier_read_only(self.root, raw)
-                except memory_refs.ReferenceError as error:
-                    return self._remember(f"memory:{identity}", error.code == "REFERENCE_NOT_FOUND")
+                except memory_refs.ReferenceError:
+                    return self._remember(f"memory:{identity}", False)
             elif raw.lower().startswith(("exomem://vault/", "exomem://source/")):
                 target = memory_refs.resolve_identifier_read_only(self.root, raw)
             elif (match := re.fullmatch(r"\[\[([^\[\]]+)\]\]", raw)) is not None:
@@ -169,7 +169,7 @@ class _LinkProjector:
                 vault.PathGuard.capture(self.root, relative, leaf_policy="absent")
             except (vault.VaultPathError, vault.PathGuardError):
                 return False
-            return self._remember(f"forward:{relative}", True)
+            return self._remember(f"forward:{relative}", False)
         except (memory_refs.ReferenceError, vault.PathGuardError):
             return False
         if relative in self.verdicts:
@@ -194,7 +194,7 @@ def resolve_collection(
 ) -> collections.CollectionManifest:
     """Resolve only a fully released manifest, treating every other case as absent."""
     root = Path(vault_root)
-    with egress.disclosure_boundary(root, "record_resolve") as collector:
+    with egress.disclosure_boundary(root, "record_resolve", join_existing=True) as collector:
         manifest = _resolve_released_collection(root, selector, receipt=True)
         egress.emit_boundary_receipt(collector)
         return manifest
@@ -231,7 +231,7 @@ def query_collection(
 ) -> record_formats.RecordQueryResult:
     """Query released Records only; authorization happens before adapter parsing."""
     root = Path(vault_root)
-    with egress.disclosure_boundary(root, "record_query") as collector:
+    with egress.disclosure_boundary(root, "record_query", join_existing=True) as collector:
         manifest = _resolve_released_collection(root, collection, receipt=True)
         if not _authorize(
             root, manifest.storage.source, receipt=True
@@ -776,16 +776,17 @@ def _project_plan_link(
             return None
     else:
         return None
-    if target is not None:
-        try:
-            _path, target = cast(
-                tuple[Path, str],
-                vault.resolve_under_vault(root, target, must_exist=True, must_be_file=True),
-            )
-        except vault.VaultPathError:
-            return None
-        if not _authorize(root, target, receipt=True):
-            return None
+    if target is None:
+        return None
+    try:
+        _path, target = cast(
+            tuple[Path, str],
+            vault.resolve_under_vault(root, target, must_exist=True, must_be_file=True),
+        )
+    except vault.VaultPathError:
+        return None
+    if not _authorize(root, target, receipt=True):
+        return None
     query = _project_manifest_query(root, manifest, plan.query, links=links)
     return {"reference": reference, "query": query} if query is not None else None
 
@@ -843,7 +844,7 @@ def project_manifest(
 ) -> dict[str, Any]:
     """Project a manifest only after every returned template target is released."""
     root = Path(vault_root)
-    with egress.disclosure_boundary(root, "record_manifest") as collector:
+    with egress.disclosure_boundary(root, "record_manifest", join_existing=True) as collector:
         manifest = _resolve_released_collection(root, collection, receipt=True)
         if not _authorize(root, manifest.storage.source, receipt=True) or any(
             not _authorize(root, template.path, receipt=True) for template in manifest.templates
@@ -890,7 +891,7 @@ def read_template(
 ) -> bytes:
     """Return an explicitly declared template only after its L6 path decision."""
     root = Path(vault_root)
-    with egress.disclosure_boundary(root, "record_template") as collector:
+    with egress.disclosure_boundary(root, "record_template", join_existing=True) as collector:
         manifest = _resolve_released_collection(root, collection, receipt=True)
         declared = {template.path for template in manifest.templates}
         if (

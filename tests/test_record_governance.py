@@ -314,7 +314,7 @@ def test_query_projection_accepts_manifest_declared_expanded_child_fields(tmp_pa
     assert projected["rows"] == result.rows
 
 
-def test_manifest_projector_round_trips_opaque_plan_descriptor_without_resolution(
+def test_manifest_projector_omits_unresolved_plan_descriptor(
     tmp_path: Path,
 ) -> None:
     fixture = copy_vehicle_maintenance_fixture(tmp_path)
@@ -343,12 +343,7 @@ One ordinary""",
     projected = record_governance.project_manifest(tmp_path, manifest)
 
     assert projected["collection_id"] == manifest.collection_id
-    assert projected["plans"] == [
-        {
-            "reference": "exomem://memory/99f6fa8b-5d6e-43f8-8cdf-e30767e8f4d7",
-            "query": {"limit": 12},
-        }
-    ]
+    assert projected["plans"] == []
     assert "rows" not in projected
 
     _write_l6_rule(tmp_path, ceiling=6, paths="Records/**")
@@ -452,12 +447,7 @@ One ordinary""",
     assert projected["templates"] == [
         {"path": manifest.templates[0].path, "default_properties": {"provider": "Northside Garage"}}
     ]
-    assert projected["plans"] == [
-        {
-            "reference": "exomem://memory/99f6fa8b-5d6e-43f8-8cdf-e30767e8f4d7",
-            "query": {"limit": 12},
-        }
-    ]
+    assert projected["plans"] == []
     assert projected["views"] == {
         "current": {"query": {"filters": {"status": "completed"}, "limit": 12}},
         "latest": {"sort": ["occurred_on", "desc"]},
@@ -527,7 +517,7 @@ def test_manifest_projection_requires_l6_for_source_and_templates(tmp_path: Path
     assert raised.value.code == "COLLECTION_NOT_FOUND"
 
 
-def test_schema_link_projection_handles_anchors_forward_refs_and_hidden_targets(tmp_path: Path) -> None:
+def test_schema_link_projection_omits_anchors_missing_and_hidden_targets(tmp_path: Path) -> None:
     fixture = copy_vehicle_maintenance_fixture(tmp_path)
     manifest = collections.load_manifest(tmp_path, fixture / "_collection.md")
     secret = tmp_path / "Knowledge Base" / "Evidence" / "Secret.md"
@@ -546,7 +536,7 @@ def test_schema_link_projection_handles_anchors_forward_refs_and_hidden_targets(
             },
         )
 
-    assert projected == {"receipt": "[[Future evidence]]"}
+    assert projected == {}
 
 
 def test_schema_link_projection_supports_exact_paths_and_caches_normalized_targets(
@@ -586,8 +576,35 @@ def test_schema_link_projection_supports_exact_paths_and_caches_normalized_targe
             },
         )
 
-    assert projected == {"services": ["Knowledge Base/Evidence/Future.md"]}
+    assert projected == {}
     assert calls.count("Knowledge Base/Evidence/Secret.md") == 1
+
+
+def test_missing_and_withheld_link_targets_have_identical_public_query_state(tmp_path: Path) -> None:
+    fixture = copy_vehicle_maintenance_fixture(tmp_path)
+    manifest = collections.load_manifest(tmp_path, fixture / "_collection.md")
+    target = tmp_path / "Knowledge Base" / "Assets" / "Vehicle.md"
+    _write_l6_rule(tmp_path, ceiling=6, paths="Records/**")
+
+    with request_scope(RequestPrincipal(audience_id=EXTERNAL, surface="mcp")):
+        missing = record_governance.query_collection(
+            tmp_path, manifest, limit=1, sort_by="occurred_on"
+        )
+    target.parent.mkdir(parents=True)
+    target.write_text("withheld", encoding="utf-8")
+    _write_l0_rule(tmp_path, name="blocked", paths="Assets/**")
+    with request_scope(RequestPrincipal(audience_id=EXTERNAL, surface="mcp")):
+        withheld = record_governance.query_collection(
+            tmp_path, manifest, limit=1, sort_by="occurred_on"
+        )
+
+    assert (missing.rows, missing.returned, missing.total_matched, missing.snapshot, missing.continuation) == (
+        withheld.rows,
+        withheld.returned,
+        withheld.total_matched,
+        withheld.snapshot,
+        withheld.continuation,
+    )
 
 
 def test_precommit_refusal_leaves_canonical_and_manifest_unchanged(
@@ -797,6 +814,49 @@ def test_governed_append_emits_one_disclosure_receipt_at_precommit_only(tmp_path
     }
 
 
+def test_governed_append_persists_receipt_before_publication(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fixture = copy_vehicle_maintenance_fixture(tmp_path)
+    (tmp_path / "Knowledge Base" / "log.md").write_text("# Activity\n", encoding="utf-8")
+    manifest = collections.load_manifest(tmp_path, fixture / "_collection.md")
+    _write_l6_rule(tmp_path, ceiling=6, paths="Records/**")
+    order: list[str] = []
+    append_event = egress.receipts.append_event
+    publish = records.vault.batch_atomic_write
+
+    def receipt(*args: object, **kwargs: object) -> None:
+        order.append("receipt")
+        append_event(*args, **kwargs)
+
+    def publication(*args: object, **kwargs: object) -> object:
+        order.append("publish")
+        return publish(*args, **kwargs)
+
+    monkeypatch.setattr(egress.receipts, "append_event", receipt)
+    monkeypatch.setattr(records.vault, "batch_atomic_write", publication)
+    with request_scope(RequestPrincipal(audience_id=EXTERNAL, surface="mcp")):
+        records.append_record(
+            tmp_path,
+            manifest,
+            item={
+                "occurred_on": "2026-07-01",
+                "asset": "[[Assets/Vehicle]]",
+                "odometer": 46000,
+                "provider": "Workshop",
+                "services": ["oil"],
+                "amount": 20,
+                "currency": "GBP",
+                "status": "completed",
+                "next_due_on": None,
+                "next_due_odometer": None,
+            },
+            why="receipt precedes publication",
+        )
+
+    assert order == ["receipt", "publish"]
+
+
 @pytest.mark.parametrize("operation", ("resolve", "query", "manifest", "template"))
 def test_governed_public_records_operations_emit_one_receipt(
     tmp_path: Path, operation: str
@@ -857,7 +917,7 @@ def test_disclosure_boundary_rejects_a_nested_different_vault(tmp_path: Path) ->
     other = tmp_path / "other"
     with egress.disclosure_boundary(tmp_path, "outer"):
         with pytest.raises(RuntimeError, match="different vault"):
-            with egress.disclosure_boundary(other, "inner"):
+            with egress.disclosure_boundary(other, "inner", join_existing=True):
                 pass
 
 
@@ -1092,7 +1152,9 @@ def test_receipt_publication_failure_prevents_append_publication(
         raise receipts.ReceiptError("simulated receipt outage")
 
     monkeypatch.setattr(egress.receipts, "append_event", receipt_failure)
-    with request_scope(RequestPrincipal(audience_id=EXTERNAL, surface="mcp")):
+    with request_scope(RequestPrincipal(audience_id=EXTERNAL, surface="mcp")), egress.disclosure_boundary(
+        tmp_path, "ambient"
+    ):
         with pytest.raises(egress.ReceiptUnavailableError):
             records.append_record(
                 tmp_path,

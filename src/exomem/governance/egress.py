@@ -106,14 +106,18 @@ _DISCLOSURE_BOUNDARY_OWNERS: ContextVar[tuple[bool, ...]] = ContextVar(
 
 
 @contextmanager
-def disclosure_boundary(vault_root: Path, command_name: str):
-    """Collect one top-level read's decisions and emit only on its success."""
+def disclosure_boundary(vault_root: Path, command_name: str, *, join_existing: bool = False):
+    """Collect one command's decisions and emit only on its success.
+
+    Nested commands own separate receipts unless their caller explicitly opts
+    into the active command's same-vault collector.
+    """
     existing = _collector()
     root = Path(vault_root)
-    if existing is not None and existing.vault_root != root:
+    if join_existing and existing is not None and existing.vault_root != root:
         raise RuntimeError("nested disclosure boundary cannot use a different vault")
-    owns_collector = existing is None
-    collector = existing or DisclosureCollector(root, uuid.uuid4().hex, command_name)
+    owns_collector = not (join_existing and existing is not None)
+    collector = existing if not owns_collector else DisclosureCollector(root, uuid.uuid4().hex, command_name)
     token = _DISCLOSURE_COLLECTOR.set(collector) if owns_collector else None
     owners = _DISCLOSURE_BOUNDARY_OWNERS.set(
         (*_DISCLOSURE_BOUNDARY_OWNERS.get(), owns_collector)

@@ -847,8 +847,12 @@ def _genuinely_absent_collection_path(root: Path, raw: str) -> bool:
     """Recognize only a safe, missing leaf as an absent collection selector."""
     candidate = Path(raw)
     if candidate.is_absolute():
-        return False
-    normalized = raw.replace("\\", "/")
+        try:
+            normalized = candidate.relative_to(root).as_posix()
+        except ValueError:
+            return False
+    else:
+        normalized = raw.replace("\\", "/")
     if not normalized.startswith(f"{vault.kb_dirname()}/") or _unsafe_relative(normalized):
         return False
     current = root

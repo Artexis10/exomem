@@ -113,10 +113,11 @@ def test_resolve_keeps_unsafe_collection_filesystem_forms_distinct_from_absence(
         except OSError:
             pytest.skip("symlinks/reparse points are unavailable")
 
-    with pytest.raises(collections.CollectionError) as excinfo:
-        collections.resolve_collection(vault, target.relative_to(vault))
+    for selector in (target.relative_to(vault), target):
+        with pytest.raises(collections.CollectionError) as excinfo:
+            collections.resolve_collection(vault, selector)
 
-    assert excinfo.value.code == "INVALID_COLLECTION_PATH"
+        assert excinfo.value.code == "INVALID_COLLECTION_PATH"
 
 
 def test_resolve_normalizes_safe_absence_like_an_authorized_withheld_selector(tmp_path: Path) -> None:
@@ -126,10 +127,27 @@ def test_resolve_normalizes_safe_absence_like_an_authorized_withheld_selector(tm
 
     with pytest.raises(collections.CollectionError) as absent:
         collections.resolve_collection(vault, missing)
+    with pytest.raises(collections.CollectionError) as absolute_absent:
+        collections.resolve_collection(vault, vault / missing)
     with pytest.raises(collections.CollectionError) as withheld:
         collections.resolve_collection(vault, existing.relative_to(vault), authorize_path=lambda _path: False)
 
     assert (absent.value.code, absent.value.reason) == (withheld.value.code, withheld.value.reason)
+    assert (absolute_absent.value.code, absolute_absent.value.reason) == (
+        withheld.value.code,
+        withheld.value.reason,
+    )
+
+
+@pytest.mark.parametrize("target", ("outside/_collection.md", "Knowledge Base/../outside/_collection.md"))
+def test_resolve_rejects_unsafe_absolute_collection_selectors(tmp_path: Path, target: str) -> None:
+    vault = tmp_path / "vault"
+    candidate = tmp_path / target
+
+    with pytest.raises(collections.CollectionError) as excinfo:
+        collections.resolve_collection(vault, candidate)
+
+    assert excinfo.value.code == "INVALID_COLLECTION_PATH"
 
 
 def test_discovery_stops_after_cap_plus_one_candidates(
