@@ -622,6 +622,7 @@ class PathGuard:
         *,
         leaf_policy: Literal["absent", "stable", "content"],
         expected_content_hash: str | None = None,
+        expected_content_size: int | None = None,
     ) -> PathGuard:
         parts = _safe_guard_target(target)
         if leaf_policy not in {"absent", "stable", "content"}:
@@ -632,6 +633,14 @@ class PathGuard:
             raise PathGuardError("PATH_GUARD_INVALID", "content guard requires a lowercase SHA-256")
         if leaf_policy != "content" and expected_content_hash is not None:
             raise PathGuardError("PATH_GUARD_INVALID", "content hash requires content leaf policy")
+        if expected_content_size is not None and (
+            leaf_policy != "content"
+            or type(expected_content_size) is not int
+            or expected_content_size < 0
+        ):
+            raise PathGuardError(
+                "PATH_GUARD_INVALID", "content size requires a content leaf policy"
+            )
         root = Path(vault_root)
         try:
             root_info = root.lstat()
@@ -687,6 +696,7 @@ class PathGuard:
             leaf_policy,
             expected_content_hash,
         )
+        object.__setattr__(guard, "expected_content_size", expected_content_size)
         guard.recheck(root)
         return guard
 
@@ -703,6 +713,7 @@ class PathGuard:
             self.target,
             leaf_policy=self.leaf_policy,
             expected_content_hash=self.expected_content_hash,
+            expected_content_size=self.expected_content_size,
         )
 
     def recheck(self, vault_root: Path) -> None:
@@ -2474,8 +2485,8 @@ def _prepare_path_guards(
                 guard.target,
                 leaf_policy=guard.leaf_policy,
                 expected_content_hash=guard.expected_content_hash,
+                expected_content_size=guard.expected_content_size,
             )
-            object.__setattr__(rebound, "expected_content_size", guard.expected_content_size)
             prepared.append(rebound)
         return tuple(prepared)
     except BaseException:

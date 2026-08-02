@@ -170,7 +170,7 @@ def test_compact_record_receipt_uses_the_content_free_whitelist() -> None:
     assert "values" not in projected
 
 
-def test_compact_record_receipt_accepts_manifest_only_create_without_audit_claim() -> None:
+def test_compact_record_receipt_rejects_manifest_only_create_without_audit_claim() -> None:
     mutation_terminal = _terminal_module()
     raw = {
         "_record_receipt": "exomem.records-mutation",
@@ -197,8 +197,7 @@ def test_compact_record_receipt_accepts_manifest_only_create_without_audit_claim
         )
     )
 
-    assert projected["collection_id"] == raw["collection_id"]
-    assert projected["audit_correlation"] is None
+    assert "collection_id" not in projected
 
 
 @pytest.mark.parametrize("operation", ["append", "update"])

@@ -330,12 +330,16 @@ item_schema:
 
     assert result["outcome"] == "committed"
     assert (tmp_path / manifest_path).is_file()
-    assert (tmp_path / "Knowledge Base/Records/New/Events").is_dir()
+    source = tmp_path / "Knowledge Base/Records/New/Events"
+    assert source.is_dir()
+    assert records.inspect_audit_gap(tmp_path, manifest_path) == {"status": "ok", "gaps": []}
+    source.rmdir()
+    assert records.inspect_audit_gap(tmp_path, manifest_path)["status"] == "gap"
     with pytest.raises(collections.CollectionError, match="CREATE_ONLY_CONFLICT"):
         records.create_collection(tmp_path, manifest_path, manifest, why="retry creation")
 
 
-def test_create_collection_without_scaffold_is_an_honest_manifest_only_baseline(
+def test_create_collection_without_scaffold_has_an_audited_absent_source_state(
     tmp_path: Path,
 ) -> None:
     from exomem import records
@@ -368,10 +372,40 @@ item_schema:
     )
 
     created = tmp_path / manifest_path
-    assert result["audit_correlation"] is None
-    assert "record_audit:" not in created.read_text(encoding="utf-8")
+    assert result["audit_correlation"] is not None
+    assert result["after_container_hash"] is not None
+    assert "record_audit:" in created.read_text(encoding="utf-8")
     assert not (created.parent / "Events").exists()
-    assert records.inspect_audit_gap(tmp_path, manifest_path) == {"status": "baseline", "gaps": []}
+    assert records.inspect_audit_gap(tmp_path, manifest_path) == {"status": "ok", "gaps": []}
+    (created.parent / "Events").mkdir()
+    assert records.inspect_audit_gap(tmp_path, manifest_path)["status"] == "gap"
+
+
+def test_create_unscaffolded_markdown_log_has_an_audited_absent_source_state(
+    tmp_path: Path,
+) -> None:
+    from exomem import records
+
+    fixture = copy_x3_fixture(tmp_path)
+    _activity_log(tmp_path)
+    manifest = (
+        (fixture / "_collection.md")
+        .read_text(encoding="utf-8")
+        .replace("9ba8d1cf-d1e7-4309-95ae-cb28d7a6eea8", "56565656-5656-4565-8565-565656565656")
+    )
+    manifest_path = "Knowledge Base/Records/Log Only/_collection.md"
+
+    result = records.create_collection(
+        tmp_path, manifest_path, manifest, why="create only the log contract", scaffold=False
+    )
+
+    source = tmp_path / "Knowledge Base/Records/Log Only/Training Log.md"
+    assert result["audit_correlation"] is not None
+    assert result["after_container_hash"] is not None
+    assert not source.exists()
+    assert records.inspect_audit_gap(tmp_path, manifest_path) == {"status": "ok", "gaps": []}
+    source.write_text("manual source\n", encoding="utf-8")
+    assert records.inspect_audit_gap(tmp_path, manifest_path)["status"] == "gap"
 
 
 def test_append_preserves_committed_batch_publication_state(

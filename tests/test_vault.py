@@ -138,14 +138,23 @@ def test_path_guards_share_new_parent_chain_safely(tmp_path: Path) -> None:
     assert [path.read_text(encoding="utf-8") for path in paths] == ["one", "two"]
 
 
-def test_preparing_a_bounded_content_guard_preserves_its_read_limit(tmp_path: Path) -> None:
+def test_preparing_a_bounded_content_guard_preserves_its_read_limit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     target = tmp_path / "guarded.md"
     target.write_bytes(b"bounded bytes")
     _data, guard = vault.read_bounded_guarded_bytes(tmp_path, "guarded.md", limit=64)
 
+    def unbounded_hash(*_args, **_kwargs):
+        raise AssertionError("bounded guard must not use _leaf_hash")
+
+    monkeypatch.setattr(vault, "_leaf_hash", unbounded_hash)
     prepared = vault._prepare_path_guards(tmp_path, (guard,))
 
     assert prepared[0].expected_content_size == len(b"bounded bytes")
+    target.write_bytes(b"bounded bytes grew")
+    with pytest.raises(vault.PathGuardError, match="PATH_GUARD"):
+        prepared[0].recheck(tmp_path)
 
 
 def test_batch_write_refuses_portably_colliding_destinations(tmp_path: Path) -> None:

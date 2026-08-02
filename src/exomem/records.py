@@ -399,44 +399,6 @@ def create_collection(
                 "INVALID_COLLECTION_MANIFEST", "manifest must be _collection.md"
             )
         collections.parse_manifest_bytes(root, path, manifest_text.encode("utf-8"))
-        if not scaffold:
-            manifest = collections.parse_manifest_bytes(root, path, manifest_text.encode("utf-8"))
-            source = root / manifest.storage.source
-            _assert_portable_absent(root, source)
-            if source.exists() or _casefold_alias(source):
-                raise collections.CollectionError(
-                    "CREATE_ONLY_CONFLICT", "canonical source already exists"
-                )
-            source_guard = vault.PathGuard.capture(
-                root, manifest.storage.source, leaf_policy="absent"
-            )
-            try:
-                vault.batch_atomic_write(
-                    [
-                        vault.PlannedWrite(
-                            path, manifest_text, create_only=True, guard=manifest_guard
-                        )
-                    ],
-                    vault_root=root,
-                    required_guards=(*_portable_absence_guards(root, path, source), source_guard),
-                )
-            except vault.BatchWriteError:
-                raise
-            except (vault.PathGuardError, vault.CreateOnlyConflict, OSError, ValueError) as error:
-                raise _publication_error(error) from error
-            return _result(
-                operation="create",
-                manifest=manifest,
-                key=None,
-                before_item_hash=None,
-                after_item_hash=None,
-                before_container_hash=None,
-                after_container_hash=None,
-                affected_paths=[manifest.path],
-                payload_hash=None,
-                outcome="committed",
-                audit_correlation=None,
-            )
         _require_activity_log(root)
         audit_correlation = _transition_id()
         marked_manifest_text = record_formats.render_manifest_audit_head(
@@ -463,6 +425,7 @@ def create_collection(
             )
         ]
         affected = [manifest.path]
+        source_guard = None
         if scaffold and manifest.storage.strategy == "markdown-log":
             title = manifest.storage.descriptor["section"]["title"]
             level = manifest.storage.descriptor["section"]["level"]
@@ -477,7 +440,14 @@ def create_collection(
             affected.append(manifest.storage.source)
         elif scaffold and manifest.storage.strategy == "markdown-items":
             affected.append(manifest.storage.source)
-        if scaffold and manifest.storage.strategy == "markdown-log":
+        else:
+            source_guard = vault.PathGuard.capture(
+                root, manifest.storage.source, leaf_policy="absent"
+            )
+        if not scaffold or manifest.storage.strategy == "dataset":
+            after_item_hash = None
+            after_container_hash = _absent_source_container_hash(manifest)
+        elif manifest.storage.strategy == "markdown-log":
             after_item_hash = hashlib.sha256(
                 f"{'#' * manifest.storage.descriptor['section']['level']} {manifest.storage.descriptor['section']['title']}\n".encode()
             ).hexdigest()
@@ -509,7 +479,10 @@ def create_collection(
             vault.batch_atomic_write(
                 [*writes, *log_plan.writes],
                 vault_root=root,
-                required_guards=_portable_absence_guards(root, path, source),
+                required_guards=(
+                    *_portable_absence_guards(root, path, source),
+                    *((source_guard,) if source_guard is not None else ()),
+                ),
             )
         except vault.BatchWriteError:
             raise
@@ -556,29 +529,34 @@ def inspect_audit_gap(
     try:
         snapshot = record_formats.load_adapter(root, manifest).read()
     except collections.CollectionError:
-        if head is not None:
-            return {"status": "gap", "gaps": ["canonical-source-unavailable"]}
-        events, complete = _audit_events(root, history_guard=history_guard)
-        if complete and not any(
-            event.get("collection_id") == manifest.collection_id for event in events
-        ):
-            return {"status": "baseline", "gaps": []}
-        return {"status": "history_incomplete", "gaps": []}
-    current_hash = (
-        snapshot.source_versions[-1].hash
-        if manifest.storage.strategy == "markdown-log"
-        else snapshot.snapshot
-    )
-    try:
-        for path_guard in snapshot.path_guards:
-            path_guard.recheck(root)
-        for directory_guard in snapshot.directory_guards:
-            directory_guard.recheck(root)
-    except vault.PathGuardError:
-        return {"status": "history_incomplete", "gaps": []}
-    markers = _audit_markers(root, manifest, snapshot)
-    if markers is None:
-        return {"status": "history_incomplete", "gaps": []}
+        try:
+            vault.PathGuard.capture(root, manifest.storage.source, leaf_policy="absent")
+        except vault.PathGuardError:
+            return {
+                "status": "gap" if head is not None else "history_incomplete",
+                "gaps": ["canonical-source-unavailable"] if head is not None else [],
+            }
+        snapshot = None
+        current_hash = _absent_source_container_hash(manifest)
+        markers: tuple[_AuditMarker, ...] = ()
+    else:
+        assert snapshot is not None
+        current_hash = (
+            snapshot.source_versions[-1].hash
+            if manifest.storage.strategy == "markdown-log"
+            else snapshot.snapshot
+        )
+        try:
+            for path_guard in snapshot.path_guards:
+                path_guard.recheck(root)
+            for directory_guard in snapshot.directory_guards:
+                directory_guard.recheck(root)
+        except vault.PathGuardError:
+            return {"status": "history_incomplete", "gaps": []}
+        snapshot_markers = _audit_markers(root, manifest, snapshot)
+        if snapshot_markers is None:
+            return {"status": "history_incomplete", "gaps": []}
+        markers = snapshot_markers
     events, complete = _audit_events(root, history_guard=history_guard)
     relevant = [event for event in events if event.get("collection_id") == manifest.collection_id]
     if head is None and not markers and not relevant:
@@ -1368,6 +1346,20 @@ def _empty_items_container_hash(manifest: collections.CollectionManifest) -> str
             [
                 (manifest.manifest_version.path, manifest.manifest_version.hash),
                 (f"directory:{manifest.storage.source}", ""),
+            ],
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _absent_source_container_hash(manifest: collections.CollectionManifest) -> str:
+    """Bind a create transition to a deliberately absent declared source."""
+    return hashlib.sha256(
+        json.dumps(
+            [
+                (manifest.manifest_version.path, manifest.manifest_version.hash),
+                ("absent-source", manifest.storage.strategy, manifest.storage.source),
             ],
             separators=(",", ":"),
             ensure_ascii=False,

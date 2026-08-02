@@ -180,7 +180,6 @@ def _is_record_receipt(value: Any) -> bool:
         return False
     outcome = value.get("outcome")
     correlation = value.get("audit_correlation")
-    manifest_only_create = operation == "create" and correlation is None
     if operation == "create":
         if (
             value.get("item_key") is not None
@@ -191,8 +190,7 @@ def _is_record_receipt(value: Any) -> bool:
             )
             or value.get("before_container_hash") is not None
             or value.get("payload_hash") is not None
-            or (not manifest_only_create and not _hash(value.get("after_container_hash")))
-            or (manifest_only_create and value.get("after_container_hash") is not None)
+            or not _hash(value.get("after_container_hash"))
         ):
             return False
     elif not _normalized_uuid(value.get("item_key")):
@@ -211,7 +209,7 @@ def _is_record_receipt(value: Any) -> bool:
             or any(character not in "0123456789abcdef" for character in hash_value)
         ):
             return False
-    if not manifest_only_create and not (
+    if not (
         isinstance(correlation, str)
         and len(correlation) == 24
         and all(character in "0123456789abcdef" for character in correlation)
