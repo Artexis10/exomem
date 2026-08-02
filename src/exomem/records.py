@@ -11,6 +11,7 @@ import stat
 import unicodedata
 import uuid
 from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +24,14 @@ _MAX_ITEM_FILES = 2_000
 _SYSTEM_FIELDS = frozenset({"type", "collection_id", "record_id", "schema_version", "item_version"})
 _RECEIPT_MARKER = "exomem.records-mutation"
 _RECEIPT_VERSION = 1
+_AUDIT_MARKER = re.compile(r"exomem-record-audit:\s*([0-9a-f]{24})")
+
+
+@dataclass(frozen=True, slots=True)
+class _AuditMarker:
+    transition_id: str
+    canonical_path: str
+    item_key: str
 
 
 def append_record(
@@ -95,7 +104,7 @@ def append_record(
                     affected_paths=[existing[0].source.path],
                     payload_hash=payload_hash,
                     outcome="replayed",
-                    audit_correlation=None,
+                    audit_correlation=_record_audit_correlation(root, manifest, existing[0]),
                 )
             raise collections.CollectionError(
                 "RECORD_ID_CONFLICT", "record ID already has different data"
@@ -477,7 +486,7 @@ def inspect_audit_gap(
     """Report, without repair, whether current bytes prove an audit transition chain."""
     root = Path(vault_root)
     manifest = _resolve_outside(root, collection)
-    head = _manifest_audit_head((root / manifest.path).read_text(encoding="utf-8"))
+    head = _manifest_audit_head((root / manifest.path).read_text(encoding="utf-8-sig"))
     try:
         snapshot = record_formats.load_adapter(root, manifest).read()
     except collections.CollectionError:
@@ -495,7 +504,10 @@ def inspect_audit_gap(
     if head is None and not markers and not relevant:
         return {"status": "baseline" if complete else "history_incomplete", "gaps": []}
     if not complete:
-        return {"status": "history_incomplete", "gaps": sorted(markers)[:32]}
+        return {
+            "status": "history_incomplete",
+            "gaps": sorted(marker.transition_id for marker in markers)[:32],
+        }
     by_id: dict[str, dict[str, Any]] = {}
     gaps: list[str] = []
     for event in relevant:
@@ -505,12 +517,21 @@ def inspect_audit_gap(
             by_id[transition] = event
         elif old != event:
             gaps.append("conflicting-transition:" + transition)
+    children: dict[str, set[str]] = {}
+    for event in by_id.values():
+        children.setdefault(event["parent_id"], set()).add(event["transition_id"])
+    for fork_parent, transition_ids in children.items():
+        if len(transition_ids) > 1:
+            gaps.append("transition-fork:" + fork_parent)
+    reachable: set[str] = set()
     if head is None:
         gaps.append("missing-manifest-head")
     current = by_id.get(head or "")
     if current is None:
         gaps.append("missing-head-event")
     else:
+        if not _event_matches_collection(current, manifest):
+            gaps.append("head-collection-mismatch")
         if current["after_container_hash"] != current_hash:
             gaps.append("current-container-mismatch")
         if current["after_manifest_hash"] != manifest.manifest_version.hash:
@@ -518,27 +539,33 @@ def inspect_audit_gap(
         cursor = current
         depth = 0
         while cursor["parent_id"] not in {"baseline", "absent"}:
+            reachable.add(cursor["transition_id"])
             depth += 1
             if depth > 2048:
                 gaps.append("chain-depth")
                 break
-            parent = by_id.get(cursor["parent_id"])
-            if parent is None:
+            predecessor = by_id.get(cursor["parent_id"])
+            if predecessor is None:
                 gaps.append("missing-parent:" + cursor["parent_id"])
                 break
             if (
-                cursor["before_container_hash"] != parent["after_container_hash"]
-                or cursor["before_manifest_hash"] != parent["after_manifest_hash"]
+                cursor["before_container_hash"] != predecessor["after_container_hash"]
+                or cursor["before_manifest_hash"] != predecessor["after_manifest_hash"]
             ):
                 gaps.append("transition-discontinuity:" + cursor["transition_id"])
                 break
-            cursor = parent
+            cursor = predecessor
+        reachable.add(cursor["transition_id"])
     for marker in markers:
-        marker_event = by_id.get(marker)
-        if marker_event is None or marker_event["canonical_path"] not in _canonical_paths(
-            manifest, snapshot
+        marker_event = by_id.get(marker.transition_id)
+        if (
+            marker_event is None
+            or marker.transition_id not in reachable
+            or not _event_matches_collection(marker_event, manifest)
+            or marker_event["canonical_path"] != marker.canonical_path
+            or marker_event["item_key"] != marker.item_key
         ):
-            gaps.append("unmatched-marker:" + marker)
+            gaps.append("unmatched-marker:" + marker.transition_id)
     return {"status": "gap" if gaps else "ok", "gaps": sorted(set(gaps))[:32]}
 
 
@@ -546,22 +573,48 @@ def _audit_markers(
     root: Path,
     manifest: collections.CollectionManifest,
     snapshot: record_formats.AdapterSnapshot,
-) -> set[str]:
-    marker = re.compile(r"exomem-record-audit:\s*([0-9a-f]{24})")
+) -> tuple[_AuditMarker, ...]:
     if manifest.storage.strategy == "markdown-log":
-        return set(marker.findall((root / manifest.storage.source).read_text(encoding="utf-8")))
-    found: set[str] = set()
-    for version in snapshot.source_versions[1:]:
-        found.update(marker.findall((root / version.path).read_text(encoding="utf-8")))
-    return found
+        data = (root / manifest.storage.source).read_bytes()
+        return tuple(
+            _AuditMarker(match, manifest.storage.source, record.identity.key)
+            for record in snapshot.records
+            for match in _AUDIT_MARKER.findall(
+                data[record.span.start : record.span.end].decode("utf-8")
+            )
+        )
+    return tuple(
+        _AuditMarker(match, record.source.path, record.identity.key)
+        for record in snapshot.records
+        for match in _AUDIT_MARKER.findall(
+            (root / record.source.path).read_text(encoding="utf-8-sig")
+        )
+    )
 
 
-def _canonical_paths(
-    manifest: collections.CollectionManifest, snapshot: record_formats.AdapterSnapshot
-) -> set[str]:
+def _event_matches_collection(
+    event: Mapping[str, Any], manifest: collections.CollectionManifest
+) -> bool:
+    return (
+        event["collection_id"] == manifest.collection_id
+        and event["manifest_path"] == manifest.path
+        and event["source_path"] == manifest.storage.source
+    )
+
+
+def _record_audit_correlation(
+    root: Path, manifest: collections.CollectionManifest, record: record_formats.Record
+) -> str | None:
     if manifest.storage.strategy == "markdown-log":
-        return {manifest.storage.source}
-    return {version.path for version in snapshot.source_versions[1:]}
+        text = (
+            (root / manifest.storage.source)
+            .read_bytes()[record.span.start : record.span.end]
+            .decode("utf-8")
+        )
+    else:
+        text = (root / record.source.path).read_text(encoding="utf-8-sig")
+    markers = _AUDIT_MARKER.findall(text)
+    return markers[0] if len(markers) == 1 else None
 
 
 def _audit_events(root: Path) -> tuple[list[dict[str, Any]], bool]:

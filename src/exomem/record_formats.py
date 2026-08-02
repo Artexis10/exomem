@@ -9,7 +9,8 @@ import hashlib
 import json
 import math
 import re
-from collections.abc import Iterable, Mapping, Sequence
+import stat
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Protocol
@@ -315,7 +316,19 @@ class MarkdownItemsAdapter(_BaseAdapter):
         records: list[Record] = []
         versions: list[tuple[str, str]] = []
         total_bytes = 0
-        paths = list(_bounded_paths(source.rglob("*.md"), _MAX_ITEM_FILES))
+        paths: list[Path] = []
+        for path in source.rglob("*"):
+            try:
+                info = path.lstat()
+            except OSError as error:
+                raise collections.CollectionError(
+                    "INVALID_RECORD_ITEM_PATH", "item inventory could not be read"
+                ) from error
+            if stat.S_ISDIR(info.st_mode):
+                continue
+            paths.append(path)
+            if len(paths) > _MAX_ITEM_FILES:
+                break
         if len(paths) > _MAX_ITEM_FILES:
             raise collections.CollectionError(
                 "RECORD_ITEM_LIMIT", "collection has too many item files"
@@ -323,7 +336,8 @@ class MarkdownItemsAdapter(_BaseAdapter):
         paths.sort()
         source_root = source.resolve()
         for path in paths:
-            if path.is_symlink():
+            info = path.lstat()
+            if path.is_symlink() or not stat.S_ISREG(info.st_mode):
                 raise collections.CollectionError(
                     "INVALID_RECORD_ITEM_PATH", "item files cannot be symlinks"
                 )
@@ -339,6 +353,11 @@ class MarkdownItemsAdapter(_BaseAdapter):
                 raise collections.CollectionError(
                     "RECORD_SOURCE_TOO_LARGE", "collection exceeds the byte limit"
                 )
+            rel = path.relative_to(self.vault_root).as_posix()
+            digest = hashlib.sha256(data).hexdigest()
+            versions.append((rel, digest))
+            if path.suffix != ".md":
+                continue
             text = _decode_item_bytes(data)
             try:
                 frontmatter, body, marker = vault.parse_frontmatter(text, strict=True)
@@ -362,9 +381,6 @@ class MarkdownItemsAdapter(_BaseAdapter):
                 if name not in {"type", "collection_id", "record_id", "schema_version"}
             }
             self._validate_values(values)
-            rel = path.relative_to(self.vault_root).as_posix()
-            digest = hashlib.sha256(data).hexdigest()
-            versions.append((rel, digest))
             records.append(
                 Record(
                     identity=collections.ItemIdentity(collection_id, record_id),
@@ -584,9 +600,6 @@ def render_markdown_item_update(
     """Replace complete top-level YAML nodes while retaining unrelated source bytes."""
     bom = "\ufeff" if source.startswith("\ufeff") else ""
     text = source[len(bom) :]
-    _frontmatter, _body, marker = vault.parse_frontmatter(text, strict=True)
-    if marker is None:
-        raise collections.CollectionError("INVALID_RECORD_ITEM", "item requires frontmatter")
     newline = "\r\n" if "\r\n" in text else "\n"
     opening = re.match(r"\A---\r?\n", text)
     if opening is None:
@@ -1147,14 +1160,6 @@ def _marker_outside_fences(block: bytes) -> re.Match[bytes] | None:
 def _first_content_offset(data: bytes, start: int, end: int) -> int:
     match = re.search(rb"[^\r\n]", data[start:end])
     return start + match.start() if match else end
-
-
-def _bounded_paths(paths: Iterable[Path], limit: int) -> Iterable[Path]:
-    for path in paths:
-        yield path
-        limit -= 1
-        if limit < 0:
-            return
 
 
 def _read_bounded(path: Path, limit: int, kind: str) -> bytes:
