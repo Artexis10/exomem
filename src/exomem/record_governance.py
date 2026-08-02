@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from math import isfinite
 from pathlib import Path
 from typing import Any, cast
+from urllib.parse import quote, unquote
 
 from . import access, memory_refs, mutation_terminal, query_data, record_formats, vault
 from . import structured_collections as collections
@@ -751,41 +752,36 @@ def _project_manifest_query(
     return result
 
 
+def _opaque_plan_reference(reference: object) -> str | None:
+    """Validate a manifest-authored Planning descriptor without resolving it."""
+    if type(reference) is not str or not 1 <= len(reference.encode("utf-8")) <= 2_048:
+        return None
+    stable_id = memory_refs.parse_memory_ref(reference)
+    if reference.startswith(memory_refs.REF_PREFIX):
+        return reference if stable_id and reference == memory_refs.memory_ref(stable_id) else None
+    for prefix in ("exomem://vault/", "exomem://source/"):
+        if not reference.startswith(prefix):
+            continue
+        encoded = reference[len(prefix) :]
+        decoded = unquote(encoded)
+        if (
+            not encoded
+            or quote(decoded, safe="/") != encoded
+            or decoded.startswith("/")
+            or "\\" in decoded
+            or "\0" in decoded
+            or any(part in {"", ".", ".."} for part in decoded.split("/"))
+        ):
+            return None
+        return reference
+    return None
+
+
 def _project_plan_link(
     root: Path, manifest: collections.CollectionManifest, plan: collections.PlanLink, *, links: _LinkProjector | None = None
 ) -> dict[str, Any] | None:
-    reference = plan.reference
-    if type(reference) is not str or not 1 <= len(reference.encode("utf-8")) <= 2_048:
-        return None
-    lower = reference.lower()
-    stable_id = memory_refs.parse_memory_ref(reference)
-    if lower.startswith(memory_refs.REF_PREFIX):
-        if stable_id is None or reference != memory_refs.memory_ref(stable_id):
-            return None
-        try:
-            target = memory_refs.resolve_identifier_read_only(root, reference)
-        except memory_refs.ReferenceError as error:
-            if error.code == "REFERENCE_NOT_FOUND":
-                target = None
-            else:
-                return None
-    elif lower.startswith(("exomem://vault/", "exomem://source/")):
-        try:
-            target = memory_refs.resolve_identifier_read_only(root, reference)
-        except memory_refs.ReferenceError:
-            return None
-    else:
-        return None
-    if target is None:
-        return None
-    try:
-        _path, target = cast(
-            tuple[Path, str],
-            vault.resolve_under_vault(root, target, must_exist=True, must_be_file=True),
-        )
-    except vault.VaultPathError:
-        return None
-    if not _authorize(root, target, receipt=True):
+    reference = _opaque_plan_reference(plan.reference)
+    if reference is None:
         return None
     query = _project_manifest_query(root, manifest, plan.query, links=links)
     return {"reference": reference, "query": query} if query is not None else None

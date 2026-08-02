@@ -13,7 +13,7 @@ from record_fixtures import (
     copy_x3_fixture,
 )
 
-from exomem import record_formats, record_governance, records
+from exomem import memory_refs, record_formats, record_governance, records
 from exomem import structured_collections as collections
 from exomem.governance import egress, receipts
 from exomem.governance.principal import RequestPrincipal, request_scope
@@ -314,8 +314,8 @@ def test_query_projection_accepts_manifest_declared_expanded_child_fields(tmp_pa
     assert projected["rows"] == result.rows
 
 
-def test_manifest_projector_omits_unresolved_plan_descriptor(
-    tmp_path: Path,
+def test_manifest_projector_round_trips_opaque_plan_descriptor_without_resolution(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     fixture = copy_vehicle_maintenance_fixture(tmp_path)
     manifest_path = fixture / "_collection.md"
@@ -329,6 +329,10 @@ links:
   plans:
     - reference: exomem://memory/99f6fa8b-5d6e-43f8-8cdf-e30767e8f4d7
       query: {limit: 12}
+    - reference: exomem://vault/Planning/private.md
+      query: {limit: 12}
+    - reference: exomem://source/Planning/private
+      query: {limit: 12}
 ---
 
 One ordinary""",
@@ -340,10 +344,22 @@ One ordinary""",
     template.write_text("private template", encoding="utf-8")
     manifest = collections.load_manifest(tmp_path, manifest_path)
 
+    def unexpected_resolution(*_args: object, **_kwargs: object) -> str:
+        raise AssertionError("opaque planning references must not be resolved")
+
+    monkeypatch.setattr(memory_refs, "resolve_identifier_read_only", unexpected_resolution)
+
     projected = record_governance.project_manifest(tmp_path, manifest)
 
     assert projected["collection_id"] == manifest.collection_id
-    assert projected["plans"] == []
+    assert projected["plans"] == [
+        {
+            "reference": "exomem://memory/99f6fa8b-5d6e-43f8-8cdf-e30767e8f4d7",
+            "query": {"limit": 12},
+        },
+        {"reference": "exomem://vault/Planning/private.md", "query": {"limit": 12}},
+        {"reference": "exomem://source/Planning/private", "query": {"limit": 12}},
+    ]
     assert "rows" not in projected
 
     _write_l6_rule(tmp_path, ceiling=6, paths="Records/**")
@@ -366,6 +382,52 @@ One ordinary""",
         with pytest.raises(collections.CollectionError) as raised:
             record_governance.project_manifest(tmp_path, manifest)
     assert raised.value.code == "COLLECTION_NOT_FOUND"
+
+
+def test_opaque_plan_reference_has_missing_and_hidden_target_parity(tmp_path: Path) -> None:
+    fixture = copy_vehicle_maintenance_fixture(tmp_path)
+    manifest_path = fixture / "_collection.md"
+    reference = "exomem://memory/99f6fa8b-5d6e-43f8-8cdf-e30767e8f4d7"
+    manifest_path.write_text(
+        manifest_path.read_text(encoding="utf-8").replace(
+            "\n---\n\nOne ordinary",
+            f"""
+links:
+  plans:
+    - reference: {reference}
+      query: {{limit: 12}}
+---
+
+One ordinary""",
+        ),
+        encoding="utf-8",
+    )
+    manifest = collections.load_manifest(tmp_path, manifest_path)
+    _write_l6_rule(tmp_path, ceiling=6, paths="Records/**")
+    _write_l0_rule(tmp_path, name="private", paths="Planning/**")
+
+    with request_scope(RequestPrincipal(audience_id=EXTERNAL, surface="mcp")):
+        missing = record_governance.project_manifest(tmp_path, manifest)
+    target = tmp_path / "Knowledge Base" / "Planning" / "private.md"
+    target.parent.mkdir(parents=True)
+    target.write_text(f"---\nexomem_id: {reference.rsplit('/', 1)[1]}\n---\nprivate", encoding="utf-8")
+    with request_scope(RequestPrincipal(audience_id=EXTERNAL, surface="mcp")):
+        hidden = record_governance.project_manifest(tmp_path, manifest)
+
+    assert hidden["plans"] == missing["plans"] == [{"reference": reference, "query": {"limit": 12}}]
+
+
+@pytest.mark.parametrize(
+    "reference",
+    (
+        "exomem://memory/99F6FA8B-5D6E-43F8-8CDF-E30767E8F4D7",
+        "exomem://vault/Planning/../private.md",
+        "exomem://vault/Planning%2Fprivate.md",
+        "exomem://source/Planning//private",
+    ),
+)
+def test_opaque_plan_reference_rejects_noncanonical_or_unsafe_uris(reference: str) -> None:
+    assert record_governance._opaque_plan_reference(reference) is None
 
 
 def _write_l0_rule(vault: Path, *, name: str, paths: str) -> None:
@@ -447,7 +509,17 @@ One ordinary""",
     assert projected["templates"] == [
         {"path": manifest.templates[0].path, "default_properties": {"provider": "Northside Garage"}}
     ]
-    assert projected["plans"] == []
+    assert projected["plans"] == [
+        {
+            "reference": "exomem://memory/81947000-4c22-46e4-9874-23fed028314b",
+            "query": {"filters": {"status": "completed"}, "limit": 12},
+        },
+        {"reference": "exomem://vault/Planning/private.md", "query": {"limit": 12}},
+        {
+            "reference": "exomem://memory/99f6fa8b-5d6e-43f8-8cdf-e30767e8f4d7",
+            "query": {"limit": 12},
+        },
+    ]
     assert projected["views"] == {
         "current": {"query": {"filters": {"status": "completed"}, "limit": 12}},
         "latest": {"sort": ["occurred_on", "desc"]},
