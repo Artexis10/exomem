@@ -19,6 +19,7 @@ from membench.templates import t13_entropy_dedup  # noqa: F401  (registration)
 from membench.templates import t14_identity_graph  # noqa: F401  (registration)
 from membench.templates import t15_numeric_multimodal  # noqa: F401  (registration)
 from membench.templates import t16_governance_audiences  # noqa: F401  (registration)
+from membench.templates import t17_procedural_chains  # noqa: F401  (registration)
 from membench.templates.base import Template, registry
 
 __all__ = ["Template", "registry"]

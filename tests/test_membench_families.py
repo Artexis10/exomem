@@ -25,8 +25,12 @@ V01_ACTIVE_FAMILIES = {
     "governance",
 }
 
-V02_PLANNED_FAMILIES = {
+# v0.2 families flipped active by their implementing change (task 3.x lanes).
+V02_ACTIVE_FAMILIES = {
     "procedural",
+}
+
+V02_PLANNED_FAMILIES = {
     "quantitative",
     "negation_counterfactual",
     "cross_lingual",
@@ -82,8 +86,11 @@ def test_every_template_family_is_an_active_registry_entry() -> None:
 
 def test_v01_families_are_active_deterministic_oracle() -> None:
     reg = families.registry()
-    assert {t.family for t in registry().values()} == V01_ACTIVE_FAMILIES
-    for family_id in sorted(V01_ACTIVE_FAMILIES):
+    assert (
+        {t.family for t in registry().values()}
+        == V01_ACTIVE_FAMILIES | V02_ACTIVE_FAMILIES
+    )
+    for family_id in sorted(V01_ACTIVE_FAMILIES | V02_ACTIVE_FAMILIES):
         entry = reg[family_id]
         assert entry.classification == "deterministic-oracle"
         assert entry.status == "active"
@@ -96,6 +103,10 @@ def test_v02_planned_families_are_registered() -> None:
         assert entry is not None, f"planned v0.2 family {family_id!r} not registered"
         assert entry.status == "planned"
         assert entry.classification != "out-of-scope"
+    for family_id in sorted(V02_ACTIVE_FAMILIES):
+        entry = reg.get(family_id)
+        assert entry is not None, f"activated v0.2 family {family_id!r} not registered"
+        assert entry.status == "active"
 
 
 def test_out_of_scope_entry_present_with_rationale() -> None:
@@ -127,8 +138,8 @@ def test_unregistered_family_refuses_generation(tmp_path: Path) -> None:
 
 
 def test_planned_family_refuses_generation(tmp_path: Path) -> None:
-    probe = _probe_template("procedural")
-    with pytest.raises(GenerationError, match=r"t98_family_probe.*procedural.*planned"):
+    probe = _probe_template("quantitative")
+    with pytest.raises(GenerationError, match=r"t98_family_probe.*quantitative.*planned"):
         generate_corpus(1, tmp_path / "corpus", templates={probe.template_id: probe})
 
 

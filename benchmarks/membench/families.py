@@ -113,7 +113,7 @@ _V02_FAMILIES: tuple[Family, ...] = (
     Family(
         family_id="procedural",
         classification="deterministic-oracle",
-        status="planned",
+        status="active",
         rationale=(
             "Ordered how-to chains where step order, preconditions, and "
             "revisions over time are the ground truth, computable from the "

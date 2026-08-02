@@ -205,7 +205,7 @@ unregistered or still `planned`, and out-of-scope families are permanently
 | `identity` | deterministic-oracle | active | Alias and entity-graph resolution targets are declared at generation time; the oracle knows every coreference. |
 | `multimodal` | deterministic-oracle | active | Numeric and table/PDF evidence carries generated sentinel values; retrieval and answer identity are exact-checkable. |
 | `governance` | deterministic-oracle | active | Audience policy and disclosure expectations come from the generated PolicySet; leak vs no-leak is deterministic. |
-| `procedural` | deterministic-oracle | planned | Ordered how-to chains where step order, preconditions, and revisions over time are the ground truth, computable from the authored chain. |
+| `procedural` | deterministic-oracle | active | Ordered how-to chains where step order, preconditions, and revisions over time are the ground truth, computable from the authored chain. |
 | `quantitative` | deterministic-oracle | planned | Arithmetic over two or more stored values; the oracle computes the expected value, unit, and tolerance with both contributing sources as required citations. |
 | `negation_counterfactual` | deterministic-oracle | planned | Recorded-as-false vs not-recorded and considered-then-rejected plans score against the existing abstention and current-state gates. |
 | `cross_lingual` | deterministic-oracle | planned | Synthetic non-Latin-script sources queried in English; sentinel citation and value identity are exact-checkable, and profiles declaring no support report unsupported, never zero. |
