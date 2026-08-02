@@ -12,6 +12,7 @@ from membench import oracle, quant
 from membench.schema import (
     ClaimRecord,
     ClaimStatus,
+    EntityRecord,
     ExpectedAnswer,
     ExpectedRecord,
     QueryRecord,
@@ -444,6 +445,217 @@ def expect_recorded_false(
             required_citations=list(citations),
             abstain=False,
             gates=["current_state", "citations", "abstention"],
+        )
+
+    return build
+
+
+def expect_attributed_opinion(
+    opinion: ClaimRecord,
+    holder: EntityRecord,
+    objective: ClaimRecord,
+    *,
+    forbidden: list[ClaimRecord] | None = None,
+    hedged: bool | None = None,
+) -> ExpectationBuilder:
+    """An opinion stays bound to its holder and distinct from objective fact."""
+
+    def build(ctx: OracleCtx, query: QueryRecord) -> ExpectedRecord:
+        if opinion.subject != holder.entity_id:
+            raise GenerationError(
+                f"{query.query_id}: opinion {opinion.claim_id} is not held by "
+                f"{holder.entity_id}"
+            )
+        if not opinion.predicate.startswith("position_on_"):
+            raise GenerationError(
+                f"{query.query_id}: opinion predicate {opinion.predicate!r} "
+                "does not encode the holder's position"
+            )
+        if holder.canonical_name not in opinion.object.value:
+            raise GenerationError(
+                f"{query.query_id}: opinion value does not embed holder "
+                f"{holder.canonical_name!r}"
+            )
+        if opinion.claim_id == objective.claim_id or opinion.predicate == objective.predicate:
+            raise GenerationError(
+                f"{query.query_id}: opinion and objective fact are not separate claims"
+            )
+        if (
+            opinion.object.value in objective.object.value
+            or objective.object.value in opinion.object.value
+        ):
+            raise GenerationError(
+                f"{query.query_id}: opinion and objective values overlap"
+            )
+
+        view = _view_for(ctx, opinion, query)
+        if not view.is_active:
+            raise GenerationError(
+                f"{query.query_id}: opinion {opinion.claim_id} is inactive "
+                f"({view.status.value})"
+            )
+        citations = _citations_for(ctx, opinion, view, query)
+        if not citations:
+            raise GenerationError(f"{query.query_id}: opinion has no citation")
+        for source_id in citations:
+            content = ctx.graph.contents.get(source_id)
+            if content is None or opinion.object.value not in "\n".join(content.lines):
+                raise GenerationError(
+                    f"{query.query_id}: quoting source {source_id} does not contain "
+                    "the opinion value verbatim"
+                )
+        return ExpectedRecord(
+            query_id=query.query_id,
+            answer=_answer_from_value(view.value),
+            required_claims=[opinion.claim_id],
+            forbidden_claims=[claim.claim_id for claim in forbidden or []],
+            required_citations=list(citations),
+            uncertainty=UncertaintyExpectation(hedged=hedged),
+            gates=["current_state", "citations", "calibration"],
+        )
+
+    return build
+
+
+def _correction_chain(
+    ctx: OracleCtx, first: ClaimRecord, query: QueryRecord
+) -> list[tuple[ClaimRecord, oracle.TruthView, SourceRecord]]:
+    """Follow and validate a visible claim/source correction chain."""
+
+    sources_by_id = {source.source_id: source for source in ctx.graph.sources}
+    chain: list[tuple[ClaimRecord, oracle.TruthView, SourceRecord]] = []
+    seen: set[str] = set()
+    claim = first
+    while True:
+        if claim.claim_id in seen:
+            raise GenerationError(
+                f"{query.query_id}: correction chain cycles at {claim.claim_id}"
+            )
+        seen.add(claim.claim_id)
+        evolution = oracle.evolution(claim, query.ask.knowledge_week)
+        view = oracle.current_truth(claim, query.ask.knowledge_week)
+        if not evolution:
+            raise GenerationError(
+                f"{query.query_id}: correction claim {claim.claim_id} has no evolution"
+            )
+        if view.value is None:
+            raise GenerationError(
+                f"{query.query_id}: correction claim {claim.claim_id} has no "
+                "oracle-visible value"
+            )
+        source_id = claim.assertions[0].source_id
+        source = sources_by_id[source_id]
+        chain.append((claim, view, source))
+        if claim.superseded_by is None:
+            if not view.is_active:
+                raise GenerationError(
+                    f"{query.query_id}: correction chain ends in inactive "
+                    f"{claim.claim_id} ({view.status.value})"
+                )
+            break
+        if view.status not in (
+            ClaimStatus.SUPERSEDED,
+            ClaimStatus.PARTIALLY_SUPERSEDED,
+        ):
+            raise GenerationError(
+                f"{query.query_id}: {claim.claim_id} points to a successor but "
+                f"oracle status is {view.status.value}"
+            )
+        successor = ctx.claims_by_id.get(claim.superseded_by)
+        if successor is None or successor.supersedes != claim.claim_id:
+            raise GenerationError(
+                f"{query.query_id}: broken correction successor for {claim.claim_id}"
+            )
+        claim = successor
+
+    if len(chain) < 3:
+        raise GenerationError(
+            f"{query.query_id}: source reliability needs at least two corrections"
+        )
+    first_title = chain[0][2].title
+    for previous, current in zip(chain, chain[1:], strict=False):
+        previous_source = previous[2]
+        current_source = current[2]
+        if current_source.supersedes_source != previous_source.source_id:
+            raise GenerationError(
+                f"{query.query_id}: source {current_source.source_id} does not "
+                f"supersede {previous_source.source_id}"
+            )
+        if current_source.version != previous_source.version + 1:
+            raise GenerationError(
+                f"{query.query_id}: source versions are not consecutive"
+            )
+        if current_source.title != first_title:
+            raise GenerationError(
+                f"{query.query_id}: correction chain changes source identity"
+            )
+    return chain
+
+
+def expect_correction_history(first: ClaimRecord) -> ExpectationBuilder:
+    """List every oracle-visible value in a twice-corrected claim chain."""
+
+    def build(ctx: OracleCtx, query: QueryRecord) -> ExpectedRecord:
+        chain = _correction_chain(ctx, first, query)
+        citations: dict[str, None] = {}
+        for claim, view, _ in chain:
+            for source_id in _citations_for(ctx, claim, view, query):
+                citations.setdefault(source_id)
+        return ExpectedRecord(
+            query_id=query.query_id,
+            answer=ExpectedAnswer(
+                kind="list",
+                values=[view.value.value for _, view, _ in chain if view.value],
+            ),
+            required_claims=[claim.claim_id for claim, _, _ in chain],
+            required_citations=list(citations),
+            gates=["current_state", "citations"],
+        )
+
+    return build
+
+
+def expect_value_with_correction_history(
+    claim: ClaimRecord, first_corrected: ClaimRecord
+) -> ExpectationBuilder:
+    """A fresh claim from a repeatedly corrected source must hedge and cite history."""
+
+    def build(ctx: OracleCtx, query: QueryRecord) -> ExpectedRecord:
+        chain = _correction_chain(ctx, first_corrected, query)
+        view = _view_for(ctx, claim, query)
+        if view.status is not ClaimStatus.TENTATIVE:
+            raise GenerationError(
+                f"{query.query_id}: fresh claim {claim.claim_id} must be tentative, "
+                f"got {view.status.value}"
+            )
+        fresh_source = next(
+            source
+            for source in ctx.graph.sources
+            if source.source_id == claim.assertions[0].source_id
+        )
+        prior_source = chain[-1][2]
+        if (
+            fresh_source.title != prior_source.title
+            or fresh_source.supersedes_source != prior_source.source_id
+            or fresh_source.version != prior_source.version + 1
+        ):
+            raise GenerationError(
+                f"{query.query_id}: fresh value is not from the recurring source"
+            )
+
+        citations: dict[str, None] = {}
+        for history_claim, history_view, _ in chain:
+            for source_id in _citations_for(ctx, history_claim, history_view, query):
+                citations.setdefault(source_id)
+        for source_id in _citations_for(ctx, claim, view, query):
+            citations.setdefault(source_id)
+        return ExpectedRecord(
+            query_id=query.query_id,
+            answer=_answer_from_value(view.value),
+            required_claims=[claim.claim_id],
+            required_citations=list(citations),
+            uncertainty=UncertaintyExpectation(hedged=True),
+            gates=["current_state", "citations", "calibration"],
         )
 
     return build

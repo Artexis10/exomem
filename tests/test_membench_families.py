@@ -31,11 +31,11 @@ V02_ACTIVE_FAMILIES = {
     "quantitative",
     "negation_counterfactual",
     "cross_lingual",
+    "preference_attribution",
+    "source_reliability",
 }
 
 V02_PLANNED_FAMILIES = {
-    "preference_attribution",
-    "source_reliability",
     "long_horizon_entropy",
     "multimodal_depth",
 }
@@ -138,9 +138,9 @@ def test_unregistered_family_refuses_generation(tmp_path: Path) -> None:
 
 
 def test_planned_family_refuses_generation(tmp_path: Path) -> None:
-    probe = _probe_template("preference_attribution")
+    probe = _probe_template("long_horizon_entropy")
     with pytest.raises(
-        GenerationError, match=r"t98_family_probe.*preference_attribution.*planned"
+        GenerationError, match=r"t98_family_probe.*long_horizon_entropy.*planned"
     ):
         generate_corpus(1, tmp_path / "corpus", templates={probe.template_id: probe})
 

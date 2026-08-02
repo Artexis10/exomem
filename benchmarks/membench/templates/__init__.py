@@ -23,6 +23,8 @@ from membench.templates import t17_procedural_chains  # noqa: F401  (registratio
 from membench.templates import t18_quantitative  # noqa: F401  (registration)
 from membench.templates import t19_negation_counterfactual  # noqa: F401  (registration)
 from membench.templates import t20_cross_lingual  # noqa: F401  (registration)
+from membench.templates import t21_preference_attribution  # noqa: F401  (registration)
+from membench.templates import t22_source_reliability  # noqa: F401  (registration)
 from membench.templates.base import Template, registry
 
 __all__ = ["Template", "registry"]

@@ -153,7 +153,7 @@ _V02_FAMILIES: tuple[Family, ...] = (
     Family(
         family_id="preference_attribution",
         classification="deterministic-oracle",
-        status="planned",
+        status="active",
         rationale=(
             "Holder and as-of time of an opinion are the ground truth; an "
             "unattributed restatement as objective fact fails the calibration "
@@ -163,7 +163,7 @@ _V02_FAMILIES: tuple[Family, ...] = (
     Family(
         family_id="source_reliability",
         classification="deterministic-oracle",
-        status="planned",
+        status="active",
         rationale=(
             "A recurring source's correction track record is derivable from "
             "the corpus; weighting is scored behaviourally via required "
