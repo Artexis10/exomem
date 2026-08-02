@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import re
 import stat
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
@@ -161,24 +163,64 @@ def query_collection(
         return result
 
 
-def project_query_result(result: record_formats.RecordQueryResult) -> dict[str, Any]:
+def project_query_result(
+    result: record_formats.RecordQueryResult,
+    manifest: collections.CollectionManifest,
+    *,
+    output_format: str = "json",
+) -> dict[str, Any]:
     """Default-deny wire envelope for an already L6-authorized query result."""
+    if (
+        result.collection_id != manifest.collection_id
+        or not re.fullmatch(r"[0-9a-f]{64}", result.snapshot)
+        or type(result.returned) is not int
+        or type(result.total_matched) is not int
+        or type(result.truncated) is not bool
+        or result.returned != len(result.rows)
+        or result.returned < 0
+        or result.total_matched < result.returned
+        or output_format not in {"json", "markdown", "csv"}
+        or not isinstance(result.query, Mapping)
+    ):
+        return {"withheld": True, "reason": "invalid_record_query"}
+    system = {"collection_id", "record_id", "item_version", "inferred", "ambiguous", "parent_record_id"}
+    rows: list[dict[str, Any]] = []
+    for row in result.rows:
+        if not isinstance(row, dict) or set(row) - set(manifest.schema.fields) - system:
+            return {"withheld": True, "reason": "invalid_record_query"}
+        values = {name: value for name, value in row.items() if name in manifest.schema.fields}
+        try:
+            manifest.schema.validate(values)
+        except collections.CollectionError:
+            return {"withheld": True, "reason": "invalid_record_query"}
+        if row.get("collection_id") != manifest.collection_id or not isinstance(row.get("record_id"), str):
+            return {"withheld": True, "reason": "invalid_record_query"}
+        rows.append({key: row[key] for key in row})
+    versions: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for version in result.source_versions:
+        if (
+            not isinstance(version.path, str)
+            or version.path in seen
+            or version.path.startswith("/")
+            or ".." in version.path.split("/")
+            or not re.fullmatch(r"[0-9a-f]{64}", version.hash)
+        ):
+            return {"withheld": True, "reason": "invalid_record_query"}
+        seen.add(version.path)
+        versions.append({"path": version.path, "hash": version.hash})
+    payload_data = {
+        "collection_id": result.collection_id, "snapshot": result.snapshot, "rows": rows,
+        "returned": result.returned, "total_matched": result.total_matched,
+        "truncated": result.truncated, "continuation": result.continuation,
+        "derived": result.derived, "aggregate": result.aggregate, "query": dict(result.query),
+        "source_versions": versions,
+    }
+    rendered = json.dumps(payload_data, sort_keys=True, separators=(",", ":"), default=str)
     payload = _RecordEnvelope(
         {
-            "collection_id": result.collection_id,
-            "snapshot": result.snapshot,
-            "rows": result.rows,
-            "returned": result.returned,
-            "total_matched": result.total_matched,
-            "truncated": result.truncated,
-            "continuation": result.continuation,
-            "derived": result.derived,
-            "rendered": result.rendered,
-            "aggregate": result.aggregate,
-            "query": dict(result.query),
-            "source_versions": [
-                {"path": version.path, "hash": version.hash} for version in result.source_versions
-            ],
+            **payload_data,
+            "rendered": rendered,
         }
     )
     return egress.project(payload, egress.LEVEL_FULL, kind="record_query") or {}
