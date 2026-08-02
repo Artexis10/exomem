@@ -339,11 +339,20 @@ def recall_checkpoint(vault_root: Path, scope: str) -> RecallFreshnessCheckpoint
                 continue
             if _recall_identities.get(key) == identity:
                 continue
+            previous = _recall_maps.get(key, {})
+            touched = {
+                path
+                for path in set(previous) | set(projected)
+                if previous.get(path) != projected.get(path)
+            }
             _recall_maps[key] = projected
             _recall_triples[key] = None
             _recall_identities[key] = identity
-            _recall_generations[key] = _next_gen()
-            _recall_history[key] = []
+            # An access-policy transition is a real projected event even when
+            # no Markdown changed.  Retain its exact row delta so a live catalog
+            # can remove/re-add eligible pages without a request-path walk.
+            _record_recall_event(key, touched)
+            continue
     return RecallFreshnessCheckpoint(
         _instance_id,
         generation,
@@ -362,6 +371,14 @@ def live_recall_entries(vault_root: Path, scope: str) -> dict[str, FileSignature
         if not event_indexes_enabled() or key not in _recall_live:
             return None
         return dict(_recall_maps.get(key, {}))
+
+
+def recall_is_live(vault_root: Path, scope: str) -> bool:
+    """Whether the projected recall stream is event-maintained (no walk)."""
+    if not event_indexes_enabled():
+        return False
+    with _lock:
+        return _key(vault_root, scope) in _recall_live
 
 
 def recall_delta_since(
@@ -740,7 +757,13 @@ def on_files_changed(
 
     # Reproject policy-only changes before classifying an event; never merge
     # event admission judged under a new access snapshot into an old projection.
-    for _scope in SCOPES:
+    # A non-live scope intentionally remains a polling/fallback caller: a
+    # watcher event must not turn into an unexpected request-path corpus walk.
+    with _lock:
+        projected_live = {
+            scope for scope in SCOPES if _key(vault_root, scope) in _recall_live
+        }
+    for _scope in projected_live:
         recall_checkpoint(vault_root, _scope)
 
     chg_items: list[tuple[str, FileSignature | None, bool, bool, bool]] = []

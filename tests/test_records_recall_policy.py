@@ -122,3 +122,17 @@ def test_symlink_alias_cannot_admit_records_bytes_as_an_ordinary_page(tmp_path: 
         pytest.skip("symlinks/reparse points are unavailable")
 
     assert not recall_policy.is_recall_candidate(tmp_path, alias / raw_item.name)
+
+
+def test_canonical_alias_seam_suppresses_a_windows_short_name(tmp_path: Path, monkeypatch) -> None:
+    note = tmp_path / "Knowledge Base" / "Elsewhere" / "SHORT~1.MD"
+    note.parent.mkdir(parents=True)
+    note.write_text("ordinary looking alias", encoding="utf-8")
+    monkeypatch.setattr(recall_policy, "_needs_canonical_alias_check", lambda _parts: True)
+    monkeypatch.setattr(
+        recall_policy,
+        "_canonical_parts_after_safe_validation",
+        lambda _root, _parts: ["Knowledge Base", "Records", "Health", "raw.md"],
+    )
+
+    assert not recall_policy.is_recall_candidate(tmp_path, note)

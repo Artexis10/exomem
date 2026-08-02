@@ -37,3 +37,26 @@ def test_raw_event_moves_broad_cursor_not_live_recall_projection(tmp_path: Path)
     assert freshness.consumer_checkpoint(tmp_path, "kb").generation > broad_before.generation
     after = freshness.recall_checkpoint(tmp_path, "kb")
     assert (after.triple, after.generation) == (before.triple, before.generation)
+
+
+def test_raw_history_overflow_does_not_overflow_the_projected_delta(tmp_path: Path) -> None:
+    note = tmp_path / "Knowledge Base" / "Notes" / "note.md"
+    raw = tmp_path / "Knowledge Base" / "Records" / "raw.md"
+    note.parent.mkdir(parents=True)
+    raw.parent.mkdir(parents=True)
+    note.write_text("note", encoding="utf-8")
+    raw.write_text("raw", encoding="utf-8")
+    entries = [(str(note), freshness.stat_signature(note)), (str(raw), freshness.stat_signature(raw))]
+    freshness.seed(tmp_path, "kb", entries)
+    before = freshness.recall_checkpoint(tmp_path, "kb")
+
+    for index in range(freshness.DELTA_HISTORY_LIMIT + 2):
+        raw.write_text(f"raw {index}", encoding="utf-8")
+        freshness.on_files_changed(tmp_path, changed=[raw])
+
+    assert freshness.recall_checkpoint(tmp_path, "kb") == before
+    note.write_text("changed note", encoding="utf-8")
+    freshness.on_files_changed(tmp_path, changed=[note])
+    delta = freshness.recall_delta_since(tmp_path, "kb", before)
+    assert delta.complete
+    assert delta.changed == frozenset({str(note)})

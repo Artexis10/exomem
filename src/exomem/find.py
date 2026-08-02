@@ -1242,6 +1242,9 @@ def _hydrate_indexed_unit_records(
     for hit in indexed:
         parent = parents.get(hit.parent_path)
         if hit.parent_path not in parents:
+            if not recall_policy.is_recall_candidate(vault_root, vault_root / hit.parent_path):
+                parents[hit.parent_path] = None
+                continue
             page = _CACHE.get(vault_root / hit.parent_path, vault_root)
             if page is None or not _passes_filters(
                 page,
@@ -2327,13 +2330,20 @@ def _indexed_eligible_filter_paths(
     for rel_path in candidate_parent_paths:
         if rel_path.rsplit("/", 1)[-1].lower() in _NAVIGATION_BASENAMES:
             continue
+        if not recall_policy.is_recall_candidate(vault_root, vault_root / rel_path):
+            continue
         page = _CACHE.get(vault_root / rel_path, vault_root)
         # Access policy always runs before caller filters, including for a
         # scene-frame child whose match is emitted as its parent video.
         if page is None or not _indexable(page):
             continue
         if page.parent_media:
-            emitted = _CACHE.get(vault_root / (page.parent_media + ".md"), vault_root) or page
+            parent_path = vault_root / (page.parent_media + ".md")
+            emitted = (
+                _CACHE.get(parent_path, vault_root)
+                if recall_policy.is_recall_candidate(vault_root, parent_path)
+                else None
+            ) or page
         else:
             emitted = page
         if not _indexable(emitted):
@@ -2440,7 +2450,12 @@ def _find_keyword(
         scene_frame: str | None = None
         scene_frame_ts: float | None = None
         if page.parent_media:
-            parent_page = _CACHE.get(vault_root / (page.parent_media + ".md"), vault_root)
+            parent_path = vault_root / (page.parent_media + ".md")
+            parent_page = (
+                _CACHE.get(parent_path, vault_root)
+                if recall_policy.is_recall_candidate(vault_root, parent_path)
+                else None
+            )
             if parent_page is not None:
                 existing = by_path.get(parent_page.rel_path)
                 if existing is not None:

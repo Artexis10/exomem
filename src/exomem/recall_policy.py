@@ -30,6 +30,19 @@ def is_recall_candidate(vault_root: Path, path: Path | str) -> bool:
     if rel is None:
         return False
     parts = rel.split("/")
+    # Validate the spelling we were handed before asking the OS to expand it.
+    # That preserves the no-follow/reparse boundary while still allowing the
+    # post-validation canonicalization below to catch Windows 8.3 aliases that
+    # would otherwise look like an unrelated ordinary note.
+    if not _safe_regular_file(root, parts):
+        return False
+    if _needs_canonical_alias_check(parts):
+        canonical_parts = _canonical_parts_after_safe_validation(root, parts)
+        # A changed spelling is an alias we cannot safely classify without
+        # trusting a filesystem-specific path form.  Suppress it rather than
+        # letting it bypass the exact Records boundary.
+        if canonical_parts is None or canonical_parts != parts:
+            return False
     if _is_records_alias(parts):
         # Casefold/Unicode aliases are never ordinary pages: on a
         # case-insensitive filesystem they can reach the same Records bytes.
@@ -38,8 +51,6 @@ def is_recall_candidate(vault_root: Path, path: Path | str) -> bool:
         if len(parts) < 3 or parts[-1] != "_collection.md":
             return False
         if not access.is_indexable(root, rel):
-            return False
-        if not _safe_regular_file(root, parts):
             return False
         try:
             data, _guard = vault.read_bounded_guarded_bytes(
@@ -53,7 +64,7 @@ def is_recall_candidate(vault_root: Path, path: Path | str) -> bool:
         return manifest.semantic_profile == "records"
     if not access.is_indexable(root, rel):
         return False
-    return _safe_regular_file(root, parts)
+    return True
 
 
 def is_structured_only_path(vault_root: Path, path: Path | str) -> bool:
@@ -121,3 +132,31 @@ def _safe_regular_file(root: Path, parts: list[str]) -> bool:
         return stat.S_ISREG(current.lstat().st_mode)
     except OSError:
         return False
+
+
+def _canonical_parts_after_safe_validation(root: Path, parts: list[str]) -> list[str] | None:
+    """Best-effort long-name comparison seam for Windows short-path aliases.
+
+    ``resolve`` is deliberately after :func:`_safe_regular_file`: it is used
+    only to compare a verified non-reparse path to the operating system's long
+    spelling, never to authorize traversal through an alias or reparse point.
+    Tests can replace this seam on any platform; native Windows additionally
+    exercises the real 8.3 behaviour where the volume supports it.
+    """
+    try:
+        resolved = (root.joinpath(*parts)).resolve().relative_to(root.resolve())
+    except (OSError, ValueError):
+        return None
+    if not resolved.parts or any(part in {"", ".", ".."} for part in resolved.parts):
+        return None
+    return list(resolved.parts)
+
+
+def _needs_canonical_alias_check(parts: list[str]) -> bool:
+    """Whether this platform can report a short-name alias for this spelling.
+
+    Linux/macOS keep the hot corpus path syscall-free after the no-follow lstat
+    validation above.  Windows uses the canonical comparison for all names: an
+    8.3 alias cannot be recognized reliably from its text alone.
+    """
+    return os.name == "nt"
