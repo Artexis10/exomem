@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import uuid
 from collections.abc import Mapping
 from typing import Any, Literal
 
@@ -164,11 +165,13 @@ def _is_record_receipt(value: Any) -> bool:
         return False
     if (
         value.get("_record_receipt") != _RECORD_RECEIPT_MARKER
+        or type(value.get("receipt_version")) is not int
         or value.get("receipt_version") != _RECORD_RECEIPT_VERSION
         or value.get("operation") not in {"create", "append", "update"}
-        or not isinstance(value.get("collection_id"), str)
-        or not isinstance(value.get("item_key"), str)
+        or not _normalized_uuid(value.get("collection_id"))
+        or not _normalized_uuid(value.get("item_key"))
         or not isinstance(value.get("affected_paths"), list)
+        or len(value["affected_paths"]) > 16
         or not all(isinstance(path, str) for path in value["affected_paths"])
         or value.get("outcome") not in {"committed", "replayed"}
     ):
@@ -187,4 +190,18 @@ def _is_record_receipt(value: Any) -> bool:
             or any(character not in "0123456789abcdef" for character in hash_value)
         ):
             return False
-    return isinstance(value.get("audit_correlation"), str | type(None))
+    correlation = value.get("audit_correlation")
+    return correlation is None or (
+        isinstance(correlation, str)
+        and len(correlation) == 24
+        and all(character in "0123456789abcdef" for character in correlation)
+    )
+
+
+def _normalized_uuid(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    try:
+        return str(uuid.UUID(value)) == value
+    except ValueError:
+        return False

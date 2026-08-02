@@ -150,7 +150,7 @@ def test_compact_record_receipt_uses_the_content_free_whitelist() -> None:
         "affected_paths": ["Knowledge Base/Records/example.md"],
         "payload_hash": "d" * 64,
         "outcome": "committed",
-        "audit_correlation": "audit-1",
+        "audit_correlation": "e" * 24,
         "why": "private rationale",
         "values": {"secret": "canonical item value"},
     }

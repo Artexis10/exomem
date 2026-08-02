@@ -601,18 +601,16 @@ def render_markdown_item_update(
     replacements: list[tuple[int, int, str]] = []
     for name, value in changes.items():
         span = spans.get(name)
-        if span is None:
-            raise collections.CollectionError("INVALID_RECORD_ITEM", "item field is missing")
         rendered = vault.serialize_frontmatter({name: value}).replace("\n", newline)
-        replacements.append((*span, rendered))
+        if span is None:
+            replacements.append((len(yaml_text), len(yaml_text), rendered + newline))
+        else:
+            replacements.append((*span, rendered))
     updated_yaml = yaml_text
     for start, end, rendered in sorted(replacements, reverse=True):
         updated_yaml = updated_yaml[:start] + rendered + updated_yaml[end:]
-    audit_line = (
-        f"# exomem-record-audit: {audit_correlation}{newline}"
-        if audit_correlation and "exomem-record-audit:" not in updated_yaml
-        else ""
-    )
+    updated_yaml = re.sub(r"(?m)^# exomem-record-audit: [0-9a-f]{24}\r?\n?", "", updated_yaml)
+    audit_line = f"# exomem-record-audit: {audit_correlation}{newline}" if audit_correlation else ""
     return bom + text[: opening.end()] + updated_yaml + audit_line + text[close_start:]
 
 
