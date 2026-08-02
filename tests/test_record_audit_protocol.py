@@ -466,6 +466,50 @@ def test_item_append_caught_prefixes_restore_exact_files(
     ) == before
 
 
+@pytest.mark.parametrize("prefix", [1, 2, 3])
+def test_item_append_abrupt_prefixes_remain_inspectable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, prefix: int
+) -> None:
+    from exomem import records
+
+    fixture = copy_vehicle_maintenance_fixture(tmp_path)
+    _activity_log(tmp_path)
+    manifest = collections.load_manifest(tmp_path, fixture / "_collection.md")
+    snapshot = record_formats.load_adapter(tmp_path, manifest).read()
+    real_replace, calls = vault._BatchWorkspace.replace_artifact, 0
+
+    def interrupt(workspace, artifact, target):
+        nonlocal calls
+        result = real_replace(workspace, artifact, target)
+        calls += 1
+        if calls == prefix:
+            raise KeyboardInterrupt("item abrupt prefix")
+        return result
+
+    monkeypatch.setattr(vault._BatchWorkspace, "replace_artifact", interrupt)
+    with pytest.raises(KeyboardInterrupt, match="item abrupt prefix"):
+        records.append_record(
+            tmp_path,
+            manifest.path,
+            item={
+                "occurred_on": "2026-08-03",
+                "asset": "[[Assets/Vehicle]]",
+                "provider": "Garage",
+                "services": ["oil change"],
+                "amount": 95.0,
+                "currency": "GBP",
+                "status": "completed",
+                "next_due_on": None,
+            },
+            item_key="67676767-6767-4676-8676-676767676767",
+            expected_container_hash=snapshot.snapshot,
+            why="exercise abrupt item append",
+        )
+    assert records.inspect_audit_gap(tmp_path, manifest.path)["status"] == (
+        "ok" if prefix == 3 else "gap"
+    )
+
+
 def test_create_rolls_back_caught_failure_and_exposes_abrupt_manifest_residue(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
