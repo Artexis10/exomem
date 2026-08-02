@@ -56,7 +56,7 @@
 - [x] 8.2 Founder-regression format (`membench/private_regressions.py` committed; data dir gitignored; P0 never leaves the local store) + replayer stub
 - [x] 8.3 Baseline runs complete: full-corpus exomem leaf (236/240 scored, 0 harness failures), T00 wire, Track A smoke (exomem-local ok + baseline-grep; bm-local sandbox-blocked→user-run), Track C suite, Track D J1/J2, blinded judge smoke (12 real-model judgments agreeing with deterministic gates)
 - [x] 8.4 Weaknesses-first report: `docs/memory-proof-benchmark-v01-findings.md` (headline: conjunctive retention gate → NL retrieval ≈0 in lexical profile, confirmed by two harnesses; + gate-limit, isolation, and robustness findings) with exact reproduction commands
-- [ ] 8.5 Exomem KB write-back: BLOCKED this session — the Exomem connector was disconnected at closeout. The compiled results note is drafted at `benchmarks/private/pending-kb-note-benchmark-v01-results.md` (gitignored founder channel); capture via `remember` + read-back on reconnect. The Milestone-1 decision note was written and read-back-verified earlier (2026-07-31).
+- [x] 8.5 Exomem KB write-back complete and read-back-verified (connector confirmed live 2026-08-01): Milestone-1 decision note + v0.1 results note + Gray Box audit note (2026-07-31) and the retrieval-fix results note (2026-08-01) all present in Knowledge Base/Notes/Research/Exomem/. The gitignored pending-note draft is superseded.
 
 ## 9. Validation
 - [x] 9.1 `openspec validate add-memory-proof-benchmark --strict` + `add-terminal-review-surface --strict` both valid; `validate --specs --strict` 31/31 main specs pass (2026-08-01)
