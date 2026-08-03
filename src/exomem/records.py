@@ -10,7 +10,7 @@ import re
 import stat
 import unicodedata
 import uuid
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -29,6 +29,7 @@ _LOG_AUDIT_MARKER = re.compile(rb"<!--\s*exomem-record-audit:\s*([0-9a-f]{24})\s
 _ITEM_AUDIT_MARKER = re.compile(rb"#\s*exomem-record-audit:\s*([0-9a-f]{24})\s*")
 _MAX_AUDIT_SOURCE_BYTES = 2 * 1024 * 1024
 _MAX_AUDIT_MARKERS = 10_000
+_MAX_AGENT_AUDIT_HISTORY = 50
 
 
 @dataclass(frozen=True, slots=True)
@@ -36,6 +37,20 @@ class _AuditMarker:
     transition_id: str
     canonical_path: str
     item_key: str
+
+
+@dataclass(frozen=True, slots=True)
+class _AuditEvents:
+    events: tuple[dict[str, Any], ...]
+    parsed: bool
+
+
+@dataclass(frozen=True, slots=True)
+class _AuditChain:
+    status: str
+    gaps: tuple[str, ...]
+    events: tuple[dict[str, Any], ...]
+    complete: bool
 
 
 def append_record(
@@ -536,43 +551,102 @@ def create_collection(
 
 
 def inspect_audit_gap(
-    vault_root: Path, collection: str | Path | collections.CollectionManifest
+    vault_root: Path,
+    collection: str | Path | collections.CollectionManifest,
+    *,
+    authorize_path: Callable[[str], bool] | None = None,
 ) -> dict[str, Any]:
     """Report, without repair, whether current bytes prove an audit transition chain."""
-    root = Path(vault_root)
+    chain = _inspect_audit_chain(Path(vault_root), collection, authorize_path=authorize_path)
+    return {"status": chain.status, "gaps": list(chain.gaps)}
+
+
+def agent_audit_history(
+    vault_root: Path,
+    collection: str | Path | collections.CollectionManifest,
+    *,
+    authorize_path: Callable[[str], bool] | None = None,
+) -> dict[str, Any]:
+    """Return the bounded agent-mutation chain without canonical item values."""
+    chain = _inspect_audit_chain(Path(vault_root), collection, authorize_path=authorize_path)
+    events = chain.events[:_MAX_AGENT_AUDIT_HISTORY]
+    return {
+        "status": chain.status,
+        "complete": chain.complete,
+        "truncated": len(chain.events) > len(events),
+        "events": [_project_agent_audit_event(event) for event in events],
+    }
+
+
+def _inspect_audit_chain(
+    root: Path,
+    collection: str | Path | collections.CollectionManifest,
+    *,
+    authorize_path: Callable[[str], bool] | None,
+) -> _AuditChain:
+    denied = False
+
+    def authorize(relative: str) -> bool:
+        nonlocal denied
+        if authorize_path is None:
+            return True
+        if authorize_path(relative):
+            return True
+        denied = True
+        return False
+
     try:
         history_guard = vault.DirectoryCensusGuard.capture(
             root, f"{vault.kb_prefix()}_archive/logs", max_entries=128
         )
     except vault.PathGuardError:
-        return {"status": "history_incomplete", "gaps": []}
-    manifest = _resolve_outside(root, collection)
+        return _incomplete_audit_chain()
+    try:
+        manifest = (
+            collection
+            if isinstance(collection, collections.CollectionManifest)
+            else collections.resolve_collection(root, collection, authorize_path=authorize)
+        )
+        if not authorize(manifest.path):
+            return _incomplete_audit_chain()
+    except collections.CollectionError:
+        return _incomplete_audit_chain()
     manifest_bytes = _safe_audit_read(
         root, manifest.path, manifest.manifest_version.hash, _MAX_AUDIT_SOURCE_BYTES
     )
     if manifest_bytes is None:
-        return {"status": "history_incomplete", "gaps": []}
+        return _incomplete_audit_chain()
     try:
         head = collections.parse_manifest_bytes(
             root, root / manifest.path, manifest_bytes
         ).audit_head
     except (UnicodeDecodeError, collections.CollectionError):
-        return {"status": "history_incomplete", "gaps": []}
+        return _incomplete_audit_chain()
+    if not authorize(manifest.storage.source):
+        return _incomplete_audit_chain()
     try:
-        snapshot = record_formats.load_adapter(root, manifest).read()
+        snapshot = record_formats.load_adapter(root, manifest, authorize_path=authorize).read()
     except collections.CollectionError:
+        if denied:
+            return _incomplete_audit_chain()
         try:
             vault.PathGuard.capture(root, manifest.storage.source, leaf_policy="absent")
         except vault.PathGuardError:
-            return {
-                "status": "gap" if head is not None else "history_incomplete",
-                "gaps": ["canonical-source-unavailable"] if head is not None else [],
-            }
+            return (
+                _audit_chain("gap", ("canonical-source-unavailable",), (), complete=False)
+                if head is not None
+                else _incomplete_audit_chain()
+            )
         snapshot = None
         current_hash = _absent_source_container_hash(manifest)
         markers: tuple[_AuditMarker, ...] = ()
     else:
         assert snapshot is not None
+        # A markdown-items adapter deliberately omits denied files so ordinary
+        # queries can be reduced over the released subset. Audit verification
+        # is different: a subset hash can never prove the whole container.
+        if denied:
+            return _incomplete_audit_chain()
         current_hash = (
             snapshot.source_versions[-1].hash
             if manifest.storage.strategy == "markdown-log"
@@ -584,20 +658,66 @@ def inspect_audit_gap(
             for directory_guard in snapshot.directory_guards:
                 directory_guard.recheck(root)
         except vault.PathGuardError:
-            return {"status": "history_incomplete", "gaps": []}
+            return _incomplete_audit_chain()
         snapshot_markers = _audit_markers(root, manifest, snapshot)
         if snapshot_markers is None:
-            return {"status": "history_incomplete", "gaps": []}
+            return _incomplete_audit_chain()
         markers = snapshot_markers
-    events, complete = _audit_events(root, history_guard=history_guard)
-    relevant = [event for event in events if event.get("collection_id") == manifest.collection_id]
+    return _reconstruct_audit_chain(
+        root,
+        manifest,
+        head=head,
+        manifest_hash=manifest.manifest_version.hash,
+        current_hash=current_hash,
+        markers=markers,
+        history_guard=history_guard,
+        authorize_path=authorize_path,
+    )
+
+
+def _incomplete_audit_chain() -> _AuditChain:
+    return _audit_chain("history_incomplete", (), (), complete=False)
+
+
+def _audit_chain(
+    status: str,
+    gaps: tuple[str, ...],
+    events: tuple[dict[str, Any], ...],
+    *,
+    complete: bool,
+) -> _AuditChain:
+    return _AuditChain(status, gaps, events, complete)
+
+
+def _reconstruct_audit_chain(
+    root: Path,
+    manifest: collections.CollectionManifest,
+    *,
+    head: str | None,
+    manifest_hash: str,
+    current_hash: str,
+    markers: tuple[_AuditMarker, ...],
+    history_guard: vault.DirectoryCensusGuard | None = None,
+    authorize_path: Callable[[str], bool] | None = None,
+) -> _AuditChain:
+    history = _audit_events(root, history_guard=history_guard, authorize_path=authorize_path)
+    events = history.events
+    relevant = [event for event in events if event["collection_id"] == manifest.collection_id]
+    influencing = _audit_influencing_events(
+        events, relevant, collection_id=manifest.collection_id, head=head
+    )
+    if authorize_path is not None and any(
+        not authorize_path(path)
+        for event in influencing
+        for path in (event["manifest_path"], event["source_path"], event["canonical_path"])
+    ):
+        # Do not disclose a partial event chain or even audit-gap topology when
+        # a current/deleted item is outside this request's release boundary.
+        return _incomplete_audit_chain()
     if head is None and not markers and not relevant:
-        return {"status": "baseline" if complete else "history_incomplete", "gaps": []}
-    if not complete:
-        return {
-            "status": "history_incomplete",
-            "gaps": sorted(marker.transition_id for marker in markers)[:32],
-        }
+        return _audit_chain("baseline" if history.parsed else "history_incomplete", (), (), complete=history.parsed)
+    if not history.parsed:
+        return _incomplete_audit_chain()
     all_by_id: dict[str, dict[str, Any]] = {}
     gaps: list[str] = []
     for event in events:
@@ -622,6 +742,7 @@ def inspect_audit_gap(
     if head is None:
         gaps.append("missing-manifest-head")
     current = by_id.get(head or "")
+    chain: list[dict[str, Any]] = []
     if current is None:
         gaps.append("missing-head-event")
     else:
@@ -635,6 +756,7 @@ def inspect_audit_gap(
         depth = 0
         while True:
             reachable.add(cursor["transition_id"])
+            chain.append(cursor)
             if not _event_matches_transition(cursor, manifest):
                 gaps.append("invalid-transition:" + cursor["transition_id"])
                 break
@@ -671,7 +793,68 @@ def inspect_audit_gap(
             or marker_event["item_key"] != marker.item_key
         ):
             gaps.append("unmatched-marker:" + marker.transition_id)
-    return {"status": "gap" if gaps else "ok", "gaps": sorted(set(gaps))[:32]}
+    return _audit_chain(
+        "gap" if gaps else "ok",
+        tuple(sorted(set(gaps))[:32]),
+        tuple(chain),
+        complete=not gaps,
+    )
+
+
+def _audit_influencing_events(
+    events: tuple[dict[str, Any], ...],
+    relevant: list[dict[str, Any]],
+    *,
+    collection_id: str,
+    head: str | None,
+) -> tuple[dict[str, Any], ...]:
+    """Return only foreign events that can alter this collection's audit result."""
+    relevant_ids = {event["transition_id"] for event in relevant}
+    if head is not None:
+        relevant_ids.add(head)
+    matching_by_id: dict[str, dict[str, Any]] = {}
+    for event in relevant:
+        matching_by_id.setdefault(event["transition_id"], event)
+    reachable: set[str] = set()
+    cursor = matching_by_id.get(head or "")
+    depth = 0
+    while cursor is not None and cursor["transition_id"] not in reachable and depth <= 2048:
+        transition = cursor["transition_id"]
+        reachable.add(transition)
+        parent = cursor["parent_id"]
+        if parent in {"baseline", "absent"}:
+            break
+        cursor = matching_by_id.get(parent)
+        depth += 1
+    influencing: list[dict[str, Any]] = []
+    for event in events:
+        if (
+            event["collection_id"] == collection_id
+            or event["transition_id"] in relevant_ids
+            or event["parent_id"] in reachable
+        ):
+            influencing.append(event)
+    return tuple(influencing)
+
+
+def _project_agent_audit_event(event: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        name: event[name]
+        for name in (
+            "transition_id",
+            "parent_id",
+            "operation",
+            "item_key",
+            "canonical_path",
+            "before_manifest_hash",
+            "after_manifest_hash",
+            "before_item_hash",
+            "after_item_hash",
+            "before_container_hash",
+            "after_container_hash",
+            "rationale",
+        )
+    }
 
 
 def _audit_markers(
@@ -821,13 +1004,28 @@ def _replay_audit_correlation(
     correlation = _record_audit_correlation(manifest, snapshot, record)
     if correlation is None:
         return None
-    events, complete = _audit_events(root)
-    if not complete:
+    markers = _audit_markers(root, manifest, snapshot)
+    if markers is None:
+        return None
+    current_hash = (
+        snapshot.source_versions[-1].hash
+        if manifest.storage.strategy == "markdown-log"
+        else snapshot.snapshot
+    )
+    chain = _reconstruct_audit_chain(
+        root,
+        manifest,
+        head=manifest.audit_head,
+        manifest_hash=manifest.manifest_version.hash,
+        current_hash=current_hash,
+        markers=markers,
+    )
+    if chain.status != "ok":
         return None
     matching = [
         event
-        for event in events
-        if event.get("transition_id") == correlation
+        for event in chain.events
+        if event["transition_id"] == correlation
         and _event_matches_transition(event, manifest)
         and event["operation"] == "append"
         and event["item_key"] == record.identity.key
@@ -842,8 +1040,8 @@ def _audit_events(
     root: Path,
     *,
     history_guard: vault.DirectoryCensusGuard | None = None,
-    history_stamps: tuple[tuple[str, int, int], ...] | None = None,
-) -> tuple[list[dict[str, Any]], bool]:
+    authorize_path: Callable[[str], bool] | None = None,
+) -> _AuditEvents:
     """Read bounded ordinary log segments without following untrusted archive entries."""
     live = f"{vault.kb_prefix()}log.md"
     archive = f"{vault.kb_prefix()}_archive/logs"
@@ -856,47 +1054,49 @@ def _audit_events(
         if archive_guard.directory_identity is not None:
             entries = archive_guard.entries
             if len(entries) > 128:
-                return [], False
+                return _AuditEvents((), False)
             candidates.extend(
                 entry.relative_path
                 for entry in entries
                 if re.fullmatch(r"log-[0-9a-f]{20}\.md", Path(entry.relative_path).name)
             )
     except vault.PathGuardError:
-        return [], False
+        return _AuditEvents((), False)
     events: list[dict[str, Any]] = []
     file_guards: list[vault.PathGuard] = []
     total = 0
     for relative in candidates:
+        if authorize_path is not None and not authorize_path(relative):
+            return _AuditEvents((), False)
         try:
             data, file_guard = vault.read_bounded_guarded_bytes(root, relative, limit=2_000_000)
             text = data.decode("utf-8")
         except (vault.PathGuardError, UnicodeDecodeError):
-            return [], False
+            return _AuditEvents((), False)
         total += len(data)
         file_guards.append(file_guard)
         if total > 8_000_000:
-            return [], False
+            return _AuditEvents((), False)
         for line in text.splitlines():
             if not line.startswith("Records audit-v1 "):
                 continue
             try:
                 event = json.loads(line.removeprefix("Records audit-v1 "))
             except json.JSONDecodeError:
-                return [], False
+                return _AuditEvents((), False)
             if not _valid_audit_event(event):
-                return [], False
+                return _AuditEvents((), False)
             events.append(event)
             if len(events) > 10_000:
-                return [], False
+                return _AuditEvents((), False)
     try:
         if archive_guard is not None:
             archive_guard.recheck(root)
         for file_guard in file_guards:
             file_guard.recheck(root)
     except vault.PathGuardError:
-        return [], False
-    return events, True
+        return _AuditEvents((), False)
+    return _AuditEvents(tuple(events), True)
 
 
 def _valid_audit_event(event: Any) -> bool:

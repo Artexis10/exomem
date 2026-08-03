@@ -52,6 +52,11 @@ def _path_projection(result: Any) -> dict[str, Any]:
     path = result.get("path")
     if isinstance(path, str):
         return {"path": path}
+    affected_paths = result.get("affected_paths")
+    if valid_record_receipt(result) and isinstance(affected_paths, (list, tuple)) and all(
+        isinstance(item, str) for item in affected_paths
+    ):
+        return {"paths": list(affected_paths)}
     paths = result.get("paths")
     if isinstance(paths, (list, tuple)) and all(isinstance(item, str) for item in paths):
         return {"paths": list(paths)}
@@ -105,6 +110,35 @@ def committed_terminal(
         "ok": True,
         "status": "committed",
         "mutated": True,
+    }
+    terminal.update(_path_projection(leaf_result))
+    terminal.update(
+        request_id=request_id,
+        receipt_id=receipt_id,
+        warnings_count=_warning_count(leaf_result),
+        leaf_result=leaf_result,
+    )
+    if idempotency_key is not None:
+        terminal["idempotency_key"] = idempotency_key
+    return terminal
+
+
+def replayed_terminal(
+    leaf_result: Any,
+    *,
+    request_id: str,
+    receipt_id: str | None,
+    idempotency_key: str | None,
+) -> dict[str, Any]:
+    """Present a verified Records no-op replay without fabricating a commit."""
+    if not valid_record_receipt(leaf_result) or leaf_result.get("outcome") != "replayed":
+        raise ValueError("replayed terminal requires a valid replayed record receipt")
+    terminal: dict[str, Any] = {
+        "_terminal": _TERMINAL_MARKER,
+        "version": _TERMINAL_VERSION,
+        "ok": True,
+        "status": "replayed",
+        "mutated": False,
     }
     terminal.update(_path_projection(leaf_result))
     terminal.update(

@@ -5,7 +5,7 @@
   "purpose": "Track health, training, symptoms, protocols, measurements, and evidence without turning raw logs into unsupported conclusions.",
   "audience": "Athletes, patients, coaches, health experimenters, and people managing personal records with professional oversight.",
   "beginner_description": "Use this for workouts, symptoms, injuries, measurements, protocols, appointments, and health records.",
-  "agent_instructions": "Keep raw logs and external documents as sources or evidence. Do not infer medical advice. Compile only user-stated observations, protocols, decisions, and experiment summaries with source links and review prompts.",
+  "agent_instructions": "Use record_memory for observed training sessions, symptoms, measurements, and protocol events; this is guidance only and selecting the pack creates nothing. Keep external documents as Sources or Evidence. Do not infer medical advice or progress. Compile only explicit conclusions, decisions, and experiment summaries with links and review prompts.",
   "default_note_types": [
     "experiment",
     "research-note",
@@ -35,13 +35,13 @@
     {
       "title": "Log a training or symptom record",
       "intent": "Capture observations without prematurely turning them into conclusions.",
-      "route": "add raw log or preserve proof, then compile only durable observations when needed",
+      "route": "record_memory(action=append) for a configured Record collection; use record_memory(action=query) for bounded history, and preserve external proof separately",
       "example": "Log this training session."
     },
     {
       "title": "Review a protocol change",
       "intent": "Compare what changed after a protocol, injury, or intervention.",
-      "route": "find relevant logs and experiments, then reason in the agent with citations",
+      "route": "record_memory(action=query) for the configured collection, then review the observed data without inferring medical or performance judgments",
       "example": "What changed after the new protocol?"
     }
   ],
@@ -61,6 +61,9 @@
   ],
   "examples": [
     "Log this training session.",
+    "Record today's symptoms.",
+    "Log this blood pressure measurement.",
+    "Give me a template for logging these sessions.",
     "What changed after the new protocol?"
   ],
   "signals": [

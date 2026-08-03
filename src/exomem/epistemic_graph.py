@@ -1124,7 +1124,7 @@ def graph_context(
         allowed &= set(narrowed)
     conn = idx._open_read_snapshot()
     if conn is None:
-        return {
+        unavailable: dict[str, Any] = {
             "available": False,
             "reason": "graph sidecar unavailable",
             "seeds": [],
@@ -1132,6 +1132,12 @@ def graph_context(
             "edges": [],
             "truncation": [],
         }
+        if unit_ref is not None:
+            unavailable["unit_status"] = "stale"
+            unavailable["warnings"] = [
+                _drift_warning({"graph_sidecar_unavailable": 1})
+            ]
+        return unavailable
     try:
         drift_counts: dict[str, int] = {}
         freshness_cache: dict[tuple[str, str, str, int], bool] = {}

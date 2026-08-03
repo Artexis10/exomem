@@ -47,6 +47,46 @@ _MAX_INFERENCE_PROVENANCE = 32
 _MAX_PATH_BYTES = 1024
 _MAX_ITEM_KEY_BYTES = 512
 _MAX_MANIFEST_BYTES = 512 * 1024
+_MAX_SAVED_VIEWS = 32
+_MAX_SAVED_VIEW_NAME_BYTES = 128
+_MAX_SAVED_VIEW_FILTERS = 128
+_SAVED_VIEW_QUERY_KEYS = frozenset(
+    {
+        "filters",
+        "columns",
+        "sort_by",
+        "descending",
+        "aggregate",
+        "date_from",
+        "date_to",
+        "date_column",
+        "expand_children",
+        "limit",
+    }
+)
+_SAVED_VIEW_SYSTEM_FIELDS = frozenset(
+    {"collection_id", "record_id", "item_version", "inferred", "ambiguous", "parent_record_id"}
+)
+_SAVED_VIEW_QUERY_OPS = frozenset(
+    {
+        "eq",
+        "ne",
+        "gt",
+        "gte",
+        "lt",
+        "lte",
+        "contains",
+        "icontains",
+        "startswith",
+        "in",
+        "nin",
+        "exists",
+        "missing",
+    }
+)
+_SAVED_VIEW_AGGREGATES = frozenset(
+    {"min", "max", "sum", "avg", "latest", "distinct", "group"}
+)
 
 
 @dataclass(slots=True)
@@ -172,6 +212,15 @@ class LegacyCollection:
     collection_id: str
     path: str
     inspect_only: bool = True
+
+
+@dataclass(frozen=True, slots=True)
+class SavedView:
+    """A manifest-owned, canonical query definition and its provenance binding."""
+
+    name: str
+    definition: Mapping[str, Any]
+    identity: str
 
 
 def load_manifest(vault_root: Path, path: Path | str) -> CollectionManifest:
@@ -436,14 +485,21 @@ def infer_schema(
     )
 
 
-def inspect_legacy_tracker(vault_root: Path, path: Path | str) -> LegacyCollection:
+def inspect_legacy_tracker(
+    vault_root: Path,
+    path: Path | str,
+    *,
+    authorize_path: Callable[[str], bool] | None = None,
+) -> LegacyCollection:
+    """Inspect a manifest-less tracker without making it queryable or mutable."""
     root = Path(vault_root)
     tracker, rel = _safe_existing_path(root, path)
+    if authorize_path is not None and not authorize_path(rel):
+        raise CollectionError("COLLECTION_NOT_FOUND", "collection was not found")
     try:
-        frontmatter, _body, _marker = vault.parse_frontmatter(
-            tracker.read_text(encoding="utf-8"), strict=True
-        )
-    except (OSError, vault.FrontmatterError) as error:
+        data, _guard = vault.read_bounded_guarded_bytes(root, rel, limit=_MAX_MANIFEST_BYTES)
+        frontmatter, _body, _marker = vault.parse_frontmatter(data.decode("utf-8"), strict=True)
+    except (UnicodeDecodeError, vault.PathGuardError, vault.FrontmatterError) as error:
         raise CollectionError(
             "INVALID_LEGACY_TRACKER", "legacy tracker could not be read"
         ) from error
@@ -491,6 +547,7 @@ def _manifest_from_frontmatter(
     schema = _parse_schema(schema_version, frontmatter.get("item_schema"))
     audit_head = record_audit_head(frontmatter)
     templates = _parse_templates(root, manifest_rel, frontmatter.get("templates", []))
+    views = _parse_saved_views(frontmatter.get("views", {}), schema, storage)
     links = _parse_links(frontmatter.get("links", {}))
     return CollectionManifest(
         collection_id=collection_id,
@@ -505,10 +562,198 @@ def _manifest_from_frontmatter(
         audit_head=audit_head,
         manifest_stable_hash=manifest_stable_hash,
         templates=templates,
-        views=_freeze_mapping(frontmatter.get("views", {}), "views"),
+        views=views,
         governance=_freeze_mapping(frontmatter.get("governance", {}), "governance"),
         links=links,
     )
+
+
+def resolve_saved_view(manifest: CollectionManifest, name: str) -> SavedView:
+    """Resolve one manifest view into the exact definition used for query provenance."""
+    if type(name) is not str or not name or len(name.encode("utf-8")) > _MAX_SAVED_VIEW_NAME_BYTES:
+        raise CollectionError("INVALID_SAVED_VIEW", "saved view name is invalid")
+    definition = manifest.views.get(name)
+    if definition is None:
+        raise CollectionError("SAVED_VIEW_NOT_FOUND", "saved view was not found")
+    if not isinstance(definition, Mapping):  # Defensive: manifests normalize this on load.
+        raise CollectionError("INVALID_SAVED_VIEW", "saved view definition is invalid")
+    plain_definition = _plain_json_value(definition)
+    assert isinstance(plain_definition, dict)
+    normalized_definition = _normalize_saved_view(
+        plain_definition, _saved_view_fields(manifest.schema, manifest.storage)
+    )
+    canonical = json.dumps(
+        {
+            "collection_id": manifest.collection_id,
+            "manifest_path": manifest.path,
+            "manifest_hash": manifest.manifest_version.hash,
+            "name": name,
+            "definition": normalized_definition,
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return SavedView(
+        name=name,
+        definition=normalized_definition,
+        identity=hashlib.sha256(canonical).hexdigest(),
+    )
+
+
+def _parse_saved_views(
+    value: object, schema: ItemSchema, storage: StorageSpec
+) -> Mapping[str, Any]:
+    views = _mapping(value, "views")
+    if len(views) > _MAX_SAVED_VIEWS:
+        raise CollectionError("INVALID_SAVED_VIEW", "too many saved views")
+    return _freeze_mapping(views, "views")
+
+
+def _saved_view_fields(schema: ItemSchema, storage: StorageSpec) -> set[str]:
+    fields = set(schema.fields) | set(_SAVED_VIEW_SYSTEM_FIELDS)
+    if storage.strategy != "markdown-log":
+        return fields
+    heading = storage.descriptor.get("item_heading")
+    if isinstance(heading, Mapping):
+        note = heading.get("note")
+        if isinstance(note, Mapping) and type(note.get("field")) is str:
+            fields.add(note["field"])
+    children = storage.descriptor.get("child_rows")
+    if isinstance(children, Mapping) and isinstance(children.get("fields"), (list, tuple)):
+        fields.update(field for field in children["fields"] if type(field) is str)
+    return fields
+
+
+def _normalize_saved_view(value: object, fields: set[str]) -> dict[str, Any]:
+    if not isinstance(value, Mapping) or not value or not _mapping_has_only_keys(
+        value, {"query", "sort", "source_snapshot"}
+    ):
+        raise CollectionError("INVALID_SAVED_VIEW", "saved view definition is invalid")
+    raw_query = value.get("query", {})
+    if not isinstance(raw_query, Mapping):
+        raise CollectionError("INVALID_SAVED_VIEW", "saved view query is invalid")
+    if not _mapping_has_only_keys(raw_query, _SAVED_VIEW_QUERY_KEYS):
+        raise CollectionError("INVALID_SAVED_VIEW", "saved view query has unknown fields")
+    query: dict[str, Any] = {}
+    if "filters" in raw_query:
+        query["filters"] = _normalize_saved_view_filters(raw_query["filters"], fields)
+    if "columns" in raw_query:
+        columns = raw_query["columns"]
+        if (
+            not isinstance(columns, list)
+            or not columns
+            or len(columns) > len(fields)
+            or any(type(column) is not str or column not in fields for column in columns)
+            or len(set(columns)) != len(columns)
+        ):
+            raise CollectionError("INVALID_SAVED_VIEW", "saved view columns are invalid")
+        query["columns"] = list(columns)
+    for key in ("sort_by", "date_column"):
+        if key in raw_query:
+            column = raw_query[key]
+            if type(column) is not str or column not in fields:
+                raise CollectionError("INVALID_SAVED_VIEW", f"saved view {key} is invalid")
+            query[key] = column
+    for key in ("date_from", "date_to"):
+        if key in raw_query:
+            bound = raw_query[key]
+            if type(bound) is not str or not bound or len(bound.encode("utf-8")) > 128:
+                raise CollectionError("INVALID_SAVED_VIEW", f"saved view {key} is invalid")
+            query[key] = bound
+    for key in ("descending", "expand_children"):
+        if key in raw_query:
+            if type(raw_query[key]) is not bool:
+                raise CollectionError("INVALID_SAVED_VIEW", f"saved view {key} is invalid")
+            query[key] = raw_query[key]
+    if "aggregate" in raw_query:
+        aggregate = _normalize_saved_view_aggregate(raw_query["aggregate"], fields)
+        query["aggregate"] = aggregate
+    if "limit" in raw_query:
+        limit = raw_query["limit"]
+        if type(limit) is not int or not 1 <= limit <= 1_000:
+            raise CollectionError("INVALID_SAVED_VIEW", "saved view limit is invalid")
+        query["limit"] = limit
+    if "sort" in value:
+        sort = value["sort"]
+        if (
+            not isinstance(sort, (list, tuple))
+            or len(sort) != 2
+            or type(sort[0]) is not str
+            or sort[0] not in fields
+            or type(sort[1]) is not str
+            or sort[1] not in {"asc", "desc"}
+            or "sort_by" in query
+            or "descending" in query
+        ):
+            raise CollectionError("INVALID_SAVED_VIEW", "saved view sort is invalid")
+        query["sort_by"] = sort[0]
+        query["descending"] = sort[1] == "desc"
+    if not query:
+        raise CollectionError("INVALID_SAVED_VIEW", "saved view requires query or sort")
+    normalized: dict[str, Any] = {"query": query}
+    if "source_snapshot" in value:
+        snapshot = value["source_snapshot"]
+        if type(snapshot) is not str or re.fullmatch(r"[0-9a-f]{64}", snapshot) is None:
+            raise CollectionError("INVALID_SAVED_VIEW", "saved view source snapshot is invalid")
+        normalized["source_snapshot"] = snapshot
+    return normalized
+
+
+def _normalize_saved_view_filters(value: object, fields: set[str]) -> list[dict[str, Any]]:
+    if isinstance(value, Mapping):
+        if not all(type(column) is str for column in value):
+            raise CollectionError("INVALID_SAVED_VIEW", "saved view filters are invalid")
+        raw_filters = [
+            {"column": column, "op": "eq", "value": item}
+            for column, item in sorted(value.items())
+        ]
+    elif isinstance(value, list):
+        raw_filters = value
+    else:
+        raise CollectionError("INVALID_SAVED_VIEW", "saved view filters are invalid")
+    if len(raw_filters) > _MAX_SAVED_VIEW_FILTERS:
+        raise CollectionError("INVALID_SAVED_VIEW", "saved view has too many filters")
+    filters: list[dict[str, Any]] = []
+    for raw in raw_filters:
+        if not isinstance(raw, Mapping) or not _mapping_has_only_keys(
+            raw, {"column", "op", "value"}
+        ):
+            raise CollectionError("INVALID_SAVED_VIEW", "saved view filter is invalid")
+        column = raw.get("column")
+        operator = raw.get("op", "eq")
+        if (
+            type(column) is not str
+            or column not in fields
+            or type(operator) is not str
+            or operator not in _SAVED_VIEW_QUERY_OPS
+        ):
+            raise CollectionError("INVALID_SAVED_VIEW", "saved view filter is invalid")
+        if operator not in {"exists", "missing"} and "value" not in raw:
+            raise CollectionError("INVALID_SAVED_VIEW", "saved view filter value is required")
+        if "value" in raw and not _is_json_value(raw["value"]):
+            raise CollectionError("INVALID_SAVED_VIEW", "saved view filter value is invalid")
+        normalized = {"column": column, "op": operator}
+        if "value" in raw:
+            normalized["value"] = raw["value"]
+        filters.append(normalized)
+    return filters
+
+
+def _mapping_has_only_keys(value: Mapping[object, Any], allowed: set[str] | frozenset[str]) -> bool:
+    return all(type(key) is str and key in allowed for key in value)
+
+
+def _normalize_saved_view_aggregate(value: object, fields: set[str]) -> str:
+    if type(value) is not str:
+        raise CollectionError("INVALID_SAVED_VIEW", "saved view aggregate is invalid")
+    aggregate = value.strip()
+    if aggregate in {"count", "profile"}:
+        return aggregate
+    function, separator, column = aggregate.partition(":")
+    if not separator or function not in _SAVED_VIEW_AGGREGATES or column not in fields:
+        raise CollectionError("INVALID_SAVED_VIEW", "saved view aggregate is invalid")
+    return f"{function}:{column}"
 
 
 def record_audit_head(frontmatter: Mapping[str, Any]) -> str | None:
@@ -1024,6 +1269,15 @@ def _is_json_value(value: Any) -> bool:
     if isinstance(value, Mapping):
         return all(type(key) is str and _is_json_value(item) for key, item in value.items())
     return False
+
+
+def _plain_json_value(value: Any) -> Any:
+    """Detach frozen manifest values before hashing or returning provenance."""
+    if isinstance(value, Mapping):
+        return {str(key): _plain_json_value(item) for key, item in value.items()}
+    if isinstance(value, list | tuple):
+        return [_plain_json_value(item) for item in value]
+    return value
 
 
 def _nonempty_string(value: object, name: str) -> str:

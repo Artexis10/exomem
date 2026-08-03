@@ -53,24 +53,24 @@
 
 ## 7. One Generated Product Command
 
-- [ ] 7.1 Write failing registry, selector, argument-matrix, governance-projector, retry, MCP schema, REST, CLI, and bootstrap tests for exactly `inspect`, `create`, `query`, `append`, and `update`.
-- [ ] 7.2 Implement `record_memory` once in the canonical registry, with `inspect`/`query` lease-free, `create`/`append`/`update` writer-routed, unknown actions fail-closed, and conservative command-level write annotations.
-- [ ] 7.3 Implement report-only collection inspection and queryable agent-audit fields; leave generic derived-index repair under `maintain_memory(mode="reconcile")`.
-- [ ] 7.4 Regenerate shared MCP schema fixtures and verify MCP/REST/CLI/bootstrap parameter and response parity without adding storage-specific tools.
-- [ ] 7.5 Run focused command-surface, schema-fidelity, REST, CLI, bootstrap, retry, lease, and governance tests.
+- [x] 7.1 Write failing registry, selector, argument-matrix, governance-projector, retry, MCP schema, REST, CLI, and bootstrap tests for exactly `inspect`, `create`, `query`, `append`, and `update`.
+- [x] 7.2 Implement `record_memory` once in the canonical registry, with `inspect`/`query` lease-free, `create`/`append`/`update` writer-routed, unknown actions fail-closed, and conservative command-level write annotations.
+- [x] 7.3 Implement report-only collection inspection and queryable agent-audit fields; leave generic derived-index repair under `maintain_memory(mode="reconcile")`.
+- [x] 7.4 Regenerate shared MCP schema fixtures and verify MCP/REST/CLI/bootstrap parameter and response parity without adding storage-specific tools.
+- [x] 7.5 Run focused command-surface, schema-fidelity, REST, CLI, bootstrap, retry, lease, and governance tests.
 
 ## 8. Templates, Packs, Scaffold, And Product Documentation
 
-- [ ] 8.1 Update existing health and personal-records pack guidance through the current validated pack surface; do not add blueprint activation, silent folders, migrations, or domain-specific storage behavior.
-- [ ] 8.2 Update the hand-authored generic scaffold, bootstrap guidance, README, capability/product-model docs, and new Records documentation with the eight-layer distinction, manual-first invariant, five actions, storage/granularity limits, tracker adoption, template independence, agent audit gaps, non-persistent derived-output provenance, deferred summary materialization, and Planning/OpenSpec boundaries.
-- [ ] 8.3 Document `Knowledge Base/Templates/` as the intended ordinary template root while explicitly recording that Exomem does not mutate `.obsidian`; keep the observed real-vault template configuration discrepancy as an acceptance follow-up.
-- [ ] 8.4 Document compatibility and rollback: manifest-less inspection only, adjacent-manifest opt-in, prospective markers, no forced tracker rewrite, query-only datasets, no automatic representation promotion, and rebuildable derived state.
-- [ ] 8.5 Run pack, bootstrap, docs/schema generation, scaffold integrity, and no-personal-leak tests.
+- [x] 8.1 Update existing health and personal-records pack guidance through the current validated pack surface; do not add blueprint activation, silent folders, migrations, or domain-specific storage behavior.
+- [x] 8.2 Update the hand-authored generic scaffold, bootstrap guidance, README, capability/product-model docs, and new Records documentation with the eight-layer distinction, manual-first invariant, five actions, storage/granularity limits, tracker adoption, template independence, agent audit gaps, non-persistent derived-output provenance, deferred summary materialization, and Planning/OpenSpec boundaries.
+- [x] 8.3 Document `Knowledge Base/Templates/` as the ordinary template root, verify that the Knowledge Base vault's `.obsidian/templates.json` maps `Templates` to that path, and record that Exomem preserves rather than mutates `.obsidian`.
+- [x] 8.4 Document compatibility and rollback: manifest-less inspection only, adjacent-manifest opt-in, prospective markers, no forced tracker rewrite, query-only datasets, no automatic representation promotion, and rebuildable derived state.
+- [x] 8.5 Run pack, bootstrap, docs/schema generation, scaffold integrity, and no-personal-leak tests.
 
 ## 9. Real Product Path, Review, And Delivery
 
-- [ ] 9.1 Add an end-to-end dispatcher test that preserves the X3 files/templates, simulates ordinary template insertion, performs guarded append, targeted update, structured query with non-persistent JSON/Markdown/CSV derived views, opaque Planning descriptor round-trip, neutral three-month rendering, governance enforcement, and direct-manual-edit visibility without recall flooding or persisted-summary admission.
-- [ ] 9.2 Add end-to-end vehicle and dataset paths proving targeted correction, evidence links, mixed-release pre-reduction filtering, dataset caps, snapshot invalidation, and unsupported dataset mutation refusal.
+- [x] 9.1 Add an end-to-end dispatcher test that preserves the X3 files/templates, simulates ordinary template insertion, performs guarded append, targeted update, structured query with non-persistent JSON/Markdown/CSV derived views, opaque Planning descriptor round-trip, neutral three-month rendering, governance enforcement, and direct-manual-edit visibility without recall flooding or persisted-summary admission.
+- [x] 9.2 Add end-to-end vehicle and dataset paths proving targeted correction, evidence links, mixed-release pre-reduction filtering, dataset caps, snapshot invalidation, and unsupported dataset mutation refusal.
 - [ ] 9.3 Run strict OpenSpec validation, focused Records suites, repository full tests with embeddings disabled, Ruff, mypy, generated-surface checks, scaffold leak checks, and proportional latency/scale gates; record exact results.
 - [ ] 9.4 Run an independent architecture/code/security review focused on Planning overlap, duplicate substrate, exact-span writes, concurrency, manual edits, identity/schema evolution, tracker compatibility, governance/aggregate leakage, recall pollution, source-of-truth promotion, template coupling, hidden DB dependence, stale/ambiguous updates, X3 leakage, migration claims, and Windows publication.
 - [ ] 9.5 Correct every material reviewer finding and rerun the affected plus full verification rather than merely documenting failures.

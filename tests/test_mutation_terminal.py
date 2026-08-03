@@ -104,6 +104,67 @@ def test_response_detail_is_removed_from_an_owned_payload_copy() -> None:
     assert original["response_detail"] == "full"
 
 
+def test_record_replay_terminal_is_not_presented_as_a_new_commit() -> None:
+    mutation_terminal = _terminal_module()
+    receipt = {
+        "_record_receipt": "exomem.records-mutation",
+        "receipt_version": 1,
+        "operation": "append",
+        "collection_id": "11111111-1111-4111-8111-111111111111",
+        "item_key": "22222222-2222-4222-8222-222222222222",
+        "before_item_hash": "a" * 64,
+        "after_item_hash": "a" * 64,
+        "before_container_hash": "b" * 64,
+        "after_container_hash": "b" * 64,
+        "affected_paths": ["Knowledge Base/Records/log.md"],
+        "payload_hash": "c" * 64,
+        "outcome": "replayed",
+        "audit_correlation": "d" * 24,
+    }
+
+    terminal = mutation_terminal.replayed_terminal(
+        receipt,
+        request_id="11111111-1111-4111-8111-111111111111",
+        receipt_id="receipt-1",
+        idempotency_key="same-call",
+    )
+
+    assert mutation_terminal.project_terminal(terminal) == {
+        "ok": True,
+        "status": "replayed",
+        "mutated": False,
+        "paths": ["Knowledge Base/Records/log.md"],
+        "request_id": "11111111-1111-4111-8111-111111111111",
+        "receipt_id": "receipt-1",
+        "idempotency_key": "same-call",
+        "operation": "append",
+        "collection_id": "11111111-1111-4111-8111-111111111111",
+        "item_key": "22222222-2222-4222-8222-222222222222",
+        "before_item_hash": "a" * 64,
+        "after_item_hash": "a" * 64,
+        "before_container_hash": "b" * 64,
+        "after_container_hash": "b" * 64,
+        "affected_paths": ["Knowledge Base/Records/log.md"],
+        "payload_hash": "c" * 64,
+        "outcome": "replayed",
+        "audit_correlation": "d" * 24,
+        "warnings_count": 0,
+    }
+
+
+def test_unvalidated_affected_paths_do_not_become_terminal_paths() -> None:
+    mutation_terminal = _terminal_module()
+
+    terminal = mutation_terminal.committed_terminal(
+        {"affected_paths": ["Knowledge Base/private.md"]},
+        request_id="11111111-1111-4111-8111-111111111111",
+        receipt_id=None,
+        idempotency_key=None,
+    )
+
+    assert mutation_terminal.project_terminal(terminal)["paths"] == []
+
+
 @pytest.mark.parametrize("detail", ["verbose", []])
 def test_unknown_response_detail_is_rejected_before_invocation(detail) -> None:
     mutation_terminal = _terminal_module()

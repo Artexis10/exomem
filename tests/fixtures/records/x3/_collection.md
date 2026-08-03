@@ -59,8 +59,8 @@ item_schema:
       items:
         type: object
 templates:
-  - path: X3 Push.md
-  - path: X3 Pull.md
+  - path: Knowledge Base/Templates/Records/Health/X3/X3 Push.md
+  - path: Knowledge Base/Templates/Records/Health/X3/X3 Pull.md
 links:
   plans:
     - reference: exomem://memory/81947000-4c22-46e4-9874-23fed028314b

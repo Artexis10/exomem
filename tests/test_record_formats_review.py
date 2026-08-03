@@ -242,6 +242,103 @@ def test_continuation_binds_manifest_bytes_and_refuses_tampering(tmp_path: Path)
     assert excinfo.value.code == "STALE_RECORD_SNAPSHOT"
 
 
+def test_saved_view_query_binds_definition_and_manifest_only_edits_stale_continuation(
+    tmp_path: Path,
+) -> None:
+    manifest = _log_collection(tmp_path)
+    path = tmp_path / manifest.path
+    source = tmp_path / manifest.storage.source
+    source.write_text(
+        source.read_text(encoding="utf-8").replace(
+            "```markdown",
+            "### 2026-08-01 · Pull\n- Row | grey | 8\n\n```markdown",
+        ),
+        encoding="utf-8",
+    )
+    path.write_text(
+        path.read_text(encoding="utf-8").replace(
+            "item_schema:",
+            "views:\n  recent:\n    query:\n      limit: 1\n    sort: [occurred_on, desc]\nitem_schema:",
+        ),
+        encoding="utf-8",
+    )
+    manifest = collections.load_manifest(tmp_path, path)
+
+    first = record_formats.query_collection(tmp_path, manifest, view="recent")
+    assert first.view is not None
+    assert first.view["name"] == "recent"
+    assert first.continuation
+
+    path.write_text(
+        path.read_text(encoding="utf-8").replace("limit: 1", "limit: 2"), encoding="utf-8"
+    )
+    changed = collections.load_manifest(tmp_path, path)
+    with pytest.raises(collections.CollectionError) as raised:
+        record_formats.query_collection(
+            tmp_path, changed, view="recent", continuation=first.continuation
+        )
+    assert raised.value.code == "STALE_RECORD_SNAPSHOT"
+
+
+def test_saved_view_source_snapshot_binds_canonical_data_not_its_manifest(tmp_path: Path) -> None:
+    manifest = _log_collection(tmp_path)
+    path = tmp_path / manifest.path
+    source = tmp_path / manifest.storage.source
+    source_snapshot = record_formats.load_adapter(tmp_path, manifest).read().data_snapshot
+    path.write_text(
+        path.read_text(encoding="utf-8").replace(
+            "item_schema:",
+            "views:\n  current:\n    query:\n      limit: 1\n"
+            f"    source_snapshot: {source_snapshot}\nitem_schema:",
+        ),
+        encoding="utf-8",
+    )
+    manifest = collections.load_manifest(tmp_path, path)
+
+    current = record_formats.inspect_collection(tmp_path, manifest)
+    assert current.snapshot is not None
+    assert "STALE_SAVED_VIEW" not in {diagnostic.code for diagnostic in current.diagnostics}
+
+    source.write_text(source.read_text(encoding="utf-8").replace("Push", "Pull"), encoding="utf-8")
+    stale = record_formats.inspect_collection(tmp_path, manifest)
+
+    assert "STALE_SAVED_VIEW" in {diagnostic.code for diagnostic in stale.diagnostics}
+
+
+def test_inspection_keeps_adapter_evidence_when_one_saved_view_is_malformed(tmp_path: Path) -> None:
+    manifest = _log_collection(tmp_path)
+    path = tmp_path / manifest.path
+    path.write_text(
+        path.read_text(encoding="utf-8").replace(
+            "item_schema:",
+            "views:\n  good:\n    query:\n      limit: 1\n  broken:\n"
+            "    query:\n      columns: [[title]]\nitem_schema:",
+        ),
+        encoding="utf-8",
+    )
+    manifest = collections.load_manifest(tmp_path, path)
+
+    inspected = record_formats.inspect_collection(tmp_path, manifest)
+
+    assert inspected.snapshot is not None
+    assert inspected.source_versions
+    assert "INVALID_SAVED_VIEW" in {diagnostic.code for diagnostic in inspected.diagnostics}
+
+
+def test_report_only_inspection_returns_typed_diagnostics_without_repair(tmp_path: Path) -> None:
+    manifest = _log_collection(tmp_path)
+    source = tmp_path / manifest.storage.source
+    source.write_text("## Wrong section\n", encoding="utf-8")
+    before = source.read_bytes()
+
+    inspected = record_formats.inspect_collection(tmp_path, manifest)
+
+    assert inspected.snapshot is None
+    assert inspected.source_hashes[manifest.manifest_version.path] == manifest.manifest_version.hash
+    assert inspected.diagnostics[0].code == "COLLECTION_SECTION_NOT_FOUND"
+    assert source.read_bytes() == before
+
+
 def test_dataset_duplicate_keys_are_ambiguous_and_rows_hide_item_versions(tmp_path: Path) -> None:
     collection = tmp_path / "Knowledge Base/Records/Dataset"
     collection.mkdir(parents=True)

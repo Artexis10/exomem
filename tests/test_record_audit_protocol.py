@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 from record_fixtures import copy_vehicle_maintenance_fixture, copy_x3_fixture
 
-from exomem import record_formats, vault
+from exomem import record_formats, vault, writer_lease
 from exomem import structured_collections as collections
 
 
@@ -17,6 +17,14 @@ def _activity_log(vault: Path) -> None:
     path = vault / "Knowledge Base/log.md"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("# Activity\n", encoding="utf-8")
+
+
+@pytest.fixture(autouse=True)
+def _isolated_writer_lease_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    writer_lease.reset_managers_for_tests()
+    monkeypatch.setenv("EXOMEM_WRITER_LEASE_STATE_DIR", str(tmp_path / "lease-state"))
+    yield
+    writer_lease.reset_managers_for_tests()
 
 
 def _item(day: str, title: str) -> dict[str, object]:
@@ -170,6 +178,12 @@ def test_audit_chain_is_archive_order_independent_and_exact_duplicates_dedupe(
     (archive / "log-22222222222222222222.md").write_text(events[0] + "\n", encoding="utf-8")
     log.write_text("# Activity\n", encoding="utf-8")
     assert records.inspect_audit_gap(tmp_path, refreshed.path)["status"] == "ok"
+    history = records.agent_audit_history(tmp_path, refreshed.path)
+    assert history["status"] == "ok"
+    assert [event["transition_id"] for event in history["events"]] == [
+        second["audit_correlation"],
+        first["audit_correlation"],
+    ]
 
 
 @pytest.mark.parametrize("unsafe", ["fifo", "oversize", "over-cap"])
@@ -237,6 +251,309 @@ def test_history_descriptor_drift_is_incomplete(
 
     monkeypatch.setattr(vault, "read_bounded_guarded_bytes", drift)
     assert records.inspect_audit_gap(tmp_path, manifest.path)["status"] == "history_incomplete"
+
+
+def test_agent_audit_history_authorizes_each_file_before_bounded_parse(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import records
+
+    fixture = copy_x3_fixture(tmp_path)
+    _activity_log(tmp_path)
+    manifest = collections.load_manifest(tmp_path, fixture / "_collection.md")
+    snapshot = record_formats.load_adapter(tmp_path, manifest).read()
+    records.append_record(
+        tmp_path,
+        manifest.path,
+        item=_item("2026-08-03", "Pull"),
+        item_key="90909090-9090-4090-8090-909090909090",
+        expected_container_hash=snapshot.source_versions[-1].hash,
+        why="audit authorization fixture",
+    )
+    archive = tmp_path / "Knowledge Base/_archive/logs"
+    archive.mkdir(parents=True)
+    archive_file = archive / "log-00000000000000000000.md"
+    archive_file.write_text("# inert\n", encoding="utf-8")
+    authorized: list[str] = []
+    reads: list[str] = []
+    real_read = vault.read_bounded_guarded_bytes
+
+    def guarded_read(root: Path, relative: str, **kwargs: object):
+        if relative == "Knowledge Base/log.md" or relative == archive_file.relative_to(root).as_posix():
+            assert relative in authorized
+            reads.append(relative)
+        return real_read(root, relative, **kwargs)
+
+    monkeypatch.setattr(vault, "read_bounded_guarded_bytes", guarded_read)
+    result = records.agent_audit_history(
+        tmp_path, manifest.path, authorize_path=lambda path: authorized.append(path) or True
+    )
+
+    assert result["status"] == "ok"
+    assert set(reads) == {"Knowledge Base/log.md", archive_file.relative_to(tmp_path).as_posix()}
+    assert all(set(event) == {
+        "transition_id",
+        "parent_id",
+        "operation",
+        "item_key",
+        "canonical_path",
+        "before_manifest_hash",
+        "after_manifest_hash",
+        "before_item_hash",
+        "after_item_hash",
+        "before_container_hash",
+        "after_container_hash",
+        "rationale",
+    } for event in result["events"])
+    assert "Pull" not in repr(result)
+
+
+def test_withheld_audit_history_is_incomplete_without_history_details(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import records
+
+    fixture = copy_x3_fixture(tmp_path)
+    _activity_log(tmp_path)
+    manifest = collections.load_manifest(tmp_path, fixture / "_collection.md")
+    snapshot = record_formats.load_adapter(tmp_path, manifest).read()
+    records.append_record(
+        tmp_path,
+        manifest.path,
+        item=_item("2026-08-03", "Pull"),
+        item_key="91919191-9191-4191-8191-919191919191",
+        expected_container_hash=snapshot.source_versions[-1].hash,
+        why="withheld audit fixture",
+    )
+    real_read = vault.read_bounded_guarded_bytes
+
+    def fail_if_live_audit_is_read(root: Path, relative: str, **kwargs: object):
+        if relative == "Knowledge Base/log.md":
+            pytest.fail("withheld audit file was parsed")
+        return real_read(root, relative, **kwargs)
+
+    monkeypatch.setattr(vault, "read_bounded_guarded_bytes", fail_if_live_audit_is_read)
+    report = records.inspect_audit_gap(
+        tmp_path, manifest.path, authorize_path=lambda _path: False
+    )
+
+    assert report == {"status": "history_incomplete", "gaps": []}
+
+
+def test_audit_authorization_never_parses_a_withheld_malformed_item(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A partial markdown-items snapshot cannot stand in for the canonical one."""
+    from exomem import records
+
+    fixture = copy_vehicle_maintenance_fixture(tmp_path)
+    _activity_log(tmp_path)
+    manifest = collections.load_manifest(tmp_path, fixture / "_collection.md")
+    source = fixture / "Events" / "withheld" / "2026-06-01-inspection.md"
+    source.write_bytes(b"---\nnot: [valid\n---\n" + b"hidden" * 2048)
+    hidden = source.relative_to(tmp_path).as_posix()
+    read = vault.read_bounded_guarded_bytes
+
+    def no_hidden_read(root: Path, relative: str, **kwargs: object):
+        if relative == hidden:
+            pytest.fail("withheld item was parsed for audit inspection")
+        return read(root, relative, **kwargs)
+
+    monkeypatch.setattr(vault, "read_bounded_guarded_bytes", no_hidden_read)
+
+    report = records.inspect_audit_gap(
+        tmp_path, manifest.path, authorize_path=lambda path: path != hidden
+    )
+
+    assert report == {"status": "history_incomplete", "gaps": []}
+
+
+@pytest.mark.parametrize("path_field", ("manifest_path", "source_path", "canonical_path"))
+def test_audit_history_withholds_when_a_relevant_historical_path_is_denied(
+    tmp_path: Path, path_field: str
+) -> None:
+    """A hidden historical path must not yield a partially projected audit chain."""
+    from exomem import records
+
+    fixture = copy_x3_fixture(tmp_path)
+    _activity_log(tmp_path)
+    manifest = collections.load_manifest(tmp_path, fixture / "_collection.md")
+    snapshot = record_formats.load_adapter(tmp_path, manifest).read()
+    first = records.append_record(
+        tmp_path,
+        manifest.path,
+        item=_item("2026-08-03", "Pull"),
+        item_key="93939393-9393-4393-8393-939393939393",
+        expected_container_hash=snapshot.source_versions[-1].hash,
+        why="historical audit authorization fixture",
+    )
+    current = record_formats.load_adapter(tmp_path, manifest).read()
+    records.append_record(
+        tmp_path,
+        manifest.path,
+        item=_item("2026-08-04", "Push"),
+        item_key="94949494-9494-4494-8494-949494949494",
+        expected_container_hash=current.source_versions[-1].hash,
+        why="historical audit authorization fixture",
+    )
+    log = tmp_path / "Knowledge Base" / "log.md"
+    hidden = "Knowledge Base/Records/Health/X3/deleted-session.md"
+    text = log.read_text(encoding="utf-8")
+    first_id = str(first["audit_correlation"])
+    lines = []
+    for line in text.splitlines():
+        if first_id not in line:
+            lines.append(line)
+            continue
+        event = json.loads(line.removeprefix("Records audit-v1 "))
+        event[path_field] = hidden
+        lines.append("Records audit-v1 " + json.dumps(event, sort_keys=True))
+    log.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    history = records.agent_audit_history(
+        tmp_path, manifest.path, authorize_path=lambda path: path != hidden
+    )
+
+    assert history == {
+        "status": "history_incomplete",
+        "complete": False,
+        "truncated": False,
+        "events": [],
+    }
+
+
+def test_audit_history_withholds_for_a_denied_foreign_child_of_the_live_chain(tmp_path: Path) -> None:
+    """A foreign child is audit-relevant only once its parent is live."""
+    from exomem import records
+
+    fixture = copy_x3_fixture(tmp_path)
+    _activity_log(tmp_path)
+    manifest = collections.load_manifest(tmp_path, fixture / "_collection.md")
+    snapshot = record_formats.load_adapter(tmp_path, manifest).read()
+    appended = records.append_record(
+        tmp_path,
+        manifest.path,
+        item=_item("2026-08-03", "Pull"),
+        item_key="95959595-9595-4595-8595-959595959595",
+        expected_container_hash=snapshot.source_versions[-1].hash,
+        why="foreign child authorization fixture",
+    )
+    log = tmp_path / "Knowledge Base" / "log.md"
+    line = next(item for item in log.read_text(encoding="utf-8").splitlines() if "audit-v1" in item)
+    event = json.loads(line.removeprefix("Records audit-v1 "))
+    hidden = "Knowledge Base/Records/Health/X3/foreign-child.md"
+    event.update(
+        {
+            "transition_id": "eeeeeeeeeeeeeeeeeeeeeeee",
+            "parent_id": appended["audit_correlation"],
+            "collection_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            "canonical_path": hidden,
+        }
+    )
+    log.write_text(log.read_text(encoding="utf-8") + "Records audit-v1 " + json.dumps(event) + "\n", encoding="utf-8")
+
+    history = records.agent_audit_history(
+        tmp_path, manifest.path, authorize_path=lambda path: path != hidden
+    )
+
+    assert history == {"status": "history_incomplete", "complete": False, "truncated": False, "events": []}
+
+
+def test_audit_history_withholds_for_a_denied_transition_collision(tmp_path: Path) -> None:
+    """A hidden collision must not turn into an exposed conflict gap."""
+    from exomem import records
+
+    fixture = copy_x3_fixture(tmp_path)
+    _activity_log(tmp_path)
+    manifest = collections.load_manifest(tmp_path, fixture / "_collection.md")
+    snapshot = record_formats.load_adapter(tmp_path, manifest).read()
+    records.append_record(
+        tmp_path,
+        manifest.path,
+        item=_item("2026-08-03", "Pull"),
+        item_key="96969696-9696-4696-8696-969696969696",
+        expected_container_hash=snapshot.source_versions[-1].hash,
+        why="collision authorization fixture",
+    )
+    log = tmp_path / "Knowledge Base" / "log.md"
+    line = next(item for item in log.read_text(encoding="utf-8").splitlines() if "audit-v1" in item)
+    event = json.loads(line.removeprefix("Records audit-v1 "))
+    hidden = "Knowledge Base/Records/Health/X3/hidden-collision.md"
+    event.update(
+        {"collection_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "canonical_path": hidden}
+    )
+    log.write_text(log.read_text(encoding="utf-8") + "Records audit-v1 " + json.dumps(event) + "\n", encoding="utf-8")
+
+    history = records.agent_audit_history(
+        tmp_path, manifest.path, authorize_path=lambda path: path != hidden
+    )
+
+    assert history == {"status": "history_incomplete", "complete": False, "truncated": False, "events": []}
+
+
+def test_agent_audit_history_caps_head_to_predecessor_chain_without_value_projection(
+    tmp_path: Path,
+) -> None:
+    from exomem import records
+
+    fixture = copy_x3_fixture(tmp_path)
+    _activity_log(tmp_path)
+    manifest = collections.load_manifest(tmp_path, fixture / "_collection.md")
+    current_hash = record_formats.load_adapter(tmp_path, manifest).read().source_versions[-1].hash
+    last: dict[str, object] | None = None
+    for index in range(51):
+        last = records.append_record(
+            tmp_path,
+            manifest.path,
+            item=_item(f"2026-08-{index % 28 + 1:02d}", "Pull"),
+            item_key=f"{index + 1:08x}-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            expected_container_hash=current_hash,
+            why=f"audit chain {index}",
+        )
+        current_hash = str(last["after_container_hash"])
+
+    history = records.agent_audit_history(tmp_path, manifest.path)
+
+    assert history["status"] == "ok"
+    assert history["complete"] is True
+    assert history["truncated"] is True
+    assert len(history["events"]) == 50
+    assert history["events"][0]["transition_id"] == last["audit_correlation"]
+    assert history["events"][0]["parent_id"] == history["events"][1]["transition_id"]
+    assert "occurred_on" not in repr(history)
+
+
+def test_replay_uses_the_same_rotated_audit_chain(tmp_path: Path) -> None:
+    from exomem import records
+
+    fixture = copy_x3_fixture(tmp_path)
+    _activity_log(tmp_path)
+    manifest = collections.load_manifest(tmp_path, fixture / "_collection.md")
+    snapshot = record_formats.load_adapter(tmp_path, manifest).read()
+    item = _item("2026-08-03", "Pull")
+    first = records.append_record(
+        tmp_path,
+        manifest.path,
+        item=item,
+        item_key="92929292-9292-4292-8292-929292929292",
+        expected_container_hash=snapshot.source_versions[-1].hash,
+        why="replay rotation fixture",
+    )
+    log = tmp_path / "Knowledge Base/log.md"
+    archive = tmp_path / "Knowledge Base/_archive/logs"
+    archive.mkdir(parents=True)
+    (archive / "log-11111111111111111111.md").write_bytes(log.read_bytes())
+    log.write_text("# Activity\n", encoding="utf-8")
+
+    replay = records.append_record(
+        tmp_path,
+        manifest.path,
+        item=item,
+        item_key="92929292-9292-4292-8292-929292929292",
+        expected_container_hash=first["after_container_hash"],
+        why="replay rotation fixture",
+    )
+
+    assert replay["outcome"] == "replayed"
+    assert replay["audit_correlation"] == first["audit_correlation"]
 
 
 def test_caught_and_abrupt_publication_prefixes_leave_rollback_or_gap(

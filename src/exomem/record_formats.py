@@ -69,6 +69,9 @@ class Record:
 class AdapterSnapshot:
     records: tuple[Record, ...]
     snapshot: str
+    # Canonical data only.  This deliberately omits the manifest so a saved
+    # view can pin source state without invalidating itself on its own edit.
+    data_snapshot: str
     insertion_offset: int | None = None
     diagnostics: tuple[collections.CollectionDiagnostic, ...] = ()
     source_versions: tuple[collections.SourceVersion, ...] = ()
@@ -330,6 +333,7 @@ class MarkdownLogAdapter(_BaseAdapter):
                     (source_version.path, source_version.hash),
                 ]
             ),
+            data_snapshot=_snapshot([(source_version.path, source_version.hash)]),
             insertion_offset=insertion_offset,
             diagnostics=diagnostics,
             source_versions=(manifest_version, source_version),
@@ -502,6 +506,7 @@ class MarkdownItemsAdapter(_BaseAdapter):
                 [(manifest_version.path, manifest_version.hash)]
                 + [(f"{kind}:{path}", digest) for path, kind, digest in inventory]
             ),
+            _snapshot([(f"{kind}:{path}", digest) for path, kind, digest in inventory]),
             diagnostics=diagnostics,
             source_versions=source_versions,
             source_inventory=tuple(inventory),
@@ -573,6 +578,7 @@ class DatasetAdapter(_BaseAdapter):
                     (source_version.path, source_version.hash),
                 ]
             ),
+            _snapshot([(source_version.path, source_version.hash)]),
             diagnostics=diagnostics,
             source_versions=(manifest_version, source_version),
             path_guards=(source_guard,),
@@ -838,6 +844,72 @@ class RecordQueryResult:
     query: Mapping[str, Any] = field(default_factory=dict)
     source_versions: tuple[collections.SourceVersion, ...] = ()
     columns: tuple[str, ...] = ()
+    view: Mapping[str, Any] | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class CollectionInspection:
+    """Read-only adapter evidence, including bounded parse diagnostics."""
+
+    collection_id: str
+    snapshot: str | None
+    source_versions: tuple[collections.SourceVersion, ...]
+    source_hashes: Mapping[str, str]
+    diagnostics: tuple[collections.CollectionDiagnostic, ...]
+    record_count: int = 0
+
+
+def inspect_collection(
+    vault_root: Path,
+    manifest: collections.CollectionManifest,
+    *,
+    authorize_path: Callable[[str], bool] | None = None,
+    project_values: Callable[[Mapping[str, Any]], dict[str, Any]] | None = None,
+) -> CollectionInspection:
+    """Inspect one authorized canonical representation without repairing it.
+
+    The adapter is deliberately read once.  On parse failure the manifest version
+    remains reportable, while the typed diagnostic preserves the canonical error.
+    """
+    adapter = load_adapter(
+        vault_root, manifest, authorize_path=authorize_path, project_values=project_values
+    )
+    try:
+        parsed = adapter.read()
+    except collections.CollectionError as error:
+        versions = (manifest.manifest_version,)
+        diagnostics = (collections.CollectionDiagnostic(error.code, error.reason),)
+        return CollectionInspection(
+            collection_id=manifest.collection_id,
+            snapshot=None,
+            source_versions=versions,
+            source_hashes={version.path: version.hash for version in versions},
+            diagnostics=diagnostics,
+        )
+    diagnostics = list(parsed.diagnostics[:64])
+    for name in manifest.views:
+        if len(diagnostics) >= 64:
+            break
+        try:
+            view = collections.resolve_saved_view(manifest, name)
+        except collections.CollectionError as error:
+            diagnostics.append(collections.CollectionDiagnostic(error.code, error.reason))
+            continue
+        expected = view.definition.get("source_snapshot")
+        if expected is not None and expected != parsed.data_snapshot:
+            diagnostics.append(
+                collections.CollectionDiagnostic(
+                    "STALE_SAVED_VIEW", "saved view source snapshot no longer matches canonical data"
+                )
+            )
+    return CollectionInspection(
+        collection_id=manifest.collection_id,
+        snapshot=parsed.snapshot,
+        source_versions=parsed.source_versions,
+        source_hashes={version.path: version.hash for version in parsed.source_versions},
+        diagnostics=tuple(diagnostics),
+        record_count=len(parsed.records),
+    )
 
 
 def query_collection(
@@ -856,10 +928,45 @@ def query_collection(
     expand_children: bool = False,
     continuation: str | None = None,
     output_format: str = "json",
+    view: str | None = None,
     authorize_path: Callable[[str], bool] | None = None,
     project_values: Callable[[Mapping[str, Any]], dict[str, Any]] | None = None,
 ) -> RecordQueryResult:
     """Query a fresh canonical adapter snapshot with a snapshot-bound cursor."""
+    view_provenance: dict[str, Any] | None = None
+    if view is not None:
+        if (
+            filters is not None
+            or columns is not None
+            or sort_by is not None
+            or descending
+            or aggregate is not None
+            or date_from is not None
+            or date_to is not None
+            or date_column is not None
+            or expand_children
+        ):
+            raise collections.CollectionError(
+                "INVALID_RECORD_QUERY", "saved views cannot be mixed with inline shaping"
+            )
+        saved_view = collections.resolve_saved_view(manifest, view)
+        saved_query = saved_view.definition["query"]
+        assert isinstance(saved_query, Mapping)
+        filters = saved_query.get("filters")
+        columns = saved_query.get("columns")
+        sort_by = saved_query.get("sort_by")
+        descending = saved_query.get("descending", False)
+        aggregate = saved_query.get("aggregate")
+        date_from = saved_query.get("date_from")
+        date_to = saved_query.get("date_to")
+        date_column = saved_query.get("date_column")
+        expand_children = saved_query.get("expand_children", False)
+        limit = saved_query.get("limit", limit)
+        view_provenance = {
+            "name": saved_view.name,
+            "definition": saved_view.definition,
+            "identity": saved_view.identity,
+        }
     adapter = load_adapter(
         vault_root, manifest, authorize_path=authorize_path, project_values=project_values
     )
@@ -875,15 +982,20 @@ def query_collection(
         "date_column": date_column,
         "expand_children": expand_children,
     }
+    cursor_query = query if view_provenance is None else {**query, "limit": limit, "view": view_provenance}
     offset = 0
     if continuation:
         token = _decode_continuation(continuation)
-        if token.get("collection_id") != manifest.collection_id or token.get("query") != query:
+        if token.get("collection_id") != manifest.collection_id:
             raise collections.CollectionError(
                 "INVALID_RECORD_CONTINUATION", "continuation does not match query"
             )
         if token.get("snapshot") != parsed.snapshot:
             raise collections.CollectionError("STALE_RECORD_SNAPSHOT", "canonical source changed")
+        if token.get("query") != cursor_query:
+            raise collections.CollectionError(
+                "INVALID_RECORD_CONTINUATION", "continuation does not match query"
+            )
         offset = token["offset"]
     rows = _query_rows(parsed.records, expand_children, include_item_version=adapter.mutable)
     effective_columns = columns
@@ -918,7 +1030,7 @@ def query_collection(
             {
                 "collection_id": manifest.collection_id,
                 "snapshot": parsed.snapshot,
-                "query": query,
+                "query": cursor_query,
                 "offset": next_offset,
             }
         )
@@ -936,6 +1048,7 @@ def query_collection(
         query=query,
         source_versions=parsed.source_versions,
         columns=tuple(result.columns),
+        view=view_provenance,
     )
     rendered = render_query_result(response, output_format=output_format)
     if len(rendered.encode("utf-8")) > query_data.MAX_RESPONSE_BYTES:
@@ -1625,7 +1738,7 @@ def render_query_result(result: RecordQueryResult, *, output_format: str) -> str
         ),
         result.collection_id,
         result.snapshot,
-        result.query,
+        {**result.query, **({"view": result.view} if result.view is not None else {})},
         result.source_versions,
         output_format,
     )

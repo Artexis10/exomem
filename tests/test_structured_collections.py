@@ -291,6 +291,110 @@ def test_manifestless_tracker_is_inspection_only_compatibility_surface(tmp_path:
     assert legacy.collection_id.startswith("legacy-")
 
 
+def test_saved_view_normalizes_legacy_shapes_and_binds_its_definition(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    path = _write_manifest(
+        vault,
+        "Knowledge Base/Records/Maintenance/_collection.md",
+        _manifest().replace(
+            "  latest:\n    sort: [occurred_on, desc]",
+            "  focused:\n"
+            "    query:\n"
+            "      filters:\n"
+            "        title: Service\n"
+            "      columns: [title]\n"
+            "      limit: 7\n"
+            "    sort: [occurred_on, desc]\n"
+            f"    source_snapshot: {'a' * 64}",
+        ),
+    )
+
+    manifest = collections.load_manifest(vault, path)
+    view = collections.resolve_saved_view(manifest, "focused")
+
+    assert view.definition == {
+        "query": {
+            "filters": [{"column": "title", "op": "eq", "value": "Service"}],
+            "columns": ["title"],
+            "sort_by": "occurred_on",
+            "descending": True,
+            "limit": 7,
+        },
+        "source_snapshot": "a" * 64,
+    }
+    original_identity = view.identity
+    path.write_text(
+        path.read_text(encoding="utf-8").replace("limit: 7", "limit: 8"), encoding="utf-8"
+    )
+    assert collections.resolve_saved_view(
+        collections.load_manifest(vault, path), "focused"
+    ).identity != original_identity
+
+
+@pytest.mark.parametrize(
+    "replacement",
+    (
+        "  latest:\n    query:\n      filters:\n        unknown: value",
+        "  latest:\n    source_snapshot: not-a-source-hash",
+        "  latest:\n    sort: [unknown, sideways]",
+    ),
+)
+def test_manifest_refuses_malformed_saved_views(tmp_path: Path, replacement: str) -> None:
+    vault = tmp_path / "vault"
+    path = _write_manifest(
+        vault,
+        "Knowledge Base/Records/Maintenance/_collection.md",
+        _manifest().replace("  latest:\n    sort: [occurred_on, desc]", replacement),
+    )
+
+    manifest = collections.load_manifest(vault, path)
+    with pytest.raises(collections.CollectionError) as raised:
+        collections.resolve_saved_view(manifest, "latest")
+
+    assert raised.value.code == "INVALID_SAVED_VIEW"
+
+
+@pytest.mark.parametrize(
+    "view",
+    (
+        {"query": {"columns": [["title"]]}},
+        {"query": {"filters": [{"column": "title", "op": ["eq"], "value": "Service"}]}},
+        {"sort": ["title", ["desc"]]},
+        {"query": {"filters": {("title",): "Service"}}},
+        {"query": {"filters": [{"column": {"title": "name"}, "value": "Service"}]}},
+    ),
+)
+def test_saved_view_normalization_refuses_nonscalar_yaml_json_shapes(view: object) -> None:
+    with pytest.raises(collections.CollectionError) as raised:
+        collections._normalize_saved_view(view, {"title", "occurred_on"})
+
+    assert raised.value.code == "INVALID_SAVED_VIEW"
+
+
+def test_legacy_tracker_authorizes_before_parsing_and_refuses_symlinks(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    tracker = vault / "Knowledge Base/Records/Training Log.md"
+    tracker.parent.mkdir(parents=True)
+    tracker.write_text("---\ntype: tracker\n---\n", encoding="utf-8")
+
+    with pytest.raises(collections.CollectionError) as raised:
+        collections.inspect_legacy_tracker(
+            vault,
+            tracker,
+            authorize_path=lambda _path: False,
+        )
+    assert raised.value.code == "COLLECTION_NOT_FOUND"
+
+    linked = vault / "Knowledge Base/Records/linked.md"
+    try:
+        linked.symlink_to(tracker)
+    except OSError:
+        pytest.skip("symlinks unavailable")
+    with pytest.raises(collections.CollectionError) as raised:
+        collections.inspect_legacy_tracker(vault, linked)
+    assert raised.value.code == "INVALID_COLLECTION_PATH"
+
+
 def test_acceptance_fixtures_cover_log_item_and_query_only_dataset_storage(tmp_path: Path) -> None:
     x3 = copy_x3_fixture(tmp_path / "x3")
     vehicle = copy_vehicle_maintenance_fixture(tmp_path / "vehicle")

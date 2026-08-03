@@ -228,6 +228,247 @@ def test_records_egress_envelopes_are_default_deny_and_never_use_l5_rows() -> No
     ) == {"withheld": True, "reason": "records_requires_full_release"}
 
 
+@pytest.mark.parametrize("section", ("contract", "diagnostics", "audit", "saved_views"))
+def test_record_inspection_egress_rejects_nested_untyped_payloads(section: str) -> None:
+    """The inspection allow-list must not pass arbitrary nested public data."""
+    payload: dict[str, object] = {
+        "kind": "collection",
+        "report_only": True,
+        "contract": {
+            "collection_id": "49622075-9ff4-4660-9ab7-414854b5bca2",
+            "path": "Knowledge Base/Records/vehicle-maintenance/_collection.md",
+            "title": "Vehicle maintenance",
+            "semantic_profile": "records",
+            "schema_version": 1,
+            "storage": {
+                "strategy": "markdown-items",
+                "source": "Knowledge Base/Records/vehicle-maintenance/Events",
+                "format_version": 1,
+            },
+        },
+        "legacy": None,
+        "snapshot": None,
+        "source_versions": [],
+        "diagnostics": [],
+        "audit": {"status": "baseline", "gaps": []},
+        "saved_views": [],
+    }
+    if section == "contract":
+        payload["contract"] = {**payload["contract"], "secret": "must not escape"}  # type: ignore[arg-type]
+    elif section == "diagnostics":
+        payload["diagnostics"] = [{"code": "OK", "reason": "safe", "secret": "must not escape"}]
+    elif section == "audit":
+        payload["audit"] = {"status": "baseline", "gaps": [], "secret": "must not escape"}
+    else:
+        payload["saved_views"] = [
+            {
+                "name": "recent",
+                "definition": {"query": {"limit": 1}, "secret": "must not escape"},
+                "identity": "a" * 64,
+            }
+        ]
+
+    assert egress.project(
+        record_governance._RecordEnvelope(payload), egress.LEVEL_FULL, kind="record_inspection"
+    ) == {"withheld": True, "reason": "invalid_projector_payload"}
+
+
+@pytest.mark.parametrize(
+    ("section", "value"),
+    (
+        ("kind", []),
+        ("contract.semantic_profile", []),
+        ("contract.storage.strategy", []),
+        ("contract.title", "\ud800"),
+        ("audit.status", []),
+        ("saved_views.filter.op", []),
+        ("saved_views.columns", [["unhashable"]]),
+    ),
+)
+def test_record_inspection_egress_fails_closed_on_unhashable_hostile_scalars(
+    section: str, value: object
+) -> None:
+    payload: dict[str, object] = {
+        "kind": "collection",
+        "report_only": True,
+        "contract": {
+            "collection_id": "49622075-9ff4-4660-9ab7-414854b5bca2",
+            "path": "Knowledge Base/Records/vehicle-maintenance/_collection.md",
+            "title": "Vehicle maintenance",
+            "semantic_profile": "records",
+            "schema_version": 1,
+            "storage": {
+                "strategy": "markdown-items",
+                "source": "Knowledge Base/Records/vehicle-maintenance/Events",
+                "format_version": 1,
+            },
+        },
+        "legacy": None,
+        "snapshot": None,
+        "source_versions": [],
+        "diagnostics": [],
+        "audit": {"status": "baseline", "gaps": []},
+        "saved_views": [],
+    }
+    if section == "kind":
+        payload["kind"] = value
+    elif section == "contract.semantic_profile":
+        payload["contract"]["semantic_profile"] = value  # type: ignore[index]
+    elif section == "contract.storage.strategy":
+        payload["contract"]["storage"]["strategy"] = value  # type: ignore[index]
+    elif section == "contract.title":
+        payload["contract"]["title"] = value  # type: ignore[index]
+    elif section == "audit.status":
+        payload["audit"]["status"] = value  # type: ignore[index]
+    elif section == "saved_views.filter.op":
+        payload["saved_views"] = [
+            {
+                "name": "recent",
+                "definition": {"query": {"filters": [{"column": "status", "op": value, "value": "ok"}]}},
+                "identity": "a" * 64,
+            }
+        ]
+    else:
+        payload["saved_views"] = [
+            {
+                "name": "recent",
+                "definition": {"query": {"columns": value}},
+                "identity": "a" * 64,
+            }
+        ]
+
+    assert egress.project(
+        record_governance._RecordEnvelope(payload), egress.LEVEL_FULL, kind="record_inspection"
+    ) == {"withheld": True, "reason": "invalid_projector_payload"}
+
+
+def test_record_inspection_validator_survives_two_argument_projector_reregistration() -> None:
+    allowed = egress._PROJECTORS["record_inspection"]
+
+    egress.register_projector("record_inspection", allowed)
+
+    assert egress.project(
+        record_governance._RecordEnvelope({"kind": "collection"}),
+        egress.LEVEL_FULL,
+        kind="record_inspection",
+    ) == {"withheld": True, "reason": "invalid_projector_payload"}
+
+
+def test_egress_fails_closed_when_a_projector_validator_raises() -> None:
+    kind = "test_throwing_projector_validator"
+
+    def raise_for_test(_payload: object) -> dict[str, object] | None:
+        raise RuntimeError("hostile validator")
+
+    egress.register_projector(kind, ("value",), validator=raise_for_test)
+    try:
+        projected = egress.project(
+            record_governance._RecordEnvelope({"value": "safe"}), egress.LEVEL_FULL, kind=kind
+        )
+    finally:
+        egress._PROJECTORS.pop(kind, None)
+        egress._PROJECTOR_VALIDATORS.pop(kind, None)
+
+    assert projected == {"withheld": True, "reason": "invalid_projector_payload"}
+
+
+def test_record_inspection_egress_keeps_a_valid_null_saved_view_filter_value() -> None:
+    payload = {
+        "kind": "collection",
+        "report_only": True,
+        "contract": {
+            "collection_id": "49622075-9ff4-4660-9ab7-414854b5bca2",
+            "path": "Knowledge Base/Records/vehicle-maintenance/_collection.md",
+            "title": "Vehicle maintenance",
+            "semantic_profile": "records",
+            "schema_version": 1,
+            "storage": {
+                "strategy": "markdown-items",
+                "source": "Knowledge Base/Records/vehicle-maintenance/Events",
+                "format_version": 1,
+            },
+        },
+        "legacy": None,
+        "snapshot": None,
+        "source_versions": [],
+        "diagnostics": [],
+        "audit": {"status": "baseline", "gaps": []},
+        "saved_views": [
+            {
+                "name": "unset",
+                "definition": {"query": {"filters": [{"column": "status", "op": "eq", "value": None}]}},
+                "identity": "a" * 64,
+            }
+        ],
+    }
+
+    projected = egress.project(
+        record_governance._RecordEnvelope(payload), egress.LEVEL_FULL, kind="record_inspection"
+    )
+
+    assert projected is not None
+    assert projected["saved_views"][0]["definition"]["query"]["filters"][0]["value"] is None
+
+
+def test_record_inspection_egress_accepts_collection_field_names_with_spaces_and_hyphens() -> None:
+    payload = {
+        "kind": "collection",
+        "report_only": True,
+        "contract": {
+            "collection_id": "49622075-9ff4-4660-9ab7-414854b5bca2",
+            "path": "Knowledge Base/Records/vehicle-maintenance/_collection.md",
+            "title": "Vehicle maintenance",
+            "semantic_profile": "records",
+            "schema_version": 1,
+            "storage": {"strategy": "markdown-items", "source": "Knowledge Base/Records/events", "format_version": 1},
+        },
+        "legacy": None,
+        "snapshot": None,
+        "source_versions": [],
+        "diagnostics": [],
+        "audit": {"status": "baseline", "gaps": []},
+        "saved_views": [
+            {
+                "name": "body-weight",
+                "definition": {"query": {"columns": ["body weight", "trend-kg"]}},
+                "identity": "a" * 64,
+            }
+        ],
+    }
+
+    projected = egress.project(
+        record_governance._RecordEnvelope(payload), egress.LEVEL_FULL, kind="record_inspection"
+    )
+
+    assert projected is not None
+    assert projected["saved_views"][0]["definition"]["query"]["columns"] == ["body weight", "trend-kg"]
+
+
+def test_record_inspection_egress_accepts_legacy_tracker_identity() -> None:
+    payload = {
+        "kind": "legacy_tracker",
+        "report_only": True,
+        "contract": None,
+        "legacy": {
+            "collection_id": "legacy-49622075-9ff4-4660-9ab7-414854b5bca2",
+            "path": "Knowledge Base/Records/legacy-tracker.md",
+            "inspect_only": True,
+        },
+        "snapshot": None,
+        "source_versions": [],
+        "diagnostics": [],
+        "audit": {"status": "not_applicable", "gaps": []},
+        "saved_views": [],
+    }
+
+    projected = egress.project(
+        record_governance._RecordEnvelope(payload), egress.LEVEL_FULL, kind="record_inspection"
+    )
+
+    assert projected is not None
+    assert projected["legacy"]["collection_id"] == "legacy-49622075-9ff4-4660-9ab7-414854b5bca2"
+
+
 @pytest.mark.parametrize(
     ("fixture_copy", "output_format", "aggregate"),
     (
@@ -312,6 +553,170 @@ def test_query_projection_accepts_manifest_declared_expanded_child_fields(tmp_pa
     projected = record_governance.project_query_result(result, manifest)
 
     assert projected["rows"] == result.rows
+
+
+def test_query_projection_keeps_saved_view_inside_its_typed_envelope(tmp_path: Path) -> None:
+    fixture = copy_vehicle_maintenance_fixture(tmp_path)
+    manifest_path = fixture / "_collection.md"
+    manifest_path.write_text(
+        manifest_path.read_text(encoding="utf-8").replace(
+            "---\n\nOne ordinary",
+            """views:
+  scheduled:
+    query:
+      filters: {status: scheduled}
+      sort_by: occurred_on
+      descending: true
+      limit: 1
+---
+
+One ordinary""",
+        ),
+        encoding="utf-8",
+    )
+    manifest = collections.load_manifest(tmp_path, manifest_path)
+    result = record_formats.query_collection(tmp_path, manifest, view="scheduled")
+
+    projected = record_governance.project_query_result(result, manifest)
+
+    assert projected["view"] == result.view
+    assert json.loads(projected["rendered"])["query"]["view"] == result.view
+    assert record_governance.project_query_result(
+        replace(result, view={"name": "scheduled", "definition": {}, "identity": "forged"}),
+        manifest,
+    ) == {"withheld": True, "reason": "invalid_record_query"}
+
+
+@pytest.mark.parametrize("view", ("asset-membership", "service-membership"))
+def test_governed_saved_view_refuses_a_withheld_link_filter_before_query(
+    tmp_path: Path, view: str
+) -> None:
+    fixture = copy_vehicle_maintenance_fixture(tmp_path)
+    manifest_path = fixture / "_collection.md"
+    manifest_path.write_text(
+        manifest_path.read_text(encoding="utf-8")
+        .replace("items:\n        type: string", "items:\n        type: link")
+        .replace(
+            "---\n\nOne ordinary",
+            """views:
+  asset-membership:
+    query:
+      filters:
+        - column: asset
+          op: in
+          value: ["[[Assets/Vehicle]]"]
+  service-membership:
+    query:
+      filters:
+        - column: services
+          op: contains
+          value: "[[Assets/Vehicle]]"
+---
+
+One ordinary""",
+        ),
+        encoding="utf-8",
+    )
+    manifest = collections.load_manifest(tmp_path, manifest_path)
+    target = tmp_path / "Knowledge Base" / "Assets" / "Vehicle.md"
+    target.parent.mkdir()
+    target.write_text("private", encoding="utf-8")
+    _write_l6_rule(tmp_path, ceiling=6, paths="Records/**")
+    _write_l0_rule(tmp_path, name="blocked", paths="Assets/**")
+
+    with request_scope(RequestPrincipal(audience_id=EXTERNAL, surface="mcp")):
+        with pytest.raises(collections.CollectionError) as raised:
+            record_governance.query_collection(tmp_path, manifest, view=view)
+
+    assert raised.value.code == "SAVED_VIEW_NOT_AVAILABLE"
+
+
+def test_governed_inspection_is_typed_report_only_and_requires_l6_before_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fixture = copy_vehicle_maintenance_fixture(tmp_path)
+    manifest = collections.load_manifest(tmp_path, fixture / "_collection.md")
+    _write_l6_rule(tmp_path, ceiling=0, paths="Records/**")
+    calls: list[Path] = []
+    original = record_formats.inspect_collection
+
+    def watched(*args: object, **kwargs: object) -> record_formats.CollectionInspection:
+        calls.append(Path(args[0]))
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(record_formats, "inspect_collection", watched)
+    with request_scope(RequestPrincipal(audience_id=EXTERNAL, surface="mcp")):
+        with pytest.raises(collections.CollectionError) as raised:
+            record_governance.inspect_collection(tmp_path, manifest)
+    assert raised.value.code == "COLLECTION_NOT_FOUND"
+    assert calls == []
+
+    _write_l6_rule(tmp_path, ceiling=6, paths="Records/**")
+    with request_scope(RequestPrincipal(audience_id=EXTERNAL, surface="mcp")):
+        inspection = record_governance.inspect_collection(tmp_path, manifest)
+    assert inspection["kind"] == "collection"
+    assert inspection["report_only"] is True
+    assert inspection["contract"]["collection_id"] == manifest.collection_id
+    assert inspection["legacy"] is None
+    assert "snapshot" in inspection
+    assert "source_versions" in inspection
+    assert "diagnostics" in inspection
+    assert "audit" in inspection
+    assert "saved_views" in inspection
+
+
+def test_governed_inspection_reports_malformed_saved_views_without_raising(tmp_path: Path) -> None:
+    fixture = copy_vehicle_maintenance_fixture(tmp_path)
+    manifest_path = fixture / "_collection.md"
+    manifest_path.write_text(
+        manifest_path.read_text(encoding="utf-8").replace(
+            "---\n\nOne ordinary",
+            """views:
+  broken:
+    query:
+      filters: not-a-filter
+---
+
+One ordinary""",
+        ),
+        encoding="utf-8",
+    )
+    manifest = collections.load_manifest(tmp_path, manifest_path)
+
+    inspection = record_governance.inspect_collection(tmp_path, manifest)
+
+    assert inspection["report_only"] is True
+    assert {item["code"] for item in inspection["diagnostics"]} >= {"INVALID_SAVED_VIEW"}
+    assert inspection["saved_views"] == []
+
+
+def test_governed_inspection_reports_hidden_and_missing_templates_the_same(tmp_path: Path) -> None:
+    fixture = copy_vehicle_maintenance_fixture(tmp_path)
+    manifest_path = fixture / "_collection.md"
+    manifest_path.write_text(
+        manifest_path.read_text(encoding="utf-8").replace(
+            "---\n\nOne ordinary",
+            "templates: [{path: Templates/session.md}]\n---\n\nOne ordinary",
+        ),
+        encoding="utf-8",
+    )
+    manifest = collections.load_manifest(tmp_path, manifest_path)
+    _write_l6_rule(tmp_path, ceiling=6, paths="Records/**")
+
+    with request_scope(RequestPrincipal(audience_id=EXTERNAL, surface="mcp")):
+        missing = record_governance.inspect_collection(tmp_path, manifest)
+    template = fixture / "Templates" / "session.md"
+    template.parent.mkdir()
+    template.write_text("private", encoding="utf-8")
+    _write_l0_rule(tmp_path, name="blocked", paths="Records/vehicle-maintenance/Templates/**")
+    with request_scope(RequestPrincipal(audience_id=EXTERNAL, surface="mcp")):
+        withheld = record_governance.inspect_collection(tmp_path, manifest)
+
+    assert missing["diagnostics"] == withheld["diagnostics"]
+    assert missing["diagnostics"][-1] == {
+        "code": "TEMPLATE_UNAVAILABLE",
+        "reason": "declared template is unavailable",
+    }
 
 
 def test_manifest_projector_round_trips_opaque_plan_descriptor_without_resolution(

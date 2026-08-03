@@ -24,6 +24,297 @@ class _RecordEnvelope:
         return dict(self.payload)
 
 
+_INSPECTION_KEYS = frozenset(
+    {
+        "kind",
+        "report_only",
+        "contract",
+        "legacy",
+        "snapshot",
+        "source_versions",
+        "diagnostics",
+        "audit",
+        "saved_views",
+    }
+)
+_INSPECTION_VIEW_QUERY_KEYS = frozenset(
+    {
+        "filters",
+        "columns",
+        "sort_by",
+        "descending",
+        "aggregate",
+        "date_from",
+        "date_to",
+        "date_column",
+        "expand_children",
+        "limit",
+    }
+)
+_INSPECTION_VIEW_FILTER_KEYS = frozenset({"column", "op", "value"})
+_INSPECTION_VIEW_OPS = frozenset(
+    {"eq", "ne", "gt", "gte", "lt", "lte", "contains", "icontains", "startswith", "in", "nin", "exists", "missing"}
+)
+_INSPECTION_INVALID = object()
+
+
+def _inspection_string(value: Any, *, maximum: int, nonempty: bool = True) -> str | None:
+    if type(value) is not str:
+        return None
+    try:
+        if len(value.encode("utf-8")) > maximum:
+            return None
+    except UnicodeEncodeError:
+        return None
+    if nonempty and not value:
+        return None
+    return value
+
+
+def _inspection_path(value: Any) -> str | None:
+    path = _inspection_string(value, maximum=2_048)
+    if (
+        path is None
+        or path.startswith(("/", "\\"))
+        or re.match(r"^[A-Za-z]:", path) is not None
+        or "\\" in path
+        or "\0" in path
+        or any(part in {"", ".", ".."} for part in path.split("/"))
+    ):
+        return None
+    return path
+
+
+def _inspection_hash(value: Any) -> str | None:
+    return value if type(value) is str and re.fullmatch(r"[0-9a-f]{64}", value) else None
+
+
+def _inspection_identifier(value: Any) -> str | None:
+    normalized = memory_refs.normalize_id(value)
+    return normalized if normalized == value else None
+
+
+def _inspection_json(value: Any, *, depth: int = 0, nodes: list[int] | None = None) -> Any:
+    """Return only bounded plain JSON; never stringify an arbitrary object."""
+    nodes = [0] if nodes is None else nodes
+    nodes[0] += 1
+    if nodes[0] > 256 or depth > 8:
+        return _INSPECTION_INVALID
+    if value is None or type(value) in {bool, int}:
+        return value
+    if type(value) is float:
+        return value if isfinite(value) else _INSPECTION_INVALID
+    if type(value) is str:
+        return value if len(value.encode("utf-8")) <= 16 * 1024 else _INSPECTION_INVALID
+    if isinstance(value, list | tuple):
+        result = [_inspection_json(item, depth=depth + 1, nodes=nodes) for item in value]
+        return result if all(item is not _INSPECTION_INVALID for item in result) else _INSPECTION_INVALID
+    if isinstance(value, Mapping):
+        result: dict[str, Any] = {}
+        for key, item in value.items():
+            if type(key) is not str or len(key.encode("utf-8")) > 512:
+                return _INSPECTION_INVALID
+            projected = _inspection_json(item, depth=depth + 1, nodes=nodes)
+            if projected is _INSPECTION_INVALID:
+                return _INSPECTION_INVALID
+            result[key] = projected
+        return result
+    return _INSPECTION_INVALID
+
+
+def _inspection_field_name(value: Any) -> str | None:
+    return _inspection_string(value, maximum=128)
+
+
+def _inspection_legacy_identifier(value: Any) -> str | None:
+    if type(value) is not str or not value.startswith("legacy-"):
+        return None
+    suffix = value.removeprefix("legacy-")
+    return value if _inspection_identifier(suffix) == suffix else None
+
+
+def _inspection_saved_view(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, Mapping) or set(value) != {"name", "definition", "identity"}:
+        return None
+    name = _inspection_string(value.get("name"), maximum=128)
+    identity = _inspection_hash(value.get("identity"))
+    definition = value.get("definition")
+    if name is None or identity is None or not isinstance(definition, Mapping):
+        return None
+    if set(definition) - {"query", "source_snapshot"} or "query" not in definition:
+        return None
+    query = definition.get("query")
+    if not isinstance(query, Mapping) or not query or set(query) - _INSPECTION_VIEW_QUERY_KEYS:
+        return None
+    normalized_query: dict[str, Any] = {}
+    for key, value_ in query.items():
+        if key == "filters":
+            if not isinstance(value_, list) or len(value_) > 32:
+                return None
+            filters: list[dict[str, Any]] = []
+            for raw in value_:
+                if not isinstance(raw, Mapping) or set(raw) - _INSPECTION_VIEW_FILTER_KEYS:
+                    return None
+                column = _inspection_field_name(raw.get("column"))
+                operation = raw.get("op")
+                if column is None or type(operation) is not str or operation not in _INSPECTION_VIEW_OPS:
+                    return None
+                if operation not in {"exists", "missing"} and "value" not in raw:
+                    return None
+                if "value" in raw:
+                    projected = _inspection_json(raw["value"])
+                    if projected is _INSPECTION_INVALID:
+                        return None
+                    filters.append({"column": column, "op": operation, "value": projected})
+                else:
+                    filters.append({"column": column, "op": operation})
+            normalized_query[key] = filters
+        elif key == "columns":
+            if (
+                not isinstance(value_, list)
+                or not value_
+                or len(value_) > 128
+            ):
+                return None
+            columns = [_inspection_field_name(column) for column in value_]
+            if any(column is None for column in columns) or len(set(columns)) != len(columns):
+                return None
+            normalized_query[key] = [column for column in columns if column is not None]
+        elif key in {"sort_by", "date_column"}:
+            column = _inspection_field_name(value_)
+            if column is None:
+                return None
+            normalized_query[key] = column
+        elif key in {"date_from", "date_to", "aggregate"}:
+            text = _inspection_string(value_, maximum=256)
+            if text is None:
+                return None
+            normalized_query[key] = text
+        elif key in {"descending", "expand_children"}:
+            if type(value_) is not bool:
+                return None
+            normalized_query[key] = value_
+        elif key == "limit":
+            if type(value_) is not int or not 1 <= value_ <= query_data.HARD_ROW_CAP:
+                return None
+            normalized_query[key] = value_
+    normalized: dict[str, Any] = {"name": name, "definition": {"query": normalized_query}, "identity": identity}
+    if "source_snapshot" in definition:
+        snapshot = _inspection_hash(definition["source_snapshot"])
+        if snapshot is None:
+            return None
+        normalized["definition"]["source_snapshot"] = snapshot
+    return normalized
+
+
+def _validate_record_inspection(payload: Mapping[str, Any]) -> dict[str, Any] | None:
+    """Reconstruct the report-only inspection union before it reaches egress."""
+    kind = payload.get("kind")
+    if set(payload) != _INSPECTION_KEYS or type(kind) is not str or kind not in {"collection", "legacy_tracker"}:
+        return None
+    if payload.get("report_only") is not True or not isinstance(payload.get("source_versions"), list):
+        return None
+    versions = payload["source_versions"]
+    if len(versions) > 2_000:
+        return None
+    normalized_versions: list[dict[str, str]] = []
+    seen_paths: set[str] = set()
+    for value in versions:
+        if not isinstance(value, Mapping) or set(value) != {"path", "hash"}:
+            return None
+        path, digest = _inspection_path(value.get("path")), _inspection_hash(value.get("hash"))
+        if path is None or digest is None or path in seen_paths:
+            return None
+        seen_paths.add(path)
+        normalized_versions.append({"path": path, "hash": digest})
+    diagnostics = payload.get("diagnostics")
+    if not isinstance(diagnostics, list) or len(diagnostics) > 64:
+        return None
+    normalized_diagnostics: list[dict[str, str]] = []
+    for value in diagnostics:
+        if not isinstance(value, Mapping) or set(value) != {"code", "reason"}:
+            return None
+        code, reason = _inspection_string(value.get("code"), maximum=128), _inspection_string(value.get("reason"), maximum=512)
+        if code is None or reason is None or re.fullmatch(r"[A-Z][A-Z0-9_]*", code) is None:
+            return None
+        normalized_diagnostics.append({"code": code, "reason": reason})
+    audit = payload.get("audit")
+    if not isinstance(audit, Mapping) or set(audit) != {"status", "gaps"}:
+        return None
+    status, gaps = audit.get("status"), audit.get("gaps")
+    if type(status) is not str or status not in {"baseline", "ok", "gap", "history_incomplete", "not_applicable"} or not isinstance(gaps, list) or len(gaps) > 32:
+        return None
+    if status in {"history_incomplete", "not_applicable"} and gaps:
+        return None
+    normalized_gaps = [_inspection_string(gap, maximum=256) for gap in gaps]
+    if any(gap is None for gap in normalized_gaps):
+        return None
+    views = payload.get("saved_views")
+    if not isinstance(views, list) or len(views) > 32:
+        return None
+    normalized_views = [_inspection_saved_view(view) for view in views]
+    if any(view is None for view in normalized_views):
+        return None
+    snapshot = payload.get("snapshot")
+    if snapshot is not None and _inspection_hash(snapshot) is None:
+        return None
+    contract, legacy = payload.get("contract"), payload.get("legacy")
+    if kind == "collection":
+        if legacy is not None or not isinstance(contract, Mapping):
+            return None
+        if set(contract) != {"collection_id", "path", "title", "semantic_profile", "schema_version", "storage"}:
+            return None
+        collection_id = _inspection_identifier(contract.get("collection_id"))
+        path, title = _inspection_path(contract.get("path")), _inspection_string(contract.get("title"), maximum=512)
+        profile, version, storage = contract.get("semantic_profile"), contract.get("schema_version"), contract.get("storage")
+        if (
+            collection_id is None
+            or path is None
+            or not path.endswith("/_collection.md")
+            or title is None
+            or type(profile) is not str
+            or profile not in {"records", "planning"}
+            or type(version) is not int
+            or not 1 <= version <= 1_000_000
+            or not isinstance(storage, Mapping)
+            or set(storage) != {"strategy", "source", "format_version"}
+        ):
+            return None
+        strategy, source, format_version = storage.get("strategy"), _inspection_path(storage.get("source")), storage.get("format_version")
+        if type(strategy) is not str or strategy not in {"markdown-log", "markdown-items", "dataset"} or source is None or format_version != 1:
+            return None
+        normalized_contract: dict[str, Any] | None = {
+            "collection_id": collection_id,
+            "path": path,
+            "title": title,
+            "semantic_profile": profile,
+            "schema_version": version,
+            "storage": {"strategy": strategy, "source": source, "format_version": format_version},
+        }
+        normalized_legacy: dict[str, Any] | None = None
+        if status == "not_applicable":
+            return None
+    else:
+        if contract is not None or not isinstance(legacy, Mapping) or set(legacy) != {"collection_id", "path", "inspect_only"}:
+            return None
+        collection_id, path = _inspection_legacy_identifier(legacy.get("collection_id")), _inspection_path(legacy.get("path"))
+        if collection_id is None or path is None or legacy.get("inspect_only") is not True or snapshot is not None or normalized_versions or normalized_views or status != "not_applicable":
+            return None
+        normalized_contract = None
+        normalized_legacy = {"collection_id": collection_id, "path": path, "inspect_only": True}
+    return {
+        "kind": kind,
+        "report_only": True,
+        "contract": normalized_contract,
+        "legacy": normalized_legacy,
+        "snapshot": snapshot,
+        "source_versions": normalized_versions,
+        "diagnostics": normalized_diagnostics,
+        "audit": {"status": status, "gaps": [gap for gap in normalized_gaps if gap is not None]},
+        "saved_views": [view for view in normalized_views if view is not None],
+    }
+
+
 egress.register_projector(
     "record_query",
     (
@@ -39,7 +330,24 @@ egress.register_projector(
         "aggregate",
         "query",
         "source_versions",
+        "view",
+        "agent_history",
     ),
+)
+egress.register_projector(
+    "record_inspection",
+    (
+        "kind",
+        "report_only",
+        "contract",
+        "legacy",
+        "snapshot",
+        "source_versions",
+        "diagnostics",
+        "audit",
+        "saved_views",
+    ),
+    validator=_validate_record_inspection,
 )
 egress.register_projector(
     "record_manifest",
@@ -239,6 +547,9 @@ def query_collection(
         ):
             raise collections.CollectionError("COLLECTION_NOT_FOUND", "collection was not found")
         links = _LinkProjector.create(root, manifest)
+        view = kwargs.get("view")
+        if view is not None:
+            _authorize_saved_view(root, manifest, view, links)
         result = record_formats.query_collection(
             root,
             manifest,
@@ -248,6 +559,228 @@ def query_collection(
         )
         egress.emit_boundary_receipt(collector)
         return result
+
+
+def _authorize_saved_view(
+    root: Path,
+    manifest: collections.CollectionManifest,
+    name: object,
+    links: _LinkProjector,
+) -> collections.SavedView:
+    """Refuse a saved view if link projection would change its query meaning."""
+    if type(name) is not str:
+        raise collections.CollectionError("INVALID_SAVED_VIEW", "saved view name is invalid")
+    view = collections.resolve_saved_view(manifest, name)
+    query = view.definition.get("query")
+    if not isinstance(query, Mapping):
+        raise collections.CollectionError("INVALID_SAVED_VIEW", "saved view definition is invalid")
+    filters = query.get("filters", ())
+    if not isinstance(filters, list):
+        raise collections.CollectionError("INVALID_SAVED_VIEW", "saved view filters are invalid")
+    for raw in filters:
+        if not isinstance(raw, Mapping) or "value" not in raw:
+            continue
+        column = raw.get("column")
+        spec = manifest.schema.fields.get(column) if type(column) is str else None
+        if spec is None:
+            continue
+        if not _saved_view_filter_links_are_authorized(raw["value"], spec, links):
+            raise collections.CollectionError(
+                "SAVED_VIEW_NOT_AVAILABLE", "saved view is not available"
+            )
+    return view
+
+
+def _saved_view_filter_links_are_authorized(
+    value: Any, spec: collections.FieldSpec, links: _LinkProjector
+) -> bool:
+    """Check every link-shaped filter value against the field's element type."""
+    if spec.type == "link":
+        if isinstance(value, list | tuple):
+            return all(_saved_view_filter_links_are_authorized(item, spec, links) for item in value)
+        return links._project_value(value, spec) == value
+    if spec.type == "array" and spec.items is not None:
+        if isinstance(value, list | tuple):
+            return all(
+                _saved_view_filter_links_are_authorized(item, spec.items, links) for item in value
+            )
+        return _saved_view_filter_links_are_authorized(value, spec.items, links)
+    return True
+
+
+def inspect_collection(
+    vault_root: Path,
+    collection: str | Path | collections.CollectionManifest,
+) -> dict[str, Any]:
+    """Return bounded, report-only evidence for one fully released collection."""
+    root = Path(vault_root)
+    # `records` already imports this governance boundary for mutations.
+    from . import records
+
+    with egress.disclosure_boundary(root, "record_inspection", join_existing=True) as collector:
+        manifest = _resolve_released_collection(root, collection, receipt=True)
+        if not _authorize(root, manifest.storage.source, receipt=True):
+            raise collections.CollectionError("COLLECTION_NOT_FOUND", "collection was not found")
+        links = _LinkProjector.create(root, manifest)
+        try:
+            inspection = record_formats.inspect_collection(
+                root,
+                manifest,
+                authorize_path=lambda path: _authorize(root, path, receipt=True),
+                project_values=links,
+            )
+        except collections.CollectionError as error:
+            inspection = record_formats.CollectionInspection(
+                collection_id=manifest.collection_id,
+                snapshot=None,
+                source_versions=(manifest.manifest_version,),
+                source_hashes={manifest.path: manifest.manifest_version.hash},
+                diagnostics=(collections.CollectionDiagnostic(error.code, error.reason),),
+            )
+        diagnostics = _inspection_diagnostics(inspection.diagnostics)
+        _inspection_templates(root, manifest, diagnostics)
+        saved_views = _inspection_saved_views(root, manifest, links, diagnostics)
+        try:
+            audit = records.inspect_audit_gap(
+                root,
+                manifest,
+                authorize_path=lambda path: _authorize(root, path, receipt=True),
+            )
+        except collections.CollectionError:
+            audit = {"status": "history_incomplete", "gaps": []}
+        payload = _RecordEnvelope(
+            {
+                "kind": "collection",
+                "report_only": True,
+                "contract": _inspection_contract(manifest),
+                "legacy": None,
+                "snapshot": inspection.snapshot,
+                "source_versions": [
+                    {"path": version.path, "hash": version.hash}
+                    for version in inspection.source_versions[:2_000]
+                ],
+                "diagnostics": diagnostics,
+                "audit": _inspection_audit(audit),
+                "saved_views": saved_views,
+            }
+        )
+        projected = egress.project(payload, egress.LEVEL_FULL, kind="record_inspection") or {}
+        egress.emit_boundary_receipt(collector)
+        return projected
+
+
+def inspect_legacy_tracker(vault_root: Path, path: str | Path) -> dict[str, Any]:
+    """Inspect a manifest-less tracker at collection granularity without parsing items."""
+    root = Path(vault_root)
+    with egress.disclosure_boundary(root, "record_inspection", join_existing=True) as collector:
+        legacy = collections.inspect_legacy_tracker(
+            root, path, authorize_path=lambda relative: _authorize(root, relative, receipt=True)
+        )
+        payload = _RecordEnvelope(
+            {
+                "kind": "legacy_tracker",
+                "report_only": True,
+                "contract": None,
+                "legacy": {
+                    "collection_id": legacy.collection_id,
+                    "path": legacy.path,
+                    "inspect_only": legacy.inspect_only,
+                },
+                "snapshot": None,
+                "source_versions": [],
+                "diagnostics": [],
+                "audit": {"status": "not_applicable", "gaps": []},
+                "saved_views": [],
+            }
+        )
+        projected = egress.project(payload, egress.LEVEL_FULL, kind="record_inspection") or {}
+        egress.emit_boundary_receipt(collector)
+        return projected
+
+
+def _inspection_contract(manifest: collections.CollectionManifest) -> dict[str, Any]:
+    return {
+        "collection_id": manifest.collection_id,
+        "path": manifest.path,
+        "title": manifest.title,
+        "semantic_profile": manifest.semantic_profile,
+        "schema_version": manifest.schema.version,
+        "storage": {
+            "strategy": manifest.storage.strategy,
+            "source": manifest.storage.source,
+            "format_version": manifest.storage.format_version,
+        },
+    }
+
+
+def _inspection_diagnostics(
+    diagnostics: Iterable[collections.CollectionDiagnostic],
+) -> list[dict[str, str]]:
+    projected: list[dict[str, str]] = []
+    for diagnostic in diagnostics:
+        if len(projected) >= 64:
+            break
+        if (
+            not isinstance(diagnostic, collections.CollectionDiagnostic)
+            or type(diagnostic.code) is not str
+            or type(diagnostic.reason) is not str
+            or not diagnostic.code
+            or len(diagnostic.code) > 128
+            or len(diagnostic.reason.encode("utf-8")) > 512
+        ):
+            continue
+        projected.append({"code": diagnostic.code, "reason": diagnostic.reason})
+    return projected
+
+
+def _inspection_saved_views(
+    root: Path,
+    manifest: collections.CollectionManifest,
+    links: _LinkProjector,
+    diagnostics: list[dict[str, str]],
+) -> list[dict[str, Any]]:
+    saved_views: list[dict[str, Any]] = []
+    for name in list(manifest.views)[:32]:
+        try:
+            view = _authorize_saved_view(root, manifest, name, links)
+        except collections.CollectionError as error:
+            if len(diagnostics) < 64:
+                diagnostics.append({"code": error.code, "reason": error.reason})
+            continue
+        saved_views.append(
+            {"name": view.name, "definition": dict(view.definition), "identity": view.identity}
+        )
+    return saved_views
+
+
+def _inspection_templates(
+    root: Path, manifest: collections.CollectionManifest, diagnostics: list[dict[str, str]]
+) -> None:
+    """Check declared template availability only after its own L6 decision."""
+    for template in manifest.templates[:32]:
+        unavailable = not _authorize(root, template.path, receipt=True)
+        if not unavailable:
+            try:
+                vault.PathGuard.capture(root, template.path, leaf_policy="stable")
+            except vault.PathGuardError:
+                unavailable = True
+        if unavailable and len(diagnostics) < 64:
+            diagnostics.append(
+                {"code": "TEMPLATE_UNAVAILABLE", "reason": "declared template is unavailable"}
+            )
+
+
+def _inspection_audit(audit: Any) -> dict[str, Any]:
+    if not isinstance(audit, Mapping):
+        return {"status": "history_incomplete", "gaps": []}
+    status = audit.get("status")
+    gaps = audit.get("gaps")
+    if status not in {"baseline", "ok", "gap", "history_incomplete"} or not isinstance(gaps, list):
+        return {"status": "history_incomplete", "gaps": []}
+    return {
+        "status": status,
+        "gaps": [gap for gap in gaps[:32] if type(gap) is str and len(gap) <= 256],
+    }
 
 
 _QUERY_KEYS = frozenset(
@@ -522,6 +1055,7 @@ def project_query_result(
     manifest: collections.CollectionManifest,
     *,
     output_format: str = "json",
+    agent_history: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Default-deny wire envelope reconstructed from a typed query contract."""
     if (
@@ -541,12 +1075,14 @@ def project_query_result(
         or not isinstance(result.query, Mapping)
         or not _valid_query_descriptor(result.query, manifest)
         or result.derived is not True
+        or not _valid_saved_view(result.view, manifest)
+        or not _valid_agent_history(agent_history)
         or (result.continuation is not None and type(result.continuation) is not str)
         or (isinstance(result.continuation, str) and not record_formats.validate_continuation(
             result.continuation,
             collection_id=result.collection_id,
             snapshot=result.snapshot,
-            query=result.query,
+            query=_cursor_query(result, manifest),
         ))
     ):
         return _withheld_query()
@@ -586,6 +1122,7 @@ def project_query_result(
         query=dict(result.query),
         source_versions=source_versions,
         columns=columns,
+        view=dict(result.view) if isinstance(result.view, Mapping) else None,
     )
     try:
         rendered = record_formats.render_query_result(typed, output_format=output_format)
@@ -606,10 +1143,109 @@ def project_query_result(
             "source_versions": [
                 {"path": version.path, "hash": version.hash} for version in typed.source_versions
             ],
+            "view": typed.view,
+            **({"agent_history": dict(agent_history)} if agent_history is not None else {}),
             "rendered": rendered,
         }
     )
     return egress.project(payload, egress.LEVEL_FULL, kind="record_query") or {}
+
+
+def _cursor_query(
+    result: record_formats.RecordQueryResult, manifest: collections.CollectionManifest
+) -> Mapping[str, Any]:
+    if result.view is None:
+        return result.query
+    view = collections.resolve_saved_view(manifest, result.view["name"])
+    query = view.definition["query"]
+    assert isinstance(query, Mapping)
+    return {
+        **result.query,
+        "limit": query.get("limit", query_data.DEFAULT_LIMIT),
+        "view": dict(result.view),
+    }
+
+
+def _valid_saved_view(value: Any, manifest: collections.CollectionManifest) -> bool:
+    if value is None:
+        return True
+    if not isinstance(value, Mapping) or set(value) != {"name", "definition", "identity"}:
+        return False
+    name = value.get("name")
+    definition = value.get("definition")
+    identity = value.get("identity")
+    if type(name) is not str or not isinstance(definition, Mapping) or type(identity) is not str:
+        return False
+    try:
+        expected = collections.resolve_saved_view(manifest, name)
+    except collections.CollectionError:
+        return False
+    return dict(definition) == dict(expected.definition) and identity == expected.identity
+
+
+def _valid_agent_history(value: Mapping[str, Any] | None) -> bool:
+    if value is None:
+        return True
+    if set(value) != {"status", "complete", "truncated", "events"}:
+        return False
+    if value["status"] not in ("baseline", "ok", "gap", "history_incomplete"):
+        return False
+    if type(value["complete"]) is not bool or type(value["truncated"]) is not bool:
+        return False
+    events = value["events"]
+    if not isinstance(events, list) or len(events) > 50:
+        return False
+    allowed = {
+        "transition_id",
+        "parent_id",
+        "operation",
+        "item_key",
+        "canonical_path",
+        "before_manifest_hash",
+        "after_manifest_hash",
+        "before_item_hash",
+        "after_item_hash",
+        "before_container_hash",
+        "after_container_hash",
+        "rationale",
+    }
+    for event in events:
+        if not isinstance(event, Mapping) or set(event) != allowed:
+            return False
+        if event["operation"] not in ("create", "append", "update"):
+            return False
+        if type(event["transition_id"]) is not str or not re.fullmatch(
+            r"[0-9a-f]{24}", event["transition_id"]
+        ):
+            return False
+        parent = event["parent_id"]
+        if parent not in ("baseline", "absent") and (
+            type(parent) is not str or re.fullmatch(r"[0-9a-f]{24}", parent) is None
+        ):
+            return False
+        if event["item_key"] is not None and memory_refs.normalize_id(event["item_key"]) is None:
+            return False
+        if (
+            type(event["canonical_path"]) is not str
+            or event["canonical_path"].startswith("/")
+            or ".." in event["canonical_path"].split("/")
+        ):
+            return False
+        for field in (
+            "before_manifest_hash",
+            "after_manifest_hash",
+            "before_item_hash",
+            "after_item_hash",
+            "before_container_hash",
+            "after_container_hash",
+        ):
+            if event[field] is not None and (
+                type(event[field]) is not str or re.fullmatch(r"[0-9a-f]{64}", event[field]) is None
+            ):
+                return False
+        if type(event["rationale"]) is not str or len(event["rationale"].encode("utf-8")) > 512:
+            return False
+    return True
 
 
 def project_mutation_receipt(receipt: Mapping[str, Any]) -> dict[str, Any]:

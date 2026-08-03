@@ -8,6 +8,7 @@ from record_fixtures import (
     copy_dataset_fixture,
     copy_vehicle_maintenance_fixture,
     copy_x3_fixture,
+    x3_template_directory,
 )
 
 
@@ -25,6 +26,11 @@ def test_x3_fixture_has_the_declared_live_section_legend_archive_and_edge_notati
     assert "21+6" in log and "| " in log and "Overhead Press | white short paraforce |" in log
     assert "### 2026-08-02 · Push" in log
     assert "X3 Push" in log and "X3 Pull" in log
+    template_root = x3_template_directory(tmp_path)
+    assert (template_root / "X3 Push.md").exists()
+    assert (template_root / "X3 Pull.md").exists()
+    assert not (fixture / "X3 Push.md").exists()
+    assert not (fixture / "X3 Pull.md").exists()
 
 
 def test_x3_fixture_matches_the_read_only_current_vault_files(tmp_path: Path) -> None:
@@ -36,11 +42,13 @@ def test_x3_fixture_matches_the_read_only_current_vault_files(tmp_path: Path) ->
         "X3 Pull.md": "3d20ea58e746270ac24b5256dbd058bac78bd641ca83fd805f1d7b2e6228f80a",
     }
 
-    assert {
-        path.name: hashlib.sha256(path.read_bytes()).hexdigest()
-        for path in fixture.glob("*.md")
-        if path.name in expected
-    } == expected
+    paths = [
+        fixture / "Training Log.md",
+        fixture / "Historical Reps (undated).md",
+        x3_template_directory(tmp_path) / "X3 Push.md",
+        x3_template_directory(tmp_path) / "X3 Pull.md",
+    ]
+    assert {path.name: hashlib.sha256(path.read_bytes()).hexdigest() for path in paths} == expected
 
 
 def test_vehicle_fixture_uses_path_governance_and_complete_cross_domain_fields(

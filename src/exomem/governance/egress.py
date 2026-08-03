@@ -38,7 +38,7 @@ import sqlite3
 import textwrap
 import uuid
 from collections import OrderedDict
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
@@ -527,9 +527,17 @@ _PROJECTORS: dict[str, frozenset[str]] = {
     # coverage check permanently unsatisfiable.
     "page": _PAGE_FIELDS,
 }
+_PROJECTOR_VALIDATORS: dict[str, Callable[[Mapping[str, Any]], dict[str, Any] | None]] = {}
+_PROJECTOR_VALIDATOR_UNSET = object()
 
 _FULL_ONLY_PROJECTORS: frozenset[str] = frozenset(
-    {"record_query", "record_manifest", "record_template", "record_mutation"}
+    {
+        "record_query",
+        "record_inspection",
+        "record_manifest",
+        "record_template",
+        "record_mutation",
+    }
 )
 
 
@@ -837,6 +845,22 @@ def project(
         )
         return _fail_closed_notice("no_projector")
 
+    validator = _PROJECTOR_VALIDATORS.get(resolved_kind or "")
+    if validator is not None:
+        try:
+            validated = validator(raw)
+        except Exception:  # noqa: BLE001 - a projector is an untrusted extension boundary.
+            label = (
+                resolved_kind
+                if type(resolved_kind) is str and len(resolved_kind) <= 128
+                else type(resolved_kind).__name__
+            )
+            log.warning("governance.egress: projector validator failed for kind %s", label)
+            return _fail_closed_notice("invalid_projector_payload")
+        if validated is None:
+            return _fail_closed_notice("invalid_projector_payload")
+        raw = validated
+
     # Only L5–L6 reach this line: every lower level returned a notice above,
     # which is how "scores, graph seeds, relation matches, matched units,
     # supersession pointers, and parent refs appear only at L5–L6" (D3) is
@@ -914,9 +938,20 @@ def annotate_pack(pack: dict[str, Any] | None, release: AnnotatedHits) -> dict[s
     return pack
 
 
-def register_projector(kind: str, allowed_fields: Iterable[str]) -> None:
+def register_projector(
+    kind: str,
+    allowed_fields: Iterable[str],
+    *,
+    validator: Callable[[Mapping[str, Any]], dict[str, Any] | None] | None | object = _PROJECTOR_VALIDATOR_UNSET,
+) -> None:
     """Register the wire allow-list for one payload kind."""
     _PROJECTORS[kind] = frozenset(allowed_fields)
+    if validator is _PROJECTOR_VALIDATOR_UNSET:
+        return
+    if validator is None:
+        _PROJECTOR_VALIDATORS.pop(kind, None)
+    else:
+        _PROJECTOR_VALIDATORS[kind] = validator  # type: ignore[assignment]
 
 
 def registered_kinds() -> frozenset[str]:
@@ -2085,6 +2120,7 @@ _REFERENCE_KWARGS = frozenset(
         "source_path",
         "target_path",
         "manifest_path",
+        "collection",
         "only_paths",
         "selector_paths",
     }
@@ -2301,6 +2337,9 @@ _COMMAND_PROJECTOR_KIND: dict[str, str] = {
     "provenance_report": "structure",
     "query_data": "structure",
     "adopt": "structure",
+    # The action dispatcher routes all content through the typed Records
+    # inspection/query/mutation projectors before it returns.
+    "record_memory": "structure",
 }
 
 # Receipt adapters follow the same default-deny registry as serializers.  A
@@ -2318,6 +2357,7 @@ _COMMAND_OUTCOME_ADAPTER: dict[str, str] = {
             "evolution", "propose_compilation", "provenance_report", "query_data", "adopt",
         )
     },
+    "record_memory": "structure",
 }
 
 # Every content selector declares both evidence collection and tombstone
@@ -2386,6 +2426,13 @@ _SELECTOR_ADAPTERS: dict[tuple[str, str], dict[str, str]] = {
         "infer": "save-conditional",
         "validate": "structure",
         "diff": "structure",
+    },
+    ("record_memory", "action"): {
+        "inspect": "structure",
+        "create": "mutation",
+        "query": "structure",
+        "append": "mutation",
+        "update": "mutation",
     },
 }
 

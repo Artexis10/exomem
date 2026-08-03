@@ -191,7 +191,7 @@ ID, then issues an Exomem-owned durable session. Operators can inspect and revok
 those sessions with `exomem auth sessions`, `exomem auth revoke <session-id>`,
 and `exomem auth revoke --all`; session administration is never an MCP tool.
 
-The product model is intentionally simple: built-in AI memory remembers preferences and routing, while Exomem stores durable governed knowledge with sources, proof, history, decisions, records, and review. See [docs/product-model.md](docs/product-model.md) for the full mental model, [docs/review-studio.md](docs/review-studio.md) for the packaged browser review loop, [docs/epistemic-inbox.md](docs/epistemic-inbox.md) for daily review and relation repair, [docs/knowledge-packs.md](docs/knowledge-packs.md) for pack/admin details, and [docs/workflow-skills.md](docs/workflow-skills.md) for the named agent workflows.
+The product model is intentionally simple: built-in AI memory remembers preferences and routing, while Exomem stores durable governed knowledge with sources, proof, history, decisions, records, and review. See [docs/product-model.md](docs/product-model.md) for the full mental model, [docs/records.md](docs/records.md) for human-owned longitudinal Records, [docs/review-studio.md](docs/review-studio.md) for the packaged browser review loop, [docs/epistemic-inbox.md](docs/epistemic-inbox.md) for daily review and relation repair, [docs/knowledge-packs.md](docs/knowledge-packs.md) for pack/admin details, and [docs/workflow-skills.md](docs/workflow-skills.md) for the named agent workflows.
 
 For development, or to run the sample vault from a checkout instead of a
 package install:
@@ -355,6 +355,7 @@ Agents should route normal user requests through simple actions first, then use 
 | Review | "what needs cleanup?", "what is stale?" | `attention`, `audit`, `propose_compilation` |
 | Update | "this replaced the old conclusion", "fix that note" | `edit`, `replace`, `reconcile` |
 | Connect | "link this to X", "what should this cite?" | `link`, `suggest_links` |
+| Record | "log this session", "record this measurement", "update the mileage" | `record_memory` with `inspect`, `create`, `query`, `append`, or `update` |
 
 ## Core tools
 
@@ -373,6 +374,7 @@ exomem exposes typed MCP tools for common knowledge-base work:
 | `attention` | Surface review queues such as stale notes, close-by claims, and unprocessed sources. |
 | `overview` | Bounded, read-only structure report of the vault or a subtree — works outside `Knowledge Base/` and before `init`. |
 | `adopt` | Existing-vault adoption: scan-only by default; can save a manifest, copy selected legacy text files as Sources, or return a compile plan while preserving originals. |
+| `record_memory` | One front door for human-owned observed state: inspect, create, query, append, or targeted update a governed Record collection. |
 
 Tier-2 tools cover governance administration and filesystem escape hatches such
 as listing directories, creating files, moving pages, trashing files, and

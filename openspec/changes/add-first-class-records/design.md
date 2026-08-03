@@ -4,7 +4,7 @@ Exomem currently has strong lower-level pieces but no collection product model. 
 
 The durable Planning work defines intended future state and explicitly leaves accepted software contracts to OpenSpec/repository truth. Records is the complementary observed-state layer. There is no committed Planning implementation to extend and no hidden Records branch. A separate `add-first-class-records` change is therefore the clean delivery boundary, but its mechanics must be profile-neutral so a later Planning change consumes the same collection substrate.
 
-The current X3 vault material is a newest-first `type: tracker` Markdown log with dated Push/Pull blocks, pipe-delimited movement rows, a separate undated archive, and ordinary Push/Pull templates. It must remain canonical and directly editable. The live `.obsidian/templates.json` discovered during reconciliation currently points to `Knowledge Base/Imported/Templates`, not the intended `Knowledge Base/Templates`; Exomem will not mutate `.obsidian`, and real-vault template-menu acceptance remains a configuration follow-up outside this repository change.
+The current X3 vault material is a newest-first `type: tracker` Markdown log with dated Push/Pull blocks, pipe-delimited movement rows, a separate undated archive, and ordinary Push/Pull templates. It must remain canonical and directly editable. The Knowledge Base is itself the active Obsidian vault: its `.obsidian/templates.json` points to `Templates`, which maps to the Exomem path `Knowledge Base/Templates/`. A separate parent-directory Obsidian configuration is outside this vault and does not change the X3 workflow. Exomem preserves the active configuration and never mutates `.obsidian`.
 
 ## Goals / Non-Goals
 
@@ -161,7 +161,7 @@ Manifest `links.plans` can carry an opaque Planning reference plus a bounded Rec
 - **[A mixed-release subset hash is mistaken for canonical CAS]** → Allow authorized-only query snapshots, but require full-collection L6 visibility before mutation.
 - **[One command has a broad schema]** → Keep finite actions, bounded shared arguments, strict cross-field validation, and generated schema/parity tests; do not split by adapter.
 - **[Pack metadata starts acting like migrations]** → Use existing guidance only; machine-readable blueprints and activation remain deferred, and collection creation stays explicit.
-- **[The real Obsidian template menu is presently misconfigured]** → Preserve templates and test ordinary expansion/insertion in fixtures; report the live `.obsidian` discrepancy rather than editing outside the governed layer.
+- **[A fixture can accidentally prove only colocated templates]** → Keep X3 templates at `Knowledge Base/Templates/Records/Health/X3/`, bind the manifest to those vault-relative paths, and test ordinary expansion/insertion without editing `.obsidian`.
 - **[First delivery scan cost is finite]** → Cap files/items/bytes/results, return snapshot/pagination metadata, and defer an optional rebuildable collection index until measurements justify it.
 
 ## Migration Plan

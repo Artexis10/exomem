@@ -80,6 +80,7 @@ from . import query_data as query_data_module
 from . import query_log, retrieval_models, semantic_census, upload_tokens, vault
 from . import readiness as readiness_module
 from . import reconcile as reconcile_module
+from . import record_memory as record_memory_module
 from . import recover_from_trash as recover_from_trash_module
 from . import relation_queue as relation_queue_module
 from . import relation_registry as relation_registry_module
@@ -289,8 +290,53 @@ def op_bootstrap(
     semantic_authoring_projection = semantic_authoring_module.bootstrap_projection(
         profile=profile
     )
+    if "record_memory" in active_product_names:
+        records_contract = {
+            "available": True,
+            "route": {
+                "tool": "record_memory",
+                "actions": ["inspect", "create", "query", "append", "update"],
+            },
+            "intent_boundary": {
+                "records": (
+                    "observed events, measurements, transactions, sessions, and state changes"
+                ),
+                "planning": (
+                    "intended future state, goals, priorities, commitments, and candidate work"
+                ),
+            },
+            "capture_examples": (
+                "Route requests to log a session, record a measurement, add a transaction, "
+                "or update a maintenance event through the matching finite action."
+            ),
+            "review_rule": (
+                "Review may compare planned intent with recorded reality; it must not make "
+                "Records silently infer goals, success, failure, or personal judgments."
+            ),
+            "manual_first": (
+                "Canonical Records remain ordinary editable files; direct human edits and "
+                "work without an agent are supported product paths."
+            ),
+            "template_rule": (
+                "Templates are ordinary editable entry scaffolds; collection schema and "
+                "validation remain independent of template content."
+            ),
+            "activation_rule": (
+                "Bootstrap and knowledge-pack guidance does not create collections, folders, "
+                "templates, migrations, or canonical data."
+            ),
+            "software_rule": (
+                "Exomem Planning owns durable intent and prioritisation; OpenSpec, git, tests, "
+                "and code own accepted software contracts and execution truth."
+            ),
+        }
+    else:
+        records_contract = {
+            "available": False,
+            "unavailable_reason": "The active surface does not export the Records command.",
+        }
     payload: dict = {
-        "contract_version": "2026-07-28.1",
+        "contract_version": "2026-08-02.1",
         "profile": profile,
         "server": {
             "name": "exomem",
@@ -321,6 +367,7 @@ def op_bootstrap(
             ),
         },
         "semantic_authoring": semantic_authoring_projection,
+        "records": records_contract,
         "memory_model": {
             "built_in_ai_memory": (
                 "Use as short-term or behavioural memory for user preferences, working "
@@ -5719,6 +5766,96 @@ def op_manage_memory_file(
     )
 
 
+def op_record_memory(
+    vault_root: Path,
+    action: Literal["inspect", "create", "query", "append", "update"],
+    collection: str | None = None,
+    manifest_path: str | None = None,
+    manifest_text: str | None = None,
+    why: str | None = None,
+    scaffold: bool | None = None,
+    view: str | None = None,
+    filters: list[dict[str, Any]] | None = None,
+    columns: list[str] | None = None,
+    sort_by: str | None = None,
+    descending: bool | None = None,
+    limit: int | None = None,
+    aggregate: str | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    date_column: str | None = None,
+    expand_children: bool | None = None,
+    continuation: str | None = None,
+    include_agent_history: bool | None = None,
+    output_format: Literal["json", "markdown", "csv"] | None = None,
+    item: dict[str, Any] | None = None,
+    item_key: str | None = None,
+    expected_container_hash: str | None = None,
+    body: str | None = None,
+    changes: dict[str, Any] | None = None,
+    expected_item_version: str | None = None,
+) -> dict[str, Any]:
+    """Inspect, create, query, append, or update a governed Record collection.
+
+    Args:
+        action: inspect, create, query, append, or update.
+        collection: Collection manifest reference for inspect, query, append, or update.
+        manifest_path: New manifest path for create.
+        manifest_text: Complete manifest text for create.
+        why: Audit reason for create, append, or update.
+        scaffold: Create the initial canonical source for create.
+        view: Saved query view; cannot be combined with inline shaping.
+        filters: Query predicates.
+        columns: Query columns.
+        sort_by: Query sort column.
+        descending: Sort query results descending.
+        limit: Bounded query limit.
+        aggregate: Optional query aggregate.
+        date_from: Inclusive query date lower bound.
+        date_to: Inclusive query date upper bound.
+        date_column: Query date property.
+        expand_children: Expand query child values.
+        continuation: Snapshot-bound query continuation.
+        include_agent_history: Include bounded agent mutation history.
+        output_format: json, markdown, or csv query output.
+        item: Values for append.
+        item_key: Stable item ID for append or update.
+        expected_container_hash: Exact current container hash for append or update.
+        body: Optional Markdown body for append.
+        changes: Targeted values for update.
+        expected_item_version: Exact current item version for update.
+    """
+    return record_memory_module.record_memory(
+        vault_root,
+        action=action,
+        collection=collection,
+        manifest_path=manifest_path,
+        manifest_text=manifest_text,
+        why=why,
+        scaffold=scaffold,
+        view=view,
+        filters=filters,
+        columns=columns,
+        sort_by=sort_by,
+        descending=descending,
+        limit=limit,
+        aggregate=aggregate,
+        date_from=date_from,
+        date_to=date_to,
+        date_column=date_column,
+        expand_children=expand_children,
+        continuation=continuation,
+        include_agent_history=include_agent_history,
+        output_format=output_format,
+        item=item,
+        item_key=item_key,
+        expected_container_hash=expected_container_hash,
+        body=body,
+        changes=changes,
+        expected_item_version=expected_item_version,
+    )
+
+
 def op_query_dataset(
     vault_root: Path,
     path: str,
@@ -6095,6 +6232,11 @@ _PRODUCT_METADATA: dict[str, dict] = {
     "evolution": {"surface": "advanced", "actions": ("ask", "review"), "first_run_safe": True},
     "reconcile": {"surface": "advanced", "actions": ("update",), "first_run_safe": False},
     "audit_fix": {"surface": "advanced", "actions": ("review", "update"), "first_run_safe": False},
+    "record_memory": {
+        "surface": "primary",
+        "actions": ("ask", "review", "save", "update"),
+        "first_run_safe": False,
+    },
 }
 _MCRC = frozenset({"mcp", "rest", "cli"})
 _RC = frozenset({"rest", "cli"})
@@ -6140,6 +6282,7 @@ _SPEC: tuple[tuple, ...] = (
     ("recover_from_trash", op_recover_from_trash, 2, True, False, "trash_path", _MCRC),
     ("list_inbound_links", op_list_inbound_links, 2, False, False, "target", _MCRC),
     ("schema_memory", op_schema_memory, 1, True, False, None, _MCRC),
+    ("record_memory", op_record_memory, 1, True, False, None, _MCRC),
     ("get_video_frames", op_get_video_frames, 2, False, False, None, _M),
 )
 
@@ -6459,6 +6602,21 @@ _PRODUCT_SPEC: tuple[tuple, ...] = (
             "recover_from_trash",
         ),
         {"surface": "advanced", "actions": ("update", "ask"), "first_run_safe": False},
+    ),
+    (
+        "record_memory",
+        op_record_memory,
+        1,
+        True,
+        False,
+        None,
+        _MCRC,
+        ("record_memory",),
+        {
+            "surface": "primary",
+            "actions": ("ask", "review", "save", "update"),
+            "first_run_safe": False,
+        },
     ),
     (
         "query_dataset",
