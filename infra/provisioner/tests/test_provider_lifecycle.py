@@ -63,7 +63,7 @@ def _request(**overrides: object) -> dict[str, object]:
         "protocolVersion": "1",
         "releaseVersion": "0.22.0",
         "serviceCredential": _credential(),
-        "workerPolicy": {"workerCount": 0, "semantic": False, "media": False},
+        "workerPolicy": {"workerCount": 2, "semantic": True, "media": False},
         "providerRef": "cell-irrelevant-caller-ref",
     }
     value.update(overrides)
@@ -758,7 +758,7 @@ async def test_provision_adopts_partial_attempt_and_waits_for_volume_health_and_
         "credentialsManagedExternally": True,
         "expectedProtocol": "1",
         "expectedRelease": "0.22.0",
-        "featureGrants": "",
+        "featureGrants": "embeddings,file-watcher",
         "image": _config().image,
         "initOperationId": "operation-alpha",
         "initRequestId": "5ec7a442-663f-476b-80f8-dd803afe5590",
@@ -783,13 +783,64 @@ async def test_provision_adopts_partial_attempt_and_waits_for_volume_health_and_
         "transferHostname": "transfer.example.invalid",
         "uploadLimitBytes": 90 * 1024**2,
         "vaultId": "tenant-alpha",
-        "workerLimit": 0,
+        "workerLimit": 2,
         "workerPolicyDigest": hashlib.sha256(
-            b'{"media":false,"semantic":false,"workerCount":0}'
+            b'{"media":false,"semantic":true,"workerCount":2}'
         ).hexdigest(),
         "workloadMode": "serve",
     }
     assert _credential() not in repr(plane)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "policy",
+    [
+        {"workerCount": 0, "semantic": False, "media": False},
+        {"workerCount": 2, "semantic": False, "media": False},
+        {"workerCount": 0, "semantic": True, "media": False},
+        {"workerCount": 2, "semantic": True, "media": True},
+    ],
+)
+async def test_provision_refuses_a_worker_policy_that_is_not_the_shipped_product(
+    policy: dict[str, object],
+) -> None:
+    """The caller's declared policy and the rendered cell must not diverge.
+
+    The chart renders a fixed worker shape while the caller declares its own
+    `workerPolicy`, and runtime health then verifies the cell reports exactly
+    what the caller declared. Nothing structural keeps those in step. A stale
+    caller asking for the old keyword-only policy would provision an
+    embedding-capable cell and then fail health with a mismatch that reads like
+    a runtime fault, so reject the request at the boundary instead.
+    """
+    plane = HighFidelityProviderPlane(location="fsn1")
+    codec = ProviderRecoveryIdentityCodec.from_secret("provider-recovery-root")
+    driver = CellLifecycleDriver(plane=plane, volume_worker=None, config=_config())
+    volume_driver = VolumeRegistrationDriver(
+        VolumeLifecycleWorker(plane, plane, identity_codec=codec),
+        identity_verifier=codec.verifier(),
+    )
+    request = _request_with_provider_identity(workerPolicy=policy)
+    context = _context()
+
+    with pytest.raises(DriverTerminal) as raised:
+        for _ in range(8):
+            selected = (
+                volume_driver if context.checkpoint == "volume-registration-required" else driver
+            )
+            outcome = await selected.execute("provision", request, context)
+            if isinstance(outcome, DriverPending):
+                context = _context(checkpoint=outcome.checkpoint)
+                continue
+            break
+
+    # Terminal, not retryable: retrying the same bad request cannot succeed, and
+    # the cause is preserved so the operator sees why rather than a bare code.
+    assert str(raised.value) == "PROVISIONER_PROVIDER_METADATA_CONFLICT"
+    assert isinstance(raised.value.__cause__, MetadataConflict)
+    assert "complete product surface" in str(raised.value.__cause__)
+    assert not plane.has_release(_metadata())
 
 
 @pytest.mark.asyncio
@@ -886,7 +937,7 @@ async def test_health_flattens_exact_runtime_contract_and_fails_closed_on_drift(
         "mutationAuthority": True,
         "readAdmission": True,
         "writeAdmission": True,
-        "workerPolicy": {"workerCount": 0, "semantic": False, "media": False},
+        "workerPolicy": {"workerCount": 2, "semantic": True, "media": False},
         "code": "CELL_READY",
     }
 

@@ -97,11 +97,11 @@ def _capacity_contract(path: Path) -> Path:
             "capacity_public_key_id": hashlib.sha256(raw_key).hexdigest(),
         },
         "limits": {
-            "active_user_cells": 6,
+            "active_user_cells": 4,
             "active_recovery_cells": 2,
-            "maximum_potential_attachments": 8,
+            "maximum_potential_attachments": 6,
             "provider_volume_attachment_limit": 16,
-            "minimum_unused_provider_headroom": 8,
+            "minimum_unused_provider_headroom": 10,
         },
     }
     target = path / "private-alpha-capacity-v1.json"
@@ -348,7 +348,7 @@ async def test_live_route_enable_reconciles_the_original_authenticated_helm_rele
     )
     request = {
         "provisionMode": "serve",
-        "workerPolicy": {"workerCount": 0, "semantic": False, "media": False},
+        "workerPolicy": {"workerCount": 2, "semantic": True, "media": False},
         "_providerRecoveryEnvelopes": {"controlRoute": "signed-control"},
     }
     plane = LiveLifecyclePlane(
@@ -446,7 +446,7 @@ async def test_credential_operator_requests_keep_physical_cell_and_stable_tenant
         {
             "releaseVersion": "0.22.0",
             "protocolVersion": "exomem-hosted.v1",
-            "workerPolicy": {"workerCount": 0, "semantic": False, "media": False},
+            "workerPolicy": {"workerCount": 2, "semantic": True, "media": False},
         },
         "rotate-alpha",
     )
@@ -510,7 +510,7 @@ async def test_legacy_credential_promotion_uses_the_catalog_unit_after_mutation(
         "releaseVersion": "0.22.0",
         "protocolVersion": "exomem-hosted.v1",
         "serviceCredential": "credential-current",
-        "workerPolicy": {"workerCount": 0, "semantic": False, "media": False},
+        "workerPolicy": {"workerCount": 2, "semantic": True, "media": False},
     }
 
     assert await plane.promote_credential(metadata, 2, request, "rotate-legacy") is True

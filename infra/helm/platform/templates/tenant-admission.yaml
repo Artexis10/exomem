@@ -236,10 +236,10 @@ spec:
         object.spec.containers[0].env.exists(env,
           env.name == 'EXOMEM_HOSTED_UPLOAD_LIMIT_BYTES' && has(env.value) && env.value == '94371840' && !has(env.valueFrom)) &&
         object.spec.containers[0].env.exists(env,
-          env.name == 'EXOMEM_HOSTED_WORKER_LIMIT' && has(env.value) && env.value == '0' && !has(env.valueFrom)) &&
+          env.name == 'EXOMEM_HOSTED_WORKER_LIMIT' && has(env.value) && env.value == '2' && !has(env.valueFrom)) &&
         object.spec.containers[0].env.exists(env,
-          env.name == 'EXOMEM_HOSTED_FEATURE_GRANTS' &&
-          (!has(env.value) || env.value == '') && !has(env.valueFrom)) &&
+          env.name == 'EXOMEM_HOSTED_FEATURE_GRANTS' && has(env.value) &&
+          env.value == 'embeddings,file-watcher' && !has(env.valueFrom)) &&
         object.spec.containers[0].env.exists(env,
           env.name == 'EXOMEM_HOSTED_TRANSFER_BROWSER_ORIGIN' && has(env.value) &&
           env.value == namespaceObject.metadata.annotations['exomem.io/browser-origin'] && !has(env.valueFrom)) &&

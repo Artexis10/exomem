@@ -51,3 +51,24 @@ exomem.io/recovery-envelope: {{ required (printf "providerRecoveryEnvelopes.%s i
 app.kubernetes.io/name: exomem-cell
 exomem.io/cell: {{ .Values.resourceName }}
 {{- end -}}
+
+{{/*
+Fail closed on a cell that would serve keyword-only recall.
+
+hosted_runtime.py computes `workers_enabled = worker_count > 0` and SETS
+EXOMEM_DISABLE_EMBEDDINGS whenever that is false or the grant is absent. Both
+failures are silent: the cell starts, accepts writes, answers queries, and
+simply never matches on meaning. A tenant paying for semantic recall would get
+a strictly lesser product than the free local runtime with no error anywhere.
+Render-time is the last place to catch it, so catch it here.
+*/}}
+{{- define "exomem-cell.validateProductSurface" -}}
+{{- $workers := int .Values.workerLimit -}}
+{{- if lt $workers 1 -}}
+{{- fail "workerLimit must be greater than zero: a zero worker limit disables embeddings and ships keyword-only recall" -}}
+{{- end -}}
+{{- $grants := splitList "," (.Values.featureGrants | default "") -}}
+{{- if not (has "embeddings" $grants) -}}
+{{- fail "featureGrants must include embeddings: without it the cell silently serves keyword-only recall" -}}
+{{- end -}}
+{{- end -}}

@@ -405,8 +405,8 @@ def _runtime_environment(release: dict[str, Any]) -> list[str]:
         "EXOMEM_HOSTED_WORKER_POLICY_DIGEST": "b" * 64,
         "EXOMEM_HOSTED_STORAGE_LIMIT_BYTES": str(5 * 1024 * 1024 * 1024),
         "EXOMEM_HOSTED_UPLOAD_LIMIT_BYTES": str(90 * 1024 * 1024),
-        "EXOMEM_HOSTED_WORKER_LIMIT": "0",
-        "EXOMEM_HOSTED_FEATURE_GRANTS": "",
+        "EXOMEM_HOSTED_WORKER_LIMIT": "2",
+        "EXOMEM_HOSTED_FEATURE_GRANTS": "embeddings,file-watcher",
         "EXOMEM_HOSTED_TRANSFER_BROWSER_ORIGIN": "https://substratesystems.io",
         "EXOMEM_HOSTED_TRANSFER_HOST": "transfer.release.invalid",
     }
@@ -484,6 +484,57 @@ def probe_published_runtime(release: dict[str, Any], fixture: dict[str, Any]) ->
     probe_runtime_contract(image, release, fixture)
 
 
+def _verify_offline_embedding_capability(image: str, environment: dict[str, str]) -> None:
+    """Prove the published image can embed with no network and no writable root.
+
+    That is exactly the condition a cell runs under: a default-deny NetworkPolicy
+    with no egress rules and `readOnlyRootFilesystem: true`. A hosted image built
+    without the embedding runtime or without baked weights still starts, still
+    reports ready, and still answers queries — it just never matches on meaning.
+    Nothing else in this verification would notice, so run the real thing behind
+    `--network none` and require a vector back.
+    """
+    if environment.get("HF_HUB_OFFLINE") != "1":
+        raise ValueError("published hosted image does not pin the model hub offline")
+
+    script = (
+        "from exomem.embeddings import MODEL_NAME;"
+        "from sentence_transformers import SentenceTransformer;"
+        "m = SentenceTransformer(MODEL_NAME, device='cpu');"
+        "v = m.encode(['release verification'], show_progress_bar=False);"
+        "assert v.shape[0] == 1 and v.shape[1] > 0, v.shape;"
+        "print('ok', MODEL_NAME, v.shape[1])"
+    )
+    result = _run(
+        [
+            "docker",
+            "run",
+            "--rm",
+            "--network",
+            "none",
+            "--read-only",
+            "--user",
+            "10001:10001",
+            "--cap-drop",
+            "ALL",
+            "--security-opt",
+            "no-new-privileges",
+            "--tmpfs",
+            "/tmp",
+            "--env",
+            "HOME=/tmp",
+            "--entrypoint",
+            "python",
+            image,
+            "-c",
+            script,
+        ],
+        timeout=900,
+    )
+    if "ok " not in result.stdout:
+        raise ValueError("published hosted image cannot embed offline")
+
+
 def probe_runtime_contract(image: str, release: dict[str, Any], fixture: dict[str, Any]) -> None:
     """Initialize one selected image and compare its authenticated contract route."""
 
@@ -500,6 +551,7 @@ def probe_runtime_contract(image: str, release: dict[str, Any], fixture: dict[st
         "EXOMEM_RELEASE_BUILD_TIME"
     ) != release.get("releaseBuildTime"):
         raise ValueError("published runtime image variant/build-time drift")
+    _verify_offline_embedding_capability(image, environment)
 
     credential = base64.urlsafe_b64encode(secrets.token_bytes(32)).rstrip(b"=").decode("ascii")
     container = f"exomem-release-verify-{uuid.uuid4().hex[:12]}"

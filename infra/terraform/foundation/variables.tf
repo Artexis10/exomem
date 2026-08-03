@@ -78,7 +78,22 @@ variable "server_name" {
 }
 
 variable "server_type" {
-  description = "Cost-safe shared-x86 Hetzner instance used until owner soak proves otherwise."
+  # Still cx33, but no longer by choice: as of 2026-08-03 Hetzner lists no cx
+  # type as available or available_for_migration in ANY datacenter, EU or
+  # otherwise. The line is retired. Existing cx servers keep running; none can
+  # be placed or resized into. An attempted cx33 -> cx43 resize failed with
+  # `resource_unavailable` and left the node powered off until restarted.
+  #
+  # The alpha therefore sizes the fleet to this node instead of the node to the
+  # fleet: an embedding-capable cell measures 918 MiB peak at the CPU encode
+  # batch the runtime uses, so the capacity contract caps USER cells at four
+  # rather than six. The binding unknown is platform overhead, which is still
+  # estimated because the platform has never been installed.
+  #
+  # The successor families cost roughly four times as much for the same memory
+  # (cpx42 8/16 at EUR 69.49, ccx23 4/16 at EUR 85.99, against cx33's EUR 8.49),
+  # so moving is a pricing decision, not a maintenance one. Make it deliberately.
+  description = "Legacy shared-x86 Hetzner instance; the cx line is retired and cannot be re-placed."
   type        = string
   default     = "cx33"
 

@@ -1457,6 +1457,36 @@ def _metadata_from_context(context: EffectContext) -> OpaqueProviderMetadata:
     )
 
 
+# The cell chart renders a fixed worker shape, but the caller declares its own
+# `workerPolicy` in the request and the runtime health check verifies the cell
+# reports exactly that. The two are only consistent because they are written to
+# agree — nothing structural ties them together, so a caller that still asks for
+# the old keyword-only policy would render an embedding-capable cell and then
+# fail health with a mismatch that reads like a runtime fault.
+_SHIPPED_WORKER_POLICY = {"workerCount": 2, "semantic": True, "media": False}
+
+
+def _require_complete_product_policy(request: dict[str, Any]) -> None:
+    """Reject a request that asks for a serving cell we will not build.
+
+    A cell without semantic recall is a lesser product than the free local
+    runtime, so refusing here is the provisioning-boundary form of the same rule
+    the chart enforces at render time.
+
+    Restore candidates are exempt: that mode renders an offline storage shell
+    with no serving runtime, and its worker policy governs nothing until the
+    candidate is promoted and re-rendered in serve mode.
+    """
+    if request.get("provisionMode") == "restore-candidate":
+        return
+    policy = request["workerPolicy"]
+    if not isinstance(policy, dict) or dict(policy) != _SHIPPED_WORKER_POLICY:
+        raise MetadataConflict(
+            "worker policy must request the complete product surface "
+            f"({_SHIPPED_WORKER_POLICY}); a cell without semantic recall is not provisioned"
+        )
+
+
 def _fixed_helm_values(
     metadata: OpaqueProviderMetadata,
     request: dict[str, Any],
@@ -1468,6 +1498,7 @@ def _fixed_helm_values(
         if has_runtime_target
         else {"protocolVersion": config.protocol_version, "releaseVersion": config.release_version}
     )
+    _require_complete_product_policy(request)
     worker_policy = json.dumps(
         request["workerPolicy"], sort_keys=True, separators=(",", ":")
     ).encode("utf-8")
@@ -1479,7 +1510,10 @@ def _fixed_helm_values(
         "credentialsManagedExternally": True,
         "expectedProtocol": target["protocolVersion"],
         "expectedRelease": target["releaseVersion"],
-        "featureGrants": "",
+        # A hosted cell must deliver the same retrieval capability as the free
+        # local runtime. Dropping either of these silently downgrades the tenant
+        # to keyword-only recall; see the cell chart's validateProductSurface.
+        "featureGrants": "embeddings,file-watcher",
         "image": (
             config.runtime_image_for(request, v2="runtimeTarget" in request)
             if has_runtime_target
@@ -1507,7 +1541,7 @@ def _fixed_helm_values(
         "transferHostname": config.transfer_hostname,
         "uploadLimitBytes": 90 * 1024**2,
         "vaultId": metadata.tenant_id,
-        "workerLimit": 0,
+        "workerLimit": 2,
         "workerPolicyDigest": hashlib.sha256(worker_policy).hexdigest(),
         "workloadMode": (
             "restore" if request["provisionMode"] == "restore-candidate" else "initialize"

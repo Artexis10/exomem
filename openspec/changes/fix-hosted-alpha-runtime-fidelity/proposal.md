@@ -28,10 +28,19 @@ probable, and none are helped by frequency — they are helped by retention dept
 
 ## What Changes
 
-- Enable the `embeddings` feature grant and raise the cell worker limit above zero so
-  hosted cells run semantic recall, file watching, and media extraction.
-- Resize the alpha node from CX33 to CX43 to hold six embedding-capable cells, and update
-  the capacity contract's cost basis accordingly.
+- Enable the `embeddings` and `file-watcher` feature grants and raise the cell worker
+  limit above zero so hosted cells run semantic recall.
+- Build the hosted image from the ML builder and bake the bi-encoder weights into it.
+  Cells have no egress and a read-only root, so the grant is inert without this.
+- Leave the `media` grant withheld: Whisper weights are an order of magnitude larger
+  than the bi-encoder and CPU-only transcription on a shared node approaches
+  real-time, so it needs its own capacity analysis rather than riding on this change.
+- Choose the encode batch size by device: 8 on CPU, where it is both smaller and faster,
+  and 32 on accelerators. This halves a cell's peak memory for free.
+- Cap USER cells at four rather than six, sized from measured peak memory against the
+  node in service. The planned CX33 to CX43 resize is not possible — the provider has
+  retired the cx line and lists no cx type as placeable or migratable anywhere — and the
+  available successors cost roughly four times as much for equivalent memory.
 - Change the vault durability cadence from 30-minute full archives to daily, restating
   the recovery objective as 24 hours rather than one hour.
 - Record the resulting economics honestly, including that the EUR 5 friends tier is
@@ -47,10 +56,18 @@ probable, and none are helped by frequency — they are helped by retention dept
 
 ## Impact
 
-- `infra/helm/cell/values.yaml` worker limit and feature grants; the rendered cell
-  environment stops setting `EXOMEM_DISABLE_EMBEDDINGS`.
-- `infra/terraform/foundation` server type, and the `server_type == "cx33"` validation.
+- `infra/helm/cell/values.yaml` worker limit, feature grants, and a resource envelope
+  set from measurement; the rendered cell environment stops setting
+  `EXOMEM_DISABLE_EMBEDDINGS`. The cell namespace quota rises to hold the larger
+  runtime limit alongside the init job.
+- `Dockerfile`: the `hosted` stage moves off `builder-lean` and gains baked weights.
+- The provisioner rejects a request whose declared worker policy is not the shipped
+  product, because the chart's fixed shape and the caller's declaration are verified
+  against each other at runtime health but nothing keeps them in step.
+- `infra/terraform/foundation` keeps `cx33` with the retirement recorded, since the type
+  cannot be changed; the fixed-cost output is unchanged at EUR 8.99.
 - `infra/operations/private-alpha-capacity-v1.json` and its byte-identical chart copy:
-  cost basis and the resource envelope behind the six-cell cap.
+  the filled cost basis, the observed Paddle fee and tax model, the evidence digests,
+  and the four-cell cap with its matching attachment ceiling.
 - The durability worker's schedule and the declared RPO in runbooks and specs.
 - No change to tenant isolation, encryption, admission, or routing.

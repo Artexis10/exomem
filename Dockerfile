@@ -86,6 +86,45 @@ RUN uv pip install --python /app/.venv/bin/python "torch>=2.12" --index-url http
  && uv pip install --python /app/.venv/bin/python ".[embeddings]"
 
 ########################################################################
+# builder-hosted — builder-ml plus the embedding weights resolved at BUILD
+# time into the image itself.
+#
+# A hosted cell runs under a default-deny NetworkPolicy with no egress rules
+# and a read-only root filesystem. It therefore cannot download a model, and
+# has nowhere writable to cache one if it could. Any weight the cell needs
+# must already be a layer, or the `embeddings` grant produces a cell that
+# advertises semantic recall and fails on first use.
+#
+# Only the bi-encoder is fetched. The CLIP model belongs to the `vision`
+# grant and the cross-encoder reranker never runs in a hosted cell (see the
+# hosted stage's EXOMEM_DISABLE_RANKING), so baking either would add hundreds
+# of megabytes to every cell for a path that is closed.
+########################################################################
+FROM builder-ml AS builder-hosted
+ENV HF_HOME=/opt/exomem-models
+# Fetch the weights, drop the duplicate serializations the loader will not use
+# (the hub cache stores snapshot entries as symlinks into blobs/, so the blob
+# has to go too or the layer keeps the bytes), then load once more with the
+# network closed. That final load is the gate: if trimming removed something
+# the loader actually needs, the build fails here instead of every cell
+# failing on its first query.
+RUN /app/.venv/bin/python -c "\
+from exomem.embeddings import MODEL_NAME; \
+from sentence_transformers import SentenceTransformer; \
+SentenceTransformer(MODEL_NAME, device='cpu'); \
+print('fetched', MODEL_NAME)" \
+ && find /opt/exomem-models \( -name 'pytorch_model.bin' -o -name '*.h5' \
+      -o -name '*.msgpack' -o -name '*.ot' \) \
+      -exec sh -c 'for f; do t=$(readlink -f "$f" || true); rm -f "$f" "$t"; done' _ {} + \
+ && HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 /app/.venv/bin/python -c "\
+from exomem.embeddings import MODEL_NAME; \
+from sentence_transformers import SentenceTransformer; \
+m = SentenceTransformer(MODEL_NAME, device='cpu'); \
+v = m.encode(['offline load gate'], show_progress_bar=False); \
+assert v.shape[0] == 1 and v.shape[1] > 0, v.shape; \
+print('offline load verified', MODEL_NAME, v.shape)"
+
+########################################################################
 # Final: ml (target `ml`). Fresh slim base — no build tooling, no uv, no
 # source tree — just the populated venv. HF_HOME pins the downloaded
 # embedding/CLIP model weights under the declared /data volume so they
@@ -150,9 +189,17 @@ CMD ["--transport", "http", "--port", "8765"]
 # vault/state/log roots plus native Secret/operator projections. Kubernetes
 # supplies readOnlyRootFilesystem; this image supplies the matching fixed
 # runtime identity and avoids bytecode writes to the image layer.
+#
+# This carries the embedding runtime and pre-baked weights, not the lean venv:
+# a paying tenant gets the same semantic recall as the free local runtime.
+# The cell has no egress and no writable root, so the weights are a read-only
+# image layer under HF_HOME and the hub client is pinned offline — an
+# accidental fetch must fail loudly at load rather than hang a tenant query
+# against a blocked NetworkPolicy until the client's deadline.
 ########################################################################
 FROM python:3.12-slim AS hosted
-COPY --from=builder-lean /app/.venv /app/.venv
+COPY --from=builder-hosted /app/.venv /app/.venv
+COPY --from=builder-hosted /opt/exomem-models /opt/exomem-models
 COPY LICENSE /LICENSE
 
 ARG EXOMEM_RELEASE_BUILD_TIME
@@ -164,6 +211,10 @@ ENV PATH=/app/.venv/bin:$PATH \
     EXOMEM_HOST=0.0.0.0 \
     EXOMEM_CONTAINER_VARIANT=hosted \
     EXOMEM_RELEASE_BUILD_TIME=${EXOMEM_RELEASE_BUILD_TIME} \
+    HF_HOME=/opt/exomem-models \
+    HF_HUB_OFFLINE=1 \
+    TRANSFORMERS_OFFLINE=1 \
+    EXOMEM_DISABLE_RANKING=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
