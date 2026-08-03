@@ -267,6 +267,7 @@ class FreshnessSnapshot:
         self._kb: tuple[int, int, str] | None = None
         self._vault: tuple[int, int, str] | None = None
         self._recall: dict[str, freshness.RecallFreshnessCheckpoint] = {}
+        self._recall_paths: dict[str, set[str]] = {}
 
     def kb(self) -> tuple[int, int, str]:
         if self._kb is None:
@@ -301,8 +302,8 @@ class FreshnessSnapshot:
     def recall_checkpoint(self, scope: str) -> freshness.RecallFreshnessCheckpoint:
         checkpoint = self._recall.get(scope)
         if checkpoint is None:
-            checkpoint = freshness.recall_checkpoint(self._root, scope)
-            self._recall[scope] = checkpoint
+            self._load_recall_projection(scope)
+            checkpoint = self._recall[scope]
         return checkpoint
 
     def projection_key(self, scope: str) -> tuple:
@@ -312,6 +313,36 @@ class FreshnessSnapshot:
             checkpoint.policy_version,
             checkpoint.access_policy_fingerprint,
         )
+
+    def recall_paths(self, scope: str) -> set[str]:
+        """Stable request-local ordinary-recall path projection.
+
+        Vector and visual KNN must receive this set before scoring: filtering a
+        ranked raw Records window afterwards can starve admitted pages.  A live
+        freshness registry supplies it without a walk; CLI/cold callers rebuild
+        the same projection from the human-owned Markdown files.
+        """
+        cached = self._recall_paths.get(scope)
+        if cached is not None:
+            return cached
+        self._load_recall_projection(scope)
+        return self._recall_paths[scope]
+
+    def _load_recall_projection(self, scope: str) -> None:
+        if scope in self._recall and scope in self._recall_paths:
+            return
+        checkpoint, entries = freshness.recall_projection_snapshot(self._root, scope)
+        root = self._root.absolute()
+        paths: set[str] = set()
+        for raw_path in entries:
+            try:
+                paths.add(Path(raw_path).absolute().relative_to(root).as_posix())
+            except (OSError, ValueError):
+                # Registry identities outside the literal vault spelling are
+                # never valid semantic-search parents; fail closed.
+                continue
+        self._recall[scope] = checkpoint
+        self._recall_paths[scope] = paths
 
 
 def _freshness_key(
@@ -676,7 +707,11 @@ def find(
 
     def _page_of(rel: str) -> ParsedPage | None:
         if rel not in page_memo:
-            page_memo[rel] = _CACHE.get(vault_root / rel, vault_root)
+            page_memo[rel] = (
+                _CACHE.get(vault_root / rel, vault_root)
+                if recall_policy.is_recall_candidate(vault_root, vault_root / rel)
+                else None
+            )
         return page_memo[rel]
 
     walk_scope = "vault" if scope == "vault" else "kb"
@@ -959,6 +994,7 @@ def find(
             degraded_out=degraded,
             failed_out=failed,
             eligible_paths=eligible_paths,
+            recall_scope="kb" if scope == "kb-only" else "vault",
             retrieval_trace=retrieval_trace,
         )
 
@@ -1405,6 +1441,7 @@ def _vector_unit_candidates(
     query: str,
     candidate_limit: int,
     allowed_unit_refs: set[str] | None,
+    allowed_parent_paths: set[str],
     degraded_out: list[str] | None,
     failed_out: list[str] | None,
 ) -> tuple[list[Any], dict[str, Any], str]:
@@ -1432,6 +1469,7 @@ def _vector_unit_candidates(
             query_vector,
             k=candidate_limit,
             allowed_unit_refs=allowed_unit_refs,
+            allowed_parent_paths=allowed_parent_paths,
             validate=False,
         )
         profile = {
@@ -1688,6 +1726,7 @@ def _find_semantic_units(
             query=query,
             candidate_limit=vector_candidate_limit,
             allowed_unit_refs=vector_allowed_refs,
+            allowed_parent_paths=snapshot.recall_paths(scope),
             degraded_out=degraded_out,
             failed_out=failed_out,
         )
@@ -2542,6 +2581,7 @@ def _find_semantic(
     degraded_out: list[str] | None = None,
     failed_out: list[str] | None = None,
     eligible_paths: set[str] | None = None,
+    recall_scope: str | None = None,
     retrieval_trace: Any | None = None,
 ) -> list[Hit]:
     """Hybrid (BM25+vector) or vector-only mode.
@@ -2562,7 +2602,11 @@ def _find_semantic(
 
     def _page_of(rel: str) -> ParsedPage | None:
         if rel not in page_memo:
-            page_memo[rel] = _CACHE.get(vault_root / rel, vault_root)
+            page_memo[rel] = (
+                _CACHE.get(vault_root / rel, vault_root)
+                if recall_policy.is_recall_candidate(vault_root, vault_root / rel)
+                else None
+            )
         return page_memo[rel]
 
     bundle = find_candidates.collect_candidates(
@@ -2584,10 +2628,11 @@ def _find_semantic(
         page_of=_page_of,
         keyword_match_paths=_keyword_match_paths,
         outbound_wikilink_paths=_outbound_wikilink_paths,
-        get_query_resolver=_get_query_resolver,
+        get_query_resolver=recall_resolver_snapshot,
         record_degradation=_record_degradation,
         degraded_out=degraded_out,
         failed_out=failed_out,
+        recall_paths=snapshot.recall_paths(recall_scope or scope),
         eligible_paths=eligible_paths,
         capture_trace=retrieval_trace is not None,
     )
@@ -2681,6 +2726,10 @@ def _find_semantic(
             continue
         seen.add(rel_path)
         if rel_path.rsplit("/", 1)[-1].lower() in _NAVIGATION_BASENAMES:
+            continue
+        # Final egress guard: stale/non-projected sidecars can nominate paths,
+        # but they must not cause a raw Record to be hydrated even transiently.
+        if not recall_policy.is_recall_candidate(vault_root, vault_root / rel_path):
             continue
         page = _page_of(rel_path)
         if page is None:
@@ -3028,7 +3077,7 @@ def _find_outside_kb(
     try:
         search_kwargs = {
             "scope": "vault",
-            "freshness": snapshot.vault() if snapshot is not None else None,
+            "freshness": snapshot.for_scope("vault") if snapshot is not None else None,
             "allowed_paths": allowed_outside,
         }
         search_kwargs["repair"] = _bounded_lexical_repair_allowed(search_kwargs["freshness"])
@@ -3334,6 +3383,8 @@ def _outbound_wikilink_paths(page: ParsedPage, vault_root: Path, resolver=None) 
         # trees are intentional out-of-graph references.
         if not rel_with_md.startswith(kb_prefix()):
             continue
+        if not recall_policy.is_recall_candidate(vault_root, vault_root / rel_with_md):
+            continue
         if rel_with_md in seen:
             continue
         seen.add(rel_with_md)
@@ -3342,6 +3393,7 @@ def _outbound_wikilink_paths(page: ParsedPage, vault_root: Path, resolver=None) 
 
 
 _RESOLVER_CACHE: dict[Path, tuple[tuple, object]] = {}
+_RECALL_RESOLVER_CACHE: dict[Path, tuple[tuple, object]] = {}
 _RESOLVER_LOCK = threading.Lock()
 
 
@@ -3397,6 +3449,60 @@ def shared_resolver(vault_root: Path):
       never landed, so the disk re-read drops the phantom entry.
     """
     return _get_query_resolver(vault_root)
+
+
+def recall_resolver_snapshot(vault_root: Path, freshness: tuple | None = None):
+    """Resolver for ordinary recall and graph expansion only.
+
+    Unlike the writer resolver, this view is intentionally constructed from
+    policy-admitted paths.  The admission check precedes cache hydration, so a
+    raw Records filename/stem/title can neither resolve a link nor collide with
+    an ordinary note in the graph lane.
+    """
+    from .vault import WikilinkResolver, walk_vault_md
+
+    root = Path(vault_root)
+    # Callers that already measured disk freshness (notably the graph rebuild)
+    # must not pay another broad/event-registry walk just to warm this resolver.
+    # The key remains distinct from the broad writer resolver by policy identity.
+    freshness_key = (
+        freshness
+        if freshness is not None
+        else FreshnessSnapshot(root).projection_key("vault")
+    )
+    policy_version, access_fingerprint = recall_policy.recall_policy_identity(root)
+    if (
+        isinstance(freshness_key, tuple)
+        and len(freshness_key) == 3
+        and isinstance(freshness_key[0], tuple)
+        and freshness_key[1:] == (policy_version, access_fingerprint)
+    ):
+        # A query's projected request key is already the complete resolver
+        # identity.  Reuse it verbatim rather than nesting it and accidentally
+        # separating otherwise identical warmed snapshots.
+        identity = freshness_key
+    else:
+        identity = (freshness_key, policy_version, access_fingerprint)
+    with _RESOLVER_LOCK:
+        cached = _RECALL_RESOLVER_CACHE.get(root)
+        if cached and cached[0] == identity:
+            return cached[1].fork()
+
+    entries: list[tuple[str, str | None]] = []
+    for path in walk_vault_md(root):
+        if not recall_policy.is_recall_candidate(root, path):
+            continue
+        page = _CACHE.get(path, root)
+        if page is not None:
+            entries.append((page.rel_path, page.title))
+    resolver = WikilinkResolver.from_entries(root, entries)
+    with _RESOLVER_LOCK:
+        # The supplied freshness key names this immutable resolver snapshot.
+        # A later caller with changed disk/policy identity cannot reuse it;
+        # graph rebuild performs its stronger direct before/after proof around
+        # sidecar publication.
+        _RECALL_RESOLVER_CACHE[root] = (identity, resolver)
+    return resolver.fork()
 
 
 def prime_resolver_from_entries(
@@ -3501,8 +3607,9 @@ def unload_ram_caches() -> dict[str, int]:
     page_entries = len(_CACHE.entries)
     _CACHE.clear()
     with _RESOLVER_LOCK:
-        resolver_entries = len(_RESOLVER_CACHE)
+        resolver_entries = len(_RESOLVER_CACHE) + len(_RECALL_RESOLVER_CACHE)
         _RESOLVER_CACHE.clear()
+        _RECALL_RESOLVER_CACHE.clear()
     with _FIND_CACHE_LOCK:
         hot_entries = len(_FIND_CACHE)
         _FIND_CACHE.clear()
@@ -3523,7 +3630,7 @@ def cache_status() -> dict:
     """No-allocation residency status for find's rebuildable RAM caches."""
     page_entries = list(_CACHE.entries.values())
     with _RESOLVER_LOCK:
-        resolver_entries = len(_RESOLVER_CACHE)
+        resolver_entries = len(_RESOLVER_CACHE) + len(_RECALL_RESOLVER_CACHE)
     with _FIND_CACHE_LOCK:
         hot_entries = len(_FIND_CACHE)
         hot_hits = sum(len(v) for v in _FIND_CACHE.values())

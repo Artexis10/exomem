@@ -207,7 +207,9 @@ def test_upsert_report_contains_failures_and_continues_single_fanout(
 
     report = index_sync.upsert_after_write(tmp_path, [target])
 
-    assert calls == ["lexstore", "memory_refs", "resolver", "epistemic_graph"]
+    # Identity maintenance runs before semantic leaves so a simultaneously
+    # suppressed Record can be purged before any semantic insertion.
+    assert calls == ["memory_refs", "resolver", "lexstore", "epistemic_graph"]
     assert report.requested_paths == ("Knowledge Base/Notes/item.md",)
     assert report.eligible_paths == report.requested_paths
     assert _outcome(report, "lexstore").outcome == "degraded"

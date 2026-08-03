@@ -19,10 +19,11 @@ from dataclasses import field as dataclass_field
 from pathlib import Path
 from typing import Any
 
+from . import find as find_module
 from . import (
-    access,
     memory_refs,
     mutation_lock,
+    recall_policy,
     relation_registry,
     semantic_blocks,
     semantic_index,
@@ -30,7 +31,6 @@ from . import (
     semantic_units,
     traversal_profiles,
 )
-from . import find as find_module
 from . import vault as vault_module
 from .cli_ops import OpError
 from .kbdir import kb_dirname, kb_prefix
@@ -43,6 +43,7 @@ EDGE_INSPECTION_MULTIPLIER = 4
 REBUILD_STABILIZATION_ATTEMPTS = 2
 GRAPH_MUTATION_TIMEOUT_SECONDS = 30.0
 GRAPH_COORDINATION_DIRNAME = ".graph-coordination"
+_AVAILABILITY_FRESHNESS_KEY = "recall_projection_identity"
 
 RELATION_TYPES: frozenset[str] = relation_registry.core_registry().keys
 
@@ -172,9 +173,70 @@ def sidecar_path(vault_root: Path) -> Path:
 
 
 def _disk_vault_freshness(vault_root: Path) -> tuple[int, int, str]:
-    """Vault freshness from a direct walk, bypassing event-registry state."""
+    """Direct-disk freshness of the ordinary-recall projection only.
+
+    Raw Records must neither enter the graph nor churn its sidecar identity.
+    Admission precedes the freshness stat, so this preserves the same no-read
+    boundary as every other ordinary recall ingress while retaining the direct
+    filesystem proof needed when watcher events are missed.
+    """
     return find_module._walk_freshness_key(
-        vault_module.walk_vault_md(vault_root)
+        recall_policy.iter_recall_markdown(
+            vault_root, vault_module.walk_vault_md(vault_root)
+        )
+    )
+
+
+def _recall_projection_identity(
+    vault_root: Path, *, disk_freshness: tuple[int, int, str]
+) -> tuple[tuple[int, int, str], str, str]:
+    """A direct-disk graph rebuild identity for the projected resolver.
+
+    The graph's old rebuild contract deliberately uses a full direct walk: a
+    watcher/event checkpoint can lag behind an ordinary editor.  Keep that
+    proof while binding the resolver to the Records admission and access
+    policy that shape its view.
+    """
+    policy_version, access_fingerprint = recall_policy.recall_policy_identity(vault_root)
+    return disk_freshness, policy_version, access_fingerprint
+
+
+def _availability_freshness_value(
+    identity: tuple[tuple[int, int, str], str, str],
+) -> str:
+    return json.dumps(identity, separators=(",", ":"))
+
+
+def _vault_rel(vault_root: Path, path: Path | str) -> str | None:
+    """Return a vault-relative path without opening the candidate."""
+    try:
+        return Path(path).resolve().relative_to(Path(vault_root).resolve()).as_posix()
+    except (ValueError, OSError):
+        return None
+
+
+def _recall_path_allowed(vault_root: Path, rel_path: str) -> bool:
+    return recall_policy.is_recall_candidate(vault_root, Path(vault_root) / rel_path)
+
+
+def _placeholder_path_allowed(vault_root: Path, rel_path: str) -> bool:
+    """Missing ordinary targets remain useful placeholders; Records do not."""
+    return not recall_policy.is_structured_only_path(vault_root, rel_path)
+
+
+def _records_suppressed_path(vault_root: Path, rel_path: str) -> bool:
+    """Classify raw Records without treating a missing ordinary page as one."""
+    return recall_policy.is_structured_only_path(vault_root, rel_path)
+
+
+def _source_signature(path: Path, source: str) -> tuple[int, int, int, str]:
+    """Bind graph rows to the exact bytes and file identity used to derive them."""
+    info = path.stat()
+    return (
+        int(info.st_mtime_ns),
+        int(info.st_ctime_ns),
+        int(info.st_size),
+        vault_module.content_hash(source),
     )
 
 
@@ -190,9 +252,10 @@ class EpistemicGraphIndex:
             timeout_seconds=GRAPH_MUTATION_TIMEOUT_SECONDS,
         )
 
-    def _connect(self) -> sqlite3.Connection:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(self.path)
+    def _connect(self, path: Path | None = None) -> sqlite3.Connection:
+        target = path if path is not None else self.path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(target)
         try:
             from . import embeddings
 
@@ -291,17 +354,22 @@ class EpistemicGraphIndex:
             values = dict(
                 conn.execute(
                     "SELECT key, value FROM graph_meta WHERE key IN "
-                    "('schema_version', 'core_registry_version', 'extension_registry_hash')"
+                    "('schema_version', 'core_registry_version', 'extension_registry_hash', "
+                    "'recall_policy_version', 'recall_access_fingerprint', "
+                    "'recall_projection_identity')"
                 ).fetchall()
             )
         except sqlite3.Error:
             if conn is not None:
                 conn.close()
             return None
+        policy_version, access_fingerprint = recall_policy.recall_policy_identity(self.vault_root)
         current = (
             values.get("schema_version") == str(SCHEMA_VERSION)
             and values.get("core_registry_version") == str(self.registry.core_version)
             and values.get("extension_registry_hash") == self.registry.extension_hash
+            and values.get("recall_policy_version") == policy_version
+            and values.get("recall_access_fingerprint") == access_fingerprint
         )
         if not current:
             conn.close()
@@ -324,17 +392,23 @@ class EpistemicGraphIndex:
         stable = False
         try:
             for _attempt in range(REBUILD_STABILIZATION_ATTEMPTS):
-                before = _disk_vault_freshness(self.vault_root)
-                resolver = find_module.writer_resolver_snapshot(
-                    self.vault_root,
-                    freshness_key=before,
+                before_disk = _disk_vault_freshness(self.vault_root)
+                before = _recall_projection_identity(
+                    self.vault_root, disk_freshness=before_disk
+                )
+                resolver = find_module.recall_resolver_snapshot(
+                    self.vault_root, freshness=before_disk
                 )
                 pass_started = True
                 report = self._rebuild_all_pass(resolver)
-                if _disk_vault_freshness(self.vault_root) == before:
-                    self._mark_available()
-                    stable = True
-                    return report
+                after_disk = _disk_vault_freshness(self.vault_root)
+                if _recall_projection_identity(
+                    self.vault_root, disk_freshness=after_disk
+                ) == before:
+                    if self._mark_available(before):
+                        stable = True
+                        return report
+                    self._mark_unavailable()
             raise RuntimeError(
                 "epistemic graph rebuild did not stabilize after 2 attempts"
             )
@@ -356,6 +430,10 @@ class EpistemicGraphIndex:
                     "DELETE FROM graph_meta WHERE key = 'schema_version'"
                 )
                 conn.execute(
+                    "DELETE FROM graph_meta WHERE key = ?",
+                    (_AVAILABILITY_FRESHNESS_KEY,),
+                )
+                conn.execute(
                     "INSERT OR REPLACE INTO graph_meta(key, value) VALUES (?, ?)",
                     ("core_registry_version", str(self.registry.core_version)),
                 )
@@ -375,6 +453,17 @@ class EpistemicGraphIndex:
                 conn.execute(
                     "INSERT OR REPLACE INTO graph_meta(key, value) VALUES (?, ?)",
                     ("indexed_scope", "kb"),
+                )
+                policy_version, access_fingerprint = recall_policy.recall_policy_identity(
+                    self.vault_root
+                )
+                conn.execute(
+                    "INSERT OR REPLACE INTO graph_meta(key, value) VALUES (?, ?)",
+                    ("recall_policy_version", policy_version),
+                )
+                conn.execute(
+                    "INSERT OR REPLACE INTO graph_meta(key, value) VALUES (?, ?)",
+                    ("recall_access_fingerprint", access_fingerprint),
                 )
                 _bump_generation(conn)
             indexed = 0
@@ -399,22 +488,53 @@ class EpistemicGraphIndex:
                 conn.execute(
                     "DELETE FROM graph_meta WHERE key = 'schema_version'"
                 )
+                conn.execute(
+                    "DELETE FROM graph_meta WHERE key = ?",
+                    (_AVAILABILITY_FRESHNESS_KEY,),
+                )
         finally:
             conn.close()
 
-    def _mark_available(self) -> None:
+    def _mark_available(
+        self, identity: tuple[tuple[int, int, str], str, str]
+    ) -> bool:
         conn = sqlite3.connect(self.path)
         try:
             with conn:
+                conn.execute(
+                    "INSERT OR REPLACE INTO graph_meta(key, value) VALUES (?, ?)",
+                    (_AVAILABILITY_FRESHNESS_KEY, _availability_freshness_value(identity)),
+                )
                 conn.execute(
                     "INSERT OR REPLACE INTO graph_meta(key, value) VALUES (?, ?)",
                     ("schema_version", str(SCHEMA_VERSION)),
                 )
         finally:
             conn.close()
+        return _recall_projection_identity(
+            self.vault_root,
+            disk_freshness=_disk_vault_freshness(self.vault_root),
+        ) == identity
 
     def refresh_paths(self, paths: list[Path]) -> dict[str, int]:
         if not graph_enabled():
+            # Feature-off does not authorize a stale sidecar to retain sensitive
+            # raw Record rows.  Purge only an already-existing sidecar; do not
+            # create graph state merely to process a suppression notification.
+            if self.path.exists():
+                with self._mutation_coordinator.hold(
+                    operation="epistemic_graph_purge_suppressed", holder_kind="graph"
+                ):
+                    conn = self._connect()
+                    try:
+                        for path in paths:
+                            rel = _vault_rel(self.vault_root, path)
+                            if rel is not None and not recall_policy.is_recall_candidate(
+                                self.vault_root, path
+                            ):
+                                self._delete_path(conn, rel)
+                    finally:
+                        conn.close()
             return {"indexed_files": 0, "nodes": 0, "edges": 0, "disabled": 1}
         with self._mutation_coordinator.hold(
             operation="epistemic_graph_refresh_paths", holder_kind="graph"
@@ -422,9 +542,50 @@ class EpistemicGraphIndex:
             return self._refresh_paths_locked(paths)
 
     def _refresh_paths_locked(self, paths: list[Path]) -> dict[str, int]:
-        if not self.available():
+        snapshot = self._open_read_snapshot()
+        if snapshot is None:
             return self._rebuild_all_locked()
-        resolver = find_module.writer_resolver_snapshot(self.vault_root)
+        snapshot.close()
+        pass_started = False
+        stable = False
+        withdrawn_for_retry = False
+        try:
+            for _attempt in range(REBUILD_STABILIZATION_ATTEMPTS):
+                before_disk = _disk_vault_freshness(self.vault_root)
+                before = _recall_projection_identity(
+                    self.vault_root, disk_freshness=before_disk
+                )
+                resolver = find_module.recall_resolver_snapshot(
+                    self.vault_root, freshness=before_disk
+                )
+                pass_started = True
+                report = self._refresh_paths_pass(paths, resolver=resolver)
+                after_disk = _disk_vault_freshness(self.vault_root)
+                if _recall_projection_identity(
+                    self.vault_root, disk_freshness=after_disk
+                ) != before:
+                    self._mark_unavailable()
+                    withdrawn_for_retry = True
+                    continue
+                publication = self._open_read_snapshot()
+                if publication is None and not withdrawn_for_retry:
+                    return report
+                if publication is not None:
+                    publication.close()
+                if self._mark_available(before):
+                    stable = True
+                    return report
+                self._mark_unavailable()
+            raise RuntimeError(
+                "epistemic graph refresh did not stabilize after 2 attempts"
+            )
+        finally:
+            if pass_started and not stable:
+                self._mark_unavailable()
+
+    def _refresh_paths_pass(
+        self, paths: list[Path], *, resolver: vault_module.WikilinkResolver
+    ) -> dict[str, int]:
         conn = self._connect()
         indexed = 0
         try:
@@ -434,15 +595,68 @@ class EpistemicGraphIndex:
             with conn:
                 n_nodes = conn.execute("SELECT COUNT(*) FROM graph_nodes").fetchone()[0]
                 n_edges = conn.execute("SELECT COUNT(*) FROM graph_edges").fetchone()[0]
-            return {"indexed_files": indexed, "nodes": int(n_nodes), "edges": int(n_edges)}
         finally:
             conn.close()
+        return {"indexed_files": indexed, "nodes": int(n_nodes), "edges": int(n_edges)}
 
     def delete_paths(self, rel_paths: list[str]) -> int:
         with self._mutation_coordinator.hold(
             operation="epistemic_graph_delete_paths", holder_kind="graph"
         ):
             return self._delete_paths_locked(rel_paths)
+
+    def purge_exact_persisted_rows(
+        self,
+        node_paths: list[str],
+        edge_values: dict[str, list[str]],
+        *,
+        connection_path: Path | None = None,
+    ) -> int:
+        """Purge quarantined sidecar values without normalizing them as paths."""
+        target = connection_path if connection_path is not None else self.path
+        if not target.exists():
+            return 0
+        values = {
+            column: sorted({value for value in raw if isinstance(value, str)})
+            for column, raw in edge_values.items()
+            if column in {"source_path", "src_key", "dst_key"}
+        }
+        paths = sorted({value for value in node_paths if isinstance(value, str)})
+        if not paths and not values:
+            return 0
+        with self._mutation_coordinator.hold(
+            operation="epistemic_graph_purge_exact_persisted_rows", holder_kind="graph"
+        ):
+            conn = self._connect(target)
+            try:
+                with conn:
+                    changed = 0
+                    for path in paths:
+                        file_key = f"file:{path}"
+                        changed += conn.execute(
+                            "DELETE FROM graph_edges WHERE source_path = ? "
+                            "OR src_key = ? OR dst_key = ?",
+                            (path, file_key, file_key),
+                        ).rowcount
+                        changed += conn.execute(
+                            "DELETE FROM graph_nodes WHERE path = ?", (path,)
+                        ).rowcount
+                        changed += conn.execute(
+                            "DELETE FROM graph_parent_refs WHERE path = ?", (path,)
+                        ).rowcount
+                    for column, raw_values in values.items():
+                        for start in range(0, len(raw_values), 900):
+                            batch = raw_values[start : start + 900]
+                            placeholders = ",".join("?" for _ in batch)
+                            changed += conn.execute(
+                                f"DELETE FROM graph_edges WHERE {column} IN ({placeholders})",
+                                batch,
+                            ).rowcount
+                    if changed:
+                        _bump_generation(conn)
+                return int(changed)
+            finally:
+                conn.close()
 
     def _delete_paths_locked(self, rel_paths: list[str]) -> int:
         if not self.path.exists():
@@ -482,7 +696,11 @@ class EpistemicGraphIndex:
             rows = conn.execute(
                 select + " WHERE path = ? ORDER BY node_key", (_with_md(path),)
             ).fetchall()
-        return [_node_row_to_dict(r) for r in rows]
+        return [
+            node
+            for node in (_node_row_to_dict(r) for r in rows)
+            if _recall_path_allowed(self.vault_root, str(node.get("path") or ""))
+        ]
 
     def edges(self, *, source_path: str | None = None) -> list[dict[str, Any]]:
         conn = self._open_read_snapshot()
@@ -511,7 +729,11 @@ class EpistemicGraphIndex:
                 select + " WHERE source_path = ? ORDER BY edge_key",
                 (_with_md(source_path),),
             ).fetchall()
-        return [_edge_row_to_dict(r) for r in rows]
+        return [
+            edge
+            for edge in (_edge_row_to_dict(r) for r in rows)
+            if _edge_recall_allowed(conn, self.vault_root, edge)
+        ]
 
     def _index_path(
         self,
@@ -520,17 +742,22 @@ class EpistemicGraphIndex:
         *,
         resolver: vault_module.WikilinkResolver,
     ) -> bool:
-        try:
-            rel = path.resolve().relative_to(self.vault_root.resolve()).as_posix()
-        except (ValueError, OSError):
+        rel = _vault_rel(self.vault_root, path)
+        if rel is None:
             return False
         if not rel.lower().endswith(".md") or vault_module.in_excluded_scan_dir(rel):
             return False
         if not path.exists():
             self._delete_path(conn, rel)
             return False
+        # Admission is deliberately before title/body parsing.  Raw Records
+        # may never become a graph node, edge source, or resolver entry.
+        if not recall_policy.is_recall_candidate(self.vault_root, path):
+            self._delete_path(conn, rel)
+            return False
         try:
             raw = path.read_text(encoding="utf-8")
+            source_signature = _source_signature(path, raw)
         except (OSError, UnicodeDecodeError):
             return False
         page = find_module._parse_page(path, path.stat().st_mtime, self.vault_root)
@@ -558,6 +785,22 @@ class EpistemicGraphIndex:
             resolver=resolver,
         )
         with conn:
+            # Direct editors can replace a file while parsing/edge resolution is
+            # in flight.  Rebind to the exact source immediately before the
+            # transaction: do not momentarily publish rows for bytes that are
+            # now raw Records (or merely newer ordinary content).
+            try:
+                current = path.read_text(encoding="utf-8")
+                current_signature = _source_signature(path, current)
+            except (OSError, UnicodeDecodeError):
+                self._delete_path(conn, rel)
+                return False
+            if (
+                current_signature != source_signature
+                or not recall_policy.is_recall_candidate(self.vault_root, path)
+            ):
+                self._delete_path(conn, rel)
+                return False
             conn.execute("DELETE FROM graph_edges WHERE source_path = ?", (rel,))
             conn.execute("DELETE FROM graph_nodes WHERE path = ?", (rel,))
             conn.execute("DELETE FROM graph_parent_refs WHERE path = ?", (rel,))
@@ -593,7 +836,11 @@ class EpistemicGraphIndex:
 
     def _delete_path(self, conn: sqlite3.Connection, rel_path: str) -> int:
         with conn:
-            conn.execute("DELETE FROM graph_edges WHERE source_path = ?", (rel_path,))
+            conn.execute(
+                "DELETE FROM graph_edges WHERE source_path = ? "
+                "OR src_key = ? OR dst_key = ?",
+                (rel_path, _file_key(rel_path), _file_key(rel_path)),
+            )
             cur = conn.execute("DELETE FROM graph_nodes WHERE path = ?", (rel_path,))
             conn.execute("DELETE FROM graph_parent_refs WHERE path = ?", (rel_path,))
             _bump_generation(conn)
@@ -624,6 +871,8 @@ class EpistemicGraphIndex:
         seed_order: dict[str, int] = {}
         for i, seed in enumerate(seeds):
             rel = _with_md(seed)
+            if not _recall_path_allowed(self.vault_root, rel):
+                continue
             if rel not in seed_order:
                 seed_order[rel] = i
         seed_paths = list(seed_order)
@@ -661,7 +910,12 @@ class EpistemicGraphIndex:
         for direction, batch in (("outbound", outbound), ("inbound", inbound)):
             for rowid, seed_key, relation_type, other_path in batch:
                 seed_rel = seed_rel_by_key.get(seed_key)
-                if seed_rel is None or other_path == seed_rel:
+                if (
+                    seed_rel is None
+                    or other_path == seed_rel
+                    or not _recall_path_allowed(self.vault_root, seed_rel)
+                    or not _recall_path_allowed(self.vault_root, str(other_path))
+                ):
                     continue
                 definition = self.registry.definition(str(relation_type or ""))
                 rows.append(
@@ -729,6 +983,8 @@ class EpistemicGraphIndex:
         """
         key_set = {str(k) for k in keys if k}
         anchor_rel = _with_md(anchor) if anchor else None
+        if anchor_rel is not None and not _recall_path_allowed(self.vault_root, anchor_rel):
+            return RelationFilterResult(status="available")
         if not key_set and anchor_rel is None:
             return RelationFilterResult(status="available")
         if not graph_enabled():
@@ -788,7 +1044,11 @@ class EpistemicGraphIndex:
         provenance: dict[str, RelationMatch] = {}
 
         def _add(page: str, counterpart: str, relation_type: str | None, cand_dir: str) -> None:
-            if anchor_rel is not None and page == anchor_rel:
+            if (
+                (anchor_rel is not None and page == anchor_rel)
+                or not _recall_path_allowed(self.vault_root, str(page))
+                or not _recall_path_allowed(self.vault_root, str(counterpart))
+            ):
                 return
             # In anchor-alone mode there is no requested key; the edge's canonical
             # relation is what matched.
@@ -936,7 +1196,10 @@ def graph_context(
             indexed = [
                 seed
                 for seed in indexed
-                if not access.refuse_if_excluded(vault_root, str(seed.get("path") or ""))
+                # Preserve a missing ordinary seed long enough for collision
+                # recovery to prove its current replacement.  Only a Records
+                # path is an intentional semantic suppression here.
+                if not _records_suppressed_path(vault_root, str(seed.get("path") or ""))
             ]
             current = [
                 seed
@@ -951,12 +1214,12 @@ def graph_context(
                 unit_parent_work_exhausted,
             ) = _current_unit_status(conn, vault_root, unit_ref)
             current_parent_paths = [
-                p for p in current_parent_paths if not access.refuse_if_excluded(vault_root, p)
+                p for p in current_parent_paths if not _records_suppressed_path(vault_root, p)
             ]
             canonical_seeds = [
                 seed
                 for seed in canonical_seeds
-                if not access.refuse_if_excluded(vault_root, str(seed.get("path") or ""))
+                if _recall_path_allowed(vault_root, str(seed.get("path") or ""))
             ]
             for code, count in parent_drift_counts.items():
                 drift_counts[code] = max(drift_counts.get(code, 0), count)
@@ -1035,7 +1298,7 @@ def graph_context(
         seeds = [
             seed
             for seed in seeds
-            if not access.refuse_if_excluded(vault_root, str(seed.get("path") or ""))
+            if _recall_path_allowed(vault_root, str(seed.get("path") or ""))
         ]
         if not seeds:
             empty: dict[str, Any] = {
@@ -1088,6 +1351,11 @@ def graph_context(
             for edge in rows:
                 if not _current_record(
                     edge, parent_path=str(edge.get("source_path") or "")
+                ) or not _edge_recall_allowed(
+                    conn,
+                    vault_root,
+                    edge,
+                    endpoint_overrides=seed_node_overrides,
                 ):
                     continue
                 status = edge.get("registry_status")
@@ -1128,10 +1396,16 @@ def graph_context(
                         continue
                     node = _node_by_key(conn, key)
                     endpoint_nodes[key] = node
-                    if node is not None and access.refuse_if_excluded(
+                    if node is not None and not _recall_path_allowed(
                         vault_root, str(node.get("path") or "")
                     ):
                         endpoint_excluded = True
+                    elif node is None:
+                        placeholder_path = _path_for_node_key(conn, key)
+                        if placeholder_path is not None and not _placeholder_path_allowed(
+                            vault_root, placeholder_path
+                        ):
+                            endpoint_excluded = True
                 if endpoint_excluded:
                     continue
                 if edge["edge_key"] not in seen_edges:
@@ -1165,6 +1439,7 @@ def graph_context(
             node
             for node in _nodes_by_keys(conn, seen_nodes)
             if _current_record(node, parent_path=str(node.get("path") or ""))
+            and _recall_path_allowed(vault_root, str(node.get("path") or ""))
         ]
         present_node_keys = {str(node["node_key"]) for node in nodes}
         nodes.extend(
@@ -1253,7 +1528,11 @@ def suggest_relations(
     warnings: list[str] = []
     if path:
         rel = _with_md(path)
-        page = find_module._CACHE.get(Path(vault_root) / rel, Path(vault_root))
+        page = (
+            find_module._CACHE.get(Path(vault_root) / rel, Path(vault_root))
+            if _recall_path_allowed(Path(vault_root), rel)
+            else None
+        )
         if page is not None:
             candidates.extend(_wikilink_candidates(vault_root, page.body, rel))
             candidates.extend(_frontmatter_source_candidates(page))
@@ -2253,6 +2532,14 @@ def _current_unit_parent_paths(
     for row in rows[:UNIT_PARENT_REF_MAX_CANDIDATES]:
         rel = str(row[0])
         path = vault_root / rel
+        # The parent-ref sidecar may predate Records admission.  Suppress raw
+        # Records by path before opening them, while missing ordinary paths
+        # remain evidence for the stale-seed collision recovery below.
+        if _records_suppressed_path(vault_root, rel):
+            drift_counts["suppressed_record_parent"] = (
+                drift_counts.get("suppressed_record_parent", 0) + 1
+            )
+            continue
         try:
             source = path.read_text(encoding="utf-8")
         except FileNotFoundError:
@@ -2423,6 +2710,46 @@ def _node_by_key(conn: sqlite3.Connection, key: str) -> dict[str, Any] | None:
         (key,),
     ).fetchone()
     return _node_row_to_dict(row) if row else None
+
+
+def _path_for_node_key(conn: sqlite3.Connection, key: str) -> str | None:
+    row = conn.execute("SELECT path FROM graph_nodes WHERE node_key = ?", (key,)).fetchone()
+    if row is not None:
+        return str(row[0])
+    if key.startswith("file:"):
+        return key.removeprefix("file:")
+    return None
+
+
+def _edge_recall_allowed(
+    conn: sqlite3.Connection,
+    vault_root: Path,
+    edge: dict[str, Any],
+    *,
+    endpoint_overrides: dict[str, dict[str, Any]] | None = None,
+) -> bool:
+    """Reject an edge before it can reconstruct a suppressed endpoint.
+
+    Collision recovery may have revalidated a current semantic-unit node whose
+    key is still owned by a stale graph row.  Only that bounded graph-context
+    recovery path supplies an override; ordinary public reads remain tied to
+    the sidecar's stored endpoint rows.
+    """
+    source = str(edge.get("source_path") or "")
+    if not _recall_path_allowed(vault_root, source):
+        return False
+    for key in (str(edge.get("src_key") or ""), str(edge.get("dst_key") or "")):
+        node = endpoint_overrides.get(key) if endpoint_overrides is not None else None
+        if node is None:
+            node = _node_by_key(conn, key)
+        if node is not None:
+            if not _recall_path_allowed(vault_root, str(node.get("path") or "")):
+                return False
+        else:
+            path = _path_for_node_key(conn, key)
+            if path is not None and not _placeholder_path_allowed(vault_root, path):
+                return False
+    return True
 
 
 def _placeholder_node(key: str) -> dict[str, Any]:

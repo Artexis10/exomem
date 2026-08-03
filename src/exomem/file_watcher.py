@@ -586,11 +586,28 @@ class FileWatcher:
             return
 
         kb_ups = [p for p in ups if self._is_kb(p)]
+        semantic_kb_ups: list[Path] = []
         if kb_ups:
+            try:
+                from . import recall_policy
+
+                # A watchdog event can race the final stat after an editor's
+                # atomic rename.  Keep that legacy unknown case in the semantic
+                # accounting; live Records are classified (without opening the
+                # body) and therefore never consume a cap.
+                semantic_kb_ups = [
+                    path
+                    for path in kb_ups
+                    if not path.exists()
+                    or recall_policy.is_recall_candidate(self._vault_root, path)
+                ]
+            except Exception:  # noqa: BLE001 — fail closed for expensive work
+                log.exception("file watcher: semantic admission evaluation failed")
+        if semantic_kb_ups:
             try:
                 posthoc = semantic_writes.evaluate_posthoc_batch(
                     self._vault_root,
-                    paths=kb_ups,
+                    paths=semantic_kb_ups,
                     operation="watcher",
                 )
                 summary = posthoc.as_dict()
@@ -624,31 +641,31 @@ class FileWatcher:
         defer_semantic = False
         if cap and not policy.defer_expensive_indexes:
             max_files = policy.max_reconcile_embed_files
-            if max_files is not None and len(kb_ups) > max_files:
+            if max_files is not None and len(semantic_kb_ups) > max_files:
                 log.warning(
-                    "file watcher: reconcile drift re-embed capped at %d of %d KB file(s); "
-                    "the freshness registry is fully healed — run `reconcile` to re-embed "
-                    "the remainder",
-                    max_files,
-                    len(kb_ups),
-                )
-                kb_ups = kb_ups[:max_files]
-        elif not cap and not policy.defer_expensive_indexes:
-            max_files = policy.max_embed_files_per_batch
-            if max_files is not None and len(kb_ups) > max_files:
-                log.warning(
-                    "file watcher: live import/sync burst has %d KB file(s), above "
-                    "EXOMEM_WATCHER_MAX_EMBED_FILES=%d; lexical indexes updated but "
-                    "semantic indexing deferred. Run `exomem index --scope vault` "
-                    "after the import.",
-                    len(kb_ups),
+                    "file watcher: reconcile drift has %d admitted semantic file(s), above "
+                    "the cap of %d; identity/purge dispatch stays full and semantic indexing "
+                    "is deferred",
+                    len(semantic_kb_ups),
                     max_files,
                 )
                 defer_semantic = True
-        elif policy.defer_expensive_indexes and kb_ups:
+        elif not cap and not policy.defer_expensive_indexes:
+            max_files = policy.max_embed_files_per_batch
+            if max_files is not None and len(semantic_kb_ups) > max_files:
+                log.warning(
+                    "file watcher: live import/sync burst has %d admitted semantic file(s), above "
+                    "EXOMEM_WATCHER_MAX_EMBED_FILES=%d; lexical indexes updated but "
+                    "semantic indexing deferred. Run `exomem index --scope vault` "
+                    "after the import.",
+                    len(semantic_kb_ups),
+                    max_files,
+                )
+                defer_semantic = True
+        elif policy.defer_expensive_indexes and semantic_kb_ups:
             log.info(
-                "file watcher: quiet mode deferring semantic indexing for %d KB file(s)",
-                len(kb_ups),
+                "file watcher: quiet mode deferring semantic indexing for %d admitted semantic file(s)",
+                len(semantic_kb_ups),
             )
         if kb_ups:
             try:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import sqlite3
@@ -9,22 +10,32 @@ import tempfile
 import time
 from dataclasses import dataclass
 from enum import StrEnum
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from .kbdir import kb_dirname
+
+_SEMANTIC_ISOLATION_CURSOR_KEY = "semantic_isolation_cursors:v1"
+_SEMANTIC_UPSERTS_GENERATION_KEY = "semantic_upserts_generation"
 
 
 def store_path(vault_root: Path) -> Path:
     return vault_root / kb_dirname() / ".deferred-index.sqlite"
 
 
-def _connect(vault_root: Path, *, create: bool) -> sqlite3.Connection:
-    path = store_path(vault_root)
+def _connect_readonly(vault_root: Path) -> sqlite3.Connection:
+    """Open an existing sidecar without schema repair or journal writes."""
+    return sqlite3.connect(
+        f"{store_path(vault_root).resolve().as_uri()}?mode=ro", uri=True, timeout=5.0
+    )
+
+
+def _connect(
+    vault_root: Path, *, create: bool, connection_path: Path | None = None
+) -> sqlite3.Connection:
+    path = connection_path if connection_path is not None else store_path(vault_root)
     if not create:
-        return sqlite3.connect(
-            f"{path.resolve().as_uri()}?mode=ro", uri=True, timeout=5.0
-        )
+        return _connect_readonly(vault_root)
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(path, timeout=5.0)
     conn.execute("PRAGMA journal_mode=WAL")
@@ -38,6 +49,31 @@ def _connect(vault_root: Path, *, create: bool) -> sqlite3.Connection:
             revision INTEGER NOT NULL DEFAULT 1
         )
         """
+    )
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS maintenance_state ("
+        "key TEXT PRIMARY KEY, value TEXT NOT NULL)"
+    )
+    conn.execute(
+        "CREATE TRIGGER IF NOT EXISTS semantic_upserts_generation_insert "
+        "AFTER INSERT ON semantic_upserts BEGIN "
+        "INSERT INTO maintenance_state(key, value) VALUES "
+        f"('{_SEMANTIC_UPSERTS_GENERATION_KEY}', '1') "
+        "ON CONFLICT(key) DO UPDATE SET value = CAST(value AS INTEGER) + 1; END"
+    )
+    conn.execute(
+        "CREATE TRIGGER IF NOT EXISTS semantic_upserts_generation_update "
+        "AFTER UPDATE ON semantic_upserts BEGIN "
+        "INSERT INTO maintenance_state(key, value) VALUES "
+        f"('{_SEMANTIC_UPSERTS_GENERATION_KEY}', '1') "
+        "ON CONFLICT(key) DO UPDATE SET value = CAST(value AS INTEGER) + 1; END"
+    )
+    conn.execute(
+        "CREATE TRIGGER IF NOT EXISTS semantic_upserts_generation_delete "
+        "AFTER DELETE ON semantic_upserts BEGIN "
+        "INSERT INTO maintenance_state(key, value) VALUES "
+        f"('{_SEMANTIC_UPSERTS_GENERATION_KEY}', '1') "
+        "ON CONFLICT(key) DO UPDATE SET value = CAST(value AS INTEGER) + 1; END"
     )
     conn.execute(
         """
@@ -59,6 +95,102 @@ def _connect(vault_root: Path, *, create: bool) -> sqlite3.Connection:
     return conn
 
 
+def semantic_isolation_cursors(vault_root: Path) -> dict[str, dict[str, str]]:
+    """Read durable bounded-census cursors without creating a sidecar."""
+    if not store_path(vault_root).exists():
+        return {}
+    try:
+        conn = _connect_readonly(vault_root)
+        try:
+            row = conn.execute(
+                "SELECT value FROM maintenance_state WHERE key = ?",
+                (_SEMANTIC_ISOLATION_CURSOR_KEY,),
+            ).fetchone()
+        finally:
+            conn.close()
+    except (OSError, sqlite3.Error):
+        return {}
+    if row is None:
+        return {}
+    try:
+        payload = json.loads(str(row[0]))
+    except (TypeError, ValueError):
+        return {}
+    if not isinstance(payload, dict) or payload.get("version") != 1:
+        return {}
+    cursors = payload.get("cursors")
+    if not isinstance(cursors, dict):
+        return {}
+    return {
+        component: {"cursor": value["cursor"], "signature": value["signature"]}
+        for component, value in cursors.items()
+        if isinstance(component, str)
+        and isinstance(value, dict)
+        and isinstance(value.get("cursor"), str)
+        and isinstance(value.get("signature"), str)
+    }
+
+
+def semantic_isolation_signature(
+    vault_root: Path, *, connection_path: Path | None = None
+) -> str | None:
+    """In-band semantic receipt generation, isolated from cursor writes."""
+    target = connection_path if connection_path is not None else store_path(vault_root)
+    if not target.exists():
+        return "semantic:0"
+    try:
+        conn = sqlite3.connect(f"{target.as_uri()}?mode=ro", uri=True, timeout=5.0)
+        try:
+            row = conn.execute(
+                "SELECT value FROM maintenance_state WHERE key = ?",
+                (_SEMANTIC_UPSERTS_GENERATION_KEY,),
+            ).fetchone()
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return None
+    return f"semantic:{row[0] if row is not None else '0'}"
+
+
+def set_semantic_isolation_cursors(
+    vault_root: Path, cursors: dict[str, dict[str, str]]
+) -> bool:
+    """Atomically replace durable audit cursors after a successful repair page."""
+    payload = {
+        "version": 1,
+        "cursors": {
+            component: {"cursor": value["cursor"], "signature": value["signature"]}
+            for component, value in cursors.items()
+            if isinstance(component, str)
+            and isinstance(value, dict)
+            and isinstance(value.get("cursor"), str)
+            and isinstance(value.get("signature"), str)
+        },
+    }
+    if not payload["cursors"] and not store_path(vault_root).exists():
+        return True
+    try:
+        conn = _connect(vault_root, create=True)
+        try:
+            with conn:
+                if payload["cursors"]:
+                    conn.execute(
+                        "INSERT INTO maintenance_state(key, value) VALUES (?, ?) "
+                        "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                        (_SEMANTIC_ISOLATION_CURSOR_KEY, json.dumps(payload, sort_keys=True)),
+                    )
+                else:
+                    conn.execute(
+                        "DELETE FROM maintenance_state WHERE key = ?",
+                        (_SEMANTIC_ISOLATION_CURSOR_KEY,),
+                    )
+        finally:
+            conn.close()
+    except (OSError, sqlite3.Error):
+        return False
+    return True
+
+
 @dataclass(frozen=True, slots=True)
 class DeferredReceipt:
     rel_path: str
@@ -69,6 +201,38 @@ class EmbeddingFreshness(StrEnum):
     CURRENT = "current"
     STALE = "stale"
     UNVERIFIABLE = "unverifiable"
+
+
+def _safe_markdown_rel_path(value: object) -> str | None:
+    """Normalize one persisted Markdown identity without permitting traversal."""
+    if not isinstance(value, str):
+        return None
+    if "\\" in value:
+        return None
+    normalized = value
+    path = PurePosixPath(normalized)
+    if (
+        not normalized
+        or "\0" in normalized
+        or (len(normalized) >= 2 and normalized[0].isalpha() and normalized[1] == ":")
+        or path.is_absolute()
+        or any(part in {"", ".", ".."} for part in path.parts)
+        or not normalized.lower().endswith(".md")
+        or not path.parts
+        or path.parts[0] != kb_dirname()
+    ):
+        return None
+    return path.as_posix()
+
+
+def _semantic_admission(vault_root: Path, rel: str) -> bool | None:
+    """True/false for a present leaf; None means absent and remains retryable."""
+    path = Path(vault_root).joinpath(*rel.split("/"))
+    if not os.path.lexists(path):
+        return None
+    from . import recall_policy
+
+    return recall_policy.is_recall_candidate(vault_root, path)
 
 
 def add(vault_root: Path, rel_paths: list[str]) -> int:
@@ -84,13 +248,20 @@ def add_receipts(vault_root: Path, rel_paths: list[str]) -> list[DeferredReceipt
 def _add_receipts(
     vault_root: Path, rel_paths: list[str]
 ) -> tuple[list[DeferredReceipt], int]:
-    rels = sorted(
-        {
-            rel.replace("\\", "/")
-            for rel in rel_paths
-            if rel.lower().endswith(".md")
-        }
-    )
+    rels: list[str] = []
+    rejected: list[str] = []
+    for raw in rel_paths:
+        rel = _safe_markdown_rel_path(raw)
+        if rel is None:
+            continue
+        admission = _semantic_admission(vault_root, rel)
+        if admission is False:
+            rejected.append(rel)
+        else:
+            rels.append(rel)
+    rels = sorted(set(rels))
+    if rejected:
+        clear_semantic_receipts(vault_root, rejected)
     if not rels:
         return [], 0
     now = time.time()
@@ -136,7 +307,13 @@ def add_full(vault_root: Path, rel_paths: list[str]) -> int:
 
 
 def _add(vault_root: Path, rel_paths: list[str], *, table: str) -> int:
-    rels = sorted({rel.replace("\\", "/") for rel in rel_paths if rel.endswith(".md")})
+    rels = sorted(
+        {
+            rel
+            for raw in rel_paths
+            if (rel := _safe_markdown_rel_path(raw)) is not None
+        }
+    )
     if not rels:
         return 0
     now = time.time()
@@ -164,11 +341,16 @@ def _add(vault_root: Path, rel_paths: list[str], *, table: str) -> int:
 
 
 def list_paths(vault_root: Path, *, limit: int | None = None) -> list[str]:
-    return _list_paths(vault_root, table="semantic_upserts", limit=limit)
+    return [receipt.rel_path for receipt in snapshot(vault_root, limit=limit)]
 
 
 def list_full_paths(vault_root: Path, *, limit: int | None = None) -> list[str]:
-    return _list_paths(vault_root, table="full_upserts", limit=limit)
+    paths = _list_paths(vault_root, table="full_upserts", limit=limit)
+    valid = [rel for rel in paths if _safe_markdown_rel_path(rel) is not None]
+    corrupt = [rel for rel in paths if _safe_markdown_rel_path(rel) is None]
+    if corrupt:
+        _purge_corrupt_paths(vault_root, "full_upserts", corrupt)
+    return valid
 
 
 def snapshot(
@@ -189,12 +371,27 @@ def snapshot(
         if limit is not None:
             sql += " LIMIT ?"
             params = (max(0, limit),)
-        return [
+        receipts = [
             DeferredReceipt(str(row[0]), int(row[1]))
             for row in conn.execute(sql, params).fetchall()
         ]
     finally:
         conn.close()
+    valid: list[DeferredReceipt] = []
+    rejected: list[DeferredReceipt] = []
+    for receipt in receipts:
+        rel = _safe_markdown_rel_path(receipt.rel_path)
+        if rel is None:
+            rejected.append(receipt)
+            continue
+        admission = _semantic_admission(vault_root, rel)
+        if admission is False:
+            rejected.append(receipt)
+        else:
+            valid.append(DeferredReceipt(rel, receipt.revision))
+    if rejected:
+        clear_receipts(vault_root, rejected)
+    return valid
 
 
 def clear_receipts(vault_root: Path, receipts: list[DeferredReceipt]) -> int:
@@ -215,6 +412,31 @@ def clear_receipts(vault_root: Path, receipts: list[DeferredReceipt]) -> int:
         conn.close()
 
 
+def clear_semantic_receipts(vault_root: Path, rel_paths: list[str]) -> int:
+    """CAS-clear current receipts for paths made structured-only.
+
+    A direct edit can make an older suppression observation stale. Read exact
+    revisions first, then delete only those revisions so a newer admitted write
+    cannot be erased by this cleanup.
+    """
+    wanted = {_safe_markdown_rel_path(rel) for rel in rel_paths}
+    wanted.discard(None)
+    if not wanted or not store_path(vault_root).exists():
+        return 0
+    conn = _connect(vault_root, create=False)
+    try:
+        rows = conn.execute(
+            "SELECT rel_path, revision FROM semantic_upserts WHERE rel_path IN "
+            f"({','.join('?' for _ in wanted)})",
+            tuple(sorted(wanted)),
+        ).fetchall()
+    finally:
+        conn.close()
+    return clear_receipts(
+        vault_root, [DeferredReceipt(str(row[0]), int(row[1])) for row in rows]
+    )
+
+
 def _list_paths(
     vault_root: Path, *, table: str, limit: int | None = None
 ) -> list[str]:
@@ -231,6 +453,42 @@ def _list_paths(
         return [str(row[0]) for row in conn.execute(sql, params).fetchall()]
     finally:
         conn.close()
+
+
+def _purge_corrupt_paths(
+    vault_root: Path,
+    table: str,
+    paths: list[str],
+    *,
+    connection_path: Path | None = None,
+) -> int:
+    """Delete exact unsafe legacy rows without turning them into filesystem paths."""
+    if table not in {"semantic_upserts", "full_upserts"} or not paths:
+        return 0
+    conn = _connect(vault_root, create=True, connection_path=connection_path)
+    try:
+        with conn:
+            return int(
+                conn.execute(
+                    f"DELETE FROM {table} WHERE rel_path IN "
+                    f"({','.join('?' for _ in paths)})",
+                    tuple(paths),
+                ).rowcount
+            )
+    finally:
+        conn.close()
+
+
+def purge_exact_persisted_semantic_rows(
+    vault_root: Path, values: list[str], *, connection_path: Path | None = None
+) -> int:
+    """Drop quarantined semantic receipts without normalizing their spellings."""
+    target = connection_path if connection_path is not None else store_path(vault_root)
+    if not target.exists():
+        return 0
+    return _purge_corrupt_paths(
+        vault_root, "semantic_upserts", values, connection_path=connection_path
+    )
 
 
 def clear(vault_root: Path, rel_paths: list[str] | None = None) -> int:

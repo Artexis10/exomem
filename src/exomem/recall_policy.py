@@ -10,12 +10,130 @@ from __future__ import annotations
 import os
 import stat
 from collections.abc import Iterable, Iterator
+from dataclasses import dataclass
 from pathlib import Path
 
-from . import access, vault
+from . import access, freshness, vault
 
 RECALL_POLICY_VERSION = "records-manifest-only-v1"
 _MAX_MANIFEST_BYTES = 512 * 1024
+
+
+@dataclass(frozen=True, slots=True)
+class RecallBatchPath:
+    """One safe, present Markdown identity captured for index publication."""
+
+    path: Path
+    rel_path: str
+    signature: freshness.FileSignature
+    guard: vault.PathGuard
+
+
+@dataclass(frozen=True, slots=True)
+class RecallBatch:
+    """A single guarded admission snapshot for a Markdown index fan-out.
+
+    Identity maintenance needs every live Markdown page; semantic consumers need
+    only the policy-admitted subset.  Missing and invalid input are deliberately
+    outside both sets: a stale event must not look like a current suppressed
+    record and trigger a semantic-only purge of an unrelated later edit.
+    """
+
+    policy_version: str
+    access_policy_fingerprint: str
+    identity_paths: tuple[RecallBatchPath, ...]
+    admitted_paths: tuple[RecallBatchPath, ...]
+    suppressed_paths: tuple[RecallBatchPath, ...]
+    missing_paths: tuple[str, ...]
+    invalid_paths: tuple[str, ...]
+
+    def revalidate(self, vault_root: Path) -> bool:
+        """Prove the policy and every captured live source still match."""
+        if recall_policy_identity(vault_root) != (
+            self.policy_version,
+            self.access_policy_fingerprint,
+        ):
+            return False
+        admitted = {item.rel_path for item in self.admitted_paths}
+        for item in self.identity_paths:
+            try:
+                item.guard.recheck(vault_root)
+                if freshness.stat_signature(item.path) != item.signature:
+                    return False
+            except (OSError, vault.PathGuardError):
+                return False
+            if is_recall_candidate(vault_root, item.path) != (item.rel_path in admitted):
+                return False
+        return True
+
+
+def partition_markdown_paths(vault_root: Path, paths: Iterable[Path | str]) -> RecallBatch:
+    """Capture ordered, de-duplicated Markdown identities and recall admission.
+
+    This is the sole admission snapshot used by incremental index fan-out.
+    Paths are re-rooted from a safe vault-relative spelling before any leaf is
+    opened, and every live candidate gets a content guard plus a stat signature
+    that callers revalidate immediately before publishing semantic sidecars.
+    """
+    root = Path(vault_root)
+    policy_version, access_fingerprint = recall_policy_identity(root)
+    identity: list[RecallBatchPath] = []
+    admitted: list[RecallBatchPath] = []
+    suppressed: list[RecallBatchPath] = []
+    missing: list[str] = []
+    invalid: list[str] = []
+    seen: set[str] = set()
+
+    for raw_path in paths:
+        rel = _vault_relative(root, raw_path)
+        if rel is None:
+            invalid.append("<unsafe>")
+            continue
+        if rel in seen:
+            continue
+        seen.add(rel)
+        if not rel.lower().endswith(".md"):
+            invalid.append(rel)
+            continue
+        path = root.joinpath(*rel.split("/"))
+        if not os.path.lexists(path):
+            missing.append(rel)
+            continue
+        if not _safe_regular_file(root, rel.split("/")):
+            invalid.append(rel)
+            continue
+        try:
+            admitted_here = is_recall_candidate(root, path)
+            # Structured-only Records must never have their body opened merely
+            # because an index event arrived. A stable no-follow guard plus the
+            # event signature is enough to make their later purge drift-safe.
+            if admitted_here:
+                _text, guard = vault.read_guarded_text(root, path)
+            else:
+                guard = vault.PathGuard.capture(root, rel, leaf_policy="stable")
+            signature = freshness.stat_signature(path)
+            guard.recheck(root)
+        except (OSError, UnicodeError, vault.PathGuardError):
+            # The leaf may have vanished after lstat; re-classify only that
+            # exact safe identity and never route it as a semantic suppression.
+            (missing if not os.path.lexists(path) else invalid).append(rel)
+            continue
+        item = RecallBatchPath(path, rel, signature, guard)
+        identity.append(item)
+        if admitted_here:
+            admitted.append(item)
+        else:
+            suppressed.append(item)
+
+    return RecallBatch(
+        policy_version,
+        access_fingerprint,
+        tuple(identity),
+        tuple(admitted),
+        tuple(suppressed),
+        tuple(missing),
+        tuple(invalid),
+    )
 
 
 def is_recall_candidate(vault_root: Path, path: Path | str) -> bool:

@@ -55,6 +55,14 @@ class ReconcileReport:
     semantic_unit_orphans_removed: int = 0
     clip_orphans_removed: int = 0
     frame_orphans_removed: int = 0
+    semantic_suppressed_drift: list[dict[str, str]] = field(default_factory=list)
+    semantic_suppressed_purged: list[str] = field(default_factory=list)
+    semantic_suppressed_corrupt: list[dict[str, str]] = field(default_factory=list)
+    semantic_suppressed_corrupt_purged: dict[str, int] = field(default_factory=dict)
+    semantic_suppressed_truncation: dict[str, int] = field(default_factory=dict)
+    semantic_missing_drift: list[str] = field(default_factory=list)
+    semantic_missing_purged: list[str] = field(default_factory=list)
+    semantic_suppressed_incomplete: dict[str, str] = field(default_factory=dict)
     semantic_unit_indexes_status: str = "current"
     semantic_unit_index_drift: list[dict] = field(default_factory=list)
     semantic_unit_index_remaining: list[dict] = field(default_factory=list)
@@ -91,6 +99,14 @@ class ReconcileReport:
             "semantic_unit_orphans_removed": self.semantic_unit_orphans_removed,
             "clip_orphans_removed": self.clip_orphans_removed,
             "frame_orphans_removed": self.frame_orphans_removed,
+            "semantic_suppressed_drift": self.semantic_suppressed_drift,
+            "semantic_suppressed_purged": self.semantic_suppressed_purged,
+            "semantic_suppressed_corrupt": self.semantic_suppressed_corrupt,
+            "semantic_suppressed_corrupt_purged": self.semantic_suppressed_corrupt_purged,
+            "semantic_suppressed_truncation": self.semantic_suppressed_truncation,
+            "semantic_missing_drift": self.semantic_missing_drift,
+            "semantic_missing_purged": self.semantic_missing_purged,
+            "semantic_suppressed_incomplete": self.semantic_suppressed_incomplete,
             "semantic_unit_indexes_status": self.semantic_unit_indexes_status,
             "semantic_unit_index_drift": self.semantic_unit_index_drift,
             "semantic_unit_index_remaining": self.semantic_unit_index_remaining,
@@ -210,14 +226,70 @@ def reconcile(vault_root: Path, *, dry_run: bool = False) -> ReconcileReport:
         path: semantic_index.from_semantic_page_state(state)
         for path, state in semantic_batch.corpus.pages.items()
     }
-    from . import epistemic_graph, index_paths, lexstore
+    from . import deferred_index, epistemic_graph, index_paths, lexstore
+
+    # A live raw Record is present, not missing.  Purge only the semantic
+    # derivatives that should never have survived a policy transition; generic
+    # delete routing would incorrectly remove its stable identity/reference rows.
+    suppression_census = audit_module.semantic_recall_isolation_census(
+        vault_root, after=deferred_index.semantic_isolation_cursors(vault_root)
+    )
+    report.semantic_suppressed_drift = suppression_census.safe_dicts()
+    report.semantic_suppressed_corrupt = suppression_census.corrupt_dicts()
+    report.semantic_suppressed_truncation = suppression_census.truncation
+    report.semantic_suppressed_incomplete = suppression_census.incomplete
+    suppressed_paths = sorted(
+        {item["path"] for item in report.semantic_suppressed_drift}
+    )
+    missing_paths = sorted({row.path for row in suppression_census.missing_rows if row.path})
+    report.semantic_missing_drift = missing_paths
+    repair_succeeded = not suppression_census.incomplete
+    if suppressed_paths and not dry_run:
+        from . import index_sync
+
+        if index_sync.purge_semantic_only(vault_root, suppressed_paths):
+            report.semantic_suppressed_purged = suppressed_paths
+        else:
+            repair_succeeded = False
+    if suppression_census.corrupt_rows and not dry_run:
+        report.semantic_suppressed_corrupt_purged = (
+            audit_module.purge_corrupt_semantic_recall_isolation_rows(
+                vault_root, suppression_census.corrupt_rows
+            )
+        )
+        expected_components = {
+            "graph" if row.component == "graph_edges" else row.component
+            for row in suppression_census.corrupt_rows
+        }
+        if not expected_components <= set(report.semantic_suppressed_corrupt_purged):
+            repair_succeeded = False
+    if missing_paths and not dry_run:
+        from . import embeddings, index_sync
+
+        # These are lexically validated, absent Markdown identities: ordinary
+        # removal routing is correct and intentionally clears stable identity
+        # sidecars too. CLIP stores the corresponding media key without `.md`.
+        missing_report = index_sync.delete_after_remove(vault_root, missing_paths)
+        embeddings.get_clip_index(vault_root).purge_markdown_paths_if_present(missing_paths)
+        report.semantic_missing_purged = missing_paths
+        repair_succeeded &= not missing_report.reconcile_required
+    if not dry_run and repair_succeeded:
+        deferred_index.set_semantic_isolation_cursors(
+            vault_root,
+            suppression_census.continuation if suppression_census.truncation else {},
+        )
 
     include_unit_lexical = lexstore.lexical_path(vault_root).exists()
     include_unit_vectors = bool(
         not os.environ.get("EXOMEM_DISABLE_EMBEDDINGS")
         and index_paths.sidecar_path(vault_root).exists()
     )
-    initial_graph_drift = epistemic_graph.graph_drift(vault_root)
+    graph_sidecar_exists = epistemic_graph.sidecar_path(vault_root).exists()
+    initial_graph_drift = (
+        []
+        if suppressed_paths and not graph_sidecar_exists
+        else audit_module._check_graph_drift(vault_root)
+    )
     include_unit_graph = bool(
         epistemic_graph.graph_enabled()
         and epistemic_graph.sidecar_path(vault_root).exists()
@@ -328,14 +400,29 @@ def reconcile(vault_root: Path, *, dry_run: bool = False) -> ReconcileReport:
         report.embeddings_status = "disabled"
     else:
         drift = audit_module._check_embedding_drift(vault_root)
-        drifted_abs = [vault_root / f.path for f in drift]
+        drifted_abs: list[Path] = []
+        missing_rels: list[str] = []
+        for finding in drift:
+            rel = audit_module._safe_persisted_markdown_rel(str(finding.path))
+            if rel is None:
+                continue
+            candidate = audit_module._no_follow_regular_markdown_path(vault_root, rel)
+            if candidate is not None:
+                drifted_abs.append(candidate)
+            else:
+                missing_rels.append(rel)
         refresh_succeeded = True
-        if drifted_abs and not dry_run:
+        if not dry_run:
             from . import embeddings, index_sync
 
-            refresh_succeeded = embeddings.upsert_after_write(vault_root, drifted_abs) is not False
-            if refresh_succeeded:
-                index_sync.clear_deferred_work(vault_root, paths=drifted_abs)
+            if missing_rels:
+                index_sync.delete_after_remove(vault_root, missing_rels)
+            if drifted_abs:
+                refresh_succeeded = (
+                    embeddings.upsert_after_write(vault_root, drifted_abs) is not False
+                )
+                if refresh_succeeded:
+                    index_sync.clear_deferred_work(vault_root, paths=drifted_abs)
         report.embeddings_refreshed = len(drifted_abs) if refresh_succeeded else 0
         if not refresh_succeeded:
             report.embeddings_status = "deferred"
@@ -346,9 +433,8 @@ def reconcile(vault_root: Path, *, dry_run: bool = False) -> ReconcileReport:
     # NOT behind the embeddings gate: the lexical index is a lean-install
     # artifact. The store's own sync check is the heal; forcing it here means
     # "reconcile" leaves the sidecar verified-fresh, not lazily healed later.
-    if not dry_run:
+    if not dry_run and (not suppressed_paths or lexstore.lexical_path(vault_root).exists()):
         try:
-            from . import lexstore
             lexstore.ensure_fresh(vault_root)
         except Exception:  # noqa: BLE001 — best-effort, lanes soft-fail anyway
             log.exception("lexical sidecar reconcile failed; next use self-heals")
@@ -358,7 +444,7 @@ def reconcile(vault_root: Path, *, dry_run: bool = False) -> ReconcileReport:
         report.graph_status = "disabled"
     else:
         if initial_graph_drift and not dry_run:
-            if epistemic_graph.graph_drift(vault_root):
+            if audit_module._check_graph_drift(vault_root):
                 epistemic_graph.EpistemicGraphIndex(vault_root).rebuild_all()
         report.graph_refreshed = len(initial_graph_drift)
         report.graph_status = "refreshed" if initial_graph_drift else "current"
@@ -425,7 +511,13 @@ def reconcile(vault_root: Path, *, dry_run: bool = False) -> ReconcileReport:
     # ---- 4. Remaining drift report ----
     post = audit_module.audit(
         vault_root,
-        categories=["index_drift", "embedding_drift", "graph_drift", "reference_identity"],
+        categories=[
+            "index_drift",
+            "embedding_drift",
+            "graph_drift",
+            "reference_identity",
+            "semantic_recall_isolation",
+        ],
     )
     report.remaining_drift = [f.as_dict() for f in post.findings]
 

@@ -44,8 +44,9 @@ import logging
 import math
 import os
 import re
+import stat
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Literal
 
 import yaml
@@ -76,7 +77,7 @@ ALL_CATEGORIES: tuple[str, ...] = (
     "unregistered_project_key", "embedding_drift", "graph_drift", "reference_identity",
     "relevance_pairs_pending", "stale_review", "corpus_contradictions",
     "relation_debt", "governance_receipts", "bridge_review",
-    "duplicated_sidecar",
+    "duplicated_sidecar", "semantic_recall_isolation",
 )
 OPTIONAL_CATEGORIES: tuple[str, ...] = (
     "relation_registry",
@@ -394,6 +395,8 @@ def audit(
         findings.extend(_check_bridge_review(vault_root, today=today))
     if "duplicated_sidecar" in selected:
         findings.extend(_check_duplicated_sidecars(vault_root))
+    if "semantic_recall_isolation" in selected:
+        findings.extend(_check_semantic_recall_isolation(vault_root))
     semantic_categories = selected & _SEMANTIC_AUDIT_CATEGORIES
     if semantic_categories:
         semantic_findings, semantic_metadata = _check_semantic_contract_drift(
@@ -510,6 +513,590 @@ def _check_duplicated_sidecars(vault_root: Path) -> list[AuditFinding]:
                     "maintain_memory(mode='fix') keeps the longest extraction and "
                     "drops the nesting"
                 ),
+            )
+        )
+    return findings
+
+
+# ---------------- check: semantic_recall_isolation ----------------
+
+_SEMANTIC_ISOLATION_CENSUS_LIMIT = 256
+_SEMANTIC_ISOLATION_CENSUS_FETCH = 64
+
+
+@dataclass(frozen=True)
+class _SemanticIsolationRow:
+    component: str
+    raw: str
+    path: str | None
+    edge_column: str | None = None
+    missing: bool = False
+
+    def as_dict(self) -> dict[str, str]:
+        if self.path is not None:
+            return {"component": self.component, "path": self.path}
+        fingerprint = hashlib.sha256(self.raw.encode("utf-8", "replace")).hexdigest()[:16]
+        return {
+            "component": self.component,
+            "path": f"<corrupt-sidecar-row:{fingerprint}>",
+        }
+
+
+@dataclass(frozen=True)
+class SemanticRecallIsolationCensus:
+    rows: tuple[_SemanticIsolationRow, ...]
+    truncation: dict[str, int]
+    continuation: dict[str, dict[str, str]]
+    incomplete: dict[str, str]
+
+    @property
+    def safe_rows(self) -> tuple[_SemanticIsolationRow, ...]:
+        return tuple(row for row in self.rows if row.path is not None and not row.missing)
+
+    @property
+    def missing_rows(self) -> tuple[_SemanticIsolationRow, ...]:
+        return tuple(row for row in self.rows if row.path is not None and row.missing)
+
+    @property
+    def corrupt_rows(self) -> tuple[_SemanticIsolationRow, ...]:
+        return tuple(row for row in self.rows if row.path is None)
+
+    def safe_dicts(self) -> list[dict[str, str]]:
+        return [row.as_dict() for row in self.safe_rows]
+
+    def corrupt_dicts(self) -> list[dict[str, str]]:
+        return [row.as_dict() for row in self.corrupt_rows]
+
+
+def _safe_persisted_markdown_rel(value: object) -> str | None:
+    """Normalize an untrusted persisted Markdown identity without traversal."""
+    if not isinstance(value, str) or "\\" in value:
+        return None
+    path = PurePosixPath(value)
+    if (
+        not value
+        or "\0" in value
+        or (len(value) >= 2 and value[0].isalpha() and value[1] == ":")
+        or path.is_absolute()
+        or any(part in {"", ".", ".."} for part in path.parts)
+        or not value.lower().endswith(".md")
+    ):
+        return None
+    return path.as_posix()
+
+
+def _no_follow_regular_markdown_path(vault_root: Path, rel: str) -> Path | None:
+    """Return a regular leaf only after no-follow validation of every segment."""
+    current = Path(vault_root)
+    try:
+        for index, part in enumerate(PurePosixPath(rel).parts):
+            current /= part
+            info = current.lstat()
+            if stat.S_ISLNK(info.st_mode) or _is_reparse_point(info):
+                return None
+            if index < len(PurePosixPath(rel).parts) - 1:
+                if not stat.S_ISDIR(info.st_mode):
+                    return None
+            elif not stat.S_ISREG(info.st_mode):
+                return None
+    except OSError:
+        return None
+    return current
+
+
+def _is_reparse_point(info: os.stat_result) -> bool:
+    """Platform-neutral seam for Windows reparse-point rejection."""
+    return bool(
+        getattr(info, "st_file_attributes", 0)
+        & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+    )
+
+
+@dataclass(frozen=True)
+class _BoundSidecarRepair:
+    fds: tuple[int, ...]
+    path: Path
+    checks: tuple[tuple[int, str, tuple[int, int], bool], ...]
+    signatures: tuple[tuple[str, tuple[int, int, int, int]], ...]
+
+    def close(self) -> None:
+        for fd in reversed(self.fds):
+            os.close(fd)
+
+    def entry_matches(self) -> bool:
+        for parent_fd, name, identity, is_directory in self.checks:
+            try:
+                info = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+            except OSError:
+                return False
+            if (
+                not (stat.S_ISDIR(info.st_mode) if is_directory else stat.S_ISREG(info.st_mode))
+                or _is_reparse_point(info)
+                or (info.st_dev, info.st_ino) != identity
+            ):
+                return False
+        return True
+
+
+def _bind_sidecar(path: Path, *, writable: bool) -> tuple[str, _BoundSidecarRepair | None]:
+    """Pin a standard sidecar through no-follow vault-root and KB dirfds."""
+    if os.name != "posix" or not all(
+        hasattr(os, flag) for flag in ("O_NOFOLLOW", "O_CLOEXEC", "O_DIRECTORY")
+    ):
+        return "invalid", None
+    vault_root = path.parent.parent
+    flags = os.O_CLOEXEC | os.O_NOFOLLOW
+    fds: list[int] = []
+    checks: list[tuple[int, str, tuple[int, int], bool]] = []
+    signatures: list[tuple[str, tuple[int, int, int, int]]] = []
+    bound: _BoundSidecarRepair | None = None
+    try:
+        root_fd = os.open(vault_root, os.O_RDONLY | os.O_DIRECTORY | flags)
+        fds.append(root_fd)
+        root_info = os.fstat(root_fd)
+        if not stat.S_ISDIR(root_info.st_mode) or _is_reparse_point(root_info):
+            return "invalid", None
+        kb_name = path.parent.name
+        kb_fd = os.open(kb_name, os.O_RDONLY | os.O_DIRECTORY | flags, dir_fd=root_fd)
+        fds.append(kb_fd)
+        kb_info = os.fstat(kb_fd)
+        if not stat.S_ISDIR(kb_info.st_mode) or _is_reparse_point(kb_info):
+            return "invalid", None
+        checks.append((root_fd, kb_name, (kb_info.st_dev, kb_info.st_ino), True))
+        leaf_flags = (os.O_RDWR if writable else os.O_RDONLY) | flags
+        leaf_fd = os.open(path.name, leaf_flags, dir_fd=kb_fd)
+        fds.append(leaf_fd)
+        leaf_info = os.fstat(leaf_fd)
+        if not stat.S_ISREG(leaf_info.st_mode) or _is_reparse_point(leaf_info):
+            return "invalid", None
+        checks.append((kb_fd, path.name, (leaf_info.st_dev, leaf_info.st_ino), False))
+        signatures.append(
+            (path.name, (leaf_info.st_dev, leaf_info.st_ino, leaf_info.st_size, leaf_info.st_mtime_ns))
+        )
+        for suffix in ("-wal", "-shm", "-journal"):
+            name = path.name + suffix
+            try:
+                companion_fd = os.open(name, os.O_RDONLY | flags, dir_fd=kb_fd)
+            except FileNotFoundError:
+                continue
+            fds.append(companion_fd)
+            info = os.fstat(companion_fd)
+            if not stat.S_ISREG(info.st_mode) or _is_reparse_point(info):
+                return "invalid", None
+            checks.append((kb_fd, name, (info.st_dev, info.st_ino), False))
+            signatures.append((name, (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns)))
+        bound = _BoundSidecarRepair(
+            tuple(fds), Path(f"/proc/self/fd/{leaf_fd}"), tuple(checks), tuple(signatures)
+        )
+        return "regular", bound
+    except FileNotFoundError:
+        return "absent", None
+    except OSError:
+        return "invalid", None
+    finally:
+        if bound is None:
+            for fd in reversed(fds):
+                os.close(fd)
+
+
+def _bound_sidecar_repair(path: Path) -> _BoundSidecarRepair | None:
+    """Bind an existing POSIX sidecar inode for an exact-row repair."""
+    state, binding = _bind_sidecar(path, writable=True)
+    return binding if state == "regular" else None
+
+
+def _classify_semantic_isolation_row(
+    vault_root: Path,
+    component: str,
+    raw: object,
+    *,
+    markdown_identity: object | None = None,
+    edge_column: str | None = None,
+) -> _SemanticIsolationRow | None:
+    """Return persisted Markdown identities that are live but no longer admitted.
+
+    Sidecars are untrusted input here.  Validate the persisted spelling before
+    joining it to the vault root so an old/corrupt row can never make audit or
+    reconcile traverse outside the vault.
+    """
+    from . import recall_policy
+
+    if not isinstance(raw, str):
+        return _SemanticIsolationRow(component, repr(raw), None, edge_column)
+    value = raw if markdown_identity is None else markdown_identity
+    rel = _safe_persisted_markdown_rel(value)
+    if rel is None:
+        return _SemanticIsolationRow(component, raw, None, edge_column)
+    candidate = _no_follow_regular_markdown_path(vault_root, rel)
+    if candidate is None:
+        # A valid but missing identity remains ordinary missing-path cleanup;
+        # a symlink/reparse leaf is never followed and its sidecar row is
+        # handled only as an exact corrupt value.
+        try:
+            if not os.path.lexists(Path(vault_root) / rel):
+                return _SemanticIsolationRow(component, raw, rel, edge_column, missing=True)
+        except OSError:
+            return None
+        return _SemanticIsolationRow(component, raw, None, edge_column)
+    if recall_policy.is_recall_candidate(vault_root, candidate):
+        return None
+    return _SemanticIsolationRow(component, raw, rel, edge_column)
+
+
+def _sidecar_rows(
+    vault_root: Path, path: Path, query: str, *, after: str, limit: int
+) -> tuple[list[tuple[object, ...]], int, str | None, str | None]:
+    """Read at most one bounded census page without creating a sidecar."""
+    state, binding = _bind_sidecar(path, writable=False)
+    if state == "absent":
+        return [], 0, None, None
+    if state != "regular" or binding is None:
+        return [], 0, None, "sidecar_unreadable"
+    import sqlite3
+
+    try:
+        conn = sqlite3.connect(f"{binding.path.as_uri()}?mode=ro", uri=True)
+    except (OSError, sqlite3.Error):
+        binding.close()
+        return [], 0, None, "sidecar_unreadable"
+    try:
+        cursor = conn.execute(query, (after,))
+        rows: list[tuple[object, ...]] = []
+        while len(rows) < limit:
+            batch = cursor.fetchmany(
+                min(_SEMANTIC_ISOLATION_CENSUS_FETCH, limit - len(rows))
+            )
+            if not batch:
+                break
+            rows.extend(batch)
+            if len(rows) >= limit:
+                break
+        return (
+            rows,
+            int(cursor.fetchone() is not None),
+            str(rows[-1][0]) if rows else None,
+            None,
+        )
+    except sqlite3.Error:
+        return [], 0, None, "sidecar_schema_unreadable"
+    finally:
+        conn.close()
+        binding.close()
+
+
+def _sidecar_signature(vault_root: Path, path: Path) -> str | None:
+    """Stable-enough revision marker for a bounded SQLite census cursor."""
+    state, binding = _bind_sidecar(path, writable=False)
+    if state == "absent":
+        return hashlib.sha256(b"absent|absent|absent").hexdigest()
+    if state != "regular" or binding is None:
+        return None
+    try:
+        identities = dict(binding.signatures)
+        pieces = [
+            ":".join(map(str, identities.get(name, ("absent",))))
+            for name in (path.name, path.name + "-wal", path.name + "-shm")
+        ]
+        return hashlib.sha256("|".join(pieces).encode("ascii")).hexdigest()
+    finally:
+        binding.close()
+
+
+def _deferred_sidecar_signature(vault_root: Path, path: Path) -> str | None:
+    """Read deferred generation through the same pinned sidecar binding."""
+    from . import deferred_index
+
+    state, binding = _bind_sidecar(path, writable=False)
+    if state == "absent":
+        return "semantic:0"
+    if state != "regular" or binding is None:
+        return None
+    try:
+        return deferred_index.semantic_isolation_signature(
+            vault_root, connection_path=binding.path
+        )
+    finally:
+        binding.close()
+
+
+def semantic_recall_isolation_census(
+    vault_root: Path,
+    *,
+    limit: int = _SEMANTIC_ISOLATION_CENSUS_LIMIT,
+    after: dict[str, str] | None = None,
+) -> SemanticRecallIsolationCensus:
+    """Inventory live suppressed Markdown that survives in semantic sidecars.
+
+    This deliberately inspects persisted state rather than the ordinary recall
+    APIs: those APIs correctly fail closed, while reconcile needs a complete
+    maintenance census even with embeddings, graph, claims, or CLIP disabled.
+    """
+    from . import claims, deferred_index, epistemic_graph, index_paths, lexstore
+
+    cursors = after or {}
+    sources = (
+        ("lexical", lexstore.lexical_path(vault_root), "SELECT DISTINCT path FROM pages WHERE path > ? ORDER BY path"),
+        (
+            "lexical_units",
+            lexstore.lexical_path(vault_root),
+            "SELECT DISTINCT parent_path FROM semantic_units WHERE parent_path > ? ORDER BY parent_path",
+        ),
+        ("vector", index_paths.sidecar_path(vault_root), "SELECT DISTINCT file_path FROM chunks WHERE file_path > ? ORDER BY file_path"),
+        (
+            "vector_units",
+            index_paths.sidecar_path(vault_root),
+            "SELECT DISTINCT parent_path FROM semantic_unit_vectors WHERE parent_path > ? ORDER BY parent_path",
+        ),
+        ("graph", epistemic_graph.sidecar_path(vault_root), "SELECT DISTINCT path FROM graph_nodes WHERE path > ? ORDER BY path"),
+        ("claims", claims.sidecar_path(vault_root), "SELECT DISTINCT file_path FROM claims WHERE file_path > ? ORDER BY file_path"),
+        (
+            "deferred_semantic",
+            deferred_index.store_path(vault_root),
+            "SELECT DISTINCT rel_path FROM semantic_upserts WHERE rel_path > ? ORDER BY rel_path",
+        ),
+    )
+    rows: list[_SemanticIsolationRow] = []
+    truncation: dict[str, int] = {}
+    continuation: dict[str, dict[str, str]] = {}
+    incomplete: dict[str, str] = {}
+    for component, sidecar, query in sources:
+        signature = (
+            _deferred_sidecar_signature(vault_root, sidecar)
+            if component == "deferred_semantic"
+            else _sidecar_signature(vault_root, sidecar)
+        )
+        stored = cursors.get(component, {})
+        cursor = (
+            stored.get("cursor", "")
+            if stored.get("signature") == signature
+            else ""
+        )
+        values, truncated, last, failure = _sidecar_rows(
+            vault_root, sidecar, query, after=cursor, limit=limit
+        )
+        truncation[component] = truncated
+        if failure is not None:
+            incomplete[component] = failure
+        elif truncated and last is not None and signature is not None:
+            continuation[component] = {"cursor": last, "signature": signature}
+        for (value,) in values:
+            row = _classify_semantic_isolation_row(vault_root, component, value)
+            if row is not None:
+                rows.append(row)
+
+    # CLIP keys omit the terminal Markdown sidecar suffix.  Re-add it before
+    # policy admission; a non-Markdown binary can never be a semantic finding.
+    clip_sidecar = index_paths.clip_sidecar_path(vault_root)
+    signature = _sidecar_signature(vault_root, clip_sidecar)
+    stored = cursors.get("clip", {})
+    values, truncated, last, failure = _sidecar_rows(
+        vault_root,
+        clip_sidecar,
+        "SELECT DISTINCT file_path FROM images WHERE file_path > ? ORDER BY file_path",
+        after=stored.get("cursor", "") if stored.get("signature") == signature else "",
+        limit=limit,
+    )
+    truncation["clip"] = truncated
+    if failure is not None:
+        incomplete["clip"] = failure
+    elif truncated and last is not None and signature is not None:
+        continuation["clip"] = {"cursor": last, "signature": signature}
+    for (key,) in values:
+        if isinstance(key, str):
+            row = _classify_semantic_isolation_row(
+                vault_root, "clip", key, markdown_identity=f"{key}.md"
+            )
+            if row is not None:
+                rows.append(row)
+
+    graph_sidecar = epistemic_graph.sidecar_path(vault_root)
+    signature = _sidecar_signature(vault_root, graph_sidecar)
+    stored = cursors.get("graph_edges", {})
+    values, truncated, last, failure = _sidecar_rows(
+        vault_root,
+        graph_sidecar,
+        "SELECT edge_key, source_path, src_key, dst_key FROM graph_edges WHERE edge_key > ? ORDER BY edge_key",
+        after=stored.get("cursor", "") if stored.get("signature") == signature else "",
+        limit=limit,
+    )
+    truncation["graph_edges"] = truncated
+    if failure is not None:
+        incomplete["graph_edges"] = failure
+    elif truncated and last is not None and signature is not None:
+        continuation["graph_edges"] = {"cursor": last, "signature": signature}
+    for _edge_key, source_path, src_key, dst_key in values:
+        for raw, identity, edge_column in (
+            (source_path, source_path, "source_path"),
+            (src_key, src_key.removeprefix("file:") if isinstance(src_key, str) and src_key.startswith("file:") else None, "src_key"),
+            (dst_key, dst_key.removeprefix("file:") if isinstance(dst_key, str) and dst_key.startswith("file:") else None, "dst_key"),
+        ):
+            if identity is None:
+                continue
+            row = _classify_semantic_isolation_row(
+                vault_root, "graph_edges", raw, markdown_identity=identity, edge_column=edge_column
+            )
+            if row is not None:
+                rows.append(row)
+    unique = {(row.component, row.raw, row.path, row.edge_column, row.missing): row for row in rows}
+    return SemanticRecallIsolationCensus(
+        tuple(sorted(unique.values(), key=lambda row: (row.path or "", row.component, row.raw))),
+        {component: count for component, count in truncation.items() if count},
+        continuation,
+        incomplete,
+    )
+
+
+def semantic_recall_isolation_drift(vault_root: Path) -> list[dict[str, str]]:
+    """Compatibility projection of the bounded safe census."""
+    return semantic_recall_isolation_census(vault_root).safe_dicts()
+
+
+def purge_corrupt_semantic_recall_isolation_rows(
+    vault_root: Path, rows: tuple[_SemanticIsolationRow, ...]
+) -> dict[str, int]:
+    """Purge quarantined values through each sidecar's exact-row model seam."""
+    from . import claims, deferred_index, embeddings, epistemic_graph, index_paths, lexstore
+
+    grouped: dict[str, set[str]] = {}
+    graph_edges: dict[str, set[str]] = {}
+    for row in rows:
+        if row.path is not None:
+            continue
+        if row.component == "graph_edges":
+            if row.edge_column in {"source_path", "src_key", "dst_key"}:
+                graph_edges.setdefault(row.edge_column, set()).add(row.raw)
+            continue
+        grouped.setdefault(row.component, set()).add(row.raw)
+
+    deleted: dict[str, int] = {}
+
+    def purge(component: str, sidecar: Path, callback) -> None:
+        binding = _bound_sidecar_repair(sidecar)
+        if binding is None:
+            return
+        try:
+            changed = callback(binding.path)
+        except Exception:  # noqa: BLE001 - independent derived-sidecar cleanup
+            log.warning("%s exact-row purge failed", component, exc_info=True)
+            return
+        finally:
+            entry_matches = binding.entry_matches()
+            binding.close()
+        if changed and entry_matches:
+            deleted[component] = int(changed)
+
+    purge(
+        "lexical",
+        lexstore.lexical_path(vault_root),
+        lambda connection_path: lexstore.purge_exact_persisted_rows(
+            vault_root,
+            sorted(grouped.get("lexical", set()) | grouped.get("lexical_units", set())),
+            connection_path=connection_path,
+        ),
+    )
+    purge(
+        "vector",
+        index_paths.sidecar_path(vault_root),
+        lambda connection_path: embeddings.get_embedding_index(vault_root).purge_exact_persisted_rows(
+            sorted(grouped.get("vector", set()) | grouped.get("vector_units", set())),
+            connection_path=connection_path,
+        ),
+    )
+    purge(
+        "claims",
+        claims.sidecar_path(vault_root),
+        lambda connection_path: claims.get_claim_index(vault_root).purge_exact_persisted_rows(
+            sorted(grouped.get("claims", set())), connection_path=connection_path
+        ),
+    )
+    purge(
+        "deferred_semantic",
+        deferred_index.store_path(vault_root),
+        lambda connection_path: deferred_index.purge_exact_persisted_semantic_rows(
+            vault_root,
+            sorted(grouped.get("deferred_semantic", set())),
+            connection_path=connection_path,
+        ),
+    )
+    purge(
+        "clip",
+        index_paths.clip_sidecar_path(vault_root),
+        lambda connection_path: embeddings.get_clip_index(vault_root).purge_exact_persisted_rows(
+            sorted(grouped.get("clip", set())), connection_path=connection_path
+        ),
+    )
+    graph_values = {column: sorted(values) for column, values in graph_edges.items()}
+    purge(
+        "graph",
+        epistemic_graph.sidecar_path(vault_root),
+        lambda connection_path: epistemic_graph.EpistemicGraphIndex(vault_root).purge_exact_persisted_rows(
+            sorted(grouped.get("graph", set())),
+            graph_values,
+            connection_path=connection_path,
+        ),
+    )
+    return deleted
+
+
+def _check_semantic_recall_isolation(vault_root: Path) -> list[AuditFinding]:
+    findings: list[AuditFinding] = []
+    census = semantic_recall_isolation_census(vault_root)
+    for item in census.safe_dicts():
+        component = item["component"]
+        findings.append(
+            AuditFinding(
+                category="semantic_recall_isolation",
+                severity="warn",
+                path=item["path"],
+                detail=(
+                    f"live suppressed Markdown remains in the {component} semantic sidecar"
+                ),
+                proposed_fix="Run `reconcile` to purge the stale semantic row.",
+                meta={"component": component},
+            )
+        )
+    for item in census.corrupt_dicts():
+        findings.append(
+            AuditFinding(
+                category="semantic_recall_isolation",
+                severity="warn",
+                path=item["path"],
+                detail="corrupt persisted semantic identity is quarantined from path routing",
+                proposed_fix="Run `reconcile` to purge the exact corrupt sidecar row.",
+                meta={"component": item["component"], "state": "corrupt"},
+            )
+        )
+    for row in census.missing_rows:
+        findings.append(
+            AuditFinding(
+                category="semantic_recall_isolation",
+                severity="warn",
+                path=str(row.path),
+                detail="missing Markdown remains in a semantic sidecar",
+                proposed_fix="Run `reconcile` to purge stale derived rows.",
+                meta={"component": row.component, "state": "missing"},
+            )
+        )
+    for component, remaining in census.truncation.items():
+        findings.append(
+            AuditFinding(
+                category="semantic_recall_isolation",
+                severity="info",
+                path=kb_prefix(),
+                detail=f"{component} census capped; at least {remaining} persisted row remains",
+                proposed_fix="Run `reconcile` again to continue bounded semantic cleanup.",
+                meta={"component": component, "state": "truncated", "remaining_at_least": remaining},
+            )
+        )
+    for component, code in census.incomplete.items():
+        findings.append(
+            AuditFinding(
+                category="semantic_recall_isolation",
+                severity="warn",
+                path=kb_prefix(),
+                detail="semantic sidecar isolation could not be proven",
+                proposed_fix="Repair or rebuild the affected derived sidecar, then rerun audit.",
+                meta={"component": component, "state": "incomplete", "code": code},
             )
         )
     return findings
@@ -1286,11 +1873,18 @@ def _check_reference_identity(vault_root: Path) -> list[AuditFinding]:
 
 def _check_graph_drift(vault_root: Path) -> list[AuditFinding]:
     """Flag derived graph sidecar drift. Read-only and disabled-gate aware."""
-    from . import epistemic_graph
+    from . import epistemic_graph, recall_policy
 
     findings: list[AuditFinding] = []
     for item in epistemic_graph.graph_drift(vault_root):
         path = str(item.get("path") or kb_prefix())
+        if path.lower().endswith(".md"):
+            safe_path = _safe_persisted_markdown_rel(path)
+            if safe_path is None:
+                continue
+            candidate = _no_follow_regular_markdown_path(vault_root, safe_path)
+            if candidate is not None and not recall_policy.is_recall_candidate(vault_root, candidate):
+                continue
         reason = str(item.get("reason") or "graph drift")
         findings.append(AuditFinding(
             category="graph_drift",
@@ -1343,6 +1937,8 @@ def _check_embedding_drift(vault_root: Path) -> list[AuditFinding]:
     if not sidecar.exists():
         return findings
     import sqlite3
+
+    from . import recall_policy
     try:
         conn = sqlite3.connect(sidecar)
     except sqlite3.Error:
@@ -1358,29 +1954,40 @@ def _check_embedding_drift(vault_root: Path) -> list[AuditFinding]:
         conn.close()
     seen: set[str] = set()
     for rel_path, row_mtime in rows:
-        if not isinstance(rel_path, str) or rel_path in seen:
+        safe_rel = _safe_persisted_markdown_rel(rel_path)
+        if safe_rel is None or safe_rel in seen:
             continue
-        seen.add(rel_path)
-        abs_path = vault_root / rel_path
-        try:
-            disk_mtime = abs_path.stat().st_mtime
-        except OSError:
+        seen.add(safe_rel)
+        abs_path = _no_follow_regular_markdown_path(vault_root, safe_rel)
+        if abs_path is None:
+            try:
+                missing = not os.path.lexists(vault_root.joinpath(*PurePosixPath(safe_rel).parts))
+            except OSError:
+                missing = False
+            if not missing:
+                continue
             # File removed in vault but still in sidecar: surface that too.
             findings.append(AuditFinding(
                 category="embedding_drift",
                 severity="info",
-                path=rel_path,
+                path=safe_rel,
                 detail="sidecar row for file no longer on disk",
                 proposed_fix=(
                     "Run `audit_fix(rebuild_embeddings=true)` to drop stale rows."
                 ),
             ))
             continue
+        try:
+            disk_mtime = abs_path.stat().st_mtime
+        except OSError:
+            continue
+        if not recall_policy.is_recall_candidate(vault_root, abs_path):
+            continue
         if disk_mtime > (row_mtime or 0) + 1.0:  # 1s slack for FS jitter
             findings.append(AuditFinding(
                 category="embedding_drift",
                 severity="info",
-                path=rel_path,
+                path=safe_rel,
                 detail=(
                     f"file mtime ({disk_mtime:.0f}) newer than sidecar "
                     f"({(row_mtime or 0):.0f}) — likely external edit."
@@ -1414,6 +2021,8 @@ def _check_embedding_drift(vault_root: Path) -> list[AuditFinding]:
         except (ValueError, OSError):
             continue
         if rel in seen:
+            continue
+        if not recall_policy.is_recall_candidate(vault_root, md):
             continue
         # Vault scope walks trees the KB scan never reached; honor is_indexable
         # so an `excluded` out-of-KB subtree isn't flagged as perpetual drift

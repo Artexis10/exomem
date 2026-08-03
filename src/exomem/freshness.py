@@ -362,6 +362,89 @@ def recall_checkpoint(vault_root: Path, scope: str) -> RecallFreshnessCheckpoint
     )
 
 
+def recall_projection_snapshot(
+    vault_root: Path, scope: str
+) -> tuple[RecallFreshnessCheckpoint, dict[str, FileSignature]]:
+    """Return one checkpoint-bound projected path map.
+
+    Request-time semantic search needs both the projected freshness identity and
+    the exact parent-path allowlist used before top-k ranking.  Obtaining those
+    through ``recall_checkpoint()`` and a later walk both doubled cold-query
+    cost and allowed the two observations to describe different generations.
+    This function snapshots them together: live registries are copied under the
+    registry lock, while cold callers perform one policy-projected stat walk.
+    """
+    from . import recall_policy
+
+    root = Path(vault_root)
+    key = _key(root, scope)
+    while True:
+        with _lock:
+            live = event_indexes_enabled() and key in _recall_live
+        if live:
+            # Handles access-policy reprojection outside the registry lock.
+            checkpoint = recall_checkpoint(root, scope)
+            with _lock:
+                if not event_indexes_enabled() or key not in _recall_live:
+                    continue
+                cached = _recall_triples.get(key)
+                if cached is None:
+                    cached = triple_from_entries(_recall_maps.get(key, {}).items())
+                    _recall_triples[key] = cached
+                identity = _recall_identities.get(key)
+                current = RecallFreshnessCheckpoint(
+                    _instance_id,
+                    _recall_generations.get(key, 0),
+                    cached,
+                    identity[0] if identity is not None else "",
+                    identity[1] if identity is not None else "",
+                )
+                entries = dict(_recall_maps.get(key, {}))
+            if current != checkpoint:
+                continue
+            if recall_policy.recall_policy_identity(root) != (
+                current.policy_version,
+                current.access_policy_fingerprint,
+            ):
+                continue
+            return current, entries
+
+        identity = recall_policy.recall_policy_identity(root)
+        if scope == "vault":
+            from .vault import walk_vault_md
+
+            walk = walk_vault_md(root)
+        else:
+            from . import find as find_module
+
+            kb = root / kb_dirname()
+            walk = find_module._walk_md(kb) if kb.is_dir() else ()
+        entries: dict[str, FileSignature] = {}
+        for path in recall_policy.iter_recall_markdown(root, walk):
+            try:
+                entries[str(path)] = stat_signature(path)
+            except OSError:
+                continue
+        if recall_policy.recall_policy_identity(root) != identity:
+            continue
+        with _lock:
+            # A watcher may have become authoritative while the cold walk ran.
+            if event_indexes_enabled() and key in _recall_live:
+                continue
+            instance_id = _instance_id
+            generation = _recall_generations.get(key, 0)
+        return (
+            RecallFreshnessCheckpoint(
+                instance_id,
+                generation,
+                triple_from_entries(entries.items()),
+                identity[0],
+                identity[1],
+            ),
+            entries,
+        )
+
+
 def live_recall_entries(vault_root: Path, scope: str) -> dict[str, FileSignature] | None:
     """Projected live rows for lexical repair; never exposes broad raw Records."""
     # Refresh identity first: access-policy edits have no Markdown event.

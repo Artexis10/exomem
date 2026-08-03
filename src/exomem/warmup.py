@@ -104,7 +104,9 @@ def warm_caches(
     _step("pages", _warm_pages)
     _step("bm25_kb", lambda: bm25.warm(vault_root, "kb"))
     _step("bm25_vault", lambda: bm25.warm(vault_root, "vault"))
-    _step("resolver", lambda: find._get_query_resolver(vault_root))
+    # Ordinary recall resolves links through the policy-projected view.  Keep
+    # the broad writer resolver lazy so warm-up never reads raw Records titles.
+    _step("resolver", lambda: find.recall_resolver_snapshot(vault_root))
     if preload_models and not os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
         # One tiny search warms WHICHEVER backend serves vector search: the vec0
         # backend (sync check + first KNN faults in the vec tables; the numpy

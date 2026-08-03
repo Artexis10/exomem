@@ -145,6 +145,7 @@ def collect_candidates(
     record_degradation: Callable[[str], None],
     degraded_out: list[str] | None,
     failed_out: list[str] | None,
+    recall_paths: set[str],
     eligible_paths: set[str] | None = None,
     capture_trace: bool = False,
 ) -> CandidateBundle:
@@ -160,6 +161,9 @@ def collect_candidates(
         limit * config.candidate_multiplier,
         config.candidate_floor,
         len(eligible_paths) if eligible_paths is not None else 0,
+    )
+    semantic_paths = (
+        recall_paths if eligible_paths is None else (recall_paths & eligible_paths)
     )
 
     def _eligible(ranking: list[str]) -> list[str]:
@@ -200,14 +204,10 @@ def collect_candidates(
             with _span(timings, "vector"):
                 idx = embeddings.get_embedding_index(vault_root)
                 query_vec = embeddings.embed_texts([query], is_query=True)[0]
-                chunk_hits = (
-                    idx.search(query_vec, k=candidate_k * 3)
-                    if eligible_paths is None
-                    else idx.search(
-                        query_vec,
-                        k=candidate_k * 3,
-                        allowed_paths=eligible_paths,
-                    )
+                chunk_hits = idx.search(
+                    query_vec,
+                    k=candidate_k * 3,
+                    allowed_paths=semantic_paths,
                 )
                 best_per_file: dict[str, tuple[float, str]] = {}
                 for fp, _idx, ctext, score in chunk_hits:
@@ -241,7 +241,7 @@ def collect_candidates(
             log.info("vector search unavailable (%s); keyword/BM25-only ranking", e)
             if timings is not None:
                 timings.error("vector", e)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - vector search is best-effort
             if capture_trace:
                 lane_statuses["vector"] = {
                     "status": "failed",
@@ -283,23 +283,15 @@ def collect_candidates(
             with _span(timings, "clip"):
                 clip_idx = embeddings.get_clip_index(vault_root)
                 clip_qvec = embeddings.embed_clip_text(query)
-                allowed_images = (
-                    None
-                    if eligible_paths is None
-                    else {
-                        path.removesuffix(".md")
-                        for path in eligible_paths
-                        if path.endswith(".md")
-                    }
-                )
-                clip_hits = (
-                    clip_idx.search(clip_qvec, k=candidate_k * 8)
-                    if allowed_images is None
-                    else clip_idx.search(
-                        clip_qvec,
-                        k=candidate_k * 8,
-                        allowed_paths=allowed_images,
-                    )
+                allowed_images = {
+                    path.removesuffix(".md")
+                    for path in semantic_paths
+                    if path.endswith(".md")
+                }
+                clip_hits = clip_idx.search(
+                    clip_qvec,
+                    k=candidate_k * 8,
+                    allowed_paths=allowed_images,
                 )
                 for img_rel, frame_ts, score in clip_hits:
                     if len(clip_ranking) >= candidate_k:
@@ -428,7 +420,7 @@ def collect_candidates(
             log.warning("BM25 unavailable (%s); using vector-only", e)
             if timings is not None:
                 timings.error("bm25", e)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - BM25 search is best-effort
             if capture_trace:
                 lane_statuses["bm25"] = {
                     "status": "failed",
@@ -520,6 +512,8 @@ def collect_candidates(
             first_pos_for_target: dict[str, int] = {}
             for pos, neighbor in enumerate(neighbors):
                 target_rel = neighbor.other_rel
+                if not recall_policy.is_recall_candidate(vault_root, vault_root / target_rel):
+                    continue
                 graph_in_degree_by_path[target_rel] = (
                     graph_in_degree_by_path.get(target_rel, 0) + 1
                 )
@@ -549,7 +543,9 @@ def collect_candidates(
 
             legacy_targets: list[str] = []
             if legacy_seeds:
-                resolver = get_query_resolver(vault_root, freshness=snapshot.vault())
+                resolver = get_query_resolver(
+                    vault_root, freshness=snapshot.projection_key("vault")
+                )
                 for seed_rel in legacy_seeds:
                     page = page_of(seed_rel)
                     if page is None:
@@ -557,6 +553,10 @@ def collect_candidates(
                     for target_rel in outbound_wikilink_paths(
                         page, vault_root, resolver=resolver
                     ):
+                        if not recall_policy.is_recall_candidate(
+                            vault_root, vault_root / target_rel
+                        ):
+                            continue
                         graph_in_degree_by_path[target_rel] = (
                             graph_in_degree_by_path.get(target_rel, 0) + 1
                         )
@@ -591,7 +591,9 @@ def collect_candidates(
             # Fallback: the pre-existing 1-hop outbound-wikilink expansion,
             # byte-identical to the pre-change ordering. Do not refactor.
             resolver = (
-                get_query_resolver(vault_root, freshness=snapshot.vault())
+                get_query_resolver(
+                    vault_root, freshness=snapshot.projection_key("vault")
+                )
                 if graph_seeds else None
             )
             graph_t_resolver = time.perf_counter()
@@ -603,6 +605,10 @@ def collect_candidates(
                 for target_rel in outbound_wikilink_paths(
                     page, vault_root, resolver=resolver
                 ):
+                    if not recall_policy.is_recall_candidate(
+                        vault_root, vault_root / target_rel
+                    ):
+                        continue
                     graph_in_degree_by_path[target_rel] = (
                         graph_in_degree_by_path.get(target_rel, 0) + 1
                     )

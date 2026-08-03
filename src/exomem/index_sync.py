@@ -53,6 +53,8 @@ class IndexComponentOutcome:
             "embeddings",
             "watcher",
             "clip",
+            "claims",
+            "semantic_purge",
         }:
             raise ValueError("unsupported index component")
         if type(self.outcome) is not str or self.outcome not in {
@@ -102,7 +104,7 @@ class IndexSyncReport:
             for path in (*self.requested_paths, *self.eligible_paths)
         ):
             raise ValueError("index sync report contains an unsafe path")
-        if len(self.components) > 6:
+        if len(self.components) > 8:
             raise ValueError("index sync component count exceeds report bound")
         if len({item.component for item in self.components}) != len(self.components):
             raise ValueError("index sync report contains duplicate components")
@@ -190,6 +192,29 @@ def failed_upsert_report(
     return IndexSyncReport(
         "upsert", requested, requested, components, truncated
     )
+
+
+def _stale_batch_report(
+    vault_root: Path,
+    identity_rels: list[str],
+    requested: tuple[str, ...],
+    eligible: tuple[str, ...],
+    *,
+    truncated: bool,
+) -> IndexSyncReport:
+    """Requeue a changed admission snapshot without publishing mixed state."""
+    deferred_index.add_full(vault_root, identity_rels)
+    components = tuple(
+        IndexComponentOutcome(component, "degraded", "batch_stale")
+        for component in (
+            "lexstore",
+            "memory_refs",
+            "resolver",
+            "epistemic_graph",
+            "embeddings",
+        )
+    )
+    return IndexSyncReport("upsert", requested, eligible, components, truncated)
 
 
 def unverified_upsert_report(
@@ -321,6 +346,63 @@ def _record_deferred_semantic_upserts(
     return len(rels), deferred_index.add(vault_root, rels)
 
 
+def purge_semantic_only(vault_root: Path, rel_paths: list[str]) -> bool:
+    """Drop structured-only paths from semantic sidecars without touching identity.
+
+    This is intentionally model-free: cleanup must work while model features are
+    disabled, and a failure in one derivative must not keep the other semantic
+    indexes serving a raw Record.  Memory references and the wikilink resolver
+    are deliberately absent; they index stable page identity, not recall text.
+    """
+    rels = [
+        rel
+        for raw in rel_paths
+        if (rel := _safe_relative_path(raw)) is not None and rel.lower().endswith(".md")
+    ]
+    if not rels:
+        return True
+    # Keep the first event spelling/order but avoid redundant sqlite writes.
+    rels = list(dict.fromkeys(rels))
+    from . import claims, embedding_index, embeddings, epistemic_graph, index_paths, lexstore
+
+    def _purge(component: str, callback) -> bool:
+        try:
+            return callback() is not False
+        except Exception:  # noqa: BLE001 - every semantic sidecar heals independently
+            log.warning("%s semantic purge failed", component, exc_info=True)
+            return False
+
+    succeeded = True
+    if lexstore.lexical_path(vault_root).exists():
+        succeeded &= _purge(
+            "lexstore", lambda: lexstore.get_store(vault_root).delete_rel_paths(rels)
+        )
+    if index_paths.sidecar_path(vault_root).exists():
+        succeeded &= _purge(
+            "embeddings",
+            lambda: embedding_index.EmbeddingIndex(vault_root).purge_paths_if_present(rels),
+        )
+    if epistemic_graph.sidecar_path(vault_root).exists():
+        succeeded &= _purge(
+            "epistemic_graph",
+            lambda: epistemic_graph.EpistemicGraphIndex(vault_root).delete_paths(rels),
+        )
+    if claims.sidecar_path(vault_root).exists():
+        succeeded &= _purge(
+            "claims",
+            lambda: claims.delete_after_remove(vault_root, rels),
+        )
+    if index_paths.clip_sidecar_path(vault_root).exists():
+        succeeded &= _purge(
+            "clip",
+            lambda: embeddings.get_clip_index(vault_root).purge_markdown_paths_if_present(rels),
+        )
+    succeeded &= _purge(
+        "deferred_semantic", lambda: deferred_index.clear_semantic_receipts(vault_root, rels)
+    )
+    return bool(succeeded)
+
+
 def replay_deferred_embedding(
     vault_root: Path,
     paths: list[Path],
@@ -449,7 +531,9 @@ def drain_deferred_work(
 
 def _dispatch_upsert_components(
     vault_root: Path,
-    eligible: list[Path],
+    identity_paths: list[Path],
+    semantic_paths: list[Path],
+    suppressed_rels: list[str],
     *,
     defer_semantic: bool,
 ) -> list[IndexComponentOutcome]:
@@ -457,14 +541,11 @@ def _dispatch_upsert_components(
 
     components = [
         _legacy_component(
-            "lexstore", lambda: lexstore.upsert_after_write(vault_root, eligible)
-        ),
-        _legacy_component(
             "memory_refs",
-            lambda: memory_refs.upsert_after_write(vault_root, eligible),
+            lambda: memory_refs.upsert_after_write(vault_root, identity_paths),
         ),
     ]
-    rels = _rel_md_paths(vault_root, eligible)
+    rels = _rel_md_paths(vault_root, identity_paths)
     components.append(
         _resolver_component(
             lambda: find.on_resolver_files_changed(vault_root, rels, [])
@@ -472,17 +553,33 @@ def _dispatch_upsert_components(
             else None
         )
     )
+    # Publish all raw-Record removals before any semantic insertion/defer. The
+    # identity fan-out above remains intentionally broad and has no recall body
+    # egress; a purge failure is isolated and cannot stop other sidecars.
+    purge_succeeded = purge_semantic_only(vault_root, suppressed_rels)
+    components.append(
+        IndexComponentOutcome(
+            "semantic_purge",
+            "completed" if purge_succeeded else "degraded",
+            "purge_completed" if purge_succeeded else "purge_failed",
+        )
+    )
+    components.append(
+        _legacy_component(
+            "lexstore", lambda: lexstore.upsert_after_write(vault_root, semantic_paths)
+        )
+    )
     components.append(
         _legacy_component(
             "epistemic_graph",
-            lambda: epistemic_graph.upsert_after_write(vault_root, eligible),
+            lambda: epistemic_graph.upsert_after_write(vault_root, semantic_paths),
         )
     )
     if defer_semantic or mode.defer_expensive_indexes():
         try:
             semantic_count, added = _record_deferred_semantic_upserts(
                 vault_root,
-                eligible,
+                semantic_paths,
                 omit_proven_current=defer_semantic,
             )
         except Exception:  # noqa: BLE001 - degradation is reported, other lanes landed
@@ -511,7 +608,7 @@ def _dispatch_upsert_components(
         from . import embeddings
 
         try:
-            status = embeddings.upsert_after_write_status(vault_root, eligible)
+            status = embeddings.upsert_after_write_status(vault_root, semantic_paths)
             component = _embedding_component(status)
         except Exception:  # noqa: BLE001 - derived index must not fail a writer
             log.warning("embeddings index dispatch failed", exc_info=True)
@@ -522,7 +619,7 @@ def _dispatch_upsert_components(
             components.append(component)
             if status.status != "completed" and status.code != "deferred_warmup":
                 try:
-                    _record_deferred_semantic_upserts(vault_root, eligible)
+                    _record_deferred_semantic_upserts(vault_root, semantic_paths)
                 except Exception:  # noqa: BLE001 - report remains the primary outcome
                     log.warning(
                         "durable semantic retry recording failed", exc_info=True
@@ -576,9 +673,46 @@ def upsert_after_write(
             (),
             requested_truncated or eligible_truncated,
         )
-    states = dict(semantic_states or {})
-    for path, rel in zip(eligible, eligible_rels, strict=True):
-        if path.suffix.lower() != ".md" or rel in states:
+    from . import recall_policy
+
+    batch = recall_policy.partition_markdown_paths(vault_root, eligible)
+    identity_paths = [item.path for item in batch.identity_paths]
+    semantic_paths = [item.path for item in batch.admitted_paths]
+    semantic_rels = [item.rel_path for item in batch.admitted_paths]
+    suppressed_rels = [item.rel_path for item in batch.suppressed_paths]
+    if not identity_paths:
+        # Preserve the observable no-semantic-path fan-out contract for legacy
+        # non-Markdown notifications while keeping them out of every identity
+        # and semantic collection.
+        components = _dispatch_upsert_components(
+            vault_root, [], [], [], defer_semantic=defer_semantic
+        )
+        return IndexSyncReport(
+            "upsert",
+            requested_report,
+            eligible_report,
+            tuple(components),
+            requested_truncated or eligible_truncated,
+        )
+    if not batch.revalidate(vault_root):
+        # A changed policy or source cannot be safely split across the identity
+        # and semantic fan-outs. Preserve a generic retry; the next replay takes
+        # a fresh snapshot rather than treating the path as suppression.
+        return _stale_batch_report(
+            vault_root,
+            [item.rel_path for item in batch.identity_paths],
+            requested_report,
+            eligible_report,
+            truncated=requested_truncated or eligible_truncated,
+        )
+    admitted_rels = {item.rel_path for item in batch.admitted_paths}
+    states = {
+        rel: state
+        for rel, state in (semantic_states or {}).items()
+        if rel in admitted_rels
+    }
+    for path, rel in zip(semantic_paths, semantic_rels, strict=True):
+        if rel in states:
             continue
         active = semantic_index.parent_state_for_path(vault_root, path)
         if active is not None:
@@ -588,13 +722,33 @@ def upsert_after_write(
             states[rel] = semantic_index.build_parent_index_state(vault_root, path)
         except (OSError, UnicodeError, ValueError):
             continue
+    if not batch.revalidate(vault_root):
+        return _stale_batch_report(
+            vault_root,
+            [item.rel_path for item in batch.identity_paths],
+            requested_report,
+            eligible_report,
+            truncated=requested_truncated or eligible_truncated,
+        )
     token = semantic_index.set_parent_states(states)
     try:
         components = _dispatch_upsert_components(
-            vault_root, eligible, defer_semantic=defer_semantic
+            vault_root,
+            identity_paths,
+            semantic_paths,
+            suppressed_rels,
+            defer_semantic=defer_semantic,
         )
     finally:
         semantic_index.reset_parent_states(token)
+    if not batch.revalidate(vault_root):
+        return _stale_batch_report(
+            vault_root,
+            [item.rel_path for item in batch.identity_paths],
+            requested_report,
+            eligible_report,
+            truncated=requested_truncated or eligible_truncated,
+        )
     return IndexSyncReport(
         "upsert",
         requested_report,
@@ -609,6 +763,7 @@ def delete_after_remove(
 ) -> IndexSyncReport:
     """Fan a removal out to every index sidecar."""
     from . import (
+        claims,
         embeddings,
         epistemic_graph,
         find,
@@ -654,6 +809,17 @@ def delete_after_remove(
     else:
         components.append(component)
     md_rels = [rel for rel in safe_paths if rel.lower().endswith(".md")]
+    components.append(
+        _legacy_component(
+            "claims", lambda: claims.delete_after_remove(vault_root, md_rels)
+        )
+    )
+    components.append(
+        _legacy_component(
+            "semantic_purge",
+            lambda: deferred_index.clear_semantic_receipts(vault_root, md_rels),
+        )
+    )
     components.append(
         _resolver_component(
             lambda: find.on_resolver_files_changed(vault_root, [], md_rels)

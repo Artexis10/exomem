@@ -29,7 +29,7 @@ from typing import Any
 
 import numpy as np
 
-from . import accel, index_paths, vecstore
+from . import accel, index_paths, recall_policy, vecstore
 from .clip_index import CLIP_DIM, ClipIndex
 from .embedding_index import VECTOR_DIM, EmbeddingIndex
 from .vector_index_common import vec_gate as _vec_gate
@@ -1045,7 +1045,27 @@ def upsert_after_write_status(
 ) -> EmbeddingSyncStatus:
     """Re-embed eligible files and return an observable bounded outcome."""
     global _IMPORT_FAILED
-    md_paths = [p for p in written_paths if index_paths.is_embeddable_path(p)]
+    root = vault_root.resolve()
+    md_paths: list[Path] = []
+    rejected_paths: list[str] = []
+    for path in written_paths:
+        if not index_paths.is_embeddable_path(path):
+            continue
+        try:
+            rel = path.relative_to(root).as_posix()
+        except ValueError:
+            continue
+        # Admission is intentionally before defer/model/page-cache/content work.
+        # A raw Record stays structured-only even when the vector backend is off.
+        if recall_policy.is_recall_candidate(vault_root, path):
+            md_paths.append(path)
+        else:
+            rejected_paths.append(rel)
+    if rejected_paths:
+        try:
+            get_embedding_index(vault_root).purge_paths_if_present(rejected_paths)
+        except Exception as e:  # noqa: BLE001 - derived purge is best-effort
+            log.warning("embedding recall-policy purge failed: %s", e)
     eligible_count = len(md_paths)
     # Test runs disable the heavy embedding path to keep the suite fast.
     # Production servers leave EXOMEM_DISABLE_EMBEDDINGS unset.
@@ -1133,11 +1153,16 @@ def upsert_after_write_status(
                 "degraded", "embedding_index_open_failed", eligible_count
             )
         )
-    per_file: list[tuple[Path, Any, list[str], float]] = []
+    from . import freshness
+
+    captured_policy_identity = recall_policy.recall_policy_identity(vault_root)
+    per_file: list[tuple[Path, Any, list[str], float, freshness.FileSignature]] = []
     failure_code: str | None = None
     for md in md_paths:
         try:
-            mtime = md.stat().st_mtime
+            stat = md.stat()
+            signature = freshness.stat_signature(md)
+            mtime = stat.st_mtime
         except FileNotFoundError:
             # File was just written then disappeared — treat as a delete.
             try:
@@ -1168,7 +1193,7 @@ def upsert_after_write_status(
             log.warning("embedding chunks could not be prepared: %s", e)
             failure_code = "embedding_chunking_failed"
             continue
-        per_file.append((md, page, chunks, mtime))
+        per_file.append((md, page, chunks, mtime, signature))
 
     if not per_file:
         return finish(
@@ -1181,11 +1206,34 @@ def upsert_after_write_status(
 
     from . import semantic_index
 
-    for md, page, chunks, mtime in per_file:
+    published_paths: list[Path] = []
+    for md, page, chunks, mtime, signature in per_file:
         rel_path = page.rel_path
+        def still_current(path: Path = md, expected: freshness.FileSignature = signature) -> bool:
+            try:
+                return (
+                    recall_policy.is_recall_candidate(vault_root, path)
+                    and freshness.stat_signature(path) == expected
+                    and recall_policy.recall_policy_identity(vault_root)
+                    == captured_policy_identity
+                )
+            except OSError:
+                return False
+
+        if not still_current():
+            try:
+                index.purge_paths_if_present([rel_path])
+            except Exception as e:  # noqa: BLE001
+                log.warning("embedding drift purge failed for %s: %s", rel_path, e)
+            failure_code = failure_code or "embedding_input_drifted"
+            continue
         if chunks:
             try:
                 vectors = _embed_live_chunks(chunks)
+                if not still_current():
+                    index.purge_paths_if_present([rel_path])
+                    failure_code = failure_code or "embedding_input_drifted"
+                    continue
                 index.upsert_file(rel_path, chunks, vectors, mtime)
             except Exception as e:  # noqa: BLE001 - one bad encode must not fail the writer
                 log.warning(
@@ -1203,11 +1251,27 @@ def upsert_after_write_status(
                 log.warning("embedding stale-row cleanup failed: %s", e)
                 failure_code = failure_code or "embedding_delete_failed"
 
+        # The page vector write can take long enough for a direct edit or a
+        # policy transition to occur.  Never publish a semantic-unit vector for
+        # bytes we did not capture, and purge the just-published page if that
+        # happened between the two derived writes.
+        if not still_current():
+            try:
+                index.purge_paths_if_present([rel_path])
+            except Exception as e:  # noqa: BLE001
+                log.warning("embedding drift purge failed for %s: %s", rel_path, e)
+            failure_code = failure_code or "embedding_input_drifted"
+            continue
+
         try:
             state = semantic_index.current_parent_index_state(vault_root, md)
             units = [unit for unit in state.document.units if unit.unit_ref is not None]
             if units:
                 unit_vectors = _embed_live_chunks([unit.content for unit in units])
+                if not still_current():
+                    index.purge_paths_if_present([rel_path])
+                    failure_code = failure_code or "embedding_input_drifted"
+                    continue
                 index.upsert_semantic_units(state, unit_vectors, mtime)
             else:
                 index.delete_semantic_units(rel_path)
@@ -1218,6 +1282,7 @@ def upsert_after_write_status(
                 e,
             )
             failure_code = failure_code or "semantic_unit_embedding_encode_failed"
+        published_paths.append(md)
 
     # Claim-level sidecar (.claims.sqlite) rides the same write seam — opt-in via
     # EXOMEM_CLAIM_LEVEL, no-op otherwise. Local import avoids a module cycle
@@ -1226,8 +1291,8 @@ def upsert_after_write_status(
     try:
         from . import claims
 
-        if claims.claim_level_enabled():
-            claims.upsert_claims_after_write(vault_root, md_paths)
+        if claims.claim_level_enabled() and published_paths:
+            claims.upsert_claims_after_write(vault_root, published_paths)
     except Exception as e:  # noqa: BLE001
         log.debug("claim sidecar upsert skipped (%s)", e)
         failure_code = failure_code or "embedding_auxiliary_failed"
@@ -1277,9 +1342,27 @@ def delete_after_remove_status(
 ) -> EmbeddingSyncStatus:
     """Drop sidecar rows and return an observable bounded outcome."""
     eligible_count = len(removed_rel_paths)
+    # Deletion is a model-free policy operation.  Run it before the optional
+    # backend gates so a lean install still removes stale rows, and the index's
+    # no-sidecar guard keeps an absent derived store absent.
+    purge_failed = False
+    if removed_rel_paths:
+        try:
+            index = get_embedding_index(vault_root)
+            purge = getattr(index, "purge_paths_if_present", None)
+            if purge is not None:
+                purge(removed_rel_paths)
+            else:  # compatibility for narrow third-party index adapters
+                for rel in removed_rel_paths:
+                    index.delete_file(rel)
+        except Exception as e:  # noqa: BLE001 - derived deletion is best-effort
+            log.warning("could not purge embedding sidecar rows for delete: %s", e)
+            purge_failed = True
     if os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
         return EmbeddingSyncStatus(
-            "disabled", "embeddings_disabled", eligible_count
+            "degraded" if purge_failed else "disabled",
+            "embedding_delete_failed" if purge_failed else "embeddings_disabled",
+            eligible_count,
         )
     if not removed_rel_paths:
         return EmbeddingSyncStatus("completed", "no_eligible_paths", 0)
@@ -1287,20 +1370,7 @@ def delete_after_remove_status(
         return EmbeddingSyncStatus(
             "disabled", "embeddings_import_unavailable", eligible_count
         )
-    try:
-        index = get_embedding_index(vault_root)
-    except Exception as e:  # noqa: BLE001 - derived index deletion is best-effort
-        log.warning("could not open embedding sidecar for delete: %s", e)
-        return EmbeddingSyncStatus(
-            "degraded", "embedding_index_open_failed", eligible_count
-        )
-    succeeded = True
-    for rel in removed_rel_paths:
-        try:
-            index.delete_file(rel)
-        except Exception as e:  # noqa: BLE001 - derived index deletion is best-effort
-            log.warning("delete_file(%s) failed in sidecar: %s", rel, e)
-            succeeded = False
+    succeeded = not purge_failed
     return EmbeddingSyncStatus(
         "completed" if succeeded else "degraded",
         "embedding_delete_completed" if succeeded else "embedding_delete_failed",

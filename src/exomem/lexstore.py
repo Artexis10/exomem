@@ -846,6 +846,18 @@ def delete_after_remove(vault_root: Path, removed_rel_paths: list[str]) -> None:
         log.warning("lexical sidecar delete skipped (%s)", e)
 
 
+def purge_exact_persisted_rows(
+    vault_root: Path, values: list[str], *, connection_path: Path | None = None
+) -> int:
+    """Purge untrusted stored identities without converting them to paths."""
+    target = connection_path if connection_path is not None else lexical_path(vault_root)
+    if not values or not target.exists():
+        return 0
+    return get_store(vault_root).purge_exact_persisted_rows(
+        values, connection_path=connection_path
+    )
+
+
 # ------------------------------------------------------------------ mechanism
 
 
@@ -2211,6 +2223,58 @@ class LexicalStore:
         if not applied:
             _schedule_repair(self.vault_root)
         return applied
+
+    def purge_exact_persisted_rows(
+        self, values: list[str], *, connection_path: Path | None = None
+    ) -> int:
+        """Delete exact sidecar values while keeping FTS companions coherent.
+
+        Unlike :meth:`delete_rel_paths`, these values are quarantined persisted
+        spellings.  They must never be joined to ``vault_root`` or used to build
+        a freshness witness.
+        """
+        raw_values = sorted({value for value in values if isinstance(value, str)})
+        target = connection_path if connection_path is not None else self.path
+        if not raw_values or not target.exists() or self._failed:
+            return 0
+        from .vault import VaultLockError
+
+        try:
+            with self._publication_lock(timeout=_PUBLICATION_TIMEOUT_FOREGROUND):
+                conn = self._connect(target)
+                try:
+                    removed = 0
+                    with conn:
+                        for value in raw_values:
+                            row = conn.execute(
+                                "SELECT rowid FROM pages WHERE path = ?", (value,)
+                            ).fetchone()
+                            if row is not None:
+                                self._delete_rowid(conn, row[0])
+                                removed += 1
+                            else:
+                                unit_count = conn.execute(
+                                    "SELECT COUNT(*) FROM semantic_units WHERE parent_path = ?",
+                                    (value,),
+                                ).fetchone()[0]
+                                self._delete_semantic_units(conn, value)
+                                removed += int(unit_count)
+                        if removed:
+                            # No vault event can attest these rows. Force the
+                            # next reader to reconcile its persisted checkpoint.
+                            conn.execute("DELETE FROM meta WHERE key LIKE 'triple:%'")
+                    if removed:
+                        self._synced.clear()
+                        self._witnessed.clear()
+                        self._broad_seen.clear()
+                        self._recall_seen.clear()
+                    return int(removed)
+                finally:
+                    conn.close()
+        except (VaultLockError, sqlite3.Error) as e:
+            log.info("lexical exact-row purge deferred (%s)", e)
+            _schedule_repair(self.vault_root)
+            return 0
 
     def _delete_rel_paths_locked(self, rel_paths: list[str]) -> bool:
         """`delete_rel_paths` body with the publication barrier already held."""

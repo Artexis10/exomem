@@ -43,6 +43,9 @@ def test_flush_batches_upserts_and_dedupes(vault, monkeypatch: pytest.MonkeyPatc
     w = file_watcher.FileWatcher(vault)
     a = vault / "Knowledge Base" / "Notes" / "a.md"
     b = vault / "Knowledge Base" / "Notes" / "b.md"
+    a.parent.mkdir(parents=True, exist_ok=True)
+    a.write_text("# A\n", encoding="utf-8")
+    b.write_text("# B\n", encoding="utf-8")
     w._record(a, deleted=False)
     w._record(a, deleted=False)  # duplicate save coalesces
     w._record(b, deleted=False)
@@ -329,7 +332,11 @@ def test_delete_then_recreate_only_upserts(vault, monkeypatch: pytest.MonkeyPatc
     ups, dels = _stub_embeddings(monkeypatch)
     w = file_watcher.FileWatcher(vault)
     p = vault / "Knowledge Base" / "Notes" / "y.md"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text("# Before\n", encoding="utf-8")
+    p.unlink()
     w._record(p, deleted=True)
+    p.write_text("# After\n", encoding="utf-8")
     w._record(p, deleted=False)  # recreated → modify
     w._flush()
     assert dels == []
@@ -344,6 +351,9 @@ def test_dispatch_thread_coalesces_within_debounce(vault, monkeypatch: pytest.Mo
     try:
         a = vault / "Knowledge Base" / "Notes" / "a.md"
         b = vault / "Knowledge Base" / "Notes" / "b.md"
+        a.parent.mkdir(parents=True, exist_ok=True)
+        a.write_text("# A\n", encoding="utf-8")
+        b.write_text("# B\n", encoding="utf-8")
         w._record(a, deleted=False)
         w._record(b, deleted=False)
         deadline = time.monotonic() + 2.0

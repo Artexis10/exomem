@@ -322,15 +322,15 @@ def test_full_rebuild_reuses_one_detached_resolver_without_shared_cache(
 ) -> None:
     vault = tmp_path / "vault"
     _seed(vault)
-    find_module._RESOLVER_CACHE.clear()
-    real_snapshot = find_module.writer_resolver_snapshot
+    find_module._RECALL_RESOLVER_CACHE.clear()
+    real_snapshot = find_module.recall_resolver_snapshot
     acquisitions: list[Path] = []
 
     def acquire(root: Path, **kwargs):
         acquisitions.append(root)
         return real_snapshot(root, **kwargs)
 
-    monkeypatch.setattr(find_module, "writer_resolver_snapshot", acquire)
+    monkeypatch.setattr(find_module, "recall_resolver_snapshot", acquire)
     monkeypatch.setattr(
         find_module,
         "shared_resolver",
@@ -341,7 +341,7 @@ def test_full_rebuild_reuses_one_detached_resolver_without_shared_cache(
 
     assert report["indexed_files"] == 2
     assert acquisitions == [vault]
-    assert vault not in find_module._RESOLVER_CACHE
+    assert vault in find_module._RECALL_RESOLVER_CACHE
 
 
 def test_full_rebuild_retries_when_target_is_renamed_after_snapshot(
@@ -360,7 +360,7 @@ def test_full_rebuild_retries_when_target_is_renamed_after_snapshot(
         "Knowledge Base/Notes/Insights/staged-target.md",
         "# Late target\n",
     )
-    real_snapshot = find_module.writer_resolver_snapshot
+    real_snapshot = find_module.recall_resolver_snapshot
     acquisitions = 0
 
     def acquire(root: Path, **kwargs):
@@ -371,7 +371,7 @@ def test_full_rebuild_retries_when_target_is_renamed_after_snapshot(
             staged_target.rename(target)
         return snapshot
 
-    monkeypatch.setattr(find_module, "writer_resolver_snapshot", acquire)
+    monkeypatch.setattr(find_module, "recall_resolver_snapshot", acquire)
 
     index = epistemic_graph.EpistemicGraphIndex(vault)
     report = index.rebuild_all()
@@ -391,7 +391,7 @@ def test_full_rebuild_twice_moving_vault_is_marked_unavailable(
 ) -> None:
     vault = tmp_path / "vault"
     _seed(vault)
-    real_snapshot = find_module.writer_resolver_snapshot
+    real_snapshot = find_module.recall_resolver_snapshot
     acquisitions = 0
 
     def acquire(root: Path, **kwargs):
@@ -405,7 +405,7 @@ def test_full_rebuild_twice_moving_vault_is_marked_unavailable(
         )
         return snapshot
 
-    monkeypatch.setattr(find_module, "writer_resolver_snapshot", acquire)
+    monkeypatch.setattr(find_module, "recall_resolver_snapshot", acquire)
     index = epistemic_graph.EpistemicGraphIndex(vault)
 
     with pytest.raises(RuntimeError, match="did not stabilize"):
@@ -422,7 +422,7 @@ def test_full_rebuild_retry_acquisition_failure_marks_graph_unavailable(
     _seed(vault)
     index = epistemic_graph.EpistemicGraphIndex(vault)
     index.rebuild_all()
-    real_snapshot = find_module.writer_resolver_snapshot
+    real_snapshot = find_module.recall_resolver_snapshot
     acquisitions = 0
 
     def acquire(root: Path, **kwargs):
@@ -434,7 +434,7 @@ def test_full_rebuild_retry_acquisition_failure_marks_graph_unavailable(
         _write(vault, "Knowledge Base/Notes/Insights/moved.md", "# Moved\n")
         return snapshot
 
-    monkeypatch.setattr(find_module, "writer_resolver_snapshot", acquire)
+    monkeypatch.setattr(find_module, "recall_resolver_snapshot", acquire)
 
     with pytest.raises(RuntimeError, match="retry resolver failed"):
         index.rebuild_all()
@@ -451,7 +451,7 @@ def test_full_rebuild_retry_freshness_failure_marks_graph_unavailable(
     index = epistemic_graph.EpistemicGraphIndex(vault)
     index.rebuild_all()
     real_freshness = epistemic_graph._disk_vault_freshness
-    real_snapshot = find_module.writer_resolver_snapshot
+    real_snapshot = find_module.recall_resolver_snapshot
     freshness_checks = 0
 
     def freshness(root: Path):
@@ -467,7 +467,7 @@ def test_full_rebuild_retry_freshness_failure_marks_graph_unavailable(
         return snapshot
 
     monkeypatch.setattr(epistemic_graph, "_disk_vault_freshness", freshness)
-    monkeypatch.setattr(find_module, "writer_resolver_snapshot", acquire)
+    monkeypatch.setattr(find_module, "recall_resolver_snapshot", acquire)
 
     with pytest.raises(RuntimeError, match="retry freshness failed"):
         index.rebuild_all()
@@ -519,6 +519,27 @@ def test_full_rebuild_keeps_schema_marker_absent_until_stable(
     assert index.available() is True
 
 
+def test_full_rebuild_rejects_direct_edit_before_availability_publication(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault = tmp_path / "vault"
+    source, _target = _seed(vault)
+    index = epistemic_graph.EpistemicGraphIndex(vault)
+    real_mark_available = index._mark_available
+
+    def mark_available(*args, **kwargs) -> bool:
+        source.write_text("# Edited after final graph freshness check\n", encoding="utf-8")
+        return real_mark_available(*args, **kwargs)
+
+    monkeypatch.setattr(index, "_mark_available", mark_available)
+
+    with pytest.raises(RuntimeError, match="did not stabilize"):
+        index.rebuild_all()
+
+    assert index.available() is False
+    assert index.nodes() == []
+
+
 def test_refresh_admitted_before_failed_rebuild_cannot_restore_availability(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -526,7 +547,7 @@ def test_refresh_admitted_before_failed_rebuild_cannot_restore_availability(
     source, _target = _seed(vault)
     index = epistemic_graph.EpistemicGraphIndex(vault)
     index.rebuild_all()
-    real_snapshot = find_module.writer_resolver_snapshot
+    real_snapshot = find_module.recall_resolver_snapshot
     real_index_path = index._index_path
     rebuild_active = False
     overlap_triggered = False
@@ -539,7 +560,7 @@ def test_refresh_admitted_before_failed_rebuild_cannot_restore_availability(
     def acquire(root: Path, **kwargs):
         nonlocal rebuild_active, overlap_triggered
         snapshot = real_snapshot(root, **kwargs)
-        if "freshness_key" not in kwargs and not overlap_triggered:
+        if "freshness" in kwargs and not overlap_triggered:
             overlap_triggered = True
             rebuild_active = True
             try:
@@ -551,7 +572,7 @@ def test_refresh_admitted_before_failed_rebuild_cannot_restore_availability(
         return snapshot
 
     monkeypatch.setattr(index, "_index_path", index_path)
-    monkeypatch.setattr(find_module, "writer_resolver_snapshot", acquire)
+    monkeypatch.setattr(find_module, "recall_resolver_snapshot", acquire)
 
     report = index.refresh_paths([source])
 
@@ -605,7 +626,7 @@ def test_full_rebuild_snapshot_isolated_from_shared_cache_patch(
     _seed(vault)
     find_module._RESOLVER_CACHE.clear()
     shared = find_module.shared_resolver(vault)
-    real_snapshot = find_module.writer_resolver_snapshot
+    real_snapshot = find_module.recall_resolver_snapshot
 
     def acquire(root: Path, **kwargs):
         snapshot = real_snapshot(root, **kwargs)
@@ -613,7 +634,7 @@ def test_full_rebuild_snapshot_isolated_from_shared_cache_patch(
         shared._remove_entry(B.removesuffix(".md"))
         return snapshot
 
-    monkeypatch.setattr(find_module, "writer_resolver_snapshot", acquire)
+    monkeypatch.setattr(find_module, "recall_resolver_snapshot", acquire)
     try:
         index = epistemic_graph.EpistemicGraphIndex(vault)
         index.rebuild_all()
@@ -634,14 +655,14 @@ def test_refresh_batch_reuses_one_snapshot_and_separate_calls_reacquire(
     a, b = _seed(vault)
     index = epistemic_graph.EpistemicGraphIndex(vault)
     index.rebuild_all()
-    real_snapshot = find_module.writer_resolver_snapshot
+    real_snapshot = find_module.recall_resolver_snapshot
     acquisitions: list[Path] = []
 
     def acquire(root: Path, **kwargs):
         acquisitions.append(root)
         return real_snapshot(root, **kwargs)
 
-    monkeypatch.setattr(find_module, "writer_resolver_snapshot", acquire)
+    monkeypatch.setattr(find_module, "recall_resolver_snapshot", acquire)
     monkeypatch.setattr(
         find_module,
         "shared_resolver",
@@ -666,7 +687,7 @@ def test_rebuild_resolver_failure_preserves_committed_graph_rows(
     before_edges = index.edges()
     monkeypatch.setattr(
         find_module,
-        "writer_resolver_snapshot",
+        "recall_resolver_snapshot",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(
             RuntimeError("resolver failed")
         ),
@@ -762,6 +783,43 @@ def test_single_file_edit_refreshes_affected_graph_rows(tmp_path: Path) -> None:
         a.read_text(encoding="utf-8")
     )
     assert b_after["source_hash"] == b_before
+
+
+def test_incremental_refresh_retries_when_path_changes_during_indexing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault = tmp_path / "vault"
+    source, _target = _seed(vault)
+    index = epistemic_graph.EpistemicGraphIndex(vault)
+    index.rebuild_all()
+    real_edges_for_page = epistemic_graph._edges_for_page
+    real_snapshot = find_module.recall_resolver_snapshot
+    acquisitions: list[Path] = []
+    raced = False
+
+    def edges_for_page(*args, **kwargs):
+        nonlocal raced
+        if not raced:
+            raced = True
+            source.write_text("# Raced refresh source\n", encoding="utf-8")
+        return real_edges_for_page(*args, **kwargs)
+
+    def acquire(root: Path, **kwargs):
+        acquisitions.append(root)
+        return real_snapshot(root, **kwargs)
+
+    monkeypatch.setattr(epistemic_graph, "_edges_for_page", edges_for_page)
+    monkeypatch.setattr(find_module, "recall_resolver_snapshot", acquire)
+
+    report = index.refresh_paths([source])
+
+    assert raced is True
+    assert acquisitions == [vault, vault]
+    assert report["indexed_files"] == 1
+    current = next(node for node in index.nodes(path=A) if node["kind"] == "file")
+    assert current["source_hash"] == epistemic_graph.vault_module.content_hash(
+        source.read_text(encoding="utf-8")
+    )
 
 
 def test_incremental_graph_update_matches_full_rebuild(tmp_path: Path) -> None:
