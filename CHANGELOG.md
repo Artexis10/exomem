@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.37.0](https://github.com/Artexis10/exomem/compare/v0.36.0...v0.37.0) (2026-08-04)
+
+
+### Features
+
+* **governance:** let a scope deny audiences it does not name ([#370](https://github.com/Artexis10/exomem/issues/370)) ([c66cf04](https://github.com/Artexis10/exomem/commit/c66cf0420a2e88f8628f8e7fb4ed203d512f1d7a))
+* **memory:** measure real note connectivity and grow the relation vocabulary ([#369](https://github.com/Artexis10/exomem/issues/369)) ([6107d7b](https://github.com/Artexis10/exomem/commit/6107d7bb9c74aeeb6c9b8d1f336c91f3d815a6bf))
+* **tui:** add exomem tui terminal interface ([#365](https://github.com/Artexis10/exomem/issues/365)) ([1151bfc](https://github.com/Artexis10/exomem/commit/1151bfc656d0ae2e072a2babadb639fb628cd9ab))
+
+
+### Bug Fixes
+
+* **governance:** close five fail-open and disclosure defects in the release plane ([#367](https://github.com/Artexis10/exomem/issues/367)) ([14ba1cc](https://github.com/Artexis10/exomem/commit/14ba1ccf418ebcf52224d7f70c4c6845fa3ff3b5))
+* **hosted:** restore semantic recall in cells and move durability to daily ([#372](https://github.com/Artexis10/exomem/issues/372)) ([8e384f8](https://github.com/Artexis10/exomem/commit/8e384f8a5410d4382b4ecf816a979db419f2a63c))
+
 ## [0.36.0](https://github.com/Artexis10/exomem/compare/v0.35.1...v0.36.0) (2026-07-31)
 
 
