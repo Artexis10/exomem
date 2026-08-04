@@ -177,7 +177,7 @@ The hosting provider for Project Cindergate is Petra Group.
 [ctx:3]
 ```
 
-**Your label:** <yes | no | unsure>
+**Your label:** yes
 
 ---
 
@@ -259,7 +259,7 @@ Reviews for Project Cinderspur stay on every Tuesday, unchanged.
 [ctx:3]
 ```
 
-**Your label:** <yes | no | unsure>
+**Your label:** yes
 
 ---
 
@@ -341,7 +341,7 @@ Critical findings for Project Sablegate this quarter: none found.
 [ctx:3]
 ```
 
-**Your label:** <yes | no | unsure>
+**Your label:** yes
 
 ---
 
@@ -377,7 +377,7 @@ Last month the load floor for Project Larkcrest stood at 57 points.
 [ctx:1]
 ```
 
-**Your label:** <yes | no | unsure>
+**Your label:** no
 
 ---
 
@@ -453,7 +453,7 @@ Weekly check: the flux index for Project Emberspur measured 217.
 [ctx:3]
 ```
 
-**Your label:** <yes | no | unsure>
+**Your label:** yes
 
 ---
 
@@ -541,7 +541,7 @@ Reviews for Project Quarryreach stay on every Tuesday, unchanged.
 [ctx:3]
 ```
 
-**Your label:** <yes | no | unsure>
+**Your label:** no
 
 ---
 
@@ -575,7 +575,7 @@ The Project Emberspur sample shipment weighed 4.4 kg on the dock scale.
 [ctx:1]
 ```
 
-**Your label:** <yes | no | unsure>
+**Your label:** yes
 
 ---
 
@@ -632,7 +632,7 @@ Salen Mareth recorded the Project Mossspur demo date as 2025-03-18.
 [ctx:2]
 ```
 
-**Your label:** <yes | no | unsure>
+**Your label:** yes
 
 ---
 
@@ -708,7 +708,7 @@ Annual compensation for Renric Ostuna is set at 129000 credits.
 [ctx:3]
 ```
 
-**Your label:** <yes | no | unsure>
+**Your label:** yes
 
 ---
 
@@ -786,7 +786,7 @@ Weekly check: the drift rate for Project Drifthollow measured 341.
 [ctx:3]
 ```
 
-**Your label:** <yes | no | unsure>
+**Your label:** no
 
 ---
 
