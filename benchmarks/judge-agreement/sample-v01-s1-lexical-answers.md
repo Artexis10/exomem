@@ -4,16 +4,16 @@ One line per item. Replace each placeholder with `yes`, `no` or
 `unsure`. Read the items in the sheet next to this file; the ids match.
 
 ```
-J001: <yes | no | unsure>
-J002: <yes | no | unsure>
-J003: <yes | no | unsure>
-J004: <yes | no | unsure>
-J005: <yes | no | unsure>
-J006: <yes | no | unsure>
-J007: <yes | no | unsure>
-J008: <yes | no | unsure>
-J009: <yes | no | unsure>
-J010: <yes | no | unsure>
+J001: yes
+J002: yes
+J003: yes
+J004: no
+J005: yes
+J006: no
+J007: yes
+J008: yes
+J009: yes
+J010: no
 J011: <yes | no | unsure>
 J012: <yes | no | unsure>
 J013: <yes | no | unsure>

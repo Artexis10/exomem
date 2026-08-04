@@ -86,10 +86,35 @@ The judge's verdict and every deterministic gate result are deliberately
 absent from this file. If you find you can infer them anyway, say so —
 that is itself a finding about the sheet.
 
-Candidate responses are shown in full and exactly as the judge receives
-them: source references appear as neutral `[ctx:N]` tokens and product
-names are replaced, so neither of you can tell which system answered.
-Retrieval-mode contenders return document text rather than prose.
+## About `[ctx:1]`, `[ctx:2]`, … — you can ignore them
+
+**Each `[ctx:N]` is one source document.** Same number = same document,
+different numbers = different documents. Numbering restarts on every item,
+so `[ctx:1]` in J001 has nothing to do with `[ctx:1]` in J002.
+
+A single response is often **several whole documents stacked together**,
+each ending with its own marker. For instance one response might be:
+
+```
+title: Project Sablereach budget amendment      →  [ctx:1]
+title: Project Sablereach steering decision     →  [ctx:2]
+title: Project Cindergate hosting decision      →  [ctx:3]
+```
+
+That is three separate notes returned at once — and the third is about a
+different project entirely. **That is normal and is not your problem.**
+Whether a system cites the right sources is scored separately, by an
+automatic check. Off-topic extra documents do not make an item a `no`.
+
+Your question stays the same: **is the expected answer stated anywhere in
+this text?** If yes, `yes` — even if it is buried in the third document
+under two irrelevant ones.
+
+(The markers are anonymised on purpose. The real references name the
+product that produced them, which would tell you which system you are
+grading.)
+
+## A note on length
 
 Most items have real content to read. A handful are empty or an explicit
 refusal to answer — those take a second, and they are deliberately kept

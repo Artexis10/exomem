@@ -214,7 +214,18 @@ _NO = {"no", "n", "false", "mismatch"}
 _UNSURE = {"unsure", "?", "skip", "maybe"}
 
 
-def render_answer_form(items: list[SampleItem]) -> str:
+def _render_label(existing: dict[str, bool | None] | None, item_id: str) -> str:
+    """An already-entered label, or the blank placeholder."""
+
+    if existing is None or item_id not in existing:
+        return _LABEL_PLACEHOLDER
+    value = existing[item_id]
+    return "unsure" if value is None else ("yes" if value else "no")
+
+
+def render_answer_form(
+    items: list[SampleItem], existing: dict[str, bool | None] | None = None
+) -> str:
     """One line per item, for labelling without scrolling the full sheet.
 
     Equivalent to filling the sheet in place; :func:`parse_labels` reads either.
@@ -228,7 +239,9 @@ def render_answer_form(items: list[SampleItem]) -> str:
         "",
         "```",
     ]
-    lines += [f"{item.item_id}: {_LABEL_PLACEHOLDER}" for item in items]
+    lines += [
+        f"{item.item_id}: {_render_label(existing, item.item_id)}" for item in items
+    ]
     lines += ["```", ""]
     return "\n".join(lines)
 
@@ -269,8 +282,15 @@ def parse_labels(text: str) -> dict[str, bool | None]:
     return labels
 
 
-def render_sheet(items: list[SampleItem]) -> str:
-    """Markdown labelling sheet. Contains no verdict a labeller could anchor on."""
+def render_sheet(
+    items: list[SampleItem], existing: dict[str, bool | None] | None = None
+) -> str:
+    """Markdown labelling sheet. Contains no verdict a labeller could anchor on.
+
+    ``existing`` re-applies labels already entered by hand, so the sheet can be
+    improved and regenerated without destroying work in progress. Hand-entered
+    labels are the one input here that cannot be recomputed.
+    """
 
     lines = [
         "# Judge–human agreement — blind labelling sheet",
@@ -361,10 +381,35 @@ def render_sheet(items: list[SampleItem]) -> str:
         "absent from this file. If you find you can infer them anyway, say so —",
         "that is itself a finding about the sheet.",
         "",
-        "Candidate responses are shown in full and exactly as the judge receives",
-        "them: source references appear as neutral `[ctx:N]` tokens and product",
-        "names are replaced, so neither of you can tell which system answered.",
-        "Retrieval-mode contenders return document text rather than prose.",
+        "## About `[ctx:1]`, `[ctx:2]`, … — you can ignore them",
+        "",
+        "**Each `[ctx:N]` is one source document.** Same number = same document,",
+        "different numbers = different documents. Numbering restarts on every item,",
+        "so `[ctx:1]` in J001 has nothing to do with `[ctx:1]` in J002.",
+        "",
+        "A single response is often **several whole documents stacked together**,",
+        "each ending with its own marker. For instance one response might be:",
+        "",
+        "```",
+        "title: Project Sablereach budget amendment      →  [ctx:1]",
+        "title: Project Sablereach steering decision     →  [ctx:2]",
+        "title: Project Cindergate hosting decision      →  [ctx:3]",
+        "```",
+        "",
+        "That is three separate notes returned at once — and the third is about a",
+        "different project entirely. **That is normal and is not your problem.**",
+        "Whether a system cites the right sources is scored separately, by an",
+        "automatic check. Off-topic extra documents do not make an item a `no`.",
+        "",
+        "Your question stays the same: **is the expected answer stated anywhere in",
+        "this text?** If yes, `yes` — even if it is buried in the third document",
+        "under two irrelevant ones.",
+        "",
+        "(The markers are anonymised on purpose. The real references name the",
+        "product that produced them, which would tell you which system you are",
+        "grading.)",
+        "",
+        "## A note on length",
         "",
         "Most items have real content to read. A handful are empty or an explicit",
         "refusal to answer — those take a second, and they are deliberately kept",
@@ -387,7 +432,7 @@ def render_sheet(items: list[SampleItem]) -> str:
             item.candidate,
             "```",
             "",
-            f"**Your label:** {_LABEL_PLACEHOLDER}",
+            f"**Your label:** {_render_label(existing, item.item_id)}",
             "",
             "---",
             "",

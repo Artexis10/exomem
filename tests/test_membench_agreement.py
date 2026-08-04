@@ -285,6 +285,30 @@ def test_every_item_carries_question_expected_and_candidate(
 # -- kappa -----------------------------------------------------------------
 
 
+def test_regenerating_preserves_hand_entered_labels(items: list[SampleItem]) -> None:
+    """Hand-entered labels are the one input here that cannot be recomputed.
+
+    The sheet gets improved while a labelling pass is in progress, so rendering
+    must be able to carry existing answers forward. Losing them costs a human
+    another hour; nothing else in this pipeline has that property.
+    """
+
+    entered: dict[str, bool | None] = {
+        items[0].item_id: True,
+        items[1].item_id: False,
+        items[2].item_id: None,
+    }
+    sheet = render_sheet(items, entered)
+    form = render_answer_form(items, entered)
+
+    assert parse_labels(sheet) == entered
+    assert parse_labels(form) == entered
+    # Unentered items stay blank rather than defaulting to anything.
+    remaining = {i.item_id for i in items} - set(entered)
+    assert sheet.count("**Your label:** <yes | no | unsure>") == len(remaining) + 1
+    assert all(f"{item_id}: <yes | no | unsure>" in form for item_id in remaining)
+
+
 def test_labels_read_back_from_a_filled_sheet(items: list[SampleItem]) -> None:
     """The sheet must be machine-readable after a human edits it in place."""
 
