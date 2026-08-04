@@ -11,6 +11,8 @@ from membench.agreement import (
     _outcome,
     build_sample,
     cohen_kappa,
+    parse_labels,
+    render_answer_form,
     render_sheet,
 )
 from membench.judge.backends import make_judge_item
@@ -143,9 +145,13 @@ def test_rendered_sheet_carries_every_item_and_a_blank_to_fill(
     for item in items:
         assert f"## {item.item_id}" in sheet, f"{item.item_id} missing from the sheet"
         assert item.question in sheet
-    assert sheet.count("**Your label:**") == len(items), (
+    # The header carries a format demo and two pre-filled worked examples, so
+    # count only within the item section — everything from the first item on.
+    body = sheet[sheet.index(f"## {items[0].item_id}") :]
+    assert body.count("**Your label:** <yes | no | unsure>") == len(items), (
         "every item needs exactly one blank, or labels cannot be matched back"
     )
+    assert body.count("**Your label:**") == len(items), "an item label is pre-filled"
     # Query ids stay out of the prose a labeller reads; they live in the
     # separate keys file so labels can be joined without anchoring the labeller.
     for item in items:
@@ -171,6 +177,64 @@ def test_every_item_carries_question_expected_and_candidate(
 
 
 # -- kappa -----------------------------------------------------------------
+
+
+def test_labels_read_back_from_a_filled_sheet(items: list[SampleItem]) -> None:
+    """The sheet must be machine-readable after a human edits it in place."""
+
+    sheet = render_sheet(items)
+    filled = []
+    for line in sheet.splitlines():
+        if line.startswith("**Your label:** <"):
+            filled.append("**Your label:** yes")
+        else:
+            filled.append(line)
+    labels = parse_labels("\n".join(filled))
+    assert set(labels) == {i.item_id for i in items}
+    assert all(v is True for v in labels.values())
+
+
+def test_labels_read_back_from_the_answer_form(items: list[SampleItem]) -> None:
+    form = render_answer_form(items).replace(
+        "<yes | no | unsure>", "no"
+    )
+    labels = parse_labels(form)
+    assert set(labels) == {i.item_id for i in items}
+    assert all(v is False for v in labels.values())
+
+
+def test_worked_examples_are_not_parsed_as_answers(items: list[SampleItem]) -> None:
+    """The header's two examples carry real labels; they must not be scored.
+
+    They sit above the first `## J###` heading, so no item id is in scope —
+    if that ever changed, the sample would gain two phantom rows.
+    """
+
+    sheet = render_sheet(items)
+    assert "**Your label:** yes" in sheet, "example A should model a filled answer"
+    assert "**Your label:** no" in sheet, "example B should model a filled answer"
+    assert parse_labels(sheet) == {}, "unfilled sheet must yield no labels"
+
+
+def test_unfilled_items_are_omitted_not_guessed(items: list[SampleItem]) -> None:
+    """A half-finished sheet must not silently become a half-sized sample."""
+
+    form = render_answer_form(items)
+    partial = form.replace(f"{items[0].item_id}: <yes | no | unsure>", f"{items[0].item_id}: yes")
+    labels = parse_labels(partial)
+    assert labels == {items[0].item_id: True}
+
+
+def test_labels_tolerate_realistic_human_variation() -> None:
+    assert parse_labels("J001: YES") == {"J001": True}
+    assert parse_labels("J002:  n ") == {"J002": False}
+    assert parse_labels("J003: Unsure") == {"J003": None}
+    assert parse_labels("**J004**: `yes`") == {"J004": True}
+
+
+def test_unreadable_label_is_refused_not_guessed() -> None:
+    with pytest.raises(ValueError, match="cannot read label"):
+        parse_labels("J001: probably?")
 
 
 def test_kappa_is_zero_for_chance_agreement() -> None:

@@ -31,6 +31,7 @@ divergence there would show up as disagreement and be misread as judge error.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -148,38 +149,176 @@ def build_sample(run_dir: Path, corpus_dir: Path, *, size: int = 50) -> list[Sam
     return items
 
 
+_LABEL_PLACEHOLDER = "<yes | no | unsure>"
+# Tolerates `**Your label:** yes` (colon inside the emphasis), `J001: yes`,
+# and `**J004**: `yes``. Humans produce all three.
+_LABEL_LINE = re.compile(
+    r"^\s*\*{0,2}(?:Your label|(J\d{3}))\*{0,2}\s*[:.]\s*\*{0,2}\s*(.*?)\s*$", re.I
+)
+_ITEM_HEADING = re.compile(r"^##\s+(J\d{3})\b")
+_YES = {"yes", "y", "true", "match"}
+_NO = {"no", "n", "false", "mismatch"}
+_UNSURE = {"unsure", "?", "skip", "maybe"}
+
+
+def render_answer_form(items: list[SampleItem]) -> str:
+    """One line per item, for labelling without scrolling the full sheet.
+
+    Equivalent to filling the sheet in place; :func:`parse_labels` reads either.
+    """
+
+    lines = [
+        "# Judge–human agreement — answer form",
+        "",
+        "One line per item. Replace each placeholder with `yes`, `no` or",
+        "`unsure`. Read the items in the sheet next to this file; the ids match.",
+        "",
+        "```",
+    ]
+    lines += [f"{item.item_id}: {_LABEL_PLACEHOLDER}" for item in items]
+    lines += ["```", ""]
+    return "\n".join(lines)
+
+
+def parse_labels(text: str) -> dict[str, bool | None]:
+    """Read labels from either the filled sheet or the filled answer form.
+
+    Returns ``{item_id: True | False | None}``; ``None`` is an explicit
+    ``unsure``. Unfilled placeholders are omitted entirely rather than guessed —
+    a half-finished sheet must not silently become a half-sized sample.
+    """
+
+    labels: dict[str, bool | None] = {}
+    current: str | None = None
+    for line in text.splitlines():
+        heading = _ITEM_HEADING.match(line)
+        if heading:
+            current = heading.group(1)
+            continue
+        match = _LABEL_LINE.match(line)
+        if not match:
+            continue
+        item_id, raw = match.group(1), match.group(2).strip()
+        target = item_id or current
+        if target is None or not raw or raw == _LABEL_PLACEHOLDER:
+            continue
+        word = raw.strip("`*_ ").lower()
+        if word in _YES:
+            labels[target] = True
+        elif word in _NO:
+            labels[target] = False
+        elif word in _UNSURE:
+            labels[target] = None
+        else:
+            raise ValueError(
+                f"{target}: cannot read label {raw!r} — use yes, no, or unsure"
+            )
+    return labels
+
+
 def render_sheet(items: list[SampleItem]) -> str:
     """Markdown labelling sheet. Contains no verdict a labeller could anchor on."""
 
     lines = [
         "# Judge–human agreement — blind labelling sheet",
         "",
-        "For each item, answer one question and nothing else:",
+        f"{len(items)} items. For each one, answer exactly this question:",
         "",
         "> **Does the candidate response convey the expected answer?**",
         "",
-        "Write `yes` or `no` in the `Your label` line. Use `unsure` only when the",
-        "item is genuinely ambiguous — `unsure` rows are excluded from the",
-        "agreement statistic and reported separately as a count, so they cost",
-        "nothing but they do not help either.",
+        "## How to fill this in",
         "",
-        "Judge answer, `semantic_match`, and every deterministic gate verdict are",
-        "deliberately absent. If you find yourself able to infer them, say so —",
+        "Every item ends with a line that looks like this:",
+        "",
+        "```",
+        "**Your label:** <yes | no | unsure>",
+        "```",
+        "",
+        "Replace the whole `<yes | no | unsure>` placeholder with one word.",
+        "Nothing else on the line, no quotes, no punctuation. Leave the rest of",
+        "the item untouched. Capitalisation does not matter.",
+        "",
+        "Use `unsure` only when the item is genuinely ambiguous. Unsure rows are",
+        "excluded from the agreement statistic and reported separately as a",
+        "count — they cost nothing, but they do not help either.",
+        "",
+        "If you would rather not scroll this file, there is a one-line-per-item",
+        "form next to it (`…-answers.md`). Fill in either; both are accepted.",
+        "",
+        "## Two worked examples",
+        "",
+        "These two are **examples only** — they are not in the sheet and are not",
+        "scored. Real items start at J001.",
+        "",
+        "### Example A → `yes`",
+        "",
+        "**Question:** What is the current review cadence for Project Sablereach?",
+        "",
+        "**Expected answer:** every Tuesday",
+        "",
+        "**Candidate response:**",
+        "",
+        "```",
+        "# Project Sablereach budget amendment",
+        "",
+        "Only the budget clause of the Project Sablereach steering decision changes.",
+        "The pilot budget for Project Sablereach is now 51000 credits.",
+        "Reviews for Project Sablereach stay on every Tuesday, unchanged.",
+        "",
+        "[ctx:1]",
+        "```",
+        "",
+        "**Your label:** yes",
+        "",
+        "Why: the text states the cadence, *every Tuesday*, even though it is a",
+        "raw note about the budget and never phrases it as an answer. Content is",
+        "what counts, not presentation.",
+        "",
+        "### Example B → `no`",
+        "",
+        "**Question:** What is the current delivery deadline for Project Quarrypoint?",
+        "",
+        "**Expected answer:** 2025-03-28",
+        "",
+        "**Candidate response:**",
+        "",
+        "```",
+        "# Project Quarrypoint kickoff brief",
+        "",
+        "Arden Labs approved the kickoff of Project Quarrypoint.",
+        "The delivery deadline for Project Quarrypoint is 2025-03-14.",
+        "",
+        "[ctx:1]",
+        "```",
+        "",
+        "**Your label:** no",
+        "",
+        "Why: it looks authoritative and is clearly about the right project, but",
+        "the date is the superseded one. A confident wrong answer is still `no`.",
+        "",
+        "## What to resist",
+        "",
+        "- Do **not** reward a fluent, well-structured response that never states",
+        "  the fact.",
+        "- Do **not** punish an ugly document dump that does state it.",
+        "- Do **not** try to guess what the automated judge would say. The point",
+        "  is to find out where it disagrees with you.",
+        "",
+        "The judge's verdict and every deterministic gate result are deliberately",
+        "absent from this file. If you find you can infer them anyway, say so —",
         "that is itself a finding about the sheet.",
         "",
         "Candidate responses are shown in full and exactly as the judge receives",
         "them: source references appear as neutral `[ctx:N]` tokens and product",
         "names are replaced, so neither of you can tell which system answered.",
-        "Retrieval-mode contenders return document text rather than prose — judge",
-        "whether the expected answer is actually conveyed by what is shown, not",
-        "whether it is well written.",
+        "Retrieval-mode contenders return document text rather than prose.",
         "",
         "---",
         "",
     ]
-    for item in items:
+    for position, item in enumerate(items, start=1):
         lines += [
-            f"## {item.item_id}",
+            f"## {item.item_id}  ({position} of {len(items)})",
             "",
             f"**Question:** {item.question}",
             "",
@@ -191,7 +330,7 @@ def render_sheet(items: list[SampleItem]) -> str:
             item.candidate,
             "```",
             "",
-            "**Your label:** ",
+            f"**Your label:** {_LABEL_PLACEHOLDER}",
             "",
             "---",
             "",

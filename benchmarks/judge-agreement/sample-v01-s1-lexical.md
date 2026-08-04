@@ -1,28 +1,99 @@
 # Judge–human agreement — blind labelling sheet
 
-For each item, answer one question and nothing else:
+50 items. For each one, answer exactly this question:
 
 > **Does the candidate response convey the expected answer?**
 
-Write `yes` or `no` in the `Your label` line. Use `unsure` only when the
-item is genuinely ambiguous — `unsure` rows are excluded from the
-agreement statistic and reported separately as a count, so they cost
-nothing but they do not help either.
+## How to fill this in
 
-Judge answer, `semantic_match`, and every deterministic gate verdict are
-deliberately absent. If you find yourself able to infer them, say so —
+Every item ends with a line that looks like this:
+
+```
+**Your label:** <yes | no | unsure>
+```
+
+Replace the whole `<yes | no | unsure>` placeholder with one word.
+Nothing else on the line, no quotes, no punctuation. Leave the rest of
+the item untouched. Capitalisation does not matter.
+
+Use `unsure` only when the item is genuinely ambiguous. Unsure rows are
+excluded from the agreement statistic and reported separately as a
+count — they cost nothing, but they do not help either.
+
+If you would rather not scroll this file, there is a one-line-per-item
+form next to it (`…-answers.md`). Fill in either; both are accepted.
+
+## Two worked examples
+
+These two are **examples only** — they are not in the sheet and are not
+scored. Real items start at J001.
+
+### Example A → `yes`
+
+**Question:** What is the current review cadence for Project Sablereach?
+
+**Expected answer:** every Tuesday
+
+**Candidate response:**
+
+```
+# Project Sablereach budget amendment
+
+Only the budget clause of the Project Sablereach steering decision changes.
+The pilot budget for Project Sablereach is now 51000 credits.
+Reviews for Project Sablereach stay on every Tuesday, unchanged.
+
+[ctx:1]
+```
+
+**Your label:** yes
+
+Why: the text states the cadence, *every Tuesday*, even though it is a
+raw note about the budget and never phrases it as an answer. Content is
+what counts, not presentation.
+
+### Example B → `no`
+
+**Question:** What is the current delivery deadline for Project Quarrypoint?
+
+**Expected answer:** 2025-03-28
+
+**Candidate response:**
+
+```
+# Project Quarrypoint kickoff brief
+
+Arden Labs approved the kickoff of Project Quarrypoint.
+The delivery deadline for Project Quarrypoint is 2025-03-14.
+
+[ctx:1]
+```
+
+**Your label:** no
+
+Why: it looks authoritative and is clearly about the right project, but
+the date is the superseded one. A confident wrong answer is still `no`.
+
+## What to resist
+
+- Do **not** reward a fluent, well-structured response that never states
+  the fact.
+- Do **not** punish an ugly document dump that does state it.
+- Do **not** try to guess what the automated judge would say. The point
+  is to find out where it disagrees with you.
+
+The judge's verdict and every deterministic gate result are deliberately
+absent from this file. If you find you can infer them anyway, say so —
 that is itself a finding about the sheet.
 
 Candidate responses are shown in full and exactly as the judge receives
 them: source references appear as neutral `[ctx:N]` tokens and product
 names are replaced, so neither of you can tell which system answered.
-Retrieval-mode contenders return document text rather than prose — judge
-whether the expected answer is actually conveyed by what is shown, not
-whether it is well written.
+Retrieval-mode contenders return document text rather than prose.
 
 ---
 
-## J001
+## J001  (1 of 50)
 
 **Question:** What is the current review cadence for Project Sablereach?
 
@@ -102,11 +173,11 @@ The hosting provider for Project Cindergate is Petra Group.
 [ctx:3]
 ```
 
-**Your label:** 
+**Your label:** <yes | no | unsure>
 
 ---
 
-## J002
+## J002  (2 of 50)
 
 **Question:** What is the confirmed standing of the Project Hollowbank pilot?
 
@@ -184,11 +255,11 @@ Reviews for Project Cinderspur stay on every Tuesday, unchanged.
 [ctx:3]
 ```
 
-**Your label:** 
+**Your label:** <yes | no | unsure>
 
 ---
 
-## J003
+## J003  (3 of 50)
 
 **Question:** Thanks, that looks good - go ahead.
 
@@ -200,11 +271,11 @@ Reviews for Project Cinderspur stay on every Tuesday, unchanged.
 (empty response)
 ```
 
-**Your label:** 
+**Your label:** <yes | no | unsure>
 
 ---
 
-## J004
+## J004  (4 of 50)
 
 **Question:** On what date did Project Cinderfall actually complete its launch?
 
@@ -216,11 +287,11 @@ Reviews for Project Cinderspur stay on every Tuesday, unchanged.
 (the system declined to answer)
 ```
 
-**Your label:** 
+**Your label:** <yes | no | unsure>
 
 ---
 
-## J005
+## J005  (5 of 50)
 
 **Question:** What does the wall chart show for the current load floor of Project Larkcrest?
 
@@ -252,11 +323,11 @@ Last month the load floor for Project Larkcrest stood at 57 points.
 [ctx:1]
 ```
 
-**Your label:** 
+**Your label:** <yes | no | unsure>
 
 ---
 
-## J006
+## J006  (6 of 50)
 
 **Question:** Thanks, that looks good - go ahead.
 
@@ -268,11 +339,11 @@ Last month the load floor for Project Larkcrest stood at 57 points.
 (empty response)
 ```
 
-**Your label:** 
+**Your label:** <yes | no | unsure>
 
 ---
 
-## J007
+## J007  (7 of 50)
 
 **Question:** What fine amount did the Project Sablegate quarterly audit assess?
 
@@ -284,11 +355,11 @@ Last month the load floor for Project Larkcrest stood at 57 points.
 (the system declined to answer)
 ```
 
-**Your label:** 
+**Your label:** <yes | no | unsure>
 
 ---
 
-## J008
+## J008  (8 of 50)
 
 **Question:** As of week 3, what initiative had Lumo Institute announced?
 
@@ -300,11 +371,11 @@ Last month the load floor for Project Larkcrest stood at 57 points.
 (the system declined to answer)
 ```
 
-**Your label:** 
+**Your label:** <yes | no | unsure>
 
 ---
 
-## J009
+## J009  (9 of 50)
 
 **Question:** Thanks, that looks good - go ahead.
 
@@ -316,11 +387,11 @@ Last month the load floor for Project Larkcrest stood at 57 points.
 (empty response)
 ```
 
-**Your label:** 
+**Your label:** <yes | no | unsure>
 
 ---
 
-## J010
+## J010  (10 of 50)
 
 **Question:** Were any critical findings reported in the Project Mossfield quarterly audit?
 
@@ -398,11 +469,11 @@ Critical findings for Project Sablegate this quarter: none found.
 [ctx:3]
 ```
 
-**Your label:** 
+**Your label:** <yes | no | unsure>
 
 ---
 
-## J011
+## J011  (11 of 50)
 
 **Question:** What was the pilot budget for Project Cinderspur as of week 3, before the amendment?
 
@@ -486,11 +557,11 @@ Reviews for Project Quarryreach stay on every Tuesday, unchanged.
 [ctx:3]
 ```
 
-**Your label:** 
+**Your label:** <yes | no | unsure>
 
 ---
 
-## J012
+## J012  (12 of 50)
 
 **Question:** Thanks, that looks good - go ahead.
 
@@ -502,11 +573,11 @@ Reviews for Project Quarryreach stay on every Tuesday, unchanged.
 (empty response)
 ```
 
-**Your label:** 
+**Your label:** <yes | no | unsure>
 
 ---
 
-## J013
+## J013  (13 of 50)
 
 **Question:** What was the weekly flux index reading for Project Emberspur as of week 5?
 
@@ -578,11 +649,11 @@ Weekly check: the flux index for Project Emberspur measured 217.
 [ctx:3]
 ```
 
-**Your label:** 
+**Your label:** <yes | no | unsure>
 
 ---
 
-## J014
+## J014  (14 of 50)
 
 **Question:** When is the Project Mossspur demo scheduled?
 
@@ -635,11 +706,11 @@ Salen Mareth recorded the Project Mossspur demo date as 2025-03-18.
 [ctx:2]
 ```
 
-**Your label:** 
+**Your label:** <yes | no | unsure>
 
 ---
 
-## J015
+## J015  (15 of 50)
 
 **Question:** How many grams did the Project Emberspur sample shipment weigh?
 
@@ -669,11 +740,11 @@ The Project Emberspur sample shipment weighed 4.4 kg on the dock scale.
 [ctx:1]
 ```
 
-**Your label:** 
+**Your label:** <yes | no | unsure>
 
 ---
 
-## J016
+## J016  (16 of 50)
 
 **Question:** How many advisories stand against Ulmport Depot from its inspection?
 
@@ -685,11 +756,11 @@ The Project Emberspur sample shipment weighed 4.4 kg on the dock scale.
 (the system declined to answer)
 ```
 
-**Your label:** 
+**Your label:** <yes | no | unsure>
 
 ---
 
-## J017
+## J017  (17 of 50)
 
 **Question:** What annual compensation is set for Nela Velwick?
 
@@ -761,11 +832,11 @@ Annual compensation for Renric Ostuna is set at 129000 credits.
 [ctx:3]
 ```
 
-**Your label:** 
+**Your label:** <yes | no | unsure>
 
 ---
 
-## J018
+## J018  (18 of 50)
 
 **Question:** What is the latest weekly drift rate reading for Project Drifthollow?
 
@@ -839,11 +910,11 @@ Weekly check: the drift rate for Project Drifthollow measured 341.
 [ctx:3]
 ```
 
-**Your label:** 
+**Your label:** <yes | no | unsure>
 
 ---
 
-## J019
+## J019  (19 of 50)
 
 **Question:** What partner discount does Norva Dynamics currently offer?
 
@@ -875,11 +946,11 @@ The offer stands until 2025-03-03 and lapses after that date.
 [ctx:1]
 ```
 
-**Your label:** 
+**Your label:** <yes | no | unsure>
 
 ---
 
-## J020
+## J020  (20 of 50)
 
 **Question:** Now that the embargo lapsed, what did the Vanta Partners board decide?
 
@@ -891,11 +962,11 @@ The offer stands until 2025-03-03 and lapses after that date.
 (the system declined to answer)
 ```
 
-**Your label:** 
+**Your label:** <yes | no | unsure>
 
 ---
 
-## J021
+## J021  (21 of 50)
 
 **Question:** How many grams did the Project Larkcrest sample shipment weigh?
 
@@ -925,11 +996,11 @@ The Project Larkcrest sample shipment weighed 4.1 kg on the dock scale.
 [ctx:1]
 ```
 
-**Your label:** 
+**Your label:** <yes | no | unsure>
 
 ---
 
-## J022
+## J022  (22 of 50)
 
 **Question:** What is the latest weekly churn window reading for Project Larkcrest?
 
@@ -1001,11 +1072,11 @@ Weekly check: the churn window for Project Larkcrest measured 273.
 [ctx:3]
 ```
 
-**Your label:** 
+**Your label:** <yes | no | unsure>
 
 ---
 
-## J023
+## J023  (23 of 50)
 
 **Question:** How many grams did the Project Emberfall sample shipment weigh?
 
@@ -1035,11 +1106,11 @@ The Project Emberfall sample shipment weighed 4.3 kg on the dock scale.
 [ctx:1]
 ```
 
-**Your label:** 
+**Your label:** <yes | no | unsure>
 
 ---
 
-## J024
+## J024  (24 of 50)
 
 **Question:** What was the pilot budget for Project Quarryreach as of week 3, before the amendment?
 
@@ -1123,11 +1194,11 @@ Reviews for Project Mossrun stay on every Tuesday, unchanged.
 [ctx:3]
 ```
 
-**Your label:** 
+**Your label:** <yes | no | unsure>
 
 ---
 
-## J025
+## J025  (25 of 50)
 
 **Question:** How many services did the Project Sablefall quarterly audit cover?
 
@@ -1205,11 +1276,11 @@ Critical findings for Project Sablegate this quarter: none found.
 [ctx:3]
 ```
 
-**Your label:** 
+**Your label:** <yes | no | unsure>
 
 ---
 
-## J026
+## J026  (26 of 50)
 
 **Question:** What did the yield floor for Project Drifthollow read as of week 4?
 
@@ -1241,11 +1312,11 @@ The yield floor for Project Drifthollow now reads 467.
 [ctx:1]
 ```
 
-**Your label:** 
+**Your label:** <yes | no | unsure>
 
 ---
 
-## J027
+## J027  (27 of 50)
 
 **Question:** Given everything now known, what was the valid bench readout for Project Larkpoint as of week 2?
 
@@ -1257,11 +1328,11 @@ The yield floor for Project Drifthollow now reads 467.
 (the system declined to answer)
 ```
 
-**Your label:** 
+**Your label:** <yes | no | unsure>
 
 ---
 
-## J028
+## J028  (28 of 50)
 
 **Question:** Now that the embargo lapsed, what did the Arden Institute board decide?
 
@@ -1273,11 +1344,11 @@ The yield floor for Project Drifthollow now reads 467.
 (the system declined to answer)
 ```
 
-**Your label:** 
+**Your label:** <yes | no | unsure>
 
 ---
 
-## J029
+## J029  (29 of 50)
 
 **Question:** Which vendor performed the security audit for Project Quarrypoint?
 
@@ -1289,11 +1360,11 @@ The yield floor for Project Drifthollow now reads 467.
 (the system declined to answer)
 ```
 
-**Your label:** 
+**Your label:** <yes | no | unsure>
 
 ---
 
-## J030
+## J030  (30 of 50)
 
 **Question:** How did the hosting decision for Project Larkrun change over time, and why?
 
@@ -1305,11 +1376,11 @@ The yield floor for Project Drifthollow now reads 467.
 (the system declined to answer)
 ```
 
-**Your label:** 
+**Your label:** <yes | no | unsure>
 
 ---
 
-## J031
+## J031  (31 of 50)
 
 **Question:** What partner discount does Norva Dynamics offer now that week 8 has passed?
 
@@ -1321,11 +1392,11 @@ The yield floor for Project Drifthollow now reads 467.
 (the system declined to answer)
 ```
 
-**Your label:** 
+**Your label:** <yes | no | unsure>
 
 ---
 
-## J032
+## J032  (32 of 50)
 
 **Question:** As of week 2, how many advisories had the Melmoor Depot inspection logged?
 
@@ -1359,11 +1430,11 @@ The inspection at Melmoor Depot logged 4 advisories.
 [ctx:1]
 ```
 
-**Your label:** 
+**Your label:** <yes | no | unsure>
 
 ---
 
-## J033
+## J033  (33 of 50)
 
 **Question:** As of week 2, how many advisories did the Melmoor Depot inspection log?
 
@@ -1397,11 +1468,11 @@ The inspection at Melmoor Depot logged 4 advisories.
 [ctx:1]
 ```
 
-**Your label:** 
+**Your label:** <yes | no | unsure>
 
 ---
 
-## J034
+## J034  (34 of 50)
 
 **Question:** Is Project Hollowgate changing its supplier setup?
 
@@ -1477,11 +1548,11 @@ The single-supplier story is wrong.
 [ctx:3]
 ```
 
-**Your label:** 
+**Your label:** <yes | no | unsure>
 
 ---
 
-## J035
+## J035  (35 of 50)
 
 **Question:** As of week 2, how many advisories did the Ulmport Depot inspection log?
 
@@ -1515,11 +1586,11 @@ The inspection at Ulmport Depot logged 3 advisories.
 [ctx:1]
 ```
 
-**Your label:** 
+**Your label:** <yes | no | unsure>
 
 ---
 
-## J036
+## J036  (36 of 50)
 
 **Question:** What initiative had Lumo Partners announced?
 
@@ -1531,11 +1602,11 @@ The inspection at Ulmport Depot logged 3 advisories.
 (the system declined to answer)
 ```
 
-**Your label:** 
+**Your label:** <yes | no | unsure>
 
 ---
 
-## J037
+## J037  (37 of 50)
 
 **Question:** When was the Project Valereach demo scheduled per the first planning note?
 
@@ -1588,11 +1659,11 @@ Kaivi Quinuna recorded the Project Valereach demo date as 2025-03-17.
 [ctx:2]
 ```
 
-**Your label:** 
+**Your label:** <yes | no | unsure>
 
 ---
 
-## J038
+## J038  (38 of 50)
 
 **Question:** As of week 2, how many advisories had the Falford Depot inspection logged?
 
@@ -1626,11 +1697,11 @@ The inspection at Falford Depot logged 8 advisories.
 [ctx:1]
 ```
 
-**Your label:** 
+**Your label:** <yes | no | unsure>
 
 ---
 
-## J039
+## J039  (39 of 50)
 
 **Question:** What partner discount did Petra Labs offer as of week 4?
 
@@ -1662,11 +1733,11 @@ The offer stands until 2025-03-03 and lapses after that date.
 [ctx:1]
 ```
 
-**Your label:** 
+**Your label:** <yes | no | unsure>
 
 ---
 
-## J040
+## J040  (40 of 50)
 
 **Question:** What is the current delivery deadline for Project Beaconcrest?
 
@@ -1744,11 +1815,11 @@ The delivery deadline for Project Beaconfield is 2025-03-13.
 [ctx:3]
 ```
 
-**Your label:** 
+**Your label:** <yes | no | unsure>
 
 ---
 
-## J041
+## J041  (41 of 50)
 
 **Question:** What annual compensation is set for Valen Osteth?
 
@@ -1820,11 +1891,11 @@ Annual compensation for Nela Velwick is set at 146000 credits.
 [ctx:3]
 ```
 
-**Your label:** 
+**Your label:** <yes | no | unsure>
 
 ---
 
-## J042
+## J042  (42 of 50)
 
 **Question:** Is Project Cinderbank changing its supplier setup?
 
@@ -1900,11 +1971,11 @@ The single-supplier story is wrong.
 [ctx:3]
 ```
 
-**Your label:** 
+**Your label:** <yes | no | unsure>
 
 ---
 
-## J043
+## J043  (43 of 50)
 
 **Question:** What initiative does Lumo Institute currently have announced?
 
@@ -1916,11 +1987,11 @@ The single-supplier story is wrong.
 (the system declined to answer)
 ```
 
-**Your label:** 
+**Your label:** <yes | no | unsure>
 
 ---
 
-## J044
+## J044  (44 of 50)
 
 **Question:** Is Project Cinderbank moving to a single supplier?
 
@@ -1994,11 +2065,11 @@ Chatter suggests Project Hollowbank is switching to a single supplier next quart
 [ctx:3]
 ```
 
-**Your label:** 
+**Your label:** <yes | no | unsure>
 
 ---
 
-## J045
+## J045  (45 of 50)
 
 **Question:** How many services did the Project Mossfield quarterly audit cover?
 
@@ -2076,11 +2147,11 @@ Critical findings for Project Sablegate this quarter: none found.
 [ctx:3]
 ```
 
-**Your label:** 
+**Your label:** <yes | no | unsure>
 
 ---
 
-## J046
+## J046  (46 of 50)
 
 **Question:** What did the Vanta Dynamics board decide in closed session?
 
@@ -2131,11 +2202,11 @@ In closed session, the Vanta Partners board approved the granary initiative.
 [ctx:2]
 ```
 
-**Your label:** 
+**Your label:** <yes | no | unsure>
 
 ---
 
-## J047
+## J047  (47 of 50)
 
 **Question:** How many points did the flux rate for Project Cinderrun measure in the field report?
 
@@ -2207,11 +2278,11 @@ Field check: the uptake score for Project Beaconfield measured 56.3 points.
 [ctx:3]
 ```
 
-**Your label:** 
+**Your label:** <yes | no | unsure>
 
 ---
 
-## J048
+## J048  (48 of 50)
 
 **Question:** How many advisories stand against Vormont Depot from its inspection?
 
@@ -2223,11 +2294,11 @@ Field check: the uptake score for Project Beaconfield measured 56.3 points.
 (the system declined to answer)
 ```
 
-**Your label:** 
+**Your label:** <yes | no | unsure>
 
 ---
 
-## J049
+## J049  (49 of 50)
 
 **Question:** How many services did the Project Valefield quarterly audit cover?
 
@@ -2305,11 +2376,11 @@ Critical findings for Project Sablefall this quarter: none found.
 [ctx:3]
 ```
 
-**Your label:** 
+**Your label:** <yes | no | unsure>
 
 ---
 
-## J050
+## J050  (50 of 50)
 
 **Question:** Which technician signed the Meridipoint lab log?
 
@@ -2339,6 +2410,6 @@ The Meridipoint instrument recorded 732 units in its first pass.
 [ctx:1]
 ```
 
-**Your label:** 
+**Your label:** <yes | no | unsure>
 
 ---
