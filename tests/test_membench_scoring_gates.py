@@ -3,21 +3,30 @@
 from __future__ import annotations
 
 from datetime import date
+from pathlib import Path
 
+import pytest
+from membench import oracle
+from membench.generate import generate_corpus
 from membench.schema import (
+    ArtifactKind,
     Ask,
     Assertion,
+    AuthorityTier,
     ClaimRecord,
     ClaimStatus,
+    EntityRecord,
     ExpectedAnswer,
     ExpectedRecord,
     QueryRecord,
+    SourceRecord,
     SpanCause,
     SpanCauseKind,
     Stance,
     StatusSpan,
     TypedValue,
     UncertaintyExpectation,
+    load_jsonl,
 )
 from membench.scoring import GateStatus, ScoringContext, evaluate, summarize_dimensions
 from membench.scoring.answer_contract import AnswerRecord, extract_structure
@@ -58,6 +67,14 @@ def _claim(claim_id: str, value: str) -> ClaimRecord:
 CTX = ScoringContext(
     claims_by_id={NEW: _claim(NEW, "2025-03-14"), OLD: _claim(OLD, "2025-02-01")},
     sources_by_id={},
+    entities_by_id={
+        "ENT-00000001": EntityRecord(
+            entity_id="ENT-00000001",
+            kind="project",
+            domain="delivery",
+            canonical_name="Baseline",
+        )
+    },
 )
 
 
@@ -87,6 +104,79 @@ def test_wrong_date_fails_value_gate() -> None:
     assert item.status is GateStatus.FAIL
 
 
+def test_value_gate_honors_tolerance_inclusively() -> None:
+    """A numeric expected answer with a non-zero tolerance must accept any
+    candidate within tolerance -- via ``quant.within_tolerance``, the same
+    rule the oracle used to compute the tolerance -- not just the literal
+    canonical string."""
+
+    tolerant = _expected(
+        answer=ExpectedAnswer(kind="value", values=["2.5"], tolerance=0.05)
+    )
+
+    exact = gate_value(_query(), tolerant, _answer("The ratio is 2.5."), CTX)
+    assert exact.status is GateStatus.PASS
+
+    inside = gate_value(_query(), tolerant, _answer("The ratio is 2.52."), CTX)
+    assert inside.status is GateStatus.PASS
+
+    boundary = gate_value(_query(), tolerant, _answer("The ratio is 2.55."), CTX)
+    assert boundary.status is GateStatus.PASS  # inclusive boundary
+
+    outside = gate_value(_query(), tolerant, _answer("The ratio is 2.56."), CTX)
+    assert outside.status is GateStatus.FAIL
+    assert "tolerance" in (outside.evidence or "")
+
+    far_outside = gate_value(_query(), tolerant, _answer("The ratio is 9.9."), CTX)
+    assert far_outside.status is GateStatus.FAIL
+
+
+def test_value_gate_zero_tolerance_still_requires_exact_match() -> None:
+    """Zero tolerance (the exact-arithmetic default) keeps the plain
+    substring rule -- wiring tolerance in must not loosen exact answers."""
+
+    exact_only = _expected(
+        answer=ExpectedAnswer(kind="value", values=["75"], tolerance=0.0)
+    )
+    assert (
+        gate_value(_query(), exact_only, _answer("The total is 75 min."), CTX).status
+        is GateStatus.PASS
+    )
+    assert (
+        gate_value(_query(), exact_only, _answer("The total is 80 min."), CTX).status
+        is GateStatus.FAIL
+    )
+
+
+def test_value_gate_degrades_instead_of_raising_on_a_non_numeric_tolerance() -> None:
+    """``quant.within_tolerance`` parses the expected side unguarded, so a
+    record like ``values=["2.5 kg"]`` with a tolerance used to raise
+    ``InvalidOperation`` out of the gate. expected.jsonl is consumed by third
+    parties: one malformed record must not abort a whole run, so the tolerance
+    rule declines and the literal rule decides."""
+
+    malformed = _expected(
+        answer=ExpectedAnswer(kind="value", values=["2.5 kg"], tolerance=0.05)
+    )
+    hit = gate_value(_query(), malformed, _answer("The mass is 2.5 kg."), CTX)
+    assert hit.status is GateStatus.PASS
+    miss = gate_value(_query(), malformed, _answer("The mass is 9.9 kg."), CTX)
+    assert miss.status is GateStatus.FAIL
+
+
+def test_numeric_token_does_not_absorb_a_preceding_hyphen() -> None:
+    """``-?\\d+`` without a boundary guard reads "SRC-3.5" as -3.5 and
+    "2x-3.5x" as -3.5, failing an answer that states the expected value."""
+
+    tolerant = _expected(answer=ExpectedAnswer(kind="value", values=["3.5"], tolerance=0.05))
+    for text in ("Ref SRC-3.5 only", "a 2x-3.5x increase", "the value is 3.5"):
+        assert gate_value(_query(), tolerant, _answer(text), CTX).status is GateStatus.PASS, text
+    # A real negative sign still parses as negative.
+    negative = _expected(answer=ExpectedAnswer(kind="value", values=["-3.5"], tolerance=0.05))
+    assert gate_value(_query(), negative, _answer("delta of -3.5"), CTX).status is GateStatus.PASS
+    assert gate_value(_query(), tolerant, _answer("delta of -3.5"), CTX).status is GateStatus.FAIL
+
+
 def test_current_state_fails_when_superseded_value_returned() -> None:
     expected = _expected(required_claims=[NEW], forbidden_claims=[OLD])
     stale = _answer("Deadline: 2025-03-14, previously 2025-02-01 still applies")
@@ -103,11 +193,859 @@ def test_as_of_dimension_label() -> None:
 
 
 def test_missing_mandatory_citation_fails() -> None:
-    expected = _expected(required_citations=[SRC])
+    # The claim basis is what makes the PASS half meaningful: without it the
+    # gate can verify recall but not precision, and reports UNSUPPORTED rather
+    # than banking an unverifiable provenance verdict as a pass (see
+    # test_precision_without_a_claim_basis_is_unsupported_not_passed).
+    expected = _expected(required_claims=[NEW], required_citations=[SRC])
     without = _answer("The deadline is 2025-03-14.")
     assert gate_citations(_query(), expected, without, CTX).status is GateStatus.FAIL
     with_citation = _answer("The deadline is 2025-03-14.", citations=[SRC])
     assert gate_citations(_query(), expected, with_citation, CTX).status is GateStatus.PASS
+
+
+# --- citation precision -----------------------------------------------------
+#
+# Recall alone is not attribution: a contender that cites every source it
+# retrieved (or the whole corpus) passed the old provenance gate on every
+# citation query. The gate is precision AND recall, with precision measured
+# against the oracle's evidence neighbourhood -- never against required-only,
+# which would punish honest providers for citing a source the corpus itself
+# asks them to name.
+
+DISPUTED = "CLM-DISP0001"
+NAMED = "CLM-NAME0001"
+DIGEST = "CLM-DGST0001"
+MEASURED = "CLM-MEAS0001"
+ENTITY = "ENT-00000042"
+OTHER_ENTITY = "ENT-00000099"
+
+SUPPORTING = "SRC-SUPP0001"
+DISPUTING = "SRC-DISP0001"
+RENAME = "SRC-RENM0001"
+DIGEST_SRC = "SRC-DGST0001"
+LATE = "SRC-LATE0001"
+MEASUREMENT = "SRC-MEAS0001"
+UNRELATED = "SRC-NOISE001"
+REVISION = "SRC-REVN0001"
+
+LATE_WEEK = 9
+
+
+def _assert(source_id: str, week: int, stance: Stance = Stance.SUPPORTS) -> Assertion:
+    return Assertion(
+        source_id=source_id, stance=stance, asserted_at=date(2025, 1, 7), recorded_week=week
+    )
+
+
+def _disputed_claim() -> ClaimRecord:
+    """The claim under discussion.
+
+    Three assertions the oracle can see at week 8 (a supporter and an
+    objector) and one recorded at week 9 that it cannot. ``required_citations``
+    names only the supporter.
+    """
+
+    return ClaimRecord(
+        claim_id=DISPUTED,
+        subject=ENTITY,
+        predicate="deadline",
+        object=TypedValue(kind="date", value="2025-03-14"),
+        assertions=[
+            _assert(SUPPORTING, 0),
+            _assert(DISPUTING, 3, Stance.DISPUTES),
+            _assert(LATE, LATE_WEEK, Stance.DISPUTES),
+        ],
+        status_timeline=[
+            StatusSpan(
+                status=ClaimStatus.CURRENT,
+                valid_from=date(2025, 1, 6),
+                recorded_week=0,
+                cause=SpanCause(kind=SpanCauseKind.INITIAL, by=SUPPORTING),
+            ),
+            StatusSpan(
+                status=ClaimStatus.DISPROVED,
+                valid_from=date(2025, 3, 3),
+                recorded_week=LATE_WEEK,
+                cause=SpanCause(kind=SpanCauseKind.DISPROOF, by=LATE),
+            ),
+        ],
+    )
+
+
+def _rename_claim() -> ClaimRecord:
+    """A *different* claim about the *same* entity: what it is called.
+
+    This is the t14 shape. An answer that names the entity rests on whatever
+    established the name, so the rename memo is on-topic provenance even
+    though it asserts nothing about the deadline.
+    """
+
+    return ClaimRecord(
+        claim_id=NAMED,
+        subject=ENTITY,
+        predicate="official_name",
+        object=TypedValue(kind="text", value="Northwind"),
+        assertions=[_assert(RENAME, 1)],
+        status_timeline=[
+            StatusSpan(
+                status=ClaimStatus.CURRENT,
+                valid_from=date(2025, 1, 6),
+                recorded_week=1,
+                cause=SpanCause(kind=SpanCauseKind.INITIAL, by=RENAME),
+            )
+        ],
+    )
+
+
+def _digest_claim() -> ClaimRecord:
+    """A claim derived *from* the one under discussion, restating its value.
+
+    This is the t11 shape: the digest is downstream, so a walk that follows
+    ``derived_from`` upward only never reaches it.
+    """
+
+    return ClaimRecord(
+        claim_id=DIGEST,
+        subject=OTHER_ENTITY,
+        predicate="deadline_digest",
+        object=TypedValue(kind="date", value="2025-03-14"),
+        assertions=[_assert(DIGEST_SRC, 2)],
+        status_timeline=[
+            StatusSpan(
+                status=ClaimStatus.CURRENT,
+                valid_from=date(2025, 1, 6),
+                recorded_week=2,
+                cause=SpanCause(kind=SpanCauseKind.INITIAL, by=DIGEST_SRC),
+            )
+        ],
+        derived_from=[DISPUTED],
+    )
+
+
+def _superseded_claim() -> ClaimRecord:
+    """A claim about a third entity whose supersession was recorded later."""
+
+    return ClaimRecord(
+        claim_id=OLD,
+        subject="ENT-00000007",
+        predicate="deadline",
+        object=TypedValue(kind="date", value="2025-02-01"),
+        assertions=[_assert(SRC, 0)],
+        status_timeline=[
+            StatusSpan(
+                status=ClaimStatus.CURRENT,
+                valid_from=date(2025, 1, 6),
+                valid_to=date(2025, 2, 10),
+                recorded_week=0,
+                cause=SpanCause(kind=SpanCauseKind.INITIAL, by=SRC),
+            ),
+            StatusSpan(
+                status=ClaimStatus.SUPERSEDED,
+                valid_from=date(2025, 2, 10),
+                recorded_week=4,
+                cause=SpanCause(kind=SpanCauseKind.SUPERSESSION, by=REVISION),
+            ),
+        ],
+    )
+
+
+def _attribute_claim() -> ClaimRecord:
+    """A measurement about the same entity, and nothing more.
+
+    The counterpart to ``_rename_claim``: same subject, but its object is a
+    quantity, so it resolves no reference. Admitting it would make
+    shotgunning free inside an entity — a field report about a yield score is
+    not provenance for a question about a date.
+    """
+
+    return ClaimRecord(
+        claim_id=MEASURED,
+        subject=ENTITY,
+        predicate="yield-score",
+        object=TypedValue(kind="quantity", value="25.1", unit="points"),
+        assertions=[_assert(MEASUREMENT, 1)],
+        status_timeline=[
+            StatusSpan(
+                status=ClaimStatus.CURRENT,
+                valid_from=date(2025, 1, 6),
+                recorded_week=1,
+                cause=SpanCause(kind=SpanCauseKind.INITIAL, by=MEASUREMENT),
+            )
+        ],
+    )
+
+
+PRECISION_ENTITIES = {
+    ENTITY: EntityRecord(
+        entity_id=ENTITY,
+        kind="project",
+        domain="delivery",
+        canonical_name="Northwind",
+        aliases=["Project Northwind"],
+    ),
+    OTHER_ENTITY: EntityRecord(
+        entity_id=OTHER_ENTITY,
+        kind="project",
+        domain="delivery",
+        canonical_name="Southgale",
+    ),
+}
+
+PRECISION_CTX = ScoringContext(
+    claims_by_id={
+        DISPUTED: _disputed_claim(),
+        NAMED: _rename_claim(),
+        MEASURED: _attribute_claim(),
+        DIGEST: _digest_claim(),
+        OLD: _superseded_claim(),
+    },
+    sources_by_id={},
+    entities_by_id=PRECISION_ENTITIES,
+)
+
+DEADLINE_REQUIRED = [SUPPORTING]
+
+
+def _cite(*sources: str) -> AnswerRecord:
+    return _answer("Deadline 2025-03-14.", citations=list(sources))
+
+
+def _deadline_expected(**kwargs) -> ExpectedRecord:
+    return _expected(
+        required_claims=[DISPUTED], required_citations=list(DEADLINE_REQUIRED), **kwargs
+    )
+
+
+def test_required_citations_come_from_the_oracle_for_this_fixture() -> None:
+    """Anchor: the fixture's required set is what the generator would write,
+    so the precision tests below are not arguing with a hand-picked list."""
+
+    claim = PRECISION_CTX.claims_by_id[DISPUTED]
+    view = oracle.current_truth(claim, 8)
+    assert (
+        list(
+            oracle.required_citations(
+                claim, view, claims_by_id=PRECISION_CTX.claims_by_id, knowledge_week=8
+            )
+        )
+        == DEADLINE_REQUIRED
+    )
+
+
+def test_exact_citation_match_passes_and_publishes_both_ratios() -> None:
+    item = gate_citations(_query(), _deadline_expected(), _cite(SUPPORTING), PRECISION_CTX)
+    assert item.status is GateStatus.PASS
+    # Auditable without rerunning: both halves are in the evidence.
+    assert "recall 1/1" in (item.evidence or "")
+    assert "precision 1/1" in (item.evidence or "")
+
+
+def test_missing_required_citation_still_fails_with_a_claim_basis() -> None:
+    """Adding precision must not weaken the recall half of the gate."""
+
+    item = gate_citations(_query(), _deadline_expected(), _cite(DISPUTING), PRECISION_CTX)
+    assert item.status is GateStatus.FAIL
+    assert "missing citations" in (item.evidence or "")
+    assert SUPPORTING in (item.evidence or "")
+    assert "recall 0/1" in (item.evidence or "")
+
+
+def test_extra_but_supporting_citation_is_never_punished() -> None:
+    """The objecting source is real provenance the oracle can justify, so an
+    answer that cites both sides is precise, not sloppy. Failing this would
+    score an honest provider — one doing exactly what ``cite_both_sides`` asks
+    for — as a provenance failure."""
+
+    assert DISPUTING not in DEADLINE_REQUIRED
+    item = gate_citations(
+        _query(), _deadline_expected(), _cite(SUPPORTING, DISPUTING), PRECISION_CTX
+    )
+    assert item.status is GateStatus.PASS
+    assert "precision 2/2" in (item.evidence or "")
+
+
+def test_a_downstream_derived_claims_source_is_permitted() -> None:
+    """H1a, the t11 shape. ``CLM-DGST0001`` is ``derived_from`` the claim under
+    discussion and restates its value, so its source is better provenance, not
+    worse. A ``derived_from`` walk that only goes upward never reaches it and
+    scores this answer as a provenance failure."""
+
+    digest = PRECISION_CTX.claims_by_id[DIGEST]
+    assert DISPUTED in digest.derived_from  # downstream, not upstream
+    assert digest.object.value == PRECISION_CTX.claims_by_id[DISPUTED].object.value
+    assert DIGEST_SRC not in DEADLINE_REQUIRED
+
+    item = gate_citations(
+        _query(), _deadline_expected(), _cite(SUPPORTING, DIGEST_SRC), PRECISION_CTX
+    )
+    assert item.status is GateStatus.PASS, item.evidence
+    assert "precision 2/2" in (item.evidence or "")
+
+
+def test_a_same_entity_claims_source_is_permitted() -> None:
+    """H1b, the t14 shape. The rename memo asserts a different claim about the
+    same entity; an answer naming that entity legitimately rests on it."""
+
+    named = PRECISION_CTX.claims_by_id[NAMED]
+    disputed = PRECISION_CTX.claims_by_id[DISPUTED]
+    assert named.subject == disputed.subject and named.claim_id != disputed.claim_id
+    assert RENAME not in DEADLINE_REQUIRED
+
+    item = gate_citations(
+        _query(), _deadline_expected(), _cite(SUPPORTING, RENAME), PRECISION_CTX
+    )
+    assert item.status is GateStatus.PASS, item.evidence
+    assert "precision 2/2" in (item.evidence or "")
+
+
+def test_a_same_entity_attribute_claims_source_is_not_permitted() -> None:
+    """The narrowing, minimally. ``CLM-MEAS0001`` is about the same entity as
+    the claim under discussion, but its object is a measurement, so it resolves
+    no reference and backs nothing in a date answer. The wide subject edge
+    admitted it and made shotgunning free inside an entity."""
+
+    measured = PRECISION_CTX.claims_by_id[MEASURED]
+    disputed = PRECISION_CTX.claims_by_id[DISPUTED]
+    assert measured.subject == disputed.subject  # same entity...
+    assert measured.object.kind == "quantity"  # ...but names no entity
+
+    item = gate_citations(
+        _query(), _deadline_expected(), _cite(SUPPORTING, MEASUREMENT), PRECISION_CTX
+    )
+    assert item.status is GateStatus.FAIL, item.evidence
+    assert MEASUREMENT in (item.evidence or "")
+    assert "precision 1/2" in (item.evidence or "")
+
+
+def test_precision_is_unsupported_when_entity_records_are_missing() -> None:
+    """Resolving a name to an entity needs entity records. Without them the
+    edge cannot be evaluated, and neither guess is safe: dropping it fails
+    honest multi-hop answers, keeping it wide waves the shotgun through. So the
+    gate declines to decide rather than picking one."""
+
+    blind = ScoringContext(
+        claims_by_id=PRECISION_CTX.claims_by_id, sources_by_id={}, entities_by_id={}
+    )
+    item = gate_citations(
+        _query(), _deadline_expected(), _cite(SUPPORTING, RENAME), blind
+    )
+    assert item.status is GateStatus.UNSUPPORTED
+    assert "entity records unavailable" in (item.evidence or "")
+    # With the records present the same answer is decidable, and precise.
+    assert (
+        gate_citations(
+            _query(), _deadline_expected(), _cite(SUPPORTING, RENAME), PRECISION_CTX
+        ).status
+        is GateStatus.PASS
+    )
+
+
+def test_derived_from_source_refs_honour_the_knowledge_week() -> None:
+    """``derived_from`` may reference a source directly. That branch skipped the
+    visibility filter, so a contender could cite a source recorded after the
+    ask and still be scored precise."""
+
+    late_source = SourceRecord(
+        source_id=LATE,
+        title="late",
+        artifact_kind=ArtifactKind.MARKDOWN,
+        path="late.md",
+        authority=AuthorityTier.OFFICIAL,
+        event_time=date(2025, 3, 3),
+        recorded_week=LATE_WEEK,
+    )
+    derived = _disputed_claim().model_copy(update={"derived_from": [LATE], "assertions": [_assert(SUPPORTING, 0)]})
+    ctx = ScoringContext(
+        claims_by_id={DISPUTED: derived},
+        sources_by_id={LATE: late_source},
+        entities_by_id=PRECISION_ENTITIES,
+    )
+    early = QueryRecord(
+        query_id="QRY-1",
+        template_id="t00",
+        family="temporal",
+        query_kind="current_truth",
+        prompt_text="deadline?",
+        ask=Ask(world_week=None, knowledge_week=LATE_WEEK - 1),
+    )
+    item = gate_citations(early, _deadline_expected(), _cite(SUPPORTING, LATE), ctx)
+    assert item.status is GateStatus.FAIL, item.evidence
+    assert LATE in (item.evidence or "")
+
+    late_ask = early.model_copy(update={"ask": Ask(world_week=None, knowledge_week=LATE_WEEK)})
+    assert (
+        gate_citations(late_ask, _deadline_expected(), _cite(SUPPORTING, LATE), ctx).status
+        is GateStatus.PASS
+    )
+
+
+def test_supersession_cause_source_is_permitted_on_an_as_of_answer() -> None:
+    """An as-of answer may name the source that later superseded the fact:
+    the oracle sees that span, so it cannot call the citation wrong."""
+
+    expected = _expected(
+        required_claims=[OLD],
+        required_citations=[SRC],
+        answer=ExpectedAnswer(kind="date", values=["2025-02-01"]),
+    )
+    explained = _answer(
+        "As of week 2 the deadline was 2025-02-01; it was later revised.",
+        citations=[SRC, REVISION],
+    )
+    item = gate_citations(_query(world_week=2, kind="as_of"), expected, explained, PRECISION_CTX)
+    assert item.status is GateStatus.PASS
+    assert "precision 2/2" in (item.evidence or "")
+
+
+def test_extra_and_unsupporting_citation_fails() -> None:
+    """The shotgun, minimally: perfect recall plus one source the oracle can
+    prove says nothing about anything the answer is about. Recall-only scored
+    this PASS."""
+
+    item = gate_citations(
+        _query(), _deadline_expected(), _cite(SUPPORTING, UNRELATED), PRECISION_CTX
+    )
+    assert item.status is GateStatus.FAIL
+    assert "unsupported citations" in (item.evidence or "")
+    assert UNRELATED in (item.evidence or "")
+    # The recall half is still reported, and still perfect — the verdict is
+    # attributable to precision alone.
+    assert "recall 1/1" in (item.evidence or "")
+    assert "precision 1/2" in (item.evidence or "")
+
+
+# --- bitemporal visibility inside the permitted set -------------------------
+
+
+def test_citing_evidence_recorded_after_the_knowledge_week_fails() -> None:
+    """``SRC-LATE0001`` disproves the claim, but only from week 9. A contender
+    answering at week 8 cannot have seen it, so naming it is a provenance
+    failure — not a bonus. This pins the ``recorded_week <= knowledge_week``
+    filter inside the permitted set; without it the citation is admitted."""
+
+    early = QueryRecord(
+        query_id="QRY-1",
+        template_id="t00",
+        family="temporal",
+        query_kind="current_truth",
+        prompt_text="deadline?",
+        ask=Ask(world_week=None, knowledge_week=LATE_WEEK - 1),
+    )
+    item = gate_citations(early, _deadline_expected(), _cite(SUPPORTING, LATE), PRECISION_CTX)
+    assert item.status is GateStatus.FAIL, item.evidence
+    assert LATE in (item.evidence or "")
+    assert "precision 1/2" in (item.evidence or "")
+
+
+def test_the_same_citation_is_permitted_once_the_knowledge_week_reaches_it() -> None:
+    """The other half of the same filter: at week 9 the disproof is visible,
+    so the identical answer is now precise. A gate that ignores recorded_week
+    cannot tell these two cases apart."""
+
+    late = QueryRecord(
+        query_id="QRY-1",
+        template_id="t00",
+        family="temporal",
+        query_kind="current_truth",
+        prompt_text="deadline?",
+        ask=Ask(world_week=None, knowledge_week=LATE_WEEK),
+    )
+    item = gate_citations(late, _deadline_expected(), _cite(SUPPORTING, LATE), PRECISION_CTX)
+    assert item.status is GateStatus.PASS, item.evidence
+    assert "precision 2/2" in (item.evidence or "")
+
+
+# --- unmeasurable precision --------------------------------------------------
+
+
+def test_no_required_citations_and_none_given_is_not_applicable() -> None:
+    """Nothing was required and nothing was cited: there is no verdict to
+    reach, and the cited count stays auditable."""
+
+    expected = _expected(required_claims=[DISPUTED])
+    item = gate_citations(_query(), expected, _cite(), PRECISION_CTX)
+    assert item.status is GateStatus.NOT_APPLICABLE
+    assert "0 cited" in (item.evidence or "")
+
+
+def test_precision_is_scored_even_when_no_citation_was_required() -> None:
+    """Requiring no citations does not license citing anything. Returning
+    NOT_APPLICABLE before computing precision made a shotgun free on every
+    such record, and a claim basis is present here, so the oracle can prove
+    the extra citation wrong."""
+
+    expected = _expected(required_claims=[DISPUTED])
+    assert not expected.required_citations
+    item = gate_citations(_query(), expected, _cite(SUPPORTING, UNRELATED), PRECISION_CTX)
+    assert item.status is GateStatus.FAIL
+    assert "recall n/a" in (item.evidence or "")
+    assert "precision 1/2" in (item.evidence or "")
+    assert UNRELATED in (item.evidence or "")
+    # …and a precise answer to the same record still passes.
+    good = gate_citations(_query(), expected, _cite(SUPPORTING), PRECISION_CTX)
+    assert good.status is GateStatus.PASS
+
+
+def test_precision_without_a_claim_basis_is_unsupported_not_passed() -> None:
+    """Unsupported-never-zero cuts both ways. A record that names citations but
+    no claims gives the oracle nothing to reason from, so the verdict is
+    UNSUPPORTED — banking it as a PASS would let a contender that shotguns
+    those records show a clean provenance sheet."""
+
+    expected = _expected(required_citations=[SUPPORTING])
+    assert not expected.required_claims and not expected.forbidden_claims
+    item = gate_citations(
+        _query(), expected, _cite(SUPPORTING, UNRELATED), PRECISION_CTX
+    )
+    assert item.status is GateStatus.UNSUPPORTED
+    assert "precision unverifiable" in (item.evidence or "")
+    assert "recall 1/1" in (item.evidence or "")
+
+
+def test_unverifiable_precision_still_fails_a_missing_required_citation() -> None:
+    """Recall is provable whatever precision could be established."""
+
+    expected = _expected(required_citations=[SUPPORTING])
+    item = gate_citations(_query(), expected, _cite(UNRELATED), PRECISION_CTX)
+    assert item.status is GateStatus.FAIL
+    assert "recall 0/1" in (item.evidence or "")
+
+
+def test_precision_is_unsupported_when_the_claim_is_outside_the_index() -> None:
+    expected = _expected(required_claims=["CLM-ABSENT01"], required_citations=[SUPPORTING])
+    item = gate_citations(
+        _query(), expected, _cite(SUPPORTING, UNRELATED), PRECISION_CTX
+    )
+    assert item.status is GateStatus.UNSUPPORTED
+    assert "precision unverifiable" in (item.evidence or "")
+    assert "CLM-ABSENT01" in (item.evidence or "")
+
+
+def test_duplicate_citations_do_not_distort_the_ratios() -> None:
+    item = gate_citations(
+        _query(), _deadline_expected(), _cite(SUPPORTING, SUPPORTING), PRECISION_CTX
+    )
+    assert item.status is GateStatus.PASS
+    assert "precision 1/1" in (item.evidence or "")
+
+
+def test_permitted_citations_always_contains_the_required_ones() -> None:
+    """The superset guarantee is a property of the oracle function, not of the
+    graph walk. A record may require a citation the neighbourhood does not
+    reach; no caller may then punish an answer for citing exactly what the
+    record demands."""
+
+    stranded = _expected(required_claims=[DISPUTED], required_citations=[SUPPORTING, UNRELATED])
+    permitted, reason = oracle.permitted_citations(
+        stranded,
+        claims_by_id=PRECISION_CTX.claims_by_id,
+        knowledge_week=8,
+        entities_by_id=PRECISION_CTX.entities_by_id,
+    )
+    assert reason is None
+    assert {SUPPORTING, UNRELATED} <= permitted
+    item = gate_citations(_query(), stranded, _cite(SUPPORTING, UNRELATED), PRECISION_CTX)
+    assert item.status is GateStatus.PASS
+
+
+# --- citation precision against a real generated corpus ---------------------
+
+_SHOTGUN_TEMPLATES = [
+    "t01_temporal_reversal",
+    "t07_authority_conflict",
+    "t10_retraction",
+    "t11_transitive_provenance",
+    "t14_identity_graph",
+]
+
+
+@pytest.fixture(scope="module")
+def shotgun_corpus(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    out = tmp_path_factory.mktemp("shotgun") / "corpus"
+    generate_corpus(1, out, template_ids=_SHOTGUN_TEMPLATES)
+    return out
+
+
+def _corpus_records(
+    corpus: Path,
+) -> tuple[list[QueryRecord], dict[str, ExpectedRecord], ScoringContext, list[str]]:
+    queries = load_jsonl(QueryRecord, corpus / "queries.jsonl")
+    expected = {
+        record.query_id: record
+        for record in load_jsonl(ExpectedRecord, corpus / "expected.jsonl")
+    }
+    claims = load_jsonl(ClaimRecord, corpus / "claims.jsonl")
+    sources = load_jsonl(SourceRecord, corpus / "sources.jsonl")
+    entities = load_jsonl(EntityRecord, corpus / "entities.jsonl")
+    ctx = ScoringContext(
+        claims_by_id={claim.claim_id: claim for claim in claims},
+        sources_by_id={source.source_id: source for source in sources},
+        entities_by_id={entity.entity_id: entity for entity in entities},
+    )
+    return queries, expected, ctx, [source.source_id for source in sources]
+
+
+def test_citing_every_source_in_the_corpus_fails(shotgun_corpus: Path) -> None:
+    """The shotgun, at full scale: cite the entire corpus on every citation
+    query. Recall is perfect by construction, so the old recall-only gate
+    scored a contender with no provenance at all as a clean sweep."""
+
+    queries, expected, ctx, every_source = _corpus_records(shotgun_corpus)
+    assert len(every_source) > 20  # a shotgun worth the name
+
+    checked = 0
+    for query in queries:
+        record = expected[query.query_id]
+        if not record.required_citations:
+            continue
+        if not (record.required_claims or record.forbidden_claims):
+            continue  # precision unmeasurable — covered by its own test
+        shotgun = _answer("Some answer.", citations=list(every_source))
+        item = gate_citations(query, record, shotgun, ctx)
+        assert item.status is GateStatus.FAIL, f"{query.query_id} passed the shotgun"
+        assert "unsupported citations" in (item.evidence or "")
+        # The listing is capped so one shotgun row cannot bloat the run
+        # artifacts; the precision ratio still carries the full count.
+        assert "more)" in (item.evidence or "")
+        assert len(item.evidence or "") < 500
+        checked += 1
+    assert checked > 0
+
+
+def test_citing_another_scenarios_sources_fails(shotgun_corpus: Path) -> None:
+    """Templates build isolated scenario graphs, so one record's claims and
+    another template's sources share no entity, no derivation and no
+    supersession. Those sources are therefore provably unrelated *from corpus
+    facts* — this test never consults the permitted set to decide what should
+    be rejected."""
+
+    queries, expected, ctx, _ = _corpus_records(shotgun_corpus)
+    by_template: dict[str, list[QueryRecord]] = {}
+    for query in queries:
+        if expected[query.query_id].required_citations:
+            by_template.setdefault(query.template_id, []).append(query)
+    assert len(by_template) >= 2
+
+    def entities(record: ExpectedRecord) -> set[str]:
+        return {
+            ctx.claims_by_id[cid].subject
+            for cid in [*record.required_claims, *record.forbidden_claims]
+            if cid in ctx.claims_by_id
+        }
+
+    checked = 0
+    template_ids = sorted(by_template)
+    for index, template_id in enumerate(template_ids):
+        foreign_id = template_ids[(index + 1) % len(template_ids)]
+        foreign = by_template[foreign_id][0]
+        foreign_record = expected[foreign.query_id]
+        for query in by_template[template_id]:
+            record = expected[query.query_id]
+            if not (record.required_claims or record.forbidden_claims):
+                continue
+            if entities(record) & entities(foreign_record):
+                continue  # not actually a foreign scenario
+            intruders = [
+                source
+                for source in foreign_record.required_citations
+                if source not in record.required_citations
+            ]
+            if not intruders:
+                continue
+            answer = _answer(
+                "Some answer.", citations=[*record.required_citations, *intruders]
+            )
+            item = gate_citations(query, record, answer, ctx)
+            assert item.status is GateStatus.FAIL, (query.query_id, item.evidence)
+            assert intruders[0] in (item.evidence or "")
+            checked += 1
+    assert checked > 0
+
+
+def _entity_name_index(ctx: ScoringContext) -> dict[str, set[str]]:
+    """Name -> entity ids, straight from entities.jsonl. A corpus fact, so the
+    tests below never ask the function under test what it considers related."""
+
+    names: dict[str, set[str]] = {}
+    for entity in ctx.entities_by_id.values():
+        for name in (
+            entity.canonical_name,
+            *entity.aliases,
+            *(span.name for span in entity.name_timeline),
+        ):
+            names.setdefault(name, set()).add(entity.entity_id)
+    return names
+
+
+def _basis_subjects(record: ExpectedRecord, ctx: ScoringContext) -> set[str]:
+    return {
+        ctx.claims_by_id[cid].subject
+        for cid in [*record.required_claims, *record.forbidden_claims]
+        if cid in ctx.claims_by_id
+    }
+
+
+def test_reference_resolving_same_entity_sources_are_admitted(
+    shotgun_corpus: Path,
+) -> None:
+    """The t14 shape over real records. A same-entity claim whose object *names*
+    an entity resolves reference — that is what lets a system prove the entity
+    in one source is the entity in another — so its sources must be admitted.
+    Membership is decided from entities.jsonl, not from the permitted set."""
+
+    queries, expected, ctx, _ = _corpus_records(shotgun_corpus)
+    names = _entity_name_index(ctx)
+    checked = 0
+    for query in queries:
+        record = expected[query.query_id]
+        if not record.required_citations:
+            continue
+        subjects = _basis_subjects(record, ctx)
+        if not subjects:
+            continue
+        kin = [
+            assertion.source_id
+            for claim in ctx.claims_by_id.values()
+            if claim.subject in subjects and names.get(claim.object.value, set()) & subjects
+            for assertion in claim.assertions
+            if assertion.recorded_week <= query.ask.knowledge_week
+        ]
+        if not kin:
+            continue
+        answer = _answer("Some answer.", citations=[*record.required_citations, *kin])
+        item = gate_citations(query, record, answer, ctx)
+        assert item.status is GateStatus.PASS, (query.query_id, item.evidence)
+        checked += 1
+    assert checked > 0
+
+
+def _relation_closure(basis: set[str], ctx: ScoringContext) -> set[str]:
+    """Claims reachable from ``basis`` by derivation (either direction) and
+    supersession, walked straight off the corpus records. Used to subtract the
+    edges that are not under test, so a test about the entity edge is about
+    the entity edge."""
+
+    children: dict[str, list[str]] = {}
+    for claim in ctx.claims_by_id.values():
+        for parent in claim.derived_from:
+            children.setdefault(parent, []).append(claim.claim_id)
+    seen: set[str] = set()
+    frontier = list(basis)
+    while frontier:
+        cid = frontier.pop()
+        if cid in seen or cid not in ctx.claims_by_id:
+            continue
+        seen.add(cid)
+        claim = ctx.claims_by_id[cid]
+        frontier.extend(claim.derived_from)
+        frontier.extend(children.get(cid, ()))
+        frontier.extend(r for r in (claim.supersedes, claim.superseded_by) if r)
+    return seen
+
+
+def test_same_entity_attribute_sources_are_not_admitted(shotgun_corpus: Path) -> None:
+    """The other side of the narrowed edge, and the hole it closes. A claim
+    about the same entity whose object is a measurement rather than an entity
+    name resolves no reference: a field report on a yield score is not
+    provenance for a question about a date. Shotgunning inside one entity must
+    not be free."""
+
+    queries, expected, ctx, _ = _corpus_records(shotgun_corpus)
+    names = _entity_name_index(ctx)
+    checked = 0
+    for query in queries:
+        record = expected[query.query_id]
+        if not record.required_citations:
+            continue
+        subjects = _basis_subjects(record, ctx)
+        basis = {*record.required_claims, *record.forbidden_claims}
+        if not subjects:
+            continue
+        related = _relation_closure(basis, ctx)
+        strangers = []
+        for claim in ctx.claims_by_id.values():
+            if claim.subject not in subjects or claim.claim_id in related:
+                continue  # reachable without the entity edge at all
+            if names.get(claim.object.value):
+                continue  # reference-resolving: legitimately admitted
+            strangers.extend(
+                a.source_id
+                for a in claim.assertions
+                if a.recorded_week <= query.ask.knowledge_week
+                and a.source_id not in record.required_citations
+            )
+        if not strangers:
+            continue
+        answer = _answer("Some answer.", citations=[*record.required_citations, *strangers])
+        item = gate_citations(query, record, answer, ctx)
+        assert item.status is GateStatus.FAIL, (query.query_id, item.evidence)
+        checked += 1
+    assert checked > 0
+
+
+def test_claim_closure_stays_bounded(shotgun_corpus: Path) -> None:
+    """The closure is transitive, so a careless edge can make it swallow the
+    corpus. Pin its size: the reviewer built 400 claims where a subject-only
+    edge reached 100% of them from a single basis claim."""
+
+    queries, expected, ctx, _ = _corpus_records(shotgun_corpus)
+    worst = 0
+    for query in queries:
+        record = expected[query.query_id]
+        basis = [
+            cid
+            for cid in [*record.required_claims, *record.forbidden_claims]
+            if cid in ctx.claims_by_id
+        ]
+        if not basis:
+            continue
+        worst = max(
+            worst,
+            len(
+                oracle.claim_neighbourhood(
+                    basis, ctx.claims_by_id, entities_by_id=ctx.entities_by_id
+                )
+            ),
+        )
+    assert worst <= 8, f"closure grew to {worst} claims"
+    assert worst < len(ctx.claims_by_id) / 4
+
+
+def test_downstream_derived_sources_are_admitted_across_the_corpus(
+    shotgun_corpus: Path,
+) -> None:
+    """The t11 shape over real records: any claim that is ``derived_from`` a
+    basis claim is downstream evidence, and its visible sources must be
+    admitted. Found by walking the corpus' own ``derived_from`` edges."""
+
+    queries, expected, ctx, _ = _corpus_records(shotgun_corpus)
+    checked = 0
+    for query in queries:
+        record = expected[query.query_id]
+        if not record.required_citations:
+            continue
+        basis = {
+            cid
+            for cid in [*record.required_claims, *record.forbidden_claims]
+            if cid in ctx.claims_by_id
+        }
+        if not basis:
+            continue
+        downstream = [
+            assertion.source_id
+            for claim in ctx.claims_by_id.values()
+            if basis.intersection(claim.derived_from)
+            for assertion in claim.assertions
+            if assertion.recorded_week <= query.ask.knowledge_week
+        ]
+        if not downstream:
+            continue
+        answer = _answer("Some answer.", citations=[*record.required_citations, *downstream])
+        item = gate_citations(query, record, answer, ctx)
+        assert item.status is GateStatus.PASS, (query.query_id, item.evidence)
+        checked += 1
+    assert checked > 0
 
 
 def test_forbidden_disclosure_fails_no_leak() -> None:

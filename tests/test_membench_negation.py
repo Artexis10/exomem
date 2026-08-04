@@ -21,6 +21,7 @@ from membench.schema import (
     ClaimRecord,
     ClaimStatus,
     CorpusManifest,
+    EntityRecord,
     ExpectedRecord,
     QueryRecord,
     SourceRecord,
@@ -43,6 +44,7 @@ Corpus = tuple[
     dict[str, ExpectedRecord],
     dict[str, ClaimRecord],
     dict[str, SourceRecord],
+    dict[str, EntityRecord],
 ]
 
 
@@ -54,7 +56,10 @@ def corpus(tmp_path_factory: pytest.TempPathFactory) -> Corpus:
     expected = {e.query_id: e for e in load_jsonl(ExpectedRecord, root / "expected.jsonl")}
     claims = {c.claim_id: c for c in load_jsonl(ClaimRecord, root / "claims.jsonl")}
     sources = {s.source_id: s for s in load_jsonl(SourceRecord, root / "sources.jsonl")}
-    return manifest, queries, expected, claims, sources
+    entities_by_id = {
+        e.entity_id: e for e in load_jsonl(EntityRecord, root / "entities.jsonl")
+    }
+    return manifest, queries, expected, claims, sources, entities_by_id
 
 
 def _gate(items, name):  # type: ignore[no-untyped-def]
@@ -93,7 +98,7 @@ def test_negation_family_is_active_deterministic_oracle() -> None:
 
 
 def test_t19_generates_with_five_queries_per_variant(corpus: Corpus) -> None:
-    manifest, queries, expected, _, _ = corpus
+    manifest, queries, expected, _, _, _ = corpus
     assert manifest.counts["queries"] == 4 * 5
     assert manifest.counts["expected"] == manifest.counts["queries"]
     assert {q.family for q in queries} == {FAMILY}
@@ -106,7 +111,7 @@ def test_t19_generates_with_five_queries_per_variant(corpus: Corpus) -> None:
 def test_recorded_false_expected_record_demands_rejection_and_citation(
     corpus: Corpus,
 ) -> None:
-    _, queries, expected, claims, _ = corpus
+    _, queries, expected, claims, _, _ = corpus
     pairs = _recorded_false_pairs(queries, expected)
     assert len(pairs) == 2 * 4  # rejected proposal + rejected plan, per variant
     for query, record in pairs:
@@ -127,8 +132,10 @@ def test_recorded_false_expected_record_demands_rejection_and_citation(
 def test_recorded_false_gates_fail_abstention_and_active_framing(
     corpus: Corpus,
 ) -> None:
-    _, queries, expected, claims, sources = corpus
-    ctx = ScoringContext(claims_by_id=claims, sources_by_id=sources)
+    _, queries, expected, claims, sources, entities_by_id = corpus
+    ctx = ScoringContext(
+        claims_by_id=claims, sources_by_id=sources, entities_by_id=entities_by_id
+    )
     for query, record in _recorded_false_pairs(queries, expected):
         rejection_value = claims[record.required_claims[0]].object.value
         active_value = claims[record.forbidden_claims[0]].object.value
@@ -179,8 +186,10 @@ def test_recorded_false_gates_fail_abstention_and_active_framing(
 
 
 def test_not_recorded_sibling_requires_abstention(corpus: Corpus) -> None:
-    _, queries, expected, claims, sources = corpus
-    ctx = ScoringContext(claims_by_id=claims, sources_by_id=sources)
+    _, queries, expected, claims, sources, entities_by_id = corpus
+    ctx = ScoringContext(
+        claims_by_id=claims, sources_by_id=sources, entities_by_id=entities_by_id
+    )
     abstain_pairs = [
         (query, expected[query.query_id])
         for query in queries
@@ -207,7 +216,7 @@ def test_not_recorded_sibling_requires_abstention(corpus: Corpus) -> None:
 
 
 def test_contrast_pair_uses_near_identical_phrasing(corpus: Corpus) -> None:
-    _, queries, expected, _, _ = corpus
+    _, queries, expected, _, _, _ = corpus
     answered: list[tuple[str, str]] = []
     abstained: list[tuple[str, str]] = []
     for query in queries:
@@ -228,7 +237,7 @@ def test_contrast_pair_uses_near_identical_phrasing(corpus: Corpus) -> None:
 
 
 def test_pre_rejection_window_is_asked_as_of(corpus: Corpus) -> None:
-    _, queries, expected, _, _ = corpus
+    _, queries, expected, _, _, _ = corpus
     as_of = [q for q in queries if q.ask.world_week is not None]
     assert len(as_of) == 4  # one pre-rejection as-of view per variant
     for query in as_of:

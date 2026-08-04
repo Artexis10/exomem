@@ -216,6 +216,11 @@ def execute_run(spec: RunSpec) -> RunResult:
             ctx = ScoringContext(
                 claims_by_id={c.claim_id: c for c in view.claims},
                 sources_by_id={s.source_id: s for s in view.sources},
+                # Citation precision resolves same-entity references by name, so
+                # it needs the entity records: without them the gate cannot tell
+                # a reference-resolving claim from an attribute claim and
+                # reports UNSUPPORTED rather than guessing in either direction.
+                entities_by_id={e.entity_id: e for e in view.entities},
             )
 
             # Wired-translation report: written by the adapter into its own

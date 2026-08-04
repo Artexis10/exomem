@@ -37,6 +37,18 @@ def _citations_for(
     )
 
 
+def _state_gate(query: QueryRecord) -> str:
+    """Name of the state gate this ask is actually scored by.
+
+    Mirrors :func:`membench.scoring.gates.gate_state`: an ask that pins a world
+    week is scored as ``as_of``, everything else as ``current_state``. Declared
+    gates in ``expected.jsonl`` are a published claim about what a record
+    evaluates, so they have to track the scorer rather than the author's intent.
+    """
+
+    return "as_of" if query.ask.world_week is not None else "current_state"
+
+
 def expect_change(
     old: ClaimRecord, new: ClaimRecord, reversal_source: SourceRecord
 ) -> ExpectationBuilder:
@@ -504,6 +516,9 @@ def expect_attributed_opinion(
                     f"{query.query_id}: quoting source {source_id} does not contain "
                     "the opinion value verbatim"
                 )
+        gates = [_state_gate(query), "citations"]
+        if hedged is not None:
+            gates.append("calibration")
         return ExpectedRecord(
             query_id=query.query_id,
             answer=_answer_from_value(view.value),
@@ -511,7 +526,7 @@ def expect_attributed_opinion(
             forbidden_claims=[claim.claim_id for claim in forbidden or []],
             required_citations=list(citations),
             uncertainty=UncertaintyExpectation(hedged=hedged),
-            gates=["current_state", "citations", "calibration"],
+            gates=gates,
         )
 
     return build
@@ -520,7 +535,15 @@ def expect_attributed_opinion(
 def _correction_chain(
     ctx: OracleCtx, first: ClaimRecord, query: QueryRecord
 ) -> list[tuple[ClaimRecord, oracle.TruthView, SourceRecord]]:
-    """Follow and validate a visible claim/source correction chain."""
+    """Follow and validate a visible claim/source correction chain.
+
+    Two oracle views per link, deliberately: the *reported* view is the
+    as-of-aware one (:func:`_view_for`), so a chain asked about an earlier world
+    week reports what was believed then rather than the latest truth; the
+    *structural* view stays pinned to the knowledge week, because "has this
+    claim been corrected yet" is a question about what the corpus has recorded,
+    not about the world time being asked after.
+    """
 
     sources_by_id = {source.source_id: source for source in ctx.graph.sources}
     chain: list[tuple[ClaimRecord, oracle.TruthView, SourceRecord]] = []
@@ -533,7 +556,8 @@ def _correction_chain(
             )
         seen.add(claim.claim_id)
         evolution = oracle.evolution(claim, query.ask.knowledge_week)
-        view = oracle.current_truth(claim, query.ask.knowledge_week)
+        structural = oracle.current_truth(claim, query.ask.knowledge_week)
+        view = _view_for(ctx, claim, query)
         if not evolution:
             raise GenerationError(
                 f"{query.query_id}: correction claim {claim.claim_id} has no evolution"
@@ -541,25 +565,25 @@ def _correction_chain(
         if view.value is None:
             raise GenerationError(
                 f"{query.query_id}: correction claim {claim.claim_id} has no "
-                "oracle-visible value"
+                "oracle-visible value at the asked time"
             )
         source_id = claim.assertions[0].source_id
         source = sources_by_id[source_id]
         chain.append((claim, view, source))
         if claim.superseded_by is None:
-            if not view.is_active:
+            if not structural.is_active:
                 raise GenerationError(
                     f"{query.query_id}: correction chain ends in inactive "
-                    f"{claim.claim_id} ({view.status.value})"
+                    f"{claim.claim_id} ({structural.status.value})"
                 )
             break
-        if view.status not in (
+        if structural.status not in (
             ClaimStatus.SUPERSEDED,
             ClaimStatus.PARTIALLY_SUPERSEDED,
         ):
             raise GenerationError(
                 f"{query.query_id}: {claim.claim_id} points to a successor but "
-                f"oracle status is {view.status.value}"
+                f"oracle status is {structural.status.value}"
             )
         successor = ctx.claims_by_id.get(claim.superseded_by)
         if successor is None or successor.supersedes != claim.claim_id:
@@ -609,7 +633,7 @@ def expect_correction_history(first: ClaimRecord) -> ExpectationBuilder:
             ),
             required_claims=[claim.claim_id for claim, _, _ in chain],
             required_citations=list(citations),
-            gates=["current_state", "citations"],
+            gates=[_state_gate(query), "citations"],
         )
 
     return build
@@ -634,13 +658,25 @@ def expect_value_with_correction_history(
             if source.source_id == claim.assertions[0].source_id
         )
         prior_source = chain[-1][2]
+        # The fresh issue is bound to the correction record by publication
+        # identity (same title, later week), never by a supersession edge: that
+        # edge means "this edition replaces that one, retire its claims", and
+        # the prior edition's claim is still current and still a required
+        # citation here.
         if (
             fresh_source.title != prior_source.title
-            or fresh_source.supersedes_source != prior_source.source_id
-            or fresh_source.version != prior_source.version + 1
+            or fresh_source.recorded_week <= prior_source.recorded_week
         ):
             raise GenerationError(
-                f"{query.query_id}: fresh value is not from the recurring source"
+                f"{query.query_id}: fresh value is not a later issue of the "
+                "recurring source"
+            )
+        if fresh_source.supersedes_source is not None:
+            raise GenerationError(
+                f"{query.query_id}: {fresh_source.source_id} declares "
+                f"supersedes_source={fresh_source.supersedes_source} while adding a "
+                "live claim of its own; a source-level supersession edge must retire "
+                "the superseded edition's claims"
             )
 
         citations: dict[str, None] = {}
@@ -655,7 +691,48 @@ def expect_value_with_correction_history(
             required_claims=[claim.claim_id],
             required_citations=list(citations),
             uncertainty=UncertaintyExpectation(hedged=True),
-            gates=["current_state", "citations", "calibration"],
+            gates=[_state_gate(query), "citations", "calibration"],
         )
+
+    return build
+
+
+def expect_settled_value(claim: ClaimRecord) -> ExpectationBuilder:
+    """A settled fact from an uncorrected source: state it plainly, no hedging.
+
+    ``hedged=False`` is the discriminating half of the calibration gate. A suite
+    of ``hedged=True``/``hedged=None`` records lets a provider hedge every answer
+    and never lose a point; one record that a hedge fails makes the gate measure
+    something. The builder refuses unless the corpus really warrants a flat
+    answer: the claim must be settled and free of any correction or dispute
+    history, and every source it cites must be a first edition that supersedes
+    nothing.
+    """
+
+    inner = expect_value(claim, hedged=False)
+
+    def build(ctx: OracleCtx, query: QueryRecord) -> ExpectedRecord:
+        view = _view_for(ctx, claim, query)
+        if view.status not in (ClaimStatus.CURRENT, ClaimStatus.CONFIRMED):
+            raise GenerationError(
+                f"{query.query_id}: a plainly-stated answer needs a settled claim, "
+                f"got {view.status.value} for {claim.claim_id}"
+            )
+        if view.disputing or claim.supersedes or claim.superseded_by:
+            raise GenerationError(
+                f"{query.query_id}: {claim.claim_id} carries a dispute or correction "
+                "history, so an unhedged answer is not warranted"
+            )
+        record = inner(ctx, query)
+        sources_by_id = {source.source_id: source for source in ctx.graph.sources}
+        for source_id in record.required_citations:
+            source = sources_by_id[source_id]
+            if source.supersedes_source is not None or source.version != 1:
+                raise GenerationError(
+                    f"{query.query_id}: citation {source_id} is a corrected edition "
+                    f"(version {source.version}), so the answer cannot be required "
+                    "to skip hedging"
+                )
+        return record.model_copy(update={"gates": [*record.gates, "calibration"]})
 
     return build

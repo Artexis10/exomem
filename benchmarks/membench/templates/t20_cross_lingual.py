@@ -9,9 +9,11 @@ script control, while an unrecorded count still requires abstention.
 from __future__ import annotations
 
 from membench import wordbank
+from membench.ids import stable_id
 from membench.schema import AuthorityTier, TypedValue
 from membench.templates.base import (
     BuildContext,
+    GenerationError,
     Template,
     expect_abstain,
     expect_value,
@@ -20,21 +22,68 @@ from membench.templates.base import (
 
 TEMPLATE_ID = "t20_cross_lingual"
 FAMILY = "cross_lingual"
+VARIANTS = 4
+
+# Quantity ranges are disjoint by construction. Both counts are "units" of the
+# same organisation, so if their ranges overlapped a contender that answered
+# with the wrong metric could land on the right number and score as correct —
+# a scoring hole, not a memory result. ``routing_count_new`` peaks at the old
+# ceiling plus the largest increment; archive counts start strictly above that.
+#
+# Disjointness alone is not enough: ``gate_state`` tests forbidden values by
+# substring, so a three-digit archive count can *contain* a two-digit routing
+# count (archive 105 spells routing 10). A correct answer that also mentioned
+# the archive figure would then fail with "forbidden value '10' present" — the
+# harness punishing correct behaviour, which is the worst defect class here.
+# Capping archive at two digits removes the channel: no two distinct two-digit
+# numbers are substrings of one another.
+_ROUTING_OLD_RANGE = (10, 40)  # randrange bounds: upper is exclusive
+_ROUTING_STEP_RANGE = (5, 20)
+_ROUTING_CEILING = (_ROUTING_OLD_RANGE[1] - 1) + (_ROUTING_STEP_RANGE[1] - 1)
+_ARCHIVE_RANGE = (_ROUTING_CEILING + 1, 100)
+
+
+def _name_slot(native_name: str) -> int:
+    """Which variant owns ``native_name``, from the repo's stable digest.
+
+    ``stable_id`` ends in eight hex digits of a SHA-256 over its parts, so this
+    partitions the Cyrillic organisation-name space into ``VARIANTS`` disjoint
+    classes that are identical on every machine and every run.
+    """
+
+    return int(stable_id("T20ORGSLOT", native_name)[-8:], 16) % VARIANTS
+
+
+def _variant_org_name(ctx: BuildContext) -> tuple[str, str]:
+    """A native/Latin organisation pair no sibling variant can also draw.
+
+    Redraw-until-distinct, the idiom ``t19`` uses for its sibling product name.
+    The earlier scheme appended a per-variant marker to a freely drawn name,
+    which left the base name colliding across variants in 158 of 1000 seeds:
+    two organisations differing by one trailing token are a retrieval confound,
+    and a contender that fetched the wrong one would be scored as a
+    cross-lingual failure. Reserving a digest class per variant removes the
+    collision instead of decorating it.
+    """
+
+    for _ in range(256):
+        native, latin = wordbank.org_name_cyr(ctx.rng)
+        if _name_slot(native) == ctx.variant:
+            return native, latin
+    raise GenerationError(f"{ctx.template_id}: no organisation name for this variant")
 
 
 def build(ctx: BuildContext) -> None:
-    native_name, latin_alias = wordbank.org_name_cyr(
-        ctx.rng, discriminator=ctx.variant
-    )
+    native_name, latin_alias = _variant_org_name(ctx)
     org = ctx.entity(
         "organization",
         "business",
         aliases=[latin_alias],
         name=native_name,
     )
-    archive_count = ctx.rng.randrange(40, 90)
-    routing_count_old = ctx.rng.randrange(10, 40)
-    routing_count_new = routing_count_old + ctx.rng.randrange(5, 20)
+    archive_count = ctx.rng.randrange(*_ARCHIVE_RANGE)
+    routing_count_old = ctx.rng.randrange(*_ROUTING_OLD_RANGE)
+    routing_count_new = routing_count_old + ctx.rng.randrange(*_ROUTING_STEP_RANGE)
 
     initial = ctx.source(
         2,
@@ -115,7 +164,7 @@ register(
             "Cyrillic sources queried through Latin aliases: direct recall, "
             "supersession, abstention, and same-script control"
         ),
-        variants=4,
+        variants=VARIANTS,
         build=build,
     )
 )

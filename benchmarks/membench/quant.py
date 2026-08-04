@@ -96,7 +96,12 @@ def _table_entry(unit: str) -> tuple[str, Decimal]:
 def _canonical(value: Decimal) -> str:
     if value == value.to_integral_value():
         return str(value.quantize(Decimal(1)))
-    return str(value.normalize())
+    # ``str()``/default formatting switches to E-notation once the adjusted
+    # exponent drops below -6 (any magnitude under ~1e-6). The explicit "f"
+    # format spec forces plain fixed-point notation across the full range
+    # normalize() can produce, so a candidate string like "1E-7" never has to
+    # be reconciled against the plain "0.0000001" it denotes.
+    return format(value.normalize(), "f")
 
 
 def _compute(operation, *, places: int | None) -> tuple[Decimal, Decimal]:

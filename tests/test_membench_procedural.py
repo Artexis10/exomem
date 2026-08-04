@@ -22,7 +22,7 @@ from membench.schema import (
     load_jsonl,
 )
 from membench.scoring.answer_contract import AnswerRecord
-from membench.scoring.gates import GateStatus, ScoringContext, gate_state
+from membench.scoring.gates import GateStatus, ScoringContext, gate_state, gate_value
 
 T17 = "t17_procedural_chains"
 
@@ -144,6 +144,28 @@ def test_step_order_question_scored_deterministically(tmp_path: Path) -> None:
         assert wrong_item.status is GateStatus.FAIL
         assert right_item.gate == "current_state"
         assert right_item.status is GateStatus.PASS
+
+        # Stale-echo variant: the provider gives the current value but also
+        # echoes the superseded one alongside it. The correct value being
+        # present is not enough -- the forbidden (retired) value must also be
+        # absent, or the answer is misleading about what changed. A bare
+        # value check would let this slip through (it contains the right
+        # answer); it is the current-state gate's forbidden-claims check
+        # that must catch it.
+        both = AnswerRecord(
+            query_id=query.query_id,
+            answer_text=(
+                f"It used to be the {old_claim.object.value}, but it is now "
+                f"the {new_claim.object.value}."
+            ),
+            citations=[revising_source_id],
+        )
+        both_value_item = gate_value(query, record, both, ctx)
+        both_state_item = gate_state(query, record, both, ctx)
+        assert both_value_item.status is GateStatus.PASS  # the right value is present
+        assert both_state_item.gate == "current_state"
+        assert both_state_item.status is GateStatus.FAIL  # but so is the retired one
+        assert old_claim.object.value in (both_state_item.evidence or "")
 
 
 # -- (c) determinism -------------------------------------------------------

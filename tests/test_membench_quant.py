@@ -117,6 +117,37 @@ def test_float_inputs_are_rejected() -> None:
         quant.within_tolerance(derived, 75.0)  # type: ignore[arg-type]
 
 
+def test_canonical_never_emits_e_notation_for_small_magnitudes() -> None:
+    """``_canonical`` must format plain decimal notation across the range it
+    can produce, including below the ~1e-6 threshold where default Decimal
+    string conversion switches to scientific notation (spurious "1E-7" vs
+    "0.0000001" mismatches otherwise)."""
+
+    cases = {
+        Decimal("0.0000001"): "0.0000001",  # 1e-7: below the -6 threshold
+        Decimal("0.00000012340"): "0.0000001234",  # trailing zeros stripped too
+        Decimal("-0.0000001"): "-0.0000001",  # sign preserved
+        Decimal("1.234E-9"): "0.000000001234",  # already-scientific input
+        Decimal("4.20"): "4.2",  # unaffected case still normalizes as before
+        Decimal("0.5"): "0.5",
+    }
+    for value, expected in cases.items():
+        canonical = quant._canonical(value)
+        assert canonical == expected
+        assert "E" not in canonical and "e" not in canonical
+
+
+def test_derive_ratio_small_magnitude_result_has_no_e_notation() -> None:
+    """End-to-end: a derivation whose quantized result falls below 1e-6 still
+    round-trips through Decimal and never leaks scientific notation."""
+
+    derived = quant.derive_ratio(_q("1", "points"), _q("100000000", "points"), places=8)
+    assert derived.value == "0.00000001"
+    assert "E" not in derived.value and "e" not in derived.value
+    assert Decimal(derived.value) == Decimal("1E-8")
+    assert quant.within_tolerance(derived, "0.00000001")
+
+
 # -- (b) family activation: registry flip + t18 registration ---------------
 
 
@@ -210,12 +241,23 @@ def test_right_number_with_missing_citation_fails_citations_gate(
         citations=list(record.required_citations),
     )
     assert gate_value(query, record, complete, ctx).status is GateStatus.PASS
-    assert gate_citations(query, record, complete, ctx).status is GateStatus.PASS
+
+    # expect_derived_quantity builds required_citations from two claims but
+    # leaves required_claims empty, so the scorer has no claim basis and cannot
+    # verify citation precision for t18 records. The gate reports UNSUPPORTED
+    # rather than banking an unverifiable provenance verdict as a PASS — a
+    # contender that shotguns these records must not show a clean provenance
+    # sheet. Recall is still measured and still reported.
+    citations_item = gate_citations(query, record, complete, ctx)
+    assert citations_item.status is GateStatus.UNSUPPORTED
+    assert "recall 2/2" in (citations_item.evidence or "")
+    assert "precision unverifiable" in (citations_item.evidence or "")
 
     missing_one = complete.model_copy(
         update={"citations": list(record.required_citations)[:1]}
     )
     assert gate_value(query, record, missing_one, ctx).status is GateStatus.PASS
+    # Recall is provable whether or not precision is, so this still fails.
     item = gate_citations(query, record, missing_one, ctx)
     assert item.status is GateStatus.FAIL
     assert "missing citations" in (item.evidence or "")

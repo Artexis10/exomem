@@ -95,6 +95,33 @@ def _tree(root: Path) -> dict[str, bytes]:
     }
 
 
+def _scored_gates(query: QueryRecord, record: ExpectedRecord) -> set[str]:
+    """The deterministic gates this record actually makes discriminating.
+
+    ``expected.jsonl`` is published, so its ``gates`` field is a claim about the
+    record and has to be true. A gate belongs in the list when the record's own
+    fields give it something to decide: state gates need claims (and take the
+    scorer's ``as_of``/``current_state`` naming from the ask), citations need
+    required citations, ``no_leak`` needs forbidden disclosures, ``abstention``
+    needs a required abstention/clarification, ``calibration`` needs a hedging
+    requirement. ``value`` is subsumed by the state gate wherever required
+    claims exist, which is the convention the rest of the suite follows.
+    """
+
+    gates: set[str] = set()
+    if record.required_claims or record.forbidden_claims:
+        gates.add("as_of" if query.ask.world_week is not None else "current_state")
+    if record.required_citations:
+        gates.add("citations")
+    if record.forbidden_disclosures:
+        gates.add("no_leak")
+    if record.abstain or record.clarify:
+        gates.add("abstention")
+    if record.uncertainty.hedged is not None:
+        gates.add("calibration")
+    return gates
+
+
 def test_preference_family_is_active_and_accepts_generation(tmp_path: Path) -> None:
     probe = _active_probe()
     manifest = generate_corpus(1, tmp_path / "probe", templates={probe.template_id: probe})
@@ -166,7 +193,11 @@ def test_only_opinion_support_requires_hedging_and_attribution(
 ) -> None:
     _, entities, queries, expected, claims, sources = corpus
     entities_by_id = {entity.entity_id: entity for entity in entities}
-    ctx = ScoringContext(claims_by_id=claims, sources_by_id=sources)
+    ctx = ScoringContext(
+        claims_by_id=claims,
+        sources_by_id=sources,
+    entities_by_id={e.entity_id: e for e in entities},
+    )
     picks = [query for query in queries if query.query_kind == "opinion_objectivity"]
     assert len(picks) == 4
     for query in picks:
@@ -211,8 +242,12 @@ def test_only_opinion_support_requires_hedging_and_attribution(
 
 
 def test_changed_position_as_of_forbids_the_old_view(corpus: Corpus) -> None:
-    _, _, queries, expected, claims, sources = corpus
-    ctx = ScoringContext(claims_by_id=claims, sources_by_id=sources)
+    _, entities, queries, expected, claims, sources = corpus
+    ctx = ScoringContext(
+        claims_by_id=claims,
+        sources_by_id=sources,
+    entities_by_id={e.entity_id: e for e in entities},
+    )
     picks = [query for query in queries if query.query_kind == "opinion_as_of"]
     assert len(picks) == 4
     for query in picks:
@@ -248,6 +283,22 @@ def test_unrecorded_opinion_requires_abstention(corpus: Corpus) -> None:
         assert record.abstain is True
         assert record.answer.kind == "none"
         assert record.required_claims == []
+
+
+def test_declared_gates_match_what_each_record_evaluates(corpus: Corpus) -> None:
+    _, _, queries, expected, _, _ = corpus
+    by_kind = {query.query_kind: expected[query.query_id] for query in queries}
+    for query in queries:
+        record = expected[query.query_id]
+        assert set(record.gates) == _scored_gates(query, record), (
+            f"{query.query_kind} declares {record.gates}"
+        )
+    # The two specifics this guards: an as-of ask is scored by the as_of gate,
+    # and a record with no hedging requirement must not advertise calibration.
+    assert "as_of" in by_kind["opinion_as_of"].gates
+    assert "current_state" not in by_kind["opinion_as_of"].gates
+    assert "calibration" not in by_kind["holder_opinion"].gates
+    assert "calibration" in by_kind["opinion_objectivity"].gates
 
 
 def test_t21_double_generation_is_byte_identical(tmp_path: Path) -> None:

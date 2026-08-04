@@ -9,6 +9,7 @@ lints that every span is justified by evidence.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import date
 
@@ -16,6 +17,8 @@ from membench.clock import week_date
 from membench.schema import (
     ClaimRecord,
     ClaimStatus,
+    EntityRecord,
+    ExpectedRecord,
     PolicySet,
     SourceRecord,
     SpanCauseKind,
@@ -194,6 +197,207 @@ def required_citations(
                     ):
                         ordered.setdefault(source_id)
     return tuple(ordered)
+
+
+def entity_names(entities_by_id: dict[str, EntityRecord]) -> dict[str, frozenset[str]]:
+    """Every string that designates an entity, mapped to the entities it names.
+
+    Canonical names, aliases and historical ``name_timeline`` names all count:
+    a rename memo carrying the *old* name still resolves reference.
+    """
+
+    names: dict[str, set[str]] = {}
+    for entity in entities_by_id.values():
+        for name in (
+            entity.canonical_name,
+            *entity.aliases,
+            *(span.name for span in entity.name_timeline),
+        ):
+            names.setdefault(name, set()).add(entity.entity_id)
+    return {name: frozenset(ids) for name, ids in names.items()}
+
+
+def claim_neighbourhood(
+    basis: Iterable[str],
+    claims_by_id: dict[str, ClaimRecord],
+    *,
+    entities_by_id: dict[str, EntityRecord] | None = None,
+) -> frozenset[str]:
+    """Claims an answer about ``basis`` is entitled to draw evidence from.
+
+    Closed under three relations, to a fixpoint, because provenance for an
+    answer is not confined to the claim that states it:
+
+    - ``derived_from`` in **both** directions. Upward reaches the originals a
+      derived claim rests on. Downward reaches a claim derived *from* the
+      basis — a weekly digest restating the same reading is on-topic evidence,
+      and a one-way walk would score citing it as unsupported.
+    - supersession partners, which document the change under discussion.
+    - **reference-resolving claims about an entity already in the closure.**
+
+    The third edge is deliberately *not* "every claim about the same subject".
+    That version admitted arbitrary predicates: a field report measuring a
+    yield score became precise provenance for a question about a delivery
+    date, because both happen to be about the same project. Shotgunning inside
+    an entity was free, which is the original hole one level down.
+
+    The edge exists so a system can prove the entity named in one source is
+    the entity named in another, so it admits exactly the claims that do that
+    work: those whose object *names* an entity already in the closure. A claim
+    asserting ``official_name = "Project Driftreach"`` resolves reference and
+    is admitted; ``yield-score = 25.1`` resolves nothing and is not. The test
+    is structural — it asks whether the object value is an entity name, never
+    what the predicate is called — so it does not rot as templates add
+    predicates.
+
+    Without ``entities_by_id`` no name can be resolved, so this edge is
+    skipped entirely; callers must treat that as *unverifiable* rather than as
+    a narrower answer (see :func:`permitted_citations`), because silently
+    dropping the edge would fail honest multi-hop answers.
+    """
+
+    names = entity_names(entities_by_id or {})
+    children: dict[str, list[str]] = {}
+    by_subject: dict[str, list[str]] = {}
+    for claim in claims_by_id.values():
+        by_subject.setdefault(claim.subject, []).append(claim.claim_id)
+        for parent in claim.derived_from:
+            if is_claim_id(parent):
+                children.setdefault(parent, []).append(claim.claim_id)
+
+    seen: set[str] = set()
+    frontier = [claim_id for claim_id in basis if claim_id in claims_by_id]
+    while frontier:
+        claim_id = frontier.pop()
+        if claim_id in seen:
+            continue
+        seen.add(claim_id)
+        claim = claims_by_id[claim_id]
+        adjacent = [parent for parent in claim.derived_from if is_claim_id(parent)]
+        adjacent.extend(children.get(claim_id, ()))
+        adjacent.extend(
+            rel for rel in (claim.supersedes, claim.superseded_by) if rel and is_claim_id(rel)
+        )
+        if names:
+            known = {claims_by_id[other].subject for other in seen} | {claim.subject}
+            for sibling_id in by_subject.get(claim.subject, ()):
+                sibling = claims_by_id[sibling_id]
+                designated = names.get(sibling.object.value)
+                if designated and designated & known:
+                    adjacent.append(sibling_id)
+        frontier.extend(
+            other for other in adjacent if other in claims_by_id and other not in seen
+        )
+    return frozenset(seen)
+
+
+def evidence_neighbourhood(
+    basis: Iterable[str],
+    *,
+    claims_by_id: dict[str, ClaimRecord],
+    knowledge_week: int,
+    entities_by_id: dict[str, EntityRecord] | None = None,
+    sources_by_id: dict[str, SourceRecord] | None = None,
+) -> tuple[str, ...]:
+    """Source ids the oracle can tie to the evidence neighbourhood of ``basis``.
+
+    For every claim in :func:`claim_neighbourhood` this admits assertions of
+    **every** stance (a disputed claim's objector is real provenance, and the
+    corpus asks for it via ``UncertaintyExpectation.cite_both_sides``), the
+    justifying source of **every** visible status span rather than only the
+    active one, and ``derived_from`` source references.
+
+    Recorded-week visibility is honoured on all three: an assertion, span or
+    referenced source recorded after ``knowledge_week`` is invisible and is
+    *not* admitted, so a contender that cites evidence it could not yet have
+    seen is outside the set. That filter is the bitemporal separation this
+    benchmark rests on. A ``derived_from`` source absent from ``sources_by_id``
+    is admitted, because its recorded week is then unknown and unprovable.
+
+    This makes **no** claim about :func:`required_citations`. A template is free
+    to require citations this walk does not reach; the superset guarantee lives
+    in :func:`permitted_citations`, which is what scorers must use.
+    """
+
+    ordered: dict[str, None] = {}
+    neighbourhood = claim_neighbourhood(
+        basis, claims_by_id, entities_by_id=entities_by_id
+    )
+    for claim_id in sorted(neighbourhood):
+        claim = claims_by_id[claim_id]
+        for assertion in claim.assertions:
+            if assertion.recorded_week <= knowledge_week:
+                ordered.setdefault(assertion.source_id)
+        for span in visible_spans(claim, knowledge_week):
+            if span.cause.by is not None and is_source_id(span.cause.by):
+                ordered.setdefault(span.cause.by)
+        for reference in claim.derived_from:
+            if not is_source_id(reference):
+                continue
+            source = (sources_by_id or {}).get(reference)
+            if source is None or source.recorded_week <= knowledge_week:
+                ordered.setdefault(reference)
+    return tuple(ordered)
+
+
+def permitted_citations(
+    expected: ExpectedRecord,
+    *,
+    claims_by_id: dict[str, ClaimRecord],
+    knowledge_week: int,
+    entities_by_id: dict[str, EntityRecord] | None = None,
+    sources_by_id: dict[str, SourceRecord] | None = None,
+) -> tuple[frozenset[str], str | None]:
+    """Citations an answer to ``expected`` may name without being provably wrong.
+
+    Returns ``(permitted, unverifiable_reason)``. The reason is non-``None``
+    when precision cannot be established: the record names no claims the oracle
+    can resolve, or entity records are unavailable while the basis has sibling
+    claims whose admission depends on resolving names. Per the module contract
+    an unmeasurable verdict is reported as unsupported rather than decided
+    either way — guessing narrow would fail honest multi-hop answers, guessing
+    wide would wave through the shotgun.
+
+    ``permitted`` always contains ``expected.required_citations``. That is a
+    guarantee of *this* function, not an observed property of the graph walk: a
+    template may require a citation :func:`evidence_neighbourhood` does not
+    reach, and no caller should ever be able to punish an answer for citing
+    exactly what the record demands.
+    """
+
+    basis = list(dict.fromkeys([*expected.required_claims, *expected.forbidden_claims]))
+    if not basis:
+        return frozenset(expected.required_citations), "expected record names no claims"
+    unknown = [claim_id for claim_id in basis if claim_id not in claims_by_id]
+    if unknown:
+        return (
+            frozenset(expected.required_citations),
+            f"claims absent from the scoring index: {unknown}",
+        )
+    if not entities_by_id:
+        subjects = {claims_by_id[claim_id].subject for claim_id in basis}
+        siblings = [
+            claim
+            for claim in claims_by_id.values()
+            if claim.subject in subjects and claim.claim_id not in basis
+        ]
+        if siblings:
+            return (
+                frozenset(expected.required_citations),
+                "entity records unavailable to resolve same-entity references",
+            )
+    return (
+        frozenset(expected.required_citations).union(
+            evidence_neighbourhood(
+                basis,
+                claims_by_id=claims_by_id,
+                knowledge_week=knowledge_week,
+                entities_by_id=entities_by_id,
+                sources_by_id=sources_by_id,
+            )
+        ),
+        None,
+    )
 
 
 def what_changed(

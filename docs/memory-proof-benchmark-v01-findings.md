@@ -420,3 +420,90 @@ surface — a product decision, recorded here, not a harness simulation.
 - `EXOMEM_DISABLE_EMBEDDINGS=1 /home/hugoa/projects/exomem/.venv/bin/python benchmarks/run.py run --corpus benchmarks/corpus/generated/s1-t16 --governance wired --label t23-wired --top-k 10`
 - `EXOMEM_DISABLE_EMBEDDINGS=1 /home/hugoa/projects/exomem/.venv/bin/python benchmarks/run.py run --corpus benchmarks/corpus/generated/s1-t16 --label t23-default-open --top-k 10`
 - Wiring gate suite: `EXOMEM_DISABLE_EMBEDDINGS=1 PYTHONPATH=src /home/hugoa/projects/exomem/.venv/bin/python -m pytest -q tests/test_membench_governance_wiring.py`
+
+## Addendum — reproducibility defect: the release manifest is environment-pinned (2026-08-04)
+
+**Severity: latent — blocks deliverable 4.1 (replication kit) the moment v0.2
+release bytes are pinned.** Found while triaging an incidental environment change
+during the wave-3 follow-up lanes, not by a test.
+
+**Scope correction (applied after independent review).** An earlier revision of
+this addendum claimed the reproduction test currently fails *solely* because the
+recorded Pillow version moved. That was wrong, and the error was self-inflicted:
+the reproduction command below intersects the two artifact sets (`set(R) & set(N)`),
+which structurally hides a set-size mismatch. The committed v0.1 release covers
+**17 templates / 200 artifacts / 240 expected records**; the suite now registers
+**23 templates**. So today's red is dominated by that count difference — expected,
+by design, until the packaging lane cuts a v0.2 release. The environment-pinning
+defect below is real and independently measured, but it is **latent**: it bites
+the moment a v0.2 manifest is pinned with a renderer version string inside it,
+which is precisely why it must be settled before packaging rather than after.
+
+`test_full_suite_seed1_reproduces_committed_manifest`
+(`tests/test_membench_release_manifest.py:31`) asserts byte equality of the
+*whole* generated `manifest.json` against the committed release file. That file
+carries a `renderer_versions` block (`benchmarks/membench/artifacts/__init__.py:52`,
+recorded at `generate.py:246`) holding the installed third-party renderer
+versions. The committed v0.1 release records `"pillow": "12.2.0"`.
+
+**Measured:** with Pillow **12.3.0** installed, seed-1 generation of
+`t15_numeric_multimodal` produced **28 artifacts — markdown, csv and png —
+whose `bytes_sha256` and `logical_sha256` are all identical to the committed
+release, 0 differing on either axis.** Across the full committed release, all
+**200 artifacts common to both manifests match byte-for-byte on both hashes**.
+The corpus is bit-for-bit reproducible across the Pillow bump; only the recorded
+version string moved. Once v0.2 is pinned and the template-count difference is
+gone, that version string becomes the *only* remaining source of drift — a
+reproduction failure with no corpus difference behind it.
+
+**Why this matters more than it looks.** The published claim is that a third
+party can regenerate our corpus and verify it. Under the current check they run
+one command, get `manifest drifted from the committed release identity`, and
+have no way to tell a genuine corpus change from a patch-level bump in a
+transitive image library. A reviewer looking to dismiss the benchmark does not
+need to find a scoring flaw — they can just report that the replication kit
+fails on a clean machine. The check is *stricter than the property it defends*,
+which makes it worse than a weaker check: it manufactures false drift.
+
+**Second defect, same area — asymmetric hard dependency.** `pillow_version()`
+(`artifacts/image.py:18`) performs a bare `import PIL` with no fallback, while
+`pymupdf_version() or "absent"` degrades gracefully. Because `renderer_versions()`
+is called unconditionally by `generate_corpus`, **every** corpus generation —
+including text-only templates that render no image — hard-fails with
+`ModuleNotFoundError: No module named 'PIL'` when the media extra is absent.
+The lean-suite premise ("no extras required") does not actually hold for
+generation; it held only because the development venv happened to carry Pillow.
+
+**Disposition (to implement in the packaging lane, before release bytes are pinned):**
+
+1. Split the reproduction check into two verdicts. **Corpus identity** —
+   templates, master seed, counts, and every artifact's `logical_sha256` and
+   `bytes_sha256` — must match exactly and remains a hard failure.
+   **Environment provenance** — `renderer_versions`, `generator_version` — is
+   recorded, diffed, and reported as an *environment difference*, never as
+   corpus drift. The dual-hash design already present in the manifest is what
+   makes this split honest: `logical_sha256` is renderer-independent by
+   construction, so a renderer swap that preserves logical content is
+   distinguishable from one that does not.
+2. Make `pillow_version()` degrade to `"absent"` like pymupdf, and have
+   generation route image artifacts through the existing `degradations`
+   machinery when the media extra is missing — a replicator without extras must
+   get a labelled, degraded-but-valid corpus plus an explicit
+   `N artifacts degraded (media extra absent)` line, not a stack trace.
+3. The replication kit must state the extras required for **byte-identical**
+   reproduction, and the publication gate must label any figure produced from a
+   degraded-artifact corpus.
+
+**Falsification value.** This is a case where the harness was wrong in the
+direction that makes *us* look bad rather than good, so it would never have been
+caught by checking whether results flatter Exomem. It was caught only because a
+lane reported an environment workaround instead of silently installing the
+dependency and moving on.
+
+**Reproduction (single-line commands):**
+
+- `uv run python -c "import PIL; print(PIL.__version__)"`
+- `uv run python -c "import sys; sys.path.insert(0,'benchmarks'); from membench.generate import generate_corpus; m=generate_corpus(1,'/tmp/probe_p1',template_ids=['t15_numeric_multimodal']); print(m.model_dump()['renderer_versions'])"`
+- `uv run python -c "import json; r=json.load(open('benchmarks/corpus/releases/v0.1-seed1.manifest.json')); n=json.load(open('/tmp/probe_p1/manifest.json')); R={a['source_id']:a for a in r['artifacts']}; N={a['source_id']:a for a in n['artifacts']}; c=sorted(set(R)&set(N)); print('committed',len(R),'regenerated',len(N),'common',len(c),'only-committed',len(set(R)-set(N)),'only-regenerated',len(set(N)-set(R)),'bytes-differ',sum(R[s]['bytes_sha256']!=N[s]['bytes_sha256'] for s in c),'logical-differ',sum(R[s]['logical_sha256']!=N[s]['logical_sha256'] for s in c))"`
+  — note the set-size terms: an intersection-only comparison silently hides a
+  template-count difference, which is the mistake the scope correction above fixes.

@@ -1,4 +1,17 @@
-"""T22 — a recurring bulletin corrects itself twice before a fresh claim."""
+"""T22 — a recurring bulletin corrects itself twice before a fresh claim.
+
+``supersedes_source`` topology: a source-level supersession edge means *this
+edition replaces that edition*, so it is only authored together with
+claim-level supersession that retires the replaced edition's claims — the
+meaning t13 already uses for its digest refresh, and the meaning the two
+correction editions below carry (v2 retires c_v1, v3 retires c_v2). The later
+``fresh`` issue therefore declares no such edge and stays at version 1: it adds
+a new unconfirmed claim about a different metric while v3's claim is still
+current, and v3 is still the required citation for the current-metric answer.
+Declaring supersession there would have made ``expected.jsonl`` tell a memory
+system to cite an edition the corpus had told it to retire, penalising exactly
+the behaviour source supersession is supposed to reward.
+"""
 
 from __future__ import annotations
 
@@ -7,6 +20,7 @@ from membench.schema import AuthorityTier, ClaimStatus, ScheduleOpKind, TypedVal
 from membench.templates.base import BuildContext, Template, expect_value, register
 from membench.templates.builders_ext import (
     expect_correction_history,
+    expect_settled_value,
     expect_value_with_correction_history,
 )
 
@@ -107,12 +121,14 @@ def build(ctx: BuildContext) -> None:
         s_clean,
     )
 
+    # A later issue of the same recurring bulletin: it neither replaces nor
+    # retires the corrected edition (c_v3 stays current), so it opens no
+    # supersession edge and starts its own version lineage at 1. Its link to
+    # the correction record is publication identity — the shared title.
     s_fresh = ctx.source(
         9,
         source_title,
         authority=AuthorityTier.OFFICIAL,
-        supersedes_source=s_v3.source_id,
-        version=4,
         lines=[
             f"A fresh unconfirmed {fresh_metric} value for {project.canonical_name} "
             f"is {fresh_value} points."
@@ -145,7 +161,10 @@ def build(ctx: BuildContext) -> None:
         f"What {clean_metric} does {clean_org.canonical_name} record for {project.canonical_name}?",
         knowledge_week=10,
         family=FAMILY,
-        expect=expect_value(c_clean),
+        # The discriminating calibration axis: a system-of-record fact with no
+        # correction record must be stated plainly, so a provider that hedges
+        # every answer fails here instead of hedging its way past the family.
+        expect=expect_settled_value(c_clean),
     )
     ctx.query(
         "fresh_unconfirmed",
