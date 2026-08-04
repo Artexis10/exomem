@@ -19,6 +19,13 @@ Balance is over the *deterministic* outcome (did the run's gates pass this
 query), not over the judge's own verdict. Stratifying on the judge would bias
 the sample toward cases the judge is already confident about, which is exactly
 the measurement error this is meant to detect.
+
+The other half of a valid comparison is that both raters grade **the same
+input**. Candidate text is therefore passed through the judge's own
+:func:`~membench.judge.blinding.normalize_for_judge`, with one shared
+``SourceNumbering`` across question/expected/candidate in the same order as
+:func:`~membench.judge.backends.make_judge_item`, and is never truncated. Any
+divergence there would show up as disagreement and be misread as judge error.
 """
 
 from __future__ import annotations
@@ -28,9 +35,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from membench.ids import stable_id
+from membench.judge.blinding import SourceNumbering, normalize_for_judge
 from membench.schema import ExpectedRecord, QueryRecord, load_jsonl
-
-_ANSWER_EXCERPT_CHARS = 1200
 
 
 @dataclass(frozen=True)
@@ -107,15 +113,36 @@ def build_sample(run_dir: Path, corpus_dir: Path, *, size: int = 50) -> list[Sam
         text = (answers[query_id].get("answer_text") or "").strip()
         if answers[query_id].get("abstained"):
             text = f"(the system declined to answer) {text}".strip()
-        if len(text) > _ANSWER_EXCERPT_CHARS:
-            text = text[:_ANSWER_EXCERPT_CHARS] + "\n… (truncated)"
+
+        # The human and the judge must label *the same input*, or the resulting
+        # kappa measures this sheet rather than the judge. Two asymmetries were
+        # measured on the v0.1 run and are closed here:
+        #
+        #   - Truncation. An earlier revision cut candidates at 1200 characters
+        #     while the judge receives the whole answer; 31 of 140 non-empty
+        #     answers exceeded that, so on 22% of items the human would have
+        #     graded strictly less text than the judge.
+        #   - Blinding. Raw answers carry `[ref:SRC-…]` sentinels, vault paths
+        #     and product names — 33 of the first 60 answers tripped
+        #     `leakage_scan`. The judge never sees those (they become `[ctx:N]`
+        #     and a neutral system token), so an unblinded sheet would hand the
+        #     human provider-identifying information the judge is denied.
+        #
+        # One shared numbering across question/expected/candidate, applied in
+        # the same order as `judge.backends.make_judge_item`, so a given source
+        # carries the same `[ctx:N]` for both raters.
+        numbering = SourceNumbering()
+        question = normalize_for_judge(queries[query_id].prompt_text, numbering)
+        expected_text = normalize_for_judge(_expected_text(expected[query_id]), numbering)
+        candidate = normalize_for_judge(text, numbering) if text else "(empty response)"
+
         items.append(
             SampleItem(
                 item_id=f"J{index:03d}",
                 query_id=query_id,
-                question=queries[query_id].prompt_text,
-                expected=_expected_text(expected[query_id]),
-                candidate=text or "(empty response)",
+                question=question,
+                expected=expected_text,
+                candidate=candidate,
             )
         )
     return items
@@ -140,10 +167,12 @@ def render_sheet(items: list[SampleItem]) -> str:
         "deliberately absent. If you find yourself able to infer them, say so —",
         "that is itself a finding about the sheet.",
         "",
-        "Candidate responses are raw system output, truncated at "
-        f"{_ANSWER_EXCERPT_CHARS} characters. Retrieval-mode contenders return",
-        "document text rather than prose; judge whether the expected answer is",
-        "actually conveyed by what is shown.",
+        "Candidate responses are shown in full and exactly as the judge receives",
+        "them: source references appear as neutral `[ctx:N]` tokens and product",
+        "names are replaced, so neither of you can tell which system answered.",
+        "Retrieval-mode contenders return document text rather than prose — judge",
+        "whether the expected answer is actually conveyed by what is shown, not",
+        "whether it is well written.",
         "",
         "---",
         "",

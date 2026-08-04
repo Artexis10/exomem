@@ -13,6 +13,8 @@ from membench.agreement import (
     cohen_kappa,
     render_sheet,
 )
+from membench.judge.backends import make_judge_item
+from membench.judge.blinding import leakage_scan
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 RUN = REPO_ROOT / "benchmarks/runs/20260801T115138Z-exomem-local-postfix-lexical-v2-30586b"
@@ -58,6 +60,59 @@ def test_sheet_never_reveals_a_verdict(items: list[SampleItem]) -> None:
         # withheld), so the check is scoped to item bodies.
         for field in ("semantic_match", "explanation_quality", "not_applicable"):
             assert field not in rendered, f"{item.item_id} leaks {field!r}"
+
+
+def test_labeller_grades_exactly_what_the_judge_grades(items: list[SampleItem]) -> None:
+    """Both raters must see the same input, or kappa measures the sheet.
+
+    Two asymmetries were live in the first revision and are pinned here. The
+    sheet truncated candidates at 1200 characters while the judge receives the
+    whole answer (31 of 140 non-empty v0.1 answers exceeded it), and the sheet
+    showed raw text carrying sentinels, vault paths and product names that the
+    judge never sees (33 of the first 60 answers tripped ``leakage_scan``).
+    Either one turns a disagreement into an artefact of this module.
+    """
+
+    raw = {
+        row["query_id"]: row
+        for row in (
+            json.loads(line)
+            for line in (RUN / "answers.jsonl").read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        )
+    }
+
+    for item in items:
+        text = (raw[item.query_id].get("answer_text") or "").strip()
+        if raw[item.query_id].get("abstained"):
+            text = f"(the system declined to answer) {text}".strip()
+        judge_item = make_judge_item(
+            item.query_id,
+            question=item.question,
+            expected_summary=item.expected,
+            candidate_answer=text,
+            provider_token="system-A",
+        )
+        if text:
+            assert item.candidate == judge_item.payload["candidate_answer"], (
+                f"{item.item_id}: labeller and judge see different candidate text"
+            )
+        assert not leakage_scan(item.candidate), (
+            f"{item.item_id} shows provider-identifying text the judge never sees: "
+            f"{leakage_scan(item.candidate)}"
+        )
+        assert not leakage_scan(item.question), f"{item.item_id} question leaks identity"
+
+
+def test_candidate_text_is_never_truncated(items: list[SampleItem]) -> None:
+    """Truncation would silently shorten one rater's evidence, not the other's."""
+
+    assert not any("(truncated)" in i.candidate for i in items)
+    longest = max(len(i.candidate) for i in items)
+    assert longest > 1200, (
+        "no sampled answer exceeds the old 1200-char cut, so this test no longer "
+        "demonstrates that truncation was removed"
+    )
 
 
 def test_sample_is_balanced_against_a_skewed_population(items: list[SampleItem]) -> None:
