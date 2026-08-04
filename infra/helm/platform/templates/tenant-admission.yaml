@@ -200,7 +200,7 @@ spec:
         (
         !has(object.spec.containers[0].command) &&
         object.spec.containers[0].args == ['--transport', 'http', '--port', '8765'] &&
-        size(object.spec.containers[0].env) == 19 &&
+        size(object.spec.containers[0].env) == 22 &&
         object.spec.containers[0].env.exists(env,
           env.name == 'EXOMEM_HOSTED_CELL' && has(env.value) && env.value == '1' && !has(env.valueFrom)) &&
         object.spec.containers[0].env.exists(env,
@@ -236,10 +236,17 @@ spec:
         object.spec.containers[0].env.exists(env,
           env.name == 'EXOMEM_HOSTED_UPLOAD_LIMIT_BYTES' && has(env.value) && env.value == '94371840' && !has(env.valueFrom)) &&
         object.spec.containers[0].env.exists(env,
-          env.name == 'EXOMEM_HOSTED_WORKER_LIMIT' && has(env.value) && env.value == '0' && !has(env.valueFrom)) &&
+          env.name == 'EXOMEM_HOSTED_WORKER_LIMIT' && has(env.value) && env.value == '2' && !has(env.valueFrom)) &&
         object.spec.containers[0].env.exists(env,
-          env.name == 'EXOMEM_HOSTED_FEATURE_GRANTS' &&
-          (!has(env.value) || env.value == '') && !has(env.valueFrom)) &&
+          env.name == 'EXOMEM_HOSTED_FEATURE_GRANTS' && has(env.value) &&
+          env.value == 'embeddings,file-watcher' && !has(env.valueFrom)) &&
+        object.spec.containers[0].env.exists(env,
+          env.name == 'OMP_NUM_THREADS' && has(env.value) && env.value == '1' && !has(env.valueFrom)) &&
+        object.spec.containers[0].env.exists(env,
+          env.name == 'MKL_NUM_THREADS' && has(env.value) && env.value == '1' && !has(env.valueFrom)) &&
+        object.spec.containers[0].env.exists(env,
+          env.name == 'TOKENIZERS_PARALLELISM' && has(env.value) &&
+          env.value == 'false' && !has(env.valueFrom)) &&
         object.spec.containers[0].env.exists(env,
           env.name == 'EXOMEM_HOSTED_TRANSFER_BROWSER_ORIGIN' && has(env.value) &&
           env.value == namespaceObject.metadata.annotations['exomem.io/browser-origin'] && !has(env.valueFrom)) &&
@@ -320,11 +327,11 @@ spec:
         !variables.inScope ||
         (has(object.spec.runtimeClassName) && object.spec.runtimeClassName == 'exomem-storage-init') ||
         (
-        string(dyn(object.spec.containers[0].resources).requests['cpu']) == '100m' &&
-        string(dyn(object.spec.containers[0].resources).requests['memory']) == '256Mi' &&
+        string(dyn(object.spec.containers[0].resources).requests['cpu']) == '250m' &&
+        string(dyn(object.spec.containers[0].resources).requests['memory']) == '1Gi' &&
         string(dyn(object.spec.containers[0].resources).requests['ephemeral-storage']) == '512Mi' &&
-        string(dyn(object.spec.containers[0].resources).limits['cpu']) == '1' &&
-        string(dyn(object.spec.containers[0].resources).limits['memory']) == '1Gi' &&
+        string(dyn(object.spec.containers[0].resources).limits['cpu']) == '2' &&
+        string(dyn(object.spec.containers[0].resources).limits['memory']) == '1536Mi' &&
         string(dyn(object.spec.containers[0].resources).limits['ephemeral-storage']) == '512Mi' &&
         size(dyn(object.spec.containers[0].resources).requests) == 3 &&
         size(dyn(object.spec.containers[0].resources).limits) == 3)

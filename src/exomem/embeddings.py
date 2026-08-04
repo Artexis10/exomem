@@ -896,6 +896,33 @@ def _chunks_for_page(vault_root: Path, page) -> list[str]:
     return out
 
 
+def encode_batch_size(model) -> int:
+    """Encode batch size for the device the model actually landed on.
+
+    Batch size sets peak resident memory, because activations scale with it
+    while the weights do not. Measured on CPU with bge-base at ~280-token
+    chunks: batch 32 peaks at 1332 MiB and yields 1.8 chunks/s, batch 8 peaks
+    at 918 MiB and yields 2.3 chunks/s. On CPU a large batch is strictly worse
+    on both axes — it buys no parallelism the cores were not already giving and
+    just costs cache locality. On an accelerator the opposite holds, so the
+    choice follows the device rather than being one global constant.
+
+    This matters most where memory is the binding constraint: a hosted cell's
+    limit is sized from this peak, and peak per cell is what decides how many
+    tenants a node carries.
+    """
+    override = os.environ.get("EXOMEM_EMBED_BATCH", "").strip()
+    if override:
+        try:
+            parsed = int(override)
+        except ValueError:
+            parsed = 0
+        if parsed > 0:
+            return parsed
+    device = str(getattr(model, "device", "cpu")).lower()
+    return 32 if (device.startswith("cuda") or device == "mps") else 8
+
+
 def embed_texts(texts: list[str], *, is_query: bool = False) -> np.ndarray:
     """Batch-encode texts → float32 `(N, 768)`, L2-normalized for cosine."""
     if not texts:
@@ -906,7 +933,7 @@ def embed_texts(texts: list[str], *, is_query: bool = False) -> np.ndarray:
     with BGE_GUARD.active():
         vecs = model.encode(
             texts,
-            batch_size=32,
+            batch_size=encode_batch_size(model),
             convert_to_numpy=True,
             normalize_embeddings=True,
             show_progress_bar=False,

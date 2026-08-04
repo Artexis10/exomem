@@ -78,17 +78,43 @@ spec:
               value: {{ printf "%.0f" .Values.workerLimit | quote }}
             - name: EXOMEM_HOSTED_FEATURE_GRANTS
               value: {{ .Values.featureGrants | quote }}
+            # torch sizes its thread pool from the host's core count, not the
+            # cgroup's CPU limit, so every cell on a four-core node would spawn
+            # four compute threads and the fleet would spend its budget on
+            # context switching. One thread per cell matches the cap to the
+            # cores: four cells, four embedding threads, no oversubscription.
+            # It is also the more CPU-efficient point — measured 0.56 CPU-s per
+            # chunk at one thread against 0.64 at two — which is what matters
+            # when cells contend. The CPU limit stays above this so non-embedding
+            # work can still burst.
+            - name: OMP_NUM_THREADS
+              value: {{ .Values.embeddingThreads | quote }}
+            - name: MKL_NUM_THREADS
+              value: {{ .Values.embeddingThreads | quote }}
+            - name: TOKENIZERS_PARALLELISM
+              value: "false"
             - name: EXOMEM_HOSTED_TRANSFER_BROWSER_ORIGIN
               value: {{ .Values.browserOrigin | quote }}
             - name: EXOMEM_HOSTED_TRANSFER_HOST
               value: {{ .Values.transferHostname | quote }}
+          # Measured on CPU torch 2.13 with BAAI/bge-base-en-v1.5 at the encode
+          # batch this runtime actually uses (8 on CPU): 531 MiB resident once
+          # the idle reaper has unloaded the model, 791 MiB warm, 918 MiB peak
+          # mid-encode. The old 1Gi limit predates embeddings and would OOM-kill
+          # a cell inside its first batch.
+          #
+          # Peak per cell is what decides how many tenants a node carries, so it
+          # is measured rather than guessed. Requests reserve the warm figure so
+          # the fleet schedules; the limit leaves headroom over peak for the
+          # server, sqlite, and index caches without reserving memory that a
+          # mostly-idle cell never touches.
           resources:
             requests:
-              cpu: 100m
-              memory: 256Mi
+              cpu: {{ .Values.cpuRequest | quote }}
+              memory: {{ .Values.memoryRequest | quote }}
             limits:
-              cpu: 1
-              memory: 1Gi
+              cpu: {{ .Values.cpuLimit | quote }}
+              memory: {{ .Values.memoryLimit | quote }}
               ephemeral-storage: 512Mi
           securityContext:
             runAsNonRoot: true

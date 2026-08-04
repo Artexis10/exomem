@@ -504,10 +504,14 @@ def test_platform_renders_disjoint_durability_workloads() -> None:
 
     expected = {
         "exomem-export-gc": ("CronJob", ["exomem-export-gc"], "*/5 * * * *", False),
+        # Daily: each vault run is a full independent encrypted archive and
+        # quiesces the cell, so frequency multiplies storage and downtime.
+        # The database dump below stays sub-daily — it is small and its loss
+        # window governs control-plane recovery, not tenant vault content.
         "exomem-durability-backup": (
             "CronJob",
             ["exomem-durability-backup-worker"],
-            "*/30 * * * *",
+            "17 2 * * *",
             True,
         ),
         "exomem-database-backup": (
@@ -1592,8 +1596,15 @@ def test_platform_renders_owned_namespaces_and_content_free_observability() -> N
         check for check in contract["checks"] if check["name"] == "scheduler-last-success"
     )
     assert scheduler_check["maximum_age_seconds"] == 480
-    assert contract["alerts"]["backup_warn_age_seconds"] == 2700
-    assert contract["alerts"]["backup_block_age_seconds"] == 3600
+    # Daily full archives: the newest object always approaches the 24-hour
+    # objective just before each run, so thresholds sit past it. Warn at 26h
+    # catches a late run; block at 30h catches a missed one inside the same day.
+    backup_check = next(check for check in contract["checks"] if check["name"] == "backup-freshness")
+    assert backup_check["maximum_age_seconds"] == 108000
+    assert contract["alerts"]["backup_warn_age_seconds"] == 93600
+    assert contract["alerts"]["backup_block_age_seconds"] == 108000
+    assert contract["alerts"]["backup_warn_age_seconds"] > 24 * 3600
+    assert contract["alerts"]["backup_block_age_seconds"] < 48 * 3600
 
     scheduler_jobs = [
         item
@@ -1755,8 +1766,24 @@ def test_cell_chart_renders_separate_privileged_init_and_restricted_serving_mode
         assert "EXOMEM_HOSTED_BROWSER_ORIGIN" not in env
         assert env["EXOMEM_HOSTED_STORAGE_LIMIT_BYTES"] == "5368709120"
         assert env["EXOMEM_HOSTED_UPLOAD_LIMIT_BYTES"] == "94371840"
-        assert env["EXOMEM_HOSTED_WORKER_LIMIT"] == "0"
-        assert env["EXOMEM_HOSTED_FEATURE_GRANTS"] == ""
+        # A hosted cell must not be a lesser product than the free local
+        # runtime. hosted_runtime.py SETS EXOMEM_DISABLE_EMBEDDINGS whenever the
+        # worker limit is zero or the grant is missing, and nothing downstream
+        # surfaces that: the cell serves keyword-only recall in silence.
+        assert env["EXOMEM_HOSTED_WORKER_LIMIT"] == "2"
+        assert env["EXOMEM_HOSTED_FEATURE_GRANTS"] == "embeddings,file-watcher"
+        assert "EXOMEM_DISABLE_EMBEDDINGS" not in env
+        assert "EXOMEM_DISABLE_FILE_WATCHER" not in env
+        # torch would otherwise size its pool from the node's core count and
+        # oversubscribe every cell's cgroup.
+        assert env["OMP_NUM_THREADS"] == "1"
+        assert env["MKL_NUM_THREADS"] == "1"
+        assert int(env["OMP_NUM_THREADS"]) <= int(container["resources"]["limits"]["cpu"])
+        # Measured at the CPU encode batch the runtime uses: 918 MiB peak
+        # mid-encode, 791 MiB warm. The pre-embedding 1Gi limit would
+        # OOM-kill the cell inside its first batch.
+        assert container["resources"]["limits"]["memory"] == "1536Mi"
+        assert container["resources"]["requests"]["memory"] == "1Gi"
         assert env["TMPDIR"] == "/var/lib/exomem/state/tmp/runtime"
         assert {volume["name"] for volume in pod["volumes"]} == {"data", "credentials"}
         assert {mount["mountPath"] for mount in container["volumeMounts"]} == {
@@ -1817,8 +1844,20 @@ def test_cell_schema_rejects_mutable_image_and_non_fixed_limits() -> None:
     assert "@sha256:" in text
     assert '"const": 5368709120' in text
     assert '"const": 94371840' in text
-    assert '"const": 0' in text
     assert '"const": "10Gi"' in text
+    # Every knob that decides what the tenant actually receives is pinned, so a
+    # values override cannot quietly change the product or the resource
+    # envelope. The worker limit and grants are here because a zero/empty pair
+    # renders a cell that serves keyword-only recall without erroring.
+    properties = schema["properties"]
+    assert properties["workerLimit"]["const"] == 2
+    assert properties["featureGrants"]["const"] == "embeddings,file-watcher"
+    assert properties["cpuRequest"]["const"] == "250m"
+    assert properties["cpuLimit"]["const"] == "2"
+    assert properties["memoryRequest"]["const"] == "1Gi"
+    assert properties["memoryLimit"]["const"] == "1536Mi"
+    assert properties["embeddingThreads"]["const"] == 1
+    assert properties["embeddingThreads"]["const"] <= int(properties["cpuLimit"]["const"])
     assert schema["properties"]["workloadMode"]["enum"] == ["initialize", "restore", "serve"]
     assert schema["properties"]["provisionMode"]["enum"] == ["serve", "restore-candidate"]
     assert '"transferHostname"' not in json.dumps(schema["properties"]["routes"])
@@ -1888,6 +1927,84 @@ def test_cell_chart_rejects_mismatched_runtime_and_provider_cell_ids(tmp_path: P
     )
     assert result.returncode != 0
     assert "providerIdentity.cellId must equal cellId" in result.stderr
+
+
+@pytest.mark.parametrize(
+    ("override", "messages"),
+    [
+        ({"workerLimit": 0}, ("workerLimit must be greater than zero", "/workerLimit")),
+        ({"featureGrants": ""}, ("featureGrants must include embeddings", "/featureGrants")),
+        (
+            {"featureGrants": "file-watcher"},
+            ("featureGrants must include embeddings", "/featureGrants"),
+        ),
+    ],
+)
+def test_cell_chart_refuses_to_render_a_keyword_only_cell(
+    tmp_path: Path, override: dict[str, object], messages: tuple[str, ...]
+) -> None:
+    """Either setting silently downgrades the tenant, so rendering must fail.
+
+    `hosted_runtime.apply_process_environment` SETS EXOMEM_DISABLE_EMBEDDINGS
+    when the worker limit is zero or the grant is absent. The cell then starts
+    healthy, accepts writes, answers queries, and never matches on meaning.
+    Nothing downstream distinguishes that from a working cell, so render time is
+    the last point where it can be caught.
+
+    Two layers reject it and either is a pass: values.schema.json pins the exact
+    shipped shape, and the chart's own guard catches a zero worker limit or a
+    missing grant if that schema is ever relaxed to a per-plan range.
+    """
+    if HELM is None:
+        pytest.skip("set HELM_BIN to run pinned Helm rendering")
+    override_file = tmp_path / "downgraded-cell.yaml"
+    override_file.write_text(yaml.safe_dump(override), encoding="utf-8")
+    result = subprocess.run(
+        [
+            str(HELM),
+            "template",
+            "contract-test",
+            str(CELL),
+            "--namespace",
+            "cell-alpha-test",
+            "--values",
+            str(CELL / "values.validation.yaml"),
+            "--values",
+            str(override_file),
+        ],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode != 0, result.stdout
+    assert any(message in result.stderr for message in messages), result.stderr
+
+
+def test_cell_quota_holds_the_serving_pod_and_its_init_job_together() -> None:
+    """The quota counts every non-terminal pod, so it must cover both at once.
+
+    The pre-embedding ceiling was exactly the old runtime limit plus the init
+    job's. Raising the runtime limit without raising this would have made the
+    init job fail admission on quota rather than on real capacity — and it would
+    have failed during provisioning, not during a test.
+    """
+    documents = _render(CELL, CELL / "values.validation.yaml", namespace="cell-alpha-test")
+    quota = _find(documents, "ResourceQuota", "cell-alpha-quota")["spec"]["hard"]
+    statefulset = _find(documents, "StatefulSet", "cell-alpha")
+    runtime = statefulset["spec"]["template"]["spec"]["containers"][0]["resources"]["limits"]
+
+    def mebibytes(value: str) -> int:
+        if value.endswith("Gi"):
+            return int(value.removesuffix("Gi")) * 1024
+        if value.endswith("Mi"):
+            return int(value.removesuffix("Mi"))
+        raise AssertionError(f"unhandled memory unit: {value}")
+
+    init_job_memory = mebibytes("1Gi")  # init-job.yaml, limits.memory
+    init_job_cpu = 1  # init-job.yaml, limits.cpu
+    assert mebibytes(quota["limits.memory"]) >= mebibytes(runtime["memory"]) + init_job_memory
+    assert int(quota["limits.cpu"]) >= int(runtime["cpu"]) + init_job_cpu
 
 
 def test_cell_routes_expose_only_exact_control_and_transfer_paths() -> None:

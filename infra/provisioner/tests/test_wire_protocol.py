@@ -50,7 +50,7 @@ def test_v2_cell_requests_require_only_a_strict_six_field_runtime_target() -> No
         "cellId": "cell-v2-alpha",
         "provisionMode": "serve",
         "serviceCredential": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
-        "workerPolicy": {"workerCount": 0, "semantic": False, "media": False},
+        "workerPolicy": {"workerCount": 2, "semantic": True, "media": False},
         "runtimeTarget": _runtime_target(),
     }
 
@@ -141,7 +141,7 @@ async def test_fake_driver_emits_the_selected_health_protocol_shape() -> None:
     )
     request = {
         "cellId": "cell-v2-alpha",
-        "workerPolicy": {"workerCount": 0, "semantic": False, "media": False},
+        "workerPolicy": {"workerCount": 2, "semantic": True, "media": False},
         "runtimeTarget": _runtime_target(),
     }
 
@@ -156,7 +156,7 @@ async def test_fake_driver_emits_the_selected_health_protocol_shape() -> None:
         "mutationAuthority": True,
         "readAdmission": True,
         "writeAdmission": True,
-        "workerPolicy": {"workerCount": 0, "semantic": False, "media": False},
+        "workerPolicy": {"workerCount": 2, "semantic": True, "media": False},
         "code": "CELL_READY",
     }
 
