@@ -86,8 +86,8 @@ RUN uv pip install --python /app/.venv/bin/python "torch>=2.12" --index-url http
  && uv pip install --python /app/.venv/bin/python ".[embeddings]"
 
 ########################################################################
-# builder-hosted — builder-ml plus the embedding weights resolved at BUILD
-# time into the image itself.
+# builder-hosted — builder-lean plus ONNX Runtime and the embedding weights
+# resolved at BUILD time into the image itself.
 #
 # A hosted cell runs under a default-deny NetworkPolicy with no egress rules
 # and a read-only root filesystem. It therefore cannot download a model, and
@@ -95,33 +95,39 @@ RUN uv pip install --python /app/.venv/bin/python "torch>=2.12" --index-url http
 # must already be a layer, or the `embeddings` grant produces a cell that
 # advertises semantic recall and fails on first use.
 #
-# Only the bi-encoder is fetched. The CLIP model belongs to the `vision`
-# grant and the cross-encoder reranker never runs in a hosted cell (see the
-# hosted stage's EXOMEM_DISABLE_RANKING), so baking either would add hundreds
-# of megabytes to every cell for a path that is closed.
+# This stage builds from `builder-lean`, NOT `builder-ml`: the hosted lane
+# serves the same bi-encoder through ONNX Runtime, which imports ~40 MiB
+# against torch's ~400 and holds a materially smaller peak. Peak per cell is
+# what decides how many tenants a node carries, so torch's absence here is the
+# capacity argument, not a packaging preference. It is only possible in this
+# lane — the reranker and CLIP are sentence-transformers models, and the hosted
+# stage withholds both (EXOMEM_DISABLE_RANKING; CLIP belongs to `vision`).
+#
+# Only the bi-encoder is fetched, and only in the form the runtime reads.
 ########################################################################
-FROM builder-ml AS builder-hosted
+FROM builder-lean AS builder-hosted
 ENV HF_HOME=/opt/exomem-models
-# Fetch the weights, drop the duplicate serializations the loader will not use
-# (the hub cache stores snapshot entries as symlinks into blobs/, so the blob
-# has to go too or the layer keeps the bytes), then load once more with the
-# network closed. That final load is the gate: if trimming removed something
-# the loader actually needs, the build fails here instead of every cell
-# failing on its first query.
-RUN /app/.venv/bin/python -c "\
+# Resolve the model through the very backend the cell serves with, so the build
+# fetches exactly what that runtime opens — the ONNX export, the fast tokenizer,
+# and the sequence config — and never a torch serialization there is no loader
+# for. Then load once more with the network closed. That second load is the
+# gate: if anything the runtime needs is absent, the build fails here instead of
+# every cell failing on its first query.
+RUN uv pip install --python /app/.venv/bin/python ".[embeddings-onnx]" \
+ && EXOMEM_EMBED_BACKEND=onnx /app/.venv/bin/python -c "\
 from exomem.embeddings import MODEL_NAME; \
-from sentence_transformers import SentenceTransformer; \
-SentenceTransformer(MODEL_NAME, device='cpu'); \
+from exomem import embedding_backend as backend; \
+backend.load_encoder(MODEL_NAME, backend=backend.ONNX); \
 print('fetched', MODEL_NAME)" \
- && find /opt/exomem-models \( -name 'pytorch_model.bin' -o -name '*.h5' \
-      -o -name '*.msgpack' -o -name '*.ot' \) \
-      -exec sh -c 'for f; do t=$(readlink -f "$f" || true); rm -f "$f" "$t"; done' _ {} + \
- && HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 /app/.venv/bin/python -c "\
-from exomem.embeddings import MODEL_NAME; \
-from sentence_transformers import SentenceTransformer; \
-m = SentenceTransformer(MODEL_NAME, device='cpu'); \
-v = m.encode(['offline load gate'], show_progress_bar=False); \
-assert v.shape[0] == 1 and v.shape[1] > 0, v.shape; \
+ && HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 EXOMEM_EMBED_BACKEND=onnx \
+    /app/.venv/bin/python -c "\
+import importlib.util; \
+from exomem.embeddings import MODEL_NAME, VECTOR_DIM; \
+from exomem import embedding_backend as backend; \
+encoder = backend.load_encoder(MODEL_NAME, backend=backend.ONNX); \
+v = encoder.encode(['offline load gate'], batch_size=1); \
+assert v.shape == (1, VECTOR_DIM), v.shape; \
+assert importlib.util.find_spec('torch') is None, 'torch reached the hosted image'; \
 print('offline load verified', MODEL_NAME, v.shape)"
 
 ########################################################################
@@ -215,6 +221,7 @@ ENV PATH=/app/.venv/bin:$PATH \
     HF_HUB_OFFLINE=1 \
     TRANSFORMERS_OFFLINE=1 \
     EXOMEM_DISABLE_RANKING=1 \
+    EXOMEM_EMBED_BACKEND=onnx \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 

@@ -5,23 +5,30 @@ architecture. The node has 7751 MiB, of which 815 MiB is in use by K3s, containe
 metrics-server, and CoreDNS. Every remaining cell-shaped megabyte is a paying seat.
 
 The bi-encoder is loaded through `sentence-transformers`, which pulls the full PyTorch
-runtime into every cell. Measured on the identical model (`BAAI/bge-base-en-v1.5`):
+runtime into every cell. Measured here on the identical model
+(`BAAI/bge-base-en-v1.5`), CPU, batch 8, same 15-text set through both runtimes:
 
 | | torch | ONNX Runtime |
 |---|---|---|
-| import cost | 431 MiB | 79 MiB |
-| warm resident | 854 MiB | 528 MiB |
-| encode throughput | baseline | 17% faster |
+| import cost | 399 MiB | 40 MiB |
+| peak resident | 905 MiB | 661 MiB |
+| load | 14.0 s | 1.1 s |
+| encode | 3.26 s | 0.91 s |
 
-The vectors are interchangeable: minimum cosine similarity 0.999977 across five texts
-including edge cases, same 768 dimensions. That is roughly forty times tighter than the
+The vectors are interchangeable: **minimum cosine similarity 0.99999994**, maximum
+absolute component difference 4.2e-07, identical 768 dimensions, and nearest-neighbour
+ordering identical on every input. That is four orders of magnitude tighter than the
 fp16-versus-fp32 drift `_maybe_half` already documents as harmless for ranking, so this
 is a runtime substitution rather than a model change.
 
-326 MiB of warm resident per cell is the difference between four seats and six or more
-on hardware already paid for. Hetzner has retired the CX line, so the node cannot be
-resized and successors cost roughly four times as much for the same memory — density on
-the existing node is the only cheap capacity available.
+Peak is the number that sizes a cell, and 244 MiB of it per cell is the difference
+between four seats and six or more on hardware already paid for. Hetzner has retired the
+CX line, so the node cannot be resized and successors cost roughly four times as much for
+the same memory — density on the existing node is the only cheap capacity available.
+
+These figures are a like-for-like comparison of the two runtimes on one workstation, not
+a cell envelope. The envelope that sets the cap is re-measured on the node itself, in the
+image, under realistic chunk load; see task 5.1.
 
 The alternative considered and rejected was a shared embedding service. It would collapse
 six model copies into one, but it cannot offer zero cross-tenant exposure: tenant text

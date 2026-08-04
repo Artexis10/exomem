@@ -632,7 +632,7 @@ wheels = [
 
 [[package]]
 name = "exomem"
-version = "0.37.0" # x-release-please-version
+version = "0.37.0"
 source = { editable = "." }
 dependencies = [
     { name = "fastmcp" },
@@ -658,6 +658,12 @@ embeddings = [
     { name = "sqlite-vec" },
     { name = "torch", version = "2.12.0", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform != 'linux' and sys_platform != 'win32'" },
     { name = "torch", version = "2.12.0+cu132", source = { registry = "https://download.pytorch.org/whl/cu132" }, marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+]
+embeddings-onnx = [
+    { name = "huggingface-hub" },
+    { name = "onnxruntime" },
+    { name = "sqlite-vec" },
+    { name = "tokenizers" },
 ]
 media = [
     { name = "faster-whisper" },
@@ -693,12 +699,14 @@ requires-dist = [
     { name = "faster-whisper", marker = "extra == 'media'", specifier = ">=1.0" },
     { name = "fastmcp", specifier = "==3.4.4" },
     { name = "httpx", specifier = ">=0.27" },
+    { name = "huggingface-hub", marker = "extra == 'embeddings-onnx'", specifier = ">=0.24" },
     { name = "markitdown", extras = ["docx", "xlsx", "pptx"], marker = "extra == 'media'", specifier = ">=0.1.1" },
     { name = "mlx-whisper", marker = "platform_machine == 'arm64' and sys_platform == 'darwin' and extra == 'media-mlx'", specifier = ">=0.4" },
     { name = "numpy", specifier = ">=1.26" },
     { name = "nvidia-cublas-cu12", marker = "sys_platform == 'win32' and extra == 'media'" },
     { name = "nvidia-cuda-runtime-cu12", marker = "sys_platform == 'win32' and extra == 'media'" },
     { name = "nvidia-cudnn-cu12", marker = "sys_platform == 'win32' and extra == 'media'" },
+    { name = "onnxruntime", marker = "extra == 'embeddings-onnx'", specifier = ">=1.20" },
     { name = "pillow", marker = "extra == 'embeddings'", specifier = ">=10.0" },
     { name = "pillow", marker = "extra == 'media'", specifier = ">=10.0" },
     { name = "pyjwt", extras = ["crypto"], specifier = ">=2.8" },
@@ -713,13 +721,15 @@ requires-dist = [
     { name = "snowballstemmer", specifier = ">=2.2" },
     { name = "speechbrain", marker = "extra == 'diarization'", specifier = ">=1.0" },
     { name = "sqlite-vec", marker = "extra == 'embeddings'", specifier = ">=0.1.6" },
+    { name = "sqlite-vec", marker = "extra == 'embeddings-onnx'", specifier = ">=0.1.6" },
     { name = "textual", marker = "extra == 'tui'", specifier = ">=5.0" },
+    { name = "tokenizers", marker = "extra == 'embeddings-onnx'", specifier = ">=0.20" },
     { name = "torch", marker = "(sys_platform == 'linux' and extra == 'embeddings') or (sys_platform == 'win32' and extra == 'embeddings')", specifier = ">=2.12", index = "https://download.pytorch.org/whl/cu132" },
     { name = "torch", marker = "sys_platform != 'linux' and sys_platform != 'win32' and extra == 'embeddings'", specifier = ">=2.12" },
     { name = "transformers", marker = "extra == 'vision'", specifier = ">=4.40" },
     { name = "watchdog", specifier = ">=4.0" },
 ]
-provides-extras = ["embeddings", "media", "media-mlx", "diarization", "vision", "tui"]
+provides-extras = ["embeddings", "embeddings-onnx", "media", "media-mlx", "diarization", "vision", "tui"]
 
 [package.metadata.requires-dev]
 dev = [
