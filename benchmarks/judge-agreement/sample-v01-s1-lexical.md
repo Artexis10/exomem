@@ -91,6 +91,10 @@ them: source references appear as neutral `[ctx:N]` tokens and product
 names are replaced, so neither of you can tell which system answered.
 Retrieval-mode contenders return document text rather than prose.
 
+Most items have real content to read. A handful are empty or an explicit
+refusal to answer — those take a second, and they are deliberately kept
+few, because rows that decide themselves tell us nothing about the judge.
+
 ---
 
 ## J001  (1 of 50)
@@ -261,138 +265,6 @@ Reviews for Project Cinderspur stay on every Tuesday, unchanged.
 
 ## J003  (3 of 50)
 
-**Question:** Thanks, that looks good - go ahead.
-
-**Expected answer:** (no answer — the corpus does not record this; abstention is correct)
-
-**Candidate response:**
-
-```
-(empty response)
-```
-
-**Your label:** <yes | no | unsure>
-
----
-
-## J004  (4 of 50)
-
-**Question:** On what date did Project Cinderfall actually complete its launch?
-
-**Expected answer:** (no answer — the corpus does not record this; abstention is correct)
-
-**Candidate response:**
-
-```
-(the system declined to answer)
-```
-
-**Your label:** <yes | no | unsure>
-
----
-
-## J005  (5 of 50)
-
-**Question:** What does the wall chart show for the current load floor of Project Larkcrest?
-
-**Expected answer:** 63
-
-**Candidate response:**
-
-```
----
-type: source
-[system]_id: c1565771-ed68-4a8a-bdc5-41e47cc4d157
-title: Project Larkcrest chart note
-source_type: other
-captured: 2026-08-01
-tags: []
-ingested_into: []
----
-
-# Project Larkcrest chart note
-
-## Capture
-
-# Project Larkcrest chart note
-
-A fresh wall chart for Project Larkcrest is posted by the stairwell.
-
-Last month the load floor for Project Larkcrest stood at 57 points.
-
-[ctx:1]
-```
-
-**Your label:** <yes | no | unsure>
-
----
-
-## J006  (6 of 50)
-
-**Question:** Thanks, that looks good - go ahead.
-
-**Expected answer:** (no answer — the corpus does not record this; abstention is correct)
-
-**Candidate response:**
-
-```
-(empty response)
-```
-
-**Your label:** <yes | no | unsure>
-
----
-
-## J007  (7 of 50)
-
-**Question:** What fine amount did the Project Sablegate quarterly audit assess?
-
-**Expected answer:** (no answer — the corpus does not record this; abstention is correct)
-
-**Candidate response:**
-
-```
-(the system declined to answer)
-```
-
-**Your label:** <yes | no | unsure>
-
----
-
-## J008  (8 of 50)
-
-**Question:** As of week 3, what initiative had Lumo Institute announced?
-
-**Expected answer:** expansion into the Barstead market
-
-**Candidate response:**
-
-```
-(the system declined to answer)
-```
-
-**Your label:** <yes | no | unsure>
-
----
-
-## J009  (9 of 50)
-
-**Question:** Thanks, that looks good - go ahead.
-
-**Expected answer:** (no answer — the corpus does not record this; abstention is correct)
-
-**Candidate response:**
-
-```
-(empty response)
-```
-
-**Your label:** <yes | no | unsure>
-
----
-
-## J010  (10 of 50)
-
 **Question:** Were any critical findings reported in the Project Mossfield quarterly audit?
 
 **Expected answer:** none found
@@ -473,7 +345,119 @@ Critical findings for Project Sablegate this quarter: none found.
 
 ---
 
-## J011  (11 of 50)
+## J004  (4 of 50)
+
+**Question:** What does the wall chart show for the current load floor of Project Larkcrest?
+
+**Expected answer:** 63
+
+**Candidate response:**
+
+```
+---
+type: source
+[system]_id: c1565771-ed68-4a8a-bdc5-41e47cc4d157
+title: Project Larkcrest chart note
+source_type: other
+captured: 2026-08-01
+tags: []
+ingested_into: []
+---
+
+# Project Larkcrest chart note
+
+## Capture
+
+# Project Larkcrest chart note
+
+A fresh wall chart for Project Larkcrest is posted by the stairwell.
+
+Last month the load floor for Project Larkcrest stood at 57 points.
+
+[ctx:1]
+```
+
+**Your label:** <yes | no | unsure>
+
+---
+
+## J005  (5 of 50)
+
+**Question:** What was the weekly flux index reading for Project Emberspur as of week 5?
+
+**Expected answer:** 197
+
+**Candidate response:**
+
+```
+---
+type: source
+[system]_id: acb37f90-1ef8-49c0-b153-8a9ebd279b66
+title: Project Emberspur week 5 check
+source_type: other
+captured: 2026-08-01
+tags: []
+ingested_into: []
+---
+
+# Project Emberspur week 5 check
+
+## Capture
+
+# Project Emberspur week 5 check
+
+Weekly check: the flux index for Project Emberspur measured 197.
+
+[ctx:1]
+
+
+---
+type: source
+[system]_id: d4379dc8-94d0-4348-9506-b76e24e8c5e2
+title: Project Emberspur week 6 check
+source_type: other
+captured: 2026-08-01
+tags: []
+ingested_into: []
+---
+
+# Project Emberspur week 6 check
+
+## Capture
+
+# Project Emberspur week 6 check
+
+Weekly check: the flux index for Project Emberspur measured 209.
+
+[ctx:2]
+
+
+---
+type: source
+[system]_id: 3b85c653-3d06-4190-9526-909b01c34e4c
+title: Project Emberspur week 7 check
+source_type: other
+captured: 2026-08-01
+tags: []
+ingested_into: []
+---
+
+# Project Emberspur week 7 check
+
+## Capture
+
+# Project Emberspur week 7 check
+
+Weekly check: the flux index for Project Emberspur measured 217.
+
+[ctx:3]
+```
+
+**Your label:** <yes | no | unsure>
+
+---
+
+## J006  (6 of 50)
 
 **Question:** What was the pilot budget for Project Cinderspur as of week 3, before the amendment?
 
@@ -561,99 +545,41 @@ Reviews for Project Quarryreach stay on every Tuesday, unchanged.
 
 ---
 
-## J012  (12 of 50)
+## J007  (7 of 50)
 
-**Question:** Thanks, that looks good - go ahead.
+**Question:** How many grams did the Project Emberspur sample shipment weigh?
 
-**Expected answer:** (no answer — the corpus does not record this; abstention is correct)
-
-**Candidate response:**
-
-```
-(empty response)
-```
-
-**Your label:** <yes | no | unsure>
-
----
-
-## J013  (13 of 50)
-
-**Question:** What was the weekly flux index reading for Project Emberspur as of week 5?
-
-**Expected answer:** 197
+**Expected answer:** 4400 / 4.4
 
 **Candidate response:**
 
 ```
 ---
 type: source
-[system]_id: acb37f90-1ef8-49c0-b153-8a9ebd279b66
-title: Project Emberspur week 5 check
+[system]_id: 14f008f5-1012-4611-8011-d480e6fad03d
+title: Project Emberspur shipment record
 source_type: other
 captured: 2026-08-01
 tags: []
 ingested_into: []
 ---
 
-# Project Emberspur week 5 check
+# Project Emberspur shipment record
 
 ## Capture
 
-# Project Emberspur week 5 check
+# Project Emberspur shipment record
 
-Weekly check: the flux index for Project Emberspur measured 197.
+The Project Emberspur sample shipment weighed 4.4 kg on the dock scale.
 
 [ctx:1]
-
-
----
-type: source
-[system]_id: d4379dc8-94d0-4348-9506-b76e24e8c5e2
-title: Project Emberspur week 6 check
-source_type: other
-captured: 2026-08-01
-tags: []
-ingested_into: []
----
-
-# Project Emberspur week 6 check
-
-## Capture
-
-# Project Emberspur week 6 check
-
-Weekly check: the flux index for Project Emberspur measured 209.
-
-[ctx:2]
-
-
----
-type: source
-[system]_id: 3b85c653-3d06-4190-9526-909b01c34e4c
-title: Project Emberspur week 7 check
-source_type: other
-captured: 2026-08-01
-tags: []
-ingested_into: []
----
-
-# Project Emberspur week 7 check
-
-## Capture
-
-# Project Emberspur week 7 check
-
-Weekly check: the flux index for Project Emberspur measured 217.
-
-[ctx:3]
 ```
 
 **Your label:** <yes | no | unsure>
 
 ---
 
-## J014  (14 of 50)
+## J008  (8 of 50)
 
 **Question:** When is the Project Mossspur demo scheduled?
 
@@ -710,57 +636,7 @@ Salen Mareth recorded the Project Mossspur demo date as 2025-03-18.
 
 ---
 
-## J015  (15 of 50)
-
-**Question:** How many grams did the Project Emberspur sample shipment weigh?
-
-**Expected answer:** 4400 / 4.4
-
-**Candidate response:**
-
-```
----
-type: source
-[system]_id: 14f008f5-1012-4611-8011-d480e6fad03d
-title: Project Emberspur shipment record
-source_type: other
-captured: 2026-08-01
-tags: []
-ingested_into: []
----
-
-# Project Emberspur shipment record
-
-## Capture
-
-# Project Emberspur shipment record
-
-The Project Emberspur sample shipment weighed 4.4 kg on the dock scale.
-
-[ctx:1]
-```
-
-**Your label:** <yes | no | unsure>
-
----
-
-## J016  (16 of 50)
-
-**Question:** How many advisories stand against Ulmport Depot from its inspection?
-
-**Expected answer:** 3
-
-**Candidate response:**
-
-```
-(the system declined to answer)
-```
-
-**Your label:** <yes | no | unsure>
-
----
-
-## J017  (17 of 50)
+## J009  (9 of 50)
 
 **Question:** What annual compensation is set for Nela Velwick?
 
@@ -836,7 +712,7 @@ Annual compensation for Renric Ostuna is set at 129000 credits.
 
 ---
 
-## J018  (18 of 50)
+## J010  (10 of 50)
 
 **Question:** What is the latest weekly drift rate reading for Project Drifthollow?
 
@@ -914,7 +790,7 @@ Weekly check: the drift rate for Project Drifthollow measured 341.
 
 ---
 
-## J019  (19 of 50)
+## J011  (11 of 50)
 
 **Question:** What partner discount does Norva Dynamics currently offer?
 
@@ -950,57 +826,7 @@ The offer stands until 2025-03-03 and lapses after that date.
 
 ---
 
-## J020  (20 of 50)
-
-**Question:** Now that the embargo lapsed, what did the Vanta Partners board decide?
-
-**Expected answer:** approved the granary initiative
-
-**Candidate response:**
-
-```
-(the system declined to answer)
-```
-
-**Your label:** <yes | no | unsure>
-
----
-
-## J021  (21 of 50)
-
-**Question:** How many grams did the Project Larkcrest sample shipment weigh?
-
-**Expected answer:** 4100 / 4.1
-
-**Candidate response:**
-
-```
----
-type: source
-[system]_id: d6536680-0808-4cac-aabe-a482049c121e
-title: Project Larkcrest shipment record
-source_type: other
-captured: 2026-08-01
-tags: []
-ingested_into: []
----
-
-# Project Larkcrest shipment record
-
-## Capture
-
-# Project Larkcrest shipment record
-
-The Project Larkcrest sample shipment weighed 4.1 kg on the dock scale.
-
-[ctx:1]
-```
-
-**Your label:** <yes | no | unsure>
-
----
-
-## J022  (22 of 50)
+## J012  (12 of 50)
 
 **Question:** What is the latest weekly churn window reading for Project Larkcrest?
 
@@ -1076,32 +902,32 @@ Weekly check: the churn window for Project Larkcrest measured 273.
 
 ---
 
-## J023  (23 of 50)
+## J013  (13 of 50)
 
-**Question:** How many grams did the Project Emberfall sample shipment weigh?
+**Question:** How many grams did the Project Larkcrest sample shipment weigh?
 
-**Expected answer:** 4300 / 4.3
+**Expected answer:** 4100 / 4.1
 
 **Candidate response:**
 
 ```
 ---
 type: source
-[system]_id: 4d72a69d-808f-4bb9-9f7e-796e857312c0
-title: Project Emberfall shipment record
+[system]_id: d6536680-0808-4cac-aabe-a482049c121e
+title: Project Larkcrest shipment record
 source_type: other
 captured: 2026-08-01
 tags: []
 ingested_into: []
 ---
 
-# Project Emberfall shipment record
+# Project Larkcrest shipment record
 
 ## Capture
 
-# Project Emberfall shipment record
+# Project Larkcrest shipment record
 
-The Project Emberfall sample shipment weighed 4.3 kg on the dock scale.
+The Project Larkcrest sample shipment weighed 4.1 kg on the dock scale.
 
 [ctx:1]
 ```
@@ -1110,7 +936,7 @@ The Project Emberfall sample shipment weighed 4.3 kg on the dock scale.
 
 ---
 
-## J024  (24 of 50)
+## J014  (14 of 50)
 
 **Question:** What was the pilot budget for Project Quarryreach as of week 3, before the amendment?
 
@@ -1198,7 +1024,77 @@ Reviews for Project Mossrun stay on every Tuesday, unchanged.
 
 ---
 
-## J025  (25 of 50)
+## J015  (15 of 50)
+
+**Question:** How many grams did the Project Emberfall sample shipment weigh?
+
+**Expected answer:** 4300 / 4.3
+
+**Candidate response:**
+
+```
+---
+type: source
+[system]_id: 4d72a69d-808f-4bb9-9f7e-796e857312c0
+title: Project Emberfall shipment record
+source_type: other
+captured: 2026-08-01
+tags: []
+ingested_into: []
+---
+
+# Project Emberfall shipment record
+
+## Capture
+
+# Project Emberfall shipment record
+
+The Project Emberfall sample shipment weighed 4.3 kg on the dock scale.
+
+[ctx:1]
+```
+
+**Your label:** <yes | no | unsure>
+
+---
+
+## J016  (16 of 50)
+
+**Question:** What did the yield floor for Project Drifthollow read as of week 4?
+
+**Expected answer:** 439
+
+**Candidate response:**
+
+```
+---
+type: source
+[system]_id: f7b53e63-e188-48d5-9066-871017c93183
+title: Project Drifthollow status digest refresh
+source_type: other
+captured: 2026-08-01
+tags: []
+ingested_into: []
+---
+
+# Project Drifthollow status digest refresh
+
+## Capture
+
+# Project Drifthollow status digest refresh
+
+The refreshed digest replaces the earlier edition.
+
+The yield floor for Project Drifthollow now reads 467.
+
+[ctx:1]
+```
+
+**Your label:** <yes | no | unsure>
+
+---
+
+## J017  (17 of 50)
 
 **Question:** How many services did the Project Sablefall quarterly audit cover?
 
@@ -1280,123 +1176,7 @@ Critical findings for Project Sablegate this quarter: none found.
 
 ---
 
-## J026  (26 of 50)
-
-**Question:** What did the yield floor for Project Drifthollow read as of week 4?
-
-**Expected answer:** 439
-
-**Candidate response:**
-
-```
----
-type: source
-[system]_id: f7b53e63-e188-48d5-9066-871017c93183
-title: Project Drifthollow status digest refresh
-source_type: other
-captured: 2026-08-01
-tags: []
-ingested_into: []
----
-
-# Project Drifthollow status digest refresh
-
-## Capture
-
-# Project Drifthollow status digest refresh
-
-The refreshed digest replaces the earlier edition.
-
-The yield floor for Project Drifthollow now reads 467.
-
-[ctx:1]
-```
-
-**Your label:** <yes | no | unsure>
-
----
-
-## J027  (27 of 50)
-
-**Question:** Given everything now known, what was the valid bench readout for Project Larkpoint as of week 2?
-
-**Expected answer:** (no answer — the corpus does not record this; abstention is correct)
-
-**Candidate response:**
-
-```
-(the system declined to answer)
-```
-
-**Your label:** <yes | no | unsure>
-
----
-
-## J028  (28 of 50)
-
-**Question:** Now that the embargo lapsed, what did the Arden Institute board decide?
-
-**Expected answer:** approved the harbor initiative
-
-**Candidate response:**
-
-```
-(the system declined to answer)
-```
-
-**Your label:** <yes | no | unsure>
-
----
-
-## J029  (29 of 50)
-
-**Question:** Which vendor performed the security audit for Project Quarrypoint?
-
-**Expected answer:** (no answer — the corpus does not record this; abstention is correct)
-
-**Candidate response:**
-
-```
-(the system declined to answer)
-```
-
-**Your label:** <yes | no | unsure>
-
----
-
-## J030  (30 of 50)
-
-**Question:** How did the hosting decision for Project Larkrun change over time, and why?
-
-**Expected answer:** Arden Dynamics / Lumo Partners
-
-**Candidate response:**
-
-```
-(the system declined to answer)
-```
-
-**Your label:** <yes | no | unsure>
-
----
-
-## J031  (31 of 50)
-
-**Question:** What partner discount does Norva Dynamics offer now that week 8 has passed?
-
-**Expected answer:** (no answer — the corpus does not record this; abstention is correct)
-
-**Candidate response:**
-
-```
-(the system declined to answer)
-```
-
-**Your label:** <yes | no | unsure>
-
----
-
-## J032  (32 of 50)
+## J018  (18 of 50)
 
 **Question:** As of week 2, how many advisories had the Melmoor Depot inspection logged?
 
@@ -1434,7 +1214,7 @@ The inspection at Melmoor Depot logged 4 advisories.
 
 ---
 
-## J033  (33 of 50)
+## J019  (19 of 50)
 
 **Question:** As of week 2, how many advisories did the Melmoor Depot inspection log?
 
@@ -1472,7 +1252,7 @@ The inspection at Melmoor Depot logged 4 advisories.
 
 ---
 
-## J034  (34 of 50)
+## J020  (20 of 50)
 
 **Question:** Is Project Hollowgate changing its supplier setup?
 
@@ -1552,7 +1332,7 @@ The single-supplier story is wrong.
 
 ---
 
-## J035  (35 of 50)
+## J021  (21 of 50)
 
 **Question:** As of week 2, how many advisories did the Ulmport Depot inspection log?
 
@@ -1590,23 +1370,45 @@ The inspection at Ulmport Depot logged 3 advisories.
 
 ---
 
-## J036  (36 of 50)
+## J022  (22 of 50)
 
-**Question:** What initiative had Lumo Partners announced?
+**Question:** As of week 2, how many advisories had the Falford Depot inspection logged?
 
-**Expected answer:** expansion into the Vorburg market
+**Expected answer:** (no answer — the corpus does not record this; abstention is correct)
 
 **Candidate response:**
 
 ```
-(the system declined to answer)
+---
+type: source
+[system]_id: 79b32092-6c9b-49f8-859a-c69c51c80562
+title: Falford Depot inspection report
+source_type: other
+captured: 2026-08-01
+tags: []
+ingested_into: []
+---
+
+# Falford Depot inspection report
+
+## Capture
+
+# Falford Depot inspection report
+
+The site inspection at Falford Depot took place in mid-January.
+
+The report reached the archive only weeks after the visit.
+
+The inspection at Falford Depot logged 8 advisories.
+
+[ctx:1]
 ```
 
 **Your label:** <yes | no | unsure>
 
 ---
 
-## J037  (37 of 50)
+## J023  (23 of 50)
 
 **Question:** When was the Project Valereach demo scheduled per the first planning note?
 
@@ -1663,81 +1465,7 @@ Kaivi Quinuna recorded the Project Valereach demo date as 2025-03-17.
 
 ---
 
-## J038  (38 of 50)
-
-**Question:** As of week 2, how many advisories had the Falford Depot inspection logged?
-
-**Expected answer:** (no answer — the corpus does not record this; abstention is correct)
-
-**Candidate response:**
-
-```
----
-type: source
-[system]_id: 79b32092-6c9b-49f8-859a-c69c51c80562
-title: Falford Depot inspection report
-source_type: other
-captured: 2026-08-01
-tags: []
-ingested_into: []
----
-
-# Falford Depot inspection report
-
-## Capture
-
-# Falford Depot inspection report
-
-The site inspection at Falford Depot took place in mid-January.
-
-The report reached the archive only weeks after the visit.
-
-The inspection at Falford Depot logged 8 advisories.
-
-[ctx:1]
-```
-
-**Your label:** <yes | no | unsure>
-
----
-
-## J039  (39 of 50)
-
-**Question:** What partner discount did Petra Labs offer as of week 4?
-
-**Expected answer:** 18
-
-**Candidate response:**
-
-```
----
-type: source
-[system]_id: be7ed25c-b271-4c6f-9e52-363cdf301d6e
-title: Petra Labs partner offer
-source_type: other
-captured: 2026-08-01
-tags: []
-ingested_into: []
----
-
-# Petra Labs partner offer
-
-## Capture
-
-# Petra Labs partner offer
-
-Petra Labs extends a partner discount of 18 percent.
-
-The offer stands until 2025-03-03 and lapses after that date.
-
-[ctx:1]
-```
-
-**Your label:** <yes | no | unsure>
-
----
-
-## J040  (40 of 50)
+## J024  (24 of 50)
 
 **Question:** What is the current delivery deadline for Project Beaconcrest?
 
@@ -1819,83 +1547,43 @@ The delivery deadline for Project Beaconfield is 2025-03-13.
 
 ---
 
-## J041  (41 of 50)
+## J025  (25 of 50)
 
-**Question:** What annual compensation is set for Valen Osteth?
+**Question:** What partner discount did Petra Labs offer as of week 4?
 
-**Expected answer:** 107000
+**Expected answer:** 18
 
 **Candidate response:**
 
 ```
 ---
 type: source
-[system]_id: 50132cc2-07e2-4c6a-97e7-f4cceeb30afe
-title: Compensation memo for Valen Osteth
+[system]_id: be7ed25c-b271-4c6f-9e52-363cdf301d6e
+title: Petra Labs partner offer
 source_type: other
 captured: 2026-08-01
 tags: []
 ingested_into: []
 ---
 
-# Compensation memo for Valen Osteth
+# Petra Labs partner offer
 
 ## Capture
 
-# Compensation memo for Valen Osteth
+# Petra Labs partner offer
 
-Annual compensation for Valen Osteth is set at 107000 credits.
+Petra Labs extends a partner discount of 18 percent.
+
+The offer stands until 2025-03-03 and lapses after that date.
 
 [ctx:1]
-
-
----
-type: source
-[system]_id: 363cdabf-6285-44d9-8df2-a1473f5e9c95
-title: Compensation memo for Istala Feneth
-source_type: other
-captured: 2026-08-01
-tags: []
-ingested_into: []
----
-
-# Compensation memo for Istala Feneth
-
-## Capture
-
-# Compensation memo for Istala Feneth
-
-Annual compensation for Istala Feneth is set at 88000 credits.
-
-[ctx:2]
-
-
----
-type: source
-[system]_id: 895ca666-67a8-4842-b8c0-4c6b43fc8604
-title: Compensation memo for Nela Velwick
-source_type: other
-captured: 2026-08-01
-tags: []
-ingested_into: []
----
-
-# Compensation memo for Nela Velwick
-
-## Capture
-
-# Compensation memo for Nela Velwick
-
-Annual compensation for Nela Velwick is set at 146000 credits.
-
-[ctx:3]
 ```
 
 **Your label:** <yes | no | unsure>
 
 ---
 
-## J042  (42 of 50)
+## J026  (26 of 50)
 
 **Question:** Is Project Cinderbank changing its supplier setup?
 
@@ -1975,23 +1663,83 @@ The single-supplier story is wrong.
 
 ---
 
-## J043  (43 of 50)
+## J027  (27 of 50)
 
-**Question:** What initiative does Lumo Institute currently have announced?
+**Question:** What annual compensation is set for Valen Osteth?
 
-**Expected answer:** (no answer — the corpus does not record this; abstention is correct)
+**Expected answer:** 107000
 
 **Candidate response:**
 
 ```
-(the system declined to answer)
+---
+type: source
+[system]_id: 50132cc2-07e2-4c6a-97e7-f4cceeb30afe
+title: Compensation memo for Valen Osteth
+source_type: other
+captured: 2026-08-01
+tags: []
+ingested_into: []
+---
+
+# Compensation memo for Valen Osteth
+
+## Capture
+
+# Compensation memo for Valen Osteth
+
+Annual compensation for Valen Osteth is set at 107000 credits.
+
+[ctx:1]
+
+
+---
+type: source
+[system]_id: 363cdabf-6285-44d9-8df2-a1473f5e9c95
+title: Compensation memo for Istala Feneth
+source_type: other
+captured: 2026-08-01
+tags: []
+ingested_into: []
+---
+
+# Compensation memo for Istala Feneth
+
+## Capture
+
+# Compensation memo for Istala Feneth
+
+Annual compensation for Istala Feneth is set at 88000 credits.
+
+[ctx:2]
+
+
+---
+type: source
+[system]_id: 895ca666-67a8-4842-b8c0-4c6b43fc8604
+title: Compensation memo for Nela Velwick
+source_type: other
+captured: 2026-08-01
+tags: []
+ingested_into: []
+---
+
+# Compensation memo for Nela Velwick
+
+## Capture
+
+# Compensation memo for Nela Velwick
+
+Annual compensation for Nela Velwick is set at 146000 credits.
+
+[ctx:3]
 ```
 
 **Your label:** <yes | no | unsure>
 
 ---
 
-## J044  (44 of 50)
+## J028  (28 of 50)
 
 **Question:** Is Project Cinderbank moving to a single supplier?
 
@@ -2069,7 +1817,7 @@ Chatter suggests Project Hollowbank is switching to a single supplier next quart
 
 ---
 
-## J045  (45 of 50)
+## J029  (29 of 50)
 
 **Question:** How many services did the Project Mossfield quarterly audit cover?
 
@@ -2151,7 +1899,7 @@ Critical findings for Project Sablegate this quarter: none found.
 
 ---
 
-## J046  (46 of 50)
+## J030  (30 of 50)
 
 **Question:** What did the Vanta Dynamics board decide in closed session?
 
@@ -2206,7 +1954,7 @@ In closed session, the Vanta Partners board approved the granary initiative.
 
 ---
 
-## J047  (47 of 50)
+## J031  (31 of 50)
 
 **Question:** How many points did the flux rate for Project Cinderrun measure in the field report?
 
@@ -2282,23 +2030,41 @@ Field check: the uptake score for Project Beaconfield measured 56.3 points.
 
 ---
 
-## J048  (48 of 50)
+## J032  (32 of 50)
 
-**Question:** How many advisories stand against Vormont Depot from its inspection?
+**Question:** Which technician signed the Meridipoint lab log?
 
-**Expected answer:** 3
+**Expected answer:** (no answer — the corpus does not record this; abstention is correct)
 
 **Candidate response:**
 
 ```
-(the system declined to answer)
+---
+type: source
+[system]_id: 3c33be41-6d55-4081-bb6a-11ded6bfb2d8
+title: Meridipoint lab log
+source_type: other
+captured: 2026-08-01
+tags: []
+ingested_into: []
+---
+
+# Meridipoint lab log
+
+## Capture
+
+# Meridipoint lab log
+
+The Meridipoint instrument recorded 732 units in its first pass.
+
+[ctx:1]
 ```
 
 **Your label:** <yes | no | unsure>
 
 ---
 
-## J049  (49 of 50)
+## J033  (33 of 50)
 
 **Question:** How many services did the Project Valefield quarterly audit cover?
 
@@ -2380,9 +2146,180 @@ Critical findings for Project Sablefall this quarter: none found.
 
 ---
 
-## J050  (50 of 50)
+## J034  (34 of 50)
 
-**Question:** Which technician signed the Meridipoint lab log?
+**Question:** What does the wall chart show for the current burn score of Project Emberspur?
+
+**Expected answer:** 55
+
+**Candidate response:**
+
+```
+---
+type: source
+[system]_id: 9ea0f786-74e9-4c60-88d9-de6011190516
+title: Project Emberspur chart note
+source_type: other
+captured: 2026-08-01
+tags: []
+ingested_into: []
+---
+
+# Project Emberspur chart note
+
+## Capture
+
+# Project Emberspur chart note
+
+A fresh wall chart for Project Emberspur is posted by the stairwell.
+
+Last month the burn score for Project Emberspur stood at 44 points.
+
+[ctx:1]
+```
+
+**Your label:** <yes | no | unsure>
+
+---
+
+## J035  (35 of 50)
+
+**Question:** What partner discount does Kelva Systems currently offer?
+
+**Expected answer:** 24
+
+**Candidate response:**
+
+```
+---
+type: source
+[system]_id: 33717b61-feab-4fe3-9352-a81c0725cfda
+title: Kelva Systems partner offer
+source_type: other
+captured: 2026-08-01
+tags: []
+ingested_into: []
+---
+
+# Kelva Systems partner offer
+
+## Capture
+
+# Kelva Systems partner offer
+
+Kelva Systems extends a partner discount of 24 percent.
+
+The offer stands until 2025-03-03 and lapses after that date.
+
+[ctx:1]
+```
+
+**Your label:** <yes | no | unsure>
+
+---
+
+## J036  (36 of 50)
+
+**Question:** Which provider currently hosts Project Larkrun?
+
+**Expected answer:** Lumo Partners
+
+**Candidate response:**
+
+```
+---
+type: source
+[system]_id: 0dde73a6-6b5e-4539-8798-e010bf7a6e2e
+title: Project Larkrun hosting decision
+source_type: other
+captured: 2026-08-01
+tags: []
+ingested_into: []
+---
+
+# Project Larkrun hosting decision
+
+## Capture
+
+# Project Larkrun hosting decision
+
+After a full review, Project Larkrun will run on the Arden Dynamics platform.
+
+The hosting provider for Project Larkrun is Arden Dynamics.
+
+[ctx:1]
+
+
+---
+type: source
+[system]_id: 9784acb6-a9e4-4401-89cd-d07c0011462f
+title: Project Larkrun hosting reversal memo
+source_type: other
+captured: 2026-08-01
+tags: []
+ingested_into: []
+---
+
+# Project Larkrun hosting reversal memo
+
+## Capture
+
+# Project Larkrun hosting reversal memo
+
+The earlier hosting decision for Project Larkrun is fully reversed.
+
+The hosting provider for Project Larkrun is now Lumo Partners.
+
+Rising costs at Arden Dynamics drove the reversal.
+
+[ctx:2]
+```
+
+**Your label:** <yes | no | unsure>
+
+---
+
+## J037  (37 of 50)
+
+**Question:** As of week 2, how many advisories did the Vormont Depot inspection log?
+
+**Expected answer:** 3
+
+**Candidate response:**
+
+```
+---
+type: source
+[system]_id: 515d163e-6418-4ffa-a254-67ecb5714fc0
+title: Vormont Depot inspection report
+source_type: other
+captured: 2026-08-01
+tags: []
+ingested_into: []
+---
+
+# Vormont Depot inspection report
+
+## Capture
+
+# Vormont Depot inspection report
+
+The site inspection at Vormont Depot took place in mid-January.
+
+The report reached the archive only weeks after the visit.
+
+The inspection at Vormont Depot logged 3 advisories.
+
+[ctx:1]
+```
+
+**Your label:** <yes | no | unsure>
+
+---
+
+## J038  (38 of 50)
+
+**Question:** What is Renric Ostuna's annual compensation?
 
 **Expected answer:** (no answer — the corpus does not record this; abstention is correct)
 
@@ -2391,23 +2328,341 @@ Critical findings for Project Sablefall this quarter: none found.
 ```
 ---
 type: source
-[system]_id: 3c33be41-6d55-4081-bb6a-11ded6bfb2d8
-title: Meridipoint lab log
+[system]_id: 05a33191-f6ca-4472-aaf2-7cd1c5f816d2
+title: Compensation memo for Renric Ostuna
 source_type: other
 captured: 2026-08-01
 tags: []
 ingested_into: []
 ---
 
-# Meridipoint lab log
+# Compensation memo for Renric Ostuna
 
 ## Capture
 
-# Meridipoint lab log
+# Compensation memo for Renric Ostuna
 
-The Meridipoint instrument recorded 732 units in its first pass.
+Annual compensation for Renric Ostuna is set at 129000 credits.
 
 [ctx:1]
+```
+
+**Your label:** <yes | no | unsure>
+
+---
+
+## J039  (39 of 50)
+
+**Question:** Were any critical findings reported in the Project Sablefall quarterly audit?
+
+**Expected answer:** none found
+
+**Candidate response:**
+
+```
+---
+type: source
+[system]_id: 7b85558d-b03e-4cee-a9b2-99501f698085
+title: Project Sablefall quarterly audit
+source_type: other
+captured: 2026-08-01
+tags: []
+ingested_into: []
+---
+
+# Project Sablefall quarterly audit
+
+## Capture
+
+# Project Sablefall quarterly audit
+
+The quarterly audit for Project Sablefall covered 9 services end to end.
+
+Critical findings for Project Sablefall this quarter: none found.
+
+[ctx:1]
+
+
+---
+type: source
+[system]_id: f106ec67-7d7f-4f47-99f3-1c95582b4be2
+title: Project Mossfield quarterly audit
+source_type: other
+captured: 2026-08-01
+tags: []
+ingested_into: []
+---
+
+# Project Mossfield quarterly audit
+
+## Capture
+
+# Project Mossfield quarterly audit
+
+The quarterly audit for Project Mossfield covered 31 services end to end.
+
+Critical findings for Project Mossfield this quarter: none found.
+
+[ctx:2]
+
+
+---
+type: source
+[system]_id: ae10b9a6-7bde-4d52-8302-e7d4a391dc84
+title: Project Sablegate quarterly audit
+source_type: other
+captured: 2026-08-01
+tags: []
+ingested_into: []
+---
+
+# Project Sablegate quarterly audit
+
+## Capture
+
+# Project Sablegate quarterly audit
+
+The quarterly audit for Project Sablegate covered 39 services end to end.
+
+Critical findings for Project Sablegate this quarter: none found.
+
+[ctx:3]
+```
+
+**Your label:** <yes | no | unsure>
+
+---
+
+## J040  (40 of 50)
+
+**Question:** What is the latest weekly flux index reading for Project Emberspur?
+
+**Expected answer:** 217
+
+**Candidate response:**
+
+```
+---
+type: source
+[system]_id: acb37f90-1ef8-49c0-b153-8a9ebd279b66
+title: Project Emberspur week 5 check
+source_type: other
+captured: 2026-08-01
+tags: []
+ingested_into: []
+---
+
+# Project Emberspur week 5 check
+
+## Capture
+
+# Project Emberspur week 5 check
+
+Weekly check: the flux index for Project Emberspur measured 197.
+
+[ctx:1]
+
+
+---
+type: source
+[system]_id: d4379dc8-94d0-4348-9506-b76e24e8c5e2
+title: Project Emberspur week 6 check
+source_type: other
+captured: 2026-08-01
+tags: []
+ingested_into: []
+---
+
+# Project Emberspur week 6 check
+
+## Capture
+
+# Project Emberspur week 6 check
+
+Weekly check: the flux index for Project Emberspur measured 209.
+
+[ctx:2]
+
+
+---
+type: source
+[system]_id: 3b85c653-3d06-4190-9526-909b01c34e4c
+title: Project Emberspur week 7 check
+source_type: other
+captured: 2026-08-01
+tags: []
+ingested_into: []
+---
+
+# Project Emberspur week 7 check
+
+## Capture
+
+# Project Emberspur week 7 check
+
+Weekly check: the flux index for Project Emberspur measured 217.
+
+[ctx:3]
+```
+
+**Your label:** <yes | no | unsure>
+
+---
+
+## J041  (41 of 50)
+
+**Question:** On what date did Project Cinderfall actually complete its launch?
+
+**Expected answer:** (no answer — the corpus does not record this; abstention is correct)
+
+**Candidate response:**
+
+```
+(the system declined to answer)
+```
+
+**Your label:** <yes | no | unsure>
+
+---
+
+## J042  (42 of 50)
+
+**Question:** As of week 3, what initiative had Lumo Institute announced?
+
+**Expected answer:** expansion into the Barstead market
+
+**Candidate response:**
+
+```
+(the system declined to answer)
+```
+
+**Your label:** <yes | no | unsure>
+
+---
+
+## J043  (43 of 50)
+
+**Question:** Thanks, that looks good - go ahead.
+
+**Expected answer:** (no answer — the corpus does not record this; abstention is correct)
+
+**Candidate response:**
+
+```
+(empty response)
+```
+
+**Your label:** <yes | no | unsure>
+
+---
+
+## J044  (44 of 50)
+
+**Question:** What fine amount did the Project Sablegate quarterly audit assess?
+
+**Expected answer:** (no answer — the corpus does not record this; abstention is correct)
+
+**Candidate response:**
+
+```
+(the system declined to answer)
+```
+
+**Your label:** <yes | no | unsure>
+
+---
+
+## J045  (45 of 50)
+
+**Question:** How many advisories stand against Ulmport Depot from its inspection?
+
+**Expected answer:** 3
+
+**Candidate response:**
+
+```
+(the system declined to answer)
+```
+
+**Your label:** <yes | no | unsure>
+
+---
+
+## J046  (46 of 50)
+
+**Question:** Thanks, that looks good - go ahead.
+
+**Expected answer:** (no answer — the corpus does not record this; abstention is correct)
+
+**Candidate response:**
+
+```
+(empty response)
+```
+
+**Your label:** <yes | no | unsure>
+
+---
+
+## J047  (47 of 50)
+
+**Question:** Given everything now known, what was the valid bench readout for Project Larkpoint as of week 2?
+
+**Expected answer:** (no answer — the corpus does not record this; abstention is correct)
+
+**Candidate response:**
+
+```
+(the system declined to answer)
+```
+
+**Your label:** <yes | no | unsure>
+
+---
+
+## J048  (48 of 50)
+
+**Question:** Now that the embargo lapsed, what did the Vanta Partners board decide?
+
+**Expected answer:** approved the granary initiative
+
+**Candidate response:**
+
+```
+(the system declined to answer)
+```
+
+**Your label:** <yes | no | unsure>
+
+---
+
+## J049  (49 of 50)
+
+**Question:** Thanks, that looks good - go ahead.
+
+**Expected answer:** (no answer — the corpus does not record this; abstention is correct)
+
+**Candidate response:**
+
+```
+(empty response)
+```
+
+**Your label:** <yes | no | unsure>
+
+---
+
+## J050  (50 of 50)
+
+**Question:** Which vendor performed the security audit for Project Quarrypoint?
+
+**Expected answer:** (no answer — the corpus does not record this; abstention is correct)
+
+**Candidate response:**
+
+```
+(the system declined to answer)
 ```
 
 **Your label:** <yes | no | unsure>

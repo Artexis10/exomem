@@ -42,13 +42,33 @@ from membench.schema import ExpectedRecord, QueryRecord, load_jsonl
 
 @dataclass(frozen=True)
 class SampleItem:
-    """One blind labelling row. Deliberately carries no verdict of any kind."""
+    """One blind labelling row. Deliberately carries no verdict of any kind.
+
+    ``stratum`` is ``"judged"`` when the response has semantic content for the
+    judge to assess, and ``"control"`` when it is empty or an abstention. It is
+    bookkeeping for the kappa split and is never rendered into the sheet.
+    """
 
     item_id: str
     query_id: str
     question: str
     expected: str
     candidate: str
+    stratum: str = "judged"
+
+
+def _is_contentful(answer_row: dict) -> bool:
+    """Does this response contain anything the judge must actually read?
+
+    An abstention or an empty response is decided by looking at it, by either
+    rater, in a second. Abstention is additionally covered by `gate_abstention`
+    — a deterministic gate, and deterministic gates are final — so the judge's
+    semantic verdict there is not load-bearing.
+    """
+
+    if answer_row.get("abstained"):
+        return False
+    return bool((answer_row.get("answer_text") or "").strip())
 
 
 def _expected_text(record: ExpectedRecord) -> str:
@@ -69,7 +89,9 @@ def _outcome(gate_rows: list[dict]) -> str:
     return "pass" if all(g["status"] == "pass" for g in decided) else "fail"
 
 
-def build_sample(run_dir: Path, corpus_dir: Path, *, size: int = 50) -> list[SampleItem]:
+def build_sample(
+    run_dir: Path, corpus_dir: Path, *, size: int = 50, control_share: float = 0.2
+) -> list[SampleItem]:
     """Draw a balanced, deterministic sample of labelling rows from a run.
 
     Deterministic because the ordering key is :func:`stable_id` over the query
@@ -99,15 +121,45 @@ def build_sample(run_dir: Path, corpus_dir: Path, *, size: int = 50) -> list[Sam
     for ids in buckets.values():
         ids.sort(key=lambda q: stable_id("JUDGEAGREE", q))
 
-    # Round-robin across outcome buckets so the sheet cannot be dominated by
-    # whichever outcome happens to be most common in this particular run.
-    ordered: list[str] = []
-    cursors = dict.fromkeys(buckets, 0)
-    while len(ordered) < size and any(cursors[k] < len(buckets[k]) for k in buckets):
-        for key in ("pass", "fail", "undecided"):
-            if cursors[key] < len(buckets[key]) and len(ordered) < size:
-                ordered.append(buckets[key][cursors[key]])
-                cursors[key] += 1
+    # Split each outcome bucket by whether there is anything for the judge to
+    # *judge*. An empty or abstained response carries no semantic content: both
+    # raters decide it instantly and agree trivially, so such rows inflate kappa
+    # exactly the way a dominant class does — the inflation this statistic was
+    # chosen to avoid. They are also redundant: abstention is already decided by
+    # `gate_abstention`, and deterministic gates are final, so the judge's
+    # verdict there is not load-bearing.
+    #
+    # They are not dropped entirely. A small control stratum is kept as a sanity
+    # check: agreement on it should be ~1.0, and if it is not, the judge is
+    # broken in a gross way we want to see. Kappa is reported per stratum, with
+    # the judged stratum as the headline because that is where the judge can
+    # actually be wrong.
+    judged_share = max(0, size - round(size * control_share))
+    strata: dict[str, list[str]] = {"judged": [], "control": []}
+    for key in ("pass", "fail", "undecided"):
+        for query_id in buckets[key]:
+            stratum = "judged" if _is_contentful(answers[query_id]) else "control"
+            strata[stratum].append((key, query_id))  # type: ignore[arg-type]
+
+    def _round_robin(pairs: list[tuple[str, str]], limit: int) -> list[str]:
+        by_outcome: dict[str, list[str]] = {"pass": [], "fail": [], "undecided": []}
+        for outcome, query_id in pairs:
+            by_outcome[outcome].append(query_id)
+        picked: list[str] = []
+        cursors = dict.fromkeys(by_outcome, 0)
+        while len(picked) < limit and any(
+            cursors[k] < len(by_outcome[k]) for k in by_outcome
+        ):
+            for key in ("pass", "fail", "undecided"):
+                if cursors[key] < len(by_outcome[key]) and len(picked) < limit:
+                    picked.append(by_outcome[key][cursors[key]])
+                    cursors[key] += 1
+        return picked
+
+    judged = _round_robin(strata["judged"], judged_share)  # type: ignore[arg-type]
+    control = _round_robin(strata["control"], size - len(judged))  # type: ignore[arg-type]
+    stratum_of = {q: "judged" for q in judged} | {q: "control" for q in control}
+    ordered = judged + control
 
     items: list[SampleItem] = []
     for index, query_id in enumerate(ordered, start=1):
@@ -144,6 +196,7 @@ def build_sample(run_dir: Path, corpus_dir: Path, *, size: int = 50) -> list[Sam
                 question=question,
                 expected=expected_text,
                 candidate=candidate,
+                stratum=stratum_of[query_id],
             )
         )
     return items
@@ -313,6 +366,10 @@ def render_sheet(items: list[SampleItem]) -> str:
         "names are replaced, so neither of you can tell which system answered.",
         "Retrieval-mode contenders return document text rather than prose.",
         "",
+        "Most items have real content to read. A handful are empty or an explicit",
+        "refusal to answer — those take a second, and they are deliberately kept",
+        "few, because rows that decide themselves tell us nothing about the judge.",
+        "",
         "---",
         "",
     ]
@@ -349,6 +406,11 @@ def cohen_kappa(pairs: list[tuple[bool, bool]]) -> float:
     total = len(pairs)
     if total == 0:
         raise ValueError("no labelled pairs")
+    return _kappa(pairs)
+
+
+def _kappa(pairs: list[tuple[bool, bool]]) -> float:
+    total = len(pairs)
     observed = sum(1 for a, b in pairs if a == b) / total
     a_true = sum(1 for a, _ in pairs if a) / total
     b_true = sum(1 for _, b in pairs if b) / total
@@ -356,3 +418,62 @@ def cohen_kappa(pairs: list[tuple[bool, bool]]) -> float:
     if expected == 1.0:
         return 1.0 if observed == 1.0 else 0.0
     return (observed - expected) / (1 - expected)
+
+
+def agreement_report(
+    items: list[SampleItem],
+    human: dict[str, bool | None],
+    judge: dict[str, bool],
+) -> dict:
+    """Kappa per stratum plus the counts needed to read it honestly.
+
+    The **judged** figure is the headline: it covers the rows where the response
+    had semantic content, which is the only place the judge's verdict is
+    load-bearing. The **control** figure covers empty and abstained responses,
+    where both raters decide by inspection; it should sit at or near 1.0 and is
+    a sanity check, not a result. A combined figure is reported too, and is the
+    one to distrust — it is the strata mixed together, so it drifts toward
+    whichever stratum happens to be larger.
+
+    ``unsure`` rows are excluded from every kappa and counted separately: a
+    labeller declining to decide is information, not a vote.
+    """
+
+    by_id = {item.item_id: item for item in items}
+    strata: dict[str, list[tuple[bool, bool]]] = {"judged": [], "control": []}
+    unsure = 0
+    missing: list[str] = []
+
+    for item_id, human_label in human.items():
+        item = by_id.get(item_id)
+        if item is None:
+            raise ValueError(f"{item_id} is not in this sample")
+        if human_label is None:
+            unsure += 1
+            continue
+        if item_id not in judge:
+            missing.append(item_id)
+            continue
+        strata[item.stratum].append((human_label, judge[item_id]))
+
+    report: dict = {
+        "labelled": len(human),
+        "unsure": unsure,
+        "unjudged": missing,
+        "strata": {},
+    }
+    combined: list[tuple[bool, bool]] = []
+    for name, pairs in strata.items():
+        combined += pairs
+        report["strata"][name] = {
+            "n": len(pairs),
+            "kappa": _kappa(pairs) if pairs else None,
+            "raw_agreement": (
+                sum(1 for a, b in pairs if a == b) / len(pairs) if pairs else None
+            ),
+        }
+    report["combined"] = {
+        "n": len(combined),
+        "kappa": _kappa(combined) if combined else None,
+    }
+    return report

@@ -1,52 +1,202 @@
 {
- "J001": "QRY-689AD321",
- "J002": "QRY-7D15A6A8",
- "J003": "QRY-07A3C588",
- "J004": "QRY-9053FC9C",
- "J005": "QRY-BED2A594",
- "J006": "QRY-13C49732",
- "J007": "QRY-4B7CB6BF",
- "J008": "QRY-91A45A44",
- "J009": "QRY-FDB7ABB6",
- "J010": "QRY-60DBD758",
- "J011": "QRY-38003613",
- "J012": "QRY-BF9918E9",
- "J013": "QRY-8D668E7F",
- "J014": "QRY-504FFC50",
- "J015": "QRY-2033C24B",
- "J016": "QRY-8CAE94CF",
- "J017": "QRY-3F1911D1",
- "J018": "QRY-E886AE21",
- "J019": "QRY-AF98A6DF",
- "J020": "QRY-3BD403CE",
- "J021": "QRY-64F31A32",
- "J022": "QRY-F2A34249",
- "J023": "QRY-F60153CE",
- "J024": "QRY-743D0CD9",
- "J025": "QRY-382D1842",
- "J026": "QRY-AD6EA3B7",
- "J027": "QRY-0A083A12",
- "J028": "QRY-C0FEDF5E",
- "J029": "QRY-DF85ECFA",
- "J030": "QRY-45664019",
- "J031": "QRY-FDCAC434",
- "J032": "QRY-02A2AAD7",
- "J033": "QRY-07DAA69D",
- "J034": "QRY-A38DAA6F",
- "J035": "QRY-96FAC241",
- "J036": "QRY-1E3CFA84",
- "J037": "QRY-63B05B2F",
- "J038": "QRY-0AB977AD",
- "J039": "QRY-65D41793",
- "J040": "QRY-E95FDC4B",
- "J041": "QRY-D0CFF3FD",
- "J042": "QRY-9C19F110",
- "J043": "QRY-22487EAE",
- "J044": "QRY-F581699A",
- "J045": "QRY-303D5400",
- "J046": "QRY-B7932F16",
- "J047": "QRY-0446A2D2",
- "J048": "QRY-87D9CDAE",
- "J049": "QRY-37174808",
- "J050": "QRY-37949D52"
+ "J001": {
+  "query_id": "QRY-689AD321",
+  "stratum": "judged"
+ },
+ "J002": {
+  "query_id": "QRY-7D15A6A8",
+  "stratum": "judged"
+ },
+ "J003": {
+  "query_id": "QRY-60DBD758",
+  "stratum": "judged"
+ },
+ "J004": {
+  "query_id": "QRY-BED2A594",
+  "stratum": "judged"
+ },
+ "J005": {
+  "query_id": "QRY-8D668E7F",
+  "stratum": "judged"
+ },
+ "J006": {
+  "query_id": "QRY-38003613",
+  "stratum": "judged"
+ },
+ "J007": {
+  "query_id": "QRY-2033C24B",
+  "stratum": "judged"
+ },
+ "J008": {
+  "query_id": "QRY-504FFC50",
+  "stratum": "judged"
+ },
+ "J009": {
+  "query_id": "QRY-3F1911D1",
+  "stratum": "judged"
+ },
+ "J010": {
+  "query_id": "QRY-E886AE21",
+  "stratum": "judged"
+ },
+ "J011": {
+  "query_id": "QRY-AF98A6DF",
+  "stratum": "judged"
+ },
+ "J012": {
+  "query_id": "QRY-F2A34249",
+  "stratum": "judged"
+ },
+ "J013": {
+  "query_id": "QRY-64F31A32",
+  "stratum": "judged"
+ },
+ "J014": {
+  "query_id": "QRY-743D0CD9",
+  "stratum": "judged"
+ },
+ "J015": {
+  "query_id": "QRY-F60153CE",
+  "stratum": "judged"
+ },
+ "J016": {
+  "query_id": "QRY-AD6EA3B7",
+  "stratum": "judged"
+ },
+ "J017": {
+  "query_id": "QRY-382D1842",
+  "stratum": "judged"
+ },
+ "J018": {
+  "query_id": "QRY-02A2AAD7",
+  "stratum": "judged"
+ },
+ "J019": {
+  "query_id": "QRY-07DAA69D",
+  "stratum": "judged"
+ },
+ "J020": {
+  "query_id": "QRY-A38DAA6F",
+  "stratum": "judged"
+ },
+ "J021": {
+  "query_id": "QRY-96FAC241",
+  "stratum": "judged"
+ },
+ "J022": {
+  "query_id": "QRY-0AB977AD",
+  "stratum": "judged"
+ },
+ "J023": {
+  "query_id": "QRY-63B05B2F",
+  "stratum": "judged"
+ },
+ "J024": {
+  "query_id": "QRY-E95FDC4B",
+  "stratum": "judged"
+ },
+ "J025": {
+  "query_id": "QRY-65D41793",
+  "stratum": "judged"
+ },
+ "J026": {
+  "query_id": "QRY-9C19F110",
+  "stratum": "judged"
+ },
+ "J027": {
+  "query_id": "QRY-D0CFF3FD",
+  "stratum": "judged"
+ },
+ "J028": {
+  "query_id": "QRY-F581699A",
+  "stratum": "judged"
+ },
+ "J029": {
+  "query_id": "QRY-303D5400",
+  "stratum": "judged"
+ },
+ "J030": {
+  "query_id": "QRY-B7932F16",
+  "stratum": "judged"
+ },
+ "J031": {
+  "query_id": "QRY-0446A2D2",
+  "stratum": "judged"
+ },
+ "J032": {
+  "query_id": "QRY-37949D52",
+  "stratum": "judged"
+ },
+ "J033": {
+  "query_id": "QRY-37174808",
+  "stratum": "judged"
+ },
+ "J034": {
+  "query_id": "QRY-60AE209E",
+  "stratum": "judged"
+ },
+ "J035": {
+  "query_id": "QRY-9E27085C",
+  "stratum": "judged"
+ },
+ "J036": {
+  "query_id": "QRY-BE620411",
+  "stratum": "judged"
+ },
+ "J037": {
+  "query_id": "QRY-1AA421AC",
+  "stratum": "judged"
+ },
+ "J038": {
+  "query_id": "QRY-E3D1B0B2",
+  "stratum": "judged"
+ },
+ "J039": {
+  "query_id": "QRY-BBA1670B",
+  "stratum": "judged"
+ },
+ "J040": {
+  "query_id": "QRY-BD73A01F",
+  "stratum": "judged"
+ },
+ "J041": {
+  "query_id": "QRY-9053FC9C",
+  "stratum": "control"
+ },
+ "J042": {
+  "query_id": "QRY-91A45A44",
+  "stratum": "control"
+ },
+ "J043": {
+  "query_id": "QRY-07A3C588",
+  "stratum": "control"
+ },
+ "J044": {
+  "query_id": "QRY-4B7CB6BF",
+  "stratum": "control"
+ },
+ "J045": {
+  "query_id": "QRY-8CAE94CF",
+  "stratum": "control"
+ },
+ "J046": {
+  "query_id": "QRY-13C49732",
+  "stratum": "control"
+ },
+ "J047": {
+  "query_id": "QRY-0A083A12",
+  "stratum": "control"
+ },
+ "J048": {
+  "query_id": "QRY-3BD403CE",
+  "stratum": "control"
+ },
+ "J049": {
+  "query_id": "QRY-FDB7ABB6",
+  "stratum": "control"
+ },
+ "J050": {
+  "query_id": "QRY-DF85ECFA",
+  "stratum": "control"
+ }
 }

@@ -9,6 +9,7 @@ import pytest
 from membench.agreement import (
     SampleItem,
     _outcome,
+    agreement_report,
     build_sample,
     cohen_kappa,
     parse_labels,
@@ -156,6 +157,111 @@ def test_rendered_sheet_carries_every_item_and_a_blank_to_fill(
     # separate keys file so labels can be joined without anchoring the labeller.
     for item in items:
         assert item.query_id not in sheet, f"{item.item_id} leaks its query id"
+
+
+def test_judged_stratum_has_content_and_control_stratum_does_not(
+    items: list[SampleItem],
+) -> None:
+    """Rows with nothing to read inflate kappa and waste the labeller.
+
+    An empty or abstained response is decided by inspection by both raters, so
+    it contributes near-free agreement — the same majority-class inflation kappa
+    exists to avoid. Abstention is also already decided by `gate_abstention`, a
+    deterministic gate, so the judge is not load-bearing there. A capped control
+    stratum is kept as a sanity check and separated so it cannot dilute the
+    headline figure.
+    """
+
+    judged = [i for i in items if i.stratum == "judged"]
+    control = [i for i in items if i.stratum == "control"]
+    assert len(judged) == 40 and len(control) == 10
+
+    def _empty(item: SampleItem) -> bool:
+        return item.candidate == "(empty response)" or item.candidate.startswith(
+            "(the system declined"
+        )
+
+    assert not any(_empty(i) for i in judged), "a judged row has nothing to judge"
+    assert all(_empty(i) for i in control), "a control row carries real content"
+
+
+def test_judged_stratum_is_itself_outcome_balanced(items: list[SampleItem]) -> None:
+    """Balance has to hold where the headline kappa is computed, not just overall."""
+
+    scores = json.loads((RUN / "deterministic-scores.json").read_text(encoding="utf-8"))
+    by_query = {r["query_id"]: _outcome(r.get("gates", [])) for r in scores["per_query"]}
+    judged = [by_query[i.query_id] for i in items if i.stratum == "judged"]
+    assert abs(judged.count("pass") - judged.count("fail")) <= 2, (
+        f"judged stratum unbalanced: {judged.count('pass')} pass vs {judged.count('fail')} fail"
+    )
+
+
+def test_stratum_is_never_rendered_into_the_sheet(items: list[SampleItem]) -> None:
+    """Telling a labeller a row is a control invites them to skim it."""
+
+    sheet = render_sheet(items)
+    assert "control" not in sheet.lower()
+    assert "stratum" not in sheet.lower()
+
+
+# -- agreement report ------------------------------------------------------
+
+
+def _items(*specs: tuple[str, str]) -> list[SampleItem]:
+    return [
+        SampleItem(
+            item_id=item_id,
+            query_id=f"QRY-{item_id}",
+            question="q",
+            expected="e",
+            candidate="c",
+            stratum=stratum,
+        )
+        for item_id, stratum in specs
+    ]
+
+
+def test_report_separates_judged_from_control() -> None:
+    """A perfect control stratum must not rescue a poor judged stratum.
+
+    This is the failure mode the split exists to expose: control rows agree for
+    free, so mixing them in drags the combined figure upward and a weak judge
+    looks acceptable.
+    """
+
+    items = _items(*[(f"J{n:03d}", "judged") for n in range(1, 5)],
+                   *[(f"J{n:03d}", "control") for n in range(5, 9)])
+    human = {"J001": True, "J002": False, "J003": True, "J004": False,
+             "J005": True, "J006": True, "J007": False, "J008": False}
+    judge = {"J001": False, "J002": True, "J003": False, "J004": True,
+             "J005": True, "J006": True, "J007": False, "J008": False}
+
+    report = agreement_report(items, human, judge)
+    assert report["strata"]["judged"]["kappa"] == pytest.approx(-1.0)
+    assert report["strata"]["control"]["kappa"] == pytest.approx(1.0)
+    assert report["combined"]["kappa"] > report["strata"]["judged"]["kappa"], (
+        "the combined figure should visibly differ from the judged one, which is "
+        "why the judged one is the headline"
+    )
+
+
+def test_report_excludes_unsure_rather_than_counting_it() -> None:
+    items = _items(("J001", "judged"), ("J002", "judged"))
+    report = agreement_report(items, {"J001": True, "J002": None}, {"J001": True, "J002": True})
+    assert report["unsure"] == 1
+    assert report["strata"]["judged"]["n"] == 1
+
+
+def test_report_records_rows_the_judge_never_scored() -> None:
+    items = _items(("J001", "judged"), ("J002", "judged"))
+    report = agreement_report(items, {"J001": True, "J002": True}, {"J001": True})
+    assert report["unjudged"] == ["J002"]
+    assert report["strata"]["judged"]["n"] == 1
+
+
+def test_report_refuses_a_label_for_an_unknown_item() -> None:
+    with pytest.raises(ValueError, match="not in this sample"):
+        agreement_report(_items(("J001", "judged")), {"J999": True}, {"J999": True})
 
 
 def test_sample_is_deterministic(items: list[SampleItem]) -> None:
