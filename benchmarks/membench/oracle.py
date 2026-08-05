@@ -158,6 +158,49 @@ def evolution(claim: ClaimRecord, knowledge_week: int) -> list[TruthView]:
     return views
 
 
+def superseded_toward(
+    claim_id: str,
+    targets: Iterable[str],
+    *,
+    claims_by_id: dict[str, ClaimRecord],
+    world_t: date,
+    knowledge_week: int,
+) -> tuple[str, ...]:
+    """The documented supersession chain from ``claim_id`` to one of ``targets``.
+
+    Returns the ordered successor claim ids walked, ending on the target that
+    was reached, or ``()`` when the oracle cannot walk one.
+
+    Every hop is taken from :func:`truth_at`, never from the raw
+    ``superseded_by`` field, so it is **visible and superseded at the ask**:
+    ``TruthView.superseded_by`` is populated only when the active span for that
+    (world time × knowledge week) is ``superseded`` or ``partially_superseded``.
+    A supersession recorded after the ask therefore does not count, which is
+    the bitemporal separation the rest of the module keeps.
+
+    The walk is transitive because corpora revise more than once: a reading
+    corrected 197 -> 209 -> 217 leaves *both* earlier values superseded toward
+    the current one, and a one-hop test would see only the last of them.
+    """
+
+    wanted = frozenset(targets)
+    if not wanted:
+        return ()
+    path: list[str] = []
+    seen: set[str] = set()
+    current = claim_id
+    while current in claims_by_id and current not in seen:
+        seen.add(current)
+        successor = truth_at(claims_by_id[current], world_t, knowledge_week).superseded_by
+        if successor is None:
+            return ()
+        path.append(successor)
+        if successor in wanted:
+            return tuple(path)
+        current = successor
+    return ()
+
+
 def required_citations(
     claim: ClaimRecord,
     view: TruthView,

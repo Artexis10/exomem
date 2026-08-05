@@ -8,8 +8,10 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from datetime import date
 from decimal import Decimal
 from enum import Enum
+from functools import lru_cache
 
 from membench import oracle, quant
 from membench.schema import (
@@ -28,6 +30,28 @@ _NUMERIC_TOKEN = re.compile(r"(?<![\w.])-?\d+(?:\.\d+)?")
 
 # Cap on how many offending citations a single gate evidence string lists.
 _MAX_LISTED_CITATIONS = 8
+
+# A value the gates can compare as a number rather than as a string.
+_PLAIN_NUMBER = re.compile(r"^-?\d+(?:\.\d+)?$")
+
+# Numbers that stand on their own. Stricter than ``_NUMERIC_TOKEN``, which
+# deliberately reads a magnitude out of the middle of a token ("SRC-3.5" ->
+# 3.5) so a *tolerance* comparison has something to work with. Presence is a
+# different question from tolerance: "SRC-10" does not state the value 10, and
+# "2025-03-14" does not state 3.
+#
+# Both boundaries are asymmetric on purpose, and the asymmetry is load-bearing:
+#
+# - A leading ``.``, ``,`` or ``-`` always means the digits continue a larger
+#   token — the ``5`` of "SRC-3.5", the ``000`` of "84,000", the ``03`` of a
+#   hyphenated date.
+# - A *trailing* ``.`` does not: the group is greedy, so a match can only end
+#   before a dot that is not followed by a digit. That dot ends a sentence, and
+#   "measured 197." states 197. Excluding it lost every value at the end of a
+#   sentence, which is most of them.
+# - A trailing ``,`` only continues the token when a digit follows it
+#   (thousands separator); "197, 209 and 217" is a list, not one number.
+_STANDALONE_NUMBER = re.compile(r"(?<![\w.,-])-?\d+(?:\.\d+)?(?![\w-])(?!,\d)")
 
 
 class GateStatus(str, Enum):
@@ -102,6 +126,51 @@ def _numeric_candidate_within_tolerance(
         return None
 
 
+@lru_cache(maxsize=4096)
+def _literal_pattern(value: str) -> re.Pattern[str]:
+    """``value`` anchored so it cannot match inside a longer word.
+
+    The boundary is asserted only on the sides where the value itself ends in a
+    word character, so a value with punctuation at either end still matches.
+    """
+
+    pattern = re.escape(value)
+    if value[:1].isalnum() or value[:1] == "_":
+        pattern = r"(?<![0-9A-Za-z_])" + pattern
+    if value[-1:].isalnum() or value[-1:] == "_":
+        pattern = pattern + r"(?![0-9A-Za-z_])"
+    return re.compile(pattern)
+
+
+def states_value(value: str, text: str) -> bool:
+    """True iff ``text`` states ``value`` as a value in its own right.
+
+    The single matching rule for both :func:`gate_value` and :func:`gate_state`.
+    Bare substring containment — what both used — is wrong in both directions
+    at once: a forbidden ``10`` fires on ``105``, ``2010`` and ``SRC-10``, and
+    an expected ``10`` passes on ``105``. So it fails correct answers *and*
+    passes wrong ones, and the corpus has already been bent around it (t20 caps
+    a generated count at two digits purely so no forbidden value can be a
+    substring of a legitimate one).
+
+    Numbers go through the same ``Decimal`` path :func:`quant.within_tolerance`
+    gives the tolerance branch, at tolerance zero, so there is one numeric
+    matching rule rather than two: ``105`` is not ``10`` by arithmetic, not by
+    string luck. Everything else — names, dates, free text — matches on word
+    boundaries.
+    """
+
+    if not value:
+        return False
+    if _PLAIN_NUMBER.match(value):
+        derived = quant.DerivedQuantity(value=value, unit=None, tolerance=Decimal(0))
+        return any(
+            quant.within_tolerance(derived, candidate)
+            for candidate in _STANDALONE_NUMBER.findall(text)
+        )
+    return _literal_pattern(value).search(text) is not None
+
+
 def gate_value(
     query: QueryRecord, expected: ExpectedRecord, answer: AnswerRecord, ctx: ScoringContext
 ) -> ScoreItem:
@@ -110,7 +179,7 @@ def gate_value(
     text = answer.answer_text
     values = expected.answer.values
     if expected.answer.kind == "list":
-        missing = [v for v in values if v not in text]
+        missing = [v for v in values if not states_value(v, text)]
         if missing:
             return _item(
                 query, "value", "factual_qa", GateStatus.FAIL, f"missing values: {missing}"
@@ -132,39 +201,136 @@ def gate_value(
             )
         # within is None: the expected value is not numeric, so the tolerance
         # rule cannot decide. Fall through to the literal rule below.
-    if any(v in text for v in values):
+    if any(states_value(v, text) for v in values):
         return _item(query, "value", "factual_qa", GateStatus.PASS)
     return _item(
         query, "value", "factual_qa", GateStatus.FAIL, f"none of {values} in answer"
     )
 
 
+def _ask_instant(query: QueryRecord) -> date:
+    """World-time instant this ask is scored at — the same one the gate's own
+    name is chosen from: a pinned world week for ``as_of``, the knowledge
+    cutoff for ``current_state``."""
+
+    week = query.ask.world_week if query.ask.world_week is not None else query.ask.knowledge_week
+    return oracle.world_cutoff(week)
+
+
 def gate_state(
     query: QueryRecord, expected: ExpectedRecord, answer: AnswerRecord, ctx: ScoringContext
 ) -> ScoreItem:
-    """current_state / as_of: required claim values present, superseded ones absent."""
+    """current_state / as_of: state the required claim values, and do not put
+    forward a retired one the oracle can prove should have been dropped.
+
+    The bare rule this replaces — every required value present by substring,
+    every forbidden value absent by substring — scored correct product
+    behaviour as failure three separate ways. Each is fixed on its own terms:
+
+    - **Matching is boundary-aware** (:func:`states_value`). Substring
+      containment fires a forbidden ``10`` on ``105``, ``2010`` and ``SRC-10``,
+      and it fired a forbidden ``3`` on the ``03`` inside a date and on
+      whatever digits the provider's own ingest ids happened to contain, which
+      made the verdict depend on a UUID.
+
+    - **A forbidden value the query itself supplies is not measurable.** Four
+      identity asks name the retired project name in the prompt ("the project
+      once called X"), so *every possible* answer echoes it — including one
+      produced with no memory at all. Its presence carries no information about
+      the system under test, so it is excluded rather than scored. Without this
+      those four asks are unwinnable, which is a defect in the harness, not a
+      result about a contender.
+
+    - **A retired value that arrives together with its own supersession is not
+      a decidable verdict.** The absence rule silently assumed an assertive QA
+      answer. Return a record *and* the memo that reversed it — reasonable
+      retrieval behaviour, arguably better than hiding the history — and both
+      values are in the text. Whether the answer *asserts* the retired value or
+      merely reports it as history is a fact about rhetoric, and no
+      deterministic rule can read it. Guessing PASS would let a provider that
+      has the reversal backwards ("it is X, previously Y") bank a pass;
+      guessing FAIL is the defect above. So the gate reports ``UNSUPPORTED``:
+      unsupported-never-zero cuts both ways, and an answer that cannot be
+      scored must not be banked as a pass either.
+
+    The gate is not thereby weakened. A missing required value still fails; a
+    retired value stated with no oracle-visible supersession toward a required
+    claim still fails (including every record whose whole expectation is
+    absence — the not-yet-knowable and retracted facts, which have no required
+    claim for a supersession to point at). ``UNSUPPORTED`` is never a pass, so
+    a contender that answers by dumping documents earns no temporal credit at
+    all rather than earning a free one.
+    """
 
     gate = "as_of" if query.ask.world_week is not None else "current_state"
     if not expected.required_claims and not expected.forbidden_claims:
         return _item(query, gate, "temporal", GateStatus.NOT_APPLICABLE)
     text = answer.answer_text
+
+    stated_required: list[str] = []
     for claim_id in expected.required_claims:
         value = ctx.claim_value(claim_id)
-        if value is not None and value not in text:
-            return _item(
-                query, gate, "temporal", GateStatus.FAIL, f"required {claim_id} value absent"
-            )
-    for claim_id in expected.forbidden_claims:
-        value = ctx.claim_value(claim_id)
-        if value is not None and value in text:
+        if value is None:
+            continue
+        if not states_value(value, text):
             return _item(
                 query,
                 gate,
                 "temporal",
                 GateStatus.FAIL,
-                f"forbidden {claim_id} value {value!r} present",
+                f"required {claim_id} value {value!r} absent",
             )
-    return _item(query, gate, "temporal", GateStatus.PASS)
+        stated_required.append(claim_id)
+
+    echoed: list[str] = []
+    superseded: list[str] = []
+    asserted: list[str] = []
+    for claim_id in expected.forbidden_claims:
+        value = ctx.claim_value(claim_id)
+        if value is None:
+            continue
+        if states_value(value, query.prompt_text):
+            echoed.append(f"{claim_id} {value!r}")
+            continue
+        if not states_value(value, text):
+            continue
+        chain = oracle.superseded_toward(
+            claim_id,
+            stated_required,
+            claims_by_id=ctx.claims_by_id,
+            world_t=_ask_instant(query),
+            knowledge_week=query.ask.knowledge_week,
+        )
+        if chain:
+            superseded.append(f"{claim_id} {value!r} -> {' -> '.join(chain)}")
+        else:
+            asserted.append(f"{claim_id} {value!r}")
+
+    if asserted:
+        return _item(
+            query,
+            gate,
+            "temporal",
+            GateStatus.FAIL,
+            f"forbidden value present with no supersession toward the required claims: "
+            f"{asserted}",
+        )
+    if superseded:
+        return _item(
+            query,
+            gate,
+            "temporal",
+            GateStatus.UNSUPPORTED,
+            f"every required value is stated, and so is a value the oracle shows it "
+            f"superseded ({superseded}); which of the two the answer asserts is not "
+            f"derivable from the text",
+        )
+    evidence = (
+        f"forbidden value supplied by the query prompt, not measurable: {echoed}"
+        if echoed
+        else None
+    )
+    return _item(query, gate, "temporal", GateStatus.PASS, evidence)
 
 
 def gate_citations(

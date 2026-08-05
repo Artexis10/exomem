@@ -145,13 +145,22 @@ def test_step_order_question_scored_deterministically(tmp_path: Path) -> None:
         assert right_item.gate == "current_state"
         assert right_item.status is GateStatus.PASS
 
-        # Stale-echo variant: the provider gives the current value but also
-        # echoes the superseded one alongside it. The correct value being
-        # present is not enough -- the forbidden (retired) value must also be
-        # absent, or the answer is misleading about what changed. A bare
-        # value check would let this slip through (it contains the right
-        # answer); it is the current-state gate's forbidden-claims check
-        # that must catch it.
+        # Change-narrating variant: the provider gives the current value and
+        # names the superseded one as history alongside it.
+        #
+        # This used to assert FAIL, on the reasoning that a retired value in
+        # the text is misleading about what changed. That was wrong, and it is
+        # the same defect the harness has been caught in six times: the answer
+        # below ("it used to be X, but it is now Y") is *correct*, and stating
+        # what a step used to be is better than hiding it. Reading which of the
+        # two values an answer asserts is a fact about rhetoric that no
+        # deterministic rule can derive, so the gate reports UNSUPPORTED — with
+        # the oracle's supersession chain as evidence.
+        #
+        # UNSUPPORTED is not a pass, and nothing here is softened: `wrong`
+        # above (the retired value alone) still FAILs on the required half, and
+        # a retired value with no supersession the oracle can see still FAILs
+        # outright (tests/test_membench_scoring_gates.py).
         both = AnswerRecord(
             query_id=query.query_id,
             answer_text=(
@@ -164,8 +173,10 @@ def test_step_order_question_scored_deterministically(tmp_path: Path) -> None:
         both_state_item = gate_state(query, record, both, ctx)
         assert both_value_item.status is GateStatus.PASS  # the right value is present
         assert both_state_item.gate == "current_state"
-        assert both_state_item.status is GateStatus.FAIL  # but so is the retired one
+        assert both_state_item.status is GateStatus.UNSUPPORTED
+        assert both_state_item.status is not GateStatus.PASS  # never banked as a pass
         assert old_claim.object.value in (both_state_item.evidence or "")
+        assert new_claim.claim_id in (both_state_item.evidence or "")  # the chain walked
 
 
 # -- (c) determinism -------------------------------------------------------

@@ -78,14 +78,20 @@ CTX = ScoringContext(
 )
 
 
-def _query(world_week: int | None = None, kind: str = "current_truth") -> QueryRecord:
+def _query(
+    world_week: int | None = None,
+    kind: str = "current_truth",
+    *,
+    prompt_text: str = "deadline?",
+    knowledge_week: int = 8,
+) -> QueryRecord:
     return QueryRecord(
         query_id="QRY-1",
         template_id="t00",
         family="temporal",
         query_kind=kind,
-        prompt_text="deadline?",
-        ask=Ask(world_week=world_week, knowledge_week=8),
+        prompt_text=prompt_text,
+        ask=Ask(world_week=world_week, knowledge_week=knowledge_week),
     )
 
 
@@ -190,6 +196,395 @@ def test_as_of_dimension_label() -> None:
     expected = _expected(required_claims=[OLD])
     item = gate_state(_query(world_week=2, kind="as_of"), expected, _answer("2025-02-01"), CTX)
     assert item.gate == "as_of" and item.status is GateStatus.PASS
+
+
+# --- the state gate: what "the retired value is absent" can and cannot prove --
+#
+# The bare rule (every required value present by substring, every forbidden one
+# absent by substring) scored correct product behaviour as failure three ways
+# at once. The fixture below is the shape that exposes all three: a hosting
+# decision revised twice, so there is a direct predecessor and a transitive one.
+
+HOST_ENTITY = "ENT-00000123"
+HOST_OLD, HOST_MID, HOST_NEW = "CLM-HOST0001", "CLM-HOST0002", "CLM-HOST0003"
+HOST_SRC_OLD, HOST_SRC_MID, HOST_SRC_NEW = "SRC-HOST0001", "SRC-HOST0002", "SRC-HOST0003"
+PRIOR_READING, CURRENT_READING = "CLM-READ0001", "CLM-READ0002"
+
+# Recorded weeks: the first revision lands at week 4, the second at week 6, so
+# an ask at week 3 predates both and an ask at week 8 sees both.
+_FIRST_REVISION_WEEK, _SECOND_REVISION_WEEK = 4, 6
+
+
+def _hosting_claim(
+    claim_id: str,
+    value: str,
+    source_id: str,
+    recorded_week: int,
+    *,
+    supersedes: str | None = None,
+    superseded_by: str | None = None,
+    retired_week: int | None = None,
+    retired_by: str | None = None,
+) -> ClaimRecord:
+    timeline = [
+        StatusSpan(
+            status=ClaimStatus.CURRENT,
+            valid_from=date(2025, 1, 6),
+            recorded_week=recorded_week,
+            cause=SpanCause(kind=SpanCauseKind.INITIAL, by=source_id),
+        )
+    ]
+    if retired_week is not None:
+        timeline.append(
+            StatusSpan(
+                status=ClaimStatus.SUPERSEDED,
+                valid_from=date(2025, 1, 6),
+                recorded_week=retired_week,
+                cause=SpanCause(kind=SpanCauseKind.SUPERSESSION, by=retired_by),
+            )
+        )
+    return ClaimRecord(
+        claim_id=claim_id,
+        subject=HOST_ENTITY,
+        predicate="hosting_provider",
+        object=TypedValue(kind="entity_ref", value=value),
+        assertions=[_assert_supports(source_id, recorded_week)],
+        status_timeline=timeline,
+        supersedes=supersedes,
+        superseded_by=superseded_by,
+    )
+
+
+def _assert_supports(source_id: str, week: int) -> Assertion:
+    return Assertion(
+        source_id=source_id, stance=Stance.SUPPORTS, asserted_at=date(2025, 1, 7), recorded_week=week
+    )
+
+
+def _reading_claim(claim_id: str, predicate: str, value: str) -> ClaimRecord:
+    """A measurement with no supersession edge of any kind (the t15 shape).
+
+    ``prior-*`` and its current sibling are two separate current claims, not a
+    documented change, so the oracle has nothing to excuse co-presence with.
+    """
+
+    return ClaimRecord(
+        claim_id=claim_id,
+        subject=HOST_ENTITY,
+        predicate=predicate,
+        object=TypedValue(kind="quantity", value=value, unit="points"),
+        assertions=[_assert_supports(HOST_SRC_OLD, 3)],
+        status_timeline=[
+            StatusSpan(
+                status=ClaimStatus.CURRENT,
+                valid_from=date(2025, 1, 6),
+                recorded_week=3,
+                cause=SpanCause(kind=SpanCauseKind.INITIAL, by=HOST_SRC_OLD),
+            )
+        ],
+    )
+
+
+HOST_CTX = ScoringContext(
+    claims_by_id={
+        HOST_OLD: _hosting_claim(
+            HOST_OLD,
+            "Petra Group",
+            HOST_SRC_OLD,
+            0,
+            superseded_by=HOST_MID,
+            retired_week=_FIRST_REVISION_WEEK,
+            retired_by=HOST_SRC_MID,
+        ),
+        HOST_MID: _hosting_claim(
+            HOST_MID,
+            "Cinder Group",
+            HOST_SRC_MID,
+            _FIRST_REVISION_WEEK,
+            supersedes=HOST_OLD,
+            superseded_by=HOST_NEW,
+            retired_week=_SECOND_REVISION_WEEK,
+            retired_by=HOST_SRC_NEW,
+        ),
+        HOST_NEW: _hosting_claim(
+            HOST_NEW, "Lumo Group", HOST_SRC_NEW, _SECOND_REVISION_WEEK, supersedes=HOST_MID
+        ),
+        PRIOR_READING: _reading_claim(PRIOR_READING, "prior-burn-score", "44"),
+        CURRENT_READING: _reading_claim(CURRENT_READING, "burn-score", "55"),
+    },
+    sources_by_id={},
+    entities_by_id={
+        HOST_ENTITY: EntityRecord(
+            entity_id=HOST_ENTITY, kind="project", domain="delivery", canonical_name="Cindergate"
+        )
+    },
+)
+
+HOSTING_ASK = "Which provider currently hosts Project Cindergate?"
+
+
+def _hosting_query(**kwargs) -> QueryRecord:
+    kwargs.setdefault("prompt_text", HOSTING_ASK)
+    return _query(**kwargs)
+
+
+def _hosting_expected(forbidden: list[str]) -> ExpectedRecord:
+    return _expected(
+        answer=ExpectedAnswer(kind="entity", values=["Lumo Group"]),
+        required_claims=[HOST_NEW],
+        forbidden_claims=forbidden,
+    )
+
+
+def test_the_current_value_alone_passes_and_the_retired_one_alone_fails() -> None:
+    """Both ends of the gate, unchanged. Nothing below may soften either."""
+
+    expected = _hosting_expected([HOST_OLD])
+    clean = _answer("The hosting provider is Lumo Group.")
+    assert gate_state(_hosting_query(), expected, clean, HOST_CTX).status is GateStatus.PASS
+
+    stale = _answer("The hosting provider is Petra Group.")
+    item = gate_state(_hosting_query(), expected, stale, HOST_CTX)
+    assert item.status is GateStatus.FAIL
+    assert "required" in (item.evidence or "") and "Lumo Group" in (item.evidence or "")
+
+
+def test_a_record_returned_with_its_own_supersession_is_unsupported_not_failed() -> None:
+    """The measured defect: 23 of 120 state-gate failures on the reference run
+    were responses containing *every* required current value that failed only
+    because a superseded value was also present.
+
+    This run's answerer is extractive — it returns retrieved documents — so the
+    hosting decision and the memo that reversed it come back together. That is
+    reasonable retrieval behaviour, arguably better than hiding the history.
+    Whether the answer *asserts* the retired value or reports it as history is
+    a fact about rhetoric that no deterministic rule can read, so the honest
+    verdict is UNSUPPORTED: unsupported-never-zero cuts both ways, and it is
+    emphatically not banked as a PASS.
+    """
+
+    dump = _answer(
+        "The hosting provider for Project Cindergate is Petra Group.\n\n"
+        "The earlier hosting decision is fully reversed. The hosting provider "
+        "for Project Cindergate is now Lumo Group."
+    )
+    item = gate_state(_hosting_query(), _hosting_expected([HOST_OLD]), dump, HOST_CTX)
+    assert item.status is GateStatus.UNSUPPORTED
+    # The chain the oracle walked is in the evidence, so the verdict is
+    # auditable without rerunning.
+    assert HOST_OLD in (item.evidence or "") and HOST_NEW in (item.evidence or "")
+    assert "not\nderivable" not in (item.evidence or "")  # single-line evidence
+
+
+def test_supersession_toward_the_answer_is_walked_transitively() -> None:
+    """Corpora revise more than once (t15 moves a reading 197 -> 209 -> 217).
+    A one-hop test sees only the last retired value and fails the answer for
+    the one before it, which is the same defect one step further back."""
+
+    assert HOST_CTX.claims_by_id[HOST_OLD].superseded_by == HOST_MID  # two hops away
+    dump = _answer(
+        "Petra Group hosts it. Then Cinder Group. The provider is now Lumo Group."
+    )
+    item = gate_state(
+        _hosting_query(), _hosting_expected([HOST_OLD, HOST_MID]), dump, HOST_CTX
+    )
+    assert item.status is GateStatus.UNSUPPORTED, item.evidence
+    assert HOST_MID in (item.evidence or "")
+
+
+def test_supersession_must_be_visible_at_the_ask_to_excuse_co_presence() -> None:
+    """The excuse is bitemporal, not structural. At week 3 neither revision has
+    been recorded, so the oracle cannot see that Petra Group was ever retired —
+    and it must not reach into the future to forgive an answer."""
+
+    early = _hosting_query(knowledge_week=_FIRST_REVISION_WEEK - 1)
+    assert (
+        oracle.superseded_toward(
+            HOST_OLD,
+            [HOST_NEW],
+            claims_by_id=HOST_CTX.claims_by_id,
+            world_t=oracle.world_cutoff(early.ask.knowledge_week),
+            knowledge_week=early.ask.knowledge_week,
+        )
+        == ()
+    )
+    dump = _answer("Petra Group hosts it. The provider is now Lumo Group.")
+    item = gate_state(early, _hosting_expected([HOST_OLD]), dump, HOST_CTX)
+    assert item.status is GateStatus.FAIL, item.evidence
+    assert "no supersession" in (item.evidence or "")
+    # …and at week 8, with both revisions recorded, the same answer is excused.
+    assert (
+        gate_state(_hosting_query(), _hosting_expected([HOST_OLD]), dump, HOST_CTX).status
+        is GateStatus.UNSUPPORTED
+    )
+
+
+def test_a_forbidden_value_with_no_documented_supersession_still_fails() -> None:
+    """The narrowing, and the reason this is not just a weakened gate. The t15
+    ``prior-burn-score`` is a separate current claim, not a retired predecessor:
+    the oracle has no supersession edge to point at, so an answer that puts the
+    wrong reading forward is still provably wrong."""
+
+    prior = HOST_CTX.claims_by_id[PRIOR_READING]
+    current = HOST_CTX.claims_by_id[CURRENT_READING]
+    assert prior.superseded_by is None and current.supersedes is None
+
+    expected = _expected(
+        answer=ExpectedAnswer(kind="value", values=["55"]),
+        required_claims=[CURRENT_READING],
+        forbidden_claims=[PRIOR_READING],
+    )
+    both = _answer("The burn score is 55 points; the prior reading was 44 points.")
+    item = gate_state(
+        _query(prompt_text="What is the burn score?"), expected, both, HOST_CTX
+    )
+    assert item.status is GateStatus.FAIL, item.evidence
+    assert "no supersession" in (item.evidence or "")
+
+
+def test_absence_only_records_still_fail_on_the_forbidden_value() -> None:
+    """28 records in the reference corpus expect absence and nothing else — a
+    fact not yet knowable at the ask, or one since retracted. They name no
+    required claim, so there is no successor for a supersession to point at and
+    nothing to be undecided about: surfacing the value is the failure."""
+
+    expected = _expected(
+        answer=ExpectedAnswer(kind="none"), abstain=True, forbidden_claims=[HOST_OLD]
+    )
+    assert not expected.required_claims
+    leaked = _answer("The hosting provider for Project Cindergate is Petra Group.")
+    item = gate_state(_hosting_query(), expected, leaked, HOST_CTX)
+    assert item.status is GateStatus.FAIL
+    assert "Petra Group" in (item.evidence or "")
+
+
+# --- forbidden values the question itself hands over -------------------------
+
+
+def test_a_forbidden_value_supplied_by_the_prompt_is_not_measurable() -> None:
+    """Four ``identity`` asks name the retired project name in the question
+    ("the project once called X"), so *every possible* answer echoes it —
+    including one produced with no memory at all. Scoring its presence made
+    those four asks unwinnable: no correct answer could pass. Presence of a
+    string the question supplied measures nothing, so it is excluded, and the
+    exclusion is stated in the evidence rather than hidden."""
+
+    expected = _expected(
+        answer=ExpectedAnswer(kind="text", values=["Lumo Group"]),
+        required_claims=[HOST_NEW],
+        forbidden_claims=[HOST_OLD],
+    )
+    asked = _hosting_query(
+        prompt_text="Who hosts the project once served by Petra Group?"
+    )
+    correct = _answer("Petra Group has been replaced; the host is now Lumo Group.")
+    item = gate_state(asked, expected, correct, HOST_CTX)
+    assert item.status is GateStatus.PASS, item.evidence
+    assert "supplied by the query prompt" in (item.evidence or "")
+    assert "Petra Group" in (item.evidence or "")
+
+
+def test_the_prompt_exclusion_does_not_leak_to_a_value_the_prompt_never_names() -> None:
+    """The control. The exclusion is keyed on the question's own text, so an
+    identical answer to a question that does *not* hand over the retired name
+    is still measured — here as UNSUPPORTED, because the supersession is
+    documented, and it would be a FAIL without one."""
+
+    expected = _expected(
+        answer=ExpectedAnswer(kind="text", values=["Lumo Group"]),
+        required_claims=[HOST_NEW],
+        forbidden_claims=[HOST_OLD],
+    )
+    correct = _answer("Petra Group has been replaced; the host is now Lumo Group.")
+    assert HOST_OLD not in HOSTING_ASK and "Petra" not in HOSTING_ASK
+    item = gate_state(_hosting_query(), expected, correct, HOST_CTX)
+    assert item.status is GateStatus.UNSUPPORTED, item.evidence
+    assert "supplied by the query prompt" not in (item.evidence or "")
+
+
+# --- boundary-aware matching (4b.14) ----------------------------------------
+
+
+def _numeric_state(required: str, forbidden: str, text: str, prompt: str = "how many?"):
+    claims = {
+        "CLM-NUMR0001": _reading_claim("CLM-NUMR0001", "count", required),
+        "CLM-NUMF0001": _reading_claim("CLM-NUMF0001", "count", forbidden),
+    }
+    ctx = ScoringContext(claims_by_id=claims, sources_by_id={}, entities_by_id={})
+    expected = _expected(
+        answer=ExpectedAnswer(kind="value", values=[required]),
+        required_claims=["CLM-NUMR0001"],
+        forbidden_claims=["CLM-NUMF0001"],
+    )
+    return gate_state(_query(prompt_text=prompt), expected, _answer(text), ctx)
+
+
+def test_numbers_are_matched_as_values_not_as_substrings() -> None:
+    """Bare substring containment is wrong in both directions at once: a
+    forbidden ``10`` fires on ``105``, ``2010`` and ``SRC-10``, and an expected
+    ``10`` passes on ``105``. On the reference corpus the forbidden values
+    include ``3``, ``4`` and ``8``, so the old rule fired on the ``03`` of a
+    date — and on whatever digits the provider's own ingest ids happened to
+    carry, which made a temporal verdict depend on a UUID."""
+
+    # Forbidden 10 must not fire on longer numbers or on an id fragment.
+    for text in (
+        "The count is 76 out of 105 items.",
+        "The count is 76; see the 2010 archive.",
+        "The count is 76. Ref SRC-10 and record 4c10f2b1.",
+        "The count is 76 as of 2025-10-01.",
+    ):
+        assert _numeric_state("76", "10", text).status is GateStatus.PASS, text
+
+    # …and still fires on the value actually stated, including at end of
+    # sentence and inside a comma-separated list.
+    for text in ("The count is 76, previously 10.", "The count is 76. It was 10."):
+        item = _numeric_state("76", "10", text)
+        assert item.status is GateStatus.FAIL, text
+        assert "'10'" in (item.evidence or "")
+
+    # The required half is boundary-aware too: 105 does not state 10.
+    assert _numeric_state("10", "99", "The count is 105.").status is GateStatus.FAIL
+    assert _numeric_state("10", "99", "The count is 10.").status is GateStatus.PASS
+    # A thousands separator is part of the number, not a boundary.
+    assert _numeric_state("76", "84", "The count is 76 of 84,000.").status is GateStatus.PASS
+
+
+def test_a_sentence_final_period_does_not_hide_a_number() -> None:
+    """The regression that would silently gut the gate: every generated corpus
+    sentence ends in a period, so treating ``.`` as token continuation lost the
+    value on most rows at once (measured: 11 gate_value rows and 4 gate_state
+    rows flipped to spurious failures before this was fixed)."""
+
+    assert _numeric_state("197", "44", "The flux index measured 197.").status is GateStatus.PASS
+    # A real decimal is still one number: 197.5 does not state 197.
+    assert _numeric_state("197", "44", "The flux index measured 197.5").status is GateStatus.FAIL
+
+
+def test_value_gate_matches_on_boundaries_too() -> None:
+    """The same defect, same rule, other gate. Without a tolerance the value
+    gate fell back to bare substring, so an expected ``10`` passed on ``105``."""
+
+    exact = _expected(answer=ExpectedAnswer(kind="value", values=["10"]))
+    assert gate_value(_query(), exact, _answer("The total is 105."), CTX).status is GateStatus.FAIL
+    assert gate_value(_query(), exact, _answer("The total is 10."), CTX).status is GateStatus.PASS
+
+    listed = _expected(answer=ExpectedAnswer(kind="list", values=["10", "Lumo Group"]))
+    partial = _answer("Saw 105 and Lumo Groupings.")
+    item = gate_value(_query(), listed, partial, CTX)
+    assert item.status is GateStatus.FAIL
+    assert "10" in (item.evidence or "") and "Lumo Group" in (item.evidence or "")
+    whole = _answer("Saw 10 and Lumo Group.")
+    assert gate_value(_query(), listed, whole, CTX).status is GateStatus.PASS
+
+
+def test_text_values_are_matched_on_word_boundaries() -> None:
+    expected = _hosting_expected([HOST_OLD])
+    # "Lumo Groupings" is not "Lumo Group".
+    near = _answer("The provider is Lumo Groupings.")
+    assert gate_state(_hosting_query(), expected, near, HOST_CTX).status is GateStatus.FAIL
+    exact = _answer("The provider is Lumo Group.")
+    assert gate_state(_hosting_query(), expected, exact, HOST_CTX).status is GateStatus.PASS
 
 
 def test_missing_mandatory_citation_fails() -> None:
