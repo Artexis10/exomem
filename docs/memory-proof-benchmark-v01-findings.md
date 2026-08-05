@@ -875,3 +875,56 @@ retention for the writing process. Recorded as a finding, not a diagnosis.
 results, which should be impossible and suggests a vault-path fallback somewhere.
 Not chased. It does not affect the above — every comparison in the table uses a
 populated vault at an explicit path — but it wants its own look.
+
+### Correction — it is the interpreter, not process history
+
+The "process-history dependent" root cause above is **withdrawn**. It did not
+survive its own test: performing `op_capture_source` writes in the same process
+and re-querying returns **2 hits before and 2 hits after** — writing does not
+break retrieval. That conclusion rested on an earlier probe whose vault was
+structurally incomplete (it returned 2 results while *empty*, which should be
+impossible — the loose end flagged at the time was in fact invalidating the
+experiment, not incidental to it).
+
+**What actually happened, measured:** replaying the Aug-1 run's own queries
+against the Aug-1 run's own untouched vault, today:
+
+| query | Aug-1 hits | today |
+|---|---:|---:|
+| "What is the current delivery deadline for Project Quarrypoint?" | 8 | **0** |
+| "How many points did the yield score for Project Quarrypoint measure…?" | 4 | **0** |
+| "What is the current delivery deadline for Project Cinderrun?" | 8 | **0** |
+
+Same vault on disk, same query text, byte-identical `src/exomem`. The one
+difference the run artifacts record:
+
+```
+environment.json  python:  3.12.3   (Aug-1)
+today                      3.14.6
+```
+
+The worktree venv was rebuilt on a new interpreter, re-resolving every dependency
+with it. That is sufficient to explain the change and nothing else survives as a
+candidate — product source, profile knobs (all twelve, plus per-kwarg bisection),
+corpus, vault, governance wiring, deferred index, machine config, `rank_bm25`
+availability, and the stemmer (snowball, pure-Python, verified producing
+identical stems) are all ruled out by direct test.
+
+**The precise mechanism inside the retention seam is not isolated.** Doing so
+needs a side-by-side 3.12 environment, which this worktree cannot build. Recorded
+as a product question, not diagnosed.
+
+**Why this is still the reproducibility finding, and a sharper one.**
+`environment.json` *recorded the interpreter version all along*. The artifact was
+sufficient to detect this; nothing ever compared it. A replication kit that pins
+the product commit and the corpus seed, but not the interpreter and dependency
+set, produces exactly this: a published number that silently stops reproducing
+and looks like a product regression when it is an environment change. That is
+what 4b.24 must fix — pin and *verify* the full environment, and fail loudly on
+mismatch rather than reporting a plausible-looking zero.
+
+**Two wrong root causes were published before this one** (a version gap between
+worktree and main; process-history dependence). Both were stated with evidence
+and both were wrong. They are left in the record above rather than deleted,
+because the pattern matters more than the tidiness: each died to a control, and
+the correct answer was in the run artifacts from the beginning.
