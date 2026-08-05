@@ -592,3 +592,82 @@ Cost note, since it bears on any future judged dimension: the supported
 warming across calls — a flat ~$0.20 to grade an ~855-character prompt, ~$48 for
 one pass over 240 queries, ~96% of it bootstrap. A judged dimension has to earn
 that; this one did not.
+
+## Correction to the 2026-08-05 judge addendum — claim 3 is withdrawn
+
+Prompted by the operator asking whether better prompting would fix the judge.
+Testing that question falsified one of my own published claims, so the
+correction comes first and the disposition is reopened.
+
+### The experiment
+
+The judge prompt was rewritten with an explicit supersession clause — *"the
+candidate may contain several conflicting values … presence is not enough … set
+`semantic_match` true only if the candidate asserts the expected value as the
+answer and does not also assert a conflicting value"* — giving the judge no
+oracle knowledge, only a change of question from **presence** to **assertion**.
+Re-run over the same 44 rows: **44/44 identical verdicts, zero flips.**
+
+That looked like confirmation. It was not. It prompted a check of *who was
+right*, which had been assumed rather than tested.
+
+### What the disputed rows actually contain
+
+`QRY-1CCF65F0`, identity, current-truth:
+
+> **Question:** "What is the current official name of the project once called
+> **Project Driftreach**?"
+> **Response:** "Project Driftreach is renamed to Project Emberfall. All
+> artifacts now use the Project Emberfall name."
+> **`gate_state`:** FAIL — *forbidden value 'Project Driftreach' present*
+
+The response is correct. It failed for echoing a name **the question itself
+supplies**. Four queries have this shape (all `identity`): the prompt names the
+old project, the gate forbids that name, so **no possible correct answer can
+pass**. Guaranteed failure for every contender, in perpetuity.
+
+The other 19 are a different defect. Example, `QRY-20481782`: the response
+returns the original hosting decision (*"…is Petra Group"*) **and** the reversal
+memo (*"the earlier hosting decision is fully reversed … is now Lumo Group"*).
+`gate_state` fails it because the retired value appears anywhere in the text.
+But this run's answerer is **extractive** — it returns retrieved documents, and
+returning a record together with its supersession is reasonable retrieval
+behaviour, arguably better than hiding the history.
+
+**Measured across the whole run: 23 of 120 state-gate failures (19%) are
+responses containing every required current value, failed solely because a
+superseded value is also present** — `mini_smoke` 4, `temporal` 8,
+`maintenance` 4, `identity` 4, `multimodal` 3.
+
+### Two harness defects, one of them the worst class again
+
+1. **Self-defeating forbidden values** (4 queries): the forbidden value occurs in
+   the query text. Unwinnable by construction. This is the sixth instance in
+   this project of the harness scoring correct product behaviour as failure.
+2. **Mode mismatch**: `gate_state`'s "forbidden value absent from answer text"
+   rule presumes an *assertive QA* answer. Applied to an *extractive/retrieval*
+   answer it punishes returning provenance. The gate is applied uniformly across
+   modes today, so every `current_state`/`as_of` figure in the lexical profile
+   inherits this.
+
+### Consequences for the judge disposition
+
+Of the four disqualifying results in the addendum above:
+
+- **Claim 1 (redundant, κ = +0.989 vs `gate_value`) — stands.**
+- **Claim 2 (its one independent deviation was a fabrication) — stands.**
+- **Claim 3 (blind to supersession; passed 23 answers the benchmark scores as
+  wrong) — WITHDRAWN.** Those answers were not wrong. The judge was
+  distinguishing *resolved* from *unresolved* conflict, which is real signal
+  `gate_state` cannot currently express. I asserted the gate was correct without
+  checking it, which is precisely the error this benchmark exists to catch.
+- **Claim 4 (its exclusive coverage is already gated) — stands.**
+
+**Disposition reopened.** Dropping `semantic_match` (4b.20) is on hold. The
+honest order is: fix the two `gate_state` defects, re-run, and re-measure the
+judge against a gate that is itself correct. A dimension must not be removed on
+evidence that turned out to be partly a defect in what it was compared against.
+
+The strategic point survives intact and is now better supported: a judge earns
+its place only where the oracle is silent — and part of what looked like judge
+error was the *gate* being silent about a distinction the oracle can express.
