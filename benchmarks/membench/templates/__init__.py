@@ -25,6 +25,7 @@ from membench.templates import t19_negation_counterfactual  # noqa: F401  (regis
 from membench.templates import t20_cross_lingual  # noqa: F401  (registration)
 from membench.templates import t21_preference_attribution  # noqa: F401  (registration)
 from membench.templates import t22_source_reliability  # noqa: F401  (registration)
+from membench.templates import t23_sub_day_temporality  # noqa: F401  (registration)
 from membench.templates.base import Template, registry
 
 __all__ = ["Template", "registry"]

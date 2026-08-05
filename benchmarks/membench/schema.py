@@ -7,10 +7,48 @@ Time model, used consistently everywhere:
   ``event_time``, ``occurred_at``.
 - **Knowledge time** (when the corpus learned something) is an integer
   simulated-week index 0..11: ``recorded_week`` on sources, assertions, and
-  status spans; ``knowledge_week`` on queries.
+  status spans; ``knowledge_week`` on queries — refined to the second by
+  ``recorded_offset_s`` (see below).
 
 Templates author both axes explicitly; the oracle only evaluates and lints —
 it never infers spans.
+
+Sub-day knowledge time
+----------------------
+
+``recorded_week`` alone cannot express *order within a day*, so a corpus built
+only from it is structurally unable to ask whether a memory system kept the
+order in which it learned two same-day facts. ``recorded_offset_s`` refines
+the same axis rather than opening a parallel one: seconds after 00:00:00 on
+the Monday that opens ``recorded_week``, so a record's knowledge time is the
+pair ``(recorded_week, recorded_offset_s)``.
+
+**Precision is part of the data.** ``recorded_offset_s`` is ``None`` — and is
+then *omitted from the serialised record entirely* — when the intra-day
+instant was never captured. ``None`` does not mean midnight; it means an
+unknown instant somewhere inside ``recorded_week``, which is exactly what
+every v0.1–v0.2 record has always meant. Defaulting it to ``0`` would assert a
+precision the corpus never had, and would have restamped 300 existing claims
+as "Monday 00:00:00". Omission on serialisation is what keeps every v0.1–v0.2
+corpus byte-identical, and it mirrors the product's own no-backfill rule
+(``src/exomem/temporal.py``): a mixed-precision store is the permanent state,
+not a migration window.
+
+Because precision is data, **ordering is not total** and the oracle compares
+these values four-valued (:func:`membench.oracle.compare_recorded`:
+``before | after | same | indeterminate``). Two records sharing a week where
+either lacks an instant genuinely cannot be ordered, and the oracle says so
+rather than guessing. Visibility, by contrast, stays total and unchanged: an
+ask carries no sub-day cutoff, so it is evaluated at the *end* of its
+knowledge week, and every record of week ``rw <= kw`` lies determinately
+before that instant whatever its precision. ``recorded_week <= knowledge_week``
+is the new rule's default case, not a second rule beside it.
+
+Only the three records the oracle's visibility rule reads carry the finer
+field: :class:`Assertion`, :class:`StatusSpan`, and :class:`SourceRecord`.
+:class:`EventRecord` also has a ``recorded_week``, but no oracle rule consults
+it, so refining it would add unexercised surface; that gap is deliberate and
+should be closed by whichever change first gives events an oracle rule.
 """
 
 from __future__ import annotations
@@ -20,9 +58,41 @@ import json
 from collections.abc import Iterable, Sequence
 from datetime import date
 from pathlib import Path
-from typing import Literal, TypeVar
+from typing import Annotated, Any, Literal, TypeVar
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SerializerFunctionWrapHandler,
+    model_serializer,
+    model_validator,
+)
+
+#: Seconds in one simulated week; the exclusive bound on ``recorded_offset_s``
+#: and the source of the end-of-week knowledge cutoff.
+WEEK_SECONDS: int = 7 * 24 * 60 * 60
+
+#: Seconds after the Monday 00:00:00 that opens ``recorded_week``, or ``None``
+#: when the intra-day instant was never captured (see the module docstring:
+#: ``None`` is "unknown instant within the week", never midnight).
+RecordedOffset = Annotated[int, Field(ge=0, lt=WEEK_SECONDS)] | None
+
+
+def _drop_unknown_instant(data: dict[str, Any]) -> dict[str, Any]:
+    """Serialise an uncaptured intra-day instant as absence, not as ``null``.
+
+    A record that never had a sub-day instant is written exactly as it was
+    before the field existed. That is not a cosmetic choice: it keeps every
+    v0.1–v0.2 corpus byte-identical (so a new template provably perturbs no
+    existing one), and it is the honest encoding — an absent key says the
+    precision was never captured, where ``"recorded_offset_s": null`` on 300
+    claims would say the corpus considered and recorded its absence.
+    """
+
+    if data.get("recorded_offset_s", 0) is None:
+        data.pop("recorded_offset_s")
+    return data
 
 
 class StrictModel(BaseModel):
@@ -98,6 +168,11 @@ class Assertion(StrictModel):
     stance: Stance
     asserted_at: date
     recorded_week: int = Field(ge=0)
+    recorded_offset_s: RecordedOffset = None
+
+    @model_serializer(mode="wrap")
+    def serialize_model(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        return _drop_unknown_instant(handler(self))
 
 
 class SpanCause(StrictModel):
@@ -110,6 +185,7 @@ class StatusSpan(StrictModel):
     valid_from: date
     valid_to: date | None = None
     recorded_week: int = Field(ge=0)
+    recorded_offset_s: RecordedOffset = None
     cause: SpanCause
 
     @model_validator(mode="after")
@@ -117,6 +193,10 @@ class StatusSpan(StrictModel):
         if self.valid_to is not None and self.valid_to <= self.valid_from:
             raise ValueError("valid_to must be after valid_from")
         return self
+
+    @model_serializer(mode="wrap")
+    def serialize_model(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        return _drop_unknown_instant(handler(self))
 
 
 class TypedValue(StrictModel):
@@ -153,8 +233,13 @@ class SourceRecord(StrictModel):
     authority: AuthorityTier
     event_time: date
     recorded_week: int = Field(ge=0)
+    recorded_offset_s: RecordedOffset = None
     audiences: list[str] = Field(default_factory=list)
     adversarial: AdversarialFlags = Field(default_factory=AdversarialFlags)
+
+    @model_serializer(mode="wrap")
+    def serialize_model(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        return _drop_unknown_instant(handler(self))
 
 
 class EventRecord(StrictModel):

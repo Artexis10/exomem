@@ -9,12 +9,14 @@ lints that every span is justified by evidence.
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+import enum
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from datetime import date
 
 from membench.clock import week_date
 from membench.schema import (
+    Assertion,
     ClaimRecord,
     ClaimStatus,
     EntityRecord,
@@ -26,6 +28,30 @@ from membench.schema import (
     StatusSpan,
     TypedValue,
 )
+
+#: Records carrying knowledge time. ``EventRecord`` is deliberately absent —
+#: no rule in this module consults its ``recorded_week`` (see schema docstring).
+RecordedRecord = Assertion | StatusSpan | SourceRecord
+
+
+class Order(enum.Enum):
+    """Result of comparing two records on the knowledge axis.
+
+    ``INDETERMINATE`` is an answer, not a failure: two records sharing a week
+    where either never captured an intra-day instant genuinely do not
+    determine an order, and reporting that beats a coin flip. The vocabulary
+    deliberately matches the product's ``src/exomem/temporal.Order``, but this
+    module does **not** import it: the oracle is the ground truth a contender
+    is measured against, so it may not be computed by the code under test — a
+    bug shared with the implementation would be invisible to the benchmark by
+    construction. Nothing under ``membench.schema``/``oracle``/``generate``
+    imports ``exomem``; only the adapters that drive a product do.
+    """
+
+    BEFORE = "before"
+    AFTER = "after"
+    SAME = "same"
+    INDETERMINATE = "indeterminate"
 
 _ACTIVE_STATUSES = frozenset(
     {ClaimStatus.CURRENT, ClaimStatus.CONFIRMED, ClaimStatus.TENTATIVE, ClaimStatus.DISPUTED}
@@ -73,6 +99,9 @@ class TruthView:
     superseded_by: str | None
     supporting: tuple[str, ...] = ()
     disputing: tuple[str, ...] = ()
+    #: True when two covering spans could not be ordered from their recorded
+    #: time and authoring order picked the winner (see :func:`_resolve_span`).
+    resolved_by_authoring_order: bool = False
 
     @property
     def is_active(self) -> bool:
@@ -95,8 +124,103 @@ class Visibility:
     tombstoned: bool = False
 
 
-def visible_spans(claim: ClaimRecord, knowledge_week: int) -> list[StatusSpan]:
-    return [s for s in claim.status_timeline if s.recorded_week <= knowledge_week]
+def compare_recorded(left: RecordedRecord, right: RecordedRecord) -> Order:
+    """Order two records on the knowledge axis, four-valued.
+
+    Weeks decide whenever they differ — a whole week precedes the next. Within
+    one week the answer depends on what was actually captured: two instants
+    order exactly, an instant against an uncaptured one does not (the unknown
+    ranges over the entire week), and two uncaptured ones do not either. The
+    unknown is never collapsed into a guess.
+    """
+
+    if left.recorded_week != right.recorded_week:
+        return Order.BEFORE if left.recorded_week < right.recorded_week else Order.AFTER
+    if left.recorded_offset_s is None or right.recorded_offset_s is None:
+        return Order.INDETERMINATE
+    if left.recorded_offset_s == right.recorded_offset_s:
+        return Order.SAME
+    return Order.BEFORE if left.recorded_offset_s < right.recorded_offset_s else Order.AFTER
+
+
+def sort_key(record: RecordedRecord) -> tuple[int, int]:
+    """Stable total order for listing; does **not** resolve indeterminacy.
+
+    Uncaptured instants sort before captured ones inside their week, and ties
+    fall to the caller's stable sort. Use :func:`compare_recorded` for any
+    verdict; this exists only so histories can be listed reproducibly.
+    """
+
+    return (record.recorded_week, -1 if record.recorded_offset_s is None else record.recorded_offset_s)
+
+
+def is_recorded_by(
+    record: RecordedRecord, knowledge_week: int, knowledge_offset_s: int | None = None
+) -> bool:
+    """Is ``record`` determinately at or before this ask's knowledge cutoff?
+
+    The single visibility predicate; every filter in this module goes through
+    it. ``knowledge_offset_s=None`` — the only thing an
+    :class:`~membench.schema.Ask` can express — puts the cutoff at the *end* of
+    the knowledge week, which is what ``recorded_week <= knowledge_week`` has
+    always meant: every record of that week lies inside it whatever its
+    precision. So the finer axis refines the old rule rather than standing
+    beside it, and no v0.1–v0.2 verdict moves.
+
+    A sub-day cutoff is answered conservatively: a record whose intra-day
+    instant was never captured is not *provably* at or before it, so it is not
+    visible. Guessing the other way would let an ask see evidence the corpus
+    cannot show it had.
+    """
+
+    if record.recorded_week != knowledge_week:
+        return record.recorded_week < knowledge_week
+    if knowledge_offset_s is None:
+        return True
+    if record.recorded_offset_s is None:
+        return False
+    return record.recorded_offset_s <= knowledge_offset_s
+
+
+def _resolve_span(candidates: list[StatusSpan]) -> tuple[StatusSpan, bool]:
+    """The latest-recorded covering span, and whether *authoring order* decided it.
+
+    Later-recorded spans win over earlier ones. When :func:`compare_recorded`
+    cannot separate two of them — same week, at least one without a captured
+    instant, or the same instant exactly — there is nothing in the data to
+    decide with, and the historical rule (the span declared last wins) is kept
+    so no existing corpus changes verdict. That fallback is reported rather
+    than hidden: the second element is ``True`` whenever it was used, and
+    :func:`positional_resolutions` enumerates every claim that depends on it.
+    A claim that captures any intra-day instant may not rely on it at all —
+    :func:`lint_claim` refuses to generate one that does.
+    """
+
+    best = 0
+    positional = False
+    for index in range(1, len(candidates)):
+        order = compare_recorded(candidates[index], candidates[best])
+        if order is Order.AFTER:
+            best, positional = index, False
+        elif order in (Order.SAME, Order.INDETERMINATE):
+            best, positional = index, True
+    return candidates[best], positional
+
+
+def visible_spans(
+    claim: ClaimRecord, knowledge_week: int, *, knowledge_offset_s: int | None = None
+) -> list[StatusSpan]:
+    return [
+        s for s in claim.status_timeline if is_recorded_by(s, knowledge_week, knowledge_offset_s)
+    ]
+
+
+def _overlap(left: StatusSpan, right: StatusSpan) -> bool:
+    """Do two spans describe any common world instant?"""
+
+    starts_before_other_ends = right.valid_to is None or left.valid_from < right.valid_to
+    ends_after_other_starts = left.valid_to is None or right.valid_from < left.valid_to
+    return starts_before_other_ends and ends_after_other_starts
 
 
 def _covering(spans: list[StatusSpan], world_t: date) -> list[StatusSpan]:
@@ -107,42 +231,52 @@ def _covering(spans: list[StatusSpan], world_t: date) -> list[StatusSpan]:
     return out
 
 
-def _evidence(claim: ClaimRecord, knowledge_week: int) -> tuple[tuple[str, ...], tuple[str, ...]]:
-    supporting = tuple(
-        a.source_id
-        for a in claim.assertions
-        if a.stance is Stance.SUPPORTS and a.recorded_week <= knowledge_week
-    )
-    disputing = tuple(
-        a.source_id
-        for a in claim.assertions
-        if a.stance is Stance.DISPUTES and a.recorded_week <= knowledge_week
-    )
+def _evidence(
+    claim: ClaimRecord, knowledge_week: int, knowledge_offset_s: int | None = None
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    visible = [a for a in claim.assertions if is_recorded_by(a, knowledge_week, knowledge_offset_s)]
+    supporting = tuple(a.source_id for a in visible if a.stance is Stance.SUPPORTS)
+    disputing = tuple(a.source_id for a in visible if a.stance is Stance.DISPUTES)
     return supporting, disputing
 
 
-def truth_at(claim: ClaimRecord, world_t: date, knowledge_week: int) -> TruthView:
+def truth_at(
+    claim: ClaimRecord,
+    world_t: date,
+    knowledge_week: int,
+    *,
+    knowledge_offset_s: int | None = None,
+) -> TruthView:
     """What the corpus believed about ``world_t``, given everything recorded
-    through ``knowledge_week``. Later-recorded spans win over earlier ones for
-    the same world interval (retroactive corrections)."""
+    through the ask's knowledge cutoff. Later-recorded spans win over earlier
+    ones for the same world interval (retroactive corrections); where recorded
+    time cannot separate two of them, see :func:`_resolve_span`."""
 
-    supporting, disputing = _evidence(claim, knowledge_week)
-    candidates = _covering(visible_spans(claim, knowledge_week), world_t)
+    supporting, disputing = _evidence(claim, knowledge_week, knowledge_offset_s)
+    candidates = _covering(
+        visible_spans(claim, knowledge_week, knowledge_offset_s=knowledge_offset_s), world_t
+    )
     if not candidates:
         return TruthView(ClaimStatus.UNKNOWN, None, None, None, supporting, disputing)
-    indexed = list(enumerate(candidates))
-    _, span = max(indexed, key=lambda pair: (pair[1].recorded_week, pair[0]))
+    span, positional = _resolve_span(candidates)
     superseded_by = (
         claim.superseded_by
         if span.status in (ClaimStatus.SUPERSEDED, ClaimStatus.PARTIALLY_SUPERSEDED)
         else None
     )
     value = claim.object if span.status is not ClaimStatus.UNKNOWN else None
-    return TruthView(span.status, value, span, superseded_by, supporting, disputing)
+    return TruthView(span.status, value, span, superseded_by, supporting, disputing, positional)
 
 
-def current_truth(claim: ClaimRecord, knowledge_week: int) -> TruthView:
-    return truth_at(claim, world_cutoff(knowledge_week), knowledge_week)
+def current_truth(
+    claim: ClaimRecord, knowledge_week: int, *, knowledge_offset_s: int | None = None
+) -> TruthView:
+    return truth_at(
+        claim,
+        world_cutoff(knowledge_week),
+        knowledge_week,
+        knowledge_offset_s=knowledge_offset_s,
+    )
 
 
 def evolution(claim: ClaimRecord, knowledge_week: int) -> list[TruthView]:
@@ -150,12 +284,95 @@ def evolution(claim: ClaimRecord, knowledge_week: int) -> list[TruthView]:
 
     views: list[TruthView] = []
     for span in sorted(
-        visible_spans(claim, knowledge_week), key=lambda s: (s.valid_from, s.recorded_week)
+        visible_spans(claim, knowledge_week), key=lambda s: (s.valid_from, sort_key(s))
     ):
         view = truth_at(claim, span.valid_from, knowledge_week)
         if not views or views[-1].span is not view.span:
             views.append(view)
     return views
+
+
+def learned_at(
+    claim: ClaimRecord, *, knowledge_week: int, knowledge_offset_s: int | None = None
+) -> Assertion | None:
+    """The visible supporting assertion that first put this claim in the corpus.
+
+    ``None`` when nothing supporting it is visible yet. Where several share the
+    earliest knowledge time the first declared is returned; callers that need a
+    verdict about *which claim came last* must use :func:`latest_recorded`,
+    which refuses to break such a tie.
+    """
+
+    visible = [
+        a
+        for a in claim.assertions
+        if a.stance is Stance.SUPPORTS and is_recorded_by(a, knowledge_week, knowledge_offset_s)
+    ]
+    if not visible:
+        return None
+    earliest = visible[0]
+    for assertion in visible[1:]:
+        if compare_recorded(assertion, earliest) is Order.BEFORE:
+            earliest = assertion
+    return earliest
+
+
+def latest_recorded(
+    claims: Sequence[ClaimRecord],
+    *,
+    knowledge_week: int,
+    knowledge_offset_s: int | None = None,
+) -> ClaimRecord | None:
+    """The claim the corpus learned **last**, or ``None`` when it cannot tell.
+
+    This is the whole point of sub-day knowledge time: which of several claims
+    a memory system heard about most recently. ``None`` covers every case where
+    the answer is not in the data — nothing visible, or a leader the recorded
+    instants cannot separate from a rival (same week without captured instants,
+    or the very same second). It is deliberately four-valued collapsed to
+    "answer or no answer", with no authoring-order fallback: this function is
+    new surface, so nothing depends on a guess, and an ask whose truth is
+    indeterminate is one whose honest expected answer is abstention.
+    """
+
+    scored: list[tuple[ClaimRecord, Assertion]] = []
+    for claim in claims:
+        assertion = learned_at(
+            claim, knowledge_week=knowledge_week, knowledge_offset_s=knowledge_offset_s
+        )
+        if assertion is not None:
+            scored.append((claim, assertion))
+    if not scored:
+        return None
+    leader, leader_at = scored[0]
+    for claim, assertion in scored[1:]:
+        if compare_recorded(assertion, leader_at) is Order.AFTER:
+            leader, leader_at = claim, assertion
+    for claim, assertion in scored:
+        if claim is leader:
+            continue
+        if compare_recorded(assertion, leader_at) is not Order.BEFORE:
+            return None
+    return leader
+
+
+def positional_resolutions(
+    claims: Iterable[ClaimRecord], *, knowledge_week: int
+) -> tuple[str, ...]:
+    """Claim ids whose current truth is decided by authoring order, not data.
+
+    A standing audit of the debt :func:`_resolve_span` carries. Every id listed
+    here is a claim where two covering spans share a week and neither captured
+    an intra-day instant, so which one is current depends on the order the rows
+    happen to sit in ``claims.jsonl``. New corpora should not add to this list;
+    claims that capture instants provably cannot (:func:`lint_claim`).
+    """
+
+    return tuple(
+        claim.claim_id
+        for claim in claims
+        if current_truth(claim, knowledge_week).resolved_by_authoring_order
+    )
 
 
 def superseded_toward(
@@ -369,7 +586,7 @@ def evidence_neighbourhood(
     for claim_id in sorted(neighbourhood):
         claim = claims_by_id[claim_id]
         for assertion in claim.assertions:
-            if assertion.recorded_week <= knowledge_week:
+            if is_recorded_by(assertion, knowledge_week):
                 ordered.setdefault(assertion.source_id)
         for span in visible_spans(claim, knowledge_week):
             if span.cause.by is not None and is_source_id(span.cause.by):
@@ -378,7 +595,7 @@ def evidence_neighbourhood(
             if not is_source_id(reference):
                 continue
             source = (sources_by_id or {}).get(reference)
-            if source is None or source.recorded_week <= knowledge_week:
+            if source is None or is_recorded_by(source, knowledge_week):
                 ordered.setdefault(reference)
     return tuple(ordered)
 
@@ -509,6 +726,21 @@ def lint_claim(claim: ClaimRecord, known_ids: frozenset[str]) -> list[str]:
         earliest = min(s.recorded_week for s in claim.status_timeline)
         if initial_spans[0].recorded_week != earliest:
             errors.append(f"{cid}: initial span must be the earliest recorded")
+    if any(span.recorded_offset_s is not None for span in claim.status_timeline):
+        # This claim captured intra-day instants, so its order must come from
+        # them. Two spans the recorded time cannot separate would silently fall
+        # back to authoring order (:func:`_resolve_span`) — a corpus asserting
+        # a precision it does not have, and unaskable ground truth. Refuse.
+        for i, left in enumerate(claim.status_timeline):
+            for right in claim.status_timeline[i + 1 :]:
+                order = compare_recorded(left, right)
+                if order in (Order.SAME, Order.INDETERMINATE) and _overlap(left, right):
+                    errors.append(
+                        f"{cid}: spans declare sub-day knowledge time but are "
+                        f"{order.value} with respect to each other while covering a "
+                        "common world interval; which is current would be decided by "
+                        "row order, not by data"
+                    )
     for index, span in enumerate(claim.status_timeline):
         allowed = _STATUS_CAUSES.get(span.status, frozenset())
         if span.cause.kind not in allowed:

@@ -8,6 +8,20 @@
           "title": "Asserted At",
           "type": "string"
         },
+        "recorded_offset_s": {
+          "anyOf": [
+            {
+              "exclusiveMaximum": 604800,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Recorded Offset S"
+        },
         "recorded_week": {
           "minimum": 0,
           "title": "Recorded Week",
@@ -99,6 +113,20 @@
       "properties": {
         "cause": {
           "$ref": "#/$defs/SpanCause"
+        },
+        "recorded_offset_s": {
+          "anyOf": [
+            {
+              "exclusiveMaximum": 604800,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Recorded Offset S"
         },
         "recorded_week": {
           "minimum": 0,

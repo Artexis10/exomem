@@ -171,6 +171,18 @@ _V02_FAMILIES: tuple[Family, ...] = (
         ),
     ),
     Family(
+        family_id="sub_day_temporality",
+        classification="deterministic-oracle",
+        status="active",
+        rationale=(
+            "Which of several same-day records the corpus learned last is "
+            "computed from captured intra-day instants, so a store that keeps "
+            "knowledge time only to the day cannot order them; where the "
+            "instants coincide the oracle returns indeterminate and the "
+            "expected answer is abstention, never a guess."
+        ),
+    ),
+    Family(
         family_id="long_horizon_entropy",
         classification="deterministic-oracle",
         status="planned",

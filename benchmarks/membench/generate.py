@@ -92,6 +92,42 @@ def _merge_policies(graphs: list[ScenarioGraph]) -> PolicySet:
     )
 
 
+def _lint_ingestion_order(
+    schedule: list[ScheduleOp], sources_by_id: dict[str, SourceRecord]
+) -> list[str]:
+    """Captured intra-day instants must agree with the order sources are fed in.
+
+    The schedule is the order a contender receives the corpus, and it is the
+    *only* way an intra-day ordering reaches one: the sources themselves carry
+    no clock, so a memory system can only know that A preceded B by having
+    stamped its own knowledge time when each arrived. If a template declares
+    instants that contradict the ingestion order, the corpus asks contenders to
+    reproduce an order they were never shown — an unwinnable query dressed as a
+    capability test. Refuse at generation instead.
+
+    Sources with no captured instant constrain nothing: an unknown instant
+    ranges over its whole week, so it is indeterminate against everything in
+    that week and cannot be out of order (the same four-valued rule
+    :func:`membench.oracle.compare_recorded` applies everywhere).
+    """
+
+    errors: list[str] = []
+    previous: SourceRecord | None = None
+    for op in schedule:
+        source = sources_by_id.get(op.source_id or "")
+        if source is None or source.recorded_offset_s is None:
+            continue
+        if previous is not None and oracle.compare_recorded(source, previous) is oracle.Order.BEFORE:
+            errors.append(
+                f"{source.source_id}: ingested after {previous.source_id} but records an "
+                f"earlier instant (week {source.recorded_week} offset "
+                f"{source.recorded_offset_s}s vs week {previous.recorded_week} offset "
+                f"{previous.recorded_offset_s}s)"
+            )
+        previous = source
+    return errors
+
+
 def _lint_vocabulary(text: str, where: str, errors: list[str]) -> None:
     lowered = text.lower()
     for token in BANNED_VOCABULARY:
@@ -164,6 +200,10 @@ def generate_corpus(
 
     ordered_schedule = sorted(schedule, key=lambda op: (op.week, schedule.index(op)))
     schedule = [op.model_copy(update={"seq": index}) for index, op in enumerate(ordered_schedule)]
+
+    order_errors = _lint_ingestion_order(schedule, {s.source_id: s for s in sources})
+    if order_errors:
+        raise GenerationError("ingestion order lint failed:\n" + "\n".join(order_errors))
 
     sources_dir = out_dir / "sources"
     sources_dir.mkdir(parents=True, exist_ok=True)

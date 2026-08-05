@@ -33,6 +33,7 @@ V02_ACTIVE_FAMILIES = {
     "cross_lingual",
     "preference_attribution",
     "source_reliability",
+    "sub_day_temporality",
 }
 
 V02_PLANNED_FAMILIES = {
