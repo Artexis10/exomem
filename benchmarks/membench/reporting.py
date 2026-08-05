@@ -2,7 +2,11 @@
 
 Publication contract enforced here:
 
-- Deterministic dimension tables NEVER incorporate judge values.
+- Deterministic dimension tables NEVER incorporate judge values. Judged
+  verdicts arrive in their own file (``judged-scores.json``), are tallied
+  under their own dimension, and are rendered in their own section — so the
+  judged contribution to any published figure can be subtracted by ignoring
+  one section, without rerunning anything.
 - No weighted aggregate exists anywhere.
 - Latency lives in its own section, never mixed into quality tables.
 - An INVALID run renders ``INVALID`` in every metric column — never numbers.
@@ -28,7 +32,12 @@ from pathlib import Path
 from membench.judge.backends import parse_judge_verdict
 from membench.judge.handshake import PairedResponse, append_failure, load_requests
 
+#: Raw merged judge samples (one row per judged query, per-sample verbatim).
 JUDGE_SCORES_NAME = "judge-scores.json"
+#: Judged VERDICTS derived from those samples, scoped to rows a deterministic
+#: gate reported UNSUPPORTED. Kept out of ``deterministic-scores.json`` so the
+#: deterministic record is byte-identical whether or not a judge ran.
+JUDGED_SCORES_NAME = "judged-scores.json"
 GATE_CONFLICT_NOTE = "gate_conflict (deterministic verdict stands)"
 _STATUS_KEYS = ("pass", "fail", "not_applicable", "unsupported")
 
@@ -153,6 +162,9 @@ class _RunView:
     judge: dict | None
     failure_lines: int
     governance_state: str = "default_open"
+    #: Judged verdicts (``judged-scores.json``). Never merged into
+    #: ``dimensions``; rendered only in the judged section.
+    judged: dict | None = None
 
 
 def _load_run(run_dir: Path) -> _RunView:
@@ -177,6 +189,10 @@ def _load_run(run_dir: Path) -> _RunView:
     judge_path = run_dir / JUDGE_SCORES_NAME
     if judge_path.is_file():
         judge = json.loads(judge_path.read_text(encoding="utf-8"))
+    judged: dict | None = None
+    judged_path = run_dir / JUDGED_SCORES_NAME
+    if judged_path.is_file():
+        judged = json.loads(judged_path.read_text(encoding="utf-8"))
     failures_path = run_dir / "failures.jsonl"
     failure_lines = 0
     if failures_path.is_file():
@@ -200,6 +216,7 @@ def _load_run(run_dir: Path) -> _RunView:
         # Runs recorded before the three-state contract carry no field; they
         # were by construction measured against the default-open surface.
         governance_state=str(manifest.get("governance_state", "default_open")),
+        judged=judged,
     )
 
 
@@ -350,6 +367,65 @@ def _gate_conflicts(run: _RunView) -> list[str]:
     return conflicts
 
 
+def _judged_lane_section(runs: Sequence[_RunView]) -> list[str]:
+    """Judged verdicts, per run, reported apart from every deterministic count.
+
+    This section exists so a published figure stays auditable: it states how
+    much of each dimension's result came from a judge rather than a gate, and
+    under which model and prompt, so a reader can subtract it. Folding these
+    numbers into the dimension table would make the published counts
+    unauditable, which is the objection this benchmark exists to survive.
+    """
+
+    lines = [
+        "",
+        "## Judged lane (separate — never added to the dimension table)",
+        "",
+        "A judged verdict resolves ONLY a row where a deterministic gate",
+        "reported UNSUPPORTED. A gate that returned pass, fail or",
+        "not_applicable is final and is never revisited, so no count in the",
+        "dimension table can move because a judge ran.",
+        "",
+    ]
+    judged_runs = [run for run in runs if run.judged]
+    if not judged_runs:
+        lines.append("Judged lane: not run (no judged-scores.json in any run).")
+        return lines
+    caveats: dict[str, None] = {}
+    for run in judged_runs:
+        meta = (run.judged or {}).get("meta", {})
+        summary = (run.judged or {}).get("summary", {})
+        lines.append(f"### {run.label}")
+        lines.append("")
+        if run.invalid:
+            lines.extend(["INVALID run — judged output is not reported as results.", ""])
+            continue
+        lines.extend(
+            [
+                f"- backend: {meta.get('backend', '?')} · "
+                f"status: {meta.get('status', '?')} · "
+                f"prompt: {meta.get('prompt_id', 'n/a')}",
+                f"- scope: {', '.join(meta.get('scope_gates', [])) or 'n/a'} "
+                f"(UNSUPPORTED rows only) · candidates: {meta.get('candidates', 0)}",
+                "",
+                "| base dimension | judged pass | judged fail | judged unsupported |",
+                "| --- | --- | --- | --- |",
+            ]
+        )
+        for base, counts in sorted(summary.get("by_base_dimension", {}).items()):
+            lines.append(
+                f"| {base} | {counts.get('pass', 0)} | {counts.get('fail', 0)} "
+                f"| {counts.get('unsupported', 0)} |"
+            )
+        lines.append("")
+        caveat = meta.get("caveat")
+        if isinstance(caveat, str) and caveat:
+            caveats.setdefault(caveat)
+    for caveat in caveats:
+        lines.extend([f"**{caveat}**", ""])
+    return lines
+
+
 def build_comparison_report(run_dirs: Sequence[Path], out_path: Path) -> Path:
     """Render a cross-run markdown comparison to ``out_path``."""
 
@@ -379,6 +455,11 @@ def build_comparison_report(run_dirs: Sequence[Path], out_path: Path) -> Path:
         [
             "",
             "## Dimensions (deterministic; judge values never incorporated)",
+            "",
+            "Every count in this table came from a deterministic gate. Judged",
+            "verdicts are reported in their own section below and are never",
+            "added here — subtract the judged contribution by ignoring that",
+            "section.",
             "",
             "Governance dimensions are comparable only between runs measured",
             "against wired governance; default-open and unsupported runs are",
@@ -480,6 +561,8 @@ def build_comparison_report(run_dirs: Sequence[Path], out_path: Path) -> Path:
             )
         else:
             lines.append(f"- {run.label}: {run.failure_lines} failure record(s)")
+
+    lines.extend(_judged_lane_section(runs))
 
     lines.extend(["", "## Judge (advisory — deterministic gates are FINAL)", ""])
     judged = [run for run in runs if run.judge is not None]

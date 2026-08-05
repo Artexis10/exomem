@@ -11,14 +11,42 @@ from membench.scoring.gates import (
     ScoringContext,
     evaluate,
 )
+from membench.scoring.judged import (
+    JUDGE_RESOLVABLE_GATES,
+    JUDGE_UPPER_BOUND_CAVEAT,
+    JUDGED_DIMENSION,
+    JudgeCandidate,
+    JudgedItem,
+    JudgeProvenance,
+    candidate_for,
+    expected_summary_for,
+    prompt_fingerprint,
+    request_items,
+    resolve,
+    summarize_judged,
+    unresolved,
+)
 
 __all__ = [
     "ALL_GATES",
+    "JUDGE_RESOLVABLE_GATES",
+    "JUDGE_UPPER_BOUND_CAVEAT",
+    "JUDGED_DIMENSION",
     "GateStatus",
+    "JudgeCandidate",
+    "JudgeProvenance",
+    "JudgedItem",
     "ScoreItem",
     "ScoringContext",
+    "candidate_for",
     "evaluate",
+    "expected_summary_for",
+    "prompt_fingerprint",
+    "request_items",
+    "resolve",
     "summarize_dimensions",
+    "summarize_judged",
+    "unresolved",
 ]
 
 
