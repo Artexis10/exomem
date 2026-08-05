@@ -1052,3 +1052,63 @@ on the same machine. Everything the replication kit was going to promise was
 already false, silently, and nothing detected it. The environment gate and the
 retrieval floor exist so the next occurrence announces itself instead of
 publishing 236 plausible zeros.
+
+### Cause found — `EXOMEM_DISABLE_CLIP=1` zeroes text retrieval
+
+The fifth hypothesis is the right one, and it was in the benchmark's own profile
+the whole time.
+
+**Measured**, 20 real corpus queries, one fixed vault:
+
+| | hits |
+|---|---:|
+| the original run recorded | 52 |
+| today, **without** `EXOMEM_DISABLE_CLIP` | **40** |
+| today, **with** it | **0** |
+
+A flag that reads as an image-search switch takes *text* retrieval to zero. The
+benchmark's `lexical_profile()` set it on every run.
+
+**Why four root causes came and went first.** The adapter applies profile
+settings *temporarily* — `_set_env` (`exomem_local.py:193`), restored in
+`cleanup()` — while `capture_environment` reads `os.environ` **outside** that
+window. Every run artifact therefore recorded only `EXOMEM_DISABLE_EMBEDDINGS`,
+and the flags actually in force were never written down.
+
+And the trap that cost the most: the profile was reconstructed *faithfully from
+the run manifest* in every probe, which meant setting the very flag that broke
+it. Every control — interpreter, locked dependencies, product source, the
+original adapter — correctly answered "not this". All true, all useless: the bug
+was riding inside the control.
+
+**Two defects.** Product: a CLIP/image switch suppressing text retrieval is wrong
+independent of this benchmark. Harness: we set it. Removed, with a comment
+forbidding its return without a test proving retrieval survives it.
+
+### What removing it revealed
+
+The verification run came back:
+
+```
+invalid=True  reason=environment: scored response carries degraded marker: ['clip']
+```
+
+Without the flag, exomem reports the CLIP lane degraded (no
+`sentence-transformers`) and the adapter refuses to score a degraded response —
+correctly. So the flag was suppressing the *symptom* of a missing dependency
+while destroying text retrieval as a side effect.
+
+Both states are unscoreable, but they are not equally bad:
+
+- **with the flag**: 236 plausible zeros, `invalid: false`, silently wrong
+- **without it**: INVALID with a named cause, loudly wrong
+
+That is the correct trade and the change stands. This machine still cannot
+produce a valid lexical-profile run until `sentence-transformers` is installed
+(or the product stops degrading text retrieval when CLIP is absent) — but it now
+*says so* instead of publishing zeros.
+
+**Gap in the environment gate, stated:** it captures `env_knobs` from ambient
+`os.environ`, outside the adapter's apply/restore window, so it would miss this
+exact class again. Effective profile settings must be captured where they are
+applied.

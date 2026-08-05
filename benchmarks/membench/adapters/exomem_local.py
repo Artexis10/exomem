@@ -107,7 +107,16 @@ def lexical_profile(name: str = "neutral-lexical") -> Profile:
             "EXOMEM_DISABLE_RANKING_CONFIG": "1",
             "EXOMEM_DISABLE_CORPUS_CACHE": "1",
             "EXOMEM_DISABLE_MEDIA_EXTRACTION": "1",
-            "EXOMEM_DISABLE_CLIP": "1",
+            # EXOMEM_DISABLE_CLIP is deliberately NOT set. It reads as an
+            # image-search switch, but on this environment it zeroes *text*
+            # retrieval outright: measured over 20 real corpus queries against
+            # a fixed vault, 40 hits without it and 0 with it. It was the cause
+            # of a whole-suite zero-hit run that took four withdrawn root
+            # causes to find. CLIP is unavailable here anyway (no
+            # sentence-transformers), so the flag bought nothing and cost
+            # every retrieval result. Product-side bug, recorded in the
+            # findings doc; do not re-add without a test proving retrieval
+            # survives it.
             "EXOMEM_DISABLE_QUERY_LOG": "1",
             "EXOMEM_VEC_BACKEND": "numpy",
             "EXOMEM_LEXICAL_BACKEND": "python",
