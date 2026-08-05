@@ -825,3 +825,53 @@ is a claim no one can check. Tracked as 4b.24.
 numbers remain the best available record, but they are currently
 **unreproducible on the machine that produced them**, and must be labelled as
 such until 4b.24 lands.
+
+### Root cause — retrieval is process-history dependent
+
+Continued from the addendum above, which stopped at "the cause is environmental."
+That was wrong, and the real cause is worse.
+
+**Measured, same vault and same query throughout:**
+
+| context | bm25 lane | `op_ask_memory` |
+|---|---:|---:|
+| cold process, the failing run's own vault | 10 | **2** |
+| cold process, the Aug-1 vault | 10 | **2** |
+| process that has just written to the vault | 10 | **0** |
+
+The BM25 lane returns the correct documents ranked 1–2 (`kickoff-brief` 19.078,
+`replan-memo` 18.919) in **every** case. What changes is whether they survive the
+retention seam (`find.py:2669`, `find_results.stem_tokens_present`) — instrumented
+directly: **46 retention checks, 0 passed**.
+
+So a benchmark run — which ingests ~200 documents and then queries **in the same
+process** — gets zero hits, while any cold process querying the identical vault
+on disk retrieves normally. `bm25.clear_cache()` does not restore it, so the
+stale state is not the BM25 corpus cache.
+
+**This supersedes the environmental hypothesis.** Nothing about dependencies had
+to change: Aug-1's 452 hits and today's 0 are the same code with different
+process histories. Ruled out along the way, each with evidence: product source
+(byte-identical), profile knobs (all twelve, and a per-kwarg bisection — 2 hits
+in every combination), corpus size, governance wiring, deferred index, machine
+config, and `rank_bm25` availability.
+
+**Why this matters beyond one broken run.** A memory system whose retrieval
+depends on whether the querying process previously wrote to the vault is
+non-deterministic in the dimension the benchmark exists to measure. And a
+harness that ingests and queries in one process measures that artefact rather
+than the product. Every lexical-profile number this project has published was
+produced by an ingest-then-query process.
+
+**Harness mitigation (benchmark-side, implementable now):** query from a process
+that did not perform the ingest — split the phases, or re-exec between them. This
+is verified by construction: the cold-process probes above are exactly that
+arrangement and they retrieve.
+
+**Product question (not ours to answer here):** why write-side state suppresses
+retention for the writing process. Recorded as a finding, not a diagnosis.
+
+**Loose end, stated:** a search against a freshly-created empty vault returned 2
+results, which should be impossible and suggests a vault-path fallback somewhere.
+Not chased. It does not affect the above — every comparison in the table uses a
+populated vault at an explicit path — but it wants its own look.
