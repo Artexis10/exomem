@@ -33,6 +33,15 @@ class DatabaseBootstrapError(RuntimeError):
 
 
 @dataclass(frozen=True, slots=True)
+class RuntimeRoleMembership:
+    """One grant of the runtime role to another role."""
+
+    member: str
+    inherits: bool
+    can_set_role: bool
+
+
+@dataclass(frozen=True, slots=True)
 class RuntimeRoleState:
     """Security-relevant PostgreSQL runtime-role attributes."""
 
@@ -44,7 +53,7 @@ class RuntimeRoleState:
     can_replicate: bool
     can_bypass_rls: bool
     member_of: tuple[str, ...]
-    members: tuple[str, ...]
+    members: tuple[RuntimeRoleMembership, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,7 +108,16 @@ def validate_runtime_role(
         or state.can_replicate
         or state.can_bypass_rls
         or state.member_of
-        or state.members
+        or any(
+            # A managed provider records an unrevocable administrative grant of every
+            # role it creates to the account owner (Neon does this as `cloud_admin`),
+            # so requiring no members at all is unsatisfiable there. Reject any grant
+            # that can actually assume the runtime role, and any other grantee.
+            membership.member != database_owner
+            or membership.inherits
+            or membership.can_set_role
+            for membership in state.members
+        )
     ):
         raise DatabaseBootstrapError("runtime role is unsafe")
     if admin_role == expected_role:
@@ -312,17 +330,23 @@ async def _runtime_role_state(
         ).scalars()
     )
     members = tuple(
-        (
+        RuntimeRoleMembership(
+            member=str(membership.rolname),
+            inherits=bool(membership.inherit_option),
+            can_set_role=bool(membership.set_option),
+        )
+        for membership in (
             await connection.execute(
                 text(
-                    "SELECT member.rolname FROM pg_auth_members membership "
+                    "SELECT member.rolname, membership.inherit_option, membership.set_option "
+                    "FROM pg_auth_members membership "
                     "JOIN pg_roles member ON member.oid = membership.member "
                     "JOIN pg_roles parent ON parent.oid = membership.roleid "
                     "WHERE parent.rolname = :role ORDER BY member.rolname"
                 ),
                 {"role": role},
             )
-        ).scalars()
+        ).all()
     )
     return RuntimeRoleState(
         name=str(row.rolname),

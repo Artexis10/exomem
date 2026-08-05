@@ -186,6 +186,19 @@ unsupported. A separately reviewed proxy with a backend-session-affinity
 guarantee may use `pool_mode=session` as the local contract marker. That marker
 does not make a transaction pool safe.
 
+On a managed provider the runtime role's search path must be pinned on the role
+itself. Neon's proxy silently drops the `search_path` startup parameter, so the
+`server_settings` the provisioner sends on every connection never take effect and
+the role would resolve to `public` instead of its own schema. Pin it once, with a
+credential that administers the runtime role:
+
+```bash
+ALTER ROLE exomem_provisioner_runtime SET search_path = exomem_provisioner, pg_catalog;
+```
+
+Confirm `SELECT current_schema` returns `exomem_provisioner` as the runtime role
+before bootstrapping; the bootstrap asserts exactly this and fails closed on it.
+
 ```bash
 : "${EXOMEM_DATABASE_ADMIN_ROTATION_RECEIPT:?set the private receipt path}"
 : "${EXOMEM_DATABASE_BOOTSTRAP_ATTEMPT_STATE:?set a persistent private attempt-state path}"

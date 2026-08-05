@@ -32,7 +32,6 @@ def test_bootstrap_lock_key_is_deterministic_and_database_schema_specific() -> N
         {"can_replicate": True},
         {"can_bypass_rls": True},
         {"member_of": ("privileged_parent",)},
-        {"members": ("inherited_reader",)},
     ],
 )
 def test_existing_runtime_role_with_unsafe_attributes_fails_closed(
@@ -61,6 +60,59 @@ def test_existing_runtime_role_with_unsafe_attributes_fails_closed(
             expected_schema="exomem_provisioner",
             owned_schemas=("exomem_provisioner",),
         )
+
+
+@pytest.mark.parametrize(
+    ("member", "inherits", "can_set_role", "accepted"),
+    [
+        # A managed provider (Neon) records an unrevocable administrative grant of the
+        # runtime role to the account owner. Administration alone cannot assume the role.
+        ("neondb_owner", False, False, True),
+        # Anything that can actually act as the runtime role is still rejected.
+        ("neondb_owner", True, False, False),
+        ("neondb_owner", False, True, False),
+        # A grantee that is not the database owner is never expected.
+        ("some_other_role", False, False, False),
+    ],
+)
+def test_only_a_non_assumable_database_owner_grant_is_tolerated(
+    member: str,
+    inherits: bool,
+    can_set_role: bool,
+    accepted: bool,
+) -> None:
+    module = _bootstrap_module()
+    state = module.RuntimeRoleState(
+        name="exomem_provisioner_runtime",
+        can_login=True,
+        is_superuser=False,
+        can_create_database=False,
+        can_create_role=False,
+        can_replicate=False,
+        can_bypass_rls=False,
+        member_of=(),
+        members=(
+            module.RuntimeRoleMembership(
+                member=member, inherits=inherits, can_set_role=can_set_role
+            ),
+        ),
+    )
+
+    def validate() -> None:
+        module.validate_runtime_role(
+            state,
+            expected_role="exomem_provisioner_runtime",
+            admin_role="bootstrap_admin",
+            database_owner="neondb_owner",
+            expected_schema="exomem_provisioner",
+            owned_schemas=("exomem_provisioner",),
+        )
+
+    if accepted:
+        validate()
+    else:
+        with pytest.raises(module.DatabaseBootstrapError, match="runtime role is unsafe"):
+            validate()
 
 
 @pytest.mark.parametrize(
