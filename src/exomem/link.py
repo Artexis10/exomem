@@ -18,7 +18,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import entity_candidates, indexes, memory_refs, semantic_writes
+from . import entity_candidates, indexes, memory_refs, semantic_writes, temporal
 from .entity_types import (
     ENTITY_TYPE_IDS,
     ENTITY_TYPE_TO_FOLDER,
@@ -157,8 +157,9 @@ def _legacy_link(
                 # unregistered_project_key.
                 pass
 
-    today = today or dt.date.today()
-    date_iso = today.isoformat()
+    now = today or temporal.now()
+    date_iso = temporal.render_date(now)
+    stamp_iso = temporal.stamp(now)
     tags_clean = _clean_tags(tags)
     exomem_id = memory_refs.new_id()
 
@@ -209,7 +210,7 @@ def _legacy_link(
         name=display_name,
         summary=summary_clean,
         why_in_kb=why_clean,
-        date_iso=date_iso,
+        date_iso=stamp_iso,
         tags=tags_clean,
         connections=[
             render_wikilink_target(connection, vault_root)
@@ -282,7 +283,7 @@ def _legacy_link(
     if log_file.exists():
         new_log = _prepend_log_entry(
             log_file.read_text(encoding="utf-8"),
-            date_iso=date_iso,
+            date_iso=stamp_iso,
             rel_path=rel_entity_no_ext,
             body=log_body,
         )
@@ -616,7 +617,9 @@ def link(
         raise LinkError("PROJECT_KEY_TYPO", ["project"], str(error)) from error
     except ValueError as error:
         raise LinkError("INVALID_LINK", ["project"], str(error)) from error
-    date_iso = (today or dt.date.today()).isoformat()
+    now = today or temporal.now()
+    date_iso = temporal.render_date(now)
+    stamp_iso = temporal.stamp(now)
     identity = memory_refs.new_id()
     display_name = name.strip()
     identity_resolution = entity_candidates.resolve_entity_candidate(
@@ -672,7 +675,7 @@ def link(
         name=display_name,
         summary=summary_clean,
         why_in_kb=why_clean,
-        date_iso=date_iso,
+        date_iso=stamp_iso,
         tags=_clean_tags(tags),
         connections=[
             render_wikilink_target(item, vault_root) for item in connections_norm
@@ -699,6 +702,7 @@ def link(
         rel_entity,
         date_iso,
         registrations,
+        render_stamp=stamp_iso,
     ).encode()
     try:
         preflight = semantic_writes.preflight_creation(
@@ -749,7 +753,7 @@ def link(
     try:
         log_plan = plan_log_writes(
             vault_root,
-            date_iso=date_iso,
+            date_iso=stamp_iso,
             op="link",
             rel_path_no_ext=rel_entity_no_ext,
             body=_log_entry_body(

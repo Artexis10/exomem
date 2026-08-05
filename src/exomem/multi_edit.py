@@ -24,7 +24,7 @@ from typing import Annotated
 
 from pydantic import BeforeValidator
 
-from . import guards, semantic_writes
+from . import guards, semantic_writes, temporal
 from .edit import (
     EditError,
     _set_or_append,
@@ -153,8 +153,8 @@ def multi_edit(
 
     edits = normalized_edits
 
-    today = today or dt.date.today()
-    date_iso = today.isoformat()
+    now = today or temporal.now()
+    date_iso = temporal.stamp(now)
 
     editable = load_editable(vault_root, path, expected_hash=expected_hash)
 

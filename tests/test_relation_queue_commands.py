@@ -6,12 +6,13 @@ and triage_memory relation-ref routing, plus registry-surface exposure.
 
 from __future__ import annotations
 
+import datetime as dt
 from pathlib import Path
 
 import pytest
 from starlette.testclient import TestClient
 
-from exomem import attention, commands, find, relation_queue, server
+from exomem import attention, commands, find, relation_queue, server, temporal
 
 
 def _write_page(
@@ -132,7 +133,15 @@ def test_accept_relation_creates_relations_section_when_absent(tmp_path: Path) -
     assert "## Relations" in text
 
 
-def test_accept_writes_bullet_byte_identical_to_studio_path(tmp_path: Path) -> None:
+def test_accept_writes_bullet_byte_identical_to_studio_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Both paths stamp knowledge time from the clock, so two executions that
+    # straddle a second boundary differ in `updated:` alone. Pin the clock: the
+    # claim under test is that the two code paths agree, not that they run fast.
+    frozen = dt.datetime(2026, 8, 5, 9, 12, 33, tzinfo=dt.UTC)
+    monkeypatch.setattr(temporal, "now", lambda: frozen)
+
     studio_vault = tmp_path / "studio"
     accept_vault = tmp_path / "accept"
     studio_vault.mkdir()

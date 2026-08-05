@@ -5,9 +5,12 @@ from __future__ import annotations
 import time
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field
+from datetime import date
 from functools import cached_property
 from pathlib import Path
 from typing import Any
+
+from . import temporal
 
 
 @dataclass(frozen=True)
@@ -78,8 +81,23 @@ class ParsedPage:
 
     @property
     def updated(self) -> str:
+        """Canonical ISO rendering of the recorded day or instant.
+
+        Not `str(value)`: PyYAML hands back a `datetime` for an unquoted
+        timestamp, and `str()` on that yields a space-separated form
+        (`2026-08-05 09:12:33+00:00`) that neither round-trips as ISO nor
+        matches what `semantic_unit_read` renders for the same field. Going
+        through `temporal` keeps one spelling across every result surface, and
+        keeps the lexicographic sorts in `find` and `lexstore` monotonic when
+        date-only and timestamped pages are interleaved.
+        """
         u = self.frontmatter.get("updated") or self.frontmatter.get("captured") or ""
-        return str(u)
+        if isinstance(u, date):
+            return temporal.stamp(u)
+        moment = temporal.parse(u)
+        if moment is None:
+            return str(u)
+        return temporal.stamp(moment.instant or moment.day)
 
     @property
     def tags(self) -> list[str]:
@@ -203,6 +221,10 @@ class Hit:
     activation: float | None = None
     usage_boost_applied: float | None = None
     graph_provenance: GraphProvenance | None = None
+    # Bounds this hit matched without the ordering actually being decidable —
+    # a page recorded only to the day, against a bound carrying a time inside
+    # it. Empty for every hit whose order was genuinely determined.
+    order_indeterminate: list[str] = field(default_factory=list)
     relation_match: dict[str, Any] | None = None
     matched_units: list[dict[str, Any]] | None = None
     matched_units_truncated: int = 0
@@ -225,6 +247,8 @@ class Hit:
             "updated": self.updated,
             "excerpt": self.excerpt,
         }
+        if self.order_indeterminate:
+            out["order_indeterminate"] = list(self.order_indeterminate)
         if self.graph_provenance is not None:
             out["graph"] = {
                 "relation_type": self.graph_provenance.relation_type,

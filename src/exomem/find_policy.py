@@ -9,6 +9,10 @@ from datetime import date, timedelta
 
 from .find_types import Hit
 from .ranking_config import DEFAULT_RANKING, RankingConfig
+# Names imported directly rather than the `temporal` module: this file already
+# has a parameter called `temporal` in `apply_post_rrf_multipliers`, and a
+# module of the same name would sit one refactor away from being shadowed.
+from .temporal import Moment, Order, compare as compare_moments, parse as parse_moment
 
 COMPILED_TYPES = frozenset(
     {
@@ -229,13 +233,14 @@ def classify_intent(query: str) -> str:
 
 
 def parse_date(value: str | None) -> date | None:
-    """Best-effort ISO date parse (YYYY-MM-DD prefix); None when unparseable."""
-    if not value:
-        return None
-    try:
-        return date.fromisoformat(str(value).strip()[:10])
-    except ValueError:
-        return None
+    """Best-effort parse of a recorded date; None when unparseable.
+
+    Recency scoring buckets pages by whole days, so a timestamp collapses to
+    its day. Delegating to `temporal` also picks up the quoted and
+    space-separated forms that prefix-slicing to 10 characters used to reject.
+    """
+    moment = parse_moment(value)
+    return moment.day if moment is not None else None
 
 
 def recency_multiplier(
@@ -290,6 +295,34 @@ def recency_ranking(candidate_paths: list[str], page_of: PageOf, cap: int) -> li
     return [p for _, p in dated][:cap]
 
 
+def _bound_verdict(
+    recorded: Moment, bound: str | None, *, keep_when: tuple[Order, ...]
+) -> tuple[bool, bool]:
+    """Apply one bound to one recorded value. Returns `(keep, indeterminate)`.
+
+    The bound's own precision decides the granularity. A day-scoped bound asks
+    a day-scoped question, which every page can answer; an instant bound cannot
+    be answered by a page recorded only to the day it falls on.
+    """
+    parsed = parse_moment(bound)
+    if parsed is None:
+        return True, False
+    if parsed.precise:
+        order = compare_moments(recorded, parsed)
+        if order is Order.INDETERMINATE:
+            # Undecidable: keep it and say so, rather than dropping it silently
+            # (the defect this change exists to fix) or passing a guess off as
+            # a match.
+            return True, True
+    else:
+        order = compare_moments(
+            Moment(recorded.day), Moment(parsed.day)
+        )
+        if order is Order.INDETERMINATE:
+            order = Order.SAME
+    return order in keep_when, False
+
+
 def filter_by_date(
     hits: list[Hit],
     *,
@@ -297,25 +330,47 @@ def filter_by_date(
     updated_before: str | None = None,
     recency_days: int | None = None,
 ) -> list[Hit]:
-    """Drop hits whose updated date falls outside the requested window."""
-    after = parse_date(updated_after)
-    before = parse_date(updated_before)
+    """Drop hits whose recorded time falls outside the requested window.
+
+    `updated_after`/`updated_before` accept an instant as well as a day.
+    `recency_days` stays day-scoped: it is a window of whole days by
+    construction. A hit kept on a bound that could not actually be decided is
+    marked in `Hit.order_indeterminate` rather than presented as a clean match.
+    """
     floor: date | None = None
     if recency_days is not None and recency_days >= 0:
         floor = date.today() - timedelta(days=recency_days)
-    if after is None and before is None and floor is None:
+    if updated_after is None and updated_before is None and floor is None:
         return hits
+    after_keep = (Order.AFTER, Order.SAME)
+    before_keep = (Order.BEFORE, Order.SAME)
     out: list[Hit] = []
     for h in hits:
-        d = parse_date(h.updated)
-        if d is None:
+        recorded = parse_moment(h.updated)
+        if recorded is None:
             continue
-        if after is not None and d < after:
+        if floor is not None and recorded.day < floor:
             continue
-        if before is not None and d > before:
+        keep_after, vague_after = _bound_verdict(
+            recorded, updated_after, keep_when=after_keep
+        )
+        if not keep_after:
             continue
-        if floor is not None and d < floor:
+        keep_before, vague_before = _bound_verdict(
+            recorded, updated_before, keep_when=before_keep
+        )
+        if not keep_before:
             continue
+        vague = [
+            name
+            for name, flag in (
+                ("updated_after", vague_after),
+                ("updated_before", vague_before),
+            )
+            if flag
+        ]
+        if vague:
+            h.order_indeterminate = vague
         out.append(h)
     return out
 

@@ -415,6 +415,7 @@ _HIT_FIELDS: frozenset[str] = frozenset(
         "scope",
         "title",
         "updated",
+        "order_indeterminate",
         "excerpt",
         "graph",
         "relation_match",
