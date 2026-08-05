@@ -928,3 +928,71 @@ worktree and main; process-history dependence). Both were stated with evidence
 and both were wrong. They are left in the record above rather than deleted,
 because the pattern matters more than the tidiness: each died to a control, and
 the correct answer was in the run artifacts from the beginning.
+
+## Addendum — the environment gate, and the vacuous passes it found (2026-08-05)
+
+4b.24 implemented (`d29ec42`). Two guards, and the second immediately found a
+defect in this project's own test suite.
+
+### Guards
+
+**Environment pin-and-verify.** Full distribution capture (81 here) plus the
+product's runtime closure. Two tiers on one principle: *block only where nothing
+else in the artifacts can independently establish that the difference did not
+matter.* Blocking — interpreter version and implementation, `exomem_version`,
+repo head and dirty flag, every `EXOMEM_*` knob, and distributions inside the
+runtime closure. Reported — everything else, `platform` included, since it
+embeds the WSL kernel patch level and blocking on it would manufacture invalid
+runs from an OS update.
+
+This is the same rule as the release manifest (4b.7) reaching the opposite
+verdict, and the asymmetry is the point: corpus identity has an independent check
+— dual artifact hashes proved 200/200 identical across a Pillow bump — so
+renderer versions are provenance. Retrieval behaviour has no such check, so the
+interpreter blocks.
+
+Two safeguards against a guard so strict it gets switched off: blocking only
+applies to a run that *claims a reproduction* (`reference_environment` is opt-in),
+and distribution blocking follows extras only when requested — following every
+extra everywhere pulls `pyjwt`'s dev extra through to pytest and blocks 81 of 81
+installed distributions, i.e. the whole venv. The scoped rule blocks 75.
+
+**Retrieval floor.** Zero queries with hits, over at least 10 attempted, is
+INVALID. Exactly zero is the only threshold requiring no assumption about a
+contender's competence: it is the absence of signal rather than a degree of
+badness. A contender managing 1 hit in 236 is dreadful *and measured* — scored and
+flagged, never dismissed as broken.
+
+Verified on the real artifacts: Aug-1 versus today reports `blocking_mismatch` on
+`python_version`, repo head and dirty flag; the zero-hit s1 run
+(236 queries, 0 hits) becomes `floor_violation → INVALID`. Neither is a contender
+loss — `invalid=True`, `run_failures == 0`, dimensions withheld, the fault
+recorded in `failures.jsonl` but uncounted.
+
+### What the floor guard caught in our own suite
+
+Five previously-green tests now fail, correctly. They are real-adapter runs
+asserting `not result.invalid` over runs that retrieve **nothing**:
+
+- `test_membench_adapter_exomem.py::test_leaf_run_end_to_end_produces_valid_run_dir`
+  — 0 hits on all 16 retrieval queries
+- four tests in `test_membench_governance_wiring.py` — 0 hits on all 24
+
+**The governance ones are the serious case.** A run that retrieves zero documents
+trivially satisfies "the withheld content was not returned". Independently
+confirmed on the zero-hit s1 run recorded earlier in this document, which
+published `governance: {pass: 16, fail: 0}` — sixteen governance passes earned by
+returning nothing at all.
+
+This is a new shape of this project's recurring defect. The previous eight
+instances were the harness scoring *correct product behaviour as failure*. This
+is the inverse: the harness scoring *a non-measurement as success*. Same
+underlying disease — the harness measuring itself rather than the product — and
+the inverse form is more dangerous, because a false failure gets investigated and
+a false pass does not.
+
+**Disposition: left red deliberately.** They are currently the loudest available
+signal that this machine cannot retrieve. Converting them to
+`pytest.skip(invalid_reason)` would be one line each and would risk masking a
+genuine product regression later. They go green when a 3.12 environment exists,
+which is the remaining half of 4b.24.
