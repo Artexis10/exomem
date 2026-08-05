@@ -996,3 +996,59 @@ signal that this machine cannot retrieve. Converting them to
 `pytest.skip(invalid_reason)` would be one line each and would risk masking a
 genuine product regression later. They go green when a 3.12 environment exists,
 which is the remaining half of 4b.24.
+
+### Correction 2 — it is not the interpreter either; the Aug-1 run is simply not reproducible
+
+A Python **3.12.3** environment was built (the exact version `environment.json`
+records for the Aug-1 run, from `/usr/bin/python3.12`) and synced from the
+committed `uv.lock` with `uv sync --frozen`. The lock is unchanged since Jul 31,
+before the Aug-1 run.
+
+Result: **0 hits**, on all three replayed Aug-1 queries. The interpreter root
+cause published above is **withdrawn**.
+
+Everything reconstructible has now been ruled out by direct test, each replaying
+the Aug-1 run's own queries against the Aug-1 run's own vault:
+
+| variable | control | result |
+|---|---|---|
+| interpreter | 3.12.3, exact match to the record | 0 hits |
+| dependency set | `uv sync --frozen`, lock unchanged since Jul 31 | 0 hits |
+| product source | `git diff bc6cfac HEAD -- src/exomem` empty | 0 hits |
+| **adapter** | the literal `bc6cfac` version, run from a scratch copy | **0 hits** |
+| search kwargs | `_search_kwargs` / `_NEUTRAL_SEARCH_KWARGS` byte-identical at both commits | 0 hits |
+| query text | `query.prompt_text`, exactly what the runner passes | 0 hits |
+| vault | index files untouched since Aug 1 14:52 | 0 hits |
+| profile knobs | all twelve, plus a per-kwarg bisection | 0 hits |
+
+The Aug-1 hits are unambiguously real: rank 1, genuine excerpt, a
+`provider_path` that still exists in the vault.
+
+**Conclusion: the Aug-1 run cannot be reproduced, and we cannot determine why.**
+That is the finding — not a placeholder for a better one. Some state that no
+artifact captured determined whether retrieval worked, and it is gone.
+
+**Four root causes were published for this failure before this one, all wrong:**
+a worktree/main version gap; process-history dependence; the interpreter; each
+stated with evidence, each killed by a control. They are left in the record
+above. The pattern is the lesson — every one of them was a plausible story that
+explained the symptom, and the discipline that mattered was building the control
+rather than believing the story.
+
+**Disposition: retire the Aug-1 numbers rather than explain them.** They are
+unreproducible on the machine that produced them, by any reconstruction available,
+so they cannot be published regardless of cause. The correct next step is not more
+archaeology — it is a **fresh baseline produced under the now-verified
+environment gate**, which records the full distribution set and fails loudly on
+mismatch. That run will be reproducible by construction; this one never can be.
+
+A Python 3.12 environment now exists at `.venv-312` (gitignored) if a future
+bisection wants it.
+
+**What this episode actually establishes**, and the reason the guards matter more
+than the diagnosis: a benchmark run captured its corpus, vault, product commit,
+profile, answers and interpreter — and still could not be replayed six days later
+on the same machine. Everything the replication kit was going to promise was
+already false, silently, and nothing detected it. The environment gate and the
+retrieval floor exist so the next occurrence announces itself instead of
+publishing 236 plausible zeros.
