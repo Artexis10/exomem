@@ -507,3 +507,88 @@ dependency and moving on.
 - `uv run python -c "import json; r=json.load(open('benchmarks/corpus/releases/v0.1-seed1.manifest.json')); n=json.load(open('/tmp/probe_p1/manifest.json')); R={a['source_id']:a for a in r['artifacts']}; N={a['source_id']:a for a in n['artifacts']}; c=sorted(set(R)&set(N)); print('committed',len(R),'regenerated',len(N),'common',len(c),'only-committed',len(set(R)-set(N)),'only-regenerated',len(set(N)-set(R)),'bytes-differ',sum(R[s]['bytes_sha256']!=N[s]['bytes_sha256'] for s in c),'logical-differ',sum(R[s]['logical_sha256']!=N[s]['logical_sha256'] for s in c))"`
   — note the set-size terms: an intersection-only comparison silently hides a
   template-count difference, which is the mistake the scope correction above fixes.
+
+## Addendum — the LLM judge does not earn its place (2026-08-05)
+
+**Disposition: `semantic_match` should not be a scored dimension.** Measured, not
+argued. Raised by the human labeller mid-pass ("I'm sure Sonnet 5 would do a
+great job — I don't see how it would fail"), which turned out to be the right
+question asked of the wrong thing: the issue is not whether the judge is *good*,
+it is whether it is *doing anything a deterministic gate does not already do*.
+
+**Setup.** All 240 seed-1 queries from the `postfix-lexical-v2` run, blinded
+through the judge's own `normalize_for_judge`, graded by Claude Sonnet 5 across
+six lanes, 240/240 verdicts, 0 errors. Verdicts and the comparison script are
+committed under `benchmarks/judge-agreement/judge-vs-gates/`.
+
+**Scope caveat, stated up front:** one model, and the lanes graded in batches of
+40 rather than one call per item, which makes the judge *more* self-consistent
+than production would be. Every number below is therefore the judge's
+best case.
+
+### 1. It reproduces a free deterministic check
+
+| comparison | n | raw agreement | Cohen's κ |
+|---|---:|---:|---:|
+| `semantic_match` vs `gate_value` | 180 | 0.994 | **+0.989** |
+
+179 of 180 identical. `gate_value` is a substring check that costs nothing, is
+deterministic, and cannot hallucinate. At κ = 0.989 the judge is an expensive,
+non-deterministic reimplementation of it.
+
+### 2. Its single deviation is a fabrication
+
+The one disagreement, `QRY-E5122D20` (temporal, as-of): *"What was the pilot
+budget for Project Sablereach as of week 3, before the amendment?"*, expected
+`48000`. `gate_value` failed it. The judge passed it, reasoning:
+
+> "Steering decision doc gives 48000 as the original Sablereach pilot budget
+> clause, matching the expected pre-amendment value."
+
+**The string `48000` does not occur anywhere in the response.** The text says
+the Sablereach pilot budget "is now 51000 credits" — the *amended* value — beside
+budgets for two unrelated projects. The judge invented the expected figure,
+attributed it to a document, and confirmed itself. n = 1, so this is an
+existence proof rather than a rate: the judge's only independent contribution
+across 180 comparable rows was a confident false positive on a temporal query.
+
+### 3. It is blind to supersession, which is the benchmark's core subject
+
+44 responses contain a **retired** value. The state gate fails all 44. The judge
+returned `semantic_match: true` on **23 of them** — it is passing answers the
+benchmark scores as wrong.
+
+This is structural, not a model defect, and no stronger model fixes it: the
+prompt asks *"does the candidate convey the expected answer"*, which is a
+**presence** question. A response containing both the current and the superseded
+value satisfies presence while asserting something false. Temporal correctness is
+not expressible in the judge's framing.
+
+### 4. Its apparent unique coverage is not coverage
+
+60 rows have `gate_value` not-applicable and a judged verdict — the judge's only
+exclusive territory. All 60 have expected `kind: none` (no answer recorded); 52
+expect abstention, and `gate_abstention` already decides 56 of the 60
+deterministically. The 28 `match` verdicts there mean "correctly said nothing",
+which the abstention gate scores directly. No information is added.
+
+### Disposition
+
+Drop `semantic_match` from scored output. It is redundant where it agrees
+(κ = 0.989 with a free gate), fabricates where it deviates (1 of 1), wrong in the
+one direction the benchmark exists to measure (23 of 44 supersession rows), and
+adds no coverage where it is alone (60 of 60 already gated). Removing it also
+removes the benchmark's softest published claim and the entire judge–human
+agreement dependency.
+
+**Consequence for the human labelling pass:** stood down at 17 of 50 labels.
+Those labels are retained (`benchmarks/judge-agreement/labels-human.json`) as
+evidence for the record, not as an agreement statistic — measuring human
+agreement with a dimension we are removing would be spending a person's attention
+to validate something already disqualified on structural grounds.
+
+Cost note, since it bears on any future judged dimension: the supported
+`ClaudeCliBackend` path pays ~32k cache-creation tokens per invocation with no
+warming across calls — a flat ~$0.20 to grade an ~855-character prompt, ~$48 for
+one pass over 240 queries, ~96% of it bootstrap. A judged dimension has to earn
+that; this one did not.
