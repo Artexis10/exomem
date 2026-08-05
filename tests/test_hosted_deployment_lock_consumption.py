@@ -243,6 +243,70 @@ def test_candidate_selection_rejects_unbounded_discovery() -> None:
         verifier._one_candidate([], "0" * 64, object())
 
 
+def test_referrer_discovery_reads_the_pinned_oras_report_shape() -> None:
+    """oras >= 1.3 reports `referrers` and adds fields outside the OCI descriptor."""
+
+    verifier = _module(VERIFIER)
+    descriptor = {
+        "mediaType": verifier._OCI_MANIFEST_MEDIA_TYPE,
+        "digest": "sha256:" + "b" * 64,
+        "size": 1316,
+        "artifactType": verifier._CANDIDATE_MEDIA_TYPE,
+        "annotations": {"org.opencontainers.image.created": "2026-08-04T05:46:13Z"},
+        "reference": "ghcr.io/artexis10/exomem-provisioner@sha256:" + "b" * 64,
+        "referrers": [],
+    }
+
+    for report in (
+        {"referrers": [descriptor]},
+        {"manifests": [descriptor]},  # oras <= 1.2
+    ):
+        descriptors = verifier._oci_referrer_descriptors(report)
+        assert [entry["digest"] for entry in descriptors] == ["sha256:" + "b" * 64]
+        # The oras-only reporting fields must not survive into the descriptor.
+        assert set(descriptors[0]) == {
+            "mediaType",
+            "digest",
+            "size",
+            "artifactType",
+            "annotations",
+        }
+
+    with pytest.raises(ValueError, match="descriptor is invalid"):
+        verifier._oci_referrer_descriptors({"referrers": [{**descriptor, "smuggled": 1}]})
+
+
+def test_inline_descriptor_data_must_equal_the_blob_it_names() -> None:
+    verifier = _module(VERIFIER)
+    empty = json.dumps({}, separators=(",", ":")).encode()
+    descriptor = {
+        "mediaType": "application/vnd.oci.empty.v1+json",
+        "digest": "sha256:" + hashlib.sha256(empty).hexdigest(),
+        "size": len(empty),
+        "data": "e30=",
+    }
+
+    digest, size = verifier._oci_descriptor(
+        descriptor, label="config", media_type="application/vnd.oci.empty.v1+json", maximum=1024
+    )
+    assert (digest, size) == (descriptor["digest"], len(empty))
+
+    with pytest.raises(ValueError, match="inline data does not match"):
+        verifier._oci_descriptor(
+            {**descriptor, "data": "eyJhIjoxfQ=="},
+            label="config",
+            media_type="application/vnd.oci.empty.v1+json",
+            maximum=1024,
+        )
+    with pytest.raises(ValueError, match="inline data is invalid"):
+        verifier._oci_descriptor(
+            {**descriptor, "data": "not base64!"},
+            label="config",
+            media_type="application/vnd.oci.empty.v1+json",
+            maximum=1024,
+        )
+
+
 def test_runtime_candidate_listing_rejects_unbounded_assets(monkeypatch: pytest.MonkeyPatch) -> None:
     verifier = _module(VERIFIER)
     monkeypatch.setattr(

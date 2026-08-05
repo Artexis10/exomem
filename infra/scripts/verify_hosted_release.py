@@ -1038,7 +1038,7 @@ def _oci_descriptor(
     maximum: int,
     allow_artifact_type: bool = False,
 ) -> tuple[str, int]:
-    fields = {"mediaType", "digest", "size", "annotations"}
+    fields = {"mediaType", "digest", "size", "annotations", "data"}
     if allow_artifact_type:
         fields.add("artifactType")
     if not isinstance(value, dict) or set(value) - fields:
@@ -1046,6 +1046,7 @@ def _oci_descriptor(
     digest = value.get("digest")
     size = value.get("size")
     annotations = value.get("annotations")
+    inline = value.get("data")
     if value.get("mediaType") != media_type or not isinstance(digest, str):
         raise ValueError(f"{label} descriptor media type is invalid")
     if not re.fullmatch(r"sha256:[0-9a-f]{64}", digest) or not isinstance(size, int):
@@ -1057,6 +1058,16 @@ def _oci_descriptor(
         or any(not isinstance(key, str) or not isinstance(item, str) for key, item in annotations.items())
     ):
         raise ValueError(f"{label} descriptor annotations are invalid")
+    if inline is not None:
+        # An inline descriptor MUST carry exactly the blob it names (OCI image-spec).
+        if not isinstance(inline, str):
+            raise ValueError(f"{label} descriptor inline data is invalid")
+        try:
+            decoded = base64.b64decode(inline, validate=True)
+        except ValueError as error:
+            raise ValueError(f"{label} descriptor inline data is invalid") from error
+        if len(decoded) != size or f"sha256:{hashlib.sha256(decoded).hexdigest()}" != digest:
+            raise ValueError(f"{label} descriptor inline data does not match its digest")
     return digest, size
 
 
@@ -1133,24 +1144,38 @@ def _validate_oci_candidate_manifest(manifest: object, *, subject_image: str | N
 
 
 def _oci_referrer_descriptors(discovered: object) -> list[dict[str, Any]]:
-    manifests = discovered.get("manifests") if isinstance(discovered, dict) else None
+    manifests: object = None
+    if isinstance(discovered, dict):
+        # oras emits "referrers" from 1.3 onward; earlier releases emitted "manifests".
+        manifests = discovered.get("referrers")
+        if manifests is None:
+            manifests = discovered.get("manifests")
     if not isinstance(manifests, list) or not 1 <= len(manifests) <= _MAX_PROVISIONER_REFERRERS:
         raise ValueError("provisioner candidate attachment discovery count exceeds its size contract")
     descriptors: list[dict[str, Any]] = []
     seen: set[str] = set()
     for manifest in manifests:
+        # "reference" and the nested "referrers" tree are oras reporting fields, not
+        # part of the OCI descriptor; drop them before the strict descriptor check.
         if not isinstance(manifest, dict) or set(manifest) - {
             "mediaType",
             "digest",
             "size",
             "artifactType",
             "annotations",
+            "reference",
+            "referrers",
         }:
             raise ValueError("provisioner candidate attachment descriptor is invalid")
-        if manifest.get("artifactType") != _CANDIDATE_MEDIA_TYPE:
+        descriptor = {
+            key: value
+            for key, value in manifest.items()
+            if key in {"mediaType", "digest", "size", "artifactType", "annotations"}
+        }
+        if descriptor.get("artifactType") != _CANDIDATE_MEDIA_TYPE:
             raise ValueError("provisioner candidate attachment type is invalid")
         digest, _ = _oci_descriptor(
-            manifest,
+            descriptor,
             label="provisioner candidate attachment",
             media_type=_OCI_MANIFEST_MEDIA_TYPE,
             maximum=_MAX_OCI_ATTACHMENT_BYTES,
@@ -1159,7 +1184,7 @@ def _oci_referrer_descriptors(discovered: object) -> list[dict[str, Any]]:
         if digest in seen:
             raise ValueError("provisioner candidate attachment descriptors are duplicated")
         seen.add(digest)
-        descriptors.append(manifest)
+        descriptors.append(descriptor)
     return descriptors
 
 
