@@ -196,9 +196,22 @@ def test_bm_adapter_drives_cli_with_isolated_env(tmp_path: Path) -> None:
         hits = adapter.search("the fact", 5)
         search_argv, search_env = calls[3]
         assert search_argv[1:3] == ["tool", "search-notes"]
-        assert "--json" in search_argv
-        assert "the fact" in search_argv
+        # Pinned against bm 0.22.1, verified live. QUERY is POSITIONAL and must
+        # follow the subcommand; `--query` and `--json` were both removed
+        # upstream (search already emits JSON). The previous assertion pinned
+        # `--json`, so this test stayed green while the real CLI rejected the
+        # invocation with `No such option: --query`, exit 2.
+        assert search_argv[3] == "the fact", "query must be positional"
+        assert "--query" not in search_argv
+        assert "--json" not in search_argv
+        # Local routing is forced so a cloud-mode config can never silently
+        # redirect a contender's measurement elsewhere.
+        assert "--local" in search_argv
         assert search_env["BASIC_MEMORY_CONFIG_DIR"].startswith(str(workdir))
+        # A benchmark-owned HF cache: bm resolves an embedding model for search,
+        # and an unwritable cache fails as a permission error that reads like
+        # "search is broken" and would invalidate every contender run.
+        assert search_env["HF_HOME"].startswith(str(workdir))
 
         assert [h.rank for h in hits] == [1, 2]
         first = hits[0]

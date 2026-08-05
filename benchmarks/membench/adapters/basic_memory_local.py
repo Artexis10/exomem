@@ -5,8 +5,8 @@ Driven command contract (the shapes the fake-runner tests pin down):
 - availability probe:  ``bm --version``
 - ingest:              ``bm project add <project> <native_dir>`` then
                        ``bm reindex --search -p <project>``
-- search:              ``bm tool search-notes --query <q> --project <project>
-                       --page-size <limit> --json`` returning
+- search:              ``bm tool search-notes <q> --project <project>
+                       --page-size <limit> --local`` returning
                        ``{"results": [{file_path|permalink, title,
                        matched_chunk|content, score?}, ...]}``
 
@@ -16,8 +16,9 @@ a benchmark-owned directory under the adapter workdir, and with
 personal Basic Memory config (including cloud-mode routing) is never consulted
 or mutated (same rationale as the sibling Track-A provider).
 
-LIVE EXECUTION IS USER-RUN: the ``bm`` executable cannot run inside this
-sandbox (it spawns ``uv`` against a read-only cache). The executable path is
+LIVE EXECUTION WORKS HERE (verified against bm 0.22.1 on 2026-08-05); the
+earlier "cannot run inside this sandbox" note was stale and had never been
+re-tested. The executable path is
 injectable (constructor ``command=`` or the ``BM_COMMAND`` env var), ``setup``
 probes availability and reports honest unavailability via
 :class:`AdapterUnsupported` when the binary is absent, and all tests drive the
@@ -74,8 +75,35 @@ class BasicMemoryLocalAdapter:
     supports_group_reuse = False
 
     def __init__(
-        self, *, command: str | None = None, runner: Runner | None = None
+        self,
+        *,
+        command: str | None = None,
+        runner: Runner | None = None,
+        mode: str = "leaf",
+        search_style: str = "neutral",
     ) -> None:
+        # The CLI hands every provider the run-shape kwargs, so a contender
+        # must accept them and say honestly which it can honour rather than
+        # silently ignoring one and letting the manifest claim a shape that
+        # was never applied.
+        #
+        # `mode`: this adapter drives the `bm` CLI, which is the leaf-equivalent
+        # surface. There is no wire (MCP) surface to measure, so `wire` is
+        # refused rather than quietly served as leaf — that would report a
+        # transport comparison that never happened.
+        if mode != "leaf":
+            raise AdapterUnsupported(
+                f"basic-memory-local has no {mode!r} surface; it drives the bm CLI "
+                "(leaf-equivalent). Run it with --mode leaf."
+            )
+        # `search_style`: exomem's neutral/product-default split exists to
+        # separate raw retrieval from product tuning. Basic Memory exposes one
+        # search surface, so the distinction is not applicable — recorded as
+        # such instead of implying a tuning choice was made.
+        if search_style not in ("neutral", "product-default"):
+            raise AdapterUnsupported(f"unknown search_style {search_style!r}")
+        self.mode = mode
+        self.search_style = search_style
         self.command = command or os.environ.get("BM_COMMAND", "bm")
         self._runner: Runner = runner or _subprocess_runner
         self._workdir: Path | None = None
@@ -95,6 +123,17 @@ class BasicMemoryLocalAdapter:
         config_dir = workdir / "bm-config"
         config_dir.mkdir(parents=True, exist_ok=True)
         env["BASIC_MEMORY_CONFIG_DIR"] = str(config_dir)
+        # bm 0.22.x resolves an embedding model (BAAI/bge-small-en-v1.5) for
+        # search. With the operator's HF cache unwritable it fails on a cache
+        # *permission* error rather than on network, which reads like "search
+        # is broken" and would invalidate every contender run. A benchmark-owned
+        # cache under the workdir removes that failure mode; the caller's HF_HOME
+        # is honoured when already set, so a warm shared cache still wins.
+        if not env.get("HF_HOME"):
+            hf_home = workdir / "hf-cache"
+            hf_home.mkdir(parents=True, exist_ok=True)
+            env["HF_HOME"] = str(hf_home)
+        env.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
         return env
 
     def _run(self, args: list[str]) -> _ProcLike:
@@ -165,13 +204,18 @@ class BasicMemoryLocalAdapter:
             [
                 "tool",
                 "search-notes",
-                "--query",
+                # QUERY is positional as of bm 0.22.x — `--query` was removed,
+                # and so was `--json`: search already emits JSON on stdout.
+                # Verified live against 0.22.1; the previous flags produced
+                # `No such option: --query`, exit 2.
                 query,
                 "--project",
                 self._project,
                 "--page-size",
                 str(limit),
-                "--json",
+                # Force local API routing so a cloud-mode config on the host
+                # can never silently redirect a contender's measurement.
+                "--local",
             ]
         )
         if proc.returncode != 0:
