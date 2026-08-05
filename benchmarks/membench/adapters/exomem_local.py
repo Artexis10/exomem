@@ -226,6 +226,32 @@ class ExomemLocalAdapter:
         from exomem.init import init_vault
         from exomem.schema import load_source_schema
 
+        # A profile that ASKS for the semantic lane must get it or stop. exomem
+        # soft-degrades when sentence-transformers is missing ("embeddings
+        # disabled (import failed) … keyword-mode find() still works"), which is
+        # correct for a product and catastrophic for a measurement: the run
+        # completes, reports invalid=False, and stamps the manifest
+        # `profile: recommended-embeddings` over numbers that are bit-identical
+        # to the lexical run. A false label on a real number is worse than a
+        # wrong number, and this has now silently produced mislabelled runs
+        # three times (two superseded in the v0.1 findings, once again on
+        # 2026-08-05). An environment fault invalidates a run; it is never a
+        # contender loss.
+        if not profile.settings.get("EXOMEM_DISABLE_EMBEDDINGS", "1"):
+            try:
+                # get_model() is the same call the writer path makes; catching
+                # its ImportError here is what turns a silent degrade into a
+                # refusal. Loading the model is the point — "the package
+                # imports" is not the same claim as "the lane works".
+                embeddings_module.get_model()
+            except Exception as exc:
+                raise AdapterEnvironmentError(
+                    f"profile {profile.name!r} requests the semantic lane but the "
+                    f"embedding model could not load ({type(exc).__name__}: "
+                    f"{str(exc)[:160]}). Refusing to score a lexical run labelled as "
+                    "embeddings — install the `embeddings` extra."
+                ) from exc
+
         init_vault(vault)
         self._vault = vault
         self._schema = load_source_schema(vault)

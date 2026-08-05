@@ -1295,3 +1295,63 @@ lanes on.
 
 Tracked as 4b.29. An exomem embeddings-profile run is underway to produce the
 first genuinely like-for-like pair.
+
+## First like-for-like comparison (2026-08-05)
+
+Both contenders with their semantic lanes active — exomem under
+`recommended-embeddings` (sentence-transformers 5.6.1, model loaded and verified),
+basic-memory with its ONNX `bge-small-en-v1.5`. Same seed-1 corpus, 236 queries,
+both `invalid=False`, 0 harness failures.
+
+| dimension | exomem | basic-memory | reading |
+|---|---:|---:|---|
+| factual_qa | **148** / 32 | 122 / 58 | real signal |
+| abstention | **180** / 56 | 156 / 80 | real signal |
+| temporal | **131** / 57 (u=20) | 130 / 71 (u=7) | effectively tied |
+| contradiction_uncertainty | 0 / 20 | 0 / 20 | shared capability gap |
+| provenance | 0 / 208 | 24 / 172 | **NOT COMPARABLE — see below** |
+| governance (default-open) | 0 / 16 | 4 / 12 | excluded by design |
+
+### Provenance is measuring our answerer, and it penalises good retrieval
+
+exomem scored **0/208**. That is not a product result.
+
+`scoring/extractive.py` is the *shared* deterministic answerer both contenders
+are scored through, and it cites the sentinels of its top-3 hits
+**unconditionally** (`_TOP_HITS = 3`). Measured on these two runs:
+
+| | mean citations/answer | queries with hits |
+|---|---:|---:|
+| exomem | 2.98 | **236 / 236** |
+| basic-memory | 2.14 | 188 / 236 |
+
+exomem retrieved something for *every* query; basic-memory for 188. The answerer
+therefore emitted 704 citations for exomem against 290 in its own lexical run,
+and with the citation-precision gate (4b.8) admitting a permitted set averaging
+~1.6–2.7 sources, every answer carried an unpermitted citation.
+
+**So retrieving better makes a contender score worse on provenance.** The
+dimension currently rewards retrieving less. This was predicted verbatim when the
+precision gate was built — "the deterministic extractive baseline is a shotgunner
+by construction… its citation verdicts will move from near-uniform PASS to FAIL
+whenever an unrelated source lands in its top 3" — and it has now arrived.
+
+Neither the 0 nor the 24 is a statement about either product's provenance
+behaviour. Both are statements about `extractive.py`'s citation policy under a
+precision gate. Tracked as 4b.31.
+
+### What can honestly be said
+
+- **factual_qa and abstention are real and favour exomem** (148 vs 122; 180 vs
+  156) under matched capability.
+- **temporal is a tie** (131 vs 130) — and exomem carries 20 UNSUPPORTED against
+  basic-memory's 7, i.e. more rows where our own gate cannot decide.
+- **`contradiction_uncertainty` is 0/20 for both.** Neither system does disputed
+  state. It is the corpus's hardest family and currently discriminates nothing,
+  because nobody passes it.
+- **Provenance and governance say nothing yet** — one measures the harness, the
+  other is excluded under default-open.
+
+Two dimensions of genuine signal, one tie, one shared zero, and two that are not
+yet measuring the products. That is the honest state of the first real
+head-to-head, and it is a long way from a publishable comparison.
