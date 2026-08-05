@@ -107,16 +107,19 @@ def lexical_profile(name: str = "neutral-lexical") -> Profile:
             "EXOMEM_DISABLE_RANKING_CONFIG": "1",
             "EXOMEM_DISABLE_CORPUS_CACHE": "1",
             "EXOMEM_DISABLE_MEDIA_EXTRACTION": "1",
-            # EXOMEM_DISABLE_CLIP is deliberately NOT set. It reads as an
-            # image-search switch, but on this environment it zeroes *text*
-            # retrieval outright: measured over 20 real corpus queries against
-            # a fixed vault, 40 hits without it and 0 with it. It was the cause
-            # of a whole-suite zero-hit run that took four withdrawn root
-            # causes to find. CLIP is unavailable here anyway (no
-            # sentence-transformers), so the flag bought nothing and cost
-            # every retrieval result. Product-side bug, recorded in the
-            # findings doc; do not re-add without a test proving retrieval
-            # survives it.
+            # Correct as a determinism pin, and REQUIRES the product fix
+            # `91b016f` (fix/lexical-degraded-retention, unmerged as of
+            # 2026-08-05). Without that fix this flag zeroes *text* retrieval:
+            # a disabled lane never "fails", so the BM25-only fallback at
+            # find_candidates.py:242 never triggers, and the strict retention
+            # seam vetoes every candidate lacking ALL query stems — which no
+            # natural-language question satisfies. Measured on a fixed vault
+            # over 20 real queries: 0 hits without the fix, 52 with it (the
+            # August baseline recorded 52 on the same 20). Dropping the flag
+            # instead is NOT the workaround: CLIP then reports `degraded` and
+            # the run is refused for a misleading reason. Until the fix lands,
+            # the retrieval floor makes the failure loud rather than silent.
+            "EXOMEM_DISABLE_CLIP": "1",
             "EXOMEM_DISABLE_QUERY_LOG": "1",
             "EXOMEM_VEC_BACKEND": "numpy",
             "EXOMEM_LEXICAL_BACKEND": "python",

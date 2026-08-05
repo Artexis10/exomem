@@ -1112,3 +1112,52 @@ produce a valid lexical-profile run until `sentence-transformers` is installed
 `os.environ`, outside the adapter's apply/restore window, so it would miss this
 exact class again. Effective profile settings must be captured where they are
 applied.
+
+### Resolution — the product fix exists and is unmerged
+
+`EXOMEM_DISABLE_CLIP=1` is **not** a benchmark mistake. It is a correct
+determinism pin that requires product fix **`91b016f`**, which is written,
+reviewed, and sitting unmerged on `fix/lexical-degraded-retention` (authored
+2026-08-01, **not** on `origin/main`).
+
+Its own commit message describes this failure, citing this benchmark:
+
+> "When the semantic lanes are structurally absent (embeddings disabled, index
+> empty, or lane degraded), the in-KB retention seam previously vetoed every
+> BM25 candidate lacking ALL query stems — natural-language questions retrieved
+> nothing (benchmark: factual_qa 0/180 while BM25 ranked the right document
+> first)."
+
+**Verified by overlaying that commit's `find.py` onto a scratch copy**, CLIP
+disabled, the same 20 queries and the same vault:
+
+| | hits |
+|---|---:|
+| without `91b016f` | **0** |
+| with `91b016f` | **52** |
+| the August baseline recorded | **52** |
+
+An exact reproduction of the original numbers. The August run was executed
+against a checkout carrying that fix; this worktree branched from
+`84f1f63` (release 0.36.0, 2026-07-31) and never had it.
+
+**Mechanism.** A *disabled* lane never fails, so the BM25-only fallback at
+`find_candidates.py:242` never triggers, and the strict retention seam vetoes
+every candidate lacking ALL query stems — which no interrogative phrasing
+satisfies. A lane that *fails* is rescued by the fallback; a lane that is
+switched off is not. `91b016f` replaces all-stems with majority-coverage
+retention for exactly this case.
+
+**Disposition.** The flag is restored, with the dependency recorded in the code.
+Dropping it is not the workaround: without it CLIP reports `degraded` and the run
+is refused for a misleading reason. Until `91b016f` reaches `origin/main`, the
+retrieval floor makes the failure loud instead of silent — which is the whole
+point of that guard.
+
+**The action is a merge, not a patch.** Nothing needs writing.
+
+**And the honest reading of this whole episode:** the benchmark did its job. It
+detected a real product defect, produced the number that appears verbatim in the
+fix's commit message (`factual_qa 0/180`), and then — six days later, on a
+checkout without the fix — detected it *again* and refused to publish. The five
+withdrawn root causes were mine, not the harness's.
