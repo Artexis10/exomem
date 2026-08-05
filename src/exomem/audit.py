@@ -75,10 +75,12 @@ ALL_CATEGORIES: tuple[str, ...] = (
     "index_drift", "tag_inconsistency", "frontmatter_compliance",
     "unregistered_project_key", "embedding_drift", "graph_drift", "reference_identity",
     "relevance_pairs_pending", "stale_review", "corpus_contradictions",
-    "relation_debt",
+    "relation_debt", "governance_receipts", "bridge_review",
+    "duplicated_sidecar",
 )
 OPTIONAL_CATEGORIES: tuple[str, ...] = (
     "relation_registry",
+    "missing_sources",
     "semantic_contract_drift",
     "semantic_malformed_unit",
     "semantic_category_governance",
@@ -384,6 +386,14 @@ def audit(
         findings.extend(_check_relation_registry(vault_root))
     if "relation_debt" in selected:
         findings.extend(_check_relation_debt(vault_root, pages))
+    if "missing_sources" in selected:
+        findings.extend(_check_missing_sources(vault_root, pages))
+    if "governance_receipts" in selected:
+        findings.extend(_check_governance_receipts(vault_root))
+    if "bridge_review" in selected:
+        findings.extend(_check_bridge_review(vault_root, today=today))
+    if "duplicated_sidecar" in selected:
+        findings.extend(_check_duplicated_sidecars(vault_root))
     semantic_categories = selected & _SEMANTIC_AUDIT_CATEGORIES
     if semantic_categories:
         semantic_findings, semantic_metadata = _check_semantic_contract_drift(
@@ -407,6 +417,119 @@ def audit(
         summary=summary,
         metadata=metadata or None,
     )
+
+
+def _check_bridge_review(
+    vault_root: Path,
+    *,
+    today: dt.date | None,
+) -> list[AuditFinding]:
+    """Derive approval-bound bridge review work without persisting state."""
+    from .governance import bridges, policy
+
+    compiled = policy.load(vault_root)
+    if compiled.empty or compiled.blocked:
+        return []
+    effective_today = today or dt.date.today()
+    findings: list[AuditFinding] = []
+    for grant in compiled.release_grants:
+        signal = bridges.review_signal(
+            Path(vault_root),
+            grant,
+            policy=compiled,
+            today=effective_today,
+        )
+        if signal is None:
+            continue
+        partition = hashlib.sha256(
+            f"{grant.id}\0{grant.to_audience}".encode()
+        ).hexdigest()[:24]
+        findings.append(
+            AuditFinding(
+                category="bridge_review",
+                severity="warn",
+                path=grant.path,
+                detail=f"Bridge review required: {signal.cause}.",
+                proposed_fix=(
+                    "Review the bridge and, when appropriate, separately commit "
+                    "a new exact release approval."
+                ),
+                meta={
+                    "bridge_audience": grant.to_audience,
+                    "cause": signal.cause,
+                    "review_date": signal.review_date,
+                    "review_partition": partition,
+                    "signal_version": signal.signal_version,
+                },
+            )
+        )
+    return sorted(
+        findings,
+        key=lambda finding: (
+            finding.path,
+            str((finding.meta or {}).get("review_partition") or ""),
+        ),
+    )
+
+
+def _check_duplicated_sidecars(vault_root: Path) -> list[AuditFinding]:
+    """Report media sidecars carrying nested copies of themselves.
+
+    Sidecars are chunked and embedded whole, so an N-times duplicated document
+    contributes N near-identical chunks. The distortion tracks how often a file
+    happened to be reprocessed rather than anything about the file, so it
+    arbitrarily suppresses the rest of the corpus in ranked results.
+    """
+    from . import sidecar_repair
+
+    findings: list[AuditFinding] = []
+    for sidecar in sidecar_repair.iter_media_sidecars(vault_root):
+        try:
+            content = sidecar.read_text(encoding="utf-8")
+        except (OSError, UnicodeError):
+            continue
+        damage = sidecar_repair.analyze(content, sidecar)
+        if damage is None:
+            continue
+        rel = sidecar.relative_to(vault_root).as_posix()
+        detail = (
+            f"{damage.depth} nested copies; "
+            f"{damage.duplicate_chars:,} duplicate chars"
+        )
+        if damage.recovery_only:
+            detail += "; extraction survives ONLY in a nested copy"
+        elif damage.distinct_extractions > 1:
+            detail += f"; {damage.distinct_extractions} differing extractions"
+        findings.append(
+            AuditFinding(
+                category="duplicated_sidecar",
+                severity="error" if damage.recovery_only else "warn",
+                path=rel,
+                detail=detail,
+                proposed_fix=(
+                    "maintain_memory(mode='fix') keeps the longest extraction and "
+                    "drops the nesting"
+                ),
+            )
+        )
+    return findings
+
+
+def _check_governance_receipts(vault_root: Path) -> list[AuditFinding]:
+    """Project receipt-chain evidence problems without touching its sidecar."""
+    from .governance import receipts
+
+    report = receipts.verify_chain(vault_root)
+    return [
+        AuditFinding(
+            category="governance_receipts",
+            severity="error",
+            path=item["path"],
+            detail=f"{item['code']}: {item['detail']}",
+            proposed_fix="Run `maintain_memory` with mode `reconcile` after reviewing evidence.",
+        )
+        for item in report["issues"]
+    ]
 
 
 def _check_semantic_contract_drift(
@@ -488,7 +611,11 @@ def semantic_finding_group(item: dict) -> str | None:
     resolved_rule = tuple(str(value) for value in (item.get("resolved_rule") or ()))
     namespace = resolved_rule[0] if resolved_rule else ""
     rule = resolved_rule[2] if len(resolved_rule) >= 3 else ""
-    if code in {"RELATION_DISPOSITION_MISSING", "RELATION_DISPOSITION_STALE"}:
+    if code in {
+        "RELATION_DISPOSITION_MISSING",
+        "RELATION_DISPOSITION_STALE",
+        "RELATION_TYPED_EDGE_ABSENT",
+    }:
         return "semantic_relation_disposition"
     if rule == "syntax":
         return "semantic_malformed_unit"
@@ -1485,6 +1612,65 @@ def _check_relation_debt(
                     "typed_relations": typed_count,
                     "body_wikilinks": body_link_count,
                 },
+            )
+        )
+
+    return sorted(findings, key=lambda finding: finding.path)
+
+
+# ---------------- check: missing_sources ----------------
+
+# `_Schema/references/frontmatter.md` marks `sources:` required for these four
+# compiled types. Deliberately NOT expressed through `_REQUIRED_FIELDS_BY_TYPE`:
+# that table is `warn` severity (overstating a chronic, often-honest condition),
+# it would swamp `frontmatter_compliance` — whose job is structural integrity —
+# with hundreds of findings, and `audit_fix` iterates it to backfill inferable
+# values. Provenance is exactly the field that must never be inferred.
+_SOURCES_REQUIRED_TYPES = frozenset(
+    {"research-note", "insight", "failure", "pattern"}
+)
+
+
+def _check_missing_sources(
+    vault_root: Path,
+    pages: list[find_module.ParsedPage],
+) -> list[AuditFinding]:
+    """Surface active compiled pages that should cite provenance and cite none."""
+    findings: list[AuditFinding] = []
+    for page in pages:
+        if page.page_type not in _SOURCES_REQUIRED_TYPES:
+            continue
+        if page.path.name in ("index.md", "log.md"):
+            continue
+        if page.status in ("superseded", "archived", "draft", "dropped"):
+            continue
+        if access.access_tier(vault_root, page.rel_path) != access.TIER_READ_WRITE:
+            continue
+        stem = page.path.stem.lower()
+        if any(stem.endswith(suffix) for suffix in _STALE_SKIP_SLUG_SUFFIXES):
+            continue
+        if _STALE_SKIP_TAGS & set(page.tags):
+            continue
+        if page.frontmatter.get("sources"):
+            continue
+
+        findings.append(
+            AuditFinding(
+                category="missing_sources",
+                severity="info",
+                path=page.rel_path,
+                detail=(
+                    "Active compiled page cites no `sources:`; the raw material it "
+                    "was drawn from is not recoverable from the page itself, and any "
+                    "originating source still counts as unprocessed."
+                ),
+                proposed_fix=(
+                    "If this came from live work with nothing captured, it is an "
+                    "honest empty list — dismiss it. Otherwise cite the `Sources/` "
+                    "page, which also appends this note to that source's "
+                    "`ingested_into:`. Nothing is auto-written or inferred."
+                ),
+                meta={"signal_version": _page_signal_version(page)},
             )
         )
 

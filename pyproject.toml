@@ -1,6 +1,6 @@
 [project]
 name = "exomem"
-version = "0.34.0" # x-release-please-version
+version = "0.37.0" # x-release-please-version
 description = "Local knowledge substrate for owned markdown/Obsidian vaults, exposed through MCP, REST, and CLI with multimodal OCR/ASR/CLIP search"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -71,6 +71,20 @@ embeddings = [
     # scan when absent or when this Python's sqlite3 can't load extensions.
     "sqlite-vec>=0.1.6",
 ]
+# Same bi-encoder, served by ONNX Runtime instead of PyTorch. Imports ~40 MiB against
+# torch's ~400 and holds a smaller peak, which is what decides how many hosted cells fit
+# a node. Vectors are interchangeable with the torch lane (see tests/test_embedding_backend.py),
+# so this is a runtime substitution and never a re-index.
+#
+# It cannot simply replace `embeddings`: the reranker and CLIP are sentence-transformers
+# models, so only a lane that withholds both — the hosted image does — can drop torch.
+# Select with EXOMEM_EMBED_BACKEND=onnx; `auto` picks torch whenever it is importable.
+embeddings-onnx = [
+    "onnxruntime>=1.20",
+    "tokenizers>=0.20",       # fast tokenizer, no torch and no transformers
+    "huggingface-hub>=0.24",  # resolves the published ONNX export from the hub cache
+    "sqlite-vec>=0.1.6",
+]
 # Server-side media extraction (transduction, not a brain): ASR for audio/video,
 # OCR for images, text for PDFs, MarkItDown for office/html docs. Optional so a lean box
 # runs without it — the code
@@ -134,11 +148,23 @@ diarization = [
 vision = [
     "transformers>=4.40",
 ]
+# Interactive terminal UI (`exomem tui`). Optional so lean/server installs never
+# carry a UI stack; the subcommand degrades to a clear install hint when the
+# extra is absent. Textual builds on rich (already an indirect dependency),
+# stays pure-Python, and renders on Windows Terminal, WSL, macOS, and Linux.
+tui = [
+    "textual>=5.0",
+]
 
 [dependency-groups]
 dev = [
     "pytest>=8.0",
     "pytest-timeout>=2.3",
+]
+# TUI snapshot/interaction testing. Separate group: the lean dev matrix must
+# not require the TUI stack; CI opts in explicitly alongside `--extra tui`.
+tui-dev = [
+    "pytest-textual-snapshot>=1.0",
 ]
 
 [project.scripts]

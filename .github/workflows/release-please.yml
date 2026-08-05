@@ -232,8 +232,10 @@ jobs:
     if: ${{ github.event_name == 'push' && needs.release-please.outputs.release_created == 'true' && vars.GHCR_PUBLISH_ENABLED == 'true' }}
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: write
       packages: write
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/checkout@v4
         with:
@@ -252,7 +254,14 @@ jobs:
         env:
           TAG: ${{ needs.release-please.outputs.tag_name }}
         run: |
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]
           echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+          test "$GITHUB_REF" = "refs/heads/main"
+          source_commit=$(git rev-parse "$TAG^{commit}")
+          test "$(git rev-parse HEAD)" = "$source_commit"
+          test "$GITHUB_SHA" = "$source_commit"
+          echo "source_commit=$source_commit" >> "$GITHUB_OUTPUT"
+          echo "source_ref=refs/tags/$TAG" >> "$GITHUB_OUTPUT"
           build_time=$(git show -s --format=%cI "$TAG")
           echo "build_time=$(date -u -d "$build_time" +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
 
@@ -296,6 +305,7 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Build and push hosted image (linux/amd64)
+        id: hosted-build
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -307,15 +317,143 @@ jobs:
           tags: |
             ghcr.io/artexis10/exomem:hosted
             ghcr.io/artexis10/exomem:${{ steps.meta.outputs.version }}-hosted
+            ghcr.io/artexis10/exomem:${{ steps.meta.outputs.source_commit }}-hosted
+          labels: |
+            org.opencontainers.image.revision=${{ steps.meta.outputs.source_commit }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Attest the exact hosted runtime image
+        id: hosted-attestation
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4
+        with:
+          subject-name: ghcr.io/artexis10/exomem
+          subject-digest: ${{ steps.hosted-build.outputs.digest }}
+          push-to-registry: true
+          create-storage-record: false
+
+      - name: Record the hosted runtime candidate
+        id: runtime-candidate
+        env:
+          TAG: ${{ needs.release-please.outputs.tag_name }}
+          VERSION: ${{ steps.meta.outputs.version }}
+          SOURCE_COMMIT: ${{ steps.meta.outputs.source_commit }}
+          SOURCE_REF: ${{ steps.meta.outputs.source_ref }}
+          HOSTED_DIGEST: ${{ steps.hosted-build.outputs.digest }}
+          ATTESTATION_BUNDLE: ${{ steps.hosted-attestation.outputs.bundle-path }}
+        run: |
+          set -euo pipefail
+          digest_hex=${HOSTED_DIGEST#sha256:}
+          evidence_stem="exomem-hosted-runtime-${SOURCE_COMMIT}-${digest_hex}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          candidate="${evidence_stem}.candidate-v1.json"
+          bundle="${evidence_stem}.sigstore.json"
+          cp "$ATTESTATION_BUNDLE" "$bundle"
+          immutable_image="ghcr.io/artexis10/exomem@${HOSTED_DIGEST}"
+          discovery_tag="ghcr.io/artexis10/exomem:${SOURCE_COMMIT}-hosted"
+          storage_uri="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/${bundle}"
+          python3 infra/scripts/hosted_image_candidate.py record \
+            --component runtime \
+            --source-repository "$GITHUB_REPOSITORY" \
+            --source-ref "$SOURCE_REF" \
+            --source-commit "$SOURCE_COMMIT" \
+            --release "$VERSION" \
+            --image "$immutable_image" \
+            --discovery-tag "$discovery_tag" \
+            --producer-repository "$GITHUB_REPOSITORY" \
+            --producer-workflow "$GITHUB_REPOSITORY/.github/workflows/release-please.yml" \
+            --producer-workflow-commit "$GITHUB_WORKFLOW_SHA" \
+            --producer-oidc-source-ref "$GITHUB_REF" \
+            --producer-oidc-source-commit "$GITHUB_SHA" \
+            --producer-event "$GITHUB_EVENT_NAME" \
+            --run-id "$GITHUB_RUN_ID" \
+            --run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --bundle "$bundle" \
+            --storage-kind github-release \
+            --storage-uri "$storage_uri" \
+            --output "$candidate"
+          {
+            echo "candidate=$candidate"
+            echo "bundle=$bundle"
+            echo "immutable_image=$immutable_image"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Attest the exact hosted runtime candidate
+        id: runtime-candidate-attestation
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4
+        with:
+          subject-path: ${{ steps.runtime-candidate.outputs.candidate }}
+          create-storage-record: false
+
+      - name: Verify the hosted runtime image and signed candidate
+        id: runtime-candidate-proof
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.meta.outputs.version }}
+          SOURCE_COMMIT: ${{ steps.meta.outputs.source_commit }}
+          CANDIDATE: ${{ steps.runtime-candidate.outputs.candidate }}
+          IMAGE_BUNDLE: ${{ steps.runtime-candidate.outputs.bundle }}
+          CANDIDATE_ATTESTATION_BUNDLE: ${{ steps.runtime-candidate-attestation.outputs.bundle-path }}
+          IMMUTABLE_IMAGE: ${{ steps.runtime-candidate.outputs.immutable_image }}
+        run: |
+          set -euo pipefail
+          candidate_bundle="${CANDIDATE%.candidate-v1.json}.candidate.sigstore.json"
+          cp "$CANDIDATE_ATTESTATION_BUNDLE" "$candidate_bundle"
+          python3 infra/scripts/hosted_image_candidate.py verify \
+            --candidate "$CANDIDATE" \
+            --bundle "$IMAGE_BUNDLE" \
+            --candidate-bundle "$candidate_bundle"
+          docker pull "$IMMUTABLE_IMAGE"
+          observed_version=$(docker run --rm --network=none "$IMMUTABLE_IMAGE" --version)
+          test "$observed_version" = "exomem ${VERSION}"
+          observed_revision=$(docker image inspect \
+            --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' \
+            "$IMMUTABLE_IMAGE")
+          test "$observed_revision" = "$SOURCE_COMMIT"
+          echo "candidate_bundle=$candidate_bundle" >> "$GITHUB_OUTPUT"
+
+      - name: Upload bounded runtime candidate workflow evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: hosted-runtime-candidate-${{ steps.meta.outputs.source_commit }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ steps.runtime-candidate.outputs.candidate }}
+            ${{ steps.runtime-candidate.outputs.bundle }}
+            ${{ steps.runtime-candidate-proof.outputs.candidate_bundle }}
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Retain the runtime candidate with the matching release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.release-please.outputs.tag_name }}
+          CANDIDATE: ${{ steps.runtime-candidate.outputs.candidate }}
+          BUNDLE: ${{ steps.runtime-candidate.outputs.bundle }}
+          CANDIDATE_BUNDLE: ${{ steps.runtime-candidate-proof.outputs.candidate_bundle }}
+        run: gh release upload "$TAG" "$CANDIDATE" "$BUNDLE" "$CANDIDATE_BUNDLE"
+
+      - name: Record the runtime candidate inputs
+        env:
+          IMMUTABLE_IMAGE: ${{ steps.runtime-candidate.outputs.immutable_image }}
+          CANDIDATE: ${{ steps.runtime-candidate.outputs.candidate }}
+          BUNDLE: ${{ steps.runtime-candidate.outputs.bundle }}
+          CANDIDATE_BUNDLE: ${{ steps.runtime-candidate-proof.outputs.candidate_bundle }}
+        run: |
+          {
+            echo "Hosted runtime image: ${IMMUTABLE_IMAGE}"
+            echo "Candidate asset: ${CANDIDATE}"
+            echo "Image attestation bundle asset: ${BUNDLE}"
+            echo "Candidate attestation bundle asset: ${CANDIDATE_BUNDLE}"
+          } >> "$GITHUB_STEP_SUMMARY"
 
   publish-existing-image:
     if: ${{ github.event_name == 'workflow_dispatch' && vars.GHCR_PUBLISH_ENABLED == 'true' }}
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: write
       packages: write
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/checkout@v4
         with:
@@ -333,8 +471,18 @@ jobs:
         id: meta
         env:
           TAG: ${{ inputs.tag }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]
           echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+          expected_ref="refs/tags/$TAG"
+          test "$GITHUB_REF" = "$expected_ref"
+          source_commit=$(git rev-parse "$TAG^{commit}")
+          test "$(git rev-parse HEAD)" = "$source_commit"
+          test "$GITHUB_SHA" = "$source_commit"
+          test "$(gh release view "$TAG" --json tagName --jq .tagName)" = "$TAG"
+          echo "source_commit=$source_commit" >> "$GITHUB_OUTPUT"
+          echo "source_ref=$expected_ref" >> "$GITHUB_OUTPUT"
           build_time=$(git show -s --format=%cI "$TAG")
           echo "build_time=$(date -u -d "$build_time" +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
 
@@ -375,6 +523,7 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Build and push hosted image (linux/amd64)
+        id: hosted-build
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -385,8 +534,134 @@ jobs:
           push: true
           tags: |
             ghcr.io/artexis10/exomem:${{ steps.meta.outputs.version }}-hosted
+            ghcr.io/artexis10/exomem:${{ steps.meta.outputs.source_commit }}-hosted
+          labels: |
+            org.opencontainers.image.revision=${{ steps.meta.outputs.source_commit }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Attest the exact hosted runtime image
+        id: hosted-attestation
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4
+        with:
+          subject-name: ghcr.io/artexis10/exomem
+          subject-digest: ${{ steps.hosted-build.outputs.digest }}
+          push-to-registry: true
+          create-storage-record: false
+
+      - name: Record the hosted runtime candidate
+        id: runtime-candidate
+        env:
+          TAG: ${{ inputs.tag }}
+          VERSION: ${{ steps.meta.outputs.version }}
+          SOURCE_COMMIT: ${{ steps.meta.outputs.source_commit }}
+          SOURCE_REF: ${{ steps.meta.outputs.source_ref }}
+          HOSTED_DIGEST: ${{ steps.hosted-build.outputs.digest }}
+          ATTESTATION_BUNDLE: ${{ steps.hosted-attestation.outputs.bundle-path }}
+        run: |
+          set -euo pipefail
+          digest_hex=${HOSTED_DIGEST#sha256:}
+          evidence_stem="exomem-hosted-runtime-${SOURCE_COMMIT}-${digest_hex}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          candidate="${evidence_stem}.candidate-v1.json"
+          bundle="${evidence_stem}.sigstore.json"
+          cp "$ATTESTATION_BUNDLE" "$bundle"
+          immutable_image="ghcr.io/artexis10/exomem@${HOSTED_DIGEST}"
+          discovery_tag="ghcr.io/artexis10/exomem:${SOURCE_COMMIT}-hosted"
+          storage_uri="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/${bundle}"
+          python3 infra/scripts/hosted_image_candidate.py record \
+            --component runtime \
+            --source-repository "$GITHUB_REPOSITORY" \
+            --source-ref "$SOURCE_REF" \
+            --source-commit "$SOURCE_COMMIT" \
+            --release "$VERSION" \
+            --image "$immutable_image" \
+            --discovery-tag "$discovery_tag" \
+            --producer-repository "$GITHUB_REPOSITORY" \
+            --producer-workflow "$GITHUB_REPOSITORY/.github/workflows/release-please.yml" \
+            --producer-workflow-commit "$GITHUB_WORKFLOW_SHA" \
+            --producer-oidc-source-ref "$GITHUB_REF" \
+            --producer-oidc-source-commit "$GITHUB_SHA" \
+            --producer-event "$GITHUB_EVENT_NAME" \
+            --run-id "$GITHUB_RUN_ID" \
+            --run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --bundle "$bundle" \
+            --storage-kind github-release \
+            --storage-uri "$storage_uri" \
+            --output "$candidate"
+          {
+            echo "candidate=$candidate"
+            echo "bundle=$bundle"
+            echo "immutable_image=$immutable_image"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Attest the exact hosted runtime candidate
+        id: runtime-candidate-attestation
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4
+        with:
+          subject-path: ${{ steps.runtime-candidate.outputs.candidate }}
+          create-storage-record: false
+
+      - name: Verify the hosted runtime image and signed candidate
+        id: runtime-candidate-proof
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.meta.outputs.version }}
+          SOURCE_COMMIT: ${{ steps.meta.outputs.source_commit }}
+          CANDIDATE: ${{ steps.runtime-candidate.outputs.candidate }}
+          IMAGE_BUNDLE: ${{ steps.runtime-candidate.outputs.bundle }}
+          CANDIDATE_ATTESTATION_BUNDLE: ${{ steps.runtime-candidate-attestation.outputs.bundle-path }}
+          IMMUTABLE_IMAGE: ${{ steps.runtime-candidate.outputs.immutable_image }}
+        run: |
+          set -euo pipefail
+          candidate_bundle="${CANDIDATE%.candidate-v1.json}.candidate.sigstore.json"
+          cp "$CANDIDATE_ATTESTATION_BUNDLE" "$candidate_bundle"
+          python3 infra/scripts/hosted_image_candidate.py verify \
+            --candidate "$CANDIDATE" \
+            --bundle "$IMAGE_BUNDLE" \
+            --candidate-bundle "$candidate_bundle"
+          docker pull "$IMMUTABLE_IMAGE"
+          observed_version=$(docker run --rm --network=none "$IMMUTABLE_IMAGE" --version)
+          test "$observed_version" = "exomem ${VERSION}"
+          observed_revision=$(docker image inspect \
+            --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' \
+            "$IMMUTABLE_IMAGE")
+          test "$observed_revision" = "$SOURCE_COMMIT"
+          echo "candidate_bundle=$candidate_bundle" >> "$GITHUB_OUTPUT"
+
+      - name: Upload bounded runtime candidate workflow evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: hosted-runtime-candidate-${{ steps.meta.outputs.source_commit }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ steps.runtime-candidate.outputs.candidate }}
+            ${{ steps.runtime-candidate.outputs.bundle }}
+            ${{ steps.runtime-candidate-proof.outputs.candidate_bundle }}
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Retain the runtime candidate with the matching release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.tag }}
+          CANDIDATE: ${{ steps.runtime-candidate.outputs.candidate }}
+          BUNDLE: ${{ steps.runtime-candidate.outputs.bundle }}
+          CANDIDATE_BUNDLE: ${{ steps.runtime-candidate-proof.outputs.candidate_bundle }}
+        run: gh release upload "$TAG" "$CANDIDATE" "$BUNDLE" "$CANDIDATE_BUNDLE"
+
+      - name: Record the runtime candidate inputs
+        env:
+          IMMUTABLE_IMAGE: ${{ steps.runtime-candidate.outputs.immutable_image }}
+          CANDIDATE: ${{ steps.runtime-candidate.outputs.candidate }}
+          BUNDLE: ${{ steps.runtime-candidate.outputs.bundle }}
+          CANDIDATE_BUNDLE: ${{ steps.runtime-candidate-proof.outputs.candidate_bundle }}
+        run: |
+          {
+            echo "Hosted runtime image: ${IMMUTABLE_IMAGE}"
+            echo "Candidate asset: ${CANDIDATE}"
+            echo "Image attestation bundle asset: ${BUNDLE}"
+            echo "Candidate attestation bundle asset: ${CANDIDATE_BUNDLE}"
+          } >> "$GITHUB_STEP_SUMMARY"
 
   publish-existing-pypi:
     if: ${{ github.event_name == 'workflow_dispatch' && vars.PYPI_PUBLISH_ENABLED == 'true' }}

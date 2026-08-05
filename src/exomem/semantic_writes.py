@@ -426,6 +426,10 @@ class PosthocBatch:
             "string_bytes_omitted": 0,
             "nested_items_omitted": 0,
         }
+        # Census over EVERY evaluation, not only the ones that produced a finding.
+        # Satisfied pages emit no finding, so counting findings alone would report a
+        # reviewed-none share of 100% on a healthy vault.
+        disposition_census: dict[str, int] = {}
         for evaluation in self.evaluations:
             disposition = evaluation.contract_result.relation_disposition
             disposition_value = (
@@ -437,6 +441,14 @@ class PosthocBatch:
                 if disposition is not None
                 else None
             )
+            if disposition is None:
+                census_key = "not_applicable"
+            elif disposition.kind == "qualifying_relation":
+                signal = getattr(disposition, "qualifying_signal", "typed")
+                census_key = f"qualifying_relation_{signal}"
+            else:
+                census_key = disposition.kind
+            disposition_census[census_key] = disposition_census.get(census_key, 0) + 1
             for finding in evaluation.contract_result.findings:
                 summary[finding.code] = summary.get(finding.code, 0) + 1
                 item = {
@@ -476,6 +488,7 @@ class PosthocBatch:
             "evaluated_paths": evaluated_paths,
             "semantic_contract_findings": findings,
             "semantic_contract_summary": retained_summary,
+            "relation_disposition_summary": dict(sorted(disposition_census.items())),
             "omitted_counts": {
                 "evaluated_paths": len(self.evaluations) - len(evaluated_paths),
                 "semantic_contract_findings": omitted,

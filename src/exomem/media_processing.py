@@ -12,6 +12,7 @@ import logging
 import os
 import re
 import threading
+import time
 from collections.abc import Callable
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from dataclasses import dataclass
@@ -44,6 +45,49 @@ _TRANSIENT_COORDINATION_CODES = frozenset(
         "WRITER_LEASE_REQUIRED",
     }
 )
+
+# A read-only replica correctly declining the writer lease
+# (WRITER_LEASE_REQUIRED) is an EXPECTED operational state, not a crash. The
+# background reconcile loop retries the whole pass every cycle, so logging a
+# full multi-frame traceback per artifact floods exomem.log and evicts the
+# tool-call trace history operators rely on. Record it instead as one concise
+# WARNING line with no traceback, throttled down to one line per holder change
+# or interval while the condition persists.
+_READONLY_REPLICA_CODE = "WRITER_LEASE_REQUIRED"
+_READONLY_LOG_LOCK = threading.Lock()
+# resolved vault root -> (holder note, monotonic deadline) of the last notice.
+_READONLY_LOG_STATE: dict[str, tuple[str, float]] = {}
+_READONLY_LOG_INTERVAL_SECONDS = 300.0
+
+
+def _should_log_readonly_replica(vault: Path, holder_note: str) -> bool:
+    """True only when this read-only notice is new, its holder changed, or its
+    throttle window lapsed — so a bounded pass over many artifacts, and a
+    persistent read-only state across cycles, both collapse to a single line."""
+    key = str(Path(vault).resolve())
+    now = time.monotonic()
+    with _READONLY_LOG_LOCK:
+        previous = _READONLY_LOG_STATE.get(key)
+        if previous is not None and previous[0] == holder_note and now < previous[1]:
+            return False
+        _READONLY_LOG_STATE[key] = (holder_note, now + _READONLY_LOG_INTERVAL_SECONDS)
+        return True
+
+
+def _log_reconcile_op_error(
+    error: OpError, binary: Path, vault: Path, *, activity: str
+) -> None:
+    """Record a soft-failed background reconcile at a severity that fits its cause.
+
+    The read-only-replica case (``WRITER_LEASE_REQUIRED``) is expected and gets a
+    single throttled WARNING with no traceback; every other OpError keeps its
+    full traceback so genuinely unexpected failures stay diagnosable.
+    """
+    if error.code == _READONLY_REPLICA_CODE:
+        if _should_log_readonly_replica(vault, error.message):
+            log.warning("%s skipped for read-only replica: %s", activity, error)
+        return
+    log.warning("%s failed for %s", activity, binary, exc_info=True)
 
 
 class MediaProcessingError(Exception):
@@ -79,6 +123,12 @@ class _BinaryProvenance:
 _EXTRACTED_SECTION_RE = re.compile(
     r"(?ms)^## Extracted text\s*\n(.*?)(?=^## |\Z)"
 )
+_PRESERVED_HEADING = "## Preserved notes"
+# The title + locator lines _render_sidecar emits. Re-emitted on every render, so
+# they are regenerated rather than preserved.
+_SIDECAR_BOILERPLATE_RE = re.compile(
+    r"(?m)^# Evidence: .*$\n?|^Preserved under `[^`]*`\.[ \t]*$\n?"
+)
 _INCOMPLETE_ENGINES = {"", "none", "pending"}
 _PROVENANCE_FIELDS = (
     "evidence_file",
@@ -88,6 +138,16 @@ _PROVENANCE_FIELDS = (
     "binary_mtime_ns",
     "binary_ctime_ns",
 )
+# Content identity: a mismatch here means genuinely different bytes, so the
+# recorded transcript no longer describes this artifact.
+_IDENTITY_FIELDS = (
+    "evidence_file",
+    "original_filename",
+    "binary_sha256",
+    "binary_size",
+)
+# Cache hints only: filesystem timestamps move without the bytes changing.
+_TIMESTAMP_FIELDS = ("binary_mtime_ns", "binary_ctime_ns")
 
 
 def classify_media(path: str | Path) -> str | None:
@@ -354,10 +414,8 @@ def reconcile_all_media(
                     and error.code in _TRANSIENT_COORDINATION_CODES
                 ):
                     raise
-                log.warning(
-                    "media reconciliation failed for %s",
-                    binary,
-                    exc_info=True,
+                _log_reconcile_op_error(
+                    error, binary, vault, activity="media reconciliation"
                 )
             except Exception:  # noqa: BLE001 - one artifact must not abort discovery
                 log.warning("media reconciliation failed for %s", binary, exc_info=True)
@@ -504,12 +562,15 @@ def _is_completed_sidecar_shape(
         current = binary.stat()
     except OSError:
         return False
+    # Deliberately NOT comparing binary_mtime_ns/binary_ctime_ns. They are cache
+    # hints, not identity: `binary.stat()` here and the `os.fstat()` that recorded
+    # them in _read_provenance can disagree for an unchanged file (see the note in
+    # _verify_binary_identity), and on POSIX any metadata touch moves st_ctime.
+    # Treating that drift as "not completed" made every pass re-render the sidecar.
     expected = {
         "evidence_file": binary.relative_to(vault).as_posix(),
         "original_filename": binary.name,
         "binary_size": current.st_size,
-        "binary_mtime_ns": current.st_mtime_ns,
-        "binary_ctime_ns": current.st_ctime_ns,
     }
     digest = str(frontmatter.get("binary_sha256", ""))
     return (
@@ -613,10 +674,8 @@ def retry_all_media(
                 and error.code in _TRANSIENT_COORDINATION_CODES
             ):
                 raise
-            log.warning(
-                "media retry reconciliation failed for %s",
-                job.binary_path,
-                exc_info=True,
+            _log_reconcile_op_error(
+                error, job.binary_path, vault, activity="media retry reconciliation"
             )
             continue
         except Exception:  # noqa: BLE001 - one stale artifact must not abort the pass
@@ -757,7 +816,9 @@ def _render_pending_sidecar(
             for field, value in pending_fields:
                 rendered = preserve._set_frontmatter_field(rendered, field, str(value))
             return rendered
-        preserved_notes = body if raw_frontmatter is not None else original
+        preserved_notes = _preservable_notes(
+            body if raw_frontmatter is not None else original
+        )
 
     parts = Path(provenance.relative_path).parts
     evidence_index = next(
@@ -782,6 +843,36 @@ def _render_pending_sidecar(
     if preserved_notes:
         rendered = rendered.rstrip("\n") + "\n\n## Preserved notes\n\n" + preserved_notes
     return rendered
+
+
+def _preservable_notes(body: str) -> str | None:
+    """The content worth carrying into a re-rendered sidecar, or None.
+
+    A prior ``## Preserved notes`` section is UNWRAPPED rather than re-nested,
+    and identical segments collapse to one. That is what bounds this: re-rendering
+    an already-preserved sidecar reproduces it byte for byte instead of wrapping
+    another copy around it, so a sidecar can no longer accumulate a copy of itself
+    per reconciliation pass.
+
+    A real transcript is still preserved — on a genuine provenance conflict the
+    binary may not re-extract to the same thing, so the recorded text is the only
+    record. Only regenerated scaffolding is dropped: the title/locator lines and
+    an empty ``## Extracted text`` anchor.
+    """
+    kept: list[str] = []
+    for segment in body.split(_PRESERVED_HEADING):
+        prose = _strip_empty_extracted_sections(segment)
+        prose = _SIDECAR_BOILERPLATE_RE.sub("", prose).strip()
+        if prose and prose not in kept:
+            kept.append(prose)
+    return "\n\n".join(kept) + "\n" if kept else None
+
+
+def _strip_empty_extracted_sections(text: str) -> str:
+    """Drop `## Extracted text` anchors that carry no transcript."""
+    return _EXTRACTED_SECTION_RE.sub(
+        lambda match: "" if not match.group(1).strip() else match.group(0), text
+    )
 
 
 def _pending_fields(provenance: _BinaryProvenance) -> tuple[tuple[str, object], ...]:
@@ -862,7 +953,48 @@ def _completed_provenance_state(
         return "not-completed"
     if not _is_completed_transcript_shape(frontmatter, body, media_type):
         return "not-completed"
-    expected = {
+    values = _provenance_values(provenance)
+    for field in _IDENTITY_FIELDS:
+        if field in frontmatter and frontmatter.get(field) != values[field]:
+            return "conflict"
+    # Timestamps are NOT identity. Same bytes under the same engine produce the
+    # same transcript, so a moved mtime/ctime is drift to heal in place, never a
+    # reason to discard a completed transcript and re-extract. Reporting it as a
+    # conflict is what drove the pending re-render that nested each sidecar
+    # inside itself once per pass.
+    drifted = any(
+        field in frontmatter and frontmatter.get(field) != values[field]
+        for field in _TIMESTAMP_FIELDS
+    )
+    if drifted or not all(field in frontmatter for field in _PROVENANCE_FIELDS):
+        return "repairable"
+    return "valid"
+
+
+def _backfill_completed_provenance(
+    content: str, provenance: _BinaryProvenance
+) -> str:
+    """Heal a completed sidecar's provenance in place, keeping its transcript.
+
+    Fills fields a legacy sidecar never recorded AND refreshes drifted
+    mtime/ctime, so the next pass sees "valid" instead of re-reporting drift.
+    """
+    preserve = _preserve_module()
+    rendered = content
+    existing, _body, _raw = parse_frontmatter(content)
+    # _pending_fields carries the SERIALIZED form (yaml_scalar-quoted for strings);
+    # compare against the parsed semantic value so an already-correct quoted field
+    # is not rewritten on every pass.
+    semantic = _provenance_values(provenance)
+    for field, serialized in _pending_fields(provenance)[1:]:
+        if field not in existing or existing.get(field) != semantic[field]:
+            rendered = preserve._set_frontmatter_field(rendered, field, str(serialized))
+    return rendered
+
+
+def _provenance_values(provenance: _BinaryProvenance) -> dict[str, object]:
+    """Provenance as parsed frontmatter would carry it, for comparison."""
+    return {
         "evidence_file": provenance.relative_path,
         "original_filename": provenance.original_filename,
         "binary_sha256": provenance.sha256,
@@ -870,24 +1002,6 @@ def _completed_provenance_state(
         "binary_mtime_ns": provenance.mtime_ns,
         "binary_ctime_ns": provenance.ctime_ns,
     }
-    for field, value in expected.items():
-        if field in frontmatter and frontmatter.get(field) != value:
-            return "conflict"
-    if all(field in frontmatter for field in _PROVENANCE_FIELDS):
-        return "valid"
-    return "repairable"
-
-
-def _backfill_completed_provenance(
-    content: str, provenance: _BinaryProvenance
-) -> str:
-    preserve = _preserve_module()
-    rendered = content
-    existing, _body, _raw = parse_frontmatter(content)
-    for field, value in _pending_fields(provenance)[1:]:
-        if field not in existing:
-            rendered = preserve._set_frontmatter_field(rendered, field, str(value))
-    return rendered
 
 
 def mark_processing_unavailable(

@@ -1,0 +1,65 @@
+{
+  "schema_version": 1,
+  "common": {
+    "product_name": "Exomem Hosted",
+    "publisher": "Substrate Systems OÜ",
+    "description": "A governed external knowledge store for relevant project work, with cited retrieval and deliberate durable capture.",
+    "website_url": "https://substratesystems.io/exomem",
+    "privacy_url": "https://substratesystems.io/exomem/privacy",
+    "terms_url": "https://substratesystems.io/exomem/terms",
+    "support_url": "https://substratesystems.io/exomem/support",
+    "documentation_url": "https://substratesystems.io/exomem/setup",
+    "setup_url": "https://substratesystems.io/exomem/setup",
+    "brand_asset": {
+      "path": "assets/icon.svg",
+      "sha256": "9eef30cfe92ee021218bc9076f0a107e8adf84664c70eb61f7b9790d4afc27bb"
+    },
+    "categories": ["Productivity"],
+    "use_cases": [
+      "Retrieve cited project decisions and supporting evidence.",
+      "Capture concise durable conclusions from active work."
+    ],
+    "capabilities": {
+      "read": "Cited retrieval from the user's governed Exomem store.",
+      "write": "Deliberate durable capture of concise conclusions."
+    },
+    "user_prerequisites": {
+      "account": "Requires an Exomem Hosted account and authorization.",
+      "admission": {
+        "mode": "invite_only",
+        "eligibility": "Private alpha access is available by invitation."
+      }
+    },
+    "regions": ["EEA", "United States"],
+    "release_notes": "Hosted directory submission."
+  },
+  "channels": {
+    "claude-connector": {
+      "title": "Exomem Hosted",
+      "short_description": "Governed knowledge with cited retrieval and capture.",
+      "starter_prompts": [
+        "What have we already decided about this project?",
+        "Find the supporting evidence for our current plan.",
+        "Capture this conclusion as a concise project memory."
+      ]
+    },
+    "claude-plugin": {
+      "title": "Exomem Hosted",
+      "short_description": "Governed project knowledge for Claude Code and Cowork.",
+      "starter_prompts": [
+        "Continue this project from its governed knowledge.",
+        "Find the evidence behind this decision.",
+        "Capture the durable conclusion, not the whole transcript."
+      ]
+    },
+    "openai-plugin": {
+      "title": "Exomem Hosted",
+      "short_description": "Governed knowledge, cited.",
+      "starter_prompts": [
+        "What is relevant from my governed project knowledge?",
+        "Find evidence for this plan and cite it.",
+        "Preserve this durable conclusion in Exomem."
+      ]
+    }
+  }
+}

@@ -71,11 +71,17 @@ def test_platform_dependencies_and_first_party_images_are_immutable() -> None:
         (PLATFORM / "values.validation.yaml").read_text(encoding="utf-8")
     )
     assert "runtime" not in values
-    release = json.loads(validation_values["provisioner"]["releaseManifestJson"])
-    assert release["runtimeImage"] == "ghcr.io/artexis10/exomem@sha256:" + "a" * 64
+    lock = json.loads(validation_values["provisioner"]["deploymentLockJson"])
+    assert lock["components"]["runtime"]["image"] == "ghcr.io/artexis10/exomem@sha256:" + "a" * 64
+    assert lock["components"]["provisioner"]["image"] == (
+        "ghcr.io/artexis10/exomem-provisioner@sha256:" + "b" * 64
+    )
     platform_schema = json.loads((PLATFORM / "values.schema.json").read_text(encoding="utf-8"))
     assert platform_schema["properties"]["runtime"] is False
-    assert "releaseManifestJson" in platform_schema["properties"]["provisioner"]["required"]
+    required = platform_schema["properties"]["provisioner"]["required"]
+    assert "deploymentLockJson" in required
+    assert "deploymentLockSha256" in required
+    assert "image" not in platform_schema["properties"]["provisioner"]["properties"]
     assert values["cloudflared"]["image"].endswith(
         "@sha256:5e49861633763e8933475477c20bae6039ed47f32c1d267a34babc347f28f0df"
     )
@@ -88,7 +94,7 @@ def test_platform_dependencies_and_first_party_images_are_immutable() -> None:
     assert "crypto_LUKS" in provenance
 
 
-def test_platform_rejects_mutable_or_partial_runtime_release_overrides(
+def test_platform_rejects_mutable_or_partial_deployment_lock_overrides(
     tmp_path: Path,
 ) -> None:
     if HELM is None:
@@ -96,14 +102,24 @@ def test_platform_rejects_mutable_or_partial_runtime_release_overrides(
     validation_values = yaml.safe_load(
         (PLATFORM / "values.validation.yaml").read_text(encoding="utf-8")
     )
-    release = json.loads(validation_values["provisioner"]["releaseManifestJson"])
-    mutable = {**release, "runtimeImage": "ghcr.io/artexis10/exomem:latest"}
-    partial = dict(release)
-    partial.pop("gatewayContractSha256")
+    lock = json.loads(validation_values["provisioner"]["deploymentLockJson"])
+    mutable = json.loads(json.dumps(lock))
+    mutable["components"]["runtime"]["image"] = "ghcr.io/artexis10/exomem:latest"
+    partial = dict(lock)
+    partial.pop("runtimeTarget")
     for index, invalid in enumerate((mutable, partial), start=1):
-        override = tmp_path / f"invalid-release-{index}.yaml"
+        override = tmp_path / f"invalid-lock-{index}.yaml"
         override.write_text(
-            yaml.safe_dump({"provisioner": {"releaseManifestJson": json.dumps(invalid)}}),
+            yaml.safe_dump(
+                {
+                    "provisioner": {
+                        "deploymentLockJson": json.dumps(invalid, separators=(",", ":")) + "\n",
+                        "deploymentLockSha256": hashlib.sha256(
+                            (json.dumps(invalid, separators=(",", ":")) + "\n").encode()
+                        ).hexdigest(),
+                    }
+                }
+            ),
             encoding="utf-8",
         )
         result = subprocess.run(
@@ -125,55 +141,28 @@ def test_platform_rejects_mutable_or_partial_runtime_release_overrides(
             text=True,
         )
         assert result.returncode != 0
-        assert "hosted release" in result.stderr
+        assert "deployment lock" in result.stderr
 
 
-def test_platform_rejects_malformed_release_fields_and_noncanonical_registry(
+def test_platform_rejects_deployment_lock_hash_drift(
     tmp_path: Path,
 ) -> None:
     if HELM is None:
         pytest.skip("set HELM_BIN to run pinned Helm rendering")
-    validation_values = yaml.safe_load(
-        (PLATFORM / "values.validation.yaml").read_text(encoding="utf-8")
+    override = tmp_path / "lock-hash-drift.yaml"
+    override.write_text(
+        yaml.safe_dump({"provisioner": {"deploymentLockSha256": "0" * 64}}),
+        encoding="utf-8",
     )
-    release = json.loads(validation_values["provisioner"]["releaseManifestJson"])
-    invalid_releases = []
-    for field, value in (
-        ("schemaVersion", "1"),
-        ("release", {"not": "a version"}),
-        ("hostedProtocol", "999"),
-        ("releaseBuildTime", False),
-        ("releaseBuildTime", "2026-99-99T03:50:34Z"),
-        ("commandRegistry", [None] * 21),
-        ("commandRegistry", list(reversed(release["commandRegistry"]))),
-    ):
-        invalid_releases.append({**release, field: value})
-    for index, invalid in enumerate(invalid_releases, start=1):
-        override = tmp_path / f"malformed-release-{index}.yaml"
-        override.write_text(
-            yaml.safe_dump({"provisioner": {"releaseManifestJson": json.dumps(invalid)}}),
-            encoding="utf-8",
-        )
-        result = subprocess.run(
-            [
-                str(HELM),
-                "template",
-                "exomem-platform",
-                str(PLATFORM),
-                "--namespace",
-                "exomem-platform",
-                "--values",
-                str(PLATFORM / "values.validation.yaml"),
-                "--values",
-                str(override),
-            ],
-            cwd=ROOT,
-            check=False,
-            capture_output=True,
-            text=True,
-        )
-        assert result.returncode != 0, (index, result.stdout)
-        assert "hosted release" in result.stderr
+    result = subprocess.run(
+        [str(HELM), "template", "exomem-platform", str(PLATFORM), "--namespace", "exomem-platform", "--values", str(PLATFORM / "values.validation.yaml"), "--values", str(override)],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode != 0
+    assert "deployment lock SHA-256 mismatch" in result.stderr
 
 
 def test_platform_rejects_wrong_provisioner_image_repository(tmp_path: Path) -> None:
@@ -216,13 +205,20 @@ def test_platform_renders_real_provisioner_composition() -> None:
     validation_values = yaml.safe_load(
         (PLATFORM / "values.validation.yaml").read_text(encoding="utf-8")
     )
-    expected_image = validation_values["provisioner"]["image"]
-    expected_release = json.loads(validation_values["provisioner"]["releaseManifestJson"])
+    expected_lock = json.loads(validation_values["provisioner"]["deploymentLockJson"])
+    expected_image = expected_lock["components"]["provisioner"]["image"]
 
-    release = _find(documents, "ConfigMap", "exomem-hosted-release-v1")
-    assert release["metadata"]["namespace"] == "exomem-platform"
-    assert release.get("immutable") is not True
-    assert json.loads(release["data"]["exomem-hosted-release-v1.json"]) == expected_release
+    lock_name = "exomem-hosted-deployment-lock-v2-" + validation_values["provisioner"][
+        "deploymentLockSha256"
+    ][:16]
+    lock_config = _find(documents, "ConfigMap", lock_name)
+    assert lock_config["metadata"]["namespace"] == "exomem-platform"
+    assert lock_config["immutable"] is True
+    assert json.loads(lock_config["data"]["exomem-hosted-deployment-lock-v2.json"]) == expected_lock
+    rendered_lock = lock_config["data"]["exomem-hosted-deployment-lock-v2.json"]
+    assert hashlib.sha256(rendered_lock.encode()).hexdigest() == validation_values["provisioner"][
+        "deploymentLockSha256"
+    ]
 
     service = _find(documents, "Service", "exomem-provisioner")
     assert service["metadata"]["namespace"] == "exomem-platform"
@@ -257,18 +253,20 @@ def test_platform_renders_real_provisioner_composition() -> None:
         for name in environment
         for privileged_fragment in ("HCLOUD_TOKEN", "B2_", "DELETE_CREDENTIAL")
     )
-    assert environment["EXOMEM_PROVISIONER_RELEASE_MANIFEST_PATH"]["value"] == (
-        "/etc/exomem/release/exomem-hosted-release-v1.json"
+    assert environment["EXOMEM_PROVISIONER_DEPLOYMENT_LOCK_PATH"]["value"] == (
+        "/etc/exomem/deployment-lock/exomem-hosted-deployment-lock-v2.json"
     )
+    assert environment["EXOMEM_PROVISIONER_ADMISSION_MODE"]["value"] == "expand"
+    assert json.loads(environment["EXOMEM_PROVISIONER_RUNTIME_TARGET_JSON"]["value"]) == expected_lock["runtimeTarget"]
     assert {item["name"] for item in worker_container["volumeMounts"]} >= {
-        "hosted-release",
+        "deployment-lock",
         "temporary",
     }
     assert (
-        next(volume for volume in worker_spec["volumes"] if volume["name"] == "hosted-release")[
+        next(volume for volume in worker_spec["volumes"] if volume["name"] == "deployment-lock")[
             "configMap"
         ]["name"]
-        == "exomem-hosted-release-v1"
+        == lock_name
     )
     provisioner_role = _find(documents, "ClusterRole", "exomem-cell-provisioner")
     provisioner_configmaps = next(
@@ -314,6 +312,46 @@ def test_platform_renders_real_provisioner_composition() -> None:
     for action in actions:
         assert f"Path(`/cells/{action}`)" in rule["match"]
     assert rule["services"] == [{"name": "exomem-provisioner", "port": 8080}]
+
+
+def test_platform_mounts_the_selected_lock_for_every_lock_consuming_workload() -> None:
+    documents = _render(PLATFORM, PLATFORM / "values.validation.yaml", namespace="exomem-platform")
+    values = yaml.safe_load((PLATFORM / "values.validation.yaml").read_text(encoding="utf-8"))
+    lock_name = "exomem-hosted-deployment-lock-v2-" + values["provisioner"][
+        "deploymentLockSha256"
+    ][:16]
+    deletion_job = json.loads(
+        _find(documents, "ConfigMap", "exomem-deletion-job-template")["data"]["job-template.json"]
+    )
+    workloads = {
+        "exomem-provisioner-worker": _find(documents, "Deployment", "exomem-provisioner-worker")[
+            "spec"
+        ]["template"]["spec"],
+        "exomem-durability-actions": _find(documents, "CronJob", "exomem-durability-actions")[
+            "spec"
+        ]["jobTemplate"]["spec"]["template"]["spec"],
+        "exomem-durability-backup": _find(documents, "CronJob", "exomem-durability-backup")[
+            "spec"
+        ]["jobTemplate"]["spec"]["template"]["spec"],
+        "exomem-deletion-worker": deletion_job["spec"]["template"]["spec"],
+    }
+    for name, pod in workloads.items():
+        container = pod["containers"][0]
+        environment = {item["name"]: item for item in container["env"]}
+        assert environment["EXOMEM_PROVISIONER_DEPLOYMENT_LOCK_PATH"]["value"] == (
+            "/etc/exomem/deployment-lock/exomem-hosted-deployment-lock-v2.json"
+        ), name
+        assert any(item["name"] == "deployment-lock" for item in container["volumeMounts"]), name
+        volume = next(item for item in pod["volumes"] if item["name"] == "deployment-lock")
+        assert volume["configMap"]["name"] == lock_name, name
+        assert volume["configMap"]["items"] == [
+            {
+                "key": "exomem-hosted-deployment-lock-v2.json",
+                "path": "exomem-hosted-deployment-lock-v2.json",
+            }
+        ], name
+        if name == "exomem-deletion-worker":
+            assert volume["configMap"]["defaultMode"] == 0o444
 
 
 def test_platform_renders_live_capacity_receipt_collector_with_isolated_keys() -> None:
@@ -466,10 +504,14 @@ def test_platform_renders_disjoint_durability_workloads() -> None:
 
     expected = {
         "exomem-export-gc": ("CronJob", ["exomem-export-gc"], "*/5 * * * *", False),
+        # Daily: each vault run is a full independent encrypted archive and
+        # quiesces the cell, so frequency multiplies storage and downtime.
+        # The database dump below stays sub-daily — it is small and its loss
+        # window governs control-plane recovery, not tenant vault content.
         "exomem-durability-backup": (
             "CronJob",
             ["exomem-durability-backup-worker"],
-            "*/30 * * * *",
+            "17 2 * * *",
             True,
         ),
         "exomem-database-backup": (
@@ -894,8 +936,33 @@ def test_deletion_dispatcher_admission_closes_probe_and_container_override_surfa
     assert f"!has({container}.securityContext.privileged)" in expressions
     assert f"!has({container}.securityContext.seccompProfile)" in expressions
     assert "metadata.labels['batch.kubernetes.io/job-name']" in expressions
-    assert f"{container}.resources.requests.cpu == quantity('25m')" in expressions
-    assert f"{container}.resources.limits.memory == quantity('384Mi')" in expressions
+    assert f"{container}.resources.requests.cpu == quantity('25m')" not in expressions
+    assert f"{container}.resources.limits.memory == quantity('384Mi')" not in expressions
+    assert "quantity(dyn(object.spec.template.spec.containers[0].resources).requests['cpu']).compareTo(quantity('25m')) == 0" in expressions
+    assert "quantity(dyn(object.spec.template.spec.containers[0].resources).limits['memory']).compareTo(quantity('384Mi')) == 0" in expressions
+    assert "size(dyn(object.spec.template.spec.containers[0].resources).requests) == 2" in expressions
+    assert "size(dyn(object.spec.template.spec.containers[0].resources).limits) == 2" in expressions
+    assert "!has(dyn(object.spec.template.spec).resources)" in expressions
+    assert "EXOMEM_PROVISIONER_DEPLOYMENT_LOCK_PATH" in expressions
+    assert f"{container}.env[14].value == '/etc/exomem/deployment-lock/exomem-hosted-deployment-lock-v2.json'" in expressions
+    assert 'volumes[1].configMap.name == "exomem-hosted-deployment-lock-v2-97c1fc1bf93e0492"' in expressions
+    assert "volumes[1].configMap.items[0].key == 'exomem-hosted-deployment-lock-v2.json'" in expressions
+    assert "volumes[1].configMap.defaultMode == 292" in expressions
+    assert "!has(dyn(object.spec.template.spec.volumes[1].configMap.items[0]).mode)" in expressions
+    assert "!has(object.spec.template.spec.volumes[1].configMap.defaultMode)" not in expressions
+    assert "quantity(dyn(object.spec.template.spec.volumes[0].emptyDir).sizeLimit).compareTo(quantity('64Mi')) == 0" in expressions
+    assert "!has(dyn(object.spec.template.spec).overhead)" in expressions
+    assert "!has(dyn(object.spec.template.spec).activeDeadlineSeconds)" in expressions
+    assert "object.spec.parallelism == 1" in expressions
+    assert "object.spec.completions == 1" in expressions
+    assert "object.spec.completionMode == 'NonIndexed'" in expressions
+    assert "dyn(object.spec).podReplacementPolicy == 'TerminatingOrFailed'" in expressions
+    assert "!has(dyn(object.spec).managedBy)" in expressions
+    assert "object.spec.selector.matchLabels['batch.kubernetes.io/controller-uid'] == object.metadata.uid" in expressions
+    assert "object.spec.template.metadata.labels['batch.kubernetes.io/controller-uid'] == object.metadata.uid" in expressions
+    assert "object.spec.template.spec.serviceAccount == 'exomem-deletion-worker'" in expressions
+    assert f"{container}.env[16].valueFrom.fieldRef.apiVersion == 'v1'" in expressions
+    assert f"{container}.volumeMounts[1].readOnly == true" in expressions
 
 
 def test_platform_renders_one_shot_durability_actions_and_exact_restore_scope() -> None:
@@ -948,9 +1015,12 @@ def test_platform_renders_one_shot_durability_actions_and_exact_restore_scope() 
     env = {item["name"]: item for item in container["env"]}
     assert env["EXOMEM_DURABILITY_MAX_OPERATIONS"]["value"] == "1"
     assert env["EXOMEM_DURABILITY_SCRATCH_ROOT"]["value"] == "/var/lib/exomem-scratch"
-    assert env["EXOMEM_PROVISIONER_RELEASE_MANIFEST_PATH"]["value"] == (
-        "/etc/exomem/release/exomem-hosted-release-v1.json"
+    assert env["EXOMEM_PROVISIONER_DEPLOYMENT_LOCK_PATH"]["value"] == (
+        "/etc/exomem/deployment-lock/exomem-hosted-deployment-lock-v2.json"
     )
+    assert next(item for item in pod["volumes"] if item["name"] == "deployment-lock")[
+        "configMap"
+    ]["name"] == "exomem-hosted-deployment-lock-v2-97c1fc1bf93e0492"
     assert env["EXOMEM_DURABILITY_PROVISIONER_IMAGE"]["value"] == (
         "ghcr.io/artexis10/exomem-provisioner@sha256:" + "b" * 64
     )
@@ -1526,8 +1596,15 @@ def test_platform_renders_owned_namespaces_and_content_free_observability() -> N
         check for check in contract["checks"] if check["name"] == "scheduler-last-success"
     )
     assert scheduler_check["maximum_age_seconds"] == 480
-    assert contract["alerts"]["backup_warn_age_seconds"] == 2700
-    assert contract["alerts"]["backup_block_age_seconds"] == 3600
+    # Daily full archives: the newest object always approaches the 24-hour
+    # objective just before each run, so thresholds sit past it. Warn at 26h
+    # catches a late run; block at 30h catches a missed one inside the same day.
+    backup_check = next(check for check in contract["checks"] if check["name"] == "backup-freshness")
+    assert backup_check["maximum_age_seconds"] == 108000
+    assert contract["alerts"]["backup_warn_age_seconds"] == 93600
+    assert contract["alerts"]["backup_block_age_seconds"] == 108000
+    assert contract["alerts"]["backup_warn_age_seconds"] > 24 * 3600
+    assert contract["alerts"]["backup_block_age_seconds"] < 48 * 3600
 
     scheduler_jobs = [
         item
@@ -1689,8 +1766,24 @@ def test_cell_chart_renders_separate_privileged_init_and_restricted_serving_mode
         assert "EXOMEM_HOSTED_BROWSER_ORIGIN" not in env
         assert env["EXOMEM_HOSTED_STORAGE_LIMIT_BYTES"] == "5368709120"
         assert env["EXOMEM_HOSTED_UPLOAD_LIMIT_BYTES"] == "94371840"
-        assert env["EXOMEM_HOSTED_WORKER_LIMIT"] == "0"
-        assert env["EXOMEM_HOSTED_FEATURE_GRANTS"] == ""
+        # A hosted cell must not be a lesser product than the free local
+        # runtime. hosted_runtime.py SETS EXOMEM_DISABLE_EMBEDDINGS whenever the
+        # worker limit is zero or the grant is missing, and nothing downstream
+        # surfaces that: the cell serves keyword-only recall in silence.
+        assert env["EXOMEM_HOSTED_WORKER_LIMIT"] == "2"
+        assert env["EXOMEM_HOSTED_FEATURE_GRANTS"] == "embeddings,file-watcher"
+        assert "EXOMEM_DISABLE_EMBEDDINGS" not in env
+        assert "EXOMEM_DISABLE_FILE_WATCHER" not in env
+        # torch would otherwise size its pool from the node's core count and
+        # oversubscribe every cell's cgroup.
+        assert env["OMP_NUM_THREADS"] == "1"
+        assert env["MKL_NUM_THREADS"] == "1"
+        assert int(env["OMP_NUM_THREADS"]) <= int(container["resources"]["limits"]["cpu"])
+        # Measured at the CPU encode batch the runtime uses: 918 MiB peak
+        # mid-encode, 791 MiB warm. The pre-embedding 1Gi limit would
+        # OOM-kill the cell inside its first batch.
+        assert container["resources"]["limits"]["memory"] == "1536Mi"
+        assert container["resources"]["requests"]["memory"] == "1Gi"
         assert env["TMPDIR"] == "/var/lib/exomem/state/tmp/runtime"
         assert {volume["name"] for volume in pod["volumes"]} == {"data", "credentials"}
         assert {mount["mountPath"] for mount in container["volumeMounts"]} == {
@@ -1751,8 +1844,20 @@ def test_cell_schema_rejects_mutable_image_and_non_fixed_limits() -> None:
     assert "@sha256:" in text
     assert '"const": 5368709120' in text
     assert '"const": 94371840' in text
-    assert '"const": 0' in text
     assert '"const": "10Gi"' in text
+    # Every knob that decides what the tenant actually receives is pinned, so a
+    # values override cannot quietly change the product or the resource
+    # envelope. The worker limit and grants are here because a zero/empty pair
+    # renders a cell that serves keyword-only recall without erroring.
+    properties = schema["properties"]
+    assert properties["workerLimit"]["const"] == 2
+    assert properties["featureGrants"]["const"] == "embeddings,file-watcher"
+    assert properties["cpuRequest"]["const"] == "250m"
+    assert properties["cpuLimit"]["const"] == "2"
+    assert properties["memoryRequest"]["const"] == "1Gi"
+    assert properties["memoryLimit"]["const"] == "1536Mi"
+    assert properties["embeddingThreads"]["const"] == 1
+    assert properties["embeddingThreads"]["const"] <= int(properties["cpuLimit"]["const"])
     assert schema["properties"]["workloadMode"]["enum"] == ["initialize", "restore", "serve"]
     assert schema["properties"]["provisionMode"]["enum"] == ["serve", "restore-candidate"]
     assert '"transferHostname"' not in json.dumps(schema["properties"]["routes"])
@@ -1822,6 +1927,84 @@ def test_cell_chart_rejects_mismatched_runtime_and_provider_cell_ids(tmp_path: P
     )
     assert result.returncode != 0
     assert "providerIdentity.cellId must equal cellId" in result.stderr
+
+
+@pytest.mark.parametrize(
+    ("override", "messages"),
+    [
+        ({"workerLimit": 0}, ("workerLimit must be greater than zero", "/workerLimit")),
+        ({"featureGrants": ""}, ("featureGrants must include embeddings", "/featureGrants")),
+        (
+            {"featureGrants": "file-watcher"},
+            ("featureGrants must include embeddings", "/featureGrants"),
+        ),
+    ],
+)
+def test_cell_chart_refuses_to_render_a_keyword_only_cell(
+    tmp_path: Path, override: dict[str, object], messages: tuple[str, ...]
+) -> None:
+    """Either setting silently downgrades the tenant, so rendering must fail.
+
+    `hosted_runtime.apply_process_environment` SETS EXOMEM_DISABLE_EMBEDDINGS
+    when the worker limit is zero or the grant is absent. The cell then starts
+    healthy, accepts writes, answers queries, and never matches on meaning.
+    Nothing downstream distinguishes that from a working cell, so render time is
+    the last point where it can be caught.
+
+    Two layers reject it and either is a pass: values.schema.json pins the exact
+    shipped shape, and the chart's own guard catches a zero worker limit or a
+    missing grant if that schema is ever relaxed to a per-plan range.
+    """
+    if HELM is None:
+        pytest.skip("set HELM_BIN to run pinned Helm rendering")
+    override_file = tmp_path / "downgraded-cell.yaml"
+    override_file.write_text(yaml.safe_dump(override), encoding="utf-8")
+    result = subprocess.run(
+        [
+            str(HELM),
+            "template",
+            "contract-test",
+            str(CELL),
+            "--namespace",
+            "cell-alpha-test",
+            "--values",
+            str(CELL / "values.validation.yaml"),
+            "--values",
+            str(override_file),
+        ],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode != 0, result.stdout
+    assert any(message in result.stderr for message in messages), result.stderr
+
+
+def test_cell_quota_holds_the_serving_pod_and_its_init_job_together() -> None:
+    """The quota counts every non-terminal pod, so it must cover both at once.
+
+    The pre-embedding ceiling was exactly the old runtime limit plus the init
+    job's. Raising the runtime limit without raising this would have made the
+    init job fail admission on quota rather than on real capacity — and it would
+    have failed during provisioning, not during a test.
+    """
+    documents = _render(CELL, CELL / "values.validation.yaml", namespace="cell-alpha-test")
+    quota = _find(documents, "ResourceQuota", "cell-alpha-quota")["spec"]["hard"]
+    statefulset = _find(documents, "StatefulSet", "cell-alpha")
+    runtime = statefulset["spec"]["template"]["spec"]["containers"][0]["resources"]["limits"]
+
+    def mebibytes(value: str) -> int:
+        if value.endswith("Gi"):
+            return int(value.removesuffix("Gi")) * 1024
+        if value.endswith("Mi"):
+            return int(value.removesuffix("Mi"))
+        raise AssertionError(f"unhandled memory unit: {value}")
+
+    init_job_memory = mebibytes("1Gi")  # init-job.yaml, limits.memory
+    init_job_cpu = 1  # init-job.yaml, limits.cpu
+    assert mebibytes(quota["limits.memory"]) >= mebibytes(runtime["memory"]) + init_job_memory
+    assert int(quota["limits.cpu"]) >= int(runtime["cpu"]) + init_job_cpu
 
 
 def test_cell_routes_expose_only_exact_control_and_transfer_paths() -> None:

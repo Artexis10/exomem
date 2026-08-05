@@ -38,8 +38,16 @@ providerRecoveryEnvelopes:
   transferIngressRoute: ""
 storageLimitBytes: 5368709120
 uploadLimitBytes: 94371840
-workerLimit: 0
-featureGrants: ""
+workerLimit: 2
+featureGrants: "embeddings,file-watcher"
+# Resource envelope measured for one warm embedding-capable cell; see the
+# statefulset template for the figures behind these numbers.
+cpuRequest: 250m
+cpuLimit: "2"
+memoryRequest: 1Gi
+memoryLimit: 1536Mi
+# One per cell so the fleet total matches the node cores; must not exceed cpuLimit.
+embeddingThreads: 1
 browserOrigin: https://substratesystems.io
 transferHostname: ""
 credentialsSecretName: exomem-cell-credentials

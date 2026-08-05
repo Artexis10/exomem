@@ -22,6 +22,7 @@ from .policy import Policy, Scope
 
 _MEMO_MAX = 4096
 _MEMO: OrderedDict[tuple[str, str, int, int], frozenset[str]] = OrderedDict()
+_SNAPSHOT_MEMO: OrderedDict[tuple[str, str, str], frozenset[str]] = OrderedDict()
 
 
 class MembershipUnresolved(Exception):
@@ -38,6 +39,7 @@ class MembershipUnresolved(Exception):
 
 def clear_memo() -> None:
     _MEMO.clear()
+    _SNAPSHOT_MEMO.clear()
 
 
 def _kb_relative(rel_path: str) -> str:
@@ -229,4 +231,32 @@ def evaluate(page: ParsedPage, policy: Policy) -> frozenset[str]:
     _MEMO.move_to_end(key)
     while len(_MEMO) > _MEMO_MAX:
         _MEMO.popitem(last=False)
+    return result
+
+
+def evaluate_snapshot(
+    page: ParsedPage, policy: Policy, *, content_hash: str
+) -> frozenset[str]:
+    """Evaluate membership for immutable bytes already held by the caller.
+
+    Direct reads cannot use :func:`evaluate`: its live ``stat`` intentionally
+    proves a search candidate still names the on-disk page, but a direct-read
+    response must instead bind to the exact representation captured by its
+    open file descriptor.  The content hash is that representation identity;
+    no later path lookup participates in this answer.
+    """
+    if policy.empty or not policy.scopes:
+        return frozenset()
+    key = (policy.fingerprint, page.rel_path, content_hash)
+    cached = _SNAPSHOT_MEMO.get(key)
+    if cached is not None:
+        _SNAPSHOT_MEMO.move_to_end(key)
+        return cached
+    result = frozenset(
+        scope_id for scope_id, scope in policy.scopes.items() if _scope_matches(scope, page)
+    )
+    _SNAPSHOT_MEMO[key] = result
+    _SNAPSHOT_MEMO.move_to_end(key)
+    while len(_SNAPSHOT_MEMO) > _MEMO_MAX:
+        _SNAPSHOT_MEMO.popitem(last=False)
     return result

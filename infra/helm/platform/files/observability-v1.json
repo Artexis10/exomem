@@ -12,7 +12,7 @@
       "target_environment_variable": "EXOMEM_BLACKBOX_BACKUP_FRESHNESS_URL",
       "timeout_seconds": 10,
       "maximum_age_header": "x-exomem-backup-age-seconds",
-      "maximum_age_seconds": 3600
+      "maximum_age_seconds": 108000
     },
     {
       "name": "scheduler-last-success",
@@ -35,8 +35,8 @@
   "alerts": {
     "scheduler_missed_run_seconds": 180,
     "scheduler_consecutive_failures": 2,
-    "backup_warn_age_seconds": 2700,
-    "backup_block_age_seconds": 3600,
+    "backup_warn_age_seconds": 93600,
+    "backup_block_age_seconds": 108000,
     "pending_operation_warn_seconds": 900,
     "pvc_reserved_free_bytes": 1073741824,
     "cell_log_cap_bytes": 134217728,

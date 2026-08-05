@@ -46,6 +46,15 @@ OWNER_AUDIENCE = "owner"
 # be produced by `normalize_audience`), so "deny" cannot be widened by policy.
 MOST_RESTRICTIVE_AUDIENCE = "\x00unresolved"
 
+# A stand-in for "whoever the policy does not name" — never bound to a request
+# and never resolvable, on the same reserved `\x00` prefix so no document and
+# no credential can mint it. Policy review enumerates audiences from the rules
+# and grants a proposal touches, which by construction cannot see a change to
+# the DEFAULT that applies where no rule matches; this id puts that default in
+# the compared lattice so removing a `default_deny` declaration reports as the
+# widening it is.
+UNNAMED_AUDIENCE_PROBE = "\x00unnamed"
+
 # Surface-scope prefixes whose payload is ALREADY a sha256 over `iss\0sub` —
 # the same formula `normalize_audience` uses, so they fold into the shared id
 # space by relabelling rather than by re-hashing. `cf-access:` is minted in
@@ -64,6 +73,7 @@ class RequestPrincipal:
     audience_id: str
     surface: str = "library"
     session_id: str | None = None
+    authorization_session_id: str | None = None
     purpose: str | None = None
     resolved: bool = True
 
@@ -72,6 +82,10 @@ class RequestPrincipal:
         if purpose is None:
             return self
         return replace(self, purpose=purpose)
+
+    def with_authorization_session(self, handle: str | None) -> RequestPrincipal:
+        """Bind the explicit client-conversation authorization identity."""
+        return replace(self, authorization_session_id=handle)
 
 
 def normalize_audience(*, subject: Any, issuer: Any = None) -> str:

@@ -62,7 +62,7 @@
 - [x] 7.2 Implement base OS updates, key-only SSH, administrator path, UFW, fail2ban, time sync, log rotation, disk hygiene, and `cryptsetup`.
 - [x] 7.3 Add tests for pinned/checksummed K3s installation, embedded etcd, secrets encryption, metadata-safe audit, token expiry policy, image/log GC, and restricted kubeconfig.
 - [x] 7.4 Implement K3s bootstrap plus encrypted off-host etcd snapshots and break-glass escrow.
-- [ ] 7.5 Generate Ansible inventory from non-sensitive Terraform outputs and prove two consecutive site runs converge cleanly.
+- [x] 7.5 Generate Ansible inventory from non-sensitive Terraform outputs and prove two consecutive site runs converge cleanly.
 
 ## 8. Implement platform and cell Helm releases
 

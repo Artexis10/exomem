@@ -12,6 +12,8 @@ Subcommands:
 - `demo` — the packaged 30-second proof: doctor → find → get → audit against a
   bundled sample vault, no clone/config/vault needed (`uvx exomem demo`)
 - `studio` — print the local Review Studio URL; `--open` launches it explicitly
+- `tui` — launch the interactive terminal UI over the same product commands
+  (requires the optional `tui` extra; needs an interactive terminal)
 - `doctor` — read-only local install/setup preflight
 - `auth sessions|revoke` — operator-only durable MCP session administration
 - `status` — resource posture/residency diagnostics without loading models
@@ -89,6 +91,7 @@ _CLI_ONLY_SUBCOMMANDS: frozenset[str] = frozenset(
         "install-hook",
         "demo",
         "studio",
+        "tui",
         "doctor",
         "install-info",
         "auth",
@@ -170,6 +173,8 @@ def _dispatch_main(raw: list[str]) -> int:
         return demo_main(raw[1:])
     if raw and raw[0] == "studio":
         return _studio_main(raw[1:])
+    if raw and raw[0] == "tui":
+        return _tui_main(raw[1:])
     if raw and raw[0] == "doctor":
         return _doctor_main(raw[1:])
     if raw and raw[0] == "install-info":
@@ -413,6 +418,63 @@ def _studio_main(argv: list[str]) -> int:
         print("Could not open the system browser; use the URL above.", file=sys.stderr)
         return 1
     return 0
+
+
+def _tui_stdio_is_tty() -> bool:
+    """Whether stdin AND stdout are interactive — the TUI needs both."""
+    try:
+        return sys.stdin.isatty() and sys.stdout.isatty()
+    except (AttributeError, ValueError):
+        return False
+
+
+def _tui_main(argv: list[str]) -> int:
+    """`exomem tui` — the interactive terminal UI over the product commands.
+
+    Guards run before any TUI import so a piped invocation or a lean install
+    fails in milliseconds with one actionable line, never a traceback.
+    """
+    parser = argparse.ArgumentParser(
+        prog="exomem tui",
+        description=(
+            "Launch the interactive terminal UI: capture, ask, review, adopt, "
+            "packs, status, and settings over the same product commands as the "
+            "CLI and MCP surfaces. Requires the optional `tui` extra."
+        ),
+    )
+    parser.add_argument(
+        "--vault",
+        default=None,
+        help="vault root override for this session (default: $EXOMEM_VAULT_PATH)",
+    )
+    parser.add_argument(
+        "--no-mouse",
+        action="store_true",
+        help=(
+            "do not capture the mouse, so the terminal keeps its own click-drag "
+            "selection (otherwise selecting text needs shift held down)"
+        ),
+    )
+    args = parser.parse_args(argv)
+
+    if not _tui_stdio_is_tty():
+        print(
+            "exomem tui needs an interactive terminal (stdin/stdout is not a TTY).",
+            file=sys.stderr,
+        )
+        return 2
+    if not _module_available("textual"):
+        print(
+            "exomem tui needs the optional TUI stack: run `uv sync --extra tui` "
+            "(source checkout) or `pip install 'exomem[tui]'`, then retry.",
+            file=sys.stderr,
+        )
+        return 1
+
+    from . import tui as tui_package
+
+    vault = str(Path(args.vault).expanduser()) if args.vault else None
+    return tui_package.run(vault=vault, mouse=not args.no_mouse)
 
 
 def _backfill_media_main(argv: list[str]) -> int:
@@ -2243,21 +2305,12 @@ def _print_triage_human(result: dict) -> None:
 
 
 def _core_op_main(argv: list[str]) -> int:
-    from . import capabilities, cli_ops
+    from . import cli_ops, product_invoke
     from . import commands as commands_module
-    from . import schema as schema_module
-    from .vault import resolve_vault
 
     expose_tier2 = _expose_tier2()
     registered_commands = commands_module.product_commands_for("cli", expose_tier2=expose_tier2)
     cmds = {command.name: command for command in registered_commands}
-    surface_descriptor = capabilities.ActiveSurfaceDescriptor(
-        surface="cli",
-        profile="product",
-        tier2_enabled=expose_tier2,
-        product_commands=tuple(command.name for command in registered_commands),
-        exported_aliases=commands_module.simple_action_names(),
-    )
 
     parser = _CLIParser(prog="kb", description=f"Query and write the local {kb_dirname()}.")
     sub = parser.add_subparsers(dest="op", required=True, parser_class=_CLIParser)
@@ -2284,26 +2337,14 @@ def _core_op_main(argv: list[str]) -> int:
             kwargs = cli_ops.coerce(
                 cmd.params, raw, guarded_fields=cmd.guarded_fields, tool=cmd.name, cli=True
             )
-        vault_root = _resolve_core_op_vault(cmd.name, kwargs, resolve_vault)
-        if cmd.needs_schema:
-            injected = (vault_root, schema_module.load_source_schema(vault_root))
-        else:
-            injected = (vault_root,)
-        from .governance import principal as principal_module
-        from .writer_lease import invoke_command
-
-        # The CLI runs in the vault owner's own process: canonical audience is
-        # `owner` (design D5), bound explicitly rather than left to the
-        # unbound-contextvar default so the surface label is accurate.
-        with capabilities.active_surface(
-            surface_descriptor
-        ), principal_module.request_scope(principal_module.owner_principal(surface="cli")):
-            result = invoke_command(
-                cmd,
-                *injected,
-                idempotency_key=os.environ.get("EXOMEM_IDEMPOTENCY_KEY") or None,
-                **kwargs,
-            )
+        # The invocation itself — coercion aside — is the shared CLI-family
+        # seam (`product_invoke`), the same code path the terminal UI drives.
+        result = product_invoke.invoke_prepared(
+            cmd,
+            kwargs,
+            expose_tier2=expose_tier2,
+            idempotency_key=os.environ.get("EXOMEM_IDEMPOTENCY_KEY") or None,
+        )
     except (cli_ops.OpError, ValueError, TypeError, RuntimeError) as e:
         err = cli_ops.error_dict(e)
         if as_json:
@@ -2319,30 +2360,6 @@ def _core_op_main(argv: list[str]) -> int:
     else:
         _print_human(result, op=cmd.name)
     return 1 if isinstance(result, dict) and result.get("strict_failed") else 0
-
-
-def _resolve_core_op_vault(op: str, kwargs: dict, resolve_vault_func) -> Path:
-    """Resolve the CLI vault root, allowing read-only first-run scans pre-init."""
-    try:
-        return resolve_vault_func()
-    except RuntimeError:
-        if not _core_op_allows_uninitialized_vault(op, kwargs):
-            raise
-        override = os.environ.get("EXOMEM_VAULT_PATH")
-        if not override:
-            raise
-        path = Path(override)
-        if not path.is_dir():
-            raise
-        return path
-
-
-def _core_op_allows_uninitialized_vault(op: str, kwargs: dict) -> bool:
-    if op == "browse_memory":
-        return True
-    if op == "adopt_vault":
-        return (kwargs.get("mode") or "scan-only") == "scan-only"
-    return False
 
 
 if __name__ == "__main__":

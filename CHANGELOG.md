@@ -5,6 +5,59 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.37.0](https://github.com/Artexis10/exomem/compare/v0.36.0...v0.37.0) (2026-08-04)
+
+
+### Features
+
+* **governance:** let a scope deny audiences it does not name ([#370](https://github.com/Artexis10/exomem/issues/370)) ([c66cf04](https://github.com/Artexis10/exomem/commit/c66cf0420a2e88f8628f8e7fb4ed203d512f1d7a))
+* **memory:** measure real note connectivity and grow the relation vocabulary ([#369](https://github.com/Artexis10/exomem/issues/369)) ([6107d7b](https://github.com/Artexis10/exomem/commit/6107d7bb9c74aeeb6c9b8d1f336c91f3d815a6bf))
+* **tui:** add exomem tui terminal interface ([#365](https://github.com/Artexis10/exomem/issues/365)) ([1151bfc](https://github.com/Artexis10/exomem/commit/1151bfc656d0ae2e072a2babadb639fb628cd9ab))
+
+
+### Bug Fixes
+
+* **governance:** close five fail-open and disclosure defects in the release plane ([#367](https://github.com/Artexis10/exomem/issues/367)) ([14ba1cc](https://github.com/Artexis10/exomem/commit/14ba1ccf418ebcf52224d7f70c4c6845fa3ff3b5))
+* **hosted:** restore semantic recall in cells and move durability to daily ([#372](https://github.com/Artexis10/exomem/issues/372)) ([8e384f8](https://github.com/Artexis10/exomem/commit/8e384f8a5410d4382b4ecf816a979db419f2a63c))
+
+## [0.36.0](https://github.com/Artexis10/exomem/compare/v0.35.1...v0.36.0) (2026-07-31)
+
+
+### Features
+
+* **hosted:** bind runtime deployment identity ([#361](https://github.com/Artexis10/exomem/issues/361)) ([5dbc34c](https://github.com/Artexis10/exomem/commit/5dbc34cb854e3240d92a6ace3f67c717b6681889))
+
+
+### Bug Fixes
+
+* **media:** stop sidecars nesting copies of themselves ([#363](https://github.com/Artexis10/exomem/issues/363)) ([defd69d](https://github.com/Artexis10/exomem/commit/defd69dc1ce8892168d4940b830d253fa07fabcb))
+
+## [0.35.1](https://github.com/Artexis10/exomem/compare/v0.35.0...v0.35.1) (2026-07-30)
+
+
+### Bug Fixes
+
+* **ci:** authenticate hosted candidate verification ([#358](https://github.com/Artexis10/exomem/issues/358)) ([6cc0718](https://github.com/Artexis10/exomem/commit/6cc0718fc6baf294ed313662a889462aad56f164))
+* **hosted:** harden marketplace contract and admission ([07bdc1c](https://github.com/Artexis10/exomem/commit/07bdc1c622fed752e44091b2015bc8c07ea7cb79))
+
+## [0.35.0](https://github.com/Artexis10/exomem/compare/v0.34.0...v0.35.0) (2026-07-29)
+
+
+### Features
+
+* **governance:** add governed egress and cross-domain bridges ([#349](https://github.com/Artexis10/exomem/issues/349)) ([5bd533a](https://github.com/Artexis10/exomem/commit/5bd533aaeba1204ee2c8aa8e27624b309505588d))
+* **hosted:** prepare marketplace distribution ([#348](https://github.com/Artexis10/exomem/issues/348)) ([253c9aa](https://github.com/Artexis10/exomem/commit/253c9aa365d7afd8829dc7843f1cac53353ac825))
+
+
+### Bug Fixes
+
+* **diagnostics:** confirm latency-gate failures and attribute graph holds ([#344](https://github.com/Artexis10/exomem/issues/344)) ([a9b4bf0](https://github.com/Artexis10/exomem/commit/a9b4bf0b6e65bc493e1d4b37f9e7f9357900d0ca))
+* **governance:** block resolved policy-tree read aliases ([#338](https://github.com/Artexis10/exomem/issues/338)) ([6977e3a](https://github.com/Artexis10/exomem/commit/6977e3add5df585c02af17f7f59b8d1a3797bed9))
+* **hosted:** identify the plugin descriptor by contract, not release ([#345](https://github.com/Artexis10/exomem/issues/345)) ([430d1f5](https://github.com/Artexis10/exomem/commit/430d1f5c8ac37797d2941373f3f3b5d23a565d59))
+* **hosted:** prepare OpenAI marketplace submission ([#350](https://github.com/Artexis10/exomem/issues/350)) ([d103f31](https://github.com/Artexis10/exomem/commit/d103f31ef5443468874fdf2a7d98a5140836cc30))
+* **release:** regenerate hosted plugin artifacts on the release branch ([#342](https://github.com/Artexis10/exomem/issues/342)) ([8b2769b](https://github.com/Artexis10/exomem/commit/8b2769ba35987dcc0d9ed5dd8d1d264852d2c61b))
+* stop media-reconcile log flood from read-only-replica lease refusals ([#317](https://github.com/Artexis10/exomem/issues/317)) ([a4483e9](https://github.com/Artexis10/exomem/commit/a4483e9b95adf9514cd30b5f95ce705250a5e992))
+
 ## [0.34.0](https://github.com/Artexis10/exomem/compare/v0.33.0...v0.34.0) (2026-07-27)
 
 

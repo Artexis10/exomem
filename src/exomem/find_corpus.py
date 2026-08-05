@@ -17,10 +17,15 @@ from .find_types import ParsedPage
 
 log = logging.getLogger(__name__)
 
+# Operational state is not knowledge: `_Governance` (policy/receipts) and
+# `_Adoption` (durable run objects + run manifests) both name items whose own
+# disclosure decisions may be restrictive, so neither may enter the content
+# corpus or be reachable by recall.
 EXCLUDED_DIR_NAMES = frozenset(
     {
         ".graph-coordination",
         ".trash",
+        "_Adoption",
         "_Schema",
         "_Governance",
         "_attachments",
@@ -163,6 +168,7 @@ def parse_page(
     vault_root: Path,
     *,
     content: bytes | None = None,
+    resolved_relative: str | None = None,
 ) -> ParsedPage | None:
     if content is None:
         content = _read_page_bytes(path)
@@ -213,10 +219,13 @@ def parse_page(
 
     title = resolve_display_title(frontmatter, body, path)
 
-    try:
-        rel_path = path.resolve().relative_to(vault_root.resolve()).as_posix()
-    except ValueError:
-        rel_path = path.as_posix()
+    if resolved_relative is not None:
+        rel_path = resolved_relative
+    else:
+        try:
+            rel_path = path.resolve().relative_to(vault_root.resolve()).as_posix()
+        except ValueError:
+            rel_path = path.as_posix()
 
     return ParsedPage(
         path=path,
@@ -225,6 +234,7 @@ def parse_page(
         body=body,
         title=title,
         mtime=mtime,
+        snapshot_hash=hashlib.sha256(content).hexdigest(),
     )
 
 

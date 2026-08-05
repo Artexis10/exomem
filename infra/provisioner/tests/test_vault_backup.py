@@ -39,7 +39,7 @@ def _settings(tmp_path: Path, **overrides: object) -> VaultBackupSettings:
         "recovery_bucket": "exomem-private-alpha-recovery-deadbeef",
         "recovery_upload_key_id": "upload-key-id",
         "recovery_upload_key": "upload-key-secret",
-        "release_manifest_path": tmp_path / "exomem-hosted-release-v1.json",
+        "deployment_lock_path": tmp_path / "selected-deployment-lock.json",
         "scratch_root": tmp_path / "scratch",
     }
     values.update(overrides)
@@ -50,6 +50,8 @@ def test_vault_backup_settings_bind_one_provider_identity_trust_root(tmp_path: P
     settings = _settings(tmp_path)
     assert settings.max_concurrency == 4
     assert settings.scratch_root.is_absolute()
+    with pytest.raises(ValueError, match="deployment lock is unavailable"):
+        _ = settings.deployment_lock
     assert "public" not in " ".join(type(settings).model_fields)
     assert ProviderRecoveryIdentityCodec.from_encoded_seed(
         settings.provider_recovery_signing_key.get_secret_value()

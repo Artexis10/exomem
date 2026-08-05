@@ -58,6 +58,11 @@ class OperationState(StrEnum):
     ERROR = "error"
 
 
+class WireProtocol(StrEnum):
+    V1 = "exomem-cell-provisioner.v1"
+    V2 = "exomem-cell-provisioner.v2"
+
+
 class ResourceKind(StrEnum):
     KUBERNETES_NAMESPACE = "kubernetes-namespace"
     HELM_RELEASE = "helm-release"
@@ -73,6 +78,10 @@ class Operation(Base):
         UniqueConstraint("action", "idempotency_key", name="uq_operation_action_key"),
         CheckConstraint("fence_generation >= 1", name="ck_operation_positive_fence"),
         CheckConstraint("length(canonical_request_sha256) = 64", name="ck_operation_hash"),
+        CheckConstraint(
+            "wire_protocol IN ('exomem-cell-provisioner.v1', 'exomem-cell-provisioner.v2')",
+            name="ck_operation_wire_protocol",
+        ),
         Index("ix_operation_claim", "state", "available_at", "claim_expires_at"),
         Index("ix_operation_tenant_fence", "tenant_id", "fence_generation"),
     )
@@ -82,6 +91,16 @@ class Operation(Base):
         Enum(OperationAction, native_enum=False, length=32), nullable=False
     )
     idempotency_key: Mapped[str] = mapped_column(String(256), nullable=False)
+    wire_protocol: Mapped[WireProtocol] = mapped_column(
+        Enum(
+            WireProtocol,
+            native_enum=False,
+            length=32,
+            values_callable=lambda members: [member.value for member in members],
+        ),
+        server_default=text("'exomem-cell-provisioner.v1'"),
+        nullable=False,
+    )
     canonical_request_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
     tenant_id: Mapped[str] = mapped_column(String(256), nullable=False)
     cell_id: Mapped[str | None] = mapped_column(String(256))

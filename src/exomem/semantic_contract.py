@@ -42,6 +42,24 @@ _TARGET_STATUSES = frozenset({"resolved", "unresolved", "ambiguous"})
 _EXCLUDED_FAMILIES = frozenset(
     {"link", "citation", "derivation", "evidence", "mention", "observation", "provenance"}
 )
+# Origins that can carry a connectivity signal, chosen to mirror
+# `audit._check_relation_debt` exactly: it clears a page on authored relation rows
+# or body wikilinks, and ignores `sources:`.
+#
+# `frontmatter` is deliberately absent. Provenance is a vertical edge to raw
+# material; it says nothing about how this conclusion relates to other
+# conclusions, and every adoption-compiled note has it by construction — so
+# counting it would make the gate a no-op for exactly the bulk-import case that
+# most needs review, and would make the gate more permissive than the audit.
+_CONNECTIVITY_ORIGINS = frozenset(
+    {
+        "markdown_relation",
+        "semantic_relation",
+        "semantic_block",
+        "wikilink",
+    }
+)
+_MAX_WIKILINK_FACTS_PER_PAGE = 32
 _AUTHORED_SCHEMA_ORIGINS = frozenset({"markdown_relation", "semantic_relation"})
 _CREATE_LIKE = frozenset({"create", "replacement", "adoption_compile", "tier2_create"})
 _GRANDFATHERED_OPERATIONS = frozenset(
@@ -157,10 +175,20 @@ class SemanticPageState:
     document: SemanticUnitDocument
     eligible_governed: bool
     eligible_compiled: bool
+    # Valid *target* of a connectivity signal. Wider than `eligible_governed`
+    # (admits append-only Sources) and deliberately tracked separately, because
+    # `eligible_governed_paths` gates the empty-corpus bootstrap disposition.
+    connectable_target: bool = False
+    # (target, line) for each deduped body wikilink not already on a typed
+    # relation row. Retained so fact derivation never re-reads the file.
+    body_wikilinks: tuple[tuple[str, int], ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "frontmatter", _freeze(dict(self.frontmatter)))
         object.__setattr__(self, "projects", tuple(sorted(set(self.projects))))
+        object.__setattr__(
+            self, "body_wikilinks", tuple(tuple(item) for item in self.body_wikilinks)
+        )
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -179,6 +207,7 @@ class SemanticPageState:
             "canonical_bullet_count": self.document.canonical_bullet_count,
             "eligible_governed": self.eligible_governed,
             "eligible_compiled": self.eligible_compiled,
+            "connectable_target": self.connectable_target,
         }
 
 
@@ -419,6 +448,17 @@ class RelationDisposition:
     qualifying_facts: tuple[RelationFact, ...] = ()
     rejected_facts: tuple[RejectedRelationFact, ...] = ()
     actions: tuple[str, ...] = ()
+    # Which lane satisfied a `qualifying_relation`: a deliberate typed epistemic
+    # edge, or the weaker outbound connectivity signal. Carried as a field rather
+    # than a new `kind` on purpose — `relation_review._commit_plan` dispatches on
+    # `kind` through an if/elif chain whose terminal else raises, so an unknown
+    # satisfied kind would fail every commit it newly applied to.
+    qualifying_signal: str = "typed"
+    # Reason and reference recorded with a reviewed-none or bootstrap decision.
+    # Already persisted and already loaded during evaluation; previously dropped
+    # before reaching any caller-visible surface.
+    review_reason: str | None = None
+    review_reference: str | None = None
 
     def __post_init__(self) -> None:
         if self.kind not in _DISPOSITION_KINDS:
@@ -437,6 +477,9 @@ class RelationDisposition:
             "qualifying_facts": [fact.as_dict() for fact in self.qualifying_facts],
             "rejected_facts": [item.as_dict() for item in self.rejected_facts],
             "actions": list(self.actions),
+            "qualifying_signal": self.qualifying_signal,
+            "review_reason": self.review_reason,
+            "review_reference": self.review_reference,
         }
 
 
@@ -850,6 +893,7 @@ class SemanticCorpusContext:
     relation_facts: tuple[RelationFact, ...]
     eligible_governed_paths: frozenset[str]
     eligible_compiled_paths: frozenset[str]
+    connectable_target_paths: frozenset[str]
     inbound: Mapping[str, tuple[RelationFact, ...]]
     outbound: Mapping[str, tuple[RelationFact, ...]]
     activation_census: activation_manifest.ActivationCensus
@@ -885,6 +929,11 @@ class SemanticCorpusContext:
             self,
             "eligible_governed_paths",
             frozenset(self.eligible_governed_paths),
+        )
+        object.__setattr__(
+            self,
+            "connectable_target_paths",
+            frozenset(self.connectable_target_paths),
         )
         object.__setattr__(
             self,
@@ -1031,6 +1080,33 @@ def build_page_state(
         page_type=page_type,
     )
     title = vault.resolve_display_title(frontmatter, body, rel_path)
+    # Collected here, where the body is already in scope, so fact derivation
+    # never re-reads the file. Deduped by normalized target and capped, because
+    # a pathological page would otherwise inflate the corpus fact graph.
+    # Every authored relation row covers its own line, registered or not. An
+    # unregistered label is deliberately NOT degraded into a generic wikilink:
+    # it stays a retained relation so it keeps surfacing for promotion through
+    # `schema_memory(subject="relations")`. Converting it to a link would connect
+    # the page at the cost of hiding the very signal that needs review.
+    typed_lines = {relation.line for relation in document.note_relations} | {
+        relation.line for unit in document.rich_units for relation in unit.relations
+    }
+    body_links: list[tuple[str, int]] = []
+    seen_link_targets: set[str] = set()
+    for match in vault.find_body_wikilinks(body):
+        if len(body_links) >= _MAX_WIKILINK_FACTS_PER_PAGE:
+            break
+        target = match.group(0)[2:-2].split("|", 1)[0].split("#", 1)[0].strip()
+        if not target:
+            continue
+        line = body.count("\n", 0, match.start()) + 1
+        if line in typed_lines:
+            continue
+        key = target.casefold()
+        if key in seen_link_targets:
+            continue
+        seen_link_targets.add(key)
+        body_links.append((target, line))
     parsed = find_module.ParsedPage(
         path=root / rel_path,
         rel_path=rel_path,
@@ -1068,6 +1144,8 @@ def build_page_state(
         document=document,
         eligible_governed=activation.is_eligible_governed_page(root, parsed),
         eligible_compiled=activation.is_eligible_compiled_page(root, parsed),
+        connectable_target=activation.is_connectable_target(root, parsed),
+        body_wikilinks=tuple(body_links),
     )
 
 
@@ -2201,6 +2279,9 @@ def _context_from_resolved_state(
         eligible_compiled_paths=frozenset(
             state.path for state in ordered_pages.values() if state.eligible_compiled
         ),
+        connectable_target_paths=frozenset(
+            state.path for state in ordered_pages.values() if state.connectable_target
+        ),
         inbound=_mapping_of_tuples(
             {
                 key: tuple(sorted(values, key=lambda item: item.identity))
@@ -2397,7 +2478,6 @@ def _derive_relation_facts(
                         "reverse": reverse,
                     }
                 )
-
     occurrences: Counter[tuple[str, str, str, str, str, str]] = Counter()
     facts: list[RelationFact] = []
     for raw in raw_facts:
@@ -2479,12 +2559,21 @@ def _dependency_key(raw_target: str) -> str:
     return path.removesuffix(".md").strip("/").casefold()
 
 
-def qualify_relation(
+def _structural_relation_reasons(
     fact: RelationFact,
     *,
     registry: relation_registry.RelationRegistry,
     corpus: SemanticCorpusContext,
-) -> RelationQualification:
+    target_paths: frozenset[str],
+) -> tuple[list[str], Any]:
+    """Checks both qualification lanes agree on, so they cannot drift apart.
+
+    Everything here is lane-independent: the edge must be authored, resolve
+    unambiguously, originate from an eligible governed page, land on an allowed
+    target, not point at itself, and carry an active in-scope registry entry.
+    Only family and origin policy differ between the lanes, and each applies its
+    own on top of this.
+    """
     reasons: list[str] = []
     definition = registry.definition(fact.canonical_relation or "")
     target_page = corpus.pages.get(fact.logical_target_path)
@@ -2513,10 +2602,7 @@ def qualify_relation(
     if fact.target_status == "resolved":
         if fact.logical_source_path not in corpus.eligible_governed_paths:
             reasons.append("ineligible_target")
-        if (
-            fact.logical_target_path not in corpus.eligible_governed_paths
-            and not mutual_supersession
-        ):
+        if fact.logical_target_path not in target_paths and not mutual_supersession:
             reasons.append("ineligible_target")
         if fact.logical_source_path == fact.logical_target_path:
             reasons.append("self_target")
@@ -2540,12 +2626,51 @@ def qualify_relation(
         )
         if resolution.status == "scope_violation":
             reasons.append("scope_violation")
-        if definition.family in _EXCLUDED_FAMILIES:
-            reasons.append("excluded_family")
+    return reasons, definition
+
+
+def qualify_relation(
+    fact: RelationFact,
+    *,
+    registry: relation_registry.RelationRegistry,
+    corpus: SemanticCorpusContext,
+) -> RelationQualification:
+    """Whether ``fact`` is a deliberate typed epistemic edge.
+
+    Unchanged in meaning: excluded families are rejected, frontmatter only counts
+    for supersession, and targets must be eligible governed pages.
+    """
+    reasons, definition = _structural_relation_reasons(
+        fact, registry=registry, corpus=corpus, target_paths=corpus.eligible_governed_paths
+    )
+    if definition is not None and definition.family in _EXCLUDED_FAMILIES:
+        reasons.append("excluded_family")
     if fact.origin == "frontmatter":
         if definition is None or definition.family != "supersession":
             reasons.append("frontmatter_not_supersession")
     elif fact.origin not in {"markdown_relation", "semantic_relation", "semantic_block"}:
+        reasons.append("unsupported_origin")
+    ordered = tuple(dict.fromkeys(reasons))
+    return RelationQualification(not ordered, ordered)
+
+
+def qualify_connectivity(
+    fact: RelationFact,
+    *,
+    registry: relation_registry.RelationRegistry,
+    corpus: SemanticCorpusContext,
+) -> RelationQualification:
+    """Whether ``fact`` is real connectivity — the weaker sibling lane.
+
+    Permits every excluded family, frontmatter origin for any family, and
+    `wikilink` origin, and resolves targets against the wider connectable set so
+    a cited Source counts. This measures the same `links_to`/`origin: wikilink`
+    edge the retrieval graph already materialises; it does not invent one.
+    """
+    reasons, _definition = _structural_relation_reasons(
+        fact, registry=registry, corpus=corpus, target_paths=corpus.connectable_target_paths
+    )
+    if fact.origin not in _CONNECTIVITY_ORIGINS:
         reasons.append("unsupported_origin")
     ordered = tuple(dict.fromkeys(reasons))
     return RelationQualification(not ordered, ordered)
@@ -2590,13 +2715,15 @@ def _relation_disposition(
     review_is_current = review is not None and is_relation_review_current(review, page, corpus)
     stale_review = review is not None and not review_is_current
     other_governed = corpus.eligible_governed_paths - {page.path}
-    if qualifying:
+
+    def _satisfied_actions() -> tuple[str, ...]:
         if stale_review:
-            actions = ("cleanup_stale_review",)
-        elif review is not None:
-            actions = ("cleanup_relation_review",)
-        else:
-            actions = ()
+            return ("cleanup_stale_review",)
+        if review is not None:
+            return ("cleanup_relation_review",)
+        return ()
+
+    if qualifying:
         return RelationDisposition(
             kind="qualifying_relation",
             satisfied=True,
@@ -2604,17 +2731,52 @@ def _relation_disposition(
             qualifying_directions=tuple(direction for direction, _ in qualifying),
             qualifying_facts=tuple(fact for _, fact in qualifying),
             rejected_facts=tuple(rejected),
-            actions=actions,
+            actions=_satisfied_actions(),
+            qualifying_signal="typed",
+        )
+    # Second lane. Outbound only, and that is a correctness requirement rather
+    # than a preference: the writer appends a back-reference into every cited
+    # source's `ingested_into:`, so counting inbound edges would let a page's own
+    # automatically-written back-references satisfy the gate and make it vacuous.
+    connectivity = [
+        fact
+        for fact in corpus.outbound.get(page.path, ())
+        if qualify_connectivity(fact, registry=corpus.registry, corpus=corpus).qualifies
+    ]
+    if connectivity:
+        return RelationDisposition(
+            kind="qualifying_relation",
+            satisfied=True,
+            current=True,
+            qualifying_directions=("outbound",) * len(connectivity),
+            qualifying_facts=tuple(sorted(connectivity, key=lambda item: item.identity)),
+            rejected_facts=tuple(rejected),
+            actions=_satisfied_actions(),
+            qualifying_signal="connectivity",
         )
     if review_is_current and review is not None and review.kind == "reviewed_none":
-        return RelationDisposition("reviewed_none", True, True, rejected_facts=tuple(rejected))
+        return RelationDisposition(
+            "reviewed_none",
+            True,
+            True,
+            rejected_facts=tuple(rejected),
+            review_reason=review.reason,
+            review_reference=review.reference,
+        )
     if (
         review_is_current
         and review is not None
         and review.kind == "bootstrap"
         and not other_governed
     ):
-        return RelationDisposition("bootstrap", True, True, rejected_facts=tuple(rejected))
+        return RelationDisposition(
+            "bootstrap",
+            True,
+            True,
+            rejected_facts=tuple(rejected),
+            review_reason=review.reason,
+            review_reference=review.reference,
+        )
     automatic_bootstrap = (
         review is None
         and mode == "precommit"
@@ -2969,6 +3131,38 @@ def _disposition_finding(
     )
 
 
+def _typed_edge_finding(
+    page: SemanticPageState, disposition: RelationDisposition
+) -> ContractFinding | None:
+    """Surface a page that connects but names no typed epistemic relationship.
+
+    `warning` severity, so it can never enter the blocking set — the page is
+    genuinely connected, and the gap is a review opportunity rather than a defect.
+    """
+    if not disposition.satisfied or not page.eligible_compiled:
+        return None
+    if disposition.qualifying_signal != "connectivity":
+        return None
+    return ContractFinding(
+        code="RELATION_TYPED_EDGE_ABSENT",
+        severity="warning",
+        path=page.path,
+        span=None,
+        detail=(
+            "connected through wikilinks or cited provenance only; no typed edge "
+            "names what the relationship actually is"
+        ),
+        remediation=(
+            "Optional. When the relationship is nameable, add a row under "
+            "`## Relations` as `- relation_type [[Target]]`, or review "
+            "`connect_memory(operation='suggest-relations')`. Never author an edge "
+            "merely to clear this warning."
+        ),
+        governed_element_identity=("relations", "typed_edge"),
+        resolved_rule=("relations", "*", "typed_edge"),
+    )
+
+
 def _disposition_detail(page: SemanticPageState, disposition: RelationDisposition) -> str:
     if disposition.kind == "stale":
         return "the saved non-edge relation disposition is no longer current"
@@ -3050,6 +3244,9 @@ def _raw_findings(
         disposition_finding = _disposition_finding(page, disposition)
         if disposition_finding is not None:
             findings.append(disposition_finding)
+        typed_edge_finding = _typed_edge_finding(page, disposition)
+        if typed_edge_finding is not None:
+            findings.append(typed_edge_finding)
     return findings, disposition
 
 

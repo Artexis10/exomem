@@ -55,7 +55,14 @@ def test_foundation_defaults_are_cost_safe_and_admin_cidrs_are_explicit() -> Non
     firewall = (FOUNDATION / "firewall.tf").read_text(encoding="utf-8")
 
     assert re.search(r'variable "admin_ssh_cidrs"\s*{(?:(?!default).)*}', variables, re.S)
+    # Pinned to cx33 because Hetzner retired the cx line: no cx type is
+    # available or available_for_migration in any datacenter, so this node
+    # cannot be resized at all. The fleet is sized to the node instead — see
+    # the four-cell USER cap in the capacity contract. Moving to a successor
+    # family costs ~4x for the same memory and is a pricing decision.
     assert 'default     = "cx33"' in variables
+    assert 'condition     = var.server_type == "cx33"' in variables
+    # Sizing must not quietly relax where the data sits or what protects it.
     assert 'default     = "fsn1"' in variables
     assert 'default     = "ubuntu-24.04"' in variables
     assert 'default     = "10.50.1.10"' in variables
@@ -77,6 +84,7 @@ def test_foundation_defaults_are_cost_safe_and_admin_cidrs_are_explicit() -> Non
     assert 'output "estimated_fixed_monthly_eur_ex_vat"' in outputs
     assert 'output "control_hostname"' in outputs
     assert 'output "transfer_hostname"' in outputs
+    # 8.49 (cx33, fsn1) + 0.50 (primary IPv4), from the Hetzner pricing API.
     assert re.search(r"value\s*=\s*8\.99", outputs)
 
 
@@ -99,14 +107,14 @@ def test_cloudflare_tunnel_has_exact_control_and_transfer_ingress() -> None:
 
 def test_durability_has_object_lock_retention_and_split_credentials() -> None:
     storage = (DURABILITY / "storage.tf").read_text(encoding="utf-8")
-    outputs = (DURABILITY / "outputs.tf").read_text(encoding="utf-8")
 
     assert storage.count("file_lock_configuration") == 2
     assert storage.count("is_file_lock_enabled = true") == 2
     assert storage.count('mode = "governance"') == 2
     assert storage.count("duration = 7") == 2
     assert storage.count('unit     = "days"') == 2
-    assert storage.count("days_from_uploading_to_hiding = 30") == 2
+    # recovery, database_backup, and etcd_snapshot; user_export uses 31.
+    assert storage.count("days_from_uploading_to_hiding = 30") == 3
     assert 'resource "b2_bucket" "user_export"' in storage
     user_export = storage.split('resource "b2_bucket" "user_export"', 1)[1].split(
         'resource "b2_bucket" "database_backup"', 1
@@ -130,6 +138,47 @@ def test_durability_has_object_lock_retention_and_split_credentials() -> None:
     assert 'key_name     = "exomem-database-backup-upload"' in storage
     assert 'key_name     = "exomem-database-backup-restore-jit"' in storage
     assert 'key_name     = "exomem-database-backup-delete-jit"' not in storage
+
+
+def test_etcd_snapshots_use_an_unlocked_bucket_and_a_write_only_key() -> None:
+    """etcd snapshots deliberately forgo Object Lock, and must not share a bucket
+    with anything that needs it.
+
+    A bucket carrying an Object Lock default retention applies lock parameters to
+    every PUT, and B2 then demands a Content-MD5 or x-amz-checksum header that
+    k3s's uploader does not send. Object Lock cannot be disabled once enabled, so
+    sharing the database-backup bucket would have meant dropping ITS retention and
+    stripping immutability from the provisioner's Postgres backups.
+    """
+    storage = (DURABILITY / "storage.tf").read_text(encoding="utf-8")
+    outputs = (DURABILITY / "outputs.tf").read_text(encoding="utf-8")
+
+    assert 'resource "b2_bucket" "etcd_snapshot"' in storage
+    etcd_bucket = storage.split('resource "b2_bucket" "etcd_snapshot"', 1)[1].split(
+        "\nresource ", 1
+    )[0]
+    assert "file_lock_configuration" not in etcd_bucket
+    assert "days_from_uploading_to_hiding = 30" in etcd_bucket
+    assert "prevent_destroy = true" in etcd_bucket
+    assert 'mode      = "SSE-B2"' in etcd_bucket
+
+    # Both etcd keys must target the unlocked bucket, not the database one.
+    for key in ("etcd_snapshot_upload", "etcd_snapshot_restore"):
+        block = storage.split(f'resource "b2_application_key" "{key}"', 1)[1].split(
+            "\nresource ", 1
+        )[0]
+        assert "bucket_ids   = [b2_bucket.etcd_snapshot.bucket_id]" in block, key
+        assert "b2_bucket.database_backup" not in block, key
+
+    # The node holds the upload credential, so it must not be able to delete its
+    # own etcd history. Expiry belongs to the bucket lifecycle rule instead.
+    upload = storage.split('resource "b2_application_key" "etcd_snapshot_upload"', 1)[
+        1
+    ].split("\nresource ", 1)[0]
+    assert 'capabilities = ["listBuckets", "listFiles", "writeFiles"]' in upload
+    assert "deleteFiles" not in upload
+
+    assert "etcd_snapshot_bucket_name" in outputs
     assert '"bypassGovernance"' not in storage
     assert 'key_name     = "exomem-etcd-snapshot-upload"' in storage
     assert 'key_name     = "exomem-etcd-snapshot-restore-jit"' in storage

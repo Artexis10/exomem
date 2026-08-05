@@ -20,6 +20,8 @@ from exomem_provisioner.models import (
     ResourceKind,
 )
 from exomem_provisioner.repository import (
+    AdmissionPolicy,
+    AdmissionRejected,
     ClaimConflict,
     IdempotencyConflict,
     ImmutableMetadataConflict,
@@ -28,6 +30,7 @@ from exomem_provisioner.repository import (
     _claim_statement,
     canonical_request_sha256,
 )
+from exomem_provisioner.wire_protocol import WIRE_PROTOCOL_V1, WIRE_PROTOCOL_V2
 
 
 def _settings(database: Path) -> ProvisionerSettings:
@@ -51,7 +54,7 @@ def _request(**overrides: object) -> dict[str, object]:
         "protocolVersion": "exomem-hosted.v1",
         "releaseVersion": "0.22.0",
         "serviceCredential": "service-credential-sentinel-000000000",
-        "workerPolicy": {"workerCount": 0, "semantic": False, "media": False},
+        "workerPolicy": {"workerCount": 2, "semantic": True, "media": False},
     }
     value.update(overrides)
     return value
@@ -111,6 +114,142 @@ async def test_submit_replays_exact_request_and_conflicts_changed_body(
 
     other_action = await repository.submit("health", "idempotency-alpha", _request())
     assert other_action.id != first.id
+
+
+@pytest.mark.asyncio
+async def test_submission_admission_is_atomic_and_protocol_bound(
+    repository: OperationRepository,
+) -> None:
+    legacy = ("0.22.0", "exomem-hosted.v1")
+    forward_target = {
+        "releaseVersion": "0.35.1",
+        "protocolVersion": "1",
+        "agentProfile": "hosted-alpha-agent-v1",
+        "gatewayContractDigest": "a" * 64,
+        "commandFingerprint": "b" * 64,
+        "schemaDigest": "c" * 64,
+    }
+    contract = AdmissionPolicy(
+        mode="contract",
+        legacy_catalog=frozenset(),
+        forward_target=forward_target,
+    )
+
+    with pytest.raises(AdmissionRejected):
+        await repository.submit(
+            "provision",
+            "fresh-v1-contract",
+            _request(),
+            wire_protocol=WIRE_PROTOCOL_V1,
+            admission=contract,
+        )
+    assert await repository.get("provision", "fresh-v1-contract") is None
+
+    expand = AdmissionPolicy(
+        mode="expand",
+        legacy_catalog=frozenset({legacy}),
+        forward_target=forward_target,
+    )
+    operation = await repository.submit(
+        "provision",
+        "protocol-bound",
+        _request(),
+        wire_protocol=WIRE_PROTOCOL_V1,
+        admission=expand,
+    )
+    assert operation.wire_protocol == WIRE_PROTOCOL_V1
+
+    with pytest.raises(IdempotencyConflict):
+        await repository.submit(
+            "provision",
+            "protocol-bound",
+            {**_request(), "runtimeTarget": forward_target},
+            wire_protocol=WIRE_PROTOCOL_V2,
+            admission=expand,
+        )
+
+    v2_request = {
+        **_request(operationId="v2-target", fenceGeneration=8),
+        "runtimeTarget": forward_target,
+    }
+    v2_request.pop("releaseVersion")
+    v2_request.pop("protocolVersion")
+    v2 = await repository.submit(
+        "provision",
+        "v2-target",
+        v2_request,
+        wire_protocol=WIRE_PROTOCOL_V2,
+        admission=expand,
+    )
+    assert v2.wire_protocol == WIRE_PROTOCOL_V2
+    with pytest.raises(AdmissionRejected):
+        await repository.submit(
+            "provision",
+            "wrong-v2-target",
+            {**v2_request, "operationId": "wrong-v2-target", "runtimeTarget": {**forward_target, "schemaDigest": "d" * 64}},
+            wire_protocol=WIRE_PROTOCOL_V2,
+            admission=expand,
+        )
+    assert await repository.get("provision", "wrong-v2-target") is None
+
+
+@pytest.mark.asyncio
+async def test_contract_replays_only_final_v1_without_a_retained_catalog_unit(
+    repository: OperationRepository,
+) -> None:
+    legacy = ("0.22.0", "exomem-hosted.v1")
+    target = {
+        "releaseVersion": "0.35.1",
+        "protocolVersion": "1",
+        "agentProfile": "hosted-alpha-agent-v1",
+        "gatewayContractDigest": "a" * 64,
+        "commandFingerprint": "b" * 64,
+        "schemaDigest": "c" * 64,
+    }
+    request = _request()
+    operation = await repository.submit(
+        "provision",
+        "final-v1-replay",
+        request,
+        wire_protocol=WIRE_PROTOCOL_V1,
+        admission=AdmissionPolicy("expand", frozenset({legacy}), target),
+    )
+    claim = await repository.claim_next("final-v1-worker")
+    assert claim is not None and claim.id == operation.id and claim.claim_token is not None
+    await repository.complete(
+        operation.id,
+        {},
+        worker_id="final-v1-worker",
+        claim_token=claim.claim_token,
+        claim_generation=claim.claim_generation,
+    )
+
+    replay = await repository.submit(
+        "provision",
+        "final-v1-replay",
+        request,
+        wire_protocol=WIRE_PROTOCOL_V1,
+        admission=AdmissionPolicy("contract", frozenset(), target),
+    )
+    assert replay.id == operation.id and replay.state is OperationState.FINAL
+
+    pending = await repository.submit(
+        "provision",
+        "pending-v1-replay",
+        _request(operationId="pending-v1"),
+        wire_protocol=WIRE_PROTOCOL_V1,
+        admission=AdmissionPolicy("expand", frozenset({legacy}), target),
+    )
+    with pytest.raises(AdmissionRejected):
+        await repository.submit(
+            "provision",
+            "pending-v1-replay",
+            _request(operationId="pending-v1"),
+            wire_protocol=WIRE_PROTOCOL_V1,
+            admission=AdmissionPolicy("contract", frozenset(), target),
+        )
+    unchanged = await repository.get("provision", "pending-v1-replay")
+    assert unchanged is not None and unchanged.id == pending.id and unchanged.state is pending.state
 
 
 @pytest.mark.asyncio

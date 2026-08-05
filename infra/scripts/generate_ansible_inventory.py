@@ -45,16 +45,19 @@ def main() -> int:
         raise SystemExit(str(error)) from error
 
     inventory = {
-        "_meta": {
-            "hostvars": {
-                "exomem-alpha": {
-                    "ansible_host": public_ip,
-                    "ansible_user": args.user,
-                    "private_node_ip": private_ip,
+        "all": {
+            "children": {
+                "hosted_nodes": {
+                    "hosts": {
+                        "exomem-alpha": {
+                            "ansible_host": public_ip,
+                            "ansible_user": args.user,
+                            "private_node_ip": private_ip,
+                        }
+                    }
                 }
             }
-        },
-        "all": {"children": {"hosted_nodes": {"hosts": {"exomem-alpha": {}}}}},
+        }
     }
 
     args.inventory.parent.mkdir(parents=True, exist_ok=True)

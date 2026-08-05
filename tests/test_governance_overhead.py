@@ -9,16 +9,26 @@ leaves are registry-level plumbing, not a shipped user-facing tool.
 
 from __future__ import annotations
 
+import copy
+import gc
+import math
+import os
 import statistics
+import subprocess
 import sys
 import time
+import uuid
+from collections.abc import Callable, Mapping
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from exomem import commands, governance
 from exomem import find as find_module
+from exomem.find_types import Hit, SemanticUnitHit
 from exomem.governance import store
+from exomem.governance.principal import RequestPrincipal, request_scope
 
 
 def test_empty_policy_short_circuit(vault: Path) -> None:
@@ -106,6 +116,7 @@ if str(_SCRIPTS) not in sys.path:
 from synth_vault import gen_dense_vault  # noqa: E402
 
 from exomem.governance import egress as egress_module  # noqa: E402
+from exomem.governance import receipts as receipts_module  # noqa: E402
 from exomem.governance import scrubber as scrubber_module  # noqa: E402
 
 _OVERHEAD_N_NOTES = 2000
@@ -117,8 +128,17 @@ _OVERHEAD_QUERIES = (
 )
 #: Median added milliseconds `op_find` may spend in the release plane on a
 #: vault with no `_Governance/` directory. The empty-policy fast path is a
-#: single `is_dir()` plus the projector's allow-list filter per hit.
+#: bounded set of governance-marker, sidecar, and lifecycle probes plus the
+#: projector's allow-list filter per hit.
 _EMPTY_POLICY_BUDGET_MS = 5.0
+#: Direct entry-point work must not grow with corpus size. This is deliberately
+#: a ratio, not an absolute microsecond ceiling: shared runners can delay an
+#: entire timing batch, but the same bounded probes should cost the same on a
+#: 50-note and a 1,000-note vault. A 3x ceiling matches the other load-invariant
+#: gates in this module while still catching any accidental corpus walk.
+_ENTRY_POINT_SCALE_RATIO_CEILING = 3.0
+_ENTRY_POINT_BATCH_CALLS = 1000
+_ENTRY_POINT_SAMPLES = 5
 #: Scrubber budget: < 2 ms per 100 KB of result text (design D7).
 _SCRUBBER_BUDGET_MS_PER_100KB = 2.0
 
@@ -189,6 +209,32 @@ def _best_ms(fn, samples: int) -> float:
         fn()
         elapsed.append((time.perf_counter() - start) * 1000.0)
     return min(elapsed)
+
+
+def _interleaved_best_per_call_us(
+    small_fn: Callable[[], Any], large_fn: Callable[[], Any]
+) -> tuple[float, float]:
+    """Return the least-contaminated per-call costs for two fixed-work paths.
+
+    Each sample times a batch large enough to span scheduler quanta, and the
+    order alternates so a transient load spike cannot systematically favor one
+    corpus size. Scheduling noise only adds time, so the minimum batch for each
+    side is the useful estimate, as with `_best_ms` above.
+    """
+    small_fn()
+    large_fn()
+    elapsed: dict[str, list[float]] = {"small": [], "large": []}
+    functions = {"small": small_fn, "large": large_fn}
+    for sample in range(_ENTRY_POINT_SAMPLES):
+        order = ("small", "large") if sample % 2 == 0 else ("large", "small")
+        for label in order:
+            start = time.perf_counter()
+            for _ in range(_ENTRY_POINT_BATCH_CALLS):
+                functions[label]()
+            elapsed[label].append(
+                (time.perf_counter() - start) / _ENTRY_POINT_BATCH_CALLS * 1_000_000
+            )
+    return min(elapsed["small"]), min(elapsed["large"])
 
 
 def _skip_unless_quiet(control_ms: float, ratio: float, ratio_ceiling: float) -> None:
@@ -289,23 +335,445 @@ def test_empty_policy_op_find_overhead_under_budget(tmp_path: Path, monkeypatch)
 
 def test_empty_policy_gate_entry_points_are_constant_time(tmp_path: Path) -> None:
     """The two entry points the release plane adds to `op_find` on an
-    ungoverned vault: a `policy.load` that short-circuits on `is_dir()`, and
-    an `annotate_hits` that returns its input. Both are microseconds, and
-    pinning them directly is what makes the paired A/B above interpretable."""
-    vault = tmp_path / "dense-small"
-    gen_dense_vault(vault, 50)
-    for _ in range(20):
-        egress_module.gate_state(vault)
-    start = time.perf_counter()
-    for _ in range(200):
-        egress_module.gate_state(vault)
-    gate_us = (time.perf_counter() - start) / 200 * 1_000_000
-    start = time.perf_counter()
-    for _ in range(200):
-        egress_module.annotate_hits(vault, [], limit=10)
-    annotate_us = (time.perf_counter() - start) / 200 * 1_000_000
-    assert gate_us < 500, f"gate_state cost {gate_us:.1f} us per call"
-    assert annotate_us < 500, f"annotate_hits cost {annotate_us:.1f} us per call"
+    ungoverned vault: a bounded policy/lifecycle probe and an `annotate_hits`
+    call that returns its input. Their cost must not grow with the corpus.
+
+    The end-to-end paired A/B above owns the absolute 5 ms release-plane
+    budget. This direct gate protects the constant-work invariant with an
+    interleaved ratio so scheduler contention cannot turn a healthy path into
+    a false release failure.
+    """
+    small_vault = tmp_path / "dense-small"
+    large_vault = tmp_path / "dense-large"
+    gen_dense_vault(small_vault, 50, links_per_note=0)
+    gen_dense_vault(large_vault, 1000, links_per_note=0)
+
+    small_gate_us, large_gate_us = _interleaved_best_per_call_us(
+        lambda: egress_module.gate_state(small_vault),
+        lambda: egress_module.gate_state(large_vault),
+    )
+    gate_ratio = max(small_gate_us, large_gate_us) / min(small_gate_us, large_gate_us)
+    assert gate_ratio < _ENTRY_POINT_SCALE_RATIO_CEILING, (
+        f"gate_state scaled {gate_ratio:.1f}x with corpus size "
+        f"(small={small_gate_us:.1f} us, large={large_gate_us:.1f} us)"
+    )
+
+    small_annotate_us, large_annotate_us = _interleaved_best_per_call_us(
+        lambda: egress_module.annotate_hits(small_vault, [], limit=10),
+        lambda: egress_module.annotate_hits(large_vault, [], limit=10),
+    )
+    annotate_ratio = max(small_annotate_us, large_annotate_us) / min(
+        small_annotate_us, large_annotate_us
+    )
+    assert annotate_ratio < _ENTRY_POINT_SCALE_RATIO_CEILING, (
+        f"annotate_hits scaled {annotate_ratio:.1f}x with corpus size "
+        f"(small={small_annotate_us:.1f} us, large={large_annotate_us:.1f} us)"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Governed receipt append overhead micro-gate (add-disclosure-receipts 5.2)
+# ---------------------------------------------------------------------------
+
+_RECEIPT_WARMUP_PAIRS = 30
+_RECEIPT_MEASURED_PAIRS = 200
+_RECEIPT_MEDIAN_CEILING_MS = 3.0
+_RECEIPT_P95_CEILING_MS = 8.0
+_RECEIPT_PRINCIPAL = RequestPrincipal(audience_id="external", surface="test")
+_RECEIPT_MICROGATE_CHILD_ENV = "EXOMEM_RECEIPT_MICROGATE_CHILD"
+
+
+def _write_receipt_perf_policy(vault: Path) -> None:
+    scopes = (
+        (
+            "01ARZ3NDEKTSV4RRFFQ69G5A01",
+            "Knowledge Base/Search/l5-*.md",
+            5,
+            "01ARZ3NDEKTSV4RRFFQ69G5B01",
+        ),
+        (
+            "01ARZ3NDEKTSV4RRFFQ69G5A02",
+            "Knowledge Base/Search/l6-*.md",
+            6,
+            "01ARZ3NDEKTSV4RRFFQ69G5B02",
+        ),
+        (
+            "01ARZ3NDEKTSV4RRFFQ69G5A03",
+            "Knowledge Base/Structure/blocked-*.md",
+            0,
+            "01ARZ3NDEKTSV4RRFFQ69G5B03",
+        ),
+        (
+            "01ARZ3NDEKTSV4RRFFQ69G5A04",
+            "Knowledge Base/Structure/released-*.md",
+            6,
+            "01ARZ3NDEKTSV4RRFFQ69G5B04",
+        ),
+    )
+    governance_root = vault / "Knowledge Base" / "_Governance"
+    for scope_id, path_glob, ceiling, rule_id in scopes:
+        scope = governance_root / "scopes" / f"perf-{scope_id[-1]}.yaml"
+        scope.parent.mkdir(parents=True, exist_ok=True)
+        scope.write_text(
+            "governance_version: 1\n"
+            f"id: {scope_id}\n"
+            f'paths: ["{path_glob}"]\n',
+            encoding="utf-8",
+        )
+        rule = governance_root / "rules" / f"perf-{rule_id[-1]}.yaml"
+        rule.parent.mkdir(parents=True, exist_ok=True)
+        rule.write_text(
+            "governance_version: 1\n"
+            f"id: {rule_id}\n"
+            f'scope_ids: ["{scope_id}"]\n'
+            "audience: external\n"
+            f"ceiling: {ceiling}\n",
+            encoding="utf-8",
+        )
+
+
+def _receipt_perf_hit(path: str, index: int) -> Hit | SemanticUnitHit:
+    if index % 2 == 0:
+        return Hit(
+            path=path,
+            type="insight",
+            scope="perf",
+            title=f"Receipt performance page {index}",
+            updated="2026-07-27",
+            excerpt="bounded receipt performance excerpt",
+            bm25_rank=index + 1,
+        )
+    return SemanticUnitHit(
+        unit_ref=f"unit-{index}",
+        form="compact",
+        category_raw="config",
+        category_key="config",
+        category="config",
+        kind="observation",
+        content="bounded receipt performance unit",
+        excerpt="bounded receipt performance unit",
+        tags=[],
+        context=None,
+        source_anchor=None,
+        source_span={},
+        source_hash=f"{index + 1:064x}",
+        parent_path=path,
+        parent_ref=None,
+        parent_title=f"Receipt performance page {index}",
+        parent_type="insight",
+        parent_status="active",
+        parent_updated="2026-07-27",
+        bm25_rank=index + 1,
+    )
+
+
+def _seed_receipt_perf_vault(vault: Path) -> list[Hit | SemanticUnitHit]:
+    _write_receipt_perf_policy(vault)
+    hits: list[Hit | SemanticUnitHit] = []
+    for index in range(10):
+        level = 5 if index < 5 else 6
+        path = f"Knowledge Base/Search/l{level}-{index:02d}.md"
+        target = vault / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(
+            "---\ntype: insight\n---\n"
+            f"# Receipt performance page {index}\n\n"
+            "Bounded content for the governed mixed search.\n",
+            encoding="utf-8",
+        )
+        hits.append(_receipt_perf_hit(path, index))
+    structure = vault / "Knowledge Base" / "Structure"
+    structure.mkdir(parents=True, exist_ok=True)
+    for prefix in ("blocked", "released"):
+        for index in range(50):
+            (structure / f"{prefix}-{index:02d}.md").write_text(
+                "---\ntype: insight\n---\n# Structure entry\n",
+                encoding="utf-8",
+            )
+    return hits
+
+
+def _serializing_receipt_sink() -> Callable[..., dict[str, Any]]:
+    """Pure append_event drop-in: validate and serialize, but touch no storage."""
+    state: dict[str, Any] = {"seq": 0, "prev": receipts_module.GENESIS_HASH}
+    instance_id = "f" * 32
+
+    def append_event(
+        _vault_root: Path,
+        *,
+        event_type: str,
+        payload: Mapping[str, Any],
+        phase: str = "recorded",
+        event_id: str | None = None,
+        timestamp: str | None = None,
+        critical: bool = False,
+    ) -> dict[str, Any]:
+        receipts_module._validate_event(event_type, phase, payload)
+        if event_id is not None and not receipts_module._valid_event_id(
+            event_type, phase, event_id
+        ):
+            raise receipts_module.ReceiptError(
+                "receipt event id is not opaque for its event phase"
+            )
+        if event_type == "critical" and event_id is None:
+            raise receipts_module.ReceiptError(
+                "critical receipts require a deterministic event id"
+            )
+        normalized_timestamp, _parsed = receipts_module._timestamp(
+            timestamp or receipts_module._now()
+        )
+        record: dict[str, Any] = {
+            "schema": receipts_module.SCHEMA,
+            "event_id": event_id or uuid.uuid4().hex,
+            "event_type": event_type,
+            "phase": phase,
+            "timestamp": normalized_timestamp,
+            "instance_id": instance_id,
+            "seq": state["seq"] + 1,
+            "prev": state["prev"],
+            "durable": critical,
+            **dict(payload),
+        }
+        record["hash"] = receipts_module._record_hash(record)
+        encoded = receipts_module._canonical_json(record)
+        if len(encoded) + 1 > receipts_module.MAX_RECORD_BYTES:
+            raise receipts_module.ReceiptError(
+                "receipt record exceeds the bounded tail window"
+            )
+        state.update(seq=record["seq"], prev=record["hash"])
+        return record
+
+    return append_event
+
+
+def _receipt_perf_invoke(
+    vault: Path,
+    command_name: str,
+    leaf: Callable[[], Any],
+) -> tuple[Any, tuple[dict[str, Any], ...]]:
+    with request_scope(_RECEIPT_PRINCIPAL):
+        with egress_module.disclosure_boundary(vault, command_name) as collector:
+            projection = leaf()
+            projection = egress_module.postfilter(command_name, projection, vault)
+            egress_module.emit_boundary_receipt(collector)
+    return projection, tuple(outcome.value for outcome in collector.outcomes)
+
+
+def _nearest_rank(samples: list[float], percentile: int) -> float:
+    ordered = sorted(samples)
+    return ordered[max(0, math.ceil(len(ordered) * percentile / 100) - 1)]
+
+
+def _receipt_distribution(samples: list[float]) -> dict[str, float | int]:
+    return {
+        "n": len(samples),
+        "min": min(samples),
+        "p50": statistics.median(samples),
+        "p90": _nearest_rank(samples, 90),
+        "p95": _nearest_rank(samples, 95),
+        "max": max(samples),
+    }
+
+
+def _format_receipt_distribution(label: str, samples: list[float]) -> str:
+    distribution = _receipt_distribution(samples)
+    return (
+        f"{label}: n={distribution['n']} min={distribution['min']:.3f} "
+        f"p50={distribution['p50']:.3f} p90={distribution['p90']:.3f} "
+        f"p95={distribution['p95']:.3f} max={distribution['max']:.3f} ms"
+    )
+
+
+def _measure_receipt_case(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    case_name: str,
+    invoke: Callable[[], tuple[Any, tuple[dict[str, Any], ...]]],
+) -> tuple[list[float], list[float], list[float]]:
+    real_append = receipts_module.append_event
+    sink_append = _serializing_receipt_sink()
+
+    def call(append: Callable[..., dict[str, Any]]) -> tuple[int, Any]:
+        monkeypatch.setattr(receipts_module, "append_event", append)
+        started = time.perf_counter_ns()
+        result = invoke()
+        return time.perf_counter_ns() - started, result
+
+    # Like timeit, exclude cyclic-collector scheduling from the timed region.
+    # Both arms still allocate, validate, hash, and serialize the same receipt;
+    # refcount cleanup remains in-band. A collection inherited from hundreds of
+    # earlier full-suite tests would otherwise land arbitrarily in one adjacent
+    # arm and measure process history rather than incremental receipt storage.
+    gc_was_enabled = gc.isenabled()
+    gc.collect()
+    if gc_was_enabled:
+        gc.disable()
+    try:
+        _real_preflight_ns, real_preflight = call(real_append)
+        _sink_preflight_ns, sink_preflight = call(sink_append)
+        assert real_preflight == sink_preflight, (
+            f"{case_name} real/sink final projections or outcome sets differ"
+        )
+        assert real_preflight[1], f"{case_name} preflight recorded no governed outcomes"
+
+        for pair in range(_RECEIPT_WARMUP_PAIRS):
+            order = (
+                (real_append, sink_append)
+                if pair % 2 == 0
+                else (sink_append, real_append)
+            )
+            for append in order:
+                call(append)
+
+        real_ms: list[float] = []
+        sink_ms: list[float] = []
+        overhead_ms: list[float] = []
+        for pair in range(_RECEIPT_MEASURED_PAIRS):
+            order = (
+                (real_append, sink_append)
+                if pair % 2 == 0
+                else (sink_append, real_append)
+            )
+            measured = {append: call(append)[0] / 1_000_000 for append in order}
+            real = measured[real_append]
+            sink = measured[sink_append]
+            real_ms.append(real)
+            sink_ms.append(sink)
+            overhead_ms.append(real - sink)
+        return real_ms, sink_ms, overhead_ms
+    finally:
+        monkeypatch.setattr(receipts_module, "append_event", real_append)
+        if gc_was_enabled:
+            gc.enable()
+
+
+@pytest.mark.timeout(240)
+def test_governed_receipt_append_overhead_under_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    if os.environ.get(_RECEIPT_MICROGATE_CHILD_ENV) != "1":
+        # Performance is process-history-sensitive: the full suite reaches this
+        # test after thousands of threads/subprocesses and otherwise measures
+        # that accumulated interpreter state. Run exactly one fresh worker; the
+        # guarded child executes both paired cases together in one process.
+        repo_root = Path(__file__).resolve().parents[1]
+        env = dict(os.environ)
+        env[_RECEIPT_MICROGATE_CHILD_ENV] = "1"
+        env["EXOMEM_DISABLE_EMBEDDINGS"] = "1"
+        existing_pythonpath = env.get("PYTHONPATH")
+        env["PYTHONPATH"] = str(repo_root / "src") + (
+            f"{os.pathsep}{existing_pythonpath}" if existing_pythonpath else ""
+        )
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "pytest",
+                "-q",
+                "-s",
+                f"{Path(__file__).resolve()}::"
+                "test_governed_receipt_append_overhead_under_budget",
+            ],
+            cwd=repo_root,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=180,
+            check=False,
+        )
+        output = completed.stdout + completed.stderr
+        if output:
+            print(output, end="")
+        assert completed.returncode == 0, (
+            "fresh receipt microgate worker failed\n" + output
+        )
+        return
+
+    monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")
+    monkeypatch.setenv("EXOMEM_WRITER_LEASE_STATE_DIR", str(tmp_path / "runtime-state"))
+    vault = tmp_path / "receipt-overhead"
+    hits = _seed_receipt_perf_vault(vault)
+    monkeypatch.setattr(
+        find_module,
+        "find",
+        lambda *_args, **_kwargs: copy.deepcopy(hits),
+    )
+    monkeypatch.setattr(commands.query_log, "log_find_call", lambda **_kwargs: None)
+
+    cases: tuple[
+        tuple[str, str, Callable[[], Any], int, dict[int, int]], ...
+    ] = (
+        (
+            "mixed-search",
+            "find",
+            lambda: commands.op_find(
+                vault,
+                query="receipt performance",
+                result_level="mixed",
+                limit=10,
+                mode="keyword",
+                graph=False,
+                rerank=False,
+            ),
+            10,
+            {5: 5, 6: 5},
+        ),
+        (
+            "structure-reduction",
+            "list_directory",
+            lambda: commands.op_list_directory(
+                vault,
+                path="Knowledge Base/Structure",
+            ),
+            100,
+            {0: 50, 6: 50},
+        ),
+    )
+    violations: list[str] = []
+    for case_name, command_name, leaf, expected_outcomes, expected_levels in cases:
+        def invoke(
+            leaf: Callable[[], Any] = leaf,
+            command_name: str = command_name,
+        ) -> tuple[Any, tuple[dict[str, Any], ...]]:
+            return _receipt_perf_invoke(vault, command_name, leaf)
+
+        projection, outcomes = invoke()
+        assert len(outcomes) == expected_outcomes
+        assert {
+            level: sum(outcome.get("level") == level for outcome in outcomes)
+            for level in expected_levels
+        } == expected_levels
+        if case_name == "mixed-search":
+            assert len(projection) == 10
+            assert {
+                "semantic_unit" if item.get("result_type") == "semantic_unit" else "page"
+                for item in projection
+            } == {"page", "semantic_unit"}
+        else:
+            assert len(projection["entries"]) == 50
+
+        real_ms, sink_ms, overhead_ms = _measure_receipt_case(
+            monkeypatch,
+            case_name=case_name,
+            invoke=invoke,
+        )
+        report = "\n".join(
+            (
+                _format_receipt_distribution("real", real_ms),
+                _format_receipt_distribution("sink", sink_ms),
+                _format_receipt_distribution("overhead", overhead_ms),
+            )
+        )
+        print(f"{case_name}\n{report}")
+        median = statistics.median(overhead_ms)
+        p95 = _nearest_rank(overhead_ms, 95)
+        if median > _RECEIPT_MEDIAN_CEILING_MS or p95 > _RECEIPT_P95_CEILING_MS:
+            violations.append(
+                f"{case_name} receipt overhead exceeded median "
+                f"{_RECEIPT_MEDIAN_CEILING_MS:.1f} ms / p95 "
+                f"{_RECEIPT_P95_CEILING_MS:.1f} ms ceilings\n{report}"
+            )
+    assert not violations, "\n\n".join(violations)
 
 
 def test_scrubber_throughput_under_budget() -> None:

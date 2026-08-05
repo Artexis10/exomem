@@ -235,10 +235,12 @@ def test_unresolvable_membership_makes_the_decision_fail_closed(
     membership.clear_memo()
     egress.clear_decision_memo()
 
-    def _boom(page, policy_arg):
+    def _boom(page, policy_arg, *, content_hash):
+        assert len(content_hash) == 64
+        assert all(char in "0123456789abcdef" for char in content_hash)
         raise membership.MembershipUnresolved("Knowledge Base/Notes/Patterns/p.md")
 
-    monkeypatch.setattr(egress.membership_module, "evaluate", _boom)
+    monkeypatch.setattr(egress.membership_module, "evaluate_snapshot", _boom)
     decision = egress._decide_path(
         vault,
         "Knowledge Base/Notes/Patterns/p.md",

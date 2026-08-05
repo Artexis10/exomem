@@ -740,6 +740,8 @@ class PrivateCellApiAdapter:
         config: LifecycleConfig,
         expected_release: str,
         expected_worker_policy: dict[str, Any],
+        require_runtime_identity: bool = False,
+        expected_contract_digest: str | None = None,
     ) -> HealthObservation:
         live = await self._call(
             "GET",
@@ -776,6 +778,40 @@ class PrivateCellApiAdapter:
             if isinstance(digest, dict) and digest.get("algorithm") == "sha256"
             else None
         )
+        agent_profile: str | None = None
+        command_fingerprint: str | None = None
+        schema_digest: str | None = None
+        if require_runtime_identity:
+            if config.runtime_target is None:
+                raise MetadataConflict("selected runtime identity is unavailable")
+            selected_profile = config.runtime_target["agentProfile"]
+            agent_response = await self._request(
+                "GET",
+                self._url(metadata, f"agent/{selected_profile}/contract"),
+                headers=self._headers(
+                    metadata,
+                    credential=credential,
+                    protocol_version=protocol_version,
+                ),
+                json=None,
+            )
+            if agent_response.status_code != 200:
+                raise MetadataConflict("private cell agent contract request failed")
+            agent_contract = agent_response.json()
+            agent_metadata = agent_contract.get("agent_profile") if isinstance(agent_contract, dict) else None
+            agent_digest = agent_contract.get("digest") if isinstance(agent_contract, dict) else None
+            if (
+                not isinstance(agent_metadata, dict)
+                or not isinstance(agent_digest, dict)
+                or agent_digest.get("algorithm") != "sha256"
+                or not isinstance(agent_metadata.get("profile"), str)
+                or not isinstance(agent_metadata.get("active_capability_sha256"), str)
+                or not isinstance(agent_digest.get("value"), str)
+            ):
+                raise MetadataConflict("private cell agent contract is incomplete")
+            agent_profile = agent_metadata["profile"]
+            command_fingerprint = agent_metadata["active_capability_sha256"]
+            schema_digest = agent_digest["value"]
         expected_policy_digest = hashlib.sha256(
             json.dumps(
                 expected_worker_policy,
@@ -825,10 +861,13 @@ class PrivateCellApiAdapter:
                 contract_digest=str(contract_digest),
                 policy_admitted=policy_admitted,
                 admission_admitted=admission_admitted,
+                agent_profile=agent_profile,
+                command_fingerprint=command_fingerprint,
+                schema_digest=schema_digest,
             )
         except (KeyError, TypeError, ValueError) as error:
             raise MetadataConflict("private cell health response is incomplete") from error
-        if observation.contract_digest != config.contract_digest:
+        if observation.contract_digest != (expected_contract_digest or config.contract_digest):
             raise MetadataConflict("private cell contract digest differs")
         return observation
 

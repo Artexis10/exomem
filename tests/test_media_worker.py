@@ -996,6 +996,33 @@ def test_scan_pending_reenqueues(vault, monkeypatch: pytest.MonkeyPatch) -> None
     assert w.scan_pending() == 2
 
 
+def test_scan_pending_ignores_non_canonical_sidecar_copies(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stray `.md` naming the same binary must not become a second job.
+
+    Syncthing writes `<name>.sync-conflict-<stamp>.md` beside the real sidecar. It
+    carries the same `evidence_file:` and `extracted_by: pending`, so the scan
+    queued it as work of its own — the binary was then extracted twice, into two
+    different files, both of which got embedded.
+    """
+    monkeypatch.delenv("EXOMEM_DISABLE_MEDIA_EXTRACTION", raising=False)
+    stub = _preserve_media_stub(vault, filename="conflicted.mp3")
+    sidecar = Path(stub.sidecar_path)
+    if not sidecar.is_absolute():
+        sidecar = vault / sidecar
+    for stray_name in (
+        "conflicted.mp3.sync-conflict-20260728-212129-XEB57HX.md",
+        "conflicted.mp3 (copy).md",
+    ):
+        sidecar.with_name(stray_name).write_text(
+            sidecar.read_text(encoding="utf-8"), encoding="utf-8"
+        )
+
+    assert media_worker.MediaWorker(vault).scan_pending() == 1
+    assert media_jobs.MediaJobStore(vault).counts()["pending"] == 1
+
+
 def test_worker_clip_embeds_image(vault, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("EXOMEM_DISABLE_CLIP", raising=False)
     monkeypatch.delenv("EXOMEM_DISABLE_MEDIA_EXTRACTION", raising=False)

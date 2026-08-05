@@ -135,7 +135,12 @@ def _mcp_tool_contract(
     tool = FunctionTool.from_function(
         bound,
         name=command.name,
-        annotations=command.mcp_annotations,
+        annotations=commands_module.mcp_tool_annotations(
+            command.name,
+            read_only=command.read_only,
+            open_world=True,
+            idempotent=command.read_only,
+        ),
     )
     return {
         key: value

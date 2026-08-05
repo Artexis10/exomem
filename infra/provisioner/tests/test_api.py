@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -19,6 +20,7 @@ from exomem_provisioner.provider_identity import ProviderRecoveryIdentityCodec
 from exomem_provisioner.repository import OperationRepository
 from exomem_provisioner.schemas import FailureResponse, ProvisionRequest, TargetRequest
 from exomem_provisioner.volume import build_volume_registration_worker
+from exomem_provisioner.wire_protocol import WIRE_PROTOCOL_V2
 from exomem_provisioner.worker import ProvisionerWorker
 
 _BEARER = "provisioner-bearer-sentinel-000000000000"
@@ -44,6 +46,12 @@ class _AllowCapacityAdmission:
 _ALLOW_CAPACITY = _AllowCapacityAdmission()
 
 
+def _canonical_sha256(value: object) -> str:
+    return hashlib.sha256(
+        (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode()
+    ).hexdigest()
+
+
 def test_volume_registration_worker_cannot_bypass_capacity_admission() -> None:
     repository = object()
     driver = object()
@@ -67,6 +75,24 @@ def test_volume_registration_worker_cannot_bypass_capacity_admission() -> None:
 
 
 def _settings(path: Path) -> ProvisionerSettings:
+    digest = "a" * 64
+    commit = "b" * 40
+    target = {
+        "releaseVersion": "0.35.1", "protocolVersion": "1", "agentProfile": "hosted-alpha-agent-v1",
+        "gatewayContractDigest": digest, "commandFingerprint": "c" * 64, "schemaDigest": "d" * 64,
+    }
+    legacy_contract = {
+        **target, "releaseVersion": "0.22.0", "protocolVersion": "exomem-hosted.v1",
+        "runtimeImage": f"ghcr.io/artexis10/exomem@sha256:{digest}", "sourceCommit": commit,
+    }
+    lock_path = path.with_suffix(".lock.json")
+    lock_path.write_text(json.dumps({
+        "artifact": "exomem-hosted-deployment-lock", "schemaVersion": 2, "admissionMode": "expand",
+        "components": {"runtime": {"image": f"ghcr.io/artexis10/exomem@sha256:{digest}", "sourceCommit": commit, "candidateSha256": digest}, "provisioner": {"image": f"ghcr.io/artexis10/exomem-provisioner@sha256:{'e' * 64}", "sourceCommit": commit, "candidateSha256": "e" * 64, "wireProtocol": "exomem-cell-provisioner.v2"}},
+        "runtimeTarget": target,
+        "composition": {"commit": commit, "sourceClosure": {name: {"candidateCommit": commit, "compositionCommit": commit, "paths": ["src/**"]} for name in ("runtime", "provisioner")}, "forwardContractSha256": digest, "authoritativeLegacyReleaseSetSha256": "f" * 64, "legacyCatalog": [{"releaseVersion": "0.22.0", "protocolVersion": "exomem-hosted.v1", "runtimeImage": f"ghcr.io/artexis10/exomem@sha256:{digest}", "sourceCommit": commit, "contractSha256": _canonical_sha256(legacy_contract), "contract": legacy_contract}], "legacyReleaseSetSha256": _canonical_sha256([{"releaseVersion": "0.22.0", "protocolVersion": "exomem-hosted.v1"}])},
+        "rollback": {"provisionerImage": f"ghcr.io/artexis10/exomem-provisioner@sha256:{'e' * 64}", "provisionerSourceCommit": commit, "v1CorpusSha256": digest, "legacyManifestSha256": digest, "substrateV1ConsumerCommit": commit},
+    }), encoding="utf-8")
     return ProvisionerSettings(
         bearer=_BEARER,
         envelope_key="envelope-key-sentinel-00000000000000",
@@ -74,6 +100,7 @@ def _settings(path: Path) -> ProvisionerSettings:
         database_schema="exomem_provisioner",
         database_role="exomem_provisioner_runtime",
         trusted_proxy_ips="127.0.0.1",
+        deployment_lock_path=str(lock_path),
         request_max_bytes=4096,
     )
 
@@ -89,7 +116,7 @@ def _base_body(**overrides: Any) -> dict[str, Any]:
         "protocolVersion": "exomem-hosted.v1",
         "releaseVersion": "0.22.0",
         "serviceCredential": _SERVICE_CREDENTIAL,
-        "workerPolicy": {"workerCount": 0, "semantic": False, "media": False},
+        "workerPolicy": {"workerCount": 2, "semantic": True, "media": False},
     }
     body.update(overrides)
     return body
@@ -330,6 +357,67 @@ def _headers(idempotency_key: str = "idempotency-api-alpha") -> dict[str, str]:
         "Idempotency-Key": idempotency_key,
         "X-Exomem-Provisioner-Protocol": PROVISIONER_PROTOCOL,
     }
+
+
+@pytest.mark.asyncio
+async def test_exact_header_selects_v2_models_before_operation_creation(
+    api: tuple[httpx.AsyncClient, OperationRepository, Path],
+) -> None:
+    client, repository, _ = api
+    target = {
+        "releaseVersion": "0.35.1",
+        "protocolVersion": "1",
+        "agentProfile": "hosted-alpha-agent-v1",
+        "gatewayContractDigest": "a" * 64,
+        "commandFingerprint": "c" * 64,
+        "schemaDigest": "d" * 64,
+    }
+    body = _base_body(operationId="v2-api")
+    body.pop("releaseVersion")
+    body.pop("protocolVersion")
+    body["runtimeTarget"] = target
+    headers = _headers("v2-api")
+    headers["X-Exomem-Provisioner-Protocol"] = WIRE_PROTOCOL_V2
+
+    accepted = await client.post("/cells/provision", headers=headers, json=body)
+
+    assert accepted.status_code == 202
+    operation = await repository.get("provision", "v2-api")
+    assert operation is not None and operation.wire_protocol == WIRE_PROTOCOL_V2
+    mixed = await client.post(
+        "/cells/provision",
+        headers={**headers, "Idempotency-Key": "v2-mixed"},
+        json={**body, "releaseVersion": "0.35.1"},
+    )
+    assert mixed.status_code == 422
+    assert await repository.get("provision", "v2-mixed") is None
+
+
+@pytest.mark.asyncio
+async def test_serving_requires_a_selected_lock_and_locked_health_advertises_v2(tmp_path: Path) -> None:
+    no_lock = ProvisionerSettings(
+        bearer=_BEARER,
+        envelope_key="envelope-key-sentinel-00000000000000",
+        database_url="sqlite+aiosqlite:///:memory:",
+        database_schema="exomem_provisioner",
+        database_role="exomem_provisioner_runtime",
+        trusted_proxy_ips="127.0.0.1",
+    )
+    with pytest.raises(ValueError, match="selected deployment lock"):
+        create_app(settings=no_lock, readiness_probe=lambda: _ready(True), repository=object())  # type: ignore[arg-type]
+
+    settings = _settings(tmp_path / "locked.sqlite")
+    app = create_app(settings=settings, readiness_probe=lambda: _ready(True))
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="https://provisioner.test"
+    ) as client:
+        assert (await client.get("/health/live")).json() == {"protocol": WIRE_PROTOCOL_V2, "status": "live"}
+        assert (await client.get("/health/ready")).json() == {"protocol": WIRE_PROTOCOL_V2, "status": "ready"}
+
+
+async def _ready(value: bool) -> bool:
+    return value
 
 
 @pytest.fixture

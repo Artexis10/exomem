@@ -42,6 +42,7 @@ from exomem_provisioner.provider_identity import (
     provider_operation_resource_name,
 )
 from exomem_provisioner.repository import OperationRepository
+from exomem_provisioner.wire_protocol import WIRE_PROTOCOL_V2
 from exomem_provisioner.worker import ProvisionerWorker
 
 
@@ -62,9 +63,31 @@ def _request(**overrides: object) -> dict[str, object]:
         "protocolVersion": "1",
         "releaseVersion": "0.22.0",
         "serviceCredential": _credential(),
-        "workerPolicy": {"workerCount": 0, "semantic": False, "media": False},
+        "workerPolicy": {"workerCount": 2, "semantic": True, "media": False},
         "providerRef": "cell-irrelevant-caller-ref",
     }
+    value.update(overrides)
+    return value
+
+
+def _runtime_target(**overrides: object) -> dict[str, object]:
+    value: dict[str, object] = {
+        "releaseVersion": "0.22.0",
+        "protocolVersion": "1",
+        "agentProfile": "hosted-alpha-agent-v1",
+        "gatewayContractDigest": "b" * 64,
+        "commandFingerprint": "c" * 64,
+        "schemaDigest": "d" * 64,
+    }
+    value.update(overrides)
+    return value
+
+
+def _v2_request(**overrides: object) -> dict[str, object]:
+    value = _request()
+    value.pop("releaseVersion")
+    value.pop("protocolVersion")
+    value["runtimeTarget"] = _runtime_target()
     value.update(overrides)
     return value
 
@@ -120,9 +143,15 @@ def _config() -> LifecycleConfig:
         browser_origin="https://substratesystems.io",
         release_version="0.22.0",
         protocol_version="1",
-        operator_contract_digest="c" * 64,
         contract_digest="b" * 64,
         location="fsn1",
+        legacy_runtime_units={
+            ("0.22.0", "1"): {
+                **_runtime_target(),
+                "runtimeImage": "registry.invalid/exomem@sha256:" + "a" * 64,
+                "sourceCommit": "a" * 40,
+            }
+        },
     )
 
 
@@ -132,7 +161,7 @@ async def test_release_unit_mismatch_is_terminal_before_any_provider_effect() ->
     driver = CellLifecycleDriver(
         plane=plane,
         volume_worker=VolumeLifecycleWorker(plane, plane),
-        config=_config(),
+        config=replace(_config(), runtime_target=_runtime_target()),
     )
 
     for override in ({"releaseVersion": "0.22.1"}, {"protocolVersion": "2"}):
@@ -140,6 +169,90 @@ async def test_release_unit_mismatch_is_terminal_before_any_provider_effect() ->
             await driver.execute("provision", _request(**override), _context())
         assert plane._cells == {}
         assert plane._tenant_fences == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "field",
+    (
+        "releaseVersion",
+        "protocolVersion",
+        "agentProfile",
+        "gatewayContractDigest",
+        "commandFingerprint",
+        "schemaDigest",
+    ),
+)
+async def test_v2_runtime_target_mismatch_is_terminal_before_any_provider_effect(
+    field: str,
+) -> None:
+    plane = HighFidelityProviderPlane(location="fsn1")
+    driver = CellLifecycleDriver(
+        plane=plane,
+        volume_worker=VolumeLifecycleWorker(plane, plane),
+        config=replace(_config(), runtime_target=_runtime_target()),
+    )
+    target = _runtime_target()
+    target[field] = "2" if field == "protocolVersion" else "e" * 64
+
+    with pytest.raises(DriverTerminal, match="PROVISIONER_RELEASE_UNIT_MISMATCH"):
+        await driver.execute(
+            "provision", _v2_request(runtimeTarget=target), _context(wire_protocol=WIRE_PROTOCOL_V2)
+        )
+
+    assert plane._cells == {}
+    assert plane._tenant_fences == {}
+
+
+@pytest.mark.asyncio
+async def test_legacy_catalog_unit_selects_its_exact_runtime_image() -> None:
+    legacy_image = "registry.invalid/exomem@sha256:" + "e" * 64
+    plane = HighFidelityProviderPlane(location="fsn1")
+    driver = CellLifecycleDriver(
+        plane=plane,
+        volume_worker=None,
+        config=replace(
+            _config(),
+            legacy_runtime_units={
+                ("0.22.0", "1"): {
+                    **_runtime_target(),
+                    "runtimeImage": legacy_image,
+                    "sourceCommit": "a" * 40,
+                }
+            },
+        ),
+    )
+
+    first = await driver.execute("provision", _request(), _context())
+    assert isinstance(first, DriverPending)
+    second = await driver.execute("provision", _request(), _context(checkpoint=first.checkpoint))
+
+    assert isinstance(second, DriverPending)
+    assert plane.helm_values(_metadata())["image"] == legacy_image
+
+
+@pytest.mark.asyncio
+async def test_v2_runtime_identity_is_rechecked_immediately_before_routes_open() -> None:
+    plane = HighFidelityProviderPlane(location="fsn1")
+    config = replace(_config(), runtime_target=_runtime_target())
+    request = _v2_request()
+    await plane.seed_ready_cell(_metadata(), request, config)
+    cell = plane._cells[plane._key(_metadata())]
+    cell.control_route = False
+    cell.transfer_route = False
+    plane.set_health(
+        _metadata(),
+        HealthObservation.ready_for(_metadata(), request, config).replace(schema_digest="e" * 64),
+    )
+    driver = CellLifecycleDriver(plane=plane, volume_worker=None, config=config)
+
+    with pytest.raises(DriverTerminal, match="PROVISIONER_RUNTIME_CONTRACT_MISMATCH"):
+        await driver.execute(
+            "provision",
+            request,
+            _context(checkpoint="runtime-admitted", wire_protocol=WIRE_PROTOCOL_V2),
+        )
+    assert plane.routes_enabled(_metadata()) == (False, False)
 
 
 def _metadata(**overrides: object) -> OpaqueProviderMetadata:
@@ -645,7 +758,7 @@ async def test_provision_adopts_partial_attempt_and_waits_for_volume_health_and_
         "credentialsManagedExternally": True,
         "expectedProtocol": "1",
         "expectedRelease": "0.22.0",
-        "featureGrants": "",
+        "featureGrants": "embeddings,file-watcher",
         "image": _config().image,
         "initOperationId": "operation-alpha",
         "initRequestId": "5ec7a442-663f-476b-80f8-dd803afe5590",
@@ -670,13 +783,64 @@ async def test_provision_adopts_partial_attempt_and_waits_for_volume_health_and_
         "transferHostname": "transfer.example.invalid",
         "uploadLimitBytes": 90 * 1024**2,
         "vaultId": "tenant-alpha",
-        "workerLimit": 0,
+        "workerLimit": 2,
         "workerPolicyDigest": hashlib.sha256(
-            b'{"media":false,"semantic":false,"workerCount":0}'
+            b'{"media":false,"semantic":true,"workerCount":2}'
         ).hexdigest(),
         "workloadMode": "serve",
     }
     assert _credential() not in repr(plane)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "policy",
+    [
+        {"workerCount": 0, "semantic": False, "media": False},
+        {"workerCount": 2, "semantic": False, "media": False},
+        {"workerCount": 0, "semantic": True, "media": False},
+        {"workerCount": 2, "semantic": True, "media": True},
+    ],
+)
+async def test_provision_refuses_a_worker_policy_that_is_not_the_shipped_product(
+    policy: dict[str, object],
+) -> None:
+    """The caller's declared policy and the rendered cell must not diverge.
+
+    The chart renders a fixed worker shape while the caller declares its own
+    `workerPolicy`, and runtime health then verifies the cell reports exactly
+    what the caller declared. Nothing structural keeps those in step. A stale
+    caller asking for the old keyword-only policy would provision an
+    embedding-capable cell and then fail health with a mismatch that reads like
+    a runtime fault, so reject the request at the boundary instead.
+    """
+    plane = HighFidelityProviderPlane(location="fsn1")
+    codec = ProviderRecoveryIdentityCodec.from_secret("provider-recovery-root")
+    driver = CellLifecycleDriver(plane=plane, volume_worker=None, config=_config())
+    volume_driver = VolumeRegistrationDriver(
+        VolumeLifecycleWorker(plane, plane, identity_codec=codec),
+        identity_verifier=codec.verifier(),
+    )
+    request = _request_with_provider_identity(workerPolicy=policy)
+    context = _context()
+
+    with pytest.raises(DriverTerminal) as raised:
+        for _ in range(8):
+            selected = (
+                volume_driver if context.checkpoint == "volume-registration-required" else driver
+            )
+            outcome = await selected.execute("provision", request, context)
+            if isinstance(outcome, DriverPending):
+                context = _context(checkpoint=outcome.checkpoint)
+                continue
+            break
+
+    # Terminal, not retryable: retrying the same bad request cannot succeed, and
+    # the cause is preserved so the operator sees why rather than a bare code.
+    assert str(raised.value) == "PROVISIONER_PROVIDER_METADATA_CONFLICT"
+    assert isinstance(raised.value.__cause__, MetadataConflict)
+    assert "complete product surface" in str(raised.value.__cause__)
+    assert not plane.has_release(_metadata())
 
 
 @pytest.mark.asyncio
@@ -773,7 +937,7 @@ async def test_health_flattens_exact_runtime_contract_and_fails_closed_on_drift(
         "mutationAuthority": True,
         "readAdmission": True,
         "writeAdmission": True,
-        "workerPolicy": {"workerCount": 0, "semantic": False, "media": False},
+        "workerPolicy": {"workerCount": 2, "semantic": True, "media": False},
         "code": "CELL_READY",
     }
 
@@ -786,6 +950,73 @@ async def test_health_flattens_exact_runtime_contract_and_fails_closed_on_drift(
     with pytest.raises(Exception) as rejected:
         await driver.execute("health", _request(), _context())
     assert getattr(rejected.value, "code", None) == "PROVISIONER_RUNTIME_CONTRACT_MISMATCH"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("field", "replacement"),
+    (
+        ("release_version", "0.22.1"),
+        ("protocol_version", "2"),
+        ("agent_profile", "hosted-alpha-agent-v2"),
+        ("contract_digest", "e" * 64),
+        ("command_fingerprint", "e" * 64),
+        ("schema_digest", "e" * 64),
+    ),
+)
+async def test_v2_health_reports_only_the_exact_observed_runtime_identity(
+    field: str,
+    replacement: str,
+) -> None:
+    plane = HighFidelityProviderPlane(location="fsn1")
+    config = replace(_config(), runtime_target=_runtime_target())
+    driver = CellLifecycleDriver(plane=plane, volume_worker=None, config=config)
+    request = _v2_request()
+    await plane.seed_ready_cell(_metadata(), request, config)
+
+    healthy = await driver.execute("health", request, _context(wire_protocol=WIRE_PROTOCOL_V2))
+    assert isinstance(healthy, DriverFinal)
+    assert healthy.result["runtimeIdentity"] == _runtime_target()
+    assert "releaseVersion" not in healthy.result
+    assert "protocolVersion" not in healthy.result
+
+    plane.set_health(
+        _metadata(),
+        HealthObservation.ready_for(_metadata(), request, config).replace(**{field: replacement}),
+    )
+    with pytest.raises(DriverTerminal, match="PROVISIONER_RUNTIME_CONTRACT_MISMATCH"):
+        await driver.execute("health", request, _context(wire_protocol=WIRE_PROTOCOL_V2))
+
+
+@pytest.mark.asyncio
+async def test_v2_restore_candidate_does_not_require_a_live_health_probe() -> None:
+    plane = HighFidelityProviderPlane(location="fsn1")
+    codec = ProviderRecoveryIdentityCodec.from_secret("provider-recovery-root")
+    config = replace(_config(), runtime_target=_runtime_target())
+    driver = CellLifecycleDriver(plane=plane, volume_worker=None, config=config)
+    volume_driver = VolumeRegistrationDriver(
+        VolumeLifecycleWorker(plane, plane, identity_codec=codec),
+        identity_verifier=codec.verifier(),
+    )
+    request = _v2_request(provisionMode="restore-candidate")
+    request = _request_with_provider_identity(**request)
+    request.pop("releaseVersion")
+    request.pop("protocolVersion")
+    request["runtimeTarget"] = _runtime_target()
+    context = _context(wire_protocol=WIRE_PROTOCOL_V2)
+
+    for _ in range(8):
+        selected = volume_driver if context.checkpoint == "volume-registration-required" else driver
+        outcome = await selected.execute("provision", request, context)
+        if isinstance(outcome, DriverFinal):
+            break
+        context = _context(checkpoint=outcome.checkpoint, wire_protocol=WIRE_PROTOCOL_V2)
+    else:
+        raise AssertionError("restore candidate did not converge")
+
+    assert isinstance(outcome, DriverFinal)
+    assert plane.is_initialized(_metadata()) is False
+    assert plane.routes_enabled(_metadata()) == (False, False)
 
 
 @pytest.mark.asyncio

@@ -2,7 +2,7 @@ cluster-init: true
 token: {{ k3s_server_token | to_json }}
 node-ip: {{ private_node_ip | to_json }}
 advertise-address: {{ private_node_ip | to_json }}
-flannel-iface: {{ k3s_private_interface | to_json }}
+flannel-iface: {{ k3s_resolved_private_interface | to_json }}
 secrets-encryption: true
 write-kubeconfig-mode: "0640"
 write-kubeconfig-group: exomem-operators
@@ -31,9 +31,25 @@ etcd-s3: true
 etcd-s3-endpoint: {{ k3s_etcd_s3_endpoint | to_json }}
 etcd-s3-region: {{ k3s_etcd_s3_region | to_json }}
 etcd-s3-bucket: {{ k3s_etcd_s3_bucket | to_json }}
-etcd-s3-folder: exomem-private-alpha/etcd
+# Must match `name_prefix` on b2_application_key.etcd_snapshot_upload and
+# .etcd_snapshot_restore in infra/terraform/durability/storage.tf. It did not:
+# the keys permit `etcd-snapshot/` while this wrote to
+# `exomem-private-alpha/etcd`, so B2 rejected every upload AND every restore
+# listing with `not entitled`, silently, for the life of the cluster. The bucket
+# name already carries the deployment prefix, so repeating it here bought
+# nothing.
+etcd-s3-folder: etcd-snapshot
 etcd-s3-access-key: {{ k3s_etcd_s3_access_key | to_json }}
 etcd-s3-secret-key: {{ k3s_etcd_s3_secret_key | to_json }}
-etcd-s3-retention: 336
+# A COUNT of snapshots to keep on S3, not a duration — the previous 336 read as
+# "14 days of hours" but means 336 objects. Expiry is owned by the bucket's
+# lifecycle rule (hide at 30 days, delete one day later), so this is set above
+# anything that rule will ever allow to accumulate: 30-minute snapshots reach
+# ~1440 objects before lifecycle removes them. k3s therefore never prunes and
+# never issues a delete, which is what lets the upload identity stay
+# write-only. That matters because this credential lives on the node — if the
+# node is compromised it must not be able to erase its own etcd history.
+# k3s offers no way to disable S3 retention outright; it defaults to 5.
+etcd-s3-retention: 5000
 etcd-s3-timeout: 2m
 etcd-s3-skip-ssl-verify: false

@@ -5,7 +5,8 @@ cloudflared:
   tokenSecretKey: token
 
 provisioner:
-  image: ""
+  deploymentLockJson: ""
+  deploymentLockSha256: ""
   replicas: 1
   databaseSchema: exomem_provisioner
   databaseRole: exomem_provisioner_runtime
@@ -17,7 +18,6 @@ provisioner:
   controlHostname: ""
   transferHostname: ""
   browserOrigin: https://substratesystems.io
-  releaseManifestJson: ""
   location: fsn1
   internalOrigin: http://{resource}.{namespace}.svc.cluster.local:8765
   pollSeconds: "1"
@@ -42,13 +42,13 @@ scheduler:
   secretKey: secret
 
 observability:
-  contractSha256: cd576fd9012557787d8c740e96fdafdbfc851cf6a818207ec128731e8d732ad0
+  contractSha256: b616e6b07b39226cb16296b86c818e8f613efa85e883f261efb0685fd87ec7dd
   alertDeliverySecretName: exomem-hosted-alert-delivery
   alertDeliverySecretKey: url
 
 capacityCollector:
   schedule: "* * * * *"
-  contractSha256: 1cbb5f93c71d2e85c6b54ed09fa1da9909c3fc13a588a1968bb1b330698a635e
+  contractSha256: 9339f62fd322c1d82361ec90506d45e840a38d7abd3f7948507d03adcc572e76
   hcloudServerId: 0
   stateConfigMap: exomem-capacity-receipt
   privateKeySecret:
@@ -59,7 +59,7 @@ capacityCollector:
     key: token
 
 durability:
-  contractSha256: 1e51097d5ff2570cb1c523916c1827e17bd285cc4f6499b0b09d019f0f424975
+  contractSha256: 3d1445fe13a4be75ea7bed5c9593f8745e5197926710786cd48c2e9463582dc8
   storageContractSha256: 68e26665af9a48c831c975bc96afb03fbf47e229f89a3c13bc852809787de0f5
   b2Endpoint: ""
   b2Region: ""

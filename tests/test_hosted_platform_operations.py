@@ -5,6 +5,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import re
 import stat
 import subprocess
 import sys
@@ -22,31 +23,37 @@ ROOT = Path(__file__).resolve().parents[1]
 INFRA = ROOT / "infra"
 
 _NAMESPACE_OWNED_MARKERS = (
-    *(("labels", marker) for marker in (
-        "exomem.io/tenant-cell",
-        "exomem.io/cell-resource",
-    )),
-    *(("annotations", marker) for marker in (
-        "exomem.io/tenant-id",
-        "exomem.io/cell-id",
-        "exomem.io/operation-id",
-        "exomem.io/tenant-digest",
-        "exomem.io/subject-digest",
-        "exomem.io/operation-digest",
-        "exomem.io/fence",
-        "exomem.io/recovery-envelope",
-        "exomem.io/resource-name",
-        "exomem.io/pvc-name",
-        "exomem.io/credentials-secret-name",
-        "exomem.io/init-request-configmap-name",
-        "exomem.io/provision-mode",
-        "exomem.io/vault-id",
-        "exomem.io/expected-release",
-        "exomem.io/worker-policy-digest",
-        "exomem.io/browser-origin",
-        "exomem.io/transfer-hostname",
-        "exomem.io/runtime-admitted",
-    )),
+    *(
+        ("labels", marker)
+        for marker in (
+            "exomem.io/tenant-cell",
+            "exomem.io/cell-resource",
+        )
+    ),
+    *(
+        ("annotations", marker)
+        for marker in (
+            "exomem.io/tenant-id",
+            "exomem.io/cell-id",
+            "exomem.io/operation-id",
+            "exomem.io/tenant-digest",
+            "exomem.io/subject-digest",
+            "exomem.io/operation-digest",
+            "exomem.io/fence",
+            "exomem.io/recovery-envelope",
+            "exomem.io/resource-name",
+            "exomem.io/pvc-name",
+            "exomem.io/credentials-secret-name",
+            "exomem.io/init-request-configmap-name",
+            "exomem.io/provision-mode",
+            "exomem.io/vault-id",
+            "exomem.io/expected-release",
+            "exomem.io/worker-policy-digest",
+            "exomem.io/browser-origin",
+            "exomem.io/transfer-hostname",
+            "exomem.io/runtime-admitted",
+        )
+    ),
 )
 
 
@@ -114,8 +121,7 @@ def test_hosted_ci_wires_every_static_security_gate() -> None:
     assert 'install -d -m 0755 "$HOME/.local/bin"' in workflow
     assert "${TRIVY_LINUX_AMD64_SHA256}" in workflow
     assert (
-        "TRIVY_LINUX_AMD64_SHA256="
-        "bbb64b9695866ce4a7a8f5c9592002c5961cab378577fa3f8a040df362b9b2ea"
+        "TRIVY_LINUX_AMD64_SHA256=bbb64b9695866ce4a7a8f5c9592002c5961cab378577fa3f8a040df362b9b2ea"
     ) in tool_versions
     parsed = yaml.safe_load(workflow)
     triggers = parsed.get("on", parsed.get(True))
@@ -131,10 +137,12 @@ def test_hosted_ci_wires_every_static_security_gate() -> None:
         "github.event_name == 'schedule' || "
         "(github.event_name == 'workflow_dispatch' && inputs.external_blackbox)"
     )
-    assert "--fetch-substrate-fixture" in workflow
-    assert "--probe-image" in workflow
     assert "--require-published" in workflow
-    assert "substrate-gateway-contract-selection-v1.json" in workflow
+    assert "DEPLOYMENT_LOCK_PAIR: infra/contracts/exomem-hosted-deployment-lock-pair-v2.json" in workflow
+    assert "verify_hosted_release.py" in workflow
+    assert "--phase \"$DEPLOYMENT_PHASE\"" in workflow
+    assert "--deployment-lock-pair" not in workflow
+    assert "--member-sha256" not in workflow
     assert 'uvx --from "ruff==${RUFF_VERSION}"' in validator
     assert 'uvx --from "mypy==${MYPY_VERSION}"' in validator
     assert '(cd "${repo_root}" && uv lock --check)' in validator
@@ -183,6 +191,7 @@ def test_hosted_provisioner_publish_workflow_is_source_bound_and_smoke_verified(
     assert "workflow_dispatch" in triggers
     job = parsed["jobs"]["publish"]
     assert job["permissions"] == {
+        "attestations": "write",
         "contents": "read",
         "id-token": "write",
         "packages": "write",
@@ -196,10 +205,15 @@ def test_hosted_provisioner_publish_workflow_is_source_bound_and_smoke_verified(
     assert "steps.build.outputs.digest" in workflow
     assert "infra/scripts/verify_provisioner_image.py" in workflow
     assert "--require-published" in workflow
-    assert "infra/scripts/verify_hosted_release.py" in workflow
-    assert "--fetch-substrate-fixture" in workflow
-    assert "--probe-image" in workflow
-    assert "substrate-gateway-contract-selection-v1.json" in workflow
+    assert "infra/scripts/hosted_image_candidate.py record" in workflow
+    assert "infra/scripts/hosted_image_candidate.py verify" in workflow
+    assert workflow.count("actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d") == 2
+    assert "push-to-registry: true" in workflow
+    assert workflow.count("create-storage-record: false") == 2
+    assert "--candidate-bundle" in workflow
+    assert "infra/scripts/verify_hosted_release.py" not in workflow
+    assert "--fetch-substrate-fixture" not in workflow
+    assert "substrate-gateway-contract-selection-v1.json" not in workflow
     for action_line in (
         line.strip() for line in workflow.splitlines() if line.strip().startswith("- uses:")
     ):
@@ -213,8 +227,27 @@ def test_k3s_snapshot_and_break_glass_contract_is_off_host_and_versioned() -> No
 
     assert "etcd-s3: true" in config
     assert "etcd-s3-skip-ssl-verify: false" in config
-    assert "etcd-s3-folder: exomem-private-alpha/etcd" in config
     assert "secrets-encryption: true" in config
+
+    # The folder must match the prefix the B2 keys permit. It did not, and every
+    # upload AND every restore listing was rejected as `not entitled` for the
+    # life of the cluster — silently, because the only signal was a journal line.
+    # Pinning the folder as a literal string is what let the two drift apart, so
+    # cross-check them instead: this assertion fails on either side changing
+    # alone.
+    storage = (INFRA / "terraform/durability/storage.tf").read_text(encoding="utf-8")
+    folder = re.search(r"^etcd-s3-folder:\s*(\S+)\s*$", config, re.MULTILINE)
+    assert folder is not None, "etcd-s3-folder is not set"
+    for key in ("etcd_snapshot_upload", "etcd_snapshot_restore"):
+        block = storage.split(f'resource "b2_application_key" "{key}"', 1)[1].split(
+            "\nresource ", 1
+        )[0]
+        prefix = re.search(r'name_prefix\s*=\s*"([^"]+)"', block)
+        assert prefix is not None, key
+        assert prefix.group(1) == f"{folder.group(1)}/", (
+            f"{key} permits {prefix.group(1)!r} but k3s writes to "
+            f"{folder.group(1)!r}/ — B2 will reject every object as 'not entitled'"
+        )
     assert set(destinations) == {
         "ansible.hosted-node.k3s-server-token.active",
         "escrow.k3s-server-token.active",
@@ -442,7 +475,7 @@ def test_rotation_retirement_gate_covers_every_independent_rotation(
         "domain": "exomem.rotation-drill-receipt.v1",
         "ttl_seconds": 86400,
         "private_key_custody": "drill-collector-only",
-        "public_key_id": None,
+        "public_key_id": ("e9531f918d57e9b7d8d38c5d111e602cc91c49f551fbf4561c36b3b89a1096df"),
         "verifier_material": "public-key-only",
     }
     receipt_private_key = Ed25519PrivateKey.generate()
@@ -613,19 +646,29 @@ def test_rotation_retirement_gate_covers_every_independent_rotation(
                 )
 
 
-def test_capacity_gate_blocks_unknown_economics_and_seventh_user(tmp_path: Path) -> None:
+def test_capacity_gate_blocks_unknown_economics_and_the_cell_past_the_cap(tmp_path: Path) -> None:
     module = _load("infra/scripts/capacity_gate.py", "capacity_gate_test")
     contract = json.loads((INFRA / "operations/private-alpha-capacity-v1.json").read_text())
+    # Four USER cells, not six: Hetzner retired the cx line so this node cannot
+    # be resized, and one embedding-capable cell measures 918 MiB peak. Four
+    # plus the platform is what 8 GB actually holds. Attachments follow at
+    # 4 user + 2 recovery, leaving 10 of the provider's 16 unused.
     assert contract["limits"] == {
-        "active_user_cells": 6,
+        "active_user_cells": 4,
         "active_recovery_cells": 2,
-        "maximum_potential_attachments": 8,
+        "maximum_potential_attachments": 6,
         "provider_volume_attachment_limit": 16,
-        "minimum_unused_provider_headroom": 8,
+        "minimum_unused_provider_headroom": 10,
     }
     assert contract["pricing"]["friend_price_eur_gross"] == 5
     assert contract["pricing"]["public_price_eur_gross_range"] == [10, 15]
-    assert contract["live_costs_verified"] is False
+    # Filled from the Hetzner invoice and the observed live Paddle
+    # transaction, both digested into the evidence block below.
+    assert contract["live_costs_verified"] is True
+    assert all(
+        isinstance(value, (int, float))
+        for value in contract["monthly_costs_eur_ex_vat"].values()
+    )
     assert contract["receipt_authentication"] == {
         "algorithm": "ed25519",
         "capacity_domain": "exomem.capacity-live-receipt.v1",
@@ -633,9 +676,13 @@ def test_capacity_gate_blocks_unknown_economics_and_seventh_user(tmp_path: Path)
         "capacity_ttl_seconds": 300,
         "economics_ttl_seconds": 2678400,
         "capacity_private_key_custody": "kubernetes-hcloud-collector-only",
-        "capacity_public_key_id": None,
+        "capacity_public_key_id": (
+            "214c7703cb2124763beab43fecc4cbd7827502993af58eb16c68a162e92b5b13"
+        ),
         "economics_private_key_custody": "provider-paddle-collector-only",
-        "economics_public_key_id": None,
+        "economics_public_key_id": (
+            "c91cb6358057dce8e1a4f14a2ab0fac6c14adad128d916722eb2d5cafa19b782"
+        ),
         "gate_material": "public-keys-only",
     }
     contract["live_costs_verified"] = True
@@ -704,9 +751,9 @@ def test_capacity_gate_blocks_unknown_economics_and_seventh_user(tmp_path: Path)
         "hcloud_location": "fsn1",
         "observed_at": "2026-07-14T12:00:00Z",
         "expires_at": "2026-07-14T12:05:00Z",
-        "active_user_cells": 5,
+        "active_user_cells": 3,
         "active_recovery_cells": 1,
-        "attached_volumes": 6,
+        "attached_volumes": 4,
     }
     economics = {
         "schema_version": 1,
@@ -790,7 +837,7 @@ def test_capacity_gate_blocks_unknown_economics_and_seventh_user(tmp_path: Path)
         )
     write_receipt(economics_path, economics, economics_private_key)
 
-    blocked_capacity = {**capacity, "active_user_cells": 6}
+    blocked_capacity = {**capacity, "active_user_cells": 4}
     write_receipt(capacity_path, blocked_capacity, capacity_private_key)
     blocked = module.evaluate_files(
         contract,
@@ -1045,9 +1092,7 @@ def test_operational_receipt_collectors_issue_only_domain_bound_attestations(
                     "exomem.io/operation-id": operation_id,
                     "exomem.io/tenant-digest": hashlib.sha256(tenant_id.encode()).hexdigest(),
                     "exomem.io/subject-digest": hashlib.sha256(cell_id.encode()).hexdigest(),
-                    "exomem.io/operation-digest": hashlib.sha256(
-                        operation_id.encode()
-                    ).hexdigest(),
+                    "exomem.io/operation-digest": hashlib.sha256(operation_id.encode()).hexdigest(),
                     "exomem.io/fence": "1",
                     "exomem.io/resource-name": resource_name,
                     "exomem.io/provision-mode": mode,
@@ -1492,11 +1537,11 @@ def test_production_composition_contract_binds_release_and_operator_actions() ->
         "exomem-volume-worker",
     ]
     assert capacity["limits"] == {
-        "active_user_cells": 6,
+        "active_user_cells": 4,
         "active_recovery_cells": 2,
-        "maximum_potential_attachments": 8,
+        "maximum_potential_attachments": 6,
         "provider_volume_attachment_limit": 16,
-        "minimum_unused_provider_headroom": 8,
+        "minimum_unused_provider_headroom": 10,
     }
     assert contract["volume_rebind"]["public_endpoint"] is None
     assert contract["volume_rebind"]["worker_primitive"] == ("VolumeLifecycleWorker.rebind_static")
@@ -1523,8 +1568,8 @@ def test_production_composition_contract_binds_release_and_operator_actions() ->
             "delivery_gc": "exomem-export-gc",
             "vault_backup": "exomem-durability-backup",
             "database_backup": "exomem-database-backup",
-                "deletion_dispatcher": "exomem-deletion-dispatcher",
-                "deletion_job_template": "exomem-deletion-job-template",
+            "deletion_dispatcher": "exomem-deletion-dispatcher",
+            "deletion_job_template": "exomem-deletion-job-template",
             "volume_lifecycle": "exomem-volume-worker",
         },
         "private_signers": ["exomem-provider-recovery-signer/private-key"],
@@ -1549,7 +1594,8 @@ def test_production_composition_contract_binds_release_and_operator_actions() ->
             "exomem-hosted-release-v1",
             "exomem-provisioner-api",
             "exomem-provisioner-worker",
-            "verify_provisioner_image.py",
+            "exomem-hosted-deployment-lock-pair-v2.json",
+            "verify_hosted_release.py",
             "durability-values.json",
             "recovery_bucket_name",
             "user_export_bucket_name",
@@ -1569,12 +1615,12 @@ def test_production_composition_contract_binds_release_and_operator_actions() ->
             "exomem-export-gc",
             "exomem-durability-storage",
         ],
-            "deletion.md": [
-                "/cells/destroy",
-                "X-Exomem-Provisioner-Protocol",
-                "exomem-deletion-dispatcher",
-                "exomem-deletion-worker",
-            ],
+        "deletion.md": [
+            "/cells/destroy",
+            "X-Exomem-Provisioner-Protocol",
+            "exomem-deletion-dispatcher",
+            "exomem-deletion-worker",
+        ],
         "volume-rebind.md": [
             "/cells/restore",
             "VolumeLifecycleWorker.rebind_static",
@@ -1745,9 +1791,10 @@ def test_release_manifest_is_one_fail_closed_deployment_unit(tmp_path: Path) -> 
     validation_values = yaml.safe_load(
         (INFRA / "helm/platform/values.validation.yaml").read_text(encoding="utf-8")
     )
-    registry = json.loads(validation_values["provisioner"]["releaseManifestJson"])[
-        "commandRegistry"
-    ]
+    assert "releaseManifestJson" not in validation_values["provisioner"]
+    registry = json.loads(
+        (INFRA / "contracts/exomem-hosted-release-v1.json").read_text(encoding="utf-8")
+    )["commandRegistry"]
     manifest = {
         "artifact": "exomem-hosted-release",
         "schemaVersion": 1,
@@ -1776,14 +1823,11 @@ def test_release_manifest_is_one_fail_closed_deployment_unit(tmp_path: Path) -> 
     )
     assert stat.S_IMODE(values_path.stat().st_mode) == 0o600
     values = json.loads(values_path.read_text(encoding="utf-8"))
-    assert values == {
-        "provisioner": {
-            "image": "ghcr.io/artexis10/exomem-provisioner@sha256:" + "e" * 64,
-            "releaseManifestJson": json.dumps(manifest, separators=(",", ":"), sort_keys=True),
-            "controlHostname": "memory.example.test",
-            "transferHostname": "transfer.example.test",
-        },
-    }
+    assert values["provisioner"]["image"] == (
+        "ghcr.io/artexis10/exomem-provisioner@sha256:" + "e" * 64
+    )
+    assert values["provisioner"]["controlHostname"] == "memory.example.test"
+    assert values["provisioner"]["transferHostname"] == "transfer.example.test"
     partial = dict(manifest)
     partial.pop("gatewayContractSha256")
     manifest_path.write_text(json.dumps(partial), encoding="utf-8")

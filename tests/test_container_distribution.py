@@ -6,10 +6,18 @@ import re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+ATTEST_ACTION = "actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d"
 
 
 def _read(path: str) -> str:
     return (ROOT / path).read_text(encoding="utf-8")
+
+
+def _workflow_job(text: str, name: str, next_name: str | None = None) -> str:
+    body = text.split(f"\n  {name}:\n", 1)[1]
+    if next_name is not None:
+        body = body.split(f"\n  {next_name}:\n", 1)[0]
+    return body
 
 
 def test_dockerfile_declares_cuda_target_as_capable_not_resident() -> None:
@@ -58,6 +66,77 @@ def test_release_workflow_publishes_hosted_image_with_immutable_build_time() -> 
     ) == 2
     assert "ghcr.io/artexis10/exomem:hosted" in text
     assert text.count('build_time=$(git show -s --format=%cI "$TAG")') == 2
+
+
+def test_release_workflow_publishes_digest_authoritative_hosted_candidates() -> None:
+    text = _read(".github/workflows/release-please.yml")
+    automatic = _workflow_job(text, "publish-image", "publish-existing-image")
+    manual = _workflow_job(text, "publish-existing-image", "publish-existing-pypi")
+
+    for job in (automatic, manual):
+        proof_step = job.split(
+            "\n      - name: Verify the hosted runtime image and signed candidate\n", 1
+        )[1].split("\n      - name:", 1)[0]
+        assert "contents: write" in job
+        assert "packages: write" in job
+        assert "id-token: write" in job
+        assert "attestations: write" in job
+        assert "id: hosted-build" in job
+        assert "steps.hosted-build.outputs.digest" in job
+        assert (
+            "ghcr.io/artexis10/exomem:${{ steps.meta.outputs.source_commit }}-hosted"
+            in job
+        )
+        assert "org.opencontainers.image.revision=${{ steps.meta.outputs.source_commit }}" in job
+        assert job.count(ATTEST_ACTION) == 2
+        assert "subject-name: ghcr.io/artexis10/exomem" in job
+        assert "subject-digest: ${{ steps.hosted-build.outputs.digest }}" in job
+        assert "subject-path: ${{ steps.runtime-candidate.outputs.candidate }}" in job
+        assert "push-to-registry: true" in job
+        assert job.count("create-storage-record: false") == 2
+        assert "infra/scripts/hosted_image_candidate.py record" in job
+        assert "infra/scripts/hosted_image_candidate.py verify" in job
+        assert "GH_TOKEN: ${{ github.token }}" in proof_step
+        assert "--candidate-bundle" in job
+        assert "candidate.sigstore.json" in job
+        assert "--attestation-id" not in job
+        assert "--attestation-url" not in job
+        assert 'docker run --rm --network=none "$IMMUTABLE_IMAGE" --version' in job
+        assert 'test "$observed_version" = "exomem ${VERSION}"' in job
+        assert 'test "$observed_revision" = "$SOURCE_COMMIT"' in job
+        assert '--source-repository "$GITHUB_REPOSITORY"' in job
+        assert (
+            '--producer-workflow "$GITHUB_REPOSITORY/.github/workflows/release-please.yml"'
+            in job
+        )
+        assert '--release "$VERSION"' in job
+        assert "--storage-kind github-release" in job
+        assert "--producer-oidc-source-ref" in job
+        assert "--source-ref" in job
+        assert "GITHUB_RUN_ID" in job and "GITHUB_RUN_ATTEMPT" in job
+        assert "gh release upload" in job
+        assert '"$CANDIDATE_BUNDLE"' in job
+        assert "--clobber" not in job
+        assert "exomem-hosted-release-v1.json" not in job
+        assert "substrate-gateway-contract-selection" not in job
+
+
+def test_release_workflow_binds_automatic_and_manual_builds_to_the_tag_commit() -> None:
+    text = _read(".github/workflows/release-please.yml")
+    automatic = _workflow_job(text, "publish-image", "publish-existing-image")
+    manual = _workflow_job(text, "publish-existing-image", "publish-existing-pypi")
+
+    for job in (automatic, manual):
+        assert '[[ "$TAG" =~ ^v[0-9]+\\.[0-9]+\\.[0-9]+' in job
+        assert 'source_commit=$(git rev-parse "$TAG^{commit}")' in job
+        assert 'test "$(git rev-parse HEAD)" = "$source_commit"' in job
+        assert 'test "$GITHUB_SHA" = "$source_commit"' in job
+        assert 'echo "source_commit=$source_commit" >> "$GITHUB_OUTPUT"' in job
+
+    assert 'test "$GITHUB_REF" = "refs/heads/main"' in automatic
+    assert 'expected_ref="refs/tags/$TAG"' in manual
+    assert 'test "$GITHUB_REF" = "$expected_ref"' in manual
+    assert 'gh release view "$TAG" --json tagName --jq .tagName' in manual
 
 
 def test_compose_overrides_select_cpu_ml_and_cuda() -> None:

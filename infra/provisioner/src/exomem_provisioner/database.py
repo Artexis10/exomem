@@ -14,7 +14,7 @@ from sqlalchemy.pool import StaticPool
 from .config import ProvisionerSettings
 from .models import Base, CapacityLedger
 
-DATABASE_REVISION = "0005_capacity_reservations"
+DATABASE_REVISION = "0006_operation_wire_protocol"
 
 
 class ProvisionerDatabase:

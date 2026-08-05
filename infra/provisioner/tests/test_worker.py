@@ -19,6 +19,7 @@ from exomem_provisioner.driver import (
 )
 from exomem_provisioner.models import OperationAction, OperationState
 from exomem_provisioner.repository import OperationRepository
+from exomem_provisioner.wire_protocol import WIRE_PROTOCOL_V2
 from exomem_provisioner.worker import ProvisionerWorker
 
 
@@ -44,7 +45,23 @@ def _request(**overrides: object) -> dict[str, object]:
         "protocolVersion": "exomem-hosted.v1",
         "releaseVersion": "0.22.0",
         "serviceCredential": "service-credential-sentinel-000000000",
-        "workerPolicy": {"workerCount": 0, "semantic": False, "media": False},
+        "workerPolicy": {"workerCount": 2, "semantic": True, "media": False},
+    }
+    request.update(overrides)
+    return request
+
+
+def _v2_request(**overrides: object) -> dict[str, object]:
+    request = _request()
+    request.pop("protocolVersion")
+    request.pop("releaseVersion")
+    request["runtimeTarget"] = {
+        "releaseVersion": "0.22.0",
+        "protocolVersion": "exomem-hosted.v1",
+        "agentProfile": "hosted-alpha-agent-v1",
+        "gatewayContractDigest": "a" * 64,
+        "commandFingerprint": "b" * 64,
+        "schemaDigest": "c" * 64,
     }
     request.update(overrides)
     return request
@@ -162,9 +179,16 @@ async def test_worker_resumes_only_the_dispatcher_claim_bound_to_its_job_identit
             _action: str,
             _request_data: dict[str, object],
             context: EffectContext,
-        ) -> DriverFinal:
-            self.operation_ids.append(context.operation_id)
-            return DriverFinal(result={"deleted": True})
+            ) -> DriverFinal:
+                self.operation_ids.append(context.operation_id)
+                return DriverFinal(
+                    result={
+                        "computeDestroyed": True,
+                        "storageDestroyed": True,
+                        "keysDestroyed": True,
+                        "tenantResourcesDestroyed": True,
+                    }
+                )
 
     driver = RecordingDriver()
     worker = ProvisionerWorker(
@@ -626,3 +650,116 @@ async def test_non_provision_action_does_not_invoke_capacity_admission(
     assert await worker.run_once(now=datetime(2030, 1, 1, tzinfo=UTC)) is True
     assert admission.calls == []
     assert driver.effect_count("health", operation.id) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("body", "wire_protocol", "result", "code"),
+    (
+        (
+            _request(),
+            "exomem-cell-provisioner.v1",
+            {
+                "live": True,
+                "ready": True,
+                "cellId": "cell-worker-alpha",
+                "protocolVersion": "exomem-hosted.v1",
+                "releaseVersion": "0.22.1",
+                "serviceAuthenticated": True,
+                "mutationAuthority": True,
+                "readAdmission": True,
+                "writeAdmission": True,
+                "workerPolicy": {"workerCount": 2, "semantic": True, "media": False},
+                "code": "CELL_READY",
+            },
+            "PROVISIONER_RUNTIME_CONTRACT_MISMATCH",
+        ),
+        (
+            _request(),
+            "exomem-cell-provisioner.v1",
+            {
+                "live": True,
+                "ready": True,
+                "cellId": "cell-other",
+                "protocolVersion": "exomem-hosted.v1",
+                "releaseVersion": "0.22.0",
+                "serviceAuthenticated": True,
+                "mutationAuthority": True,
+                "readAdmission": True,
+                "writeAdmission": True,
+                "workerPolicy": {"workerCount": 2, "semantic": True, "media": False},
+                "code": "CELL_READY",
+            },
+            "PROVISIONER_RUNTIME_CONTRACT_MISMATCH",
+        ),
+        (
+            _request(),
+            "exomem-cell-provisioner.v1",
+            {
+                "live": True,
+                "ready": True,
+                "cellId": "cell-worker-alpha",
+                "protocolVersion": "exomem-hosted.v1",
+                "releaseVersion": "0.22.0",
+                "serviceAuthenticated": True,
+                "mutationAuthority": True,
+                "readAdmission": True,
+                "writeAdmission": True,
+                "workerPolicy": {"workerCount": 1, "semantic": False, "media": False},
+                "code": "CELL_READY",
+            },
+            "PROVISIONER_RUNTIME_CONTRACT_MISMATCH",
+        ),
+        (
+            _v2_request(),
+            WIRE_PROTOCOL_V2,
+            {
+                "live": True,
+                "ready": True,
+                "cellId": "cell-worker-alpha",
+                "protocolVersion": "exomem-hosted.v1",
+                "releaseVersion": "0.22.0",
+                "serviceAuthenticated": True,
+                "mutationAuthority": True,
+                "readAdmission": True,
+                "writeAdmission": True,
+                "workerPolicy": {"workerCount": 2, "semantic": True, "media": False},
+                "code": "CELL_READY",
+            },
+            "PROVISIONER_DRIVER_INVALID",
+        ),
+    ),
+)
+async def test_worker_rejects_malformed_protocol_selected_health_final(
+    worker_context: tuple[ProvisionerDatabase, OperationRepository, FakeDriver],
+    body: dict[str, object],
+    wire_protocol: str,
+    result: dict[str, object],
+    code: str,
+) -> None:
+    _, repository, _ = worker_context
+    operation = await repository.submit(
+        "health",
+        f"invalid-final-{wire_protocol}",
+        body,
+        wire_protocol=wire_protocol,
+    )
+
+    class InvalidFinalDriver:
+        async def observed_fence(self, _tenant_id: str) -> int:
+            return 0
+
+        async def execute(self, *_args: object) -> DriverFinal:
+            return DriverFinal(result=result)
+
+    worker = ProvisionerWorker(
+        repository,
+        InvalidFinalDriver(),
+        worker_id="invalid-final-worker",
+        allowed_actions=frozenset({OperationAction.HEALTH}),
+    )
+
+    assert await worker.run_once(now=datetime(2030, 1, 1, tzinfo=UTC)) is True
+    saved = await repository.get_by_id(operation.id)
+    assert saved is not None and saved.state is OperationState.ERROR
+    assert saved.error_code == code

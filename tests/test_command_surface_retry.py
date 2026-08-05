@@ -732,8 +732,14 @@ def test_maintain_audit_is_read_only_for_common_invocation_boundary() -> None:
     )
     assert invocation_is_read_only(command, {}) is True
     assert invocation_is_read_only(command, {"mode": "audit"}) is True
-    assert invocation_is_read_only(command, {"mode": "fix"}) is False
+    assert invocation_is_read_only(command, {"mode": "fix"}) is True
+    assert invocation_is_read_only(
+        command, {"mode": "fix", "dry_run": False}
+    ) is False
     assert invocation_is_read_only(command, {"mode": "reconcile"}) is False
+    assert invocation_is_read_only(
+        command, {"mode": "reconcile", "dry_run": True}
+    ) is True
 
 
 def test_all_public_audit_routes_are_classified_read_only() -> None:

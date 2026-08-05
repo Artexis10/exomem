@@ -34,6 +34,22 @@ jobs:
       - name: Sample vault smoke (the exact command users run)
         run: uv run --frozen --python ${{ matrix.python-version }} exomem demo --json
 
+  tui:
+    name: terminal UI (textual, headless + snapshots)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - name: TUI suite (Pilot interaction + committed SVG goldens)
+        # The lean matrix skips tests/tui (no `tui` extra there); this job
+        # opts in. Goldens render only from the deterministic FakeBackend —
+        # regenerate intentionally with `pytest tests/tui --snapshot-update`.
+        run: uv run --frozen --extra tui --group tui-dev python -m pytest tests/tui tests/test_tui_entry.py -q
+
   product-e2e:
     name: product E2E (installed wheel, stdio + HTTP)
     runs-on: ubuntu-latest

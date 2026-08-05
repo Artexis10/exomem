@@ -430,6 +430,25 @@ def infer_relation_registry(
                 "unregistered",
             )
         },
+        # The full registered vocabulary, not just what the corpus happens to use.
+        # Without this a caller can only discover a relation by finding one already
+        # written, so unused-but-perfect labels stay invisible and authors fall back
+        # to `relates_to` or invent an unregistered word. Listing it closes the
+        # retrieve -> promote -> retrieve loop: promoted labels appear here.
+        "vocabulary": [
+            {
+                "relation": key,
+                "family": definition.family,
+                "direction": definition.direction,
+                "description": definition.description,
+                "status": "core" if definition.core else "extension",
+                **({"inverse": definition.inverse} if definition.inverse else {}),
+            }
+            for key, definition in sorted(
+                (*registry.core.items(), *registry.extensions.items())
+            )
+        ],
+        "aliases": dict(sorted(registry.aliases.items())),
         "relations": sorted(
             grouped.values(), key=lambda item: (-item["count"], item["raw_relation"])
         ),
