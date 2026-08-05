@@ -847,7 +847,7 @@ The offer stands until 2025-03-03 and lapses after that date.
 [ctx:1]
 ```
 
-**Your label:** <yes | no | unsure>
+**Your label:** yes
 
 ---
 
@@ -923,7 +923,7 @@ Weekly check: the churn window for Project Larkcrest measured 273.
 [ctx:3]
 ```
 
-**Your label:** <yes | no | unsure>
+**Your label:** yes
 
 ---
 
@@ -957,7 +957,7 @@ The Project Larkcrest sample shipment weighed 4.1 kg on the dock scale.
 [ctx:1]
 ```
 
-**Your label:** <yes | no | unsure>
+**Your label:** yes
 
 ---
 
@@ -1045,7 +1045,7 @@ Reviews for Project Mossrun stay on every Tuesday, unchanged.
 [ctx:3]
 ```
 
-**Your label:** <yes | no | unsure>
+**Your label:** no
 
 ---
 
@@ -1079,7 +1079,7 @@ The Project Emberfall sample shipment weighed 4.3 kg on the dock scale.
 [ctx:1]
 ```
 
-**Your label:** <yes | no | unsure>
+**Your label:** yes
 
 ---
 
@@ -1115,7 +1115,7 @@ The yield floor for Project Drifthollow now reads 467.
 [ctx:1]
 ```
 
-**Your label:** <yes | no | unsure>
+**Your label:** no
 
 ---
 
@@ -1197,7 +1197,7 @@ Critical findings for Project Sablegate this quarter: none found.
 [ctx:3]
 ```
 
-**Your label:** <yes | no | unsure>
+**Your label:** yes
 
 ---
 
