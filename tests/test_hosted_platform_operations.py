@@ -5,6 +5,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import re
 import stat
 import subprocess
 import sys
@@ -226,8 +227,27 @@ def test_k3s_snapshot_and_break_glass_contract_is_off_host_and_versioned() -> No
 
     assert "etcd-s3: true" in config
     assert "etcd-s3-skip-ssl-verify: false" in config
-    assert "etcd-s3-folder: exomem-private-alpha/etcd" in config
     assert "secrets-encryption: true" in config
+
+    # The folder must match the prefix the B2 keys permit. It did not, and every
+    # upload AND every restore listing was rejected as `not entitled` for the
+    # life of the cluster — silently, because the only signal was a journal line.
+    # Pinning the folder as a literal string is what let the two drift apart, so
+    # cross-check them instead: this assertion fails on either side changing
+    # alone.
+    storage = (INFRA / "terraform/durability/storage.tf").read_text(encoding="utf-8")
+    folder = re.search(r"^etcd-s3-folder:\s*(\S+)\s*$", config, re.MULTILINE)
+    assert folder is not None, "etcd-s3-folder is not set"
+    for key in ("etcd_snapshot_upload", "etcd_snapshot_restore"):
+        block = storage.split(f'resource "b2_application_key" "{key}"', 1)[1].split(
+            "\nresource ", 1
+        )[0]
+        prefix = re.search(r'name_prefix\s*=\s*"([^"]+)"', block)
+        assert prefix is not None, key
+        assert prefix.group(1) == f"{folder.group(1)}/", (
+            f"{key} permits {prefix.group(1)!r} but k3s writes to "
+            f"{folder.group(1)!r}/ — B2 will reject every object as 'not entitled'"
+        )
     assert set(destinations) == {
         "ansible.hosted-node.k3s-server-token.active",
         "escrow.k3s-server-token.active",

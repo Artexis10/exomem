@@ -384,6 +384,59 @@ def test_doctor_infers_hybrid_from_installed_embeddings(monkeypatch: pytest.Monk
     assert doctor_module.infer_profile() == "hybrid"
 
 
+def test_doctor_infers_hybrid_from_onnx_backend_without_torch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A torch-free ONNX image holds a working embedder and must not be demoted.
+
+    Demotion to `lean` is not cosmetic: it is how a hosted cell would come to
+    advertise keyword-only recall while carrying the weights for semantic search.
+    """
+    monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
+    monkeypatch.setattr(
+        doctor_module,
+        "_module_available",
+        lambda name: name in {"onnxruntime", "tokenizers"},
+    )
+    assert doctor_module.infer_profile() == "hybrid"
+
+
+def test_embedding_requirements_follow_the_configured_backend(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("EXOMEM_EMBED_BACKEND", "onnx")
+    extra, requirements = doctor_module._embedding_requirements()
+    assert extra == "embeddings-onnx"
+    assert [name for _, name in requirements] == ["onnxruntime", "tokenizers"]
+
+    monkeypatch.setenv("EXOMEM_EMBED_BACKEND", "torch")
+    extra, requirements = doctor_module._embedding_requirements()
+    assert extra == "embeddings"
+    assert "torch" in {name for _, name in requirements}
+
+
+def test_embedding_requirements_survive_an_invalid_backend(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """doctor diagnoses configuration; it must not raise on the one it is diagnosing."""
+    monkeypatch.setenv("EXOMEM_EMBED_BACKEND", "tensorflow")
+    extra, _requirements = doctor_module._embedding_requirements()
+    assert extra == "embeddings"
+
+
+def test_doctor_omits_torch_probes_on_the_onnx_lane(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("EXOMEM_EMBED_BACKEND", "onnx")
+    report = doctor_module.doctor(vault=str(tmp_path), profile="hybrid")
+    ids = {check.id for check in report.checks}
+
+    assert "dep.torch" not in ids
+    assert "torch.cuda" not in ids
+    assert "dep.onnxruntime" in ids
+    assert "dep.tokenizers" in ids
+
+
 def test_doctor_infers_media_when_full_stack_is_available(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
