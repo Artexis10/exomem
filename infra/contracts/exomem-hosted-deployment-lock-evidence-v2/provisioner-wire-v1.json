@@ -1,0 +1,578 @@
+{
+  "actions": {
+    "destroy": {
+      "final": {
+        "body": {
+          "computeDestroyed": true,
+          "keysDestroyed": true,
+          "storageDestroyed": true,
+          "tenantResourcesDestroyed": true
+        },
+        "status": 200
+      },
+      "idempotencyKey": "fixture-destroy-key",
+      "pending": {
+        "body": {
+          "checkpoint": "requested",
+          "operationId": "operation-cross-language-alpha",
+          "retryAfterSeconds": 2,
+          "status": "pending"
+        },
+        "headers": {
+          "retry-after": "2"
+        },
+        "status": 202
+      },
+      "request": {
+        "checkpoint": "requested",
+        "fenceGeneration": 7,
+        "operationId": "operation-cross-language-alpha",
+        "tenantId": "tenant-cross-language-alpha"
+      }
+    },
+    "discard": {
+      "final": {
+        "body": {
+          "computeDestroyed": true,
+          "keysDestroyed": true,
+          "storageDestroyed": true
+        },
+        "status": 200
+      },
+      "idempotencyKey": "fixture-discard-key",
+      "pending": {
+        "body": {
+          "checkpoint": "requested",
+          "operationId": "operation-cross-language-alpha",
+          "retryAfterSeconds": 2,
+          "status": "pending"
+        },
+        "headers": {
+          "retry-after": "2"
+        },
+        "status": 202
+      },
+      "request": {
+        "cellId": "cell-cross-language-alpha",
+        "checkpoint": "requested",
+        "fenceGeneration": 7,
+        "operationId": "operation-cross-language-alpha",
+        "protocolVersion": "1",
+        "providerRef": "hcloud.volume.fixture-alpha",
+        "releaseVersion": "0.22.0",
+        "serviceCredential": "$ACTIVE_SERVICE_CREDENTIAL",
+        "tenantId": "tenant-cross-language-alpha",
+        "workerPolicy": {
+          "media": false,
+          "semantic": false,
+          "workerCount": 0
+        }
+      }
+    },
+    "export": {
+      "final": {
+        "body": {
+          "archiveSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "archiveSize": 1048576,
+          "encryptionScheme": "envelope-aes-256-gcm",
+          "exportRef": "export.fixture-alpha",
+          "integrityVerified": true,
+          "manifestSha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "releaseRef": "release.fixture-alpha"
+        },
+        "status": 200
+      },
+      "idempotencyKey": "fixture-export-key",
+      "pending": {
+        "body": {
+          "checkpoint": "requested",
+          "operationId": "operation-cross-language-alpha",
+          "retryAfterSeconds": 2,
+          "status": "pending"
+        },
+        "headers": {
+          "retry-after": "2"
+        },
+        "status": 202
+      },
+      "request": {
+        "cellId": "cell-cross-language-alpha",
+        "checkpoint": "requested",
+        "expiresAt": "$NOW_PLUS_86400_SECONDS",
+        "fenceGeneration": 7,
+        "operationId": "operation-cross-language-alpha",
+        "protocolVersion": "1",
+        "providerRef": "hcloud.volume.fixture-alpha",
+        "releaseVersion": "0.22.0",
+        "serviceCredential": "$ACTIVE_SERVICE_CREDENTIAL",
+        "tenantId": "tenant-cross-language-alpha",
+        "workerPolicy": {
+          "media": false,
+          "semantic": false,
+          "workerCount": 0
+        }
+      }
+    },
+    "export-delete": {
+      "final": {
+        "body": {
+          "objectDestroyed": true
+        },
+        "status": 200
+      },
+      "idempotencyKey": "fixture-export-delete-key",
+      "pending": {
+        "body": {
+          "checkpoint": "requested",
+          "operationId": "operation-cross-language-alpha",
+          "retryAfterSeconds": 2,
+          "status": "pending"
+        },
+        "headers": {
+          "retry-after": "2"
+        },
+        "status": 202
+      },
+      "request": {
+        "checkpoint": "requested",
+        "exportRef": "export.fixture-alpha",
+        "fenceGeneration": 7,
+        "operationId": "operation-cross-language-alpha",
+        "tenantId": "tenant-cross-language-alpha"
+      }
+    },
+    "export-download": {
+      "final": {
+        "body": {
+          "expiresAt": "$NOW_PLUS_600_SECONDS",
+          "url": "https://downloads.example/export.fixture-alpha"
+        },
+        "status": 200
+      },
+      "idempotencyKey": "fixture-export-download-key",
+      "pending": {
+        "body": {
+          "checkpoint": "requested",
+          "operationId": "operation-cross-language-alpha",
+          "retryAfterSeconds": 2,
+          "status": "pending"
+        },
+        "headers": {
+          "retry-after": "2"
+        },
+        "status": 202
+      },
+      "request": {
+        "checkpoint": "requested",
+        "exportRef": "export.fixture-alpha",
+        "fenceGeneration": 7,
+        "operationId": "operation-cross-language-alpha",
+        "tenantId": "tenant-cross-language-alpha"
+      }
+    },
+    "export-release": {
+      "final": {
+        "body": null,
+        "status": 204
+      },
+      "idempotencyKey": "fixture-export-release-key",
+      "pending": {
+        "body": {
+          "checkpoint": "requested",
+          "operationId": "operation-cross-language-alpha",
+          "retryAfterSeconds": 2,
+          "status": "pending"
+        },
+        "headers": {
+          "retry-after": "2"
+        },
+        "status": 202
+      },
+      "request": {
+        "cellId": "cell-cross-language-alpha",
+        "checkpoint": "requested",
+        "fenceGeneration": 7,
+        "operationId": "operation-cross-language-alpha",
+        "protocolVersion": "1",
+        "providerRef": "hcloud.volume.fixture-alpha",
+        "releaseRef": "release.fixture-alpha",
+        "releaseVersion": "0.22.0",
+        "serviceCredential": "$ACTIVE_SERVICE_CREDENTIAL",
+        "tenantId": "tenant-cross-language-alpha",
+        "workerPolicy": {
+          "media": false,
+          "semantic": false,
+          "workerCount": 0
+        }
+      }
+    },
+    "health": {
+      "final": {
+        "body": {
+          "cellId": "cell-cross-language-alpha",
+          "code": "CELL_READY",
+          "live": true,
+          "mutationAuthority": true,
+          "protocolVersion": "1",
+          "readAdmission": true,
+          "ready": true,
+          "releaseVersion": "0.22.0",
+          "serviceAuthenticated": true,
+          "workerPolicy": {
+            "media": false,
+            "semantic": false,
+            "workerCount": 0
+          },
+          "writeAdmission": true
+        },
+        "status": 200
+      },
+      "idempotencyKey": "fixture-health-key",
+      "pending": {
+        "body": {
+          "checkpoint": "requested",
+          "operationId": "operation-cross-language-alpha",
+          "retryAfterSeconds": 2,
+          "status": "pending"
+        },
+        "headers": {
+          "retry-after": "2"
+        },
+        "status": 202
+      },
+      "request": {
+        "cellId": "cell-cross-language-alpha",
+        "checkpoint": "requested",
+        "fenceGeneration": 7,
+        "operationId": "operation-cross-language-alpha",
+        "protocolVersion": "1",
+        "providerRef": "hcloud.volume.fixture-alpha",
+        "releaseVersion": "0.22.0",
+        "serviceCredential": "$ACTIVE_SERVICE_CREDENTIAL",
+        "tenantId": "tenant-cross-language-alpha",
+        "workerPolicy": {
+          "media": false,
+          "semantic": false,
+          "workerCount": 0
+        }
+      }
+    },
+    "provision": {
+      "final": {
+        "body": {
+          "privateEndpoint": "https://cell-fixture-alpha.internal.example",
+          "providerRef": "hcloud.volume.fixture-alpha"
+        },
+        "status": 200
+      },
+      "idempotencyKey": "fixture-provision-key",
+      "pending": {
+        "body": {
+          "checkpoint": "requested",
+          "operationId": "operation-cross-language-alpha",
+          "retryAfterSeconds": 2,
+          "status": "pending"
+        },
+        "headers": {
+          "retry-after": "2"
+        },
+        "status": 202
+      },
+      "request": {
+        "cellId": "cell-cross-language-alpha",
+        "checkpoint": "requested",
+        "fenceGeneration": 7,
+        "operationId": "operation-cross-language-alpha",
+        "protocolVersion": "1",
+        "provisionMode": "serve",
+        "releaseVersion": "0.22.0",
+        "serviceCredential": "$ACTIVE_SERVICE_CREDENTIAL",
+        "tenantId": "tenant-cross-language-alpha",
+        "workerPolicy": {
+          "media": false,
+          "semantic": false,
+          "workerCount": 0
+        }
+      }
+    },
+    "quiesce": {
+      "final": {
+        "body": null,
+        "status": 204
+      },
+      "idempotencyKey": "fixture-quiesce-key",
+      "pending": {
+        "body": {
+          "checkpoint": "requested",
+          "operationId": "operation-cross-language-alpha",
+          "retryAfterSeconds": 2,
+          "status": "pending"
+        },
+        "headers": {
+          "retry-after": "2"
+        },
+        "status": 202
+      },
+      "request": {
+        "cellId": "cell-cross-language-alpha",
+        "checkpoint": "requested",
+        "fenceGeneration": 7,
+        "operationId": "operation-cross-language-alpha",
+        "protocolVersion": "1",
+        "providerRef": "hcloud.volume.fixture-alpha",
+        "releaseVersion": "0.22.0",
+        "serviceCredential": "$ACTIVE_SERVICE_CREDENTIAL",
+        "tenantId": "tenant-cross-language-alpha",
+        "workerPolicy": {
+          "media": false,
+          "semantic": false,
+          "workerCount": 0
+        }
+      }
+    },
+    "restore": {
+      "final": {
+        "body": null,
+        "status": 204
+      },
+      "idempotencyKey": "fixture-restore-key",
+      "pending": {
+        "body": {
+          "checkpoint": "requested",
+          "operationId": "operation-cross-language-alpha",
+          "retryAfterSeconds": 2,
+          "status": "pending"
+        },
+        "headers": {
+          "retry-after": "2"
+        },
+        "status": 202
+      },
+      "request": {
+        "archiveSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "archiveSize": 1048576,
+        "cellId": "cell-cross-language-alpha",
+        "checkpoint": "requested",
+        "fenceGeneration": 7,
+        "manifestSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "operationId": "operation-cross-language-alpha",
+        "protocolVersion": "1",
+        "providerRef": "hcloud.volume.fixture-alpha",
+        "releaseVersion": "0.22.0",
+        "restoreRef": "restore.fixture-alpha",
+        "serviceCredential": "$ACTIVE_SERVICE_CREDENTIAL",
+        "sourceCellId": "cell-source-fixture-alpha",
+        "tenantId": "tenant-cross-language-alpha",
+        "workerPolicy": {
+          "media": false,
+          "semantic": false,
+          "workerCount": 0
+        }
+      }
+    },
+    "resume": {
+      "final": {
+        "body": null,
+        "status": 204
+      },
+      "idempotencyKey": "fixture-resume-key",
+      "pending": {
+        "body": {
+          "checkpoint": "requested",
+          "operationId": "operation-cross-language-alpha",
+          "retryAfterSeconds": 2,
+          "status": "pending"
+        },
+        "headers": {
+          "retry-after": "2"
+        },
+        "status": 202
+      },
+      "request": {
+        "cellId": "cell-cross-language-alpha",
+        "checkpoint": "requested",
+        "fenceGeneration": 7,
+        "operationId": "operation-cross-language-alpha",
+        "protocolVersion": "1",
+        "providerRef": "hcloud.volume.fixture-alpha",
+        "releaseVersion": "0.22.0",
+        "serviceCredential": "$ACTIVE_SERVICE_CREDENTIAL",
+        "tenantId": "tenant-cross-language-alpha",
+        "workerPolicy": {
+          "media": false,
+          "semantic": false,
+          "workerCount": 0
+        }
+      }
+    },
+    "rotate-credential": {
+      "final": {
+        "body": {
+          "previousCredentialRejected": true
+        },
+        "status": 200
+      },
+      "idempotencyKey": "fixture-rotate-credential-key",
+      "pending": {
+        "body": {
+          "checkpoint": "requested",
+          "operationId": "operation-cross-language-alpha",
+          "retryAfterSeconds": 2,
+          "status": "pending"
+        },
+        "headers": {
+          "retry-after": "2"
+        },
+        "status": 202
+      },
+      "request": {
+        "cellId": "cell-cross-language-alpha",
+        "checkpoint": "requested",
+        "credentialVersion": 2,
+        "fenceGeneration": 7,
+        "nextCredential": "$NEXT_SERVICE_CREDENTIAL",
+        "operationId": "operation-cross-language-alpha",
+        "phase": "finalize",
+        "protocolVersion": "1",
+        "providerRef": "hcloud.volume.fixture-alpha",
+        "releaseVersion": "0.22.0",
+        "serviceCredential": "$ACTIVE_SERVICE_CREDENTIAL",
+        "tenantId": "tenant-cross-language-alpha",
+        "workerPolicy": {
+          "media": false,
+          "semantic": false,
+          "workerCount": 0
+        }
+      }
+    },
+    "seal": {
+      "final": {
+        "body": null,
+        "status": 204
+      },
+      "idempotencyKey": "fixture-seal-key",
+      "pending": {
+        "body": {
+          "checkpoint": "requested",
+          "operationId": "operation-cross-language-alpha",
+          "retryAfterSeconds": 2,
+          "status": "pending"
+        },
+        "headers": {
+          "retry-after": "2"
+        },
+        "status": 202
+      },
+      "request": {
+        "cellId": "cell-cross-language-alpha",
+        "checkpoint": "requested",
+        "fenceGeneration": 7,
+        "operationId": "operation-cross-language-alpha",
+        "protocolVersion": "1",
+        "providerRef": "hcloud.volume.fixture-alpha",
+        "releaseVersion": "0.22.0",
+        "serviceCredential": "$ACTIVE_SERVICE_CREDENTIAL",
+        "tenantId": "tenant-cross-language-alpha",
+        "workerPolicy": {
+          "media": false,
+          "semantic": false,
+          "workerCount": 0
+        }
+      }
+    },
+    "stop": {
+      "final": {
+        "body": null,
+        "status": 204
+      },
+      "idempotencyKey": "fixture-stop-key",
+      "pending": {
+        "body": {
+          "checkpoint": "requested",
+          "operationId": "operation-cross-language-alpha",
+          "retryAfterSeconds": 2,
+          "status": "pending"
+        },
+        "headers": {
+          "retry-after": "2"
+        },
+        "status": 202
+      },
+      "request": {
+        "cellId": "cell-cross-language-alpha",
+        "checkpoint": "requested",
+        "fenceGeneration": 7,
+        "operationId": "operation-cross-language-alpha",
+        "protocolVersion": "1",
+        "providerRef": "hcloud.volume.fixture-alpha",
+        "releaseVersion": "0.22.0",
+        "serviceCredential": "$ACTIVE_SERVICE_CREDENTIAL",
+        "tenantId": "tenant-cross-language-alpha",
+        "workerPolicy": {
+          "media": false,
+          "semantic": false,
+          "workerCount": 0
+        }
+      }
+    }
+  },
+  "errors": [
+    {
+      "body": {
+        "code": "CONTROL_PLANE_STATE_CONFLICT",
+        "retryable": false
+      },
+      "expectedTypeScript": {
+        "code": "CONTROL_PLANE_STATE_CONFLICT",
+        "retryable": false
+      },
+      "status": 409
+    },
+    {
+      "body": {
+        "code": "PROVISIONER_REJECTED",
+        "retryable": false
+      },
+      "expectedTypeScript": {
+        "code": "PROVISIONER_REJECTED",
+        "retryable": false
+      },
+      "status": 422
+    },
+    {
+      "body": {
+        "code": "EXPORT_REQUEST_EXPIRED",
+        "retryable": false
+      },
+      "expectedTypeScript": {
+        "code": "EXPORT_REQUEST_EXPIRED",
+        "retryable": false
+      },
+      "status": 422
+    },
+    {
+      "body": {
+        "code": "PROVISIONER_RESPONSE_INVALID",
+        "retryable": false
+      },
+      "expectedTypeScript": {
+        "code": "PROVISIONER_RESPONSE_INVALID",
+        "retryable": false
+      },
+      "status": 500
+    },
+    {
+      "body": {
+        "code": "PROVISIONER_UNAVAILABLE",
+        "retryable": true
+      },
+      "expectedTypeScript": {
+        "code": "PROVISIONER_UNAVAILABLE",
+        "retryable": true
+      },
+      "status": 503
+    }
+  ],
+  "protocol": "exomem-cell-provisioner.v1",
+  "schemaVersion": 1
+}
