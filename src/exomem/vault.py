@@ -89,6 +89,15 @@ def excluded_frontmatter_reason(field: str) -> str | None:
 
 
 # When scanning the full vault for inbound wikilinks, skip these.
+#
+# `_Governance` and `_Adoption` are operational state, not knowledge: they name
+# items whose own disclosure decisions may be restrictive, so surfacing them as
+# content would release by the back door what the release plane withholds at the
+# front. `find_corpus.EXCLUDED_DIR_NAMES` already excludes them from the KB
+# corpus; this set is the walker `find(scope="vault")` reaches through
+# (`bm25.py` -> `walk_vault_md`), and the two must not disagree — a name excluded
+# from one walk and indexed by the other is exactly the bypass the exclusion
+# exists to prevent.
 VAULT_SCAN_SKIP_DIRS = frozenset(
     {
         ".obsidian",
@@ -99,6 +108,8 @@ VAULT_SCAN_SKIP_DIRS = frozenset(
         "_archive",
         "_trash",
         "_Schema",
+        "_Governance",
+        "_Adoption",
     }
 )
 
@@ -4647,10 +4658,19 @@ def write_log_entry(
         return f"log entry skipped: {error}"
 
 
-# Matches a single log.md entry header: `## [2026-06-23] edit | Notes/Insights/foo`.
+# Matches a single log.md entry header, at either recorded precision:
+#   `## [2026-06-23] edit | Notes/Insights/foo`
+#   `## [2026-06-23T09:12:33Z] edit | Notes/Insights/foo`
 # `op` is a single whitespace-free token; the title runs to end-of-line.
+#
+# The optional time group is what makes same-day edits orderable — three
+# entries written within one afternoon used to read identically, leaving
+# position in the file as the only ordering signal. A header this fails to
+# match is not an error anywhere downstream: `read_log_entries` simply returns
+# nothing, so `read_memory(include_history=true)` would lose the page's history
+# silently. Widen this before anything can write the longer form.
 _LOG_ENTRY_HEADER_RE = re.compile(
-    r"^## \[(\d{4}-\d{2}-\d{2})\] (\S+) \| (.+)$",
+    r"^## \[(\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2}:\d{2}Z)?)\] (\S+) \| (.+)$",
     re.MULTILINE,
 )
 

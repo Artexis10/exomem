@@ -2,14 +2,26 @@
 
 ## Preconditions
 
-Use the newest remotely verified encrypted object, not job-start time. Backup
-age above 45 minutes warns; 60 minutes blocks invitations. A restore always uses
-a new stopped candidate identity and a bounded scratch volume.
+Use the newest remotely verified encrypted object, not job-start time. The vault
+recovery point objective is **24 hours**: one complete archive per day. Because
+the newest object always approaches 24 hours old just before the next run, the
+thresholds sit past the objective — backup age above 26 hours warns, and 30 hours
+blocks invitations, which catches an entirely missed run before a second day
+passes. A restore always uses a new stopped candidate identity and a bounded
+scratch volume.
+
+Depth, not frequency, is what recovers from the failures that actually happen. A
+bad write, a bad migration, or an operator mistake is usually discovered days
+later and is recovered from the 30-day retention, not from a recent archive.
+Frequency only helps against volume loss, which on replicated network storage is
+the least likely way this system loses data — and each run costs a full
+independent encrypted copy plus a quiescence window for the tenant. Do not
+shorten the cadence until archives are content-addressed and incremental.
 
 The platform renders four separate durability paths from the pinned workload
-contract. `exomem-durability-backup` runs every 30 minutes with Kubernetes route
-coordination, bounded 6 GiB scratch, the recovery upload-only B2 key, and the
-provider identity signer. `exomem-database-backup` runs every 30 minutes without
+contract. `exomem-durability-backup` runs once daily at 02:17 UTC with Kubernetes
+route coordination, bounded 6 GiB scratch, the recovery upload-only B2 key, and
+the provider identity signer. `exomem-database-backup` runs every 30 minutes without
 a Kubernetes token, uses mode-`0600` PGSERVICE/PGPASS copies and the independent
 database-backup upload key, and proves a clean scratch restore for the configured
 opaque owner tenant/cell. Every plaintext portable delivery records its exact B2

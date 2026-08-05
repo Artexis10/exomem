@@ -3589,3 +3589,245 @@ def test_multi_grant_revoke_receipt_uses_sorted_component_identity_hashes(
         if record.get("event_id") == revoked["event_id"]
     )
     assert intent["affected_ids"] == expected == sorted(set(expected))
+
+
+# ---------------------------------------------------------------------------
+# `explain` for a default denial (add-default-deny-scope-cap, task 3)
+# ---------------------------------------------------------------------------
+
+DECLARED_RESTRICTED = "Knowledge Base/Notes/Patterns/kill-switch-for-risky-releases.md"
+
+
+def _write_declared_scope(vault: Path, *, default_deny: bool = True) -> None:
+    """A scope carrying the declaration and NO rule naming `external`."""
+    scopes = vault / "Knowledge Base" / "_Governance" / "scopes"
+    scopes.mkdir(parents=True, exist_ok=True)
+    (scopes / "patterns.yaml").write_text(
+        f"governance_version: 1\nid: {SCOPE_ID}\nname: Confidential patterns\n"
+        f'paths: ["{PATTERN_GLOB}"]\n'
+        + ("default_deny: true\n" if default_deny else ""),
+        encoding="utf-8",
+    )
+
+
+def test_explain_names_the_declaring_scope_for_a_default_denial(vault: Path) -> None:
+    """Spec: the explanation identifies the declaring scope, and does NOT
+    attribute the outcome to a standing rule that does not exist.
+
+    A declared scope with no rules is invisible until someone is denied, so
+    `explain` reporting a bare "nothing matched" would leave the owner unable
+    to tell a default denial from a missing item."""
+    from exomem.governance.tool import op_govern_memory
+
+    _write_declared_scope(vault)
+    explained = op_govern_memory(
+        vault,
+        operation="explain",
+        principal=owner_principal(),
+        audience="external",
+        path=DECLARED_RESTRICTED,
+    )
+    assert explained["effective_ceiling"] == 0
+    # No rule was invented to carry the outcome.
+    assert explained["rule_ids"] == []
+    assert explained["participating_chain"] == []
+    assert explained["default_deny_scope_ids"] == [SCOPE_ID]
+
+
+def test_explain_reports_no_declaring_scope_when_a_rule_decided(vault: Path) -> None:
+    """The distinguishing half: an authored denial must not be dressed up as a
+    default one, or the field means nothing."""
+    from exomem.governance.tool import op_govern_memory
+
+    _committed_policy(vault)
+    explained = op_govern_memory(
+        vault,
+        operation="explain",
+        principal=owner_principal(),
+        audience="external",
+        path=DECLARED_RESTRICTED,
+    )
+    assert explained["rule_ids"] == [RULE_ID]
+    assert "default_deny_scope_ids" not in explained
+
+
+def _scope_document(*, default_deny: bool) -> str:
+    return (
+        f"governance_version: 1\nid: {SCOPE_ID}\nname: Confidential patterns\n"
+        f'paths: ["{PATTERN_GLOB}"]\n'
+        + ("default_deny: true\n" if default_deny else "")
+    )
+
+
+def _write_declared_scope_with_a_rule(vault: Path, *, default_deny: bool) -> None:
+    """A declared scope PLUS an unrelated authored audience.
+
+    The rule is what makes the failure visible rather than vacuous: with a
+    named audience in the policy the lattice is non-empty, so a direction is
+    computed from it — and the audience whose ceiling actually moved is the one
+    no document names.
+    """
+    governance = vault / "Knowledge Base" / "_Governance"
+    (governance / "scopes").mkdir(parents=True, exist_ok=True)
+    (governance / "rules").mkdir(parents=True, exist_ok=True)
+    (governance / "scopes" / "patterns.yaml").write_text(
+        _scope_document(default_deny=default_deny), encoding="utf-8"
+    )
+    (governance / "rules" / "patterns.yaml").write_text(
+        f"governance_version: 1\nid: {RULE_ID}\n"
+        f'scope_ids: ["{SCOPE_ID}"]\naudience: external\nceiling: 1\n',
+        encoding="utf-8",
+    )
+
+
+def test_removing_default_deny_is_classified_as_a_widening(vault: Path) -> None:
+    """The owner's only review signal before committing must not misreport the
+    exact edit that undoes this feature.
+
+    The declaration names no audience, so enumerating audiences from rules and
+    grants alone never evaluates the one whose ceiling moves 0 -> 6. The
+    default itself has to be in the compared lattice.
+    """
+    from exomem.governance.tool import _effective_transition_direction
+
+    _write_declared_scope_with_a_rule(vault, default_deny=True)
+
+    direction = _effective_transition_direction(
+        vault, {"scopes/patterns.yaml": _scope_document(default_deny=False)}
+    )
+
+    assert direction == "widening"
+
+
+def test_adding_default_deny_is_classified_as_a_narrowing(vault: Path) -> None:
+    """The other half of the pair: the declaration is a restriction, and the
+    lattice it is measured in must be able to see that."""
+    from exomem.governance.tool import _effective_transition_direction
+
+    _write_declared_scope_with_a_rule(vault, default_deny=False)
+
+    direction = _effective_transition_direction(
+        vault, {"scopes/patterns.yaml": _scope_document(default_deny=True)}
+    )
+
+    assert direction == "narrowing"
+
+
+def test_a_proposal_removing_default_deny_counts_the_widened_audience(
+    vault: Path,
+) -> None:
+    """`propose` reports the consequences the owner reviews. A removal that
+    reopens every unnamed audience must not read as `widened: 0`."""
+    from exomem.governance.tool import op_govern_memory
+
+    _write_declared_scope_with_a_rule(vault, default_deny=True)
+
+    proposal = op_govern_memory(
+        vault,
+        operation="propose",
+        principal=owner_principal(),
+        intent="Stop denying audiences the policy does not name",
+        documents={"scopes/patterns.yaml": _scope_document(default_deny=False)},
+        selector_paths=[],
+        target_ceiling=6,
+    )
+
+    assert proposal["consequences"]["direction"] == "widening"
+    assert proposal["consequences"]["widened"] > 0
+    assert proposal["consequences"]["target_ceiling"] == 1
+    assert proposal["consequences"]["unnamed_audience_ceiling"] == 6
+
+
+def test_a_proposal_adding_default_deny_counts_the_narrowed_audience(
+    vault: Path,
+) -> None:
+    from exomem.governance.tool import op_govern_memory
+
+    _write_declared_scope_with_a_rule(vault, default_deny=False)
+
+    proposal = op_govern_memory(
+        vault,
+        operation="propose",
+        principal=owner_principal(),
+        intent="Deny audiences the policy does not name",
+        documents={"scopes/patterns.yaml": _scope_document(default_deny=True)},
+        selector_paths=[],
+        target_ceiling=0,
+    )
+
+    assert proposal["consequences"]["direction"] == "narrowing"
+    assert proposal["consequences"]["narrowed"] > 0
+    assert proposal["consequences"]["widened"] == 0
+
+
+@pytest.mark.parametrize(
+    ("operation", "argument"),
+    [("explain", "path"), ("simulate", "paths")],
+)
+def test_non_owner_inspection_cannot_distinguish_default_denied_from_missing(
+    vault: Path, operation: str, argument: str
+) -> None:
+    """Same input, varied condition: the caller asks about one path while it
+    exists behind a declared default, then asks again after it is deleted."""
+    from exomem.governance.tool import GovernanceError, op_govern_memory
+
+    _write_declared_scope(vault)
+    value: object = DECLARED_RESTRICTED if argument == "path" else [DECLARED_RESTRICTED]
+
+    def outcome() -> tuple[str, str, str]:
+        try:
+            result = op_govern_memory(
+                vault,
+                operation=operation,
+                principal=_external(),
+                audience="external",
+                **{argument: value},
+            )
+        except GovernanceError as error:
+            return type(error).__name__, error.code, str(error)
+        return "ok", "", repr(result)
+
+    present = outcome()
+    (vault / DECLARED_RESTRICTED).unlink()
+    missing = outcome()
+
+    assert present == missing
+    assert present == (
+        "GovernanceError",
+        "INVALID_INSPECTION_PATH",
+        "INVALID_INSPECTION_PATH: path must be canonical",
+    )
+
+
+def test_non_owner_inspection_remains_available_when_a_grant_raises_the_default(
+    vault: Path,
+) -> None:
+    """The oracle guard applies only while the declared floor remains L0."""
+    from exomem.governance.tool import op_govern_memory
+
+    _write_declared_scope(vault)
+    grants = vault / "Knowledge Base" / "_Governance" / "grants"
+    grants.mkdir(parents=True, exist_ok=True)
+    (grants / "external.yaml").write_text(
+        "governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FB1\nkind: standing\n"
+        f'scope_ids: ["{SCOPE_ID}"]\naudience: external\nceiling: 4\n',
+        encoding="utf-8",
+    )
+
+    explained = op_govern_memory(
+        vault,
+        operation="explain",
+        principal=_external(),
+        audience="external",
+        path=DECLARED_RESTRICTED,
+    )
+    simulated = op_govern_memory(
+        vault,
+        operation="simulate",
+        principal=_external(),
+        audience="external",
+        paths=[DECLARED_RESTRICTED],
+    )
+
+    assert explained["effective_ceiling"] == 4
+    assert simulated["evaluated_count"] == 1

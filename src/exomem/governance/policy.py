@@ -5,8 +5,9 @@ a missing (or file-less) policy directory yields the cached `EMPTY_POLICY`
 singleton with a stable "missing" fingerprint; a present one is gated by a
 cheap per-file stat signature, and a content hash — computed only when that
 signature moves — is the stable identity handed to callers and used as the
-membership memo key (`membership.py`). A `(conflicted copy)` sibling anywhere
-under `_Governance/` refuses the compile: the last good policy stays in
+membership memo key (`membership.py`). A synchronisation conflict copy anywhere
+under `_Governance/` (Obsidian `(conflicted copy …)` or Syncthing
+`.sync-conflict-…`) refuses the compile: the last good policy stays in
 effect and the refusal is surfaced as a finding, never silently merged.
 
 Schema v1 is strict and deliberately small (see the change's design doc,
@@ -69,12 +70,30 @@ def is_valid_document_id(value: object) -> bool:
     return isinstance(value, str) and _ULID_RE.fullmatch(value) is not None
 
 
-# Substring only (no trailing ")") — Obsidian Sync typically inserts a
-# timestamp before the closing paren, e.g. "file (conflicted copy 2024-01-01).md".
-# Always compared against a lower-cased filename (Obsidian doesn't guarantee
-# case, and a stray capital-C sibling must still be caught as a conflict, not
-# mistaken for a second, differently-named policy document).
-_CONFLICTED_MARKER = "(conflicted copy"
+# Conflict-copy filenames, one substring per synchronisation tool the vault may
+# be replicated with. Substrings only, because each tool appends its own
+# timestamp/id: Obsidian Sync writes "file (conflicted copy 2024-01-01).md" and
+# Syncthing writes "file.sync-conflict-20240101-120000-ABCDEFG.md". Always
+# compared against a lower-cased filename (no tool guarantees case, and a stray
+# capital-C sibling must still be caught as a conflict, not mistaken for a
+# second, differently-named policy document).
+#
+# Every other walker in this codebase already filters the hyphenated form
+# (`find_corpus`, `vault`, `lexstore`, `freshness`, `media_worker`); this is the
+# one place where missing it is a disclosure bug rather than a stale read.
+_CONFLICT_MARKERS = ("conflicted copy", ".sync-conflict-")
+
+
+def is_conflict_copy(name: str) -> bool:
+    """True when `name` is a synchronisation conflict copy, for any known tool.
+
+    Shared by policy-document discovery, the governance file walk, and the
+    receipt tree so a conflict cannot be a policy document in one walk and an
+    ordinary file in another.
+    """
+    folded = str(name).lower()
+    return any(marker in folded for marker in _CONFLICT_MARKERS)
+
 
 # Distinct from `EMPTY_POLICY`'s "missing" sentinel on purpose: a refused
 # compile with NO prior good compile to fall back on (a cold start) is a
@@ -89,6 +108,7 @@ _SCOPE_ALLOWED_FIELDS = frozenset(
         "name",
         "exclude",
         "constraint",
+        "default_deny",
         *_SCOPE_SELECTOR_FIELDS,
     }
 )
@@ -143,6 +163,11 @@ class Scope:
     source: str
     name: str | None = None
     constraint: str | None = None
+    #: When true, an audience that no standing rule names receives NOTHING for
+    #: an item in this scope, instead of full release. It inverts one default;
+    #: it is not a rule and never lowers an authored ceiling (see
+    #: `decisions._decide_at`). The owner is never subject to it.
+    default_deny: bool = False
     paths: tuple[str, ...] = ()
     projects: tuple[str, ...] = ()
     tags: tuple[str, ...] = ()
@@ -239,6 +264,25 @@ class Policy:
         """
         return self.fingerprint == BLOCKED_FINGERPRINT
 
+    @property
+    def conflicted(self) -> bool:
+        """True when a synchronisation conflict copy is present under `_Governance/`.
+
+        Deliberately NOT folded into `.blocked`. A conflict on a warm vault must
+        keep SERVING the last good policy — flooring every read to L0 because a
+        sync tool dropped a sibling file would be worse than the defect. What it
+        must not do is let policy be AUTHORED, because the author cannot see
+        which of the two documents will win, and `compile_prospective` filters
+        conflict copies out of its temp tree — so a mutation would be accepted
+        and receipted while the conflict silently decides the live outcome.
+
+        Before conflict detection was widened, a conflict alongside its original
+        produced a `duplicate_id` error that refused the mutation by accident.
+        Filtering the copy at discovery removed that refusal, so this restores
+        it deliberately and for the right reason.
+        """
+        return any(f.get("code") == "conflicted_copy" for f in self.findings)
+
 
 EMPTY_POLICY = Policy(fingerprint="missing")
 
@@ -276,6 +320,17 @@ def _iter_all_files(root: Path):
             yield p
 
 
+def has_conflict_copy(vault_root: Path) -> bool:
+    """Filesystem-only conflict probe for the authoring gate.
+
+    Deliberately does NOT go through `load()`: `op_govern_memory` guarantees a
+    rejected operation creates no sidecar, policy directory, receipt or marker,
+    and `load()` opens the governance sidecar through the guard probe. Reading
+    the directory listing keeps the gate free of that side effect.
+    """
+    return any(is_conflict_copy(p.name) for p in _iter_all_files(governance_root(Path(vault_root))))
+
+
 def _is_operational_state(root: Path, path: Path) -> bool:
     """Receipt evidence is governed state, never a policy input or warning."""
     try:
@@ -296,7 +351,7 @@ def _iter_policy_files(root: Path) -> list[tuple[str, Path]]:
         if not sub.is_dir():
             continue
         for p in sorted(sub.glob("*.yaml")):
-            if p.is_file() and _CONFLICTED_MARKER not in p.name.lower():
+            if p.is_file() and not is_conflict_copy(p.name):
                 out.append((kind, p))
     return out
 
@@ -368,7 +423,7 @@ def _load_unguarded(vault_root: Path) -> Policy:
         return cached[1]
 
     files = _iter_policy_files(root)
-    conflicts = [p for p in _iter_all_files(root) if _CONFLICTED_MARKER in p.name.lower()]
+    conflicts = [p for p in _iter_all_files(root) if is_conflict_copy(p.name)]
 
     if not files and not conflicts:
         _CACHE.pop(key, None)
@@ -379,8 +434,8 @@ def _load_unguarded(vault_root: Path) -> Policy:
             _finding(
                 "conflicted_copy",
                 p.relative_to(root).as_posix(),
-                "an Obsidian conflicted-copy sibling is present; resolve it before "
-                "policy changes take effect",
+                "a synchronisation conflict-copy sibling is present; resolve it "
+                "before policy changes take effect",
             )
             for p in conflicts
         )
@@ -483,8 +538,21 @@ def load(vault_root: Path) -> Policy:
             and marker_before == marker_after
             and not marker_after_present
         ):
-            if not loaded.blocked and not any(
-                finding.get("severity") == "error" for finding in loaded.findings
+            # Retain only a compile that PRODUCED GOVERNANCE — neither the
+            # empty open singleton nor the blocked floor. `_LAST_GOOD` is
+            # defined as "the last policy worth falling back to", and an open
+            # policy is never worth falling back to: `_guarded_policy` replaces
+            # only `findings`, so retaining `EMPTY_POLICY` here would hand back
+            # a policy that still fingerprints as "missing" and therefore takes
+            # every caller's fully-open fast path while a mutation is pending.
+            # With the cache unable to hold one, the existing `last_good is
+            # None` branch already reaches `_blocked` correctly.
+            if (
+                not loaded.empty
+                and not loaded.blocked
+                and not any(
+                    finding.get("severity") == "error" for finding in loaded.findings
+                )
             ):
                 _LAST_GOOD[key] = loaded
             return loaded
@@ -518,7 +586,7 @@ def _compile(
 
     recognized = {path for _kind, path in files}
     for p in _iter_all_files(root):
-        if p in recognized or _CONFLICTED_MARKER in p.name.lower():
+        if p in recognized or is_conflict_copy(p.name):
             continue
         findings.append(
             _finding(
@@ -703,6 +771,25 @@ def _valid_release_time(value: object) -> bool:
     return True
 
 
+def _reject_reserved_audience(
+    value: str | None,
+    rel: str,
+    field_name: str,
+    findings: list[dict[str, str]],
+) -> str | None:
+    """Keep authored policy out of the process-reserved NUL namespace."""
+    if value is not None and "\x00" in value:
+        findings.append(
+            _finding(
+                "invalid_field",
+                f"{rel}:{field_name}",
+                f"{field_name} must not contain NUL; the NUL prefix is reserved",
+            )
+        )
+        return None
+    return value
+
+
 def _parse_scope(data: dict[str, Any], rel: str) -> tuple[Scope | None, list[dict[str, str]]]:
     findings, doc_id = _check_common(data, rel, _SCOPE_ALLOWED_FIELDS)
 
@@ -732,6 +819,25 @@ def _parse_scope(data: dict[str, Any], rel: str) -> tuple[Scope | None, list[dic
         )
         constraint = None
 
+    # Presence-checked rather than `.get() is not None`: `default_deny:` with
+    # the value forgotten parses as YAML null, and for a confidentiality
+    # control the permissive reading of a typo is the whole failure mode this
+    # field exists to close. Any non-boolean is an ERROR, which refuses the
+    # compile — the scope is never quietly left open.
+    default_deny = False
+    if "default_deny" in data:
+        raw_default_deny = data["default_deny"]
+        if isinstance(raw_default_deny, bool):
+            default_deny = raw_default_deny
+        else:
+            findings.append(
+                _finding(
+                    "invalid_field",
+                    f"{rel}:default_deny",
+                    "default_deny must be a boolean",
+                )
+            )
+
     if doc_id is None:
         return None, findings
 
@@ -740,6 +846,7 @@ def _parse_scope(data: dict[str, Any], rel: str) -> tuple[Scope | None, list[dic
         source=rel,
         name=name,
         constraint=constraint,
+        default_deny=default_deny,
         paths=_as_str_tuple(data.get("paths"), rel, "paths", findings),
         projects=_as_str_tuple(data.get("projects"), rel, "projects", findings),
         tags=_as_str_tuple(data.get("tags"), rel, "tags", findings),
@@ -792,6 +899,7 @@ def _parse_rule(data: dict[str, Any], rel: str) -> tuple[Rule | None, list[dict[
     if not isinstance(audience, str) or not audience.strip():
         findings.append(_finding("missing_field", f"{rel}:audience", "audience is required"))
         audience = None
+    audience = _reject_reserved_audience(audience, rel, "audience", findings)
 
     ceiling = data.get("ceiling")
     if (
@@ -878,6 +986,7 @@ def _parse_grant(
     if not isinstance(audience, str) or not audience.strip():
         findings.append(_finding("missing_field", f"{rel}:audience", "audience is required"))
         audience = None
+    audience = _reject_reserved_audience(audience, rel, "audience", findings)
 
     ceiling = data.get("ceiling")
     if (
@@ -930,7 +1039,9 @@ def _parse_release_grant(
         findings.append(_finding("invalid_field", f"{rel}:content_hash", "content_hash must be lowercase SHA-256"))
         content_hash = None
 
-    to_audience = required_text("to_audience")
+    to_audience = _reject_reserved_audience(
+        required_text("to_audience"), rel, "to_audience", findings
+    )
     released_at = required_text("released_at")
     if released_at is not None and not _valid_release_time(released_at):
         findings.append(_finding("invalid_field", f"{rel}:released_at", "released_at must be an ISO-8601 timestamp"))

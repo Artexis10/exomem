@@ -16,7 +16,7 @@ def test_core_is_single_source_for_parser_and_graph() -> None:
     from exomem import epistemic_graph
 
     core = relation_registry.core_registry()
-    assert len(core.core) == 25
+    assert len(core.core) == 28
     assert markdown_relations.RELATION_TYPES == core.keys
     assert semantic_blocks.RELATION_TYPES == core.keys
     assert epistemic_graph.RELATION_TYPES == core.keys
@@ -294,3 +294,27 @@ def test_invalid_node_kind_and_active_replacement_are_rejected() -> None:
     )
     codes = {item["code"] for item in registry.findings}
     assert {"invalid_node_kind", "invalid_replacement"} <= codes
+
+
+def test_relation_inference_exposes_the_full_registered_vocabulary(tmp_path) -> None:
+    """Callers must be able to see relations the corpus has not used yet.
+
+    Without this, a label is only discoverable by finding one already written, so
+    unused-but-apt relations stay invisible and authors fall back to `relates_to`
+    or invent an unregistered word.
+    """
+    from exomem import memory_schema
+
+    (tmp_path / "Knowledge Base").mkdir(parents=True)
+    inferred = memory_schema.infer_relation_registry(tmp_path)
+
+    vocabulary = {item["relation"]: item for item in inferred["vocabulary"]}
+    core = relation_registry.core_registry()
+
+    assert set(vocabulary) == set(core.keys), "every registered relation is listed"
+    assert vocabulary["part_of"]["family"] == "composition"
+    assert vocabulary["part_of"]["inverse"] == "contains"
+    assert vocabulary["refines"]["description"]
+    assert vocabulary["refines"]["status"] == "core"
+    # Listing is read-only: no corpus observations, so nothing is proposed.
+    assert inferred["proposal"]["extensions"] == {}

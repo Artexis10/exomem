@@ -25,6 +25,7 @@ from . import (
     semantic_contract,
     semantic_index,
     semantic_language_registry,
+    temporal,
     vault,
 )
 from . import (
@@ -32,7 +33,11 @@ from . import (
 )
 from .kbdir import kb_prefix
 
-_TOKEN_VERSION = 1
+# v2 froze the authored *instant* alongside the authored day. v1 tokens are
+# rejected: a token minted before the bump carries no knowledge-time stamp,
+# and inferring one at commit is exactly the non-determinism the freeze exists
+# to prevent. Clients mid validate->commit re-validate once at the boundary.
+_TOKEN_VERSION = 2
 _MAX_TOKEN_BYTES = 12 * 1024
 _COMPILED_TYPES = frozenset(
     {
@@ -426,6 +431,10 @@ class PosthocBatch:
             "string_bytes_omitted": 0,
             "nested_items_omitted": 0,
         }
+        # Census over EVERY evaluation, not only the ones that produced a finding.
+        # Satisfied pages emit no finding, so counting findings alone would report a
+        # reviewed-none share of 100% on a healthy vault.
+        disposition_census: dict[str, int] = {}
         for evaluation in self.evaluations:
             disposition = evaluation.contract_result.relation_disposition
             disposition_value = (
@@ -437,6 +446,14 @@ class PosthocBatch:
                 if disposition is not None
                 else None
             )
+            if disposition is None:
+                census_key = "not_applicable"
+            elif disposition.kind == "qualifying_relation":
+                signal = getattr(disposition, "qualifying_signal", "typed")
+                census_key = f"qualifying_relation_{signal}"
+            else:
+                census_key = disposition.kind
+            disposition_census[census_key] = disposition_census.get(census_key, 0) + 1
             for finding in evaluation.contract_result.findings:
                 summary[finding.code] = summary.get(finding.code, 0) + 1
                 item = {
@@ -476,6 +493,7 @@ class PosthocBatch:
             "evaluated_paths": evaluated_paths,
             "semantic_contract_findings": findings,
             "semantic_contract_summary": retained_summary,
+            "relation_disposition_summary": dict(sorted(disposition_census.items())),
             "omitted_counts": {
                 "evaluated_paths": len(self.evaluations) - len(evaluated_paths),
                 "semantic_contract_findings": omitted,
@@ -669,11 +687,27 @@ class DraftRegistration:
 
 @dataclass(frozen=True, slots=True)
 class DraftToken:
+    """A validated destination frozen across the validate->commit gap.
+
+    `render_date` is the authored calendar day; it names the file and must stay
+    day-granular. `render_stamp` is the authored knowledge-time instant written
+    into `created`/`updated`. Both are frozen at validation rather than read
+    again at commit, so committing the same token twice produces identical
+    bytes — the property the mutation-receipt replay path depends on.
+    """
+
     writer: str
     operation: str
     destination: str
     render_date: str
     registrations: tuple[DraftRegistration, ...] = ()
+    # Declared last so existing positional construction keeps binding
+    # `registrations` where callers expect it; always pass this by keyword.
+    render_stamp: str = ""
+
+    def stamp(self) -> str:
+        """The frozen instant, falling back to the frozen day."""
+        return self.render_stamp or self.render_date
 
     def encode(self) -> str:
         value = {
@@ -682,6 +716,7 @@ class DraftToken:
             "operation": self.operation,
             "destination": self.destination,
             "render_date": self.render_date,
+            "render_stamp": self.render_stamp or self.render_date,
             "registrations": [item.as_dict() for item in self.registrations],
         }
         raw = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode(
@@ -721,12 +756,13 @@ class DraftToken:
             "operation",
             "destination",
             "render_date",
+            "render_stamp",
             "registrations",
         }:
             raise SemanticWriteError("INVALID_DRAFT_TOKEN", "draft token has invalid fields")
         if value["version"] != _TOKEN_VERSION or any(
             type(value[key]) is not str
-            for key in ("writer", "operation", "destination", "render_date")
+            for key in ("writer", "operation", "destination", "render_date", "render_stamp")
         ):
             raise SemanticWriteError("INVALID_DRAFT_TOKEN", "draft token has invalid fields")
         try:
@@ -735,6 +771,19 @@ class DraftToken:
             raise SemanticWriteError(
                 "INVALID_DRAFT_TOKEN", "draft token has invalid render date"
             ) from error
+        # The frozen stamp must be canonical, or committing the same token
+        # twice could still produce different bytes.
+        stamp_moment = temporal.parse(value["render_stamp"])
+        if stamp_moment is None or temporal.stamp(
+            stamp_moment.instant or stamp_moment.day
+        ) != value["render_stamp"]:
+            raise SemanticWriteError(
+                "INVALID_DRAFT_TOKEN", "draft token has invalid render stamp"
+            )
+        if stamp_moment.day != render_date:
+            raise SemanticWriteError(
+                "INVALID_DRAFT_TOKEN", "draft token render stamp disagrees with its render date"
+            )
         if (
             render_date.isoformat() != value["render_date"]
             or not re.fullmatch(r"[a-z][a-z0-9_]{0,31}", value["writer"])
@@ -762,6 +811,7 @@ class DraftToken:
             value["destination"],
             value["render_date"],
             tuple(registrations),
+            render_stamp=value["render_stamp"],
         )
         if decoded.encode() != token:
             raise SemanticWriteError("INVALID_DRAFT_TOKEN", "draft token is not canonical")

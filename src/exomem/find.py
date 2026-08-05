@@ -623,6 +623,10 @@ def find(
             effective_result_level=effective_result_level,
             normalized_filters=filter_plan.to_dict(),
         )
+    # Keep the date bounds after the legacy arguments are cleared below: the
+    # typed plan does the filtering, but reporting *which* bound could not be
+    # decided still needs the original values.
+    bound_after, bound_before = updated_after, updated_before
     if filter_plan.root is not None:
         # Every shortcut is now represented in the shared typed plan.  Clear
         # the legacy arguments so no lane applies a second, divergent filter.
@@ -1024,6 +1028,20 @@ def find(
             updated_before=updated_before,
             recency_days=recency_days,
         )
+
+    # A hit kept on a bound that could not actually be ordered is reported as
+    # such rather than presented as a clean match. Runs after every filtering
+    # lane so it sees exactly the hits the caller will receive.
+    if bound_after is not None or bound_before is not None:
+        bound_shortcuts = structured_filters.FilterShortcuts(
+            updated_after=bound_after, updated_before=bound_before
+        )
+        for hit in hits:
+            vague = structured_filters.indeterminate_bounds(
+                {"updated": hit.updated}, shortcuts=bound_shortcuts
+            )
+            if vague:
+                hit.order_indeterminate = list(vague)
 
     if retrieval_trace is not None:
         retrieval_trace.finalize_page_results(

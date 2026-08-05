@@ -1576,6 +1576,121 @@ def test_governed_file_delete_records_lifecycle_before_terminal_and_keeps_lineag
     assert json.loads(tombstones[0].read_text(encoding="utf-8"))["state"] == "committed"
 
 
+def _write_restriction_shape(vault: Path, pattern: str, *, shape: str) -> None:
+    """Write the SAME restriction two ways, so lifecycle can be diffed on them.
+
+    `ceiling_zero` authors a rule that closes the scope to the one audience it
+    names. `default_deny` declares the scope closed to every audience no rule
+    names — and names no rule at all. A declaration restricts at least as much
+    as the rule does, so every subsystem that asks "is this item restricted?"
+    owes the same answer to both.
+    """
+    governance = vault / "Knowledge Base" / "_Governance"
+    scope = governance / "scopes" / "lifecycle.yaml"
+    rule = governance / "rules" / "lifecycle.yaml"
+    scope.parent.mkdir(parents=True, exist_ok=True)
+    rule.parent.mkdir(parents=True, exist_ok=True)
+    scope.write_text(
+        f'governance_version: 1\nid: {_LIFECYCLE_SCOPE}\npaths: ["{pattern}"]\n'
+        + ("default_deny: true\n" if shape == "default_deny" else ""),
+        encoding="utf-8",
+    )
+    if shape == "ceiling_zero":
+        rule.write_text(
+            f"governance_version: 1\nid: {_LIFECYCLE_RULE}\n"
+            f'scope_ids: ["{_LIFECYCLE_SCOPE}"]\naudience: external\nceiling: 0\n',
+            encoding="utf-8",
+        )
+    elif rule.exists():
+        rule.unlink()
+    from exomem.governance import membership, policy
+
+    policy._CACHE.clear()
+    membership.clear_memo()
+    egress.clear_decision_memo()
+
+
+_RESTRICTION_SHAPES = pytest.mark.parametrize(
+    "shape", ["ceiling_zero", "default_deny"]
+)
+
+
+@_RESTRICTION_SHAPES
+def test_deleting_a_restricted_item_tombstones_it_however_the_restriction_is_written(
+    vault: Path, shape: str
+) -> None:
+    """A governed delete leaves a tombstone; an ungoverned one does not.
+
+    Classify a `default_deny`-only item as ungoverned and `begin_deletion`
+    takes the ungoverned branch: no tombstone, so `is_tombstoned` is False
+    forever and the reference gate (`egress._ArtifactReferenceGate._permits`)
+    can no longer withhold a path that no longer exists — a permitted note's
+    wikilink to it renders in the clear. It also removes governed material with
+    no `governed_delete` audit record.
+    """
+    from exomem.governance import lifecycle
+
+    rel = "Knowledge Base/Notes/Insights/restricted-delete.md"
+    (vault / rel).write_text(
+        "---\ntype: insight\n---\n# Restricted\nprivate body\n", encoding="utf-8"
+    )
+    _write_restriction_shape(vault, "Notes/Insights/restricted-delete.md", shape=shape)
+
+    delete_file.delete_file(vault, path=rel, confirm=True)
+
+    tombstones = list(
+        (vault / "Knowledge Base" / "_Governance" / "deletion-tombstones").glob("*.json")
+    )
+    assert len(tombstones) == 1
+    assert lifecycle.is_tombstoned(vault, rel) is True
+    assert any(item["event_type"] == "deletion" for item in _receipt_records(vault))
+
+
+@_RESTRICTION_SHAPES
+def test_a_tombstoned_path_stays_withheld_after_the_policy_is_removed(
+    vault: Path, shape: str
+) -> None:
+    """The tombstone is what survives the item. Without it the path is
+    published the moment the governance tree stops matching it."""
+    rel = "Knowledge Base/Notes/Insights/restricted-stale.md"
+    body = "---\ntype: insight\n---\n# Restricted stale\n"
+    (vault / rel).write_text(body, encoding="utf-8")
+    _write_restriction_shape(vault, "Notes/Insights/restricted-stale.md", shape=shape)
+    delete_file.delete_file(vault, path=rel, confirm=True)
+    governance = vault / "Knowledge Base" / "_Governance"
+    shutil.rmtree(governance / "scopes")
+    if (governance / "rules").exists():
+        shutil.rmtree(governance / "rules")
+    from exomem.governance import membership, policy
+
+    policy._CACHE.clear()
+    membership.clear_memo()
+    egress.clear_decision_memo()
+
+    assert egress.annotate_page(vault, {"path": rel, "body": body}) is None
+    assert egress.release_level_for(vault, rel) is None
+
+
+@_RESTRICTION_SHAPES
+def test_restoring_a_restricted_item_is_governed_however_the_restriction_is_written(
+    vault: Path, shape: str
+) -> None:
+    """`_is_governed_for_restore` decides on its own whenever the deletion left
+    no committed lineage — here the item was deleted before the policy existed,
+    so the restore is the first governed step and must be receipted."""
+    rel = "Knowledge Base/Notes/Insights/restricted-restore.md"
+    (vault / rel).write_text(
+        "---\ntype: insight\nstatus: draft\n---\n# Restore me\n", encoding="utf-8"
+    )
+    deleted = delete_file.delete_file(vault, path=rel, confirm=True)
+    assert not any(item["event_type"] == "deletion" for item in _receipt_records(vault))
+    _write_restriction_shape(vault, "Notes/Insights/restricted-restore.md", shape=shape)
+
+    recover_from_trash.recover_from_trash(vault, trash_path=deleted.trash_path)
+
+    assert any(item["event_type"] == "recovery" for item in _receipt_records(vault))
+
+
 def test_tombstone_suppresses_stale_page_before_empty_policy_and_not_same_hash_sibling(
     vault: Path,
 ) -> None:
@@ -2617,3 +2732,26 @@ def test_scene_recovery_is_explicitly_disabled_with_clip(
     assert not any("remains tombstoned" in warning for warning in recovered.warnings)
     assert any(item["event_type"] == "recovery" for item in _receipt_records(vault))
     assert lifecycle.is_tombstoned(vault, rel) is False
+
+
+def test_sync_conflict_evidence_fails_the_append_closed(vault: Path) -> None:
+    """Task 2.3 — a Syncthing conflict copy must not fork the append-only chain.
+
+    The policy walk prunes operational state, so a conflict copy inside the
+    receipt tree is invisible to the compile-time conflict refusal. The append
+    path is the only thing standing between a forked hash chain and the next
+    record, so it has to recognise the same filenames.
+    """
+    first = receipts.append_event(vault, event_type="disclosure", payload={"outcomes": []})
+    instance_dir = receipts._instance_dir(vault, first["instance_id"])
+    conflict = instance_dir / "2026-07.sync-conflict-20260731-120000-ABCDEFG.jsonl"
+    conflict.write_text(json.dumps(first) + "\n", encoding="utf-8")
+
+    with pytest.raises(receipts.ReceiptError, match="conflicted receipt evidence"):
+        receipts.append_event(vault, event_type="disclosure", payload={"outcomes": []})
+
+    assert [record["seq"] for record in receipts.event_records(vault)] == [1]
+    assert any(
+        item["code"] == "evidence_conflict"
+        for item in receipts.verify_chain(vault)["issues"]
+    )

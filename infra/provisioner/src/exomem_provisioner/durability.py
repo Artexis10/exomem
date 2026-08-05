@@ -562,15 +562,35 @@ class ExportBackupWorkflow:
 
 
 class BackupScheduler:
-    INTERVAL_MINUTES = 30
-    WARNING_SECONDS = 45 * 60
-    BLOCK_SECONDS = 60 * 60
+    """Daily full-archive cadence with a stated 24-hour recovery objective.
+
+    Each run produces a complete independent encrypted archive and quiesces the
+    cell to do it, so frequency multiplies both storage and unavailability while
+    buying protection only against volume loss — the least likely way this system
+    loses data. Retention depth, not cadence, is what recovers from the failures
+    that actually occur. Do not shorten this interval until archives are
+    content-addressed and incremental.
+
+    The thresholds sit past the 24-hour objective on purpose: with a daily
+    cadence the newest object always approaches 24 hours old just before the next
+    run, so an alarm at the objective itself would fire every single day. Warning
+    at 26h catches a late run; blocking at 30h catches an entirely missed one
+    before a second day passes.
+    """
+
+    INTERVAL_MINUTES = 24 * 60
+    WARNING_SECONDS = 26 * 3600
+    BLOCK_SECONDS = 30 * 3600
+    # How long one enumerated sweep of every cell may take. Must equal the
+    # vaultBackup CronJob's activeDeadlineSeconds in durability-workloads-v1.json;
+    # Kubernetes kills the job there regardless, and a sweep that needs longer
+    # means the cell count or the entitlement outgrew the node.
+    SWEEP_BUDGET_SECONDS = 3600
 
     @staticmethod
     def slot(value: datetime) -> datetime:
         value = value if value.tzinfo is not None else value.replace(tzinfo=UTC)
-        minute = 30 if value.minute >= 30 else 0
-        return value.replace(minute=minute, second=0, microsecond=0)
+        return value.replace(hour=0, minute=0, second=0, microsecond=0)
 
     @classmethod
     def freshness_metrics(cls, *, age_seconds: int | None) -> dict[str, int]:
@@ -619,7 +639,7 @@ class ScheduledBackupWorkflow(Protocol):
 
 
 class CentralBackupScheduler:
-    """Run one globally enumerated, per-cell serialized backup for each 30-minute slot."""
+    """Run one globally enumerated, per-cell serialized backup for each daily slot."""
 
     def __init__(
         self,
@@ -728,9 +748,10 @@ class CentralBackupScheduler:
                 blocked_cells.append(target.cell_id)
 
         sweep_seconds = max(0.0, self._monotonic() - sweep_started)
-        capacity_rpo_met = (
-            sweep_seconds < BackupScheduler.INTERVAL_MINUTES * 60 and not failed_cells
-        )
+        # Bound the sweep by its own budget, not by the interval. Under the daily
+        # cadence "finished inside the slot" is 24 hours and would pass for any
+        # sweep at all, so it would silently stop being a gate.
+        capacity_rpo_met = sweep_seconds < BackupScheduler.SWEEP_BUDGET_SECONDS and not failed_cells
         return BackupScheduleReport(
             slot=slot,
             started=started,

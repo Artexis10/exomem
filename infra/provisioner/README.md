@@ -39,11 +39,13 @@ pass.
 
 ## Durability contract
 
-The central vault-backup sweep enumerates cells every 30 minutes, derives one
-stable operation ID per cell/slot, and relies on the database partial unique
-constraint to serialize backup/export/restore work. It renews claims during long
-snapshots and reports verified-object age, warning at 45 minutes and blocking new
-alpha invitations at 60 minutes.
+The central vault-backup sweep enumerates cells once daily, derives one stable
+operation ID per cell/slot, and relies on the database partial unique constraint
+to serialize backup/export/restore work. It renews claims during long snapshots
+and reports verified-object age against a 24-hour objective, warning at 26 hours
+and blocking new alpha invitations at 30 hours. One sweep must finish inside its
+own hour-long budget; the interval is not the gate, because under a daily cadence
+"inside the slot" would pass for any sweep at all.
 
 Vault backups stop and verify routes, quiesce the cell, stage and authenticate the
 portable archive, reopen service, then encrypt and upload. Every archive uses a

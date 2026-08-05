@@ -45,7 +45,7 @@ def _request(**overrides: object) -> dict[str, object]:
         "protocolVersion": "exomem-hosted.v1",
         "releaseVersion": "0.22.0",
         "serviceCredential": "service-credential-sentinel-000000000",
-        "workerPolicy": {"workerCount": 0, "semantic": False, "media": False},
+        "workerPolicy": {"workerCount": 2, "semantic": True, "media": False},
     }
     request.update(overrides)
     return request
@@ -669,7 +669,7 @@ async def test_non_provision_action_does_not_invoke_capacity_admission(
                 "mutationAuthority": True,
                 "readAdmission": True,
                 "writeAdmission": True,
-                "workerPolicy": {"workerCount": 0, "semantic": False, "media": False},
+                "workerPolicy": {"workerCount": 2, "semantic": True, "media": False},
                 "code": "CELL_READY",
             },
             "PROVISIONER_RUNTIME_CONTRACT_MISMATCH",
@@ -687,7 +687,7 @@ async def test_non_provision_action_does_not_invoke_capacity_admission(
                 "mutationAuthority": True,
                 "readAdmission": True,
                 "writeAdmission": True,
-                "workerPolicy": {"workerCount": 0, "semantic": False, "media": False},
+                "workerPolicy": {"workerCount": 2, "semantic": True, "media": False},
                 "code": "CELL_READY",
             },
             "PROVISIONER_RUNTIME_CONTRACT_MISMATCH",
@@ -723,7 +723,7 @@ async def test_non_provision_action_does_not_invoke_capacity_admission(
                 "mutationAuthority": True,
                 "readAdmission": True,
                 "writeAdmission": True,
-                "workerPolicy": {"workerCount": 0, "semantic": False, "media": False},
+                "workerPolicy": {"workerCount": 2, "semantic": True, "media": False},
                 "code": "CELL_READY",
             },
             "PROVISIONER_DRIVER_INVALID",

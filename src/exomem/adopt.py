@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import datetime as dt
 import hashlib
-import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -37,6 +36,7 @@ SUPPORTED_MODES = ("scan-only", "save-manifest", "copy-as-sources", "compile-sel
 PLANNED_MODES: tuple[str, ...] = ()
 ADOPTION_DIR = "_Adoption"
 IMPORTED_SOURCE_FOLDER = "Imported"
+_APPLIED_OUTCOME_STATUSES = frozenset({"applied", "already-applied"})
 _TEXT_IMPORT_SUFFIXES = frozenset(
     {".md", ".markdown", ".txt", ".text", ".csv", ".tsv", ".json", ".yaml", ".yml", ".rst", ".log"}
 )
@@ -163,23 +163,7 @@ def _resolve_manifest_path(root: Path, manifest_path: str | None, today: dt.date
     return target, rel
 
 
-def _compact_report(report: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "mode": report.get("mode"),
-        "write_contract": report.get("write_contract"),
-        "governance": report.get("governance"),
-        "summary": report.get("summary"),
-        "pack_suggestions": report.get("pack_suggestions"),
-        "next_actions": report.get("next_actions"),
-        "refs": report.get("refs"),
-        "copy": report.get("copy"),
-        "compile_plan": report.get("compile_plan"),
-        "overview": report.get("overview"),
-    }
-
-
 def _render_manifest(report: dict[str, Any], *, rel_path: str, today: dt.date) -> str:
-    compact = _compact_report(report)
     suggested = report.get("pack_suggestions") or []
     actions = report.get("next_actions") or []
     totals = ((report.get("summary") or {}).get("totals") or {})
@@ -221,17 +205,17 @@ def _render_manifest(report: dict[str, Any], *, rel_path: str, today: dt.date) -
         lines.append(
             f"- {action.get('action')} [{action.get('status')}]: {action.get('description')}"
         )
-    lines.extend(
-        [
-            "",
-            "## Machine-Readable Report",
-            "",
-            "```json",
-            json.dumps(compact, indent=2, sort_keys=True, ensure_ascii=False, default=str),
-            "```",
-            "",
-        ]
-    )
+    # No machine-readable dump here, for the same reason `_render_run_manifest`
+    # carries counts only: this manifest is a released page, a full-level release
+    # is byte-identical to the ungoverned response, and page BODIES are never
+    # scanned by the artifact-reference gate (it only treats `handoff`/`prompt`/
+    # `resource` keys as free text). A `json.dumps(_compact_report(...))` fence
+    # embeds `overview`, `refs`, `copy` and `compile_plan` — every scanned path
+    # and target — so one read of this page would release the whole inventory
+    # even where each individual path is withheld. The sections above carry the
+    # human-readable summary; the full report stays available live from
+    # `adopt(mode="scan-only")`, where a disclosure decision applies.
+    lines.append("")
     return "\n".join(lines)
 
 
@@ -606,7 +590,40 @@ def _copy_as_sources(
     }
 
 
+def _run_manifest_counts(summary: dict) -> list[str]:
+    """Count lines for the run manifest — never a path, title, hash or item code.
+
+    Mirrors ``adoption_run._APPLIED_STATUSES``; importing it would be a cycle
+    (``adoption_run`` imports this module).
+    """
+    outcomes = summary.get("outcomes") or {}
+    applied = sum(
+        1
+        for outcome in outcomes.values()
+        if isinstance(outcome, dict) and outcome.get("status") in _APPLIED_OUTCOME_STATUSES
+    )
+    recall_ok = bool((summary.get("recall_check") or {}).get("ok"))
+    return [
+        f"- Selected: {len(summary.get('selection') or [])}",
+        f"- Applied: {applied}",
+        f"- Not applied: {len(outcomes) - applied}",
+        f"- Verified unchanged: {summary.get('verified_unchanged', 0)} of "
+        f"{summary.get('verified_total', 0)}",
+        f"- Recall check: {'ok' if recall_ok else 'needs attention'}",
+    ]
+
+
 def _render_run_manifest(*, run_id: str, summary: dict, today: dt.date, rel_path: str) -> str:
+    """Render the run manifest body: counts and the run reference only.
+
+    The manifest is an ordinary page. A page released at full level is returned
+    byte-identically and only named frontmatter/page provenance fields are
+    stripped — the body is never scanned. So a machine-readable dump of the run
+    here would hand a caller every source path, target path and content hash in
+    the run even when each individual item is withheld. Per-item detail stays in
+    the run object, read through ``adoption_studio(action="status")`` where a
+    disclosure decision applies.
+    """
     lines = [
         "---",
         "type: adoption-run-manifest",
@@ -620,11 +637,17 @@ def _render_run_manifest(*, run_id: str, summary: dict, today: dt.date, rel_path
         "",
         f"Saved at `{rel_path}` by `adoption_studio(action=\"finish\")`. Originals remain untouched.",
         "",
-        "## Machine-Readable Summary",
+        "## Run",
         "",
-        "```json",
-        json.dumps(summary, indent=2, sort_keys=True, ensure_ascii=False, default=str),
-        "```",
+        f"- Run ref: `{summary.get('run_ref', '')}`",
+        f"- Phase: {summary.get('phase', '')}",
+        "",
+        "## Counts",
+        "",
+        *_run_manifest_counts(summary),
+        "",
+        "Per-item detail (sources, targets, hashes) stays in the run object. Read it with",
+        f"`adoption_studio(action=\"status\", run_id=\"{run_id}\")`.",
         "",
     ]
     return "\n".join(lines)

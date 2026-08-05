@@ -666,7 +666,7 @@ class _Response:
 @pytest.mark.asyncio
 async def test_private_cell_api_uses_fresh_identity_and_exact_lifecycle_routes() -> None:
     calls: list[tuple[str, str, dict[str, str], object]] = []
-    worker_policy = {"workerCount": 0, "semantic": False, "media": False}
+    worker_policy = {"workerCount": 2, "semantic": True, "media": False}
     ready = {
         "cell_id": "cell-alpha",
         "vault_id": "tenant-alpha",
@@ -781,7 +781,7 @@ async def test_private_cell_api_uses_fresh_identity_and_exact_lifecycle_routes()
         mutation_authority=True,
         read_admission=True,
         write_admission=True,
-        worker_policy={"workerCount": 0, "semantic": False, "media": False},
+        worker_policy={"workerCount": 2, "semantic": True, "media": False},
         code="CELL_READY",
         contract_digest="b" * 64,
         policy_admitted=True,
@@ -841,7 +841,7 @@ async def test_private_cell_api_observes_the_selected_agent_contract() -> None:
                     "read_admission": True,
                     "write_admission": True,
                     "worker_policy_digest": hashlib.sha256(
-                        b'{"media":false,"semantic":false,"workerCount":0}'
+                        b'{"media":false,"semantic":true,"workerCount":2}'
                     ).hexdigest(),
                 },
             )
@@ -876,7 +876,7 @@ async def test_private_cell_api_observes_the_selected_agent_contract() -> None:
         protocol_version="1",
         config=config,
         expected_release="0.22.0",
-        expected_worker_policy={"workerCount": 0, "semantic": False, "media": False},
+        expected_worker_policy={"workerCount": 2, "semantic": True, "media": False},
         require_runtime_identity=True,
     )
 

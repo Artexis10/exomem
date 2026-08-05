@@ -116,7 +116,7 @@ def _base_body(**overrides: Any) -> dict[str, Any]:
         "protocolVersion": "exomem-hosted.v1",
         "releaseVersion": "0.22.0",
         "serviceCredential": _SERVICE_CREDENTIAL,
-        "workerPolicy": {"workerCount": 0, "semantic": False, "media": False},
+        "workerPolicy": {"workerCount": 2, "semantic": True, "media": False},
     }
     body.update(overrides)
     return body

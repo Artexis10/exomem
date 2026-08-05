@@ -7,14 +7,19 @@ metadata:
   annotations:
     {{- include "exomem-cell.providerAnnotationsFor" (dict "root" . "key" "resourceQuota") | nindent 4 }}
 spec:
+  # Sized to hold the serving cell and its init job at once, because the quota
+  # counts every non-terminal pod: the runtime container's own limits plus the
+  # init container's 1 CPU / 1Gi. The previous 2Gi ceiling exactly equalled the
+  # pre-embedding pair, so raising the cell's limit without raising this would
+  # have made the init job unschedulable on quota rather than on capacity.
   hard:
     persistentvolumeclaims: "1"
     requests.storage: 10Gi
     pods: "2"
     requests.cpu: "1500m"
     requests.memory: 1536Mi
-    limits.cpu: "2"
-    limits.memory: 2Gi
+    limits.cpu: "3"
+    limits.memory: 3Gi
 ---
 apiVersion: v1
 kind: LimitRange

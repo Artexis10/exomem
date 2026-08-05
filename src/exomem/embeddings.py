@@ -29,7 +29,7 @@ from typing import Any
 
 import numpy as np
 
-from . import accel, index_paths, vecstore
+from . import accel, embedding_backend, index_paths, vecstore
 from .clip_index import CLIP_DIM, ClipIndex
 from .embedding_index import VECTOR_DIM, EmbeddingIndex
 from .vector_index_common import vec_gate as _vec_gate
@@ -131,6 +131,13 @@ def unload_model() -> bool:
         if _MODEL is None or BGE_GUARD.inflight() > 0:
             return False
         m, _MODEL = _MODEL, None
+    # Backends hold runtime memory the reference drop alone will not return: an
+    # ONNX session owns arenas outside Python's heap, and torch owns a caching
+    # allocator. `release` is where each says how to give it back.
+    release = getattr(m, "release", None)
+    if release is not None:
+        with contextlib.suppress(Exception):  # unload must never raise
+            release()
     del m
     gc.collect()
     accel.empty_cache()
@@ -208,20 +215,20 @@ def _is_embeddable_path(path: Path) -> bool:
 
 
 def get_model():
-    """Lazy singleton selected by ``accel``, CPU-default unless explicitly set."""
+    """Lazy singleton served by the configured backend, CPU-default unless set.
+
+    The backend decides which runtime loads the model; the model itself, its
+    pooling, and its output are fixed, so a backend change never invalidates a
+    stored vector. `embedding_backend.load_encoder` keeps the heavy import local
+    for the same reason this function did — a lean install must not pay it.
+    """
     global _MODEL
     if _MODEL is not None:
         return _MODEL
     with _MODEL_LOCK:
         if _MODEL is not None:
             return _MODEL
-        # Heavy import stays local — keyword-mode and existing tests must not
-        # pay this cost.
-        from sentence_transformers import SentenceTransformer
-
-        device = accel.select_device(override_env="EXOMEM_EMBED_DEVICE")
-        log.info("loading embedding model %s on %s", MODEL_NAME, device)
-        _MODEL = _maybe_half(SentenceTransformer(MODEL_NAME, device=device), device)
+        _MODEL = embedding_backend.load_encoder(MODEL_NAME)
     BGE_GUARD.touch()  # start the idle clock at load, not epoch 0
     return _MODEL
 
@@ -243,24 +250,20 @@ def get_reranker():
     return _RERANKER
 
 
-def _maybe_half(model, device: str):
-    """Run bge/CLIP in fp16 on Apple Silicon (MPS): ~half the memory and faster encodes,
-    and these retrieval models tolerate half precision well. Gated to MPS only — CPU fp16
-    is emulated (slower) and the CUDA path stays fp32 for cross-run/voiceprint parity.
-    Disable with EXOMEM_MPS_FP16=0.
-
-    Storage is unaffected: every vector is upcast to float32 before it hits the sqlite blob
-    (the astype(np.float32) guards in embed_*/upsert_*), so the on-disk format is identical —
-    only the computed precision changes. Existing fp32 vectors differ from new fp16 ones by
-    ~1e-3 (harmless for ranking); `audit_fix(rebuild_embeddings=True)` re-embeds for exact
-    consistency if wanted."""
-    if device != "mps" or os.environ.get("EXOMEM_MPS_FP16", "1") == "0":
-        return model
-    try:
-        return model.half()
-    except Exception:  # noqa: BLE001 — a precision tweak must never break model load
-        log.warning("fp16 (MPS) conversion failed; staying fp32", exc_info=True)
-        return model
+# Run bge/CLIP in fp16 on Apple Silicon (MPS): ~half the memory and faster encodes, and
+# these retrieval models tolerate half precision well. Gated to MPS only — CPU fp16 is
+# emulated (slower) and the CUDA path stays fp32 for cross-run/voiceprint parity. Disable
+# with EXOMEM_MPS_FP16=0.
+#
+# Storage is unaffected: every vector is upcast to float32 before it hits the sqlite blob
+# (the astype(np.float32) guards in embed_*/upsert_*), so the on-disk format is identical —
+# only the computed precision changes. Existing fp32 vectors differ from new fp16 ones by
+# ~1e-3 (harmless for ranking); `audit_fix(rebuild_embeddings=True)` re-embeds for exact
+# consistency if wanted.
+#
+# It lives in `embedding_backend` because the torch encoder applies it at load; CLIP below
+# and `tests/test_accel.py` reach it through this name.
+_maybe_half = embedding_backend._maybe_half
 
 
 class ClipUnavailable(Exception):
@@ -896,6 +899,19 @@ def _chunks_for_page(vault_root: Path, page) -> list[str]:
     return out
 
 
+def encode_batch_size(model) -> int:
+    """Encode batch size for the device the model actually landed on.
+
+    The policy lives in `embedding_backend.batch_size_for` so both backends share
+    one rule. An ONNX session exposes no `.device`, so the backend carries the
+    resolved device rather than the batch size being inferred from the model
+    object; `getattr` keeps a bare sentence-transformers model working for callers
+    and tests that construct one directly.
+    """
+    device = str(getattr(model, "device", "cpu"))
+    return embedding_backend.batch_size_for(device)
+
+
 def embed_texts(texts: list[str], *, is_query: bool = False) -> np.ndarray:
     """Batch-encode texts → float32 `(N, 768)`, L2-normalized for cosine."""
     if not texts:
@@ -906,7 +922,7 @@ def embed_texts(texts: list[str], *, is_query: bool = False) -> np.ndarray:
     with BGE_GUARD.active():
         vecs = model.encode(
             texts,
-            batch_size=32,
+            batch_size=encode_batch_size(model),
             convert_to_numpy=True,
             normalize_embeddings=True,
             show_progress_bar=False,

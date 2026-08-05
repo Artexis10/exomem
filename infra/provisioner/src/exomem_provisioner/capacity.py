@@ -230,13 +230,19 @@ class CapacityReceiptVerifier:
             or authentication.get("capacity_domain") != _DOMAIN[:-1].decode("ascii")
             or authentication.get("capacity_ttl_seconds") != 300
             or authentication.get("capacity_public_key_id") != _public_key_id(self._key)
+            # Deliberately duplicated from the shipped capacity contract rather
+            # than read from it: the provisioner refuses to act on a contract
+            # whose limits it does not already recognise, so a swapped or
+            # tampered contract cannot quietly raise the cap. The cost of that
+            # is that this pin and the contract must be changed together —
+            # see the test that binds them.
             or limits
             != {
-                "active_user_cells": 6,
+                "active_user_cells": 4,
                 "active_recovery_cells": 2,
-                "maximum_potential_attachments": 8,
+                "maximum_potential_attachments": 6,
                 "provider_volume_attachment_limit": 16,
-                "minimum_unused_provider_headroom": 8,
+                "minimum_unused_provider_headroom": 10,
             }
         ):
             raise CapacityReceiptError("capacity contract authentication is invalid")

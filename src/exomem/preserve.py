@@ -34,7 +34,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO
 
-from . import indexes, memory_refs, privacy_log
+from . import indexes, memory_refs, privacy_log, temporal
 from .kbdir import kb_prefix
 from .vault import (
     ContentHashMismatchError,
@@ -168,8 +168,9 @@ def preserve(
     if missing:
         return _raise("INVALID_PRESERVE", missing, "; ".join(reasons))
 
-    today = today or dt.date.today()
-    date_iso = today.isoformat()
+    now = today or temporal.now()
+    date_iso = temporal.render_date(now)
+    stamp_iso = temporal.stamp(now)
     kb = kb_root(vault_root)
     folder = kb / "Evidence" / scope_safe / category_safe
     artifact_path = folder / filename_safe
@@ -293,7 +294,7 @@ def preserve(
                     artifact_name=filename_safe,
                     scope=scope_safe,
                     category=category_safe,
-                    date_iso=date_iso,
+                    date_iso=stamp_iso,
                     description=desc_clean,
                     text=text_clean,
                     media_type=media_type,
@@ -345,7 +346,7 @@ def preserve(
         if log_file.exists():
             new_log = _prepend_log_entry(
                 log_file.read_text(encoding="utf-8"),
-                date_iso=date_iso,
+                date_iso=stamp_iso,
                 rel_path=rel_artifact,
                 body=log_body,
             )
@@ -629,7 +630,7 @@ def ensure_media_sidecar(
         artifact_name=name,
         scope=scope,
         category=category,
-        date_iso=(today or dt.date.today()).isoformat(),
+        date_iso=temporal.stamp(today or temporal.now()),
         media_type=media_type,
         evidence_file=rel,
         extracted_by="none",  # not pending → the auto OCR scan ignores it; backfill OCRs it

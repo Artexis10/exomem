@@ -405,8 +405,8 @@ def _runtime_environment(release: dict[str, Any]) -> list[str]:
         "EXOMEM_HOSTED_WORKER_POLICY_DIGEST": "b" * 64,
         "EXOMEM_HOSTED_STORAGE_LIMIT_BYTES": str(5 * 1024 * 1024 * 1024),
         "EXOMEM_HOSTED_UPLOAD_LIMIT_BYTES": str(90 * 1024 * 1024),
-        "EXOMEM_HOSTED_WORKER_LIMIT": "0",
-        "EXOMEM_HOSTED_FEATURE_GRANTS": "",
+        "EXOMEM_HOSTED_WORKER_LIMIT": "2",
+        "EXOMEM_HOSTED_FEATURE_GRANTS": "embeddings,file-watcher",
         "EXOMEM_HOSTED_TRANSFER_BROWSER_ORIGIN": "https://substratesystems.io",
         "EXOMEM_HOSTED_TRANSFER_HOST": "transfer.release.invalid",
     }
@@ -484,6 +484,57 @@ def probe_published_runtime(release: dict[str, Any], fixture: dict[str, Any]) ->
     probe_runtime_contract(image, release, fixture)
 
 
+def _verify_offline_embedding_capability(image: str, environment: dict[str, str]) -> None:
+    """Prove the published image can embed with no network and no writable root.
+
+    That is exactly the condition a cell runs under: a default-deny NetworkPolicy
+    with no egress rules and `readOnlyRootFilesystem: true`. A hosted image built
+    without the embedding runtime or without baked weights still starts, still
+    reports ready, and still answers queries — it just never matches on meaning.
+    Nothing else in this verification would notice, so run the real thing behind
+    `--network none` and require a vector back.
+    """
+    if environment.get("HF_HUB_OFFLINE") != "1":
+        raise ValueError("published hosted image does not pin the model hub offline")
+
+    script = (
+        "from exomem.embeddings import MODEL_NAME;"
+        "from sentence_transformers import SentenceTransformer;"
+        "m = SentenceTransformer(MODEL_NAME, device='cpu');"
+        "v = m.encode(['release verification'], show_progress_bar=False);"
+        "assert v.shape[0] == 1 and v.shape[1] > 0, v.shape;"
+        "print('ok', MODEL_NAME, v.shape[1])"
+    )
+    result = _run(
+        [
+            "docker",
+            "run",
+            "--rm",
+            "--network",
+            "none",
+            "--read-only",
+            "--user",
+            "10001:10001",
+            "--cap-drop",
+            "ALL",
+            "--security-opt",
+            "no-new-privileges",
+            "--tmpfs",
+            "/tmp",
+            "--env",
+            "HOME=/tmp",
+            "--entrypoint",
+            "python",
+            image,
+            "-c",
+            script,
+        ],
+        timeout=900,
+    )
+    if "ok " not in result.stdout:
+        raise ValueError("published hosted image cannot embed offline")
+
+
 def probe_runtime_contract(image: str, release: dict[str, Any], fixture: dict[str, Any]) -> None:
     """Initialize one selected image and compare its authenticated contract route."""
 
@@ -500,6 +551,7 @@ def probe_runtime_contract(image: str, release: dict[str, Any], fixture: dict[st
         "EXOMEM_RELEASE_BUILD_TIME"
     ) != release.get("releaseBuildTime"):
         raise ValueError("published runtime image variant/build-time drift")
+    _verify_offline_embedding_capability(image, environment)
 
     credential = base64.urlsafe_b64encode(secrets.token_bytes(32)).rstrip(b"=").decode("ascii")
     container = f"exomem-release-verify-{uuid.uuid4().hex[:12]}"
@@ -986,7 +1038,7 @@ def _oci_descriptor(
     maximum: int,
     allow_artifact_type: bool = False,
 ) -> tuple[str, int]:
-    fields = {"mediaType", "digest", "size", "annotations"}
+    fields = {"mediaType", "digest", "size", "annotations", "data"}
     if allow_artifact_type:
         fields.add("artifactType")
     if not isinstance(value, dict) or set(value) - fields:
@@ -994,6 +1046,7 @@ def _oci_descriptor(
     digest = value.get("digest")
     size = value.get("size")
     annotations = value.get("annotations")
+    inline = value.get("data")
     if value.get("mediaType") != media_type or not isinstance(digest, str):
         raise ValueError(f"{label} descriptor media type is invalid")
     if not re.fullmatch(r"sha256:[0-9a-f]{64}", digest) or not isinstance(size, int):
@@ -1005,6 +1058,16 @@ def _oci_descriptor(
         or any(not isinstance(key, str) or not isinstance(item, str) for key, item in annotations.items())
     ):
         raise ValueError(f"{label} descriptor annotations are invalid")
+    if inline is not None:
+        # An inline descriptor MUST carry exactly the blob it names (OCI image-spec).
+        if not isinstance(inline, str):
+            raise ValueError(f"{label} descriptor inline data is invalid")
+        try:
+            decoded = base64.b64decode(inline, validate=True)
+        except ValueError as error:
+            raise ValueError(f"{label} descriptor inline data is invalid") from error
+        if len(decoded) != size or f"sha256:{hashlib.sha256(decoded).hexdigest()}" != digest:
+            raise ValueError(f"{label} descriptor inline data does not match its digest")
     return digest, size
 
 
@@ -1081,24 +1144,38 @@ def _validate_oci_candidate_manifest(manifest: object, *, subject_image: str | N
 
 
 def _oci_referrer_descriptors(discovered: object) -> list[dict[str, Any]]:
-    manifests = discovered.get("manifests") if isinstance(discovered, dict) else None
+    manifests: object = None
+    if isinstance(discovered, dict):
+        # oras emits "referrers" from 1.3 onward; earlier releases emitted "manifests".
+        manifests = discovered.get("referrers")
+        if manifests is None:
+            manifests = discovered.get("manifests")
     if not isinstance(manifests, list) or not 1 <= len(manifests) <= _MAX_PROVISIONER_REFERRERS:
         raise ValueError("provisioner candidate attachment discovery count exceeds its size contract")
     descriptors: list[dict[str, Any]] = []
     seen: set[str] = set()
     for manifest in manifests:
+        # "reference" and the nested "referrers" tree are oras reporting fields, not
+        # part of the OCI descriptor; drop them before the strict descriptor check.
         if not isinstance(manifest, dict) or set(manifest) - {
             "mediaType",
             "digest",
             "size",
             "artifactType",
             "annotations",
+            "reference",
+            "referrers",
         }:
             raise ValueError("provisioner candidate attachment descriptor is invalid")
-        if manifest.get("artifactType") != _CANDIDATE_MEDIA_TYPE:
+        descriptor = {
+            key: value
+            for key, value in manifest.items()
+            if key in {"mediaType", "digest", "size", "artifactType", "annotations"}
+        }
+        if descriptor.get("artifactType") != _CANDIDATE_MEDIA_TYPE:
             raise ValueError("provisioner candidate attachment type is invalid")
         digest, _ = _oci_descriptor(
-            manifest,
+            descriptor,
             label="provisioner candidate attachment",
             media_type=_OCI_MANIFEST_MEDIA_TYPE,
             maximum=_MAX_OCI_ATTACHMENT_BYTES,
@@ -1107,7 +1184,7 @@ def _oci_referrer_descriptors(discovered: object) -> list[dict[str, Any]]:
         if digest in seen:
             raise ValueError("provisioner candidate attachment descriptors are duplicated")
         seen.add(digest)
-        descriptors.append(manifest)
+        descriptors.append(descriptor)
     return descriptors
 
 

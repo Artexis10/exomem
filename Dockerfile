@@ -86,6 +86,51 @@ RUN uv pip install --python /app/.venv/bin/python "torch>=2.12" --index-url http
  && uv pip install --python /app/.venv/bin/python ".[embeddings]"
 
 ########################################################################
+# builder-hosted — builder-lean plus ONNX Runtime and the embedding weights
+# resolved at BUILD time into the image itself.
+#
+# A hosted cell runs under a default-deny NetworkPolicy with no egress rules
+# and a read-only root filesystem. It therefore cannot download a model, and
+# has nowhere writable to cache one if it could. Any weight the cell needs
+# must already be a layer, or the `embeddings` grant produces a cell that
+# advertises semantic recall and fails on first use.
+#
+# This stage builds from `builder-lean`, NOT `builder-ml`: the hosted lane
+# serves the same bi-encoder through ONNX Runtime, which imports ~40 MiB
+# against torch's ~400 and holds a materially smaller peak. Peak per cell is
+# what decides how many tenants a node carries, so torch's absence here is the
+# capacity argument, not a packaging preference. It is only possible in this
+# lane — the reranker and CLIP are sentence-transformers models, and the hosted
+# stage withholds both (EXOMEM_DISABLE_RANKING; CLIP belongs to `vision`).
+#
+# Only the bi-encoder is fetched, and only in the form the runtime reads.
+########################################################################
+FROM builder-lean AS builder-hosted
+ENV HF_HOME=/opt/exomem-models
+# Resolve the model through the very backend the cell serves with, so the build
+# fetches exactly what that runtime opens — the ONNX export, the fast tokenizer,
+# and the sequence config — and never a torch serialization there is no loader
+# for. Then load once more with the network closed. That second load is the
+# gate: if anything the runtime needs is absent, the build fails here instead of
+# every cell failing on its first query.
+RUN uv pip install --python /app/.venv/bin/python ".[embeddings-onnx]" \
+ && EXOMEM_EMBED_BACKEND=onnx /app/.venv/bin/python -c "\
+from exomem.embeddings import MODEL_NAME; \
+from exomem import embedding_backend as backend; \
+backend.load_encoder(MODEL_NAME, backend=backend.ONNX); \
+print('fetched', MODEL_NAME)" \
+ && HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 EXOMEM_EMBED_BACKEND=onnx \
+    /app/.venv/bin/python -c "\
+import importlib.util; \
+from exomem.embeddings import MODEL_NAME, VECTOR_DIM; \
+from exomem import embedding_backend as backend; \
+encoder = backend.load_encoder(MODEL_NAME, backend=backend.ONNX); \
+v = encoder.encode(['offline load gate'], batch_size=1); \
+assert v.shape == (1, VECTOR_DIM), v.shape; \
+assert importlib.util.find_spec('torch') is None, 'torch reached the hosted image'; \
+print('offline load verified', MODEL_NAME, v.shape)"
+
+########################################################################
 # Final: ml (target `ml`). Fresh slim base — no build tooling, no uv, no
 # source tree — just the populated venv. HF_HOME pins the downloaded
 # embedding/CLIP model weights under the declared /data volume so they
@@ -150,9 +195,17 @@ CMD ["--transport", "http", "--port", "8765"]
 # vault/state/log roots plus native Secret/operator projections. Kubernetes
 # supplies readOnlyRootFilesystem; this image supplies the matching fixed
 # runtime identity and avoids bytecode writes to the image layer.
+#
+# This carries the embedding runtime and pre-baked weights, not the lean venv:
+# a paying tenant gets the same semantic recall as the free local runtime.
+# The cell has no egress and no writable root, so the weights are a read-only
+# image layer under HF_HOME and the hub client is pinned offline — an
+# accidental fetch must fail loudly at load rather than hang a tenant query
+# against a blocked NetworkPolicy until the client's deadline.
 ########################################################################
 FROM python:3.12-slim AS hosted
-COPY --from=builder-lean /app/.venv /app/.venv
+COPY --from=builder-hosted /app/.venv /app/.venv
+COPY --from=builder-hosted /opt/exomem-models /opt/exomem-models
 COPY LICENSE /LICENSE
 
 ARG EXOMEM_RELEASE_BUILD_TIME
@@ -164,6 +217,11 @@ ENV PATH=/app/.venv/bin:$PATH \
     EXOMEM_HOST=0.0.0.0 \
     EXOMEM_CONTAINER_VARIANT=hosted \
     EXOMEM_RELEASE_BUILD_TIME=${EXOMEM_RELEASE_BUILD_TIME} \
+    HF_HOME=/opt/exomem-models \
+    HF_HUB_OFFLINE=1 \
+    TRANSFORMERS_OFFLINE=1 \
+    EXOMEM_DISABLE_RANKING=1 \
+    EXOMEM_EMBED_BACKEND=onnx \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
