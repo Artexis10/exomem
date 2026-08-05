@@ -1213,3 +1213,35 @@ the packaging lane.
 **Caveat on status:** this is a pre-4.5 baseline. The sub-day temporality family
 changes generated corpus bytes, so if it lands this must be regenerated before
 being published as the v0.2 reference.
+
+### Reproducibility confirmed against the August run
+
+Today's baseline diffed against `20260801T115138Z-…-postfix-lexical-v2`, across
+four days, two Python interpreters, a rebuilt venv, and a merged product fix:
+
+| dimension | Aug-1 | today | |
+|---|---|---|---|
+| factual_qa | p=99 f=81 n/a=56 | p=99 f=81 n/a=56 | **identical** |
+| abstention | p=136 f=100 | p=136 f=100 | **identical** |
+| contradiction_uncertainty | p=0 f=20 n/a=216 | p=0 f=20 n/a=216 | **identical** |
+| governance | p=0 f=16 n/a=220 | p=0 f=16 n/a=220 | **identical** |
+| behavior, _run | — | — | **identical** |
+| provenance | p=91 f=89 n/a=56 | p=47 f=149 n/a=40 | changed |
+| temporal | p=88 f=120 n/a=28 | p=92 f=97 n/a=28 u=19 | changed |
+
+Retrieval also reproduces exactly: 452 hits over 236 queries, 140 with hits.
+
+**Both deltas are attributable to deliberate scorer changes, and the arithmetic
+closes.** Temporal: 88+4 = 92 pass (the four identity queries no correct answer
+could previously pass), 120−19−4 = 97 fail, 19 → unsupported (co-presence with a
+documented predecessor). Provenance: citation precision is now scored, and
+`n/a` 56→40 is the 16 rows that became measurable when precision began being
+computed wherever a claim basis exists.
+
+Nothing moved that should not have.
+
+**Scope of the claim, stated precisely:** this is *same-machine* reproducibility.
+Cross-machine is untested and is exactly what 4.1's replication kit must prove.
+The environment gate now records 81 distributions plus the interpreter, so a
+mismatch announces itself rather than silently producing different numbers — but
+announcing is not the same as proving, and the kit is still owed.
