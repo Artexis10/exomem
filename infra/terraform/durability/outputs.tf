@@ -10,6 +10,10 @@ output "database_backup_bucket_name" {
   value = b2_bucket.database_backup.bucket_name
 }
 
+output "etcd_snapshot_bucket_name" {
+  value = b2_bucket.etcd_snapshot.bucket_name
+}
+
 output "recovery_upload_application_key_id" {
   value     = b2_application_key.recovery_upload.application_key_id
   sensitive = true
