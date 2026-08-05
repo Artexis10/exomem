@@ -43,6 +43,7 @@ from . import (
     relation_review,
     semantic_units,
     semantic_writes,
+    temporal,
 )
 from . import (
     find as find_module,
@@ -188,6 +189,24 @@ STATUS_PRODUCTION = (
     "planned", "recorded", "edited", "published", "reflected", "dropped", "archived",
 )
 
+# Types whose frontmatter spec marks `sources:` required. Omitting provenance on
+# one of these returns a warning, never an error: a conclusion drawn from live
+# work with nothing captured is an honest empty list, and inventing a source to
+# silence a gate would be strictly worse than leaving it empty.
+SOURCES_REQUIRED_TYPES = ("research-note", "insight", "failure", "pattern")
+
+
+def _empty_sources_warning(note_type: str) -> str | None:
+    """Warn when a type that should cite provenance cites none."""
+    if note_type not in SOURCES_REQUIRED_TYPES:
+        return None
+    return (
+        f"no `sources:` cited — frontmatter marks provenance required for "
+        f"{note_type}. If this came from live work with nothing captured, that is "
+        f"an honest empty list; otherwise cite the `Sources/` page it draws from "
+        f"(each entry also appends this note to that source's `ingested_into:`)."
+    )
+
 
 @dataclass
 class NoteResult:
@@ -297,7 +316,18 @@ def _build_write_feedback(
             "review related-page suggestions and add accepted note edges under `## Relations`"
         )
     if not sources_norm:
-        next_actions.append("add a source link later if this conclusion came from raw material")
+        if not body_targets:
+            next_actions.append(
+                "connect this page now: cite the `Sources/` page it draws from in "
+                "`sources:`, or link the prior conclusions it builds on — it currently "
+                "has no outbound connection of any kind"
+            )
+        else:
+            next_actions.append(
+                "cite the `Sources/` page this drew from in `sources:` — each entry "
+                "appends this note's wikilink to that source's `ingested_into:`, which "
+                "is what marks the source processed"
+            )
     if relation_debt:
         next_actions.append(
             "review relation debt with `connect_memory(operation='suggest-relations')`"
@@ -319,6 +349,8 @@ def _build_write_feedback(
         "sources": {
             "cited": len(sources_norm),
             "backrefs_planned": backrefs_planned,
+            "required": note_type in SOURCES_REQUIRED_TYPES,
+            "missing": note_type in SOURCES_REQUIRED_TYPES and not sources_norm,
         },
         "links": {
             "body_wikilinks": len(body_targets),
@@ -477,8 +509,13 @@ def _legacy_note(
     if err is not None:
         raise NoteError(code=err.code, missing=err.missing, reason=err.reason)
 
-    today = today or dt.date.today()
-    date_iso = today.isoformat()
+    # Two precisions from one clock read. `date_iso` is the bare day that
+    # names files and index bullets; `stamp_iso` is what gets recorded as
+    # knowledge time. A caller injecting a plain `date` (as every existing
+    # test does) gets the day in both, so day-granular expectations stay true.
+    now = today or temporal.now()
+    date_iso = temporal.render_date(now)
+    stamp_iso = temporal.stamp(now)
     tags_clean = _clean_tags(tags)
     exomem_id = memory_refs.new_id()
 
@@ -585,7 +622,7 @@ def _legacy_note(
         project=project,
         projects=projects,
         status=status,
-        date_iso=date_iso,
+        date_iso=stamp_iso,
         sources=[render_wikilink_target(source, vault_root) for source in sources_norm],
         tags=tags_clean,
         content=body_clean,
@@ -627,6 +664,10 @@ def _legacy_note(
         + list(dup_warnings)
         + list(contradiction_warnings)
     )
+    if not sources_norm:
+        provenance_warning = _empty_sources_warning(note_type)
+        if provenance_warning is not None:
+            warnings.append(provenance_warning)
     # Back-refs: append the new note's wikilink to each cited source's ingested_into.
     backrefs_planned = 0
     for src in sources_norm:
@@ -706,7 +747,7 @@ def _legacy_note(
         )
         new_log = _prepend_log_entry(
             log_file.read_text(encoding="utf-8"),
-            date_iso=date_iso,
+            date_iso=stamp_iso,
             verb="note",
             rel_path=rel_note_no_ext,
             body=full_body,
@@ -1524,10 +1565,18 @@ def note(
         raise NoteError(err.code, err.missing, err.reason)
 
     identity = draft_id or memory_refs.new_id()
+    # The draft token pins the *path* date across the draft->commit gap, so a
+    # note keeps its filename whichever side of midnight it is committed on.
+    # Knowledge time is stamped at commit instead: it records when the write
+    # actually happened, not when the draft was prepared.
+    now = today or temporal.now()
     render_date = (
         token_value.render_date
         if token_value is not None
-        else (today or dt.date.today()).isoformat()
+        else temporal.render_date(now)
+    )
+    stamp_iso = (
+        token_value.stamp() if token_value is not None else temporal.stamp(now)
     )
     registrations = tuple(
         semantic_writes.DraftRegistration(item.key, item.category, item.folder)
@@ -1552,7 +1601,12 @@ def note(
         # otherwise record the minted spelling as the page's identity path.
         destination = canonical_vault_rel(root, note_path.relative_to(root).as_posix())
         token_value = semantic_writes.DraftToken(
-            "note", _preflight_operation, destination, render_date, registrations
+            "note",
+            _preflight_operation,
+            destination,
+            render_date,
+            registrations,
+            render_stamp=stamp_iso,
         )
         encoded_token = token_value.encode()
     else:
@@ -1580,7 +1634,7 @@ def note(
         project=project,
         projects=projects,
         status=status,
-        date_iso=render_date,
+        date_iso=stamp_iso,
         sources=[render_wikilink_target(item, root) for item in sources_norm],
         tags=tags_clean,
         content=body_clean,
@@ -1629,6 +1683,10 @@ def note(
     if draft_hash is not None and preflight.draft_hash != draft_hash:
         raise NoteError("DRAFT_HASH_MISMATCH", ["draft_hash"], "draft requires fresh validation")
     warnings = list(slug_warnings) + list(source_warnings) + list(body_warnings)
+    if not sources_norm:
+        provenance_warning = _empty_sources_warning(note_type)
+        if provenance_warning is not None:
+            warnings.append(provenance_warning)
     for item in key_plan.introductions:
         warnings.append(
             f"Auto-registered project key {item.key!r} (folder: {item.folder!r}, "
@@ -1688,7 +1746,7 @@ def note(
     try:
         log_plan = plan_log_writes(
             root,
-            date_iso=render_date,
+            date_iso=stamp_iso,
             op="note",
             rel_path_no_ext=rel_note_no_ext,
             body=_log_entry_body(

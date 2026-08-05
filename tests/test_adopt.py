@@ -1217,3 +1217,79 @@ def test_adopt_cli_human_output_is_product_shaped(vault: Path, capsys) -> None:
     assert "Safe next actions" in out
     assert "Originals: untouched" in out
     assert '"mode"' not in out
+
+
+# --- defect 5b: the run manifest body is released text, not a run dump ---
+
+_RUN_ID = "adr-20260731-abc123"
+_RUN_REF = f"exomem://adoption/{_RUN_ID}"
+_TARGET_PATH = "Knowledge Base/Sources/Imported/2026-07-31-quarterly-planning-notes.md"
+_SOURCE_SHA = "9f2b" + "0" * 60
+
+_RUN_SUMMARY = {
+    "run_id": _RUN_ID,
+    "run_ref": _RUN_REF,
+    "phase": "done",
+    "selection": ["Old Notes/quarterly-planning.md", "Old Notes/standup.txt"],
+    "outcomes": {
+        "Old Notes/quarterly-planning.md": {
+            "status": "applied",
+            "target_path": _TARGET_PATH,
+            "sha256": _SOURCE_SHA,
+            "at": "2026-07-31T10:00:00Z",
+        },
+        "Old Notes/standup.txt": {
+            "status": "failed",
+            "code": "SOURCE_CHANGED",
+            "reason": "sha256 mismatch at apply time",
+        },
+    },
+    "recall_check": {
+        "query": "Quarterly Planning Notes",
+        "ok": True,
+        "hits": [_TARGET_PATH],
+    },
+    "verified_unchanged": 1,
+    "verified_total": 2,
+}
+
+
+def test_run_manifest_body_carries_counts_and_the_run_reference_only(
+    tmp_path: Path,
+) -> None:
+    """A run manifest is an ordinary page; released at full level it is returned
+    byte-identically and its body is never scanned. So the body itself must carry
+    no per-item detail — counts and the run reference only."""
+    vault = _legacy_vault(tmp_path, kb=True)
+
+    writes, rel, _warnings = adopt_module.run_manifest_writes(
+        vault, run_id=_RUN_ID, summary=_RUN_SUMMARY, today=dt.date(2026, 7, 31)
+    )
+    body = writes[0].content
+    assert writes[0].path == vault / rel
+
+    # What the owner needs to reach the run.
+    assert _RUN_ID in body
+    assert _RUN_REF in body
+    # Counts, not items.
+    assert "Selected: 2" in body
+    assert "Applied: 1" in body
+    assert "Not applied: 1" in body
+    assert "Verified unchanged: 1 of 2" in body
+    assert 'adoption_studio(action="status"' in body
+
+    leaked = [
+        token
+        for token in (
+            "Old Notes/quarterly-planning.md",
+            "Old Notes/standup.txt",
+            _TARGET_PATH,
+            _SOURCE_SHA,
+            "Quarterly Planning Notes",
+            "SOURCE_CHANGED",
+        )
+        if token in body
+    ]
+    assert leaked == [], f"run manifest body names per-item detail: {leaked}"
+    assert "```json" not in body
+    assert "Machine-Readable" not in body

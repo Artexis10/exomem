@@ -10,7 +10,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURE_VAULT = ROOT / "tests" / "fixtures"
-HEAVY_MODULES = ("torch", "sentence_transformers", "fastmcp")
+HEAVY_MODULES = ("torch", "sentence_transformers", "fastmcp", "textual")
 
 
 def _run_cli_with_module_probe(tmp_path: Path, *args: str) -> tuple[subprocess.CompletedProcess[str], set[str]]:
@@ -74,4 +74,13 @@ def test_status_one_shot_does_not_import_heavy_stacks(tmp_path: Path) -> None:
 
     assert result.returncode == 0, result.stderr
     assert json.loads(result.stdout)["models"]["module_loaded"] is False
+    _assert_no_heavy_modules(modules)
+
+
+def test_tui_non_tty_fails_fast_without_heavy_stacks(tmp_path: Path) -> None:
+    # A piped `exomem tui` must exit 2 before importing the TUI stack.
+    result, modules = _run_cli_with_module_probe(tmp_path, "tui")
+
+    assert result.returncode == 2, result.stderr
+    assert "interactive terminal" in result.stderr
     _assert_no_heavy_modules(modules)

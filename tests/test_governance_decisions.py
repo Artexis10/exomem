@@ -1,24 +1,31 @@
 """Pure order-free disclosure evaluator: truth table, purity, purpose semantics.
 
 `decide()` computes `min(org_cap, max(grants, min(standing_rules)))`, default
-OPEN (L6) — see design decision D5. min/max are commutative, so the result
-must never depend on authoring/insertion order.
+OPEN (L6) unless a scope declares `default_deny` — see design decision D5.
+min/max are commutative, so the result must never depend on
+authoring/insertion order.
 """
 
 from __future__ import annotations
 
+import dataclasses
 import itertools
 import random
+from pathlib import Path
 
 from exomem.governance.decisions import decide
 from exomem.governance.policy import (
     DISCLOSURE_MAX,
+    DISCLOSURE_MIN,
     Policy,
     Rule,
+    Scope,
     StandingGrant,
 )
+from exomem.governance.principal import OWNER_AUDIENCE
 
 SCOPE = "scope-1"
+OTHER_SCOPE = "scope-2"
 
 
 def _rule(
@@ -48,8 +55,42 @@ def _grant(id_, ceiling, *, audience="ext"):
     return StandingGrant(id=id_, source="grants/x.yaml", scope_ids=(SCOPE,), audience=audience, ceiling=ceiling)
 
 
-def _policy(rules=(), grants=()):
-    return Policy(fingerprint="test", scopes={}, rules=tuple(rules), grants=tuple(grants))
+def _scope(id_=SCOPE, *, default_deny=False):
+    return Scope(id=id_, source="scopes/x.yaml", default_deny=default_deny)
+
+
+def _policy(rules=(), grants=(), scopes=()):
+    return Policy(
+        fingerprint="test",
+        scopes={scope.id: scope for scope in scopes},
+        rules=tuple(rules),
+        grants=tuple(grants),
+    )
+
+
+def _change_contract(name: str) -> str:
+    return (
+        Path(__file__).resolve().parents[1]
+        / "openspec/changes/add-default-deny-scope-cap"
+        / name
+    ).read_text(encoding="utf-8")
+
+
+def test_design_resolves_default_emptiness_per_declaring_scope() -> None:
+    design = _change_contract("design.md")
+
+    assert "if standing:" not in design
+    assert "named_scope_ids" in design
+    assert "default_deny_scope_ids" in design
+
+
+def test_no_disclosure_scenario_excludes_a_matching_grant() -> None:
+    spec = _change_contract("specs/governance-kernel/spec.md")
+    scenario = spec.split(
+        "#### Scenario: an audience no rule names receives nothing", 1
+    )[1].split("#### Scenario:", 1)[0]
+
+    assert "no matching grant applies" in scenario
 
 
 def test_default_is_full_disclosure_when_nothing_matches() -> None:
@@ -269,3 +310,308 @@ def test_options_merge_pins_lexical_rule_id_order() -> None:
     }
     assert decision.notice == "from-bbb"
     assert decision.bridge == "bridge-a"
+
+
+# ---------------------------------------------------------------------------
+# A scope may deny audiences it does not name (add-default-deny-scope-cap)
+#
+# The change is ONE default: `standing_min`'s fallback when the standing set is
+# empty. Everything below pins that it is a DEFAULT and not a synthetic
+# ceiling-0 rule — a synthetic rule would enter the `min` and silently override
+# an authored allowance, which is the failure mode design.md records.
+# ---------------------------------------------------------------------------
+
+
+def test_a_declared_scope_denies_an_audience_no_standing_rule_names() -> None:
+    """Spec: an audience no rule names receives nothing."""
+    pol = _policy(scopes=[_scope(default_deny=True)])
+    assert decide([SCOPE], audience="ext", policy=pol).level == DISCLOSURE_MIN
+
+
+def test_an_undeclared_scope_keeps_todays_open_default() -> None:
+    """Spec: an undeclared scope keeps today's default — the change is opt-in."""
+    pol = _policy(scopes=[_scope(default_deny=False)])
+    assert decide([SCOPE], audience="ext", policy=pol).level == DISCLOSURE_MAX
+
+
+def test_a_scope_absent_from_the_policy_table_keeps_the_open_default() -> None:
+    """A scope id with no compiled record cannot carry a declaration, so the
+    lookup must not be a fail-closed guess about scopes the evaluator was
+    handed but the policy never defined."""
+    assert decide([SCOPE], audience="ext", policy=_policy()).level == DISCLOSURE_MAX
+
+
+def test_a_declared_scope_does_not_lower_an_authored_rule() -> None:
+    """THE constraint that rules out the synthetic-rule implementation.
+
+    Inject a ceiling-0 standing rule for a declared scope and this reads
+    `min(3, 0) == 0` — the declaration silently overriding the allowance the
+    owner authored. It must apply only when the standing set is EMPTY."""
+    pol = _policy(rules=[_rule("r1", 3)], scopes=[_scope(default_deny=True)])
+    assert decide([SCOPE], audience="ext", policy=pol).level == 3
+
+
+def test_a_declared_scope_does_not_lower_an_authored_full_release_rule() -> None:
+    """The same constraint at the top of the lattice: an owner who deliberately
+    opens a declared scope to one named audience gets exactly that."""
+    pol = _policy(rules=[_rule("r1", DISCLOSURE_MAX)], scopes=[_scope(default_deny=True)])
+    assert decide([SCOPE], audience="ext", policy=pol).level == DISCLOSURE_MAX
+
+
+def test_a_grant_still_raises_above_the_declared_default() -> None:
+    """Spec: "unless a grant names them" needs no special case — `grant_max`
+    is `max(grants + [standing_min])`, so a grant raises off the floor."""
+    pol = _policy(grants=[_grant("g1", 4)], scopes=[_scope(default_deny=True)])
+    assert decide([SCOPE], audience="ext", policy=pol).level == 4
+
+
+def test_a_grant_for_another_audience_does_not_lift_the_declared_default() -> None:
+    pol = _policy(grants=[_grant("g1", 4, audience="someone-else")],
+                  scopes=[_scope(default_deny=True)])
+    assert decide([SCOPE], audience="ext", policy=pol).level == DISCLOSURE_MIN
+
+
+def test_an_org_cap_still_lowers_on_a_declared_scope() -> None:
+    """Spec: an organisation cap still lowers, unchanged by the declaration."""
+    pol = _policy(
+        rules=[_rule("r1", 5), _rule("cap", 2, kind="org_cap")],
+        scopes=[_scope(default_deny=True)],
+    )
+    assert decide([SCOPE], audience="ext", policy=pol).level == 2
+
+
+def test_an_org_cap_alone_leaves_the_standing_set_empty_and_the_default_applies() -> None:
+    """An org cap is not a standing rule, so a matching cap must not be read as
+    "something matched" and re-open the scope."""
+    pol = _policy(rules=[_rule("cap", 5, kind="org_cap")], scopes=[_scope(default_deny=True)])
+    assert decide([SCOPE], audience="ext", policy=pol).level == DISCLOSURE_MIN
+
+
+def test_the_owner_is_never_subject_to_the_declaration() -> None:
+    """Spec: the owner reads a declared scope at full release."""
+    pol = _policy(scopes=[_scope(default_deny=True)])
+    assert decide([SCOPE], audience=OWNER_AUDIENCE, policy=pol).level == DISCLOSURE_MAX
+
+
+def test_an_authored_rule_still_restricts_the_owner_on_a_declared_scope() -> None:
+    """The exemption is chosen at the DEFAULT site, not applied as a post-hoc
+    override, so a rule that deliberately restricts the owner still holds."""
+    pol = _policy(rules=[_rule("r1", 1, audience=OWNER_AUDIENCE)],
+                  scopes=[_scope(default_deny=True)])
+    assert decide([SCOPE], audience=OWNER_AUDIENCE, policy=pol).level == 1
+
+
+def test_one_declared_scope_denies_across_an_overlapping_undeclared_scope() -> None:
+    """Spec: a scope cannot be widened by authoring a broad undeclared scope
+    alongside it. Membership is a set; ANY declared member closes the item."""
+    pol = _policy(scopes=[_scope(default_deny=True), _scope(OTHER_SCOPE, default_deny=False)])
+    assert decide([SCOPE, OTHER_SCOPE], audience="ext", policy=pol).level == DISCLOSURE_MIN
+    # Order-free, like the rest of the lattice.
+    assert decide([OTHER_SCOPE, SCOPE], audience="ext", policy=pol).level == DISCLOSURE_MIN
+
+
+def test_a_rule_on_the_undeclared_sibling_does_not_unlock_the_declared_scope() -> None:
+    """A rule authorising an audience on the UNDECLARED sibling says nothing
+    about the declared scope, which still names nobody — so the item stays
+    closed. The floor is resolved per declaring scope, not against the item's
+    global matched-rule set."""
+    rule = Rule(
+        id="r1", source="rules/x.yaml", scope_ids=(OTHER_SCOPE,),
+        audience="ext", ceiling=3,
+    )
+    pol = _policy(rules=[rule],
+                  scopes=[_scope(default_deny=True), _scope(OTHER_SCOPE, default_deny=False)])
+    assert decide([SCOPE, OTHER_SCOPE], audience="ext", policy=pol).level == DISCLOSURE_MIN
+    assert decide([OTHER_SCOPE, SCOPE], audience="ext", policy=pol).level == DISCLOSURE_MIN
+
+
+def test_a_rule_on_one_declared_scope_does_not_unlock_another_declared_scope() -> None:
+    """Compartment crossover. `S1{default_deny}` with a rule opening it to an
+    audience, alongside `S2{default_deny}` naming nobody: an item in BOTH is a
+    member of a compartment that audience was never authorised for, so it is
+    closed. Authorising someone on one compartment must not unlock another."""
+    rule = Rule(
+        id="r1", source="rules/x.yaml", scope_ids=(SCOPE,),
+        audience="ext", ceiling=DISCLOSURE_MAX,
+    )
+    pol = _policy(rules=[rule],
+                  scopes=[_scope(default_deny=True), _scope(OTHER_SCOPE, default_deny=True)])
+    assert decide([SCOPE, OTHER_SCOPE], audience="ext", policy=pol).level == DISCLOSURE_MIN
+    # Commutative: the module promises order-independence.
+    assert decide([OTHER_SCOPE, SCOPE], audience="ext", policy=pol).level == DISCLOSURE_MIN
+    # ...and the item stays fully open on the compartment that DID name them.
+    assert decide([SCOPE], audience="ext", policy=pol).level == DISCLOSURE_MAX
+
+
+def test_the_unnamed_declared_scope_is_the_one_named_in_the_explanation() -> None:
+    """The explanation must point at the compartment that closed the item, not
+    at the one whose rule was overridden."""
+    rule = Rule(
+        id="r1", source="rules/x.yaml", scope_ids=(SCOPE,),
+        audience="ext", ceiling=DISCLOSURE_MAX,
+    )
+    pol = _policy(rules=[rule],
+                  scopes=[_scope(default_deny=True), _scope(OTHER_SCOPE, default_deny=True)])
+    decision = decide([SCOPE, OTHER_SCOPE], audience="ext", policy=pol)
+    assert decision.default_deny_scope_ids == (OTHER_SCOPE,)
+
+
+def test_a_suspended_rule_on_a_second_declared_scope_recloses_it() -> None:
+    """Suspending the rule that named the audience for one compartment returns
+    that compartment to its declared default, even though another compartment's
+    rule still matches the item."""
+    live = Rule(
+        id="r1", source="rules/x.yaml", scope_ids=(SCOPE,), audience="ext", ceiling=4,
+    )
+    suspended = Rule(
+        id="r2", source="rules/x.yaml", scope_ids=(OTHER_SCOPE,), audience="ext",
+        ceiling=4, options={"suspended": True},
+    )
+    pol = _policy(rules=[live, suspended],
+                  scopes=[_scope(default_deny=True), _scope(OTHER_SCOPE, default_deny=True)])
+    assert decide([SCOPE, OTHER_SCOPE], audience="ext", policy=pol).level == DISCLOSURE_MIN
+
+
+def test_an_org_cap_on_a_declared_scope_does_not_count_as_naming_the_audience() -> None:
+    """An org cap only lowers; it never authorises. A cap naming the audience
+    for a declared scope must not be read as the rule that opens it."""
+    cap = Rule(
+        id="cap", source="rules/x.yaml", scope_ids=(OTHER_SCOPE,), audience="ext",
+        ceiling=5, kind="org_cap",
+    )
+    rule = Rule(
+        id="r1", source="rules/x.yaml", scope_ids=(SCOPE,), audience="ext", ceiling=4,
+    )
+    pol = _policy(rules=[cap, rule],
+                  scopes=[_scope(default_deny=True), _scope(OTHER_SCOPE, default_deny=True)])
+    assert decide([SCOPE, OTHER_SCOPE], audience="ext", policy=pol).level == DISCLOSURE_MIN
+
+
+def test_a_grant_still_raises_off_a_per_scope_declared_floor() -> None:
+    """The floor is still only a floor: a grant naming the audience raises off
+    it exactly as it does when the whole standing set was empty."""
+    rule = Rule(
+        id="r1", source="rules/x.yaml", scope_ids=(SCOPE,), audience="ext", ceiling=4,
+    )
+    grant = StandingGrant(
+        id="g1", source="grants/x.yaml", scope_ids=(OTHER_SCOPE,),
+        audience="ext", ceiling=2,
+    )
+    pol = _policy(rules=[rule], grants=[grant],
+                  scopes=[_scope(default_deny=True), _scope(OTHER_SCOPE, default_deny=True)])
+    assert decide([SCOPE, OTHER_SCOPE], audience="ext", policy=pol).level == 2
+
+
+def test_the_owner_is_exempt_from_a_per_scope_declared_floor() -> None:
+    """The owner exemption is chosen where the default is chosen, so a second
+    declared compartment naming nobody never locks the owner out."""
+    rule = Rule(
+        id="r1", source="rules/x.yaml", scope_ids=(SCOPE,),
+        audience=OWNER_AUDIENCE, ceiling=4,
+    )
+    pol = _policy(rules=[rule],
+                  scopes=[_scope(default_deny=True), _scope(OTHER_SCOPE, default_deny=True)])
+    decision = decide([SCOPE, OTHER_SCOPE], audience=OWNER_AUDIENCE, policy=pol)
+    assert decision.level == 4
+    assert decision.default_deny_scope_ids == ()
+
+
+def test_a_declared_purpose_still_only_narrows_on_a_declared_scope() -> None:
+    """Spec: a declared purpose continues to only narrow. Declaring the purpose
+    of a purpose-conditioned allowance must not lift a default denial, because
+    purpose is a self-assertion by the party the rules constrain."""
+    pol = _policy(rules=[_rule("r1", 5, purpose="research")],
+                  scopes=[_scope(default_deny=True)])
+    undeclared = decide([SCOPE], audience="ext", policy=pol).level
+    declared = decide([SCOPE], audience="ext", purpose="research", policy=pol).level
+    assert undeclared == DISCLOSURE_MIN
+    assert declared <= undeclared
+
+
+def test_a_suspended_rule_falls_back_to_the_declared_default() -> None:
+    """Suspending the one rule that named an audience must close the scope for
+    that audience, not re-open it."""
+    pol = _policy(rules=[_rule("r1", 5, options={"suspended": True})],
+                  scopes=[_scope(default_deny=True)])
+    assert decide([SCOPE], audience="ext", policy=pol).level == DISCLOSURE_MIN
+
+
+def test_the_decision_names_the_declaring_scope_for_a_default_denial() -> None:
+    """`explain` must be able to say WHICH scope closed the item without
+    inventing a rule id, so the evaluator records it where it made the choice."""
+    pol = _policy(scopes=[_scope(default_deny=True), _scope(OTHER_SCOPE, default_deny=False)])
+    decision = decide([SCOPE, OTHER_SCOPE], audience="ext", policy=pol)
+    assert decision.default_deny_scope_ids == (SCOPE,)
+    assert decision.rule_ids == ()
+
+
+def test_no_declaring_scope_is_recorded_when_a_rule_decided_the_outcome() -> None:
+    pol = _policy(rules=[_rule("r1", 3)], scopes=[_scope(default_deny=True)])
+    assert decide([SCOPE], audience="ext", policy=pol).default_deny_scope_ids == ()
+
+
+def test_no_declaring_scope_is_recorded_for_the_owner() -> None:
+    pol = _policy(scopes=[_scope(default_deny=True)])
+    assert decide([SCOPE], audience=OWNER_AUDIENCE, policy=pol).default_deny_scope_ids == ()
+
+
+def test_a_grant_on_a_sibling_scope_still_raises_a_declared_scope_as_it_does_a_ceiling_0_rule() -> None:
+    """The declaration does NOT close the grant lane, and must not pretend to.
+
+    `grant_max = max(grant_ceilings + [standing_min])` and `_grant_matches` tests
+    scope INTERSECTION, so a grant naming an audience for S2 raises an item that
+    is also in a closed S1 — the compartment crossover, via grants rather than
+    rules. Measured L0 -> L6.
+
+    This is pinned as an EQUIVALENCE, not as an approval. The authored
+    `ceiling: 0` spelling behaves identically, so the behaviour is a pre-existing
+    property of the lattice and not something the declaration introduced. The
+    test exists so the two spellings cannot silently diverge while the real fix
+    (scoping a grant's raise to the scopes it names) is out of scope here.
+    """
+    s1 = "01ARZ3NDEKTSV4RRFFQ69G5FA1"
+    s2 = "01ARZ3NDEKTSV4RRFFQ69G5FA2"
+    both = [s1, s2]
+    grant = StandingGrant(
+        id="01ARZ3NDEKTSV4RRFFQ69G5FB1",
+        source="grants/g.yaml",
+        scope_ids=(s2,),
+        audience="partner-x",
+        ceiling=6,
+    )
+
+    declared = Policy(
+        fingerprint="p",
+        scopes={
+            s1: Scope(id=s1, source="scopes/s1.yaml", default_deny=True),
+            s2: Scope(id=s2, source="scopes/s2.yaml"),
+        },
+    )
+    authored = Policy(
+        fingerprint="p",
+        scopes={
+            s1: Scope(id=s1, source="scopes/s1.yaml"),
+            s2: Scope(id=s2, source="scopes/s2.yaml"),
+        },
+        rules=(
+            Rule(
+                id="01ARZ3NDEKTSV4RRFFQ69G5FB0",
+                source="rules/r.yaml",
+                scope_ids=(s1,),
+                audience="partner-x",
+                ceiling=0,
+            ),
+        ),
+    )
+
+    # Closed identically without a grant.
+    assert decide(both, audience="partner-x", policy=declared).level == DISCLOSURE_MIN
+    assert decide(both, audience="partner-x", policy=authored).level == DISCLOSURE_MIN
+
+    # And raised identically by a grant that names only the sibling scope.
+    declared_granted = dataclasses.replace(declared, grants=(grant,))
+    authored_granted = dataclasses.replace(authored, grants=(grant,))
+    assert (
+        decide(both, audience="partner-x", policy=declared_granted).level
+        == decide(both, audience="partner-x", policy=authored_granted).level
+    ), "the declaration must not be weaker OR stronger than an authored ceiling-0 here"

@@ -16,8 +16,17 @@ Use when the user asks to research a topic, compare options, investigate a claim
 1. Search Exomem first with `ask_memory` for prior conclusions and related sources.
 2. Gather external sources only as needed; preserve important raw sources with `capture_source`, `preserve_evidence`, or `transfer_artifact`.
 3. Attribute findings to sources and distinguish evidence from interpretation.
-4. Compile the result with `remember` as a `research-note` unless another type clearly fits.
+4. Compile the result with `remember` as a `research-note` unless another type clearly fits, listing every source preserved in step 2 in `sources:`.
 5. Use `connect_memory(operation="suggest-links")` and connect related prior notes.
+
+## Output contract
+Return findings, cited sources, limits, saved path, and follow-up questions.
+
+## Save rules
+Save findings that answer the question, change a decision, or create reusable context. Keep source attribution explicit.
+
+## Mistakes to avoid
+Do not research from scratch before checking Exomem. Do not save a source list without synthesis. Do not hide uncertainty or source gaps.
 
 <!-- exomem-semantic-authoring:v4 sha256:837b03b15c3d83f6c6eeb50771f4eaa04e4beaaae0f7d54be249be40ce7685f7 -->
 ## Semantic authoring contract
@@ -67,12 +76,3 @@ Rich example:
 
 Commit to a fixed 6am training block on weekdays so consistency compounds and health stays the durable lens for this decision.
 ```
-
-## Output contract
-Return findings, cited sources, limits, saved path, and follow-up questions.
-
-## Save rules
-Save findings that answer the question, change a decision, or create reusable context. Keep source attribution explicit.
-
-## Mistakes to avoid
-Do not research from scratch before checking Exomem. Do not save a source list without synthesis. Do not hide uncertainty or source gaps.

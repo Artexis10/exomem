@@ -708,16 +708,24 @@ def restriction_signature(
         for grant in policy.grants
         if grant.audience == audience and bool(scopes & set(grant.scope_ids))
     ]
+
+    def scope_row(scope_id: str) -> dict[str, Any]:
+        scope = policy.scopes.get(scope_id)
+        return {
+            "id": scope_id,
+            "constraint": None if scope is None else scope.constraint,
+            # A `default_deny` declaration restricts as much as an authored
+            # `ceiling: 0` does, and it names no rule — so without it here,
+            # locking the source scope leaves a previously approved
+            # abstraction of a private source flowing on a fresh-looking
+            # signature.
+            "default_deny": False if scope is None else bool(scope.default_deny),
+        }
+
     payload = {
         "audience": audience,
         "scope_ids": sorted(scopes),
-        "scopes": [
-            {
-                "id": scope_id,
-                "constraint": policy.scopes[scope_id].constraint if scope_id in policy.scopes else None,
-            }
-            for scope_id in sorted(scopes)
-        ],
+        "scopes": [scope_row(scope_id) for scope_id in sorted(scopes)],
         "rules": sorted(rules, key=lambda row: (row["id"], row["kind"], row["ceiling"])),
         "grants": sorted(grants, key=lambda row: (row["id"], row["ceiling"])),
     }

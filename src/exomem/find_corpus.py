@@ -17,10 +17,15 @@ from .find_types import ParsedPage
 
 log = logging.getLogger(__name__)
 
+# Operational state is not knowledge: `_Governance` (policy/receipts) and
+# `_Adoption` (durable run objects + run manifests) both name items whose own
+# disclosure decisions may be restrictive, so neither may enter the content
+# corpus or be reachable by recall.
 EXCLUDED_DIR_NAMES = frozenset(
     {
         ".graph-coordination",
         ".trash",
+        "_Adoption",
         "_Schema",
         "_Governance",
         "_attachments",

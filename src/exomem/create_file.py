@@ -31,6 +31,7 @@ from . import (
     relation_review,
     semantic_contract,
     semantic_writes,
+    temporal,
 )
 from . import vault as vault_module
 from .vault import (
@@ -183,8 +184,9 @@ def create_file(
             "CREATION_REVIEW_REQUIRES_MARKDOWN",
             "creation review fields apply only to Markdown files",
         )
-    today = today or dt.date.today()
-    date_iso = today.isoformat()
+    now = today or temporal.now()
+    date_iso = temporal.render_date(now)
+    stamp_iso = temporal.stamp(now)
     if draft_token is not None and is_markdown and not existing_file:
         try:
             token_value = semantic_writes.DraftToken.decode(draft_token)
@@ -200,6 +202,7 @@ def create_file(
                 "INVALID_DRAFT_TOKEN", "draft token does not match this creation"
             )
         date_iso = token_value.render_date
+        stamp_iso = token_value.stamp()
 
     # For markdown files, normalize wikilinks in the body to canonical form.
     # Skip non-md files (skill manifests, JSON, scratch) — their `[[...]]`
@@ -215,8 +218,8 @@ def create_file(
 
     if frontmatter is not None:
         fm = dict(frontmatter)
-        fm.setdefault("created", date_iso)
-        fm.setdefault("updated", date_iso)
+        fm.setdefault("created", stamp_iso)
+        fm.setdefault("updated", stamp_iso)
         fm_block = serialize_frontmatter(fm)
         body = content if content.endswith("\n") else content + "\n"
         full_text = f"---\n{fm_block}\n---\n{body}"
@@ -249,7 +252,7 @@ def create_file(
     creation_token = (
         draft_token
         or semantic_writes.DraftToken(
-            "create_file", "tier2_create", rel_path, date_iso
+            "create_file", "tier2_create", rel_path, date_iso, render_stamp=stamp_iso
         ).encode()
         if is_markdown and not existing_file
         else "create-file:" + hashlib.sha256(
@@ -265,7 +268,7 @@ def create_file(
     try:
         log_plan = plan_log_writes(
             vault_root,
-            date_iso=date_iso,
+            date_iso=stamp_iso,
             op=op_word,
             rel_path_no_ext=rel_no_ext,
             body=" ".join(log_body_parts),

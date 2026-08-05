@@ -134,9 +134,7 @@ def infer_profile() -> Profile:
         return raw  # type: ignore[return-value]
     if os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
         return "lean"
-    embeddings_ready = all(
-        _module_available(name) for name in ("sentence_transformers", "torch", "PIL")
-    )
+    embeddings_ready = all(_module_available(name) for _, name in _embedding_requirements()[1])
     if not embeddings_ready:
         return "lean"
     media_ready = all(
@@ -381,6 +379,35 @@ def _check_schema_files(vault_root: Path | None) -> list[DoctorCheck]:
                 "restore the missing scaffold file from src/exomem/_scaffold/.",
             ))
     return checks
+
+
+def _embedding_requirements() -> tuple[str, list[tuple[str, str]]]:
+    """`(extra, [(distribution, import name)])` for the configured embedding backend.
+
+    Health belongs to the runtime that is actually configured to serve. A hosted
+    image built on ONNX Runtime carries no torch by design, and reporting that as
+    a missing dependency would mark a correct install unhealthy — and, through
+    `infer_profile`, silently demote it to `lean`, which is how a cell would come
+    to advertise keyword-only recall while holding a working embedder.
+    """
+    from . import embedding_backend
+
+    try:
+        backend = embedding_backend.resolve_backend(is_available=_module_available)
+    except ValueError:
+        # A misconfigured backend is reported by its own check; fall back to the
+        # default lane rather than raising out of a diagnostic command.
+        backend = embedding_backend.TORCH
+    if backend == embedding_backend.ONNX:
+        return "embeddings-onnx", [
+            ("onnxruntime", "onnxruntime"),
+            ("tokenizers", "tokenizers"),
+        ]
+    return "embeddings", [
+        ("sentence-transformers", "sentence_transformers"),
+        ("torch", "torch"),
+        ("pillow", "PIL"),
+    ]
 
 
 def _check_dependency(module: str, extra: str, *, import_name: str | None = None) -> DoctorCheck:
@@ -1903,16 +1930,18 @@ def doctor(
         checks.append(media_runtime)
 
     if profile in ("hybrid", "standard", "media"):
-        checks.extend([
-            _check_embeddings_disabled(),
-            _check_dependency("sentence-transformers", "embeddings", import_name="sentence_transformers"),
-            _check_dependency("torch", "embeddings"),
-            _check_dependency("pillow", "embeddings", import_name="PIL"),
-            _check_torch_cuda(),
-            _check_torch_device(),
-            _check_models_cache(),
-            _check_sqlite_vec(),
-        ])
+        extra, requirements = _embedding_requirements()
+        checks.append(_check_embeddings_disabled())
+        checks.extend(
+            _check_dependency(distribution, extra, import_name=import_name)
+            for distribution, import_name in requirements
+        )
+        # The torch accelerator probes describe a runtime this install may not
+        # have. Reporting "torch is not installed" on an ONNX image is noise
+        # about an absent framework, not a finding about the configured one.
+        if extra == "embeddings":
+            checks.extend([_check_torch_cuda(), _check_torch_device()])
+        checks.extend([_check_models_cache(), _check_sqlite_vec()])
         mps_headroom = _check_mps_headroom()
         if mps_headroom is not None:
             checks.append(mps_headroom)

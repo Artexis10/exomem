@@ -56,6 +56,7 @@ from . import (
     relation_registry,
     semantic_language_registry,
     semantic_units,
+    temporal,
 )
 from . import find as find_module
 from .kbdir import kb_dirname, kb_prefix
@@ -80,6 +81,7 @@ ALL_CATEGORIES: tuple[str, ...] = (
 )
 OPTIONAL_CATEGORIES: tuple[str, ...] = (
     "relation_registry",
+    "missing_sources",
     "semantic_contract_drift",
     "semantic_malformed_unit",
     "semantic_category_governance",
@@ -385,6 +387,8 @@ def audit(
         findings.extend(_check_relation_registry(vault_root))
     if "relation_debt" in selected:
         findings.extend(_check_relation_debt(vault_root, pages))
+    if "missing_sources" in selected:
+        findings.extend(_check_missing_sources(vault_root, pages))
     if "governance_receipts" in selected:
         findings.extend(_check_governance_receipts(vault_root))
     if "bridge_review" in selected:
@@ -608,7 +612,11 @@ def semantic_finding_group(item: dict) -> str | None:
     resolved_rule = tuple(str(value) for value in (item.get("resolved_rule") or ()))
     namespace = resolved_rule[0] if resolved_rule else ""
     rule = resolved_rule[2] if len(resolved_rule) >= 3 else ""
-    if code in {"RELATION_DISPOSITION_MISSING", "RELATION_DISPOSITION_STALE"}:
+    if code in {
+        "RELATION_DISPOSITION_MISSING",
+        "RELATION_DISPOSITION_STALE",
+        "RELATION_TYPED_EDGE_ABSENT",
+    }:
         return "semantic_relation_disposition"
     if rule == "syntax":
         return "semantic_malformed_unit"
@@ -942,17 +950,15 @@ def _check_unprocessed_sources(
 
 
 def _parse_fm_date(value) -> dt.date | None:
-    """Coerce a frontmatter date value (yaml date, datetime, or ISO str) to date."""
-    if isinstance(value, dt.datetime):
-        return value.date()
-    if isinstance(value, dt.date):
-        return value
-    if isinstance(value, str) and value.strip():
-        try:
-            return dt.date.fromisoformat(value.strip()[:10])
-        except ValueError:
-            return None
-    return None
+    """Coerce a frontmatter date value (yaml date, datetime, or ISO str) to date.
+
+    Audit checks age pages in whole days — "unprocessed for N days", "not
+    reviewed since" — so collapsing a timestamp to its day is the right answer
+    here, not a loss. `temporal.parse` additionally accepts the quoted and
+    space-separated spellings that `[:10]` prefix-slicing used to mangle.
+    """
+    moment = temporal.parse(value)
+    return moment.day if moment is not None else None
 
 
 # ---------------- check: index_drift ----------------
@@ -1605,6 +1611,65 @@ def _check_relation_debt(
                     "typed_relations": typed_count,
                     "body_wikilinks": body_link_count,
                 },
+            )
+        )
+
+    return sorted(findings, key=lambda finding: finding.path)
+
+
+# ---------------- check: missing_sources ----------------
+
+# `_Schema/references/frontmatter.md` marks `sources:` required for these four
+# compiled types. Deliberately NOT expressed through `_REQUIRED_FIELDS_BY_TYPE`:
+# that table is `warn` severity (overstating a chronic, often-honest condition),
+# it would swamp `frontmatter_compliance` — whose job is structural integrity —
+# with hundreds of findings, and `audit_fix` iterates it to backfill inferable
+# values. Provenance is exactly the field that must never be inferred.
+_SOURCES_REQUIRED_TYPES = frozenset(
+    {"research-note", "insight", "failure", "pattern"}
+)
+
+
+def _check_missing_sources(
+    vault_root: Path,
+    pages: list[find_module.ParsedPage],
+) -> list[AuditFinding]:
+    """Surface active compiled pages that should cite provenance and cite none."""
+    findings: list[AuditFinding] = []
+    for page in pages:
+        if page.page_type not in _SOURCES_REQUIRED_TYPES:
+            continue
+        if page.path.name in ("index.md", "log.md"):
+            continue
+        if page.status in ("superseded", "archived", "draft", "dropped"):
+            continue
+        if access.access_tier(vault_root, page.rel_path) != access.TIER_READ_WRITE:
+            continue
+        stem = page.path.stem.lower()
+        if any(stem.endswith(suffix) for suffix in _STALE_SKIP_SLUG_SUFFIXES):
+            continue
+        if _STALE_SKIP_TAGS & set(page.tags):
+            continue
+        if page.frontmatter.get("sources"):
+            continue
+
+        findings.append(
+            AuditFinding(
+                category="missing_sources",
+                severity="info",
+                path=page.rel_path,
+                detail=(
+                    "Active compiled page cites no `sources:`; the raw material it "
+                    "was drawn from is not recoverable from the page itself, and any "
+                    "originating source still counts as unprocessed."
+                ),
+                proposed_fix=(
+                    "If this came from live work with nothing captured, it is an "
+                    "honest empty list — dismiss it. Otherwise cite the `Sources/` "
+                    "page, which also appends this note to that source's "
+                    "`ingested_into:`. Nothing is auto-written or inferred."
+                ),
+                meta={"signal_version": _page_signal_version(page)},
             )
         )
 

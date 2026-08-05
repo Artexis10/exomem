@@ -484,19 +484,68 @@ async def test_quiescence_over_two_minutes_reopens_routes_but_refuses_success(
     assert not any(event.startswith("uploaded:") for event in events)
 
 
-def test_scheduler_uses_exact_thirty_minute_slots_and_threshold_metrics() -> None:
+def test_scheduler_uses_exact_daily_slots_and_threshold_metrics() -> None:
     scheduler = BackupScheduler()
-    assert scheduler.slot(datetime(2030, 1, 1, 12, 29, 59, tzinfo=UTC)) == datetime(
-        2030, 1, 1, 12, 0, tzinfo=UTC
+    assert scheduler.INTERVAL_MINUTES == 24 * 60
+    # Every instant in a UTC day maps to that day's slot, so a run that starts
+    # late still claims the same slot instead of opening a second one.
+    assert scheduler.slot(datetime(2030, 1, 1, 0, 0, tzinfo=UTC)) == datetime(
+        2030, 1, 1, tzinfo=UTC
     )
-    assert scheduler.slot(datetime(2030, 1, 1, 12, 30, tzinfo=UTC)) == datetime(
-        2030, 1, 1, 12, 30, tzinfo=UTC
+    assert scheduler.slot(datetime(2030, 1, 1, 23, 59, 59, tzinfo=UTC)) == datetime(
+        2030, 1, 1, tzinfo=UTC
     )
-    metrics = scheduler.freshness_metrics(age_seconds=46 * 60)
-    assert metrics["exomem_recovery_backup_age_seconds"] == 46 * 60
-    assert metrics["exomem_recovery_backup_warning"] == 1
-    assert metrics["exomem_recovery_alpha_blocked"] == 0
-    assert scheduler.freshness_metrics(age_seconds=60 * 60)["exomem_recovery_alpha_blocked"] == 1
+    assert scheduler.slot(datetime(2030, 1, 2, 0, 0, tzinfo=UTC)) == datetime(
+        2030, 1, 2, tzinfo=UTC
+    )
+
+    # A backup that is merely approaching the next daily run is normal, not an
+    # alert — the objective is 24 hours, and the thresholds sit past it so the
+    # cadence itself does not fire an alarm every day before the run.
+    assert scheduler.freshness_metrics(age_seconds=24 * 3600)["exomem_recovery_backup_warning"] == 0
+    warned = scheduler.freshness_metrics(age_seconds=26 * 3600)
+    assert warned["exomem_recovery_backup_age_seconds"] == 26 * 3600
+    assert warned["exomem_recovery_backup_warning"] == 1
+    assert warned["exomem_recovery_alpha_blocked"] == 0
+    # One entirely missed daily run must block before a second day passes.
+    assert scheduler.freshness_metrics(age_seconds=30 * 3600)["exomem_recovery_alpha_blocked"] == 1
+    assert scheduler.BLOCK_SECONDS < 48 * 3600
+
+
+def test_sweep_budget_matches_the_deployed_cronjob_deadline() -> None:
+    """The sweep gate is only real if its budget is the deadline Kubernetes enforces.
+
+    `capacity_rpo_met` compares the sweep against `SWEEP_BUDGET_SECONDS`. If that
+    drifts above the CronJob's `activeDeadlineSeconds`, the job is killed before
+    the gate can ever fail and the check silently stops protecting anything.
+    """
+    contract = json.loads(
+        (
+            Path(__file__).resolve().parents[3]
+            / "infra/helm/platform/files/durability-workloads-v1.json"
+        ).read_text(encoding="utf-8")
+    )
+    backup = contract["workloads"]["vaultBackup"]
+    assert BackupScheduler.SWEEP_BUDGET_SECONDS == backup["activeDeadlineSeconds"]
+    # A full sweep must fit far inside the daily interval it feeds.
+    assert BackupScheduler.SWEEP_BUDGET_SECONDS < BackupScheduler.INTERVAL_MINUTES * 60
+
+
+def test_vault_backup_runs_once_daily_and_not_on_a_sub_daily_cadence() -> None:
+    contract = json.loads(
+        (
+            Path(__file__).resolve().parents[3]
+            / "infra/helm/platform/files/durability-workloads-v1.json"
+        ).read_text(encoding="utf-8")
+    )
+    schedule = contract["workloads"]["vaultBackup"]["schedule"]
+    minute, hour, *rest = schedule.split()
+    # Each run is a full independent encrypted copy and quiesces the cell, so a
+    # wildcard in either the minute or the hour field multiplies both storage
+    # cost and tenant unavailability. Reject it at the contract.
+    assert "*" not in minute and "/" not in minute, schedule
+    assert "*" not in hour and "/" not in hour, schedule
+    assert rest == ["*", "*", "*"], schedule
 
 
 @pytest.mark.asyncio

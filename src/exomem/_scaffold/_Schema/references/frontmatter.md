@@ -15,9 +15,18 @@ These appear on every page type:
 | `type` | yes | enum | `source`, `research-note`, `insight`, `failure`, `pattern`, `experiment`, `production-log`, `entity` |
 | `title` | new pages | Unicode string | exact human-facing display title; independent of the filename slug |
 | `status` | yes | enum | `draft`, `active`, `superseded`, `archived` (production-logs use a richer status set — see below) |
-| `created` | yes | ISO date | `YYYY-MM-DD`, set on creation, never edited |
-| `updated` | yes | ISO date | `YYYY-MM-DD`, refreshed on every edit |
+| `created` | yes | ISO instant or date | `YYYY-MM-DDTHH:MM:SSZ`, set on creation, never edited |
+| `updated` | yes | ISO instant or date | `YYYY-MM-DDTHH:MM:SSZ`, refreshed on every edit |
 | `tags` | yes | list | freeform, lowercase, dash-separated |
+
+`created` and `updated` are recorded at **second granularity in UTC**, so pages
+revised more than once in a day stay orderable. Pages written before this was
+introduced carry a bare `YYYY-MM-DD` and are never rewritten: a date-only value
+means the intra-day time was genuinely not captured, and restamping it as
+midnight would assert a precision that never existed. Both forms are therefore
+permanent, and readers must accept either. Comparing two values that share a day
+when at least one is date-only is undecidable rather than equal — tools report
+that rather than guessing an order.
 
 New writers also render `title` as the page's canonical H1. Readers remain
 backward-compatible with legacy pages and resolve display titles in this order:

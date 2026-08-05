@@ -19,6 +19,15 @@ Use when the user asks to continue, resume, pick up a project, recover prior sta
 4. Prefer recent active compiled notes, then linked sources/evidence when provenance is needed.
 5. Summarize current state, decisions already made, blockers, and likely next actions.
 
+## Output contract
+Return a compact continuation brief with cited Exomem pages and a short next-action list. Say when the search missed or was thin.
+
+## Save rules
+Save only if the resumed work produces a new durable decision, solved problem, failure, pattern, or research finding. Use `remember`, `edit_memory`, or `replace_memory` as appropriate.
+
+## Mistakes to avoid
+Do not invent prior context from memory. Do not treat a scoped miss as absence. Do not dump long note bodies when a state brief is enough.
+
 <!-- exomem-semantic-authoring:v4 sha256:837b03b15c3d83f6c6eeb50771f4eaa04e4beaaae0f7d54be249be40ce7685f7 -->
 ## Semantic authoring contract
 
@@ -67,12 +76,3 @@ Rich example:
 
 Commit to a fixed 6am training block on weekdays so consistency compounds and health stays the durable lens for this decision.
 ```
-
-## Output contract
-Return a compact continuation brief with cited Exomem pages and a short next-action list. Say when the search missed or was thin.
-
-## Save rules
-Save only if the resumed work produces a new durable decision, solved problem, failure, pattern, or research finding. Use `remember`, `edit_memory`, or `replace_memory` as appropriate.
-
-## Mistakes to avoid
-Do not invent prior context from memory. Do not treat a scoped miss as absence. Do not dump long note bodies when a state brief is enough.

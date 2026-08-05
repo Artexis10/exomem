@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from typing import Any, Literal, TypeAlias, cast
 
-from . import semantic_language_registry, semantic_units
+from . import semantic_language_registry, semantic_units, temporal
 
 MAX_PLAN_BYTES = 16 * 1024
 MAX_POINTER_BYTES = 512
@@ -637,10 +637,31 @@ def page_view(page: Any) -> dict[str, Any]:
     # see the union of all non-null values.
     if project_declared:
         out["project"] = projects
-    if "updated" in frontmatter:
-        out["updated"] = frontmatter["updated"]
-    elif "captured" in frontmatter:
-        out["updated"] = frontmatter["captured"]
+    recorded = frontmatter.get("updated") if "updated" in frontmatter else None
+    if "updated" not in frontmatter and "captured" in frontmatter:
+        recorded = frontmatter["captured"]
+    if "updated" in frontmatter or "captured" in frontmatter:
+        # Settle precision here rather than downstream. `page.updated` is
+        # strictly typed — `date` and `datetime` are deliberately not
+        # comparable (see `_evaluate_operator`) — so an unnormalized value
+        # whose YAML spelling differs from the operand's silently evaluates
+        # False and drops the page from every date filter with no warning.
+        # Frontmatter reaches us in four shapes: bare date, quoted date (what
+        # `serialize_frontmatter` writes), and both again with a timestamp.
+        # They all denote a recorded day, so all four answer day-granular
+        # questions. A value we cannot parse is passed through untouched, so
+        # it still fails date filters instead of acquiring an invented day.
+        moment = temporal.parse(recorded)
+        if moment is None:
+            out["updated"] = recorded
+        else:
+            # Present the most precise recorded value. `_evaluate_operator`
+            # decides at what granularity to compare, because that is a
+            # property of the *question* — "updated on or after this day" is
+            # fully answerable for a page recorded to the second, while
+            # "updated after 09:00" is not answerable for a page recorded only
+            # to the day.
+            out["updated"] = moment.instant or moment.day
     return out
 
 
@@ -1423,6 +1444,9 @@ def _evaluate_operator(
         return _same_scalar(scalar, operand)
     if operator == "$ne":
         return scalar.kind == operand.kind and scalar.value != operand.value
+    if _is_temporal(scalar) and _is_temporal(operand):
+        matches, _ = _temporal_match(operator, scalar, operand)
+        return matches
     if scalar.kind != operand.kind or scalar.kind not in {"number", "date", "datetime"}:
         return False
     if operator == "$gt":
@@ -1434,6 +1458,93 @@ def _evaluate_operator(
     if operator == "$lte":
         return scalar.value <= operand.value  # type: ignore[operator]
     raise AssertionError(f"unhandled operator: {operator}")
+
+
+def indeterminate_bounds(
+    page: Mapping[str, Any], *, shortcuts: FilterShortcuts
+) -> tuple[str, ...]:
+    """Which date bounds this page matched without the order being decidable.
+
+    A page recorded only as `2026-08-05` is genuinely unordered against a bound
+    of `2026-08-05T09:00:00Z`: the day denotes an unknown instant within it.
+    `evaluate_filter` returns such a page rather than dropping it, and this
+    reports which bounds could not actually be decided, so a caller can say so
+    instead of presenting a guess as a match.
+
+    Empty when every bound was decidable, when the bound is day-scoped (a
+    day-granular question is always answerable), or when the page records no
+    date at all — absent is not ambiguous.
+    """
+    moment = temporal.parse(page.get("updated"))
+    if moment is None:
+        return ()
+    marked: list[str] = []
+    for name, raw in (
+        ("updated_after", shortcuts.updated_after),
+        ("updated_before", shortcuts.updated_before),
+    ):
+        if raw is None:
+            continue
+        bound = temporal.parse(raw)
+        if bound is None or not bound.precise:
+            continue
+        if temporal.compare(moment, bound) is temporal.Order.INDETERMINATE:
+            marked.append(name)
+    return tuple(marked)
+
+
+_ORDERED_OPERATORS = ("$gt", "$gte", "$lt", "$lte")
+
+
+def _is_temporal(scalar: TypedScalar) -> bool:
+    return scalar.kind in {"date", "datetime"}
+
+
+def _as_moment(scalar: TypedScalar) -> temporal.Moment | None:
+    return temporal.parse(scalar.value)
+
+
+def _temporal_match(
+    operator: str, page: TypedScalar, bound: TypedScalar
+) -> tuple[bool, bool]:
+    """Compare a recorded value against a bound. Returns `(matches, indeterminate)`.
+
+    The **bound** decides the granularity, because precision is a property of
+    the question rather than of the data. "Updated on or after 2026-08-05?" is
+    fully answerable for a page recorded to the second, so a day-scoped bound
+    must not start reporting ambiguity just because some pages are precise. But
+    "updated after 09:00 on 2026-08-05?" is genuinely unanswerable for a page
+    recorded only as `2026-08-05`, because that day denotes an unknown instant.
+
+    An undecidable comparison reports `matches=True, indeterminate=True`:
+    excluding it silently is the defect this whole change exists to fix, and
+    including it silently would report a guess as a fact. The caller surfaces
+    the flag (see `indeterminate_bounds`).
+    """
+    page_moment, bound_moment = _as_moment(page), _as_moment(bound)
+    if page_moment is None or bound_moment is None:
+        return False, False
+    if operator not in _ORDERED_OPERATORS:
+        # `$eq`/`$ne` are handled before this point by exact scalar identity.
+        return False, False
+    if bound_moment.precise:
+        order = temporal.compare(page_moment, bound_moment)
+    else:
+        # Day-scoped question: compare whole days, which is always decidable.
+        order = temporal.compare(
+            temporal.Moment(page_moment.day), temporal.Moment(bound_moment.day)
+        )
+        if order is temporal.Order.INDETERMINATE:
+            order = temporal.Order.SAME
+    if order is temporal.Order.INDETERMINATE:
+        return True, True
+    if operator == "$gt":
+        return order is temporal.Order.AFTER, False
+    if operator == "$gte":
+        return order in (temporal.Order.AFTER, temporal.Order.SAME), False
+    if operator == "$lt":
+        return order is temporal.Order.BEFORE, False
+    return order in (temporal.Order.BEFORE, temporal.Order.SAME), False
 
 
 def _runtime_scalar(value: Any, *, field: FieldReference) -> TypedScalar | None:

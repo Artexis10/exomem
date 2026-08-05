@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import project_keys, semantic_writes
+from . import project_keys, semantic_writes, temporal
 from .vault import (
     PlannedWrite,
     VaultPathError,
@@ -171,8 +171,8 @@ def set_frontmatter_field(
     fm_text = m.group(1)
     body = m.group(2)
 
-    today = today or dt.date.today()
-    date_iso = today.isoformat()
+    now = today or temporal.now()
+    date_iso = temporal.stamp(now)
 
     old_value = _read_yaml_field(fm_text, field)
     fm_text = _remove_yaml_key(fm_text, field)

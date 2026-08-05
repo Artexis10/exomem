@@ -8,7 +8,7 @@ whole superseded-link chain would be silly.
 What it touches:
 - The page body (if `new_body` provided)
 - The `tags:` frontmatter field (if `tags` provided)
-- The `updated:` frontmatter field (always — bumped to today)
+- The `updated:` frontmatter field (always — bumped to the write instant)
 
 What it leaves alone:
 - All other frontmatter fields (type, project, status, sources, etc.).
@@ -38,7 +38,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import corpus_aware, indexes, semantic_writes
+from . import corpus_aware, indexes, semantic_writes, temporal
 from . import find as find_module
 from .cli_ops import OpError
 from .kbdir import kb_prefix
@@ -126,7 +126,7 @@ def edit(
     relation_review_hash: str | None = None,
     relation_review_reason: str | None = None,
 ) -> EditResult | EditValidation:
-    """Edit a compiled page in place. Bumps `updated:`.
+    """Edit a compiled page in place. Bumps `updated:` to the write instant.
 
     Four (composable) modes:
     - `new_body` — replace the whole body. The heavyweight mode.
@@ -210,8 +210,8 @@ def edit(
             code="INVALID_EDIT", missing=missing, reason="; ".join(reasons)
         )
 
-    today = today or dt.date.today()
-    date_iso = today.isoformat()
+    now = today or temporal.now()
+    date_iso = temporal.stamp(now)
 
     editable = load_editable(vault_root, path, expected_hash=expected_hash)
     abs_path = editable.abs_path
@@ -704,6 +704,8 @@ def commit_edit(
         writes.extend(sub_writes)
 
     rel_no_ext = rel_path.removesuffix(".md")
+    recorded = temporal.parse(date_iso)
+    day = temporal.render_date(recorded.day) if recorded is not None else date_iso
     log_body_parts = [f"Edit via exomem. {why.strip()}"]
     if changed:
         log_body_parts.append(f"Changed: {', '.join(changed)}.")
@@ -718,7 +720,11 @@ def commit_edit(
             operation_token=(
                 "edit:"
                 + content_hash(
-                    f"{date_iso}\0{op}\0{rel_path}\0{why}\0{new_text}"
+                    # Keyed on the calendar day, not the stamp: this token is
+                    # what makes a replayed edit idempotent, and a
+                    # second-granularity value would mint a fresh key on every
+                    # attempt and defeat the dedup entirely.
+                    f"{day}\0{op}\0{rel_path}\0{why}\0{new_text}"
                 )
             ),
         )
