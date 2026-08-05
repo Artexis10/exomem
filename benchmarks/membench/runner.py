@@ -5,6 +5,23 @@ overwrites). Per-query failures land in ``failures.jsonl`` and stay in every
 denominator; an :class:`AdapterEnvironmentError` marks the whole run INVALID
 — an environment fault is never a contender loss.
 
+Two further faults invalidate rather than score, both for that same reason:
+
+- **Blocking environment mismatch.** A run may declare a
+  ``reference_environment`` — the run (or ``environment.json``) it claims to
+  reproduce. A blocking difference (see :mod:`membench.environment`) is
+  detected BEFORE the first query, so nothing is measured, ``run_failures``
+  stays at zero, and no dimension is scored in either direction. A run that
+  declares no reference is never invalidated this way; it records its
+  environment and the report says it is unverified.
+- **Retrieval floor.** A contender that returns zero hits on *every* query
+  produced no measurement, only the shape of one. Scoring it publishes a
+  sheet of zeros that reads as a catastrophic product result and is far more
+  likely a broken harness — as it was on 2026-08-05, where a zero-hit run
+  additionally collected 16 vacuous governance PASSES for retrieving nothing.
+  Exactly-zero is the only line drawn: a contender that retrieves one wrong
+  document anywhere is terrible and gets scored as terrible.
+
 The judge phase is the LAST thing that happens, and that ordering is load
 bearing rather than incidental:
 
@@ -42,7 +59,12 @@ from membench.adapters.base import (
     MemoryAdapter,
     Profile,
 )
-from membench.environment import capture_environment
+from membench.environment import (
+    EnvironmentComparison,
+    capture_environment,
+    compare_environments,
+    load_environment,
+)
 from membench.judge.backends import JudgeBackend, default_backend
 from membench.judge.blinding import BlindingMap
 from membench.judge.handshake import append_failure, collect_responses
@@ -91,6 +113,12 @@ class RunSpec:
     #: ``none`` backend, which does not run.
     judge_backend: JudgeBackend | None = None
     judge_samples: int = 1
+    #: The environment this run claims to reproduce: a captured environment
+    #: mapping, an ``environment.json`` path, or a run directory. Opt-in, and
+    #: deliberately so — invalidation on a blocking difference is only honest
+    #: where a reproduction was claimed. ``None`` records the environment and
+    #: reports it as unverified.
+    reference_environment: dict | Path | str | None = None
 
 
 @dataclass
@@ -103,6 +131,148 @@ class RunResult:
     #: are kept in their own file: a caller cannot fold them into
     #: ``dimensions`` without meaning to.
     judged: dict[str, object] = field(default_factory=dict)
+
+
+#: Below this many attempted retrieval queries the floor guard does not fire.
+#: A narrow probe legitimately returning nothing is not evidence of a broken
+#: harness; a whole suite returning nothing is.
+RETRIEVAL_FLOOR_MIN_QUERIES = 10
+#: Positive-but-tiny hit coverage is WARNED about, never invalidated. Drawing
+#: an invalidating line here would require asserting a lower bound on a real
+#: system's competence, which this benchmark has no standing to assert: a
+#: contender is allowed to be dreadful, and dreadful must remain measurable.
+RETRIEVAL_FLOOR_WARN_FRACTION = 0.05
+
+FLOOR_OK = "ok"
+FLOOR_NEAR_ZERO = "near_zero"
+FLOOR_VIOLATION = "floor_violation"
+FLOOR_NOT_APPLICABLE = "not_applicable"
+
+
+@dataclass(frozen=True)
+class RetrievalFloor:
+    """Whether a run retrieved enough to have measured anything at all."""
+
+    queries: int
+    queries_with_hits: int
+    total_hits: int
+    status: str
+    detail: str
+
+    @property
+    def invalid(self) -> bool:
+        return self.status == FLOOR_VIOLATION
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "queries": self.queries,
+            "queries_with_hits": self.queries_with_hits,
+            "total_hits": self.total_hits,
+            "status": self.status,
+            "detail": self.detail,
+            "min_queries": RETRIEVAL_FLOOR_MIN_QUERIES,
+            "warn_fraction": RETRIEVAL_FLOOR_WARN_FRACTION,
+        }
+
+
+def evaluate_retrieval_floor(
+    queries: int, queries_with_hits: int, total_hits: int
+) -> RetrievalFloor:
+    """Classify a run's retrieval volume: measured, barely measured, or not.
+
+    Exactly zero hits across a whole suite is not a degree of badness, it is
+    the absence of a signal: nothing in the artifacts distinguishes "this
+    system has no answer for any of N diverse queries, including bare
+    entity-name lookups" from "the harness or the environment is broken".
+    Both observed instances of it were the latter. A positive but tiny hit
+    rate IS a signal — it is scored, and flagged for a human to check the
+    environment before publishing.
+    """
+
+    if queries < RETRIEVAL_FLOOR_MIN_QUERIES:
+        return RetrievalFloor(
+            queries=queries,
+            queries_with_hits=queries_with_hits,
+            total_hits=total_hits,
+            status=FLOOR_NOT_APPLICABLE,
+            detail=(
+                f"retrieval floor not applied: {queries} retrieval quer(y/ies) "
+                f"attempted, below the {RETRIEVAL_FLOOR_MIN_QUERIES}-query minimum"
+            ),
+        )
+    if queries_with_hits == 0:
+        return RetrievalFloor(
+            queries=queries,
+            queries_with_hits=0,
+            total_hits=total_hits,
+            status=FLOOR_VIOLATION,
+            detail=(
+                f"retrieval floor: 0 hits on all {queries} retrieval queries. A "
+                "contender that retrieves nothing anywhere has produced no "
+                "measurement to score — this is a harness or environment fault, "
+                "and a harness fault is INVALID, never a contender loss"
+            ),
+        )
+    fraction = queries_with_hits / queries
+    if fraction < RETRIEVAL_FLOOR_WARN_FRACTION:
+        return RetrievalFloor(
+            queries=queries,
+            queries_with_hits=queries_with_hits,
+            total_hits=total_hits,
+            status=FLOOR_NEAR_ZERO,
+            detail=(
+                f"near-zero retrieval: {queries_with_hits}/{queries} queries "
+                f"({fraction:.1%}) returned any hit. SCORED — a real contender is "
+                "allowed to be this bad — but verify the environment before "
+                "publishing these numbers"
+            ),
+        )
+    return RetrievalFloor(
+        queries=queries,
+        queries_with_hits=queries_with_hits,
+        total_hits=total_hits,
+        status=FLOOR_OK,
+        detail=(
+            f"{queries_with_hits}/{queries} queries returned at least one hit "
+            f"({total_hits} hits total)"
+        ),
+    )
+
+
+def retrieval_floor_from_run_dir(run_dir: Path | str) -> RetrievalFloor:
+    """Apply the floor to an already-completed run's ``retrieval.jsonl``.
+
+    Lets an archived run be judged by the same rule as a live one, which is
+    the point: the runs that motivated the guard are on disk already.
+    """
+
+    path = Path(run_dir)
+    if path.is_dir():
+        path = path / "retrieval.jsonl"
+    queries = 0
+    queries_with_hits = 0
+    total_hits = 0
+    if path.is_file():
+        for raw in path.read_text(encoding="utf-8").splitlines():
+            if not raw.strip():
+                continue
+            hits = json.loads(raw).get("hits")
+            hit_count = len(hits) if isinstance(hits, list) else 0
+            queries += 1
+            total_hits += hit_count
+            if hit_count:
+                queries_with_hits += 1
+    return evaluate_retrieval_floor(queries, queries_with_hits, total_hits)
+
+
+class _EnvironmentMismatch(Exception):
+    """Blocking environment difference: same verdict as an environment fault.
+
+    Private, and deliberately NOT an :class:`AdapterEnvironmentError`: that
+    path counts one entry in ``run_failures``, and this one measured nothing
+    at all, so counting a failure against the contender would be exactly the
+    misattribution the invariant forbids.
+    """
 
 
 def _jsonl_writer(path: Path):
@@ -309,6 +479,19 @@ def execute_run(spec: RunSpec) -> RunResult:
     run_dir.mkdir(parents=True, exist_ok=False)  # collision = abort, never overwrite
     (run_dir / "traces").mkdir()
 
+    # Captured ONCE, before anything is measured, and reused as both the
+    # written artifact and the thing that gets verified: a run must not
+    # publish an environment record it did not itself check.
+    environment = capture_environment()
+    comparison: EnvironmentComparison | None = None
+    environment_mismatch: str | None = None
+    if spec.reference_environment is not None:
+        comparison = compare_environments(
+            load_environment(spec.reference_environment), environment
+        )
+        if comparison.blocked:
+            environment_mismatch = f"environment: {comparison.summary()}"
+
     manifest: dict[str, object] = {
         "run_id": run_id,
         "provider": spec.adapter.name,
@@ -319,6 +502,21 @@ def execute_run(spec: RunSpec) -> RunResult:
         "started_utc": stamp,
         "invalid": False,
         "invalid_reason": None,
+        "environment_verification": (
+            comparison.as_dict()
+            if comparison is not None
+            else {
+                "status": "unverified",
+                "summary": (
+                    "no reference environment supplied: this run's environment is "
+                    "recorded but was not compared to anything, so it cannot be "
+                    "claimed to reproduce another run"
+                ),
+                "blocking": [],
+                "reported": [],
+            }
+        ),
+        "retrieval_floor": evaluate_retrieval_floor(0, 0, 0).as_dict(),
     }
     corpus_manifest = (corpus_dir / "manifest.json").read_text(encoding="utf-8")
     (run_dir / "corpus-manifest.json").write_text(corpus_manifest, encoding="utf-8")
@@ -328,8 +526,14 @@ def execute_run(spec: RunSpec) -> RunResult:
     per_query_items: list[list] = []
     judge_candidates: list[JudgeCandidate] = []
     run_failures = 0
+    floor_invalid_reason: str | None = None
 
     try:
+        if environment_mismatch is not None:
+            # Before the corpus is even loaded: a run that cannot be compared
+            # to what it claims to reproduce must not spend an hour producing
+            # numbers nobody may use.
+            raise _EnvironmentMismatch(environment_mismatch)
         view = load_corpus_view(corpus_dir)
         renderer = _NATIVE_RENDERERS.get(spec.adapter.name)
         native_dir = run_dir / "native" / spec.adapter.name
@@ -399,6 +603,9 @@ def execute_run(spec: RunSpec) -> RunResult:
             retrieval_handle, write_retrieval = _jsonl_writer(run_dir / "retrieval.jsonl")
             answers_handle, write_answer = _jsonl_writer(run_dir / "answers.jsonl")
             scores_per_query: list[dict] = []
+            retrieval_queries = 0
+            queries_with_hits = 0
+            total_hits = 0
             try:
                 for query in queries:
                     exp = expected[query.query_id]
@@ -446,6 +653,10 @@ def execute_run(spec: RunSpec) -> RunResult:
                         )
                         continue
                     latency_ms = (time.perf_counter() - started) * 1000.0
+                    retrieval_queries += 1
+                    total_hits += len(hits)
+                    if hits:
+                        queries_with_hits += 1
                     write_retrieval(
                         {
                             "query_id": query.query_id,
@@ -502,12 +713,25 @@ def execute_run(spec: RunSpec) -> RunResult:
                 retrieval_handle.close()
                 answers_handle.close()
 
+            floor = evaluate_retrieval_floor(
+                retrieval_queries, queries_with_hits, total_hits
+            )
+            manifest["retrieval_floor"] = floor.as_dict()
+            if floor.invalid:
+                floor_invalid_reason = floor.detail
+
             dimensions = summarize_dimensions(per_query_items, run_failures)
+            # Written even for a floor-invalidated run — the tallies are the
+            # evidence FOR the invalidation — but labelled in the file itself,
+            # and withheld from the report and from RunResult.dimensions so
+            # nothing can lift them out as a contender's result.
             (run_dir / "deterministic-scores.json").write_text(
                 json.dumps(
                     {
                         "dimensions": dimensions,
                         "governance_state": governance_state,
+                        "invalid": floor_invalid_reason is not None,
+                        "invalid_reason": floor_invalid_reason,
                         "per_query": scores_per_query,
                     },
                     indent=2,
@@ -519,12 +743,23 @@ def execute_run(spec: RunSpec) -> RunResult:
             manifest["provider_version"] = spec.adapter.version_info()
         finally:
             spec.adapter.cleanup()
+    except _EnvironmentMismatch as exc:
+        # Recorded in failures.jsonl for visibility, but NOT in run_failures:
+        # nothing was measured, so there is nothing to count against the
+        # contender. INVALID is a statement about the run, not about it.
+        invalid_reason = str(exc)
+        write_failure({"phase": "environment-verification", "detail": invalid_reason})
     except AdapterEnvironmentError as exc:
         invalid_reason = f"environment: {exc}"
         run_failures += 1
         write_failure({"phase": "run", "detail": invalid_reason})
     finally:
         failures_handle.close()
+
+    if invalid_reason is None and floor_invalid_reason is not None:
+        # The floor verdict lands before the judge phase below, so a judge is
+        # never asked to grade a run that measured nothing.
+        invalid_reason = floor_invalid_reason
 
     # The judge runs only now: deterministic-scores.json is on disk, the
     # adapter is cleaned up, and the failures handle is closed (so the judge
@@ -558,7 +793,7 @@ def execute_run(spec: RunSpec) -> RunResult:
     manifest["run_failures"] = run_failures
     manifest["ended_utc"] = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
     (run_dir / "environment.json").write_text(
-        json.dumps(capture_environment(), indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        json.dumps(environment, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
     (run_dir / "manifest.json").write_text(
         json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
@@ -566,9 +801,11 @@ def execute_run(spec: RunSpec) -> RunResult:
 
     dimensions_out: dict[str, dict[str, int]] = {}
     scores_path = run_dir / "deterministic-scores.json"
-    if scores_path.is_file():
+    if scores_path.is_file() and invalid_reason is None:
+        # An INVALID run returns NO dimensions. The file keeps them as
+        # evidence; the caller gets nothing it could publish as a result.
         dimensions_out = json.loads(scores_path.read_text(encoding="utf-8"))["dimensions"]
-    _write_report(run_dir, manifest, dimensions_out, judged_payload)
+    _write_report(run_dir, manifest, dimensions_out, judged_payload, environment=environment)
     return RunResult(
         run_dir=run_dir,
         invalid=manifest["invalid"],  # type: ignore[arg-type]
@@ -599,11 +836,104 @@ def _judged_cell(judged: dict, dimension: str) -> str:
     return " · ".join(parts) if parts else "—"
 
 
+def _environment_report_section(manifest: dict, environment: dict | None) -> list[str]:
+    """Environment status, readable without opening a single JSON file.
+
+    This section exists because ``environment.json`` recorded the interpreter
+    version from the first run onward and no reader ever looked: a fact in an
+    artifact that nothing surfaces is a fact nobody has.
+    """
+
+    environment = environment or {}
+    verification = manifest.get("environment_verification") or {}
+    repos = environment.get("repos") if isinstance(environment.get("repos"), dict) else {}
+    product = repos.get("exomem") if isinstance(repos.get("exomem"), dict) else {}
+    head = str(product.get("head") or "n/a")
+    distributions = environment.get("distributions")
+    closure = environment.get("runtime_closure")
+    knobs = environment.get("env_knobs") if isinstance(environment.get("env_knobs"), dict) else {}
+    lines = [
+        "",
+        "## Environment (blocking vs reported)",
+        "",
+        f"- interpreter: {environment.get('python_version', '?')} "
+        f"{environment.get('python_implementation', '')}".rstrip()
+        + f" · platform: {environment.get('platform', '?')}"
+        f" · machine: {environment.get('machine', '?')}",
+        f"- product: exomem {environment.get('exomem_version', '?')} @ {head[:12]}"
+        + (" **(DIRTY TREE — head does not identify the source)**"
+           if product.get("dirty") else ""),
+        f"- knobs: {', '.join(f'{k}={v}' for k, v in sorted(knobs.items())) or 'none'}",
+        f"- distributions recorded: "
+        f"{len(distributions) if isinstance(distributions, dict) else 'NOT RECORDED'}"
+        f" · product runtime closure: "
+        f"{len(closure) if isinstance(closure, list) else 'NOT RECORDED'}"
+        " (a difference inside the closure is blocking; outside it, reported)",
+        f"- verification: **{verification.get('status', 'unverified')}** — "
+        f"{verification.get('summary', 'n/a')}",
+        "",
+    ]
+    blocking = verification.get("blocking") or []
+    reported = verification.get("reported") or []
+    if blocking:
+        lines.extend(
+            [
+                "### Blocking differences (these invalidate the comparison)",
+                "",
+                "| field | reference | observed | why |",
+                "| --- | --- | --- | --- |",
+            ]
+        )
+        for entry in blocking:
+            lines.append(
+                f"| {entry.get('field')} | {entry.get('reference')} "
+                f"| {entry.get('observed')} | {entry.get('detail')} |"
+            )
+        lines.append("")
+    if reported:
+        unverifiable = [e for e in reported if e.get("unverifiable")]
+        lines.append(
+            f"Reported differences: {len(reported)} "
+            f"({len(unverifiable)} unverifiable — one side did not record the "
+            "field, which is NOT the same as agreement)."
+        )
+        lines.extend(["", "| field | reference | observed | why |", "| --- | --- | --- | --- |"])
+        for entry in reported:
+            lines.append(
+                f"| {entry.get('field')} | {entry.get('reference')} "
+                f"| {entry.get('observed')} | {entry.get('detail')} |"
+            )
+        lines.append("")
+    return lines
+
+
+def _retrieval_floor_section(manifest: dict) -> list[str]:
+    floor = manifest.get("retrieval_floor") or {}
+    status = str(floor.get("status", "?"))
+    emphasis = "**" if status in (FLOOR_VIOLATION, FLOOR_NEAR_ZERO) else ""
+    return [
+        "",
+        "## Retrieval floor",
+        "",
+        f"- status: {emphasis}{status}{emphasis} · "
+        f"{floor.get('queries_with_hits', 0)}/{floor.get('queries', 0)} queries "
+        f"returned a hit · {floor.get('total_hits', 0)} hits total",
+        f"- {floor.get('detail', 'n/a')}",
+    ]
+
+
 def _write_report(
-    run_dir: Path, manifest: dict, dimensions: dict, judged: dict | None = None
+    run_dir: Path,
+    manifest: dict,
+    dimensions: dict,
+    judged: dict | None = None,
+    *,
+    environment: dict | None = None,
 ) -> None:
     judged = judged or {}
     judge_meta = manifest.get("judge") or {}
+    verification = manifest.get("environment_verification") or {}
+    floor = manifest.get("retrieval_floor") or {}
     lines = [
         f"# Run {manifest['run_id']}",
         "",
@@ -614,38 +944,65 @@ def _write_report(
         f"- invalid: {manifest['invalid']}"
         + (f" ({manifest['invalid_reason']})" if manifest["invalid_reason"] else ""),
         f"- run failures (kept in denominators): {manifest.get('run_failures', 0)}",
+        f"- environment: {verification.get('status', 'unverified')} · "
+        f"retrieval floor: {floor.get('status', '?')}",
         f"- judge: {judge_meta.get('backend', 'none')} "
         f"({judge_meta.get('status', 'not_run')})",
-        "",
-        "## Dimensions (no aggregate; unsupported is never zero)",
-        "",
-        "The first four count columns are DETERMINISTIC ONLY. The `judged`"
-        " column is a separate lane reported beside them and is never added"
-        " into them: subtract it by ignoring the column, or delete"
-        f" `{JUDGED_SCORES_NAME}` and nothing else changes.",
-        "",
-        "| dimension | pass | fail | not_applicable | unsupported | judged (separate) |",
-        "| --- | --- | --- | --- | --- | --- |",
     ]
-    for dim, counts in sorted(dimensions.items()):
-        if dim.startswith("_"):
-            continue
-        lines.append(
-            f"| {dim} | {counts.get('pass', 0)} | {counts.get('fail', 0)} "
-            f"| {counts.get('not_applicable', 0)} | {counts.get('unsupported', 0)} "
-            f"| {_judged_cell(judged, dim)} |"
+    if manifest["invalid"]:
+        # No table. A sheet of plausible-looking counts is precisely what an
+        # invalidated run must not publish — the 2026-08-05 zero-hit run
+        # rendered 744 fails AND 16 governance passes for retrieving nothing.
+        lines.extend(
+            [
+                "",
+                "## Dimensions — WITHHELD (this run is INVALID)",
+                "",
+                f"Reason: {manifest['invalid_reason']}",
+                "",
+                "No dimension counts are published for an invalidated run. It is"
+                " not a contender result in either direction — not a win, and"
+                " above all not a loss. Any tallies in"
+                " `deterministic-scores.json` are evidence for the invalidation,"
+                " carry `\"invalid\": true`, and are not results.",
+            ]
         )
-    run_meta = dimensions.get("_run", {})
-    lines.extend(
-        [
-            "",
-            f"Queries scored: {run_meta.get('queries_scored', 0)}; "
-            f"failures in denominator: {run_meta.get('failures', 0)}.",
-            "",
-            "Latency is reported separately in retrieval.jsonl; see "
-            "docs/memory-proof-benchmark.md for the publication contract.",
-        ]
-    )
+    else:
+        lines.extend(
+            [
+                "",
+                "## Dimensions (no aggregate; unsupported is never zero)",
+                "",
+                "The first four count columns are DETERMINISTIC ONLY. The `judged`"
+                " column is a separate lane reported beside them and is never added"
+                " into them: subtract it by ignoring the column, or delete"
+                f" `{JUDGED_SCORES_NAME}` and nothing else changes.",
+                "",
+                "| dimension | pass | fail | not_applicable | unsupported | judged (separate) |",
+                "| --- | --- | --- | --- | --- | --- |",
+            ]
+        )
+        for dim, counts in sorted(dimensions.items()):
+            if dim.startswith("_"):
+                continue
+            lines.append(
+                f"| {dim} | {counts.get('pass', 0)} | {counts.get('fail', 0)} "
+                f"| {counts.get('not_applicable', 0)} | {counts.get('unsupported', 0)} "
+                f"| {_judged_cell(judged, dim)} |"
+            )
+        run_meta = dimensions.get("_run", {})
+        lines.extend(
+            [
+                "",
+                f"Queries scored: {run_meta.get('queries_scored', 0)}; "
+                f"failures in denominator: {run_meta.get('failures', 0)}.",
+                "",
+                "Latency is reported separately in retrieval.jsonl; see "
+                "docs/memory-proof-benchmark.md for the publication contract.",
+            ]
+        )
+    lines.extend(_retrieval_floor_section(manifest))
+    lines.extend(_environment_report_section(manifest, environment))
     lines.extend(_judged_section(judge_meta, judged))
     (run_dir / "report.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
 

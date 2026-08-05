@@ -18,6 +18,16 @@ Publication contract enforced here:
   governance show comparable counts; a run against an explicitly ungoverned
   vault renders its default-open label (and ``unsupported`` likewise) and is
   excluded from the comparative governance row — a label, never a number.
+- Environment is compared, not merely recorded. Runs whose environments differ
+  in a BLOCKING field (interpreter, product identity, captured knobs, a
+  distribution inside the product's runtime closure) are marked NOT COMPARABLE
+  against the reference run, loudly, in the report a reader actually opens.
+  A cross-run report does not invalidate anyone's run — comparability is a
+  property of a pair — but it must never place incomparable numbers side by
+  side in silence, which is what produced a published "regression" that was an
+  interpreter upgrade.
+- Retrieval floor is surfaced per run: a run that retrieved nothing anywhere
+  measured nothing, and reads here as INVALID rather than as a column of zeros.
 """
 
 from __future__ import annotations
@@ -29,6 +39,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+from membench.environment import compare_environments
 from membench.judge.backends import parse_judge_verdict
 from membench.judge.handshake import PairedResponse, append_failure, load_requests
 
@@ -165,6 +176,11 @@ class _RunView:
     #: Judged verdicts (``judged-scores.json``). Never merged into
     #: ``dimensions``; rendered only in the judged section.
     judged: dict | None = None
+    #: ``environment.json`` as recorded by the run (None for runs that predate
+    #: environment capture entirely).
+    environment: dict | None = None
+    #: The run's own retrieval-floor verdict from its manifest.
+    retrieval_floor: dict | None = None
 
 
 def _load_run(run_dir: Path) -> _RunView:
@@ -199,6 +215,12 @@ def _load_run(run_dir: Path) -> _RunView:
         failure_lines = sum(
             1 for raw in failures_path.read_text(encoding="utf-8").splitlines() if raw.strip()
         )
+    environment: dict | None = None
+    environment_path = run_dir / "environment.json"
+    if environment_path.is_file():
+        loaded = json.loads(environment_path.read_text(encoding="utf-8"))
+        environment = loaded if isinstance(loaded, dict) else None
+    floor = manifest.get("retrieval_floor")
     profile = manifest.get("profile", {})
     profile_name = profile.get("name", "?") if isinstance(profile, dict) else str(profile)
     return _RunView(
@@ -217,6 +239,8 @@ def _load_run(run_dir: Path) -> _RunView:
         # were by construction measured against the default-open surface.
         governance_state=str(manifest.get("governance_state", "default_open")),
         judged=judged,
+        environment=environment,
+        retrieval_floor=floor if isinstance(floor, dict) else None,
     )
 
 
@@ -426,6 +450,145 @@ def _judged_lane_section(runs: Sequence[_RunView]) -> list[str]:
     return lines
 
 
+def _environment_cells(run: _RunView) -> tuple[str, str, str]:
+    """(interpreter, product, distributions) as rendered in the environment table."""
+
+    environment = run.environment or {}
+    if not environment:
+        return ("not recorded", "not recorded", "not recorded")
+    python = str(
+        environment.get("python_version")
+        or str(environment.get("python", "?")).split(" ")[0]
+    )
+    implementation = str(environment.get("python_implementation") or "")
+    repos = environment.get("repos") if isinstance(environment.get("repos"), dict) else {}
+    product = repos.get("exomem") if isinstance(repos.get("exomem"), dict) else {}
+    head = str(product.get("head") or "n/a")[:12]
+    dirty = " **DIRTY**" if product.get("dirty") else ""
+    distributions = environment.get("distributions")
+    closure = environment.get("runtime_closure")
+    dist_cell = (
+        f"{len(distributions)} recorded / "
+        f"{len(closure) if isinstance(closure, list) else '?'} in closure"
+        if isinstance(distributions, dict)
+        else "**not recorded**"
+    )
+    return (
+        f"{python} {implementation}".strip(),
+        f"{environment.get('exomem_version', '?')} @ {head}{dirty}",
+        dist_cell,
+    )
+
+
+def _environment_section(runs: Sequence[_RunView]) -> list[str]:
+    """Comparability of the runs' environments, against the first run.
+
+    The information was always in ``environment.json``; what was missing was
+    anything that read it. A blocking difference does not invalidate either
+    run — each is a valid measurement of its own environment — but it does
+    mean the columns beside each other are not a comparison.
+    """
+
+    lines = [
+        "",
+        "## Environment (comparability — blocking differences are NOT comparable)",
+        "",
+        "Blocking: interpreter, product identity (version, repo head, dirty tree),",
+        "captured `EXOMEM_*` knobs, and any distribution inside the product's",
+        "runtime closure. Reported: everything else installed, the interpreter",
+        "build string, platform/machine, generator version. A field one side did",
+        "not record is `unverifiable` — recorded as such, never as agreement.",
+        "",
+    ]
+    if not runs:
+        lines.append("No runs.")
+        return lines
+    reference = runs[0]
+    lines.extend(
+        [
+            f"Reference for this table: **{reference.run_id}** (the first run given).",
+            "",
+            "| run | interpreter | product | distributions | vs reference |",
+            "| --- | --- | --- | --- | --- |",
+        ]
+    )
+    blocked: list[tuple[_RunView, tuple]] = []
+    for run in runs:
+        python_cell, product_cell, dist_cell = _environment_cells(run)
+        if run is reference:
+            verdict = "reference"
+        elif run.environment is None or reference.environment is None:
+            verdict = "**unverifiable** (an environment was not recorded)"
+        else:
+            comparison = compare_environments(reference.environment, run.environment)
+            if comparison.blocked:
+                fields = ", ".join(d.field for d in comparison.blocking)
+                verdict = f"**NOT COMPARABLE** — blocking: {fields}"
+                blocked.append((run, comparison.blocking))
+            elif comparison.reported:
+                verdict = (
+                    f"comparable · {len(comparison.reported)} reported "
+                    f"({len(comparison.unverifiable)} unverifiable)"
+                )
+            else:
+                verdict = "identical on every recorded field"
+        lines.append(
+            f"| {run.label} | {python_cell} | {product_cell} | {dist_cell} | {verdict} |"
+        )
+    lines.append("")
+    if blocked:
+        lines.extend(
+            [
+                "**These runs were measured in different environments. The blocking",
+                "differences below invalidate any comparison drawn between the",
+                "columns above — a difference in these numbers is not evidence about",
+                "the contenders until the environments match.**",
+                "",
+                "| run | field | reference | observed |",
+                "| --- | --- | --- | --- |",
+            ]
+        )
+        for run, differences in blocked:
+            for difference in differences:
+                lines.append(
+                    f"| {run.label} | {difference.field} | {difference.reference} "
+                    f"| {difference.observed} |"
+                )
+        lines.append("")
+    else:
+        lines.extend(["No blocking environment difference between these runs.", ""])
+    return lines
+
+
+def _retrieval_floor_section(runs: Sequence[_RunView]) -> list[str]:
+    lines = [
+        "",
+        "## Retrieval floor (zero hits everywhere is a fault, not a score)",
+        "",
+        "| run | status | queries with hits | total hits |",
+        "| --- | --- | --- | --- |",
+    ]
+    for run in runs:
+        floor = run.retrieval_floor or {}
+        status = str(floor.get("status", "not recorded"))
+        emphasis = "**" if status in ("floor_violation", "near_zero") else ""
+        queries = floor.get("queries", "?")
+        lines.append(
+            f"| {run.label} | {emphasis}{status}{emphasis} "
+            f"| {floor.get('queries_with_hits', '?')}/{queries} "
+            f"| {floor.get('total_hits', '?')} |"
+        )
+    details = [
+        f"- {run.label}: {(run.retrieval_floor or {}).get('detail')}"
+        for run in runs
+        if (run.retrieval_floor or {}).get("status") in ("floor_violation", "near_zero")
+    ]
+    if details:
+        lines.append("")
+        lines.extend(details)
+    return lines
+
+
 def build_comparison_report(run_dirs: Sequence[Path], out_path: Path) -> Path:
     """Render a cross-run markdown comparison to ``out_path``."""
 
@@ -439,6 +602,12 @@ def build_comparison_report(run_dirs: Sequence[Path], out_path: Path) -> Path:
         "No weighted aggregate is computed anywhere. Deterministic gates are",
         "final; judge output (if present) is advisory and never enters the",
         "dimension tables. Invalid runs render INVALID, never numbers.",
+        "",
+        "Read the Environment section before reading any difference in the",
+        "tables below: runs measured under different interpreters, product",
+        "revisions or runtime dependencies are marked NOT COMPARABLE there, and",
+        "a difference between two such columns is not evidence about either",
+        "contender.",
         "",
         "## Runs",
         "",
@@ -551,6 +720,9 @@ def build_comparison_report(run_dirs: Sequence[Path], out_path: Path) -> Path:
             else:
                 cells.append(str(len(run.latencies)))
         lines.append(f"| {metric_name} | " + " | ".join(cells) + " |")
+
+    lines.extend(_environment_section(runs))
+    lines.extend(_retrieval_floor_section(runs))
 
     lines.extend(["", "## Failures (always visible, always in denominators)", ""])
     for run in runs:
