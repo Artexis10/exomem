@@ -1161,3 +1161,55 @@ detected a real product defect, produced the number that appears verbatim in the
 fix's commit message (`factual_qa 0/180`), and then — six days later, on a
 checkout without the fix — detected it *again* and refused to publish. The five
 withdrawn root causes were mine, not the harness's.
+
+## First valid baseline (2026-08-05)
+
+Run `20260805T135132Z-exomem-local-baseline-postfix-lexical-109d39`, seed-1 corpus,
+lexical profile, default-open governance, `invalid=False`, 236 queries scored,
+0 harness failures.
+
+**Retrieval reproduces the August figures exactly** — 452 total hits over 236
+queries, 140 with hits — confirming that `888eaab` (PR #378) restores the original
+behaviour rather than merely changing it.
+
+| dimension | pass | fail | n/a | unsupported |
+|---|---:|---:|---:|---:|
+| factual_qa | 99 | 81 | 56 | 0 |
+| temporal | 92 | 97 | 28 | **19** |
+| abstention | 136 | 100 | 0 | 0 |
+| provenance | 47 | 149 | 40 | 0 |
+| contradiction_uncertainty | 0 | 20 | 216 | 0 |
+| governance | 0 | 16 | 220 | 0 |
+
+**Read the governance row correctly.** It moved 16 pass → 16 fail, and that is
+not a regression. This is a *default-open* run: the previous 16 passes were
+vacuous, earned by retrieving nothing (a run returning zero documents trivially
+satisfies "the withheld content was not returned"), and the 16 failures now
+merely state that an ungoverned vault is open. Neither number measures the
+product, which is why default-open governance rows are excluded from
+cross-product comparison. Governance is measured under `--governance wired`.
+
+**Weakest real dimension: provenance at 47/196.** Citation precision is now
+scored (4b.8), so this is the first figure that reflects both recall and
+precision. `contradiction_uncertainty` at 0/20 is the other honest zero.
+
+**The 19 temporal UNSUPPORTED** are the rows where `gate_state` cannot decide —
+exactly the set the scoped judged dimension resolves, and the reason it earns its
+place.
+
+**Why this baseline is different from every prior one.** It carries a full
+environment capture (81 distributions plus interpreter version), it passed the
+retrieval floor rather than publishing zeros, and its predecessors were all
+produced under a configuration that silently zeroed retrieval. Every number this
+project reported before today came from a broken run.
+
+**Not yet solved: run artifacts are gitignored.** `benchmarks/runs/` is untracked,
+so this baseline is not version-controlled and cannot be diffed against a future
+one. The operator asked for run reports to be tracked repo files; that publishing
+step (a `publish` subcommand writing `report.md` + `manifest.json` +
+`deterministic-scores.json` under a committed path) is still owed and belongs with
+the packaging lane.
+
+**Caveat on status:** this is a pre-4.5 baseline. The sub-day temporality family
+changes generated corpus bytes, so if it lands this must be regenerated before
+being published as the v0.2 reference.
