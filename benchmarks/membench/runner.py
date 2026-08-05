@@ -69,7 +69,9 @@ from membench.judge.backends import JudgeBackend, default_backend
 from membench.judge.blinding import BlindingMap
 from membench.judge.handshake import append_failure, collect_responses
 from membench.native import FactParityReport, load_corpus_view
+from membench.native import basic_memory as basic_memory_native
 from membench.native import exomem_kb as exomem_native
+from membench.native import graybox as graybox_native
 from membench.reporting import (
     JUDGE_SCORES_NAME,
     JUDGED_SCORES_NAME,
@@ -94,7 +96,22 @@ from membench.scoring.judged import (
 )
 from membench.scoring.retrieval import score_retrieval
 
-_NATIVE_RENDERERS = {"exomem-local": exomem_native.render}
+# Every contender needs its corpus rendered into ITS OWN native grammar before
+# ingest. A provider absent from this map receives an EMPTY directory and is
+# structurally guaranteed to retrieve nothing — which reads as a catastrophic
+# contender result while measuring only our own omission. Registering exomem
+# alone (the state until 2026-08-05) meant the harness could only ever produce
+# zeros for competitors, i.e. it was rigged in our favour by accident. The
+# retrieval floor caught it before publication; this map is the actual fix.
+#
+# A renderer here is not optional politeness: `basic_memory.render` and
+# `graybox.render` already existed, tested for grammar and per-fact parity, and
+# were simply never wired up.
+_NATIVE_RENDERERS = {
+    "exomem-local": exomem_native.render,
+    "basic-memory-local": basic_memory_native.render,
+    "graybox-local": graybox_native.render,
+}
 
 
 @dataclass

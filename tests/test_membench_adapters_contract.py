@@ -407,3 +407,36 @@ def test_bridge_unavailable_inner_adapter_becomes_skip(tmp_path: Path) -> None:
     )
     with pytest.raises(_StubSkip, match="not installed"):
         bridge.ingest(corpus, _upstream_run_config())
+
+
+def test_every_registered_provider_has_a_native_renderer() -> None:
+    """A provider with no renderer is handed an EMPTY corpus and scores zero.
+
+    This is the fairness invariant of the whole harness. `_NATIVE_RENDERERS`
+    maps a provider to the code that rewrites the corpus into *its* native
+    grammar before ingest. A provider missing from that map receives an empty
+    directory, retrieves nothing, and reads as a catastrophic contender result
+    while measuring only our omission.
+
+    Until 2026-08-05 the map held `exomem-local` alone, so the benchmark could
+    structurally only ever produce zeros for competitors — rigged in our favour
+    by accident. `basic_memory.render` and `graybox.render` already existed and
+    were tested for grammar and parity; they were simply never wired up. A live
+    basic-memory run produced 0 hits on all 236 queries and was caught by the
+    retrieval floor rather than published.
+
+    If this test fails because a provider was added, the fix is to write its
+    renderer — never to remove it from the registry to make the test pass.
+    """
+
+    from membench.adapters import base as adapters_base
+    from membench.runner import _NATIVE_RENDERERS
+
+    registered = set(adapters_base._FACTORIES)
+    assert registered, "no adapters registered; the import side effect is broken"
+    missing = sorted(registered - set(_NATIVE_RENDERERS))
+    assert not missing, (
+        f"providers with no native renderer: {missing}. Each would be ingested "
+        "from an empty directory and score zero on every query, which is a "
+        "harness fault reported as a contender result."
+    )

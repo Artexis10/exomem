@@ -1245,3 +1245,53 @@ Cross-machine is untested and is exactly what 4.1's replication kit must prove.
 The environment gate now records 81 distributions plus the interpreter, so a
 mismatch announces itself rather than silently producing different numbers — but
 announcing is not the same as proving, and the kit is still owed.
+
+## Profiles degrade only exomem — cross-product comparison under them is invalid (2026-08-05)
+
+**Found on the first real head-to-head.** A `neutral-lexical` run of exomem and a
+`neutral-lexical` run of basic-memory are not comparable, because the profile is
+defined as a bag of **exomem-specific environment variables**:
+
+```
+EXOMEM_DISABLE_EMBEDDINGS=1, EXOMEM_VEC_BACKEND=numpy,
+EXOMEM_LEXICAL_BACKEND=python, EXOMEM_DISABLE_CLIP=1, …
+```
+
+None of those mean anything to a competitor. So "lexical profile" actually means
+**exomem with its semantic lane switched off, and every contender at full
+strength.** Confirmed from the run artifacts: basic-memory's provider workdir
+contains `fastembed_cache/models--qdrant--bge-small-en-v1.5-onnx-q` — it
+downloaded and used an embedding model — while exomem ran under
+`EXOMEM_DISABLE_EMBEDDINGS=1`.
+
+The numbers from that run, recorded for the record and **not as a comparison**:
+
+| dimension | exomem (no semantic lane) | basic-memory (with embeddings) |
+|---|---|---|
+| factual_qa | 99 / 81 | 122 / 58 |
+| temporal | 92 / 97 (u=19) | 130 / 71 (u=7) |
+| abstention | 136 / 100 | 156 / 80 |
+| provenance | 47 / 149 | 24 / 172 |
+| contradiction_uncertainty | 0 / 20 | 0 / 20 |
+| governance (default-open) | 0 / 16 | 4 / 12 |
+
+Quoting any row of that table as a product comparison would be wrong in either
+direction.
+
+**This is the mirror image of the renderer defect found hours earlier.** That one
+rigged the harness in our favour by handing contenders an empty corpus; this one
+rigs it against us by degrading only our own retrieval. Same underlying disease —
+the harness measuring its own configuration rather than the products — and the
+fact that the two errors point in opposite directions is the clearest possible
+evidence that neither was motivated reasoning. Both were simply unexamined.
+
+**Disposition.** A profile must express a **capability tier that each adapter
+implements for itself** — "semantic lane off" as a declared intent — with adapters
+reporting whether they can honour it. A run that cannot apply the tier to a
+contender must say so and refuse the comparison, rather than silently comparing
+unequal configurations. Until that exists, only same-tier runs are comparable, and
+the only tier both products can currently reach together is *with* their semantic
+lanes on.
+
+Tracked as 4b.29. An exomem embeddings-profile run is underway to produce the
+first genuinely like-for-like pair.
