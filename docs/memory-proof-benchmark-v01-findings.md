@@ -756,3 +756,72 @@ The operator drove all three corrections by pushing back on conclusions that
 looked settled. Recorded because the process point outlives the result: two of my
 three positions were confidently argued and wrong, and both were wrong because I
 had assumed the deterministic baseline was correct without testing it.
+
+## Addendum — a run directory cannot reproduce its own result (2026-08-05)
+
+**Blocks deliverable 4.1 (replication kit).** Surfaced by an implementation lane
+reporting live retrieval returning nothing, then verified independently.
+
+### What was measured
+
+Same corpus, same profile, same vault, same product source — opposite results.
+
+| | Aug-1 run | today |
+|---|---:|---:|
+| queries | 236 | 236 |
+| **total hits** | **452** | **0** |
+| zero-hit rows | 96 | 236 |
+| non-empty answers | 140 | 0 |
+| abstained | 96 | 236 |
+
+Controls, each checked rather than assumed:
+
+- **Product source is byte-identical.** The Aug-1 run recorded
+  `repos.exomem.head = bc6cfac`, which *is* an ancestor of today's HEAD, and
+  `git diff bc6cfac HEAD -- src/exomem` is empty. Not a product regression.
+- **Profile settings are byte-identical** — all twelve `neutral-lexical` knobs,
+  same `exomem_version`, `mode`, `search_style`.
+- **The vault is intact.** Pointing *today's* code at the *Aug-1 vault* that
+  produced 452 hits returns **0**. A bare entity-name query (`"Project
+  Quarrypoint"`) against 200 sources also returns 0 — total retrieval failure,
+  not a phrasing effect.
+- **Not governance wiring.** The ungoverned search path is unchanged, both vaults
+  contain only a `_Governance/README.md`, and the probe took the ungoverned
+  branch.
+- **Not the deferred index.** The working Aug-1 vault has the identical shape
+  (`semantic_upserts` populated, `full_upserts = 0`, no lexical sidecar). This was
+  an intermediate hypothesis of mine and it was wrong.
+- **Not the machine config** (`~/.exomem/config.json` is `{"schema":1,"mode":"normal"}`).
+
+### The conclusion that matters
+
+Identical source plus identical inputs producing a different result means the
+difference lives in the **environment** — installed dependencies — and the venv is
+known to have been re-resolved since (Pillow moved 12.2.0 → 12.3.0 in the same
+period, recorded in the environment-pinning addendum above).
+
+Which yields the finding: **a run directory does not contain enough to reproduce
+its own result.** It captures the corpus, the vault, the profile knobs, the
+product commit and the answers — and still cannot be replayed, because the vault
+carries no persistent lexical index and retrieval rebuilds it through a
+dependency stack the artifacts do not pin. The three sqlite files present
+(`.deferred-index`, `.refs`, `.graph`) are identical between the working and
+failing vaults.
+
+This is the third reproducibility defect found in this project, after the
+environment-pinned release manifest and the blinding fingerprint, and it is the
+most serious: the other two produce *misleading* results, this one makes a
+published result **unverifiable by anyone, including us**.
+
+### Not root-caused — stated plainly
+
+The specific dependency has not been identified. Investigation stopped
+deliberately once the class of cause was established, because the disposition
+does not depend on which package it is: the replication kit must pin and record
+the full dependency set, not just the product commit, or every published figure
+is a claim no one can check. Tracked as 4b.24.
+
+**Consequence for anything published from this profile:** the Aug-1 lexical
+numbers remain the best available record, but they are currently
+**unreproducible on the machine that produced them**, and must be labelled as
+such until 4b.24 lands.
