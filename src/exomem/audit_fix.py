@@ -56,7 +56,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import access, indexes
+from . import access, indexes, temporal
 from . import audit as audit_module
 from . import find as find_module
 from .vault import (
@@ -175,15 +175,26 @@ def _walk_compiled(d: Path):
 # takes the current frontmatter dict + today's ISO date and returns the
 # inferred value, or None to skip.
 def _as_iso_date(value: object) -> str | None:
-    """Coerce a frontmatter date-ish value to ISO string, or None.
+    """Coerce a frontmatter date-ish value to a canonical ISO string, or None.
 
-    YAML loads `2026-05-15` as a `datetime.date`, not a string. Templates
-    sometimes pass strings. Both should normalize the same.
+    YAML loads `2026-05-15` as a `datetime.date` and `2026-05-15T09:12:33Z` as
+    a `datetime`; templates sometimes pass either as a string. All normalize to
+    the same spelling here.
+
+    Precision is preserved rather than flattened, because every caller is
+    copying one recorded field onto another (`created`→`updated`,
+    `created`→`captured`). Dropping the time would restate a known instant as a
+    vaguer one; inventing a time where there was none would be worse. What this
+    must not do is emit `str(datetime)`, whose space separator is not valid
+    round-trippable ISO.
     """
     if isinstance(value, dt.date):
-        return value.isoformat()
+        return temporal.stamp(value)
     if isinstance(value, str) and value:
-        return value
+        moment = temporal.parse(value)
+        if moment is None:
+            return value
+        return temporal.stamp(moment.instant or moment.day)
     return None
 
 
@@ -221,17 +232,19 @@ def _backfill_value(
             started = _as_iso_date(fm.get("started"))
             concluded = _as_iso_date(fm.get("concluded"))
             if started and concluded:
-                try:
-                    s = dt.date.fromisoformat(started)
-                    c = dt.date.fromisoformat(concluded)
-                    days = (c - s).days + 1
+                # Whole calendar days, so a timestamped `started` collapses to
+                # its day rather than raising out of the computation — plain
+                # `date.fromisoformat` rejects any value carrying a time, which
+                # would silently abandon the backfill.
+                s = temporal.parse(started)
+                c = temporal.parse(concluded)
+                if s is not None and c is not None:
+                    days = (c.day - s.day).days + 1
                     if days >= 1:
                         return (
                             f"{days} days" if days != 1 else "1 day",
                             f"computed from started:{started} to concluded:{concluded}",
                         )
-                except ValueError:
-                    return None, None
             return None, None
     if page_type == "source":
         if field == "captured":

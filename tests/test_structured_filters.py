@@ -6,6 +6,7 @@ from datetime import UTC, date, datetime
 from types import SimpleNamespace
 
 import pytest
+import yaml
 
 from exomem.structured_filters import (
     FilterError,
@@ -610,6 +611,55 @@ def test_quoted_updated_string_is_not_coerced_and_rfc3339_is_strict() -> None:
             }
         }
     ).code == "INVALID_FILTER_VALUE"
+
+
+@pytest.mark.parametrize(
+    ("label", "frontmatter_line"),
+    [
+        ("unquoted date", "updated: 2026-01-15"),
+        # `serialize_frontmatter` quotes any scalar YAML would re-type, so
+        # `create_file` and `set_frontmatter_field` have always written this
+        # form — and it used to arrive as `str` and miss every date filter.
+        ("quoted date", 'updated: "2026-01-15"'),
+        ("unquoted timestamp", "updated: 2026-01-15T09:12:33Z"),
+        ("quoted timestamp", 'updated: "2026-01-15T09:12:33Z"'),
+    ],
+)
+def test_every_written_date_form_reaches_date_filters(
+    label: str, frontmatter_line: str
+) -> None:
+    """A page's recorded day must decide date filters, not its YAML spelling.
+
+    `page.updated` is strictly typed downstream — `date` and `datetime` are
+    deliberately not comparable — so the adapter has to settle precision here.
+    Otherwise the operator silently returns False and the page vanishes from
+    `recency_days` / `updated_after` / `updated_before` with no warning.
+    """
+    page = page_view(
+        SimpleNamespace(frontmatter=yaml.safe_load(frontmatter_line), file_kind="note")
+    )
+    assert evaluate_filter(compile_filter({"page.updated": {"$gte": "2026-01-01"}}), page=page)
+    assert evaluate_filter(compile_filter({"page.updated": {"$lte": "2026-02-01"}}), page=page)
+    assert not evaluate_filter(
+        compile_filter({"page.updated": {"$gte": "2026-02-01"}}), page=page
+    )
+
+
+def test_recency_shortcut_keeps_timestamped_pages() -> None:
+    """The end-to-end shape of the bug: a fresh note must survive `recency_days`."""
+    plan = compile_filter(None, shortcuts=FilterShortcuts(recency_days=3650))
+    for line in ("updated: 2026-01-15", 'updated: "2026-01-15"', "updated: 2026-01-15T09:12:33Z"):
+        page = page_view(SimpleNamespace(frontmatter=yaml.safe_load(line), file_kind="note"))
+        assert evaluate_filter(plan, page=page), line
+
+
+def test_unparseable_updated_still_fails_date_filters() -> None:
+    """Normalizing must not invent a day for a value that has none."""
+    page = page_view(SimpleNamespace(frontmatter={"updated": "someday"}, file_kind="note"))
+    assert not evaluate_filter(
+        compile_filter({"page.updated": {"$gte": "2026-01-01"}}), page=page
+    )
+    assert evaluate_filter(compile_filter({"page.updated": {"$exists": True}}), page=page)
 
 
 def test_runtime_arbitrary_precision_integer_does_not_crash() -> None:

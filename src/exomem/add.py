@@ -20,7 +20,7 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import corpus_aware, indexes, memory_refs, schema
+from . import corpus_aware, indexes, memory_refs, schema, temporal
 from .kbdir import kb_prefix
 from .vault import (
     InvalidSlugError,
@@ -144,8 +144,9 @@ def add(
         except Exception as e:  # noqa: BLE001 — never break a capture
             log.debug("corpus-aware dup check failed (non-fatal): %s", e)
 
-    today = today or dt.date.today()
-    date_iso = today.isoformat()
+    now = today or temporal.now()
+    date_iso = temporal.render_date(now)
+    stamp_iso = temporal.stamp(now)
     folder_name = SOURCE_TYPE_TO_FOLDER[source_type]
     folder_path = kb_root(vault_root) / "Sources" / folder_name
 
@@ -158,7 +159,7 @@ def add(
     source_md = _render_source(
         title=title,
         source_type=source_type,
-        date_iso=date_iso,
+        date_iso=stamp_iso,
         url=url,
         tags=tags_clean,
         why_captured=why_captured,
@@ -202,6 +203,7 @@ def add(
         folder_name=folder_name,
         rel_source_no_ext=rel_source_no_ext,
         date_iso=date_iso,
+        stamp_iso=stamp_iso,
         activity_summary=activity_summary,
         log_entry_body=log_entry_body,
         forced_counts=post_counts,
@@ -259,6 +261,7 @@ def _compute_updates_with_counts(
     folder_name: str,
     rel_source_no_ext: str,
     date_iso: str,
+    stamp_iso: str,
     activity_summary: str,
     log_entry_body: str,
     forced_counts: dict[str, int],
@@ -279,6 +282,7 @@ def _compute_updates_with_counts(
             folder_description=FOLDER_DESCRIPTIONS.get(folder_name, "captured material"),
             rel_source_path=f"{kb_prefix()}Sources/{folder_name}/{rel_source_no_ext.rsplit('/', 1)[-1]}",
             date_iso=date_iso,
+            stamp_iso=stamp_iso,
             activity_summary=activity_summary,
             log_entry_body=log_entry_body,
         )

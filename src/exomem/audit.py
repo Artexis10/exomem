@@ -56,6 +56,7 @@ from . import (
     relation_registry,
     semantic_language_registry,
     semantic_units,
+    temporal,
 )
 from . import find as find_module
 from .kbdir import kb_dirname, kb_prefix
@@ -949,17 +950,15 @@ def _check_unprocessed_sources(
 
 
 def _parse_fm_date(value) -> dt.date | None:
-    """Coerce a frontmatter date value (yaml date, datetime, or ISO str) to date."""
-    if isinstance(value, dt.datetime):
-        return value.date()
-    if isinstance(value, dt.date):
-        return value
-    if isinstance(value, str) and value.strip():
-        try:
-            return dt.date.fromisoformat(value.strip()[:10])
-        except ValueError:
-            return None
-    return None
+    """Coerce a frontmatter date value (yaml date, datetime, or ISO str) to date.
+
+    Audit checks age pages in whole days — "unprocessed for N days", "not
+    reviewed since" — so collapsing a timestamp to its day is the right answer
+    here, not a loss. `temporal.parse` additionally accepts the quoted and
+    space-separated spellings that `[:10]` prefix-slicing used to mangle.
+    """
+    moment = temporal.parse(value)
+    return moment.day if moment is not None else None
 
 
 # ---------------- check: index_drift ----------------

@@ -26,7 +26,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import find as find_module
-from . import indexes, memory_refs, relation_review, semantic_writes
+from . import indexes, memory_refs, relation_review, semantic_writes, temporal
 from . import note as note_module
 from .kbdir import kb_prefix
 from .vault import (
@@ -96,8 +96,8 @@ def _legacy_replace(
     - Patches the new page's frontmatter to include `supersedes:`.
     - Patches the old page's frontmatter to flip status + add `superseded_by:`.
     """
-    today = today or dt.date.today()
-    date_iso = today.isoformat()
+    now = today or temporal.now()
+    stamp_iso = temporal.stamp(now)
 
     # Resolve + validate old_path.
     old_resolved, rel_old_with_ext = _resolve_kb_path(vault_root, old_path)
@@ -173,7 +173,7 @@ def _legacy_replace(
 
     # Patch old page: status -> superseded, add superseded_by, refresh updated.
     new_link_target = render_wikilink_target(rel_new_no_ext, vault_root)
-    old_text_updated = _mark_superseded(old_text, new_link_target, date_iso)
+    old_text_updated = _mark_superseded(old_text, new_link_target, stamp_iso)
     if old_text_updated == old_text:
         warnings.append(
             "could not patch old page frontmatter (status/superseded_by/updated) — "
@@ -196,7 +196,7 @@ def _legacy_replace(
         log_body = " ".join(log_body_parts)
         new_log = _prepend_replace_log_entry(
             log_write.content,
-            date_iso=date_iso,
+            date_iso=stamp_iso,
             rel_new_no_ext=rel_new_no_ext,
             body=log_body,
         )
@@ -598,10 +598,13 @@ def replace(
     if validate_only:
         return prepared.preflight
 
-    render_date = semantic_writes.DraftToken.decode(prepared.draft_token).render_date
+    # The draft token pins the path date across the draft->commit gap (it is
+    # already baked into `prepared.destination`); knowledge time is stamped at
+    # commit, when the supersession actually happened.
+    stamp_iso = temporal.stamp(today or temporal.now())
     rel_new_no_ext = prepared.destination.removesuffix(".md")
     new_link_target = render_wikilink_target(rel_new_no_ext, root)
-    old_updated = _mark_superseded(old_text, new_link_target, render_date)
+    old_updated = _mark_superseded(old_text, new_link_target, stamp_iso)
     if old_parsed.frontmatter.get("status") == "superseded" and recovery_receipt is not None:
         old_updated = old_text
     auxiliary = list(prepared.auxiliary_writes)
@@ -618,7 +621,7 @@ def replace(
     try:
         log_plan = plan_log_writes(
             root,
-            date_iso=render_date,
+            date_iso=stamp_iso,
             op="replace",
             rel_path_no_ext=rel_new_no_ext,
             body=replacement_body,
