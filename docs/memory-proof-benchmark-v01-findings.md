@@ -671,3 +671,88 @@ evidence that turned out to be partly a defect in what it was compared against.
 The strategic point survives intact and is now better supported: a judge earns
 its place only where the oracle is silent — and part of what looked like judge
 error was the *gate* being silent about a distinction the oracle can express.
+
+## Resolution — the judge does earn its place, scoped (2026-08-05)
+
+Third and final position on this question. The first two were wrong in opposite
+directions; this one is measured against a gate that is itself now correct.
+
+### The controlled probe
+
+With `gate_state` fixed (`ae0a6ff`), 19 rows report **UNSUPPORTED** — the harness
+stating plainly that it cannot prove those answers right or wrong. That is the
+only territory where a judge can add anything, so the question became: does the
+judge actually *discriminate* there, or does it say "match" whenever the expected
+value appears?
+
+One variable changed, nothing else:
+
+```
+correct  : "It was previously 2025-03-14, and it is now 2025-03-28."
+backwards: "It was previously 2025-03-28, and it is now 2025-03-14."
+expected : 2025-03-28
+```
+
+Both candidates contain both values. Both are UNSUPPORTED to the gate. Each of
+the 19 rows was graded in both directions under two prompts — plain, and one
+carrying an explicit supersession clause. 76 items, 0 errors.
+
+| direction | prompt | n | said match |
+|---|---|---:|---:|
+| correct | plain | 19 | **19** |
+| correct | strict | 19 | **19** |
+| backwards | plain | 19 | **0** |
+| backwards | strict | 19 | **0** |
+
+**19/19 discriminated correctly under both prompts.** Perfect separation, no
+false positives on the reversed direction.
+
+### What this changes
+
+The judge reads supersession *direction* — which value is asserted as current —
+and no deterministic rule available here can. The gate lane examined and rejected
+assert-position for exactly this reason: the corpus's own `expect_change` family
+requires both values present, so the same text is correct under one framing and
+wrong under another with nothing textual to key on. That is a genuine capability
+gap, and the judge fills it.
+
+**Prompt framing is not the variable.** Plain and strict were identical here, as
+they were on the earlier 44-row rerun (44/44, zero flips). The judge was doing
+this all along; two of my three positions on it were wrong because I was
+measuring it against a broken gate, not because the judge changed.
+
+### Revised disposition
+
+**Keep `semantic_match`, scoped to rows where a deterministic gate reports
+UNSUPPORTED.** This is non-redundant by construction:
+
+- Where `gate_value` decides (180 rows) it stays unscored — κ = +0.989 there, an
+  expensive reimplementation of a free check.
+- Where `gate_state` reports UNSUPPORTED (19 rows) it is the only thing that can
+  rule, and it rules correctly.
+- Deterministic gates remain final. The judge never overrides one — the
+  architecture already forbids it, and the one measured fabrication
+  (`QRY-E5122D20`, inventing `48000`) is exactly why that constraint must hold.
+
+Supersedes 4b.20 as originally written: the dimension is scoped, not removed.
+
+### Stated limit
+
+This probe used **clean one-sentence candidates** where direction is unambiguous.
+The real 19 rows are multi-document dumps. Perfect discrimination on synthetic
+sentences is an **upper bound**, not proof the judge holds up on the messy case.
+The honest next measurement is the same swap applied to the actual response text.
+Until that runs, the scoped dimension should be reported with this caveat
+attached, not as a settled capability.
+
+### Record of the reversal
+
+Position 1 (f86a37e): drop the judge — four disqualifying findings.
+Position 2 (1dde2d4): finding 3 withdrawn, disposition reopened, gate found
+defective.
+Position 3 (this): judge validated for a narrow job against a corrected gate.
+
+The operator drove all three corrections by pushing back on conclusions that
+looked settled. Recorded because the process point outlives the result: two of my
+three positions were confidently argued and wrong, and both were wrong because I
+had assumed the deterministic baseline was correct without testing it.
