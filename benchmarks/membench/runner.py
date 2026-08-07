@@ -72,6 +72,7 @@ from membench.native import FactParityReport, load_corpus_view
 from membench.native import basic_memory as basic_memory_native
 from membench.native import exomem_kb as exomem_native
 from membench.native import graybox as graybox_native
+from membench.native import oracle_ceiling as oracle_ceiling_native
 from membench.reporting import (
     JUDGE_SCORES_NAME,
     JUDGED_SCORES_NAME,
@@ -111,6 +112,9 @@ _NATIVE_RENDERERS = {
     "exomem-local": exomem_native.render,
     "basic-memory-local": basic_memory_native.render,
     "graybox-local": graybox_native.render,
+    # Identity: the ceiling reads the canonical corpus, so nothing is lost in
+    # translation and its parity report says so explicitly.
+    "oracle-retrieval": oracle_ceiling_native.render,
 }
 
 
