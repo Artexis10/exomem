@@ -1477,3 +1477,91 @@ wider net, so **narrowing for citation precision necessarily costs answer
 recall** — one shared extractive answerer cannot serve both. That is a
 structural argument for scoring provenance against each contender's own
 citations, which is 4b.31's other option.
+
+## Full-strength A/B, and the first cross-environment reproduction (2026-08-07/08)
+
+Two questions were open: does the native-answer seam change any number, and can
+this benchmark reproduce itself at all. Both are now answered, and the second
+answer is the more valuable one.
+
+### The environment was rebuilt underneath us — and nothing moved
+
+The venv that produced the 2026-08-05 headline no longer existed. It had been
+rebuilt on a different interpreter with different dependencies, and with the
+`embeddings` extra absent entirely, so the semantic lane could not load and the
+4b.30 guard refused to score a lexical run wearing an embeddings label. (Model
+downloads were separately blocked: `~/.cache/huggingface` is owned by
+`root:root` on this box, so `HF_HOME` now points at a user-owned cache.)
+
+| | 2026-08-05 | 2026-08-07 |
+|---|---|---|
+| Python | 3.14.6 | 3.12 |
+| torch | 2.13.0 | 2.12.0+cu132 |
+| sentence-transformers | 5.6.1 | 5.5.1 |
+| transformers | 5.14.1 | 5.9.0 |
+
+Re-running the *same* configuration (embeddings profile, harness answers) in
+that materially different environment:
+
+| dimension | Aug-5 | Aug-7 | |
+|---|---|---|---|
+| factual_qa | 148 / 32 | 148 / 32 | **identical** |
+| abstention | 180 / 56 | 180 / 56 | **identical** |
+| temporal | 131 / 57 (u=20) | 131 / 57 (u=20) | **identical** |
+| contradiction_uncertainty | 0 / 20 | 0 / 20 | **identical** |
+| governance | 0 / 16 | 0 / 16 | **identical** |
+| provenance | 0 / 208 | 0 / 208 (u=28) | changed — see below |
+
+Mean citations per answer reproduced exactly too: 2.98 both times.
+
+The single delta is provenance's `not_applicable` → `unsupported` split, which
+is the deliberate `gate_citations` change made in this session (an attribution
+the oracle cannot check is unmeasurable, not inapplicable) and not an
+environment effect.
+
+**This is the first cross-environment reproduction the project has, and it is
+stronger evidence than the same-machine reproducibility recorded on 2026-08-05.**
+Those numbers survived a Python minor-version change, a torch change and a
+sentence-transformers change. It does not discharge 4.1 — cross-*machine* is
+still untested, and the environment gate still correctly refuses to call these
+two runs verified against each other — but the deterministic design is holding
+where it was most likely to break.
+
+### Native answers: +8 factual_qa, and nothing else
+
+Same environment, same corpus, same profile, only answer mode differing:
+
+| dimension | harness | native | floor | ceiling |
+|---|---|---|---|---|
+| factual_qa | 148 (86%) | **156 (91%)** | 0 | 172 |
+| temporal | 131 (83%) | 133 (85%) | 28 | 152 |
+| abstention | 180 (82%) | 180 (82%) | 52 | 208 |
+| provenance | 0 | 0 | 0 | 198 |
+| contradiction_uncertainty | 0 | 0 | 0 | **0 (VOID)** |
+
+Letting exomem answer from its own context pack finds the required value on
+**eight more queries** than the harness's top-3 cut — 86% → 91% of what a
+perfect retriever can reach. That is a real, attributable gain, and it is
+attributable *only* because answer mode was made a run-level variable first.
+The first full-strength run changed environment and answer mode together and
+could credit neither; that is now fixed (`--answer-mode`), and the lesson is
+general: **a benchmark cannot attribute an effect it cannot toggle.**
+
+### Three things native answers did NOT fix
+
+- **Provenance stayed at 0/208**, and the reason inverts the original
+  hypothesis. The context pack *widens* the citation claim rather than
+  narrowing it: 4.97 citations per answer against the harness's 2.98. A pack is
+  a reasoning context and is inclusive by design, so it was never an attribution
+  claim. Citing "what the pack selected" could not have worked, and the fix has
+  to be exomem's real attribution surface — `derived_from`, `evidenced_by`,
+  `provenance_report`.
+- **Abstention stayed at 180/56, with 0 abstentions in 236 queries.** This is
+  now a product finding rather than a harness artifact: at full strength,
+  answering for itself, exomem declines on nothing while 52 queries require it.
+  Exomem does not know when to say "I don't know."
+- **The contradiction detector surfaced nothing** — 0 contradictions across 236
+  packed answers with embeddings enabled, including all 20
+  `contradiction_uncertainty` queries. The earlier explanation (a lexical
+  profile disabling an embedding-based detector) is spent. The dimension is VOID
+  from both ends: floor 0, ceiling 0, and the product's own detector silent.
