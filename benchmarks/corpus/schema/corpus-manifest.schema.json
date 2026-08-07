@@ -45,6 +45,7 @@
         "markdown",
         "csv",
         "png",
+        "png_unavailable",
         "pdf",
         "pdf_unavailable",
         "transcript"

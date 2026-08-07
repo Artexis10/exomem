@@ -2,6 +2,12 @@
 
 No font files are loaded from the host, so pixel content depends only on the
 logical content and the recorded Pillow version.
+
+Degrades like :mod:`membench.artifacts.pdf` when Pillow is absent. It has to:
+generation renders every artifact through one choke point, so an unguarded
+import here made the media extra a hard dependency of corpus *generation*
+rather than of the image artifacts alone — and a clean checkout could not
+regenerate the corpus at all.
 """
 
 from __future__ import annotations
@@ -15,14 +21,23 @@ _LINE_HEIGHT = 14
 _WIDTH = 640
 
 
-def pillow_version() -> str:
-    import PIL
+class ImageUnavailable(RuntimeError):
+    pass
 
+
+def pillow_version() -> str | None:
+    try:
+        import PIL
+    except Exception:  # pragma: no cover - environment dependent
+        return None
     return PIL.__version__
 
 
 def render(content: SourceContent, sentinel: str) -> bytes:
-    from PIL import Image, ImageDraw
+    try:
+        from PIL import Image, ImageDraw
+    except Exception as exc:
+        raise ImageUnavailable(str(exc)) from exc
 
     rows: list[str] = [content.title, ""]
     rows.extend(content.lines)

@@ -64,6 +64,7 @@ _TEXT_KINDS = {
     ArtifactKind.CSV,
     ArtifactKind.TRANSCRIPT,
     ArtifactKind.PDF_UNAVAILABLE,
+    ArtifactKind.PNG_UNAVAILABLE,
 }
 
 

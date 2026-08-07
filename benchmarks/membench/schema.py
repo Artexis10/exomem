@@ -129,6 +129,7 @@ class ArtifactKind(str, enum.Enum):
     MARKDOWN = "markdown"
     CSV = "csv"
     PNG = "png"
+    PNG_UNAVAILABLE = "png_unavailable"
     PDF = "pdf"
     PDF_UNAVAILABLE = "pdf_unavailable"
     TRANSCRIPT = "transcript"

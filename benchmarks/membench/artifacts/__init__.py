@@ -23,6 +23,7 @@ _EXTENSIONS = {
     ArtifactKind.MARKDOWN: "md",
     ArtifactKind.CSV: "csv",
     ArtifactKind.PNG: "png",
+    ArtifactKind.PNG_UNAVAILABLE: "md",
     ArtifactKind.PDF: "pdf",
     ArtifactKind.PDF_UNAVAILABLE: "md",
     ArtifactKind.TRANSCRIPT: "txt",
@@ -50,7 +51,8 @@ def logical_payload(content: SourceContent, sentinel: str, actual_kind: Artifact
 
 
 def renderer_versions() -> dict[str, str]:
-    versions = {"membench-artifacts": "0.1.0", "pillow": image_renderer.pillow_version()}
+    versions = {"membench-artifacts": "0.1.0"}
+    versions["pillow"] = image_renderer.pillow_version() or "absent"
     versions["pymupdf"] = pdf_renderer.pymupdf_version() or "absent"
     return versions
 
@@ -65,7 +67,14 @@ def render_artifact(content: SourceContent, sentinel: str) -> RenderResult:
     elif kind is ArtifactKind.TRANSCRIPT:
         data = transcript_renderer.render(content, sentinel).encode("utf-8")
     elif kind is ArtifactKind.PNG:
-        data = image_renderer.render(content, sentinel)
+        try:
+            data = image_renderer.render(content, sentinel)
+        except image_renderer.ImageUnavailable as exc:
+            kind = ArtifactKind.PNG_UNAVAILABLE
+            degradation = f"{content.title}: image renderer unavailable ({exc}); emitted markdown"
+            data = markdown_renderer.render(content, sentinel, banner="[png-unavailable]").encode(
+                "utf-8"
+            )
     elif kind is ArtifactKind.PDF:
         try:
             data = pdf_renderer.render(content, sentinel)
