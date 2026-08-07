@@ -61,6 +61,15 @@ def _cmd_run(args: argparse.Namespace) -> int:
             )
             return 2
         adapter_kwargs["governance"] = args.governance
+    if args.answer_mode != "harness":
+        if args.provider != "exomem-local":
+            print(
+                f"--answer-mode {args.answer_mode} is only supported by the "
+                "exomem-local provider",
+                file=sys.stderr,
+            )
+            return 2
+        adapter_kwargs["answer_mode"] = args.answer_mode
     adapter = create_adapter(args.provider, **adapter_kwargs)
     result = execute_run(
         RunSpec(
@@ -113,6 +122,17 @@ def main(argv: list[str] | None = None) -> int:
             "exomem-local only: translate the corpus policy set into the "
             "vault's opt-in _Governance/ policy and thread query personas "
             "(three-state reporting: wired / default_open / unsupported)"
+        ),
+    )
+    p_run.add_argument(
+        "--answer-mode",
+        default="harness",
+        choices=["harness", "native"],
+        help=(
+            "exomem-local only: 'harness' scores the shared extractive answerer; "
+            "'native' scores the contender's own answer, citations and abstention. "
+            "Decides whether provenance/abstention/calibration measure the product "
+            "or the harness, so runs of different modes are not comparable on those"
         ),
     )
     p_run.add_argument("--top-k", type=int, default=10)

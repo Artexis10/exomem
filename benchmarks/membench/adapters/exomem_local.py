@@ -162,6 +162,7 @@ class ExomemLocalAdapter:
         mode: str = "leaf",
         search_style: str = "neutral",
         governance: str = "off",
+        answer_mode: str = "harness",
     ) -> None:
         if mode not in {"leaf", "wire"}:
             raise ValueError(f"unknown mode {mode!r}")
@@ -169,6 +170,8 @@ class ExomemLocalAdapter:
             raise ValueError(f"unknown search_style {search_style!r}")
         if governance not in {"off", "wired"}:
             raise ValueError(f"unknown governance {governance!r}")
+        if answer_mode not in {"harness", "native"}:
+            raise ValueError(f"unknown answer_mode {answer_mode!r}")
         if governance == "wired" and mode != "leaf":
             # The in-process wire transport has no per-request identity seam
             # (an unauthenticated stdio-shaped call always resolves to the
@@ -179,6 +182,11 @@ class ExomemLocalAdapter:
         self.mode = mode
         self.search_style = search_style
         self.governance = governance
+        #: `harness` scores the shared extractive answerer; `native` scores
+        #: exomem's own context pack, citations and abstention. Default stays
+        #: `harness` so every existing run and every other adapter keep
+        #: identical behaviour and the change is opt-in and recorded.
+        self.answer_mode = answer_mode
         self._workdir: Path | None = None
         self._vault: Path | None = None
         self._schema: object | None = None
@@ -197,14 +205,15 @@ class ExomemLocalAdapter:
         return "wired" if self.governance == "wired" else "default_open"
 
     def capabilities(self) -> frozenset[Capability]:
-        base = {
-            Capability.INGEST_API,
-            Capability.SEARCH,
-            Capability.STATE_EXPORT,
-            # exomem selects a reasoning context rather than returning a raw
-            # result list, so it can state which sources it actually used.
-            Capability.NATIVE_ANSWER,
-        }
+        base = {Capability.INGEST_API, Capability.SEARCH, Capability.STATE_EXPORT}
+        # Declared ONLY when the run asked for it, exactly as GOVERNED_VIEWS is
+        # declared only under active wiring. Answer mode decides which of
+        # provenance/abstention/calibration measure the product rather than the
+        # harness, so it has to be a variable a run can hold fixed and A/B —
+        # baking it into the adapter makes the one comparison that would
+        # attribute its effect impossible to run.
+        if self.answer_mode == "native":
+            base.add(Capability.NATIVE_ANSWER)
         # Declared ONLY when the wiring is active (spec: "Governed Views Are
         # Wired, Not Simulated") — never from the product's mere ability.
         if self.governance == "wired":

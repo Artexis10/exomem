@@ -237,3 +237,35 @@ def test_answer_dimensions_refuse_a_mixed_mode_comparison() -> None:
     assert _answer_mode_conflict(["native", "harness"]) is True
     assert _answer_mode_conflict(["native", "native"]) is False
     assert _answer_mode_conflict(["harness"]) is False
+
+
+# --------------------------------------------------------------------------
+# Answer mode must be a run-level variable, not an adapter property
+# --------------------------------------------------------------------------
+
+
+def test_exomem_declares_native_answer_only_when_the_run_asks() -> None:
+    """Mirrors how GOVERNED_VIEWS is declared only under active wiring.
+
+    Answer mode decides whether provenance, abstention and calibration measure
+    the product or the harness, so it must be a variable a run can hold fixed
+    and A/B. Declaring the capability unconditionally makes the single
+    comparison that would attribute its effect impossible to run — which is
+    exactly what happened on the first full-strength run, where environment and
+    answer mode both changed and neither could be credited.
+    """
+
+    from membench.adapters.exomem_local import ExomemLocalAdapter
+
+    assert Capability.NATIVE_ANSWER not in ExomemLocalAdapter().capabilities()
+    assert (
+        Capability.NATIVE_ANSWER
+        in ExomemLocalAdapter(answer_mode="native").capabilities()
+    )
+
+
+def test_an_unknown_answer_mode_is_refused_loudly() -> None:
+    from membench.adapters.exomem_local import ExomemLocalAdapter
+
+    with pytest.raises(ValueError, match="unknown answer_mode"):
+        ExomemLocalAdapter(answer_mode="magic")
