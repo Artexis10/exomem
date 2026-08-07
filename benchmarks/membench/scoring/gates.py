@@ -362,6 +362,16 @@ def gate_citations(
       a PASS either, or a contender that shotguns those records shows a clean
       provenance sheet.
 
+    ``NOT_APPLICABLE`` is reserved for the case where the gate's preconditions
+    are genuinely absent: nothing was required and nothing was cited, so there
+    is no attribution to judge. An answer that DID name sources on a record
+    whose claim basis the oracle cannot resolve is a different situation — an
+    attribution was made and cannot be checked — and reports ``UNSUPPORTED``
+    like every other unverifiable precision verdict. Filing it as
+    not-applicable made the same unverifiability read two different ways
+    depending on whether a citation happened to be required, and hid the rows
+    where a shotgun is least visible.
+
     Both ratios go into the evidence on every verdict so a reader can audit
     without rerunning.
     """
@@ -375,15 +385,25 @@ def gate_citations(
         entities_by_id=ctx.entities_by_id,
         sources_by_id=ctx.sources_by_id,
     )
-    if not required and (unverifiable is not None or not cited):
-        # Genuinely nothing to decide: no citation was required and either the
-        # oracle has no claim basis or the answer cited nothing at all.
+    if not required and not cited:
+        # Genuinely nothing to decide: nothing was required and nothing was
+        # named, so there is no attribution to judge in either direction.
         return _item(
             query,
             "citations",
             "provenance",
             GateStatus.NOT_APPLICABLE,
-            f"no required citations; {len(cited)} cited",
+            "no required citations; none cited",
+        )
+    if not required and unverifiable is not None:
+        # Sources were named on a record whose claim basis the oracle cannot
+        # resolve. That is unmeasurable, not inapplicable.
+        return _item(
+            query,
+            "citations",
+            "provenance",
+            GateStatus.UNSUPPORTED,
+            f"recall n/a; precision unverifiable ({unverifiable}); {len(cited)} cited",
         )
     missing = [c for c in required if c not in cited]
     unsupported = [c for c in cited if c not in permitted] if unverifiable is None else []

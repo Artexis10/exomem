@@ -1056,12 +1056,29 @@ def test_the_same_citation_is_permitted_once_the_knowledge_week_reaches_it() -> 
 
 def test_no_required_citations_and_none_given_is_not_applicable() -> None:
     """Nothing was required and nothing was cited: there is no verdict to
-    reach, and the cited count stays auditable."""
+    reach, and the absence stays auditable."""
 
     expected = _expected(required_claims=[DISPUTED])
     item = gate_citations(_query(), expected, _cite(), PRECISION_CTX)
     assert item.status is GateStatus.NOT_APPLICABLE
-    assert "0 cited" in (item.evidence or "")
+    assert "none cited" in (item.evidence or "")
+
+
+def test_naming_sources_with_no_claim_basis_is_unsupported_not_inapplicable() -> None:
+    """An attribution that was made but cannot be checked is unmeasurable.
+
+    Filing this as NOT_APPLICABLE made the same unverifiability read two
+    different ways depending on whether a citation happened to be required,
+    and it hid exactly the rows where a shotgun is least visible: no claim
+    basis means precision cannot be computed, so cite-everything went
+    unrecorded rather than unresolved.
+    """
+
+    expected = _expected()  # no required_claims: the oracle has no basis to check against
+    item = gate_citations(_query(), expected, _cite(SUPPORTING, DISPUTING), PRECISION_CTX)
+    assert item.status is GateStatus.UNSUPPORTED
+    assert "precision unverifiable" in (item.evidence or "")
+    assert "2 cited" in (item.evidence or "")
 
 
 def test_precision_is_scored_even_when_no_citation_was_required() -> None:

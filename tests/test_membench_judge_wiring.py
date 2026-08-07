@@ -165,6 +165,18 @@ def _unsupported_gates(run_dir: Path) -> list[tuple[str, str]]:
     return sorted(key for key, status in _gates(run_dir).items() if status == "unsupported")
 
 
+def _judge_resolvable_unsupported(run_dir: Path) -> list[tuple[str, str]]:
+    """The candidate pool: UNSUPPORTED rows *on gates the judge may resolve*.
+
+    UNSUPPORTED is a legitimate status on any gate — ``citations`` reports it
+    wherever the oracle has no claim basis to check precision against — so
+    "every UNSUPPORTED row is a judge candidate" was only ever true by
+    accident of which gates happened to emit it.
+    """
+
+    return sorted(key for key in _unsupported_gates(run_dir) if key[1] in JUDGE_RESOLVABLE_GATES)
+
+
 # --------------------------------------------------------------------------
 # 1. Default off
 # --------------------------------------------------------------------------
@@ -187,9 +199,15 @@ def test_run_without_a_judge_completes_and_leaves_the_rows_unsupported(
     assert manifest["judge"]["status"] == "not_run"
     assert manifest["judge"]["candidates"] == _EXPECTED_CANDIDATES
     # Never guessed: the rows a judge could have spoken to stay UNSUPPORTED.
-    unsupported = _unsupported_gates(result.run_dir)
+    unsupported = _judge_resolvable_unsupported(result.run_dir)
     assert len(unsupported) == _EXPECTED_CANDIDATES
     assert {gate for _, gate in unsupported} <= JUDGE_RESOLVABLE_GATES
+    # And the judge's scope is a real restriction, not a tautology: this corpus
+    # also carries UNSUPPORTED `citations` rows, which must never be offered to
+    # a judge that can only rule on which value an answer asserts.
+    out_of_scope = [key for key in _unsupported_gates(result.run_dir) if key not in unsupported]
+    assert out_of_scope, "expected UNSUPPORTED rows outside the judge's scope"
+    assert manifest["judge"]["candidates"] == len(unsupported)
     assert "Judged lane" in (result.run_dir / "report.md").read_text()
 
 
