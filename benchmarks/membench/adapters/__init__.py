@@ -37,6 +37,7 @@ def _register_builtin() -> None:
     from membench.adapters import basic_memory_local  # noqa: F401  (registration)
     from membench.adapters import exomem_local  # noqa: F401  (registration)
     from membench.adapters import graybox_local  # noqa: F401  (registration)
+    from membench.adapters import null_abstain  # noqa: F401  (registration)
     from membench.adapters import oracle_retrieval  # noqa: F401  (registration)
 
 

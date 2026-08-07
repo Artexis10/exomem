@@ -115,6 +115,10 @@ _NATIVE_RENDERERS = {
     # Identity: the ceiling reads the canonical corpus, so nothing is lost in
     # translation and its parity report says so explicitly.
     "oracle-retrieval": oracle_ceiling_native.render,
+    # The floor is given the same corpus everyone else gets; withholding
+    # retrieval is its declared behaviour, withholding *ingest* would make it
+    # an empty-corpus artefact instead of a measurement.
+    "null-abstain": oracle_ceiling_native.render,
 }
 
 
@@ -168,6 +172,15 @@ FLOOR_OK = "ok"
 FLOOR_NEAR_ZERO = "near_zero"
 FLOOR_VIOLATION = "floor_violation"
 FLOOR_NOT_APPLICABLE = "not_applicable"
+#: A reference floor contender that declared up front it retrieves nothing.
+#: Recorded distinctly so no reader can confuse a declared zero with an
+#: observed one — the whole point of the guard is that those look identical in
+#: the artifacts, and only intent separates them.
+FLOOR_DECLARED_NULL = "declared_null"
+#: The declaration was false: an adapter promising zero retrieval returned
+#: hits. That invalidates too. A declaration that is not held to is a way to
+#: switch the guard off, which is precisely what must not be purchasable.
+FLOOR_DECLARATION_BROKEN = "declaration_broken"
 
 
 @dataclass(frozen=True)
@@ -182,7 +195,7 @@ class RetrievalFloor:
 
     @property
     def invalid(self) -> bool:
-        return self.status == FLOOR_VIOLATION
+        return self.status in (FLOOR_VIOLATION, FLOOR_DECLARATION_BROKEN)
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -197,9 +210,23 @@ class RetrievalFloor:
 
 
 def evaluate_retrieval_floor(
-    queries: int, queries_with_hits: int, total_hits: int
+    queries: int,
+    queries_with_hits: int,
+    total_hits: int,
+    *,
+    declares_null_retrieval: bool = False,
 ) -> RetrievalFloor:
     """Classify a run's retrieval volume: measured, barely measured, or not.
+
+    ``declares_null_retrieval`` is the reference-floor seam. A contender whose
+    *purpose* is to retrieve nothing (``null-abstain``) produces artifacts
+    byte-indistinguishable from a broken harness, so intent is the only thing
+    that can separate them — and intent has to be declared before the run, by
+    the adapter class itself, never by a flag a real run could pass. The
+    declaration is held both ways: declaring it and then returning hits is
+    ``FLOOR_DECLARATION_BROKEN`` and invalidates, because a declaration nobody
+    checks is just a switch for turning the guard off.
+
 
     Exactly zero hits across a whole suite is not a degree of badness, it is
     the absence of a signal: nothing in the artifacts distinguishes "this
@@ -210,6 +237,32 @@ def evaluate_retrieval_floor(
     environment before publishing.
     """
 
+    if declares_null_retrieval:
+        if queries_with_hits or total_hits:
+            return RetrievalFloor(
+                queries=queries,
+                queries_with_hits=queries_with_hits,
+                total_hits=total_hits,
+                status=FLOOR_DECLARATION_BROKEN,
+                detail=(
+                    f"declared null retrieval, returned {total_hits} hit(s) on "
+                    f"{queries_with_hits}/{queries} queries. The declaration exempts a "
+                    "reference floor from the zero-hit guard, so an adapter that "
+                    "breaks it has switched the guard off while retrieving — INVALID"
+                ),
+            )
+        return RetrievalFloor(
+            queries=queries,
+            queries_with_hits=0,
+            total_hits=0,
+            status=FLOOR_DECLARED_NULL,
+            detail=(
+                f"declared null retrieval: 0 hits on all {queries} queries, by design. "
+                "This is the reference FLOOR — the score every real contender must be "
+                "read against — and not an environment fault. It is never a "
+                "contender result and never enters a product comparison"
+            ),
+        )
     if queries < RETRIEVAL_FLOOR_MIN_QUERIES:
         return RetrievalFloor(
             queries=queries,
@@ -735,7 +788,15 @@ def execute_run(spec: RunSpec) -> RunResult:
                 answers_handle.close()
 
             floor = evaluate_retrieval_floor(
-                retrieval_queries, queries_with_hits, total_hits
+                retrieval_queries,
+                queries_with_hits,
+                total_hits,
+                # Class attribute, never a flag: only a purpose-built reference
+                # adapter can claim the exemption, and it is recorded in the
+                # manifest so a declared zero can never read as an observed one.
+                declares_null_retrieval=bool(
+                    getattr(spec.adapter, "retrieves_nothing_by_design", False)
+                ),
             )
             manifest["retrieval_floor"] = floor.as_dict()
             if floor.invalid:
