@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.39.1](https://github.com/Artexis10/exomem/compare/v0.39.0...v0.39.1) (2026-08-07)
+
+
+### Bug Fixes
+
+* **auth:** accept private_key_jwt client assertions at a domain root ([#380](https://github.com/Artexis10/exomem/issues/380)) ([91c13a1](https://github.com/Artexis10/exomem/commit/91c13a12a8d81bae41c34c8a8872bf430e54bc84))
+
 ## [0.39.0](https://github.com/Artexis10/exomem/compare/v0.38.0...v0.39.0) (2026-08-05)
 
 
