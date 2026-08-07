@@ -78,6 +78,25 @@ ANSWER_MODE_DIMENSIONS = frozenset(
 #: the baseline every historical run used and needs no annotation.
 ANSWER_MODE_NATIVE_LABEL = "native"
 
+#: Dimensions that are STRUCTURALLY unmeasurable at raw-source altitude: what
+#: they score does not exist, rather than existing and scoring badly. A citation
+#: chain is a compiled conclusion pointing at its sources; contradiction
+#: detection runs over compiled conclusions that disagree. Neither is present in
+#: a pile of independent raw documents, which is why both floor and ceiling sit
+#: at 0 for contradiction and why provenance degenerates to "which documents did
+#: you return" — the same shallow thing for every contender.
+#:
+#: `abstention` is deliberately absent. It is affected by altitude (a dense raw
+#: dump always matches something) but declining when you should is measurable at
+#: any altitude, so listing it here would overclaim.
+ALTITUDE_DEPENDENT_DIMENSIONS = frozenset({"provenance", "contradiction_uncertainty"})
+
+
+def _altitude_conflict(altitudes: Sequence[str]) -> bool:
+    """True when the runs being compared did not all measure the same layer."""
+
+    return len({a for a in altitudes if a}) > 1
+
 #: The query FAMILY whose rows (all their gate items, not just the governance
 #: dimension) are excluded from comparative tables for non-wired runs — a
 #: default-open run's vacuous abstention/temporal passes on governance-family
@@ -215,6 +234,8 @@ class _RunView:
     #: and reference contenders must be identified by identity rather than by
     #: parsing a display string.
     provider: str = "?"
+    #: The layer the run measured at; see INGESTION_ALTITUDES.
+    ingestion_altitude: str = "raw_source"
 
 
 def _load_run(run_dir: Path) -> _RunView:
@@ -288,6 +309,7 @@ def _load_run(run_dir: Path) -> _RunView:
         environment=environment,
         retrieval_floor=floor if isinstance(floor, dict) else None,
         provider=str(manifest.get("provider", "?")),
+        ingestion_altitude=str(manifest.get("ingestion_altitude", "raw_source")),
     )
 
 
@@ -737,7 +759,19 @@ def _bounds_section(runs: Sequence[_RunView]) -> list[str]:
         "| ---" * len(header) + " |",
     ]
 
+    raw_altitude = {
+        r.ingestion_altitude for r in runs if r.ingestion_altitude
+    } == {"raw_source"}
     for name in dimension_names:
+        if raw_altitude and name in ALTITUDE_DEPENDENT_DIMENSIONS:
+            # Structurally unmeasurable here: what this scores was never built.
+            # Rendering the counts would publish a zero that reads as a finding
+            # about the contender rather than about the benchmark.
+            lines.append(
+                f"| {name} | — | — | *not measurable at this altitude* |"
+                + " — |" * len(contenders)
+            )
+            continue
         low = _pass_count(floor, name) if floor is not None else None
         high = _pass_count(ceiling, name) if ceiling is not None else None
         low_cell = "—" if low is None else str(low)
@@ -769,10 +803,25 @@ def _bounds_section(runs: Sequence[_RunView]) -> list[str]:
                 row.append(f"{score} ({(score - (low or 0)) / span:.0%})")
         lines.append("| " + " | ".join(row) + " |")
 
+    if raw_altitude:
+        lines.extend(
+            [
+                "",
+                "**Every run here measured at raw-source altitude.** Documents were",
+                "loaded verbatim and nothing was compiled from them, so no citation",
+                "chain and no compiled contradiction exist to score. "
+                + ", ".join(f"`{d}`" for d in sorted(ALTITUDE_DEPENDENT_DIMENSIONS))
+                + " are",
+                "withheld rather than reported as zeros, because a zero there would",
+                "read as a finding about the contender instead of a statement about",
+                "what the benchmark built.",
+            ]
+        )
     voids = [
         name
         for name in dimension_names
-        if floor is not None
+        if not (raw_altitude and name in ALTITUDE_DEPENDENT_DIMENSIONS)
+        and floor is not None
         and ceiling is not None
         and (_pass_count(ceiling, name) or 0) - (_pass_count(floor, name) or 0) <= 0
         # Attempted-and-unpassable is a defect; never-attempted is just a

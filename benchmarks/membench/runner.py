@@ -53,6 +53,7 @@ from pathlib import Path
 
 from membench.adapters.base import (
     GOVERNANCE_STATES,
+    INGESTION_ALTITUDES,
     AdapterEnvironmentError,
     Capability,
     Hit,
@@ -419,6 +420,25 @@ def _dropped_rule_impact(
     return impact
 
 
+def _ingestion_altitude(adapter: MemoryAdapter) -> str:
+    """The layer this adapter loaded the corpus at, contract-checked.
+
+    Absence means ``raw_source``: a bulk load that compiles nothing is a
+    raw-source load, and defaulting the other way would let a run claim depth it
+    never had. Unlike governance there is no capability to cross-check against,
+    because altitude is a property of how the harness drove the product rather
+    than of what the product can do.
+    """
+
+    altitude = str(getattr(adapter, "ingestion_altitude", "raw_source"))
+    if altitude not in INGESTION_ALTITUDES:
+        raise ValueError(
+            f"adapter {adapter.name!r} declares unknown ingestion_altitude "
+            f"{altitude!r}; expected one of {sorted(INGESTION_ALTITUDES)}"
+        )
+    return altitude
+
+
 def _governance_state(adapter: MemoryAdapter) -> str:
     """The adapter's three-state governance label, contract-checked.
 
@@ -552,6 +572,7 @@ def _judge_phase(
 def execute_run(spec: RunSpec) -> RunResult:
     corpus_dir = Path(spec.corpus_dir)
     governance_state = _governance_state(spec.adapter)
+    ingestion_altitude = _ingestion_altitude(spec.adapter)
     governed = governance_state == "wired"
     stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
     run_id = spec.run_id or (
@@ -603,6 +624,7 @@ def execute_run(spec: RunSpec) -> RunResult:
         # would have authored its answers; overwritten below once capabilities
         # are read. A missing key would read as "unknown mode" and silently
         # dodge the mixed-mode comparability check.
+        "ingestion_altitude": ingestion_altitude,
         "answer_mode": (
             ANSWER_MODE_NATIVE
             if Capability.NATIVE_ANSWER in spec.adapter.capabilities()

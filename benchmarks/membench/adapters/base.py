@@ -43,6 +43,25 @@ class Capability(str, enum.Enum):
 #: :attr:`Capability.GOVERNED_VIEWS`; the runner enforces that equivalence.
 GOVERNANCE_STATES = frozenset({"wired", "default_open", "unsupported"})
 
+#: The layer of the product a run exercised.
+#:
+#: ``raw_source`` — documents were loaded verbatim and nothing was compiled from
+#: them. ``compiled`` — the run built durable conclusions that declare the
+#: sources they drew from, i.e. the shape a real vault has.
+#:
+#: This is a comparability key, not a label. Provenance and contradiction are
+#: *structurally* unmeasurable at raw-source altitude: a citation chain is a
+#: compiled conclusion pointing at its sources, and contradiction detection runs
+#: over compiled conclusions that disagree — neither exists in a pile of
+#: independent raw documents. Measured on the 2026-08-07 vault: 205 sources,
+#: zero compiled notes, `ingested_into: []` on 204 of 204, zero `derived_from`.
+#:
+#: An adapter MAY expose an ``ingestion_altitude`` attribute; absence means
+#: ``raw_source``, which is the honest default for a bulk load. The falsification
+#: register's mitigation for altitude asymmetry is an ingested-doc-COUNT parity
+#: check, which is blind to altitude by construction — this is what closes it.
+INGESTION_ALTITUDES = frozenset({"raw_source", "compiled"})
+
 
 class AdapterUnsupported(RuntimeError):
     """The provider does not support this capability (an honest result)."""

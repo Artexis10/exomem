@@ -60,6 +60,9 @@ PROFILE_NOTE = (
 class NullAbstainAdapter:
     name = "null-abstain"
     supports_group_reuse = False
+    #: Bulk load, nothing compiled. Declared rather than defaulted so an
+    #: adapter author has to look at it; see INGESTION_ALTITUDES.
+    ingestion_altitude = "raw_source"
     #: Read by the retrieval floor guard. Zero hits from this adapter is a
     #: declared measurement; zero hits from anything else is an incident.
     retrieves_nothing_by_design = True

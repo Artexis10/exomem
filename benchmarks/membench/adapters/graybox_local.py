@@ -49,6 +49,9 @@ def default_checkout() -> Path:
 class GrayboxLocalAdapter:
     name = "graybox-local"
     supports_group_reuse = False
+    #: Bulk load, nothing compiled. Declared rather than defaulted so an
+    #: adapter author has to look at it; see INGESTION_ALTITUDES.
+    ingestion_altitude = "raw_source"
 
     def __init__(self, *, checkout: Path | None = None) -> None:
         self._checkout = Path(checkout) if checkout is not None else default_checkout()

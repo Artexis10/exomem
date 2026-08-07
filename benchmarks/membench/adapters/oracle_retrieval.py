@@ -85,6 +85,9 @@ PROFILE_NOTE = (
 class OracleRetrievalAdapter:
     name = "oracle-retrieval"
     supports_group_reuse = False
+    #: Bulk load, nothing compiled. Declared rather than defaulted so an
+    #: adapter author has to look at it; see INGESTION_ALTITUDES.
+    ingestion_altitude = "raw_source"
 
     def __init__(self, *, mode: str = "leaf", search_style: str = "neutral") -> None:
         # The runner hands every adapter the run's mode and search style. The

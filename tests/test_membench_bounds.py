@@ -18,7 +18,22 @@ from membench.reporting import (
 )
 
 
-def _run(provider: str, dimensions: dict, *, invalid: bool = False) -> _RunView:
+def _run(
+    provider: str,
+    dimensions: dict,
+    *,
+    invalid: bool = False,
+    altitude: str = "compiled",
+) -> _RunView:
+    """Default to `compiled` here.
+
+    These tests exercise the floor/ceiling/VOID logic, which is orthogonal to
+    ingestion altitude. At raw-source altitude the altitude gate correctly
+    withholds `provenance` and `contradiction_uncertainty` — the two dimensions
+    several of these cases use — so declaring compiled keeps each test measuring
+    the one thing it is about.
+    """
+
     return _RunView(
         run_dir=Path("/nonexistent"),
         run_id=f"run-{provider}",
@@ -32,6 +47,7 @@ def _run(provider: str, dimensions: dict, *, invalid: bool = False) -> _RunView:
         judge=None,
         failure_lines=0,
         provider=provider,
+        ingestion_altitude=altitude,
     )
 
 

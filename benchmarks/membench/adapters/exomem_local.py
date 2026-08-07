@@ -155,6 +155,9 @@ class ExomemLocalAdapter:
 
     name = "exomem-local"
     supports_group_reuse = False
+    #: Bulk load, nothing compiled. Declared rather than defaulted so an
+    #: adapter author has to look at it; see INGESTION_ALTITUDES.
+    ingestion_altitude = "raw_source"
 
     def __init__(
         self,

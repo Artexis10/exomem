@@ -73,6 +73,9 @@ def _subprocess_runner(argv: list[str], env: dict[str, str]) -> _ProcLike:
 class BasicMemoryLocalAdapter:
     name = "basic-memory-local"
     supports_group_reuse = False
+    #: Bulk load, nothing compiled. Declared rather than defaulted so an
+    #: adapter author has to look at it; see INGESTION_ALTITUDES.
+    ingestion_altitude = "raw_source"
 
     def __init__(
         self,
