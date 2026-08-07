@@ -763,7 +763,17 @@ def execute_run(spec: RunSpec) -> RunResult:
                         # The contender answers for itself. Its citations are a
                         # closed claim and its abstention is its own judgment;
                         # the harness contributes neither.
-                        native = spec.adapter.answer(query.prompt_text, spec.top_k)
+                        # Persona threading is as load-bearing here as on the
+                        # search path: an answer resolved against the default
+                        # principal reads the ungoverned vault while the run
+                        # claims a persona, which is a governance leak rather
+                        # than a scoring quirk.
+                        if governed:
+                            native = spec.adapter.answer(
+                                query.prompt_text, spec.top_k, persona=query.persona
+                            )
+                        else:
+                            native = spec.adapter.answer(query.prompt_text, spec.top_k)
                         answer = AnswerRecord(
                             query_id=query.query_id,
                             answer_text=native.text,

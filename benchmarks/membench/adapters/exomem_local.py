@@ -44,6 +44,7 @@ import time
 from pathlib import Path
 
 from membench.adapters.base import (
+    NativeAnswer,
     AdapterEnvironmentError,
     Capability,
     Hit,
@@ -56,6 +57,10 @@ from membench.adapters.base import (
 from membench.clock import end_of_window
 from membench.ids import sentinels_in
 from membench.schema import ClaimRecord, PolicyRule, PolicySet, load_jsonl
+
+#: Per-source cap on quoted text in a native answer, mirroring the extractive
+#: answerer's cap so answer LENGTH never differs by answer mode.
+_ANSWER_CHARS_PER_SOURCE = 800
 
 _NEUTRAL_SEARCH_KWARGS = {
     "scope": "kb",
@@ -192,7 +197,14 @@ class ExomemLocalAdapter:
         return "wired" if self.governance == "wired" else "default_open"
 
     def capabilities(self) -> frozenset[Capability]:
-        base = {Capability.INGEST_API, Capability.SEARCH, Capability.STATE_EXPORT}
+        base = {
+            Capability.INGEST_API,
+            Capability.SEARCH,
+            Capability.STATE_EXPORT,
+            # exomem selects a reasoning context rather than returning a raw
+            # result list, so it can state which sources it actually used.
+            Capability.NATIVE_ANSWER,
+        }
         # Declared ONLY when the wiring is active (spec: "Governed Views Are
         # Wired, Not Simulated") — never from the product's mere ability.
         if self.governance == "wired":
@@ -618,6 +630,33 @@ class ExomemLocalAdapter:
         hits = getattr(payload, "hits", None)
         return list(hits) if hits is not None else []
 
+    def _ask(
+        self, query: str, limit: int, *, persona: str | None = None, deep: bool = False
+    ) -> object:
+        """One dispatch for every exomem ask: wire, governed, or plain.
+
+        Extracted so `search` and `answer` cannot drift apart on the governance
+        binding — a native answer that skipped `request_scope` would read the
+        ungoverned vault while claiming a persona, which is the exact failure
+        the wired-vs-default-open contract exists to prevent.
+        """
+
+        kwargs = self._search_kwargs()
+        if deep:
+            kwargs["deep"] = True
+        if self.mode == "wire":
+            return self._call_tool("ask_memory", {"query": query, "limit": limit, **kwargs})
+        from exomem import commands
+
+        if self.governance == "wired":
+            from exomem.governance import principal as principal_module
+
+            # The surface-boundary binding every exomem surface uses: resolve
+            # the canonical principal once, bind it for exactly this call.
+            with principal_module.request_scope(self._principal_for(persona)):
+                return commands.op_ask_memory(self._vault, query=query, limit=limit, **kwargs)
+        return commands.op_ask_memory(self._vault, query=query, limit=limit, **kwargs)
+
     def search(self, query: str, limit: int, *, persona: str | None = None) -> list[Hit]:
         """Search the vault; ``persona`` is honored only under active wiring.
 
@@ -626,25 +665,7 @@ class ExomemLocalAdapter:
         path is byte-identical to the pre-governance adapter.
         """
 
-        kwargs = self._search_kwargs()
-        if self.mode == "wire":
-            payload: object = self._call_tool(
-                "ask_memory", {"query": query, "limit": limit, **kwargs}
-            )
-        elif self.governance == "wired":
-            from exomem import commands
-            from exomem.governance import principal as principal_module
-
-            # The surface-boundary binding every exomem surface uses: resolve
-            # the canonical principal once, bind it for exactly this call.
-            with principal_module.request_scope(self._principal_for(persona)):
-                payload = commands.op_ask_memory(
-                    self._vault, query=query, limit=limit, **kwargs
-                )
-        else:
-            from exomem import commands
-
-            payload = commands.op_ask_memory(self._vault, query=query, limit=limit, **kwargs)
+        payload = self._ask(query, limit, persona=persona)
         hits: list[Hit] = []
         for rank, raw_hit in enumerate(self._normalize(payload), start=1):
             path = self._hit_field(raw_hit, "path")
@@ -669,6 +690,89 @@ class ExomemLocalAdapter:
                 )
             )
         return hits
+
+    # -- native answer -----------------------------------------------------
+    def answer(self, query: str, limit: int, *, persona: str | None = None) -> NativeAnswer:
+        """Answer from exomem's own context pack, citing what the pack selected.
+
+        ``ask_memory(deep=True)`` returns a packed reasoning context whose
+        ``packed_paths`` are the pages exomem chose to reason over — a strict
+        narrowing of the raw hit list, and the product's own statement about
+        what its answer rests on. Citing those instead of a harness-chosen
+        top-3 is the whole point of the native seam: it measures exomem's
+        selection, not `extractive.py`'s cut.
+
+        Hedging is taken from the pack's ``contradictions`` rather than from
+        prose. exomem never emits hedging *language* — it has no generative
+        step — so a prose-based calibration gate can only ever score zero
+        against it (task 4b.33). What it does have is contradiction detection,
+        and a pack that surfaces a contradiction IS the system expressing
+        uncertainty, structurally.
+
+        Abstention is honest and may well be unflattering: exomem returns
+        something for nearly every query, so if it declines to abstain where
+        the corpus requires it, that is now a product finding rather than an
+        artifact of the harness abstaining only on zero hits.
+        """
+
+        payload = self._ask(query, limit, persona=persona, deep=True)
+        hits = self._normalize(payload)
+        pack = payload.get("pack") if isinstance(payload, dict) else None
+        packed_paths: list[str] = []
+        contradictions: list = []
+        if isinstance(pack, dict):
+            raw_paths = pack.get("packed_paths")
+            if isinstance(raw_paths, list):
+                packed_paths = [p for p in raw_paths if isinstance(p, str)]
+            raw_contra = pack.get("contradictions")
+            if isinstance(raw_contra, list):
+                contradictions = raw_contra
+
+        # A result list without a pack is still exomem's own claim about what
+        # it returned, so the citation basis stays the product's rather than
+        # the harness's — but which basis was used is recorded below, because
+        # "the pack selected these" and "everything it retrieved" are different
+        # precision claims and must never be silently interchangeable.
+        basis = "pack" if packed_paths else "hits"
+        if not packed_paths:
+            packed_paths = [
+                path
+                for path in (self._hit_field(hit, "path") for hit in hits)
+                if isinstance(path, str)
+            ]
+
+        citations: list[str] = []
+        chunks: list[str] = []
+        for path in packed_paths:
+            candidate = (self._vault or Path(".")) / path
+            if not candidate.is_file():
+                continue
+            text = candidate.read_text(encoding="utf-8", errors="replace")
+            chunks.append(text[:_ANSWER_CHARS_PER_SOURCE])
+            for token in sentinels_in(text):
+                if token not in citations:
+                    citations.append(token)
+
+        if not packed_paths:
+            return NativeAnswer(
+                text="",
+                citations=(),
+                abstained=True,
+                raw={"reason": "no packed paths and no hits"},
+            )
+        return NativeAnswer(
+            text="\n\n".join(chunks),
+            citations=tuple(citations),
+            abstained=False,
+            # Structural, not prose: the pack found conflicting material.
+            hedged=bool(contradictions) or None,
+            raw={
+                "citation_basis": basis,
+                "packed_paths": packed_paths,
+                "contradiction_count": len(contradictions),
+                "hits": len(hits),
+            },
+        )
 
     # -- state export ------------------------------------------------------
     def export_state(self) -> StateExport:
