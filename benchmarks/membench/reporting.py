@@ -181,6 +181,10 @@ class _RunView:
     environment: dict | None = None
     #: The run's own retrieval-floor verdict from its manifest.
     retrieval_floor: dict | None = None
+    #: Provider name on its own. The label interleaves provider and profile,
+    #: and reference contenders must be identified by identity rather than by
+    #: parsing a display string.
+    provider: str = "?"
 
 
 def _load_run(run_dir: Path) -> _RunView:
@@ -241,6 +245,7 @@ def _load_run(run_dir: Path) -> _RunView:
         judged=judged,
         environment=environment,
         retrieval_floor=floor if isinstance(floor, dict) else None,
+        provider=str(manifest.get("provider", "?")),
     )
 
 
@@ -589,6 +594,162 @@ def _retrieval_floor_section(runs: Sequence[_RunView]) -> list[str]:
     return lines
 
 
+#: Reference contenders. These are instruments, not products: they exist to
+#: bound the scale a real result is read on, and must never appear in a product
+#: comparison as though they were competitors.
+CEILING_PROVIDER = "oracle-retrieval"
+FLOOR_PROVIDER = "null-abstain"
+REFERENCE_PROVIDERS = frozenset({CEILING_PROVIDER, FLOOR_PROVIDER})
+
+
+def _pass_count(run: _RunView, dimension: str) -> int | None:
+    counts = run.dimensions.get(dimension)
+    if not isinstance(counts, dict):
+        return None
+    value = counts.get("pass")
+    return int(value) if isinstance(value, int) else None
+
+
+def _was_attempted(run: _RunView, dimension: str) -> bool:
+    """Did any row in this dimension reach a verdict other than n/a?
+
+    A dimension that is not-applicable everywhere was never exercised — Track C
+    behaviour rows in a Track B run, say — and a zero span there means "not
+    measured here", which is unremarkable. A dimension that WAS attempted and
+    still has a zero span is unpassable, which is a defect. Reporting both as
+    VOID would bury the second in the first.
+    """
+
+    counts = run.dimensions.get(dimension)
+    if not isinstance(counts, dict):
+        return False
+    return any(int(counts.get(key, 0) or 0) > 0 for key in ("pass", "fail", "unsupported"))
+
+
+def _bounds_section(runs: Sequence[_RunView]) -> list[str]:
+    """Floor and ceiling per dimension, and where each contender sits between.
+
+    A pass count on its own is not a measurement. "148 factual_qa" is only
+    interpretable once a reader knows that a perfect retriever scores 172 and a
+    contender that retrieves nothing scores 0 — the same number would mean
+    something entirely different against a ceiling of 150 or a floor of 140.
+
+    Two failure modes this table is specifically here to expose:
+
+    - **A void dimension**, where floor equals ceiling. Nothing can score and
+      nothing can differentiate, so any equality between contenders there is an
+      artifact of the gate rather than a finding about the products. Reported
+      as VOID rather than as a shared zero, because a shared zero reads as a
+      shared capability gap and this is not one.
+    - **A contender at or below the floor**, which means the dimension is not
+      testing it at all.
+    """
+
+    ceiling = next(
+        (r for r in runs if r.provider == CEILING_PROVIDER and not r.invalid), None
+    )
+    floor = next((r for r in runs if r.provider == FLOOR_PROVIDER and not r.invalid), None)
+    if ceiling is None and floor is None:
+        return [
+            "",
+            "## Bounds (reference contenders)",
+            "",
+            f"Not available: this comparison includes neither `{CEILING_PROVIDER}` "
+            f"(ceiling) nor `{FLOOR_PROVIDER}` (floor), so every figure above is a "
+            "count without a scale. Add a reference run before publishing any of them.",
+        ]
+
+    contenders = [
+        r for r in runs if r.provider not in REFERENCE_PROVIDERS and not r.invalid
+    ]
+    dimension_names = sorted(
+        {
+            name
+            for run in runs
+            for name in run.dimensions
+            if not name.startswith("_") and name not in GOVERNANCE_DIMENSIONS
+        }
+    )
+
+    header = ["dimension", "floor", "ceiling", "usable range"]
+    header.extend(r.label for r in contenders)
+    lines = [
+        "",
+        "## Bounds (reference contenders)",
+        "",
+        "`oracle-retrieval` returns exactly the sources the oracle admits for each",
+        "query, so its score is the best any retriever could earn **under this",
+        "scorer**; `null-abstain` retrieves nothing, so its score is what pure",
+        "abstention earns. Both are instruments rather than products and are",
+        "excluded from the contender columns.",
+        "",
+        "A ceiling below the query count is a harness defect, not a product",
+        "finding — those queries cannot be passed by anything. Percentages are",
+        "position in the usable range, `(score - floor) / (ceiling - floor)`.",
+        "",
+        "Governance dimensions are omitted here: under default-open governance the",
+        "floor posts the best sheet in the suite (retrieving nothing cannot leak),",
+        "so a floor-to-ceiling scale would be meaningless in the wrong direction.",
+        "",
+        "| " + " | ".join(header) + " |",
+        "| ---" * len(header) + " |",
+    ]
+
+    for name in dimension_names:
+        low = _pass_count(floor, name) if floor is not None else None
+        high = _pass_count(ceiling, name) if ceiling is not None else None
+        low_cell = "—" if low is None else str(low)
+        high_cell = "—" if high is None else str(high)
+        attempted = any(_was_attempted(r, name) for r in runs)
+        if low is not None and high is not None:
+            span = high - low
+            if span > 0:
+                range_cell = str(span)
+            elif attempted:
+                range_cell = "**VOID** (0)"
+            else:
+                range_cell = "not exercised"
+        else:
+            span = None
+            range_cell = "—"
+        row = [name, low_cell, high_cell, range_cell]
+        for contender in contenders:
+            score = _pass_count(contender, name)
+            if score is None:
+                row.append("—")
+            elif span is None:
+                row.append(str(score))
+            elif span <= 0:
+                row.append("**not measurable**" if attempted else "—")
+            elif low is not None and score <= low:
+                row.append(f"{score} (**at/below floor**)")
+            else:
+                row.append(f"{score} ({(score - (low or 0)) / span:.0%})")
+        lines.append("| " + " | ".join(row) + " |")
+
+    voids = [
+        name
+        for name in dimension_names
+        if floor is not None
+        and ceiling is not None
+        and (_pass_count(ceiling, name) or 0) - (_pass_count(floor, name) or 0) <= 0
+        # Attempted-and-unpassable is a defect; never-attempted is just a
+        # dimension this run set does not exercise.
+        and any(_was_attempted(r, name) for r in runs)
+    ]
+    if voids:
+        lines.extend(
+            [
+                "",
+                f"**VOID dimensions: {', '.join(f'`{v}`' for v in voids)}.** Floor equals",
+                "ceiling, so these rows have no discriminative range at all. Every",
+                "contender scoring the same there is a property of the gate, and must",
+                "not be reported as a shared product capability gap.",
+            ]
+        )
+    return lines
+
+
 def build_comparison_report(run_dirs: Sequence[Path], out_path: Path) -> Path:
     """Render a cross-run markdown comparison to ``out_path``."""
 
@@ -652,6 +813,8 @@ def build_comparison_report(run_dirs: Sequence[Path], out_path: Path) -> Path:
     for name in dimension_names:
         cells = " | ".join(_dimension_cell(run, name) for run in runs)
         lines.append(f"| {name} | {cells} |")
+
+    lines.extend(_bounds_section(runs))
 
     lines.extend(
         [
