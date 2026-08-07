@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.39.2](https://github.com/Artexis10/exomem/compare/v0.39.1...v0.39.2) (2026-08-07)
+
+
+### Bug Fixes
+
+* **memory:** accept draft tokens minted across the UTC day boundary ([#384](https://github.com/Artexis10/exomem/issues/384)) ([39655ba](https://github.com/Artexis10/exomem/commit/39655ba8f0b0025d17b9c57cc9dc0c95807fac02))
+
 ## [0.39.1](https://github.com/Artexis10/exomem/compare/v0.39.0...v0.39.1) (2026-08-07)
 
 
