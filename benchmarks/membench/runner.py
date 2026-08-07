@@ -97,6 +97,14 @@ from membench.scoring.judged import (
 )
 from membench.scoring.retrieval import score_retrieval
 
+#: Who authored the answer that got scored. Answer-property dimensions
+#: (provenance, abstention, calibration) measure whoever wrote the answer, so
+#: this is a comparability key, not a cosmetic label: placing a natively
+#: answered contender next to a harness-answered one on those rows is the
+#: 4b.29 shape — a configuration difference read as a product difference.
+ANSWER_MODE_NATIVE = "native"
+ANSWER_MODE_HARNESS = "harness"
+
 # Every contender needs its corpus rendered into ITS OWN native grammar before
 # ingest. A provider absent from this map receives an EMPTY directory and is
 # structurally guaranteed to retrieve nothing — which reads as a catastrophic
@@ -591,6 +599,15 @@ def execute_run(spec: RunSpec) -> RunResult:
             }
         ),
         "retrieval_floor": evaluate_retrieval_floor(0, 0, 0).as_dict(),
+        # Present from the start so an early-invalidated run still records who
+        # would have authored its answers; overwritten below once capabilities
+        # are read. A missing key would read as "unknown mode" and silently
+        # dodge the mixed-mode comparability check.
+        "answer_mode": (
+            ANSWER_MODE_NATIVE
+            if Capability.NATIVE_ANSWER in spec.adapter.capabilities()
+            else ANSWER_MODE_HARNESS
+        ),
     }
     corpus_manifest = (corpus_dir / "manifest.json").read_text(encoding="utf-8")
     (run_dir / "corpus-manifest.json").write_text(corpus_manifest, encoding="utf-8")
@@ -609,6 +626,10 @@ def execute_run(spec: RunSpec) -> RunResult:
             # numbers nobody may use.
             raise _EnvironmentMismatch(environment_mismatch)
         view = load_corpus_view(corpus_dir)
+        native_answer_mode = Capability.NATIVE_ANSWER in spec.adapter.capabilities()
+        manifest["answer_mode"] = (
+            ANSWER_MODE_NATIVE if native_answer_mode else ANSWER_MODE_HARNESS
+        )
         renderer = _NATIVE_RENDERERS.get(spec.adapter.name)
         native_dir = run_dir / "native" / spec.adapter.name
         parity: FactParityReport | None = None
@@ -738,7 +759,24 @@ def execute_run(spec: RunSpec) -> RunResult:
                             "hits": [_hit_public(hit) for hit in hits],
                         }
                     )
-                    answer: AnswerRecord = build_answer(query, hits, latency_ms=latency_ms)
+                    if native_answer_mode:
+                        # The contender answers for itself. Its citations are a
+                        # closed claim and its abstention is its own judgment;
+                        # the harness contributes neither.
+                        native = spec.adapter.answer(query.prompt_text, spec.top_k)
+                        answer = AnswerRecord(
+                            query_id=query.query_id,
+                            answer_text=native.text,
+                            citations=list(native.citations),
+                            abstained=native.abstained,
+                            hedged=native.hedged,
+                            clarification_question=native.clarification_question,
+                            latency_ms=latency_ms,
+                            citations_are_native=True,
+                            raw=dict(native.raw) or None,
+                        )
+                    else:
+                        answer = build_answer(query, hits, latency_ms=latency_ms)
                     write_answer(json.loads(answer.model_dump_json()))
                     items = evaluate(query, exp, answer, ctx)
                     dropped_rules = dropped_impact.get(query.query_id)

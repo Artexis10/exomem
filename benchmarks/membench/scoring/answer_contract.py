@@ -38,6 +38,13 @@ class AnswerRecord(StrictModel):
     hedged: bool | None = None
     latency_ms: float | None = None
     raw: dict | None = None
+    #: The provider supplied these citations itself, so they are a CLOSED
+    #: claim about what it used. Sentinel harvesting is suppressed: a native
+    #: answer that quotes a document must not silently acquire that document
+    #: as a citation, or provenance goes back to measuring text content rather
+    #: than the system's own attribution. Recorded in the artifacts so a reader
+    #: can tell which regime produced any citation set.
+    citations_are_native: bool = False
 
 
 def detect_hedging(text: str) -> bool:
@@ -47,12 +54,19 @@ def detect_hedging(text: str) -> bool:
 
 def extract_structure(record: AnswerRecord) -> AnswerRecord:
     """Return a copy with derivable structure added; nothing gate-relevant
-    is ever removed or overwritten."""
+    is ever removed or overwritten.
+
+    Citation harvesting is skipped for native answers. Everything else —
+    hedging inference above all — still applies, because those are add-only
+    derivations of what the provider actually emitted, whereas harvesting
+    would *manufacture* an attribution the provider never made.
+    """
 
     citations = list(record.citations)
-    for sentinel in sentinels_in(record.answer_text):
-        if sentinel not in citations:
-            citations.append(sentinel)
+    if not record.citations_are_native:
+        for sentinel in sentinels_in(record.answer_text):
+            if sentinel not in citations:
+                citations.append(sentinel)
     hedged = record.hedged
     if hedged is None and record.answer_text:
         hedged = detect_hedging(record.answer_text)

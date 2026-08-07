@@ -55,6 +55,30 @@ _STATUS_KEYS = ("pass", "fail", "not_applicable", "unsupported")
 #: Dimensions whose comparative cells are meaningful only against wired
 #: governance (spec: "Governed Views Are Wired, Not Simulated").
 GOVERNANCE_DIMENSIONS = frozenset({"governance"})
+
+#: Dimensions scored from a property of the ANSWER rather than of RETRIEVAL,
+#: so they measure whoever authored the answer.
+#:
+#: This distinction is the root cause behind three separate defects. With the
+#: harness authoring every answer, `provenance` scored the extractive
+#: answerer's top-3 citation policy (4b.31), `abstention` scored whether
+#: retrieval returned zero hits — exomem abstained 0 times in 240 answers while
+#: 52 queries required it — and `contradiction_uncertainty` demanded hedged
+#: language an answerer that only quotes stored text cannot generate (4b.33).
+#: `factual_qa` and `temporal` are absent because they ask whether a required
+#: value is present in what was retrieved, which no answerer decides.
+#:
+#: Comparing these rows across contenders whose answers had different authors
+#: is the 4b.29 shape: a configuration difference read as a product difference.
+ANSWER_MODE_DIMENSIONS = frozenset(
+    {"provenance", "abstention", "contradiction_uncertainty"}
+)
+
+
+def _answer_mode_conflict(modes: Sequence[str]) -> bool:
+    """True when the runs being compared did not all use the same answer author."""
+
+    return len({mode for mode in modes if mode}) > 1
 #: The query FAMILY whose rows (all their gate items, not just the governance
 #: dimension) are excluded from comparative tables for non-wired runs — a
 #: default-open run's vacuous abstention/temporal passes on governance-family

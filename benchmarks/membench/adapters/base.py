@@ -28,6 +28,11 @@ class Capability(str, enum.Enum):
     SUPERSEDE = "supersede"
     AS_OF_QUERY = "as_of_query"
     HOOK_ACTIVATION = "hook_activation"
+    #: The provider answers in its own words, with its own attribution and its
+    #: own decision to abstain. Without it the harness builds the answer, and
+    #: every dimension scoring a property of the ANSWER — provenance,
+    #: abstention, calibration — scores the harness rather than the contender.
+    NATIVE_ANSWER = "native_answer"
 
 
 #: Three-state governance measurement vocabulary (spec: "Governed Views Are
@@ -64,6 +69,33 @@ class Hit:
     sentinels: tuple[str, ...]
     raw: dict
     text: str | None = None  # full stored text (answering); dropped from run artifacts
+
+
+@dataclass(frozen=True)
+class NativeAnswer:
+    """A contender's own answer: its words, its attribution, its abstention.
+
+    ``citations`` is a **closed** claim — the sources the provider says it
+    used. The harness never adds to it, even when the answer text quotes a
+    document carrying a sentinel, because the measured property is what the
+    system claims as its basis and not what strings happen to appear in its
+    output. (The extractive path keeps harvesting sentinels from text; there
+    the quote *is* the claim, since nothing else could be.)
+
+    ``abstained`` is likewise the provider's judgment. The extractive answerer
+    can only abstain when retrieval returned nothing, which is why exomem
+    abstained 0 times in 240 answers on seed-1 while 52 queries required it —
+    a product that knows when to decline had no way to say so.
+    """
+
+    text: str
+    citations: tuple[str, ...] = ()
+    abstained: bool = False
+    #: ``None`` leaves hedging to add-only normalization; set it explicitly
+    #: when the provider expresses uncertainty structurally rather than in prose.
+    hedged: bool | None = None
+    clarification_question: str | None = None
+    raw: dict = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
