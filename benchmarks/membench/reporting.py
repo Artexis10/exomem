@@ -74,11 +74,10 @@ ANSWER_MODE_DIMENSIONS = frozenset(
     {"provenance", "abstention", "contradiction_uncertainty"}
 )
 
+#: Only the non-default mode is surfaced in labels; a harness-answered run is
+#: the baseline every historical run used and needs no annotation.
+ANSWER_MODE_NATIVE_LABEL = "native"
 
-def _answer_mode_conflict(modes: Sequence[str]) -> bool:
-    """True when the runs being compared did not all use the same answer author."""
-
-    return len({mode for mode in modes if mode}) > 1
 #: The query FAMILY whose rows (all their gate items, not just the governance
 #: dimension) are excluded from comparative tables for non-wired runs — a
 #: default-open run's vacuous abstention/temporal passes on governance-family
@@ -88,6 +87,13 @@ _GOVERNANCE_STATE_LABELS = {
     "default_open": "default-open",
     "unsupported": "unsupported",
 }
+
+
+def _answer_mode_conflict(modes: Sequence[str]) -> bool:
+    """True when the runs being compared did not all use the same answer author."""
+
+    return len({mode for mode in modes if mode}) > 1
+
 
 
 def merge_judge_scores(run_dir: Path, paired: Sequence[PairedResponse]) -> Path:
@@ -254,7 +260,19 @@ def _load_run(run_dir: Path) -> _RunView:
     return _RunView(
         run_dir=run_dir,
         run_id=str(manifest.get("run_id", run_dir.name)),
-        label=f"{manifest.get('provider', '?')} · {profile_name}",
+        # Answer mode rides in the label because it is a comparability key,
+        # not a detail: two columns of the same provider and profile that
+        # differ only in who authored the answer are not comparable on
+        # provenance/abstention/calibration, and a reader must be able to see
+        # that without opening a manifest.
+        label=(
+            f"{manifest.get('provider', '?')} · {profile_name}"
+            + (
+                f" · {manifest['answer_mode']}-answer"
+                if manifest.get("answer_mode") == ANSWER_MODE_NATIVE_LABEL
+                else ""
+            )
+        ),
         invalid=bool(manifest.get("invalid", False)),
         invalid_reason=manifest.get("invalid_reason"),
         run_failures=int(manifest.get("run_failures", 0) or 0),
