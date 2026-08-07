@@ -1355,3 +1355,125 @@ precision gate. Tracked as 4b.31.
 Two dimensions of genuine signal, one tie, one shared zero, and two that are not
 yet measuring the products. That is the honest state of the first real
 head-to-head, and it is a long way from a publishable comparison.
+
+## Reference contenders: the suite finally has a scale (2026-08-07)
+
+Two adapters were added that are not products — they are instruments. Together
+they bound the axis every published figure is read on, and their first run
+changed what several existing figures mean.
+
+- **`oracle-retrieval` (ceiling)** returns exactly the sources the oracle admits
+  for each query (`required_citations` closed over the evidence neighbourhood),
+  ranked required-first, through the *same* shared extractive answerer as every
+  contender. It never reads `ExpectedRecord.answer` — that line is what keeps it
+  a retrieval ceiling rather than an oracle answerer that would score 100% and
+  measure nothing, and it is enforced behaviourally: mutate every expected value
+  in the corpus and the hits must be byte-identical.
+- **`null-abstain` (floor)** ingests everything and retrieves nothing, so the
+  answerer abstains on every query.
+
+Seed-1, 236 queries, both `invalid=False`, 0 failures:
+
+| dimension | floor | ceiling | usable range | exomem | basic-memory |
+|---|---:|---:|---:|---|---|
+| factual_qa | 0 | **172** | 172 | 148 (86%) | 122 (71%) |
+| abstention | **52** | **208** | 156 | 180 (82%) | 156 (67%) |
+| temporal | 28 | 152 | 124 | 131 (83%) | 130 (82%) |
+| provenance | 0 | **198** | 198 | 0 (at/below floor) | 24 (12%) |
+| contradiction_uncertainty | 0 | **0** | **VOID** | not measurable | not measurable |
+
+### What this confirms, and what it overturns
+
+**The abstention headline survives — this was the one at risk.** A gate that
+rewards declining to answer is trivially gamed by declining to answer, and
+nothing in the suite had established what pure abstention earns. It earns
+52/236. exomem's 180 sits at 82% of the floor-to-ceiling range against
+basic-memory's 67%, so the gap is real and now has a floor under it. Had the
+floor come back near 180 the headline would have needed withdrawing.
+
+**Provenance is satisfiable: 198/204.** 4b.31 argued from mechanism that
+exomem's 0/208 measured the answerer rather than the product. This measures it:
+a perfect retriever scores 198 through the same answerer, so the 0 is not a
+product statement and never was.
+
+**`contradiction_uncertainty` is not a shared capability gap — it is an
+unpassable gate (new task 4b.33).** This document previously recorded the row as
+"Neither system does disputed state… it discriminates nothing, because nobody
+passes it." The ceiling shows nobody *can*: `gate_calibration` requires hedged
+language in the answer text, and the extractive answerer only quotes stored
+source text verbatim, with no generative step that could hedge. Floor and
+ceiling are both 0. That reading was wrong in the direction that matters — it
+attributed a harness defect to both products — and it is corrected here rather
+than silently amended above.
+
+**factual_qa's denominator is 172, not 180.** Eight queries cannot be passed by
+any retriever, so exomem is at 86% of achievable rather than 82% of nominal.
+Those eight are unexamined and are the next thing the ceiling should be pointed
+at.
+
+**Temporal's ceiling carries 24 UNSUPPORTED.** Even perfect retrieval leaves 24
+rows the deterministic gate cannot decide — more than exomem's own 20, because
+the ceiling retrieves more of the evidence neighbourhood and therefore trips the
+4b.22 co-presence rule more often. Retrieving better produces more undecidable
+rows, which is worth stating plainly: it is the same shape as the provenance
+defect, one dimension over.
+
+### Why this is worth more than the defects it found
+
+Every harness defect this project has found — 4b.21's unwinnable queries,
+4b.22's co-presence failures, 4b.31's shotgun provenance, and now 4b.33 — was
+found by hand, one incident at a time, usually after a run had already produced
+numbers someone nearly believed. A ceiling run surfaces the whole class in one
+pass and keeps doing it as the suite grows: **any dimension whose ceiling is
+below its query count has a harness defect, by construction.** That is a
+standing invariant rather than a review habit.
+
+### The declared-null seam, and why it is narrow
+
+Zero hits everywhere is byte-indistinguishable from the broken harness that
+published 236 plausible zeros (4b.24), so exempting the floor from the retrieval
+guard is dangerous and is deliberately hard to reach: the exemption is a class
+attribute (`retrieves_nothing_by_design`) only a purpose-built reference adapter
+can set — never a flag or environment variable a real run could pass — it is
+recorded as its own manifest status (`declared_null`) so a declared zero can
+never be read as an observed one, and it is held in both directions, because an
+adapter that declares null retrieval and then returns hits is
+`declaration_broken` and INVALID. A declaration nobody checks is just a switch
+for turning the guard off.
+
+### Also found while building this
+
+**Entity names collide suite-wide (4b.32).** Seed-1 draws 108 entities under 89
+distinct canonical names: 18 names are shared by 37 entities, and 74 of 240
+queries name a colliding one. Three `t07_authority_conflict` prompts are
+byte-identical across two scenario instances whose expected values are mutually
+exclusive (173 vs 149) — the corpus asks one question and grades two different
+answers. It is the 4b.2 class, fixed for t20 only.
+
+It is currently *masked*, not harmless: colliding queries score the same as
+clean ones (factual_qa 81% vs 83%, temporal 68% vs 70%, abstention 78% vs 75%)
+and 4 of the 6 colliding queries pass, because the answerer dumps whole
+documents and `gate_value` matches by substring (4b.14), so both values reach
+the text and each query finds its own. Two known weaknesses are cancelling a
+third. That cancellation fails in exactly the direction the suite is heading:
+any narrowing of the answerer turns these into real failures.
+
+**Corpus generation could not run on a clean checkout.** `artifacts/image.py`
+imported Pillow with no fallback while `artifacts/pdf.py` had always degraded
+honestly, so `generate_corpus()` raised `ModuleNotFoundError` without the media
+extra — which falsified task 4.1's promise ("one-command regeneration proven on
+a clean checkout") before it was written. PNG now degrades like PDF.
+
+**The first candidate fix for 4b.31 was measured and rejected.** An uncommitted
+max-query-term-coverage `select_hits` (preserved at
+`.task/4b31-max-coverage-select-hits.patch`) breaks 12 judge-wiring tests and,
+on the t00 fixture, converts the four honestly-undecidable `current_state` rows
+into four false FAILs — `required CLM-5EFCEBA2 value '2025-03-28' absent`, one
+citation each, the superseded source every time. The query asks for the
+*current* deadline; the stale document repeats more query nouns than the terse
+revision memo, so a lexical argmax prefers it. The generalisable lesson: the old
+`_TOP_HITS = 3` was recovering the current value at rank 2–3 purely by casting a
+wider net, so **narrowing for citation precision necessarily costs answer
+recall** — one shared extractive answerer cannot serve both. That is a
+structural argument for scoring provenance against each contender's own
+citations, which is 4b.31's other option.
