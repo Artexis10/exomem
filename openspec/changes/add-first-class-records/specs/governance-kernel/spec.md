@@ -19,6 +19,10 @@ Every Records discovery, read, structured query, pagination total, aggregate, pr
 - **WHEN** UUID resolution encounters both releasable and withheld candidate manifest paths
 - **THEN** each path is authorized at L6 before identity-bearing content is parsed, internal raw-walk safety caps remain content-free, public candidate caps and ambiguity are computed only among authorized candidates, and withheld candidates remain indistinguishable from absence
 
+#### Scenario: Hidden link targets cannot create public ambiguity
+- **WHEN** an authorized Record link has a bare wikilink title or stable memory identifier that collides with a withheld page
+- **THEN** candidate paths are authorized before their titles or identifiers are parsed, and adding or removing the withheld collision cannot change the projected public Record response
+
 #### Scenario: Aggregate cannot reveal concealed rows
 - **WHEN** rows that would be withheld contain an extreme value or unique category
 - **THEN** count, min/max, latest, distinct, profile, progress, and pagination metadata reveal no contribution from those rows

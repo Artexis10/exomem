@@ -242,6 +242,17 @@ def reconcile(vault_root: Path, *, dry_run: bool = False) -> ReconcileReport:
         {item["path"] for item in report.semantic_suppressed_drift}
     )
     missing_paths = sorted({row.path for row in suppression_census.missing_rows if row.path})
+    # The semantic-isolation census validates CLIP keys through their Markdown
+    # sidecar identity. Retain only keys whose binary is also absent before the
+    # generic missing-path cleanup removes their CLIP rows below. A live binary
+    # with a missing sidecar still needs semantic cleanup, but is not an orphan.
+    missing_clip_orphans = {
+        row.path.removesuffix(".md")
+        for row in suppression_census.missing_rows
+        if row.component == "clip"
+        and row.path is not None
+        and not (vault_root / row.path.removesuffix(".md")).exists()
+    }
     report.semantic_missing_drift = missing_paths
     repair_succeeded = not suppression_census.incomplete
     if suppressed_paths and not dry_run:
@@ -464,7 +475,8 @@ def reconcile(vault_root: Path, *, dry_run: bool = False) -> ReconcileReport:
         clip_index = embeddings_module.get_clip_index(vault_root)
         clip_paths, _frame_ts, _matrix = clip_index.all_vectors()
         clip_orphans = sorted(
-            {p for p in clip_paths if not (vault_root / p).exists()}
+            missing_clip_orphans
+            | {p for p in clip_paths if not (vault_root / p).exists()}
         )
         if clip_orphans and not dry_run:
             embeddings_module.delete_clip_after_remove(vault_root, clip_orphans)

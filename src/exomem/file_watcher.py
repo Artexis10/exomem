@@ -139,16 +139,12 @@ def _publish_registry_change(
     if not freshness.event_indexes_enabled():
         # Kill switch on: don't even pay the resolve() syscalls in _rel_posix.
         return
-    try:
-        from . import semantic_contract
-
-        semantic_contract.publish_corpus_files_changed(
-            vault_root,
-            changed=changed,
-            deleted=deleted_rels,
-        )
-    except Exception:  # noqa: BLE001 — rebuildable state never breaks a write
-        log.debug("self-write freshness/semantic publish failed", exc_info=True)
+    index_sync.publish_corpus_delta(
+        vault_root,
+        changed=changed,
+        deleted=deleted_rels,
+        attempts=2,
+    )
     changed_rels = [r for r in (_rel_posix(vault_root, p) for p in changed) if r]
     try:
         from . import vault as vault_module
@@ -379,19 +375,13 @@ class FileWatcher:
         if not (ups or del_rels):
             return
 
-        # Freshness: the whole vault, since both index sibling folders too.
-        try:
-            from . import semantic_contract
-
-            semantic_contract.publish_corpus_files_changed(
-                self._vault_root,
-                changed=ups,
-                deleted=del_rels,
-            )
-        except Exception:  # noqa: BLE001 — sidecar repair retries from its census
-            log.exception("file watcher: freshness/semantic publish failed")
         up_rels = [r for r in (self._rel(p) for p in ups) if r]
-        self._dispatch_batch(ups, up_rels, del_rels, cap=False)
+        self._dispatch_batch(
+            ups,
+            up_rels,
+            del_rels,
+            cap=False,
+        )
 
     # ---- debounce loop ----
 
@@ -569,6 +559,7 @@ class FileWatcher:
         del_rels: list[str],
         *,
         cap: bool,
+        publish_corpus_change: bool = True,
     ) -> None:
         """Shared fan-out tail for `_flush` and `_dispatch_reconcile_delta`:
         inbound publish -> resolver publish -> KB-filtered index_sync
@@ -584,6 +575,17 @@ class FileWatcher:
         """
         if not (up_rels or del_rels):
             return
+
+        # Publish the complete vault-wide batch before any path-local consumer
+        # sees it. A transient failure retries this same batch; a persistent
+        # failure makes every checkpoint consumer cold before fan-out.
+        if publish_corpus_change:
+            index_sync.publish_corpus_delta(
+                self._vault_root,
+                changed=ups,
+                deleted=[self._vault_root / rel for rel in del_rels],
+                attempts=2,
+            )
 
         kb_ups = [p for p in ups if self._is_kb(p)]
         semantic_kb_ups: list[Path] = []
@@ -670,13 +672,20 @@ class FileWatcher:
         if kb_ups:
             try:
                 index_sync.upsert_after_write(
-                    self._vault_root, kb_ups, defer_semantic=defer_semantic
+                    self._vault_root,
+                    kb_ups,
+                    defer_semantic=defer_semantic,
+                    publish_corpus_change=False,
                 )
             except Exception:  # noqa: BLE001
                 log.exception("file watcher: upsert_after_write failed for %d file(s)", len(kb_ups))
         if kb_del_rels:
             try:
-                index_sync.delete_after_remove(self._vault_root, kb_del_rels)
+                index_sync.delete_after_remove(
+                    self._vault_root,
+                    kb_del_rels,
+                    publish_corpus_change=False,
+                )
             except Exception:  # noqa: BLE001
                 log.exception(
                     "file watcher: delete_after_remove failed for %d file(s)",

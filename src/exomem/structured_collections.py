@@ -120,10 +120,15 @@ class ItemSchema:
     fields: Mapping[str, FieldSpec]
     natural_key: tuple[str, ...] = ()
 
-    def validate(self, item: Mapping[str, Any]) -> dict[str, Any]:
+    def validate(
+        self, item: Mapping[str, Any], *, allowed_fields: Iterable[str] = ()
+    ) -> dict[str, Any]:
         if not isinstance(item, Mapping):
             raise CollectionError("INVALID_ITEM", "item must be an object")
         value = dict(item)
+        unknown = sorted(set(value) - set(self.fields) - set(allowed_fields))
+        if unknown:
+            raise CollectionError("SCHEMA_UNKNOWN_FIELD", f"field is not declared: {unknown[0]}")
         for name, spec in self.fields.items():
             if spec.required and name not in value:
                 raise CollectionError("SCHEMA_REQUIRED_FIELD", f"required field is missing: {name}")
@@ -740,7 +745,7 @@ def _normalize_saved_view_filters(value: object, fields: set[str]) -> list[dict[
     return filters
 
 
-def _mapping_has_only_keys(value: Mapping[object, Any], allowed: set[str] | frozenset[str]) -> bool:
+def _mapping_has_only_keys(value: Mapping[Any, Any], allowed: set[str] | frozenset[str]) -> bool:
     return all(type(key) is str and key in allowed for key in value)
 
 

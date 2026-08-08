@@ -4061,6 +4061,11 @@ def clear_inbound_index() -> None:
     _INBOUND_INDEX.clear()
 
 
+def evict_inbound_index(vault_root: Path) -> bool:
+    """Withdraw one vault's rebuildable inbound-link projection."""
+    return _INBOUND_INDEX.pop(str(Path(vault_root).resolve()), None) is not None
+
+
 def find_inbound_wikilinks(vault_root: Path, target_rel_path: str) -> list[InboundLink]:
     """Return every wikilink in the vault that resolves to `target_rel_path`.
 
@@ -4224,6 +4229,11 @@ class WikilinkResolver:
         resolver._title_by_rel = dict(self._title_by_rel)
         return resolver
 
+    def title_key_for_path(self, rel_path: str) -> str | None:
+        """Return the normalized resolver title contributed by one path."""
+        no_ext = str(rel_path).replace("\\", "/").lstrip("/").removesuffix(".md")
+        return self._title_by_rel.get(no_ext)
+
     # ---- shared add/remove primitives -------------------------------------
     # The full build AND the incremental patch both go through these, so a
     # patched resolver's maps are byte-identical to a fresh rebuild's for the
@@ -4313,6 +4323,32 @@ class WikilinkResolver:
             abs_path = vault_root / (no_ext + ".md")
             if abs_path.is_file():
                 self._add_entry(no_ext, self._read_title_lower(abs_path))
+
+    def on_entries_changed(
+        self,
+        entries: Iterable[tuple[str, str | None]],
+        deleted_rels: Iterable[str],
+    ) -> None:
+        """Apply already-guarded resolver entries without another file read.
+
+        Event-driven callers that have bound a title to an exact source
+        snapshot use this instead of ``on_files_changed``.  Keeping the map
+        mutation separate from I/O prevents a later read from being stamped as
+        an earlier freshness target.
+        """
+
+        def _no_ext(rel: str) -> str:
+            return str(rel).replace("\\", "/").lstrip("/").removesuffix(".md")
+
+        changed = {
+            _no_ext(rel): (str(title).strip().lower() if title and str(title).strip() else None)
+            for rel, title in entries
+        }
+        deleted = {_no_ext(rel) for rel in deleted_rels}
+        for no_ext in deleted | set(changed):
+            self._remove_entry(no_ext)
+        for no_ext, title_lower in sorted(changed.items()):
+            self._add_entry(no_ext, title_lower)
 
     def add_pending(self, no_ext_path: str, *, title: str | None = None) -> None:
         """Register a file the writer is about to create.

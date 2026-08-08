@@ -30,7 +30,7 @@ Record manifests, canonical logs, record-item files, datasets, templates, histor
 - **THEN** the write does not require an Observation, Claim, Decision, or other compiled-note semantic unit
 
 ### Requirement: Tracker compatibility is additive and explicit
-Existing `type: tracker` Markdown and compatible chronological logs SHALL remain discoverable and inspectable at collection level without forced migration. Attaching an adjacent collection manifest with a complete adapter descriptor SHALL enable item query/mutation without rewriting the canonical log, undated archive, notation, legend, or historical templates. A manifest-less tracker SHALL NOT be item-parsed using guessed domain grammar. Explicit identifiers SHALL be added prospectively.
+Existing `type: tracker` Markdown and compatible chronological logs SHALL remain directly inspectable at collection level by a caller-supplied path without forced migration. This delivery SHALL NOT add vault-wide legacy-tracker enumeration. Attaching an adjacent collection manifest with a complete adapter descriptor SHALL enable item query/mutation without rewriting the canonical log, undated archive, notation, legend, or historical templates. A manifest-less tracker SHALL NOT be item-parsed using guessed domain grammar. Explicit identifiers SHALL be added prospectively.
 
 #### Scenario: Manifest-less tracker stays collection-level only
 - **WHEN** a tracker has no adjacent manifest or explicit complete adapter descriptor

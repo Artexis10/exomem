@@ -142,6 +142,46 @@ def test_markdown_item_adapter_uses_file_identity_exact_version_and_readable_bod
     assert bom_item.body == "BOM-bearing item body remains readable.\n"
 
 
+def test_markdown_item_inspection_reports_undeclared_manual_frontmatter_field(
+    tmp_path: Path,
+) -> None:
+    fixture = copy_vehicle_maintenance_fixture(tmp_path)
+    manifest = _manifest(tmp_path, fixture)
+    item = fixture / "Events/released/2026-06-01-oil.md"
+    item.write_text(
+        item.read_text(encoding="utf-8").replace(
+            "schema_version: 1\n", "schema_version: 1\nundeclared_secret: surprise\n"
+        ),
+        encoding="utf-8",
+    )
+    before = item.read_bytes()
+
+    inspected = record_formats.inspect_collection(tmp_path, manifest)
+
+    assert [diagnostic.code for diagnostic in inspected.diagnostics] == ["SCHEMA_UNKNOWN_FIELD"]
+    assert item.read_bytes() == before
+
+
+def test_markdown_log_inspection_rejects_undeclared_descriptor_default(tmp_path: Path) -> None:
+    fixture = copy_x3_fixture(tmp_path)
+    manifest_path = fixture / "_collection.md"
+    manifest_path.write_text(
+        manifest_path.read_text(encoding="utf-8").replace(
+            "  defaults:\n    status: completed\n",
+            "  defaults:\n    status: completed\n    undeclared_default: true\n",
+        ),
+        encoding="utf-8",
+    )
+    manifest = _manifest(tmp_path, fixture)
+    source = fixture / "Training Log.md"
+    before = source.read_bytes()
+
+    inspected = record_formats.inspect_collection(tmp_path, manifest)
+
+    assert [diagnostic.code for diagnostic in inspected.diagnostics] == ["SCHEMA_UNKNOWN_FIELD"]
+    assert source.read_bytes() == before
+
+
 def test_dataset_adapter_is_query_only_and_exposes_declared_keys_and_snapshot(
     tmp_path: Path,
 ) -> None:

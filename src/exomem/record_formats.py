@@ -10,7 +10,7 @@ import json
 import math
 import re
 import stat
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Protocol
@@ -160,12 +160,14 @@ class _BaseAdapter:
             return True
         return False
 
-    def _validate_values(self, values: dict[str, Any]) -> None:
+    def _validate_values(
+        self, values: dict[str, Any], *, allowed_fields: Iterable[str] = ()
+    ) -> None:
         if _SYSTEM_FIELDS.intersection(self.manifest.schema.fields):
             raise collections.CollectionError(
                 "RESERVED_RECORD_FIELD", "schema uses a reserved record field"
             )
-        self.manifest.schema.validate(values)
+        self.manifest.schema.validate(values, allowed_fields=allowed_fields)
 
     def _project_values(self, values: Mapping[str, Any]) -> dict[str, Any]:
         return dict(values) if self.project_values is None else self.project_values(values)
@@ -293,7 +295,13 @@ class MarkdownLogAdapter(_BaseAdapter):
             child_count += len(children)
             if children:
                 values[child_container] = [child.values for child in children]
-            self._validate_values(values)
+            if grammar.note is not None:
+                note = values[grammar.note.field]
+                if note is not None and type(note) is not str:
+                    raise collections.CollectionError("SCHEMA_FIELD_TYPE", "heading note must be a string")
+                self._validate_values(values, allowed_fields=(grammar.note.field,))
+            else:
+                self._validate_values(values)
             marker_match = _marker_outside_fences(block)
             marker = None
             if marker_match:
@@ -878,13 +886,12 @@ def inspect_collection(
         parsed = adapter.read()
     except collections.CollectionError as error:
         versions = (manifest.manifest_version,)
-        diagnostics = (collections.CollectionDiagnostic(error.code, error.reason),)
         return CollectionInspection(
             collection_id=manifest.collection_id,
             snapshot=None,
             source_versions=versions,
             source_hashes={version.path: version.hash for version in versions},
-            diagnostics=diagnostics,
+            diagnostics=(collections.CollectionDiagnostic(error.code, error.reason),),
         )
     diagnostics = list(parsed.diagnostics[:64])
     for name in manifest.views:

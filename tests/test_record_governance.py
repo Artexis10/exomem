@@ -1036,11 +1036,11 @@ def test_schema_link_projection_supports_exact_paths_and_caches_normalized_targe
     _write_l6_rule(tmp_path, ceiling=6, paths="Records/**")
     _write_l0_rule(tmp_path, name="secret", paths="Evidence/**")
 
-    calls: list[str] = []
+    calls: list[tuple[str, bool]] = []
     original = record_governance._authorize
 
     def watched(root: Path, relative: str, *, receipt: bool = False) -> bool:
-        calls.append(relative)
+        calls.append((relative, receipt))
         return original(root, relative, receipt=receipt)
 
     monkeypatch.setattr(record_governance, "_authorize", watched)
@@ -1053,10 +1053,193 @@ def test_schema_link_projection_supports_exact_paths_and_caches_normalized_targe
                 "receipt": "[[Knowledge Base/Evidence/Secret.md#receipt|Secret]]",
                 "services": ["Knowledge Base/Evidence/Future.md", "not a path"],
             },
-        )
+    )
 
     assert projected == {}
-    assert calls.count("Knowledge Base/Evidence/Secret.md") == 1
+    secret_calls = [receipt for relative, receipt in calls if relative == "Knowledge Base/Evidence/Secret.md"]
+    assert secret_calls == [True]
+
+
+def test_schema_link_projection_ignores_withheld_colliding_wikilink_titles(tmp_path: Path) -> None:
+    fixture = copy_vehicle_maintenance_fixture(tmp_path)
+    manifest = collections.load_manifest(tmp_path, fixture / "_collection.md")
+    target = tmp_path / "Knowledge Base" / "Notes" / "Public" / "target.md"
+    target.parent.mkdir(parents=True)
+    target.write_text("---\ntitle: Target\n---\npublic", encoding="utf-8")
+    _write_l6_rule(tmp_path, ceiling=6, paths="Records/**")
+
+    with request_scope(RequestPrincipal(audience_id=EXTERNAL, surface="mcp")):
+        before = record_governance._project_links(tmp_path, manifest, {"asset": "[[Target]]"})
+
+    hidden = tmp_path / "Knowledge Base" / "Evidence" / "secret-target.md"
+    hidden.parent.mkdir(parents=True)
+    hidden.write_text("---\ntitle: Target\n---\nwithheld", encoding="utf-8")
+    _write_l0_rule(tmp_path, name="secret", paths="Evidence/**")
+    with request_scope(RequestPrincipal(audience_id=EXTERNAL, surface="mcp")):
+        after = record_governance._project_links(tmp_path, manifest, {"asset": "[[Target]]"})
+
+    assert before == after == {"asset": "[[Target]]"}
+
+
+def test_schema_link_projection_ignores_withheld_colliding_memory_ids(tmp_path: Path) -> None:
+    fixture = copy_vehicle_maintenance_fixture(tmp_path)
+    manifest = collections.load_manifest(tmp_path, fixture / "_collection.md")
+    identity = "4e482aed-3f70-4b78-9342-1ba08f3a5bd3"
+    reference = memory_refs.memory_ref(identity)
+    target = tmp_path / "Knowledge Base" / "Notes" / "Public" / "target.md"
+    target.parent.mkdir(parents=True)
+    target.write_text(f"---\nexomem_id: {identity}\n---\npublic", encoding="utf-8")
+    _write_l6_rule(tmp_path, ceiling=6, paths="Records/**")
+
+    with request_scope(RequestPrincipal(audience_id=EXTERNAL, surface="mcp")):
+        before = record_governance._project_links(tmp_path, manifest, {"asset": reference})
+
+    hidden = tmp_path / "Knowledge Base" / "Evidence" / "secret-target.md"
+    hidden.parent.mkdir(parents=True)
+    hidden.write_text(f"---\nexomem_id: {identity}\n---\nwithheld", encoding="utf-8")
+    _write_l0_rule(tmp_path, name="secret", paths="Evidence/**")
+    with request_scope(RequestPrincipal(audience_id=EXTERNAL, surface="mcp")):
+        after = record_governance._project_links(tmp_path, manifest, {"asset": reference})
+
+    assert before == after == {"asset": reference}
+
+
+def test_numeric_record_query_does_not_build_a_link_resolver(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import vault
+
+    fixture = copy_dataset_fixture(tmp_path)
+    manifest = collections.load_manifest(tmp_path, fixture / "_collection.md")
+
+    def unexpected_walk(_root: Path) -> object:
+        raise AssertionError("link-free query must not scan the vault")
+
+    monkeypatch.setattr(vault, "walk_vault_md", unexpected_walk)
+
+    result = record_governance.query_collection(tmp_path, manifest, columns=["value"], limit=1)
+
+    assert result.rows[0]["value"] == 101.0
+
+
+@pytest.mark.parametrize(
+    "reference",
+    (
+        "[[Knowledge Base/Evidence/Target.md]]",
+        "exomem://vault/Knowledge Base/Evidence/Target.md",
+        "exomem://source/Knowledge Base/Evidence/Target",
+    ),
+)
+def test_exact_record_link_does_not_build_a_candidate_index(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reference: str
+) -> None:
+    from exomem import vault
+
+    fixture = copy_vehicle_maintenance_fixture(tmp_path)
+    manifest = collections.load_manifest(tmp_path, fixture / "_collection.md")
+    target = tmp_path / "Knowledge Base" / "Evidence" / "Target.md"
+    target.parent.mkdir(parents=True)
+    target.write_text("# Target\n", encoding="utf-8")
+
+    def unexpected_walk(_root: Path) -> object:
+        raise AssertionError("exact link must not scan the vault")
+
+    monkeypatch.setattr(vault, "walk_vault_md", unexpected_walk)
+
+    projected = record_governance._project_links(tmp_path, manifest, {"asset": reference})
+
+    assert projected == {"asset": reference}
+
+
+def test_over_cap_bare_link_resolution_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import vault
+
+    fixture = copy_vehicle_maintenance_fixture(tmp_path)
+    manifest = collections.load_manifest(tmp_path, fixture / "_collection.md")
+    target = tmp_path / "Knowledge Base" / "Notes" / "Target.md"
+    other = tmp_path / "Knowledge Base" / "Notes" / "Other.md"
+    target.parent.mkdir(parents=True)
+    target.write_text("# Target\n", encoding="utf-8")
+    other.write_text("# Other\n", encoding="utf-8")
+    monkeypatch.setattr(record_governance, "_PUBLIC_LINK_INDEX_RAW_CANDIDATES", 1)
+    monkeypatch.setattr(vault, "walk_vault_md", lambda _root: iter((target, other)))
+
+    with request_scope(RequestPrincipal(audience_id=EXTERNAL, surface="mcp")):
+        projected = record_governance._project_links(tmp_path, manifest, {"asset": "[[Target]]"})
+
+    assert projected == {}
+
+
+def test_schema_link_projection_records_authorized_target_disclosure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fixture = copy_vehicle_maintenance_fixture(tmp_path)
+    manifest = collections.load_manifest(tmp_path, fixture / "_collection.md")
+    target = tmp_path / "Knowledge Base" / "Notes" / "Public" / "Target.md"
+    target.parent.mkdir(parents=True)
+    target.write_text("# Target\n", encoding="utf-8")
+    _write_l6_rule(tmp_path, ceiling=6, paths="Records/**")
+
+    calls: list[tuple[str, bool]] = []
+    original = record_governance._authorize
+
+    def watched(root: Path, relative: str, *, receipt: bool = False) -> bool:
+        calls.append((relative, receipt))
+        return original(root, relative, receipt=receipt)
+
+    monkeypatch.setattr(record_governance, "_authorize", watched)
+    with request_scope(RequestPrincipal(audience_id=EXTERNAL, surface="mcp")):
+        projected = record_governance._project_links(tmp_path, manifest, {"asset": "[[Target]]"})
+
+    assert projected == {"asset": "[[Target]]"}
+    target_calls = [receipt for relative, receipt in calls if relative == "Knowledge Base/Notes/Public/Target.md"]
+    assert target_calls == [False, True]
+
+
+def test_manifest_link_projections_ignore_withheld_colliding_titles(tmp_path: Path) -> None:
+    fixture = copy_vehicle_maintenance_fixture(tmp_path)
+    manifest_path = fixture / "_collection.md"
+    manifest_path.write_text(
+        manifest_path.read_text(encoding="utf-8").replace(
+            "\n---\n\nOne ordinary",
+            """
+templates:
+  - path: Templates/session.md
+    default_properties: {asset: "[[Target]]"}
+links:
+  plans:
+    - reference: exomem://memory/81947000-4c22-46e4-9874-23fed028314b
+      query: {filters: {asset: "[[Target]]"}, limit: 12}
+views:
+  current:
+    query: {filters: {asset: "[[Target]]"}, limit: 12}
+---
+
+One ordinary""",
+        ),
+        encoding="utf-8",
+    )
+    (fixture / "Templates").mkdir()
+    (fixture / "Templates" / "session.md").write_text("template", encoding="utf-8")
+    manifest = collections.load_manifest(tmp_path, manifest_path)
+    target = tmp_path / "Knowledge Base" / "Notes" / "Public" / "target.md"
+    target.parent.mkdir(parents=True)
+    target.write_text("---\ntitle: Target\n---\npublic", encoding="utf-8")
+    _write_l6_rule(tmp_path, ceiling=6, paths="Records/**")
+
+    with request_scope(RequestPrincipal(audience_id=EXTERNAL, surface="mcp")):
+        before = record_governance.project_manifest(tmp_path, manifest)
+
+    hidden = tmp_path / "Knowledge Base" / "Evidence" / "secret-target.md"
+    hidden.parent.mkdir(parents=True)
+    hidden.write_text("---\ntitle: Target\n---\nwithheld", encoding="utf-8")
+    _write_l0_rule(tmp_path, name="secret", paths="Evidence/**")
+    with request_scope(RequestPrincipal(audience_id=EXTERNAL, surface="mcp")):
+        after = record_governance.project_manifest(tmp_path, manifest)
+
+    assert before == after
 
 
 def test_missing_and_withheld_link_targets_have_identical_public_query_state(tmp_path: Path) -> None:

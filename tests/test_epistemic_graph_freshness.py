@@ -10,8 +10,9 @@ from pathlib import Path
 
 import pytest
 
-from exomem import audit, epistemic_graph, reconcile, semantic_index
+from exomem import audit, epistemic_graph, freshness, index_sync, reconcile, semantic_index
 from exomem import find as find_module
+from exomem import vault as vault_module
 from exomem.cli_ops import OpError
 from exomem.mutation_lock import VaultMutationCoordinator
 
@@ -58,6 +59,20 @@ B claim.
 """,
     )
     return a, b
+
+
+def _seed_live_freshness(vault: Path) -> None:
+    freshness.seed(
+        vault,
+        "vault",
+        ((str(path), freshness.stat_signature(path)) for path in vault_module.walk_vault_md(vault)),
+    )
+    kb = vault / "Knowledge Base"
+    freshness.seed(
+        vault,
+        "kb",
+        ((str(path), freshness.stat_signature(path)) for path in find_module._walk_md(kb)),
+    )
 
 
 def _spawn_graph_mutation(
@@ -540,11 +555,64 @@ def test_full_rebuild_rejects_direct_edit_before_availability_publication(
     assert index.nodes() == []
 
 
+def test_full_rebuild_recovers_from_a_stale_live_registry(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    source, _target = _seed(vault)
+    _seed_live_freshness(vault)
+    index = epistemic_graph.EpistemicGraphIndex(vault)
+    index.rebuild_all()
+
+    source.write_text(
+        source.read_text(encoding="utf-8").replace("A claim", "Manual A claim"),
+        encoding="utf-8",
+    )
+
+    report = index.rebuild_all()
+
+    assert report["indexed_files"] == 2
+    assert index.available() is True
+    current = next(node for node in index.nodes(path=A) if node["kind"] == "file")
+    assert current["source_hash"] == vault_module.content_hash(source.read_text(encoding="utf-8"))
+    conn = sqlite3.connect(epistemic_graph.sidecar_path(vault))
+    try:
+        checkpoint = conn.execute(
+            "SELECT value FROM graph_meta WHERE key = 'recall_projection_checkpoint'"
+        ).fetchone()
+    finally:
+        conn.close()
+    assert checkpoint is None
+
+
+def test_checkpointless_refresh_rebuilds_unseen_direct_edits(tmp_path: Path) -> None:
+    """A disk-derived marker has no event suffix that can justify a local patch."""
+    vault = tmp_path / "vault"
+    source, target = _seed(vault)
+    index = epistemic_graph.EpistemicGraphIndex(vault)
+    index.rebuild_all()
+
+    source.write_text(
+        source.read_text(encoding="utf-8").replace("A claim", "Changed A claim"),
+        encoding="utf-8",
+    )
+    target.write_text(
+        target.read_text(encoding="utf-8").replace("B claim", "Unseen B claim"),
+        encoding="utf-8",
+    )
+
+    report = index.refresh_paths([source])
+
+    assert report["indexed_files"] == 2
+    assert index.available() is True
+    current = next(node for node in index.nodes(path=B) if node["kind"] == "file")
+    assert current["source_hash"] == vault_module.content_hash(target.read_text(encoding="utf-8"))
+
+
 def test_refresh_admitted_before_failed_rebuild_cannot_restore_availability(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     vault = tmp_path / "vault"
     source, _target = _seed(vault)
+    _seed_live_freshness(vault)
     index = epistemic_graph.EpistemicGraphIndex(vault)
     index.rebuild_all()
     real_snapshot = find_module.recall_resolver_snapshot
@@ -573,6 +641,13 @@ def test_refresh_admitted_before_failed_rebuild_cannot_restore_availability(
 
     monkeypatch.setattr(index, "_index_path", index_path)
     monkeypatch.setattr(find_module, "recall_resolver_snapshot", acquire)
+
+    source.write_text(
+        source.read_text(encoding="utf-8").replace("A claim", "Changed A claim"),
+        encoding="utf-8",
+    )
+    freshness.on_files_changed(vault, changed=[source])
+    find_module.on_resolver_files_changed(vault, [A], [])
 
     report = index.refresh_paths([source])
 
@@ -640,8 +715,7 @@ def test_full_rebuild_snapshot_isolated_from_shared_cache_patch(
         index.rebuild_all()
 
         assert any(
-            edge["relation_type"] == "links_to"
-            and edge["dst_key"] == epistemic_graph._file_key(B)
+            edge["relation_type"] == "links_to" and edge["dst_key"] == epistemic_graph._file_key(B)
             for edge in index.edges(source_path=A)
         )
     finally:
@@ -688,9 +762,7 @@ def test_rebuild_resolver_failure_preserves_committed_graph_rows(
     monkeypatch.setattr(
         find_module,
         "recall_resolver_snapshot",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            RuntimeError("resolver failed")
-        ),
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("resolver failed")),
     )
 
     with pytest.raises(RuntimeError, match="resolver failed"):
@@ -710,14 +782,15 @@ def test_rebuild_initial_freshness_failure_preserves_committed_graph_rows(
     index.rebuild_all()
     before_nodes = index.nodes()
     before_edges = index.edges()
-    monkeypatch.setattr(
-        epistemic_graph,
-        "_disk_vault_freshness",
-        lambda *_args: (_ for _ in ()).throw(RuntimeError("freshness failed")),
-    )
+    with monkeypatch.context() as scoped:
+        scoped.setattr(
+            epistemic_graph,
+            "_disk_vault_freshness",
+            lambda *_args: (_ for _ in ()).throw(RuntimeError("freshness failed")),
+        )
 
-    with pytest.raises(RuntimeError, match="freshness failed"):
-        index.rebuild_all()
+        with pytest.raises(RuntimeError, match="freshness failed"):
+            index.rebuild_all()
 
     assert index.available() is True
     assert index.nodes() == before_nodes
@@ -747,9 +820,7 @@ def test_explicit_detached_resolver_matches_direct_fallback_for_ambiguous_links(
         "parent_state": state,
     }
 
-    fallback = epistemic_graph._edges_for_page(
-        vault, page, state.document, **kwargs
-    )
+    fallback = epistemic_graph._edges_for_page(vault, page, state.document, **kwargs)
     explicit = epistemic_graph._edges_for_page(
         vault,
         page,
@@ -758,14 +829,13 @@ def test_explicit_detached_resolver_matches_direct_fallback_for_ambiguous_links(
         **kwargs,
     )
 
-    assert [edge.as_dict() for edge in explicit] == [
-        edge.as_dict() for edge in fallback
-    ]
+    assert [edge.as_dict() for edge in explicit] == [edge.as_dict() for edge in fallback]
 
 
 def test_single_file_edit_refreshes_affected_graph_rows(tmp_path: Path) -> None:
     vault = tmp_path / "vault"
     a, b = _seed(vault)
+    _seed_live_freshness(vault)
     idx = epistemic_graph.EpistemicGraphIndex(vault)
     idx.rebuild_all()
     b_before = next(n for n in idx.nodes(path=B) if n["kind"] == "file")["source_hash"]
@@ -774,6 +844,8 @@ def test_single_file_edit_refreshes_affected_graph_rows(tmp_path: Path) -> None:
         a.read_text(encoding="utf-8").replace("A claim", "A changed claim"),
         encoding="utf-8",
     )
+    freshness.on_files_changed(vault, changed=[a])
+    find_module.on_resolver_files_changed(vault, [A], [])
     report = idx.refresh_paths([a])
 
     assert report["indexed_files"] == 1
@@ -783,6 +855,201 @@ def test_single_file_edit_refreshes_affected_graph_rows(tmp_path: Path) -> None:
         a.read_text(encoding="utf-8")
     )
     assert b_after["source_hash"] == b_before
+
+
+def test_live_incremental_refresh_does_not_repeat_a_full_disk_walk(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault = tmp_path / "vault"
+    source, _target = _seed(vault)
+    _seed_live_freshness(vault)
+    index = epistemic_graph.EpistemicGraphIndex(vault)
+    index.rebuild_all()
+
+    source.write_text(
+        source.read_text(encoding="utf-8").replace("A claim", "A live changed claim"),
+        encoding="utf-8",
+    )
+    freshness.on_files_changed(vault, changed=[source])
+    find_module.on_resolver_files_changed(vault, [A], [])
+    monkeypatch.setattr(
+        epistemic_graph,
+        "_disk_vault_freshness",
+        lambda *_args: pytest.fail("live incremental refresh performed a full disk walk"),
+    )
+
+    report = index.refresh_paths([source])
+
+    assert report["indexed_files"] == 1
+    current = next(node for node in index.nodes(path=A) if node["kind"] == "file")
+    assert current["source_hash"] == epistemic_graph.vault_module.content_hash(
+        source.read_text(encoding="utf-8")
+    )
+
+
+def test_direct_index_sync_delete_publishes_before_graph_fanout(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    _source, target = _seed(vault)
+    _seed_live_freshness(vault)
+    index = epistemic_graph.EpistemicGraphIndex(vault)
+    index.rebuild_all()
+
+    target.unlink()
+    index_sync.delete_after_remove(vault, [B])
+
+    assert index.available() is True
+    assert index.nodes(path=B) == []
+
+
+def test_live_refresh_replays_every_published_delta_before_availability(
+    tmp_path: Path,
+) -> None:
+    """A delayed B fan-out cannot let an A refresh stamp B's later checkpoint."""
+    vault = tmp_path / "vault"
+    a, b = _seed(vault)
+    _seed_live_freshness(vault)
+    index = epistemic_graph.EpistemicGraphIndex(vault)
+    index.rebuild_all()
+
+    a.write_text(
+        a.read_text(encoding="utf-8").replace("A claim", "A refreshed claim"),
+        encoding="utf-8",
+    )
+    b.write_text(
+        b.read_text(encoding="utf-8").replace("B claim", "B changed during delayed fanout"),
+        encoding="utf-8",
+    )
+    freshness.on_files_changed(vault, changed=[a])
+    freshness.on_files_changed(vault, changed=[b])
+    # The B resolver/index callback is delayed or lost.  The A callback is all
+    # this refresh receives, but the graph marker must not claim B is current
+    # unless it replays the retained A+B projected delta itself.
+    find_module.on_resolver_files_changed(vault, [A], [])
+
+    report = index.refresh_paths([a])
+
+    assert report["indexed_files"] == 2
+    assert index.available() is True
+    b_node = next(node for node in index.nodes(path=B) if node["kind"] == "file")
+    assert b_node["source_hash"] == epistemic_graph.vault_module.content_hash(
+        b.read_text(encoding="utf-8")
+    )
+    assert index.relation_participants(["links_to"]).paths == frozenset({A, B})
+
+
+def test_title_only_target_change_reresolves_unchanged_sources(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    source = _write(
+        vault,
+        A,
+        "---\ntype: insight\nstatus: active\n---\n# A\n\n## Claim\n\nLinks to [[Old B]].\n",
+    )
+    target = _write(
+        vault,
+        B,
+        "---\ntype: insight\nstatus: active\ntitle: Old B\n---\n# B\n\n## Claim\n\nTarget.\n",
+    )
+    _seed_live_freshness(vault)
+    index = epistemic_graph.EpistemicGraphIndex(vault)
+    index.rebuild_all()
+    assert index.relation_participants(["links_to"]).paths == frozenset({A, B})
+
+    target.write_text(
+        target.read_text(encoding="utf-8").replace("title: Old B", "title: New B"),
+        encoding="utf-8",
+    )
+    freshness.on_files_changed(vault, changed=[target])
+    find_module.on_resolver_files_changed(vault, [B], [])
+
+    report = index.refresh_paths([target])
+
+    assert source.exists()
+    assert report["indexed_files"] == 2
+    assert index.available() is True
+    assert index.relation_participants(["links_to"]).paths == frozenset()
+
+
+def test_projected_resolver_coalesces_renamed_target_before_delayed_callback(
+    tmp_path: Path,
+) -> None:
+    vault = tmp_path / "vault"
+    source = _write(
+        vault,
+        A,
+        "---\ntype: insight\nstatus: active\n---\n# A\n\n## Claim\n\nA claim links to [[Old B]].\n",
+    )
+    target = _write(
+        vault,
+        B,
+        "---\ntype: insight\nstatus: active\n---\n# Old B\n\n## Claim\n\nTarget.\n",
+    )
+    _seed_live_freshness(vault)
+    index = epistemic_graph.EpistemicGraphIndex(vault)
+    index.rebuild_all()
+
+    # Warm a resolver from the exact projected checkpoint. The watcher then
+    # publishes A and B separately, but delivers only A's resolver callback.
+    # A path-local patch must still see B's coalesced target title.
+    find_module.recall_resolver_snapshot(vault)
+    source.write_text(
+        "---\ntype: insight\nstatus: active\n---\n# A\n\n## Claim\n\nA claim links to [[New B]].\n",
+        encoding="utf-8",
+    )
+    target.write_text(
+        "---\ntype: insight\nstatus: active\n---\n# New B\n\n## Claim\n\nTarget.\n",
+        encoding="utf-8",
+    )
+    freshness.on_files_changed(vault, changed=[source])
+    freshness.on_files_changed(vault, changed=[target])
+    find_module.on_resolver_files_changed(vault, [A], [])
+
+    resolver = find_module.recall_resolver_snapshot(vault)
+    resolved, warning = vault_module.normalize_wikilink(
+        "New B", vault, resolver=resolver, strict=False
+    )
+    assert warning is None
+    assert resolved == B.removesuffix(".md")
+    old, old_warning = vault_module.normalize_wikilink(
+        "Old B", vault, resolver=resolver, strict=False
+    )
+    assert old == "Old B"
+    assert old_warning is not None
+
+    index.refresh_paths([source])
+    assert index.relation_participants(["links_to"]).paths == frozenset({A, B})
+
+    # The delayed B callback is now a no-op. Its result remains equivalent to
+    # a direct full rebuild over the same human-owned files.
+    find_module.on_resolver_files_changed(vault, [B], [])
+    index.refresh_paths([target])
+    incremental_edges = index.edges()
+    index.rebuild_all()
+    assert index.edges() == incremental_edges
+
+
+def test_published_edit_withholds_stale_graph_until_incremental_refresh(
+    tmp_path: Path,
+) -> None:
+    vault = tmp_path / "vault"
+    source, _target = _seed(vault)
+    _seed_live_freshness(vault)
+    index = epistemic_graph.EpistemicGraphIndex(vault)
+    index.rebuild_all()
+    assert index.relation_participants(["links_to"]).paths == frozenset({A, B})
+
+    source.write_text("# A\n\nThe link was removed directly.\n", encoding="utf-8")
+    freshness.on_files_changed(vault, changed=[source])
+    find_module.on_resolver_files_changed(vault, [A], [])
+
+    assert index.available() is False
+    assert index.edges() == []
+    assert index.relation_participants(["links_to"]).status == "warming"
+
+    report = index.refresh_paths([source])
+
+    assert report["indexed_files"] == 1
+    assert index.available() is True
+    assert index.relation_participants(["links_to"]).paths == frozenset()
 
 
 def test_incremental_refresh_retries_when_path_changes_during_indexing(
@@ -815,7 +1082,7 @@ def test_incremental_refresh_retries_when_path_changes_during_indexing(
 
     assert raced is True
     assert acquisitions == [vault, vault]
-    assert report["indexed_files"] == 1
+    assert report["indexed_files"] == 2
     current = next(node for node in index.nodes(path=A) if node["kind"] == "file")
     assert current["source_hash"] == epistemic_graph.vault_module.content_hash(
         source.read_text(encoding="utf-8")
@@ -887,8 +1154,7 @@ def test_relation_edges_follow_incremental_edit_move_and_delete(tmp_path: Path) 
     vault = tmp_path / "vault"
     source, _target = _seed(vault)
     source.write_text(
-        source.read_text(encoding="utf-8")
-        + "\n- supports: [[Knowledge Base/Notes/Insights/b]]\n",
+        source.read_text(encoding="utf-8") + "\n- supports: [[Knowledge Base/Notes/Insights/b]]\n",
         encoding="utf-8",
     )
     index = epistemic_graph.EpistemicGraphIndex(vault)
@@ -910,8 +1176,7 @@ def test_relation_edges_follow_incremental_edit_move_and_delete(tmp_path: Path) 
     index.refresh_paths([moved])
     assert index.nodes(path=A) == []
     assert any(
-        edge["relation_type"] == "contradicts"
-        for edge in index.edges(source_path=moved_rel)
+        edge["relation_type"] == "contradicts" for edge in index.edges(source_path=moved_rel)
     )
 
     moved.unlink()
@@ -924,16 +1189,13 @@ def test_target_refresh_preserves_inbound_relation_as_placeholder(tmp_path: Path
     vault = tmp_path / "vault"
     source, target = _seed(vault)
     source.write_text(
-        source.read_text(encoding="utf-8")
-        + "\n- supports: [[Knowledge Base/Notes/Insights/b]]\n",
+        source.read_text(encoding="utf-8") + "\n- supports: [[Knowledge Base/Notes/Insights/b]]\n",
         encoding="utf-8",
     )
     index = epistemic_graph.EpistemicGraphIndex(vault)
     index.rebuild_all()
     before = next(
-        edge
-        for edge in index.edges(source_path=A)
-        if edge["relation_type"] == "supports"
+        edge for edge in index.edges(source_path=A) if edge["relation_type"] == "supports"
     )
     target.write_text(target.read_text(encoding="utf-8") + "\nUpdated.\n", encoding="utf-8")
     index.refresh_paths([target])
@@ -947,14 +1209,19 @@ def test_incremental_write_after_registry_change_forces_full_reresolution(tmp_pa
     source, target = _seed(vault)
     registry_path = vault / "Knowledge Base" / "_Schema" / "relation-registry.yaml"
     registry_path.parent.mkdir(parents=True, exist_ok=True)
-    proposal = {"schema_version": 1, "extensions": {"science.replicates": {
-        "parent": "supports", "description": "Reports independent reproduction",
-        "aliases": ["mirrors"],
-    }}}
+    proposal = {
+        "schema_version": 1,
+        "extensions": {
+            "science.replicates": {
+                "parent": "supports",
+                "description": "Reports independent reproduction",
+                "aliases": ["mirrors"],
+            }
+        },
+    }
     registry_path.write_text(yaml.safe_dump(proposal), encoding="utf-8")
     source.write_text(
-        source.read_text(encoding="utf-8")
-        + "\n- mirrors: [[Knowledge Base/Notes/Insights/b]]\n",
+        source.read_text(encoding="utf-8") + "\n- mirrors: [[Knowledge Base/Notes/Insights/b]]\n",
         encoding="utf-8",
     )
     index = epistemic_graph.EpistemicGraphIndex(vault)
@@ -967,7 +1234,8 @@ def test_incremental_write_after_registry_change_forces_full_reresolution(tmp_pa
 
     assert report["indexed_files"] == 2
     changed = next(
-        edge for edge in epistemic_graph.EpistemicGraphIndex(vault).edges(source_path=A)
+        edge
+        for edge in epistemic_graph.EpistemicGraphIndex(vault).edges(source_path=A)
         if edge["raw_relation"] == "mirrors"
     )
     assert changed["registry_status"] == "unregistered"

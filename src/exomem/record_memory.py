@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, Never
 
 from . import query_data, record_governance, records
 from .cli_ops import OpError
-from .structured_collections import CollectionError
+from .structured_collections import CollectionError, parse_manifest_bytes
 
 ACTIONS = frozenset({"inspect", "create", "query", "append", "update"})
 
@@ -163,8 +163,17 @@ def record_memory(
     _validate_arguments(action, values)
     try:
         if action == "inspect":
+            assert collection is not None
+            if _is_direct_legacy_tracker_selector(collection):
+                return record_governance.inspect_legacy_tracker(vault_root, collection)
             return record_governance.inspect_collection(vault_root, collection)
         if action == "create":
+            assert manifest_path is not None
+            assert manifest_text is not None
+            assert why is not None
+            record_governance.require_records_profile(
+                parse_manifest_bytes(vault_root, manifest_path, manifest_text.encode("utf-8"))
+            )
             return records.create_collection(
                 vault_root,
                 manifest_path,
@@ -173,7 +182,10 @@ def record_memory(
                 scaffold=True if scaffold is None else scaffold,
             )
         if action == "query":
-            manifest = record_governance.resolve_collection(vault_root, collection)
+            assert collection is not None
+            manifest = record_governance.require_records_profile(
+                record_governance.resolve_collection(vault_root, collection)
+            )
             result = record_governance.query_collection(
                 vault_root,
                 manifest,
@@ -204,18 +216,33 @@ def record_memory(
                 agent_history=history,
             )
         if action == "append":
+            assert collection is not None
+            assert item is not None
+            assert why is not None
+            manifest = record_governance.require_records_profile(
+                record_governance.resolve_collection_for_mutation(vault_root, collection)
+            )
             return records.append_record(
                 vault_root,
-                collection,
+                manifest,
                 item=item,
                 item_key=item_key,
                 expected_container_hash=expected_container_hash,
                 body="" if body is None else body,
                 why=why,
             )
+        assert collection is not None
+        assert item_key is not None
+        assert changes is not None
+        assert expected_container_hash is not None
+        assert expected_item_version is not None
+        assert why is not None
+        manifest = record_governance.require_records_profile(
+            record_governance.resolve_collection_for_mutation(vault_root, collection)
+        )
         return records.update_record(
             vault_root,
-            collection,
+            manifest,
             item_key=item_key,
             changes=changes,
             expected_container_hash=expected_container_hash,
@@ -236,5 +263,15 @@ def _validate_arguments(action: object, values: dict[str, Any]) -> None:
         _invalid_arguments()
 
 
-def _invalid_arguments() -> None:
+def _invalid_arguments() -> Never:
     raise OpError("INVALID_RECORD_ARGUMENTS", "arguments do not match the selected record action")
+
+
+def _is_direct_legacy_tracker_selector(collection: str) -> bool:
+    """Only a literal Markdown path may opt into the legacy inspect route."""
+    raw = collection.strip()
+    return (
+        raw.lower().endswith(".md")
+        and Path(raw.replace("\\", "/")).name != "_collection.md"
+        and not raw.lower().startswith("exomem://")
+    )

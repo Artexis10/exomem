@@ -23,7 +23,7 @@ _PAGE_ID = "44444444-4444-4444-8444-444444444444"
 _REL = "Knowledge Base/Notes/Insights/fresh-units.md"
 
 
-def _write(root: Path, content: str) -> Path:
+def _write(root: Path, content: str, *, clear_freshness: bool = True) -> Path:
     path = root / _REL
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
@@ -36,7 +36,10 @@ def _write(root: Path, content: str) -> Path:
         f"{content.rstrip()}\n",
         encoding="utf-8",
     )
-    find_module.clear_cache()
+    if clear_freshness:
+        find_module.clear_cache()
+    else:
+        find_module.reset_page_and_result_caches()
     return path
 
 
@@ -136,9 +139,14 @@ def test_committed_parent_hash_rejects_old_lexical_and_graph_units_immediately(
     store = lexstore.get_store(tmp_path)
     old_freshness = store._synced["kb"]
     graph = epistemic_graph.EpistemicGraphIndex(tmp_path)
+    assert all(freshness.rebaseline(tmp_path).values())
     graph.rebuild_all()
 
-    path = _write(tmp_path, "- [rule] current token ^current\n")
+    path = _write(
+        tmp_path,
+        "- [rule] current token ^current\n",
+        clear_freshness=False,
+    )
 
     # Even a caller handing the lexical sidecar its old trusted corpus token
     # cannot make an old unit pass the independent current-file generation gate.

@@ -16,9 +16,17 @@ from pathlib import Path
 
 import pytest
 
-from exomem import deferred_index, embeddings, file_watcher, freshness, media_processing
+from exomem import (
+    deferred_index,
+    embeddings,
+    file_watcher,
+    freshness,
+    media_processing,
+    semantic_contract,
+)
 from exomem import find as find_module
 from exomem import reconcile as reconcile_module
+from exomem import vault as vault_module
 
 
 def _stub_embeddings(monkeypatch: pytest.MonkeyPatch):
@@ -105,7 +113,7 @@ def _spy_media_and_text_dispatch(monkeypatch: pytest.MonkeyPatch) -> dict[str, l
     monkeypatch.setattr(
         file_watcher.index_sync,
         "delete_after_remove",
-        lambda root, rels: calls["delete"].append((root, list(rels))),
+        lambda root, rels, **_kwargs: calls["delete"].append((root, list(rels))),
     )
     monkeypatch.setattr(
         "exomem.vault.on_inbound_files_changed",
@@ -410,7 +418,10 @@ def test_live_import_burst_defers_semantic_indexing(
 
     assert len(calls) == 1
     assert sorted(calls[0][0]) == sorted([a, b])
-    assert calls[0][1] == {"defer_semantic": True}
+    assert calls[0][1] == {
+        "defer_semantic": True,
+        "publish_corpus_change": False,
+    }
     assert "live import/sync burst" in caplog.text
 
 
@@ -563,6 +574,82 @@ def test_external_batch_publishes_semantic_corpus_delta(
     assert calls == [([path], [])]
 
 
+def test_external_batch_retries_the_complete_vault_delta_before_fanout(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    freshness.rebaseline(vault)
+    source = vault / "Sources" / "target.md"
+    kb_note = vault / "Knowledge Base" / "Notes" / "changed.md"
+    source.parent.mkdir(parents=True, exist_ok=True)
+    kb_note.parent.mkdir(parents=True, exist_ok=True)
+    source.write_text("---\ntitle: Old target\n---\n# Old target\n", encoding="utf-8")
+    kb_note.write_text("# Before\n", encoding="utf-8")
+    freshness.rebaseline(vault)
+    find_module._get_query_resolver(vault)
+    source.write_text("---\ntitle: New target\n---\n# New target\n", encoding="utf-8")
+    kb_note.write_text("# After\n", encoding="utf-8")
+
+    real_publish = semantic_contract.publish_corpus_files_changed
+    calls: list[tuple[list[Path], list[str]]] = []
+
+    def flaky_publish(root, *, changed=(), deleted=()):
+        calls.append((list(changed), [str(path) for path in deleted]))
+        if len(calls) == 1:
+            raise RuntimeError("transient publication failure")
+        real_publish(root, changed=changed, deleted=deleted)
+
+    upserts: list[tuple[list[Path], dict]] = []
+    monkeypatch.setattr(semantic_contract, "publish_corpus_files_changed", flaky_publish)
+    monkeypatch.setattr(
+        file_watcher.index_sync,
+        "upsert_after_write",
+        lambda _root, paths, **kwargs: upserts.append((list(paths), dict(kwargs))),
+    )
+    watcher = file_watcher.FileWatcher(vault)
+    watcher._record(source, deleted=False)
+    watcher._record(kb_note, deleted=False)
+
+    watcher._flush()
+
+    assert len(calls) == 2
+    assert all(sorted(changed) == sorted([source, kb_note]) for changed, _ in calls)
+    assert upserts == [([kb_note], {"defer_semantic": False, "publish_corpus_change": False})]
+    resolver = find_module.writer_resolver_snapshot(vault)
+    resolved, warning = vault_module.normalize_wikilink(
+        "New target", vault, resolver=resolver, strict=False
+    )
+    assert warning is None
+    assert resolved == "Sources/target"
+
+
+def test_persistent_non_kb_publication_failure_withdraws_stale_resolver(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = vault / "Sources" / "target.md"
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_text("---\ntitle: Old target\n---\n# Old target\n", encoding="utf-8")
+    freshness.rebaseline(vault)
+    find_module._get_query_resolver(vault)
+    source.write_text("---\ntitle: New target\n---\n# New target\n", encoding="utf-8")
+    monkeypatch.setattr(
+        semantic_contract,
+        "publish_corpus_files_changed",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("persistent failure")),
+    )
+    watcher = file_watcher.FileWatcher(vault)
+    watcher._record(source, deleted=False)
+
+    watcher._flush()
+
+    assert freshness.recall_is_live(vault, "vault") is False
+    resolver = find_module.writer_resolver_snapshot(vault)
+    resolved, warning = vault_module.normalize_wikilink(
+        "New target", vault, resolver=resolver, strict=False
+    )
+    assert warning is None
+    assert resolved == "Sources/target"
+
+
 def test_external_edit_after_self_write_dispatches(vault, monkeypatch: pytest.MonkeyPatch) -> None:
     ups, _dels = _stub_embeddings(monkeypatch)
     file_watcher.clear_self_write_registry()
@@ -684,7 +771,7 @@ def _spy_reconcile_fanout(monkeypatch: pytest.MonkeyPatch) -> dict[str, list]:
     monkeypatch.setattr(
         file_watcher.index_sync,
         "delete_after_remove",
-        lambda root, rels: calls["delete"].append(list(rels)),
+        lambda root, rels, **_kw: calls["delete"].append(list(rels)),
     )
     monkeypatch.setattr("exomem.bm25.warm", lambda root, scope: calls["warm"].append(scope))
     return calls
@@ -992,12 +1079,11 @@ def test_reconcile_reembeds_missed_kb_file(vault, monkeypatch: pytest.MonkeyPatc
     assert dels == []
 
 
-def test_reconcile_restamps_resolver_triple_no_rebuild(
+def test_reconcile_drift_evicts_resolver_without_checkpoint_leapfrog(
     vault, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The 11.3s fix: after reconcile dispatch, the cached resolver's freshness
-    triple is restamped, so the next _get_query_resolver HITS the same instance
-    instead of a full-vault rebuild."""
+    """A missed event has no complete retained delta, so reconcile evicts the
+    cached resolver instead of stamping it at an unprovable newer checkpoint."""
     file_watcher.clear_self_write_registry()
     _stub_embeddings(monkeypatch)  # keep torch out; lexstore/resolver run for real
     monkeypatch.setattr("exomem.bm25.warm", lambda root, scope: None)
@@ -1014,7 +1100,12 @@ def test_reconcile_restamps_resolver_triple_no_rebuild(
     w._reconcile_once(seed=False)
 
     r2 = find_module._get_query_resolver(vault)
-    assert r2 is r1, "reconcile must restamp the resolver triple, not force a rebuild"
+    assert r2 is not r1
+    resolved, warning = vault_module.normalize_wikilink(
+        target.stem, vault, resolver=r2, strict=False
+    )
+    assert warning is None
+    assert resolved == target.relative_to(vault).as_posix().removesuffix(".md")
 
 
 def test_reconcile_dispatch_suppresses_registered_self_write(

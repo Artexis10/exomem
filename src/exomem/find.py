@@ -219,9 +219,7 @@ def _set_catalog_timing_profile(
         return
     from . import lexstore
 
-    timings.profile["catalog"] = lexstore.catalog_timing_profile(
-        readiness, cache_hit=cache_hit
-    )
+    timings.profile["catalog"] = lexstore.catalog_timing_profile(readiness, cache_hit=cache_hit)
 
 
 def _record_filter_eligibility_cache_hit(timings: FindTimings | None) -> None:
@@ -741,10 +739,10 @@ def find(
                     query_norm=query_norm,
                     mode=mode,
                     graph=False,
-                snapshot=snapshot,
-                unit_filters=True,
-                metadata_only_catalog=unit_algebra.status == "complete",
-                relation_filter=relation_active,
+                    snapshot=snapshot,
+                    unit_filters=True,
+                    metadata_only_catalog=unit_algebra.status == "complete",
+                    relation_filter=relation_active,
                 )
             unit_request_key = (
                 "unit",
@@ -855,8 +853,7 @@ def find(
                 unit_filters=filter_plan.has_unit_predicate,
                 metadata_only_catalog=(
                     not query_norm
-                    and structured_filters.plan_index_candidates(filter_plan).status
-                    == "complete"
+                    and structured_filters.plan_index_candidates(filter_plan).status == "complete"
                 ),
                 relation_filter=relation_active,
             )
@@ -880,8 +877,7 @@ def find(
             )
             if (
                 filter_plan.root is not None
-                and structured_filters.plan_index_candidates(filter_plan).status
-                == "complete"
+                and structured_filters.plan_index_candidates(filter_plan).status == "complete"
             ):
                 _record_filter_eligibility_cache_hit(timings)
                 _set_catalog_timing_profile(timings, cache_hit=True)
@@ -940,9 +936,7 @@ def find(
     # empty-query recall. An authoritative empty participant set yields no hits.
     if relation_paths is not None:
         relation_set = set(relation_paths)
-        eligible_paths = (
-            relation_set if eligible_paths is None else (eligible_paths & relation_set)
-        )
+        eligible_paths = relation_set if eligible_paths is None else (eligible_paths & relation_set)
 
     # Empty queries always degrade to keyword behavior — there's no signal
     # to embed or score with, just "give me recent stuff that matches the
@@ -1551,9 +1545,7 @@ def _find_semantic_units(
                 exact_freshness = snapshot.for_scope(scope)
                 exact_repair = _bounded_lexical_repair_allowed(exact_freshness)
                 bounded_filter_only = (
-                    not query.strip()
-                    and limit is not None
-                    and not algebra.post_filter_required
+                    not query.strip() and limit is not None and not algebra.post_filter_required
                 )
                 if bounded_filter_only:
                     # SQL and final filter-only ordering are identical. Read a
@@ -1582,13 +1574,8 @@ def _find_semantic_units(
                         if not catalog_result.readiness.complete:
                             _raise_catalog_outcome(catalog_result.readiness)
                         indexed = list(catalog_result.value or [])
-                        records = _hydrate_indexed_unit_records(
-                            vault_root, indexed, plan=plan
-                        )
-                        if (
-                            len(records) >= requested_limit
-                            or len(indexed) < prefix_size
-                        ):
+                        records = _hydrate_indexed_unit_records(vault_root, indexed, plan=plan)
+                        if len(records) >= requested_limit or len(indexed) < prefix_size:
                             break
                         prefix_size *= 2
                 else:
@@ -1717,9 +1704,7 @@ def _find_semantic_units(
             # flattened cross-product filter.
             vector_allowed_refs = {row.unit_ref for row in indexed or ()}
         vector_candidate_limit = (
-            len(vector_allowed_refs)
-            if vector_allowed_refs is not None
-            else candidate_limit + 1
+            len(vector_allowed_refs) if vector_allowed_refs is not None else candidate_limit + 1
         )
         vector_hits, vector_profile, _indexed_scope = _vector_unit_candidates(
             vault_root,
@@ -1730,9 +1715,10 @@ def _find_semantic_units(
             degraded_out=degraded_out,
             failed_out=failed_out,
         )
-        if vector_allowed_refs is not None and {
-            hit.unit_ref for hit in vector_hits
-        } != vector_allowed_refs:
+        if (
+            vector_allowed_refs is not None
+            and {hit.unit_ref for hit in vector_hits} != vector_allowed_refs
+        ):
             # A partial embedding window cannot prove an exact filtered miss:
             # an omitted exact ref may be the first one to survive canonical
             # page/unit post-filters. Fall back to the complete catalog seed.
@@ -2133,8 +2119,7 @@ class RetrievalIndexWarming(cli_ops.OpError):
         status: str = "warming",
         retry_after_ms: int = _RETRIEVAL_WARMING_RETRY_MS,
         message: str = (
-            "the maintained semantic recall index is still warming; "
-            "retry the exact recall shortly"
+            "the maintained semantic recall index is still warming; retry the exact recall shortly"
         ),
     ) -> None:
         self.complete = False
@@ -2154,9 +2139,7 @@ class RetrievalIndexWarming(cli_ops.OpError):
 def _raise_catalog_outcome(readiness: object) -> None:
     outcome = str(getattr(readiness, "status", "stale"))
     public_status = (
-        "temporarily_unavailable"
-        if outcome in {"transient_failure", "unsupported"}
-        else "warming"
+        "temporarily_unavailable" if outcome in {"transient_failure", "unsupported"} else "warming"
     )
     raise RetrievalIndexWarming(status=public_status)
 
@@ -2392,9 +2375,7 @@ def _indexed_eligible_filter_paths(
             units: tuple[dict[str, Any], ...] = ()
             if plan.has_unit_predicate:
                 try:
-                    state = semantic_index.current_parent_index_state(
-                        vault_root, emitted.rel_path
-                    )
+                    state = semantic_index.current_parent_index_state(vault_root, emitted.rel_path)
                     units = tuple(
                         structured_filters.unit_view(unit) for unit in state.document.units
                     )
@@ -3394,7 +3375,34 @@ def _outbound_wikilink_paths(page: ParsedPage, vault_root: Path, resolver=None) 
 
 _RESOLVER_CACHE: dict[Path, tuple[tuple, object]] = {}
 _RECALL_RESOLVER_CACHE: dict[Path, tuple[tuple, object]] = {}
+# The writer resolver has the same event-stream contract as the projected
+# resolver: it may advance only from the exact broad checkpoint that built it.
+_RESOLVER_CHECKPOINTS: dict[Path, freshness.FreshnessCheckpoint] = {}
+# A projected resolver can advance only from the exact recall-event checkpoint
+# that produced its maps.  The cache identity is deliberately kept separate
+# for compatibility with callers that supply a direct-disk freshness proof.
+_RECALL_RESOLVER_CHECKPOINTS: dict[Path, freshness.RecallFreshnessCheckpoint] = {}
 _RESOLVER_LOCK = threading.Lock()
+
+
+def _recall_checkpoint_identity(
+    checkpoint: freshness.RecallFreshnessCheckpoint,
+) -> tuple[tuple[int, int, str], str, str]:
+    return (
+        checkpoint.triple,
+        checkpoint.policy_version,
+        checkpoint.access_policy_fingerprint,
+    )
+
+
+def _evict_recall_resolver(root: Path) -> None:
+    _RECALL_RESOLVER_CACHE.pop(root, None)
+    _RECALL_RESOLVER_CHECKPOINTS.pop(root, None)
+
+
+def _evict_resolver(root: Path) -> None:
+    _RESOLVER_CACHE.pop(root, None)
+    _RESOLVER_CHECKPOINTS.pop(root, None)
 
 
 def _get_query_resolver(vault_root: Path, freshness: tuple | None = None):
@@ -3414,19 +3422,28 @@ def _get_query_resolver(vault_root: Path, freshness: tuple | None = None):
     query — the ~14s-per-query cost this used to pay on a large, actively-synced
     vault (every edit moved the freshness digest and invalidated this cache).
     """
+    from . import freshness as freshness_module
     from .vault import WikilinkResolver
 
+    root = Path(vault_root)
     if freshness is None:
-        freshness = FreshnessSnapshot(vault_root).vault()
-    cached = _RESOLVER_CACHE.get(vault_root)
+        freshness = FreshnessSnapshot(root).vault()
+    checkpoint = freshness_module.consumer_checkpoint(root, "vault")
+    if checkpoint.triple != freshness:
+        checkpoint = None
+    cached = _RESOLVER_CACHE.get(root)
     if cached and cached[0] == freshness:
         return cached[1]
     with _RESOLVER_LOCK:
-        cached = _RESOLVER_CACHE.get(vault_root)
+        cached = _RESOLVER_CACHE.get(root)
         if cached and cached[0] == freshness:
             return cached[1]
-        resolver = WikilinkResolver(vault_root)
-        _RESOLVER_CACHE[vault_root] = (freshness, resolver)
+        resolver = WikilinkResolver(root)
+        _RESOLVER_CACHE[root] = (freshness, resolver)
+        if checkpoint is not None:
+            _RESOLVER_CHECKPOINTS[root] = checkpoint
+        else:
+            _RESOLVER_CHECKPOINTS.pop(root, None)
     return resolver
 
 
@@ -3459,6 +3476,7 @@ def recall_resolver_snapshot(vault_root: Path, freshness: tuple | None = None):
     raw Records filename/stem/title can neither resolve a link nor collide with
     an ordinary note in the graph lane.
     """
+    from . import freshness as freshness_module
     from .vault import WikilinkResolver, walk_vault_md
 
     root = Path(vault_root)
@@ -3466,9 +3484,7 @@ def recall_resolver_snapshot(vault_root: Path, freshness: tuple | None = None):
     # must not pay another broad/event-registry walk just to warm this resolver.
     # The key remains distinct from the broad writer resolver by policy identity.
     freshness_key = (
-        freshness
-        if freshness is not None
-        else FreshnessSnapshot(root).projection_key("vault")
+        freshness if freshness is not None else FreshnessSnapshot(root).projection_key("vault")
     )
     policy_version, access_fingerprint = recall_policy.recall_policy_identity(root)
     if (
@@ -3483,6 +3499,11 @@ def recall_resolver_snapshot(vault_root: Path, freshness: tuple | None = None):
         identity = freshness_key
     else:
         identity = (freshness_key, policy_version, access_fingerprint)
+    checkpoint: freshness_module.RecallFreshnessCheckpoint | None = None
+    if freshness_module.recall_is_live(root, "vault"):
+        candidate = freshness_module.recall_checkpoint(root, "vault")
+        if identity == _recall_checkpoint_identity(candidate):
+            checkpoint = candidate
     with _RESOLVER_LOCK:
         cached = _RECALL_RESOLVER_CACHE.get(root)
         if cached and cached[0] == identity:
@@ -3502,6 +3523,10 @@ def recall_resolver_snapshot(vault_root: Path, freshness: tuple | None = None):
         # graph rebuild performs its stronger direct before/after proof around
         # sidecar publication.
         _RECALL_RESOLVER_CACHE[root] = (identity, resolver)
+        if checkpoint is not None:
+            _RECALL_RESOLVER_CHECKPOINTS[root] = checkpoint
+        else:
+            _RECALL_RESOLVER_CHECKPOINTS.pop(root, None)
     return resolver.fork()
 
 
@@ -3518,6 +3543,7 @@ def prime_resolver_from_entries(
     full vault read/YAML parse when post-commit graph fanout is the first caller
     to need the resolver.
     """
+    from . import freshness as freshness_module
     from .vault import WikilinkResolver
 
     root = Path(vault_root)
@@ -3532,6 +3558,11 @@ def prime_resolver_from_entries(
             return cached[1]
         resolver = WikilinkResolver.from_entries(root, entries)
         _RESOLVER_CACHE[root] = (current_freshness, resolver)
+        checkpoint = freshness_module.consumer_checkpoint(root, "vault")
+        if checkpoint.triple == current_freshness:
+            _RESOLVER_CHECKPOINTS[root] = checkpoint
+        else:
+            _RESOLVER_CHECKPOINTS.pop(root, None)
         return resolver
 
 
@@ -3560,22 +3591,106 @@ def writer_resolver_snapshot(
     return WikilinkResolver(root)
 
 
+def _patch_broad_resolver(
+    root: Path,
+    cached: tuple[tuple, object],
+) -> None:
+    """Advance a writer resolver from its exact retained event suffix, or evict."""
+    from . import vault as vault_module
+
+    checkpoint = _RESOLVER_CHECKPOINTS.get(root)
+    if checkpoint is None:
+        with _RESOLVER_LOCK:
+            if _RESOLVER_CACHE.get(root) == cached:
+                _evict_resolver(root)
+        return
+    delta = freshness.delta_since(root, "vault", checkpoint)
+    cached_identity, resolver = cached
+    if not delta.complete or cached_identity != checkpoint.triple:
+        with _RESOLVER_LOCK:
+            if _RESOLVER_CACHE.get(root) == cached:
+                _evict_resolver(root)
+        return
+
+    target_signatures = dict(delta.target_signatures)
+    entries: list[tuple[str, str | None]] = []
+    deleted_rels: list[str] = []
+    guards: list[tuple[Path, freshness.FileSignature, vault_module.PathGuard]] = []
+    root_absolute = root.absolute()
+    try:
+        for raw_path in delta.deleted:
+            deleted_rels.append(Path(raw_path).absolute().relative_to(root_absolute).as_posix())
+        for raw_path in delta.changed:
+            path = Path(raw_path)
+            rel = path.absolute().relative_to(root_absolute).as_posix()
+            expected = target_signatures.get(str(path))
+            if expected is None or freshness.stat_signature(path) != expected:
+                raise vault_module.PathGuardError(
+                    "PATH_GUARD_CHANGED", "writer resolver target changed"
+                )
+            text, guard = vault_module.read_guarded_text(root, path)
+            if freshness.stat_signature(path) != expected:
+                raise vault_module.PathGuardError(
+                    "PATH_GUARD_CHANGED", "writer resolver target changed"
+                )
+            frontmatter, body, _ = vault_module.parse_frontmatter(text)
+            entries.append((rel, vault_module.resolve_display_title(frontmatter, body, path)))
+            guards.append((path, expected, guard))
+    except (OSError, UnicodeDecodeError, ValueError, vault_module.PathGuardError):
+        with _RESOLVER_LOCK:
+            if _RESOLVER_CACHE.get(root) == cached:
+                _evict_resolver(root)
+        return
+
+    try:
+        for path, expected, guard in guards:
+            if freshness.stat_signature(path) != expected:
+                raise vault_module.PathGuardError(
+                    "PATH_GUARD_CHANGED", "writer resolver target changed"
+                )
+            guard.recheck(root)
+    except (OSError, vault_module.PathGuardError):
+        with _RESOLVER_LOCK:
+            if _RESOLVER_CACHE.get(root) == cached:
+                _evict_resolver(root)
+        return
+    current = freshness.delta_since(root, "vault", checkpoint)
+    if not current.complete or current.to != delta.to:
+        with _RESOLVER_LOCK:
+            if _RESOLVER_CACHE.get(root) == cached:
+                _evict_resolver(root)
+        return
+
+    try:
+        with _RESOLVER_LOCK:
+            if _RESOLVER_CACHE.get(root) != cached or _RESOLVER_CHECKPOINTS.get(root) != checkpoint:
+                return
+            resolver.on_entries_changed(entries, deleted_rels)
+            _RESOLVER_CACHE[root] = (delta.to.triple, resolver)
+            _RESOLVER_CHECKPOINTS[root] = delta.to
+    except Exception:  # noqa: BLE001 - a partial resolver must never publish.
+        with _RESOLVER_LOCK:
+            if _RESOLVER_CACHE.get(root) == cached:
+                _evict_resolver(root)
+
+
 def on_resolver_files_changed(
     vault_root: Path,
     changed_rels,
     deleted_rels,
 ) -> None:
-    """Patch the process-cached wikilink resolver for one batch of changes.
+    """Patch broad and ordinary-recall resolver caches for one event batch.
 
     This is the resolver's arm of the event-maintained index family (it sits
     beside `freshness.on_files_changed` and `vault.on_inbound_files_changed`,
     and the file watcher calls all three for the same batch). Mirrors the
     inbound index:
 
-    - **Live-only.** If no resolver is cached for this vault, this is a no-op —
-      the next `_get_query_resolver` builds one from current disk state, so
-      skipping here is correct, not just cheap. It only ever mutates an index
-      that already exists.
+    - **Live-only.** A resolver cache that has not been built remains absent;
+      its next caller builds from current disk state.
+    - **Recall admission first.** The projected resolver receives only changed
+      paths admitted by the Records/access policy. Suppressed paths are routed
+      as deletes, so their body and title never enter its maps.
     - **Re-syncs the freshness key.** After patching the maps in place it
       restamps the cache entry with the vault's current freshness triple, so
       the next graph-lane query sees a cache HIT instead of re-triggering a
@@ -3593,13 +3708,122 @@ def on_resolver_files_changed(
     deleted_list = list(deleted_rels)
     if not (changed_list or deleted_list):
         return
+    root = Path(vault_root)
     with _RESOLVER_LOCK:
-        cached = _RESOLVER_CACHE.get(vault_root)
-        if cached is None:
+        broad_cached = _RESOLVER_CACHE.get(root)
+        projected_cached = _RECALL_RESOLVER_CACHE.get(root)
+        if broad_cached is None and projected_cached is None:
             return
-        _, resolver = cached
-        resolver.on_files_changed(vault_root, changed_list, deleted_list)
-        _RESOLVER_CACHE[vault_root] = (FreshnessSnapshot(vault_root).vault(), resolver)
+
+    if broad_cached is not None:
+        _patch_broad_resolver(root, broad_cached)
+
+    if projected_cached is None:
+        return
+    from . import vault as vault_module
+
+    cached_identity, projected = projected_cached
+    checkpoint = _RECALL_RESOLVER_CHECKPOINTS.get(root)
+
+    # A supplied event batch can be incomplete or arrive out of order. Advance
+    # from the resolver's exact checkpoint instead of treating this callback's
+    # path list as authoritative. No checkpoint means the cache was built from
+    # a direct disk proof, so it cannot safely consume the live event suffix.
+    if checkpoint is None or not freshness.recall_is_live(root, "vault"):
+        with _RESOLVER_LOCK:
+            if _RECALL_RESOLVER_CACHE.get(root) == projected_cached:
+                _evict_recall_resolver(root)
+        return
+    delta = freshness.recall_delta_since(root, "vault", checkpoint)
+    if (
+        not delta.complete
+        or cached_identity != _recall_checkpoint_identity(checkpoint)
+        or delta.to.policy_version != checkpoint.policy_version
+        or delta.to.access_policy_fingerprint != checkpoint.access_policy_fingerprint
+    ):
+        with _RESOLVER_LOCK:
+            if _RECALL_RESOLVER_CACHE.get(root) == projected_cached:
+                _evict_recall_resolver(root)
+        return
+
+    target_signatures = dict(delta.target_signatures)
+    entries: list[tuple[str, str | None]] = []
+    projected_deleted_rels: list[str] = []
+    guards: list[tuple[Path, freshness.FileSignature, vault_module.PathGuard]] = []
+    root_absolute = root.absolute()
+    try:
+        for raw_path in delta.deleted:
+            projected_deleted_rels.append(
+                Path(raw_path).absolute().relative_to(root_absolute).as_posix()
+            )
+        for raw_path in delta.changed:
+            path = Path(raw_path)
+            rel = path.absolute().relative_to(root_absolute).as_posix()
+            expected = target_signatures.get(str(path))
+            if (
+                expected is None
+                or not recall_policy.is_recall_candidate(root, path)
+                or freshness.stat_signature(path) != expected
+            ):
+                raise vault_module.PathGuardError(
+                    "PATH_GUARD_CHANGED", "projected resolver target changed"
+                )
+            text, guard = vault_module.read_guarded_text(root, path)
+            if freshness.stat_signature(path) != expected:
+                raise vault_module.PathGuardError(
+                    "PATH_GUARD_CHANGED", "projected resolver target changed"
+                )
+            frontmatter, body, _ = vault_module.parse_frontmatter(text)
+            entries.append((rel, vault_module.resolve_display_title(frontmatter, body, path)))
+            guards.append((path, expected, guard))
+    except (OSError, UnicodeDecodeError, ValueError, vault_module.PathGuardError):
+        with _RESOLVER_LOCK:
+            if _RECALL_RESOLVER_CACHE.get(root) == projected_cached:
+                _evict_recall_resolver(root)
+        return
+
+    # Re-check every captured source and the event checkpoint immediately
+    # before publication. A direct edit or a newly published event must evict,
+    # never stamp newer bytes with this older target checkpoint.
+    try:
+        for path, expected, guard in guards:
+            if (
+                not recall_policy.is_recall_candidate(root, path)
+                or freshness.stat_signature(path) != expected
+            ):
+                raise vault_module.PathGuardError(
+                    "PATH_GUARD_CHANGED", "projected resolver target changed"
+                )
+            guard.recheck(root)
+    except (OSError, vault_module.PathGuardError):
+        with _RESOLVER_LOCK:
+            if _RECALL_RESOLVER_CACHE.get(root) == projected_cached:
+                _evict_recall_resolver(root)
+        return
+    current = freshness.recall_delta_since(root, "vault", checkpoint)
+    if not current.complete or current.to != delta.to:
+        with _RESOLVER_LOCK:
+            if _RECALL_RESOLVER_CACHE.get(root) == projected_cached:
+                _evict_recall_resolver(root)
+        return
+
+    try:
+        with _RESOLVER_LOCK:
+            if (
+                _RECALL_RESOLVER_CACHE.get(root) != projected_cached
+                or _RECALL_RESOLVER_CHECKPOINTS.get(root) != checkpoint
+            ):
+                return
+            projected.on_entries_changed(entries, projected_deleted_rels)
+            _RECALL_RESOLVER_CACHE[root] = (
+                _recall_checkpoint_identity(delta.to),
+                projected,
+            )
+            _RECALL_RESOLVER_CHECKPOINTS[root] = delta.to
+    except Exception:  # noqa: BLE001 - a partial resolver must never publish.
+        with _RESOLVER_LOCK:
+            if _RECALL_RESOLVER_CACHE.get(root) == projected_cached:
+                _evict_recall_resolver(root)
 
 
 def unload_ram_caches() -> dict[str, int]:
@@ -3610,10 +3834,22 @@ def unload_ram_caches() -> dict[str, int]:
         resolver_entries = len(_RESOLVER_CACHE) + len(_RECALL_RESOLVER_CACHE)
         _RESOLVER_CACHE.clear()
         _RECALL_RESOLVER_CACHE.clear()
+        _RESOLVER_CHECKPOINTS.clear()
+        _RECALL_RESOLVER_CHECKPOINTS.clear()
     with _FIND_CACHE_LOCK:
         hot_entries = len(_FIND_CACHE)
         _FIND_CACHE.clear()
     return {"pages": page_entries, "resolvers": resolver_entries, "hot_find": hot_entries}
+
+
+def evict_resolver_caches(vault_root: Path) -> int:
+    """Withdraw both resolver projections for one vault after an event gap."""
+    root = Path(vault_root)
+    with _RESOLVER_LOCK:
+        removed = int(root in _RESOLVER_CACHE) + int(root in _RECALL_RESOLVER_CACHE)
+        _evict_resolver(root)
+        _evict_recall_resolver(root)
+    return removed
 
 
 def reset_page_and_result_caches() -> dict[str, int]:

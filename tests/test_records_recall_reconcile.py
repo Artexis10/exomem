@@ -177,7 +177,15 @@ def test_watcher_raw_record_burst_does_not_consume_semantic_cap(
 
     watcher._dispatch_batch(paths, [path.relative_to(tmp_path).as_posix() for path in paths], [], cap=False)
 
-    assert calls == [(paths, {"defer_semantic": False})]
+    assert calls == [
+        (
+            paths,
+            {
+                "defer_semantic": False,
+                "publish_corpus_change": True,
+            },
+        )
+    ]
 
 
 def test_access_policy_transition_purges_stale_vector_row(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

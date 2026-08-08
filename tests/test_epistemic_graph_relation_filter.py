@@ -172,3 +172,46 @@ def test_deterministic_participants(tmp_path: Path) -> None:
     assert {k: v.counterpart for k, v in first.provenance.items()} == {
         k: v.counterpart for k, v in second.provenance.items()
     }
+
+
+def test_participant_validation_is_bounded_by_unique_endpoints(tmp_path: Path, monkeypatch) -> None:
+    """A dense relation filter revalidates each endpoint once, not per edge."""
+    vault = tmp_path / "vault"
+    rels = [
+        "Knowledge Base/Notes/Insights/endpoint-a.md",
+        "Knowledge Base/Notes/Insights/endpoint-b.md",
+        "Knowledge Base/Notes/Insights/endpoint-c.md",
+        "Knowledge Base/Notes/Insights/endpoint-d.md",
+    ]
+    _write(
+        vault,
+        rels[0],
+        "---\ntype: insight\n---\n# A\n\n## Relations\n\n"
+        "- supports [[Knowledge Base/Notes/Insights/endpoint-b]]\n"
+        "- supports [[Knowledge Base/Notes/Insights/endpoint-c]]\n"
+        "- supports [[Knowledge Base/Notes/Insights/endpoint-d]]\n",
+    )
+    _write(
+        vault,
+        rels[1],
+        "---\ntype: insight\n---\n# B\n\n## Relations\n\n"
+        "- supports [[Knowledge Base/Notes/Insights/endpoint-c]]\n"
+        "- supports [[Knowledge Base/Notes/Insights/endpoint-d]]\n",
+    )
+    _write(vault, rels[2], "---\ntype: insight\n---\n# C\n\nBody.\n")
+    _write(vault, rels[3], "---\ntype: insight\n---\n# D\n\nBody.\n")
+    idx = epistemic_graph.EpistemicGraphIndex(vault)
+    idx.rebuild_all()
+
+    original = epistemic_graph._recall_path_allowed
+    calls: list[str] = []
+
+    def _counting_allowed(root: Path, rel: str) -> bool:
+        calls.append(rel)
+        return original(root, rel)
+
+    monkeypatch.setattr(epistemic_graph, "_recall_path_allowed", _counting_allowed)
+
+    assert idx.relation_participants(["supports"]).paths == frozenset(rels)
+    assert set(calls) == set(rels)
+    assert len(calls) == len(rels)

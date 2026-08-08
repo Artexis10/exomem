@@ -28,6 +28,10 @@ For this first delivery, an explicit `records` manifest and every canonical sour
 - **WHEN** a valid manifest declares `semantic_profile: planning`
 - **THEN** the generic collection loader can inspect its identity, schema, storage, links, and views without treating its items as Records
 
+#### Scenario: Records operations do not mutate Planning
+- **WHEN** a Planning-profile manifest is supplied to the Records query, create, append, or update path
+- **THEN** the Records product boundary refuses the operation while the shared substrate remains available to the future Planning product
+
 #### Scenario: Unknown profile does not become Records
 - **WHEN** a manifest declares an unsupported semantic profile
 - **THEN** the substrate reports that profile as unsupported and does not silently apply Records semantics
@@ -188,3 +192,7 @@ Queries SHALL read current canonical files so ordinary editor and Obsidian chang
 #### Scenario: Inspect reports but does not repair canonical ambiguity
 - **WHEN** manual edits create duplicate item identities or ambiguous legacy keys
 - **THEN** `record_memory(action="inspect")` reports the exact issue and leaves canonical files untouched, while `maintain_memory` may repair only derived indexes
+
+#### Scenario: Inspect reports an undeclared manual field
+- **WHEN** a human adds a property that is not declared by the collection schema to an otherwise readable Record item
+- **THEN** inspection reports a schema violation without dropping, rewriting, or silently adopting the property

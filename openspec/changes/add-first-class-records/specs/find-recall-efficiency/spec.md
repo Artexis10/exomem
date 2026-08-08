@@ -38,7 +38,7 @@ Manual edits, moves, deletions, or recall-policy changes SHALL remove stale deri
 
 #### Scenario: Legacy tracker remains explicitly inspectable
 - **WHEN** a manifest-less legacy tracker falls under the structured-only Records path
-- **THEN** explicit Records discovery/inspection can still identify the tracker subject to governance even though ordinary semantic recall does not index its raw body
+- **THEN** explicit Records inspection by its supplied path can still identify the tracker subject to governance even though ordinary semantic recall does not index its raw body or enumerate legacy trackers
 
 #### Scenario: Embeddings-disabled cleanup still prunes vectors
 - **WHEN** a raw Record path has legacy vector rows and embeddings are disabled
@@ -54,6 +54,10 @@ Generic `kb` and `vault` freshness SHALL remain authoritative for resolver, inbo
 #### Scenario: Policy-version change converges without file edit
 - **WHEN** the recall policy version changes while canonical files remain unchanged
 - **THEN** lexical, vector, graph, claim, and related semantic sidecars detect identity drift and rebuild or prune to the new policy
+
+#### Scenario: Incremental sidecars advance through complete deltas
+- **WHEN** multiple recall-eligible files change before one resolver or graph callback runs
+- **THEN** the consumer applies the complete coalesced delta from its exact prior checkpoint before publishing the new checkpoint, and an incomplete or drifting delta leaves the sidecar unavailable or forces a safe rebuild rather than stamping unapplied state as current
 
 ### Requirement: Record query scale is explicitly bounded
 Structured Records query SHALL apply file-size, parsed-item, returned-row, aggregate-cardinality, and response-size bounds with pagination/snapshot metadata. Optional derived caching SHALL be soft-fail and rebuildable; no heavy resident database or model SHALL be required for correctness.

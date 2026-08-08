@@ -23,9 +23,11 @@ import pytest
 
 from exomem import edit as edit_module
 from exomem import find as find_module
+from exomem import freshness, index_sync
 from exomem import link as link_module
 from exomem import note as note_module
-from exomem.vault import WikilinkResolver
+from exomem import vault as vault_module
+from exomem.vault import WikilinkResolver, walk_vault_md
 
 
 @pytest.fixture
@@ -44,6 +46,11 @@ def build_counter(monkeypatch: pytest.MonkeyPatch) -> list[int]:
 
 def _warm_resolver(vault: Path) -> None:
     """Prime the shared cache the way a server request / warm-up does."""
+    freshness.seed(
+        vault,
+        "vault",
+        ((str(path), freshness.stat_signature(path)) for path in walk_vault_md(vault)),
+    )
     find_module._get_query_resolver(vault)
 
 
@@ -103,6 +110,50 @@ def test_link_reuses_cached_resolver(vault: Path, build_counter: list[int]) -> N
     assert len(build_counter) == warm_builds, (
         "link() rebuilt the WikilinkResolver instead of reusing the shared cache"
     )
+
+
+def test_index_sync_publishes_title_update_before_writer_resolver_fanout(
+    vault: Path,
+) -> None:
+    target = vault / "Knowledge Base" / "Notes" / "Insights" / "target.md"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("---\ntitle: Old target\n---\n# Old target\n", encoding="utf-8")
+    _warm_resolver(vault)
+
+    target.write_text(
+        "---\ntitle: New target\n---\n# New target\n\nChanged.\n",
+        encoding="utf-8",
+    )
+    index_sync.upsert_after_write(vault, [target])
+
+    resolver = find_module.writer_resolver_snapshot(vault)
+    resolved, warning = vault_module.normalize_wikilink(
+        "New target", vault, resolver=resolver, strict=False
+    )
+    assert warning is None
+    assert resolved == "Knowledge Base/Notes/Insights/target"
+    old, old_warning = vault_module.normalize_wikilink(
+        "Old target", vault, resolver=resolver, strict=False
+    )
+    assert old == "Old target"
+    assert old_warning is not None
+
+
+def test_index_sync_publishes_delete_before_writer_resolver_fanout(vault: Path) -> None:
+    target = vault / "Knowledge Base" / "Notes" / "Insights" / "target.md"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("# Target\n", encoding="utf-8")
+    _warm_resolver(vault)
+
+    target.unlink()
+    index_sync.delete_after_remove(vault, ["Knowledge Base/Notes/Insights/target.md"])
+
+    resolver = find_module.writer_resolver_snapshot(vault)
+    resolved, warning = vault_module.normalize_wikilink(
+        "Target", vault, resolver=resolver, strict=False
+    )
+    assert resolved == "Target"
+    assert warning is not None
 
 
 def test_failed_note_write_purges_pending_resolver_entry(

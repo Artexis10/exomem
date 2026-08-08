@@ -111,6 +111,26 @@ def test_neighbors_for_is_deterministic(tmp_path: Path) -> None:
     ]
 
 
+def test_neighbors_validation_is_bounded_by_unique_endpoints(tmp_path: Path, monkeypatch) -> None:
+    vault = tmp_path / "vault"
+    _seed(vault)
+    idx = epistemic_graph.EpistemicGraphIndex(vault)
+    idx.rebuild_all()
+
+    original = epistemic_graph._recall_path_allowed
+    calls: list[str] = []
+
+    def _counting_allowed(root: Path, rel: str) -> bool:
+        calls.append(rel)
+        return original(root, rel)
+
+    monkeypatch.setattr(epistemic_graph, "_recall_path_allowed", _counting_allowed)
+
+    assert idx.neighbors_for([SEED])
+    assert set(calls) == {SEED, TARGET, LINKED, INBOUND}
+    assert len(calls) == 4
+
+
 def test_neighbors_for_empty_when_unavailable(tmp_path: Path, monkeypatch) -> None:
     vault = tmp_path / "vault"
     _seed(vault)

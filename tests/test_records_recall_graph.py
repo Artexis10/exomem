@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from exomem import context_pack, epistemic_graph, find_candidates
+from exomem import context_pack, epistemic_graph, find_candidates, freshness
 from exomem import find as find_module
 from exomem import vault as vault_module
 
@@ -146,6 +146,205 @@ def test_default_recall_resolver_cache_ignores_raw_record_edits(tmp_path: Path) 
     assert find_module._RECALL_RESOLVER_CACHE[vault][0] == first_identity
 
 
+def test_writer_resolver_coalesces_renamed_target_before_delayed_callback(
+    tmp_path: Path,
+) -> None:
+    vault = tmp_path / "vault"
+    source = _write(vault, "Knowledge Base/Notes/A.md", "# A\n\n[[Old B]]\n")
+    target = _write(vault, "Knowledge Base/Notes/B.md", "# Old B\n")
+    freshness.seed(
+        vault,
+        "vault",
+        (
+            (str(path), freshness.stat_signature(path))
+            for path in vault_module.walk_vault_md(vault)
+        ),
+    )
+    kb = vault / "Knowledge Base"
+    freshness.seed(
+        vault,
+        "kb",
+        (
+            (str(path), freshness.stat_signature(path))
+            for path in find_module._walk_md(kb)
+        ),
+    )
+    find_module._RESOLVER_CACHE.clear()
+    find_module.shared_resolver(vault)
+
+    source.write_text("# A\n\n[[New B]]\n\nChanged.\n", encoding="utf-8")
+    target.write_text("# New B\n\nChanged.\n", encoding="utf-8")
+    freshness.on_files_changed(vault, changed=[source])
+    freshness.on_files_changed(vault, changed=[target])
+    find_module.on_resolver_files_changed(vault, ["Knowledge Base/Notes/A.md"], [])
+
+    resolver = find_module.writer_resolver_snapshot(vault)
+    resolved, warning = vault_module.normalize_wikilink(
+        "New B", vault, resolver=resolver, strict=False
+    )
+    assert warning is None
+    assert resolved == "Knowledge Base/Notes/B"
+    old, old_warning = vault_module.normalize_wikilink(
+        "Old B", vault, resolver=resolver, strict=False
+    )
+    assert old == "Old B"
+    assert old_warning is not None
+
+    find_module.on_resolver_files_changed(vault, ["Knowledge Base/Notes/B.md"], [])
+    delayed = find_module.writer_resolver_snapshot(vault)
+    delayed_resolved, delayed_warning = vault_module.normalize_wikilink(
+        "New B", vault, resolver=delayed, strict=False
+    )
+    assert delayed_warning is None
+    assert delayed_resolved == "Knowledge Base/Notes/B"
+
+
+def test_live_recall_resolver_cache_is_patched_without_admitting_raw_records(
+    tmp_path: Path,
+) -> None:
+    vault = tmp_path / "vault"
+    visible = _write(
+        vault,
+        "Knowledge Base/Notes/Visible.md",
+        "---\ntitle: Old visible title\n---\n# Visible\n",
+    )
+    raw = _write(
+        vault,
+        "Knowledge Base/Records/Health/private.md",
+        "---\ntitle: Private title\n---\n# Private\n",
+    )
+    freshness.seed(
+        vault,
+        "vault",
+        (
+            (str(path), freshness.stat_signature(path))
+            for path in vault_module.walk_vault_md(vault)
+        ),
+    )
+    kb = vault / "Knowledge Base"
+    freshness.seed(
+        vault,
+        "kb",
+        (
+            (str(path), freshness.stat_signature(path))
+            for path in find_module._walk_md(kb)
+        ),
+    )
+    find_module._RECALL_RESOLVER_CACHE.clear()
+    find_module.recall_resolver_snapshot(vault)
+    cached = find_module._RECALL_RESOLVER_CACHE[vault][1]
+
+    visible.write_text(
+        "---\ntitle: Replacement visible title\n---\n# Visible\n", encoding="utf-8"
+    )
+    raw.write_text(
+        "---\ntitle: Leaking private title\n---\n# Private\n", encoding="utf-8"
+    )
+    freshness.on_files_changed(vault, changed=[visible, raw])
+    find_module.on_resolver_files_changed(
+        vault,
+        [
+            visible.relative_to(vault).as_posix(),
+            raw.relative_to(vault).as_posix(),
+        ],
+        [],
+    )
+
+    assert find_module._RECALL_RESOLVER_CACHE[vault][1] is cached
+    assert find_module._RECALL_RESOLVER_CACHE[vault][0] == find_module.FreshnessSnapshot(
+        vault
+    ).projection_key("vault")
+    assert "replacement visible title" in cached.titles
+    resolver = find_module.recall_resolver_snapshot(vault)
+    resolved, warning = vault_module.normalize_wikilink(
+        "Replacement visible title", vault, resolver=resolver, strict=False
+    )
+    assert warning is None
+    assert resolved == "Knowledge Base/Notes/Visible"
+    private, private_warning = vault_module.normalize_wikilink(
+        "Leaking private title", vault, resolver=resolver, strict=False
+    )
+    assert private_warning is not None
+    assert private == "Leaking private title"
+
+
+def test_live_recall_resolver_coalesces_an_absolute_deleted_path(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    _write(vault, "Knowledge Base/Notes/Visible.md", "# Visible\n")
+    target = _write(vault, "Knowledge Base/Notes/Target.md", "# Target\n")
+    freshness.seed(
+        vault,
+        "vault",
+        (
+            (str(path), freshness.stat_signature(path))
+            for path in vault_module.walk_vault_md(vault)
+        ),
+    )
+    kb = vault / "Knowledge Base"
+    freshness.seed(
+        vault,
+        "kb",
+        (
+            (str(path), freshness.stat_signature(path))
+            for path in find_module._walk_md(kb)
+        ),
+    )
+    find_module._RECALL_RESOLVER_CACHE.clear()
+    find_module.recall_resolver_snapshot(vault)
+
+    target.unlink()
+    freshness.on_files_changed(vault, deleted=[target])
+    # A delayed/unrelated callback must still consume the projected delete.
+    find_module.on_resolver_files_changed(vault, ["Knowledge Base/Notes/Visible.md"], [])
+
+    resolver = find_module.recall_resolver_snapshot(vault)
+    resolved, warning = vault_module.normalize_wikilink(
+        "Target", vault, resolver=resolver, strict=False
+    )
+    assert resolved == "Target"
+    assert warning is not None
+
+
+def test_recall_resolver_policy_change_evicts_instead_of_path_patching(
+    tmp_path: Path,
+) -> None:
+    vault = tmp_path / "vault"
+    _write(vault, "Knowledge Base/Notes/Visible.md", "# Visible\n")
+    freshness.seed(
+        vault,
+        "vault",
+        (
+            (str(path), freshness.stat_signature(path))
+            for path in vault_module.walk_vault_md(vault)
+        ),
+    )
+    kb = vault / "Knowledge Base"
+    freshness.seed(
+        vault,
+        "kb",
+        (
+            (str(path), freshness.stat_signature(path))
+            for path in find_module._walk_md(kb)
+        ),
+    )
+    find_module._RECALL_RESOLVER_CACHE.clear()
+    find_module.recall_resolver_snapshot(vault)
+
+    (kb / "_access.yaml").write_text("excluded:\n  - Notes\n", encoding="utf-8")
+    find_module.on_resolver_files_changed(
+        vault, ["Knowledge Base/_access.yaml"], []
+    )
+
+    assert vault not in find_module._RECALL_RESOLVER_CACHE
+    assert vault not in find_module._RECALL_RESOLVER_CHECKPOINTS
+    rebuilt = find_module.recall_resolver_snapshot(vault)
+    resolved, warning = vault_module.normalize_wikilink(
+        "Visible", vault, resolver=rebuilt, strict=False
+    )
+    assert warning is not None
+    assert resolved == "Visible"
+
+
 def test_projected_resolver_participates_in_ram_cache_unload(tmp_path: Path) -> None:
     vault = tmp_path / "vault"
     _write(vault, "Knowledge Base/Notes/Visible.md", "# Visible\n")
@@ -156,6 +355,7 @@ def test_projected_resolver_participates_in_ram_cache_unload(tmp_path: Path) -> 
 
     assert unloaded["resolvers"] >= 1
     assert find_module._RECALL_RESOLVER_CACHE == {}
+    assert find_module._RECALL_RESOLVER_CHECKPOINTS == {}
 
 
 def test_context_neighborhood_drops_raw_record_inbound_link(tmp_path: Path) -> None:

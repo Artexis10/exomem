@@ -17,10 +17,11 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from . import find as find_module
 from . import (
+    freshness,
     memory_refs,
     mutation_lock,
     recall_policy,
@@ -44,8 +45,10 @@ REBUILD_STABILIZATION_ATTEMPTS = 2
 GRAPH_MUTATION_TIMEOUT_SECONDS = 30.0
 GRAPH_COORDINATION_DIRNAME = ".graph-coordination"
 _AVAILABILITY_FRESHNESS_KEY = "recall_projection_identity"
+_RECALL_CHECKPOINT_KEY = "recall_projection_checkpoint"
 
 RELATION_TYPES: frozenset[str] = relation_registry.core_registry().keys
+
 
 @dataclass(frozen=True)
 class GraphNode:
@@ -181,9 +184,7 @@ def _disk_vault_freshness(vault_root: Path) -> tuple[int, int, str]:
     filesystem proof needed when watcher events are missed.
     """
     return find_module._walk_freshness_key(
-        recall_policy.iter_recall_markdown(
-            vault_root, vault_module.walk_vault_md(vault_root)
-        )
+        recall_policy.iter_recall_markdown(vault_root, vault_module.walk_vault_md(vault_root))
     )
 
 
@@ -201,10 +202,53 @@ def _recall_projection_identity(
     return disk_freshness, policy_version, access_fingerprint
 
 
+def _incremental_projection_identity(
+    vault_root: Path,
+) -> tuple[tuple[int, int, str], str, str]:
+    """Current event-maintained recall projection, with a cold-walk fallback.
+
+    Canonical writers and the watcher publish their exact path delta before
+    index fan-out. Reusing that checkpoint keeps a one-file graph refresh
+    proportional to the changed batch; a process without a live registry still
+    gets the direct projected walk from ``FreshnessSnapshot``.
+    """
+    identity = find_module.FreshnessSnapshot(vault_root).projection_key("vault")
+    return cast(tuple[tuple[int, int, str], str, str], identity)
+
+
 def _availability_freshness_value(
     identity: tuple[tuple[int, int, str], str, str],
 ) -> str:
     return json.dumps(identity, separators=(",", ":"))
+
+
+def _checkpoint_value(checkpoint: freshness.RecallFreshnessCheckpoint) -> str:
+    return json.dumps(tuple(checkpoint), separators=(",", ":"))
+
+
+def _checkpoint_from_value(value: str | None) -> freshness.RecallFreshnessCheckpoint | None:
+    if value is None:
+        return None
+    try:
+        instance_id, generation, triple, policy_version, access_fingerprint = json.loads(value)
+        if (
+            not isinstance(instance_id, str)
+            or not isinstance(generation, int)
+            or not isinstance(triple, list)
+            or len(triple) != 3
+            or not isinstance(policy_version, str)
+            or not isinstance(access_fingerprint, str)
+        ):
+            return None
+        return freshness.RecallFreshnessCheckpoint(
+            instance_id,
+            generation,
+            (int(triple[0]), int(triple[1]), str(triple[2])),
+            policy_version,
+            access_fingerprint,
+        )
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
 
 
 def _vault_rel(vault_root: Path, path: Path | str) -> str | None:
@@ -262,14 +306,10 @@ class EpistemicGraphIndex:
             embeddings._apply_sidecar_pragmas(conn)
         except Exception:  # noqa: BLE001 - sidecar pragmas are best-effort
             pass
-        edge_columns = {
-            row[1] for row in conn.execute("PRAGMA table_info(graph_edges)").fetchall()
-        }
+        edge_columns = {row[1] for row in conn.execute("PRAGMA table_info(graph_edges)").fetchall()}
         if edge_columns and "raw_relation" not in edge_columns:
             conn.execute("DROP TABLE graph_edges")
-        node_columns = {
-            row[1] for row in conn.execute("PRAGMA table_info(graph_nodes)").fetchall()
-        }
+        node_columns = {row[1] for row in conn.execute("PRAGMA table_info(graph_nodes)").fetchall()}
         required_unit_columns = {"unit_ref", "unit_category", "unit_kind"}
         if node_columns and not required_unit_columns <= node_columns:
             conn.execute("DROP TABLE graph_nodes")
@@ -301,9 +341,7 @@ class EpistemicGraphIndex:
             )
         """)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_graph_nodes_path ON graph_nodes(path)")
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_graph_nodes_unit_ref ON graph_nodes(unit_ref)"
-        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_graph_nodes_unit_ref ON graph_nodes(unit_ref)")
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_graph_nodes_unit_category_kind "
             "ON graph_nodes(unit_category, unit_kind, kind, path, node_key)"
@@ -341,8 +379,16 @@ class EpistemicGraphIndex:
         conn.close()
         return True
 
-    def _open_read_snapshot(self) -> sqlite3.Connection | None:
-        """Open one validated read transaction without creating or migrating schema."""
+    def _open_read_snapshot(
+        self, *, require_current_projection: bool = True
+    ) -> sqlite3.Connection | None:
+        """Open one validated read transaction without creating or migrating schema.
+
+        Public readers require the stored graph projection to match the current
+        event-maintained (or cold-walk) projection. Incremental maintenance may
+        open a structurally current but freshness-stale sidecar specifically to
+        advance it to the already-published event checkpoint.
+        """
         if not graph_enabled() or not self.path.exists():
             return None
         conn: sqlite3.Connection | None = None
@@ -356,7 +402,7 @@ class EpistemicGraphIndex:
                     "SELECT key, value FROM graph_meta WHERE key IN "
                     "('schema_version', 'core_registry_version', 'extension_registry_hash', "
                     "'recall_policy_version', 'recall_access_fingerprint', "
-                    "'recall_projection_identity')"
+                    "'recall_projection_identity', 'recall_projection_checkpoint')"
                 ).fetchall()
             )
         except sqlite3.Error:
@@ -364,13 +410,31 @@ class EpistemicGraphIndex:
                 conn.close()
             return None
         policy_version, access_fingerprint = recall_policy.recall_policy_identity(self.vault_root)
+        stored_projection = values.get(_AVAILABILITY_FRESHNESS_KEY)
+        stored_checkpoint_value = values.get(_RECALL_CHECKPOINT_KEY)
+        stored_checkpoint = _checkpoint_from_value(stored_checkpoint_value)
         current = (
             values.get("schema_version") == str(SCHEMA_VERSION)
             and values.get("core_registry_version") == str(self.registry.core_version)
             and values.get("extension_registry_hash") == self.registry.extension_hash
             and values.get("recall_policy_version") == policy_version
             and values.get("recall_access_fingerprint") == access_fingerprint
+            and stored_projection is not None
+            # A present-but-corrupt checkpoint must fail closed.  No checkpoint
+            # is valid for a sidecar published from a direct-disk rebuild while
+            # the event registry was cold or known stale.
+            and (stored_checkpoint_value is None or stored_checkpoint is not None)
         )
+        if current and require_current_projection:
+            current_identity = (
+                _incremental_projection_identity(self.vault_root)
+                if stored_checkpoint is not None
+                else _recall_projection_identity(
+                    self.vault_root,
+                    disk_freshness=_disk_vault_freshness(self.vault_root),
+                )
+            )
+            current = stored_projection == _availability_freshness_value(current_identity)
         if not current:
             conn.close()
             return None
@@ -393,25 +457,45 @@ class EpistemicGraphIndex:
         try:
             for _attempt in range(REBUILD_STABILIZATION_ATTEMPTS):
                 before_disk = _disk_vault_freshness(self.vault_root)
-                before = _recall_projection_identity(
-                    self.vault_root, disk_freshness=before_disk
-                )
+                before = _recall_projection_identity(self.vault_root, disk_freshness=before_disk)
                 resolver = find_module.recall_resolver_snapshot(
                     self.vault_root, freshness=before_disk
                 )
                 pass_started = True
                 report = self._rebuild_all_pass(resolver)
                 after_disk = _disk_vault_freshness(self.vault_root)
-                if _recall_projection_identity(
-                    self.vault_root, disk_freshness=after_disk
-                ) == before:
-                    if self._mark_available(before):
+                if (
+                    _recall_projection_identity(self.vault_root, disk_freshness=after_disk)
+                    == before
+                ):
+                    live_checkpoint = (
+                        freshness.recall_checkpoint(self.vault_root, "vault")
+                        if freshness.recall_is_live(self.vault_root, "vault")
+                        else None
+                    )
+                    checkpoint = (
+                        live_checkpoint
+                        if live_checkpoint is not None
+                        and _availability_freshness_value(before)
+                        == _availability_freshness_value(
+                            (
+                                live_checkpoint.triple,
+                                live_checkpoint.policy_version,
+                                live_checkpoint.access_policy_fingerprint,
+                            )
+                        )
+                        else None
+                    )
+                    # A stable direct-disk rebuild remains authoritative even
+                    # when a watcher registry missed the edit that triggered
+                    # it.  Publishing without an event checkpoint makes public
+                    # reads re-prove disk identity and makes the next live
+                    # incremental refresh rebuild rather than bridge a gap.
+                    if self._mark_available(before, checkpoint=checkpoint):
                         stable = True
                         return report
                     self._mark_unavailable()
-            raise RuntimeError(
-                "epistemic graph rebuild did not stabilize after 2 attempts"
-            )
+            raise RuntimeError("epistemic graph rebuild did not stabilize after 2 attempts")
         finally:
             if pass_started and not stable:
                 self._mark_unavailable()
@@ -426,12 +510,14 @@ class EpistemicGraphIndex:
                 conn.execute("DELETE FROM graph_edges")
                 conn.execute("DELETE FROM graph_nodes")
                 conn.execute("DELETE FROM graph_parent_refs")
-                conn.execute(
-                    "DELETE FROM graph_meta WHERE key = 'schema_version'"
-                )
+                conn.execute("DELETE FROM graph_meta WHERE key = 'schema_version'")
                 conn.execute(
                     "DELETE FROM graph_meta WHERE key = ?",
                     (_AVAILABILITY_FRESHNESS_KEY,),
+                )
+                conn.execute(
+                    "DELETE FROM graph_meta WHERE key = ?",
+                    (_RECALL_CHECKPOINT_KEY,),
                 )
                 conn.execute(
                     "INSERT OR REPLACE INTO graph_meta(key, value) VALUES (?, ?)",
@@ -485,19 +571,24 @@ class EpistemicGraphIndex:
         conn = sqlite3.connect(self.path)
         try:
             with conn:
-                conn.execute(
-                    "DELETE FROM graph_meta WHERE key = 'schema_version'"
-                )
+                conn.execute("DELETE FROM graph_meta WHERE key = 'schema_version'")
                 conn.execute(
                     "DELETE FROM graph_meta WHERE key = ?",
                     (_AVAILABILITY_FRESHNESS_KEY,),
                 )
+                conn.execute(
+                    "DELETE FROM graph_meta WHERE key = ?",
+                    (_RECALL_CHECKPOINT_KEY,),
+                )
         finally:
             conn.close()
 
-    def _mark_available(
-        self, identity: tuple[tuple[int, int, str], str, str]
-    ) -> bool:
+    def _publish_available_marker(
+        self,
+        identity: tuple[tuple[int, int, str], str, str],
+        *,
+        checkpoint: freshness.RecallFreshnessCheckpoint | None = None,
+    ) -> None:
         conn = sqlite3.connect(self.path)
         try:
             with conn:
@@ -509,12 +600,107 @@ class EpistemicGraphIndex:
                     "INSERT OR REPLACE INTO graph_meta(key, value) VALUES (?, ?)",
                     ("schema_version", str(SCHEMA_VERSION)),
                 )
+                if checkpoint is None:
+                    conn.execute(
+                        "DELETE FROM graph_meta WHERE key = ?",
+                        (_RECALL_CHECKPOINT_KEY,),
+                    )
+                else:
+                    conn.execute(
+                        "INSERT OR REPLACE INTO graph_meta(key, value) VALUES (?, ?)",
+                        (_RECALL_CHECKPOINT_KEY, _checkpoint_value(checkpoint)),
+                    )
         finally:
             conn.close()
-        return _recall_projection_identity(
-            self.vault_root,
-            disk_freshness=_disk_vault_freshness(self.vault_root),
-        ) == identity
+
+    def _mark_available(
+        self,
+        identity: tuple[tuple[int, int, str], str, str],
+        *,
+        checkpoint: freshness.RecallFreshnessCheckpoint | None = None,
+    ) -> bool:
+        self._publish_available_marker(identity, checkpoint=checkpoint)
+        return (
+            _recall_projection_identity(
+                self.vault_root,
+                disk_freshness=_disk_vault_freshness(self.vault_root),
+            )
+            == identity
+        )
+
+    def _mark_incremental_available(
+        self,
+        identity: tuple[tuple[int, int, str], str, str],
+        *,
+        checkpoint: freshness.RecallFreshnessCheckpoint | None = None,
+    ) -> bool:
+        self._publish_available_marker(identity, checkpoint=checkpoint)
+        if _incremental_projection_identity(self.vault_root) != identity:
+            return False
+        return (
+            checkpoint is None
+            or freshness.recall_checkpoint(self.vault_root, "vault") == checkpoint
+        )
+
+    def _stored_recall_checkpoint(
+        self, conn: sqlite3.Connection
+    ) -> freshness.RecallFreshnessCheckpoint | None:
+        row = conn.execute(
+            "SELECT value FROM graph_meta WHERE key = ?", (_RECALL_CHECKPOINT_KEY,)
+        ).fetchone()
+        return _checkpoint_from_value(str(row[0])) if row is not None else None
+
+    def _delta_target_still_current(self, delta: freshness.RecallDelta) -> bool:
+        """Prove files parsed for a bounded refresh still name ``delta.to``."""
+        if freshness.recall_checkpoint(self.vault_root, "vault") != delta.to:
+            return False
+        expected = dict(delta.target_signatures)
+        if set(expected) != set(delta.changed):
+            return False
+        for raw_path, signature in expected.items():
+            path = Path(raw_path)
+            if not recall_policy.is_recall_candidate(self.vault_root, path):
+                return False
+            try:
+                if freshness.stat_signature(path) != tuple(signature):
+                    return False
+            except OSError:
+                return False
+        for raw_path in delta.deleted:
+            path = Path(raw_path)
+            if path.exists() and recall_policy.is_recall_candidate(self.vault_root, path):
+                return False
+        return freshness.recall_checkpoint(self.vault_root, "vault") == delta.to
+
+    def _stored_resolver_title_keys(
+        self,
+        conn: sqlite3.Connection,
+        delta: freshness.RecallDelta,
+    ) -> dict[str, str | None] | None:
+        """Capture old resolver titles, or refuse a bounded source refresh.
+
+        A bounded source refresh is valid for body-only edits. Adds, deletes,
+        non-KB target changes, and title changes can alter resolution of links
+        in otherwise untouched KB sources, so they require whole-graph
+        reresolution before the global checkpoint may advance.
+        """
+        if delta.deleted:
+            return None
+        titles: dict[str, str | None] = {}
+        for raw_path in delta.changed:
+            rel = _vault_rel(self.vault_root, Path(raw_path))
+            if rel is None or not rel.startswith(kb_prefix()):
+                return None
+            row = conn.execute(
+                "SELECT title FROM graph_nodes WHERE node_key = ? AND kind = 'file'",
+                (_file_key(rel),),
+            ).fetchone()
+            if row is None:
+                return None
+            titles[rel] = (
+                str(row[0]).strip().lower() if row[0] is not None and str(row[0]).strip() else None
+            )
+        return titles
 
     def refresh_paths(self, paths: list[Path]) -> dict[str, int]:
         if not graph_enabled():
@@ -542,46 +728,76 @@ class EpistemicGraphIndex:
             return self._refresh_paths_locked(paths)
 
     def _refresh_paths_locked(self, paths: list[Path]) -> dict[str, int]:
-        snapshot = self._open_read_snapshot()
+        snapshot = self._open_read_snapshot(require_current_projection=False)
         if snapshot is None:
             return self._rebuild_all_locked()
+        stored_checkpoint = self._stored_recall_checkpoint(snapshot)
+        if stored_checkpoint is None or not freshness.recall_is_live(self.vault_root, "vault"):
+            snapshot.close()
+            return self._rebuild_all_locked()
+        delta = freshness.recall_delta_since(self.vault_root, "vault", stored_checkpoint)
+        if not delta.complete:
+            snapshot.close()
+            self._mark_unavailable()
+            return self._rebuild_all_locked()
+        checkpoint = delta.to
+        before = (
+            checkpoint.triple,
+            checkpoint.policy_version,
+            checkpoint.access_policy_fingerprint,
+        )
+        if not self._delta_target_still_current(delta):
+            snapshot.close()
+            self._mark_unavailable()
+            return self._rebuild_all_locked()
+        stored_titles = self._stored_resolver_title_keys(snapshot, delta)
         snapshot.close()
+        if stored_titles is None:
+            self._mark_unavailable()
+            return self._rebuild_all_locked()
+        resolver = find_module.recall_resolver_snapshot(self.vault_root, freshness=before)
+        if any(
+            resolver.title_key_for_path(rel) != old_title
+            for rel, old_title in stored_titles.items()
+        ):
+            self._mark_unavailable()
+            return self._rebuild_all_locked()
+
+        delta_paths = set(delta.changed | delta.deleted)
+        # Caller paths outside the exact retained suffix mean publication was
+        # skipped, failed, or this is a duplicate callback whose global safety
+        # cannot be proved path-locally. Rebuild from disk instead of blessing
+        # the event checkpoint.
+        if any(str(path) not in delta_paths for path in paths):
+            self._mark_unavailable()
+            return self._rebuild_all_locked()
+
         pass_started = False
         stable = False
-        withdrawn_for_retry = False
         try:
-            for _attempt in range(REBUILD_STABILIZATION_ATTEMPTS):
-                before_disk = _disk_vault_freshness(self.vault_root)
-                before = _recall_projection_identity(
-                    self.vault_root, disk_freshness=before_disk
-                )
-                resolver = find_module.recall_resolver_snapshot(
-                    self.vault_root, freshness=before_disk
-                )
-                pass_started = True
-                report = self._refresh_paths_pass(paths, resolver=resolver)
-                after_disk = _disk_vault_freshness(self.vault_root)
-                if _recall_projection_identity(
-                    self.vault_root, disk_freshness=after_disk
-                ) != before:
-                    self._mark_unavailable()
-                    withdrawn_for_retry = True
-                    continue
-                publication = self._open_read_snapshot()
-                if publication is None and not withdrawn_for_retry:
-                    return report
-                if publication is not None:
-                    publication.close()
-                if self._mark_available(before):
-                    stable = True
-                    return report
-                self._mark_unavailable()
-            raise RuntimeError(
-                "epistemic graph refresh did not stabilize after 2 attempts"
+            pass_started = True
+            report = self._refresh_paths_pass(
+                [Path(path) for path in sorted(delta_paths)],
+                resolver=resolver,
             )
+            publication = self._open_read_snapshot(require_current_projection=False)
+            if publication is None:
+                # A competing/failed rebuild withdrew the sidecar after this
+                # refresh was admitted. This older bounded pass may not restore
+                # availability over that newer withdrawal.
+                return report
+            publication.close()
+            if (
+                _incremental_projection_identity(self.vault_root) == before
+                and self._delta_target_still_current(delta)
+                and self._mark_incremental_available(before, checkpoint=checkpoint)
+            ):
+                stable = True
+                return report
         finally:
             if pass_started and not stable:
                 self._mark_unavailable()
+        return self._rebuild_all_locked()
 
     def _refresh_paths_pass(
         self, paths: list[Path], *, resolver: vault_module.WikilinkResolver
@@ -771,9 +987,7 @@ class EpistemicGraphIndex:
         document = state.document
         file_node = _file_node(page, raw)
         unit_nodes = [
-            _unit_node(page, unit, state)
-            for unit in document.units
-            if unit.unit_ref is not None
+            _unit_node(page, unit, state) for unit in document.units if unit.unit_ref is not None
         ]
         edges = _edges_for_page(
             self.vault_root,
@@ -795,9 +1009,8 @@ class EpistemicGraphIndex:
             except (OSError, UnicodeDecodeError):
                 self._delete_path(conn, rel)
                 return False
-            if (
-                current_signature != source_signature
-                or not recall_policy.is_recall_candidate(self.vault_root, path)
+            if current_signature != source_signature or not recall_policy.is_recall_candidate(
+                self.vault_root, path
             ):
                 self._delete_path(conn, rel)
                 return False
@@ -825,8 +1038,7 @@ class EpistemicGraphIndex:
                 _insert_node(conn, node)
             if document.parent_ref is not None:
                 conn.execute(
-                    "INSERT OR REPLACE INTO graph_parent_refs(path, parent_ref) "
-                    "VALUES (?, ?)",
+                    "INSERT OR REPLACE INTO graph_parent_refs(path, parent_ref) VALUES (?, ?)",
                     (rel, document.parent_ref),
                 )
             for edge in edges:
@@ -837,8 +1049,7 @@ class EpistemicGraphIndex:
     def _delete_path(self, conn: sqlite3.Connection, rel_path: str) -> int:
         with conn:
             conn.execute(
-                "DELETE FROM graph_edges WHERE source_path = ? "
-                "OR src_key = ? OR dst_key = ?",
+                "DELETE FROM graph_edges WHERE source_path = ? OR src_key = ? OR dst_key = ?",
                 (rel_path, _file_key(rel_path), _file_key(rel_path)),
             )
             cur = conn.execute("DELETE FROM graph_nodes WHERE path = ?", (rel_path,))
@@ -868,10 +1079,19 @@ class EpistemicGraphIndex:
         """
         if not seeds:
             return []
+        allowed_paths: dict[str, bool] = {}
+
+        def _path_allowed(rel_path: str) -> bool:
+            allowed = allowed_paths.get(rel_path)
+            if allowed is None:
+                allowed = _recall_path_allowed(self.vault_root, rel_path)
+                allowed_paths[rel_path] = allowed
+            return allowed
+
         seed_order: dict[str, int] = {}
         for i, seed in enumerate(seeds):
             rel = _with_md(seed)
-            if not _recall_path_allowed(self.vault_root, rel):
+            if not _path_allowed(rel):
                 continue
             if rel not in seed_order:
                 seed_order[rel] = i
@@ -913,8 +1133,8 @@ class EpistemicGraphIndex:
                 if (
                     seed_rel is None
                     or other_path == seed_rel
-                    or not _recall_path_allowed(self.vault_root, seed_rel)
-                    or not _recall_path_allowed(self.vault_root, str(other_path))
+                    or not _path_allowed(seed_rel)
+                    or not _path_allowed(str(other_path))
                 ):
                     continue
                 definition = self.registry.definition(str(relation_type or ""))
@@ -983,7 +1203,16 @@ class EpistemicGraphIndex:
         """
         key_set = {str(k) for k in keys if k}
         anchor_rel = _with_md(anchor) if anchor else None
-        if anchor_rel is not None and not _recall_path_allowed(self.vault_root, anchor_rel):
+        allowed_paths: dict[str, bool] = {}
+
+        def _path_allowed(rel_path: str) -> bool:
+            allowed = allowed_paths.get(rel_path)
+            if allowed is None:
+                allowed = _recall_path_allowed(self.vault_root, rel_path)
+                allowed_paths[rel_path] = allowed
+            return allowed
+
+        if anchor_rel is not None and not _path_allowed(anchor_rel):
             return RelationFilterResult(status="available")
         if not key_set and anchor_rel is None:
             return RelationFilterResult(status="available")
@@ -1046,16 +1275,14 @@ class EpistemicGraphIndex:
         def _add(page: str, counterpart: str, relation_type: str | None, cand_dir: str) -> None:
             if (
                 (anchor_rel is not None and page == anchor_rel)
-                or not _recall_path_allowed(self.vault_root, str(page))
-                or not _recall_path_allowed(self.vault_root, str(counterpart))
+                or not _path_allowed(str(page))
+                or not _path_allowed(str(counterpart))
             ):
                 return
             # In anchor-alone mode there is no requested key; the edge's canonical
             # relation is what matched.
             matched_via = (
-                "relation_type"
-                if (not key_set or relation_type in key_set)
-                else "parent_relation"
+                "relation_type" if (not key_set or relation_type in key_set) else "parent_relation"
             )
             paths.add(page)
             provenance.setdefault(
@@ -1070,11 +1297,17 @@ class EpistemicGraphIndex:
             if anchor_rel is not None:
                 if src_path == anchor_rel:
                     candidate, counterpart, cand_dir, anchor_dir = (
-                        dst_path, src_path, "inbound", "outbound",
+                        dst_path,
+                        src_path,
+                        "inbound",
+                        "outbound",
                     )
                 elif dst_path == anchor_rel:
                     candidate, counterpart, cand_dir, anchor_dir = (
-                        src_path, dst_path, "outbound", "inbound",
+                        src_path,
+                        dst_path,
+                        "outbound",
+                        "inbound",
                     )
                 else:
                     continue
@@ -1134,9 +1367,7 @@ def graph_context(
         }
         if unit_ref is not None:
             unavailable["unit_status"] = "stale"
-            unavailable["warnings"] = [
-                _drift_warning({"graph_sidecar_unavailable": 1})
-            ]
+            unavailable["warnings"] = [_drift_warning({"graph_sidecar_unavailable": 1})]
         return unavailable
     try:
         drift_counts: dict[str, int] = {}
@@ -1176,9 +1407,7 @@ def graph_context(
         category_filter = _resolved_unit_filters(
             idx.language_registry, categories, namespace="category"
         )
-        kind_filter = _resolved_unit_filters(
-            idx.language_registry, kinds, namespace="kind"
-        )
+        kind_filter = _resolved_unit_filters(idx.language_registry, kinds, namespace="kind")
         unit_status: str | None = None
         unit_filter_status: str | None = None
         seed_cap_hit = False
@@ -1236,17 +1465,10 @@ def graph_context(
                 resolved_status == "found"
                 and bool(indexed)
                 and bool(canonical_seeds)
-                and not any(
-                    str(seed.get("path") or "") in current_parent_paths
-                    for seed in indexed
-                )
+                and not any(str(seed.get("path") or "") in current_parent_paths for seed in indexed)
             )
             recovery_seeds = (
-                [
-                    seed
-                    for seed in canonical_seeds
-                    if _current_unit_seed_has_graph_proof(conn, seed)
-                ]
+                [seed for seed in canonical_seeds if _current_unit_seed_has_graph_proof(conn, seed)]
                 if collision_candidate
                 else []
             )
@@ -1267,9 +1489,7 @@ def graph_context(
                     kinds=kind_filter,
                 )
                 if collision_recovery:
-                    seed_node_overrides.update(
-                        (str(seed["node_key"]), seed) for seed in seeds
-                    )
+                    seed_node_overrides.update((str(seed["node_key"]), seed) for seed in seeds)
                 if category_filter is not None or kind_filter is not None:
                     unit_filter_status = "matched" if seeds else "excluded"
             elif indexed:
@@ -1302,9 +1522,7 @@ def graph_context(
         # find's hit-assembly filter (find.py:2601), which this lane otherwise
         # bypasses.
         seeds = [
-            seed
-            for seed in seeds
-            if _recall_path_allowed(vault_root, str(seed.get("path") or ""))
+            seed for seed in seeds if _recall_path_allowed(vault_root, str(seed.get("path") or ""))
         ]
         if not seeds:
             empty: dict[str, Any] = {
@@ -1331,9 +1549,7 @@ def graph_context(
         seen_edges: dict[str, dict[str, Any]] = {}
         edge_cap_hit = False
         edge_inspection_cap_hit = False
-        edge_inspection_budget = _edge_inspection_budget(
-            max_nodes=max_nodes, max_edges=max_edges
-        )
+        edge_inspection_budget = _edge_inspection_budget(max_nodes=max_nodes, max_edges=max_edges)
         inspected_edges = 0
         placeholder_nodes: dict[str, dict[str, Any]] = {}
         node_cap_hit = False
@@ -1424,9 +1640,7 @@ def graph_context(
                         node = endpoint_nodes[key]
                         if node is None:
                             node = _placeholder_node(key)
-                        elif not _current_record(
-                            node, parent_path=str(node.get("path") or "")
-                        ):
+                        elif not _current_record(node, parent_path=str(node.get("path") or "")):
                             continue
                         if type_filter and node["kind"] not in type_filter:
                             continue
@@ -1453,9 +1667,7 @@ def graph_context(
             for key in sorted(seed_node_overrides)
             if key in seen_nodes and key not in present_node_keys
         )
-        nodes += [
-            placeholder_nodes[key] for key in sorted(placeholder_nodes)
-        ]
+        nodes += [placeholder_nodes[key] for key in sorted(placeholder_nodes)]
         edges = list(seen_edges.values())
         truncation: list[str] = []
         if seed_cap_hit:
@@ -1474,9 +1686,7 @@ def graph_context(
         if edge_cap_hit:
             truncation.append(f"edges capped at {max_edges}")
         if edge_inspection_cap_hit:
-            truncation.append(
-                f"edge inspection capped at {edge_inspection_budget} records"
-            )
+            truncation.append(f"edge inspection capped at {edge_inspection_budget} records")
         warnings: list[dict[str, Any]] = []
         if unknown:
             warnings.append(
@@ -1672,16 +1882,13 @@ def graph_drift(vault_root: Path) -> list[dict[str, Any]]:
             {
                 "path": kb_prefix(),
                 "reason": (
-                    "graph sidecar missing, schema-mismatched, or "
-                    "relation-registry hash drift"
+                    "graph sidecar missing, schema-mismatched, or relation-registry hash drift"
                 ),
             }
         ]
     try:
         by_path = {
-            node["path"]: node
-            for node in idx._nodes_from_snapshot(conn)
-            if node["kind"] == "file"
+            node["path"]: node for node in idx._nodes_from_snapshot(conn) if node["kind"] == "file"
         }
     finally:
         conn.close()
@@ -1735,11 +1942,7 @@ def _block_key(page, unit: semantic_units.SemanticUnit) -> str:
 
 
 def _block_anchor(unit: semantic_units.SemanticUnit) -> str:
-    return (
-        unit.anchor
-        or semantic_blocks.normalize_label(unit.title or "")
-        or f"line-{unit.line}"
-    )
+    return unit.anchor or semantic_blocks.normalize_label(unit.title or "") or f"line-{unit.line}"
 
 
 def _block_node(page, unit: semantic_units.SemanticUnit, raw_text: str) -> GraphNode:
@@ -1859,9 +2062,7 @@ def _edges_for_page(
         if unit.unit_ref is None or unit.form == "rich":
             continue
         generation = (
-            _unit_generation_metadata(unit, parent_state)
-            if parent_state is not None
-            else {}
+            _unit_generation_metadata(unit, parent_state) if parent_state is not None else {}
         )
         edges.append(
             page_edge(
@@ -1878,9 +2079,7 @@ def _edges_for_page(
         block_key = _block_key(page, unit)
         block_anchor = _block_anchor(unit)
         generation = (
-            _unit_generation_metadata(unit, parent_state)
-            if parent_state is not None
-            else {}
+            _unit_generation_metadata(unit, parent_state) if parent_state is not None else {}
         )
         edges.append(
             page_edge(
@@ -2371,17 +2570,11 @@ def _query_unit_seed_batch(
     if after is not None:
         after_kind, after_path, after_key = after
         clauses.append(
-            "(kind > ? OR (kind = ? AND path > ?) OR "
-            "(kind = ? AND path = ? AND node_key > ?))"
+            "(kind > ? OR (kind = ? AND path > ?) OR (kind = ? AND path = ? AND node_key > ?))"
         )
-        params.extend(
-            (after_kind, after_kind, after_path, after_kind, after_path, after_key)
-        )
+        params.extend((after_kind, after_kind, after_path, after_kind, after_path, after_key))
     rows = conn.execute(
-        select
-        + " WHERE "
-        + " AND ".join(clauses)
-        + " ORDER BY kind, path, node_key LIMIT ?",
+        select + " WHERE " + " AND ".join(clauses) + " ORDER BY kind, path, node_key LIMIT ?",
         (*params, max(1, int(limit)) + 1),
     ).fetchall()
     has_more = len(rows) > limit
@@ -2528,8 +2721,7 @@ def _current_unit_parent_paths(
     unit_ref: str,
 ) -> tuple[list[str], list[dict[str, Any]], dict[str, int], bool]:
     rows = conn.execute(
-        "SELECT path FROM graph_parent_refs WHERE parent_ref = ? "
-        "ORDER BY path LIMIT ?",
+        "SELECT path FROM graph_parent_refs WHERE parent_ref = ? ORDER BY path LIMIT ?",
         (parent_ref, UNIT_PARENT_REF_MAX_CANDIDATES + 1),
     ).fetchall()
     current_paths: list[str] = []
@@ -2552,19 +2744,13 @@ def _current_unit_parent_paths(
             drift_counts["missing_parent"] = drift_counts.get("missing_parent", 0) + 1
             continue
         except (OSError, UnicodeError):
-            drift_counts["parent_unavailable"] = (
-                drift_counts.get("parent_unavailable", 0) + 1
-            )
+            drift_counts["parent_unavailable"] = drift_counts.get("parent_unavailable", 0) + 1
             continue
         if memory_refs.ref_from_markdown(source) != parent_ref:
-            drift_counts["parent_ref_mismatch"] = (
-                drift_counts.get("parent_ref_mismatch", 0) + 1
-            )
+            drift_counts["parent_ref_mismatch"] = drift_counts.get("parent_ref_mismatch", 0) + 1
             continue
         try:
-            state = semantic_index.current_parent_index_state(
-                vault_root, path, source=source
-            )
+            state = semantic_index.current_parent_index_state(vault_root, path, source=source)
         except (TypeError, ValueError):
             drift_counts["invalid_current_parent"] = (
                 drift_counts.get("invalid_current_parent", 0) + 1
@@ -2572,9 +2758,7 @@ def _current_unit_parent_paths(
             continue
         resolution = state.document.resolve_unit(unit_ref)
         if resolution.status != "found" or resolution.unit is None:
-            drift_counts["missing_current_unit"] = (
-                drift_counts.get("missing_current_unit", 0) + 1
-            )
+            drift_counts["missing_current_unit"] = drift_counts.get("missing_current_unit", 0) + 1
             continue
         page = find_module._parse_page(
             path,
@@ -2599,9 +2783,7 @@ def _current_unit_parent_paths(
     )
 
 
-def _current_unit_seed_has_graph_proof(
-    conn: sqlite3.Connection, seed: dict[str, Any]
-) -> bool:
+def _current_unit_seed_has_graph_proof(conn: sqlite3.Connection, seed: dict[str, Any]) -> bool:
     metadata = seed.get("metadata")
     if not isinstance(metadata, dict):
         return False
@@ -2629,9 +2811,7 @@ def _current_unit_seed_has_graph_proof(
     )
 
 
-def indexed_unit_parent_path_resolution(
-    vault_root: Path, unit_ref: str
-) -> tuple[list[str], bool]:
+def indexed_unit_parent_path_resolution(vault_root: Path, unit_ref: str) -> tuple[list[str], bool]:
     idx = EpistemicGraphIndex(vault_root)
     conn = idx._open_read_snapshot()
     if conn is None:

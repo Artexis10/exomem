@@ -14,6 +14,15 @@ from urllib.parse import quote, unquote
 from . import access, memory_refs, mutation_terminal, query_data, record_formats, vault
 from . import structured_collections as collections
 from .governance import egress
+from .governance.principal import OWNER_AUDIENCE, effective_principal
+
+_PUBLIC_LINK_INDEX_RAW_CANDIDATES = 512
+_INTERNAL_LINK_INDEX_RAW_CANDIDATES = 4_096
+_PUBLIC_LINK_INDEX_AUTHORIZED_CANDIDATES = 256
+_INTERNAL_LINK_INDEX_AUTHORIZED_CANDIDATES = 2_048
+_PUBLIC_LINK_INDEX_AUTHORIZED_BYTES = 4 * 1024 * 1024
+_INTERNAL_LINK_INDEX_AUTHORIZED_BYTES = 32 * 1024 * 1024
+_MAX_LINK_INDEX_ENTRY_BYTES = 256 * 1024
 
 
 @dataclass(frozen=True, slots=True)
@@ -107,18 +116,22 @@ def _inspection_json(value: Any, *, depth: int = 0, nodes: list[int] | None = No
     if type(value) is str:
         return value if len(value.encode("utf-8")) <= 16 * 1024 else _INSPECTION_INVALID
     if isinstance(value, list | tuple):
-        result = [_inspection_json(item, depth=depth + 1, nodes=nodes) for item in value]
-        return result if all(item is not _INSPECTION_INVALID for item in result) else _INSPECTION_INVALID
+        list_result = [_inspection_json(item, depth=depth + 1, nodes=nodes) for item in value]
+        return (
+            list_result
+            if all(item is not _INSPECTION_INVALID for item in list_result)
+            else _INSPECTION_INVALID
+        )
     if isinstance(value, Mapping):
-        result: dict[str, Any] = {}
+        mapping_result: dict[str, Any] = {}
         for key, item in value.items():
             if type(key) is not str or len(key.encode("utf-8")) > 512:
                 return _INSPECTION_INVALID
             projected = _inspection_json(item, depth=depth + 1, nodes=nodes)
             if projected is _INSPECTION_INVALID:
                 return _INSPECTION_INVALID
-            result[key] = projected
-        return result
+            mapping_result[key] = projected
+        return mapping_result
     return _INSPECTION_INVALID
 
 
@@ -401,11 +414,81 @@ class _LinkProjector:
     root: Path
     manifest: collections.CollectionManifest
     resolver: vault.WikilinkResolver
+    memory_targets: Mapping[str, tuple[str, ...]]
+    admitted: Mapping[str, bool]
+    candidate_index_complete: bool | None
     verdicts: dict[str, bool]
 
     @classmethod
     def create(cls, root: Path, manifest: collections.CollectionManifest) -> _LinkProjector:
-        return cls(root, manifest, vault.WikilinkResolver(root), {})
+        # Keep the common numeric/event query path independent of vault-wide
+        # link lookup. Even link-bearing collections defer that lookup until a
+        # bare title or memory identity actually needs it.
+        empty = vault.WikilinkResolver.from_entries(root, ())
+        return cls(root, manifest, empty, {}, {}, None, {})
+
+    def _candidate_index_available(self) -> bool:
+        if self.candidate_index_complete is not None:
+            return self.candidate_index_complete
+        entries: list[tuple[str, str | None]] = []
+        memory_targets: dict[str, list[str]] = {}
+        admitted: dict[str, bool] = {}
+        raw_limit, authorized_limit, byte_limit = _link_index_limits()
+        raw_count = authorized_count = authorized_bytes = 0
+        complete = True
+        for candidate in vault.walk_vault_md(self.root):
+            raw_count += 1
+            if raw_count > raw_limit:
+                complete = False
+                break
+            try:
+                relative = candidate.relative_to(self.root).as_posix()
+                path, relative = cast(
+                    tuple[Path, str],
+                    vault.resolve_under_vault(self.root, relative, must_exist=True, must_be_file=True),
+                )
+            except (ValueError, vault.VaultPathError):
+                continue
+            # The resolver's title and identity indexes must not learn from a
+            # path that this principal cannot read. Otherwise a hidden name or
+            # duplicate identity can change an otherwise public link result.
+            allowed = _authorize(self.root, relative)
+            admitted[relative] = allowed
+            if not allowed:
+                continue
+            authorized_count += 1
+            if authorized_count > authorized_limit or authorized_bytes >= byte_limit:
+                complete = False
+                break
+            title: str | None = None
+            identity: str | None = None
+            try:
+                data, _guard = vault.read_bounded_guarded_bytes(
+                    self.root,
+                    relative,
+                    limit=min(_MAX_LINK_INDEX_ENTRY_BYTES, byte_limit - authorized_bytes),
+                )
+                authorized_bytes += len(data)
+                text = data.decode("utf-8")
+                frontmatter, body, _marker = vault.parse_frontmatter(text)
+                display_title = vault.resolve_display_title(frontmatter, body, path)
+                title = display_title.lower() if display_title else None
+                if relative.startswith(f"{vault.kb_dirname()}/"):
+                    identity = memory_refs.normalize_id(frontmatter.get(memory_refs.ID_FIELD))
+            except (UnicodeDecodeError, vault.PathGuardError, vault.FrontmatterError):
+                complete = False
+                break
+            entries.append((relative, title))
+            if identity is not None:
+                memory_targets.setdefault(identity, []).append(relative)
+        if complete:
+            self.resolver = vault.WikilinkResolver.from_entries(self.root, entries)
+            self.memory_targets = {
+                identity: tuple(sorted(paths)) for identity, paths in memory_targets.items()
+            }
+            self.admitted = admitted
+        self.candidate_index_complete = complete
+        return complete
 
     def __call__(self, values: Mapping[str, Any]) -> dict[str, Any]:
         projected = dict(values)
@@ -430,18 +513,23 @@ class _LinkProjector:
         raw = value.strip()
         try:
             if raw.lower().startswith(memory_refs.REF_PREFIX):
+                if not self._candidate_index_available():
+                    return False
                 identity = memory_refs.parse_memory_ref(raw)
                 if identity is None or raw != memory_refs.memory_ref(identity):
                     return False
-                try:
-                    target = memory_refs.resolve_identifier_read_only(self.root, raw)
-                except memory_refs.ReferenceError:
+                matches = self.memory_targets.get(identity, ())
+                if len(matches) != 1:
                     return self._remember(f"memory:{identity}", False)
+                target = matches[0]
             elif raw.lower().startswith(("exomem://vault/", "exomem://source/")):
                 target = memory_refs.resolve_identifier_read_only(self.root, raw)
             elif (match := re.fullmatch(r"\[\[([^\[\]]+)\]\]", raw)) is not None:
                 inner = match.group(1).strip()
                 if not inner or inner.count("|") > 1:
+                    return False
+                target_text = inner.split("|", 1)[0].strip().split("#", 1)[0].strip()
+                if "/" not in target_text and not self._candidate_index_available():
                     return False
                 try:
                     canonical, _warning = vault.normalize_wikilink(
@@ -483,6 +571,8 @@ class _LinkProjector:
             return False
         if relative in self.verdicts:
             return self.verdicts[relative]
+        if relative in self.admitted and not self.admitted[relative]:
+            return self._remember(relative, False)
         return self._remember(relative, _authorize(self.root, relative, receipt=True))
 
     def _remember(self, target: str, allowed: bool) -> bool:
@@ -492,10 +582,32 @@ class _LinkProjector:
         return allowed
 
 
+def _link_index_limits() -> tuple[int, int, int]:
+    owner = effective_principal().audience_id == OWNER_AUDIENCE
+    return (
+        _INTERNAL_LINK_INDEX_RAW_CANDIDATES if owner else _PUBLIC_LINK_INDEX_RAW_CANDIDATES,
+        _INTERNAL_LINK_INDEX_AUTHORIZED_CANDIDATES
+        if owner
+        else _PUBLIC_LINK_INDEX_AUTHORIZED_CANDIDATES,
+        _INTERNAL_LINK_INDEX_AUTHORIZED_BYTES if owner else _PUBLIC_LINK_INDEX_AUTHORIZED_BYTES,
+    )
+
+
 def _project_links(
     root: Path, manifest: collections.CollectionManifest, values: Mapping[str, Any]
 ) -> dict[str, Any]:
     return _LinkProjector.create(root, manifest)(values)
+
+
+def require_records_profile(
+    manifest: collections.CollectionManifest,
+) -> collections.CollectionManifest:
+    """Keep the Records product surface from claiming Planning collections."""
+    if manifest.semantic_profile != "records":
+        raise collections.CollectionError(
+            "RECORDS_PROFILE_REQUIRED", "Records actions require a records semantic profile"
+        )
+    return manifest
 
 
 def resolve_collection(
@@ -542,6 +654,7 @@ def query_collection(
     root = Path(vault_root)
     with egress.disclosure_boundary(root, "record_query", join_existing=True) as collector:
         manifest = _resolve_released_collection(root, collection, receipt=True)
+        require_records_profile(manifest)
         if not _authorize(
             root, manifest.storage.source, receipt=True
         ):
