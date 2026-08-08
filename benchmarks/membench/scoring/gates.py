@@ -259,18 +259,48 @@ def gate_state(
       unsupported-never-zero cuts both ways, and an answer that cannot be
       scored must not be banked as a pass either.
 
-    The gate is not thereby weakened. A missing required value still fails; a
-    retired value stated with no oracle-visible supersession toward a required
-    claim still fails (including every record whose whole expectation is
-    absence — the not-yet-knowable and retracted facts, which have no required
-    claim for a supersession to point at). ``UNSUPPORTED`` is never a pass, so
-    a contender that answers by dumping documents earns no temporal credit at
-    all rather than earning a free one.
+    - **A record with no required claim is not asking a state question.** This
+      reverses an earlier reading, on measurement. The rule above once failed
+      "every record whose whole expectation is absence — the not-yet-knowable
+      and retracted facts, which have no required claim for a supersession to
+      point at". Seed-1 has 28 such records: no required claims, a forbidden
+      one, ``abstain=True``, ``answer.kind="none"``, and a declared ``gates``
+      list naming ``abstention`` and the awareness gates but never
+      ``current_state``. Running against them cost the *oracle-retrieval
+      ceiling* 32 of its 44 temporal failures — a contender that retrieves
+      perfectly by construction, which makes the verdict a harness defect by
+      the ceiling's own definition. The error is categorical: this gate asks
+      which of two competing values a system puts forward as current, and a
+      record with no required claim puts forward none, so the question does not
+      arise. Whether the system correctly declined is real and separate, and
+      :func:`gate_abstention` already asks it in both directions.
+
+    ``NOT_APPLICABLE`` rather than ``UNSUPPORTED`` for that last case, because
+    the two are not interchangeable here: unsupported means the evidence could
+    not decide a question that genuinely applied, and it keeps the row in the
+    temporal denominator. The question does not apply, so the row leaves it.
+    Charging a dimension for records it was never asked to judge is what made
+    temporal look weak.
+
+    The gate is not thereby weakened. A missing required value still fails, and
+    a retired value stated with no oracle-visible supersession toward a required
+    claim still fails. ``UNSUPPORTED`` is never a pass, so a contender that
+    answers by dumping documents earns no temporal credit at all rather than
+    earning a free one.
     """
 
     gate = "as_of" if query.ask.world_week is not None else "current_state"
-    if not expected.required_claims and not expected.forbidden_claims:
-        return _item(query, gate, "temporal", GateStatus.NOT_APPLICABLE)
+    if not expected.required_claims:
+        # Covers both the empty expectation and the absence-only one. The
+        # forbidden list on an absence record exists to support the abstention
+        # judgement, not to imply a state the answer should have asserted.
+        evidence = (
+            "no required claim: the record expects absence, which "
+            "gate_abstention scores"
+            if expected.forbidden_claims
+            else None
+        )
+        return _item(query, gate, "temporal", GateStatus.NOT_APPLICABLE, evidence)
     text = answer.answer_text
 
     stated_required: list[str] = []

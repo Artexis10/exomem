@@ -442,11 +442,31 @@ def test_a_forbidden_value_with_no_documented_supersession_still_fails() -> None
     assert "no supersession" in (item.evidence or "")
 
 
-def test_absence_only_records_still_fail_on_the_forbidden_value() -> None:
-    """28 records in the reference corpus expect absence and nothing else — a
-    fact not yet knowable at the ask, or one since retracted. They name no
+def test_absence_only_records_leave_the_temporal_denominator() -> None:
+    """4b.36 — a deliberate reversal, on measurement.
+
+    This test previously asserted FAIL, reasoning that these 28 records "name no
     required claim, so there is no successor for a supersession to point at and
-    nothing to be undecided about: surfacing the value is the failure."""
+    nothing to be undecided about: surfacing the value is the failure". Against
+    a *native* answerer that reasoning holds — authoring "the provider is Petra
+    Group" does assert a retracted fact. Against this suite's extractive
+    answerer it does not, and the gate already concedes exactly that one branch
+    below, where co-presence is UNSUPPORTED because "whether the answer asserts
+    the retired value or merely reports it as history is a fact about rhetoric".
+    Quoting is not asserting in both cases or in neither; the two branches
+    disagreed.
+
+    The measurement broke the tie. The oracle-retrieval ceiling — which
+    retrieves perfectly by construction, so any gate it fails is a harness
+    defect by definition — lost 32 of its 44 temporal failures here.
+
+    NOT_APPLICABLE rather than UNSUPPORTED, on the corpus's own evidence: these
+    records declare ``gates`` naming ``abstention`` and the awareness gates and
+    never ``current_state``. Keeping them as UNSUPPORTED would hold them in the
+    temporal denominator *and* score them again under abstention, pricing one
+    judgement twice and padding temporal with rows about declining rather than
+    about time.
+    """
 
     expected = _expected(
         answer=ExpectedAnswer(kind="none"), abstain=True, forbidden_claims=[HOST_OLD]
@@ -454,8 +474,15 @@ def test_absence_only_records_still_fail_on_the_forbidden_value() -> None:
     assert not expected.required_claims
     leaked = _answer("The hosting provider for Project Cindergate is Petra Group.")
     item = gate_state(_hosting_query(), expected, leaked, HOST_CTX)
-    assert item.status is GateStatus.FAIL
-    assert "Petra Group" in (item.evidence or "")
+    assert item.status is GateStatus.NOT_APPLICABLE, item.evidence
+
+    # Nothing is thereby excused. The abstention gate holds the same record to
+    # account in both directions -- this must not become a way to score nothing.
+    assert gate_abstention(_hosting_query(), expected, leaked, HOST_CTX).status is GateStatus.FAIL
+    declined = _answer("No record of that.", abstained=True)
+    assert (
+        gate_abstention(_hosting_query(), expected, declined, HOST_CTX).status is GateStatus.PASS
+    )
 
 
 # --- forbidden values the question itself hands over -------------------------
@@ -1529,3 +1556,18 @@ def test_full_evaluate_and_summary_shape() -> None:
     assert summary["_run"] == {"failures": 2, "queries_scored": 1}
     assert summary["factual_qa"]["pass"] == 1
     assert summary["governance"]["not_applicable"] == 1
+
+
+def test_a_forbidden_value_still_fails_when_a_required_claim_exists() -> None:
+    """The guard above must be scoped to records with no required claim.
+
+    If it leaked to every record carrying a forbidden claim it would retire the
+    gate's whole point -- a contender could state the retired value alongside
+    the current one and be excused. That case is UNSUPPORTED (co-presence) or
+    FAIL (bare retired value), never NOT_APPLICABLE.
+    """
+
+    normal = _hosting_expected([HOST_OLD])
+    assert normal.required_claims  # precondition: this record does ask a state question
+    stale = _answer("The hosting provider is Petra Group.")
+    assert gate_state(_hosting_query(), normal, stale, HOST_CTX).status is GateStatus.FAIL
