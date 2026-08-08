@@ -146,7 +146,7 @@ spec:
                 - capacity
               args:
                 - --contract
-                - /opt/exomem-hosted/private-alpha-capacity-v1.json
+                - /etc/exomem/capacity/private-alpha-capacity-v1.json
                 - --namespace
                 - {{ .Release.Namespace }}
                 - --state-configmap
@@ -175,6 +175,16 @@ spec:
                 - name: runtime
                   mountPath: /opt/exomem-hosted
                   readOnly: true
+                {{- /*
+                  _load_json rejects a symlink, and the runtime ConfigMap publishes
+                  every key as one under ..data/. Read the contract from its own
+                  subPath mount so it is a regular file; python is happy to import
+                  the collector script through the symlink, but the loader is not.
+                */}}
+                - name: capacity-contract
+                  mountPath: /etc/exomem/capacity/private-alpha-capacity-v1.json
+                  subPath: private-alpha-capacity-v1.json
+                  readOnly: true
                 - name: kube-api
                   mountPath: /var/run/secrets/exomem-api
                   readOnly: true
@@ -191,6 +201,10 @@ spec:
             - name: runtime
               configMap:
                 name: exomem-operational-receipt-collector
+                defaultMode: 0444
+            - name: capacity-contract
+              configMap:
+                name: exomem-capacity-contract
                 defaultMode: 0444
             - name: kube-api
               projected:

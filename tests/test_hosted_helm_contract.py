@@ -386,7 +386,8 @@ def test_platform_renders_live_capacity_receipt_collector_with_isolated_keys() -
     ]
     assert container["args"] == [
         "--contract",
-        "/opt/exomem-hosted/private-alpha-capacity-v1.json",
+        # Its own subPath mount: a regular file, not a ..data/ symlink.
+        "/etc/exomem/capacity/private-alpha-capacity-v1.json",
         "--namespace",
         "exomem-platform",
         "--state-configmap",
@@ -2246,3 +2247,27 @@ def test_capacity_contract_is_mounted_as_a_regular_file() -> None:
                 )
                 assert mount["mountPath"] == f"/etc/exomem/capacity/{contract_file}"
     assert seen >= 2, f"expected the provider workers to mount the contract, saw {seen}"
+
+
+def test_no_service_requires_an_external_load_balancer() -> None:
+    """The node runs k3s with servicelb disabled, so a LoadBalancer never gets an address.
+
+    `helm --wait` blocks until every LoadBalancer Service has an ingress IP, so one
+    such Service makes the install hang until it times out and rolls back. Ingress
+    reaches this platform through the Cloudflare Tunnel, which dials traefik from
+    inside the cluster, so nothing here should ask for an external balancer.
+
+    This also guards a silently-ignored value: traefik 41.x reads the type from
+    `service.spec.type`, and the chart used to set a bare `service.type`, which is
+    not a key in that subchart. The override did nothing and the subchart default
+    of LoadBalancer applied, with no error anywhere.
+    """
+
+    documents = _render(PLATFORM, PLATFORM / "values.validation.yaml", namespace="exomem-platform")
+    offenders = [
+        document["metadata"]["name"]
+        for document in documents
+        if document.get("kind") == "Service"
+        and document.get("spec", {}).get("type") in {"LoadBalancer", "NodePort"}
+    ]
+    assert not offenders, f"these Services need an external balancer the cluster lacks: {offenders}"
