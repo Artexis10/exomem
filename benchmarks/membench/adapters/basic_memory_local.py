@@ -193,9 +193,25 @@ class BasicMemoryLocalAdapter:
         if self._project is None:
             raise AdapterEnvironmentError("adapter not set up")
         results: list[OpResult] = []
+        # 4b.41. Two indexes, two flags. `--search` builds full-text; `--embeddings`
+        # builds the vectors, and bm 0.22.x resolves an embedding model for search
+        # precisely because it expects them to exist. Running only the first
+        # configures the contender's weaker retrieval: measured live, the full
+        # 352-query sweep returned **zero hits at both altitudes**, because the
+        # corpus asks natural-language questions and keyword matching answers a
+        # question with nothing — the bare token "Larkpoint" hit, the sentence
+        # "What is the current delivery deadline for Project Larkspur?" did not.
+        # After `--embeddings` (484 entities embedded, 0 errors) the same query
+        # returns five, top hit correct.
+        #
+        # Parity here is about capability *availability*, not about picking the
+        # flag that wins: exomem is measured with its semantic lane loaded, so
+        # basic-memory must be too. Which retrieval mode to then ask for stays
+        # the product's own default, so no tuning choice is made on its behalf.
         steps: list[tuple[str, list[str]]] = [
             ("project_add", ["project", "add", self._project, str(native_dir)]),
             ("reindex", ["reindex", "--search", "-p", self._project]),
+            ("reindex_embeddings", ["reindex", "--embeddings", "-p", self._project]),
         ]
         for seq, (op, args) in enumerate(steps):
             started = time.perf_counter()

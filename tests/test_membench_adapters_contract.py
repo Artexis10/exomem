@@ -182,7 +182,7 @@ def test_bm_adapter_drives_cli_with_isolated_env(tmp_path: Path) -> None:
         native_dir.mkdir()
         (native_dir / "fact-one.md").write_text("body", encoding="utf-8")
         results = adapter.ingest(tmp_path / "corpus", native_dir)
-        assert [r.op for r in results] == ["project_add", "reindex"]
+        assert [r.op for r in results] == ["project_add", "reindex", "reindex_embeddings"]
         assert all(r.ok for r in results)
         add_argv, add_env = calls[1]
         assert add_argv[1:3] == ["project", "add"]
@@ -193,8 +193,20 @@ def test_bm_adapter_drives_cli_with_isolated_env(tmp_path: Path) -> None:
         project = add_argv[3]
         assert ["-p", project] == reindex_argv[-2:]
 
+        # 4b.41. `reindex --search` builds the full-text index ONLY; vector
+        # embeddings are a separate flag on the same command. Without this step
+        # bm 0.22.x answers a natural-language question with nothing at all --
+        # measured live, the whole 352-query sweep returned zero hits at both
+        # altitudes, while the same corpus after `--embeddings` returns five.
+        # Leaving it out configures the competitor's weaker retrieval and makes
+        # every comparison void in a known direction.
+        embed_argv, _ = calls[3]
+        assert embed_argv[1] == "reindex"
+        assert "--embeddings" in embed_argv, embed_argv
+        assert ["-p", project] == embed_argv[-2:]
+
         hits = adapter.search("the fact", 5)
-        search_argv, search_env = calls[3]
+        search_argv, search_env = calls[4]
         assert search_argv[1:3] == ["tool", "search-notes"]
         # Pinned against bm 0.22.1, verified live. QUERY is POSITIONAL and must
         # follow the subcommand; `--query` and `--json` were both removed
