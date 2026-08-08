@@ -191,3 +191,101 @@ def test_the_limit_is_honoured(corpus: Path, tmp_path: Path) -> None:
     adapter = _ready(corpus, tmp_path)
     for query in _queries(corpus):
         assert len(adapter.search(query["prompt_text"], 2)) <= 2
+
+
+# --- compiled altitude (4b.38) -----------------------------------------------
+
+
+def _ready_compiled(corpus: Path, workdir: Path):
+    adapter = create_adapter("oracle-retrieval", altitude="compiled")
+    adapter.setup(workdir, Profile(name="oracle-ceiling-compiled"))
+    adapter.ingest(corpus, workdir / "native")
+    return adapter
+
+
+def test_compiled_altitude_retrieves_conclusions_not_sources(
+    corpus: Path, tmp_path: Path
+) -> None:
+    """4b.38: the ceiling served raw sources at *both* altitudes.
+
+    `search` never consulted `self.altitude`, so the two runs' retrieval
+    artifacts were byte-identical at 528 hits. Everything the compiled ceiling
+    appeared to prove about contradiction came from the calibration gate
+    reading the corpus's declared dispute structure, not from retrieving
+    compiled conclusions -- and temporal being unchanged across the two runs
+    was the necessary consequence rather than a coincidence.
+
+    A ceiling that cannot express an altitude cannot bound a contender measured
+    at it, which left compiled contender runs with no denominator: the exact
+    gap the ceiling exists to close.
+    """
+
+    raw = _ready(corpus, tmp_path / "raw")
+    compiled = _ready_compiled(corpus, tmp_path / "compiled")
+    prompt = _queries(corpus)[0]["prompt_text"]
+
+    raw_hits = raw.search(prompt, 10)
+    compiled_hits = compiled.search(prompt, 10)
+    assert raw_hits, "precondition: the raw ceiling retrieves something"
+    assert compiled_hits, "the compiled ceiling must retrieve something"
+
+    assert all(h.provider_path.startswith("SRC-") for h in raw_hits)
+    assert all(h.provider_path.startswith("CON-") for h in compiled_hits), [
+        h.provider_path for h in compiled_hits
+    ]
+
+
+def test_a_compiled_hit_carries_its_declared_basis_as_sentinels(
+    corpus: Path, tmp_path: Path
+) -> None:
+    """Chain preservation is the whole point of the compiled tier.
+
+    A conclusion's body states the value; its basis lives in `cites`. The
+    scorer reads citations from a hit's sentinels, so serving the body without
+    the cites would retrieve knowledge that had lost its provenance -- and the
+    provenance column would then measure the tier's plumbing rather than any
+    contender's chain.
+    """
+
+    compiled = _ready_compiled(corpus, tmp_path / "compiled")
+    plan = {
+        rec["conclusion_id"]: rec
+        for rec in (
+            json.loads(line)
+            for line in (corpus / "compile-plan.jsonl").read_text().splitlines()
+        )
+    }
+    hits = compiled.search(_queries(corpus)[0]["prompt_text"], 10)
+    assert hits
+    for hit in hits:
+        declared = tuple(plan[hit.provider_path]["cites"])
+        assert declared, f"{hit.provider_path} has no declared basis"
+        assert set(declared) <= set(hit.sentinels), (hit.provider_path, hit.sentinels)
+
+
+def test_the_compiled_ceiling_states_every_required_value(
+    corpus: Path, tmp_path: Path
+) -> None:
+    """The ceiling must be reachable, not merely differently shaped.
+
+    If the compiled tier retrieved conclusions whose text omitted the value the
+    oracle requires, the compiled ceiling would sit below the raw one and every
+    contender measured against it would be graded on an unreachable bar.
+    """
+
+    compiled = _ready_compiled(corpus, tmp_path / "compiled")
+    claims = {
+        rec["claim_id"]: rec
+        for rec in (
+            json.loads(line) for line in (corpus / "claims.jsonl").read_text().splitlines()
+        )
+    }
+    expected = _expected(corpus)
+    for query in _queries(corpus):
+        required = expected[query["query_id"]].get("required_claims") or []
+        if not required:
+            continue
+        text = " ".join(h.text or "" for h in compiled.search(query["prompt_text"], 10))
+        for claim_id in required:
+            value = claims[claim_id]["object"]["value"]
+            assert value in text, (query["query_id"], claim_id, value, text[:200])

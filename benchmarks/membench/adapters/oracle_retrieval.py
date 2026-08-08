@@ -35,6 +35,24 @@ quotes only its top hits, so a required source ranked below that cut would be
 retrieved and then dropped before scoring — the ceiling would understate itself
 for a reason that has nothing to do with retrieval.
 
+Altitude
+========
+
+At ``compiled`` altitude the same permitted set maps forward to conclusions:
+those stating a required claim first, then every conclusion whose declared
+basis lies inside the permitted source set. Each hit serves the conclusion's
+body as text and its ``cites`` as sentinels, so the citation chain survives
+retrieval and provenance measures chain preservation rather than this
+adapter's plumbing.
+
+This path was missing until 4b.38, and its absence was invisible: ``search``
+ignored ``self.altitude``, so the raw and compiled runs produced byte-identical
+retrieval and the compiled tier had **no ceiling at all**. Everything the
+compiled ceiling appeared to prove about contradiction came from the
+calibration gate reading the corpus's declared dispute structure, not from
+retrieving conclusions. A ceiling that cannot express an altitude cannot bound
+a contender measured at it.
+
 Prompt lookup, and its one honest limitation
 ============================================
 
@@ -67,9 +85,11 @@ from membench.adapters.base import (
     StateExport,
     register_adapter,
 )
+from membench.compile_plan import conclusion_id_for
 from membench.ids import sentinel, sentinels_in
 from membench.schema import (
     ClaimRecord,
+    ConclusionRecord,
     EntityRecord,
     ExpectedRecord,
     QueryRecord,
@@ -108,6 +128,9 @@ class OracleRetrievalAdapter:
         self._collisions: dict[str, int] = {}
         self._degraded: dict[str, str] = {}
         self._unverifiable = 0
+        #: conclusion id -> (body text, declared basis). Populated only at
+        #: compiled altitude; the raw tier has no conclusions to serve.
+        self._conclusions: dict[str, tuple[str, tuple[str, ...]]] = {}
 
     # -- lifecycle --------------------------------------------------------
     @property
@@ -137,6 +160,7 @@ class OracleRetrievalAdapter:
     def cleanup(self) -> None:
         self._by_prompt.clear()
         self._texts.clear()
+        self._conclusions.clear()
 
     # -- ingest -----------------------------------------------------------
     def ingest(self, corpus_dir: Path, native_dir: Path) -> list[OpResult]:
@@ -163,6 +187,20 @@ class OracleRetrievalAdapter:
             }
         except FileNotFoundError as exc:
             raise AdapterEnvironmentError(f"corpus incomplete: {exc}") from exc
+
+        if self.altitude == "compiled":
+            try:
+                plan = load_jsonl(ConclusionRecord, corpus_dir / "compile-plan.jsonl")
+            except FileNotFoundError as exc:
+                # Refusing beats degrading to raw: a ceiling that silently
+                # served sources at the compiled tier is exactly the defect
+                # this path exists to close (4b.38), and it would understate
+                # every contender measured against it without saying so.
+                raise AdapterEnvironmentError(
+                    "compiled altitude requires compile-plan.jsonl; regenerate "
+                    f"the corpus: {exc}"
+                ) from exc
+            self._conclusions = {c.conclusion_id: (c.body, c.cites) for c in plan}
 
         results: list[OpResult] = []
         for seq, (source_id, source) in enumerate(sources.items()):
@@ -214,7 +252,12 @@ class OracleRetrievalAdapter:
                 self._unverifiable += 1
             required = list(dict.fromkeys(exp.required_citations))
             rest = [s for s in sorted(permitted) if s not in required]
-            staged[query.prompt_text].append(required + rest)
+            if self.altitude == "compiled":
+                staged[query.prompt_text].append(
+                    self._compiled_order(exp.required_claims, required + rest)
+                )
+            else:
+                staged[query.prompt_text].append(required + rest)
 
         for prompt, variants in staged.items():
             if len(variants) > 1:
@@ -226,6 +269,31 @@ class OracleRetrievalAdapter:
             self._by_prompt[prompt] = list(merged)
         return results
 
+    def _compiled_order(
+        self, required_claims: list[str], permitted_sources: list[str]
+    ) -> list[str]:
+        """The compiled counterpart of the source ordering, same rationale.
+
+        A conclusion is admissible when the oracle admits its basis, so the
+        permitted set maps forward: conclusions stating a required claim first,
+        in declaration order, then every other conclusion whose declared basis
+        lies inside the permitted source set. Required-first matters for the
+        same reason it does at raw altitude — the shared answerer quotes only
+        its top hits, so a required conclusion ranked below the cut would be
+        retrieved and then dropped before scoring.
+        """
+
+        allowed = set(permitted_sources)
+        ordered: dict[str, None] = {}
+        for claim_id in required_claims:
+            conclusion_id = conclusion_id_for(claim_id)
+            if conclusion_id in self._conclusions:
+                ordered.setdefault(conclusion_id)
+        for conclusion_id, (_body, cites) in sorted(self._conclusions.items()):
+            if conclusion_id not in ordered and allowed.intersection(cites):
+                ordered.setdefault(conclusion_id)
+        return list(ordered)
+
     # -- search -----------------------------------------------------------
     def search(self, query: str, limit: int) -> list[Hit]:
         if self._workdir is None:
@@ -236,16 +304,26 @@ class OracleRetrievalAdapter:
             # honest answer; inventing hits would make the ceiling unfalsifiable.
             return []
         hits: list[Hit] = []
-        for rank, source_id in enumerate(ordered[:limit], start=1):
-            text = self._texts.get(source_id, "")
+        for rank, doc_id in enumerate(ordered[:limit], start=1):
+            if self.altitude == "compiled":
+                body, cites = self._conclusions[doc_id]
+                # The body states the value; the basis lives in `cites`, and
+                # the scorer reads citations from sentinels. Serving the body
+                # without the cites would retrieve knowledge stripped of its
+                # provenance, so the provenance column would measure this
+                # adapter's plumbing rather than chain preservation.
+                text, sentinels = body, cites
+            else:
+                text = self._texts.get(doc_id, "")
+                sentinels = tuple(sentinels_in(text))
             hits.append(
                 Hit(
                     rank=rank,
-                    provider_path=source_id,
+                    provider_path=doc_id,
                     title=None,
                     excerpt=text[:200] or None,
-                    sentinels=tuple(sentinels_in(text)),
-                    raw={"source_id": source_id, "oracle": True},
+                    sentinels=sentinels,
+                    raw={"source_id": doc_id, "oracle": True},
                     text=text or None,
                 )
             )
