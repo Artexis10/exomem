@@ -196,6 +196,15 @@ def _plugin_manifest() -> dict:
             "your vault; run `exomem setup` if you do not have one yet."
         ),
         "version": _package_version(),
+        # Listing metadata. A curated marketplace entry shows author, homepage,
+        # and license; without these the plugin lists as anonymous and unlicensed.
+        # The Hosted manifest has carried them since it was first generated, and
+        # these are deliberately the same values so the two listings agree.
+        "author": {"name": "Substrate Systems OÜ", "url": "https://substratesystems.io"},
+        "homepage": "https://substratesystems.io/exomem",
+        "repository": "https://github.com/Artexis10/exomem",
+        "license": "AGPL-3.0-or-later",
+        "keywords": ["memory", "knowledge-base", "markdown", "obsidian", "mcp", "notes"],
         # No "hooks" key: hooks/hooks.json is loaded automatically by convention,
         # and declaring it as well fails the install with "Duplicate hooks file
         # detected". The manifest key is only for ADDITIONAL hook files.

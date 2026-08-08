@@ -151,3 +151,40 @@ def test_marketplace_points_at_the_plugin_directory() -> None:
     # `source` is relative to the REPO ROOT, not to .claude-plugin/.
     source = (REPO_ROOT / entry["source"]).resolve()
     assert source == PLUGIN_ROOT.resolve()
+
+
+def test_manifest_carries_listing_metadata() -> None:
+    """A curated listing shows author, homepage, and licence.
+
+    Without these the plugin lists as anonymous and unlicensed, which reads as
+    abandoned next to entries that carry them. The Hosted manifest has always
+    had them; this keeps the self-hosted one from silently regressing to the
+    bare name/description/version it shipped with.
+    """
+    manifest = json.loads((PLUGIN_ROOT / _MANIFEST).read_text(encoding="utf-8"))
+
+    assert manifest["author"]["name"]
+    assert manifest["author"]["url"].startswith("https://")
+    assert manifest["homepage"].startswith("https://")
+    assert manifest["repository"].startswith("https://github.com/")
+    assert manifest["license"] == "AGPL-3.0-or-later"
+    assert "memory" in manifest["keywords"]
+
+
+def test_listing_identity_agrees_across_both_plugin_surfaces() -> None:
+    """The two listings describe one product, so they must not contradict.
+
+    A reviewer comparing the self-hosted marketplace entry against the Hosted
+    directory entry sees both. Divergent authorship or licence there reads as
+    two unrelated projects sharing a name.
+    """
+    manifest = json.loads((PLUGIN_ROOT / _MANIFEST).read_text(encoding="utf-8"))
+    hosted = json.loads(
+        (REPO_ROOT / "plugins" / "hosted" / "definition.json").read_text(encoding="utf-8")
+    )
+
+    assert manifest["author"]["name"] == hosted["author_name"]
+    assert manifest["author"]["url"] == hosted["author_url"]
+    assert manifest["homepage"] == hosted["website_url"]
+    assert manifest["repository"] == hosted["repository_url"]
+    assert manifest["license"] == hosted["license"]

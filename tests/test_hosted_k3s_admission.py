@@ -2036,20 +2036,25 @@ def test_exact_k3s_runs_the_reviewed_hosted_runtime_release(k3s: str, tmp_path: 
     image = _build_reviewed_runtime_image(gate, tmp_path)
     try:
         runtime_image = _import_runtime_image(k3s, image)
-        release = json.loads(
-            (ROOT / "infra/contracts/exomem-hosted-release-v1.json").read_text(
-                encoding="utf-8"
-            )
+        # The tenant admission policy pins the exact runtime image, and that image
+        # is read from the deployment lock rather than a standalone release
+        # manifest. Rebind the reviewed lock to the digest we just imported so the
+        # policy admits the image this gate actually built.
+        validation_values = yaml.safe_load(
+            (PLATFORM / "values.validation.yaml").read_text(encoding="utf-8")
         )
-        release["runtimeImage"] = runtime_image
+        lock = json.loads(validation_values["provisioner"]["deploymentLockJson"])
+        lock["components"]["runtime"]["image"] = runtime_image
+        lock_json = json.dumps(lock, sort_keys=True, separators=(",", ":")) + "\n"
         platform_runtime_values = tmp_path / "platform-runtime-values.yaml"
         platform_runtime_values.write_text(
             yaml.safe_dump(
                 {
                     "provisioner": {
-                        "releaseManifestJson": json.dumps(
-                            release, sort_keys=True, separators=(",", ":")
-                        )
+                        "deploymentLockJson": lock_json,
+                        "deploymentLockSha256": hashlib.sha256(
+                            lock_json.encode("utf-8")
+                        ).hexdigest(),
                     }
                 }
             ),

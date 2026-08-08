@@ -43,6 +43,7 @@ from . import (
     relation_review,
     semantic_units,
     semantic_writes,
+    temporal,
 )
 from . import (
     find as find_module,
@@ -508,8 +509,13 @@ def _legacy_note(
     if err is not None:
         raise NoteError(code=err.code, missing=err.missing, reason=err.reason)
 
-    today = today or dt.date.today()
-    date_iso = today.isoformat()
+    # Two precisions from one clock read. `date_iso` is the bare day that
+    # names files and index bullets; `stamp_iso` is what gets recorded as
+    # knowledge time. A caller injecting a plain `date` (as every existing
+    # test does) gets the day in both, so day-granular expectations stay true.
+    now = today or temporal.now()
+    date_iso = temporal.render_date(now)
+    stamp_iso = temporal.stamp(now)
     tags_clean = _clean_tags(tags)
     exomem_id = memory_refs.new_id()
 
@@ -616,7 +622,7 @@ def _legacy_note(
         project=project,
         projects=projects,
         status=status,
-        date_iso=date_iso,
+        date_iso=stamp_iso,
         sources=[render_wikilink_target(source, vault_root) for source in sources_norm],
         tags=tags_clean,
         content=body_clean,
@@ -741,7 +747,7 @@ def _legacy_note(
         )
         new_log = _prepend_log_entry(
             log_file.read_text(encoding="utf-8"),
-            date_iso=date_iso,
+            date_iso=stamp_iso,
             verb="note",
             rel_path=rel_note_no_ext,
             body=full_body,
@@ -1559,10 +1565,18 @@ def note(
         raise NoteError(err.code, err.missing, err.reason)
 
     identity = draft_id or memory_refs.new_id()
+    # The draft token pins the *path* date across the draft->commit gap, so a
+    # note keeps its filename whichever side of midnight it is committed on.
+    # Knowledge time is stamped at commit instead: it records when the write
+    # actually happened, not when the draft was prepared.
+    now = today or temporal.now()
     render_date = (
         token_value.render_date
         if token_value is not None
-        else (today or dt.date.today()).isoformat()
+        else temporal.render_date(now)
+    )
+    stamp_iso = (
+        token_value.stamp() if token_value is not None else temporal.stamp(now)
     )
     registrations = tuple(
         semantic_writes.DraftRegistration(item.key, item.category, item.folder)
@@ -1587,7 +1601,12 @@ def note(
         # otherwise record the minted spelling as the page's identity path.
         destination = canonical_vault_rel(root, note_path.relative_to(root).as_posix())
         token_value = semantic_writes.DraftToken(
-            "note", _preflight_operation, destination, render_date, registrations
+            "note",
+            _preflight_operation,
+            destination,
+            render_date,
+            registrations,
+            render_stamp=stamp_iso,
         )
         encoded_token = token_value.encode()
     else:
@@ -1615,7 +1634,7 @@ def note(
         project=project,
         projects=projects,
         status=status,
-        date_iso=render_date,
+        date_iso=stamp_iso,
         sources=[render_wikilink_target(item, root) for item in sources_norm],
         tags=tags_clean,
         content=body_clean,
@@ -1727,7 +1746,7 @@ def note(
     try:
         log_plan = plan_log_writes(
             root,
-            date_iso=render_date,
+            date_iso=stamp_iso,
             op="note",
             rel_path_no_ext=rel_note_no_ext,
             body=_log_entry_body(

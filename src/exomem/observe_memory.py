@@ -11,7 +11,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
-from . import access, edit, semantic_index, semantic_language_registry, semantic_writes, vault
+from . import (
+    access,
+    edit,
+    semantic_index,
+    semantic_language_registry,
+    semantic_writes,
+    temporal,
+    vault,
+)
 
 ObserveOperation = Literal["add", "update", "remove", "validate"]
 
@@ -273,7 +281,7 @@ def observe_memory(
     try:
         log_plan = vault.plan_log_writes(
             vault_root,
-            date_iso=(today or dt.date.today()).isoformat(),
+            date_iso=temporal.stamp(today or temporal.now()),
             op="observe",
             rel_path_no_ext=editable.rel_path.removesuffix(".md"),
             body=f"Structured semantic-unit {op} via observe_memory.",

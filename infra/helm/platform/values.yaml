@@ -42,13 +42,13 @@ scheduler:
   secretKey: secret
 
 observability:
-  contractSha256: cd576fd9012557787d8c740e96fdafdbfc851cf6a818207ec128731e8d732ad0
+  contractSha256: b616e6b07b39226cb16296b86c818e8f613efa85e883f261efb0685fd87ec7dd
   alertDeliverySecretName: exomem-hosted-alert-delivery
   alertDeliverySecretKey: url
 
 capacityCollector:
   schedule: "* * * * *"
-  contractSha256: 24103f12c5118ae728cf2d4c9fb7dc38c26cde9e419c2a2a161a48c9c69b4770
+  contractSha256: 9339f62fd322c1d82361ec90506d45e840a38d7abd3f7948507d03adcc572e76
   hcloudServerId: 0
   stateConfigMap: exomem-capacity-receipt
   privateKeySecret:
@@ -59,7 +59,7 @@ capacityCollector:
     key: token
 
 durability:
-  contractSha256: 1e51097d5ff2570cb1c523916c1827e17bd285cc4f6499b0b09d019f0f424975
+  contractSha256: 3d1445fe13a4be75ea7bed5c9593f8745e5197926710786cd48c2e9463582dc8
   storageContractSha256: 68e26665af9a48c831c975bc96afb03fbf47e229f89a3c13bc852809787de0f5
   b2Endpoint: ""
   b2Region: ""
@@ -118,11 +118,27 @@ traefik:
     podLabels:
       exomem.io/ingress: traefik
   service:
-    type: ClusterIP
+    # Traefik 41.x takes the service type at service.spec.type; a bare
+    # `service.type` is not a key in this chart and was silently ignored, so the
+    # subchart default of LoadBalancer applied. The node runs k3s with servicelb
+    # disabled, so a LoadBalancer Service never gets an address and
+    # `helm --wait` can never return. Ingress arrives through the Cloudflare
+    # Tunnel, which dials traefik from inside the cluster.
+    spec:
+      type: ClusterIP
   ports:
     web:
       port: 8000
       exposedPort: 80
+      # The tunnel terminates TLS at Cloudflare and dials this entrypoint over
+      # plain HTTP, so traefik must be told the hop in front of it is trusted or
+      # it rewrites X-Forwarded-Proto to http. The provisioner refuses any
+      # /cells/* request whose scheme is not https, so without this every
+      # control-plane call fails closed. Narrower than the 10.0.0.0/8 the
+      # provisioner already trusts for the same header.
+      forwardedHeaders:
+        trustedIPs:
+          - 10.42.0.0/16
     websecure:
       expose:
         default: false

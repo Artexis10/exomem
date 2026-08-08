@@ -360,7 +360,7 @@ def _request(**overrides: object) -> dict[str, object]:
         "protocolVersion": "exomem-hosted.v1",
         "releaseVersion": "0.22.0",
         "serviceCredential": "service-credential-postgresql-sentinel",
-        "workerPolicy": {"workerCount": 0, "semantic": False, "media": False},
+        "workerPolicy": {"workerCount": 2, "semantic": True, "media": False},
     }
     request.update(overrides)
     return request

@@ -177,6 +177,13 @@ also teaches the authoring loop: search first, draft the typed note, run
 `suggest_links`, write with the right tool, inspect warnings/suggestions, then
 report the path.
 
+How eagerly it does that is tunable: four prominence levels (`off` / `light` /
+`balanced` / `maximal`), set with `exomem prominence <level>` or pasted into a web
+assistant's custom instructions. Clients with hooks default to `balanced`; web and
+hosted default to `maximal`, because nothing there re-arms the check between turns.
+See [docs/prominence.md](docs/prominence.md) for the levels and the copy-paste
+blocks.
+
 For client-specific assistant instructions, see
 [docs/ai-assistant-guide.md](docs/ai-assistant-guide.md). For the boundary
 between Exomem and a chat product's built-in memory, see

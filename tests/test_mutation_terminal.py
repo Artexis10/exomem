@@ -32,6 +32,8 @@ def test_compact_projection_leads_with_decisive_commit_fields() -> None:
 
     assert mutation_terminal.project_terminal(terminal, "compact") == {
         "ok": True,
+        "state": "committed",
+        "terminal": True,
         "status": "committed",
         "mutated": True,
         "path": "Knowledge Base/Notes/Insights/decisive.md",
@@ -60,6 +62,8 @@ def test_full_projection_adds_the_complete_leaf_result_only_under_diagnostics() 
 
     assert projected == {
         "ok": True,
+        "state": "committed",
+        "terminal": True,
         "status": "committed",
         "mutated": True,
         "paths": ["Knowledge Base/one.md", "Knowledge Base/two.md"],

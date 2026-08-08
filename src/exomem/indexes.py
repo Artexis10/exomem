@@ -54,12 +54,19 @@ def compute_updates(
     date_iso: str,
     activity_summary: str,
     log_entry_body: str,
+    stamp_iso: str | None = None,
 ) -> IndexUpdate:
     """Build the new contents of Sources/index.md, top-level index.md, and log.md.
 
     `rel_source_path` should be the vault-relative path WITHOUT `.md` (wikilink form).
     `activity_summary` is the one-liner that appears in the top index's Recent
     activity bullet AND in the log entry's body.
+
+    `date_iso` is the calendar day: it names index rows and the human-facing
+    Recent-activity bullet, where a time would be noise. `stamp_iso` is the
+    recorded instant for the `log.md` heading, which is what makes several
+    writes on one day orderable. It defaults to `date_iso` so callers that
+    genuinely only have a day keep their existing behaviour.
     """
     kb = kb_root(vault_root)
     sources_dir = kb / "Sources"
@@ -94,7 +101,7 @@ def compute_updates(
 
     log_new = _update_log(
         log_file.read_text(encoding="utf-8"),
-        date_iso=date_iso,
+        date_iso=stamp_iso or date_iso,
         rel_source_path=rel_source_path,
         log_entry_body=log_entry_body
         + (f"\n\n{trim_note}" if trim_note else ""),

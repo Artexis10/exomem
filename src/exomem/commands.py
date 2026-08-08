@@ -252,9 +252,11 @@ def op_bootstrap(
         package_version = "0+unknown"
 
     from . import mode as mode_module
+    from . import prominence as prominence_module
     from . import tool_surface as tool_surface_module
 
     compute_policy = mode_module.resolved()
+    engagement_policy = prominence_module.resolved()
     active_descriptor = _active_bootstrap_descriptor()
     active_product_names = frozenset(active_descriptor.product_commands)
     requested_workflow = workflow.strip() if workflow and workflow.strip() else "general"
@@ -353,6 +355,11 @@ def op_bootstrap(
             "compute_policy": compute_policy,
         },
         "active_capabilities": active_descriptor.as_metadata(),
+        # How much Exomem should participate, as a behavioural contract the client can
+        # follow directly. Deliberately tool-agnostic: `_filter_bootstrap_payload`
+        # drops any string naming a command the active surface cannot call, and this
+        # contract must survive on every surface.
+        "engagement": engagement_policy,
         "governance": {
             "enabled": not governance_policy.empty,
             "policy_fingerprint": governance_policy.fingerprint,
@@ -380,7 +387,16 @@ def op_bootstrap(
             ),
         },
         "knowledge_packs": {
-            "available": knowledge_packs_module.list_builtin_packs(),
+            # A compact bootstrap advertises which packs EXIST, not what each of them
+            # would instruct. Only the selected pack's guidance can apply, so shipping
+            # every pack's `agent_instructions` on every session start spent ~13 KB of
+            # the caller's context on packs it will never act on. `full` keeps the
+            # catalogue for callers that genuinely browse it.
+            "available": (
+                knowledge_packs_module.list_builtin_packs()
+                if profile != "compact"
+                else _pack_index(knowledge_packs_module.list_builtin_packs())
+            ),
             "selected": selected_packs,
             "selection_rule": (
                 "Packs are product guidance only. They help route simple user intent "
@@ -6944,6 +6960,29 @@ def _mentions_unavailable_callable(
         elif re.search(rf"(?<!\w){escaped}\s*\(", value):
             return True
     return False
+
+
+#: Enough to name a pack and decide whether to look it up; never its guidance body.
+#: `beginner_description` earns its bytes — without a human-readable line the catalogue
+#: is a list of slugs and nobody can choose from it.
+_PACK_INDEX_FIELDS = ("id", "name", "audience", "beginner_description")
+
+
+def _pack_index(packs: object) -> list[dict]:
+    """Identity-only view of the built-in pack catalogue.
+
+    Only the *selected* pack's `agent_instructions` can ever apply, so a compact
+    bootstrap that ships all six packs' instruction bodies spends the caller's context
+    on guidance it must ignore. Callers that genuinely browse the catalogue ask for
+    `profile="full"`.
+    """
+    if not isinstance(packs, list):
+        return []
+    return [
+        {field: pack[field] for field in _PACK_INDEX_FIELDS if field in pack}
+        for pack in packs
+        if isinstance(pack, dict)
+    ]
 
 
 def _filter_bootstrap_payload(

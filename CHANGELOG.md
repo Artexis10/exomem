@@ -5,6 +5,56 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.39.2](https://github.com/Artexis10/exomem/compare/v0.39.1...v0.39.2) (2026-08-07)
+
+
+### Bug Fixes
+
+* **memory:** accept draft tokens minted across the UTC day boundary ([#384](https://github.com/Artexis10/exomem/issues/384)) ([39655ba](https://github.com/Artexis10/exomem/commit/39655ba8f0b0025d17b9c57cc9dc0c95807fac02))
+
+## [0.39.1](https://github.com/Artexis10/exomem/compare/v0.39.0...v0.39.1) (2026-08-07)
+
+
+### Bug Fixes
+
+* **auth:** accept private_key_jwt client assertions at a domain root ([#380](https://github.com/Artexis10/exomem/issues/380)) ([91c13a1](https://github.com/Artexis10/exomem/commit/91c13a12a8d81bae41c34c8a8872bf430e54bc84))
+
+## [0.39.0](https://github.com/Artexis10/exomem/compare/v0.38.0...v0.39.0) (2026-08-05)
+
+
+### Features
+
+* **hosted:** compose the deployment lock pair and open the install gate ([#376](https://github.com/Artexis10/exomem/issues/376)) ([78e09b7](https://github.com/Artexis10/exomem/commit/78e09b76fe0c577c5d75c407778d3dcb3403853b))
+* **memory:** record note knowledge time to the second ([#375](https://github.com/Artexis10/exomem/issues/375)) ([77ebc01](https://github.com/Artexis10/exomem/commit/77ebc01eb9989c1e1c2a451fc8a69897a0c13504))
+
+
+### Bug Fixes
+
+* **find:** recover degraded-profile retrieval with content-anchored majority-coverage retention ([#378](https://github.com/Artexis10/exomem/issues/378)) ([888eaab](https://github.com/Artexis10/exomem/commit/888eaab1244cfd432050a7e67dc33cc08ae15fd1))
+* **provisioner:** accept a managed-provider runtime identity on Neon ([#379](https://github.com/Artexis10/exomem/issues/379)) ([35f2856](https://github.com/Artexis10/exomem/commit/35f28563bd623c5fa222172d5cd663452073583f))
+
+## [0.38.0](https://github.com/Artexis10/exomem/compare/v0.37.0...v0.38.0) (2026-08-05)
+
+
+### Features
+
+* **embeddings:** serve the hosted bi-encoder on ONNX Runtime ([#373](https://github.com/Artexis10/exomem/issues/373)) ([612e6f4](https://github.com/Artexis10/exomem/commit/612e6f48222e47a99ff031b1f6b370b03d9adf67))
+
+## [0.37.0](https://github.com/Artexis10/exomem/compare/v0.36.0...v0.37.0) (2026-08-04)
+
+
+### Features
+
+* **governance:** let a scope deny audiences it does not name ([#370](https://github.com/Artexis10/exomem/issues/370)) ([c66cf04](https://github.com/Artexis10/exomem/commit/c66cf0420a2e88f8628f8e7fb4ed203d512f1d7a))
+* **memory:** measure real note connectivity and grow the relation vocabulary ([#369](https://github.com/Artexis10/exomem/issues/369)) ([6107d7b](https://github.com/Artexis10/exomem/commit/6107d7bb9c74aeeb6c9b8d1f336c91f3d815a6bf))
+* **tui:** add exomem tui terminal interface ([#365](https://github.com/Artexis10/exomem/issues/365)) ([1151bfc](https://github.com/Artexis10/exomem/commit/1151bfc656d0ae2e072a2babadb639fb628cd9ab))
+
+
+### Bug Fixes
+
+* **governance:** close five fail-open and disclosure defects in the release plane ([#367](https://github.com/Artexis10/exomem/issues/367)) ([14ba1cc](https://github.com/Artexis10/exomem/commit/14ba1ccf418ebcf52224d7f70c4c6845fa3ff3b5))
+* **hosted:** restore semantic recall in cells and move durability to daily ([#372](https://github.com/Artexis10/exomem/issues/372)) ([8e384f8](https://github.com/Artexis10/exomem/commit/8e384f8a5410d4382b4ecf816a979db419f2a63c))
+
 ## [0.36.0](https://github.com/Artexis10/exomem/compare/v0.35.1...v0.36.0) (2026-07-31)
 
 

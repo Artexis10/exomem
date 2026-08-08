@@ -53,9 +53,28 @@ the authority.
 ## Proactive engagement
 
 This skill is **context-aware, not just request-driven.** It engages on its own
-in two situations and stays quiet otherwise. ("Proactive" means Claude's own
-judgment mid-conversation — there are no hooks, schedules, or background
-triggers.)
+in two situations and stays quiet otherwise. ("Proactive" means the assistant's
+own judgment mid-conversation. On clients that support hooks, a capture/retrieve
+nudge re-arms that judgment each turn; on clients without hooks this text is the
+only prompt to check, so read it as standing instruction rather than advice.)
+
+**Prominence level.** How strongly the two behaviours below apply is tunable.
+`bootstrap()` reports the active level under `engagement`; the user changes it with
+`exomem prominence <level>`, or by editing the level block in their assistant's
+custom instructions. The section below describes **balanced**, the default where
+hooks exist. The other levels shift it:
+
+| Level | Shift from the baseline below |
+|---|---|
+| `off` | Never retrieve or capture on your own. Explicit requests only. |
+| `light` | Retrieve only on an outright recall question or an unmistakably on-topic turn; capture only when asked; never narrate. |
+| `balanced` | As written below. |
+| `maximal` | Retrieve before **every** substantive turn, not only ones that reference prior work; treat the bar for "durable" as low and capture whenever torn; say what you recalled and what you saved. |
+
+`maximal` is the shipped default on clients without hooks — the hosted service,
+and assistants configured through a custom-instructions block — because there is
+nothing there to re-arm the check, and passive instructions decay over a long
+conversation.
 
 **Proactive retrieval (read) — quiet, surface only hits.** When a turn
 references something the KB plausibly holds — a project, a domain, a named
@@ -986,9 +1005,13 @@ is in **`references/audit-checks.md`**.
   Surfacing a candidate ≠ a forgetting curve. Authored typed relations DO
   legitimately inform retrieval ranking — that is connectivity you wrote, not
   decay the system invented.)
-- Run on hooks, schedules, or background triggers. Operations happen because you
-  asked, or because the conversation reached a point where consulting or capturing
-  is clearly warranted.
+- Run on a schedule, or read or write your vault in the background. Every operation
+  happens inside a turn — because you asked, or because the conversation reached a
+  point where consulting or capturing is clearly warranted. (On clients that support
+  them, optional hooks may *remind* the assistant to check at the start or end of a
+  turn. A reminder is not an operation: it prompts the same in-turn judgment
+  described under **Proactive engagement**, and nothing touches the vault until the
+  assistant decides to act.)
 - Modify `Sources/` or `Evidence/` files after creation. Mistakes get superseded,
   not edited.
 

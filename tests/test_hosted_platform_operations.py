@@ -5,6 +5,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import re
 import stat
 import subprocess
 import sys
@@ -226,8 +227,27 @@ def test_k3s_snapshot_and_break_glass_contract_is_off_host_and_versioned() -> No
 
     assert "etcd-s3: true" in config
     assert "etcd-s3-skip-ssl-verify: false" in config
-    assert "etcd-s3-folder: exomem-private-alpha/etcd" in config
     assert "secrets-encryption: true" in config
+
+    # The folder must match the prefix the B2 keys permit. It did not, and every
+    # upload AND every restore listing was rejected as `not entitled` for the
+    # life of the cluster — silently, because the only signal was a journal line.
+    # Pinning the folder as a literal string is what let the two drift apart, so
+    # cross-check them instead: this assertion fails on either side changing
+    # alone.
+    storage = (INFRA / "terraform/durability/storage.tf").read_text(encoding="utf-8")
+    folder = re.search(r"^etcd-s3-folder:\s*(\S+)\s*$", config, re.MULTILINE)
+    assert folder is not None, "etcd-s3-folder is not set"
+    for key in ("etcd_snapshot_upload", "etcd_snapshot_restore"):
+        block = storage.split(f'resource "b2_application_key" "{key}"', 1)[1].split(
+            "\nresource ", 1
+        )[0]
+        prefix = re.search(r'name_prefix\s*=\s*"([^"]+)"', block)
+        assert prefix is not None, key
+        assert prefix.group(1) == f"{folder.group(1)}/", (
+            f"{key} permits {prefix.group(1)!r} but k3s writes to "
+            f"{folder.group(1)!r}/ — B2 will reject every object as 'not entitled'"
+        )
     assert set(destinations) == {
         "ansible.hosted-node.k3s-server-token.active",
         "escrow.k3s-server-token.active",
@@ -626,19 +646,29 @@ def test_rotation_retirement_gate_covers_every_independent_rotation(
                 )
 
 
-def test_capacity_gate_blocks_unknown_economics_and_seventh_user(tmp_path: Path) -> None:
+def test_capacity_gate_blocks_unknown_economics_and_the_cell_past_the_cap(tmp_path: Path) -> None:
     module = _load("infra/scripts/capacity_gate.py", "capacity_gate_test")
     contract = json.loads((INFRA / "operations/private-alpha-capacity-v1.json").read_text())
+    # Four USER cells, not six: Hetzner retired the cx line so this node cannot
+    # be resized, and one embedding-capable cell measures 918 MiB peak. Four
+    # plus the platform is what 8 GB actually holds. Attachments follow at
+    # 4 user + 2 recovery, leaving 10 of the provider's 16 unused.
     assert contract["limits"] == {
-        "active_user_cells": 6,
+        "active_user_cells": 4,
         "active_recovery_cells": 2,
-        "maximum_potential_attachments": 8,
+        "maximum_potential_attachments": 6,
         "provider_volume_attachment_limit": 16,
-        "minimum_unused_provider_headroom": 8,
+        "minimum_unused_provider_headroom": 10,
     }
     assert contract["pricing"]["friend_price_eur_gross"] == 5
     assert contract["pricing"]["public_price_eur_gross_range"] == [10, 15]
-    assert contract["live_costs_verified"] is False
+    # Filled from the Hetzner invoice and the observed live Paddle
+    # transaction, both digested into the evidence block below.
+    assert contract["live_costs_verified"] is True
+    assert all(
+        isinstance(value, (int, float))
+        for value in contract["monthly_costs_eur_ex_vat"].values()
+    )
     assert contract["receipt_authentication"] == {
         "algorithm": "ed25519",
         "capacity_domain": "exomem.capacity-live-receipt.v1",
@@ -721,9 +751,9 @@ def test_capacity_gate_blocks_unknown_economics_and_seventh_user(tmp_path: Path)
         "hcloud_location": "fsn1",
         "observed_at": "2026-07-14T12:00:00Z",
         "expires_at": "2026-07-14T12:05:00Z",
-        "active_user_cells": 5,
+        "active_user_cells": 3,
         "active_recovery_cells": 1,
-        "attached_volumes": 6,
+        "attached_volumes": 4,
     }
     economics = {
         "schema_version": 1,
@@ -807,7 +837,7 @@ def test_capacity_gate_blocks_unknown_economics_and_seventh_user(tmp_path: Path)
         )
     write_receipt(economics_path, economics, economics_private_key)
 
-    blocked_capacity = {**capacity, "active_user_cells": 6}
+    blocked_capacity = {**capacity, "active_user_cells": 4}
     write_receipt(capacity_path, blocked_capacity, capacity_private_key)
     blocked = module.evaluate_files(
         contract,
@@ -1507,11 +1537,11 @@ def test_production_composition_contract_binds_release_and_operator_actions() ->
         "exomem-volume-worker",
     ]
     assert capacity["limits"] == {
-        "active_user_cells": 6,
+        "active_user_cells": 4,
         "active_recovery_cells": 2,
-        "maximum_potential_attachments": 8,
+        "maximum_potential_attachments": 6,
         "provider_volume_attachment_limit": 16,
-        "minimum_unused_provider_headroom": 8,
+        "minimum_unused_provider_headroom": 10,
     }
     assert contract["volume_rebind"]["public_endpoint"] is None
     assert contract["volume_rebind"]["worker_primitive"] == ("VolumeLifecycleWorker.rebind_static")
@@ -1561,7 +1591,7 @@ def test_production_composition_contract_binds_release_and_operator_actions() ->
 
     runbook_expectations = {
         "deploy.md": [
-            "exomem-hosted-release-v1",
+            "app.kubernetes.io/name=exomem-hosted-deployment-lock",
             "exomem-provisioner-api",
             "exomem-provisioner-worker",
             "exomem-hosted-deployment-lock-pair-v2.json",

@@ -9,7 +9,9 @@ provisioner:
 scheduler:
   contractVersion: 1
 capacityCollector:
-  hcloudServerId: 101
+  # Nine digits on purpose: Helm parses values as float64, and Go renders a
+  # large float64 in scientific notation. A small fixture cannot catch that.
+  hcloudServerId: 156895713
 durability:
   b2Endpoint: https://s3.eu-central-003.backblazeb2.com
   b2Region: eu-central-003

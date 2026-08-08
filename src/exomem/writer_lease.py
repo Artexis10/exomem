@@ -40,6 +40,7 @@ from .mutation_lock import _release_os_lock as _release_owner_lock
 from .mutation_lock import _try_os_lock as _try_owner_lock
 from .mutation_terminal import (
     committed_terminal,
+    needs_review_terminal,
     project_terminal,
     replayed_terminal,
     split_response_detail,
@@ -1382,7 +1383,11 @@ class LeaseManager:
                         receipt_id=receipt,
                         idempotency_key=effective_public_idempotency_key,
                     )
-                return leaf_result
+                # A guarded write that validated but did not commit is mid-flight, not
+                # failed. Give it the same envelope shape as its eventual success so a
+                # client can correlate the pair on `operation_id` and see `terminal`
+                # is false, instead of reading the first response as the outcome.
+                return needs_review_terminal(leaf_result)
             except Exception as error:
                 if (
                     _ACTIVE_MUTATION_COMMITTED.get()

@@ -103,7 +103,7 @@ def _request(
         "protocolVersion": "exomem-hosted.v1",
         "releaseVersion": "0.22.0",
         "serviceCredential": "service-credential-sentinel-000000000",
-        "workerPolicy": {"workerCount": 0, "semantic": False, "media": False},
+        "workerPolicy": {"workerCount": 2, "semantic": True, "media": False},
     }
 
 
@@ -1099,11 +1099,11 @@ def _contract(private_key: Ed25519PrivateKey) -> dict[str, object]:
             "capacity_public_key_id": hashlib.sha256(raw).hexdigest(),
         },
         "limits": {
-            "active_user_cells": 6,
+            "active_user_cells": 4,
             "active_recovery_cells": 2,
-            "maximum_potential_attachments": 8,
+            "maximum_potential_attachments": 6,
             "provider_volume_attachment_limit": 16,
-            "minimum_unused_provider_headroom": 8,
+            "minimum_unused_provider_headroom": 10,
         },
     }
 
@@ -1717,3 +1717,30 @@ def test_capacity_model_enums_are_exact() -> None:
     assert CapacityReservationClass.USER.value == "USER"
     assert CapacityReservationClass.RECOVERY.value == "RECOVERY"
     assert OperationAction.PROVISION.value == "provision"
+
+
+def test_verifier_pin_matches_the_shipped_capacity_contract() -> None:
+    """The provisioner's hardcoded limits must equal the contract it will be given.
+
+    `CapacityReceiptVerifier` deliberately refuses a contract whose limits it
+    does not already recognise, so a swapped or tampered contract cannot quietly
+    raise the cap. That defence only works while the pin tracks the shipped
+    contract: if they drift, every provisioning attempt fails closed with
+    "capacity contract authentication is invalid" and the cause is nowhere near
+    the symptom. Every fixture in this file hardcodes the same values, so
+    nothing else here would notice.
+    """
+    contract = json.loads(
+        (
+            Path(__file__).resolve().parents[3]
+            / "infra/operations/private-alpha-capacity-v1.json"
+        ).read_text(encoding="utf-8")
+    )
+    source = (
+        Path(__file__).resolve().parents[1] / "src/exomem_provisioner/capacity.py"
+    ).read_text(encoding="utf-8")
+
+    for field, value in contract["limits"].items():
+        assert f'"{field}": {value},' in source or f'"{field}": {value},\n' in source, (
+            f"provisioner pin does not carry {field}={value} from the shipped contract"
+        )

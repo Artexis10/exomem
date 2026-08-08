@@ -4855,10 +4855,19 @@ def write_log_entry(
         return f"log entry skipped: {error}"
 
 
-# Matches a single log.md entry header: `## [2026-06-23] edit | Notes/Insights/foo`.
+# Matches a single log.md entry header, at either recorded precision:
+#   `## [2026-06-23] edit | Notes/Insights/foo`
+#   `## [2026-06-23T09:12:33Z] edit | Notes/Insights/foo`
 # `op` is a single whitespace-free token; the title runs to end-of-line.
+#
+# The optional time group is what makes same-day edits orderable — three
+# entries written within one afternoon used to read identically, leaving
+# position in the file as the only ordering signal. A header this fails to
+# match is not an error anywhere downstream: `read_log_entries` simply returns
+# nothing, so `read_memory(include_history=true)` would lose the page's history
+# silently. Widen this before anything can write the longer form.
 _LOG_ENTRY_HEADER_RE = re.compile(
-    r"^## \[(\d{4}-\d{2}-\d{2})\] (\S+) \| (.+)$",
+    r"^## \[(\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2}:\d{2}Z)?)\] (\S+) \| (.+)$",
     re.MULTILINE,
 )
 
