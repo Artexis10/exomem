@@ -152,7 +152,7 @@ spec:
                 - --state-configmap
                 - {{ $stateName }}
                 - --hcloud-server-id
-                - {{ .Values.capacityCollector.hcloudServerId | quote }}
+                - {{ .Values.capacityCollector.hcloudServerId | int64 | quote }}
                 - --hcloud-location
                 - {{ .Values.provisioner.location | quote }}
               env:

@@ -108,6 +108,9 @@ capacity_values="${deploy_work_dir}/capacity-values.json"
 jq -n --argjson server_id "$hcloud_server_id" \
   '{capacityCollector: {hcloudServerId: $server_id}}' > "$capacity_values"
 chmod 0600 "$capacity_values"
+# The chart pipes this through `int64` before use. Helm parses values as float64
+# and Go prints a large one as 1.56895713e+08, which every worker rejects at
+# startup with "unable to parse string as an integer".
 helm template exomem-platform infra/helm/platform --namespace exomem-platform \
   --values infra/helm/platform/values.yaml \
   --values "${deploy_work_dir}/release-values.json" \
