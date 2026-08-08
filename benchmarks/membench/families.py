@@ -183,6 +183,21 @@ _V02_FAMILIES: tuple[Family, ...] = (
         ),
     ),
     Family(
+        family_id="relational_inference",
+        classification="deterministic-oracle",
+        status="planned",
+        rationale=(
+            "A conclusion no single source states, reached by composing "
+            "relations across sources: each hop is recorded separately and the "
+            "terminal fact is named nowhere, so answering requires retrieving a "
+            "source that never mentions the subject. Every active family asks "
+            "whether a stored fact survives and returns; none asks whether the "
+            "store can compose one. The compile plan already derives "
+            "conclusions deterministically from oracle-held relations, so the "
+            "expectation needs no model."
+        ),
+    ),
+    Family(
         family_id="long_horizon_entropy",
         classification="deterministic-oracle",
         status="planned",
