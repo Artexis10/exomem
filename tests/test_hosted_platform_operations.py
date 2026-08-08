@@ -1591,7 +1591,7 @@ def test_production_composition_contract_binds_release_and_operator_actions() ->
 
     runbook_expectations = {
         "deploy.md": [
-            "exomem-hosted-release-v1",
+            "app.kubernetes.io/name=exomem-hosted-deployment-lock",
             "exomem-provisioner-api",
             "exomem-provisioner-worker",
             "exomem-hosted-deployment-lock-pair-v2.json",
