@@ -15,22 +15,21 @@ deterministic transduction of oracle-held ground truth.
 ## 2. Native rendering (fairness — write basic-memory FIRST)
 - [x] 2.1 **`basic-memory-local` renderer first**, deliberately: letting the second product constrain the record's fields is what stops the neutral record quietly becoming exomem's `remember` signature. Per-conclusion parity report
 - [x] 2.2 `exomem-local` renderer: `remember(title, body, sources=[…])`, `replace_memory` for supersession; parity report
-- [ ] 2.3 `graybox-local` declares the tier unsupported (its compile path is an LLM organize pass); assert it is excluded and never zeroed
+- [x] 2.3 `graybox-local` declares the tier unsupported (its compile path is an LLM organize pass); assert it is excluded and never zeroed
 - [ ] 2.4 `oracle-retrieval` compiles the plan exactly — the chain-preservation ceiling
 - [ ] 2.5 `null-abstain` ingests, compiles nothing, retrieves nothing — the floor
 - [ ] 2.6 Parity completeness test: every conclusion accounted for by every declaring adapter
 
 ## 3. Harness wiring
-<!-- NOT STARTED. Sections 1-2 are landed: the corpus emits the plan and both
-     products render it natively. Nothing can RUN at compiled altitude yet —
-     there is no --altitude flag, no compile phase, and no scoring change, so
-     the altitude is declarable but not selectable. -->
-- [ ] 3.1 `--altitude {raw_source,compiled}`; adapters declare what they can honour; run refuses a tier it cannot apply evenly (4b.29 rule, applied to altitude)
-- [ ] 3.2 Compile phase runs after ingest, before queries; failures are recorded and kept in denominators
-- [ ] 3.3 Reporting: withhold altitude-dependent dimensions across mixed altitudes, naming both
+- [x] 3.1 `--altitude {raw_source,compiled}`; adapters declare what they can honour; run refuses a tier it cannot apply evenly (4b.29 rule, applied to altitude)
+- [x] 3.2 Compile phase runs after ingest, before queries; failures are recorded and kept in denominators
+- [x] 3.3 Reporting: withhold altitude-dependent dimensions across mixed altitudes, naming both
 
 ## 4. Scoring
-- [ ] 4.1 `gate_citations` at compiled altitude scores the contender's reported chain, not a harness-authored answer; no attribution surface reports unsupported, never zero
+<!-- 4.1 landed. 4.2 (contradiction gate) and 4.3 (ceiling proof) remain, and
+     4.3 is the gate on this whole change: if oracle-retrieval cannot pass both
+     dimensions at compiled altitude, the gate is wrong, not the contender. -->
+- [x] 4.1 `gate_citations` at compiled altitude scores the contender's reported chain, not a harness-authored answer; no attribution surface reports unsupported, never zero
 - [ ] 4.2 Contradiction gate: conflict surfacing over compiled conclusions; no numeric confidence required; no generated hedging required
 - [ ] 4.3 **Ceiling proof:** `oracle-retrieval` at compiled altitude must pass both dimensions. A ceiling below the query count is a harness defect and blocks this change
 
