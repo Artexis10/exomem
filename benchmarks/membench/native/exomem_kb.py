@@ -2,8 +2,15 @@
 
 Track B v0.1 keeps ingestion altitude equal across products: sources go in as
 raw captured text (``capture_source``), so typed lifecycle facts are honestly
-``degraded`` here exactly as they are for the other contenders. Compiled-note
-workflows are Track D's subject, not Track B ingestion.
+``degraded`` here exactly as they are for the other contenders. That was a
+deliberate fairness choice, and it stands as the ``raw_source`` altitude.
+
+What it also does — unstated until 4b.35 measured it — is make provenance and
+contradiction structurally unmeasurable: a citation chain is a compiled
+conclusion declaring its sources, and with nothing compiled there is no chain
+to score. The fix is not to abandon the fairness choice but to add a second
+declared altitude where every contender compiles, which is what the ``compiled``
+altitude and this module's ``render_conclusions`` provide.
 """
 
 from __future__ import annotations
@@ -15,7 +22,62 @@ from membench.native import CorpusView, FactParityReport, ParityStatus, corpus_f
 from membench.schema import ScheduleOp, load_jsonl
 
 
-def render(view: CorpusView, out_dir: Path) -> FactParityReport:
+def render_conclusions(view: CorpusView, ops: list[dict], report: FactParityReport) -> None:
+    """Append the compile plan as `remember` ops, after the captures it cites.
+
+    Ordering is load-bearing: exomem's ``remember(sources=[...])`` writes
+    ``ingested_into:`` back onto each cited source, so a conclusion authored
+    before its sources exist would have nothing to link to. The capture stream
+    is emitted first for exactly that reason.
+
+    Supersession is expressed with ``replace_memory`` rather than a second
+    ``remember`` — a superseded conclusion must be demoted, not merely
+    contradicted by a newer note.
+    """
+
+    if not view.conclusions:
+        return
+    seq = max((op["seq"] for op in ops), default=-1)
+    for conclusion in sorted(view.conclusions, key=lambda c: c.sort_key):
+        seq += 1
+        ops.append(
+            {
+                "week": 11,
+                "seq": seq,
+                "op": "remember",
+                "conclusion_id": conclusion.conclusion_id,
+                "title": conclusion.title,
+                "content": conclusion.body,
+                "cites": list(conclusion.cites),
+                "supersedes": conclusion.supersedes,
+            }
+        )
+        for source_id in conclusion.cites:
+            report.record(
+                f"conclusion-cites:{conclusion.conclusion_id}:{source_id}",
+                ParityStatus.REPRESENTED,
+            )
+        for other in conclusion.disputes:
+            # No dispute primitive: exomem detects contradictions over the
+            # corpus rather than accepting a declared one, so the edge is not
+            # authored. Recorded degraded, never dropped — whether detection
+            # finds the pair is precisely what the dimension measures.
+            report.record(
+                f"conclusion-disputes:{conclusion.conclusion_id}:{other}",
+                ParityStatus.DEGRADED,
+                "no authored dispute edge; contradiction detection is expected "
+                "to surface the pair from the compiled corpus itself",
+            )
+        if conclusion.supersedes:
+            report.record(
+                f"conclusion-supersedes:{conclusion.conclusion_id}:{conclusion.supersedes}",
+                ParityStatus.REPRESENTED,
+            )
+
+
+def render(
+    view: CorpusView, out_dir: Path, *, altitude: str = "raw_source"
+) -> FactParityReport:
     report = FactParityReport(renderer="exomem")
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -41,6 +103,8 @@ def render(view: CorpusView, out_dir: Path) -> FactParityReport:
                     "content": content,
                 }
             )
+    if altitude == "compiled":
+        render_conclusions(view, ops, report)
     (out_dir / "capture-ops.jsonl").write_text(
         "\n".join(json.dumps(op, ensure_ascii=False, sort_keys=True) for op in ops) + "\n",
         encoding="utf-8",

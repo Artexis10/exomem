@@ -40,7 +40,90 @@ def _claim_sentence(view: CorpusView, claim_id: str) -> tuple[str, str]:
     return entity.canonical_name, f"{claim.predicate.replace('_', ' ')} is {value}"
 
 
-def render(view: CorpusView, out_dir: Path) -> FactParityReport:
+def _conclusion_stem(conclusion) -> str:
+    """Permalink stem for a compiled conclusion.
+
+    Uses the conclusion id rather than the title: two conclusions can share a
+    title whenever two entities share a canonical name (task 4b.32 counts 18
+    such names in seed-1), and a colliding permalink is identity loss in this
+    product's grammar — one note silently overwriting another.
+    """
+
+    return f"{_identity_stem(conclusion.title, conclusion.conclusion_id)}-{conclusion.conclusion_id[-8:].lower()}"
+
+
+def render_conclusions(view: CorpusView, out_dir: Path, report: FactParityReport) -> None:
+    """Write the compile plan as Basic Memory notes.
+
+    Grammar fit, stated honestly per relation kind:
+
+    - ``cites`` and ``disputes`` are typed relation lines, which is a native
+      fit — this product has arbitrary relation types.
+    - ``supersedes`` is written as a relation too, but recorded DEGRADED: the
+      product has no lifecycle primitive, so the older note is not demoted or
+      hidden the way a supersession-aware store would. Matching how the
+      existing renderer already treats claim supersession.
+    """
+
+    if not view.conclusions:
+        return
+    by_id = {c.conclusion_id: c for c in view.conclusions}
+    source_stems = {
+        source.source_id: f"{slugify(source.title)}-{source.source_id[-8:].lower()}"
+        for source in view.sources
+    }
+
+    for conclusion in view.conclusions:
+        stem = _conclusion_stem(conclusion)
+        lines = [
+            "---",
+            f"title: {conclusion.title}",
+            "type: conclusion",
+            f"permalink: {stem}",
+            "tags: [conclusion]",
+            "---",
+            "",
+            f"# {conclusion.title}",
+            "",
+            "## Observations",
+            f"- [conclusion] {conclusion.body} #conclusion",
+            "",
+            "## Relations",
+        ]
+        for source_id in conclusion.cites:
+            target = source_stems.get(source_id)
+            if target is None:
+                continue
+            lines.append(f"- cites [[{target}]]")
+            report.record(
+                f"conclusion-cites:{conclusion.conclusion_id}:{source_id}",
+                ParityStatus.REPRESENTED,
+            )
+        for other in conclusion.disputes:
+            partner = by_id.get(other)
+            if partner is None:
+                continue
+            lines.append(f"- disputes [[{_conclusion_stem(partner)}]]")
+            report.record(
+                f"conclusion-disputes:{conclusion.conclusion_id}:{other}",
+                ParityStatus.REPRESENTED,
+            )
+        if conclusion.supersedes:
+            partner = by_id.get(conclusion.supersedes)
+            if partner is not None:
+                lines.append(f"- supersedes [[{_conclusion_stem(partner)}]]")
+            report.record(
+                f"conclusion-supersedes:{conclusion.conclusion_id}:{conclusion.supersedes}",
+                ParityStatus.DEGRADED,
+                "relation written, but no lifecycle primitive: the superseded "
+                "note is not demoted or hidden",
+            )
+        (out_dir / f"{stem}.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def render(
+    view: CorpusView, out_dir: Path, *, altitude: str = "raw_source"
+) -> FactParityReport:
     report = FactParityReport(renderer="basic-memory")
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -121,6 +204,9 @@ def render(view: CorpusView, out_dir: Path) -> FactParityReport:
                 ParityStatus.UNSUPPORTED,
                 "no alias field in the note frontmatter grammar",
             )
+
+    if altitude == "compiled":
+        render_conclusions(view, out_dir, report)
 
     missing = report.missing(corpus_facts(view))
     if missing:

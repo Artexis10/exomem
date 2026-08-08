@@ -13,7 +13,14 @@ import enum
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from membench.schema import ArtifactKind, ClaimRecord, EntityRecord, SourceRecord, load_jsonl
+from membench.schema import (
+    ArtifactKind,
+    ClaimRecord,
+    ConclusionRecord,
+    EntityRecord,
+    SourceRecord,
+    load_jsonl,
+)
 
 _BINARY_KINDS = frozenset({ArtifactKind.PNG, ArtifactKind.PDF})
 
@@ -55,6 +62,10 @@ class CorpusView:
     entities: list[EntityRecord]
     sources: list[SourceRecord]
     claims: list[ClaimRecord]
+    #: The compiled altitude's input. Empty for a raw-source run and for any
+    #: corpus generated before the plan existed, so a renderer must treat an
+    #: empty plan as "this run is not compiled" rather than as an error.
+    conclusions: list[ConclusionRecord] = field(default_factory=list)
 
     def source_text(self, source: SourceRecord) -> str:
         return (self.root / source.path).read_text(encoding="utf-8")
@@ -87,6 +98,11 @@ def load_corpus_view(corpus_dir: Path) -> CorpusView:
         entities=load_jsonl(EntityRecord, corpus_dir / "entities.jsonl"),
         sources=load_jsonl(SourceRecord, corpus_dir / "sources.jsonl"),
         claims=load_jsonl(ClaimRecord, corpus_dir / "claims.jsonl"),
+        conclusions=(
+            load_jsonl(ConclusionRecord, corpus_dir / "compile-plan.jsonl")
+            if (corpus_dir / "compile-plan.jsonl").is_file()
+            else []
+        ),
     )
 
 

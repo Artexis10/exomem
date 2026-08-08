@@ -26,7 +26,11 @@ from pathlib import Path
 from membench.native import CorpusView, FactParityReport, ParityStatus, corpus_facts
 
 
-def render(view: CorpusView, out_dir: Path) -> FactParityReport:
+def render(
+    view: CorpusView, out_dir: Path, *, altitude: str = "raw_source"
+) -> FactParityReport:
+    """identity at either altitude: the ceiling reads the canonical corpus."""
+
     # The directory is created but stays empty: the adapter reads `corpus_dir`,
     # not `native_dir`. Creating it keeps the runner's contract uniform.
     Path(out_dir).mkdir(parents=True, exist_ok=True)

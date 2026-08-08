@@ -656,7 +656,7 @@ def execute_run(spec: RunSpec) -> RunResult:
         native_dir = run_dir / "native" / spec.adapter.name
         parity: FactParityReport | None = None
         if renderer is not None:
-            parity = renderer(view, native_dir)
+            parity = renderer(view, native_dir, altitude=ingestion_altitude)
             (run_dir / "parity.json").write_text(
                 json.dumps(
                     {

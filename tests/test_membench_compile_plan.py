@@ -397,3 +397,92 @@ def test_fixtures_are_exempt_from_the_dispute_guard(tmp_path) -> None:
         1, tmp_path / "b", templates={"t00_mini_smoke": registry()["t00_mini_smoke"]}
     )
     assert by_set.counts["conclusions"] > 0
+
+
+# --------------------------------------------------------------------------
+# Native rendering, gated on altitude (tasks 2.1-2.2)
+# --------------------------------------------------------------------------
+
+
+def _view(tmp_path):
+    from membench.generate import generate_corpus
+    from membench.native import load_corpus_view
+
+    generate_corpus(1, tmp_path / "s1", template_ids=["t07_authority_conflict"])
+    return load_corpus_view(tmp_path / "s1")
+
+
+def test_a_raw_source_run_renders_no_conclusions(tmp_path) -> None:
+    """The plan lives in every corpus, so rendering must be gated on ALTITUDE.
+
+    Keying on "does the corpus have a plan" instead would silently promote every
+    existing raw-source run to compiled, changing what its provenance and
+    contradiction numbers mean without anything saying so.
+    """
+
+    from membench.native import basic_memory, exomem_kb
+
+    view = _view(tmp_path)
+    assert view.conclusions, "fixture corpus has no plan"
+
+    bm_out = tmp_path / "bm"
+    basic_memory.render(view, bm_out, altitude="raw_source")
+    assert not any("type: conclusion" in p.read_text() for p in bm_out.glob("*.md"))
+
+    ex_out = tmp_path / "ex"
+    exomem_kb.render(view, ex_out, altitude="raw_source")
+    ops = (ex_out / "capture-ops.jsonl").read_text()
+    assert '"op": "remember"' not in ops
+
+
+def test_both_products_render_the_plan_in_their_own_grammar(tmp_path) -> None:
+    """Same neutral record, two native shapes — the fairness requirement.
+
+    basic-memory expresses citation as a typed relation line; exomem expresses
+    it as a `remember` op carrying `cites`. Neither is a translation of the
+    other's API.
+    """
+
+    import json
+
+    from membench.native import basic_memory, exomem_kb
+
+    view = _view(tmp_path)
+
+    bm_out = tmp_path / "bm"
+    basic_memory.render(view, bm_out, altitude="compiled")
+    notes = [p.read_text() for p in bm_out.glob("*.md")]
+    conclusions = [n for n in notes if "type: conclusion" in n]
+    assert len(conclusions) == len(view.conclusions)
+    assert any("- cites [[" in n for n in conclusions)
+
+    ex_out = tmp_path / "ex"
+    exomem_kb.render(view, ex_out, altitude="compiled")
+    ops = [
+        json.loads(line)
+        for line in (ex_out / "capture-ops.jsonl").read_text().splitlines()
+        if line.strip()
+    ]
+    remembers = [o for o in ops if o["op"] == "remember"]
+    assert len(remembers) == len(view.conclusions)
+    assert all(o["cites"] for o in remembers)
+
+
+def test_exomem_authors_every_conclusion_after_the_sources_it_cites(tmp_path) -> None:
+    """`remember(sources=...)` writes `ingested_into:` back onto each source, so
+    a conclusion authored before its sources exist has nothing to link to."""
+
+    import json
+
+    from membench.native import exomem_kb
+
+    view = _view(tmp_path)
+    out = tmp_path / "ex"
+    exomem_kb.render(view, out, altitude="compiled")
+    ops = [
+        json.loads(line)
+        for line in (out / "capture-ops.jsonl").read_text().splitlines()
+        if line.strip()
+    ]
+    first_remember = next(i for i, o in enumerate(ops) if o["op"] == "remember")
+    assert all(o["op"] == "capture_source" for o in ops[:first_remember])

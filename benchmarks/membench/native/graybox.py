@@ -13,7 +13,13 @@ from pathlib import Path
 from membench.native import CorpusView, FactParityReport, ParityStatus, corpus_facts
 
 
-def render(view: CorpusView, out_dir: Path) -> FactParityReport:
+def render(
+    view: CorpusView, out_dir: Path, *, altitude: str = "raw_source"
+) -> FactParityReport:
+    """raw-inbox altitude only: its compile step is an LLM organize pass,
+    which the deterministic layer excludes by construction (spec: cannot-compile
+    is declared, never zeroed)."""
+
     report = FactParityReport(renderer="graybox")
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
