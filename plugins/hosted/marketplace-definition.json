@@ -26,8 +26,8 @@
     "user_prerequisites": {
       "account": "Requires an Exomem Hosted account and authorization.",
       "admission": {
-        "mode": "invite_only",
-        "eligibility": "Private alpha access is available by invitation."
+        "mode": "public",
+        "eligibility": "Public access is available to eligible users."
       }
     },
     "regions": ["EEA", "United States"],
