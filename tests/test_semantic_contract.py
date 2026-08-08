@@ -466,11 +466,16 @@ def test_valid_unit_does_not_satisfy_missing_relation_review(tmp_path: Path) -> 
     assert "RELATION_DISPOSITION_MISSING" in codes
     assert "missing_semantic_unit" not in codes
     finding = next(item for item in result.blocking_findings if item.code == "RELATION_DISPOSITION_MISSING")
-    assert "validate_only=true" in finding.remediation
+    # Route-neutral: this finding also fires on ordinary edits, where `validate_only`
+    # and the draft trio do not exist as parameters. Naming them unconditionally sent
+    # edit callers onto an unnatural operation to find a field they could reach.
+    assert "validate_only" not in finding.remediation
     assert "draft_id" in finding.remediation
     assert "draft_hash" in finding.remediation
     assert "draft_token" in finding.remediation
+    assert "Creation writers" in finding.remediation
     assert 'relation_disposition="reviewed_none"' in finding.remediation
+    assert "re-issue the same call" in finding.remediation
     assert "relation_review_hash" in finding.remediation
     assert "relation_review_reason" in finding.remediation
 
