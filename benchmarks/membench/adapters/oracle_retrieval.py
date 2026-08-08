@@ -85,7 +85,6 @@ from membench.adapters.base import (
     StateExport,
     register_adapter,
 )
-from membench.compile_plan import conclusion_id_for
 from membench.ids import sentinel, sentinels_in
 from membench.schema import (
     ClaimRecord,
@@ -131,6 +130,9 @@ class OracleRetrievalAdapter:
         #: conclusion id -> (body text, declared basis). Populated only at
         #: compiled altitude; the raw tier has no conclusions to serve.
         self._conclusions: dict[str, tuple[str, tuple[str, ...]]] = {}
+        #: claim id -> [(knowledge_week, conclusion_id)] ascending, so an ask can
+        #: be served the revision current at its knowledge week.
+        self._revisions: dict[str, list[tuple[int, str]]] = {}
 
     # -- lifecycle --------------------------------------------------------
     @property
@@ -161,6 +163,7 @@ class OracleRetrievalAdapter:
         self._by_prompt.clear()
         self._texts.clear()
         self._conclusions.clear()
+        self._revisions.clear()
 
     # -- ingest -----------------------------------------------------------
     def ingest(self, corpus_dir: Path, native_dir: Path) -> list[OpResult]:
@@ -201,6 +204,12 @@ class OracleRetrievalAdapter:
                     f"the corpus: {exc}"
                 ) from exc
             self._conclusions = {c.conclusion_id: (c.body, c.cites) for c in plan}
+            revisions: dict[str, list[tuple[int, str]]] = defaultdict(list)
+            for conclusion in plan:
+                revisions[conclusion.claim_id].append(
+                    (conclusion.knowledge_week, conclusion.conclusion_id)
+                )
+            self._revisions = {k: sorted(v) for k, v in revisions.items()}
 
         results: list[OpResult] = []
         for seq, (source_id, source) in enumerate(sources.items()):
@@ -254,7 +263,9 @@ class OracleRetrievalAdapter:
             rest = [s for s in sorted(permitted) if s not in required]
             if self.altitude == "compiled":
                 staged[query.prompt_text].append(
-                    self._compiled_order(exp.required_claims, required + rest)
+                    self._compiled_order(
+                        exp.required_claims, required + rest, query.ask.knowledge_week
+                    )
                 )
             else:
                 staged[query.prompt_text].append(required + rest)
@@ -270,7 +281,10 @@ class OracleRetrievalAdapter:
         return results
 
     def _compiled_order(
-        self, required_claims: list[str], permitted_sources: list[str]
+        self,
+        required_claims: list[str],
+        permitted_sources: list[str],
+        knowledge_week: int | None,
     ) -> list[str]:
         """The compiled counterpart of the source ordering, same rationale.
 
@@ -286,13 +300,34 @@ class OracleRetrievalAdapter:
         allowed = set(permitted_sources)
         ordered: dict[str, None] = {}
         for claim_id in required_claims:
-            conclusion_id = conclusion_id_for(claim_id)
-            if conclusion_id in self._conclusions:
+            conclusion_id = self._revision_at(claim_id, knowledge_week)
+            if conclusion_id is not None:
                 ordered.setdefault(conclusion_id)
-        for conclusion_id, (_body, cites) in sorted(self._conclusions.items()):
-            if conclusion_id not in ordered and allowed.intersection(cites):
+        for claim_id in sorted(self._revisions):
+            conclusion_id = self._revision_at(claim_id, knowledge_week)
+            if conclusion_id is None or conclusion_id in ordered:
+                continue
+            if allowed.intersection(self._conclusions[conclusion_id][1]):
                 ordered.setdefault(conclusion_id)
         return list(ordered)
+
+    def _revision_at(self, claim_id: str, knowledge_week: int | None) -> str | None:
+        """The revision a perfect store would be holding at the ask (4b.39).
+
+        The latest one whose basis was complete at or before the ask's knowledge
+        week. Serving a later revision would cite evidence that did not yet
+        exist, which is the defect the bitemporal plan removes; serving an
+        earlier one would understate what was knowable. An ask with no declared
+        knowledge week is unbounded and sees the head.
+        """
+
+        revisions = self._revisions.get(claim_id)
+        if not revisions:
+            return None
+        if knowledge_week is None:
+            return revisions[-1][1]
+        visible = [cid for week, cid in revisions if week <= knowledge_week]
+        return visible[-1] if visible else None
 
     # -- search -----------------------------------------------------------
     def search(self, query: str, limit: int) -> list[Hit]:

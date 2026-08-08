@@ -41,5 +41,7 @@ def test_release_manifest_covers_the_declared_suite() -> None:
     assert payload["artifacts"], "artifact hash inventory must be present"
     # The compiled tier ships with the corpus, so a plan missing from the
     # release identity would let a compiled run be reproduced against bytes
-    # that never carried one.
-    assert payload["counts"]["conclusions"] == payload["counts"]["claims"]
+    # that never carried one. Conclusions *exceed* claims because the plan is
+    # bitemporal (4b.39): a claim whose basis grew over time yields one
+    # conclusion per point at which it changed.
+    assert payload["counts"]["conclusions"] >= payload["counts"]["claims"]

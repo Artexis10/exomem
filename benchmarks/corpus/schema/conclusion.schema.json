@@ -30,6 +30,11 @@
       "title": "Disputes",
       "type": "array"
     },
+    "knowledge_week": {
+      "default": 0,
+      "title": "Knowledge Week",
+      "type": "integer"
+    },
     "sort_key": {
       "default": 0,
       "minimum": 0,

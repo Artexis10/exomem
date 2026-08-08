@@ -2299,7 +2299,7 @@
   ],
   "counts": {
     "claims": 340,
-    "conclusions": 340,
+    "conclusions": 348,
     "entities": 160,
     "events": 4,
     "expected": 356,

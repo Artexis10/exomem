@@ -382,6 +382,11 @@ class ConclusionRecord(StrictModel):
     #: The oracle claim this conclusion states. Keeps the plan joinable back to
     #: expectations without duplicating the claim's contents.
     claim_id: str
+    #: The week at which this revision's basis was complete. A claim yields one
+    #: conclusion per point at which its basis changed, so an ask at knowledge
+    #: week k must be served the latest revision with `knowledge_week <= k` --
+    #: any later one rests on evidence that did not yet exist (4b.39).
+    knowledge_week: int = 0
     title: str
     body: str
     #: Source ids this conclusion draws from, in recorded order.

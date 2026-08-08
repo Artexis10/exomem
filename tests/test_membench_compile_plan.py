@@ -123,7 +123,7 @@ def test_supersession_carries_to_the_conclusion() -> None:
     by_id = {c.claim_id: c for c in derive_compile_plan(claims)}
     # Edges reference CONCLUSIONS, not claims: the plan is a graph of the
     # conclusions a vault holds, and an adapter rendering it never sees a claim.
-    assert by_id["CLM-0002"].supersedes == conclusion_id_for("CLM-0001")
+    assert by_id["CLM-0002"].supersedes == conclusion_id_for("CLM-0001", 1)
     assert by_id["CLM-0001"].supersedes is None
 
 
@@ -159,8 +159,10 @@ def test_two_live_claims_on_one_predicate_dispute_each_other() -> None:
         ),
     ]
     by_id = {c.claim_id: c for c in derive_compile_plan(claims)}
-    assert by_id["CLM-0001"].disputes == (conclusion_id_for("CLM-0002"),)
-    assert by_id["CLM-0002"].disputes == (conclusion_id_for("CLM-0001"),)
+    # Disputes point at the *head* of the other claim's chain (4b.39): that is
+    # the revision a store would be holding, not its first draft.
+    assert by_id["CLM-0001"].disputes == (conclusion_id_for("CLM-0002", 1),)
+    assert by_id["CLM-0002"].disputes == (conclusion_id_for("CLM-0001", 1),)
 
 
 def test_same_value_on_one_predicate_is_corroboration_not_dispute() -> None:
@@ -630,3 +632,75 @@ def test_altitude_moves_only_the_altitude_dependent_dimension(tmp_path) -> None:
             f"{dimension} moved with altitude: "
             f"{raw.dimensions.get(dimension)} vs {compiled.dimensions.get(dimension)}"
         )
+
+
+# --------------------------------------------------------------------------
+# Knowledge time (4b.39)
+# --------------------------------------------------------------------------
+
+
+def _claim_with_staggered_support(claim_id: str = "CLM-STAGGER") -> ClaimRecord:
+    """One claim, two supporting sources, recorded five weeks apart."""
+
+    claim = _claim(claim_id, "ENT-1", "headcount", "42", sources=("SRC-EARLY",), recorded_week=1)
+    claim.assertions.append(
+        Assertion(
+            source_id="SRC-LATE",
+            stance=Stance.SUPPORTS,
+            asserted_at=date(2025, 3, 14),
+            recorded_week=5,
+        )
+    )
+    return claim
+
+
+def test_a_conclusion_never_rests_on_evidence_recorded_after_it() -> None:
+    """4b.39. The plan derived one conclusion per claim citing *every*
+    supporting source, whatever week each was recorded. A query asking as of
+    knowledge week 3 was then served a conclusion resting on a source that did
+    not exist until week 5, and the citation gate was right to refuse it —
+    measured as six rows of `precision 1/2` and the whole reason compiled
+    provenance sat below raw (274/10 against 280/4).
+
+    The harness is bitemporal everywhere else. The plan was the one place that
+    was not, and no scoring change could fix that without either making the
+    dimension unwinnable for contenders or letting a cite-everything store win.
+    """
+
+    plan = derive_compile_plan([_claim_with_staggered_support()])
+    by_week = {c.knowledge_week: c for c in plan}
+    assert sorted(by_week) == [1, 5], [c.knowledge_week for c in plan]
+    assert by_week[1].cites == ("SRC-EARLY",)
+    assert by_week[5].cites == ("SRC-EARLY", "SRC-LATE")
+
+
+def test_a_revision_supersedes_the_conclusion_it_replaces() -> None:
+    """Revisions are a chain, not a set of unrelated notes.
+
+    A store that learns more about a claim revises the note it already holds,
+    so the compiled tier has to carry that lineage or the supersession
+    structure it hands contenders would be a fiction.
+    """
+
+    plan = derive_compile_plan([_claim_with_staggered_support()])
+    first, second = sorted(plan, key=lambda c: c.knowledge_week)
+    assert first.supersedes is None
+    assert second.supersedes == first.conclusion_id
+    assert first.conclusion_id != second.conclusion_id
+
+
+def test_a_claim_whose_support_lands_at_once_still_yields_one_conclusion() -> None:
+    """No gratuitous revisions: the chain exists to record that the basis
+    changed, so a basis that never changed must not produce one."""
+
+    plan = derive_compile_plan([_claim("CLM-1", "ENT-1", "headcount", "42", sources=("SRC-A", "SRC-B"))])
+    assert len(plan) == 1
+    assert plan[0].cites == ("SRC-A", "SRC-B")
+
+
+def test_conclusion_ids_are_distinct_per_revision() -> None:
+    """Sharing an id across revisions would collapse the chain wherever a plan
+    is indexed by conclusion id -- which is how every consumer reads it."""
+
+    assert conclusion_id_for("CLM-1", 1) != conclusion_id_for("CLM-1", 5)
+    assert conclusion_id_for("CLM-1", 1) == conclusion_id_for("CLM-1", 1)
