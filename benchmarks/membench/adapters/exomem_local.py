@@ -425,9 +425,20 @@ class ExomemLocalAdapter:
         if cites and not paths:
             return False, f"none of {cites} were captured; cannot link the chain"
 
+        # exomem refuses an active compiled note with no qualifying typed
+        # relation (SEMANTIC_CONTRACT_BLOCKED / RELATION_DISPOSITION_MISSING).
+        # That requirement is the product being strict about exactly what this
+        # altitude measures, so it is satisfied with a real `derived_from` edge
+        # per cited source rather than waived with a reviewed-none disposition:
+        # the edge IS the citation chain, and asserting "no relation applies"
+        # would discard the thing under test.
+        content = op["content"]
+        if paths:
+            edges = "\n".join(f"- derived_from [[{p}]]" for p in paths)
+            content = f"{content}\n## Relations\n\n{edges}\n"
         payload = commands.op_remember(
             self._vault,
-            content=op["content"],
+            content=content,
             title=op["title"],
             note_type="insight",
             sources=paths or None,

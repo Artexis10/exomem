@@ -486,3 +486,78 @@ def test_exomem_authors_every_conclusion_after_the_sources_it_cites(tmp_path) ->
     ]
     first_remember = next(i for i, o in enumerate(ops) if o["op"] == "remember")
     assert all(o["op"] == "capture_source" for o in ops[:first_remember])
+
+
+# --------------------------------------------------------------------------
+# End to end at compiled altitude (task 3.2)
+# --------------------------------------------------------------------------
+
+
+def test_exomem_compiles_every_conclusion_with_its_chain(tmp_path) -> None:
+    """The altitude's whole point: notes that declare what they were drawn from.
+
+    exomem refuses an active compiled note carrying no qualifying typed relation
+    (SEMANTIC_CONTRACT_BLOCKED / RELATION_DISPOSITION_MISSING) — 7 of 8 writes
+    were rejected before the adapter authored `derived_from` edges. The
+    requirement is the product being strict about precisely what this altitude
+    measures, so it is satisfied with real edges rather than waived with a
+    reviewed-none disposition, which would discard the thing under test.
+    """
+
+    from membench.adapters.exomem_local import ExomemLocalAdapter, lexical_profile
+    from membench.generate import generate_corpus
+    from membench.native import exomem_kb, load_corpus_view
+
+    generate_corpus(1, tmp_path / "s1", template_ids=["t07_authority_conflict"])
+    view = load_corpus_view(tmp_path / "s1")
+    exomem_kb.render(view, tmp_path / "native", altitude="compiled")
+
+    adapter = ExomemLocalAdapter(altitude="compiled", answer_mode="native")
+    adapter.setup(tmp_path / "wd", lexical_profile())
+    try:
+        results = adapter.ingest(tmp_path / "s1", tmp_path / "native")
+        remembers = [r for r in results if r.op == "remember"]
+        assert len(remembers) == len(view.conclusions)
+        failed = [r for r in remembers if not r.ok]
+        assert not failed, f"compile failures: {[r.detail for r in failed][:3]}"
+
+        notes = [
+            p
+            for p in (tmp_path / "wd" / "vault" / "Knowledge Base" / "Notes").rglob("*.md")
+            if p.name != "index.md"
+        ]
+        assert len(notes) == len(view.conclusions)
+        # The chain is the measurement: every compiled note must declare a basis.
+        assert all("sources:" in p.read_text() for p in notes)
+    finally:
+        adapter.cleanup()
+
+
+def test_a_raw_source_run_compiles_nothing(tmp_path) -> None:
+    from membench.adapters.exomem_local import ExomemLocalAdapter, lexical_profile
+    from membench.generate import generate_corpus
+    from membench.native import exomem_kb, load_corpus_view
+
+    generate_corpus(1, tmp_path / "s1", template_ids=["t07_authority_conflict"])
+    view = load_corpus_view(tmp_path / "s1")
+    exomem_kb.render(view, tmp_path / "native", altitude="raw_source")
+
+    adapter = ExomemLocalAdapter(altitude="raw_source")
+    adapter.setup(tmp_path / "wd", lexical_profile())
+    try:
+        results = adapter.ingest(tmp_path / "s1", tmp_path / "native")
+        assert not [r for r in results if r.op == "remember"]
+    finally:
+        adapter.cleanup()
+
+
+def test_an_adapter_refuses_an_altitude_it_cannot_honour() -> None:
+    """graybox's compile path is an LLM organize pass, which the deterministic
+    layer excludes. Refusing is the honest outcome; a zero would not be."""
+
+    from membench.adapters import create_adapter
+    from membench.adapters.base import AdapterUnsupported
+
+    assert create_adapter("graybox-local").supported_altitudes == frozenset({"raw_source"})
+    with pytest.raises(AdapterUnsupported, match="cannot honour altitude"):
+        create_adapter("graybox-local", altitude="compiled").ingestion_altitude
