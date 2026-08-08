@@ -1455,9 +1455,11 @@ def test_platform_renders_luks_retain_storage_and_exact_schedule_contract() -> N
         and document.get("metadata", {}).get("labels", {}).get("app.kubernetes.io/part-of")
         == "exomem-hosted-scheduler"
     }
-    assert set(cronjobs) == {job["name"] for job in contract["jobs"]}
+    # Scheduler CronJobs are prefixed; the bare contract name collided with the
+    # durability `exomem-export-gc` CronJob in the same namespace.
+    assert set(cronjobs) == {f"exomem-hosted-scheduler-{job['name']}" for job in contract["jobs"]}
     for job in contract["jobs"]:
-        rendered = cronjobs[job["name"]]
+        rendered = cronjobs[f"exomem-hosted-scheduler-{job['name']}"]
         spec = rendered["spec"]
         job_spec = spec["jobTemplate"]["spec"]
         pod = job_spec["template"]["spec"]
@@ -2084,3 +2086,52 @@ def test_cloudflare_tunnel_targets_the_rendered_production_traefik_service() -> 
     target = "http://exomem-platform-traefik.exomem-platform.svc.cluster.local:80"
     cloudflare = (ROOT / "infra/terraform/foundation/cloudflare.tf").read_text(encoding="utf-8")
     assert cloudflare.count(target) == 2
+
+
+def test_no_two_rendered_objects_share_one_kubernetes_identity() -> None:
+    """Two manifests with the same identity silently collapse into one object.
+
+    The schedules contract carries a job named `exomem-export-gc`, and
+    durability-workloads.yaml independently renders a CronJob of that exact name
+    in the same namespace. Kubernetes accepted the second as an update of the
+    first, so the chart shipped eight CronJobs and the cluster held seven, and
+    `helm install --wait` failed with "no CronJob with the name exomem-export-gc
+    found" only at install time. Every other assertion in this file inspects a
+    document it looked up by name, which cannot notice a second document
+    answering to the same name.
+    """
+
+    documents = _render(PLATFORM, PLATFORM / "values.validation.yaml", namespace="exomem-platform")
+    identities: dict[tuple[str, str, str, str], int] = {}
+    for document in documents:
+        metadata = document.get("metadata")
+        if not isinstance(metadata, dict) or not metadata.get("name"):
+            continue
+        identity = (
+            str(document.get("apiVersion", "")),
+            str(document.get("kind", "")),
+            str(metadata.get("namespace", "exomem-platform")),
+            str(metadata["name"]),
+        )
+        identities[identity] = identities.get(identity, 0) + 1
+
+    duplicates = sorted(identity for identity, count in identities.items() if count > 1)
+    assert not duplicates, f"rendered manifests collide on one identity: {duplicates}"
+
+
+def test_scheduler_cronjobs_are_namespaced_away_from_workload_cronjobs() -> None:
+    """The scheduler owns its object names; the contract only supplies the job name."""
+
+    documents = _render(PLATFORM, PLATFORM / "values.validation.yaml", namespace="exomem-platform")
+    schedules = json.loads(
+        (PLATFORM / "files/exomem-hosted-schedules-v1.json").read_text(encoding="utf-8")
+    )
+    expected = {f"exomem-hosted-scheduler-{job['name']}" for job in schedules["jobs"]}
+    rendered = {
+        document["metadata"]["name"]
+        for document in documents
+        if document.get("kind") == "CronJob"
+        and document.get("metadata", {}).get("labels", {}).get("app.kubernetes.io/part-of")
+        == "exomem-hosted-scheduler"
+    }
+    assert rendered == expected
