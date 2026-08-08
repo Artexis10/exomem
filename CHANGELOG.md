@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.40.0](https://github.com/Artexis10/exomem/compare/v0.39.2...v0.40.0) (2026-08-08)
+
+
+### Features
+
+* **hosted:** complete the active K3s ciphertext set for the platform install ([#391](https://github.com/Artexis10/exomem/issues/391)) ([b4f8868](https://github.com/Artexis10/exomem/commit/b4f88685213dce3af84e7eb147a77f9ac6116aaf))
+* **hosted:** recompose the deployment lock on 0.39.1 ([#383](https://github.com/Artexis10/exomem/issues/383)) ([157ec8b](https://github.com/Artexis10/exomem/commit/157ec8b92d6b6c132bbb0fd451a208705f9da0b0))
+* **hosted:** recompose the deployment lock on 0.39.2 ([#388](https://github.com/Artexis10/exomem/issues/388)) ([3222b4a](https://github.com/Artexis10/exomem/commit/3222b4a61aba8cd4e86b65a6018b10ef6ae33cea))
+* **marketplace:** add the missing directory evidence signer ([#399](https://github.com/Artexis10/exomem/issues/399)) ([77e3cb9](https://github.com/Artexis10/exomem/commit/77e3cb9f6811e27c471d84d2a08f83cfbd4cadae))
+* **marketplace:** carry listing identity and advertise public admission ([#398](https://github.com/Artexis10/exomem/issues/398)) ([abc9193](https://github.com/Artexis10/exomem/commit/abc919376e0fd818c9e23529d1faec711dff037b))
+* **memory:** add prominence levels for how much Exomem speaks up ([#389](https://github.com/Artexis10/exomem/issues/389)) ([d5204a8](https://github.com/Artexis10/exomem/commit/d5204a841b721a134c90e508cb0e79d05cdbebab))
+
+
+### Bug Fixes
+
+* **hosted:** let the provisioner API and the capacity workers actually start ([#394](https://github.com/Artexis10/exomem/issues/394)) ([ac7b2bb](https://github.com/Artexis10/exomem/commit/ac7b2bbb10e94d4c4037a2f9d5063e18e8117018))
+* **hosted:** let traefik carry the tunnel's forwarded scheme ([#400](https://github.com/Artexis10/exomem/issues/400)) ([2b3566a](https://github.com/Artexis10/exomem/commit/2b3566a9fe982560f1e3c5dc7aa21a412112d500))
+* **hosted:** mount the capacity contract as a regular file, not a symlink ([#395](https://github.com/Artexis10/exomem/issues/395)) ([55da085](https://github.com/Artexis10/exomem/commit/55da08592507929fff5576d0626d33823b96c611))
+* **hosted:** stop the scheduler CronJob colliding with the durability one ([#393](https://github.com/Artexis10/exomem/issues/393)) ([fcb24a6](https://github.com/Artexis10/exomem/commit/fcb24a6945262a041bddd9d1ca08db27a9855c5f))
+* **hosted:** stop traefik asking for a load balancer the cluster cannot provide ([#396](https://github.com/Artexis10/exomem/issues/396)) ([6b3b5d1](https://github.com/Artexis10/exomem/commit/6b3b5d10fcb43df3c151eac5e5942f938067d470))
+* **memory:** make guarded writes and the compact bootstrap readable to clients ([#392](https://github.com/Artexis10/exomem/issues/392)) ([65758a2](https://github.com/Artexis10/exomem/commit/65758a224766dda1383f701901343c28945b0196))
+
 ## [0.39.2](https://github.com/Artexis10/exomem/compare/v0.39.1...v0.39.2) (2026-08-07)
 
 
