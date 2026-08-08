@@ -40,7 +40,10 @@ _STRUCTURED_TOOL_LISTS = {
     "primary",
     "primary_tools",
 }
-_ACTION_VOCABULARY_MAPS = {"front_door_actions", "simple_actions"}
+# Maps whose KEYS are vocabulary rather than tool names. `contract` is the prominence
+# engagement contract, keyed by behavioural axis (recall/capture/narration) — `capture`
+# there names a behaviour, not the `capture` action, and advertises nothing callable.
+_ACTION_VOCABULARY_MAPS = {"front_door_actions", "simple_actions", "contract"}
 
 
 def _call_mcp(mcp, profile: str) -> dict:

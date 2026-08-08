@@ -91,6 +91,75 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+# Prominence presets. This hook is deployed as a STANDALONE copy into the client's
+# hook directory, so it cannot import `exomem.prominence` — the table is duplicated
+# here deliberately, and `tests/test_prominence.py` asserts the two stay identical.
+# Keys are the level; values are (min_chars, cooldown_sec) or None to disable.
+_PROMINENCE_PRESETS = {
+    "off": None,
+    "light": (800, 900),
+    "balanced": (300, 300),
+    "maximal": (120, 60),
+}
+_PROMINENCE_ALIASES = {
+    "none": "off",
+    "silent": "off",
+    "disabled": "off",
+    "minimal": "light",
+    "low": "light",
+    "quiet": "light",
+    "default": "balanced",
+    "medium": "balanced",
+    "normal": "balanced",
+    "high": "maximal",
+    "max": "maximal",
+    "full": "maximal",
+    "aggressive": "maximal",
+}
+
+
+def _config_path() -> Path:
+    """Mirror of `exomem.mode.config_path` — same file the CLI writes."""
+    override = os.environ.get("EXOMEM_CONFIG_PATH")
+    if override:
+        return Path(override)
+    if os.name == "nt":
+        base = (
+            os.environ.get("PROGRAMDATA")
+            or os.environ.get("ALLUSERSPROFILE")
+            or "C:" + r"\ProgramData"
+        )
+        return Path(base) / "exomem" / "config.json"
+    return Path.home() / ".exomem" / "config.json"
+
+
+def _prominence() -> str:
+    """Active level: `EXOMEM_PROMINENCE` env -> config file -> balanced.
+
+    Defaults to `balanced` rather than auto-detecting a surface: if this hook is
+    running at all, the client supports hooks, which is exactly the case that wants
+    the hook-backed default.
+    """
+
+    def _canon(value):
+        if not value or not isinstance(value, str):
+            return None
+        v = value.strip().lower()
+        if v in _PROMINENCE_PRESETS:
+            return v
+        return _PROMINENCE_ALIASES.get(v)
+
+    from_env = _canon(os.environ.get("EXOMEM_PROMINENCE"))
+    if from_env:
+        return from_env
+    try:
+        data = json.loads(_config_path().read_text("utf-8"))
+        from_config = _canon(data.get("prominence")) if isinstance(data, dict) else None
+    except Exception:  # noqa: BLE001 — missing/corrupt config must degrade to default
+        from_config = None
+    return from_config or "balanced"
+
+
 def _hook_client() -> str:
     explicit = os.environ.get("EXOMEM_HOOK_CLIENT", "").strip().lower()
     if explicit in {"claude", "codex"}:
@@ -322,6 +391,9 @@ def main() -> int:
     _normalize_env_aliases()
     if os.environ.get("EXOMEM_CAPTURE_NUDGE_DISABLE"):
         return 0
+    preset = _PROMINENCE_PRESETS[_prominence()]
+    if preset is None:  # prominence=off — the user asked for explicit invocation only
+        return 0
     try:
         raw = sys.stdin.read()
         data = json.loads(raw) if raw.strip() else {}
@@ -339,8 +411,9 @@ def main() -> int:
     if not tpath and not event_assistant_text:
         return 0
 
-    min_chars = _env_int("EXOMEM_CAPTURE_NUDGE_MIN_CHARS", 300)
-    cooldown = _env_int("EXOMEM_CAPTURE_NUDGE_COOLDOWN_SEC", 300)
+    # Explicit env still wins; the prominence level only moves the default.
+    min_chars = _env_int("EXOMEM_CAPTURE_NUDGE_MIN_CHARS", preset[0])
+    cooldown = _env_int("EXOMEM_CAPTURE_NUDGE_COOLDOWN_SEC", preset[1])
 
     # Codex exposes the final text directly because its transcript format is not
     # a stable hook API. Keep transcript parsing as the Claude/older-client

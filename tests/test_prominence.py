@@ -1,0 +1,262 @@
+"""Prominence level — resolution, persistence, and the hook-preset drift guard.
+
+The nudge hooks are deployed as standalone copies into a client's hook directory, so
+they cannot import `exomem.prominence`; each carries its own copy of the preset table.
+`test_hook_presets_match_*` is what keeps those copies honest — without it the CLI
+would report one cadence while the hooks ran another.
+"""
+
+from __future__ import annotations
+
+import json
+
+import pytest
+
+from exomem import mode, prominence
+from exomem._hooks import exomem_capture_nudge as capture_hook
+from exomem._hooks import exomem_retrieve_nudge as retrieve_hook
+
+
+@pytest.fixture
+def config(tmp_path, monkeypatch):
+    """Point mode/prominence at a throwaway config and clear the env overrides."""
+    path = tmp_path / "config.json"
+    monkeypatch.setenv("EXOMEM_CONFIG_PATH", str(path))
+    monkeypatch.delenv("EXOMEM_PROMINENCE", raising=False)
+    monkeypatch.delenv("EXOMEM_SURFACE", raising=False)
+    monkeypatch.delenv("EXOMEM_HOSTED_CELL", raising=False)
+    return path
+
+
+# --------------------------------------------------------------------- normalizing
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        ("maximal", "maximal"),
+        ("MAX", "maximal"),
+        ("  High  ", "maximal"),
+        ("aggressive", "maximal"),
+        ("normal", "balanced"),
+        ("minimal", "light"),
+        ("none", "off"),
+        ("", None),
+        ("   ", None),
+        ("bogus", None),
+        (None, None),
+    ],
+)
+def test_normalize(raw, expected):
+    assert prominence.normalize(raw) == expected
+
+
+def test_every_canonical_level_has_a_contract_and_preset():
+    assert set(prominence.CONTRACTS) == set(prominence.CANON)
+    assert set(prominence._HOOK_PRESETS) == set(prominence.CANON)
+
+
+def test_aliases_all_resolve_to_canonical_levels():
+    for alias, target in prominence._ALIASES.items():
+        assert target in prominence.CANON, alias
+
+
+# --------------------------------------------------------------------- resolution
+
+
+def test_local_install_defaults_to_balanced(config):
+    assert prominence.detect_surface() is None
+    assert prominence.resolve() == "balanced"
+
+
+def test_hosted_cell_defaults_to_maximal(config, monkeypatch):
+    """No hooks in a hosted cell, so instruction strength is the only lever."""
+    monkeypatch.setenv("EXOMEM_HOSTED_CELL", "1")
+    assert prominence.detect_surface() == "hosted"
+    assert prominence.resolve() == "maximal"
+
+
+@pytest.mark.parametrize("surface", sorted(prominence.HOOKLESS_SURFACES))
+def test_every_hookless_surface_defaults_to_maximal(config, surface):
+    assert prominence.default_for_surface(surface) == "maximal"
+
+
+def test_explicit_surface_env_is_honoured(config, monkeypatch):
+    monkeypatch.setenv("EXOMEM_SURFACE", "chatgpt")
+    assert prominence.resolve() == "maximal"
+
+
+def test_env_beats_config_and_surface_default(config, monkeypatch):
+    prominence.write_prominence("off")
+    monkeypatch.setenv("EXOMEM_HOSTED_CELL", "1")
+    monkeypatch.setenv("EXOMEM_PROMINENCE", "light")
+    assert prominence.resolve() == "light"
+    assert prominence._active_source() == "env"
+
+
+def test_config_beats_surface_default(config, monkeypatch):
+    monkeypatch.setenv("EXOMEM_HOSTED_CELL", "1")
+    prominence.write_prominence("light")
+    assert prominence.resolve() == "light"
+    assert prominence._active_source() == "config"
+
+
+def test_invalid_config_value_degrades_to_default(config):
+    config.write_text(json.dumps({"schema": 1, "prominence": "nonsense"}), "utf-8")
+    assert prominence.resolve() == "balanced"
+    assert prominence._active_source() == "default"
+
+
+def test_corrupt_config_degrades_to_default(config):
+    config.write_text("{not json", "utf-8")
+    assert prominence.resolve() == "balanced"
+
+
+# --------------------------------------------------------------------- persistence
+
+
+def test_write_prominence_round_trips(config):
+    prominence.write_prominence("maximal")
+    assert prominence.resolve() == "maximal"
+
+
+def test_write_prominence_accepts_aliases(config):
+    prominence.write_prominence("MAX")
+    assert json.loads(config.read_text())["prominence"] == "maximal"
+
+
+def test_write_prominence_rejects_unknown(config):
+    with pytest.raises(ValueError):
+        prominence.write_prominence("nonsense")
+    assert not config.exists()
+
+
+def test_prominence_and_mode_share_the_config_without_clobbering(config):
+    """Either write must preserve the other's key — they live in one file."""
+    mode.write_mode("performance")
+    prominence.write_prominence("maximal")
+    data = json.loads(config.read_text())
+    assert data["mode"] == "performance"
+    assert data["prominence"] == "maximal"
+
+    mode.write_mode("quiet")
+    data = json.loads(config.read_text())
+    assert data["mode"] == "quiet"
+    assert data["prominence"] == "maximal", "writing mode dropped prominence"
+
+    prominence.write_prominence("light")
+    data = json.loads(config.read_text())
+    assert data["mode"] == "quiet", "writing prominence dropped mode"
+    assert data["prominence"] == "light"
+
+
+def test_resolved_payload_shape(config):
+    payload = prominence.resolved()
+    assert payload["level"] == "balanced"
+    assert payload["levels"] == list(prominence.CANON)
+    assert set(payload["contract"]) == {
+        "level",
+        "recall",
+        "capture",
+        "narration",
+        "summary",
+    }
+
+
+# ------------------------------------------------------- hook preset drift guard
+
+
+def _capture_preset_as_env(level: str) -> dict[str, str]:
+    """Render the capture hook's own table in `prominence.hook_env` shape."""
+    preset = capture_hook._PROMINENCE_PRESETS[level]
+    if preset is None:
+        return {"EXOMEM_CAPTURE_NUDGE_DISABLE": "1"}
+    min_chars, cooldown = preset
+    return {
+        "EXOMEM_CAPTURE_NUDGE_DISABLE": "",
+        "EXOMEM_CAPTURE_NUDGE_MIN_CHARS": str(min_chars),
+        "EXOMEM_CAPTURE_NUDGE_COOLDOWN_SEC": str(cooldown),
+    }
+
+
+def _retrieve_preset_as_env(level: str) -> dict[str, str]:
+    """Render the retrieve hook's own table in `prominence.hook_env` shape."""
+    preset = retrieve_hook._PROMINENCE_PRESETS[level]
+    if preset is None:
+        return {"EXOMEM_RETRIEVE_NUDGE_DISABLE": "1"}
+    min_chars, control_max, cooldown, global_cooldown = preset
+    return {
+        "EXOMEM_RETRIEVE_NUDGE_DISABLE": "",
+        "EXOMEM_RETRIEVE_NUDGE_MIN_CHARS": str(min_chars),
+        "EXOMEM_RETRIEVE_NUDGE_CONTROL_MAX_CHARS": str(control_max),
+        "EXOMEM_RETRIEVE_NUDGE_COOLDOWN_SEC": str(cooldown),
+        "EXOMEM_RETRIEVE_NUDGE_GLOBAL_COOLDOWN_SEC": str(global_cooldown),
+    }
+
+
+@pytest.mark.parametrize("level", prominence.CANON)
+def test_hook_presets_match_canonical_table(level):
+    """The two standalone hook copies must agree with `prominence._HOOK_PRESETS`."""
+    canonical = prominence.hook_env(level)
+    rendered = {**_capture_preset_as_env(level), **_retrieve_preset_as_env(level)}
+    assert rendered == canonical, (
+        f"hook preset table drifted from prominence._HOOK_PRESETS at level {level!r}"
+    )
+
+
+@pytest.mark.parametrize("level", prominence.CANON)
+def test_hook_alias_tables_match(level):
+    assert capture_hook._PROMINENCE_ALIASES == prominence._ALIASES
+    assert retrieve_hook._PROMINENCE_ALIASES == prominence._ALIASES
+    assert set(capture_hook._PROMINENCE_PRESETS) == set(prominence.CANON)
+    assert set(retrieve_hook._PROMINENCE_PRESETS) == set(prominence.CANON)
+
+
+@pytest.mark.parametrize("hook", [capture_hook, retrieve_hook])
+def test_hook_resolves_level_from_shared_config(config, hook):
+    """A hook reading the config the CLI wrote is the whole point of the shared file."""
+    prominence.write_prominence("maximal")
+    assert hook._prominence() == "maximal"
+    assert hook._config_path() == mode.config_path()
+
+
+@pytest.mark.parametrize("hook", [capture_hook, retrieve_hook])
+def test_hook_defaults_to_balanced_not_surface_detected(config, hook, monkeypatch):
+    """If a hook is running, the client has hooks — never infer the hookless default."""
+    monkeypatch.setenv("EXOMEM_HOSTED_CELL", "1")
+    assert hook._prominence() == "balanced"
+
+
+@pytest.mark.parametrize("hook", [capture_hook, retrieve_hook])
+def test_hook_env_beats_config(config, hook, monkeypatch):
+    prominence.write_prominence("off")
+    monkeypatch.setenv("EXOMEM_PROMINENCE", "maximal")
+    assert hook._prominence() == "maximal"
+
+
+def test_off_disables_both_hooks():
+    env = prominence.hook_env("off")
+    assert env["EXOMEM_CAPTURE_NUDGE_DISABLE"] == "1"
+    assert env["EXOMEM_RETRIEVE_NUDGE_DISABLE"] == "1"
+    assert capture_hook._PROMINENCE_PRESETS["off"] is None
+    assert retrieve_hook._PROMINENCE_PRESETS["off"] is None
+
+
+def test_maximal_fires_on_every_prompt():
+    """Maximal exists to beat instruction decay: no length floor, no cooldown."""
+    preset = retrieve_hook._PROMINENCE_PRESETS["maximal"]
+    min_chars, _control_max, cooldown, global_cooldown = preset
+    assert min_chars == 0
+    assert cooldown == 0
+    assert global_cooldown == 0
+
+
+def test_levels_are_monotonic_in_eagerness():
+    """light is strictly less eager than balanced, which is less than maximal."""
+    levels = ["light", "balanced", "maximal"]
+    retrieve_floors = [retrieve_hook._PROMINENCE_PRESETS[x][0] for x in levels]
+    retrieve_cooldowns = [retrieve_hook._PROMINENCE_PRESETS[x][2] for x in levels]
+    capture_floors = [capture_hook._PROMINENCE_PRESETS[x][0] for x in levels]
+    capture_cooldowns = [capture_hook._PROMINENCE_PRESETS[x][1] for x in levels]
+    for series in (retrieve_floors, retrieve_cooldowns, capture_floors, capture_cooldowns):
+        assert series == sorted(series, reverse=True), series
