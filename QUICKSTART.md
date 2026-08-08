@@ -596,23 +596,37 @@ in your pocket.
 
 ### Make the KB proactive in the Claude app (custom instructions)
 
-claude.ai (web/mobile) can't run hooks — those are Claude Code only — so the
-skill's proactive find/capture is best-effort there. This vault is served by
-Exomem, an MCP server (formerly kb-mcp). Once added as a connector, its tools
-appear under whatever name you assign it (e.g. "Knowledge Base"). To nudge it
-reliably across *all* your chats, paste this into the Claude app at
-**Settings → Profile → "What personal preferences should Claude consider in
-responses?"**:
+claude.ai (web/mobile) can't run hooks — those are Claude Code and Codex only — so
+there is nothing there to re-arm the proactive find/capture check each turn, and
+instruction text alone decays over a long thread. That is why the shipped default on
+web and hosted is **maximal** prominence, while Claude Code and Codex default to
+**balanced**: maximal on a hookless client produces roughly the behaviour balanced
+produces on a hooked one.
+
+**[docs/prominence.md](docs/prominence.md) is the full reference** — four levels
+(`off` / `light` / `balanced` / `maximal`), what each one changes, and a copy-paste
+block per level for both claude.ai and ChatGPT. Set it on a local install with
+`exomem prominence <level>`; on web, paste the block. Tune *down* if it is too
+chatty — you should never have to tune up to get it working.
+
+This vault is served by Exomem, an MCP server (formerly kb-mcp). Once added as a
+connector, its tools appear under whatever name you assign it (e.g. "Knowledge
+Base"). The block below is the **balanced** wording, kept here as the inline
+example; paste it into the Claude app at **Settings → Profile → "What personal
+preferences should Claude consider in responses?"**:
 
 ```
 Precise and non-performative: no hype, fluff, or motivational tone; clarity and correctness over filler. Use lists/structure only when they genuinely help; plain prose is fine. Match length to the substance, terse when simple and fuller when it's not.
 
-I keep a personal Knowledge Base served by the Exomem MCP. If no Exomem skill is loaded, call bootstrap(profile="compact") once at the start of a new chat and follow it. Use Exomem proactively: search first when a turn touches my projects, notes, decisions, or domains (cite what you find; an empty search is a gap, not a dead end). Do not search on unrelated chit-chat, small control prompts, or follow-ups where the current conversation already has the needed KB evidence. Capture durable conclusions on your own — a decision, solved problem, diagnosed failure, or recognized pattern — as a short compiled note, not a transcript, then report one line: "Saved -> <path>". Ask before saving only if type/scope is genuinely ambiguous. Stay quiet on chit-chat; don't narrate empty searches.
+I keep a personal Knowledge Base served by the Exomem MCP. If no Exomem skill is loaded, call bootstrap(profile="compact") once at the start of a new chat and follow it. Exomem prominence: BALANCED. Use Exomem proactively: search first when a turn touches my projects, notes, decisions, or domains (cite what you find; an empty search is a gap, not a dead end). Do not search on unrelated chit-chat, small control prompts, or follow-ups where the current conversation already has the needed KB evidence. Capture durable conclusions on your own — a decision, solved problem, diagnosed failure, or recognized pattern — as a short compiled note, not a transcript, then report one line: "Saved -> <path>". Ask before saving only if type/scope is genuinely ambiguous. Stay quiet on chit-chat; don't narrate empty searches.
 ```
 
 The first paragraph is general response style (trim to taste); the second is the KB
 nudge. Account-level custom instructions are always in context, so they make Claude
 reach for the connected KB on its own — the app-side equivalent of the Claude Code
 hooks. The "do not search" line keeps it from firing on unrelated or already
-answered turns. For more client-specific instructions, see
-[docs/ai-assistant-guide.md](docs/ai-assistant-guide.md).
+answered turns.
+
+For the maximal wording (recommended on web), the lighter levels, and the ChatGPT
+variants, see [docs/prominence.md](docs/prominence.md). For more client-specific
+instructions, see [docs/ai-assistant-guide.md](docs/ai-assistant-guide.md).

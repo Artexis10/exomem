@@ -98,6 +98,7 @@ _CLI_ONLY_SUBCOMMANDS: frozenset[str] = frozenset(
         "status",
         "warm",
         "mode",
+        "prominence",
         "backfill-media",
         "index",
         "enroll-speaker",
@@ -187,6 +188,8 @@ def _dispatch_main(raw: list[str]) -> int:
         return _warm_main(raw[1:])
     if raw and raw[0] == "mode":
         return _mode_main(raw[1:])
+    if raw and raw[0] == "prominence":
+        return _prominence_main(raw[1:])
     if raw and raw[0] == "backfill-media":
         return _backfill_media_main(raw[1:])
     if raw and raw[0] == "index":
@@ -637,6 +640,77 @@ def _index_main(argv: list[str]) -> int:
         index_sync.clear_deferred_work(vault_root)
     print(json.dumps(stats))
     return 0
+
+
+def _prominence_main(argv: list[str]) -> int:
+    """`exomem prominence [off|light|balanced|maximal]` — how much Exomem speaks up.
+
+    Orthogonal to `exomem mode`, which governs machine footprint. Shares the same
+    config file so one write can never drop the other's setting. Torch-free, so it
+    stays instant.
+    """
+    from . import prominence as prom_mod
+
+    parser = argparse.ArgumentParser(
+        prog="exomem prominence",
+        description="Show or set how much Exomem participates in a conversation: "
+        "off (explicit invocation only) | light (recall when asked, capture on "
+        "request) | balanced (recall on topic match, capture durable conclusions) | "
+        "maximal (recall before every substantive turn, capture every stepping "
+        "stone, and say so). Persisted to the same config file as `exomem mode`, "
+        "read by BOTH the server and the CLI.",
+    )
+    parser.add_argument(
+        "level",
+        nargs="?",
+        choices=tuple(prom_mod.CANON) + tuple(prom_mod._ALIASES),
+        help="level to set; omit to show the current one",
+    )
+    parser.add_argument("--json", action="store_true", help="emit stable JSON (status only)")
+    parser.add_argument(
+        "--hook-env",
+        action="store_true",
+        help="print the hook tunables this level implies, as shell exports",
+    )
+    args = parser.parse_args(argv)
+
+    if args.level is None:
+        policy = prom_mod.resolved()
+        policy["config_path"] = str(mode_config_path())
+        if args.json:
+            print(json.dumps(policy))
+        elif args.hook_env:
+            for key, value in prom_mod.hook_env().items():
+                print(f"unset {key}" if value == "" else f"export {key}={value}")
+        else:
+            contract = policy["contract"]
+            print(f"prominence: {policy['level']}  (source: {policy['source']})")
+            print(f"  {contract['summary']}")
+            print(f"  recall:    {contract['recall']}")
+            print(f"  capture:   {contract['capture']}")
+            print(f"  narration: {contract['narration']}")
+            print(f"  config: {policy['config_path']}")
+            print(f"  levels: {', '.join(policy['levels'])}")
+        return 0
+
+    try:
+        path = prom_mod.write_prominence(args.level)
+    except ValueError as e:
+        print(f"prominence: {e}", file=sys.stderr)
+        return 2
+    canonical = prom_mod.normalize(args.level)
+    print(f"Prominence set to '{canonical}'  ({path})")
+    print(f"  {prom_mod.CONTRACTS[canonical].summary}")
+    print("A running exomem server serves it to new sessions via bootstrap().")
+    print("Reinstall hooks (exomem install-hook) to apply the matching nudge cadence.")
+    return 0
+
+
+def mode_config_path():
+    """Shared config path for the `mode`/`prominence` pair (kept torch-free)."""
+    from . import mode as mode_mod
+
+    return mode_mod.config_path()
 
 
 def _mode_main(argv: list[str]) -> int:
