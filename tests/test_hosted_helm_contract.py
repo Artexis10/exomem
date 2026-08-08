@@ -466,9 +466,11 @@ def test_platform_renders_live_capacity_receipt_collector_with_isolated_keys() -
             "exomem-capacity-receipt"
         )
         assert environment["EXOMEM_PROVISIONER_HCLOUD_SERVER_ID"]["value"] == "156895713"
+        # subPath, so the loader sees a regular file rather than a ..data/ symlink.
         assert any(
             mount["name"] == "capacity-contract"
-            and mount["mountPath"] == "/etc/exomem/capacity"
+            and mount["mountPath"] == "/etc/exomem/capacity/private-alpha-capacity-v1.json"
+            and mount["subPath"] == "private-alpha-capacity-v1.json"
             and mount["readOnly"] is True
             for mount in container["volumeMounts"]
         )
@@ -2206,3 +2208,41 @@ def test_provisioner_api_can_read_the_selected_deployment_lock() -> None:
     assert "EXOMEM_PROVISIONER_DEPLOYMENT_LOCK_SHA256" not in environment
     assert "EXOMEM_PROVISIONER_ADMISSION_MODE" not in environment
     assert "EXOMEM_PROVISIONER_RUNTIME_TARGET_JSON" not in environment
+
+
+def test_capacity_contract_is_mounted_as_a_regular_file() -> None:
+    """`load_capacity_contract` rejects a symlink, and ConfigMap keys are symlinks.
+
+    A ConfigMap volume publishes every key as a symlink into `..data/`, so a plain
+    directory mount made `contract_path.is_symlink()` true and both provider workers
+    died with "capacity contract is unavailable" on every start. `subPath`
+    materializes a regular file. Nothing about the manifests looked wrong -- the
+    volume, the key and the path env all matched -- so only asserting the mount
+    *shape* catches it.
+    """
+
+    documents = _render(PLATFORM, PLATFORM / "values.validation.yaml", namespace="exomem-platform")
+    contract_file = "private-alpha-capacity-v1.json"
+    seen = 0
+    for document in documents:
+        if document.get("kind") not in {"Deployment", "CronJob"}:
+            continue
+        spec = document["spec"]
+        pod = (
+            spec["template"]["spec"]
+            if document["kind"] == "Deployment"
+            else spec["jobTemplate"]["spec"]["template"]["spec"]
+        )
+        if not any(v.get("name") == "capacity-contract" for v in pod.get("volumes", [])):
+            continue
+        for container in pod["containers"]:
+            for mount in container.get("volumeMounts", []):
+                if mount["name"] != "capacity-contract":
+                    continue
+                seen += 1
+                assert mount.get("subPath") == contract_file, (
+                    f"{document['metadata']['name']} mounts the capacity contract as a "
+                    "directory; the loader rejects the resulting ..data/ symlink"
+                )
+                assert mount["mountPath"] == f"/etc/exomem/capacity/{contract_file}"
+    assert seen >= 2, f"expected the provider workers to mount the contract, saw {seen}"

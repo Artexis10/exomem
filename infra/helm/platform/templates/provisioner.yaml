@@ -294,8 +294,16 @@ spec:
             - name: deployment-lock
               mountPath: /etc/exomem/deployment-lock
               readOnly: true
+            {{- /*
+              subPath, not a directory mount: ConfigMap projection publishes each key
+              as a symlink into ..data/, and load_capacity_contract() rejects a symlink
+              outright. subPath materializes a regular file, which satisfies that check
+              without weakening it. Safe here because the ConfigMap is immutable, so the
+              lost live-update behaviour is not behaviour we have.
+            */}}
             - name: capacity-contract
-              mountPath: /etc/exomem/capacity
+              mountPath: /etc/exomem/capacity/private-alpha-capacity-v1.json
+              subPath: private-alpha-capacity-v1.json
               readOnly: true
       volumes:
         - name: temporary
