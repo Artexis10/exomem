@@ -74,8 +74,17 @@ data:
 ---
 apiVersion: batch/v1
 kind: CronJob
+{{- /*
+  Prefixed like every other scheduler-owned object. The bare contract name
+  collides: the schedules contract carries a job called `exomem-export-gc`, and
+  durability-workloads.yaml independently renders a CronJob of that exact name
+  in the same namespace, so the chart emitted two objects with one identity and
+  `helm install --wait` failed with "no CronJob with the name exomem-export-gc
+  found". The job's logical name stays $job.name everywhere it is data -- the
+  state ConfigMap key, the runtime's JOB_NAME, the labels.
+*/}}
 metadata:
-  name: {{ $job.name }}
+  name: exomem-hosted-scheduler-{{ $job.name }}
   labels:
     app.kubernetes.io/name: {{ $job.name }}
     app.kubernetes.io/part-of: exomem-hosted-scheduler
