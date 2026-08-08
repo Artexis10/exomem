@@ -13,7 +13,8 @@ from urllib.parse import parse_qs, urlencode, urlparse
 
 import httpx
 import pytest
-from fastmcp.server.auth.auth import AccessToken
+from fastmcp.server.auth.auth import AccessToken, PrivateKeyJWTClientAuthenticator
+from fastmcp.server.auth.auth import TokenHandler as FastMCPTokenHandler
 from fastmcp.server.auth.oauth_proxy import OAuthProxy
 from fastmcp.server.auth.oauth_proxy.models import (
     ClientCode,
@@ -24,6 +25,7 @@ from mcp.server.auth.provider import AuthorizationCode, TokenError
 from mcp.server.auth.routes import TokenHandler
 from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
 from pydantic import AnyUrl
+from starlette.applications import Starlette
 from starlette.requests import Request
 
 from exomem.auth_sessions import (
@@ -59,6 +61,16 @@ def test_fastmcp_private_adapter_contract_is_pinned() -> None:
         "client",
         "refresh_token",
         "scopes",
+    ]
+    # The CIMD /token route is rebuilt in get_routes to correct the assertion
+    # audience, so both constructors it calls are part of the pinned surface.
+    assert list(
+        inspect.signature(PrivateKeyJWTClientAuthenticator.__init__).parameters
+    ) == ["self", "provider", "cimd_manager", "token_endpoint_url"]
+    assert list(inspect.signature(FastMCPTokenHandler.__init__).parameters) == [
+        "self",
+        "provider",
+        "client_authenticator",
     ]
     for seam in (
         "load_refresh_token",
@@ -987,3 +999,70 @@ async def test_rfc7009_revocation_tombstones_shared_session_and_unknown_is_succe
         ("session-token", "oauth-client-revocation"),
         ("unknown", "oauth-client-revocation"),
     ]
+
+
+class _RecordingCIMDManager:
+    """Capture the token endpoint a private_key_jwt assertion is checked against."""
+
+    def __init__(self) -> None:
+        self.token_endpoints: list[str] = []
+
+    async def validate_private_key_jwt(
+        self,
+        *,
+        assertion: str,
+        client: OAuthClientInformationFull,
+        token_endpoint: str,
+    ) -> None:
+        del assertion, client
+        self.token_endpoints.append(token_endpoint)
+        raise ValueError("signature is not exercised here")
+
+
+@pytest.mark.anyio
+async def test_cimd_assertion_audience_matches_advertised_token_endpoint() -> None:
+    """A private_key_jwt client is checked against the endpoint we advertise.
+
+    FastMCP 3.4.4 derives the expected audience from ``f"{base_url}/token"``.
+    Pydantic renders a bare-authority URL with a trailing slash, so the check
+    demanded ``https://memory.example//token`` while our own authorization
+    server metadata advertised ``https://memory.example/token``. ChatGPT signs
+    its assertion against the advertised value, so every exchange 401'd.
+    """
+    proxy = _proxy()
+    recorder = _RecordingCIMDManager()
+    proxy._cimd_manager = recorder
+    client_id = "https://chatgpt.example/oauth/abc/client.json"
+    cimd_client = OAuthClientInformationFull(
+        client_id=client_id,
+        redirect_uris=[AnyUrl("https://chatgpt.example/connector/oauth/abc")],
+        token_endpoint_auth_method="private_key_jwt",
+    )
+
+    # A CIMD client is resolved from its metadata document, not from DCR
+    # storage: register_client normalizes every client it stores to "none".
+    async def _get_client(requested: str) -> OAuthClientInformationFull | None:
+        return cimd_client if requested == client_id else None
+
+    proxy.get_client = _get_client  # type: ignore[method-assign]
+
+    transport = httpx.ASGITransport(app=Starlette(routes=proxy.get_routes("/mcp")))
+    async with httpx.AsyncClient(
+        transport=transport, base_url="https://memory.example"
+    ) as client:
+        await client.post(
+            "/token",
+            data={
+                "grant_type": "authorization_code",
+                "client_id": client_id,
+                "client_assertion_type": (
+                    "urn:ietf:params:oauth:client-assertion-type:jwt-bearer"
+                ),
+                "client_assertion": "signed-assertion",
+            },
+        )
+
+    assert recorder.token_endpoints == ["https://memory.example/token"]
+    # Tripwire: this is the upstream derivation the override exists to correct.
+    # When it stops producing a double slash, the override can go.
+    assert f"{proxy.base_url}/token" == "https://memory.example//token"

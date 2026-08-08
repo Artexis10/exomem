@@ -780,7 +780,13 @@ class DraftToken:
             raise SemanticWriteError(
                 "INVALID_DRAFT_TOKEN", "draft token has invalid render stamp"
             )
-        if stamp_moment.day != render_date:
+        # `render_date` is the author's local day while `render_stamp` folds to
+        # UTC (see `temporal`), so on any host with a non-zero offset the two
+        # legitimately land on different days -- demanding equality rejected
+        # every write made between local midnight and the UTC day boundary.
+        # Bound the gap instead: real offsets span -12:00..+14:00, so one
+        # calendar day is the ceiling a correctly-minted pair can differ by.
+        if abs((stamp_moment.day - render_date).days) > 1:
             raise SemanticWriteError(
                 "INVALID_DRAFT_TOKEN", "draft token render stamp disagrees with its render date"
             )

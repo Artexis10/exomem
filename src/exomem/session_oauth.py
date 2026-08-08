@@ -9,7 +9,11 @@ from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import httpx
-from fastmcp.server.auth.auth import AccessToken
+from fastmcp.server.auth.auth import (
+    AccessToken,
+    PrivateKeyJWTClientAuthenticator,
+    TokenHandler,
+)
 from fastmcp.server.auth.oauth_proxy import OAuthProxy
 from fastmcp.server.auth.oauth_proxy.models import (
     DEFAULT_AUTH_CODE_EXPIRY_SECONDS,
@@ -18,7 +22,7 @@ from fastmcp.server.auth.oauth_proxy.models import (
 )
 from fastmcp.server.auth.oauth_proxy.ui import create_error_html
 from mcp.server.auth.provider import AuthorizationCode, RefreshToken, TokenError
-from mcp.server.auth.routes import create_protected_resource_routes
+from mcp.server.auth.routes import cors_middleware, create_protected_resource_routes
 from mcp.server.auth.settings import RevocationOptions
 from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
 from starlette.middleware import Middleware
@@ -230,10 +234,54 @@ class ExomemSessionOAuthProxy(OAuthProxy):
             *super().get_middleware(),
         ]
 
+    def _rebind_cimd_assertion_audience(self, routes: list[Route]) -> list[Route]:
+        """Bind the CIMD assertion audience to the advertised token endpoint.
+
+        A `private_key_jwt` client assertion carries the token endpoint as its
+        `aud`, and that has to match what this server advertises byte for byte.
+        FastMCP 3.4.4 builds the advertised `token_endpoint` from
+        `base_url.rstrip("/")` but builds the *expected* audience from
+        `f"{self.base_url}/token"`. Pydantic renders a bare-authority
+        `AnyHttpUrl` with a trailing slash, so a deployment at a domain root
+        advertises `https://host/token` while demanding `https://host//token`,
+        and every assertion it ever receives is rejected on audience.
+
+        Only CIMD clients that pick `private_key_jwt` hit this. ChatGPT flipped
+        to it on 2026-08-07 and its connector broke; claude.ai authenticates as
+        a public client, so it never noticed. Rebuild that one route against the
+        advertised URL. Upstream fixed this after 3.4.6 by routing both sides
+        through one property, so drop this when the pin moves past it.
+        """
+        if self._cimd_manager is None:
+            return routes
+        authenticator = PrivateKeyJWTClientAuthenticator(
+            provider=self,
+            cimd_manager=self._cimd_manager,
+            token_endpoint_url=f"{str(self.base_url).rstrip('/')}/token",
+        )
+        handler = TokenHandler(provider=self, client_authenticator=authenticator)
+        return [
+            Route(
+                path=route.path,
+                endpoint=cors_middleware(handler.handle, ["POST", "OPTIONS"]),
+                methods=["POST", "OPTIONS"],
+                name=route.name,
+                include_in_schema=route.include_in_schema,
+            )
+            if (
+                isinstance(route, Route)
+                and route.path == "/token"
+                and route.methods is not None
+                and "POST" in route.methods
+            )
+            else route
+            for route in routes
+        ]
+
     @override
     def get_routes(self, mcp_path: str | None = None) -> list[Route]:
         """Keep protocol-only scopes out of protected-resource metadata."""
-        routes = super().get_routes(mcp_path)
+        routes = self._rebind_cimd_assertion_audience(super().get_routes(mcp_path))
         if self._resource_url is None or self.issuer_url is None:
             return routes
         resource_routes = create_protected_resource_routes(

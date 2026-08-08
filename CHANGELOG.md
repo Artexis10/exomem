@@ -5,6 +5,34 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.39.2](https://github.com/Artexis10/exomem/compare/v0.39.1...v0.39.2) (2026-08-07)
+
+
+### Bug Fixes
+
+* **memory:** accept draft tokens minted across the UTC day boundary ([#384](https://github.com/Artexis10/exomem/issues/384)) ([39655ba](https://github.com/Artexis10/exomem/commit/39655ba8f0b0025d17b9c57cc9dc0c95807fac02))
+
+## [0.39.1](https://github.com/Artexis10/exomem/compare/v0.39.0...v0.39.1) (2026-08-07)
+
+
+### Bug Fixes
+
+* **auth:** accept private_key_jwt client assertions at a domain root ([#380](https://github.com/Artexis10/exomem/issues/380)) ([91c13a1](https://github.com/Artexis10/exomem/commit/91c13a12a8d81bae41c34c8a8872bf430e54bc84))
+
+## [0.39.0](https://github.com/Artexis10/exomem/compare/v0.38.0...v0.39.0) (2026-08-05)
+
+
+### Features
+
+* **hosted:** compose the deployment lock pair and open the install gate ([#376](https://github.com/Artexis10/exomem/issues/376)) ([78e09b7](https://github.com/Artexis10/exomem/commit/78e09b76fe0c577c5d75c407778d3dcb3403853b))
+* **memory:** record note knowledge time to the second ([#375](https://github.com/Artexis10/exomem/issues/375)) ([77ebc01](https://github.com/Artexis10/exomem/commit/77ebc01eb9989c1e1c2a451fc8a69897a0c13504))
+
+
+### Bug Fixes
+
+* **find:** recover degraded-profile retrieval with content-anchored majority-coverage retention ([#378](https://github.com/Artexis10/exomem/issues/378)) ([888eaab](https://github.com/Artexis10/exomem/commit/888eaab1244cfd432050a7e67dc33cc08ae15fd1))
+* **provisioner:** accept a managed-provider runtime identity on Neon ([#379](https://github.com/Artexis10/exomem/issues/379)) ([35f2856](https://github.com/Artexis10/exomem/commit/35f28563bd623c5fa222172d5cd663452073583f))
+
 ## [0.38.0](https://github.com/Artexis10/exomem/compare/v0.37.0...v0.38.0) (2026-08-05)
 
 

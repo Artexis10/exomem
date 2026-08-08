@@ -21,6 +21,7 @@ from exomem import (
     relation_review,
     replace,
     semantic_writes,
+    temporal,
 )
 from exomem import (
     vault as vault_module,
@@ -1438,6 +1439,94 @@ def test_draft_token_rejects_cross_writer_and_duplicate_json_keys(vault: Path) -
     with pytest.raises(semantic_writes.SemanticWriteError) as duplicate_exc:
         semantic_writes.DraftToken.decode(encoded)
     assert duplicate_exc.value.code == "INVALID_DRAFT_TOKEN"
+
+
+# The offsets are carried on the values themselves rather than taken from the
+# host clock: these must fail on a UTC machine too, or CI -- which runs in UTC,
+# where the local and UTC day never diverge -- would go on missing the bug.
+@pytest.mark.parametrize(
+    ("offset_hours", "hour", "minute", "expected_date", "expected_stamp"),
+    (
+        pytest.param(3, 0, 40, "2026-09-01", "2026-08-31T21:40:00Z", id="local-day-ahead"),
+        pytest.param(-5, 19, 30, "2026-09-01", "2026-09-02T00:30:00Z", id="local-day-behind"),
+    ),
+)
+def test_draft_token_survives_the_local_utc_day_boundary(
+    offset_hours: int, hour: int, minute: int, expected_date: str, expected_stamp: str
+) -> None:
+    """A token minted either side of the UTC day boundary must still decode.
+
+    `render_date` is the author's local day while `render_stamp` folds to UTC,
+    so on a UTC+3 host a note written at 00:40 carries a stamp on the *previous*
+    UTC day, and a UTC-5 evening write carries one on the *next*. Requiring the
+    two to agree rejected every governed write inside those windows.
+    """
+    minted = dt.datetime(
+        2026, 9, 1, hour, minute, tzinfo=dt.timezone(dt.timedelta(hours=offset_hours))
+    )
+    render_date = temporal.render_date(minted)
+    render_stamp = temporal.stamp(minted)
+    assert (render_date, render_stamp) == (expected_date, expected_stamp)
+
+    decoded = semantic_writes.DraftToken.decode(
+        semantic_writes.DraftToken(
+            "note",
+            "create",
+            "Knowledge Base/Notes/Insights/day-boundary.md",
+            render_date,
+            render_stamp=render_stamp,
+        ).encode()
+    )
+    assert decoded.render_date == render_date
+    assert decoded.stamp() == render_stamp
+
+
+def test_note_commits_when_authored_after_local_midnight(vault: Path) -> None:
+    """The reported outage, end to end: a governed note authored at 00:40 UTC+3.
+
+    `today` carries the offset, so the note's path date is the author's local
+    day while its knowledge stamp lands on the previous UTC day -- the pairing
+    `decode` used to reject at commit, after validation had already handed the
+    caller the very token it then refused.
+    """
+    after_midnight = dt.datetime(2026, 9, 1, 0, 40, tzinfo=dt.timezone(dt.timedelta(hours=3)))
+    kwargs = {
+        "content": _compact_content("After local midnight"),
+        "note_type": "insight",
+        "title": "After local midnight",
+        "today": after_midnight,
+    }
+    validation = note.note(vault, validate_only=True, **kwargs)
+    assert semantic_writes.DraftToken.decode(validation.draft_token).render_date == "2026-09-01"
+
+    note.note(
+        vault,
+        draft_id=validation.draft_id,
+        draft_hash=validation.draft_hash,
+        draft_token=validation.draft_token,
+        relation_disposition="reviewed_none",
+        relation_review_hash=validation.draft_hash,
+        relation_review_reason="No honest relation exists in the fixture corpus.",
+        **kwargs,
+    )
+
+    written = (vault / validation.destination).read_text(encoding="utf-8")
+    assert "2026-08-31T21:40:00Z" in written
+
+
+def test_draft_token_rejects_a_render_stamp_from_an_unrelated_day() -> None:
+    """One day is the whole allowance -- the widest a real UTC offset can skew."""
+    token = semantic_writes.DraftToken(
+        "note",
+        "create",
+        "Knowledge Base/Notes/Insights/day-boundary.md",
+        "2026-09-01",
+        render_stamp="2026-08-29T12:00:00Z",
+    ).encode()
+    with pytest.raises(semantic_writes.SemanticWriteError) as exc:
+        semantic_writes.DraftToken.decode(token)
+    assert exc.value.code == "INVALID_DRAFT_TOKEN"
+    assert "disagrees with its render date" in exc.value.reason
 
 
 @pytest.mark.parametrize("writer", ("note", "replace", "link", "create_file"))
