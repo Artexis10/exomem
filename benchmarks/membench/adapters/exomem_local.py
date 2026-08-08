@@ -380,8 +380,7 @@ class ExomemLocalAdapter:
                     source = captured.get("source") if isinstance(captured, dict) else None
                     path = source.get("path") if isinstance(source, dict) else None
                     if isinstance(path, str) and op.get("source_id"):
-                        self._source_paths.setdefault(str(op["source_id"]), []).append(path)
-                        self._path_to_source[path] = str(op["source_id"])
+                        self._register_source_path(str(op["source_id"]), path)
                     ok, detail = True, None
             except Exception as exc:  # recorded, stays in denominators
                 ok, detail = False, f"{type(exc).__name__}: {exc}"
@@ -436,27 +435,57 @@ class ExomemLocalAdapter:
         if paths:
             edges = "\n".join(f"- derived_from [[{p}]]" for p in paths)
             content = f"{content}\n## Relations\n\n{edges}\n"
-        payload = commands.op_remember(
-            self._vault,
-            content=content,
-            title=op["title"],
-            note_type="insight",
-            sources=paths or None,
-        )
+        # Supersession demotes the earlier conclusion rather than merely adding
+        # a newer one; without it the vault holds two live contradictory notes
+        # and the contradiction dimension scores a conflict the corpus never
+        # declared.
+        #
+        # 4b.43. This was a no-op. Both branches of the old conditional called
+        # `op_remember` and then stored the resulting path identically, so all
+        # 88 supersession edges in seed-1 were discarded and the compiled vault
+        # held zero `status: superseded` conclusions — superseded and current
+        # values sat side by side as active. The renderer's docstring has
+        # promised `replace_memory` the whole time; only the adapter never
+        # called it.
+        predecessor = self._compiled_paths.get(str(op.get("supersedes") or ""))
+        if predecessor:
+            payload = commands.op_replace_memory(
+                self._vault,
+                old_path=predecessor,
+                content=content,
+                title=op["title"],
+                note_type="insight",
+                sources=paths or None,
+                reason="superseded by a later revision of the same claim",
+            )
+        else:
+            # No predecessor path means either no supersession edge, or one
+            # whose target failed to compile. Falling back to a plain write is
+            # right for the first and honest for the second: the chain is
+            # already broken upstream and inventing a link would hide that.
+            payload = commands.op_remember(
+                self._vault,
+                content=content,
+                title=op["title"],
+                note_type="insight",
+                sources=paths or None,
+            )
         if isinstance(payload, dict) and payload.get("error"):
             return False, json.dumps(payload.get("error"))
-        # Supersession demotes the earlier conclusion rather than merely adding a
-        # newer one; without it the vault holds two live contradictory notes and
-        # the contradiction dimension would score a conflict the corpus never
-        # declared.
-        if op.get("supersedes") and isinstance(payload, dict):
-            self._compiled_paths[str(op["conclusion_id"])] = str(
-                (payload.get("page") or {}).get("path") or ""
-            )
-        elif isinstance(payload, dict):
-            self._compiled_paths[str(op["conclusion_id"])] = str(
-                (payload.get("page") or {}).get("path") or ""
-            )
+        if isinstance(payload, dict):
+            # 4b.43. `op_remember`/`op_replace_memory` return `path` at the TOP
+            # level — there is no `page` wrapper. Reading `payload["page"]["path"]`
+            # stored an empty string for all 348 conclusions, so every predecessor
+            # lookup was falsy and the supersession branch could never fire. The
+            # store was broken from the day it was written; the missing
+            # `replace_memory` call was the visible half of the same defect.
+            written = str(payload.get("path") or "")
+            if not written:
+                # Refuse to record a conclusion whose path is unknown: a silent
+                # empty entry is exactly what hid this, and it degrades into
+                # "no predecessor" rather than into an error.
+                return False, f"remember returned no path for {op['conclusion_id']}"
+            self._compiled_paths[str(op["conclusion_id"])] = written
         return True, None
 
     # -- governance wiring (public surfaces only) --------------------------
@@ -787,6 +816,31 @@ class ExomemLocalAdapter:
             )
         return hits
 
+    @staticmethod
+    def _vault_key(path: str) -> str:
+        """One canonical form for a vault path, used on BOTH sides of the map.
+
+        4b.42. `capture_source` returns a path ending in `.md`; the wiki-link
+        `remember` writes into `sources:` omits the extension. Keying the map
+        with one form and looking it up with the other missed every time, and
+        the failure was silent — `_declared_basis` returns an empty list both
+        for "declared no basis" and for "every lookup missed", so a broken
+        reader is indistinguishable from a store that cites nothing. Measured
+        cost: 356 of 356 answers with zero citations, published as 0/272.
+
+        A single normaliser, applied at registration and at lookup, is what
+        makes the two sides unable to drift apart again.
+        """
+
+        key = path.strip().lstrip("/")
+        return key[:-3] if key.endswith(".md") else key
+
+    def _register_source_path(self, source_id: str, path: str) -> None:
+        """Record a captured source's vault path under the canonical key."""
+
+        self._source_paths.setdefault(source_id, []).append(path)
+        self._path_to_source[self._vault_key(path)] = source_id
+
     def _declared_basis(self, path: str) -> list[str]:
         """Source ids a compiled note DECLARES as its basis.
 
@@ -809,7 +863,7 @@ class ExomemLocalAdapter:
         front = text[3 : end if end != -1 else len(text)]
         basis: list[str] = []
         for raw in re.findall(r"\[\[([^\]]+)\]\]", front):
-            source_id = self._path_to_source.get(raw.strip().lstrip("/"))
+            source_id = self._path_to_source.get(self._vault_key(raw))
             if source_id and source_id not in basis:
                 basis.append(source_id)
         return basis
