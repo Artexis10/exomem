@@ -49,11 +49,13 @@ def default_checkout() -> Path:
 class GrayboxLocalAdapter:
     name = "graybox-local"
     supports_group_reuse = False
-    #: Bulk load, nothing compiled. Declared rather than defaulted so an
-    #: adapter author has to look at it; see INGESTION_ALTITUDES.
-    ingestion_altitude = "raw_source"
+    #: Altitudes this adapter can honour: its only compile path is an LLM `organize` pass, which the
+    #: deterministic layer excludes — declared unsupported, never zeroed.
+    supported_altitudes = frozenset({"raw_source"})
 
-    def __init__(self, *, checkout: Path | None = None) -> None:
+    def __init__(self, *, altitude: str = "raw_source", checkout: Path | None = None) -> None:
+        #: Altitude this run asked for; validated by `ingestion_altitude`.
+        self.altitude = altitude
         self._checkout = Path(checkout) if checkout is not None else default_checkout()
         self._workdir: Path | None = None
         self._cfg: object | None = None
@@ -61,6 +63,22 @@ class GrayboxLocalAdapter:
         self._profile: Profile | None = None
 
     # -- lifecycle --------------------------------------------------------
+    @property
+    def ingestion_altitude(self) -> str:
+        """The altitude this run selected; validated against what we support.
+
+        Refusing here rather than degrading is the 4b.29 rule applied to
+        altitude: a run that cannot apply a tier to a contender must say so, not
+        quietly measure it at a different one.
+        """
+
+        if self.altitude not in self.supported_altitudes:
+            raise AdapterUnsupported(
+                f"{self.name} cannot honour altitude {self.altitude!r}; "
+                f"supports {sorted(self.supported_altitudes)}"
+            )
+        return self.altitude
+
     def capabilities(self) -> frozenset[Capability]:
         return frozenset({Capability.INGEST_API, Capability.SEARCH})
 

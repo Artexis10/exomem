@@ -44,6 +44,7 @@ import time
 from pathlib import Path
 
 from membench.adapters.base import (
+    AdapterUnsupported,
     NativeAnswer,
     AdapterEnvironmentError,
     Capability,
@@ -155,18 +156,20 @@ class ExomemLocalAdapter:
 
     name = "exomem-local"
     supports_group_reuse = False
-    #: Bulk load, nothing compiled. Declared rather than defaulted so an
-    #: adapter author has to look at it; see INGESTION_ALTITUDES.
-    ingestion_altitude = "raw_source"
+    #: Altitudes this adapter can honour: captures raw sources, and compiles conclusions through `remember`.
+    supported_altitudes = frozenset({"raw_source", "compiled"})
 
     def __init__(
         self,
         *,
+        altitude: str = "raw_source",
         mode: str = "leaf",
         search_style: str = "neutral",
         governance: str = "off",
         answer_mode: str = "harness",
     ) -> None:
+        #: Altitude this run asked for; validated by `ingestion_altitude`.
+        self.altitude = altitude
         if mode not in {"leaf", "wire"}:
             raise ValueError(f"unknown mode {mode!r}")
         if search_style not in {"neutral", "product-default"}:
@@ -199,6 +202,8 @@ class ExomemLocalAdapter:
         # source_id → ALL captured vault paths (a source may be captured more
         # than once, e.g. duplicate ops); scope selectors cover every one.
         self._source_paths: dict[str, list[str]] = {}
+        #: conclusion_id → vault path of the compiled note (compiled altitude).
+        self._compiled_paths: dict[str, str] = {}
 
     # -- lifecycle --------------------------------------------------------
     @property
@@ -206,6 +211,22 @@ class ExomemLocalAdapter:
         """Three-state governance measurement label for this configuration."""
 
         return "wired" if self.governance == "wired" else "default_open"
+
+    @property
+    def ingestion_altitude(self) -> str:
+        """The altitude this run selected; validated against what we support.
+
+        Refusing here rather than degrading is the 4b.29 rule applied to
+        altitude: a run that cannot apply a tier to a contender must say so, not
+        quietly measure it at a different one.
+        """
+
+        if self.altitude not in self.supported_altitudes:
+            raise AdapterUnsupported(
+                f"{self.name} cannot honour altitude {self.altitude!r}; "
+                f"supports {sorted(self.supported_altitudes)}"
+            )
+        return self.altitude
 
     def capabilities(self) -> frozenset[Capability]:
         base = {Capability.INGEST_API, Capability.SEARCH, Capability.STATE_EXPORT}
@@ -330,7 +351,9 @@ class ExomemLocalAdapter:
             op = json.loads(line)
             started = time.perf_counter()
             try:
-                if self.mode == "wire":
+                if op.get("op") == "remember":
+                    ok, detail = self._compile_one(op, commands)
+                elif self.mode == "wire":
                     payload = self._call_tool(
                         "capture_source",
                         {
@@ -349,11 +372,13 @@ class ExomemLocalAdapter:
                         title=op["title"],
                         source_type=op.get("source_type", "other"),
                     )
-                    if self.governance == "wired":
-                        source = captured.get("source") if isinstance(captured, dict) else None
-                        path = source.get("path") if isinstance(source, dict) else None
-                        if isinstance(path, str) and op.get("source_id"):
-                            self._source_paths.setdefault(str(op["source_id"]), []).append(path)
+                    # Recorded unconditionally: governance wiring needs these
+                    # for scope selectors, and the compiled altitude needs them
+                    # to resolve `cites` into the vault paths `remember` links.
+                    source = captured.get("source") if isinstance(captured, dict) else None
+                    path = source.get("path") if isinstance(source, dict) else None
+                    if isinstance(path, str) and op.get("source_id"):
+                        self._source_paths.setdefault(str(op["source_id"]), []).append(path)
                     ok, detail = True, None
             except Exception as exc:  # recorded, stays in denominators
                 ok, detail = False, f"{type(exc).__name__}: {exc}"
@@ -374,6 +399,51 @@ class ExomemLocalAdapter:
             self._wire_governance(Path(corpus_dir))
         find_module.clear_cache()
         return results
+
+    # -- compiled altitude -------------------------------------------------
+    def _compile_one(self, op: dict, commands) -> tuple[bool, str | None]:
+        """Author one compiled conclusion through the product's own surface.
+
+        `remember(sources=[...])` is what writes `ingested_into:` back onto each
+        cited source, which is the citation chain the compiled altitude exists
+        to measure. Cited source ids are resolved to the vault paths recorded
+        during capture; a conclusion whose sources were never captured is a
+        failure rather than a silently source-less note, because a conclusion
+        with no basis is exactly the record where citation precision cannot be
+        verified.
+        """
+
+        cites = [str(c) for c in (op.get("cites") or [])]
+        paths: list[str] = []
+        for source_id in cites:
+            captured = self._source_paths.get(source_id)
+            if captured:
+                paths.append(captured[0])
+        if cites and not paths:
+            return False, f"none of {cites} were captured; cannot link the chain"
+
+        payload = commands.op_remember(
+            self._vault,
+            content=op["content"],
+            title=op["title"],
+            note_type="insight",
+            sources=paths or None,
+        )
+        if isinstance(payload, dict) and payload.get("error"):
+            return False, json.dumps(payload.get("error"))
+        # Supersession demotes the earlier conclusion rather than merely adding a
+        # newer one; without it the vault holds two live contradictory notes and
+        # the contradiction dimension would score a conflict the corpus never
+        # declared.
+        if op.get("supersedes") and isinstance(payload, dict):
+            self._compiled_paths[str(op["conclusion_id"])] = str(
+                (payload.get("page") or {}).get("path") or ""
+            )
+        elif isinstance(payload, dict):
+            self._compiled_paths[str(op["conclusion_id"])] = str(
+                (payload.get("page") or {}).get("path") or ""
+            )
+        return True, None
 
     # -- governance wiring (public surfaces only) --------------------------
     def _audience_id(self, persona_id: str) -> str:

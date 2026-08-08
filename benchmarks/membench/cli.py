@@ -48,6 +48,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
     adapter_kwargs: dict[str, object] = {
         "mode": args.mode,
         "search_style": args.search_style,
+        "altitude": args.altitude,
     }
     if args.governance != "off":
         # Governance wiring is an exomem-local seam; other providers must
@@ -133,6 +134,18 @@ def main(argv: list[str] | None = None) -> int:
             "'native' scores the contender's own answer, citations and abstention. "
             "Decides whether provenance/abstention/calibration measure the product "
             "or the harness, so runs of different modes are not comparable on those"
+        ),
+    )
+    p_run.add_argument(
+        "--altitude",
+        default="raw_source",
+        choices=["raw_source", "compiled"],
+        help=(
+            "the layer to measure at. 'raw_source' loads documents verbatim; "
+            "'compiled' also authors the corpus's conclusions through each "
+            "product's own surfaces, which is what gives provenance and "
+            "contradiction something to score. An adapter that cannot honour "
+            "the tier refuses rather than being measured at another one"
         ),
     )
     p_run.add_argument("--top-k", type=int, default=10)

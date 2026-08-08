@@ -73,18 +73,20 @@ def _subprocess_runner(argv: list[str], env: dict[str, str]) -> _ProcLike:
 class BasicMemoryLocalAdapter:
     name = "basic-memory-local"
     supports_group_reuse = False
-    #: Bulk load, nothing compiled. Declared rather than defaulted so an
-    #: adapter author has to look at it; see INGESTION_ALTITUDES.
-    ingestion_altitude = "raw_source"
+    #: Altitudes this adapter can honour: writes source notes, and conclusion notes with typed relations.
+    supported_altitudes = frozenset({"raw_source", "compiled"})
 
     def __init__(
         self,
         *,
+        altitude: str = "raw_source",
         command: str | None = None,
         runner: Runner | None = None,
         mode: str = "leaf",
         search_style: str = "neutral",
     ) -> None:
+        #: Altitude this run asked for; validated by `ingestion_altitude`.
+        self.altitude = altitude
         # The CLI hands every provider the run-shape kwargs, so a contender
         # must accept them and say honestly which it can honour rather than
         # silently ignoring one and letting the manifest claim a shape that
@@ -116,6 +118,22 @@ class BasicMemoryLocalAdapter:
         self._probed_version: str | None = None
 
     # -- lifecycle --------------------------------------------------------
+    @property
+    def ingestion_altitude(self) -> str:
+        """The altitude this run selected; validated against what we support.
+
+        Refusing here rather than degrading is the 4b.29 rule applied to
+        altitude: a run that cannot apply a tier to a contender must say so, not
+        quietly measure it at a different one.
+        """
+
+        if self.altitude not in self.supported_altitudes:
+            raise AdapterUnsupported(
+                f"{self.name} cannot honour altitude {self.altitude!r}; "
+                f"supports {sorted(self.supported_altitudes)}"
+            )
+        return self.altitude
+
     def capabilities(self) -> frozenset[Capability]:
         return frozenset({Capability.FILE_DROP, Capability.SEARCH})
 

@@ -60,19 +60,36 @@ PROFILE_NOTE = (
 class NullAbstainAdapter:
     name = "null-abstain"
     supports_group_reuse = False
-    #: Bulk load, nothing compiled. Declared rather than defaulted so an
-    #: adapter author has to look at it; see INGESTION_ALTITUDES.
-    ingestion_altitude = "raw_source"
+    #: Altitudes this adapter can honour: ingests at either altitude and retrieves nothing by design.
+    supported_altitudes = frozenset({"raw_source", "compiled"})
     #: Read by the retrieval floor guard. Zero hits from this adapter is a
     #: declared measurement; zero hits from anything else is an incident.
     retrieves_nothing_by_design = True
 
-    def __init__(self, *, mode: str = "leaf", search_style: str = "neutral") -> None:
+    def __init__(self, *, altitude: str = "raw_source", mode: str = "leaf", search_style: str = "neutral") -> None:
+        #: Altitude this run asked for; validated by `ingestion_altitude`.
+        self.altitude = altitude
         self._mode = mode
         self._search_style = search_style
         self._workdir: Path | None = None
         self._profile: Profile | None = None
         self._ingested = 0
+
+    @property
+    def ingestion_altitude(self) -> str:
+        """The altitude this run selected; validated against what we support.
+
+        Refusing here rather than degrading is the 4b.29 rule applied to
+        altitude: a run that cannot apply a tier to a contender must say so, not
+        quietly measure it at a different one.
+        """
+
+        if self.altitude not in self.supported_altitudes:
+            raise AdapterUnsupported(
+                f"{self.name} cannot honour altitude {self.altitude!r}; "
+                f"supports {sorted(self.supported_altitudes)}"
+            )
+        return self.altitude
 
     def capabilities(self) -> frozenset[Capability]:
         return frozenset({Capability.INGEST_API, Capability.SEARCH})

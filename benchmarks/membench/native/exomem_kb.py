@@ -47,7 +47,14 @@ def render_conclusions(view: CorpusView, ops: list[dict], report: FactParityRepo
                 "op": "remember",
                 "conclusion_id": conclusion.conclusion_id,
                 "title": conclusion.title,
-                "content": conclusion.body,
+                # exomem's authoring contract requires at least one semantic
+                # unit on an active compiled note, so the note is composed in
+                # THIS product's grammar here rather than in the adapter — the
+                # renderer is the product-specific layer.
+                "content": (
+                    f"{conclusion.body}\n\n## Observations\n\n"
+                    f"- [conclusion] {conclusion.body} #corpus\n"
+                ),
                 "cites": list(conclusion.cites),
                 "supersedes": conclusion.supersedes,
             }
