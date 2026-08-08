@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import subprocess
 from pathlib import Path
 
@@ -391,7 +392,7 @@ def test_platform_renders_live_capacity_receipt_collector_with_isolated_keys() -
         "--state-configmap",
         "exomem-capacity-receipt",
         "--hcloud-server-id",
-        "101",
+        "156895713",
         "--hcloud-location",
         "fsn1",
     ]
@@ -464,7 +465,7 @@ def test_platform_renders_live_capacity_receipt_collector_with_isolated_keys() -
         assert environment["EXOMEM_PROVISIONER_CAPACITY_RECEIPT_CONFIG_MAP"]["value"] == (
             "exomem-capacity-receipt"
         )
-        assert environment["EXOMEM_PROVISIONER_HCLOUD_SERVER_ID"]["value"] == "101"
+        assert environment["EXOMEM_PROVISIONER_HCLOUD_SERVER_ID"]["value"] == "156895713"
         assert any(
             mount["name"] == "capacity-contract"
             and mount["mountPath"] == "/etc/exomem/capacity"
@@ -639,7 +640,7 @@ def test_platform_renders_disjoint_durability_workloads() -> None:
     assert volume_env["EXOMEM_PROVISIONER_CAPACITY_RECEIPT_CONFIG_MAP"] == (
         "exomem-capacity-receipt"
     )
-    assert volume_env["EXOMEM_PROVISIONER_HCLOUD_SERVER_ID"] == "101"
+    assert volume_env["EXOMEM_PROVISIONER_HCLOUD_SERVER_ID"] == "156895713"
 
     deletion_job = json.loads(
         _find(documents, "ConfigMap", "exomem-deletion-job-template")["data"][
@@ -2135,3 +2136,73 @@ def test_scheduler_cronjobs_are_namespaced_away_from_workload_cronjobs() -> None
         == "exomem-hosted-scheduler"
     }
     assert rendered == expected
+
+
+def test_no_rendered_value_uses_scientific_notation() -> None:
+    """Helm parses values as float64, and Go prints a large float64 as 1.5e+08.
+
+    `hcloudServerId` reached the provisioner as the string '1.56895713e+08' and
+    every worker died in pydantic with `unable to parse string as an integer`.
+    The deploy runbook hands that value in as a JSON number (`jq --argjson`), so
+    the chart has to survive a float64; the templates pipe through `int64`. The
+    validation fixture used to be `101`, which is small enough that Go prints it
+    plainly -- the fixture, not the template, was why this rendered clean in CI.
+    """
+
+    if HELM is None:
+        pytest.skip("set HELM_BIN to run pinned Helm rendering")
+    rendered = subprocess.run(
+        [
+            str(HELM),
+            "template",
+            "contract-test",
+            str(PLATFORM),
+            "--namespace",
+            "exomem-platform",
+            "--values",
+            str(PLATFORM / "values.validation.yaml"),
+            "--include-crds",
+        ],
+        capture_output=True,
+        check=True,
+        text=True,
+    ).stdout
+    offenders = re.findall(r"\d+\.\d+e[+-]\d+", rendered)
+    assert not offenders, f"rendered manifests contain float-formatted numbers: {sorted(set(offenders))}"
+
+
+def test_provisioner_api_can_read_the_selected_deployment_lock() -> None:
+    """Without the lock the API cannot start at all.
+
+    `create_app` raises "selected deployment lock is required for serving
+    admission" when the path is unset, and the chart mounted the lock on the
+    worker container only. Nothing rendered wrong -- the Deployment was valid,
+    it just could never boot -- so only a test that looks for the mount catches
+    it. The API must not inherit the worker's other EXOMEM_PROVISIONER_* vars:
+    ProvisionerSettings forbids extras, so an unmodelled one fails validation.
+    """
+
+    documents = _render(PLATFORM, PLATFORM / "values.validation.yaml", namespace="exomem-platform")
+    api = next(
+        document
+        for document in documents
+        if document.get("kind") == "Deployment"
+        and document["metadata"]["name"] == "exomem-provisioner-api"
+    )
+    pod = api["spec"]["template"]["spec"]
+    container = pod["containers"][0]
+    environment = {item["name"]: item.get("value") for item in container["env"]}
+
+    lock_path = "/etc/exomem/deployment-lock/exomem-hosted-deployment-lock-v2.json"
+    assert environment["EXOMEM_PROVISIONER_DEPLOYMENT_LOCK_PATH"] == lock_path
+    assert {"name": "deployment-lock", "mountPath": "/etc/exomem/deployment-lock", "readOnly": True} in container["volumeMounts"]
+    lock_volume = next(volume for volume in pod["volumes"] if volume["name"] == "deployment-lock")
+    assert lock_volume["configMap"]["items"] == [
+        {
+            "key": "exomem-hosted-deployment-lock-v2.json",
+            "path": "exomem-hosted-deployment-lock-v2.json",
+        }
+    ]
+    assert "EXOMEM_PROVISIONER_DEPLOYMENT_LOCK_SHA256" not in environment
+    assert "EXOMEM_PROVISIONER_ADMISSION_MODE" not in environment
+    assert "EXOMEM_PROVISIONER_RUNTIME_TARGET_JSON" not in environment

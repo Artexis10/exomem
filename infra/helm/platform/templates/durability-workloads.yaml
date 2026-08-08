@@ -1006,7 +1006,7 @@ spec:
             - name: EXOMEM_PROVISIONER_CAPACITY_RECEIPT_CONFIG_MAP
               value: {{ .Values.capacityCollector.stateConfigMap | quote }}
             - name: EXOMEM_PROVISIONER_HCLOUD_SERVER_ID
-              value: {{ .Values.capacityCollector.hcloudServerId | quote }}
+              value: {{ .Values.capacityCollector.hcloudServerId | int64 | quote }}
             - name: EXOMEM_PROVISIONER_VOLUME_ENCRYPTION_SECRET_NAME
               value: {{ .Values.storage.encryptionSecretName | quote }}
             - name: EXOMEM_PROVISIONER_VOLUME_ENCRYPTION_SECRET_NAMESPACE
