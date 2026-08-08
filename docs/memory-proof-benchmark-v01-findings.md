@@ -1565,3 +1565,78 @@ general: **a benchmark cannot attribute an effect it cannot toggle.**
   `contradiction_uncertainty` queries. The earlier explanation (a lexical
   profile disabling an embedding-based detector) is spent. The dimension is VOID
   from both ends: floor 0, ceiling 0, and the product's own detector silent.
+
+## The compiled altitude, and a dimension that stopped being void (2026-08-08)
+
+Track B bulk-loaded every document as a raw source and compiled nothing, so two
+dimensions scored a structure that was never built: 205 pages under `Sources/`,
+zero compiled notes, `ingested_into: []` on 204 of 204, zero `derived_from`.
+Three separately-filed defects — provenance 0/208, contradiction floor and
+ceiling both 0, abstention never declining — turned out to share that one cause.
+Two rounds of work had gone into fixing provenance without touching altitude,
+and neither could have worked.
+
+A second declared altitude now exists in which the corpus arrives through
+capture-then-compile. Raw-source stays; both are legitimate and measure
+different things, and which one a run used is recorded in its manifest.
+
+### The ceiling proof
+
+One corpus, one contender, only altitude differing:
+
+| dimension | raw_source | compiled |
+|---|---|---|
+| **contradiction_uncertainty** | **4 / 36** | **40 / 0** |
+| provenance | 270 / 14 (u=12) | 270 / 14 (u=12) |
+| factual_qa | 248 / 24 | 248 / 24 |
+| abstention | 324 / 28 | 324 / 28 |
+| temporal | 192 / 44 (u=52) | 192 / 44 (u=52) |
+
+A dimension nothing could pass is now fully passable by a perfect retriever,
+and **every other dimension is byte-identical**. That containment is as
+important as the movement: if compiling had shifted retrieval-property
+dimensions too, altitude would be confounded with retrieval quality and no
+cross-altitude figure would mean anything. Both properties are pinned by test.
+
+### Why the gate could move without weakening
+
+"Behavioural, never a confidence field" means different things at each altitude.
+At raw-source the only available signal is hedging *language*, which an
+answerer that quotes stored text verbatim cannot produce under any retrieval —
+so the gate was unpassable by construction and its 0/20 was published as a
+shared product capability gap. At compiled altitude the corpus declares which
+conclusions disagree, so the question becomes whether the system **surfaces the
+conflicting pair**. Scored from citations rather than prose, with hedging still
+counting, so the rule widens what can pass rather than narrowing it. No
+confidence float is required, consistent with the product's standing refusal to
+carry them.
+
+The dispute topology comes from the corpus's own compile plan and is never
+inferred at scoring time from values that happen to differ — that inference is
+exactly the supersession-vs-dispute trap the plan derivation already had to
+avoid, since a superseded claim and its replacement also share a subject and
+differ in value.
+
+### No model was added
+
+Every field of the compile plan is computed from records the oracle already
+holds. That keeps the deterministic core intact, and the limit is a limit
+rather than a feature: a scripted compile is more faithful than a bulk dump and
+less faithful than an agent deciding what is worth remembering. Only the
+agent-in-the-loop tracks answer the latter.
+
+### Two things the build surfaced
+
+**exomem refused 7 of 8 compiled writes**, with
+`SEMANTIC_CONTRACT_BLOCKED / RELATION_DISPOSITION_MISSING`: an active compiled
+note needs a qualifying typed relation. That was satisfied with real
+`derived_from` edges per cited source rather than waived with a reviewed-none
+disposition — the edge *is* the citation chain, and asserting "no relation
+applies" would have discarded the thing under test. The product being strict
+about precisely what this altitude measures is the product and the benchmark
+agreeing.
+
+**Compiled notes inherit the 4b.32 entity-name collisions**, visibly:
+`headcount-of-coril-group-2.md`. Two different organisations get
+identically-titled notes and colliding slugs, which is why that change and this
+one rebuild the corpus together rather than twice.
