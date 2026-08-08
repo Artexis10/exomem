@@ -130,6 +130,15 @@ traefik:
     web:
       port: 8000
       exposedPort: 80
+      # The tunnel terminates TLS at Cloudflare and dials this entrypoint over
+      # plain HTTP, so traefik must be told the hop in front of it is trusted or
+      # it rewrites X-Forwarded-Proto to http. The provisioner refuses any
+      # /cells/* request whose scheme is not https, so without this every
+      # control-plane call fails closed. Narrower than the 10.0.0.0/8 the
+      # provisioner already trusts for the same header.
+      forwardedHeaders:
+        trustedIPs:
+          - 10.42.0.0/16
     websecure:
       expose:
         default: false
