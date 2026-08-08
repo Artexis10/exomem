@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import json
 import os
 import re
@@ -2247,6 +2248,42 @@ def test_capacity_contract_is_mounted_as_a_regular_file() -> None:
                 )
                 assert mount["mountPath"] == f"/etc/exomem/capacity/{contract_file}"
     assert seen >= 2, f"expected the provider workers to mount the contract, saw {seen}"
+
+
+def test_traefik_preserves_the_tunnel_forwarded_scheme() -> None:
+    """The provisioner fails closed on any /cells/* request that did not arrive over TLS.
+
+    Cloudflare terminates TLS and cloudflared dials traefik's web entrypoint over
+    plain HTTP from inside the cluster, so `X-Forwarded-Proto: https` is the only
+    evidence the provisioner has. Traefik rewrites that header to the scheme it
+    received unless the client is a trusted proxy, and uvicorn then reports
+    `request.url.scheme == "http"`, which the contract middleware answers with
+    PROVISIONER_REJECTED 400. Every provision, health and deletion call fails, and
+    the rejection is content-free at both ends, so nothing names the cause.
+    """
+
+    documents = _render(PLATFORM, PLATFORM / "values.validation.yaml", namespace="exomem-platform")
+    traefik = _find(documents, "Deployment", "contract-test-traefik")
+    arguments = traefik["spec"]["template"]["spec"]["containers"][0]["args"]
+    trusted = [
+        argument
+        for argument in arguments
+        if argument.startswith("--entryPoints.web.forwardedHeaders.trustedIPs=")
+    ]
+    assert trusted, (
+        "traefik's web entrypoint trusts no proxy, so it overwrites the tunnel's "
+        f"X-Forwarded-Proto and the provisioner rejects every call; args were {arguments}"
+    )
+    networks = [
+        ipaddress.ip_network(value)
+        for value in trusted[0].split("=", 1)[1].split(",")
+        if value
+    ]
+    cloudflared = ipaddress.ip_address("10.42.0.1")
+    assert any(cloudflared in network for network in networks), (
+        f"the trusted set {trusted[0]} does not cover the cluster pod network that "
+        "cloudflared dials from"
+    )
 
 
 def test_no_service_requires_an_external_load_balancer() -> None:
