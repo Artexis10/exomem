@@ -14,6 +14,7 @@ import yaml
 
 from membench import GENERATOR_VERSION, families, oracle
 from membench.artifacts import render_artifact, renderer_versions
+from membench.compile_plan import derive_compile_plan
 from membench.ids import sentinel as sentinel_token
 from membench.ids import slugify
 from membench.schema import (
@@ -267,6 +268,26 @@ def generate_corpus(
     dump_jsonl(queries, out_dir / "queries.jsonl")
     dump_jsonl(expected, out_dir / "expected.jsonl")
     dump_jsonl(schedule, out_dir / "schedule.jsonl")
+    # The compiled altitude's input. Written into the corpus rather than built
+    # per-adapter so every contender is handed identical conclusions, hashed and
+    # reproducible from the seed — an adapter-side plan would be the renderer
+    # defect wearing a new hat.
+    compile_plan = derive_compile_plan(claims, entities)
+    # Only the REAL corpus must carry a disagreement — neither a narrowed
+    # selection nor a substituted template set. Both of those are fixtures, and
+    # a guard that fires on fixtures protects nothing while breaking every
+    # single-template test. What it protects is the artifact that gets
+    # published, which is the full registry.
+    publishable = template_ids is None and templates is None
+    if publishable and not any(conclusion.disputes for conclusion in compile_plan):
+        # A contradiction dimension with nothing to detect has a ceiling of zero
+        # and discriminates nothing. That shipped once (4b.33); refuse rather
+        # than emit a corpus in which it cannot be passed.
+        raise ValueError(
+            "compile plan contains no disputed pair: the contradiction dimension "
+            "would be structurally unpassable (see 4b.33)"
+        )
+    dump_jsonl(compile_plan, out_dir / "compile-plan.jsonl")
     (out_dir / "policies.yaml").write_text(
         yaml.safe_dump(policy.model_dump(mode="json"), sort_keys=True), encoding="utf-8"
     )
@@ -283,6 +304,7 @@ def generate_corpus(
             "queries": len(queries),
             "expected": len(expected),
             "schedule_ops": len(schedule),
+            "conclusions": len(compile_plan),
         },
         renderer_versions=renderer_versions(),
         degradations=degradations,

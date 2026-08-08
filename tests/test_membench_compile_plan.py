@@ -20,10 +20,11 @@ from datetime import date
 
 import pytest
 
-from membench.compile_plan import ConclusionRecord, conclusion_id_for, derive_compile_plan
+from membench.compile_plan import conclusion_id_for, derive_compile_plan
 from membench.schema import (
     Assertion,
     ClaimRecord,
+    ConclusionRecord,
     ClaimStatus,
     SpanCause,
     SpanCauseKind,
@@ -304,3 +305,95 @@ def test_every_conclusion_in_the_real_corpus_has_a_basis() -> None:
     plan = derive_compile_plan(load_jsonl(ClaimRecord, corpus / "claims.jsonl"))
     assert all(c.cites for c in plan)
     assert len({c.conclusion_id for c in plan}) == len(plan)
+
+
+# --------------------------------------------------------------------------
+# Generation wiring (tasks 1.3-1.5)
+# --------------------------------------------------------------------------
+
+
+def test_generation_emits_the_plan_and_counts_it(tmp_path) -> None:
+    from membench.generate import generate_corpus
+
+    manifest = generate_corpus(1, tmp_path / "s1", template_ids=["t00_mini_smoke", "t07_authority_conflict"])
+    plan_path = tmp_path / "s1" / "compile-plan.jsonl"
+    assert plan_path.is_file()
+    lines = [line for line in plan_path.read_text().splitlines() if line.strip()]
+    assert manifest.counts["conclusions"] == len(lines) == manifest.counts["claims"]
+
+
+def test_the_emitted_plan_is_byte_identical_across_generations(tmp_path) -> None:
+    """Corpus bytes and the release manifest depend on this."""
+
+    from membench.generate import generate_corpus
+
+    ids = ["t00_mini_smoke", "t07_authority_conflict"]
+    generate_corpus(1, tmp_path / "a", template_ids=ids)
+    generate_corpus(1, tmp_path / "b", template_ids=ids)
+    assert (tmp_path / "a" / "compile-plan.jsonl").read_bytes() == (
+        tmp_path / "b" / "compile-plan.jsonl"
+    ).read_bytes()
+
+
+def test_conclusions_name_entities_rather_than_ids(tmp_path) -> None:
+    """A note titled "headcount of ENT-8E7A0887" is lexically unreachable.
+
+    A query naming the organisation would never match it, so a compiled altitude
+    built on raw ids would score zero for a reason unrelated to any contender —
+    the exact class of defect the ceiling contender exists to catch.
+    """
+
+    import json
+
+    from membench.generate import generate_corpus
+
+    generate_corpus(1, tmp_path / "s1", template_ids=["t07_authority_conflict"])
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "s1" / "compile-plan.jsonl").read_text().splitlines()
+        if line.strip()
+    ]
+    assert rows
+    assert not any("ENT-" in row["title"] or "ENT-" in row["body"] for row in rows)
+
+
+def test_generation_refuses_a_corpus_with_no_disputed_pair(tmp_path) -> None:
+    """4b.33 shipped a dimension nothing could pass. Not twice.
+
+    t00 alone carries supersession but no live disagreement, so its plan has no
+    dispute edge — exactly the corpus that would give the contradiction
+    dimension a ceiling of zero.
+    """
+
+    import membench.generate as generate_module
+    from membench.generate import generate_corpus
+    from membench.templates import registry
+    from membench.templates.base import GenerationError
+
+    # The guard fires only on the REAL registry, so the registry itself is what
+    # has to be substituted. Narrowing via template_ids or templates= is a
+    # fixture and stays exempt — otherwise the guard breaks every
+    # single-template test in the suite while protecting nothing.
+    dispute_free = {"t00_mini_smoke": registry()["t00_mini_smoke"]}
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(generate_module, "registry", lambda: dispute_free)
+    try:
+        with pytest.raises((ValueError, GenerationError), match="no disputed pair"):
+            generate_corpus(1, tmp_path / "s1")
+    finally:
+        monkeypatch.undo()
+
+
+def test_fixtures_are_exempt_from_the_dispute_guard(tmp_path) -> None:
+    """Both narrowing routes must stay buildable, by template_ids and by
+    templates=. A guard that fires on fixtures protects nothing."""
+
+    from membench.generate import generate_corpus
+    from membench.templates import registry
+
+    by_ids = generate_corpus(1, tmp_path / "a", template_ids=["t00_mini_smoke"])
+    assert by_ids.counts["conclusions"] > 0
+    by_set = generate_corpus(
+        1, tmp_path / "b", templates={"t00_mini_smoke": registry()["t00_mini_smoke"]}
+    )
+    assert by_set.counts["conclusions"] > 0

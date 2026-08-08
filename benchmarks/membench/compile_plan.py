@@ -34,36 +34,8 @@ from __future__ import annotations
 
 from collections import defaultdict
 
-from pydantic import Field
-
 from membench.ids import stable_id
-from membench.schema import ClaimRecord, Stance, StrictModel
-
-
-class ConclusionRecord(StrictModel):
-    """A durable conclusion, as a knowledge store would hold it.
-
-    Field names are deliberately product-neutral. ``cites`` rather than
-    ``sources``, because the latter is exomem's ``remember`` parameter and would
-    bias the whole contract toward one contender's grammar.
-    """
-
-    conclusion_id: str
-    #: The oracle claim this conclusion states. Keeps the plan joinable back to
-    #: expectations without duplicating the claim's contents.
-    claim_id: str
-    title: str
-    body: str
-    #: Source ids this conclusion draws from, in recorded order.
-    cites: tuple[str, ...] = ()
-    #: The conclusion this one replaces, when the underlying claim superseded
-    #: another. Lineage, not a dispute.
-    supersedes: str | None = None
-    #: Conclusions asserting an incompatible value for the same subject and
-    #: predicate, live at the same time. Symmetric.
-    disputes: tuple[str, ...] = ()
-    #: Ordering key, so a plan is stable regardless of input order.
-    sort_key: int = Field(default=0, ge=0)
+from membench.schema import ClaimRecord, ConclusionRecord, EntityRecord, Stance
 
 
 def _supporting_sources(claim: ClaimRecord) -> tuple[str, ...]:
@@ -139,7 +111,17 @@ def _disputing_pairs(claims: list[ClaimRecord]) -> dict[str, tuple[str, ...]]:
     return {k: tuple(sorted(v)) for k, v in disputes.items()}
 
 
-def derive_compile_plan(claims: list[ClaimRecord]) -> list[ConclusionRecord]:
+def _phrase(claim: ClaimRecord, names: dict[str, str]) -> str:
+    """Readable subject-predicate phrase, using the entity's name when known."""
+
+    subject = names.get(claim.subject, claim.subject)
+    return f"{claim.predicate.replace('_', ' ')} of {subject}"
+
+
+def derive_compile_plan(
+    claims: list[ClaimRecord],
+    entities: list[EntityRecord] | None = None,
+) -> list[ConclusionRecord]:
     """One conclusion per claim, ordered by claim id so the plan is stable.
 
     Stability is load-bearing rather than tidy: the plan is written into the
@@ -148,6 +130,12 @@ def derive_compile_plan(claims: list[ClaimRecord]) -> list[ConclusionRecord]:
     """
 
     disputes = _disputing_pairs(claims)
+    # Conclusions must read like knowledge, not like a database dump. A note
+    # titled "headcount of ENT-8E7A0887" is lexically unreachable — a query
+    # naming the organisation would never match it — so a compiled altitude
+    # built on raw ids would score zero for a reason that has nothing to do with
+    # any contender. Entity ids are resolved to canonical names wherever known.
+    names = {e.entity_id: e.canonical_name for e in (entities or [])}
     plan: list[ConclusionRecord] = []
     for index, claim in enumerate(sorted(claims, key=lambda c: c.claim_id)):
         cites = _supporting_sources(claim)
@@ -163,10 +151,9 @@ def derive_compile_plan(claims: list[ClaimRecord]) -> list[ConclusionRecord]:
             ConclusionRecord(
                 conclusion_id=conclusion_id_for(claim.claim_id),
                 claim_id=claim.claim_id,
-                title=f"{claim.predicate} of {claim.subject}",
+                title=_phrase(claim, names),
                 body=(
-                    f"{claim.predicate} of {claim.subject} is "
-                    f"{claim.object.value}"
+                    f"{_phrase(claim, names)} is {claim.object.value}"
                     + (f" {claim.object.unit}" if claim.object.unit else "")
                     + "."
                 ),

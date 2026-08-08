@@ -1,0 +1,64 @@
+{
+  "additionalProperties": false,
+  "description": "A durable conclusion, as a knowledge store would hold it.\n\nField names are deliberately product-neutral. ``cites`` rather than\n``sources``, because the latter is exomem's ``remember`` parameter and would\nbias the whole contract toward one contender's grammar.",
+  "properties": {
+    "body": {
+      "title": "Body",
+      "type": "string"
+    },
+    "cites": {
+      "default": [],
+      "items": {
+        "type": "string"
+      },
+      "title": "Cites",
+      "type": "array"
+    },
+    "claim_id": {
+      "title": "Claim Id",
+      "type": "string"
+    },
+    "conclusion_id": {
+      "title": "Conclusion Id",
+      "type": "string"
+    },
+    "disputes": {
+      "default": [],
+      "items": {
+        "type": "string"
+      },
+      "title": "Disputes",
+      "type": "array"
+    },
+    "sort_key": {
+      "default": 0,
+      "minimum": 0,
+      "title": "Sort Key",
+      "type": "integer"
+    },
+    "supersedes": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Supersedes"
+    },
+    "title": {
+      "title": "Title",
+      "type": "string"
+    }
+  },
+  "required": [
+    "conclusion_id",
+    "claim_id",
+    "title",
+    "body"
+  ],
+  "title": "ConclusionRecord",
+  "type": "object"
+}

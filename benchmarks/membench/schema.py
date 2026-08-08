@@ -370,6 +370,32 @@ class CorpusManifest(StrictModel):
     artifacts: list[ArtifactEntry] = Field(default_factory=list)
 
 
+class ConclusionRecord(StrictModel):
+    """A durable conclusion, as a knowledge store would hold it.
+
+    Field names are deliberately product-neutral. ``cites`` rather than
+    ``sources``, because the latter is exomem's ``remember`` parameter and would
+    bias the whole contract toward one contender's grammar.
+    """
+
+    conclusion_id: str
+    #: The oracle claim this conclusion states. Keeps the plan joinable back to
+    #: expectations without duplicating the claim's contents.
+    claim_id: str
+    title: str
+    body: str
+    #: Source ids this conclusion draws from, in recorded order.
+    cites: tuple[str, ...] = ()
+    #: The conclusion this one replaces, when the underlying claim superseded
+    #: another. Lineage, not a dispute.
+    supersedes: str | None = None
+    #: Conclusions asserting an incompatible value for the same subject and
+    #: predicate, live at the same time. Symmetric.
+    disputes: tuple[str, ...] = ()
+    #: Ordering key, so a plan is stable regardless of input order.
+    sort_key: int = Field(default=0, ge=0)
+
+
 SCHEMA_EXPORTS: dict[str, type[BaseModel]] = {
     "entity": EntityRecord,
     "source": SourceRecord,
@@ -379,6 +405,7 @@ SCHEMA_EXPORTS: dict[str, type[BaseModel]] = {
     "schedule-op": ScheduleOp,
     "query": QueryRecord,
     "expected": ExpectedRecord,
+    "conclusion": ConclusionRecord,
     "corpus-manifest": CorpusManifest,
 }
 
