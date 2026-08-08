@@ -1,5 +1,22 @@
 # Memory-proof benchmark v0.1 — baseline findings (2026-07-31)
 
+> **WITHDRAWN — every cross-contender figure in this document (2026-08-09).**
+> The 2026-08-08 independent adversarial audit
+> (`rescope-benchmark-instrument-and-public-suite`, and the full artifact in
+> the session record) found every reported head-to-head dimension unsafe,
+> with critical defects in **both** directions: basic-memory's vector index
+> was never built (all pre-2026-08-08 basic-memory figures), and after that
+> was fixed, the harness's renderer was found feeding basic-memory 376
+> oracle-normalised fact lines phrased in the query vocabulary, knowledge
+> time was never transmitted to either contender, provenance and abstention
+> were authored by the shared answerer, and the profile de-tuned exomem's
+> product defaults. Every exomem-vs-basic-memory table, gap reading, and
+> directional claim below is therefore **void, not caveated** — in both
+> directions. Single-product findings (product defects found and fixed,
+> ceiling/floor mechanics, altitude effects) stand. See the terminal entry
+> "2026-08-08 — the audit that ended the head-to-head" at the end of this
+> document.
+
 Weaknesses first, per the benchmark's falsification mandate. Everything here
 was measured on this machine (WSL2, quiesced), exomem v0.36.0 at the
 `worktree-bench-foundation` base, lexical profile (embeddings disabled —
@@ -1640,3 +1657,36 @@ agreeing.
 `headcount-of-coril-group-2.md`. Two different organisations get
 identically-titled notes and colliding slugs, which is why that change and this
 one rebuild the corpus together rather than twice.
+
+## 2026-08-08 — the audit that ended the head-to-head
+
+An independent adversarial review (outside model, critic persona, read-only,
+commissioned with "find every way this disadvantages the competitor" framing)
+returned **REJECT: none of the contender results are safe to publish as
+product-comparison numbers.** Six critical findings: (1) knowledge time is
+never transmitted — the runner ingests the whole corpus before any query and
+passes only prompt text, so the temporal column is uninterpretable; (2)
+harness provenance reads sentinels from the shared answerer's top-3 hits and
+never consults either product's declared basis; (3) exomem's native compiled
+citation reader failed on every generated link (path-normalisation mismatch,
+since fixed — 4b.42); (4) the profile contract de-tunes exomem specifically
+(graph/compiled/active-state ranking off) while basic-memory receives its
+normal hybrid search; (5) basic-memory's renderer appends oracle-normalised
+`[fact]` observations phrased in the query vocabulary — including values
+locked in binaries it never ingested; (6) abstention is authored by the
+shared answerer (declines only on zero hits; both contenders returned hits
+everywhere, so `272/80` was identical by construction). Major findings
+include the compiled-supersession no-op (since fixed — 4b.43: 0→37
+superseded notes, score moved one row, proving the gates never read
+lifecycle state), gate declarations ignored, unverified environments, and
+conceptual external-validity skew toward exomem's knowledge model.
+
+Consequences, recorded in `rescope-benchmark-instrument-and-public-suite`:
+the cross-product comparison ambition is retired permanently (the defect
+class is structural — the benchmark's author configures the competitor, and
+an author cannot certify their own fairness); Track B narrows to an internal
+instrument; the public number moves to an exomem-only run on LongMemEval-S
+(cleaned, official judge), placed beside figures competitors published for
+themselves. Both prior headline readings — "exomem substantially ahead"
+(2026-08-05, competitor index never built) and "basic-memory at parity or
+ahead" (2026-08-08 morning, renderer enrichment) — are withdrawn in full.

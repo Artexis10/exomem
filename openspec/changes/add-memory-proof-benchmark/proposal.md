@@ -2,6 +2,14 @@
 
 ## Why
 
+> **Scope note (2026-08-09):** this change's cross-product comparison scope
+> (Track B as a contender-vs-contender instrument) is superseded by
+> `rescope-benchmark-instrument-and-public-suite` after the 2026-08-08
+> independent adversarial audit found every head-to-head dimension unsafe.
+> The corpus, oracle, gates, reference bounds, and Tracks A/C/D remain live;
+> Track B continues as an internal instrument only, and public comparison
+> claims move to the exomem-only `public-suite-eval` capability.
+
 Exomem's competitive claims rest on founder experience, a probe-level graph
 comparison (`graph-value-benchmark`, done), and a golden-set retrieval eval —
 none of which measures evolving truth, epistemics, corpus health over time,

@@ -1,5 +1,23 @@
 # Memory-proof benchmark — methodology and audit baseline
 
+> **Rescope (2026-08-09).** An independent adversarial audit (2026-08-08)
+> found **every reported dimension of the Track B head-to-head unsafe** — six
+> critical and six major findings — and the comparison is **withdrawn in both
+> directions**: the original "exomem substantially ahead" (the harness never
+> built the competitor's vector index) and the corrected "basic-memory at
+> parity or ahead" (the harness's renderer fed basic-memory oracle-normalised
+> facts phrased in the query vocabulary). Per OpenSpec change
+> `rescope-benchmark-instrument-and-public-suite`: Track B is an **internal
+> instrument** (regression + compiled-path correctness, bounded by the oracle
+> ceiling and null floor); **no cross-contender comparative table authored in
+> this repository is publishable**, and no competitor integration will be
+> authored here again; the public number comes from the exomem-only
+> `public-suite-eval` lane (LongMemEval-S, cleaned, official judge) placed
+> beside figures competitors published for themselves. Latency and
+> harness-mode abstention columns are withheld permanently. Cross-contender
+> readings anywhere in this page and its findings companion are historical
+> and void.
+
 This page defines the four-track benchmark system specified by OpenSpec change
 `add-memory-proof-benchmark` and records the verified audit baseline it was
 designed against (2026-07-31). It complements — and does not replace —

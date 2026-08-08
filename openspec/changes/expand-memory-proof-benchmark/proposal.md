@@ -2,6 +2,15 @@
 
 ## Why
 
+> **Scope note (2026-08-09):** the cross-product comparison and
+> industry-standard packaging ambitions of this change are superseded by
+> `rescope-benchmark-instrument-and-public-suite` after the 2026-08-08
+> independent adversarial audit voided the head-to-head in both directions.
+> Track B continues under that change's internal-instrument contract; the
+> public number moves to the exomem-only `public-suite-eval` capability.
+> The falsification register, oracle-derivation rule, and defect ledger
+> (section 4b) remain binding and live.
+
 v0.1 proved the method: seven epistemic-mechanics families over a seeded
 bitemporal corpus found a real product defect (the degraded-retention gate,
 fixed as `91b016f` and measured: factual_qa 0→99/180 lexical, 157/180

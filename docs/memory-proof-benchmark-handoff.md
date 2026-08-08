@@ -81,11 +81,14 @@ this niche (see the adjacent-landscape appendix).
   replication kit + versioned releases (AFTER 4.5 settles bytes); 4.3
   publication-gate reporting; 4.4 judge–human agreement protocol + first
   measurement (protocol design is judgment; running it is mechanical).
-- **Runs pending:** full head-to-head follow-ups per findings docs;
-  conventional datasets (LoCoMo/LongMemEval fetch + `bm-bench run
-  qa`/`diagnose`) for the Track A stage; GPU embeddings after a host
-  torch/driver alignment (CUDA context-init segfault in WSL2 — workaround
-  `CUDA_VISIBLE_DEVICES=` + CPU).
+- **Runs pending:** ~~full head-to-head follow-ups per findings docs~~ —
+  **retired 2026-08-09**: the 2026-08-08 audit voided the head-to-head in
+  both directions and `rescope-benchmark-instrument-and-public-suite`
+  retires cross-contender runs permanently; the public number now comes
+  from the exomem-only LongMemEval-S lane (`public-suite-eval`). GPU
+  embeddings after a host torch/driver alignment (CUDA context-init
+  segfault in WSL2 — workaround `CUDA_VISIBLE_DEVICES=` + CPU) — still no
+  latency claims from this machine.
 
 ## Operating rules (non-negotiable, inherited)
 
