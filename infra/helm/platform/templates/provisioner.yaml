@@ -103,6 +103,15 @@ spec:
               value: {{ .Values.provisioner.trustedProxyIps | quote }}
             - name: HOME
               value: /tmp
+            {{- /*
+              create_app() refuses to serve admission without the selected lock, and
+              reads admission mode, legacy catalog and forward target out of the file
+              itself -- so the API needs the path and the mount, and must NOT receive
+              the worker's extra EXOMEM_PROVISIONER_* vars: ProvisionerSettings sets
+              extra="forbid", so an unmodelled prefixed variable fails validation.
+            */}}
+            - name: EXOMEM_PROVISIONER_DEPLOYMENT_LOCK_PATH
+              value: /etc/exomem/deployment-lock/exomem-hosted-deployment-lock-v2.json
           ports:
             - name: http
               containerPort: 8080
@@ -135,10 +144,19 @@ spec:
           volumeMounts:
             - name: temporary
               mountPath: /tmp
+            - name: deployment-lock
+              mountPath: /etc/exomem/deployment-lock
+              readOnly: true
       volumes:
         - name: temporary
           emptyDir:
             sizeLimit: 16Mi
+        - name: deployment-lock
+          configMap:
+            name: {{ $lockName }}
+            items:
+              - key: exomem-hosted-deployment-lock-v2.json
+                path: exomem-hosted-deployment-lock-v2.json
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -236,7 +254,7 @@ spec:
             - name: EXOMEM_PROVISIONER_CAPACITY_RECEIPT_CONFIG_MAP
               value: {{ .Values.capacityCollector.stateConfigMap | quote }}
             - name: EXOMEM_PROVISIONER_HCLOUD_SERVER_ID
-              value: {{ .Values.capacityCollector.hcloudServerId | quote }}
+              value: {{ .Values.capacityCollector.hcloudServerId | int64 | quote }}
             - name: EXOMEM_PROVISIONER_INTERNAL_ORIGIN
               value: {{ .Values.provisioner.internalOrigin | quote }}
             - name: EXOMEM_PROVISIONER_VOLUME_ENCRYPTION_SECRET_NAME
@@ -276,8 +294,16 @@ spec:
             - name: deployment-lock
               mountPath: /etc/exomem/deployment-lock
               readOnly: true
+            {{- /*
+              subPath, not a directory mount: ConfigMap projection publishes each key
+              as a symlink into ..data/, and load_capacity_contract() rejects a symlink
+              outright. subPath materializes a regular file, which satisfies that check
+              without weakening it. Safe here because the ConfigMap is immutable, so the
+              lost live-update behaviour is not behaviour we have.
+            */}}
             - name: capacity-contract
-              mountPath: /etc/exomem/capacity
+              mountPath: /etc/exomem/capacity/private-alpha-capacity-v1.json
+              subPath: private-alpha-capacity-v1.json
               readOnly: true
       volumes:
         - name: temporary

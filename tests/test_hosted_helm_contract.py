@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import subprocess
 from pathlib import Path
 
@@ -391,7 +392,7 @@ def test_platform_renders_live_capacity_receipt_collector_with_isolated_keys() -
         "--state-configmap",
         "exomem-capacity-receipt",
         "--hcloud-server-id",
-        "101",
+        "156895713",
         "--hcloud-location",
         "fsn1",
     ]
@@ -464,10 +465,12 @@ def test_platform_renders_live_capacity_receipt_collector_with_isolated_keys() -
         assert environment["EXOMEM_PROVISIONER_CAPACITY_RECEIPT_CONFIG_MAP"]["value"] == (
             "exomem-capacity-receipt"
         )
-        assert environment["EXOMEM_PROVISIONER_HCLOUD_SERVER_ID"]["value"] == "101"
+        assert environment["EXOMEM_PROVISIONER_HCLOUD_SERVER_ID"]["value"] == "156895713"
+        # subPath, so the loader sees a regular file rather than a ..data/ symlink.
         assert any(
             mount["name"] == "capacity-contract"
-            and mount["mountPath"] == "/etc/exomem/capacity"
+            and mount["mountPath"] == "/etc/exomem/capacity/private-alpha-capacity-v1.json"
+            and mount["subPath"] == "private-alpha-capacity-v1.json"
             and mount["readOnly"] is True
             for mount in container["volumeMounts"]
         )
@@ -639,7 +642,7 @@ def test_platform_renders_disjoint_durability_workloads() -> None:
     assert volume_env["EXOMEM_PROVISIONER_CAPACITY_RECEIPT_CONFIG_MAP"] == (
         "exomem-capacity-receipt"
     )
-    assert volume_env["EXOMEM_PROVISIONER_HCLOUD_SERVER_ID"] == "101"
+    assert volume_env["EXOMEM_PROVISIONER_HCLOUD_SERVER_ID"] == "156895713"
 
     deletion_job = json.loads(
         _find(documents, "ConfigMap", "exomem-deletion-job-template")["data"][
@@ -1455,9 +1458,11 @@ def test_platform_renders_luks_retain_storage_and_exact_schedule_contract() -> N
         and document.get("metadata", {}).get("labels", {}).get("app.kubernetes.io/part-of")
         == "exomem-hosted-scheduler"
     }
-    assert set(cronjobs) == {job["name"] for job in contract["jobs"]}
+    # Scheduler CronJobs are prefixed; the bare contract name collided with the
+    # durability `exomem-export-gc` CronJob in the same namespace.
+    assert set(cronjobs) == {f"exomem-hosted-scheduler-{job['name']}" for job in contract["jobs"]}
     for job in contract["jobs"]:
-        rendered = cronjobs[job["name"]]
+        rendered = cronjobs[f"exomem-hosted-scheduler-{job['name']}"]
         spec = rendered["spec"]
         job_spec = spec["jobTemplate"]["spec"]
         pod = job_spec["template"]["spec"]
@@ -2084,3 +2089,160 @@ def test_cloudflare_tunnel_targets_the_rendered_production_traefik_service() -> 
     target = "http://exomem-platform-traefik.exomem-platform.svc.cluster.local:80"
     cloudflare = (ROOT / "infra/terraform/foundation/cloudflare.tf").read_text(encoding="utf-8")
     assert cloudflare.count(target) == 2
+
+
+def test_no_two_rendered_objects_share_one_kubernetes_identity() -> None:
+    """Two manifests with the same identity silently collapse into one object.
+
+    The schedules contract carries a job named `exomem-export-gc`, and
+    durability-workloads.yaml independently renders a CronJob of that exact name
+    in the same namespace. Kubernetes accepted the second as an update of the
+    first, so the chart shipped eight CronJobs and the cluster held seven, and
+    `helm install --wait` failed with "no CronJob with the name exomem-export-gc
+    found" only at install time. Every other assertion in this file inspects a
+    document it looked up by name, which cannot notice a second document
+    answering to the same name.
+    """
+
+    documents = _render(PLATFORM, PLATFORM / "values.validation.yaml", namespace="exomem-platform")
+    identities: dict[tuple[str, str, str, str], int] = {}
+    for document in documents:
+        metadata = document.get("metadata")
+        if not isinstance(metadata, dict) or not metadata.get("name"):
+            continue
+        identity = (
+            str(document.get("apiVersion", "")),
+            str(document.get("kind", "")),
+            str(metadata.get("namespace", "exomem-platform")),
+            str(metadata["name"]),
+        )
+        identities[identity] = identities.get(identity, 0) + 1
+
+    duplicates = sorted(identity for identity, count in identities.items() if count > 1)
+    assert not duplicates, f"rendered manifests collide on one identity: {duplicates}"
+
+
+def test_scheduler_cronjobs_are_namespaced_away_from_workload_cronjobs() -> None:
+    """The scheduler owns its object names; the contract only supplies the job name."""
+
+    documents = _render(PLATFORM, PLATFORM / "values.validation.yaml", namespace="exomem-platform")
+    schedules = json.loads(
+        (PLATFORM / "files/exomem-hosted-schedules-v1.json").read_text(encoding="utf-8")
+    )
+    expected = {f"exomem-hosted-scheduler-{job['name']}" for job in schedules["jobs"]}
+    rendered = {
+        document["metadata"]["name"]
+        for document in documents
+        if document.get("kind") == "CronJob"
+        and document.get("metadata", {}).get("labels", {}).get("app.kubernetes.io/part-of")
+        == "exomem-hosted-scheduler"
+    }
+    assert rendered == expected
+
+
+def test_no_rendered_value_uses_scientific_notation() -> None:
+    """Helm parses values as float64, and Go prints a large float64 as 1.5e+08.
+
+    `hcloudServerId` reached the provisioner as the string '1.56895713e+08' and
+    every worker died in pydantic with `unable to parse string as an integer`.
+    The deploy runbook hands that value in as a JSON number (`jq --argjson`), so
+    the chart has to survive a float64; the templates pipe through `int64`. The
+    validation fixture used to be `101`, which is small enough that Go prints it
+    plainly -- the fixture, not the template, was why this rendered clean in CI.
+    """
+
+    if HELM is None:
+        pytest.skip("set HELM_BIN to run pinned Helm rendering")
+    rendered = subprocess.run(
+        [
+            str(HELM),
+            "template",
+            "contract-test",
+            str(PLATFORM),
+            "--namespace",
+            "exomem-platform",
+            "--values",
+            str(PLATFORM / "values.validation.yaml"),
+            "--include-crds",
+        ],
+        capture_output=True,
+        check=True,
+        text=True,
+    ).stdout
+    offenders = re.findall(r"\d+\.\d+e[+-]\d+", rendered)
+    assert not offenders, f"rendered manifests contain float-formatted numbers: {sorted(set(offenders))}"
+
+
+def test_provisioner_api_can_read_the_selected_deployment_lock() -> None:
+    """Without the lock the API cannot start at all.
+
+    `create_app` raises "selected deployment lock is required for serving
+    admission" when the path is unset, and the chart mounted the lock on the
+    worker container only. Nothing rendered wrong -- the Deployment was valid,
+    it just could never boot -- so only a test that looks for the mount catches
+    it. The API must not inherit the worker's other EXOMEM_PROVISIONER_* vars:
+    ProvisionerSettings forbids extras, so an unmodelled one fails validation.
+    """
+
+    documents = _render(PLATFORM, PLATFORM / "values.validation.yaml", namespace="exomem-platform")
+    api = next(
+        document
+        for document in documents
+        if document.get("kind") == "Deployment"
+        and document["metadata"]["name"] == "exomem-provisioner-api"
+    )
+    pod = api["spec"]["template"]["spec"]
+    container = pod["containers"][0]
+    environment = {item["name"]: item.get("value") for item in container["env"]}
+
+    lock_path = "/etc/exomem/deployment-lock/exomem-hosted-deployment-lock-v2.json"
+    assert environment["EXOMEM_PROVISIONER_DEPLOYMENT_LOCK_PATH"] == lock_path
+    assert {"name": "deployment-lock", "mountPath": "/etc/exomem/deployment-lock", "readOnly": True} in container["volumeMounts"]
+    lock_volume = next(volume for volume in pod["volumes"] if volume["name"] == "deployment-lock")
+    assert lock_volume["configMap"]["items"] == [
+        {
+            "key": "exomem-hosted-deployment-lock-v2.json",
+            "path": "exomem-hosted-deployment-lock-v2.json",
+        }
+    ]
+    assert "EXOMEM_PROVISIONER_DEPLOYMENT_LOCK_SHA256" not in environment
+    assert "EXOMEM_PROVISIONER_ADMISSION_MODE" not in environment
+    assert "EXOMEM_PROVISIONER_RUNTIME_TARGET_JSON" not in environment
+
+
+def test_capacity_contract_is_mounted_as_a_regular_file() -> None:
+    """`load_capacity_contract` rejects a symlink, and ConfigMap keys are symlinks.
+
+    A ConfigMap volume publishes every key as a symlink into `..data/`, so a plain
+    directory mount made `contract_path.is_symlink()` true and both provider workers
+    died with "capacity contract is unavailable" on every start. `subPath`
+    materializes a regular file. Nothing about the manifests looked wrong -- the
+    volume, the key and the path env all matched -- so only asserting the mount
+    *shape* catches it.
+    """
+
+    documents = _render(PLATFORM, PLATFORM / "values.validation.yaml", namespace="exomem-platform")
+    contract_file = "private-alpha-capacity-v1.json"
+    seen = 0
+    for document in documents:
+        if document.get("kind") not in {"Deployment", "CronJob"}:
+            continue
+        spec = document["spec"]
+        pod = (
+            spec["template"]["spec"]
+            if document["kind"] == "Deployment"
+            else spec["jobTemplate"]["spec"]["template"]["spec"]
+        )
+        if not any(v.get("name") == "capacity-contract" for v in pod.get("volumes", [])):
+            continue
+        for container in pod["containers"]:
+            for mount in container.get("volumeMounts", []):
+                if mount["name"] != "capacity-contract":
+                    continue
+                seen += 1
+                assert mount.get("subPath") == contract_file, (
+                    f"{document['metadata']['name']} mounts the capacity contract as a "
+                    "directory; the loader rejects the resulting ..data/ symlink"
+                )
+                assert mount["mountPath"] == f"/etc/exomem/capacity/{contract_file}"
+    assert seen >= 2, f"expected the provider workers to mount the contract, saw {seen}"

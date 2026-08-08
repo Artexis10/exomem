@@ -1006,7 +1006,7 @@ spec:
             - name: EXOMEM_PROVISIONER_CAPACITY_RECEIPT_CONFIG_MAP
               value: {{ .Values.capacityCollector.stateConfigMap | quote }}
             - name: EXOMEM_PROVISIONER_HCLOUD_SERVER_ID
-              value: {{ .Values.capacityCollector.hcloudServerId | quote }}
+              value: {{ .Values.capacityCollector.hcloudServerId | int64 | quote }}
             - name: EXOMEM_PROVISIONER_VOLUME_ENCRYPTION_SECRET_NAME
               value: {{ .Values.storage.encryptionSecretName | quote }}
             - name: EXOMEM_PROVISIONER_VOLUME_ENCRYPTION_SECRET_NAMESPACE
@@ -1026,7 +1026,8 @@ spec:
             capabilities: {drop: [ALL]}
           volumeMounts:
             - {name: temporary, mountPath: /tmp}
-            - {name: capacity-contract, mountPath: /etc/exomem/capacity, readOnly: true}
+            # subPath so the file is regular, not a ..data/ symlink; see provisioner.yaml.
+            - {name: capacity-contract, mountPath: /etc/exomem/capacity/private-alpha-capacity-v1.json, subPath: private-alpha-capacity-v1.json, readOnly: true}
       volumes:
         - name: temporary
           emptyDir: {sizeLimit: 64Mi}
