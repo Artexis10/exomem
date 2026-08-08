@@ -386,7 +386,8 @@ def test_platform_renders_live_capacity_receipt_collector_with_isolated_keys() -
     ]
     assert container["args"] == [
         "--contract",
-        "/opt/exomem-hosted/private-alpha-capacity-v1.json",
+        # Its own subPath mount: a regular file, not a ..data/ symlink.
+        "/etc/exomem/capacity/private-alpha-capacity-v1.json",
         "--namespace",
         "exomem-platform",
         "--state-configmap",
