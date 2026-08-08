@@ -36,6 +36,10 @@ def test_full_suite_seed1_reproduces_committed_manifest(tmp_path: Path) -> None:
 def test_release_manifest_covers_the_declared_suite() -> None:
     payload = json.loads(RELEASE_MANIFEST.read_text(encoding="utf-8"))
     assert payload["master_seed"] == 1
-    assert len(payload["templates"]) == 17  # T00 smoke + T01..T16 families
+    assert len(payload["templates"]) == 24  # T00 smoke + T01..T23 families
     assert payload["counts"]["queries"] >= 200
     assert payload["artifacts"], "artifact hash inventory must be present"
+    # The compiled tier ships with the corpus, so a plan missing from the
+    # release identity would let a compiled run be reproduced against bytes
+    # that never carried one.
+    assert payload["counts"]["conclusions"] == payload["counts"]["claims"]

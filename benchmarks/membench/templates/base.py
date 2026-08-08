@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from functools import lru_cache
 from random import Random
 
 from membench import oracle, wordbank
@@ -40,6 +41,56 @@ from membench.schema import (
     TypedValue,
     UncertaintyExpectation,
 )
+
+
+#: Slots held back for templates the registry does not know (test fixtures).
+_FIXTURE_SLOTS = 16
+
+
+def _context_slot(template_id: str, variant: int) -> tuple[int, int]:
+    """This context's position in the canonical order, and how many exist.
+
+    Derived from the registry rather than a digest, because a digest modulo a
+    slot count reintroduces exactly the birthday collisions 4b.32 removes. The
+    registry import is deferred: every template module imports this one, so a
+    module-scope import would be circular.
+    """
+
+    from membench.templates import registry
+
+    contexts = _context_order(
+        tuple(sorted((t.template_id, t.variants) for t in registry().values()))
+    )
+    count = len(contexts) + _FIXTURE_SLOTS
+    known = contexts.get((template_id, variant))
+    if known is not None:
+        return known, count
+    # A template the registry does not know is a test fixture. It still needs a
+    # slot, and it must not take one a registered template owns, or building a
+    # fixture alongside the suite would silently rename real entities. Fixtures
+    # get a reserved band above the registry; collisions *within* that band are
+    # possible and are caught loudly by the generator's cross-scenario name
+    # refusal rather than passed off as a corpus.
+    offset = int(stable_id("CTXSLOT", f"{template_id}-v{variant}")[-8:], 16) % _FIXTURE_SLOTS
+    return len(contexts) + offset, count
+
+
+@lru_cache(maxsize=None)
+def _context_order(spec: tuple[tuple[str, int], ...]) -> dict[tuple[str, int], int]:
+    """Positions for every (template, variant), cached on the registry shape.
+
+    A template registered later must not shift the names of one registered
+    earlier, or every corpus would churn whenever the suite grew. Ordering is
+    lexicographic by template id, which is stable under addition at the end and
+    is the same order `generate_corpus` walks.
+    """
+
+    return {
+        (template_id, variant): index
+        for index, (template_id, variant) in enumerate(
+            (tid, v) for tid, variants in spec for v in range(variants)
+        )
+    }
 
 
 class GenerationError(RuntimeError):
@@ -101,6 +152,12 @@ class BuildContext:
         self.rng = Random(child_seed(master_seed, template_id, variant))
         self.graph = ScenarioGraph()
         self._counter = 0
+        #: Position of this context in the canonical (template, variant) order,
+        #: and how many contexts exist. Together they stride each name space so
+        #: no two contexts can draw the same name — see `_reserved` (4b.32).
+        self._context_index, self._context_count = _context_slot(template_id, variant)
+        #: How many names of each kind this context has already taken.
+        self._taken: dict[str, int] = {}
 
     # -- identity helpers -------------------------------------------------
     def _next(self) -> str:
@@ -111,14 +168,34 @@ class BuildContext:
         return stable_id(prefix, self._next())
 
     # -- vocabulary -------------------------------------------------------
+    def _reserved(self, kind: str, space: int) -> int:
+        """The next index this context owns in ``kind``'s name space.
+
+        Contexts stride: context ``k`` of ``n`` takes ``k``, ``k + n``,
+        ``k + 2n`` and so on, so two contexts can never land on one index and
+        no coordination between templates is needed. Exhaustion raises rather
+        than wrapping, because wrapping is precisely the silent collision this
+        exists to remove.
+        """
+
+        slot = self._taken.get(kind, 0)
+        self._taken[kind] = slot + 1
+        index = self._context_index + slot * self._context_count
+        if index >= space:
+            raise GenerationError(
+                f"{self.template_id}: {kind} name space exhausted at slot {slot} "
+                f"({space} names for {self._context_count} contexts); widen the wordbank"
+            )
+        return index
+
     def person(self) -> str:
-        return wordbank.person_name(self.rng)
+        return wordbank.person_name_at(self._reserved("person", wordbank.PERSON_SPACE))
 
     def org(self) -> str:
-        return wordbank.org_name(self.rng)
+        return wordbank.org_name_at(self._reserved("org", wordbank.ORG_SPACE))
 
     def project(self) -> str:
-        return wordbank.project_name(self.rng)
+        return wordbank.project_name_at(self._reserved("project", wordbank.PROJECT_SPACE))
 
     def metric(self) -> str:
         return wordbank.metric_name(self.rng)
@@ -137,7 +214,7 @@ class BuildContext:
                 "person": self.person,
                 "organization": self.org,
                 "project": self.project,
-            }.get(kind, lambda: wordbank.noun(self.rng).title())()
+            }.get(kind, lambda: wordbank.concept_name_at(self._reserved("concept", wordbank.CONCEPT_SPACE)))()
         record = EntityRecord(
             entity_id=self._id("ENT"),
             kind=kind,  # type: ignore[arg-type]

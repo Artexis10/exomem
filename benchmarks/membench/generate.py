@@ -157,6 +157,8 @@ def generate_corpus(
         raise GenerationError(f"output directory {out_dir} exists and is not empty")
 
     graphs: list[ScenarioGraph] = []
+    #: canonical name -> the scenario that owns it (4b.32)
+    name_owner: dict[str, str] = {}
     template_infos: list[TemplateInfo] = []
     entities: list[EntityRecord] = []
     sources: list[SourceRecord] = []
@@ -186,6 +188,22 @@ def generate_corpus(
             ctx = BuildContext(template.template_id, variant, master_seed)
             template.build(ctx)
             graph = ctx.graph
+            scenario = f"{template.template_id}-v{variant}"
+            for entity in graph.entities:
+                owner = name_owner.setdefault(entity.canonical_name, scenario)
+                if owner != scenario:
+                    # 4b.32. Reserved allocation makes this unreachable through
+                    # `ctx.person`/`org`/`project`, so reaching it means a
+                    # template passed an explicit `name=` that another scenario
+                    # already owns. Refusing at generation beats shipping a
+                    # corpus where one scenario's expectation silently grades
+                    # another scenario's entity. Sharing a name *within* one
+                    # scenario stays legal: that is t14's whole subject.
+                    raise GenerationError(
+                        f"{scenario}: canonical name {entity.canonical_name!r} is "
+                        f"already owned by {owner}; a name shared across scenarios "
+                        "makes every query naming it ambiguous"
+                    )
             graphs.append(graph)
             entities.extend(graph.entities)
             sources.extend(graph.sources)
