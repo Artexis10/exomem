@@ -561,3 +561,72 @@ def test_an_adapter_refuses_an_altitude_it_cannot_honour() -> None:
     assert create_adapter("graybox-local").supported_altitudes == frozenset({"raw_source"})
     with pytest.raises(AdapterUnsupported, match="cannot honour altitude"):
         create_adapter("graybox-local", altitude="compiled").ingestion_altitude
+
+
+# --------------------------------------------------------------------------
+# The ceiling proof (task 4.3) — this gates the whole change
+# --------------------------------------------------------------------------
+
+
+def _ceiling_run(tmp_path, altitude: str):
+    import sys
+    from pathlib import Path
+
+    sys.path.insert(0, str(Path(__file__).parent))
+    from membench.adapters import create_adapter
+    from membench.generate import generate_corpus
+    from membench.runner import execute_run
+    from test_membench_runner import _spec
+
+    corpus = tmp_path / f"corpus-{altitude}"
+    # Both dispute families: t07 (authority conflict, no explicit `disputed`
+    # status) and t08 (equal authority, which is what sets `uncertainty.hedged`
+    # and therefore actually reaches the calibration gate — t07 alone leaves
+    # every row NOT_APPLICABLE and proves nothing).
+    generate_corpus(
+        1, corpus, template_ids=["t07_authority_conflict", "t08_equal_authority_dispute"]
+    )
+    spec = _spec(corpus, tmp_path / altitude, create_adapter("oracle-retrieval", altitude=altitude), None)
+    spec.judge_backend = None
+    return execute_run(spec)
+
+
+def test_contradiction_is_reachable_at_compiled_altitude(tmp_path) -> None:
+    """A perfect retriever must be able to pass every dimension it is scored on.
+
+    This dimension shipped with a ceiling of ZERO (4b.33): the gate demanded
+    hedging language from an answerer with no generative step, so nothing could
+    pass and the resulting 0/20 was published as a shared product capability
+    gap. Measured on the full corpus, the ceiling moved 4/40 to 40/40 once the
+    gate asked whether the conflict was SURFACED instead.
+
+    If this ever fails, the gate is wrong and not the contender — a ceiling
+    below the query count is a harness defect.
+    """
+
+    result = _ceiling_run(tmp_path, "compiled")
+    assert not result.invalid, result.invalid_reason
+    contradiction = result.dimensions.get("contradiction_uncertainty", {})
+    assert contradiction.get("pass", 0) > 0, "ceiling cannot pass contradiction"
+    assert contradiction.get("fail", 0) == 0, (
+        "a perfect retriever failed the contradiction gate: the gate is wrong, "
+        f"not the contender ({contradiction})"
+    )
+
+
+def test_altitude_moves_only_the_altitude_dependent_dimension(tmp_path) -> None:
+    """Containment check.
+
+    Compiling changes what provenance and contradiction can measure. It must not
+    quietly move retrieval-property dimensions, or the altitude would be
+    confounded with retrieval quality and no cross-altitude figure would mean
+    anything.
+    """
+
+    raw = _ceiling_run(tmp_path, "raw_source")
+    compiled = _ceiling_run(tmp_path, "compiled")
+    for dimension in ("factual_qa", "temporal", "abstention"):
+        assert raw.dimensions.get(dimension) == compiled.dimensions.get(dimension), (
+            f"{dimension} moved with altitude: "
+            f"{raw.dimensions.get(dimension)} vs {compiled.dimensions.get(dimension)}"
+        )

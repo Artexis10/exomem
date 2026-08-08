@@ -131,6 +131,37 @@ _NATIVE_RENDERERS = {
 }
 
 
+ANSWER_MODE_COMPILED = "compiled"
+
+
+def _disputing_sources(view) -> dict[str, tuple[str, ...]]:
+    """claim_id -> source ids backing the conclusions that dispute it.
+
+    Built from the corpus's own compile plan, so the conflict a contender is
+    asked to surface is exactly the one the corpus declared — never inferred at
+    scoring time from values that happen to differ.
+    """
+
+    by_claim = {c.claim_id: c for c in view.conclusions}
+    by_conclusion = {c.conclusion_id: c for c in view.conclusions}
+    claim_sources = {
+        claim.claim_id: tuple(a.source_id for a in claim.assertions) for claim in view.claims
+    }
+    out: dict[str, tuple[str, ...]] = {}
+    for claim_id, conclusion in by_claim.items():
+        sources: list[str] = []
+        for other_id in conclusion.disputes:
+            other = by_conclusion.get(other_id)
+            if other is None:
+                continue
+            for source_id in claim_sources.get(other.claim_id, ()):
+                if source_id not in sources:
+                    sources.append(source_id)
+        if sources:
+            out[claim_id] = tuple(sources)
+    return out
+
+
 @dataclass
 class RunSpec:
     corpus_dir: Path
@@ -700,6 +731,15 @@ def execute_run(spec: RunSpec) -> RunResult:
                 # a reference-resolving claim from an attribute claim and
                 # reports UNSUPPORTED rather than guessing in either direction.
                 entities_by_id={e.entity_id: e for e in view.entities},
+                ingestion_altitude=ingestion_altitude,
+                # Only at compiled altitude does a declared disagreement exist;
+                # at raw-source the map stays empty and the gate keeps its
+                # hedging-language behaviour unchanged.
+                disputing_sources=(
+                    _disputing_sources(view)
+                    if ingestion_altitude == ANSWER_MODE_COMPILED
+                    else {}
+                ),
             )
 
             # Wired-translation report: written by the adapter into its own

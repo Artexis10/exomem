@@ -80,6 +80,12 @@ class ScoringContext:
     # keeps working; when absent the citation gate reports precision
     # unverifiable rather than guessing (see oracle.permitted_citations).
     entities_by_id: dict[str, EntityRecord] = field(default_factory=dict)
+    #: The layer this run measured at. `compiled` changes what the calibration
+    #: gate can honestly ask for; see :func:`gate_calibration`.
+    ingestion_altitude: str = "raw_source"
+    #: claim_id -> the source ids backing claims that DISPUTE it. Populated only
+    #: at compiled altitude, where a declared conflict exists to be surfaced.
+    disputing_sources: dict[str, tuple[str, ...]] = field(default_factory=dict)
 
     def claim_value(self, claim_id: str) -> str | None:
         claim = self.claims_by_id.get(claim_id)
@@ -486,13 +492,92 @@ def gate_abstention(
     return _item(query, "abstention", "abstention", GateStatus.PASS)
 
 
+def _conflict_surfaced(
+    query: QueryRecord, expected: ExpectedRecord, answer: AnswerRecord, ctx: ScoringContext
+) -> ScoreItem:
+    """Did the answer surface both sides of a declared disagreement?
+
+    Scored from citations rather than prose: a store that returns the disputing
+    source alongside the supporting one has surfaced the conflict, whatever
+    words it wrapped around it. Hedging language still counts — a system that
+    says the figure is contested has also surfaced it — so this widens what can
+    pass rather than narrowing it.
+    """
+
+    contested = [
+        source_id
+        for claim_id in expected.required_claims
+        for source_id in ctx.disputing_sources.get(claim_id, ())
+    ]
+    if not contested:
+        # Nothing declared as disputed here, so there is no conflict to surface
+        # and the settled-value expectation is what applies.
+        hedged = answer.hedged if answer.hedged is not None else detect_hedging(answer.answer_text)
+        if not expected.uncertainty.hedged and hedged:
+            return _item(
+                query,
+                "calibration",
+                "contradiction_uncertainty",
+                GateStatus.FAIL,
+                "hedged although the fact is settled",
+            )
+        return _item(query, "calibration", "contradiction_uncertainty", GateStatus.PASS)
+
+    cited = set(answer.citations)
+    surfaced = [source_id for source_id in contested if source_id in cited]
+    if surfaced:
+        return _item(
+            query,
+            "calibration",
+            "contradiction_uncertainty",
+            GateStatus.PASS,
+            f"conflict surfaced: cited disputing source(s) {sorted(surfaced)}",
+        )
+    if answer.hedged or detect_hedging(answer.answer_text):
+        return _item(
+            query,
+            "calibration",
+            "contradiction_uncertainty",
+            GateStatus.PASS,
+            "conflict acknowledged in the answer text",
+        )
+    return _item(
+        query,
+        "calibration",
+        "contradiction_uncertainty",
+        GateStatus.FAIL,
+        f"reported as settled; disputing source(s) {sorted(contested)} never surfaced",
+    )
+
+
 def gate_calibration(
     query: QueryRecord, expected: ExpectedRecord, answer: AnswerRecord, ctx: ScoringContext
 ) -> ScoreItem:
-    """Behavioural hedging only — never an internal confidence field."""
+    """Behavioural only — never an internal confidence field.
+
+    What "behavioural" can mean depends on the altitude, and conflating the two
+    is why this dimension had a ceiling of ZERO (4b.33).
+
+    At **raw-source** altitude the only available signal is hedging language in
+    the answer text. An extractive answerer quotes stored text verbatim and has
+    no generative step, so it cannot produce hedging under any retrieval — the
+    gate was unpassable by construction, for every contender, and the resulting
+    0/20 was published as a shared product capability gap.
+
+    At **compiled** altitude a real signal exists: the corpus declares which
+    conclusions disagree, so the question becomes whether the system SURFACES
+    the conflicting pair rather than reporting one value as settled. That needs
+    no confidence float and no generated prose — it is satisfiable by any store
+    that returns both sides, which is what "handles disputed state" means
+    operationally.
+    """
 
     if expected.uncertainty.hedged is None:
         return _item(query, "calibration", "contradiction_uncertainty", GateStatus.NOT_APPLICABLE)
+
+    if ctx.ingestion_altitude == "compiled":
+        return _conflict_surfaced(query, expected, answer, ctx)
+
     hedged = answer.hedged if answer.hedged is not None else detect_hedging(answer.answer_text)
     if expected.uncertainty.hedged and not hedged:
         return _item(
