@@ -208,6 +208,22 @@ def set_public_admission_copy(
     definition_path.write_text(json.dumps(definition), encoding="utf-8")
 
 
+def set_private_admission_copy(root: Path) -> None:
+    """Restore invite-only listing copy.
+
+    The shipped definition advertises public admission, so a test that means to
+    exercise the private path has to set it rather than inherit it -- otherwise
+    the guard silently stops testing anything the day the product opens up.
+    """
+    definition_path = root / "plugins/hosted/marketplace-definition.json"
+    definition = json.loads(definition_path.read_text(encoding="utf-8"))
+    definition["common"]["user_prerequisites"]["admission"] = {
+        "mode": "invite_only",
+        "eligibility": "Private alpha access is available by invitation.",
+    }
+    definition_path.write_text(json.dumps(definition), encoding="utf-8")
+
+
 def load_hosted_plugin_cli() -> object:
     spec = importlib.util.spec_from_file_location(
         "hosted_plugin_cli", REPO_ROOT / "scripts" / "hosted-plugin.py"
@@ -856,8 +872,8 @@ def test_claude_directory_packets_exclude_openai_review_only_fields(channel: str
     assert packet["user_prerequisites"] == {
         "account": "Requires an Exomem Hosted account and authorization.",
         "admission": {
-            "mode": "invite_only",
-            "eligibility": "Private alpha access is available by invitation.",
+            "mode": "public",
+            "eligibility": "Public access is available to eligible users.",
         },
     }
     assert all("annotation_explanations" not in tool for tool in packet["tools"])
@@ -950,6 +966,17 @@ def test_advertised_regions_require_public_admission_evidence_for_activation(
 ) -> None:
     root = copy_hosted_tree(tmp_path / "repo")
 
+    # Shipped copy advertises public admission, so activation now turns on the
+    # signed evidence rather than on the copy.
+    assert hosted_plugins._public_admission_blockers(
+        root,
+        trusted_key_id=None,
+        trusted_secret=None,
+        deployment_sha256=None,
+    ) == ["public admission evidence is incomplete"]
+
+    # Private copy must still block on its own, before evidence is even reached.
+    set_private_admission_copy(root)
     assert hosted_plugins._public_admission_blockers(
         root,
         trusted_key_id=None,
@@ -963,6 +990,7 @@ def test_private_admission_copy_blocks_public_readiness_for_every_directory_chan
 ) -> None:
     root = copy_hosted_tree(tmp_path / "repo")
     key_id, secret = ready_directory_evidence(root)
+    set_private_admission_copy(root)
 
     status = hosted_plugins.directory_status(
         root,
