@@ -118,7 +118,14 @@ traefik:
     podLabels:
       exomem.io/ingress: traefik
   service:
-    type: ClusterIP
+    # Traefik 41.x takes the service type at service.spec.type; a bare
+    # `service.type` is not a key in this chart and was silently ignored, so the
+    # subchart default of LoadBalancer applied. The node runs k3s with servicelb
+    # disabled, so a LoadBalancer Service never gets an address and
+    # `helm --wait` can never return. Ingress arrives through the Cloudflare
+    # Tunnel, which dials traefik from inside the cluster.
+    spec:
+      type: ClusterIP
   ports:
     web:
       port: 8000
