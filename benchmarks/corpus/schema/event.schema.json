@@ -1,0 +1,45 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "causes": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Causes",
+      "type": "array"
+    },
+    "event_id": {
+      "title": "Event Id",
+      "type": "string"
+    },
+    "kind": {
+      "title": "Kind",
+      "type": "string"
+    },
+    "occurred_at": {
+      "format": "date",
+      "title": "Occurred At",
+      "type": "string"
+    },
+    "participants": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Participants",
+      "type": "array"
+    },
+    "recorded_week": {
+      "minimum": 0,
+      "title": "Recorded Week",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "event_id",
+    "kind",
+    "occurred_at",
+    "recorded_week"
+  ],
+  "title": "EventRecord",
+  "type": "object"
+}

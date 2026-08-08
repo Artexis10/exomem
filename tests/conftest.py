@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import shutil
+import sys
 from pathlib import Path
 
 import pytest
@@ -15,6 +16,12 @@ from exomem import semantic_contract as semantic_contract_module
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 FIXTURE_VAULT = REPO_ROOT / "tests" / "fixtures"
+
+# The benchmark package (benchmarks/membench) deliberately lives outside src/
+# and outside the wheel/sdist; tests reach it via this guarded path insert.
+_BENCHMARKS_DIR = REPO_ROOT / "benchmarks"
+if _BENCHMARKS_DIR.is_dir() and str(_BENCHMARKS_DIR) not in sys.path:
+    sys.path.insert(0, str(_BENCHMARKS_DIR))
 
 
 @pytest.fixture(autouse=True)
