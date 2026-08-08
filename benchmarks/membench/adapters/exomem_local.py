@@ -204,6 +204,8 @@ class ExomemLocalAdapter:
         self._source_paths: dict[str, list[str]] = {}
         #: conclusion_id → vault path of the compiled note (compiled altitude).
         self._compiled_paths: dict[str, str] = {}
+        #: vault path → source_id, for reading a note's declared basis back.
+        self._path_to_source: dict[str, str] = {}
 
     # -- lifecycle --------------------------------------------------------
     @property
@@ -379,6 +381,7 @@ class ExomemLocalAdapter:
                     path = source.get("path") if isinstance(source, dict) else None
                     if isinstance(path, str) and op.get("source_id"):
                         self._source_paths.setdefault(str(op["source_id"]), []).append(path)
+                        self._path_to_source[path] = str(op["source_id"])
                     ok, detail = True, None
             except Exception as exc:  # recorded, stays in denominators
                 ok, detail = False, f"{type(exc).__name__}: {exc}"
@@ -773,6 +776,33 @@ class ExomemLocalAdapter:
             )
         return hits
 
+    def _declared_basis(self, path: str) -> list[str]:
+        """Source ids a compiled note DECLARES as its basis.
+
+        This is the measurement the compiled altitude exists for. At raw-source
+        altitude citations could only be scraped from quoted text, which scores
+        which documents were read; here the note states what it was drawn from
+        in `sources:` frontmatter, which is what the system claims — and the two
+        are different questions.
+        """
+
+        if self._vault is None:
+            return []
+        note = self._vault / path
+        if not note.is_file():
+            return []
+        text = note.read_text(encoding="utf-8", errors="replace")
+        if not text.startswith("---"):
+            return []
+        end = text.find("\n---", 3)
+        front = text[3 : end if end != -1 else len(text)]
+        basis: list[str] = []
+        for raw in re.findall(r"\[\[([^\]]+)\]\]", front):
+            source_id = self._path_to_source.get(raw.strip().lstrip("/"))
+            if source_id and source_id not in basis:
+                basis.append(source_id)
+        return basis
+
     # -- native answer -----------------------------------------------------
     def answer(self, query: str, limit: int, *, persona: str | None = None) -> NativeAnswer:
         """Answer from exomem's own context pack, citing what the pack selected.
@@ -825,12 +855,22 @@ class ExomemLocalAdapter:
 
         citations: list[str] = []
         chunks: list[str] = []
+        compiled = self.altitude == "compiled"
         for path in packed_paths:
+            if compiled:
+                for source_id in self._declared_basis(path):
+                    if source_id not in citations:
+                        citations.append(source_id)
             candidate = (self._vault or Path(".")) / path
             if not candidate.is_file():
                 continue
             text = candidate.read_text(encoding="utf-8", errors="replace")
             chunks.append(text[:_ANSWER_CHARS_PER_SOURCE])
+            if compiled:
+                # The note's declared basis is the claim; scraping sentinels out
+                # of quoted text would put back the raw-altitude proxy and
+                # measure reading rather than attribution.
+                continue
             for token in sentinels_in(text):
                 if token not in citations:
                     citations.append(token)
