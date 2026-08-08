@@ -46,7 +46,10 @@ from exomem.server_hosted import register_hosted_routes
 SENSITIVE_QUERY = "sensitive-query-sentinel-7f3c"
 SENSITIVE_PATH = "Knowledge Base/private-path-sentinel-91d2.md"
 DEFAULT_REQUEST_ID = "11111111-1111-4111-8111-111111111111"
-_ACTION_VOCABULARY_MAPS = {"front_door_actions", "simple_actions"}
+# Maps whose KEYS are vocabulary rather than tool names. `contract` is the prominence
+# engagement contract, keyed by behavioural axis (recall/capture/narration) — `capture`
+# there names a behaviour, not the `capture` action, and advertises nothing callable.
+_ACTION_VOCABULARY_MAPS = {"front_door_actions", "simple_actions", "contract"}
 
 
 def _principal(label: str) -> str:

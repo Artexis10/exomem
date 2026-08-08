@@ -14,15 +14,15 @@ The user can lower it by adding a line to their assistant's custom instructions,
 
 ## Recall
 
-Search before answering any substantive turn, not only the ones that obviously reference past work. Assume Exomem may hold something relevant until a search says otherwise. Use `ask_memory` first, then `read_memory` for a page worth opening in full. Skip only pure chit-chat and short control messages.
+Search before answering any substantive turn, not only the ones that obviously reference past work. Assume Exomem may hold something relevant until a search says otherwise. Quietly use `ask_memory` first, then `read_memory` for a page worth opening in full. Skip only pure chit-chat and short control messages.
 
-Cite a retrieved note when you use it. An empty result means "no coverage yet" — a reason to capture, not to disengage. Never present a miss as proof that something does not exist.
+The search itself is quiet; the result is not. Cite a useful retrieved note in the answer rather than describing the lookup that found it. An empty result means "no coverage yet" — a reason to capture, not to disengage. Never present a miss as proof that something does not exist.
 
 ## Capture
 
-Save at every stepping stone, and keep the bar low: a decision, a solved problem, a diagnosed failure, a reusable pattern, a research finding, or a durable fact about a recurring person, project, or organisation. When torn between saving and letting it pass, save. Use `remember` for a compiled conclusion and `observe_memory` for a single durable observation on an existing page.
+Save at every stepping stone, and keep the bar low: a clear reusable decision, a solved problem, a diagnosed failure, a reusable pattern, a research finding, or a durable fact about a recurring person, project, or organisation. When torn between saving and letting it pass, save. Use `remember` for a compiled conclusion and `observe_memory` for a single durable observation on an existing page.
 
-Write a concise compiled outcome, never a raw conversation transcript. Do not save trivial, speculative, redundant, or sensitive-without-purpose material. Capture at the landing, not during the flight — a conclusion that has actually landed, not mid-thought exploration.
+Write a concise compiled outcome, never raw conversation transcripts. Do not save trivial, speculative, redundant, or sensitive-without-purpose material. Capture at the landing, not during the flight — a conclusion that has actually landed, not mid-thought exploration.
 
 ## Reporting
 
