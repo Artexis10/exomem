@@ -12,7 +12,8 @@ from unittest import mock
 from membench.adapters.base import AdapterEnvironmentError, OpResult, Profile
 from membench.adapters.exomem_local import ExomemLocalAdapter
 
-from .dataset import LmeQuestion, LmeSession, render_session
+from .dataset import LmeQuestion, LmeSession
+from .normalize import neutral_tags, neutral_title, neutralize, render_neutral_session
 
 
 def lme_profile() -> Profile:
@@ -98,16 +99,21 @@ class LmeExomemAdapter(ExomemLocalAdapter):
     def ingest_question(self, question: LmeQuestion) -> tuple[OpResult, ...]:
         """Capture every session through ``op_capture_source`` at its own time."""
 
+        if not isinstance(question, LmeQuestion):
+            raise TypeError("ingest_question accepts LmeQuestion, never gold-bearing records")
         if self._vault is None or self._schema is None:
             raise AdapterEnvironmentError("adapter not set up")
         from exomem import commands, find as find_module, temporal
 
         results: list[OpResult] = []
+        events = neutralize(question)
         for sequence, session in enumerate(question.sessions):
             import time
 
             started = time.perf_counter()
-            source_id = session.session_id
+            session_ordinal = sequence + 1
+            source_id = f"session-{session_ordinal}"
+            session_events = [event for event in events if event.session_ordinal == session_ordinal]
             try:
                 # The product writer owns frontmatter. Clocking that public
                 # write is how the session timestamp lands in `captured:`
@@ -116,14 +122,11 @@ class LmeExomemAdapter(ExomemLocalAdapter):
                     captured = commands.op_capture_source(
                         self._vault,
                         self._schema,
-                        content=render_session(session),
-                        title=(
-                            f"LongMemEval {question.question_id} session "
-                            f"{session.session_id}"
-                        ),
+                        content=render_neutral_session(session_events),
+                        title=neutral_title(1, session_ordinal),
                         slug=self._slug(question, session),
                         source_type="session",
-                        tags=["longmemeval", question.question_type],
+                        tags=neutral_tags(),
                     )
                 source = captured.get("source") if isinstance(captured, dict) else None
                 path = source.get("path") if isinstance(source, dict) else None

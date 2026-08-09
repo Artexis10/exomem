@@ -1,0 +1,42 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "lanes": {
+      "items": {
+        "additionalProperties": true,
+        "type": "object"
+      },
+      "title": "Lanes",
+      "type": "array"
+    },
+    "protocol_version": {
+      "const": "1.0.0",
+      "default": "1.0.0",
+      "title": "Protocol Version",
+      "type": "string"
+    },
+    "reasons": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Reasons",
+      "type": "array"
+    },
+    "schema_version": {
+      "const": 1,
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "status": {
+      "title": "Status",
+      "type": "string"
+    }
+  },
+  "required": [
+    "status",
+    "lanes"
+  ],
+  "title": "ReadinessReport",
+  "type": "object"
+}

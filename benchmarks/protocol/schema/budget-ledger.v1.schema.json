@@ -1,0 +1,70 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "actor": {
+      "title": "Actor",
+      "type": "string"
+    },
+    "decision": {
+      "title": "Decision",
+      "type": "string"
+    },
+    "kind": {
+      "enum": [
+        "reserve",
+        "commit",
+        "release",
+        "approval"
+      ],
+      "title": "Kind",
+      "type": "string"
+    },
+    "op": {
+      "title": "Op",
+      "type": "string"
+    },
+    "protocol_version": {
+      "const": "1.0.0",
+      "default": "1.0.0",
+      "title": "Protocol Version",
+      "type": "string"
+    },
+    "running_total": {
+      "minimum": 0,
+      "title": "Running Total",
+      "type": "number"
+    },
+    "schema_version": {
+      "const": 1,
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "seq": {
+      "minimum": 0,
+      "title": "Seq",
+      "type": "integer"
+    },
+    "ts": {
+      "title": "Ts",
+      "type": "string"
+    },
+    "units": {
+      "minimum": 0,
+      "title": "Units",
+      "type": "number"
+    }
+  },
+  "required": [
+    "ts",
+    "seq",
+    "actor",
+    "op",
+    "kind",
+    "units",
+    "running_total",
+    "decision"
+  ],
+  "title": "BudgetLedgerEntry",
+  "type": "object"
+}
