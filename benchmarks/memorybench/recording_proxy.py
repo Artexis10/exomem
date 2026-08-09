@@ -27,6 +27,7 @@ from .traffic import (
     DEFAULT_UPSTREAM_TIMEOUT_SECONDS,
     EXPECTED_SDK_INTEGRITY,
     EXPECTED_SDK_VERSION,
+    SCHEMA_VERSION,
     BodyRecord,
     HarnessPins,
     HttpAttempt,
@@ -59,6 +60,9 @@ STANDARD_HOP_BY_HOP_HEADERS = {
 MAX_RAW_HEADER_BYTES = 64 * 1024
 MAX_BUN_LOCK_BYTES = 16 * 1024 * 1024
 SUPPORTED_CONTENT_ENCODINGS = {"gzip", "deflate"}
+MAX_GZIP_MEMBERS = 8
+GZIP_INPUT_CHUNK_BYTES = 64 * 1024
+MAX_JSON_NESTING_DEPTH = 1024
 
 
 class ConfigurationError(ValueError):
@@ -323,8 +327,31 @@ def _parse_json(body: bytes) -> Any:
             raise RequestRefusal("invalid_json")
         return parsed
 
+    def reject_excess_nesting(text: str) -> None:
+        depth = 0
+        in_string = False
+        escaped = False
+        for character in text:
+            if in_string:
+                if escaped:
+                    escaped = False
+                elif character == "\\":
+                    escaped = True
+                elif character == '"':
+                    in_string = False
+                continue
+            if character == '"':
+                in_string = True
+            elif character in "[{":
+                depth += 1
+                if depth > MAX_JSON_NESTING_DEPTH:
+                    raise RequestRefusal("invalid_json")
+            elif character in "]}":
+                depth -= 1
+
     try:
         text = body.decode("utf-8", errors="strict")
+        reject_excess_nesting(text)
         return json.loads(
             text,
             object_pairs_hook=reject_duplicate_keys,
@@ -333,7 +360,7 @@ def _parse_json(body: bytes) -> Any:
         )
     except RequestRefusal:
         raise
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as exc:
         raise RequestRefusal("invalid_json") from exc
 
 
@@ -526,33 +553,46 @@ def _inspect_response_headers(
 
 
 def _decompress_gzip_members(data: bytes, max_body_bytes: int) -> bytes:
-    remaining = data
+    if not data:
+        raise RequestRefusal("invalid_json")
+    source = memoryview(data)
+    position = 0
     decoded = bytearray()
     member_count = 0
-    while remaining:
+    while position < len(source):
         member_count += 1
+        if member_count > MAX_GZIP_MEMBERS:
+            raise RequestRefusal("invalid_json")
+        decompressor = zlib.decompressobj(zlib.MAX_WBITS | 16)
         try:
-            decompressor = zlib.decompressobj(zlib.MAX_WBITS | 16)
+            while not decompressor.eof:
+                if position >= len(source):
+                    raise RequestRefusal("invalid_json")
+                chunk_end = min(position + GZIP_INPUT_CHUNK_BYTES, len(source))
+                chunk = source[position:chunk_end]
+                budget = max_body_bytes - len(decoded)
+                member_part = decompressor.decompress(chunk, budget + 1)
+                if len(member_part) > budget or decompressor.unconsumed_tail:
+                    raise RequestRefusal("body_too_large")
+                decoded.extend(member_part)
+                if decompressor.eof:
+                    consumed = len(chunk) - len(decompressor.unused_data)
+                    if consumed <= 0:
+                        raise RequestRefusal("invalid_json")
+                    position += consumed
+                else:
+                    position = chunk_end
             budget = max_body_bytes - len(decoded)
-            member = decompressor.decompress(remaining, budget + 1)
-            if len(member) > budget or decompressor.unconsumed_tail:
+            flushed = decompressor.flush(budget + 1)
+            if len(flushed) > budget:
                 raise RequestRefusal("body_too_large")
-            member += decompressor.flush(budget + 1 - len(member))
-            if len(member) > budget:
-                raise RequestRefusal("body_too_large")
+            decoded.extend(flushed)
             if not decompressor.eof:
                 raise RequestRefusal("invalid_json")
-            next_member = decompressor.unused_data
-            if next_member == remaining:
-                raise RequestRefusal("invalid_json")
-            decoded.extend(member)
-            remaining = next_member
         except RequestRefusal:
             raise
         except zlib.error as exc:
             raise RequestRefusal("invalid_json") from exc
-    if member_count == 0:
-        raise RequestRefusal("invalid_json")
     return bytes(decoded)
 
 
@@ -675,6 +715,7 @@ class RecordingProxy:
         self._admission_lock = asyncio.Lock()
         self._drained = asyncio.Event()
         self._drained.set()
+        self._active_handlers: dict[asyncio.Task[Any], asyncio.StreamWriter] = {}
         self._recording_failed = False
         self._closed = False
 
@@ -731,6 +772,7 @@ class RecordingProxy:
         try:
             self.writer.record(
                 HttpAttempt(
+                    schema_version=SCHEMA_VERSION,
                     attempt_ordinal=admission.ordinal,
                     started_at=admission.started_at,
                     request=request,
@@ -739,7 +781,11 @@ class RecordingProxy:
                     client_status=client_status,
                     outcome=outcome,
                     error_code=error_code,
-                    timing=Timing(ms=(time.perf_counter() - admission.started_perf) * 1000),
+                    timing=Timing(
+                        ms=(time.perf_counter() - admission.started_perf) * 1000,
+                        latency_publishable=False,
+                        reason="host_unvalidated",
+                    ),
                 )
             )
         except Exception:
@@ -908,6 +954,8 @@ class RecordingProxy:
                 if raw_response
                 else b""
             )
+            if not decoded_response and not _empty_response_is_legal(method, response_status):
+                raise RequestRefusal("invalid_json")
             if decoded_response:
                 content_types = _group_headers(response_headers).get("content-type", [])
                 if len(content_types) != 1 or not _is_json_media_type(content_types[0]):
@@ -986,8 +1034,19 @@ class RecordingProxy:
         self._accepting = False
         if self.server is not None:
             self.server.close()
+            await self._terminate_active_handlers()
             await self.server.wait_closed()
         await self.client.aclose()
+        self._closed = True
+
+    async def _terminate_active_handlers(self) -> None:
+        active = list(self._active_handlers.items())
+        for _task, active_writer in active:
+            active_writer.close()
+        for task, _active_writer in active:
+            task.cancel()
+        if active:
+            await asyncio.gather(*(task for task, _writer in active), return_exceptions=True)
 
     async def close(self) -> None:
         if self._closed:
@@ -996,9 +1055,21 @@ class RecordingProxy:
         try:
             if self.server is not None:
                 self.server.close()
+            forced_drain = False
+            try:
+                await asyncio.wait_for(
+                    self._drained.wait(),
+                    timeout=self.writer.upstream_timeout_seconds,
+                )
+            except TimeoutError:
+                forced_drain = True
+                await self._terminate_active_handlers()
+            if self.server is not None:
                 await self.server.wait_closed()
-            await self._drained.wait()
             await self.client.aclose()
+            if forced_drain:
+                self._closed = True
+                return
             if self._recording_failed:
                 raise RecordingError("handler_record_failed")
             self.writer.finalize()
@@ -1113,6 +1184,9 @@ class RecordingProxy:
             writer.close()
             await writer.wait_closed()
             return
+        handler_task = asyncio.current_task()
+        if handler_task is not None:
+            self._active_handlers[handler_task] = writer
         connection = h11.Connection(h11.SERVER)
         request_event: h11.Request | None = None
         body = bytearray()
@@ -1236,6 +1310,8 @@ class RecordingProxy:
             if not terminal_recorded:
                 self._recording_failed = True
         finally:
+            if handler_task is not None:
+                self._active_handlers.pop(handler_task, None)
             await self._release()
             writer.close()
             try:

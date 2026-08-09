@@ -1,85 +1,8 @@
 {
   "$defs": {
-    "BodyRecord": {
+    "AbsentBodyRecord": {
       "additionalProperties": false,
-      "allOf": [
-        {
-          "if": {
-            "properties": {
-              "state": {
-                "const": "absent"
-              }
-            },
-            "required": [
-              "state"
-            ]
-          },
-          "then": {
-            "properties": {
-              "observed_bytes": {
-                "const": 0
-              },
-              "redaction_count": {
-                "const": 0
-              },
-              "sanitized_json": {
-                "type": "null"
-              },
-              "sha256": {
-                "type": "null"
-              }
-            }
-          }
-        },
-        {
-          "if": {
-            "properties": {
-              "state": {
-                "const": "json"
-              }
-            },
-            "required": [
-              "state"
-            ]
-          },
-          "then": {
-            "properties": {
-              "observed_bytes": {
-                "minimum": 1
-              },
-              "sha256": {
-                "type": "string"
-              }
-            }
-          }
-        },
-        {
-          "if": {
-            "properties": {
-              "state": {
-                "const": "rejected"
-              }
-            },
-            "required": [
-              "state"
-            ]
-          },
-          "then": {
-            "properties": {
-              "redaction_count": {
-                "const": 0
-              },
-              "sanitized_json": {
-                "type": "null"
-              },
-              "sha256": {
-                "type": "null"
-              }
-            }
-          }
-        }
-      ],
-      "description": "A safe description of a body; rejected raw bytes are never retained.",
+      "description": "Evidence that no message-body bytes were received.",
       "properties": {
         "declared_bytes": {
           "anyOf": [
@@ -91,57 +14,43 @@
               "type": "null"
             }
           ],
-          "default": null,
           "title": "Declared Bytes"
         },
-        "observed_bytes": {
-          "default": 0,
-          "minimum": 0,
-          "title": "Observed Bytes",
-          "type": "integer"
-        },
-        "redaction_count": {
-          "default": 0,
-          "minimum": 0,
-          "title": "Redaction Count",
-          "type": "integer"
-        },
-        "sanitized_json": {
-          "anyOf": [
-            {},
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Sanitized Json"
-        },
-        "sha256": {
-          "anyOf": [
-            {
-              "pattern": "^[0-9a-f]{64}$",
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Sha256"
-        },
         "state": {
-          "default": "absent",
-          "enum": [
-            "absent",
-            "json",
-            "rejected"
-          ],
+          "const": "absent",
           "title": "State",
           "type": "string"
         }
       },
-      "title": "BodyRecord",
+      "required": [
+        "state",
+        "declared_bytes"
+      ],
+      "title": "AbsentBodyRecord",
       "type": "object"
+    },
+    "BodyRecord": {
+      "description": "State-specific safe body evidence serialized without a wrapper key.",
+      "discriminator": {
+        "mapping": {
+          "absent": "#/$defs/AbsentBodyRecord",
+          "json": "#/$defs/JsonBodyRecord",
+          "rejected": "#/$defs/RejectedBodyRecord"
+        },
+        "propertyName": "state"
+      },
+      "oneOf": [
+        {
+          "$ref": "#/$defs/AbsentBodyRecord"
+        },
+        {
+          "$ref": "#/$defs/JsonBodyRecord"
+        },
+        {
+          "$ref": "#/$defs/RejectedBodyRecord"
+        }
+      ],
+      "title": "BodyRecord"
     },
     "Header": {
       "additionalProperties": false,
@@ -206,8 +115,11 @@
         }
       },
       "required": [
+        "headers",
+        "body",
         "method",
-        "path"
+        "path",
+        "query"
       ],
       "title": "HttpRequest",
       "type": "object"
@@ -233,9 +145,84 @@
         }
       },
       "required": [
+        "headers",
+        "body",
         "status_code"
       ],
       "title": "HttpResponse",
+      "type": "object"
+    },
+    "JsonBodyRecord": {
+      "additionalProperties": false,
+      "description": "A validated JSON body with one canonical received wire length.",
+      "properties": {
+        "redaction_count": {
+          "minimum": 0,
+          "title": "Redaction Count",
+          "type": "integer"
+        },
+        "sanitized_json": {
+          "title": "Sanitized Json"
+        },
+        "sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Sha256",
+          "type": "string"
+        },
+        "state": {
+          "const": "json",
+          "title": "State",
+          "type": "string"
+        },
+        "wire_bytes": {
+          "minimum": 1,
+          "title": "Wire Bytes",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "state",
+        "wire_bytes",
+        "sha256",
+        "sanitized_json",
+        "redaction_count"
+      ],
+      "title": "JsonBodyRecord",
+      "type": "object"
+    },
+    "RejectedBodyRecord": {
+      "additionalProperties": false,
+      "description": "Best-effort size evidence for bytes rejected before safe parsing.",
+      "properties": {
+        "declared_bytes": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Declared Bytes"
+        },
+        "observed_bytes": {
+          "minimum": 0,
+          "title": "Observed Bytes",
+          "type": "integer"
+        },
+        "state": {
+          "const": "rejected",
+          "title": "State",
+          "type": "string"
+        }
+      },
+      "required": [
+        "state",
+        "declared_bytes",
+        "observed_bytes"
+      ],
+      "title": "RejectedBodyRecord",
       "type": "object"
     },
     "Timing": {
@@ -243,7 +230,6 @@
       "properties": {
         "latency_publishable": {
           "const": false,
-          "default": false,
           "title": "Latency Publishable",
           "type": "boolean"
         },
@@ -254,13 +240,14 @@
         },
         "reason": {
           "const": "host_unvalidated",
-          "default": "host_unvalidated",
           "title": "Reason",
           "type": "string"
         }
       },
       "required": [
-        "ms"
+        "ms",
+        "latency_publishable",
+        "reason"
       ],
       "title": "Timing",
       "type": "object"
@@ -19070,7 +19057,6 @@
           "type": "null"
         }
       ],
-      "default": null,
       "title": "Error Code"
     },
     "outcome": {
@@ -19094,12 +19080,10 @@
         {
           "type": "null"
         }
-      ],
-      "default": null
+      ]
     },
     "schema_version": {
       "const": 1,
-      "default": 1,
       "title": "Schema Version",
       "type": "integer"
     },
@@ -19122,16 +19106,19 @@
           "type": "null"
         }
       ],
-      "default": null,
       "title": "Upstream Status"
     }
   },
   "required": [
+    "schema_version",
     "attempt_ordinal",
     "started_at",
     "request",
+    "response",
+    "upstream_status",
     "client_status",
     "outcome",
+    "error_code",
     "timing"
   ],
   "title": "HttpAttempt",

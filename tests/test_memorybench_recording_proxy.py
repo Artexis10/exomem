@@ -56,6 +56,25 @@ def _run(coro):
     return asyncio.run(coro)
 
 
+def _absent_body(*, declared_bytes: int | None = None):
+    from benchmarks.memorybench.traffic import BodyRecord
+
+    return BodyRecord.model_validate({
+        "state": "absent",
+        "declared_bytes": declared_bytes,
+    })
+
+
+def _timing(ms: float = 1):
+    from benchmarks.memorybench.traffic import Timing
+
+    return Timing(
+        ms=ms,
+        latency_publishable=False,
+        reason="host_unvalidated",
+    )
+
+
 async def _feedback3_real_response_round_trip(
     tmp_path: Path,
     *,
@@ -114,6 +133,61 @@ async def _feedback3_real_response_round_trip(
         await upstream_server.wait_closed()
     row = json.loads((recording / "http-attempts.jsonl").read_text())
     return response, row, recording, bytes(observed_head)
+
+
+async def _feedback4_real_request_round_trip(
+    tmp_path: Path,
+    *,
+    body: bytes,
+) -> tuple[bytes, list[dict[str, object]], Path, int]:
+    """Exercise request parsing through h11 and report upstream admissions."""
+
+    from benchmarks.memorybench.recording_proxy import RecordingProxy
+    from benchmarks.memorybench.traffic import RecordingWriter
+
+    upstream_calls = 0
+
+    async def upstream(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        nonlocal upstream_calls
+        upstream_calls += 1
+        await reader.readuntil(b"\r\n\r\n")
+        writer.write(
+            b"HTTP/1.1 204 No Content\r\n"
+            b"Connection: close\r\n\r\n"
+        )
+        await writer.drain()
+        writer.close()
+        await writer.wait_closed()
+
+    upstream_server = await asyncio.start_server(upstream, "127.0.0.1", 0)
+    upstream_port = upstream_server.sockets[0].getsockname()[1]
+    recording = tmp_path / "recording"
+    proxy = RecordingProxy(
+        f"http://127.0.0.1:{upstream_port}",
+        RecordingWriter(recording, pins=PINS),
+    )
+    base_url = await proxy.start("127.0.0.1", 0)
+    proxy_port = int(base_url.rsplit(":", 1)[1])
+    try:
+        reader, client_writer = await asyncio.open_connection("127.0.0.1", proxy_port)
+        client_writer.write(
+            b"POST /v3/documents HTTP/1.1\r\n"
+            b"Host: 127.0.0.1\r\n"
+            b"Content-Type: application/json\r\n"
+            + f"Content-Length: {len(body)}\r\n".encode()
+            + b"Connection: close\r\n\r\n"
+            + body
+        )
+        await client_writer.drain()
+        response = await asyncio.wait_for(reader.read(), timeout=2)
+        client_writer.close()
+        await client_writer.wait_closed()
+    finally:
+        await proxy.close()
+        upstream_server.close()
+        await upstream_server.wait_closed()
+    rows = [json.loads(line) for line in (recording / "http-attempts.jsonl").read_text().splitlines()]
+    return response, rows, recording, upstream_calls
 
 
 def test_manifest_pins_verified_harness_provider_and_sdk(tmp_path: Path) -> None:
@@ -225,8 +299,7 @@ def test_forwards_original_json_once_and_records_sanitized_copy(tmp_path: Path) 
     assert datetime.fromisoformat(row["started_at"]).tzinfo is not None
     assert row["request"]["body"] == {
         "state": "json",
-        "declared_bytes": None,
-        "observed_bytes": len(body),
+        "wire_bytes": len(body),
         "sha256": hashlib.sha256(body).hexdigest(),
         "sanitized_json": {"token": "[redacted]", "ordinary": "value"},
         "redaction_count": 1,
@@ -495,14 +568,22 @@ def test_validator_requires_independently_expected_pins(tmp_path: Path) -> None:
 
 def test_body_record_and_attempt_reject_impossible_cross_fields() -> None:
     from pydantic import ValidationError
-    from benchmarks.memorybench.traffic import BodyRecord, HttpAttempt, HttpRequest, Timing
+    from benchmarks.memorybench.traffic import BodyRecord, HttpAttempt, HttpRequest
 
     with pytest.raises(ValidationError):
-        BodyRecord(state="absent", declared_bytes=1, observed_bytes=1)
+        BodyRecord.model_validate({"state": "absent", "declared_bytes": 1, "observed_bytes": 1})
     with pytest.raises(ValidationError):
         HttpAttempt(
-            attempt_ordinal=1, request=HttpRequest(method="GET", path="/", body=BodyRecord()),
-            client_status=200, outcome="forwarded", timing=Timing(ms=1),
+            schema_version=1,
+            attempt_ordinal=1,
+            started_at="2026-08-09T00:00:00+00:00",
+            request=HttpRequest(method="GET", path="/", query=[], headers=[], body=_absent_body()),
+            response=None,
+            upstream_status=None,
+            client_status=200,
+            outcome="forwarded",
+            error_code=None,
+            timing=_timing(),
         )
 
 
@@ -810,9 +891,6 @@ def test_correction_declared_oversize_is_rejected_before_h11_body_read(tmp_path:
         "state": "rejected",
         "declared_bytes": 100,
         "observed_bytes": 0,
-        "sha256": None,
-        "sanitized_json": None,
-        "redaction_count": 0,
     }
 
 
@@ -887,30 +965,23 @@ def test_correction_unexpected_empty_json_response_is_rejected(tmp_path: Path) -
 
 def test_correction_body_and_attempt_cross_field_invariants_are_strict() -> None:
     from pydantic import ValidationError
-    from benchmarks.memorybench.traffic import BodyRecord, HttpAttempt, HttpRequest, HttpResponse, Timing
+    from benchmarks.memorybench.traffic import BodyRecord, HttpAttempt, HttpRequest, HttpResponse
 
-    absent = BodyRecord(
-        state="absent",
-        declared_bytes=None,
-        observed_bytes=0,
-        sha256=None,
-        sanitized_json=None,
-        redaction_count=0,
-    )
-    request = HttpRequest(method="GET", path="/", body=absent)
-    response = HttpResponse(status_code=200, body=absent)
-    timing = Timing(ms=1)
+    absent = _absent_body()
+    request = HttpRequest(method="GET", path="/", query=[], headers=[], body=absent)
+    response = HttpResponse(status_code=200, headers=[], body=absent)
+    timing = _timing()
 
     invalid_bodies = [
-        dict(state="absent", declared_bytes=None, observed_bytes=1, sha256=None, sanitized_json=None, redaction_count=0),
-        dict(state="json", declared_bytes=2, observed_bytes=2, sha256=None, sanitized_json={}, redaction_count=0),
+        dict(state="absent", declared_bytes=None, observed_bytes=1),
+        dict(state="json", wire_bytes=2, sanitized_json={}, redaction_count=0),
         dict(state="json", declared_bytes=3, observed_bytes=2, sha256="a" * 64, sanitized_json={}, redaction_count=0),
-        dict(state="rejected", declared_bytes=2, observed_bytes=2, sha256="a" * 64, sanitized_json=None, redaction_count=0),
+        dict(state="rejected", declared_bytes=2, observed_bytes=2, sha256="a" * 64),
     ]
     for values in invalid_bodies:
         with pytest.raises(ValidationError):
-            BodyRecord(**values)
-    assert BodyRecord(state="absent", declared_bytes=123).declared_bytes == 123
+            BodyRecord.model_validate(values)
+    assert _absent_body(declared_bytes=123).declared_bytes == 123
 
     invalid_attempts = [
         dict(request=request, response=None, upstream_status=None, client_status=200, outcome="forwarded", error_code=None),
@@ -921,7 +992,13 @@ def test_correction_body_and_attempt_cross_field_invariants_are_strict() -> None
     ]
     for values in invalid_attempts:
         with pytest.raises(ValidationError):
-            HttpAttempt(attempt_ordinal=1, started_at="2026-08-09T00:00:00+00:00", timing=timing, **values)
+            HttpAttempt(
+                schema_version=1,
+                attempt_ordinal=1,
+                started_at="2026-08-09T00:00:00+00:00",
+                timing=timing,
+                **values,
+            )
 
 
 def test_correction_expected_cli_failures_are_generic_and_secret_safe(
@@ -1016,36 +1093,33 @@ def test_correction_rejected_raw_body_is_never_stored(tmp_path: Path) -> None:
         "state": "rejected",
         "declared_bytes": None,
         "observed_bytes": len(malformed),
-        "sha256": None,
-        "sanitized_json": None,
-        "redaction_count": 0,
     }
 
 
 def test_correction_writer_serializes_concurrent_rows(tmp_path: Path) -> None:
     from benchmarks.memorybench.traffic import (
-        BodyRecord,
         HttpAttempt,
         HttpRequest,
         HttpResponse,
         RecordingWriter,
-        Timing,
         validate_recording,
     )
 
     writer = RecordingWriter(tmp_path / "recording", pins=PINS)
-    empty = BodyRecord()
+    empty = _absent_body()
 
     def write_row(ordinal: int) -> None:
         writer.record(HttpAttempt(
+            schema_version=1,
             attempt_ordinal=ordinal,
             started_at=writer.manifest.started_at,
-            request=HttpRequest(method="GET", path=f"/{ordinal}", body=empty),
-            response=HttpResponse(status_code=204, body=empty),
+            request=HttpRequest(method="GET", path=f"/{ordinal}", query=[], headers=[], body=empty),
+            response=HttpResponse(status_code=204, headers=[], body=empty),
             upstream_status=204,
             client_status=204,
             outcome="forwarded",
-            timing=Timing(ms=1),
+            error_code=None,
+            timing=_timing(),
         ))
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
@@ -1327,7 +1401,6 @@ def test_feedback2_real_listener_rejects_equal_duplicate_content_length_once(
 def test_feedback2_exported_schemas_reject_impossible_cross_fields() -> None:
     from jsonschema import Draft202012Validator
     from benchmarks.memorybench.traffic import (
-        BodyRecord,
         HarnessPins,
         HttpAttempt,
         HttpRequest,
@@ -1336,19 +1409,20 @@ def test_feedback2_exported_schemas_reject_impossible_cross_fields() -> None:
         RecordingLimits,
         RecordingManifest,
         TimingPolicy,
-        Timing,
     )
 
-    absent = BodyRecord()
+    absent = _absent_body()
     attempt = HttpAttempt(
+        schema_version=1,
         attempt_ordinal=1,
         started_at=datetime.fromisoformat("2026-08-09T00:00:00+00:00"),
-        request=HttpRequest(method="GET", path="/", body=absent),
-        response=HttpResponse(status_code=200, body=absent),
+        request=HttpRequest(method="GET", path="/", query=[], headers=[], body=absent),
+        response=HttpResponse(status_code=200, headers=[], body=absent),
         upstream_status=200,
         client_status=200,
         outcome="forwarded",
-        timing=Timing(ms=1),
+        error_code=None,
+        timing=_timing(),
     ).model_dump(mode="json")
     impossible_body = json.loads(json.dumps(attempt))
     impossible_body["request"]["body"]["observed_bytes"] = 1
@@ -1414,8 +1488,7 @@ def test_feedback2_validator_correlates_rows_with_manifest(
         ]
         row["request"]["body"] = {
             "state": "json",
-            "declared_bytes": count,
-            "observed_bytes": count,
+            "wire_bytes": count,
             "sha256": "0" * 64,
             "sanitized_json": {},
             "redaction_count": 0,
@@ -1476,10 +1549,6 @@ def test_feedback2_real_listener_preserves_empty_response_representation_length(
     assert row["response"]["body"] == {
         "state": "absent",
         "declared_bytes": 123,
-        "observed_bytes": 0,
-        "sha256": None,
-        "sanitized_json": None,
-        "redaction_count": 0,
     }
 
 
@@ -1493,16 +1562,17 @@ def test_feedback2_non_finite_artifact_and_timeout_values_are_rejected(
     from benchmarks.memorybench.traffic import BodyRecord, RecordingLimits, Timing, canonical_bytes
 
     with pytest.raises(ValidationError):
-        Timing(ms=value)
+        Timing(ms=value, latency_publishable=False, reason="host_unvalidated")
     with pytest.raises(ValidationError):
         RecordingLimits(max_body_bytes=1, upstream_timeout_seconds=value)
     with pytest.raises(ValidationError):
-        BodyRecord(
-            state="json",
-            observed_bytes=1,
-            sha256="0" * 64,
-            sanitized_json={"value": value},
-        )
+        BodyRecord.model_validate({
+            "state": "json",
+            "wire_bytes": 1,
+            "sha256": "0" * 64,
+            "sanitized_json": {"value": value},
+            "redaction_count": 0,
+        })
     with pytest.raises(ValidationError):
         ProxyConfig(
             upstream_base_url="http://127.0.0.1:8765",
@@ -1665,18 +1735,20 @@ def test_feedback3_manifest_consumption_never_fabricates_missing_claims(
 def test_feedback3_http_attempt_schema_matches_model_cross_field_rejections(case: str) -> None:
     from jsonschema import Draft202012Validator
     from pydantic import ValidationError
-    from benchmarks.memorybench.traffic import BodyRecord, HttpAttempt, HttpRequest, HttpResponse, Timing
+    from benchmarks.memorybench.traffic import HttpAttempt, HttpRequest, HttpResponse
 
-    absent = BodyRecord()
+    absent = _absent_body()
     base = HttpAttempt(
+        schema_version=1,
         attempt_ordinal=1,
         started_at=datetime.fromisoformat("2026-08-09T00:00:00+00:00"),
-        request=HttpRequest(method="GET", path="/", body=absent),
-        response=HttpResponse(status_code=200, body=absent),
+        request=HttpRequest(method="GET", path="/", query=[], headers=[], body=absent),
+        response=HttpResponse(status_code=200, headers=[], body=absent),
         upstream_status=200,
         client_status=200,
         outcome="forwarded",
-        timing=Timing(ms=1),
+        error_code=None,
+        timing=_timing(),
     ).model_dump(mode="json")
     instance = json.loads(json.dumps(base))
     if case == "client_status_mismatch":
@@ -1690,9 +1762,6 @@ def test_feedback3_http_attempt_schema_matches_model_cross_field_rejections(case
             "state": "rejected",
             "declared_bytes": None,
             "observed_bytes": 0,
-            "sha256": None,
-            "sanitized_json": None,
-            "redaction_count": 0,
         }
     elif case == "request_rejected_absent_body":
         instance.update(
@@ -1713,9 +1782,6 @@ def test_feedback3_http_attempt_schema_matches_model_cross_field_rejections(case
             "state": "rejected",
             "declared_bytes": None,
             "observed_bytes": 0,
-            "sha256": None,
-            "sanitized_json": None,
-            "redaction_count": 0,
         }
         instance.update(
             upstream_status=201,
@@ -1728,9 +1794,6 @@ def test_feedback3_http_attempt_schema_matches_model_cross_field_rejections(case
             "state": "rejected",
             "declared_bytes": None,
             "observed_bytes": 0,
-            "sha256": None,
-            "sanitized_json": None,
-            "redaction_count": 0,
         }
         instance["request"]["body"] = rejected
         instance["response"]["body"] = rejected
@@ -1744,9 +1807,6 @@ def test_feedback3_http_attempt_schema_matches_model_cross_field_rejections(case
             "state": "rejected",
             "declared_bytes": None,
             "observed_bytes": 0,
-            "sha256": None,
-            "sanitized_json": None,
-            "redaction_count": 0,
         }
         instance.update(
             response=None,
@@ -1764,9 +1824,6 @@ def test_feedback3_http_attempt_schema_matches_model_cross_field_rejections(case
                 "state": "rejected",
                 "declared_bytes": None,
                 "observed_bytes": 0,
-                "sha256": None,
-                "sanitized_json": None,
-                "redaction_count": 0,
             }
             instance.update(response=None, upstream_status=None, client_status=400)
         elif outcome == "response_rejected":
@@ -1774,9 +1831,6 @@ def test_feedback3_http_attempt_schema_matches_model_cross_field_rejections(case
                 "state": "rejected",
                 "declared_bytes": None,
                 "observed_bytes": 0,
-                "sha256": None,
-                "sanitized_json": None,
-                "redaction_count": 0,
             }
             instance["client_status"] = 502
         else:
@@ -1807,10 +1861,6 @@ def test_feedback3_complete_forgery_rejects_ordinary_forwarded_absent_body(
     row["response"]["body"] = {
         "state": "absent",
         "declared_bytes": None,
-        "observed_bytes": 0,
-        "sha256": None,
-        "sanitized_json": None,
-        "redaction_count": 0,
     }
     attempts_data = json.dumps(row, sort_keys=True, separators=(",", ":")).encode() + b"\n"
     attempts_path.write_bytes(attempts_data)
@@ -1896,7 +1946,7 @@ def test_feedback3_real_listener_accepts_bounded_concatenated_gzip_members(
     assert response_body == compressed
     assert gzip.decompress(response_body) == decoded
     assert row["response"]["body"]["sanitized_json"] == {"ok": True}
-    assert row["response"]["body"]["observed_bytes"] == len(compressed)
+    assert row["response"]["body"]["wire_bytes"] == len(compressed)
     assert validate_recording(recording, expected_pins=PINS).status == "complete"
 
 
@@ -1980,3 +2030,404 @@ def test_feedback3_real_listener_preserves_valid_deflate_behavior(tmp_path: Path
     assert response.status_code == 200
     assert response.content == decoded
     assert row["response"]["body"]["sanitized_json"] == {"deflate": True}
+
+
+@pytest.mark.parametrize(
+    "missing_path",
+    [
+        ("schema_version",),
+        ("attempt_ordinal",),
+        ("started_at",),
+        ("request",),
+        ("response",),
+        ("upstream_status",),
+        ("client_status",),
+        ("outcome",),
+        ("error_code",),
+        ("timing",),
+        ("request", "method"),
+        ("request", "path"),
+        ("request", "body"),
+        ("response", "body"),
+        ("request", "headers"),
+        ("request", "query"),
+        ("request", "body", "state"),
+        ("request", "body", "declared_bytes"),
+        ("response", "status_code"),
+        ("response", "headers"),
+        ("response", "body", "state"),
+        ("response", "body", "declared_bytes"),
+        ("timing", "ms"),
+        ("timing", "latency_publishable"),
+        ("timing", "reason"),
+    ],
+)
+def test_feedback4_complete_artifact_never_synthesizes_missing_row_evidence(
+    tmp_path: Path,
+    missing_path: tuple[str, ...],
+) -> None:
+    from benchmarks.memorybench.traffic import RecordingError, validate_recording
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(204, request=request)
+
+    proxy = _proxy(tmp_path, handler)
+    _run(proxy.handle("GET", "/v3/documents/a"))
+    proxy.writer.finalize()
+    attempts_path = proxy.writer.output_dir / "http-attempts.jsonl"
+    manifest_path = proxy.writer.output_dir / "recording-manifest.json"
+    row = json.loads(attempts_path.read_text())
+    target = row
+    for component in missing_path[:-1]:
+        target = target[component]
+    if missing_path == ("response", "body"):
+        target[missing_path[-1]] = {}
+    else:
+        del target[missing_path[-1]]
+    attempts_data = json.dumps(row, sort_keys=True, separators=(",", ":")).encode() + b"\n"
+    attempts_path.write_bytes(attempts_data)
+    manifest = json.loads(manifest_path.read_text())
+    manifest["attempts_sha256"] = hashlib.sha256(attempts_data).hexdigest()
+    manifest_path.write_text(json.dumps(manifest))
+
+    with pytest.raises(RecordingError, match="invalid_attempt_jsonl"):
+        validate_recording(proxy.writer.output_dir, expected_pins=PINS)
+
+
+def test_feedback4_message_attempt_and_timing_fields_are_required() -> None:
+    from benchmarks.memorybench.traffic import HttpAttempt, HttpMessage, HttpRequest, Timing
+
+    requirements = {
+        HttpMessage: {"headers", "body"},
+        HttpRequest: {"headers", "body", "method", "path", "query"},
+        Timing: {"ms", "latency_publishable", "reason"},
+        HttpAttempt: {
+            "schema_version",
+            "attempt_ordinal",
+            "started_at",
+            "request",
+            "response",
+            "upstream_status",
+            "client_status",
+            "outcome",
+            "error_code",
+            "timing",
+        },
+    }
+    for model, names in requirements.items():
+        assert names == set(model.model_fields)
+        assert all(model.model_fields[name].is_required() for name in names)
+        assert set(model.model_json_schema()["required"]) == names
+
+    from benchmarks.memorybench.traffic import BodyRecord
+
+    body_schema = BodyRecord.model_json_schema()
+    body_requirements = {
+        "AbsentBodyRecord": {"state", "declared_bytes"},
+        "JsonBodyRecord": {"state", "wire_bytes", "sha256", "sanitized_json", "redaction_count"},
+        "RejectedBodyRecord": {"state", "declared_bytes", "observed_bytes"},
+    }
+    for definition, names in body_requirements.items():
+        variant = body_schema["$defs"][definition]
+        assert set(variant["required"]) == names
+        assert all("default" not in variant["properties"][name] for name in names)
+
+
+def test_feedback4_body_model_and_schema_use_one_canonical_wire_length() -> None:
+    from jsonschema import Draft202012Validator
+    from pydantic import ValidationError
+    from benchmarks.memorybench.traffic import BodyRecord
+
+    canonical = {
+        "state": "json",
+        "wire_bytes": 10,
+        "sha256": "a" * 64,
+        "sanitized_json": {"ok": True},
+        "redaction_count": 0,
+    }
+    body = BodyRecord.model_validate(canonical)
+    assert body.model_dump(mode="json") == canonical
+    assert not list(Draft202012Validator(BodyRecord.model_json_schema()).iter_errors(canonical))
+
+    forged = {
+        "state": "json",
+        "declared_bytes": 10,
+        "observed_bytes": 11,
+        "sha256": "a" * 64,
+        "sanitized_json": {"ok": True},
+        "redaction_count": 0,
+    }
+    with pytest.raises(ValidationError):
+        BodyRecord.model_validate(forged)
+    assert list(Draft202012Validator(BodyRecord.model_json_schema()).iter_errors(forged))
+
+
+def test_feedback4_final_artifact_recomputes_content_length_against_wire_length(
+    tmp_path: Path,
+) -> None:
+    from benchmarks.memorybench.traffic import RecordingError, validate_recording
+
+    proxy = _proxy(tmp_path)
+    _run(proxy.handle("GET", "/v3/documents/a"))
+    proxy.writer.finalize()
+    attempts_path = proxy.writer.output_dir / "http-attempts.jsonl"
+    manifest_path = proxy.writer.output_dir / "recording-manifest.json"
+    row = json.loads(attempts_path.read_text())
+    body = row["response"]["body"]
+    assert set(body) == {"state", "wire_bytes", "sha256", "sanitized_json", "redaction_count"}
+    content_length = next(
+        header for header in row["response"]["headers"]
+        if header["name"].lower() == "content-length"
+    )
+    content_length["value"] = str(body["wire_bytes"] + 1)
+    attempts_data = json.dumps(row, sort_keys=True, separators=(",", ":")).encode() + b"\n"
+    attempts_path.write_bytes(attempts_data)
+    manifest = json.loads(manifest_path.read_text())
+    manifest["attempts_sha256"] = hashlib.sha256(attempts_data).hexdigest()
+    manifest_path.write_text(json.dumps(manifest))
+
+    with pytest.raises(RecordingError, match="attempt_header_body_mismatch"):
+        validate_recording(proxy.writer.output_dir, expected_pins=PINS)
+
+
+def test_feedback4_real_listener_rejects_compressed_empty_json(tmp_path: Path) -> None:
+    from benchmarks.memorybench.traffic import validate_recording
+
+    compressed = gzip.compress(b"", mtime=0)
+    upstream_response = (
+        b"HTTP/1.1 200 OK\r\n"
+        b"Content-Type: application/json\r\n"
+        b"Content-Encoding: gzip\r\n"
+        + f"Content-Length: {len(compressed)}\r\n".encode()
+        + b"Connection: close\r\n\r\n"
+        + compressed
+    )
+    response, row, recording, _observed = _run(_feedback3_real_response_round_trip(
+        tmp_path,
+        method="GET",
+        upstream_response=upstream_response,
+        request_headers={"accept-encoding": "gzip"},
+        raw_downstream=True,
+    ))
+
+    assert isinstance(response, bytes)
+    assert b" 502 " in response.split(b"\r\n", 1)[0]
+    assert response.endswith(b'{"error":"upstream_response_invalid"}')
+    assert row["outcome"] == "response_rejected"
+    assert row["error_code"] == "upstream_response_invalid"
+    assert row["response"]["body"]["state"] == "rejected"
+    assert "sanitized_json" not in row["response"]["body"]
+    assert validate_recording(recording, expected_pins=PINS).attempt_count == 1
+
+
+def test_feedback4_gzip_member_limit_rejects_many_empty_members_without_hanging(
+    tmp_path: Path,
+) -> None:
+    from benchmarks.memorybench.recording_proxy import MAX_GZIP_MEMBERS
+    from benchmarks.memorybench.traffic import validate_recording
+
+    assert 2 <= MAX_GZIP_MEMBERS <= 32
+    compressed = gzip.compress(b"", mtime=0) * (MAX_GZIP_MEMBERS + 1000)
+    upstream_response = (
+        b"HTTP/1.1 200 OK\r\n"
+        b"Content-Type: application/json\r\n"
+        b"Content-Encoding: gzip\r\n"
+        + f"Content-Length: {len(compressed)}\r\n".encode()
+        + b"Connection: close\r\n\r\n"
+        + compressed
+    )
+
+    async def exercise():
+        return await asyncio.wait_for(
+            _feedback3_real_response_round_trip(
+                tmp_path,
+                method="GET",
+                upstream_response=upstream_response,
+                request_headers={"accept-encoding": "gzip"},
+            ),
+            timeout=5,
+        )
+
+    response, row, recording, _observed = _run(exercise())
+    assert response.status_code == 502
+    assert response.content == b'{"error":"upstream_response_invalid"}'
+    assert row["outcome"] == "response_rejected"
+    assert validate_recording(recording, expected_pins=PINS).attempt_count == 1
+
+
+@pytest.mark.parametrize("case", ["two_members", "over_limit", "truncated", "trailing_junk", "deflate"])
+def test_feedback4_real_listener_preserves_strict_bounded_content_decoding(
+    tmp_path: Path,
+    case: str,
+) -> None:
+    max_body_bytes = 100
+    encoding = "gzip"
+    decoded = b'{"ok":true}'
+    compressed = gzip.compress(decoded[:6], mtime=0) + gzip.compress(decoded[6:], mtime=0)
+    expected_status = 200
+    if case == "over_limit":
+        decoded = b'{"value":"' + (b"x" * 120) + b'"}'
+        compressed = gzip.compress(decoded[:60], mtime=0) + gzip.compress(decoded[60:], mtime=0)
+        expected_status = 502
+    elif case == "truncated":
+        compressed = compressed[:-4]
+        expected_status = 502
+    elif case == "trailing_junk":
+        compressed += b"junk"
+        expected_status = 502
+    elif case == "deflate":
+        encoding = "deflate"
+        decoded = b'{"deflate":true}'
+        compressed = zlib.compress(decoded)
+    upstream_response = (
+        b"HTTP/1.1 200 OK\r\n"
+        b"Content-Type: application/json\r\n"
+        + f"Content-Encoding: {encoding}\r\n".encode()
+        + f"Content-Length: {len(compressed)}\r\n".encode()
+        + b"Connection: close\r\n\r\n"
+        + compressed
+    )
+    response, row, _recording, _observed = _run(_feedback3_real_response_round_trip(
+        tmp_path,
+        method="GET",
+        upstream_response=upstream_response,
+        max_body_bytes=max_body_bytes,
+        request_headers={"accept-encoding": encoding},
+        raw_downstream=case == "two_members",
+    ))
+
+    actual_status = (
+        int(response.split(b" ", 2)[1]) if isinstance(response, bytes) else response.status_code
+    )
+    assert actual_status == expected_status
+    assert row["outcome"] == ("forwarded" if expected_status == 200 else "response_rejected")
+
+
+def test_feedback4_json_nesting_exhaustion_has_stable_error_code() -> None:
+    from benchmarks.memorybench.recording_proxy import RequestRefusal, _parse_json
+
+    deeply_nested = (b"[" * 1100) + b"0" + (b"]" * 1100)
+    with pytest.raises(RequestRefusal, match="invalid_json") as exc_info:
+        _parse_json(deeply_nested)
+    assert exc_info.value.code == "invalid_json"
+
+
+def test_feedback4_real_listener_records_deeply_nested_request_rejection(
+    tmp_path: Path,
+) -> None:
+    from benchmarks.memorybench.traffic import validate_recording
+
+    deeply_nested = (b"[" * 1100) + b'"request-secret"' + (b"]" * 1100)
+    response, rows, recording, upstream_calls = _run(_feedback4_real_request_round_trip(
+        tmp_path,
+        body=deeply_nested,
+    ))
+
+    assert b" 400 " in response.split(b"\r\n", 1)[0]
+    assert response.endswith(b'{"error":"invalid_json"}')
+    assert upstream_calls == 0
+    assert len(rows) == 1
+    assert rows[0]["outcome"] == "request_rejected"
+    assert rows[0]["error_code"] == "invalid_json"
+    assert "request-secret" not in json.dumps(rows[0])
+    assert validate_recording(recording, expected_pins=PINS).attempt_count == 1
+
+
+def test_feedback4_real_listener_records_deeply_nested_upstream_rejection(
+    tmp_path: Path,
+) -> None:
+    from benchmarks.memorybench.traffic import validate_recording
+
+    deeply_nested = (b"[" * 1100) + b'"response-secret"' + (b"]" * 1100)
+    upstream_response = (
+        b"HTTP/1.1 200 OK\r\n"
+        b"Content-Type: application/json\r\n"
+        + f"Content-Length: {len(deeply_nested)}\r\n".encode()
+        + b"Connection: close\r\n\r\n"
+        + deeply_nested
+    )
+    response, row, recording, _observed = _run(_feedback3_real_response_round_trip(
+        tmp_path,
+        method="GET",
+        upstream_response=upstream_response,
+    ))
+
+    assert response.status_code == 502
+    assert response.content == b'{"error":"upstream_response_invalid"}'
+    assert row["outcome"] == "response_rejected"
+    assert "response-secret" not in json.dumps(row)
+    assert validate_recording(recording, expected_pins=PINS).attempt_count == 1
+
+
+def test_feedback4_decoded_stages_is_bounded_iterator() -> None:
+    from collections.abc import Iterator
+    from benchmarks.memorybench.traffic import _decoded_stages
+
+    stages = _decoded_stages("api%255Fkey", plus_as_space=False)
+    assert isinstance(stages, Iterator)
+    assert iter(stages) is stages
+    assert not isinstance(stages, (tuple, list))
+    assert list(stages) == ["api%255Fkey", "api%5Fkey", "api_key"]
+
+
+def test_feedback4_idle_client_close_is_bounded_and_leaves_recording_incomplete(
+    tmp_path: Path,
+) -> None:
+    from benchmarks.memorybench.recording_proxy import RecordingProxy
+    from benchmarks.memorybench.traffic import RecordingError, RecordingWriter, validate_recording
+
+    async def exercise() -> tuple[dict[str, object], bytes, bytes]:
+        writer = RecordingWriter(
+            tmp_path / "recording",
+            pins=PINS,
+            upstream_timeout_seconds=0.05,
+        )
+        proxy = RecordingProxy(
+            "http://127.0.0.1:8765",
+            writer,
+            transport=httpx.MockTransport(_response),
+            timeout_seconds=0.05,
+        )
+        base_url = await proxy.start("127.0.0.1", 0)
+        port = int(base_url.rsplit(":", 1)[1])
+        reader, client_writer = await asyncio.open_connection("127.0.0.1", port)
+        try:
+            for _ in range(100):
+                if proxy._active_count == 1:
+                    break
+                await asyncio.sleep(0)
+            assert proxy._active_count == 1
+            await asyncio.wait_for(proxy.close(), timeout=1)
+            eof = await asyncio.wait_for(reader.read(), timeout=1)
+        finally:
+            client_writer.close()
+            await client_writer.wait_closed()
+            if not proxy._closed:
+                await proxy.abort()
+        manifest = json.loads((writer.output_dir / "recording-manifest.json").read_text())
+        attempts = (writer.output_dir / "http-attempts.jsonl").read_bytes()
+        return manifest, attempts, eof
+
+    manifest, attempts, eof = _run(exercise())
+    assert eof == b""
+    assert manifest["status"] == "recording"
+    assert manifest["completed_at"] is None
+    assert attempts == b""
+    with pytest.raises(RecordingError, match="incomplete_recording"):
+        validate_recording(tmp_path / "recording", expected_pins=PINS)
+
+
+def test_feedback4_close_finalizes_after_normal_clean_drain(tmp_path: Path) -> None:
+    from benchmarks.memorybench.traffic import validate_recording
+
+    proxy = _proxy(tmp_path)
+
+    async def exercise() -> bytes:
+        base_url = await proxy.start("127.0.0.1", 0)
+        async with httpx.AsyncClient() as client:
+            response = await client.get(f"{base_url}/v3/documents/a")
+        await proxy.close()
+        return response.content
+
+    assert _run(exercise()) == b'{"ok":true,"token":"nested-secret"}'
+    assert validate_recording(proxy.writer.output_dir, expected_pins=PINS).status == "complete"

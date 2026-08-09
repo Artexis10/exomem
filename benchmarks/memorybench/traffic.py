@@ -7,12 +7,13 @@ import json
 import math
 import os
 import threading
+from collections.abc import Iterator
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 from urllib.parse import unquote, unquote_plus
 
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validator
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, RootModel, model_validator
 
 from exomem.governance.scrubber import scrub_text
 
@@ -77,85 +78,76 @@ class Header(StrictModel):
     value: str
 
 
-class BodyRecord(StrictModel):
-    """A safe description of a body; rejected raw bytes are never retained."""
+class AbsentBodyRecord(StrictModel):
+    """Evidence that no message-body bytes were received."""
 
-    model_config = ConfigDict(
-        json_schema_extra={
-            "allOf": [
-                {
-                    "if": {"properties": {"state": {"const": "absent"}}, "required": ["state"]},
-                    "then": {
-                        "properties": {
-                            "observed_bytes": {"const": 0},
-                            "sha256": {"type": "null"},
-                            "sanitized_json": {"type": "null"},
-                            "redaction_count": {"const": 0},
-                        }
-                    },
-                },
-                {
-                    "if": {"properties": {"state": {"const": "json"}}, "required": ["state"]},
-                    "then": {
-                        "properties": {
-                            "observed_bytes": {"minimum": 1},
-                            "sha256": {"type": "string"},
-                        }
-                    },
-                },
-                {
-                    "if": {"properties": {"state": {"const": "rejected"}}, "required": ["state"]},
-                    "then": {
-                        "properties": {
-                            "sha256": {"type": "null"},
-                            "sanitized_json": {"type": "null"},
-                            "redaction_count": {"const": 0},
-                        }
-                    },
-                },
-            ]
-        }
-    )
+    state: Literal["absent"]
+    declared_bytes: int | None = Field(ge=0)
 
-    state: Literal["absent", "json", "rejected"] = "absent"
-    declared_bytes: int | None = Field(default=None, ge=0)
-    observed_bytes: int = Field(default=0, ge=0)
-    sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
-    sanitized_json: Any | None = None
-    redaction_count: int = Field(default=0, ge=0)
+
+class JsonBodyRecord(StrictModel):
+    """A validated JSON body with one canonical received wire length."""
+
+    state: Literal["json"]
+    wire_bytes: int = Field(ge=1)
+    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    sanitized_json: Any
+    redaction_count: int = Field(ge=0)
 
     @model_validator(mode="after")
-    def validate_state(self) -> BodyRecord:
+    def validate_json_value(self) -> JsonBodyRecord:
         if not _json_floats_are_finite(self.sanitized_json):
             raise ValueError("body_contains_non_finite_number")
-        if self.state == "absent":
-            if (
-                self.observed_bytes != 0
-                or self.sha256 is not None
-                or self.sanitized_json is not None
-                or self.redaction_count != 0
-            ):
-                raise ValueError("absent_body_fields_invalid")
-        elif self.state == "json":
-            if self.observed_bytes < 1 or self.sha256 is None:
-                raise ValueError("json_body_fields_invalid")
-            if self.declared_bytes is not None and self.declared_bytes != self.observed_bytes:
-                raise ValueError("json_body_length_mismatch")
-        else:
-            if self.sha256 is not None or self.sanitized_json is not None or self.redaction_count:
-                raise ValueError("rejected_body_contains_payload")
         return self
 
 
+class RejectedBodyRecord(StrictModel):
+    """Best-effort size evidence for bytes rejected before safe parsing."""
+
+    state: Literal["rejected"]
+    declared_bytes: int | None = Field(ge=0)
+    observed_bytes: int = Field(ge=0)
+
+
+BodyRecordValue = Annotated[
+    AbsentBodyRecord | JsonBodyRecord | RejectedBodyRecord,
+    Field(discriminator="state"),
+]
+
+
+class BodyRecord(RootModel[BodyRecordValue]):
+    """State-specific safe body evidence serialized without a wrapper key."""
+
+    model_config = ConfigDict(strict=True)
+
+    @property
+    def state(self) -> Literal["absent", "json", "rejected"]:
+        return self.root.state
+
+    @property
+    def declared_bytes(self) -> int | None:
+        return getattr(self.root, "declared_bytes", None)
+
+    @property
+    def observed_bytes(self) -> int:
+        if isinstance(self.root, JsonBodyRecord):
+            return self.root.wire_bytes
+        return getattr(self.root, "observed_bytes", 0)
+
+    @property
+    def wire_bytes(self) -> int | None:
+        return getattr(self.root, "wire_bytes", None)
+
+
 class HttpMessage(StrictModel):
-    headers: list[Header] = Field(default_factory=list)
-    body: BodyRecord = Field(default_factory=BodyRecord)
+    headers: list[Header]
+    body: BodyRecord
 
 
 class HttpRequest(HttpMessage):
     method: str = Field(pattern=r"^[A-Z][A-Z0-9!#$%&'*+.^_`|~-]*$")
     path: str = Field(min_length=1, pattern=r"^/")
-    query: list[tuple[str, str]] = Field(default_factory=list)
+    query: list[tuple[str, str]]
 
 
 class HttpResponse(HttpMessage):
@@ -164,8 +156,8 @@ class HttpResponse(HttpMessage):
 
 class Timing(StrictModel):
     ms: float = Field(ge=0, allow_inf_nan=False)
-    latency_publishable: Literal[False] = False
-    reason: Literal["host_unvalidated"] = "host_unvalidated"
+    latency_publishable: Literal[False]
+    reason: Literal["host_unvalidated"]
 
 
 AttemptOutcome = Literal[
@@ -365,15 +357,15 @@ class HttpAttempt(StrictModel):
         }
     )
 
-    schema_version: Literal[SCHEMA_VERSION] = SCHEMA_VERSION
+    schema_version: Literal[SCHEMA_VERSION]
     attempt_ordinal: int = Field(ge=1)
     started_at: AwareDatetime
     request: HttpRequest
-    response: HttpResponse | None = None
-    upstream_status: int | None = Field(default=None, ge=100, le=599)
+    response: HttpResponse | None
+    upstream_status: int | None = Field(ge=100, le=599)
     client_status: int = Field(ge=100, le=599)
     outcome: AttemptOutcome
-    error_code: AttemptErrorCode | None = None
+    error_code: AttemptErrorCode | None
     timing: Timing
 
     @model_validator(mode="after")
@@ -535,30 +527,34 @@ def _decoded_stages(
     value: str,
     *,
     plus_as_space: bool,
-) -> tuple[tuple[str, ...], bool]:
-    stages = [value]
+) -> Iterator[str]:
+    """Yield bounded decode stages without retaining redaction-sized history."""
+
     if len(value) > MAX_DECODE_COMPONENT_CHARS:
-        return tuple(stages), False
+        raise ValueError("decode_limit")
     decoder = unquote_plus if plus_as_space else unquote
+    current = value
+    yield current
     for _ in range(MAX_DECODE_ITERATIONS):
-        decoded = decoder(stages[-1])
+        decoded = decoder(current)
         if len(decoded) > MAX_DECODE_COMPONENT_CHARS:
-            return tuple(stages), False
-        if decoded == stages[-1]:
-            return tuple(stages), True
-        stages.append(decoded)
-    return tuple(stages), False
+            raise ValueError("decode_limit")
+        if decoded == current:
+            return
+        yield decoded
+        current = decoded
+    raise ValueError("decode_limit")
 
 
 def is_sensitive_name(name: str, *, plus_as_space: bool = False) -> bool:
-    stages, complete = _decoded_stages(name, plus_as_space=plus_as_space)
-    if not complete:
+    try:
+        for stage in _decoded_stages(name, plus_as_space=plus_as_space):
+            normalized = stage.lower().replace("-", "_")
+            if any(part.replace("-", "_") in normalized for part in _SENSITIVE_PARTS):
+                return True
+        return False
+    except (UnicodeError, ValueError):
         return True
-    for stage in stages:
-        normalized = stage.lower().replace("-", "_")
-        if any(part.replace("-", "_") in normalized for part in _SENSITIVE_PARTS):
-            return True
-    return False
 
 
 def _secret_values(configured_secrets: tuple[str, ...]) -> tuple[str, ...]:
@@ -566,18 +562,22 @@ def _secret_values(configured_secrets: tuple[str, ...]) -> tuple[str, ...]:
 
 
 def _contains_secret(
-    value_stages: tuple[str, ...],
+    value: str,
     secrets: tuple[str, ...],
     *,
     plus_as_space: bool,
 ) -> bool:
-    for secret in secrets:
-        secret_stages, complete = _decoded_stages(secret, plus_as_space=plus_as_space)
-        if not complete:
-            return True
-        if any(secret_stage in value_stage for secret_stage in secret_stages for value_stage in value_stages):
-            return True
-    return False
+    try:
+        for value_stage in _decoded_stages(value, plus_as_space=plus_as_space):
+            for secret in secrets:
+                if any(
+                    secret_stage in value_stage
+                    for secret_stage in _decoded_stages(secret, plus_as_space=plus_as_space)
+                ):
+                    return True
+        return False
+    except (UnicodeError, ValueError):
+        return True
 
 
 def sanitize_component(
@@ -588,21 +588,21 @@ def sanitize_component(
     plus_as_space: bool = False,
 ) -> tuple[str, int]:
     secrets = _secret_values(secrets)
-    stages, complete = _decoded_stages(value, plus_as_space=plus_as_space)
-    if not complete:
-        return REDACTED, 1
-    if _contains_secret(stages, secrets, plus_as_space=plus_as_space) or (
+    if _contains_secret(value, secrets, plus_as_space=plus_as_space) or (
         classify_name and is_sensitive_name(value, plus_as_space=plus_as_space)
     ):
         return REDACTED, 1
     scrubbed_raw = value
-    for stage in stages:
-        scrubbed_stage, changed = scrub_text(stage)
-        if stage == value:
-            scrubbed_raw = scrubbed_stage
-        if changed:
-            return REDACTED, 1
-    return scrubbed_raw, 0
+    try:
+        for stage in _decoded_stages(value, plus_as_space=plus_as_space):
+            scrubbed_stage, changed = scrub_text(stage)
+            if stage == value:
+                scrubbed_raw = scrubbed_stage
+            if changed:
+                return REDACTED, 1
+        return scrubbed_raw, 0
+    except (UnicodeError, ValueError):
+        return REDACTED, 1
 
 
 def sanitize_headers(
@@ -696,20 +696,18 @@ def body_record(
     declared_bytes: int | None,
 ) -> BodyRecord:
     if body is None or body == b"":
-        return BodyRecord(
-            state="absent",
-            declared_bytes=declared_bytes,
-            observed_bytes=0,
-        )
+        return BodyRecord.model_validate({
+            "state": "absent",
+            "declared_bytes": declared_bytes,
+        })
     sanitized_json, redaction_count = sanitize_json(parsed_json, secrets)
-    return BodyRecord(
-        state="json",
-        declared_bytes=declared_bytes,
-        observed_bytes=len(body),
-        sha256=hashlib.sha256(body).hexdigest(),
-        sanitized_json=sanitized_json,
-        redaction_count=redaction_count,
-    )
+    return BodyRecord.model_validate({
+        "state": "json",
+        "wire_bytes": len(body),
+        "sha256": hashlib.sha256(body).hexdigest(),
+        "sanitized_json": sanitized_json,
+        "redaction_count": redaction_count,
+    })
 
 
 def rejected_body_record(
@@ -717,11 +715,11 @@ def rejected_body_record(
     declared_bytes: int | None,
     observed_bytes: int,
 ) -> BodyRecord:
-    return BodyRecord(
-        state="rejected",
-        declared_bytes=declared_bytes,
-        observed_bytes=observed_bytes,
-    )
+    return BodyRecord.model_validate({
+        "state": "rejected",
+        "declared_bytes": declared_bytes,
+        "observed_bytes": observed_bytes,
+    })
 
 
 def _atomic_write(path: Path, data: bytes) -> None:
@@ -783,9 +781,9 @@ def _validate_message_correlation(
     if rejected:
         return
     declared_header = _recorded_content_length(message.headers)
-    if declared_header != body.declared_bytes:
-        raise RecordingError("attempt_header_body_mismatch")
     if body.state == "json":
+        if declared_header is not None and declared_header != body.wire_bytes:
+            raise RecordingError("attempt_header_body_mismatch")
         content_types = [
             header.value
             for header in message.headers
@@ -798,6 +796,8 @@ def _validate_message_correlation(
             media_type.startswith("application/") and media_type.endswith("+json")
         ):
             raise RecordingError("attempt_header_body_mismatch")
+    elif declared_header != body.declared_bytes:
+        raise RecordingError("attempt_header_body_mismatch")
 
 
 def _validate_attempt_correlation(
