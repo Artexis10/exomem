@@ -41,7 +41,7 @@ from ..snapshot import (
     Relation,
     StateItem,
 )
-from .base import Projector, module_line_count
+from .base import Projector, module_code_line_count, module_line_count
 
 _FRONTMATTER_RE = re.compile(r"\A---\r?\n(?P<yaml>.*?)\r?\n---\s*?(?:\r?\n|\Z)", re.DOTALL)
 _HEADING_RE = re.compile(r"^(#{1,6})\s+(?P<title>.+?)\s*#*\s*$")
@@ -425,6 +425,7 @@ class VaultProjector(Projector):
                 author=self.author,
                 endpoints_used=self.endpoints_used,
                 loc=module_line_count(VaultProjector),
+                loc_code=module_code_line_count(VaultProjector),
             ),
             completeness_notes=COMPLETENESS_NOTES,
         )

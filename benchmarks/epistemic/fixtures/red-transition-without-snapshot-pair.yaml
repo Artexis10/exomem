@@ -1,19 +1,20 @@
-# RED fixture: catastrophic_if_failed names something outside the registry.
-scenario_id: red-catastrophic-not-registered
-family_id: f03
-kind: corpus
+# RED fixture: a transition invariant scored from a single snapshot. The
+# trajectory never takes a second snapshot, so there is no pair to compare and
+# the assertion could only ever return unsupported.
+scenario_id: red-transition-without-snapshot-pair
+family_id: f11
+kind: operational
 public_coverage: none
 phases:
   - phase_id: p1
     ops:
+      - op: ingest_source
+        ref: src-1
       - op: snapshot
         ref: s1
     expect:
-      - assert: contradiction_visible
-        subject: claim-a
-        counterpart: claim-b
-    catastrophic_if_failed:
-      - contradiction_is_pretty
+      - assert: review_reopens_on_material_change
+        subject: note-1
 fairness:
   why_neutral: red fixture; never scored
   public_coverage_subtraction: none

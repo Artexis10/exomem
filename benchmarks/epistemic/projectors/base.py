@@ -60,20 +60,40 @@ class Projector(ABC):
             author=self.author,
             endpoints_used=self.endpoints_used,
             loc=module_line_count(type(self)),
+            loc_code=module_code_line_count(type(self)),
         )
 
 
-def module_line_count(target: type | object) -> int:
-    """Line count of the module that defines ``target``.
-
-    Published as ``ProjectorMeta.loc`` so a 40-line projector and a 900-line one
-    are visibly different amounts of interpretation.
-    """
-
+def _module_lines(target: type | object) -> list[str]:
     source_file = inspect.getsourcefile(target if isinstance(target, type) else type(target))
     if source_file is None:
-        return 0
-    return len(Path(source_file).read_text(encoding="utf-8").splitlines())
+        return []
+    return Path(source_file).read_text(encoding="utf-8").splitlines()
+
+
+def module_line_count(target: type | object) -> int:
+    """Raw line count of the module that defines ``target``."""
+
+    return len(_module_lines(target))
+
+
+def module_code_line_count(target: type | object) -> int:
+    """Non-blank, non-comment line count — **docstrings included**.
+
+    Published alongside :func:`module_line_count` because the raw count is easy
+    to inflate with blank lines and ``#`` commentary, and the asymmetry finding
+    the spec wants is about how much *interpretation* a projector performs.
+    Docstrings count as code under this rule by deliberate choice: a docstring
+    that explains a field mapping is part of that mapping's justification, not
+    decoration. Excluding them would need an AST pass, which is not worth the
+    dependency for a reportable size signal.
+    """
+
+    return sum(
+        1
+        for line in _module_lines(target)
+        if line.strip() and not line.strip().startswith("#")
+    )
 
 
 def declaration_evidence_paths(

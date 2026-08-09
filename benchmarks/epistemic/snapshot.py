@@ -210,7 +210,15 @@ class ProjectorMeta(StrictModel):
     version: str = Field(min_length=1)
     author: str = Field(min_length=1)
     endpoints_used: tuple[str, ...]
+    #: Raw line count of the projector module.
     loc: int = Field(ge=0)
+    #: Non-blank, non-comment lines (**docstrings included**). Published
+    #: alongside ``loc`` because the raw count is easy to inflate with blank
+    #: lines and ``#`` commentary, and the asymmetry finding the spec wants is
+    #: about how much interpretation a projector performs. Docstrings count as
+    #: code here by deliberate choice: a docstring justifying a field mapping is
+    #: part of that mapping, not decoration.
+    loc_code: int = Field(default=0, ge=0)
 
 
 class EpistemicStateSnapshot(StrictModel):

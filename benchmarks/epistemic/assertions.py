@@ -31,7 +31,7 @@ Three rules hold across all eighteen:
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable
 from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import Literal
@@ -59,6 +59,28 @@ CLOSED_REVIEW_STATES: frozenset[str] = frozenset(
 )
 OPEN_REVIEW_STATES: frozenset[str] = frozenset(
     {"open", "reopened", "needs_review", "needs-review", "pending", "conflict", "flagged"}
+)
+#: Review states that mark a recorded conflict. A *closed vocabulary*, not a
+#: text match: ``states_value("conflict", "no conflict")`` is true, so matching
+#: the word inside a review-state field turned an explicit "no conflict" into
+#: evidence of a visible contradiction.
+CONFLICT_REVIEW_STATES: frozenset[str] = frozenset(
+    {"conflict", "conflicted", "conflicting", "contradiction", "contradicted", "disputed"}
+)
+#: Review states that declare unresolved confidence.
+UNCERTAIN_REVIEW_STATES: frozenset[str] = frozenset(
+    {"uncertain", "unverified", "unconfirmed", "provisional"}
+)
+
+#: Collection/folder path segments that name a settled decision, and ones that
+#: name something still open. Closed vocabularies, matched case-insensitively
+#: against a single path segment — the same discipline as the review-state
+#: vocabularies above and for the same reason: two items merely filed in
+#: *different* folders say nothing about which one is decided, so accepting any
+#: difference turned the documented-convention alternate into a diff detector.
+DECISION_COLLECTION_TERMS: frozenset[str] = frozenset({"decision", "decisions"})
+HYPOTHESIS_COLLECTION_TERMS: frozenset[str] = frozenset(
+    {"hypothesis", "hypotheses", "proposal", "proposals"}
 )
 
 #: Cap on how many offenders one evidence string lists (as the gates do).
@@ -138,16 +160,40 @@ def _is_open(state: str | None) -> bool:
     return _normalize_state(state) in OPEN_REVIEW_STATES
 
 
-def _conflict_marker(item: StateItem) -> bool:
-    """A conflict marker on the item, matched by the single text rule."""
+def _is_uncertain(state: str | None) -> bool:
+    return _normalize_state(state) in UNCERTAIN_REVIEW_STATES
 
-    return bool(item.review_state) and states_value("conflict", item.review_state or "")
+
+def _conflict_marker(item: StateItem) -> bool:
+    """A conflict marker on the item, read from the closed review vocabulary."""
+
+    return _normalize_state(item.review_state) in CONFLICT_REVIEW_STATES
 
 
 def _folder(locator: str | None) -> str:
     if not locator or "/" not in locator:
         return ""
     return locator.rsplit("/", 1)[0]
+
+
+def _collection_terms(locator: str | None) -> tuple[bool, bool]:
+    """``(names a decision collection, names a hypothesis/proposal collection)``.
+
+    Reads the *segments* of the containing folder against the closed
+    vocabularies, case-insensitively. Segment-level matching is deliberate: it
+    keeps ``Notes/Decisions`` a hit while leaving ``Notes/Decision-Log-Archive``
+    a miss rather than guessing at substrings.
+    """
+
+    segments = {
+        segment.strip().casefold()
+        for segment in _folder(locator).split("/")
+        if segment.strip()
+    }
+    return (
+        bool(segments & DECISION_COLLECTION_TERMS),
+        bool(segments & HYPOTHESIS_COLLECTION_TERMS),
+    )
 
 
 def _elapsed_seconds(start: str, end: str) -> float | None:
@@ -166,15 +212,57 @@ def _elapsed_seconds(start: str, end: str) -> float | None:
 # --------------------------------------------------------------------------
 
 
-def _gate(
-    ctx: AssertionContext, name: str, fields: Sequence[str]
-) -> AssertionResult | None:
-    """``None`` when the fields are observable; otherwise the honest non-pass.
+def _absence_result(name: str, declaration, subject: str | None) -> AssertionResult:
+    """``not_applicable`` for a designed absence — or ``fail`` if it is claimed."""
 
-    Mirrors :mod:`membench.scoring.health`: a declared capability is evaluated,
-    a designed absence is ``not_applicable``, and anything the projector cannot
-    see is ``unsupported`` — never a silent zero.
+    if declaration.marketing_claim:
+        return _result(
+            name,
+            "fail",
+            f"'{declaration.field}' is declared absent_by_design, but the product's own "
+            f"materials claim it: {declaration.marketing_claim} "
+            f"(declaration evidence: {declaration.evidence})",
+            subject,
+        )
+    return _result(
+        name,
+        "not_applicable",
+        f"'{declaration.field}' declared absent_by_design ({declaration.evidence})",
+        subject,
+    )
+
+
+def _gate(
+    ctx: AssertionContext,
+    name: str,
+    primary: str,
+    *siblings: str,
+) -> AssertionResult | None:
+    """``None`` when the invariant is observable; otherwise the honest non-pass.
+
+    Every assertion names one **primary** field — the capability the invariant
+    is actually about — plus any number of siblings that can widen how it is
+    observed. The asymmetry is deliberate and was a real bug before it existed:
+    with a flat OR over fields, a product that declared ``external_edit``
+    ``absent_by_design`` still got evaluated (and could take a *catastrophic
+    failure*) purely because the unrelated ``locator`` field happened to be
+    declared. A designed absence of the primary field now short-circuits, and
+    no sibling can override it.
+
+    Siblings only ever act in the observable direction: they can make an
+    otherwise unobservable invariant evaluable, never the reverse.
+
+    Otherwise this mirrors :mod:`membench.scoring.health` — declared capability
+    is evaluated, designed absence is ``not_applicable``, anything the projector
+    cannot see is ``unsupported``, and nothing silently becomes a zero.
     """
+
+    fields = (primary, *siblings)
+    primary_declaration = ctx.snapshot.declaration(primary)
+
+    # A designed absence of the primary capability decides on its own.
+    if primary_declaration is not None and primary_declaration.status == "absent_by_design":
+        return _absence_result(name, primary_declaration, ctx.subject)
 
     declarations = [
         declaration
@@ -187,23 +275,9 @@ def _gate(
     by_design = [d for d in declarations if d.status == "absent_by_design"]
     claimed = [d for d in by_design if d.marketing_claim]
     if claimed:
-        declaration = claimed[0]
-        return _result(
-            name,
-            "fail",
-            f"'{declaration.field}' is declared absent_by_design, but the product's own "
-            f"materials claim it: {declaration.marketing_claim} "
-            f"(declaration evidence: {declaration.evidence})",
-            ctx.subject,
-        )
+        return _absence_result(name, claimed[0], ctx.subject)
     if by_design:
-        declaration = by_design[0]
-        return _result(
-            name,
-            "not_applicable",
-            f"'{declaration.field}' declared absent_by_design ({declaration.evidence})",
-            ctx.subject,
-        )
+        return _absence_result(name, by_design[0], ctx.subject)
     if declarations:
         declaration = declarations[0]
         return _result(
@@ -235,8 +309,8 @@ def _superseded_ids(snapshot: EpistemicStateSnapshot) -> set[str]:
     return {value for value in superseded if value}
 
 
-def _revision_groups(snapshot: EpistemicStateSnapshot) -> dict[str, tuple[StateItem, ...]]:
-    """Group items into revision chains via chain ids and supersession edges."""
+def _union_roots(snapshot: EpistemicStateSnapshot) -> dict[str, str]:
+    """item id -> lineage root, unioned over ``revision_of`` and supersedes edges."""
 
     parent: dict[str, str] = {item.id: item.id for item in snapshot.items}
 
@@ -262,22 +336,49 @@ def _revision_groups(snapshot: EpistemicStateSnapshot) -> dict[str, tuple[StateI
             and relation.object in known
         ):
             union(relation.subject, relation.object)
+    return {item.id: find(item.id) for item in snapshot.items}
 
+
+def _revision_groups(snapshot: EpistemicStateSnapshot) -> dict[str, tuple[StateItem, ...]]:
+    """Group items into revision chains, keyed on the lineage root.
+
+    Keyed on the *root*, never on the declared ``revision_chain_id``: two
+    genuinely independent chains that both label themselves with the same chain
+    id used to collide in this dict, and the later one silently overwrote the
+    earlier — which meant a chain with two current revisions could vanish from
+    the evaluation entirely. The declared chain id is still honoured for
+    *subject matching* in :func:`exactly_one_current_revision`, where it is a
+    label the scenario can name, not an identity the engine trusts.
+    """
+
+    roots = _union_roots(snapshot)
     by_root: dict[str, list[StateItem]] = {}
     for item in snapshot.items:
-        by_root.setdefault(find(item.id), []).append(item)
+        by_root.setdefault(roots[item.id], []).append(item)
 
     groups: dict[str, tuple[StateItem, ...]] = {}
     for root, members in by_root.items():
-        chain_ids = [m.revision_chain_id for m in members if m.revision_chain_id]
         is_chain = len(members) > 1 or any(
             m.revision_of or m.retired_reason or m.revision_chain_id for m in members
         )
         if not is_chain:
             continue
-        key = sorted(chain_ids)[0] if chain_ids else root
-        groups[key] = tuple(sorted(members, key=lambda m: m.id))
+        groups[root] = tuple(sorted(members, key=lambda m: m.id))
     return groups
+
+
+def _lineage_members(
+    snapshot: EpistemicStateSnapshot, item_id: str | None
+) -> tuple[StateItem, ...]:
+    """Items sharing ``item_id``'s lineage (itself included); empty if unknown."""
+
+    if not item_id:
+        return ()
+    roots = _union_roots(snapshot)
+    root = roots.get(item_id)
+    if root is None:
+        return ()
+    return tuple(item for item in snapshot.items if roots[item.id] == root)
 
 
 def _evidence_targets(snapshot: EpistemicStateSnapshot, item: StateItem) -> tuple[str, ...]:
@@ -290,6 +391,18 @@ def _evidence_targets(snapshot: EpistemicStateSnapshot, item: StateItem) -> tupl
         if target not in seen:
             seen.append(target)
     return tuple(seen)
+
+
+def _outgoing_edges(
+    snapshot: EpistemicStateSnapshot, item_id: str
+) -> frozenset[tuple[str, str]]:
+    """``(predicate, object)`` for every edge leaving ``item_id``."""
+
+    return frozenset(
+        (relation.predicate, relation.object)
+        for relation in snapshot.relations
+        if relation.subject == item_id
+    )
 
 
 def _belief_items(ctx: AssertionContext) -> tuple[StateItem, ...]:
@@ -318,16 +431,22 @@ def exactly_one_current_revision(ctx: AssertionContext) -> AssertionResult:
     """Each revision chain exposes exactly one current revision."""
 
     name = "exactly_one_current_revision"
-    gated = _gate(ctx, name, ("current", "revision_of"))
+    gated = _gate(ctx, name, "current", "revision_of")
     if gated is not None:
         return gated
 
     groups = _revision_groups(ctx.snapshot)
     if ctx.subject:
+        # The subject may name a lineage root, a member item, or the chain id
+        # the provider declared. All three are legitimate scenario handles.
         groups = {
             key: members
             for key, members in groups.items()
-            if key == ctx.subject or any(member.id == ctx.subject for member in members)
+            if key == ctx.subject
+            or any(
+                member.id == ctx.subject or member.revision_chain_id == ctx.subject
+                for member in members
+            )
         }
     if not groups:
         return _result(
@@ -356,7 +475,7 @@ def no_retired_state_served_as_current(ctx: AssertionContext) -> AssertionResult
     """Retired state is never served as, or marked, current. CATASTROPHIC."""
 
     name = "no_retired_state_served_as_current"
-    gated = _gate(ctx, name, ("current",))
+    gated = _gate(ctx, name, "current")
     if gated is not None:
         return gated
 
@@ -396,22 +515,27 @@ def no_retired_state_served_as_current(ctx: AssertionContext) -> AssertionResult
 
     if not snapshot.items:
         return _result(name, "unsupported", "empty snapshot; nothing observable to serve", ctx.subject)
+    # ``undeclared`` counts alongside ``yes``: a retired item whose currency the
+    # product never states is still offered as though it were live, and letting
+    # silence exempt it would reward not answering the question.
     offenders = [
-        f"{item.id} (retired_reason={item.retired_reason!r})"
+        f"{item.id} (current={item.current}, retired_reason={item.retired_reason!r})"
         for item in snapshot.items
-        if item.current == "yes" and (item.retired_reason or item.id in superseded)
+        if item.current in {"yes", "undeclared"}
+        and (item.retired_reason or item.id in superseded)
     ]
     if offenders:
         return _result(
             name,
             "fail",
-            f"retired state is marked current: {_listed(offenders)}",
+            f"retired state is not marked retired: {_listed(offenders)}",
             ctx.subject,
         )
     return _result(
         name,
         "pass",
-        "no served-item list captured; no item marked current is retired or superseded",
+        "no served-item list captured; every retired or superseded item is marked "
+        "non-current",
         ctx.subject,
     )
 
@@ -424,36 +548,78 @@ def no_retired_state_served_as_current(ctx: AssertionContext) -> AssertionResult
 def prior_revision_retained(ctx: AssertionContext) -> AssertionResult:
     """History survives a correction. CATASTROPHIC.
 
-    Accepts a resolving revision chain, a retained superseded artifact, or a
-    documented ``available_via:<mechanism>`` history surface.
+    Accepts a resolving revision chain, a retained superseded artifact *in the
+    subject's own lineage*, or a documented ``available_via:<mechanism>``
+    history surface.
+
+    The lineage scoping is the whole point. An earlier build accepted any
+    retired item anywhere in the snapshot as proof that history was retained,
+    which meant a product that destroyed the predecessor of the corrected
+    conclusion still passed a catastrophic invariant because some unrelated
+    note happened to be archived. Retention is a claim about *this* subject's
+    predecessor, so the retained artifact must be reachable from the subject:
+    same lineage (``revision_of`` / supersedes edge / shared chain id), or the
+    predecessor the scenario itself declared via ``counterpart``.
+
+    A ``revision_of`` that no longer dereferences is a **failure**, not a
+    fall-through to the weaker alternates: the product recorded that it had a
+    predecessor and then lost it, which is exactly the harm being measured.
     """
 
     name = "prior_revision_retained"
-    gated = _gate(ctx, name, ("revision_of", "prior_revision", "current"))
+    gated = _gate(ctx, name, "prior_revision", "revision_of", "current")
     if gated is not None:
         return gated
 
     snapshot = ctx.snapshot
     by_id = snapshot.items_by_id()
     subject = snapshot.item(ctx.subject) if ctx.subject else None
-    candidates = (subject,) if subject is not None else tuple(
-        item for item in snapshot.items if item.revision_of
+
+    successors = (
+        (subject,)
+        if subject is not None
+        else tuple(item for item in snapshot.items if item.revision_of)
     )
-    for item in candidates:
-        if item is not None and item.revision_of and item.revision_of in by_id:
+    for item in successors:
+        if item is None or not item.revision_of:
+            continue
+        if item.revision_of in by_id:
             return _result(
                 name,
                 "pass",
                 f"revision chain: {item.id} links to retained predecessor {item.revision_of}",
                 ctx.subject,
             )
+        return _result(
+            name,
+            "fail",
+            f"history destroyed: {item.id} declares revision_of "
+            f"{item.revision_of!r}, which no longer resolves to any item",
+            ctx.subject,
+        )
 
-    retained = [item.id for item in snapshot.items if item.current == "no" or item.retired_reason]
+    # Representation #2, scoped: a retained superseded artifact that the subject
+    # can actually be connected to.
+    lineage = {member.id for member in _lineage_members(snapshot, ctx.subject)}
+    if subject is None:
+        lineage = {
+            member.id
+            for members in _revision_groups(snapshot).values()
+            for member in members
+        }
+    if ctx.counterpart:
+        lineage.add(ctx.counterpart)
+    lineage.discard(ctx.subject or "")
+    retained = [
+        item.id
+        for item in snapshot.items
+        if item.id in lineage and (item.current == "no" or item.retired_reason)
+    ]
     if retained:
         return _result(
             name,
             "pass",
-            f"retained superseded artifact(s) reachable in state: {_listed(retained)}",
+            f"retained superseded artifact(s) in the subject's lineage: {_listed(retained)}",
             ctx.subject,
         )
 
@@ -471,8 +637,9 @@ def prior_revision_retained(ctx: AssertionContext) -> AssertionResult:
     return _result(
         name,
         "fail",
-        "no prior revision retained: no resolving revision chain, no retained superseded "
-        "artifact, and no declared history mechanism",
+        "no prior revision retained for this lineage: no resolving revision chain, no "
+        "retained superseded artifact reachable from the subject, and no declared "
+        "history mechanism",
         ctx.subject,
     )
 
@@ -485,7 +652,7 @@ def revision_links_to_predecessor(ctx: AssertionContext) -> AssertionResult:
     """
 
     name = "revision_links_to_predecessor"
-    gated = _gate(ctx, name, ("revision_of", "prior_revision"))
+    gated = _gate(ctx, name, "revision_of", "prior_revision")
     if gated is not None:
         return gated
 
@@ -515,16 +682,21 @@ def revision_links_to_predecessor(ctx: AssertionContext) -> AssertionResult:
                 subject.id,
             )
 
-    predecessors = []
+    # The in-content alternate only counts when the named item could actually be
+    # this subject's predecessor. Scanning every retired item in the snapshot
+    # let a body that happened to mention an unrelated archived note pass as a
+    # supersession reference.
+    predecessors: list[StateItem] = []
     if ctx.counterpart:
         candidate = snapshot.item(ctx.counterpart)
         if candidate is not None:
             predecessors.append(candidate)
-    predecessors.extend(
-        item
-        for item in snapshot.items
-        if item.id != subject.id and (item.current == "no" or item.retired_reason)
-    )
+    else:
+        predecessors.extend(
+            member
+            for member in _lineage_members(snapshot, subject.id)
+            if member.id != subject.id and (member.current == "no" or member.retired_reason)
+        )
     for predecessor in predecessors:
         for token in (predecessor.title, predecessor.id):
             if token and states_value(token, subject.text):
@@ -568,7 +740,7 @@ def evidence_path_exists(ctx: AssertionContext) -> AssertionResult:
     """Every promoted conclusion has at least one evidence hop."""
 
     name = "evidence_path_exists"
-    gated = _gate(ctx, name, ("cites",))
+    gated = _gate(ctx, name, "cites")
     if gated is not None:
         return gated
 
@@ -596,7 +768,7 @@ def evidence_path_resolves(ctx: AssertionContext) -> AssertionResult:
     """
 
     name = "evidence_path_resolves"
-    gated = _gate(ctx, name, ("cites",))
+    gated = _gate(ctx, name, "cites")
     if gated is not None:
         return gated
 
@@ -652,7 +824,7 @@ def contradiction_visible(ctx: AssertionContext) -> AssertionResult:
     """
 
     name = "contradiction_visible"
-    gated = _gate(ctx, name, ("contradicts",))
+    gated = _gate(ctx, name, "contradicts")
     if gated is not None:
         return gated
 
@@ -718,7 +890,7 @@ def contradiction_not_flattened(ctx: AssertionContext) -> AssertionResult:
     """Neither side of a conflict is silently gone. CATASTROPHIC."""
 
     name = "contradiction_not_flattened"
-    gated = _gate(ctx, name, ("contradicts", "current"))
+    gated = _gate(ctx, name, "contradicts", "current")
     if gated is not None:
         return gated
 
@@ -806,7 +978,7 @@ def decision_distinguishable_from_hypothesis(ctx: AssertionContext) -> Assertion
     """
 
     name = "decision_distinguishable_from_hypothesis"
-    gated = _gate(ctx, name, ("kind",))
+    gated = _gate(ctx, name, "kind")
     if gated is not None:
         return gated
 
@@ -839,26 +1011,45 @@ def decision_distinguishable_from_hypothesis(ctx: AssertionContext) -> Assertion
         )
     left_folder, right_folder = _folder(left.locator), _folder(right.locator)
     if left_folder and right_folder and left_folder != right_folder:
-        return _result(
-            name,
-            "pass",
-            f"collection convention: {left_folder} vs {right_folder}",
-            ctx.subject,
-        )
-    shared_keys = sorted(set(left.raw) & set(right.raw))
-    for key in shared_keys:
-        if left.raw[key] != right.raw[key]:
+        left_decision_folder, left_hypothesis_folder = _collection_terms(left.locator)
+        right_decision_folder, right_hypothesis_folder = _collection_terms(right.locator)
+        if (left_decision_folder and right_hypothesis_folder) or (
+            left_hypothesis_folder and right_decision_folder
+        ):
             return _result(
                 name,
                 "pass",
-                f"metadata attribute {key!r}: {left.raw[key]!r} vs {right.raw[key]!r}",
+                f"documented collection convention names the distinction: "
+                f"{left_folder} vs {right_folder}",
+                ctx.subject,
+            )
+    # A schema/metadata attribute only distinguishes the two concepts if it
+    # *states* them. Two values that merely differ ("active" vs "draft") tell a
+    # fresh agent nothing about which one is a settled decision, so accepting
+    # any difference turned this invariant into a diff detector.
+    shared_keys = sorted(set(left.raw) & set(right.raw))
+    for key in shared_keys:
+        left_value, right_value = left.raw[key], right.raw[key]
+        if left_value == right_value:
+            continue
+        left_decision = states_value("decision", left_value)
+        left_hypothesis = states_value("hypothesis", left_value)
+        right_decision = states_value("decision", right_value)
+        right_hypothesis = states_value("hypothesis", right_value)
+        if (left_decision and right_hypothesis) or (left_hypothesis and right_decision):
+            return _result(
+                name,
+                "pass",
+                f"metadata attribute {key!r} states the distinction: "
+                f"{left_value!r} vs {right_value!r}",
                 ctx.subject,
             )
     return _result(
         name,
         "fail",
         f"{left.id} and {right.id} are indistinguishable: same kind {left.kind!r}, "
-        "same collection, no distinguishing metadata attribute",
+        "no collection naming decision vs hypothesis, and no metadata attribute "
+        "stating it",
         ctx.subject,
     )
 
@@ -871,7 +1062,7 @@ def open_question_queryable(ctx: AssertionContext) -> AssertionResult:
     """
 
     name = "open_question_queryable"
-    gated = _gate(ctx, name, ("open_question", "kind"))
+    gated = _gate(ctx, name, "open_question", "kind")
     if gated is not None:
         return gated
 
@@ -903,7 +1094,7 @@ def uncertainty_declared(ctx: AssertionContext) -> AssertionResult:
     """A conclusion whose support is thin says so."""
 
     name = "uncertainty_declared"
-    gated = _gate(ctx, name, ("uncertainty",))
+    gated = _gate(ctx, name, "uncertainty")
     if gated is not None:
         return gated
 
@@ -919,10 +1110,7 @@ def uncertainty_declared(ctx: AssertionContext) -> AssertionResult:
     for item in subjects:
         if item.uncertainty and item.uncertainty.strip():
             continue
-        if item.review_state and (
-            states_value("uncertain", item.review_state)
-            or states_value("open", item.review_state)
-        ):
+        if _is_open(item.review_state) or _is_uncertain(item.review_state):
             continue
         if any(
             question.kind == "open_question" and item.id in question.cites
@@ -956,7 +1144,7 @@ def review_state_durable(ctx: AssertionContext) -> AssertionResult:
     """A recorded review decision survives the transition."""
 
     name = "review_state_durable"
-    gated = _gate(ctx, name, ("review_state",))
+    gated = _gate(ctx, name, "review_state")
     if gated is not None:
         return gated
     missing_pair = _require_pair(ctx, name)
@@ -990,7 +1178,7 @@ def review_reopens_on_material_change(ctx: AssertionContext) -> AssertionResult:
     """A closed item whose content materially changed comes back open."""
 
     name = "review_reopens_on_material_change"
-    gated = _gate(ctx, name, ("review_state",))
+    gated = _gate(ctx, name, "review_state")
     if gated is not None:
         return gated
     missing_pair = _require_pair(ctx, name)
@@ -1038,7 +1226,7 @@ def review_stays_closed_on_irrelevant_change(ctx: AssertionContext) -> Assertion
     """A closed decision is not churned back open by an unrelated change."""
 
     name = "review_stays_closed_on_irrelevant_change"
-    gated = _gate(ctx, name, ("review_state",))
+    gated = _gate(ctx, name, "review_state")
     if gated is not None:
         return gated
     missing_pair = _require_pair(ctx, name)
@@ -1095,7 +1283,7 @@ def external_edit_authoritative_within(ctx: AssertionContext) -> AssertionResult
     freshness bound. CATASTROPHIC."""
 
     name = "external_edit_authoritative_within"
-    gated = _gate(ctx, name, ("external_edit", "locator"))
+    gated = _gate(ctx, name, "external_edit", "locator")
     if gated is not None:
         return gated
     missing_pair = _require_pair(ctx, name)
@@ -1169,7 +1357,7 @@ def export_reconstructs_state(ctx: AssertionContext) -> AssertionResult:
     """
 
     name = "export_reconstructs_state"
-    gated = _gate(ctx, name, ("export",))
+    gated = _gate(ctx, name, "export")
     if gated is not None:
         return gated
     missing_pair = _require_pair(ctx, name)
@@ -1193,8 +1381,15 @@ def export_reconstructs_state(ctx: AssertionContext) -> AssertionResult:
             mismatches.append(f"{item.id}: currency {found.current} != {item.current}")
         elif found.revision_of != item.revision_of:
             mismatches.append(f"{item.id}: lineage {found.revision_of} != {item.revision_of}")
-        elif set(found.cites) != set(item.cites):
+        elif set(_evidence_targets(live, item)) != set(
+            _evidence_targets(ctx.snapshot, found)
+        ):
             mismatches.append(f"{item.id}: evidence edges differ")
+        elif _outgoing_edges(live, item.id) != _outgoing_edges(ctx.snapshot, item.id):
+            # Typed relations are state. An export that keeps every item but
+            # drops the graph has not reconstructed the state, and comparing
+            # ``cites`` alone could not see that.
+            mismatches.append(f"{item.id}: typed relations differ")
     loss = len(mismatches) / len(live.items)
     if loss <= ctx.tolerance:
         return _result(
@@ -1213,10 +1408,19 @@ def export_reconstructs_state(ctx: AssertionContext) -> AssertionResult:
 
 
 def dependent_conclusions_surfaced_for_review(ctx: AssertionContext) -> AssertionResult:
-    """When support is retired, what depended on it is surfaced, not rewritten."""
+    """When support is retired, what depended on it is surfaced, not rewritten.
+
+    A dependent that was quietly *rewritten* to match the new state is the
+    failure this invariant exists to catch, not an excuse for it. An earlier
+    build treated any content change as evidence the system had handled the
+    retirement, which meant the most harmful behaviour — silently editing a
+    conclusion the user still believes they authored — scored a pass. Only an
+    open review flag (or the dependent being explicitly retired itself) counts
+    as surfacing it.
+    """
 
     name = "dependent_conclusions_surfaced_for_review"
-    gated = _gate(ctx, name, ("review_state", "cites"))
+    gated = _gate(ctx, name, "review_state", "cites")
     if gated is not None:
         return gated
     missing_pair = _require_pair(ctx, name)
@@ -1245,10 +1449,13 @@ def dependent_conclusions_surfaced_for_review(ctx: AssertionContext) -> Assertio
             continue
         dependents.append(item.id)
         before = prior_by.get(item.id)
-        revised = before is None or _content_hash(before) != _content_hash(item)
-        if _is_open(item.review_state) or revised or item.current == "no":
+        revised = before is not None and _content_hash(before) != _content_hash(item)
+        if _is_open(item.review_state) or item.current == "no":
             continue
-        offenders.append(f"{item.id} still current, unflagged, unchanged")
+        if revised:
+            offenders.append(f"{item.id} silently rewritten with no review flag")
+        else:
+            offenders.append(f"{item.id} still current, unflagged, unchanged")
     if not dependents:
         return _result(
             name, "unsupported", "no dependent conclusion cites the retired support", ctx.subject

@@ -119,4 +119,4 @@ adversarial comparison at acceptable marginal cost.
 
 ## 7. Amendments
 
-(none)
+- 2026-08-09 — `evidence_path_resolves` semantics sharpened pre-ratification: a promoted conclusion with ZERO evidence hops is an unresolvable path (vacuity fails). Rationale: erasing evidence edges must never be cheaper than maintaining them; §4's 'every hop dereferences' text is hereby extended to require at least one hop for promoted conclusions. Blast radius acknowledged: an unsourced promoted conclusion is an integrity failure with every aggregate suppressed. `evidence_path_exists` remains the non-catastrophic co-assertion; both fail on zero hops by design.

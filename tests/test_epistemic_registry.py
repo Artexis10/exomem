@@ -57,3 +57,39 @@ def test_catastrophic_set_matches_preregistration_section_three() -> None:
         assert f"`{name}`" in section, name
     assert CATASTROPHIC_ASSERTIONS <= set(ASSERTION_REGISTRY)
     assert len(CATASTROPHIC_ASSERTIONS) == 6
+
+
+# --------------------------------------------------------------------------
+# Correction round.
+# --------------------------------------------------------------------------
+
+
+def test_m3_preregistration_records_the_evidence_path_amendment() -> None:
+    """M3: the sharpened vacuity rule lives in §7, dated and reasoned."""
+
+    text = PREREGISTRATION.read_text(encoding="utf-8")
+    start = text.index("## 7. Amendments")
+    section = text[start:]
+    assert "(none)" not in section
+    assert "2026-08-09" in section
+    assert "`evidence_path_resolves` semantics sharpened pre-ratification" in section
+    assert "vacuity fails" in section
+    assert "every aggregate suppressed" in section
+    assert "`evidence_path_exists` remains the non-catastrophic co-assertion" in section
+
+
+def test_family_registry_matches_preregistration_section_one() -> None:
+    """§1 drift test, mirroring the §2 assertion drift test."""
+
+    from epistemic.registry import PREREGISTERED_FAMILIES, parse_preregistered_families
+
+    parsed = parse_preregistered_families(PREREGISTRATION.read_text(encoding="utf-8"))
+    assert len(parsed) == 14
+    assert [family_id for family_id, _name in parsed] == [f"f{n:02d}" for n in range(1, 15)]
+    assert PREREGISTERED_FAMILIES == parsed
+
+
+def test_family_ids_are_exposed_for_load_time_validation() -> None:
+    from epistemic.registry import PREREGISTERED_FAMILY_IDS
+
+    assert PREREGISTERED_FAMILY_IDS == frozenset(f"f{n:02d}" for n in range(1, 15))

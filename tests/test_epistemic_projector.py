@@ -181,3 +181,18 @@ def test_projector_is_read_only(snapshot) -> None:
     VaultProjector(VAULT).project(phase="p2", taken_at="2026-02-02T00:00:00Z")
     after = sorted(path.name for path in VAULT.rglob("*") if path.is_file())
     assert before == after
+
+
+# --------------------------------------------------------------------------
+# Correction round.
+# --------------------------------------------------------------------------
+
+
+def test_projector_meta_publishes_code_line_count_docstrings_included(snapshot) -> None:
+    """``loc_code`` is non-blank, non-comment lines — docstrings included."""
+
+    from epistemic.projectors.base import module_code_line_count
+
+    meta = snapshot.projector
+    assert meta.loc_code == module_code_line_count(VaultProjector)
+    assert 0 < meta.loc_code < meta.loc

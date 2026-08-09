@@ -12,6 +12,7 @@ markdown and fails on any drift between the two.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable, Mapping
 from types import MappingProxyType
 
@@ -45,6 +46,56 @@ PREREGISTERED_ASSERTIONS: tuple[str, ...] = (
     "export_reconstructs_state",
     "dependent_conclusions_surfaced_for_review",
     "no_cross_case_residue",
+)
+
+
+#: PREREGISTRATION.md §1, in file order: ``(family_id, family_name)``.
+#: Load-bearing — the scenario loader rejects an unregistered ``family_id``,
+#: and ``tests/test_epistemic_registry.py`` drift-tests this against the table.
+PREREGISTERED_FAMILIES: tuple[tuple[str, str], ...] = (
+    ("f01", "explicit_correction"),
+    ("f02", "implicit_staleness"),
+    ("f03", "conflicting_sources"),
+    ("f04", "source_quality_asymmetry"),
+    ("f05", "supersession_lineage"),
+    ("f06", "evidence_before_belief"),
+    ("f07", "decision_vs_hypothesis"),
+    ("f08", "modeled_ignorance"),
+    ("f09", "abstention_insufficient_support"),
+    ("f10", "downstream_impact"),
+    ("f11", "triage_invalidation"),
+    ("f12", "external_canonical_edit"),
+    ("f13", "engine_off_portability"),
+    ("f14", "cross_agent_continuation"),
+)
+
+PREREGISTERED_FAMILY_IDS: frozenset[str] = frozenset(
+    family_id for family_id, _name in PREREGISTERED_FAMILIES
+)
+
+#: Assertions whose semantics compare two *named items*. A scenario expectation
+#: must declare both ``subject`` and ``counterpart``; otherwise the assertion
+#: silently degrades to a weaker snapshot-wide reading, which is exactly the
+#: kind of quiet downgrade a comparative benchmark cannot afford.
+REQUIRES_ITEM_PAIR: frozenset[str] = frozenset(
+    {
+        "contradiction_visible",
+        "contradiction_not_flattened",
+        "decision_distinguishable_from_hypothesis",
+    }
+)
+
+#: Assertions evaluated over a *snapshot pair*. The trajectory must actually
+#: take two snapshots at or before the phase that expects them.
+REQUIRES_SNAPSHOT_PAIR: frozenset[str] = frozenset(
+    {
+        "review_state_durable",
+        "review_reopens_on_material_change",
+        "review_stays_closed_on_irrelevant_change",
+        "external_edit_authoritative_within",
+        "export_reconstructs_state",
+        "dependent_conclusions_surfaced_for_review",
+    }
 )
 
 
@@ -97,3 +148,22 @@ def parse_preregistered_assertions(text: str) -> tuple[str, ...]:
             "pre-registration is missing a fenced assertion block under §2"
         ) from error
     return tuple(text[fence:end].split())
+
+
+def parse_preregistered_families(text: str) -> tuple[tuple[str, str], ...]:
+    """Extract the §1 family table rows as ``(family_id, family_name)``."""
+
+    marker = "## 1. Scenario families"
+    try:
+        start = text.index(marker)
+        end = text.index("## 2.", start)
+    except ValueError as error:
+        raise RegistryError("pre-registration is missing the §1 family table") from error
+    rows: list[tuple[str, str]] = []
+    for line in text[start:end].splitlines():
+        match = re.match(r"^\|\s*(f\d{2})\s*\|\s*([a-z0-9_]+)\s*\|", line.strip())
+        if match is not None:
+            rows.append((match.group(1), match.group(2)))
+    if not rows:
+        raise RegistryError("pre-registration §1 family table has no parsable rows")
+    return tuple(rows)

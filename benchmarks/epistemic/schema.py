@@ -26,7 +26,14 @@ from pydantic import Field, ValidationError
 
 from .assertions import AssertionContext, AssertionResult
 from .catastrophic import CATASTROPHIC_ASSERTIONS
-from .registry import ASSERTION_REGISTRY, RegistryError, resolve
+from .registry import (
+    ASSERTION_REGISTRY,
+    PREREGISTERED_FAMILY_IDS,
+    REQUIRES_ITEM_PAIR,
+    REQUIRES_SNAPSHOT_PAIR,
+    RegistryError,
+    resolve,
+)
 from .snapshot import StrictModel
 
 #: The operation vocabulary. ``corpus`` scenarios use the first two; the
@@ -134,16 +141,13 @@ class Scenario(StrictModel):
             for _phase_id, expectation in self.expectations()
         )
 
-    def declared_catastrophic(self) -> frozenset[str]:
-        """Names this scenario escalates, unioned with the frozen §3 set."""
-
-        declared = {
-            name for phase in self.phases for name in phase.catastrophic_if_failed
-        }
-        return frozenset(declared | CATASTROPHIC_ASSERTIONS)
-
-
 def _validate_names(scenario: Scenario, source: str) -> None:
+    if scenario.family_id not in PREREGISTERED_FAMILY_IDS:
+        raise ScenarioLoadError(
+            f"{source}: family_id {scenario.family_id!r} is not in the pre-registered "
+            "§1 family table"
+        )
+
     unknown = [
         expectation.assertion
         for _phase_id, expectation in scenario.expectations()
@@ -154,18 +158,56 @@ def _validate_names(scenario: Scenario, source: str) -> None:
             f"{source}: unknown assertion name(s) {sorted(set(unknown))!r}; "
             "the registry is frozen by the pre-registration"
         )
+
+    # The §3 catastrophic set is frozen with the pre-registration hash. A
+    # scenario may restate a member of it, but it may not promote anything else
+    # into an integrity failure — that would let a scenario author change what
+    # suppresses a provider's aggregates after the fact.
     stray = sorted(
         {
             name
             for phase in scenario.phases
             for name in phase.catastrophic_if_failed
-            if name not in ASSERTION_REGISTRY
+            if name not in CATASTROPHIC_ASSERTIONS
         }
     )
     if stray:
         raise ScenarioLoadError(
-            f"{source}: catastrophic_if_failed names {stray!r} outside the registry"
+            f"{source}: catastrophic_if_failed names {stray!r}, which are not in the "
+            "frozen PREREGISTRATION §3 catastrophic set; a scenario cannot widen it"
         )
+
+
+def _validate_pair_requirements(scenario: Scenario, source: str) -> None:
+    """Assertions that compare two things must be given two things."""
+
+    snapshots_so_far = 0
+    for phase in scenario.phases:
+        snapshots_so_far += sum(1 for op in phase.ops if op.op == "snapshot")
+        for expectation in phase.expect:
+            assertion = expectation.assertion
+            if assertion in REQUIRES_ITEM_PAIR and not (
+                expectation.subject and expectation.counterpart
+            ):
+                raise ScenarioLoadError(
+                    f"{source}: phase {phase.phase_id!r} expects {assertion!r}, which "
+                    "compares two named items, but the expectation does not declare "
+                    "both a subject and a counterpart"
+                )
+            if assertion in REQUIRES_SNAPSHOT_PAIR and snapshots_so_far < 2:
+                raise ScenarioLoadError(
+                    f"{source}: phase {phase.phase_id!r} expects {assertion!r}, which is "
+                    f"evaluated over a snapshot pair, but the trajectory has taken "
+                    f"{snapshots_so_far} snapshot op(s) by this point"
+                )
+            if (
+                assertion == "external_edit_authoritative_within"
+                and expectation.freshness_bound_s is None
+            ):
+                raise ScenarioLoadError(
+                    f"{source}: phase {phase.phase_id!r} expects {assertion!r} without a "
+                    "declared freshness_bound_s; adoption latency would be unscoreable"
+                )
 
 
 def load_scenario_text(text: str, *, source: str) -> Scenario:
@@ -187,6 +229,7 @@ def load_scenario_text(text: str, *, source: str) -> Scenario:
         raise ScenarioLoadError(f"{source}: {error}") from error
     try:
         _validate_names(scenario, source)
+        _validate_pair_requirements(scenario, source)
         scenario.bound_assertions()
     except RegistryError as error:
         raise ScenarioLoadError(f"{source}: {error}") from error

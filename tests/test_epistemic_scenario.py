@@ -62,10 +62,14 @@ def test_missing_fairness_packet_blocks_the_scenario() -> None:
     assert "red-missing-fairness-packet" in message
 
 
-def test_catastrophic_list_must_be_a_subset_of_the_registry() -> None:
+def test_catastrophic_list_must_be_a_subset_of_the_frozen_set() -> None:
+    """A registered-but-non-§3 name is still an illegal escalation."""
+
     with pytest.raises(ScenarioLoadError) as excinfo:
-        load_scenario(FIXTURES / "red-catastrophic-not-registered.yaml")
-    assert "contradiction_is_pretty" in str(excinfo.value)
+        load_scenario(FIXTURES / "red-catastrophic-escalation.yaml")
+    message = str(excinfo.value)
+    assert "contradiction_visible" in message
+    assert "§3" in message
 
 
 def test_scenario_model_is_strict_about_unknown_keys(tmp_path: Path) -> None:
@@ -96,3 +100,64 @@ def test_every_shipped_fixture_not_named_red_loads() -> None:
     assert green
     for path in green:
         assert load_scenario(path).scenario_id
+
+
+# --------------------------------------------------------------------------
+# Correction round.
+# --------------------------------------------------------------------------
+
+
+def test_m8_pair_assertion_without_a_counterpart_fails_to_load() -> None:
+    """M8: an expectation whose semantics need two named items must declare both."""
+
+    with pytest.raises(ScenarioLoadError) as excinfo:
+        load_scenario(FIXTURES / "red-pair-assertion-missing-counterpart.yaml")
+    message = str(excinfo.value)
+    assert "contradiction_not_flattened" in message
+    assert "counterpart" in message
+
+
+def test_m8_snapshot_pair_assertion_needs_two_snapshot_ops() -> None:
+    """M8: a transition invariant cannot be scored from a single snapshot."""
+
+    with pytest.raises(ScenarioLoadError) as excinfo:
+        load_scenario(FIXTURES / "red-transition-without-snapshot-pair.yaml")
+    message = str(excinfo.value)
+    assert "review_reopens_on_material_change" in message
+    assert "snapshot" in message
+
+
+def test_catastrophic_escalation_outside_the_frozen_set_fails_to_load() -> None:
+    """The §3 set is frozen; a scenario may not escalate anything else."""
+
+    with pytest.raises(ScenarioLoadError) as excinfo:
+        load_scenario(FIXTURES / "red-catastrophic-escalation.yaml")
+    message = str(excinfo.value)
+    assert "contradiction_visible" in message
+
+
+def test_unregistered_family_id_fails_to_load() -> None:
+    with pytest.raises(ScenarioLoadError) as excinfo:
+        load_scenario(FIXTURES / "red-unregistered-family.yaml")
+    assert "f99" in str(excinfo.value)
+
+
+def test_dead_declared_catastrophic_helper_is_gone() -> None:
+    from epistemic.schema import Scenario
+
+    assert not hasattr(Scenario, "declared_catastrophic")
+
+
+def test_pair_requirement_sets_live_next_to_the_registry() -> None:
+    from epistemic.registry import REQUIRES_ITEM_PAIR, REQUIRES_SNAPSHOT_PAIR
+
+    assert "contradiction_not_flattened" in REQUIRES_ITEM_PAIR
+    assert "decision_distinguishable_from_hypothesis" in REQUIRES_ITEM_PAIR
+    assert {
+        "review_reopens_on_material_change",
+        "review_stays_closed_on_irrelevant_change",
+        "external_edit_authoritative_within",
+        "export_reconstructs_state",
+        "dependent_conclusions_surfaced_for_review",
+    } <= REQUIRES_SNAPSHOT_PAIR
+    assert not REQUIRES_ITEM_PAIR & REQUIRES_SNAPSHOT_PAIR

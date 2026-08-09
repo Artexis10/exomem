@@ -119,8 +119,22 @@ def prior_revision_retained_pass() -> AssertionContext:
 
 
 def prior_revision_retained_fail() -> AssertionContext:
-    only = item("budget-v2", current="yes")
-    return AssertionContext(snapshot=snapshot((only,)), subject="budget-v2")
+    """B1: history destroyed, but an unrelated retired note is still around.
+
+    The declared predecessor is gone and the only retained item belongs to a
+    different lineage. "Some retired item exists somewhere" is not history
+    retention for this subject.
+    """
+
+    orphaned_successor = item("budget-v2", current="yes", revision_of="budget-v1")
+    unrelated = item(
+        "unrelated-old-note",
+        current="no",
+        retired_reason="archived; nothing to do with the budget lineage",
+    )
+    return AssertionContext(
+        snapshot=snapshot((orphaned_successor, unrelated)), subject="budget-v2"
+    )
 
 
 def revision_links_to_predecessor_pass() -> AssertionContext:
@@ -519,6 +533,10 @@ def test_prior_revision_retained_accepts_three_representations() -> None:
     chain = _revision_pair(both_current=False).replace(subject="budget-v2")
     assert fn(chain).outcome == "pass"
 
+    # The scenario names the predecessor it planted; the product retains the
+    # superseded artifact without exposing a link. That is representation #2,
+    # and it is scoped to the declared predecessor rather than to any retired
+    # item anywhere in the snapshot (see B1).
     retained_only = AssertionContext(
         snapshot=snapshot(
             (
@@ -527,6 +545,7 @@ def test_prior_revision_retained_accepts_three_representations() -> None:
             )
         ),
         subject="budget-v2",
+        counterpart="budget-v1",
     )
     assert fn(retained_only).outcome == "pass"
 
@@ -721,3 +740,317 @@ def test_no_cross_case_residue_without_a_canary_probe_is_unsupported() -> None:
     fn = resolve("no_cross_case_residue")
     ctx = AssertionContext(snapshot=snapshot((item("claim-1", current="yes"),)))
     assert fn(ctx).outcome == "unsupported"
+
+
+# ==========================================================================
+# Correction round — adversarial fixtures from the independent review.
+# Each test below reproduces the reviewer's exact scenario for one finding.
+# ==========================================================================
+
+
+def test_b1_unrelated_retired_item_is_not_history_retention() -> None:
+    """B1: an unrelated retired note must not satisfy a catastrophic invariant."""
+
+    fn = resolve("prior_revision_retained")
+    ctx = AssertionContext(
+        snapshot=snapshot(
+            (
+                item("budget-v2", current="yes"),
+                item(
+                    "unrelated-old-note",
+                    current="no",
+                    retired_reason="archived; different lineage entirely",
+                ),
+            )
+        ),
+        subject="budget-v2",
+    )
+    result = fn(ctx)
+    assert result.outcome == "fail", result.evidence
+
+
+def test_b1_dangling_revision_of_is_a_failure_not_a_fall_through() -> None:
+    """B1: a declared predecessor that no longer resolves is destroyed history."""
+
+    fn = resolve("prior_revision_retained")
+    ctx = AssertionContext(
+        snapshot=snapshot(
+            (
+                item("budget-v2", current="yes", revision_of="budget-v1"),
+                item("unrelated-old-note", current="no", retired_reason="archived"),
+            )
+        ),
+        subject="budget-v2",
+    )
+    result = fn(ctx)
+    assert result.outcome == "fail", result.evidence
+    assert "budget-v1" in result.evidence
+
+
+def test_m1_absent_by_design_primary_survives_an_observable_sibling_external_edit() -> None:
+    """M1: a declared sibling must not turn a designed absence into a fail."""
+
+    fn = resolve("external_edit_authoritative_within")
+    ctx = _external_edit(adopted=False)
+    ctx = ctx.replace(
+        snapshot=snapshot(
+            ctx.snapshot.items,
+            decls=declarations(external_edit="absent_by_design"),
+            phase="post",
+            taken_at=ctx.snapshot.taken_at,
+        )
+    )
+    result = fn(ctx)
+    assert result.outcome == "not_applicable", result.evidence
+    assert "external_edit" in result.evidence
+
+
+def test_m1_absent_by_design_primary_survives_an_observable_sibling_open_question() -> None:
+    """M1: ``kind`` being declared must not override ``open_question`` absence."""
+
+    fn = resolve("open_question_queryable")
+    ctx = open_question_queryable_fail()
+    ctx = ctx.replace(
+        snapshot=snapshot(
+            ctx.snapshot.items, decls=declarations(open_question="absent_by_design")
+        )
+    )
+    result = fn(ctx)
+    assert result.outcome == "not_applicable", result.evidence
+    assert "open_question" in result.evidence
+
+
+def test_m2_silent_rewrite_of_a_dependent_is_a_failure() -> None:
+    """M2: rewriting a dependent instead of surfacing it is the harm, not the cure."""
+
+    fn = resolve("dependent_conclusions_surfaced_for_review")
+    before = snapshot(
+        (
+            item("src-1", kind="raw_source", current="yes"),
+            item("claim-1", current="yes", cites=("src-1",)),
+        ),
+        phase="pre",
+    )
+    after = snapshot(
+        (
+            item(
+                "src-1",
+                kind="raw_source",
+                current="no",
+                retired_reason="superseded by a corrected capture",
+            ),
+            item(
+                "claim-1",
+                current="yes",
+                cites=("src-1",),
+                text="quietly rewritten to match the new capture",
+            ),
+        ),
+        phase="post",
+        taken_at="2026-01-02T00:00:00Z",
+    )
+    result = fn(AssertionContext(snapshot=after, prior=before))
+    assert result.outcome == "fail", result.evidence
+    assert "claim-1" in result.evidence
+
+
+def test_m4_metadata_attribute_must_state_decision_or_hypothesis() -> None:
+    """M4: attributes that merely differ do not distinguish the two concepts."""
+
+    fn = resolve("decision_distinguishable_from_hypothesis")
+    ctx = AssertionContext(
+        snapshot=snapshot(
+            (
+                item("decide-1", kind="claim", current="yes", raw={"status": "active"}),
+                item("hypo-1", kind="claim", current="yes", raw={"status": "draft"}),
+            )
+        ),
+        subject="decide-1",
+        counterpart="hypo-1",
+    )
+    result = fn(ctx)
+    assert result.outcome == "fail", result.evidence
+
+
+def test_m5_in_content_reference_pool_is_scoped_to_the_lineage() -> None:
+    """M5: naming some unrelated archived note is not naming your predecessor."""
+
+    fn = resolve("revision_links_to_predecessor")
+    ctx = AssertionContext(
+        snapshot=snapshot(
+            (
+                item(
+                    "budget-v2",
+                    current="yes",
+                    text="Supersedes nothing here, but it does mention stale-pricing-note.",
+                ),
+                item(
+                    "stale-pricing-note",
+                    title="stale-pricing-note",
+                    current="no",
+                    retired_reason="archived; unrelated topic",
+                ),
+            )
+        ),
+        subject="budget-v2",
+    )
+    result = fn(ctx)
+    assert result.outcome == "fail", result.evidence
+
+
+def test_m6_export_dropping_relation_edges_fails() -> None:
+    """M6: reconstruction must cover typed relations, not just ``cites``."""
+
+    fn = resolve("export_reconstructs_state")
+    live_items = (
+        item("src-1", kind="raw_source", current="yes"),
+        item("claim-1", current="yes", cites=("src-1",)),
+    )
+    live = snapshot(
+        live_items,
+        relations=(
+            Relation(subject="claim-1", predicate="cites", object="src-1"),
+            Relation(subject="claim-1", predicate="derived_from", object="src-1"),
+        ),
+        phase="live",
+    )
+    derived = snapshot(live_items, relations=(), phase="export")
+    result = fn(AssertionContext(snapshot=derived, prior=live, tolerance=0.0))
+    assert result.outcome == "fail", result.evidence
+
+
+def test_n1_two_chains_sharing_a_chain_id_are_both_evaluated() -> None:
+    """N1: keying groups on a shared chain id silently dropped a violation."""
+
+    fn = resolve("exactly_one_current_revision")
+    ctx = AssertionContext(
+        snapshot=snapshot(
+            (
+                # Violating chain first: under the old keying it was overwritten
+                # by the clean chain that shares its declared chain id.
+                item("b1", current="yes", revision_chain_id="shared", revision_index=0),
+                item(
+                    "b2",
+                    current="yes",
+                    revision_of="b1",
+                    revision_chain_id="shared",
+                    revision_index=1,
+                ),
+                item("a1", current="no", revision_chain_id="shared", revision_index=0),
+                item(
+                    "a2",
+                    current="yes",
+                    revision_of="a1",
+                    revision_chain_id="shared",
+                    revision_index=1,
+                ),
+            )
+        )
+    )
+    result = fn(ctx)
+    assert result.outcome == "fail", result.evidence
+
+
+def test_n2_negated_review_state_is_not_a_conflict_marker() -> None:
+    """N2: ``no conflict`` matched ``conflict`` under bare text matching."""
+
+    fn = resolve("contradiction_visible")
+    ctx = AssertionContext(
+        snapshot=snapshot(
+            (
+                item("claim-a", current="yes", review_state="no conflict"),
+                item("claim-b", current="yes", review_state="no conflict"),
+            )
+        ),
+        subject="claim-a",
+        counterpart="claim-b",
+    )
+    result = fn(ctx)
+    assert result.outcome == "fail", result.evidence
+
+
+def test_n6_undeclared_currency_on_a_superseded_item_is_flagged() -> None:
+    """N6: leaving currency undeclared must not hide retired state."""
+
+    fn = resolve("no_retired_state_served_as_current")
+    ctx = AssertionContext(
+        snapshot=snapshot(
+            (
+                item(
+                    "budget-v1",
+                    current="undeclared",
+                    retired_reason="superseded by budget-v2",
+                ),
+                item("budget-v2", current="yes", revision_of="budget-v1"),
+            )
+        )
+    )
+    result = fn(ctx)
+    assert result.outcome == "fail", result.evidence
+    assert "budget-v1" in result.evidence
+
+
+def test_residual1_arbitrary_differing_folders_do_not_distinguish() -> None:
+    """Two items merely filed in different folders say nothing about decidedness."""
+
+    fn = resolve("decision_distinguishable_from_hypothesis")
+    ctx = AssertionContext(
+        snapshot=snapshot(
+            (
+                item(
+                    "decide-1",
+                    kind="claim",
+                    current="yes",
+                    locator="Notes/Alpha/pick-bounded-retrieval",
+                    locator_kind="file",
+                ),
+                item(
+                    "hypo-1",
+                    kind="claim",
+                    current="yes",
+                    locator="Notes/Beta/maybe-bounded-retrieval",
+                    locator_kind="file",
+                ),
+            )
+        ),
+        subject="decide-1",
+        counterpart="hypo-1",
+    )
+    result = fn(ctx)
+    assert result.outcome == "fail", result.evidence
+
+
+def test_residual1_collection_vocabulary_is_closed_and_case_insensitive() -> None:
+    """The documented convention is a closed vocabulary, matched case-blind."""
+
+    fn = resolve("decision_distinguishable_from_hypothesis")
+    for decision_folder, hypothesis_folder in (
+        ("Notes/Decisions", "Notes/Hypotheses"),
+        ("kb/decision", "kb/hypothesis"),
+        ("VAULT/DECISIONS", "VAULT/PROPOSALS"),
+        ("notes/decision", "notes/proposal"),
+    ):
+        ctx = AssertionContext(
+            snapshot=snapshot(
+                (
+                    item(
+                        "decide-1",
+                        kind="claim",
+                        current="yes",
+                        locator=f"{decision_folder}/settled",
+                        locator_kind="file",
+                    ),
+                    item(
+                        "hypo-1",
+                        kind="claim",
+                        current="yes",
+                        locator=f"{hypothesis_folder}/unsettled",
+                        locator_kind="file",
+                    ),
+                )
+            ),
+            subject="decide-1",
+            counterpart="hypo-1",
+        )
+        result = fn(ctx)
+        assert result.outcome == "pass", (decision_folder, hypothesis_folder, result.evidence)
