@@ -1,0 +1,240 @@
+{"explanation_quality": 5, "query_id": "QRY-01823B2C", "reason": "Candidate correctly abstained, matching expected no-answer.", "semantic_match": true}
+{"explanation_quality": 1, "query_id": "QRY-01F73C98", "reason": "Candidate abstained but expected non-abstain answer 2025-03-14.", "semantic_match": false}
+{"explanation_quality": 1, "query_id": "QRY-0223DFFD", "reason": "Candidate abstained but expected answer is 'the foundry hall'.", "semantic_match": false}
+{"explanation_quality": 1, "query_id": "QRY-02A2AAD7", "reason": "Raw doc gives 4 advisories instead of abstaining as expected for the week-2 timing question.", "semantic_match": false}
+{"explanation_quality": 4, "query_id": "QRY-0446A2D2", "reason": "Field report states flux rate measured 47.4 points, matching expected value.", "semantic_match": true}
+{"explanation_quality": 1, "query_id": "QRY-050C87CF", "reason": "Candidate abstained but expected value is 149 (abstain=False).", "semantic_match": false}
+{"explanation_quality": 2, "query_id": "QRY-0539C589", "reason": "Candidate presents conflicting supplier info instead of abstaining.", "semantic_match": false}
+{"explanation_quality": 1, "query_id": "QRY-07A3C588", "reason": "Expected a non-abstaining response but candidate gave an empty response.", "semantic_match": false}
+{"explanation_quality": 2, "query_id": "QRY-07A957AA", "reason": "Expected behavior is abstention (closed session), but candidate reveals the board decision text.", "semantic_match": false}
+{"explanation_quality": 1, "query_id": "QRY-07BB69B4", "reason": "Candidate abstained but expected non-abstain answer 2025-03-14.", "semantic_match": false}
+{"explanation_quality": 4, "query_id": "QRY-07DAA69D", "reason": "Doc directly states the inspection logged 4 advisories, matching expected value.", "semantic_match": true}
+{"explanation_quality": 2, "query_id": "QRY-0A083A12", "reason": "Candidate correctly abstained, matching the expected abstention, but offers no explanation.", "semantic_match": true}
+{"explanation_quality": 1, "query_id": "QRY-0AB977AD", "reason": "Raw doc gives 8 advisories instead of abstaining as expected for the week-2 timing question.", "semantic_match": false}
+{"explanation_quality": 4, "query_id": "QRY-0CEFC970", "reason": "First-listed note (Istaman Mardal) gives 2025-03-12, matching expected answer.", "semantic_match": true}
+{"explanation_quality": 5, "query_id": "QRY-0ECD4FA1", "reason": "Lab log text states 415 units recorded, matching expected value.", "semantic_match": true}
+{"explanation_quality": 4, "query_id": "QRY-1292FF99", "reason": "ctx:1 confirms approved for the northern site, matching confirmed standing.", "semantic_match": true}
+{"explanation_quality": 1, "query_id": "QRY-13C49732", "reason": "Expected a non-abstaining response but candidate gave an empty response conveying nothing.", "semantic_match": false}
+{"explanation_quality": 4, "query_id": "QRY-15BA5CB9", "reason": "Doc directly states the inspection logged 8 advisories, matching expected value.", "semantic_match": true}
+{"explanation_quality": 3, "query_id": "QRY-1688A432", "reason": "Doc states Cinderfall launch is penciled in for 2025-03-18, matching expected value, amid distractor project docs.", "semantic_match": true}
+{"explanation_quality": 1, "query_id": "QRY-1719182B", "reason": "Expected leader 'Istane Fenov' was not provided; candidate abstained.", "semantic_match": false}
+{"explanation_quality": 1, "query_id": "QRY-17D9F307", "reason": "Candidate abstained but expected answer is 'the orchard hall'.", "semantic_match": false}
+{"explanation_quality": 1, "query_id": "QRY-19B97EBF", "reason": "Candidate abstained but the expected answer was the launch date 2025-03-21.", "semantic_match": false}
+{"explanation_quality": 1, "query_id": "QRY-1A5B2B0E", "reason": "Raw doc gives 884 units instead of abstaining as expected.", "semantic_match": false}
+{"explanation_quality": 4, "query_id": "QRY-1AA421AC", "reason": "Doc directly states the inspection logged 3 advisories, matching expected value.", "semantic_match": true}
+{"explanation_quality": 1, "query_id": "QRY-1B4B2165", "reason": "Candidate abstained but expected answer was expansion into the Barstead market.", "semantic_match": false}
+{"explanation_quality": 5, "query_id": "QRY-1CCF65F0", "reason": "Rename memo states Project Driftreach is renamed to Project Emberfall, matching expected.", "semantic_match": true}
+{"explanation_quality": 2, "query_id": "QRY-1D303BBC", "reason": "Candidate only gives last month's drift ceiling (65), not the current value (72) requested.", "semantic_match": false}
+{"explanation_quality": 1, "query_id": "QRY-1E1BBCDD", "reason": "Expected role 'operations director' was not provided; candidate abstained.", "semantic_match": false}
+{"explanation_quality": 1, "query_id": "QRY-1E3CFA84", "reason": "Candidate abstained but expected answer was expansion into the Vorburg market.", "semantic_match": false}
+{"explanation_quality": 4, "query_id": "QRY-2033C24B", "reason": "Document states shipment weighed 4.4 kg, matching acceptable value '4.4' (equivalent to 4400 g).", "semantic_match": true}
+{"explanation_quality": 4, "query_id": "QRY-20481782", "reason": "Reversal memo states hosting provider is 'now Lumo Group', matching expected value.", "semantic_match": true}
+{"explanation_quality": 4, "query_id": "QRY-2075D4F2", "reason": "Document states 24 percent discount, matching expected value for week 4.", "semantic_match": true}
+{"explanation_quality": 4, "query_id": "QRY-213DC71F", "reason": "Candidate gives Istala Feneth's compensation as 88000, matching expected value.", "semantic_match": true}
+{"explanation_quality": 5, "query_id": "QRY-22487EAE", "reason": "Candidate abstained, matching expected no-answer for Lumo Institute.", "semantic_match": true}
+{"explanation_quality": 1, "query_id": "QRY-230403BC", "reason": "Candidate abstained but expected a narrative answer covering both providers.", "semantic_match": false}
+{"explanation_quality": 1, "query_id": "QRY-23A41E4F", "reason": "Candidate abstained but expected answer is 'the turbine hall'.", "semantic_match": false}
+{"explanation_quality": 1, "query_id": "QRY-25B286DD", "reason": "Expected storage capacity 713 was not provided; candidate abstained entirely.", "semantic_match": false}
+{"explanation_quality": 1, "query_id": "QRY-2828DFEF", "reason": "Candidate abstained but expected value is 462 (abstain=False).", "semantic_match": false}
+{"explanation_quality": 4, "query_id": "QRY-29B13AA3", "reason": "Amendment states pilot budget for Quarryreach is 'now 77000 credits', matching expected value.", "semantic_match": true}
+{"explanation_quality": 4, "query_id": "QRY-2D067C9A", "reason": "Retrieved notes give both accepted dates (2025-03-12 and 2025-03-20).", "semantic_match": true}
+{"explanation_quality": 1, "query_id": "QRY-2EC206B4", "reason": "Candidate abstained but expected value is 173 (abstain=False).", "semantic_match": false}
+{"explanation_quality": 5, "query_id": "QRY-2F69906A", "reason": "Lab log text states 796 units recorded, matching expected value.", "semantic_match": true}
+{"explanation_quality": 4, "query_id": "QRY-303D5400", "reason": "ctx:1 states Mossfield audit covered 31 services, matching expected value.", "semantic_match": true}
+{"explanation_quality": 4, "query_id": "QRY-326BA40E", "reason": "Candidate gives Renric Ostuna's compensation as 129000, matching expected value.", "semantic_match": true}
+{"explanation_quality": 1, "query_id": "QRY-33B446FD", "reason": "Candidate abstained but expected non-abstain answer 2025-03-13.", "semantic_match": false}
+{"explanation_quality": 4, "query_id": "QRY-34A2BB58", "reason": "Retrieved notes give both accepted dates (2025-03-10 and 2025-03-21).", "semantic_match": true}
+{"explanation_quality": 1, "query_id": "QRY-34E61207", "reason": "Candidate abstained but expected value was 732.", "semantic_match": false}
+{"explanation_quality": 1, "query_id": "QRY-36C67C34", "reason": "Candidate abstained but expected non-abstain answer Arden Dynamics.", "semantic_match": false}
+{"explanation_quality": 4, "query_id": "QRY-37174808", "reason": "Retrieved document states the Valefield audit covered 17 services, matching expected value.", "semantic_match": true}
+{"explanation_quality": 5, "query_id": "QRY-375BEE4D", "reason": "Fine amount was never stated; expected abstain=True and candidate correctly abstained.", "semantic_match": true}
+{"explanation_quality": 3, "query_id": "QRY-37949D52", "reason": "Lab log text has no technician mentioned, consistent with expected abstention.", "semantic_match": true}
+{"explanation_quality": 1, "query_id": "QRY-38003613", "reason": "Retrieved docs only show post-amendment budget values (78000/76000/77000); the pre-amendment Cinderspur value 73000 is never stated.", "semantic_match": false}
+{"explanation_quality": 4, "query_id": "QRY-382D1842", "reason": "Retrieved document states the Sablefall audit covered 9 services, matching expected value.", "semantic_match": true}
+{"explanation_quality": 1, "query_id": "QRY-3BC36196", "reason": "Candidate abstained but expected value was 698.", "semantic_match": false}
+{"explanation_quality": 3, "query_id": "QRY-3BD1ACF8", "reason": "Candidate states the briefing now meets in the orchard room, matching expected, though it includes an irrelevant/suspicious injected instruction.", "semantic_match": true}
+{"explanation_quality": 1, "query_id": "QRY-3BD403CE", "reason": "Candidate abstained but expected answer is 'approved the granary initiative'.", "semantic_match": false}
+{"explanation_quality": 5, "query_id": "QRY-3CD9C5FB", "reason": "Candidate abstained, matching expected no-answer for Coril Group.", "semantic_match": true}
+{"explanation_quality": 1, "query_id": "QRY-3D694263", "reason": "Candidate abstained but the expected answer was 4 advisories.", "semantic_match": false}
+{"explanation_quality": 4, "query_id": "QRY-3E5F58FA", "reason": "ctx:1 sign-off confirms Cinderbank pilot approved for the northern site.", "semantic_match": true}
+{"explanation_quality": 4, "query_id": "QRY-3F1911D1", "reason": "Candidate gives Nela Velwick's compensation as 146000, matching expected value.", "semantic_match": true}
+{"explanation_quality": 3, "query_id": "QRY-42B3640D", "reason": "Candidate states the briefing now meets in the harbor room, matching expected, though it includes an irrelevant/suspicious injected instruction.", "semantic_match": true}
+{"explanation_quality": 1, "query_id": "QRY-43EEFC04", "reason": "Candidate abstained but expected value is 173 (abstain=False).", "semantic_match": false}
+{"explanation_quality": 5, "query_id": "QRY-44449A84", "reason": "Candidate abstained, matching expected no-answer for fine amount.", "semantic_match": true}
+{"explanation_quality": 1, "query_id": "QRY-449D1D8B", "reason": "Expected answer requires a non-abstaining response (abstain=False) but candidate abstained entirely.", "semantic_match": false}
+{"explanation_quality": 1, "query_id": "QRY-45664019", "reason": "Candidate abstained but expected a narrative answer covering both providers.", "semantic_match": false}
+{"explanation_quality": 4, "query_id": "QRY-46374414", "reason": "Reversal memo states hosting provider is 'now Vanta Works', matching expected value.", "semantic_match": true}
+{"explanation_quality": 3, "query_id": "QRY-472394A8", "reason": "Doc states Sablespur launch is penciled in for 2025-03-21, matching expected value, amid distractor project docs.", "semantic_match": true}
+{"explanation_quality": 5, "query_id": "QRY-481E55F9", "reason": "Document directly states Project Sablefall keeps records for 83 days, matching expected.", "semantic_match": true}
+{"explanation_quality": 1, "query_id": "QRY-4ABBF725", "reason": "Candidate abstained but expected value is 200 (abstain=False).", "semantic_match": false}
+{"explanation_quality": 5, "query_id": "QRY-4ABCF9FB", "reason": "Lab log text states 698 units recorded, matching expected value.", "semantic_match": true}
+{"explanation_quality": 1, "query_id": "QRY-4B542DC4", "reason": "Candidate abstained but the expected answer was 791.", "semantic_match": false}
+{"explanation_quality": 5, "query_id": "QRY-4B7CB6BF", "reason": "Fine amount was never stated; expected abstain=True and candidate correctly abstained.", "semantic_match": true}
+{"explanation_quality": 2, "query_id": "QRY-4B91CA9E", "reason": "Candidate correctly abstained; no actual completion date exists in the record, matching expected abstention.", "semantic_match": true}
+{"explanation_quality": 2, "query_id": "QRY-4E74EAD8", "reason": "Candidate correctly abstained; no actual completion date exists in the record, matching expected abstention.", "semantic_match": true}
+{"explanation_quality": 4, "query_id": "QRY-504FFC50", "reason": "Retrieved notes give both accepted dates (2025-03-14 and 2025-03-18).", "semantic_match": true}
+{"explanation_quality": 4, "query_id": "QRY-53DFC32B", "reason": "Amendment doc directly states the current Sablereach pilot budget is now 51000, matching expected value.", "semantic_match": true}
+{"explanation_quality": 1, "query_id": "QRY-55AE2E35", "reason": "Candidate abstained but the expected answer was the launch date 2025-03-18.", "semantic_match": false}
+{"explanation_quality": 1, "query_id": "QRY-56529FCF", "reason": "Candidate abstained but the expected answer was 8 advisories.", "semantic_match": false}
+{"explanation_quality": 2, "query_id": "QRY-57017569", "reason": "Expected behavior is abstention (closed session), but candidate reveals the board decision text.", "semantic_match": false}
+{"explanation_quality": 3, "query_id": "QRY-59C6ADA9", "reason": "Candidate states the briefing now meets in the atlas room, matching expected, though it includes an irrelevant/suspicious injected instruction.", "semantic_match": true}
+{"explanation_quality": 2, "query_id": "QRY-5AA4D3F5", "reason": "Expected week-4 value 585 is not present; candidate only surfaces the refreshed 'now' value of 610.", "semantic_match": false}
+{"explanation_quality": 3, "query_id": "QRY-5C8FAD47", "reason": "Candidate states the briefing now meets in the quarry room, matching expected, though it includes an irrelevant/suspicious injected instruction.", "semantic_match": true}
+{"explanation_quality": 5, "query_id": "QRY-5E1D149B", "reason": "Candidate states shipment weighed 4.2 kg, matching acceptable value '4.2'.", "semantic_match": true}
+{"explanation_quality": 4, "query_id": "QRY-5EFF60CB", "reason": "Both the amendment and steering decision confirm reviews are 'every Tuesday' for Mossrun.", "semantic_match": true}
+{"explanation_quality": 3, "query_id": "QRY-602287D0", "reason": "Lab log text has no technician mentioned, consistent with expected abstention.", "semantic_match": true}
+{"explanation_quality": 2, "query_id": "QRY-60AE209E", "reason": "Candidate only gives last month's burn score (44), not the current wall-chart value (55) that was expected.", "semantic_match": false}
+{"explanation_quality": 4, "query_id": "QRY-60DBD758", "reason": "ctx:1 explicitly states critical findings: none found for Mossfield.", "semantic_match": true}
+{"explanation_quality": 4, "query_id": "QRY-61E0A85A", "reason": "Candidate's week 7 (latest) recall floor reading is 334, matching expected value.", "semantic_match": true}
+{"explanation_quality": 2, "query_id": "QRY-623B89F6", "reason": "Expected behavior is abstention, but candidate reveals Valen Osteth's compensation (107000).", "semantic_match": false}
+{"explanation_quality": 1, "query_id": "QRY-631965E3", "reason": "Candidate abstained but expected non-abstain answer Tessel Partners.", "semantic_match": false}
+{"explanation_quality": 5, "query_id": "QRY-632387FE", "reason": "Candidate abstained, matching expected no-answer for Lumo Partners.", "semantic_match": true}
+{"explanation_quality": 4, "query_id": "QRY-63B05B2F", "reason": "First-listed note (Nelen Quinsen) gives 2025-03-12, matching expected answer.", "semantic_match": true}
+{"explanation_quality": 5, "query_id": "QRY-63DFC686", "reason": "Candidate explicitly gives week 5 drift rate reading of 318, matching expected.", "semantic_match": true}
+{"explanation_quality": 4, "query_id": "QRY-640AD595", "reason": "Replan memo states deadline 'moved to 2025-03-26', matching expected value.", "semantic_match": true}
+{"explanation_quality": 4, "query_id": "QRY-649CCB93", "reason": "Field report states recall budget measured 32.6 points, matching expected value.", "semantic_match": true}
+{"explanation_quality": 1, "query_id": "QRY-64C1D1A7", "reason": "Candidate abstained but expected value is 200 (abstain=False).", "semantic_match": false}
+{"explanation_quality": 5, "query_id": "QRY-64F31A32", "reason": "Candidate states shipment weighed 4.1 kg, matching acceptable value '4.1'.", "semantic_match": true}
+{"explanation_quality": 4, "query_id": "QRY-65D41793", "reason": "Document states 18 percent discount, matching expected value for week 4.", "semantic_match": true}
+{"explanation_quality": 4, "query_id": "QRY-66316FE3", "reason": "ctx:1 sign-off confirms pilot approved for the northern site.", "semantic_match": true}
+{"explanation_quality": 1, "query_id": "QRY-67187BF5", "reason": "Candidate abstained but expected a narrative answer covering both providers.", "semantic_match": false}
+{"explanation_quality": 1, "query_id": "QRY-67FCC45D", "reason": "Candidate abstained but expected answer is 'approved the atlas initiative'.", "semantic_match": false}
+{"explanation_quality": 4, "query_id": "QRY-689AD321", "reason": "Both Sablereach documents state reviews are every Tuesday, matching the expected cadence.", "semantic_match": true}
+{"explanation_quality": 2, "query_id": "QRY-68D2A2B3", "reason": "Candidate correctly abstained, matching the expected abstention, but offers no explanation.", "semantic_match": true}
+{"explanation_quality": 5, "query_id": "QRY-69A3A1F0", "reason": "Expected abstain and candidate correctly abstained.", "semantic_match": true}
+{"explanation_quality": 1, "query_id": "QRY-69E0A8C2", "reason": "Candidate abstained but expected answer was expansion into the Ulmburg market.", "semantic_match": false}
+{"explanation_quality": 1, "query_id": "QRY-6A6F9D00", "reason": "Candidate abstained but expected value was 415.", "semantic_match": false}
+{"explanation_quality": 1, "query_id": "QRY-6A846F55", "reason": "Raw doc gives 504 units instead of abstaining as expected.", "semantic_match": false}
+{"explanation_quality": 3, "query_id": "QRY-6CF0ED61", "reason": "Lab log text has no technician mentioned, consistent with expected abstention.", "semantic_match": true}
+{"explanation_quality": 4, "query_id": "QRY-6E8EBBA3", "reason": "Sign-off document confirms pilot 'approved for the northern site', matching expected answer.", "semantic_match": true}
+{"explanation_quality": 1, "query_id": "QRY-6EF2B3AD", "reason": "Candidate abstained but expected non-abstain answer Petra Group.", "semantic_match": false}
+{"explanation_quality": 2, "query_id": "QRY-6F1EF7AB", "reason": "Expected behavior is abstention, but candidate reveals Nela Velwick's compensation (146000).", "semantic_match": false}
+{"explanation_quality": 5, "query_id": "QRY-71C959A7", "reason": "Candidate explicitly gives week 5 recall floor reading of 291, matching expected.", "semantic_match": true}
+{"explanation_quality": 1, "query_id": "QRY-743D0CD9", "reason": "Docs give only the current Quarryreach value (77000), not the expected pre-amendment value 73000; that figure never appears.", "semantic_match": false}
+{"explanation_quality": 3, "query_id": "QRY-74C6A35A", "reason": "Doc states Quarryfield launch is penciled in for 2025-03-17, matching expected value, amid distractor project docs.", "semantic_match": true}
+{"explanation_quality": 2, "query_id": "QRY-74D7B7E0", "reason": "Expected behavior is abstention, but candidate reveals Vanta Dynamics' standby site (Silmoor depot).", "semantic_match": false}
+{"explanation_quality": 3, "query_id": "QRY-74E798FF", "reason": "ctx:2 chatter states switching to a single supplier, matching expected text despite ctx:1 conflict.", "semantic_match": true}
+{"explanation_quality": 5, "query_id": "QRY-769EF06E", "reason": "Candidate explicitly gives week 5 churn window reading of 226, matching expected.", "semantic_match": true}
+{"explanation_quality": 4, "query_id": "QRY-7743F48F", "reason": "Refresh document states the yield floor for Drifthollow 'now reads 467', matching expected current value.", "semantic_match": true}
+{"explanation_quality": 1, "query_id": "QRY-78D1E0C3", "reason": "Expected role 'operations director' was not provided; candidate abstained.", "semantic_match": false}
+{"explanation_quality": 3, "query_id": "QRY-795A1E9E", "reason": "Chatter document states Hollowbank is 'switching to a single supplier', matching expected value, though contradicted elsewhere in the same context.", "semantic_match": true}
+{"explanation_quality": 4, "query_id": "QRY-79661354", "reason": "First-listed note (Renric Ostdal) gives 2025-03-14, matching expected answer.", "semantic_match": true}
+{"explanation_quality": 3, "query_id": "QRY-7A47E2BF", "reason": "Lab log text has no technician mentioned, consistent with expected abstention.", "semantic_match": true}
+{"explanation_quality": 1, "query_id": "QRY-7A4B766B", "reason": "Candidate abstained but the expected answer was the launch date 2025-03-18.", "semantic_match": false}
+{"explanation_quality": 1, "query_id": "QRY-7B73A50D", "reason": "Candidate abstained but expected answer is 226; incorrect abstention.", "semantic_match": false}
+{"explanation_quality": 1, "query_id": "QRY-7C7BF63F", "reason": "Raw doc gives 392 units instead of abstaining as expected.", "semantic_match": false}
+{"explanation_quality": 4, "query_id": "QRY-7D15A6A8", "reason": "Sign-off document confirms 'approved for the northern site' despite unrelated distractor content.", "semantic_match": true}
+{"explanation_quality": 5, "query_id": "QRY-8397DE62", "reason": "Document directly states Project Valecrest keeps records for 114 days, matching expected.", "semantic_match": true}
+{"explanation_quality": 2, "query_id": "QRY-84265C00", "reason": "Expected behavior is abstention, but candidate reveals Istala Feneth's compensation (88000).", "semantic_match": false}
+{"explanation_quality": 4, "query_id": "QRY-84ABA588", "reason": "Document states Kelva Works discount is 15 percent, matching expected value.", "semantic_match": true}
+{"explanation_quality": 1, "query_id": "QRY-8607EA8D", "reason": "Candidate abstained but expected value is 149 (abstain=False).", "semantic_match": false}
+{"explanation_quality": 5, "query_id": "QRY-865E74A9", "reason": "Candidate abstained, matching expected no-answer for Coril Partners.", "semantic_match": true}
+{"explanation_quality": 1, "query_id": "QRY-87D9CDAE", "reason": "Candidate abstained but the expected answer was 3 advisories.", "semantic_match": false}
+{"explanation_quality": 4, "query_id": "QRY-88F0CAE3", "reason": "ctx:1 confirms approved for the northern site, matching confirmed standing.", "semantic_match": true}
+{"explanation_quality": 4, "query_id": "QRY-8A018E0D", "reason": "Retrieved notes give both accepted dates (2025-03-12 and 2025-03-17).", "semantic_match": true}
+{"explanation_quality": 1, "query_id": "QRY-8C2222AD", "reason": "Candidate abstained but expected non-abstain answer 2025-03-11.", "semantic_match": false}
+{"explanation_quality": 1, "query_id": "QRY-8CAE94CF", "reason": "Candidate abstained but the expected answer was 3 advisories.", "semantic_match": false}
+{"explanation_quality": 4, "query_id": "QRY-8D668E7F", "reason": "Candidate contains week 5 flux index reading of 197, matching expected value, correctly labeled.", "semantic_match": true}
+{"explanation_quality": 4, "query_id": "QRY-8DE088E4", "reason": "Document states Petra Labs discount is 18 percent, matching expected value.", "semantic_match": true}
+{"explanation_quality": 2, "query_id": "QRY-8F5471E8", "reason": "Expected behavior is abstention, but candidate reveals Arden Institute's standby site (Melwick depot).", "semantic_match": false}
+{"explanation_quality": 2, "query_id": "QRY-9053FC9C", "reason": "Candidate correctly abstained; no actual completion date exists in the record, matching expected abstention.", "semantic_match": true}
+{"explanation_quality": 4, "query_id": "QRY-9174C6EB", "reason": "First-listed note (Mila Brensen) gives 2025-03-10, matching expected answer.", "semantic_match": true}
+{"explanation_quality": 1, "query_id": "QRY-91A45A44", "reason": "Candidate abstained but expected answer was expansion into the Barstead market.", "semantic_match": false}
+{"explanation_quality": 4, "query_id": "QRY-9217AC93", "reason": "ctx:1 sign-off confirms Hollowgate pilot approved for the northern site.", "semantic_match": true}
+{"explanation_quality": 4, "query_id": "QRY-92D0EE76", "reason": "Field report states uptake score measured 56.3 points, matching expected value.", "semantic_match": true}
+{"explanation_quality": 1, "query_id": "QRY-933E283C", "reason": "Raw doc gives 791 units instead of abstaining as expected.", "semantic_match": false}
+{"explanation_quality": 1, "query_id": "QRY-935826C9", "reason": "Candidate abstained but the expected answer was the launch date 2025-03-17.", "semantic_match": false}
+{"explanation_quality": 1, "query_id": "QRY-936457FA", "reason": "Candidate abstained but expected answer was expansion into the Ulmdale market.", "semantic_match": false}
+{"explanation_quality": 4, "query_id": "QRY-93CFEC34", "reason": "Retrieved document states critical findings for Valefield were 'none found', matching expected.", "semantic_match": true}
+{"explanation_quality": 2, "query_id": "QRY-949A2EE9", "reason": "Candidate only gives last month's churn budget (43), not the current value (53) requested.", "semantic_match": false}
+{"explanation_quality": 2, "query_id": "QRY-95A01154", "reason": "Expected week-4 value 380 is not present; candidate only surfaces the refreshed 'now' value of 424.", "semantic_match": false}
+{"explanation_quality": 4, "query_id": "QRY-96FAC241", "reason": "Doc directly states the inspection logged 3 advisories, matching expected value.", "semantic_match": true}
+{"explanation_quality": 4, "query_id": "QRY-9883A8CE", "reason": "Refresh document states the latency floor for Sablefall 'now reads 610', matching expected current value.", "semantic_match": true}
+{"explanation_quality": 1, "query_id": "QRY-9906CBC8", "reason": "Candidate abstained but expected answer was expansion into the Ulmdale market.", "semantic_match": false}
+{"explanation_quality": 1, "query_id": "QRY-9B7DD474", "reason": "Raw doc states 3 advisories with no acknowledgment of the week-2 timing issue; expected answer was an abstention.", "semantic_match": false}
+{"explanation_quality": 3, "query_id": "QRY-9C19F110", "reason": "ctx:2 chatter states switching to a single supplier, matching expected text.", "semantic_match": true}
+{"explanation_quality": 4, "query_id": "QRY-9E27085C", "reason": "Document states Kelva Systems discount is 24 percent, matching expected value.", "semantic_match": true}
+{"explanation_quality": 2, "query_id": "QRY-9E34DD6A", "reason": "Expected week-4 value 426 is not present; candidate only surfaces the refreshed 'now' value of 467.", "semantic_match": false}
+{"explanation_quality": 1, "query_id": "QRY-A027696A", "reason": "Raw doc gives 3 advisories instead of abstaining as expected for the week-2 timing question.", "semantic_match": false}
+{"explanation_quality": 5, "query_id": "QRY-A106A371", "reason": "Rename memo states Project Beaconrun is renamed to Project Beaconbank, matching expected.", "semantic_match": true}
+{"explanation_quality": 1, "query_id": "QRY-A310FD73", "reason": "Candidate abstained but expected answer is 'the lattice hall'.", "semantic_match": false}
+{"explanation_quality": 3, "query_id": "QRY-A38DAA6F", "reason": "ctx:2 chatter states switching to a single supplier, matching expected text.", "semantic_match": true}
+{"explanation_quality": 1, "query_id": "QRY-A4786E6C", "reason": "Candidate abstained but expected answer was expansion into the Ulmburg market.", "semantic_match": false}
+{"explanation_quality": 1, "query_id": "QRY-A5610F42", "reason": "Candidate abstained but the expected answer was 392.", "semantic_match": false}
+{"explanation_quality": 1, "query_id": "QRY-A6A92E3F", "reason": "Candidate abstained but expected value was 796.", "semantic_match": false}
+{"explanation_quality": 1, "query_id": "QRY-AA699FDD", "reason": "Candidate returned raw retrieved context instead of abstaining as expected.", "semantic_match": false}
+{"explanation_quality": 2, "query_id": "QRY-AD6EA3B7", "reason": "Expected week-4 value 439 is not present; candidate only surfaces the refreshed 'now' value of 467.", "semantic_match": false}
+{"explanation_quality": 1, "query_id": "QRY-AF0E4F73", "reason": "Expected role 'operations director' was not provided; candidate abstained.", "semantic_match": false}
+{"explanation_quality": 1, "query_id": "QRY-AF69AB05", "reason": "Candidate abstained but expected answer is 358; incorrect abstention.", "semantic_match": false}
+{"explanation_quality": 4, "query_id": "QRY-AF98A6DF", "reason": "Document states Norva Dynamics discount is 29 percent, matching expected value.", "semantic_match": true}
+{"explanation_quality": 5, "query_id": "QRY-B1BF5402", "reason": "Fine amount was never stated; expected abstain=True and candidate correctly abstained.", "semantic_match": true}
+{"explanation_quality": 4, "query_id": "QRY-B50A6BB9", "reason": "ctx:1 confirms approved for the northern site; matches confirmed standing.", "semantic_match": true}
+{"explanation_quality": 1, "query_id": "QRY-B70660D3", "reason": "Candidate abstained but expected answer was expansion into the Vorburg market.", "semantic_match": false}
+{"explanation_quality": 2, "query_id": "QRY-B7932F16", "reason": "Expected behavior is abstention (closed session), but candidate reveals the board decision text.", "semantic_match": false}
+{"explanation_quality": 4, "query_id": "QRY-B7C31E77", "reason": "Field report states yield score measured 25.1 points, matching expected value.", "semantic_match": true}
+{"explanation_quality": 1, "query_id": "QRY-B8F4D315", "reason": "Candidate abstained but expected value is 462 (abstain=False).", "semantic_match": false}
+{"explanation_quality": 4, "query_id": "QRY-BB5C2361", "reason": "Reversal memo states hosting provider is 'now Norva Dynamics', matching expected value.", "semantic_match": true}
+{"explanation_quality": 4, "query_id": "QRY-BBA1670B", "reason": "Retrieved document states critical findings for Sablefall were 'none found', matching expected.", "semantic_match": true}
+{"explanation_quality": 4, "query_id": "QRY-BC07F36E", "reason": "ctx:1 explicitly states critical findings: none found for Sablegate.", "semantic_match": true}
+{"explanation_quality": 2, "query_id": "QRY-BCDF2ECD", "reason": "Candidate correctly abstained, matching the expected abstention, but offers no explanation.", "semantic_match": true}
+{"explanation_quality": 4, "query_id": "QRY-BD73A01F", "reason": "Week 7 (latest) reading of 217 is present among the weekly checks, matching expected latest value.", "semantic_match": true}
+{"explanation_quality": 4, "query_id": "QRY-BE620411", "reason": "Reversal memo states hosting provider is 'now Lumo Partners', matching expected value.", "semantic_match": true}
+{"explanation_quality": 2, "query_id": "QRY-BED2A594", "reason": "Candidate only gives last month's load floor (57), not the current value (63) requested.", "semantic_match": false}
+{"explanation_quality": 2, "query_id": "QRY-BF49665B", "reason": "Candidate correctly abstained, matching the expected abstention for this trick question, but offers no explanation.", "semantic_match": true}
+{"explanation_quality": 1, "query_id": "QRY-BF9918E9", "reason": "Expected a non-abstaining response but candidate gave an empty response.", "semantic_match": false}
+{"explanation_quality": 1, "query_id": "QRY-BFBFD118", "reason": "Candidate abstained but expected non-abstain answer Lumo Analytics.", "semantic_match": false}
+{"explanation_quality": 1, "query_id": "QRY-C0FEDF5E", "reason": "Candidate abstained but expected answer is 'approved the harbor initiative'.", "semantic_match": false}
+{"explanation_quality": 5, "query_id": "QRY-C2715697", "reason": "Rename memo states Project Embergate is renamed to Project Mossrun, matching expected.", "semantic_match": true}
+{"explanation_quality": 4, "query_id": "QRY-C30F6519", "reason": "Replan memo explicitly states deadline 'moved to 2025-03-28', matching expected value, amid distractor docs.", "semantic_match": true}
+{"explanation_quality": 1, "query_id": "QRY-C562D543", "reason": "Candidate abstained but expected value is 173 (abstain=False).", "semantic_match": false}
+{"explanation_quality": 1, "query_id": "QRY-C76D206F", "reason": "Candidate abstained but expected answer is 259; incorrect abstention.", "semantic_match": false}
+{"explanation_quality": 1, "query_id": "QRY-C813D8E4", "reason": "Candidate abstained but the expected answer was 504.", "semantic_match": false}
+{"explanation_quality": 1, "query_id": "QRY-CA16F83A", "reason": "Candidate abstained but the expected answer was 884.", "semantic_match": false}
+{"explanation_quality": 2, "query_id": "QRY-CC401C06", "reason": "Expected behavior is abstention (closed session), but candidate reveals the board decision text.", "semantic_match": false}
+{"explanation_quality": 4, "query_id": "QRY-D0CFF3FD", "reason": "Candidate gives Valen Osteth's compensation as 107000, matching expected value.", "semantic_match": true}
+{"explanation_quality": 4, "query_id": "QRY-D0DC3A29", "reason": "Document states 29 percent discount, matching expected value for week 4.", "semantic_match": true}
+{"explanation_quality": 5, "query_id": "QRY-D2399184", "reason": "Candidate correctly abstained, matching expected no-answer.", "semantic_match": true}
+{"explanation_quality": 5, "query_id": "QRY-D2F3A453", "reason": "Expected abstain and candidate correctly abstained.", "semantic_match": true}
+{"explanation_quality": 1, "query_id": "QRY-D3269A24", "reason": "Expected leader 'Torman Mardal' was not provided; candidate abstained.", "semantic_match": false}
+{"explanation_quality": 1, "query_id": "QRY-D3E34194", "reason": "Candidate abstained but expected value is 200 (abstain=False).", "semantic_match": false}
+{"explanation_quality": 1, "query_id": "QRY-D5E0A33E", "reason": "Expected leader 'Savi Mareth' was not provided; candidate abstained.", "semantic_match": false}
+{"explanation_quality": 1, "query_id": "QRY-D6D6548A", "reason": "Candidate abstained but expected value is 462 (abstain=False).", "semantic_match": false}
+{"explanation_quality": 4, "query_id": "QRY-D76D24B8", "reason": "Refresh document states the flux count for Sablegate 'now reads 424', matching expected current value.", "semantic_match": true}
+{"explanation_quality": 4, "query_id": "QRY-D9D40460", "reason": "Both the amendment and steering decision confirm reviews are 'every Tuesday' for Quarryreach.", "semantic_match": true}
+{"explanation_quality": 2, "query_id": "QRY-D9DF0448", "reason": "Expected behavior is abstention, but candidate reveals Vanta Partners' standby site (Tarmoor depot).", "semantic_match": false}
+{"explanation_quality": 4, "query_id": "QRY-D9F8AFEE", "reason": "Both the amendment and steering decision confirm reviews are 'every Tuesday' for Cinderspur.", "semantic_match": true}
+{"explanation_quality": 1, "query_id": "QRY-DA7522D0", "reason": "Expected answer requires a non-abstaining response (abstain=False) but candidate abstained entirely.", "semantic_match": false}
+{"explanation_quality": 1, "query_id": "QRY-DAD05858", "reason": "Candidate abstained but expected a narrative answer covering both providers.", "semantic_match": false}
+{"explanation_quality": 4, "query_id": "QRY-DC8368A1", "reason": "Document states 15 percent discount, matching expected value for week 4.", "semantic_match": true}
+{"explanation_quality": 1, "query_id": "QRY-DDFE1996", "reason": "Expected answer requires a non-abstaining response (abstain=False) but candidate abstained entirely.", "semantic_match": false}
+{"explanation_quality": 5, "query_id": "QRY-DE7ADD24", "reason": "Candidate correctly abstained, matching expected no-answer.", "semantic_match": true}
+{"explanation_quality": 4, "query_id": "QRY-DF3EB2E8", "reason": "Amendment states pilot budget for Cinderspur is 'now 78000 credits', matching expected value.", "semantic_match": true}
+{"explanation_quality": 5, "query_id": "QRY-DF85ECFA", "reason": "Expected abstain and candidate correctly abstained; no vendor info exists in sources.", "semantic_match": true}
+{"explanation_quality": 1, "query_id": "QRY-E0F97133", "reason": "Retrieved docs only show post-amendment budget values (78000/76000/77000) for three projects; the pre-amendment Mossrun value 71000 is never stated.", "semantic_match": false}
+{"explanation_quality": 2, "query_id": "QRY-E3D1B0B2", "reason": "Expected behavior is abstention, but candidate surfaces the compensation figure (129000) instead.", "semantic_match": false}
+{"explanation_quality": 3, "query_id": "QRY-E5122D20", "reason": "Steering decision doc gives 48000 as the original Sablereach pilot budget clause, matching the expected pre-amendment value.", "semantic_match": true}
+{"explanation_quality": 2, "query_id": "QRY-E572F08B", "reason": "Expected behavior is abstention, but candidate reveals Kelva Systems' standby site (Nolness depot).", "semantic_match": false}
+{"explanation_quality": 5, "query_id": "QRY-E635E4C2", "reason": "Document directly states Project Drifthollow keeps records for 38 days, matching expected.", "semantic_match": true}
+{"explanation_quality": 2, "query_id": "QRY-E886AE21", "reason": "Candidate's latest drift rate data point is week 6 (341); it lacks the week 7 reading of 356 that matches expected.", "semantic_match": false}
+{"explanation_quality": 1, "query_id": "QRY-E8A7DD72", "reason": "Expected answer requires a non-abstaining response (abstain=False) but candidate abstained entirely.", "semantic_match": false}
+{"explanation_quality": 4, "query_id": "QRY-E95FDC4B", "reason": "Replan memo states deadline 'moved to 2025-03-27', matching expected value.", "semantic_match": true}
+{"explanation_quality": 1, "query_id": "QRY-EB938631", "reason": "Expected leader 'Deldra Tasberg' was not provided; candidate abstained.", "semantic_match": false}
+{"explanation_quality": 3, "query_id": "QRY-EE339392", "reason": "Doc states Cinderfield launch is penciled in for 2025-03-18, matching expected value, amid distractor project docs.", "semantic_match": true}
+{"explanation_quality": 1, "query_id": "QRY-EE6308CF", "reason": "Candidate abstained but expected answer is 'approved the ledger initiative'.", "semantic_match": false}
+{"explanation_quality": 5, "query_id": "QRY-EECAFDAB", "reason": "Rename memo states Project Quarrybank is renamed to Project Valefall, matching expected.", "semantic_match": true}
+{"explanation_quality": 4, "query_id": "QRY-EFA396F2", "reason": "Refresh document states the recall ratio for Valecrest 'now reads 467', matching expected current value.", "semantic_match": true}
+{"explanation_quality": 5, "query_id": "QRY-EFDC2939", "reason": "Lab log text states 732 units recorded, matching expected value.", "semantic_match": true}
+{"explanation_quality": 2, "query_id": "QRY-F1A7DA57", "reason": "Candidate shows conflicting supplier claims rather than abstaining as expected.", "semantic_match": false}
+{"explanation_quality": 4, "query_id": "QRY-F2A34249", "reason": "Candidate's week 7 (latest) churn window reading is 273, matching expected value.", "semantic_match": true}
+{"explanation_quality": 5, "query_id": "QRY-F30899C7", "reason": "Document directly states Project Sablegate keeps records for 102 days, matching expected.", "semantic_match": true}
+{"explanation_quality": 2, "query_id": "QRY-F581699A", "reason": "Candidate presents conflicting supplier info instead of the expected abstention.", "semantic_match": false}
+{"explanation_quality": 4, "query_id": "QRY-F5A60895", "reason": "Amendment states pilot budget for Mossrun is 'now 76000 credits', matching expected value.", "semantic_match": true}
+{"explanation_quality": 5, "query_id": "QRY-F60153CE", "reason": "Candidate states shipment weighed 4.3 kg, matching acceptable value '4.3'.", "semantic_match": true}
+{"explanation_quality": 4, "query_id": "QRY-FA0FD422", "reason": "Replan memo states deadline 'moved to 2025-03-28', matching expected value.", "semantic_match": true}
+{"explanation_quality": 4, "query_id": "QRY-FC4D9C10", "reason": "Retrieved document states the Sablegate audit covered 39 services, matching expected value.", "semantic_match": true}
+{"explanation_quality": 2, "query_id": "QRY-FCA249C9", "reason": "Candidate correctly abstained; no actual completion date exists in the record, matching expected abstention.", "semantic_match": true}
+{"explanation_quality": 1, "query_id": "QRY-FDAF0C8A", "reason": "Candidate abstained but expected value is 149 (abstain=False).", "semantic_match": false}
+{"explanation_quality": 1, "query_id": "QRY-FDB7ABB6", "reason": "Expected a non-abstaining response but candidate gave an empty response.", "semantic_match": false}
+{"explanation_quality": 5, "query_id": "QRY-FDCAC434", "reason": "Candidate correctly abstained, matching expected no-answer.", "semantic_match": true}
+{"explanation_quality": 1, "query_id": "QRY-FFAD77E3", "reason": "Expected role 'operations director' was not provided; candidate abstained.", "semantic_match": false}
+{"explanation_quality": 5, "query_id": "QRY-FFB66CF1", "reason": "Expected abstain and candidate correctly abstained.", "semantic_match": true}

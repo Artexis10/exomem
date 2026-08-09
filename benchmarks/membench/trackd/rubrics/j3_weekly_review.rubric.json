@@ -1,0 +1,52 @@
+{
+  "journey": "j3_weekly_review",
+  "pairing": "blind",
+  "order": "randomized",
+  "samples": 3,
+  "criteria": [
+    {
+      "id": "queue_completeness",
+      "question": "How completely did the weekly review surface the items that genuinely needed attention (dormant conclusions, raw capture backlog, open loops)?",
+      "anchors": {
+        "1": "Most planted attention items were missed entirely; the review gives no usable picture of what needs work.",
+        "2": "Several planted items were missed; the reviewer would have to re-scan the corpus manually to trust the sweep.",
+        "3": "The majority of planted items surfaced, but at least one queue has a blind spot the summary does not acknowledge.",
+        "4": "All but one planted item surfaced, and any gap is explicitly acknowledged rather than hidden.",
+        "5": "Every planted attention item surfaced in the right queue, and unsupported queues are declared as unsupported rather than silently empty."
+      }
+    },
+    {
+      "id": "false_surface_discipline",
+      "question": "How well did the review avoid surfacing items that did NOT need attention (well-maintained notes, already-compiled captures)?",
+      "anchors": {
+        "1": "The queues are dominated by noise; real items drown among false surfaces.",
+        "2": "Noticeably more false surfaces than planted items; triage would waste most of its time.",
+        "3": "Some false surfaces alongside the real items; triage works but with avoidable overhead.",
+        "4": "At most one false surface across all queues; the decoys were otherwise correctly left alone.",
+        "5": "Zero false surfaces: every well-linked decoy conclusion and every compiled capture stayed out of the queues."
+      }
+    },
+    {
+      "id": "triage_efficiency",
+      "question": "How efficient was the review in operations: could a reader clear the week's backlog from these queues without extra manual digging?",
+      "anchors": {
+        "1": "The op count is unbounded or the queues demand full manual re-derivation of what changed.",
+        "2": "High burden: many redundant operations or queues that must be cross-checked by hand.",
+        "3": "Moderate burden: the scripted sweep suffices but leaves noticeable manual reconciliation.",
+        "4": "Low burden: a single scripted pass covers the backlog with only minor manual follow-up.",
+        "5": "Minimal burden: one scripted pass, zero manual interventions, and each queue maps directly to an action."
+      }
+    },
+    {
+      "id": "summary_actionability",
+      "question": "Does the review summary state, per queue, what surfaced, what is unsupported, and what to do next - without overclaiming?",
+      "anchors": {
+        "1": "The summary is missing, misleading, or claims results for queues that never ran.",
+        "2": "The summary reports raw counts only; unsupported queues are indistinguishable from empty ones.",
+        "3": "The summary covers the queues but blurs at least one unsupported-vs-zero distinction.",
+        "4": "The summary is accurate per queue and separates unsupported from zero, with minor gaps in next-step framing.",
+        "5": "The summary is accurate, per queue, explicitly separates unsupported from zero, and reads as a direct triage plan."
+      }
+    }
+  ]
+}

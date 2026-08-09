@@ -1,0 +1,10 @@
+{
+  "claim_id": "CLM-BAD00001",
+  "subject": "ENT-00000001",
+  "predicate": "owner_of",
+  "object": {"kind": "text", "value": "someone"},
+  "assertions": [
+    {"source_id": "SRC-00000001", "stance": "supports", "asserted_at": "2025-01-06", "recorded_week": 0}
+  ],
+  "status_timeline": []
+}

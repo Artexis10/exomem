@@ -1,0 +1,745 @@
+"""The compile plan: oracle-derived conclusions, before any generation wiring.
+
+Track B bulk-loads raw sources and never compiles, so the structure `provenance`
+and `contradiction_uncertainty` score does not exist — 205 sources, 0 compiled
+notes, `ingested_into: []` on 204 of 204 (2026-08-07 vault). The plan is what
+gives a compiled altitude something to build.
+
+Every field is derived from records the oracle already holds. No model is
+involved: this is transduction of known ground truth, not reasoning about what
+deserves remembering. That limit is real — a scripted compile is more faithful
+than a bulk dump and less faithful than an agent choosing what to keep.
+
+Pure logic only. Generation wiring, native rendering and scoring come later
+(tasks 1.3+), so nothing here touches corpus bytes.
+"""
+
+from __future__ import annotations
+
+from datetime import date
+
+import pytest
+
+from membench.compile_plan import conclusion_id_for, derive_compile_plan
+from membench.schema import (
+    Assertion,
+    ClaimRecord,
+    ConclusionRecord,
+    ClaimStatus,
+    SpanCause,
+    SpanCauseKind,
+    Stance,
+    StatusSpan,
+    TypedValue,
+)
+
+
+def _claim(
+    claim_id: str,
+    subject: str,
+    predicate: str,
+    value: str,
+    *,
+    sources: tuple[str, ...] = ("SRC-AAAA0001",),
+    disputing: tuple[str, ...] = (),
+    status: ClaimStatus = ClaimStatus.CURRENT,
+    supersedes: str | None = None,
+    superseded_by: str | None = None,
+    recorded_week: int = 1,
+) -> ClaimRecord:
+    assertions = [
+        Assertion(
+            source_id=s,
+            stance=Stance.SUPPORTS,
+            asserted_at=date(2025, 3, 14),
+            recorded_week=recorded_week,
+        )
+        for s in sources
+    ]
+    assertions += [
+        Assertion(
+            source_id=s,
+            stance=Stance.DISPUTES,
+            asserted_at=date(2025, 3, 14),
+            recorded_week=recorded_week,
+        )
+        for s in disputing
+    ]
+    return ClaimRecord(
+        claim_id=claim_id,
+        subject=subject,
+        predicate=predicate,
+        object=TypedValue(kind="quantity", value=value, unit="staff"),
+        assertions=assertions,
+        status_timeline=[
+            StatusSpan(
+                status=status,
+                valid_from=date(2025, 3, 14),
+                recorded_week=recorded_week,
+                cause=SpanCause(kind=SpanCauseKind.INITIAL, by=sources[0] if sources else None),
+            )
+        ],
+        supersedes=supersedes,
+        superseded_by=superseded_by,
+    )
+
+
+# --------------------------------------------------------------------------
+# Citation derivation
+# --------------------------------------------------------------------------
+
+
+def test_a_conclusion_cites_the_sources_that_support_its_claim() -> None:
+    claims = [_claim("CLM-0001", "ENT-1", "headcount", "173", sources=("SRC-A", "SRC-B"))]
+    plan = derive_compile_plan(claims)
+    assert len(plan) == 1
+    assert plan[0].cites == ("SRC-A", "SRC-B")
+
+
+def test_a_disputing_source_is_not_cited_as_the_conclusion_s_basis() -> None:
+    """A source that objects to a claim is evidence ABOUT it, not evidence FOR it.
+
+    Citing objectors as basis would make every disputed conclusion claim support
+    it never had, and would inflate the permitted set the precision gate checks
+    against.
+    """
+
+    claims = [
+        _claim("CLM-0001", "ENT-1", "headcount", "173", sources=("SRC-A",), disputing=("SRC-B",))
+    ]
+    assert derive_compile_plan(claims)[0].cites == ("SRC-A",)
+
+
+# --------------------------------------------------------------------------
+# Lineage
+# --------------------------------------------------------------------------
+
+
+def test_supersession_carries_to_the_conclusion() -> None:
+    claims = [
+        _claim("CLM-0001", "ENT-1", "deadline", "2025-03-14", superseded_by="CLM-0002"),
+        _claim("CLM-0002", "ENT-1", "deadline", "2025-03-28", supersedes="CLM-0001"),
+    ]
+    by_id = {c.claim_id: c for c in derive_compile_plan(claims)}
+    # Edges reference CONCLUSIONS, not claims: the plan is a graph of the
+    # conclusions a vault holds, and an adapter rendering it never sees a claim.
+    assert by_id["CLM-0002"].supersedes == conclusion_id_for("CLM-0001", 1)
+    assert by_id["CLM-0001"].supersedes is None
+
+
+def test_supersession_predecessors_emit_before_their_successors() -> None:
+    """Claim-id order is not a valid compilation dependency order (4b.44)."""
+
+    claims = [
+        _claim("CLM-ZZZZ", "ENT-1", "deadline", "2025-03-14", superseded_by="CLM-AAAA"),
+        _claim("CLM-AAAA", "ENT-1", "deadline", "2025-03-28", supersedes="CLM-ZZZZ"),
+    ]
+    plan = derive_compile_plan(claims)
+    emitted: set[str] = set()
+    for conclusion in plan:
+        assert conclusion.supersedes is None or conclusion.supersedes in emitted
+        emitted.add(conclusion.conclusion_id)
+
+
+def test_supersession_cycle_is_refused() -> None:
+    claims = [
+        _claim("CLM-AAAA", "ENT-1", "deadline", "2025-03-14", supersedes="CLM-BBBB"),
+        _claim("CLM-BBBB", "ENT-1", "deadline", "2025-03-28", supersedes="CLM-AAAA"),
+    ]
+    with pytest.raises(ValueError, match="supersession cycle"):
+        derive_compile_plan(claims)
+
+
+@pytest.mark.timeout(180)
+def test_seed_one_emits_every_supersession_edge_after_its_predecessor(tmp_path) -> None:
+    """Seed 1 previously left 46 of 88 supersession edges unresolved (4b.44)."""
+
+    from membench.generate import generate_corpus
+    from membench.schema import load_jsonl
+
+    corpus = tmp_path / "s1"
+    generate_corpus(1, corpus)
+    plan = derive_compile_plan(load_jsonl(ClaimRecord, corpus / "claims.jsonl"))
+    emitted: set[str] = set()
+    for conclusion in plan:
+        assert conclusion.supersedes is None or conclusion.supersedes in emitted
+        emitted.add(conclusion.conclusion_id)
+
+
+def test_a_superseding_pair_is_not_a_dispute() -> None:
+    """The trap in this derivation.
+
+    Superseded and disputing claims look identical on a naive read — same
+    subject, same predicate, different values. Treating a supersession chain as
+    a dispute would manufacture conflicts across the whole temporal family and
+    make the contradiction dimension meaningless in the opposite direction from
+    today's.
+    """
+
+    claims = [
+        _claim("CLM-0001", "ENT-1", "deadline", "2025-03-14", superseded_by="CLM-0002"),
+        _claim("CLM-0002", "ENT-1", "deadline", "2025-03-28", supersedes="CLM-0001"),
+    ]
+    assert all(not c.disputes for c in derive_compile_plan(claims))
+
+
+def test_two_live_claims_on_one_predicate_dispute_each_other() -> None:
+    """The t07 shape: a system-of-record figure and a tentative rumour."""
+
+    claims = [
+        _claim("CLM-0001", "ENT-1", "headcount", "173", sources=("SRC-A",)),
+        _claim(
+            "CLM-0002",
+            "ENT-1",
+            "headcount",
+            "149",
+            sources=("SRC-B",),
+            status=ClaimStatus.TENTATIVE,
+        ),
+    ]
+    by_id = {c.claim_id: c for c in derive_compile_plan(claims)}
+    # Disputes point at the *head* of the other claim's chain (4b.39): that is
+    # the revision a store would be holding, not its first draft.
+    assert by_id["CLM-0001"].disputes == (conclusion_id_for("CLM-0002", 1),)
+    assert by_id["CLM-0002"].disputes == (conclusion_id_for("CLM-0001", 1),)
+
+
+def test_same_value_on_one_predicate_is_corroboration_not_dispute() -> None:
+    claims = [
+        _claim("CLM-0001", "ENT-1", "headcount", "173", sources=("SRC-A",)),
+        _claim("CLM-0002", "ENT-1", "headcount", "173", sources=("SRC-B",)),
+    ]
+    assert all(not c.disputes for c in derive_compile_plan(claims))
+
+
+def test_different_subjects_never_dispute() -> None:
+    claims = [
+        _claim("CLM-0001", "ENT-1", "headcount", "173"),
+        _claim("CLM-0002", "ENT-2", "headcount", "149"),
+    ]
+    assert all(not c.disputes for c in derive_compile_plan(claims))
+
+
+# --------------------------------------------------------------------------
+# Contract properties
+# --------------------------------------------------------------------------
+
+
+def test_the_plan_is_deterministic_and_order_independent() -> None:
+    """Corpus bytes depend on this, and the release manifest hashes it."""
+
+    claims = [
+        _claim("CLM-0002", "ENT-1", "headcount", "149", sources=("SRC-B",)),
+        _claim("CLM-0001", "ENT-1", "headcount", "173", sources=("SRC-A",)),
+    ]
+    forward = derive_compile_plan(claims)
+    reversed_input = derive_compile_plan(list(reversed(claims)))
+    assert [c.model_dump() for c in forward] == [c.model_dump() for c in reversed_input]
+
+
+def test_the_record_carries_no_product_specific_field() -> None:
+    """Neutrality guard (spec task 1.6).
+
+    A record shaped by one product's API hands that product a native fit and
+    everyone else a translation layer — the 2026-08-05 renderer defect with the
+    sign flipped. These names are all borrowed from real product APIs and must
+    never appear here.
+    """
+
+    fields = set(ConclusionRecord.model_fields)
+    forbidden = {
+        "sources",  # exomem remember(sources=...)
+        "ingested_into",
+        "observations",  # basic-memory note grammar
+        "relations",
+        "permalink",
+        "entity_type",
+        "frontmatter",
+    }
+    assert not (fields & forbidden), f"product-specific field(s): {sorted(fields & forbidden)}"
+
+
+def test_every_claim_becomes_exactly_one_conclusion() -> None:
+    claims = [
+        _claim("CLM-0001", "ENT-1", "headcount", "173"),
+        _claim("CLM-0002", "ENT-2", "deadline", "2025-03-14"),
+        _claim("CLM-0003", "ENT-3", "vendor", "Kelva"),
+    ]
+    plan = derive_compile_plan(claims)
+    assert [c.claim_id for c in plan] == ["CLM-0001", "CLM-0002", "CLM-0003"]
+    assert len({c.conclusion_id for c in plan}) == 3
+
+
+def test_a_claim_with_no_supporting_source_is_refused() -> None:
+    """A conclusion with no basis is exactly the 4b.13 defect — records whose
+    citation precision is unverifiable, where a shotgun passes for free."""
+
+    claims = [_claim("CLM-0001", "ENT-1", "headcount", "173", sources=(), disputing=("SRC-B",))]
+    with pytest.raises(ValueError, match="no supporting source"):
+        derive_compile_plan(claims)
+
+
+# --------------------------------------------------------------------------
+# Against the real corpus
+# --------------------------------------------------------------------------
+
+
+def test_derivation_finds_both_dispute_families_in_the_real_corpus() -> None:
+    """Seed-1 carries two differently-shaped conflicts, and both must be found.
+
+    - **t08 equal-authority**: both claims carry an explicit `disputed` status.
+    - **t07 authority conflict**: NEITHER carries one. A system-of-record value
+      sits at `current` and a rumour at `tentative`, and the disagreement exists
+      only in the values.
+
+    A derivation keyed on the `disputed` status would find the first family and
+    silently miss the second, halving the contradiction dimension while looking
+    correct. This is why the rule is value-disagreement-without-lineage rather
+    than a status lookup.
+    """
+
+    from pathlib import Path
+
+    from membench.schema import load_jsonl
+
+    corpus = Path(__file__).resolve().parents[1] / "benchmarks/corpus/generated/s1"
+    if not (corpus / "claims.jsonl").is_file():  # pragma: no cover - corpus optional
+        pytest.skip("generated seed-1 corpus not present in this checkout")
+
+    claims = load_jsonl(ClaimRecord, corpus / "claims.jsonl")
+    plan = derive_compile_plan(claims)
+    by_claim = {c.claim_id: c for c in claims}
+    con_to_claim = {c.conclusion_id: c.claim_id for c in plan}
+
+    pairs = {
+        frozenset({c.claim_id, con_to_claim[d]}) for c in plan for d in c.disputes
+    }
+    assert pairs, "no dispute pair derived from the real corpus"
+
+    def _marked(claim_id: str) -> bool:
+        return any(
+            span.status is ClaimStatus.DISPUTED
+            for span in by_claim[claim_id].status_timeline
+        )
+
+    both = [p for p in pairs if all(_marked(c) for c in p)]
+    neither = [p for p in pairs if not any(_marked(c) for c in p)]
+    assert both, "no explicitly-disputed pair found (t08 family)"
+    assert neither, "no implicit value-conflict pair found (t07 family)"
+    # Every pair is one shape or the other; a half-marked pair would mean the
+    # corpus and this derivation disagree about what a dispute is.
+    assert len(both) + len(neither) == len(pairs)
+
+
+def test_every_conclusion_in_the_real_corpus_has_a_basis() -> None:
+    """The refusal must not fire on a real corpus — if it does, some template
+    is emitting a claim no source supports (the 4b.13 class)."""
+
+    from pathlib import Path
+
+    from membench.schema import load_jsonl
+
+    corpus = Path(__file__).resolve().parents[1] / "benchmarks/corpus/generated/s1"
+    if not (corpus / "claims.jsonl").is_file():  # pragma: no cover - corpus optional
+        pytest.skip("generated seed-1 corpus not present in this checkout")
+
+    plan = derive_compile_plan(load_jsonl(ClaimRecord, corpus / "claims.jsonl"))
+    assert all(c.cites for c in plan)
+    assert len({c.conclusion_id for c in plan}) == len(plan)
+
+
+# --------------------------------------------------------------------------
+# Generation wiring (tasks 1.3-1.5)
+# --------------------------------------------------------------------------
+
+
+def test_generation_emits_the_plan_and_counts_it(tmp_path) -> None:
+    from membench.generate import generate_corpus
+
+    manifest = generate_corpus(1, tmp_path / "s1", template_ids=["t00_mini_smoke", "t07_authority_conflict"])
+    plan_path = tmp_path / "s1" / "compile-plan.jsonl"
+    assert plan_path.is_file()
+    lines = [line for line in plan_path.read_text().splitlines() if line.strip()]
+    assert manifest.counts["conclusions"] == len(lines) == manifest.counts["claims"]
+
+
+def test_the_emitted_plan_is_byte_identical_across_generations(tmp_path) -> None:
+    """Corpus bytes and the release manifest depend on this."""
+
+    from membench.generate import generate_corpus
+
+    ids = ["t00_mini_smoke", "t07_authority_conflict"]
+    generate_corpus(1, tmp_path / "a", template_ids=ids)
+    generate_corpus(1, tmp_path / "b", template_ids=ids)
+    assert (tmp_path / "a" / "compile-plan.jsonl").read_bytes() == (
+        tmp_path / "b" / "compile-plan.jsonl"
+    ).read_bytes()
+
+
+def test_conclusions_name_entities_rather_than_ids(tmp_path) -> None:
+    """A note titled "headcount of ENT-8E7A0887" is lexically unreachable.
+
+    A query naming the organisation would never match it, so a compiled altitude
+    built on raw ids would score zero for a reason unrelated to any contender —
+    the exact class of defect the ceiling contender exists to catch.
+    """
+
+    import json
+
+    from membench.generate import generate_corpus
+
+    generate_corpus(1, tmp_path / "s1", template_ids=["t07_authority_conflict"])
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "s1" / "compile-plan.jsonl").read_text().splitlines()
+        if line.strip()
+    ]
+    assert rows
+    assert not any("ENT-" in row["title"] or "ENT-" in row["body"] for row in rows)
+
+
+def test_generation_refuses_a_corpus_with_no_disputed_pair(tmp_path) -> None:
+    """4b.33 shipped a dimension nothing could pass. Not twice.
+
+    t00 alone carries supersession but no live disagreement, so its plan has no
+    dispute edge — exactly the corpus that would give the contradiction
+    dimension a ceiling of zero.
+    """
+
+    import membench.generate as generate_module
+    from membench.generate import generate_corpus
+    from membench.templates import registry
+    from membench.templates.base import GenerationError
+
+    # The guard fires only on the REAL registry, so the registry itself is what
+    # has to be substituted. Narrowing via template_ids or templates= is a
+    # fixture and stays exempt — otherwise the guard breaks every
+    # single-template test in the suite while protecting nothing.
+    dispute_free = {"t00_mini_smoke": registry()["t00_mini_smoke"]}
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(generate_module, "registry", lambda: dispute_free)
+    try:
+        with pytest.raises((ValueError, GenerationError), match="no disputed pair"):
+            generate_corpus(1, tmp_path / "s1")
+    finally:
+        monkeypatch.undo()
+
+
+def test_fixtures_are_exempt_from_the_dispute_guard(tmp_path) -> None:
+    """Both narrowing routes must stay buildable, by template_ids and by
+    templates=. A guard that fires on fixtures protects nothing."""
+
+    from membench.generate import generate_corpus
+    from membench.templates import registry
+
+    by_ids = generate_corpus(1, tmp_path / "a", template_ids=["t00_mini_smoke"])
+    assert by_ids.counts["conclusions"] > 0
+    by_set = generate_corpus(
+        1, tmp_path / "b", templates={"t00_mini_smoke": registry()["t00_mini_smoke"]}
+    )
+    assert by_set.counts["conclusions"] > 0
+
+
+# --------------------------------------------------------------------------
+# Native rendering, gated on altitude (tasks 2.1-2.2)
+# --------------------------------------------------------------------------
+
+
+def _view(tmp_path):
+    from membench.generate import generate_corpus
+    from membench.native import load_corpus_view
+
+    generate_corpus(1, tmp_path / "s1", template_ids=["t07_authority_conflict"])
+    return load_corpus_view(tmp_path / "s1")
+
+
+def test_a_raw_source_run_renders_no_conclusions(tmp_path) -> None:
+    """The plan lives in every corpus, so rendering must be gated on ALTITUDE.
+
+    Keying on "does the corpus have a plan" instead would silently promote every
+    existing raw-source run to compiled, changing what its provenance and
+    contradiction numbers mean without anything saying so.
+    """
+
+    from membench.native import basic_memory, exomem_kb
+
+    view = _view(tmp_path)
+    assert view.conclusions, "fixture corpus has no plan"
+
+    bm_out = tmp_path / "bm"
+    basic_memory.render(view, bm_out, altitude="raw_source")
+    assert not any("type: conclusion" in p.read_text() for p in bm_out.glob("*.md"))
+
+    ex_out = tmp_path / "ex"
+    exomem_kb.render(view, ex_out, altitude="raw_source")
+    ops = (ex_out / "capture-ops.jsonl").read_text()
+    assert '"op": "remember"' not in ops
+
+
+def test_both_products_render_the_plan_in_their_own_grammar(tmp_path) -> None:
+    """Same neutral record, two native shapes — the fairness requirement.
+
+    basic-memory expresses citation as a typed relation line; exomem expresses
+    it as a `remember` op carrying `cites`. Neither is a translation of the
+    other's API.
+    """
+
+    import json
+
+    from membench.native import basic_memory, exomem_kb
+
+    view = _view(tmp_path)
+
+    bm_out = tmp_path / "bm"
+    basic_memory.render(view, bm_out, altitude="compiled")
+    notes = [p.read_text() for p in bm_out.glob("*.md")]
+    conclusions = [n for n in notes if "type: conclusion" in n]
+    assert len(conclusions) == len(view.conclusions)
+    assert any("- cites [[" in n for n in conclusions)
+
+    ex_out = tmp_path / "ex"
+    exomem_kb.render(view, ex_out, altitude="compiled")
+    ops = [
+        json.loads(line)
+        for line in (ex_out / "capture-ops.jsonl").read_text().splitlines()
+        if line.strip()
+    ]
+    remembers = [o for o in ops if o["op"] == "remember"]
+    assert len(remembers) == len(view.conclusions)
+    assert all(o["cites"] for o in remembers)
+
+
+def test_exomem_authors_every_conclusion_after_the_sources_it_cites(tmp_path) -> None:
+    """`remember(sources=...)` writes `ingested_into:` back onto each source, so
+    a conclusion authored before its sources exist has nothing to link to."""
+
+    import json
+
+    from membench.native import exomem_kb
+
+    view = _view(tmp_path)
+    out = tmp_path / "ex"
+    exomem_kb.render(view, out, altitude="compiled")
+    ops = [
+        json.loads(line)
+        for line in (out / "capture-ops.jsonl").read_text().splitlines()
+        if line.strip()
+    ]
+    first_remember = next(i for i, o in enumerate(ops) if o["op"] == "remember")
+    assert all(o["op"] == "capture_source" for o in ops[:first_remember])
+
+
+# --------------------------------------------------------------------------
+# End to end at compiled altitude (task 3.2)
+# --------------------------------------------------------------------------
+
+
+def test_exomem_compiles_every_conclusion_with_its_chain(tmp_path) -> None:
+    """The altitude's whole point: notes that declare what they were drawn from.
+
+    exomem refuses an active compiled note carrying no qualifying typed relation
+    (SEMANTIC_CONTRACT_BLOCKED / RELATION_DISPOSITION_MISSING) — 7 of 8 writes
+    were rejected before the adapter authored `derived_from` edges. The
+    requirement is the product being strict about precisely what this altitude
+    measures, so it is satisfied with real edges rather than waived with a
+    reviewed-none disposition, which would discard the thing under test.
+    """
+
+    from membench.adapters.exomem_local import ExomemLocalAdapter, lexical_profile
+    from membench.generate import generate_corpus
+    from membench.native import exomem_kb, load_corpus_view
+
+    generate_corpus(1, tmp_path / "s1", template_ids=["t07_authority_conflict"])
+    view = load_corpus_view(tmp_path / "s1")
+    exomem_kb.render(view, tmp_path / "native", altitude="compiled")
+
+    adapter = ExomemLocalAdapter(altitude="compiled", answer_mode="native")
+    adapter.setup(tmp_path / "wd", lexical_profile())
+    try:
+        results = adapter.ingest(tmp_path / "s1", tmp_path / "native")
+        remembers = [r for r in results if r.op == "remember"]
+        assert len(remembers) == len(view.conclusions)
+        failed = [r for r in remembers if not r.ok]
+        assert not failed, f"compile failures: {[r.detail for r in failed][:3]}"
+
+        notes = [
+            p
+            for p in (tmp_path / "wd" / "vault" / "Knowledge Base" / "Notes").rglob("*.md")
+            if p.name != "index.md"
+        ]
+        assert len(notes) == len(view.conclusions)
+        # The chain is the measurement: every compiled note must declare a basis.
+        assert all("sources:" in p.read_text() for p in notes)
+    finally:
+        adapter.cleanup()
+
+
+def test_a_raw_source_run_compiles_nothing(tmp_path) -> None:
+    from membench.adapters.exomem_local import ExomemLocalAdapter, lexical_profile
+    from membench.generate import generate_corpus
+    from membench.native import exomem_kb, load_corpus_view
+
+    generate_corpus(1, tmp_path / "s1", template_ids=["t07_authority_conflict"])
+    view = load_corpus_view(tmp_path / "s1")
+    exomem_kb.render(view, tmp_path / "native", altitude="raw_source")
+
+    adapter = ExomemLocalAdapter(altitude="raw_source")
+    adapter.setup(tmp_path / "wd", lexical_profile())
+    try:
+        results = adapter.ingest(tmp_path / "s1", tmp_path / "native")
+        assert not [r for r in results if r.op == "remember"]
+    finally:
+        adapter.cleanup()
+
+
+def test_an_adapter_refuses_an_altitude_it_cannot_honour() -> None:
+    """graybox's compile path is an LLM organize pass, which the deterministic
+    layer excludes. Refusing is the honest outcome; a zero would not be."""
+
+    from membench.adapters import create_adapter
+    from membench.adapters.base import AdapterUnsupported
+
+    assert create_adapter("graybox-local").supported_altitudes == frozenset({"raw_source"})
+    with pytest.raises(AdapterUnsupported, match="cannot honour altitude"):
+        create_adapter("graybox-local", altitude="compiled").ingestion_altitude
+
+
+# --------------------------------------------------------------------------
+# The ceiling proof (task 4.3) — this gates the whole change
+# --------------------------------------------------------------------------
+
+
+def _ceiling_run(tmp_path, altitude: str):
+    import sys
+    from pathlib import Path
+
+    sys.path.insert(0, str(Path(__file__).parent))
+    from membench.adapters import create_adapter
+    from membench.generate import generate_corpus
+    from membench.runner import execute_run
+    from test_membench_runner import _spec
+
+    corpus = tmp_path / f"corpus-{altitude}"
+    # Both dispute families: t07 (authority conflict, no explicit `disputed`
+    # status) and t08 (equal authority, which is what sets `uncertainty.hedged`
+    # and therefore actually reaches the calibration gate — t07 alone leaves
+    # every row NOT_APPLICABLE and proves nothing).
+    generate_corpus(
+        1, corpus, template_ids=["t07_authority_conflict", "t08_equal_authority_dispute"]
+    )
+    spec = _spec(corpus, tmp_path / altitude, create_adapter("oracle-retrieval", altitude=altitude), None)
+    spec.judge_backend = None
+    return execute_run(spec)
+
+
+def test_contradiction_is_reachable_at_compiled_altitude(tmp_path) -> None:
+    """A perfect retriever must be able to pass every dimension it is scored on.
+
+    This dimension shipped with a ceiling of ZERO (4b.33): the gate demanded
+    hedging language from an answerer with no generative step, so nothing could
+    pass and the resulting 0/20 was published as a shared product capability
+    gap. Measured on the full corpus, the ceiling moved 4/40 to 40/40 once the
+    gate asked whether the conflict was SURFACED instead.
+
+    If this ever fails, the gate is wrong and not the contender — a ceiling
+    below the query count is a harness defect.
+    """
+
+    result = _ceiling_run(tmp_path, "compiled")
+    assert not result.invalid, result.invalid_reason
+    contradiction = result.dimensions.get("contradiction_uncertainty", {})
+    assert contradiction.get("pass", 0) > 0, "ceiling cannot pass contradiction"
+    assert contradiction.get("fail", 0) == 0, (
+        "a perfect retriever failed the contradiction gate: the gate is wrong, "
+        f"not the contender ({contradiction})"
+    )
+
+
+def test_altitude_moves_only_the_altitude_dependent_dimension(tmp_path) -> None:
+    """Containment check.
+
+    Compiling changes what provenance and contradiction can measure. It must not
+    quietly move retrieval-property dimensions, or the altitude would be
+    confounded with retrieval quality and no cross-altitude figure would mean
+    anything.
+    """
+
+    raw = _ceiling_run(tmp_path, "raw_source")
+    compiled = _ceiling_run(tmp_path, "compiled")
+    for dimension in ("factual_qa", "temporal", "abstention"):
+        assert raw.dimensions.get(dimension) == compiled.dimensions.get(dimension), (
+            f"{dimension} moved with altitude: "
+            f"{raw.dimensions.get(dimension)} vs {compiled.dimensions.get(dimension)}"
+        )
+
+
+# --------------------------------------------------------------------------
+# Knowledge time (4b.39)
+# --------------------------------------------------------------------------
+
+
+def _claim_with_staggered_support(claim_id: str = "CLM-STAGGER") -> ClaimRecord:
+    """One claim, two supporting sources, recorded five weeks apart."""
+
+    claim = _claim(claim_id, "ENT-1", "headcount", "42", sources=("SRC-EARLY",), recorded_week=1)
+    claim.assertions.append(
+        Assertion(
+            source_id="SRC-LATE",
+            stance=Stance.SUPPORTS,
+            asserted_at=date(2025, 3, 14),
+            recorded_week=5,
+        )
+    )
+    return claim
+
+
+def test_a_conclusion_never_rests_on_evidence_recorded_after_it() -> None:
+    """4b.39. The plan derived one conclusion per claim citing *every*
+    supporting source, whatever week each was recorded. A query asking as of
+    knowledge week 3 was then served a conclusion resting on a source that did
+    not exist until week 5, and the citation gate was right to refuse it —
+    measured as six rows of `precision 1/2` and the whole reason compiled
+    provenance sat below raw (274/10 against 280/4).
+
+    The harness is bitemporal everywhere else. The plan was the one place that
+    was not, and no scoring change could fix that without either making the
+    dimension unwinnable for contenders or letting a cite-everything store win.
+    """
+
+    plan = derive_compile_plan([_claim_with_staggered_support()])
+    by_week = {c.knowledge_week: c for c in plan}
+    assert sorted(by_week) == [1, 5], [c.knowledge_week for c in plan]
+    assert by_week[1].cites == ("SRC-EARLY",)
+    assert by_week[5].cites == ("SRC-EARLY", "SRC-LATE")
+
+
+def test_a_revision_supersedes_the_conclusion_it_replaces() -> None:
+    """Revisions are a chain, not a set of unrelated notes.
+
+    A store that learns more about a claim revises the note it already holds,
+    so the compiled tier has to carry that lineage or the supersession
+    structure it hands contenders would be a fiction.
+    """
+
+    plan = derive_compile_plan([_claim_with_staggered_support()])
+    first, second = sorted(plan, key=lambda c: c.knowledge_week)
+    assert first.supersedes is None
+    assert second.supersedes == first.conclusion_id
+    assert first.conclusion_id != second.conclusion_id
+
+
+def test_a_claim_whose_support_lands_at_once_still_yields_one_conclusion() -> None:
+    """No gratuitous revisions: the chain exists to record that the basis
+    changed, so a basis that never changed must not produce one."""
+
+    plan = derive_compile_plan([_claim("CLM-1", "ENT-1", "headcount", "42", sources=("SRC-A", "SRC-B"))])
+    assert len(plan) == 1
+    assert plan[0].cites == ("SRC-A", "SRC-B")
+
+
+def test_conclusion_ids_are_distinct_per_revision() -> None:
+    """Sharing an id across revisions would collapse the chain wherever a plan
+    is indexed by conclusion id -- which is how every consumer reads it."""
+
+    assert conclusion_id_for("CLM-1", 1) != conclusion_id_for("CLM-1", 5)
+    assert conclusion_id_for("CLM-1", 1) == conclusion_id_for("CLM-1", 1)

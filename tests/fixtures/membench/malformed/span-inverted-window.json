@@ -1,0 +1,7 @@
+{
+  "status": "current",
+  "valid_from": "2025-03-01",
+  "valid_to": "2025-02-01",
+  "recorded_week": 2,
+  "cause": {"kind": "initial", "by": "SRC-00000001"}
+}
