@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
 import importlib.util
 from pathlib import Path
 
@@ -13,6 +14,7 @@ from lme.adapter import LmeExomemAdapter, lme_profile
 from lme.dataset import load_dataset
 from membench.adapters.base import AdapterEnvironmentError
 from membench.adapters.exomem_local import ExomemLocalAdapter
+from protocol.models import CaseGold, CaseHandle, DatasetIdentity
 
 
 FIXTURE = Path("benchmarks/lme/fixtures/mini.json")
@@ -24,6 +26,10 @@ def _primed_adapter(vault: Path) -> LmeExomemAdapter:
     adapter._vault = vault
     adapter._schema = load_source_schema(vault)
     return adapter
+
+
+def _identity() -> DatasetIdentity:
+    return DatasetIdentity(id="longmemeval", variant="mini", source="local", revision="fixture-pin", sha256=hashlib.sha256(FIXTURE.read_bytes()).hexdigest(), case_count=2)
 
 
 def test_adapter_subclasses_product_core_and_keeps_default_capabilities_on() -> None:
@@ -47,8 +53,10 @@ def test_each_question_uses_an_isolated_vault_and_captures_session_time(
     monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")
     first = _primed_adapter(tmp_path / "first")
     second = _primed_adapter(tmp_path / "second")
-    first.ingest_question(questions[0])
-    second.ingest_question(questions[1])
+    from lme.normalize import neutralize
+
+    first.ingest_case(neutralize(questions[0], _identity()), CaseHandle(case_id=questions[0].question_id, case_ordinal=1, question_date=questions[0].question_date_text))
+    second.ingest_case(neutralize(questions[1], _identity()), CaseHandle(case_id=questions[1].question_id, case_ordinal=2, question_date=questions[1].question_date_text))
 
     first_text = "\n".join(page.text for page in first.export_state().pages)
     second_text = "\n".join(page.text for page in second.export_state().pages)
@@ -91,6 +99,16 @@ def test_retrieval_clock_reaches_the_actual_read_side_date_seams(
     assert set(observed.values()) == {question.question_date.date()}
 
 
+@pytest.mark.parametrize("value", [
+    load_dataset(FIXTURE).questions[0],
+    CaseGold(case_id="c", answer="a", answer_session_ids=[], question_type="knowledge-update", question="q"),
+    type("AnswerBearing", (), {"answer": "secret"})(),
+])
+def test_ingest_case_rejects_gold_bearing_values(value: object) -> None:
+    with pytest.raises(TypeError):
+        LmeExomemAdapter().ingest_case(value, CaseHandle(case_id="c", case_ordinal=1, question_date="2026-01-01T00:00:00Z"))  # type: ignore[arg-type]
+
+
 def test_missing_semantic_prerequisite_names_capability_and_remedy(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -116,7 +134,7 @@ def test_missing_semantic_prerequisite_names_capability_and_remedy(
 def test_run_question_uses_the_real_product_lifecycle(tmp_path: Path) -> None:
     question = load_dataset(FIXTURE).questions[0]
     try:
-        retrieved = LmeExomemAdapter().run_question(question, tmp_path / "question")
+        retrieved = LmeExomemAdapter().run_question(question, tmp_path / "question", dataset_identity=_identity(), case_ordinal=1)
     except AdapterEnvironmentError as exc:
         # The importability skipif above cannot see a cold model cache under
         # the profile's offline pins; an environment fault here is the same

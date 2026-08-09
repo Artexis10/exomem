@@ -1,4 +1,215 @@
 {
+  "$defs": {
+    "AnswerRecord": {
+      "additionalProperties": false,
+      "properties": {
+        "input_tokens": {
+          "minimum": 0,
+          "title": "Input Tokens",
+          "type": "integer"
+        },
+        "model_id": {
+          "title": "Model Id",
+          "type": "string"
+        },
+        "output_tokens": {
+          "minimum": 0,
+          "title": "Output Tokens",
+          "type": "integer"
+        },
+        "prompt_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Prompt Sha256",
+          "type": "string"
+        },
+        "record": {
+          "const": "answer",
+          "default": "answer",
+          "title": "Record",
+          "type": "string"
+        },
+        "response_ref": {
+          "title": "Response Ref",
+          "type": "string"
+        }
+      },
+      "required": [
+        "prompt_sha256",
+        "model_id",
+        "response_ref",
+        "input_tokens",
+        "output_tokens"
+      ],
+      "title": "AnswerRecord",
+      "type": "object"
+    },
+    "CleanupRecord": {
+      "additionalProperties": false,
+      "properties": {
+        "record": {
+          "const": "cleanup",
+          "default": "cleanup",
+          "title": "Record",
+          "type": "string"
+        },
+        "verified": {
+          "title": "Verified",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "verified"
+      ],
+      "title": "CleanupRecord",
+      "type": "object"
+    },
+    "IngestRecord": {
+      "additionalProperties": false,
+      "properties": {
+        "payload_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Payload Sha256",
+          "type": "string"
+        },
+        "provider_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Provider Ids",
+          "type": "array"
+        },
+        "record": {
+          "const": "ingest",
+          "default": "ingest",
+          "title": "Record",
+          "type": "string"
+        },
+        "session_ordinal": {
+          "minimum": 1,
+          "title": "Session Ordinal",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "session_ordinal",
+        "payload_sha256",
+        "provider_ids"
+      ],
+      "title": "IngestRecord",
+      "type": "object"
+    },
+    "JudgeRecord": {
+      "additionalProperties": false,
+      "properties": {
+        "model_id": {
+          "title": "Model Id",
+          "type": "string"
+        },
+        "parser_warnings": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Parser Warnings",
+          "type": "array"
+        },
+        "prompt_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Prompt Sha256",
+          "type": "string"
+        },
+        "record": {
+          "const": "judge",
+          "default": "judge",
+          "title": "Record",
+          "type": "string"
+        },
+        "verdict_label": {
+          "title": "Verdict Label",
+          "type": "string"
+        }
+      },
+      "required": [
+        "prompt_sha256",
+        "model_id",
+        "verdict_label"
+      ],
+      "title": "JudgeRecord",
+      "type": "object"
+    },
+    "SearchRecord": {
+      "additionalProperties": false,
+      "properties": {
+        "normalized_hit_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Normalized Hit Ids",
+          "type": "array"
+        },
+        "normalized_hit_shas": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Normalized Hit Shas",
+          "type": "array"
+        },
+        "query": {
+          "title": "Query",
+          "type": "string"
+        },
+        "raw_response_ref": {
+          "title": "Raw Response Ref",
+          "type": "string"
+        },
+        "record": {
+          "const": "search",
+          "default": "search",
+          "title": "Record",
+          "type": "string"
+        },
+        "top_k": {
+          "minimum": 0,
+          "title": "Top K",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "query",
+        "raw_response_ref",
+        "normalized_hit_ids",
+        "normalized_hit_shas",
+        "top_k"
+      ],
+      "title": "SearchRecord",
+      "type": "object"
+    },
+    "TimingRecord": {
+      "additionalProperties": false,
+      "properties": {
+        "ms": {
+          "minimum": 0,
+          "title": "Ms",
+          "type": "number"
+        },
+        "phase": {
+          "title": "Phase",
+          "type": "string"
+        },
+        "record": {
+          "const": "timing",
+          "default": "timing",
+          "title": "Record",
+          "type": "string"
+        }
+      },
+      "required": [
+        "phase",
+        "ms"
+      ],
+      "title": "TimingRecord",
+      "type": "object"
+    }
+  },
   "additionalProperties": false,
   "properties": {
     "case_id": {
@@ -7,8 +218,37 @@
     },
     "entries": {
       "items": {
-        "additionalProperties": true,
-        "type": "object"
+        "discriminator": {
+          "mapping": {
+            "answer": "#/$defs/AnswerRecord",
+            "cleanup": "#/$defs/CleanupRecord",
+            "ingest": "#/$defs/IngestRecord",
+            "judge": "#/$defs/JudgeRecord",
+            "search": "#/$defs/SearchRecord",
+            "timing": "#/$defs/TimingRecord"
+          },
+          "propertyName": "record"
+        },
+        "oneOf": [
+          {
+            "$ref": "#/$defs/IngestRecord"
+          },
+          {
+            "$ref": "#/$defs/SearchRecord"
+          },
+          {
+            "$ref": "#/$defs/AnswerRecord"
+          },
+          {
+            "$ref": "#/$defs/JudgeRecord"
+          },
+          {
+            "$ref": "#/$defs/TimingRecord"
+          },
+          {
+            "$ref": "#/$defs/CleanupRecord"
+          }
+        ]
       },
       "title": "Entries",
       "type": "array"

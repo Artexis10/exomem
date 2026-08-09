@@ -5,28 +5,27 @@ from __future__ import annotations
 from collections.abc import Iterable
 
 from protocol.events import assert_no_evidence_marked_ids, neutralize_dataset
-from protocol.models import ProtocolEvent
+from protocol.models import CaseHandle, DatasetIdentity, ProtocolEvent
 
 from .dataset import LmeDataset, LmeQuestion
 
 
-def neutralize(dataset: LmeDataset | LmeQuestion) -> list[ProtocolEvent]:
-    """Return canonical events; this adapter boundary does not accept CaseGold."""
+def neutralize(dataset: LmeDataset | LmeQuestion, dataset_identity: DatasetIdentity) -> list[ProtocolEvent]:
+    """Return canonical events under caller-pinned, real dataset identity."""
 
     if isinstance(dataset, LmeQuestion):
         dataset = LmeDataset((dataset,))
     if not isinstance(dataset, LmeDataset):
-        raise TypeError("neutralize accepts an LmeDataset or LmeQuestion, never gold-bearing records")
-    events = neutralize_dataset(dataset)
-    raw_ids = [session.session_id for question in dataset.questions for session in question.sessions]
-    assert_no_evidence_marked_ids(events, raw_upstream_session_ids=raw_ids)
+        raise TypeError("neutralize accepts LmeDataset/LmeQuestion with DatasetIdentity")
+    events = neutralize_dataset(dataset, dataset_identity)
+    assert_no_evidence_marked_ids(events)
     return events
 
 
-def refuse_if_evidence_marked(dataset: LmeDataset | LmeQuestion) -> None:
-    """Fail closed if a normalizer would expose raw evidence-marked identities."""
+def refuse_if_evidence_marked(dataset: LmeDataset | LmeQuestion, dataset_identity: DatasetIdentity) -> None:
+    """Fail closed if neutral public identity fields contain evidence markers."""
 
-    neutralize(dataset)
+    neutralize(dataset, dataset_identity)
 
 
 def render_neutral_session(events_for_session: Iterable[ProtocolEvent]) -> str:
@@ -45,3 +44,23 @@ def neutral_title(case_ordinal: int, session_ordinal: int) -> str:
 
 def neutral_tags() -> list[str]:
     return ["longmemeval"]
+
+
+def ingest_field_groups(events: Iterable[ProtocolEvent], handle: CaseHandle) -> tuple[list[str], dict[str, object]]:
+    """Keep verbatim dataset messages separate from harness-authored fields."""
+
+    grouped: dict[int, list[ProtocolEvent]] = {}
+    for event in events:
+        if event.case_id != handle.case_id:
+            raise ValueError("event case does not match neutral handle")
+        grouped.setdefault(event.session_ordinal, []).append(event)
+    content = [event.content for ordinal in sorted(grouped) for event in grouped[ordinal]]
+    harness = {
+        "titles": [neutral_title(handle.case_ordinal, ordinal) for ordinal in sorted(grouped)],
+        "tags": neutral_tags(),
+        "prefixes": [
+            f"Session timestamp: {grouped[ordinal][0].original_timestamp}\nSession ordinal: {ordinal}"
+            for ordinal in sorted(grouped)
+        ],
+    }
+    return content, harness

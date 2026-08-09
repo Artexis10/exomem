@@ -1,16 +1,23 @@
-"""Scope-aware inspection of payloads captured at provider transport boundaries."""
+"""Scope-aware leakage scans at provider transport boundaries."""
 
 from __future__ import annotations
 
 import re
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Literal
 
 from .models import CaseGold
 
 _STRUCTURAL_KEY = re.compile(r"(answer|gold|label|ground_truth|expected|evidence|has_answer)", re.I)
+_EVIDENCE_MARKED = re.compile(r"\banswer_[A-Za-z0-9]", re.I)
 _LABEL_LITERAL = ("_abs", "has_answer", "answer_session_ids")
+# LongMemEval's closed vocabulary is duplicated at the provider-neutral boundary
+# so ``python -m benchmarks.protocol.cli`` has no benchmark-package path dependency.
+QUESTION_TYPES = (
+    "single-session-user", "single-session-assistant", "single-session-preference",
+    "multi-session", "temporal-reasoning", "knowledge-update",
+)
 
 
 @dataclass(frozen=True)
@@ -39,53 +46,89 @@ def _tokens(text: str) -> list[str]:
     return re.findall(r"[\w'-]+", text.casefold())
 
 
-def _findings(payload: object, gold: CaseGold, *, scope: Literal["ingest", "search"]) -> tuple[LeakageFinding, ...]:
-    strict = scope == "ingest"
-    severity: Literal["case-invalidating", "advisory"] = "case-invalidating" if strict else "advisory"
+def _shingles(text: str, size: int = 4) -> set[str]:
+    tokens = _tokens(text)
+    return {" ".join(tokens[index : index + size]) for index in range(max(0, len(tokens) - size + 1))}
+
+
+def _contains_boundary(text: str, token: str) -> bool:
+    return bool(re.search(rf"(?<!\w){re.escape(token)}(?!\w)", text, re.IGNORECASE))
+
+
+def _raw_id_found(text: str, raw_ids: Iterable[str]) -> bool:
+    return bool(_EVIDENCE_MARKED.search(text)) or any(raw_id and raw_id in text for raw_id in raw_ids)
+
+
+def _finding(result: list[LeakageFinding], scope: Literal["ingest", "search", "artifact"], detector: str, location: str, severity: Literal["case-invalidating", "advisory"], note: str) -> None:
+    result.append(LeakageFinding(scope, detector, location, severity, note))
+
+
+def scan_ingest(
+    content_fields: object,
+    harness_fields: object,
+    gold: CaseGold,
+    *,
+    raw_upstream_session_ids: Iterable[str] = (),
+) -> tuple[LeakageFinding, ...]:
+    """Strictly scan harness-owned fields while allowing dataset evidence content."""
+
     result: list[LeakageFinding] = []
-    gold_text = gold.answer.casefold()
-    gold_shingles = {
-        " ".join(words[index : index + 4])
-        for words in (_tokens(gold.answer),)
-        for index in range(max(0, len(words) - 3))
-    }
-    label_tokens = {gold.question_type.casefold(), *_LABEL_LITERAL}
-    raw_ids = set(gold.answer_session_ids)
-    for location, value, is_key in _walk(payload):
-        text = str(value)
-        folded = text.casefold()
-        is_question_text = scope == "search" and folded == gold.question.casefold()
-        if is_key and _STRUCTURAL_KEY.search(text):
-            result.append(LeakageFinding(scope, "structural-key", location, severity, "sensitive structural key"))
+    raw_ids = {*gold.answer_session_ids, *raw_upstream_session_ids}
+    question_shingles = _shingles(gold.question)
+    for location, value, is_key in _walk(content_fields, "$.content"):
         if is_key:
             continue
-        if not is_question_text and gold_text and gold_text in folded:
-            result.append(LeakageFinding(scope, "gold-text", location, severity, "exact gold answer"))
-        if not is_question_text and any(shingle in " ".join(_tokens(text)) for shingle in gold_shingles):
-            result.append(LeakageFinding(scope, "gold-shingle", location, severity, "four-token gold shingle"))
-        if not is_question_text and any(token and token in folded for token in label_tokens):
-            result.append(LeakageFinding(scope, "label-token", location, severity, "gold-bearing label token"))
-        if any(raw_id and raw_id in text for raw_id in raw_ids) or re.search(r"\banswer[\w-]*", text, re.I):
-            result.append(LeakageFinding(scope, "raw-upstream-id", location, severity, "raw upstream session id"))
-        if strict and gold.question and gold.question.casefold() in folded:
-            result.append(LeakageFinding(scope, "question-text", location, severity, "future question text"))
+        text = str(value)
+        if _raw_id_found(text, raw_ids):
+            _finding(result, "ingest", "raw-upstream-id", location, "case-invalidating", "evidence-marked or raw upstream session id in content")
+        if question_shingles & _shingles(text):
+            _finding(result, "ingest", "question-text", location, "case-invalidating", "four-token question shingle in content")
+    label_tokens = {*QUESTION_TYPES, *_LABEL_LITERAL}
+    gold_shingles = _shingles(gold.answer)
+    for location, value, is_key in _walk(harness_fields, "$.harness"):
+        text = str(value)
+        if is_key and _STRUCTURAL_KEY.search(text):
+            _finding(result, "ingest", "structural-key", location, "case-invalidating", "sensitive structural key")
+        if is_key:
+            continue
+        if gold.answer and _contains_boundary(text, gold.answer):
+            _finding(result, "ingest", "gold-text", location, "case-invalidating", "exact gold answer in harness field")
+        if gold_shingles and gold_shingles & _shingles(text):
+            _finding(result, "ingest", "gold-shingle", location, "case-invalidating", "four-token gold shingle in harness field")
+        if any(token and _contains_boundary(text, token) for token in label_tokens):
+            _finding(result, "ingest", "label-token", location, "case-invalidating", "gold-bearing label token in harness field")
+        if _raw_id_found(text, raw_ids):
+            _finding(result, "ingest", "raw-upstream-id", location, "case-invalidating", "evidence-marked or raw upstream session id in harness field")
     return tuple(result)
 
 
-def scan_ingest(payload: object, gold: CaseGold) -> tuple[LeakageFinding, ...]:
-    """Strict scan: every returned finding invalidates the case."""
-
-    return _findings(payload, gold, scope="ingest")
-
-
 def scan_search(payload: object, gold: CaseGold) -> tuple[LeakageFinding, ...]:
-    """Advisory scan: question text is legitimate, gold disclosure is not."""
+    """Advisory scan: search may contain the question, never the gold answer."""
 
-    return _findings(payload, gold, scope="search")
+    result: list[LeakageFinding] = []
+    gold_shingles = _shingles(gold.answer)
+    label_tokens = {gold.question_type, *_LABEL_LITERAL}
+    for location, value, is_key in _walk(payload):
+        text = str(value)
+        if is_key and _STRUCTURAL_KEY.search(text):
+            _finding(result, "search", "structural-key", location, "advisory", "sensitive structural key")
+        if is_key:
+            continue
+        if text.casefold() == gold.question.casefold():
+            continue
+        if gold.answer and _contains_boundary(text, gold.answer):
+            _finding(result, "search", "gold-text", location, "advisory", "exact gold answer")
+        if gold_shingles and gold_shingles & _shingles(text):
+            _finding(result, "search", "gold-shingle", location, "advisory", "four-token gold shingle")
+        if any(token and _contains_boundary(text, token) for token in label_tokens):
+            _finding(result, "search", "label-token", location, "advisory", "gold-bearing label token")
+        if _raw_id_found(text, gold.answer_session_ids):
+            _finding(result, "search", "raw-upstream-id", location, "advisory", "raw upstream session id")
+    return tuple(result)
 
 
 def scan_artifact(payload: object, gold: CaseGold) -> tuple[LeakageFinding, ...]:
-    """Artifacts retain gold for offline judging; their provenance carries the boundary."""
+    """Artifacts may retain gold, with an explicit provenance-note finding."""
 
     del payload, gold
-    return ()
+    return (LeakageFinding("artifact", "artifact-provenance", "$", "advisory", "offline artifact scope permits gold-bearing records"),)

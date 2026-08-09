@@ -11,6 +11,7 @@ from .leakage import scan_ingest
 from .manifest import load_manifest
 from .models import CaseGold, export_json_schemas
 from .probes import classify_update_outcome
+from .trace import CaseTraceReader
 
 _ROOT = Path(__file__).resolve().parent
 
@@ -32,9 +33,12 @@ def _export_schemas(check: bool) -> int:
 
 def _selftest() -> int:
     gold = CaseGold(case_id="fixture", answer="violet cedar lantern", answer_session_ids=["answer_fixture"], question_type="knowledge-update", question="Which lantern?")
-    assert scan_ingest({"body": "plain source"}, gold) == ()
-    assert evaluate_probes({"presence": True, "cross_case": False, "never_ingested": False}) == "isolated"
-    assert classify_update_outcome(["current"]) == "superseded"
+    if scan_ingest(["plain source"], {"title": "case 1", "tags": ["longmemeval"]}, gold):
+        raise RuntimeError("clean fixture unexpectedly triggered leakage scan")
+    if evaluate_probes({"presence": True, "cross_case": False, "never_ingested": False}) != "isolated":
+        raise RuntimeError("canary selftest failed")
+    if classify_update_outcome(["current"]) != "superseded":
+        raise RuntimeError("probe selftest failed")
     print("protocol selftest: ok")
     return 0
 
@@ -55,6 +59,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "validate":
         try:
             print(load_manifest(args.run_dir).status)
+            trace_dir = Path(args.run_dir) / "traces"
+            for trace in sorted(trace_dir.glob("*.jsonl")) if trace_dir.exists() else ():
+                list(CaseTraceReader(args.run_dir, trace.stem))
         except Exception as exc:
             print(f"invalid manifest: {exc}")
             return 2 if args.strict else 1

@@ -1,6 +1,6 @@
 {
   "additionalProperties": false,
-  "description": "Private judging record. It deliberately is not an adapter input type.",
+  "description": "Private scoring record; adapter-facing APIs deliberately never accept it.",
   "properties": {
     "answer": {
       "title": "Answer",

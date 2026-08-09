@@ -1,10 +1,58 @@
 {
+  "$defs": {
+    "LaneReadiness": {
+      "additionalProperties": false,
+      "properties": {
+        "evidence": {
+          "title": "Evidence",
+          "type": "string"
+        },
+        "fallback_detected": {
+          "default": false,
+          "title": "Fallback Detected",
+          "type": "boolean"
+        },
+        "lane": {
+          "title": "Lane",
+          "type": "string"
+        },
+        "method": {
+          "enum": [
+            "index-count",
+            "config-state",
+            "semantic-probe",
+            "memories-canary",
+            "doctor-check",
+            "readiness-unverifiable"
+          ],
+          "title": "Method",
+          "type": "string"
+        },
+        "requested": {
+          "title": "Requested",
+          "type": "boolean"
+        },
+        "verified": {
+          "title": "Verified",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "lane",
+        "requested",
+        "verified",
+        "method",
+        "evidence"
+      ],
+      "title": "LaneReadiness",
+      "type": "object"
+    }
+  },
   "additionalProperties": false,
   "properties": {
     "lanes": {
       "items": {
-        "additionalProperties": true,
-        "type": "object"
+        "$ref": "#/$defs/LaneReadiness"
       },
       "title": "Lanes",
       "type": "array"
@@ -29,6 +77,11 @@
       "type": "integer"
     },
     "status": {
+      "enum": [
+        "VALID",
+        "INVALID",
+        "READINESS_UNVERIFIABLE"
+      ],
       "title": "Status",
       "type": "string"
     }

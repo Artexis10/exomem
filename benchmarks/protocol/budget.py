@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from pathlib import Path
 from typing import Any
 
@@ -53,10 +54,38 @@ class BudgetLedger:
             self.budget_path.write_text(json.dumps({"caps": self.caps}, sort_keys=True) + "\n", encoding="utf-8")
 
     def _lock(self) -> int:
+        """Acquire with bounded retry, recovering only demonstrably stale locks."""
+
+        for attempt in range(20):
+            try:
+                descriptor = os.open(self.lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                os.write(descriptor, f"{os.getpid()} {time.time()}\n".encode("utf-8"))
+                return descriptor
+            except FileExistsError:
+                if self._break_stale_lock():
+                    continue
+                if attempt < 19:
+                    time.sleep(0.25)
+        raise LedgerLocked("budget ledger is locked")
+
+    def _break_stale_lock(self) -> bool:
         try:
-            return os.open(self.lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-        except FileExistsError as exc:
-            raise LedgerLocked("budget ledger is locked") from exc
+            pid_text, timestamp_text = self.lock_path.read_text(encoding="utf-8").split()[:2]
+            pid, timestamp = int(pid_text), float(timestamp_text)
+        except (OSError, ValueError, IndexError):
+            return False
+        if time.time() - timestamp <= 600 or _pid_alive(pid):
+            return False
+        try:
+            self.lock_path.unlink()
+        except FileNotFoundError:
+            return False
+        self._append(
+            ts=timestamp_text, seq=max((entry.seq for entry in self._entries()), default=-1) + 1,
+            actor="budget-ledger", op="stale-lock-recovery", kind="approval", units=0,
+            running_total=self._running_total(), decision="stale-lock-recovered",
+        )
+        return True
 
     def _unlock(self, descriptor: int) -> None:
         os.close(descriptor)
@@ -70,7 +99,7 @@ class BudgetLedger:
     def _running_total(self) -> float:
         total = 0.0
         for entry in self._entries():
-            if entry.kind == "reserve":
+            if entry.kind == "reserve" and entry.decision != "refused-cap":
                 total += entry.units
             elif entry.kind == "release":
                 total -= entry.units
@@ -81,7 +110,6 @@ class BudgetLedger:
         with self.ledger_path.open("a", encoding="utf-8", newline="\n") as handle:
             handle.write(entry.model_dump_json() + "\n")
         return entry
-
     def _require_priced(self, model_id: str) -> None:
         pricing = yaml.safe_load(self.pricing_path.read_text(encoding="utf-8")) or {}
         item = (pricing.get("models") or {}).get(model_id)
@@ -131,3 +159,15 @@ class BudgetLedger:
             return self._append(ts=ts, seq=seq, actor=actor, op=op, kind="approval", units=units, running_total=self._running_total(), decision="approved")
         finally:
             self._unlock(descriptor)
+
+
+def _pid_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True

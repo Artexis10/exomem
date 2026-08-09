@@ -9,8 +9,8 @@
     "haystack_dates": ["2026-01-03T09:00:00Z", "2026-01-09T10:30:00Z"],
     "haystack_sessions": [
       [
-        {"role": "user", "content": "Ralven selected the harbor for the spring voyage."},
-        {"role": "assistant", "content": "I will remember that a harbor was selected."}
+        {"role": "user", "content": "Ralven selected the Cobalt signal for the voyage."},
+        {"role": "assistant", "content": "I will remember that Cobalt was selected."}
       ],
       [
         {"role": "user", "content": "The voyage uses a blue pennant."},
@@ -33,8 +33,8 @@
         {"role": "assistant", "content": "I will keep both maps available."}
       ],
       [
-        {"role": "user", "content": "Neris saved a preferred route map."},
-        {"role": "assistant", "content": "I recorded the ordering preference."}
+        {"role": "user", "content": "Neris saved the Cedar card for the route plan."},
+        {"role": "assistant", "content": "I recorded Cedar as the preference."}
       ]
     ],
     "answer_session_ids": ["answer_8d2ef"]

@@ -25,10 +25,24 @@
       "type": "array"
     },
     "outcome": {
+      "enum": [
+        "pass",
+        "fail",
+        "inconclusive-by-design",
+        "superseded",
+        "both_returned",
+        "stale_only",
+        "unresolvable"
+      ],
       "title": "Outcome",
       "type": "string"
     },
     "probe_kind": {
+      "enum": [
+        "lexical-rare-token",
+        "semantic-zero-overlap",
+        "update-current-state"
+      ],
       "title": "Probe Kind",
       "type": "string"
     },
