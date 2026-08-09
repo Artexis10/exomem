@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import os
 import shutil
+import sys
 from pathlib import Path
 
 import pytest
@@ -15,6 +17,34 @@ from exomem import semantic_contract as semantic_contract_module
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 FIXTURE_VAULT = REPO_ROOT / "tests" / "fixtures"
+
+# The benchmark package (benchmarks/membench) deliberately lives outside src/
+# and outside the wheel/sdist; tests reach it via this guarded path insert.
+_BENCHMARKS_DIR = REPO_ROOT / "benchmarks"
+if _BENCHMARKS_DIR.is_dir() and str(_BENCHMARKS_DIR) not in sys.path:
+    sys.path.insert(0, str(_BENCHMARKS_DIR))
+
+
+@pytest.fixture(autouse=True)
+def _process_env_isolation():
+    """Restore os.environ after every test.
+
+    Benchmark adapters apply EXOMEM_* profile pins to the process env, and a
+    test that drives setup() without a paired cleanup() leaks them into every
+    later test: PR #390's CI failed six query-log/usage-ranking tests because
+    a stale EXOMEM_VAULT_PATH and EXOMEM_DISABLE_RELEVANCE_CHECK survived from
+    an earlier adapter test — failures invisible in isolation and under -k
+    filters. Autouse setup runs before test-requested fixtures, so this
+    teardown runs after monkeypatch undo and restores the pre-test
+    environment exactly.
+    """
+    saved = os.environ.copy()
+    yield
+    for key in set(os.environ) - set(saved):
+        del os.environ[key]
+    for key, value in saved.items():
+        if os.environ.get(key) != value:
+            os.environ[key] = value
 
 
 @pytest.fixture(autouse=True)

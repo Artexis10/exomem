@@ -31,8 +31,8 @@ graph-dependent tasks, and the Review Studio closes the largest human
 product-surface gap: governed review, activation, provenance, explicit
 decisions, and recorded belief evolution now form one packaged browser loop.
 Basic Memory still leads on generic editor breadth, cloud onboarding, sync,
-importers, and collaboration. See
-[the graph-value comparison](comparison-basic-memory-graph.md); Exomem should
+importers, and collaboration. (The graph-value comparison was **withdrawn 2026-08-09** — see its banner;
+its numbers are not citable.) Exomem should
 not chase that whole surface before measuring Studio usage.
 
 The first-class semantic-language work also closes the earlier compact
@@ -56,7 +56,7 @@ The earlier largest product gap was first-run adoption: direct CLI scans of a me
 | Source preservation | Ahead | Pass | Basic Memory importers cover more formats. | Exomem `adopt_vault(mode="copy-as-sources")` preserves the original file, records `imported_from`, SHA-256, and byte count. |
 | Evidence / provenance | Ahead | Pass | Basic Memory is primarily note/knowledge-graph oriented. | Exomem has an explicit Evidence tree plus `review_memory(mode="provenance")` over durable `<!-- key:value -->` markers. The marker workflow is still hidden. |
 | Schema inference / validation | Comparable | Pass | Basic Memory publicly exposes `schema_infer`, `schema_validate`, and `schema_diff`. | Exomem's `schema_memory` now infers from corpus frequencies, saves optional contracts with hash-guarded overwrite, validates with strict CI status, and diffs corpus or contract drift. |
-| Graph / context building | Ahead | Pass | Basic Memory still exposes a broader canvas workflow. | The refreshed direct graph-value benchmark matches Basic Memory on one-hop, multi-hop, and relation typing, then wins direction, distractor precision, traversal lenses, provenance, lifecycle, semantic-block precision, and graph-backed recall visibility. |
+| Graph / context building | Ahead (interface capability, not benchmark score) | Pass | Basic Memory still exposes a broader canvas workflow. | The graph-value benchmark's win/parity readings were **withdrawn 2026-08-09** (authored-competitor bias, both directions). What survives is the product-interface observation the re-examination itself conceded: Basic Memory's `build_context` does not expose origin/source anchors, lifecycle status, relation-family profiles, or relation-bearing semantic blocks, which exomem's graph surfaces carry natively. |
 | Review / stale / contradiction workflow | Ahead | Pass | Basic Memory has recent activity and graph navigation, but less explicit epistemic review. | Exomem `review_memory` surfaces unprocessed source work, audit findings, attention queues, provenance, and compilation scaffolds. |
 | Human review control plane | Ahead | Acceptance pass | Basic Memory has broader note/editor/canvas UX; its public surface does not expose the same governed daily review and recorded-evolution loop. | Packaged `/studio/` preserves server ranking, separates opt-in Activation, composes bounded context, fingerprint-guards triage, and keeps relation/compile/supersession proposals read-only until a separate existing-command confirmation. |
 | Assistant onboarding | Comparable | Pass | Basic Memory has broader packaged plugins, skills, and public docs across clients. | Exomem `bootstrap` exposes front-door actions and product commands; `demo --json` proves doctor/retrieval/review against a sample vault. |

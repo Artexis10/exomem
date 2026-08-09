@@ -1188,9 +1188,9 @@ RecoveryMutation = Callable[[], None]
 
 
 def _existing_transition_token(
-    *, operation: str, path: str, before_hash: str, after_hash: str
+    *, operation: str, path: str, before_hash: str, after_hash: str, stamp: str | None = None
 ) -> str:
-    payload = {
+    payload: dict[str, Any] = {
         "version": 1,
         "transition_id": str(uuid.uuid4()),
         "operation": operation,
@@ -1198,6 +1198,12 @@ def _existing_transition_token(
         "before_hash": before_hash,
         "after_hash": after_hash,
     }
+    # The writer stamps `updated:` at second resolution, so the projected page a
+    # caller reviews is only reproducible if the commit reuses the reviewed
+    # instant. Carrying it here keeps the committed bytes identical to the
+    # validated ones instead of drifting whenever the clock ticks between calls.
+    if stamp is not None:
+        payload["stamp"] = stamp
     raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode(
         "utf-8"
     )
@@ -1229,14 +1235,17 @@ def _decode_existing_transition_token(token: str) -> dict[str, Any]:
         raise SemanticWriteError(
             "LIFECYCLE_TRANSITION_INVALID_TOKEN", "transition token is invalid"
         ) from error
-    if type(value) is not dict or set(value) != {
+    required = {
         "version",
         "transition_id",
         "operation",
         "path",
         "before_hash",
         "after_hash",
-    }:
+    }
+    # `stamp` is optional so a token minted before this field existed still
+    # decodes; a token that omits it simply cannot pin the writer's instant.
+    if type(value) is not dict or set(value) not in (required, required | {"stamp"}):
         raise SemanticWriteError(
             "LIFECYCLE_TRANSITION_INVALID_TOKEN", "transition token is invalid"
         )
@@ -1244,6 +1253,10 @@ def _decode_existing_transition_token(token: str) -> dict[str, Any]:
         type(value[key]) is not str
         for key in ("transition_id", "operation", "path", "before_hash", "after_hash")
     ):
+        raise SemanticWriteError(
+            "LIFECYCLE_TRANSITION_INVALID_TOKEN", "transition token is invalid"
+        )
+    if "stamp" in value and (type(value["stamp"]) is not str or not value["stamp"]):
         raise SemanticWriteError(
             "LIFECYCLE_TRANSITION_INVALID_TOKEN", "transition token is invalid"
         )
@@ -1258,6 +1271,23 @@ def _decode_existing_transition_token(token: str) -> dict[str, Any]:
             "LIFECYCLE_TRANSITION_INVALID_TOKEN", "transition token is invalid"
         )
     return value
+
+
+def transition_token_stamp(token: str | None) -> str | None:
+    """Return the writer instant a transition token pinned, when it carries one.
+
+    Callers project the page before preflight runs, so they need the reviewed
+    instant back to rebuild byte-identical content on commit.
+    """
+
+    if token is None:
+        return None
+    try:
+        value = _decode_existing_transition_token(token)
+    except SemanticWriteError:
+        return None
+    stamp = value.get("stamp")
+    return stamp if type(stamp) is str and stamp else None
 
 
 def _existing_transition_id(token: str) -> str:
@@ -1294,6 +1324,7 @@ def preflight_existing(
     relation_disposition: str | None = None,
     relation_review_hash: str | None = None,
     relation_review_reason: str | None = None,
+    stamp: str | None = None,
 ) -> ExistingPreflight:
     """Evaluate an existing-page transition without mutating any shared state."""
     relation_disposition = relation_review.normalize_relation_disposition(relation_disposition)
@@ -1387,6 +1418,7 @@ def preflight_existing(
         path=path,
         before_hash=before.source_hash,
         after_hash=after.source_hash,
+        stamp=stamp,
     )
     token_value = _decode_existing_transition_token(token)
     committed_replay = bool(

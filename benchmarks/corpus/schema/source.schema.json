@@ -1,0 +1,129 @@
+{
+  "$defs": {
+    "AdversarialFlags": {
+      "additionalProperties": false,
+      "properties": {
+        "injected_instructions": {
+          "default": false,
+          "title": "Injected Instructions",
+          "type": "boolean"
+        },
+        "malicious_metadata": {
+          "default": false,
+          "title": "Malicious Metadata",
+          "type": "boolean"
+        }
+      },
+      "title": "AdversarialFlags",
+      "type": "object"
+    },
+    "ArtifactKind": {
+      "enum": [
+        "markdown",
+        "csv",
+        "png",
+        "png_unavailable",
+        "pdf",
+        "pdf_unavailable",
+        "transcript"
+      ],
+      "title": "ArtifactKind",
+      "type": "string"
+    },
+    "AuthorityTier": {
+      "enum": [
+        "system_of_record",
+        "official",
+        "firsthand",
+        "secondhand",
+        "rumor"
+      ],
+      "title": "AuthorityTier",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "adversarial": {
+      "$ref": "#/$defs/AdversarialFlags"
+    },
+    "artifact_kind": {
+      "$ref": "#/$defs/ArtifactKind"
+    },
+    "audiences": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Audiences",
+      "type": "array"
+    },
+    "authority": {
+      "$ref": "#/$defs/AuthorityTier"
+    },
+    "event_time": {
+      "format": "date",
+      "title": "Event Time",
+      "type": "string"
+    },
+    "path": {
+      "title": "Path",
+      "type": "string"
+    },
+    "recorded_offset_s": {
+      "anyOf": [
+        {
+          "exclusiveMaximum": 604800,
+          "minimum": 0,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Recorded Offset S"
+    },
+    "recorded_week": {
+      "minimum": 0,
+      "title": "Recorded Week",
+      "type": "integer"
+    },
+    "source_id": {
+      "title": "Source Id",
+      "type": "string"
+    },
+    "supersedes_source": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Supersedes Source"
+    },
+    "title": {
+      "title": "Title",
+      "type": "string"
+    },
+    "version": {
+      "default": 1,
+      "minimum": 1,
+      "title": "Version",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "source_id",
+    "title",
+    "artifact_kind",
+    "path",
+    "authority",
+    "event_time",
+    "recorded_week"
+  ],
+  "title": "SourceRecord",
+  "type": "object"
+}

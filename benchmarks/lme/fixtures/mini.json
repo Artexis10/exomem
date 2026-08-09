@@ -1,0 +1,130 @@
+[
+  {
+    "question_id": "mini-single-user",
+    "question_type": "single-session-user",
+    "question": "Which city did Valano Kordal say the workshop would visit?",
+    "answer": "Vorstead",
+    "question_date": "2026-01-20T12:00:00Z",
+    "haystack_session_ids": ["user-a", "user-b"],
+    "haystack_dates": ["2026-01-03T09:00:00Z", "2026-01-09T10:30:00Z"],
+    "haystack_sessions": [
+      [
+        {"role": "user", "content": "Valano Kordal said the workshop would visit Vorstead."},
+        {"role": "assistant", "content": "I will remember Vorstead as the workshop city."}
+      ],
+      [
+        {"role": "user", "content": "The workshop uses the Harbor Charter."},
+        {"role": "assistant", "content": "Noted the Harbor Charter."}
+      ]
+    ],
+    "answer_session_ids": ["user-a"]
+  },
+  {
+    "question_id": "mini-single-assistant_abs",
+    "question_type": "single-session-assistant",
+    "question": "What colour did the assistant assign to the unmentioned Cindercrest token?",
+    "answer": "I don't know",
+    "question_date": "2026-02-20T12:00:00Z",
+    "haystack_session_ids": ["assistant-a", "assistant-b"],
+    "haystack_dates": ["2026-02-02T08:00:00Z", "2026-02-08T08:15:00Z"],
+    "haystack_sessions": [
+      [
+        {"role": "user", "content": "Sort the Mossbank token."},
+        {"role": "assistant", "content": "I assigned the Mossbank token the colour amber."}
+      ],
+      [
+        {"role": "user", "content": "Keep the Quarryrun token separate."},
+        {"role": "assistant", "content": "The Quarryrun token remains uncoloured."}
+      ]
+    ],
+    "answer_session_ids": []
+  },
+  {
+    "question_id": "mini-preference",
+    "question_type": "single-session-preference",
+    "question": "Does Miric Velsen prefer the Larkridge ledger before or after the Valeholt ledger?",
+    "answer": "Before",
+    "question_date": "2026-03-20T12:00:00Z",
+    "haystack_session_ids": ["preference-a", "preference-b"],
+    "haystack_dates": ["2026-03-04T11:00:00Z", "2026-03-11T11:30:00Z"],
+    "haystack_sessions": [
+      [
+        {"role": "user", "content": "Miric Velsen prefers reviewing the Larkridge ledger before the Valeholt ledger."},
+        {"role": "assistant", "content": "I recorded that ordering preference."}
+      ],
+      [
+        {"role": "user", "content": "Both ledgers use the flux index."},
+        {"role": "assistant", "content": "Noted."}
+      ]
+    ],
+    "answer_session_ids": ["preference-a"]
+  },
+  {
+    "question_id": "mini-multi-session",
+    "question_type": "multi-session",
+    "question": "Which project combines the Tessel Foundry compass with the amber seal?",
+    "answer": "Project Beaconmere",
+    "question_date": "2026-04-20T12:00:00Z",
+    "haystack_session_ids": ["multi-a", "multi-b", "multi-c"],
+    "haystack_dates": ["2026-04-01T09:00:00Z", "2026-04-07T09:30:00Z", "2026-04-12T10:00:00Z"],
+    "haystack_sessions": [
+      [
+        {"role": "user", "content": "The Tessel Foundry compass belongs with the Beaconmere work."},
+        {"role": "assistant", "content": "I linked the compass to Beaconmere."}
+      ],
+      [
+        {"role": "user", "content": "Project Beaconmere uses an amber seal."},
+        {"role": "assistant", "content": "I recorded the amber seal."}
+      ],
+      [
+        {"role": "user", "content": "Project Emberclose uses a silver seal."},
+        {"role": "assistant", "content": "Noted the separate seal."}
+      ]
+    ],
+    "answer_session_ids": ["multi-a", "multi-b"]
+  },
+  {
+    "question_id": "mini-temporal",
+    "question_type": "temporal-reasoning",
+    "question": "How many days before the Nolhaven review did Orisha Marlis finish the archive?",
+    "answer": "Three days",
+    "question_date": "2026-05-20T12:00:00Z",
+    "haystack_session_ids": ["temporal-a", "temporal-b"],
+    "haystack_dates": ["2026-05-05T14:00:00Z", "2026-05-08T14:00:00Z"],
+    "haystack_sessions": [
+      [
+        {"role": "user", "content": "Orisha Marlis finished the archive on May 5."},
+        {"role": "assistant", "content": "The archive completion date is May 5."}
+      ],
+      [
+        {"role": "user", "content": "The Nolhaven review took place on May 8."},
+        {"role": "assistant", "content": "The review date is May 8."}
+      ]
+    ],
+    "answer_session_ids": ["temporal-a", "temporal-b"]
+  },
+  {
+    "question_id": "mini-knowledge-update",
+    "question_type": "knowledge-update",
+    "question": "Which product does Delvi Tasuna use for the current reservoir plan?",
+    "answer": "Corilspan",
+    "question_date": "2026-06-20T12:00:00Z",
+    "haystack_session_ids": ["update-a", "update-b", "update-c"],
+    "haystack_dates": ["2026-06-01T08:00:00Z", "2026-06-08T08:30:00Z", "2026-06-12T09:00:00Z"],
+    "haystack_sessions": [
+      [
+        {"role": "user", "content": "Delvi Tasuna initially used Norvawold for the reservoir plan."},
+        {"role": "assistant", "content": "Norvawold is the initial choice."}
+      ],
+      [
+        {"role": "user", "content": "Delvi Tasuna replaced Norvawold with Corilspan for the reservoir plan."},
+        {"role": "assistant", "content": "Corilspan is now the current choice."}
+      ],
+      [
+        {"role": "user", "content": "The reservoir plan uses the yield window."},
+        {"role": "assistant", "content": "Noted the yield window."}
+      ]
+    ],
+    "answer_session_ids": ["update-b"]
+  }
+]

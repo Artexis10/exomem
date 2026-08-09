@@ -1,0 +1,9 @@
+{
+  "query_id": "QRY-BAD00001",
+  "template_id": "t00",
+  "family": "query_behavior",
+  "query_kind": "direct_recall",
+  "prompt_text": "What is the launch date?",
+  "ask": {"knowledge_week": 4},
+  "surprise_field": true
+}

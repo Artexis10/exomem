@@ -4282,12 +4282,12 @@
         },
         "limit": {
           "default": 25,
-          "description": "Attention/activation/evolution result cap.",
+          "description": "Attention/activation result cap. On the topic evolution route, caps returned timelines; the path route returns one selected chain and does not use `limit`.",
           "type": "integer"
         },
         "query": {
           "default": "",
-          "description": "Topic for evolution review.",
+          "description": "Topic for evolution review when `path` is absent. On the topic route, `topic_anchor` is the retrieval hit that surfaced the chain; `chain_id` is always the active head.",
           "type": "string"
         },
         "sources": {
@@ -4363,7 +4363,7 @@
             }
           ],
           "default": null,
-          "description": "Restrict provenance scan to one path."
+          "description": "Restrict provenance scan to one path. For evolution, selects the path route and `query` is not used: `topic_anchor` is the requested page and `chain_id` is always the active head. An unresolvable path raises an explicit error."
         },
         "state": {
           "default": "open",

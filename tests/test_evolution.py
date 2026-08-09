@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pytest
 
+from exomem import commands
 from exomem import evolution
 from exomem import find as find_module
 
@@ -21,6 +22,7 @@ A = """\
 ---
 type: insight
 status: superseded
+exomem_id: 11111111-1111-4111-8111-111111111111
 superseded_by: "[[Knowledge Base/Notes/Insights/widget-cache-v2]]"
 updated: 2026-09-01
 ---
@@ -237,3 +239,56 @@ def test_path_specific_evolution_reports_version_cap(chains: Path) -> None:
     assert result["truncation"] == [
         f"timeline {C_P} capped at 2 versions (1 older not shown; raise max_versions)"
     ]
+
+
+def test_review_memory_evolution_uses_requested_path_as_anchor(chains: Path) -> None:
+    oldest = commands.op_review_memory(
+        chains, mode="evolution", path=A_P, query="widget cache"
+    )
+    newest = commands.op_review_memory(
+        chains, mode="evolution", path=C_P, query="widget cache"
+    )
+
+    oldest_timeline = oldest["timelines"][0]
+    newest_timeline = newest["timelines"][0]
+    assert oldest_timeline["topic_anchor"] == A_P
+    assert newest_timeline["topic_anchor"] == C_P
+    assert oldest_timeline["chain_id"] == newest_timeline["chain_id"] == C_P
+    assert [version["path"] for version in oldest_timeline["versions"]] == [A_P, B_P, C_P]
+    assert [version["path"] for version in newest_timeline["versions"]] == [A_P, B_P, C_P]
+
+
+def test_review_memory_evolution_resolves_memory_ref_to_requested_path(chains: Path) -> None:
+    result = commands.op_review_memory(
+        chains,
+        mode="evolution",
+        path="exomem://memory/11111111-1111-4111-8111-111111111111",
+    )
+
+    assert result["target_path"] == A_P
+    assert result["timelines"][0]["topic_anchor"] == A_P
+
+
+def test_review_memory_evolution_path_route_returns_path_envelope(chains: Path) -> None:
+    result = commands.op_review_memory(chains, mode="evolution", path=A_P)
+
+    assert set(result) == {"target_path", "timelines", "truncation"}
+    assert result["target_path"] == A_P
+
+
+def test_review_memory_evolution_topic_route_uses_find_hit(chains: Path) -> None:
+    result = commands.op_review_memory(chains, mode="evolution", query="widget cache", limit=1)
+    direct = evolution.evolution(chains, query="widget cache", limit=1)
+
+    assert result == direct
+    assert result["timelines"][0]["topic_anchor"] == C_P
+
+
+def test_review_memory_evolution_rejects_an_unresolvable_path(chains: Path) -> None:
+    with pytest.raises(ValueError, match="NOT_FOUND: file does not exist"):
+        commands.op_review_memory(
+            chains,
+            mode="evolution",
+            path="Knowledge Base/Notes/Insights/missing.md",
+            query="widget cache",
+        )

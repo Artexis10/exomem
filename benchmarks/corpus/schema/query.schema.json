@@ -1,0 +1,108 @@
+{
+  "$defs": {
+    "Ask": {
+      "additionalProperties": false,
+      "properties": {
+        "knowledge_week": {
+          "minimum": 0,
+          "title": "Knowledge Week",
+          "type": "integer"
+        },
+        "world_week": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "World Week"
+        }
+      },
+      "required": [
+        "knowledge_week"
+      ],
+      "title": "Ask",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "ask": {
+      "$ref": "#/$defs/Ask"
+    },
+    "canary": {
+      "default": false,
+      "title": "Canary",
+      "type": "boolean"
+    },
+    "family": {
+      "title": "Family",
+      "type": "string"
+    },
+    "followup_of": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Followup Of"
+    },
+    "modes": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Modes",
+      "type": "array"
+    },
+    "persona": {
+      "default": "owner",
+      "title": "Persona",
+      "type": "string"
+    },
+    "prompt_text": {
+      "title": "Prompt Text",
+      "type": "string"
+    },
+    "query_id": {
+      "title": "Query Id",
+      "type": "string"
+    },
+    "query_kind": {
+      "title": "Query Kind",
+      "type": "string"
+    },
+    "should_activate": {
+      "default": true,
+      "title": "Should Activate",
+      "type": "boolean"
+    },
+    "template_id": {
+      "title": "Template Id",
+      "type": "string"
+    },
+    "tracks": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Tracks",
+      "type": "array"
+    }
+  },
+  "required": [
+    "query_id",
+    "template_id",
+    "family",
+    "query_kind",
+    "prompt_text",
+    "ask"
+  ],
+  "title": "QueryRecord",
+  "type": "object"
+}
