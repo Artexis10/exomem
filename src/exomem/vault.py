@@ -41,6 +41,12 @@ _SUPPORTS_DIRECTORY_FD = bool(
     os.open in getattr(os, "supports_dir_fd", set())
     and os.mkdir in getattr(os, "supports_dir_fd", set())
 )
+# Guarded Windows snapshots must keep every verified ancestor from being
+# renamed, deleted, or changed into a reparse point until the leaf has been
+# opened and read.  FILE_SHARE_READ alone permits concurrent observation while
+# denying the DELETE/WRITE access required for that path substitution.
+_WINDOWS_GUARDED_DIRECTORY_SHARE = 0x00000001
+_WINDOWS_DEFAULT_SHARE = 0x00000001 | 0x00000002 | 0x00000004
 
 log = logging.getLogger(__name__)
 
@@ -2271,7 +2277,10 @@ def _read_bounded_windows_snapshot(
             or _is_reparse(root_info)
         ):
             raise PathGuardError("PATH_GUARD_ROOT", "vault root is unsafe")
-        root_fd = _open_directory_path(root)
+        root_fd = _open_directory_path(
+            root,
+            share_mode=_WINDOWS_GUARDED_DIRECTORY_SHARE,
+        )
         descriptors.append(root_fd)
         opened_root = os.fstat(root_fd)
         if not _same_identity(_identity(".", root_info), opened_root):
@@ -2287,7 +2296,10 @@ def _read_bounded_windows_snapshot(
                 or _is_reparse(before)
             ):
                 raise PathGuardError("PATH_GUARD_UNSAFE", "guard ancestor is unsafe")
-            descriptor = _open_directory_path(current)
+            descriptor = _open_directory_path(
+                current,
+                share_mode=_WINDOWS_GUARDED_DIRECTORY_SHARE,
+            )
             descriptors.append(descriptor)
             opened = os.fstat(descriptor)
             if not _same_identity(_identity("/".join(parts[: index + 1]), before), opened):
@@ -2505,6 +2517,7 @@ def _open_windows_path_descriptor(
     desired_access: int,
     attributes: int,
     crt_flags: int,
+    share_mode: int = _WINDOWS_DEFAULT_SHARE,
 ) -> int:
     import ctypes
     from ctypes import wintypes
@@ -2527,7 +2540,7 @@ def _open_windows_path_descriptor(
     handle = create_file(
         os.path.abspath(path),
         desired_access,
-        0x00000001 | 0x00000002 | 0x00000004,
+        share_mode,
         None,
         3,
         attributes,
@@ -2543,7 +2556,7 @@ def _open_windows_path_descriptor(
         raise
 
 
-def _open_directory_path(path: Path) -> int:
+def _open_directory_path(path: Path, *, share_mode: int | None = None) -> int:
     """Open a directory as a CRT descriptor on every supported platform."""
     if os.name != "nt":
         return os.open(path, _directory_flags())
@@ -2556,6 +2569,7 @@ def _open_directory_path(path: Path) -> int:
         desired_access=0,
         attributes=0x02000000 | 0x00200000,
         crt_flags=os.O_RDONLY,
+        share_mode=_WINDOWS_DEFAULT_SHARE if share_mode is None else share_mode,
     )
 
 
@@ -2722,15 +2736,19 @@ def post_commit_batch_fanout(
     replaced: list[Path],
     index_reports: list[Any] | None,
     semantic_states: Mapping[str, Any] | None,
+    *,
+    created_paths: Iterable[Path] = (),
 ) -> None:
     if vault_root is None or not replaced:
         return
     # Register the self-authored replacements so the live watcher drops
     # their echo instead of re-embedding the same files a second time.
+    corpus_published = False
     try:
         from . import file_watcher
 
         file_watcher.register_self_write(vault_root, replaced)
+        corpus_published = True
     except Exception:  # noqa: BLE001 — suppression is best-effort
         logging.getLogger(__name__).debug(
             "self-write suppression registration failed", exc_info=True
@@ -2738,14 +2756,13 @@ def post_commit_batch_fanout(
     try:
         from . import index_sync
 
+        kwargs: dict[str, Any] = {
+            "created_paths": list(created_paths),
+            "publish_corpus_change": not corpus_published,
+        }
         if semantic_states:
-            report = index_sync.upsert_after_write(
-                vault_root,
-                replaced,
-                semantic_states=semantic_states,
-            )
-        else:
-            report = index_sync.upsert_after_write(vault_root, replaced)
+            kwargs["semantic_states"] = semantic_states
+        report = index_sync.upsert_after_write(vault_root, replaced, **kwargs)
         if index_reports is not None:
             index_reports.append(report)
         if report is False or getattr(report, "reconcile_required", False):
@@ -3173,11 +3190,19 @@ def _batch_atomic_write_locked(
         cleanup_retained = _cleanup_batch_workspaces(workspace_by_parent.values())
 
     if post_commit_fanout:
+        created_paths = [
+            final
+            for (final, _workspace, _artifact), snapshot in zip(
+                staged, snapshots, strict=True
+            )
+            if snapshot is None
+        ]
         post_commit_batch_fanout(
             vault_root,
             replaced,
             index_reports,
             semantic_states,
+            created_paths=created_paths,
         )
     if cleanup_retained:
         raise BatchWriteError(

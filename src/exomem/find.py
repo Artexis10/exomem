@@ -3674,6 +3674,36 @@ def recall_resolver_snapshot(vault_root: Path, freshness: tuple | None = None):
     return resolver.fork()
 
 
+def recall_resolver_snapshot_at_checkpoint(
+    vault_root: Path,
+    checkpoint: freshness.RecallFreshnessCheckpoint,
+):
+    """Borrow a read-only resolver only when exact event lineage is resident.
+
+    Incremental graph maintenance must not rebuild a resolver from current disk
+    and label it with an older live checkpoint: that loses the pre-delta
+    topology needed to prove bounded edge repair. A cache miss is therefore an
+    explicit signal to use the cold/full-rebuild path.
+
+    The returned process-shared resolver must not be mutated. Authoritative
+    publishers advance freshness before patching it, and graph publication
+    revalidates that checkpoint after its pass. That ordering lets the common
+    body-only path stay O(delta) without copying every resolver map. A caller
+    that needs to mutate or reconstruct topology must fork explicitly.
+    """
+    root = Path(vault_root)
+    identity = _recall_checkpoint_identity(checkpoint)
+    with _RESOLVER_LOCK:
+        cached = _RECALL_RESOLVER_CACHE.get(root)
+        if (
+            cached is None
+            or cached[0] != identity
+            or _RECALL_RESOLVER_CHECKPOINTS.get(root) != checkpoint
+        ):
+            return None
+        return cached[1]
+
+
 def prime_resolver_from_entries(
     vault_root: Path,
     entries,

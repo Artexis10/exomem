@@ -189,7 +189,7 @@ def test_batch_atomic_write_uses_private_workspaces_and_fans_out_once(
     def register(_root: Path, paths: list[Path]) -> None:
         watcher_calls.append(tuple(paths))
 
-    def index(_root: Path, paths: list[Path]) -> object:
+    def index(_root: Path, paths: list[Path], **_kwargs) -> object:
         index_calls.append(tuple(paths))
         return report
 
@@ -287,7 +287,9 @@ def test_batch_atomic_write_replaces_and_creates_on_windows(
     created = parent / "created.md"
     existing.write_text("old\n", encoding="utf-8")
     monkeypatch.setattr("exomem.file_watcher.register_self_write", lambda *_: None)
-    monkeypatch.setattr("exomem.index_sync.upsert_after_write", lambda *_: None)
+    monkeypatch.setattr(
+        "exomem.index_sync.upsert_after_write", lambda *_args, **_kwargs: None
+    )
 
     replaced = vault_module.batch_atomic_write(
         [
@@ -1088,7 +1090,7 @@ def test_batch_atomic_write_fans_out_once_before_committed_cleanup_error(
     def register(_root: Path, paths: list[Path]) -> None:
         watcher_calls.append(tuple(paths))
 
-    def index(_root: Path, paths: list[Path]) -> object:
+    def index(_root: Path, paths: list[Path], **_kwargs) -> object:
         index_calls.append(tuple(paths))
         return report
 

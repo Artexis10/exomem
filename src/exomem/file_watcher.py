@@ -266,6 +266,7 @@ class FileWatcher:
         self._pending_upsert: set[Path] = set()
         self._pending_delete: set[Path] = set()
         self._pending_media: set[Path] = set()
+        self._pending_external_epoch = 0
         self._last_change = 0.0
         self._wake = threading.Event()
         self._stop = threading.Event()
@@ -329,6 +330,10 @@ class FileWatcher:
                 # A re-create after a delete in the same window is a modify.
                 self._pending_delete.discard(path)
                 self._pending_upsert.add(path)
+            self._pending_external_epoch = max(
+                self._pending_external_epoch,
+                freshness.mark_external_pending(self._vault_root),
+            )
             self._last_change = time.monotonic()
         self._wake.set()
 
@@ -342,21 +347,23 @@ class FileWatcher:
             except ValueError:
                 return None
 
-    def _drain(self) -> tuple[list[Path], list[Path], list[str]]:
+    def _drain(self) -> tuple[list[Path], list[Path], list[str], int]:
         with self._lock:
             media = sorted(self._pending_media)
             ups = sorted(self._pending_upsert)
             dels = sorted(self._pending_delete)
+            pending_epoch = self._pending_external_epoch
             self._pending_media.clear()
             self._pending_upsert.clear()
             self._pending_delete.clear()
+            self._pending_external_epoch = 0
         del_rels = [r for r in (self._rel(p) for p in dels) if r]
-        return media, ups, del_rels
+        return media, ups, del_rels, pending_epoch
 
     def _flush(self) -> None:
         """Dispatch the coalesced batch: publish freshness/inbound for every
         changed path (vault-wide), and re-embed only the Knowledge Base subset."""
-        media, ups, del_rels = self._drain()
+        media, ups, del_rels, pending_epoch = self._drain()
         if not (media or ups or del_rels):
             return
 
@@ -381,6 +388,7 @@ class FileWatcher:
             up_rels,
             del_rels,
             cap=False,
+            pending_epoch=pending_epoch,
         )
 
     # ---- debounce loop ----
@@ -438,6 +446,8 @@ class FileWatcher:
         changed_union: dict[str, None] = {}  # insertion-ordered dedupe across scopes
         deleted_union: dict[str, None] = {}
         drifted = False
+        baselines_current = True
+        pending_epoch = None if seed else freshness.external_pending_epoch(self._vault_root)
         for scope in freshness.SCOPES:
             try:
                 if seed:
@@ -453,6 +463,7 @@ class FileWatcher:
                         for sp in delta.deleted:
                             deleted_union.setdefault(sp, None)
             except Exception:  # noqa: BLE001 — reconcile must never kill the watcher
+                baselines_current = False
                 log.exception("file watcher: freshness reconcile failed (scope=%s)", scope)
         if not seed:
             try:
@@ -465,15 +476,24 @@ class FileWatcher:
                 )
             except Exception:  # noqa: BLE001 - discovery must never kill the watcher
                 log.exception("file watcher: periodic media reconciliation failed")
-        if seed or not drifted:
+        if seed:
+            if baselines_current:
+                self._validate_existing_graph_on_seed()
             return
-        # Maps are healed; fan the drift delta out and pre-warm the triple-keyed
-        # bm25 corpus. Each step is belt-and-suspenders exception-safe — a bad
-        # batch must never kill the reconcile loop.
-        try:
-            self._dispatch_reconcile_delta(list(changed_union), list(deleted_union))
-        except Exception:  # noqa: BLE001
-            log.exception("file watcher: reconcile drift dispatch failed")
+        if drifted:
+            # Maps are healed; fan the drift delta out. Each step is
+            # belt-and-suspenders exception-safe — a bad batch must never kill
+            # the reconcile loop.
+            try:
+                self._dispatch_reconcile_delta(list(changed_union), list(deleted_union))
+            except Exception:  # noqa: BLE001
+                log.exception("file watcher: reconcile drift dispatch failed")
+        if pending_epoch is not None and baselines_current:
+            self._recover_external_pending(pending_epoch)
+        if baselines_current and not freshness.external_pending(self._vault_root):
+            self._recover_suspended_graph()
+        if not drifted:
+            return
         if self._watcher_policy().defer_expensive_indexes:
             log.info("file watcher: quiet reconcile deferred expensive warm-up")
             return
@@ -484,6 +504,109 @@ class FileWatcher:
                 bm25.warm(self._vault_root, scope)
             except Exception:  # noqa: BLE001
                 log.exception("file watcher: reconcile bm25 warm failed (scope=%s)", scope)
+
+    def _recover_external_pending(self, pending_epoch: int) -> None:
+        """Recover one drained watcher epoch after exact periodic baselines.
+
+        A persistent corpus-publication failure deliberately makes every event
+        consumer cold while preserving the observed external epoch. The next
+        periodic full walk can establish new exact baselines even when there is
+        no old map from which to report drift. Withdraw every mutable cache and
+        graph marker before compare-and-ack, then rebuild the graph directly.
+        A newer watcher event keeps the vault pending and prevents publication.
+        """
+        if freshness.external_pending_epoch(self._vault_root) is None:
+            return
+        from . import epistemic_graph
+        from . import find as find_module
+        from . import vault as vault_module
+
+        graph = epistemic_graph.EpistemicGraphIndex(self._vault_root)
+        graph_exists = graph.path.exists()
+        rebuild_graph = epistemic_graph.graph_enabled() and graph_exists
+        try:
+            find_module.evict_resolver_caches(self._vault_root)
+            vault_module.evict_inbound_index(self._vault_root)
+            if graph_exists:
+                graph.withdraw_availability()
+        except Exception:  # noqa: BLE001 - leave the epoch dirty for the next cycle
+            log.exception("file watcher: pending epoch cache withdrawal failed")
+            return
+
+        freshness.clear_external_pending(self._vault_root, through=pending_epoch)
+        if freshness.external_pending(self._vault_root) or not rebuild_graph:
+            return
+        try:
+            graph.rebuild_all()
+            if not graph.available():
+                raise RuntimeError("rebuilt graph did not publish an available marker")
+        except Exception:  # noqa: BLE001 - retain a retry signal and fail closed
+            if not freshness.external_pending(self._vault_root):
+                freshness.mark_external_pending(self._vault_root)
+            log.exception("file watcher: pending epoch graph recovery failed")
+
+    def _recover_suspended_graph(self) -> None:
+        """Repair a persisted graph barrier left by a crash or failed fan-out."""
+        if freshness.external_pending(self._vault_root):
+            return
+        from . import epistemic_graph
+        from . import find as find_module
+        from . import vault as vault_module
+
+        graph = epistemic_graph.EpistemicGraphIndex(self._vault_root)
+        if (
+            not epistemic_graph.graph_enabled()
+            or not graph.path.exists()
+            or not graph.reads_suspended()
+        ):
+            return
+        try:
+            find_module.evict_resolver_caches(self._vault_root)
+            vault_module.evict_inbound_index(self._vault_root)
+            graph.withdraw_availability()
+            if freshness.external_pending(self._vault_root):
+                return
+            graph.rebuild_all()
+            if not graph.available():
+                raise RuntimeError("recovered graph did not publish an available marker")
+        except Exception:  # noqa: BLE001 - persisted barrier remains a retry signal
+            try:
+                graph.suspend_reads()
+            except Exception:  # noqa: BLE001 - the unavailable marker still fails closed
+                pass
+            log.exception("file watcher: persisted graph barrier recovery failed")
+
+    def _validate_existing_graph_on_seed(self) -> None:
+        """Rebuild an existing graph after startup's exact disk baselines.
+
+        A process can die before watchdog delivers an edit or while the event is
+        still debouncing, before any in-memory epoch can persist a read barrier.
+        Filesystem metadata can also collide across such an edit. Rebuilding in
+        the watcher's background startup pass is the only complete proof of
+        source bytes and resolver topology across that crash boundary.
+        """
+        from . import epistemic_graph
+        from . import find as find_module
+        from . import vault as vault_module
+
+        graph = epistemic_graph.EpistemicGraphIndex(self._vault_root)
+        if not graph.path.exists():
+            return
+        try:
+            graph.suspend_reads()
+            if not epistemic_graph.graph_enabled():
+                return
+            find_module.evict_resolver_caches(self._vault_root)
+            vault_module.evict_inbound_index(self._vault_root)
+            graph.rebuild_all()
+            if not graph.available():
+                raise RuntimeError("startup graph rebuild did not publish availability")
+        except Exception:  # noqa: BLE001 - persisted barrier keeps reads fail-closed
+            try:
+                graph.suspend_reads()
+            except Exception:  # noqa: BLE001 - rebuild failure already withdrew markers
+                pass
+            log.exception("file watcher: startup graph validation failed")
 
     def _dispatch_reconcile_delta(self, changed: list[str], deleted: list[str]) -> None:
         """Fan a reconcile drift delta out through the per-batch event path.
@@ -550,7 +673,14 @@ class FileWatcher:
                 changed_rel_pairs = [(p, r) for p, r in changed_rel_pairs if r not in gone_now]
                 changed_paths = [p for p, _ in changed_rel_pairs]
 
-        self._dispatch_batch(changed_paths, up_rels, del_rels, cap=True)
+        self._dispatch_batch(
+            changed_paths,
+            up_rels,
+            del_rels,
+            cap=True,
+            publish_corpus_change=False,
+            pending_epoch=None,
+        )
 
     def _dispatch_batch(
         self,
@@ -560,6 +690,7 @@ class FileWatcher:
         *,
         cap: bool,
         publish_corpus_change: bool = True,
+        pending_epoch: int | None = None,
     ) -> None:
         """Shared fan-out tail for `_flush` and `_dispatch_reconcile_delta`:
         inbound publish -> resolver publish -> KB-filtered index_sync
@@ -579,8 +710,9 @@ class FileWatcher:
         # Publish the complete vault-wide batch before any path-local consumer
         # sees it. A transient failure retries this same batch; a persistent
         # failure makes every checkpoint consumer cold before fan-out.
+        publication_current = True
         if publish_corpus_change:
-            index_sync.publish_corpus_delta(
+            publication_current = index_sync.publish_corpus_delta(
                 self._vault_root,
                 changed=ups,
                 deleted=[self._vault_root / rel for rel in del_rels],
@@ -624,21 +756,75 @@ class FileWatcher:
         # Inbound + resolver: the whole vault (both index sibling folders). The
         # resolver patch also restamps its freshness triple, so the next graph
         # query HITS the cache instead of paying the full-vault rebuild.
-        try:
-            from . import vault as vault_module
+        from . import vault as vault_module
 
+        inbound_current = True
+        try:
             vault_module.on_inbound_files_changed(self._vault_root, up_rels, del_rels)
         except Exception:  # noqa: BLE001
+            inbound_current = False
+            try:
+                vault_module.evict_inbound_index(self._vault_root)
+            except Exception:  # noqa: BLE001 - pending epoch remains the safety boundary
+                pass
             log.exception("file watcher: inbound publish failed")
-        try:
-            from . import find as find_module
+        from . import find as find_module
 
+        resolver_current = True
+        try:
             find_module.on_resolver_files_changed(self._vault_root, up_rels, del_rels)
         except Exception:  # noqa: BLE001
+            resolver_current = False
+            try:
+                find_module.evict_resolver_caches(self._vault_root)
+            except Exception:  # noqa: BLE001 - pending epoch remains the safety boundary
+                pass
             log.exception("file watcher: resolver publish failed")
+
+        # The authoritative registry and resolver now cover the drained
+        # external generation. Withdraw an existing graph marker before
+        # compare-and-ack: a same-metadata edit can leave its projection
+        # identity unchanged, so pending must not disappear while stale edges
+        # are still publicly readable. The following fan-out republishes the
+        # marker from the exact checkpoint (or rebuilds).
+        from . import epistemic_graph
+
+        guarded_graph: epistemic_graph.EpistemicGraphIndex | None = None
+        ack_ready = (
+            pending_epoch is not None
+            and publication_current
+            and inbound_current
+            and resolver_current
+        )
+        if ack_ready:
+            candidate = epistemic_graph.EpistemicGraphIndex(self._vault_root)
+            if candidate.path.exists():
+                try:
+                    candidate.suspend_reads()
+                except Exception:  # noqa: BLE001 - retain pending for periodic recovery
+                    ack_ready = False
+                    log.exception("file watcher: graph availability withdrawal failed")
+                else:
+                    guarded_graph = candidate
+        if ack_ready:
+            freshness.clear_external_pending(
+                self._vault_root,
+                through=pending_epoch,
+            )
 
         # Index sidecars (embedding + lexical): Knowledge Base markdown only.
         kb_del_rels = [r for r in del_rels if r.startswith(kb_prefix())]
+        if not (kb_ups or kb_del_rels) and (up_rels or del_rels):
+            # Graph sources live in KB, but their resolver is vault-wide. A
+            # sibling-folder title/path change can alter KB edge resolution
+            # without producing a KB embedding/index event of its own.
+            try:
+                epistemic_graph.upsert_after_write(
+                    self._vault_root,
+                    [self._vault_root / rel for rel in (*up_rels, *del_rels)],
+                )
+            except Exception:  # noqa: BLE001 - graph remains fail-closed by checkpoint
+                log.exception("file watcher: vault-wide graph repair failed")
         policy = self._watcher_policy()
         defer_semantic = False
         if cap and not policy.defer_expensive_indexes:
@@ -690,6 +876,20 @@ class FileWatcher:
                 log.exception(
                     "file watcher: delete_after_remove failed for %d file(s)",
                     len(kb_del_rels),
+                )
+        if (
+            guarded_graph is not None
+            and epistemic_graph.graph_enabled()
+            and not freshness.external_pending(self._vault_root)
+        ):
+            try:
+                graph_current = guarded_graph.available()
+            except Exception:  # noqa: BLE001 - availability is the required outcome
+                graph_current = False
+            if not graph_current:
+                freshness.mark_external_pending(self._vault_root)
+                log.warning(
+                    "file watcher: graph fan-out incomplete; periodic recovery re-armed"
                 )
 
     def _run_reconcile(self) -> None:

@@ -214,6 +214,24 @@ class GetResponse(TypedDict):
 # descriptions Claude reads (byte-pinned by tests/test_mcp_schema_fidelity.py).
 
 
+def _compact_action_pack_guidance(catalogue: dict) -> dict:
+    """Keep compact action routes pointing at the one full pack projection."""
+    for action in catalogue.values():
+        guidance = action.get("selected_pack_guidance")
+        if not isinstance(guidance, list):
+            continue
+        action["selected_pack_guidance"] = [
+            {
+                key: item.get(key)
+                for key in ("pack_id", "name")
+                if isinstance(item, dict) and item.get(key) is not None
+            }
+            for item in guidance
+            if isinstance(item, dict)
+        ]
+    return catalogue
+
+
 def op_bootstrap(
     vault_root: Path,
     profile: str = "compact",
@@ -261,6 +279,15 @@ def op_bootstrap(
     active_product_names = frozenset(active_descriptor.product_commands)
     requested_workflow = workflow.strip() if workflow and workflow.strip() else "general"
     selected_packs = knowledge_packs_module.selected_pack_state(vault_root)
+    simple_actions = simple_action_catalog(
+        selected_packs, available_tools=active_product_names
+    )
+    front_door_actions = product_front_door_catalog(
+        selected_packs, available_tools=active_product_names
+    )
+    if profile == "compact":
+        _compact_action_pack_guidance(simple_actions)
+        _compact_action_pack_guidance(front_door_actions)
     governance_policy = governance_policy_module.load(vault_root)
     governance_principal = principal_module.effective_principal()
     if governance_policy.empty:
@@ -647,13 +674,9 @@ def op_bootstrap(
                 "try ask_memory(deep=true) for synthesis instead of many read_memory calls",
             ],
         },
-        "simple_actions": simple_action_catalog(
-            selected_packs, available_tools=active_product_names
-        ),
+        "simple_actions": simple_actions,
         "common_actions": list(simple_action_names()),
-        "front_door_actions": product_front_door_catalog(
-            selected_packs, available_tools=active_product_names
-        ),
+        "front_door_actions": front_door_actions,
         "product_commands": product_tool_catalog(
             active_product_names, callable_tools=active_descriptor.callable_commands
         ),

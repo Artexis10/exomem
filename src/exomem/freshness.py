@@ -183,6 +183,11 @@ _recall_generations: dict[tuple[str, str], int] = {}
 _recall_identities: dict[tuple[str, str], tuple[str, str]] = {}
 _recall_live: set[tuple[str, str]] = set()
 _recall_history: dict[tuple[str, str], list[tuple[int, int, frozenset[str]]]] = {}
+# Watchdog records an external event here before its debounce window. Graph
+# readers can then fail closed in O(1) until that exact queued generation has
+# been published through the event-maintained corpus fan-out.
+_external_pending_clock = 0
+_external_pending: dict[str, int] = {}
 
 
 def _next_gen() -> int:
@@ -462,6 +467,37 @@ def recall_is_live(vault_root: Path, scope: str) -> bool:
         return False
     with _lock:
         return _key(vault_root, scope) in _recall_live
+
+
+def mark_external_pending(vault_root: Path) -> int:
+    """Mark an observed out-of-band event pending before watcher debounce."""
+    global _external_pending_clock
+    with _lock:
+        _external_pending_clock += 1
+        epoch = _external_pending_clock
+        _external_pending[_canon(vault_root)] = epoch
+        return epoch
+
+
+def clear_external_pending(vault_root: Path, *, through: int) -> None:
+    """Clear only the observed external generations a completed flush covered."""
+    with _lock:
+        root = _canon(vault_root)
+        current = _external_pending.get(root)
+        if current is not None and current <= through:
+            _external_pending.pop(root, None)
+
+
+def external_pending(vault_root: Path) -> bool:
+    """Whether watchdog has observed unpublished external vault changes."""
+    with _lock:
+        return _canon(vault_root) in _external_pending
+
+
+def external_pending_epoch(vault_root: Path) -> int | None:
+    """Return the latest observed unpublished generation for one vault."""
+    with _lock:
+        return _external_pending.get(_canon(vault_root))
 
 
 def recall_delta_since(
@@ -945,6 +981,7 @@ def invalidate(vault_root: Path | None = None) -> None:
             _recall_identities.clear()
             _recall_live.clear()
             _recall_history.clear()
+            _external_pending.clear()
             return
         root = _canon(vault_root)
         for scope in SCOPES:
@@ -1004,6 +1041,7 @@ def snapshot() -> dict:
         return {
             "live": sorted(_live),
             "counts": {k: len(v) for k, v in _maps.items()},
+            "external_pending": sorted(_external_pending),
         }
 
 
@@ -1013,7 +1051,8 @@ def clear() -> None:
     Mints a fresh process-instance id so any checkpoint held across the reset
     reads as foreign — the same signal a genuine process restart would give.
     """
-    global _instance_id
+    global _external_pending_clock, _instance_id
     invalidate(None)
     with _lock:
         _instance_id = uuid.uuid4().hex
+        _external_pending_clock = 0

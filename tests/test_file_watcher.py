@@ -19,6 +19,7 @@ import pytest
 from exomem import (
     deferred_index,
     embeddings,
+    epistemic_graph,
     file_watcher,
     freshness,
     media_processing,
@@ -57,13 +58,351 @@ def test_flush_batches_upserts_and_dedupes(vault, monkeypatch: pytest.MonkeyPatc
     w._record(a, deleted=False)
     w._record(a, deleted=False)  # duplicate save coalesces
     w._record(b, deleted=False)
+    assert freshness.external_pending(vault) is True
     w._flush()
     assert len(ups) == 1, "one batched upsert call for the whole window"
     assert sorted(ups[0]) == sorted([a, b])
     assert dels == []
+    assert freshness.external_pending(vault) is False
     # Pending cleared after flush — a second flush dispatches nothing.
     w._flush()
     assert len(ups) == 1
+
+
+def test_external_pending_ack_does_not_clear_a_newer_event(vault: Path) -> None:
+    first = freshness.mark_external_pending(vault)
+    freshness.invalidate(vault)
+    assert freshness.external_pending(vault) is True
+    second = freshness.mark_external_pending(vault)
+
+    freshness.clear_external_pending(vault, through=first)
+
+    assert freshness.external_pending(vault) is True
+
+    freshness.clear_external_pending(vault, through=second)
+
+    assert freshness.external_pending(vault) is False
+
+
+def test_out_of_kb_markdown_event_repairs_vault_wide_graph(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repaired: list[list[Path]] = []
+    monkeypatch.setattr(
+        epistemic_graph,
+        "upsert_after_write",
+        lambda _root, paths: repaired.append(list(paths)),
+    )
+    shadow = vault / "Reference" / "shadow.md"
+    shadow.parent.mkdir(parents=True, exist_ok=True)
+    shadow.write_text("---\ntitle: Future Target\n---\n# Shadow\n", encoding="utf-8")
+    watcher = file_watcher.FileWatcher(vault)
+
+    watcher._record(shadow, deleted=False)
+    assert freshness.external_pending(vault) is True
+    watcher._flush()
+
+    assert repaired == [[shadow]]
+    assert freshness.external_pending(vault) is False
+
+
+def test_live_ack_withdraws_graph_before_same_signature_fanout(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    a = vault / "Knowledge Base" / "Notes" / "pending-a.md"
+    b = vault / "Knowledge Base" / "Notes" / "pending-b.md"
+    a.parent.mkdir(parents=True, exist_ok=True)
+    a.write_text("# Pending A\n\n[[pending-b]]\n", encoding="utf-8")
+    b.write_text("# Pending B\n", encoding="utf-8")
+    watcher = file_watcher.FileWatcher(vault)
+    watcher._reconcile_once(seed=True)
+    graph = epistemic_graph.EpistemicGraphIndex(vault)
+    graph.rebuild_all()
+    a_rel = _vault_rel(vault, a)
+    assert any(edge["relation_type"] == "links_to" for edge in graph.edges(source_path=a_rel))
+    old_signature = freshness.stat_signature(a)
+
+    a.write_text("# Pending A\n\nLink removed.\n", encoding="utf-8")
+    watcher._record(a, deleted=False)
+    real_stat_signature = freshness.stat_signature
+
+    def coarse_signature(path: Path):
+        return old_signature if Path(path) == a else real_stat_signature(path)
+
+    monkeypatch.setattr(freshness, "stat_signature", coarse_signature)
+    real_upsert = file_watcher.index_sync.upsert_after_write
+    handoff: list[tuple[bool, bool]] = []
+
+    def observe_handoff(*args, **kwargs):
+        handoff.append((freshness.external_pending(vault), graph.available()))
+        return real_upsert(*args, **kwargs)
+
+    monkeypatch.setattr(file_watcher.index_sync, "upsert_after_write", observe_handoff)
+
+    watcher._flush()
+
+    assert handoff == [(False, False)]
+    assert freshness.external_pending(vault) is False
+    assert graph.available() is True
+    assert not any(
+        edge["relation_type"] == "links_to" for edge in graph.edges(source_path=a_rel)
+    )
+
+
+def test_live_graph_read_barrier_preserves_incremental_repair(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    page = vault / "Knowledge Base" / "Notes" / "bounded-live-edit.md"
+    page.parent.mkdir(parents=True, exist_ok=True)
+    page.write_text("# Bounded live edit\n\nBefore.\n", encoding="utf-8")
+    watcher = file_watcher.FileWatcher(vault)
+    watcher._reconcile_once(seed=True)
+    graph = epistemic_graph.EpistemicGraphIndex(vault)
+    graph.rebuild_all()
+    rel = _vault_rel(vault, page)
+
+    page.write_text("# Bounded live edit\n\nAfter.\n", encoding="utf-8")
+    watcher._record(page, deleted=False)
+    monkeypatch.setattr(
+        epistemic_graph.EpistemicGraphIndex,
+        "_rebuild_all_locked",
+        lambda *_args, **_kwargs: pytest.fail("ordinary live edit rebuilt the whole graph"),
+    )
+
+    watcher._flush()
+
+    assert freshness.external_pending(vault) is False
+    assert graph.available() is True
+    current = next(node for node in graph.nodes(path=rel) if node["kind"] == "file")
+    assert current["source_hash"] == vault_module.content_hash(page.read_text(encoding="utf-8"))
+
+
+@pytest.mark.parametrize("restart", [False, True])
+def test_reconcile_repairs_a_persisted_graph_read_barrier(
+    vault: Path,
+    restart: bool,
+) -> None:
+    watcher = file_watcher.FileWatcher(vault)
+    watcher._reconcile_once(seed=True)
+    graph = epistemic_graph.EpistemicGraphIndex(vault)
+    graph.rebuild_all()
+    graph.suspend_reads()
+    assert graph.available() is False
+    if restart:
+        freshness.clear()
+
+    watcher._reconcile_once(seed=restart)
+
+    assert graph.available() is True
+
+
+def test_startup_hash_validation_repairs_a_pre_barrier_crash(
+    vault: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    a = vault / "Knowledge Base" / "Notes" / "crash-a.md"
+    b = vault / "Knowledge Base" / "Notes" / "crash-b.md"
+    a.parent.mkdir(parents=True, exist_ok=True)
+    a.write_text("# Crash A\n\n[[crash-b]]\n", encoding="utf-8")
+    b.write_text("# Crash B\n", encoding="utf-8")
+    watcher = file_watcher.FileWatcher(vault)
+    watcher._reconcile_once(seed=True)
+    graph = epistemic_graph.EpistemicGraphIndex(vault)
+    graph.rebuild_all()
+    a_rel = _vault_rel(vault, a)
+    old_signature = freshness.stat_signature(a)
+
+    a.write_text("# Crash A\n\nLink gone.\n", encoding="utf-8")
+    watcher._record(a, deleted=False)
+    assert graph.reads_suspended() is False
+    freshness.clear()  # process died during debounce; the in-memory epoch is gone
+    real_stat_signature = freshness.stat_signature
+    monkeypatch.setattr(
+        freshness,
+        "stat_signature",
+        lambda path: old_signature if Path(path) == a else real_stat_signature(path),
+    )
+
+    restarted = file_watcher.FileWatcher(vault)
+    restarted._reconcile_once(seed=True)
+
+    assert graph.available() is True
+    assert not any(
+        edge["relation_type"] == "links_to" for edge in graph.edges(source_path=a_rel)
+    )
+
+
+def test_disabled_graph_event_bars_an_existing_sidecar_before_reenable(
+    vault: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    a = vault / "Knowledge Base" / "Notes" / "disabled-a.md"
+    b = vault / "Knowledge Base" / "Notes" / "disabled-b.md"
+    a.parent.mkdir(parents=True, exist_ok=True)
+    a.write_text("# Disabled A\n\n[[disabled-b]]\n", encoding="utf-8")
+    b.write_text("# Disabled B\n", encoding="utf-8")
+    watcher = file_watcher.FileWatcher(vault)
+    watcher._reconcile_once(seed=True)
+    graph = epistemic_graph.EpistemicGraphIndex(vault)
+    graph.rebuild_all()
+    a_rel = _vault_rel(vault, a)
+    old_signature = freshness.stat_signature(a)
+
+    a.write_text("# Disabled A\n\nLink removed.\n", encoding="utf-8")
+    watcher._record(a, deleted=False)
+    real_stat_signature = freshness.stat_signature
+    monkeypatch.setattr(
+        freshness,
+        "stat_signature",
+        lambda path: old_signature if Path(path) == a else real_stat_signature(path),
+    )
+    monkeypatch.setenv("EXOMEM_DISABLE_GRAPH_INDEX", "1")
+    watcher._flush()
+
+    assert freshness.external_pending(vault) is False
+    assert graph.available() is False
+    monkeypatch.delenv("EXOMEM_DISABLE_GRAPH_INDEX")
+    assert graph.available() is False
+
+    watcher._reconcile_once(seed=False)
+
+    assert graph.available() is True
+    assert not any(
+        edge["relation_type"] == "links_to" for edge in graph.edges(source_path=a_rel)
+    )
+
+
+def test_failed_live_graph_fanout_rearms_periodic_recovery(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    watcher = file_watcher.FileWatcher(vault)
+    watcher._reconcile_once(seed=True)
+    graph = epistemic_graph.EpistemicGraphIndex(vault)
+    graph.rebuild_all()
+    page = next(find_module._walk_md(vault / "Knowledge Base"))
+    page.write_text(page.read_text(encoding="utf-8") + "\nFanout retry.\n", encoding="utf-8")
+    watcher._record(page, deleted=False)
+    real_refresh = epistemic_graph.EpistemicGraphIndex.refresh_paths
+
+    def fail_refresh(*_args, **_kwargs):
+        raise RuntimeError("transient graph fanout failure")
+
+    monkeypatch.setattr(epistemic_graph.EpistemicGraphIndex, "refresh_paths", fail_refresh)
+    watcher._flush()
+
+    assert freshness.external_pending(vault) is True
+    assert graph.available() is False
+
+    monkeypatch.setattr(epistemic_graph.EpistemicGraphIndex, "refresh_paths", real_refresh)
+    watcher._reconcile_once(seed=False)
+
+    assert freshness.external_pending(vault) is False
+    assert graph.available() is True
+
+
+def test_failed_external_publication_keeps_graph_dirty(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        file_watcher.index_sync,
+        "publish_corpus_delta",
+        lambda *_args, **_kwargs: False,
+    )
+    monkeypatch.setattr(
+        file_watcher.index_sync,
+        "upsert_after_write",
+        lambda *_args, **_kwargs: None,
+    )
+    page = vault / "Knowledge Base" / "Notes" / "pending.md"
+    page.parent.mkdir(parents=True, exist_ok=True)
+    page.write_text("# Pending\n", encoding="utf-8")
+    watcher = file_watcher.FileWatcher(vault)
+
+    watcher._record(page, deleted=False)
+    watcher._flush()
+
+    assert freshness.external_pending(vault) is True
+
+
+@pytest.mark.parametrize("failing_component", ["inbound", "resolver"])
+def test_external_pending_ack_requires_cache_patch_success(
+    vault: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failing_component: str,
+) -> None:
+    page = vault / "Knowledge Base" / "Notes" / "pending-cache-patch.md"
+    page.parent.mkdir(parents=True, exist_ok=True)
+    page.write_text("# Pending cache patch\n", encoding="utf-8")
+    watcher = file_watcher.FileWatcher(vault)
+    monkeypatch.setattr(
+        file_watcher.index_sync,
+        "publish_corpus_delta",
+        lambda *_args, **_kwargs: True,
+    )
+    monkeypatch.setattr(
+        file_watcher.index_sync,
+        "upsert_after_write",
+        lambda *_args, **_kwargs: None,
+    )
+
+    def fail_patch(*_args, **_kwargs):
+        raise RuntimeError("cache patch failed")
+
+    if failing_component == "inbound":
+        monkeypatch.setattr(vault_module, "on_inbound_files_changed", fail_patch)
+    else:
+        monkeypatch.setattr(find_module, "on_resolver_files_changed", fail_patch)
+
+    watcher._record(page, deleted=False)
+    watcher._flush()
+
+    assert freshness.external_pending(vault) is True
+
+
+def test_periodic_reconcile_recovers_a_failed_external_publication(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    file_watcher.clear_self_write_registry()
+    watcher = file_watcher.FileWatcher(vault)
+    watcher._reconcile_once(seed=True)
+    graph = epistemic_graph.EpistemicGraphIndex(vault)
+    graph.rebuild_all()
+    page = next(find_module._walk_md(vault / "Knowledge Base"))
+    rel = _vault_rel(vault, page)
+    original_publish = semantic_contract.publish_corpus_files_changed
+
+    page.write_text(
+        page.read_text(encoding="utf-8") + "\nRecovered external edit.\n",
+        encoding="utf-8",
+    )
+    watcher._record(page, deleted=False)
+
+    def fail_publication(*_args, **_kwargs):
+        raise RuntimeError("transient publication failure")
+
+    monkeypatch.setattr(
+        semantic_contract,
+        "publish_corpus_files_changed",
+        fail_publication,
+    )
+    watcher._flush()
+
+    assert freshness.external_pending(vault) is True
+    assert freshness.recall_is_live(vault, "vault") is False
+    assert graph.available() is False
+
+    monkeypatch.setattr(
+        semantic_contract,
+        "publish_corpus_files_changed",
+        original_publish,
+    )
+    watcher._reconcile_once(seed=False)
+
+    assert freshness.external_pending(vault) is False
+    assert freshness.recall_is_live(vault, "vault") is True
+    assert graph.available() is True
+    current = next(node for node in graph.nodes(path=rel) if node["kind"] == "file")
+    assert current["source_hash"] == vault_module.content_hash(page.read_text(encoding="utf-8"))
 
 
 def test_non_markdown_is_ignored(vault, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -24,7 +24,7 @@ wrappers as the outermost belt.
 from __future__ import annotations
 
 import logging
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
@@ -576,6 +576,7 @@ def _dispatch_upsert_components(
     suppressed_rels: list[str],
     *,
     defer_semantic: bool,
+    created_semantic_paths: list[Path],
 ) -> list[IndexComponentOutcome]:
     from . import epistemic_graph, find, lexstore, memory_refs, mode
 
@@ -607,12 +608,17 @@ def _dispatch_upsert_components(
             "lexstore", lambda: lexstore.upsert_after_write(vault_root, semantic_paths)
         )
     )
-    components.append(
-        _legacy_component(
-            "epistemic_graph",
-            lambda: epistemic_graph.upsert_after_write(vault_root, semantic_paths),
-        )
-    )
+    def graph_upsert() -> None:
+        if created_semantic_paths:
+            epistemic_graph.upsert_after_write(
+                vault_root,
+                semantic_paths,
+                created_paths=created_semantic_paths,
+            )
+        else:
+            epistemic_graph.upsert_after_write(vault_root, semantic_paths)
+
+    components.append(_legacy_component("epistemic_graph", graph_upsert))
     if defer_semantic or mode.defer_expensive_indexes():
         try:
             semantic_count, added = _record_deferred_semantic_upserts(
@@ -662,6 +668,7 @@ def upsert_after_write(
     defer_semantic: bool = False,
     semantic_states: Mapping[str, semantic_index.SemanticParentIndexState] | None = None,
     publish_corpus_change: bool = True,
+    created_paths: Iterable[Path] = (),
 ) -> IndexSyncReport:
     """Fan a writer's markdown change out to every index sidecar.
 
@@ -709,12 +716,25 @@ def upsert_after_write(
     semantic_paths = [item.path for item in batch.admitted_paths]
     semantic_rels = [item.rel_path for item in batch.admitted_paths]
     suppressed_rels = [item.rel_path for item in batch.suppressed_paths]
+    created_rels = {
+        rel
+        for path in created_paths
+        if (rel := _rel(Path(path))) is not None
+    }
+    created_semantic_paths = [
+        item.path for item in batch.admitted_paths if item.rel_path in created_rels
+    ]
     if not identity_paths:
         # Preserve the observable no-semantic-path fan-out contract for legacy
         # non-Markdown notifications while keeping them out of every identity
         # and semantic collection.
         components = _dispatch_upsert_components(
-            vault_root, [], [], [], defer_semantic=defer_semantic
+            vault_root,
+            [],
+            [],
+            [],
+            defer_semantic=defer_semantic,
+            created_semantic_paths=[],
         )
         return IndexSyncReport(
             "upsert",
@@ -773,6 +793,7 @@ def upsert_after_write(
             semantic_paths,
             suppressed_rels,
             defer_semantic=defer_semantic,
+            created_semantic_paths=created_semantic_paths,
         )
     finally:
         semantic_index.reset_parent_states(token)

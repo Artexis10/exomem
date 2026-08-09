@@ -340,8 +340,11 @@ def test_batch_atomic_write_collector_observes_existing_fanout_once(
     )
     calls: list[list[Path]] = []
 
-    def _upsert(_root: Path, paths: list[Path]):
+    kwargs_seen: list[dict] = []
+
+    def _upsert(_root: Path, paths: list[Path], **kwargs):
         calls.append(list(paths))
+        kwargs_seen.append(kwargs)
         return report
 
     monkeypatch.setattr(index_sync, "upsert_after_write", _upsert)
@@ -356,6 +359,12 @@ def test_batch_atomic_write_collector_observes_existing_fanout_once(
 
     assert replaced == [target]
     assert calls == [[target]]
+    assert kwargs_seen == [
+        {
+            "created_paths": [target],
+            "publish_corpus_change": False,
+        }
+    ]
     assert collected == [report]
 
 

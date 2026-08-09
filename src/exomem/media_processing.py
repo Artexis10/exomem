@@ -261,6 +261,7 @@ def reconcile_media(
     )
 
     deferred_fanout: list[Path] = []
+    deferred_created: list[Path] = []
 
     def _write_sidecar(write: PlannedWrite) -> None:
         written = batch_atomic_write(
@@ -270,6 +271,8 @@ def reconcile_media(
         )
         if commit_guard is not None:
             deferred_fanout.extend(written)
+            if write.create_only or write.expected_hash == MISSING_CONTENT_HASH:
+                deferred_created.extend(written)
 
     result: ReconcileResult | None = None
     boundary = commit_guard() if commit_guard is not None else nullcontext()
@@ -286,6 +289,7 @@ def reconcile_media(
                     list(dict.fromkeys(deferred_fanout)),
                     None,
                     None,
+                    created_paths=list(dict.fromkeys(deferred_created)),
                 )
 
     with _commit_scope():

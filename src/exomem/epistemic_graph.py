@@ -14,6 +14,7 @@ import re
 import sqlite3
 import threading
 from collections.abc import Iterable
+from contextlib import nullcontext
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
 from pathlib import Path
@@ -37,7 +38,7 @@ from .cli_ops import OpError
 from .kbdir import kb_dirname, kb_prefix
 from .markdown_relations import MarkdownRelation
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 UNIT_SEED_MAX_BATCHES = 4
 UNIT_PARENT_REF_MAX_CANDIDATES = 16
 EDGE_INSPECTION_MULTIPLIER = 4
@@ -46,6 +47,8 @@ GRAPH_MUTATION_TIMEOUT_SECONDS = 30.0
 GRAPH_COORDINATION_DIRNAME = ".graph-coordination"
 _AVAILABILITY_FRESHNESS_KEY = "recall_projection_identity"
 _RECALL_CHECKPOINT_KEY = "recall_projection_checkpoint"
+_RESOLVER_TOPOLOGY_KEY = "recall_resolver_topology"
+_READ_BARRIER_KEY = "read_barrier"
 
 RELATION_TYPES: frozenset[str] = relation_registry.core_registry().keys
 
@@ -273,7 +276,10 @@ def _records_suppressed_path(vault_root: Path, rel_path: str) -> bool:
     return recall_policy.is_structured_only_path(vault_root, rel_path)
 
 
-def _source_signature(path: Path, source: str) -> tuple[int, int, int, str]:
+GraphSourceSignature = tuple[int, int, int, str]
+
+
+def _source_signature(path: Path, source: str) -> GraphSourceSignature:
     """Bind graph rows to the exact bytes and file identity used to derive them."""
     info = path.stat()
     return (
@@ -282,6 +288,18 @@ def _source_signature(path: Path, source: str) -> tuple[int, int, int, str]:
         int(info.st_size),
         vault_module.content_hash(source),
     )
+
+
+def _resolver_topology_fingerprint(
+    resolver: vault_module.WikilinkResolver,
+) -> str:
+    """Digest every path/title input that can change wikilink resolution."""
+    topology = [
+        (rel, resolver.title_key_for_path(rel))
+        for rel in sorted(resolver.full_paths)
+    ]
+    payload = json.dumps(topology, ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 class EpistemicGraphIndex:
@@ -389,7 +407,11 @@ class EpistemicGraphIndex:
         open a structurally current but freshness-stale sidecar specifically to
         advance it to the already-published event checkpoint.
         """
-        if not graph_enabled() or not self.path.exists():
+        if (
+            not graph_enabled()
+            or freshness.external_pending(self.vault_root)
+            or not self.path.exists()
+        ):
             return None
         conn: sqlite3.Connection | None = None
         try:
@@ -402,7 +424,8 @@ class EpistemicGraphIndex:
                     "SELECT key, value FROM graph_meta WHERE key IN "
                     "('schema_version', 'core_registry_version', 'extension_registry_hash', "
                     "'recall_policy_version', 'recall_access_fingerprint', "
-                    "'recall_projection_identity', 'recall_projection_checkpoint')"
+                    "'recall_projection_identity', 'recall_projection_checkpoint', "
+                    "'recall_resolver_topology', 'read_barrier')"
                 ).fetchall()
             )
         except sqlite3.Error:
@@ -419,13 +442,21 @@ class EpistemicGraphIndex:
             and values.get("extension_registry_hash") == self.registry.extension_hash
             and values.get("recall_policy_version") == policy_version
             and values.get("recall_access_fingerprint") == access_fingerprint
+            and len(values.get(_RESOLVER_TOPOLOGY_KEY, "")) == 64
             and stored_projection is not None
             # A present-but-corrupt checkpoint must fail closed.  No checkpoint
             # is valid for a sidecar published from a direct-disk rebuild while
             # the event registry was cold or known stale.
             and (stored_checkpoint_value is None or stored_checkpoint is not None)
         )
+        if current and require_current_projection and values.get(_READ_BARRIER_KEY) is not None:
+            current = False
         if current and require_current_projection:
+            current_checkpoint = (
+                freshness.recall_checkpoint(self.vault_root, "vault")
+                if stored_checkpoint is not None
+                else None
+            )
             current_identity = (
                 _incremental_projection_identity(self.vault_root)
                 if stored_checkpoint is not None
@@ -435,10 +466,117 @@ class EpistemicGraphIndex:
                 )
             )
             current = stored_projection == _availability_freshness_value(current_identity)
-        if not current:
+            # A checkpoint is an O(delta) proof only inside the exact process
+            # lineage that published it.  A cold/direct reader, or a process
+            # that inherited a sidecar from an older registry instance, cannot
+            # know whether the writer died after changing Markdown but before
+            # persisting the graph read barrier.  In that case prove the
+            # canonical source bytes and resolver topology directly before
+            # trusting the derived sidecar.  Live readers at the exact stored
+            # checkpoint retain the event-maintained fast path.
+            exact_live_checkpoint = (
+                stored_checkpoint is not None
+                and current_checkpoint is not None
+                and freshness.recall_is_live(self.vault_root, "vault")
+                and stored_checkpoint == current_checkpoint
+            )
+            if current and not exact_live_checkpoint:
+                current = self._snapshot_sources_match_disk(
+                    conn,
+                    resolver_fingerprint=values.get(_RESOLVER_TOPOLOGY_KEY),
+                )
+        if not current or freshness.external_pending(self.vault_root):
             conn.close()
             return None
         return conn
+
+    def _snapshot_sources_match_disk(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        resolver_fingerprint: str | None,
+    ) -> bool:
+        """Prove a cold/foreign sidecar against human-owned Markdown bytes.
+
+        The graph's file rows atomically carry the source hash from which all
+        nodes and outgoing edges were derived.  Resolver-only paths outside the
+        indexed KB still affect target resolution, so their freshly parsed
+        path/title topology is checked against the persisted resolver digest as
+        well.  Any incomplete read fails closed; this is deliberately the cold
+        path and never runs for a live reader at the exact stored checkpoint.
+        """
+        try:
+            policy_identity = recall_policy.recall_policy_identity(self.vault_root)
+            resolver_membership = self._recall_membership()
+            indexed_membership = self._indexed_recall_membership()
+            if resolver_membership is None or indexed_membership is None:
+                return False
+            current_hashes: dict[str, str] = {}
+            captured_guards: dict[str, vault_module.PathGuard] = {}
+            resolver_entries: list[tuple[str, str | None]] = []
+            for rel in sorted(resolver_membership | indexed_membership):
+                path = self.vault_root / rel
+                # Admission and opening are separate operations.  A direct
+                # editor can replace an admitted path with a symlink/reparse
+                # point between them, so the proof must open descriptor-rooted
+                # with no-follow semantics.  The lstat size only supplies an
+                # arbitrary-file-size bound; a replacement outside that exact
+                # descriptor snapshot is refused without opening its bytes.
+                limit = int(path.lstat().st_size)
+                raw, source_guard = vault_module.read_bounded_guarded_bytes(
+                    self.vault_root,
+                    rel,
+                    limit=limit,
+                )
+                page = find_module._parse_page(
+                    path,
+                    0.0,
+                    self.vault_root,
+                    content=raw,
+                    resolved_relative=rel,
+                )
+                if page is None:
+                    return False
+                captured_guards[rel] = source_guard
+                if rel in indexed_membership:
+                    current_hashes[rel] = page.snapshot_hash
+                if rel in resolver_membership:
+                    resolver_entries.append((rel, page.title))
+
+            stored_hashes = {
+                str(path): str(source_hash)
+                for path, source_hash in conn.execute(
+                    "SELECT path, source_hash FROM graph_nodes WHERE kind = 'file'"
+                ).fetchall()
+            }
+            if stored_hashes != current_hashes:
+                return False
+            resolver = vault_module.WikilinkResolver.from_entries(
+                self.vault_root,
+                resolver_entries,
+            )
+            topology_matches = (
+                resolver_fingerprint is not None
+                and _resolver_topology_fingerprint(resolver) == resolver_fingerprint
+            )
+            if not topology_matches:
+                return False
+
+            # Stabilize the cold proof after every parse/topology callback.  A
+            # direct editor does not participate in Exomem's mutation lock and
+            # may replace bytes while this O(vault) proof is running.  Re-read
+            # each captured source, then repeat both path censuses and the
+            # policy identity so a mid-proof edit cannot bless the older graph
+            # snapshot merely because its first pass was internally coherent.
+            for source_guard in captured_guards.values():
+                source_guard.recheck(self.vault_root)
+            return (
+                self._recall_membership() == resolver_membership
+                and self._indexed_recall_membership() == indexed_membership
+                and recall_policy.recall_policy_identity(self.vault_root) == policy_identity
+            )
+        except Exception:  # noqa: BLE001 - an incomplete cold proof fails closed
+            return False
 
     def rebuild_all(self) -> dict[str, int]:
         if not graph_enabled():
@@ -461,12 +599,27 @@ class EpistemicGraphIndex:
                 resolver = find_module.recall_resolver_snapshot(
                     self.vault_root, freshness=before_disk
                 )
+                resolver_membership = self._recall_membership()
+                resolver_versions = (
+                    self._resolver_source_versions(resolver, resolver_membership)
+                    if resolver_membership is not None
+                    else None
+                )
+                if resolver_versions is None:
+                    # The supplied freshness identity did not actually name the
+                    # resolver bytes (for example after a coarse-metadata edit).
+                    # Clear both the resolver and page cache before retrying.
+                    self._mark_unavailable()
+                    find_module.unload_ram_caches()
+                    continue
                 pass_started = True
                 report = self._rebuild_all_pass(resolver)
                 after_disk = _disk_vault_freshness(self.vault_root)
                 if (
                     _recall_projection_identity(self.vault_root, disk_freshness=after_disk)
                     == before
+                    and self._recall_membership() == resolver_membership
+                    and self._source_versions_current(resolver_versions)
                 ):
                     live_checkpoint = (
                         freshness.recall_checkpoint(self.vault_root, "vault")
@@ -491,7 +644,11 @@ class EpistemicGraphIndex:
                     # it.  Publishing without an event checkpoint makes public
                     # reads re-prove disk identity and makes the next live
                     # incremental refresh rebuild rather than bridge a gap.
-                    if self._mark_available(before, checkpoint=checkpoint):
+                    if (
+                        self._mark_available(before, checkpoint=checkpoint)
+                        and self._recall_membership() == resolver_membership
+                        and self._source_versions_current(resolver_versions)
+                    ):
                         stable = True
                         return report
                     self._mark_unavailable()
@@ -521,6 +678,10 @@ class EpistemicGraphIndex:
                 )
                 conn.execute(
                     "INSERT OR REPLACE INTO graph_meta(key, value) VALUES (?, ?)",
+                    (_READ_BARRIER_KEY, "unavailable"),
+                )
+                conn.execute(
+                    "INSERT OR REPLACE INTO graph_meta(key, value) VALUES (?, ?)",
                     ("core_registry_version", str(self.registry.core_version)),
                 )
                 conn.execute(
@@ -540,6 +701,10 @@ class EpistemicGraphIndex:
                     "INSERT OR REPLACE INTO graph_meta(key, value) VALUES (?, ?)",
                     ("indexed_scope", "kb"),
                 )
+                conn.execute(
+                    "INSERT OR REPLACE INTO graph_meta(key, value) VALUES (?, ?)",
+                    (_RESOLVER_TOPOLOGY_KEY, _resolver_topology_fingerprint(resolver)),
+                )
                 policy_version, access_fingerprint = recall_policy.recall_policy_identity(
                     self.vault_root
                 )
@@ -552,13 +717,18 @@ class EpistemicGraphIndex:
                     ("recall_access_fingerprint", access_fingerprint),
                 )
                 _bump_generation(conn)
+            # Commit the availability-marker withdrawal before rebuilding rows.
+            # Readers must fail closed for the whole pass, while the row work
+            # itself can share one transaction instead of fsyncing per file.
             indexed = 0
             kb = self.vault_root / kb_dirname()
-            if kb.is_dir():
-                for md in find_module._walk_md(kb):
-                    if self._index_path(conn, md, resolver=resolver):
-                        indexed += 1
             with conn:
+                if kb.is_dir():
+                    for md in find_module._walk_md(kb):
+                        if self._index_path(
+                            conn, md, resolver=resolver, commit=False
+                        ):
+                            indexed += 1
                 n_nodes = conn.execute("SELECT COUNT(*) FROM graph_nodes").fetchone()[0]
                 n_edges = conn.execute("SELECT COUNT(*) FROM graph_edges").fetchone()[0]
             return {"indexed_files": indexed, "nodes": int(n_nodes), "edges": int(n_edges)}
@@ -580,8 +750,59 @@ class EpistemicGraphIndex:
                     "DELETE FROM graph_meta WHERE key = ?",
                     (_RECALL_CHECKPOINT_KEY,),
                 )
+                conn.execute(
+                    "INSERT OR REPLACE INTO graph_meta(key, value) VALUES (?, ?)",
+                    (_READ_BARRIER_KEY, "unavailable"),
+                )
         finally:
             conn.close()
+
+    def withdraw_availability(self) -> None:
+        """Fail closed under the same-vault graph mutation boundary."""
+        with self._mutation_coordinator.hold(
+            operation="epistemic_graph_withdraw_availability",
+            holder_kind="graph",
+        ):
+            self._mark_unavailable()
+
+    def suspend_reads(self) -> None:
+        """Block public reads while preserving an incremental repair checkpoint."""
+        if not self.path.exists():
+            return
+        with self._mutation_coordinator.hold(
+            operation="epistemic_graph_suspend_reads",
+            holder_kind="graph",
+        ):
+            conn = sqlite3.connect(self.path)
+            try:
+                with conn:
+                    conn.execute(
+                        "INSERT OR REPLACE INTO graph_meta(key, value) VALUES (?, ?)",
+                        (_READ_BARRIER_KEY, "watcher"),
+                    )
+            finally:
+                conn.close()
+
+    def reads_suspended(self) -> bool:
+        """Whether a persisted read barrier requires repair or publication."""
+        if not self.path.exists():
+            return False
+        conn: sqlite3.Connection | None = None
+        try:
+            uri = f"{self.path.resolve().as_uri()}?mode=ro"
+            conn = sqlite3.connect(uri, uri=True)
+            return (
+                conn.execute(
+                    "SELECT 1 FROM graph_meta WHERE key = ?",
+                    (_READ_BARRIER_KEY,),
+                ).fetchone()
+                is not None
+            )
+        except sqlite3.Error:
+            return False
+        finally:
+            if conn is not None:
+                conn.close()
 
     def _publish_available_marker(
         self,
@@ -599,6 +820,10 @@ class EpistemicGraphIndex:
                 conn.execute(
                     "INSERT OR REPLACE INTO graph_meta(key, value) VALUES (?, ?)",
                     ("schema_version", str(SCHEMA_VERSION)),
+                )
+                conn.execute(
+                    "DELETE FROM graph_meta WHERE key = ?",
+                    (_READ_BARRIER_KEY,),
                 )
                 if checkpoint is None:
                     conn.execute(
@@ -619,9 +844,12 @@ class EpistemicGraphIndex:
         *,
         checkpoint: freshness.RecallFreshnessCheckpoint | None = None,
     ) -> bool:
+        if freshness.external_pending(self.vault_root):
+            return False
         self._publish_available_marker(identity, checkpoint=checkpoint)
         return (
-            _recall_projection_identity(
+            not freshness.external_pending(self.vault_root)
+            and _recall_projection_identity(
                 self.vault_root,
                 disk_freshness=_disk_vault_freshness(self.vault_root),
             )
@@ -633,14 +861,138 @@ class EpistemicGraphIndex:
         identity: tuple[tuple[int, int, str], str, str],
         *,
         checkpoint: freshness.RecallFreshnessCheckpoint | None = None,
+        source_versions: dict[str, GraphSourceSignature] | None = None,
+        expected_membership: frozenset[str] | None = None,
     ) -> bool:
+        expected_sources = source_versions or {}
+        if freshness.external_pending(self.vault_root):
+            return False
+        if not self._source_versions_current(expected_sources):
+            return False
+        if (
+            expected_membership is not None
+            and self._recall_membership() != expected_membership
+        ):
+            return False
+        if _incremental_projection_identity(self.vault_root) != identity:
+            return False
+        if (
+            checkpoint is not None
+            and freshness.recall_checkpoint(self.vault_root, "vault") != checkpoint
+        ):
+            return False
         self._publish_available_marker(identity, checkpoint=checkpoint)
+        if freshness.external_pending(self.vault_root):
+            return False
+        if not self._source_versions_current(expected_sources):
+            return False
+        if (
+            expected_membership is not None
+            and self._recall_membership() != expected_membership
+        ):
+            return False
         if _incremental_projection_identity(self.vault_root) != identity:
             return False
         return (
             checkpoint is None
             or freshness.recall_checkpoint(self.vault_root, "vault") == checkpoint
         )
+
+    def _source_versions_current(
+        self,
+        expected: dict[str, GraphSourceSignature],
+    ) -> bool:
+        """Rebind every incrementally published row to its exact source bytes."""
+        for rel, version in expected.items():
+            path = self.vault_root / rel
+            if not recall_policy.is_recall_candidate(self.vault_root, path):
+                return False
+            try:
+                raw = path.read_text(encoding="utf-8")
+                current = _source_signature(path, raw)
+            except (OSError, UnicodeDecodeError):
+                return False
+            if current != version:
+                return False
+        return True
+
+    def _recall_membership(self) -> frozenset[str] | None:
+        """Capture on-disk membership of the vault-wide recall resolver."""
+        try:
+            return frozenset(
+                rel
+                for path in recall_policy.iter_recall_markdown(
+                    self.vault_root, vault_module.walk_vault_md(self.vault_root)
+                )
+                if (rel := _vault_rel(self.vault_root, path)) is not None
+            )
+        except Exception:  # noqa: BLE001 - an incomplete proof must fail closed
+            return None
+
+    def _indexed_recall_membership(self) -> frozenset[str] | None:
+        """Capture the exact admitted KB paths represented by graph file rows."""
+        kb = self.vault_root / kb_dirname()
+        try:
+            return frozenset(
+                rel
+                for path in recall_policy.iter_recall_markdown(
+                    self.vault_root,
+                    find_module._walk_md(kb) if kb.is_dir() else (),
+                )
+                if (rel := _vault_rel(self.vault_root, path)) is not None
+            )
+        except Exception:  # noqa: BLE001 - an incomplete proof must fail closed
+            return None
+
+    def _checkpoint_membership(
+        self,
+        checkpoint: freshness.RecallFreshnessCheckpoint,
+    ) -> frozenset[str] | None:
+        """Resolve the exact vault-wide path set represented by a checkpoint."""
+        current, entries = freshness.recall_projection_snapshot(self.vault_root, "vault")
+        if current != checkpoint:
+            return None
+        rels: set[str] = set()
+        for raw_path in entries:
+            rel = _vault_rel(self.vault_root, Path(raw_path))
+            if rel is None:
+                return None
+            rels.add(rel)
+        return frozenset(rels)
+
+    def _resolver_source_versions(
+        self,
+        resolver: vault_module.WikilinkResolver,
+        expected_membership: frozenset[str],
+    ) -> dict[str, GraphSourceSignature] | None:
+        """Bind the resolver's vault-wide paths and titles to current bytes."""
+        resolver_paths = {rel.removesuffix(".md") for rel in expected_membership}
+        if resolver.full_paths != resolver_paths:
+            return None
+        versions: dict[str, GraphSourceSignature] = {}
+        for rel in sorted(expected_membership):
+            path = self.vault_root / rel
+            try:
+                raw_bytes = path.read_bytes()
+                raw = raw_bytes.decode("utf-8")
+                source_signature = _source_signature(path, raw)
+                source_mtime = path.stat().st_mtime
+            except (OSError, UnicodeDecodeError):
+                return None
+            page = find_module._parse_page(
+                path,
+                source_mtime,
+                self.vault_root,
+                content=raw_bytes,
+                resolved_relative=rel,
+            )
+            if page is None:
+                return None
+            title = page.title.strip().lower() if page.title.strip() else None
+            if resolver.title_key_for_path(rel) != title:
+                return None
+            versions[rel] = source_signature
+        return versions
 
     def _stored_recall_checkpoint(
         self, conn: sqlite3.Connection
@@ -672,21 +1024,25 @@ class EpistemicGraphIndex:
                 return False
         return freshness.recall_checkpoint(self.vault_root, "vault") == delta.to
 
-    def _stored_resolver_title_keys(
+    def _stored_resolver_entries(
         self,
         conn: sqlite3.Connection,
         delta: freshness.RecallDelta,
-    ) -> dict[str, str | None] | None:
-        """Capture old resolver titles, or refuse a bounded source refresh.
+        created_rels: set[str],
+    ) -> dict[str, tuple[bool, str | None]] | None:
+        """Capture old resolver values for only the retained delta.
 
-        A bounded source refresh is valid for body-only edits. Adds, deletes,
-        non-KB target changes, and title changes can alter resolution of links
-        in otherwise untouched KB sources, so they require whole-graph
-        reresolution before the global checkpoint may advance.
+        Missing rows are accepted only for paths the canonical writer proved
+        were created by this batch. Deletes, non-KB changes, and unexplained
+        missing rows remain unprovable and force the whole-graph fallback.
         """
-        if delta.deleted:
+        if delta.deleted or not created_rels <= {
+            rel
+            for raw_path in delta.changed
+            if (rel := _vault_rel(self.vault_root, Path(raw_path))) is not None
+        }:
             return None
-        titles: dict[str, str | None] = {}
+        entries: dict[str, tuple[bool, str | None]] = {}
         for raw_path in delta.changed:
             rel = _vault_rel(self.vault_root, Path(raw_path))
             if rel is None or not rel.startswith(kb_prefix()):
@@ -696,13 +1052,109 @@ class EpistemicGraphIndex:
                 (_file_key(rel),),
             ).fetchone()
             if row is None:
+                if rel not in created_rels:
+                    return None
+                entries[rel] = (False, None)
+                continue
+            if rel in created_rels:
                 return None
-            titles[rel] = (
-                str(row[0]).strip().lower() if row[0] is not None and str(row[0]).strip() else None
+            entries[rel] = (
+                True,
+                str(row[0]).strip().lower()
+                if row[0] is not None and str(row[0]).strip()
+                else None,
             )
-        return titles
+        return entries
 
-    def refresh_paths(self, paths: list[Path]) -> dict[str, int]:
+    def _stored_full_resolver_topology(
+        self,
+        conn: sqlite3.Connection,
+        changed_rels: set[str],
+    ) -> tuple[dict[str, str], set[str], str] | None:
+        """Load whole-corpus proof inputs only for a real topology change."""
+        fingerprint_row = conn.execute(
+            "SELECT value FROM graph_meta WHERE key = ?",
+            (_RESOLVER_TOPOLOGY_KEY,),
+        ).fetchone()
+        if fingerprint_row is None or len(str(fingerprint_row[0])) != 64:
+            return None
+        indexed_sources = {
+            str(row[0]): str(row[1])
+            for row in conn.execute(
+                "SELECT path, source_hash FROM graph_nodes WHERE kind = 'file'"
+            ).fetchall()
+        }
+        changed_keys = [_file_key(rel) for rel in changed_rels]
+        linked_sources: set[str] = set()
+        if changed_keys:
+            placeholders = ",".join("?" for _ in changed_keys)
+            linked_sources = {
+                str(row[0])
+                for row in conn.execute(
+                    "SELECT DISTINCT source_path FROM graph_edges "
+                    f"WHERE src_key IN ({placeholders}) OR dst_key IN ({placeholders})",
+                    (*changed_keys, *changed_keys),
+                ).fetchall()
+            }
+        return indexed_sources, linked_sources, str(fingerprint_row[0])
+
+    def _resolver_affected_sources(
+        self,
+        indexed_sources: dict[str, str],
+        linked_sources: set[str],
+        changed_rels: set[str],
+        *,
+        old_resolver: vault_module.WikilinkResolver,
+        resolver: vault_module.WikilinkResolver,
+    ) -> tuple[set[str], dict[str, GraphSourceSignature]] | None:
+        """Find affected sources and bind every source used by that decision."""
+        indexed_paths = set(indexed_sources)
+        if not linked_sources <= indexed_paths:
+            return None
+        affected = set(linked_sources) - changed_rels
+        scanned_versions: dict[str, GraphSourceSignature] = {}
+        for rel in sorted(indexed_paths - changed_rels):
+            path = self.vault_root / rel
+            try:
+                raw = path.read_text(encoding="utf-8")
+                scanned_versions[rel] = _source_signature(path, raw)
+            except (OSError, UnicodeDecodeError):
+                return None
+            if scanned_versions[rel][3] != indexed_sources[rel]:
+                # The sidecar row is already stale even if a coarse filesystem
+                # clock leaves its path signature apparently unchanged.
+                return None
+            for match in vault_module.find_body_wikilinks(raw):
+                target = match.group(1).strip()
+                try:
+                    old_target, old_warning = vault_module.normalize_wikilink(
+                        target,
+                        self.vault_root,
+                        resolver=old_resolver,
+                        strict=False,
+                    )
+                    new_target, new_warning = vault_module.normalize_wikilink(
+                        target,
+                        self.vault_root,
+                        resolver=resolver,
+                        strict=False,
+                    )
+                except Exception:  # noqa: BLE001 - uncertainty requires full repair
+                    return None
+                if (old_target, old_warning is None) != (
+                    new_target,
+                    new_warning is None,
+                ):
+                    affected.add(rel)
+                    break
+        return affected, scanned_versions
+
+    def refresh_paths(
+        self,
+        paths: list[Path],
+        *,
+        created_paths: Iterable[Path] = (),
+    ) -> dict[str, int]:
         if not graph_enabled():
             # Feature-off does not authorize a stale sidecar to retain sensitive
             # raw Record rows.  Purge only an already-existing sidecar; do not
@@ -725,9 +1177,22 @@ class EpistemicGraphIndex:
         with self._mutation_coordinator.hold(
             operation="epistemic_graph_refresh_paths", holder_kind="graph"
         ):
-            return self._refresh_paths_locked(paths)
+            if freshness.external_pending(self.vault_root):
+                self._mark_unavailable()
+                return {
+                    "indexed_files": 0,
+                    "nodes": 0,
+                    "edges": 0,
+                    "deferred": 1,
+                }
+            return self._refresh_paths_locked(paths, created_paths=created_paths)
 
-    def _refresh_paths_locked(self, paths: list[Path]) -> dict[str, int]:
+    def _refresh_paths_locked(
+        self,
+        paths: list[Path],
+        *,
+        created_paths: Iterable[Path] = (),
+    ) -> dict[str, int]:
         snapshot = self._open_read_snapshot(require_current_projection=False)
         if snapshot is None:
             return self._rebuild_all_locked()
@@ -750,18 +1215,62 @@ class EpistemicGraphIndex:
             snapshot.close()
             self._mark_unavailable()
             return self._rebuild_all_locked()
-        stored_titles = self._stored_resolver_title_keys(snapshot, delta)
+        created_rels = {
+            rel
+            for path in created_paths
+            if (rel := _vault_rel(self.vault_root, Path(path))) is not None
+        }
+        stored_entries = self._stored_resolver_entries(snapshot, delta, created_rels)
+        if stored_entries is None:
+            snapshot.close()
+            self._mark_unavailable()
+            return self._rebuild_all_locked()
         snapshot.close()
-        if stored_titles is None:
+        resolver = find_module.recall_resolver_snapshot_at_checkpoint(
+            self.vault_root,
+            checkpoint,
+        )
+        if resolver is None:
             self._mark_unavailable()
             return self._rebuild_all_locked()
-        resolver = find_module.recall_resolver_snapshot(self.vault_root, freshness=before)
-        if any(
-            resolver.title_key_for_path(rel) != old_title
-            for rel, old_title in stored_titles.items()
-        ):
-            self._mark_unavailable()
-            return self._rebuild_all_locked()
+        topology_changed = any(
+            (
+                rel.removesuffix(".md") in resolver.full_paths,
+                resolver.title_key_for_path(rel),
+            )
+            != old_entry
+            for rel, old_entry in stored_entries.items()
+        )
+        indexed_sources: dict[str, str] = {}
+        linked_sources: set[str] = set()
+        resolver_fingerprint: str | None = None
+        old_resolver: vault_module.WikilinkResolver | None = None
+        if topology_changed:
+            topology_snapshot = self._open_read_snapshot(require_current_projection=False)
+            if topology_snapshot is None:
+                return self._rebuild_all_locked()
+            full_topology = self._stored_full_resolver_topology(
+                topology_snapshot,
+                set(stored_entries),
+            )
+            topology_snapshot.close()
+            if full_topology is None:
+                self._mark_unavailable()
+                return self._rebuild_all_locked()
+            indexed_sources, linked_sources, stored_resolver_fingerprint = full_topology
+            old_resolver = resolver.fork()
+            old_resolver.on_entries_changed(
+                [
+                    (rel, title)
+                    for rel, (present, title) in stored_entries.items()
+                    if present
+                ],
+                [rel for rel, (present, _title) in stored_entries.items() if not present],
+            )
+            if _resolver_topology_fingerprint(old_resolver) != stored_resolver_fingerprint:
+                self._mark_unavailable()
+                return self._rebuild_all_locked()
+            resolver_fingerprint = _resolver_topology_fingerprint(resolver)
 
         delta_paths = set(delta.changed | delta.deleted)
         # Caller paths outside the exact retained suffix mean publication was
@@ -772,14 +1281,67 @@ class EpistemicGraphIndex:
             self._mark_unavailable()
             return self._rebuild_all_locked()
 
+        refresh_paths = set(delta_paths)
+        topology_versions: dict[str, GraphSourceSignature] = {}
+        resolver_versions: dict[str, GraphSourceSignature] = {}
+        expected_membership: frozenset[str] | None = None
+        if topology_changed:
+            assert old_resolver is not None
+            assert resolver_fingerprint is not None
+            delta_rels = {
+                rel
+                for path in delta_paths
+                if (rel := _vault_rel(self.vault_root, Path(path))) is not None
+            }
+            expected_membership = self._checkpoint_membership(checkpoint)
+            resolver_version_result = (
+                self._resolver_source_versions(resolver, expected_membership)
+                if expected_membership is not None
+                else None
+            )
+            affected_result = self._resolver_affected_sources(
+                indexed_sources,
+                linked_sources,
+                delta_rels,
+                old_resolver=old_resolver,
+                resolver=resolver,
+            )
+            if (
+                expected_membership is None
+                or resolver_version_result is None
+                or not (set(indexed_sources) | created_rels) <= expected_membership
+                or affected_result is None
+                or self._recall_membership() != expected_membership
+                or _recall_projection_identity(
+                    self.vault_root,
+                    disk_freshness=_disk_vault_freshness(self.vault_root),
+                )
+                != before
+            ):
+                if resolver_version_result is None:
+                    find_module.unload_ram_caches()
+                self._mark_unavailable()
+                return self._rebuild_all_locked()
+            resolver_versions = resolver_version_result
+            affected, topology_versions = affected_result
+            refresh_paths.update(str(self.vault_root / rel) for rel in affected)
+
         pass_started = False
         stable = False
         try:
             pass_started = True
+            indexed_versions: dict[str, GraphSourceSignature] = {}
             report = self._refresh_paths_pass(
-                [Path(path) for path in sorted(delta_paths)],
+                [Path(path) for path in sorted(refresh_paths)],
                 resolver=resolver,
+                indexed_versions=indexed_versions,
+                resolver_fingerprint=resolver_fingerprint,
             )
+            expected_refresh_rels = {
+                rel
+                for path in refresh_paths
+                if (rel := _vault_rel(self.vault_root, Path(path))) is not None
+            }
             publication = self._open_read_snapshot(require_current_projection=False)
             if publication is None:
                 # A competing/failed rebuild withdrew the sidecar after this
@@ -790,7 +1352,17 @@ class EpistemicGraphIndex:
             if (
                 _incremental_projection_identity(self.vault_root) == before
                 and self._delta_target_still_current(delta)
-                and self._mark_incremental_available(before, checkpoint=checkpoint)
+                and set(indexed_versions) == expected_refresh_rels
+                and self._mark_incremental_available(
+                    before,
+                    checkpoint=checkpoint,
+                    source_versions={
+                        **resolver_versions,
+                        **topology_versions,
+                        **indexed_versions,
+                    },
+                    expected_membership=expected_membership,
+                )
             ):
                 stable = True
                 return report
@@ -800,15 +1372,31 @@ class EpistemicGraphIndex:
         return self._rebuild_all_locked()
 
     def _refresh_paths_pass(
-        self, paths: list[Path], *, resolver: vault_module.WikilinkResolver
+        self,
+        paths: list[Path],
+        *,
+        resolver: vault_module.WikilinkResolver,
+        indexed_versions: dict[str, GraphSourceSignature] | None = None,
+        resolver_fingerprint: str | None = None,
     ) -> dict[str, int]:
         conn = self._connect()
         indexed = 0
         try:
-            for path in paths:
-                if self._index_path(conn, path, resolver=resolver):
-                    indexed += 1
             with conn:
+                for path in paths:
+                    if self._index_path(
+                        conn,
+                        path,
+                        resolver=resolver,
+                        commit=False,
+                        indexed_versions=indexed_versions,
+                    ):
+                        indexed += 1
+                if resolver_fingerprint is not None:
+                    conn.execute(
+                        "INSERT OR REPLACE INTO graph_meta(key, value) VALUES (?, ?)",
+                        (_RESOLVER_TOPOLOGY_KEY, resolver_fingerprint),
+                    )
                 n_nodes = conn.execute("SELECT COUNT(*) FROM graph_nodes").fetchone()[0]
                 n_edges = conn.execute("SELECT COUNT(*) FROM graph_edges").fetchone()[0]
         finally:
@@ -957,6 +1545,8 @@ class EpistemicGraphIndex:
         path: Path,
         *,
         resolver: vault_module.WikilinkResolver,
+        commit: bool = True,
+        indexed_versions: dict[str, GraphSourceSignature] | None = None,
     ) -> bool:
         rel = _vault_rel(self.vault_root, path)
         if rel is None:
@@ -964,12 +1554,12 @@ class EpistemicGraphIndex:
         if not rel.lower().endswith(".md") or vault_module.in_excluded_scan_dir(rel):
             return False
         if not path.exists():
-            self._delete_path(conn, rel)
+            self._delete_path(conn, rel, commit=commit)
             return False
         # Admission is deliberately before title/body parsing.  Raw Records
         # may never become a graph node, edge source, or resolver entry.
         if not recall_policy.is_recall_candidate(self.vault_root, path):
-            self._delete_path(conn, rel)
+            self._delete_path(conn, rel, commit=commit)
             return False
         try:
             raw = path.read_text(encoding="utf-8")
@@ -998,7 +1588,7 @@ class EpistemicGraphIndex:
             parent_state=state,
             resolver=resolver,
         )
-        with conn:
+        with conn if commit else nullcontext():
             # Direct editors can replace a file while parsing/edge resolution is
             # in flight.  Rebind to the exact source immediately before the
             # transaction: do not momentarily publish rows for bytes that are
@@ -1007,12 +1597,12 @@ class EpistemicGraphIndex:
                 current = path.read_text(encoding="utf-8")
                 current_signature = _source_signature(path, current)
             except (OSError, UnicodeDecodeError):
-                self._delete_path(conn, rel)
+                self._delete_path(conn, rel, commit=commit)
                 return False
             if current_signature != source_signature or not recall_policy.is_recall_candidate(
                 self.vault_root, path
             ):
-                self._delete_path(conn, rel)
+                self._delete_path(conn, rel, commit=commit)
                 return False
             conn.execute("DELETE FROM graph_edges WHERE source_path = ?", (rel,))
             conn.execute("DELETE FROM graph_nodes WHERE path = ?", (rel,))
@@ -1044,10 +1634,18 @@ class EpistemicGraphIndex:
             for edge in edges:
                 _insert_edge(conn, edge)
             _bump_generation(conn)
+            if indexed_versions is not None:
+                indexed_versions[rel] = current_signature
         return True
 
-    def _delete_path(self, conn: sqlite3.Connection, rel_path: str) -> int:
-        with conn:
+    def _delete_path(
+        self,
+        conn: sqlite3.Connection,
+        rel_path: str,
+        *,
+        commit: bool = True,
+    ) -> int:
+        with conn if commit else nullcontext():
             conn.execute(
                 "DELETE FROM graph_edges WHERE source_path = ? OR src_key = ? OR dst_key = ?",
                 (rel_path, _file_key(rel_path), _file_key(rel_path)),
@@ -1850,25 +2448,44 @@ def schedule_background_rebuild(vault_root: Path) -> bool:
     return True
 
 
-def upsert_after_write(vault_root: Path, written_paths: list[Path]) -> None:
-    if not graph_enabled():
-        return
+def upsert_after_write(
+    vault_root: Path,
+    written_paths: list[Path],
+    *,
+    created_paths: Iterable[Path] = (),
+) -> None:
     try:
-        EpistemicGraphIndex(vault_root).refresh_paths(written_paths)
+        created = list(created_paths)
+        index = EpistemicGraphIndex(vault_root)
+        if not graph_enabled():
+            if index.path.exists():
+                index.suspend_reads()
+            return
+        if created:
+            index.refresh_paths(written_paths, created_paths=created)
+        else:
+            index.refresh_paths(written_paths)
     except OpError:
+        freshness.mark_external_pending(vault_root)
         raise
     except Exception:  # noqa: BLE001 - writer hooks must not break Markdown writes
+        freshness.mark_external_pending(vault_root)
         return
 
 
 def delete_after_remove(vault_root: Path, removed_rel_paths: list[str]) -> None:
-    if not graph_enabled():
-        return
     try:
-        EpistemicGraphIndex(vault_root).delete_paths(removed_rel_paths)
+        index = EpistemicGraphIndex(vault_root)
+        if not graph_enabled():
+            if index.path.exists():
+                index.suspend_reads()
+            return
+        index.delete_paths(removed_rel_paths)
     except OpError:
+        freshness.mark_external_pending(vault_root)
         raise
     except Exception:  # noqa: BLE001 - writer hooks must not break Markdown writes
+        freshness.mark_external_pending(vault_root)
         return
 
 

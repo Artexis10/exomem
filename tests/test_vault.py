@@ -348,10 +348,15 @@ def test_windows_guarded_reader_bounds_reads_and_rechecks_ancestor_identity(
     real_read = os.read
     real_lstat = Path.lstat
     reads: list[int] = []
+    directory_share_modes: list[int | None] = []
     swapped = False
 
     def open_leaf(path: Path, **_kwargs: object) -> int:
         return os.open(path, os.O_RDONLY)
+
+    def open_pinned_directory(path: Path, *, share_mode: int | None = None) -> int:
+        directory_share_modes.append(share_mode)
+        return os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
 
     def read_and_swap(descriptor: int, size: int) -> bytes:
         nonlocal swapped
@@ -374,6 +379,7 @@ def test_windows_guarded_reader_bounds_reads_and_rechecks_ancestor_identity(
 
     if os.name != "nt":
         monkeypatch.setattr(vault, "_open_windows_path_descriptor", open_leaf)
+        monkeypatch.setattr(vault, "_open_directory_path", open_pinned_directory)
     monkeypatch.setattr(vault.os, "read", read_and_swap)
     monkeypatch.setattr(Path, "lstat", lstat_after_read)
 
@@ -385,6 +391,8 @@ def test_windows_guarded_reader_bounds_reads_and_rechecks_ancestor_identity(
     assert excinfo.value.code == "PATH_GUARD_CHANGED"
     assert max(reads) == 5
     assert all(size <= 5 for size in reads)
+    if os.name != "nt":
+        assert directory_share_modes == [vault._WINDOWS_GUARDED_DIRECTORY_SHARE] * 2
 
 
 @pytest.mark.skipif(os.name != "nt", reason="requires native Windows descriptors")
@@ -395,4 +403,54 @@ def test_guarded_reader_uses_windows_descriptor_branch_for_regular_files(tmp_pat
     data, guard = vault.read_bounded_guarded_bytes(tmp_path, "entry.md", limit=16)
 
     assert data == b"safe"
+    guard.recheck(tmp_path)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires native Windows share semantics")
+def test_windows_guarded_reader_pins_parent_through_leaf_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    guarded = tmp_path / "guarded"
+    guarded.mkdir()
+    leaf = guarded / "entry.md"
+    leaf.write_bytes(b"safe")
+    retired = tmp_path / "guarded-retired"
+    real_open = vault._open_windows_path_descriptor
+    real_read = os.read
+    swap_attempted = False
+    swap_blocked = False
+    forbidden_bytes_read = False
+
+    def try_parent_swap(path: Path, **kwargs: object) -> int:
+        nonlocal swap_attempted, swap_blocked
+        if Path(path) == leaf and kwargs.get("desired_access") == 0x80000000:
+            swap_attempted = True
+            try:
+                guarded.rename(retired)
+            except OSError:
+                swap_blocked = True
+            else:
+                guarded.mkdir()
+                (guarded / "entry.md").write_bytes(b"SECRET")
+        return real_open(path, **kwargs)
+
+    def observe_read(descriptor: int, size: int) -> bytes:
+        nonlocal forbidden_bytes_read
+        data = real_read(descriptor, size)
+        forbidden_bytes_read |= b"SECRET" in data
+        return data
+
+    monkeypatch.setattr(vault, "_open_windows_path_descriptor", try_parent_swap)
+    monkeypatch.setattr(vault.os, "read", observe_read)
+
+    data, guard = vault.read_bounded_guarded_bytes(
+        tmp_path,
+        "guarded/entry.md",
+        limit=16,
+    )
+
+    assert data == b"safe"
+    assert swap_attempted is True
+    assert swap_blocked is True
+    assert forbidden_bytes_read is False
     guard.recheck(tmp_path)

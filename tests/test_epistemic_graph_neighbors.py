@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from exomem import epistemic_graph
+from exomem import epistemic_graph, index_sync
 
 SEED = "Knowledge Base/Notes/Insights/seed.md"
 TARGET = "Knowledge Base/Notes/Insights/target.md"
@@ -174,7 +174,8 @@ def test_generation_bumps_on_delete(tmp_path: Path) -> None:
     idx.rebuild_all()
     before = epistemic_graph.cache_token(vault)
 
-    epistemic_graph.delete_after_remove(vault, [LINKED])
+    (vault / LINKED).unlink()
+    index_sync.delete_after_remove(vault, [LINKED])
 
     after = epistemic_graph.cache_token(vault)
     assert int(after[2]) > int(before[2])
