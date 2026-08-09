@@ -326,7 +326,7 @@ def test_guarded_reader_dispatches_to_the_windows_descriptor_branch(
         captured.append((root, parts, target, limit))
         return b"", expected
 
-    monkeypatch.setattr(vault.os, "name", "nt")
+    monkeypatch.setattr(vault, "_uses_windows_guarded_reader", lambda: True)
     monkeypatch.setattr(vault, "_read_bounded_windows_snapshot", windows)
 
     data, guard = vault._read_bounded_guarded_snapshot(tmp_path, "entry.md", 64)

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from exomem import find as find_module
 from exomem import freshness, recall_policy
 
 
@@ -93,6 +94,41 @@ def test_live_recall_checkpoint_reuses_projected_map_without_rewalking(
     )
 
     assert freshness.recall_checkpoint(tmp_path, "kb") == first
+
+
+def test_request_snapshots_reuse_live_relative_path_projection_until_checkpoint_moves(
+    tmp_path: Path, monkeypatch
+) -> None:
+    find_module.clear_cache()
+    page = tmp_path / "Knowledge Base" / "Notes" / "page.md"
+    page.parent.mkdir(parents=True)
+    page.write_text("page", encoding="utf-8")
+    freshness.seed(tmp_path, "vault", [(str(page), freshness.stat_signature(page))])
+
+    calls = 0
+    original = freshness.recall_projection_snapshot
+
+    def counted(root: Path, scope: str):
+        nonlocal calls
+        calls += 1
+        return original(root, scope)
+
+    monkeypatch.setattr(freshness, "recall_projection_snapshot", counted)
+
+    first = find_module.FreshnessSnapshot(tmp_path).recall_paths("vault")
+    second = find_module.FreshnessSnapshot(tmp_path).recall_paths("vault")
+
+    assert first == second == {"Knowledge Base/Notes/page.md"}
+    assert calls == 1
+
+    added = page.with_name("added.md")
+    added.write_text("added", encoding="utf-8")
+    freshness.on_files_changed(tmp_path, changed=[added])
+
+    third = find_module.FreshnessSnapshot(tmp_path).recall_paths("vault")
+    assert third == {"Knowledge Base/Notes/added.md", "Knowledge Base/Notes/page.md"}
+    assert calls == 2
+    find_module.clear_cache()
 
 
 def test_raw_event_moves_broad_cursor_not_live_recall_projection(tmp_path: Path) -> None:

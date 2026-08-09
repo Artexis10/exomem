@@ -2195,7 +2195,7 @@ def _read_bounded_guarded_snapshot(
 ) -> tuple[bytes, PathGuard]:
     """Return bytes and a guard captured entirely from safe descriptors."""
     parts = _safe_guard_target(target)
-    if os.name == "nt":  # pragma: no cover - exercised on Windows CI
+    if _uses_windows_guarded_reader():  # pragma: no cover - exercised on Windows CI
         return _read_bounded_windows_snapshot(Path(vault_root), parts, target, limit)
     flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
     root_flags = flags | getattr(os, "O_DIRECTORY", 0)
@@ -2266,6 +2266,11 @@ def _read_bounded_guarded_snapshot(
     finally:
         for descriptor in reversed(descriptors):
             os.close(descriptor)
+
+
+def _uses_windows_guarded_reader() -> bool:
+    """Small dispatch seam that tests can override without mutating global ``os.name``."""
+    return os.name == "nt"
 
 
 def _read_bounded_windows_snapshot(

@@ -6,6 +6,7 @@ import logging
 import os
 import time
 from collections.abc import Callable
+from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -90,6 +91,7 @@ def collapse_frame_children(
     page_of: PageOf,
     attribution: dict[str, tuple[str, float | None]],
     *aux_maps: dict,
+    recall_paths: AbstractSet[str] | None = None,
 ) -> list[str]:
     """Remap scene-frame sidecar candidates onto their parent video sidecar."""
     if not ranking:
@@ -98,16 +100,25 @@ def collapse_frame_children(
     seen: set[str] = set()
     from . import recall_policy
 
+    def admitted(rel: str) -> bool:
+        return (
+            rel in recall_paths
+            if recall_paths is not None
+            else recall_policy.is_recall_candidate(vault_root, vault_root / rel)
+        )
+
     for rel in ranking:
-        if not recall_policy.is_recall_candidate(vault_root, vault_root / rel):
+        if not admitted(rel):
             continue
         page = page_of(rel)
         parent = page.parent_media if page is not None else None
         if parent:
             parent_sidecar = parent + ".md"
-            if recall_policy.is_recall_candidate(vault_root, vault_root / parent_sidecar) and (
-                vault_root / parent_sidecar
-            ).exists():
+            if (
+                admitted(parent_sidecar)
+                and recall_policy.is_recall_candidate(vault_root, vault_root / parent_sidecar)
+                and (vault_root / parent_sidecar).exists()
+            ):
                 attribution.setdefault(parent_sidecar, (page.media_file or rel, page.frame_ts))
                 for m in aux_maps:
                     if rel in m:
@@ -145,12 +156,12 @@ def collect_candidates(
     record_degradation: Callable[[str], None],
     degraded_out: list[str] | None,
     failed_out: list[str] | None,
-    recall_paths: set[str],
+    recall_paths: AbstractSet[str],
     eligible_paths: set[str] | None = None,
     capture_trace: bool = False,
 ) -> CandidateBundle:
     """Collect vector/BM25/keyword/CLIP/graph/temporal lanes and fuse them."""
-    from . import bm25, embeddings, epistemic_graph, fusion, readiness, recall_policy
+    from . import bm25, embeddings, epistemic_graph, fusion, readiness
 
     usage_map: dict[str, float] = {}
     if prefer_used:
@@ -170,8 +181,7 @@ def collect_candidates(
         return [
             path
             for path in ranking
-            if (eligible_paths is None or path in eligible_paths)
-            and recall_policy.is_recall_candidate(vault_root, vault_root / path)
+            if path in recall_paths and (eligible_paths is None or path in eligible_paths)
         ]
     frame_attribution: dict[str, tuple[str, float | None]] = {}
     lane_statuses: dict[str, dict[str, Any]] = {}
@@ -261,6 +271,7 @@ def collect_candidates(
         frame_attribution,
         chunk_text_by_path,
         vector_score_by_path,
+        recall_paths=recall_paths,
     )
     vector_ranking = _eligible(vector_ranking)
 
@@ -354,6 +365,7 @@ def collect_candidates(
         frame_attribution,
         clip_score_by_path,
         clip_frame_ts_by_path,
+        recall_paths=recall_paths,
     )
     clip_ranking = _eligible(clip_ranking)
 
@@ -430,7 +442,12 @@ def collect_candidates(
             if timings is not None:
                 timings.error("bm25", e)
         bm25_ranking = collapse_frame_children(
-            bm25_ranking, vault_root, page_of, frame_attribution, bm25_score_by_path
+            bm25_ranking,
+            vault_root,
+            page_of,
+            frame_attribution,
+            bm25_score_by_path,
+            recall_paths=recall_paths,
         )
         bm25_ranking = _eligible(bm25_ranking)
 
@@ -439,7 +456,11 @@ def collect_candidates(
                 vault_root, query_norm, scope, freshness=snapshot.for_scope(scope)
             )
         keyword_ranking = collapse_frame_children(
-            keyword_ranking, vault_root, page_of, frame_attribution
+            keyword_ranking,
+            vault_root,
+            page_of,
+            frame_attribution,
+            recall_paths=recall_paths,
         )
         keyword_ranking = _eligible(keyword_ranking)
         if capture_trace:
@@ -512,7 +533,7 @@ def collect_candidates(
             first_pos_for_target: dict[str, int] = {}
             for pos, neighbor in enumerate(neighbors):
                 target_rel = neighbor.other_rel
-                if not recall_policy.is_recall_candidate(vault_root, vault_root / target_rel):
+                if target_rel not in recall_paths:
                     continue
                 graph_in_degree_by_path[target_rel] = (
                     graph_in_degree_by_path.get(target_rel, 0) + 1
@@ -551,11 +572,12 @@ def collect_candidates(
                     if page is None:
                         continue
                     for target_rel in outbound_wikilink_paths(
-                        page, vault_root, resolver=resolver
+                        page,
+                        vault_root,
+                        resolver=resolver,
+                        allowed_paths=recall_paths,
                     ):
-                        if not recall_policy.is_recall_candidate(
-                            vault_root, vault_root / target_rel
-                        ):
+                        if target_rel not in recall_paths:
                             continue
                         graph_in_degree_by_path[target_rel] = (
                             graph_in_degree_by_path.get(target_rel, 0) + 1
@@ -603,11 +625,12 @@ def collect_candidates(
                 if page is None:
                     continue
                 for target_rel in outbound_wikilink_paths(
-                    page, vault_root, resolver=resolver
+                    page,
+                    vault_root,
+                    resolver=resolver,
+                    allowed_paths=recall_paths,
                 ):
-                    if not recall_policy.is_recall_candidate(
-                        vault_root, vault_root / target_rel
-                    ):
+                    if target_rel not in recall_paths:
                         continue
                     graph_in_degree_by_path[target_rel] = (
                         graph_in_degree_by_path.get(target_rel, 0) + 1

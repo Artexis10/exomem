@@ -17,6 +17,7 @@ import threading
 import time
 from collections import OrderedDict
 from collections.abc import Iterable
+from collections.abc import Set as AbstractSet
 from datetime import date
 from pathlib import Path
 from typing import Any
@@ -172,6 +173,16 @@ def auto_rerank_allowed_by_policy() -> bool:
 _FIND_CACHE: OrderedDict[tuple, list[Hit]] = OrderedDict()
 _FIND_CACHE_LOCK = threading.Lock()
 _DEFAULT_FIND_CACHE_SIZE = 32
+# A request gets a new FreshnessSnapshot, but a live recall projection changes
+# only when its exact checkpoint moves.  Rebuilding the vault-relative allowset
+# from every absolute registry key on every request is O(corpus) and defeats the
+# event-maintained registry.  Keep only the latest immutable projection per
+# bounded vault/scope entry; checkpoint equality is the validity proof.
+_RECALL_PATH_CACHE: OrderedDict[
+    tuple[Path, str], tuple[freshness.RecallFreshnessCheckpoint, frozenset[str]]
+] = OrderedDict()
+_RECALL_PATH_CACHE_LOCK = threading.Lock()
+_RECALL_PATH_CACHE_SIZE = 32
 MAX_RERANK_CANDIDATES = 300
 _FOREGROUND_LEXICAL_REPAIR_PAGE_CAP = 64
 
@@ -265,7 +276,7 @@ class FreshnessSnapshot:
         self._kb: tuple[int, int, str] | None = None
         self._vault: tuple[int, int, str] | None = None
         self._recall: dict[str, freshness.RecallFreshnessCheckpoint] = {}
-        self._recall_paths: dict[str, set[str]] = {}
+        self._recall_paths: dict[str, frozenset[str]] = {}
 
     def kb(self) -> tuple[int, int, str]:
         if self._kb is None:
@@ -312,7 +323,7 @@ class FreshnessSnapshot:
             checkpoint.access_policy_fingerprint,
         )
 
-    def recall_paths(self, scope: str) -> set[str]:
+    def recall_paths(self, scope: str) -> frozenset[str]:
         """Stable request-local ordinary-recall path projection.
 
         Vector and visual KNN must receive this set before scoring: filtering a
@@ -329,8 +340,18 @@ class FreshnessSnapshot:
     def _load_recall_projection(self, scope: str) -> None:
         if scope in self._recall and scope in self._recall_paths:
             return
-        checkpoint, entries = freshness.recall_projection_snapshot(self._root, scope)
         root = self._root.absolute()
+        cache_key = (root, scope)
+        checkpoint = freshness.recall_checkpoint(self._root, scope)
+        with _RECALL_PATH_CACHE_LOCK:
+            cached = _RECALL_PATH_CACHE.get(cache_key)
+            if cached is not None and cached[0] == checkpoint:
+                _RECALL_PATH_CACHE.move_to_end(cache_key)
+                self._recall[scope] = checkpoint
+                self._recall_paths[scope] = cached[1]
+                return
+
+        checkpoint, entries = freshness.recall_projection_snapshot(self._root, scope)
         paths: set[str] = set()
         for raw_path in entries:
             try:
@@ -339,8 +360,14 @@ class FreshnessSnapshot:
                 # Registry identities outside the literal vault spelling are
                 # never valid semantic-search parents; fail closed.
                 continue
+        projected = frozenset(paths)
         self._recall[scope] = checkpoint
-        self._recall_paths[scope] = paths
+        self._recall_paths[scope] = projected
+        with _RECALL_PATH_CACHE_LOCK:
+            _RECALL_PATH_CACHE[cache_key] = (checkpoint, projected)
+            _RECALL_PATH_CACHE.move_to_end(cache_key)
+            while len(_RECALL_PATH_CACHE) > _RECALL_PATH_CACHE_SIZE:
+                _RECALL_PATH_CACHE.popitem(last=False)
 
 
 def _freshness_key(
@@ -3467,7 +3494,13 @@ def _keyword_match_paths(
     return [p for _, p in matches]
 
 
-def _outbound_wikilink_paths(page: ParsedPage, vault_root: Path, resolver=None) -> list[str]:
+def _outbound_wikilink_paths(
+    page: ParsedPage,
+    vault_root: Path,
+    resolver=None,
+    *,
+    allowed_paths: AbstractSet[str] | None = None,
+) -> list[str]:
     """Vault-relative POSIX paths (no .md) that this page's body links to.
 
     Skips matches inside fenced code blocks and inline code (delegates to
@@ -3477,6 +3510,9 @@ def _outbound_wikilink_paths(page: ParsedPage, vault_root: Path, resolver=None) 
     (trailing `/`) are dropped. `#anchor` is stripped — anchors are intra-
     page jumps, not separate files. Pass `resolver` to reuse one across a
     request (the graph lane does); None builds/reuses the process cache.
+    ``allowed_paths`` may provide that request's exact checkpoint-bound recall
+    projection, avoiding a filesystem policy walk for every resolved link.
+    Callers without such a snapshot retain the live policy check.
     """
     from .vault import (
         find_body_wikilinks,
@@ -3508,7 +3544,11 @@ def _outbound_wikilink_paths(page: ParsedPage, vault_root: Path, resolver=None) 
         # trees are intentional out-of-graph references.
         if not rel_with_md.startswith(kb_prefix()):
             continue
-        if not recall_policy.is_recall_candidate(vault_root, vault_root / rel_with_md):
+        if (
+            rel_with_md not in allowed_paths
+            if allowed_paths is not None
+            else not recall_policy.is_recall_candidate(vault_root, vault_root / rel_with_md)
+        ):
             continue
         if rel_with_md in seen:
             continue
@@ -4013,6 +4053,8 @@ def unload_ram_caches() -> dict[str, int]:
     with _FIND_CACHE_LOCK:
         hot_entries = len(_FIND_CACHE)
         _FIND_CACHE.clear()
+    with _RECALL_PATH_CACHE_LOCK:
+        _RECALL_PATH_CACHE.clear()
     return {"pages": page_entries, "resolvers": resolver_entries, "hot_find": hot_entries}
 
 
