@@ -11,6 +11,50 @@ _TERMINAL_MARKER = "exomem.mutation-terminal"
 _TERMINAL_VERSION = 1
 _RESPONSE_DETAILS = frozenset({"compact", "full", "legacy"})
 
+#: The closed mutation state machine. A client may branch on exactly these values and
+#: MUST NOT infer any other. `needs_review` is explicitly NONTERMINAL: it means the
+#: guarded write is mid-flight and the caller should complete the review step, not that
+#: anything failed. Conflating it with failure is the 2026-08-06 misclassification.
+STATES = ("needs_review", "committed", "rejected", "retryable", "indeterminate")
+TERMINAL_STATES = frozenset({"committed", "rejected"})
+
+#: Keys a client may branch on. Everything else in a response is advisory.
+_ENVELOPE_KEYS = (
+    "ok",
+    "state",
+    "terminal",
+    "status",
+    "mutated",
+    "path",
+    "paths",
+    "operation_id",
+    "error_code",
+    "next_action",
+    "request_id",
+    "receipt_id",
+)
+
+
+def _operation_id(result: Any) -> str | None:
+    """Correlate a validate call with its later commit.
+
+    Both halves of a guarded write already carry the same `draft_id` — it is minted at
+    validation and handed back on commit — so the correlation identity exists and only
+    needs naming. Nothing has to be threaded through the writer lease.
+    """
+    if not isinstance(result, Mapping):
+        return None
+    draft_id = result.get("draft_id")
+    if isinstance(draft_id, str) and draft_id:
+        return draft_id
+    for nested_key in ("creation_commit", "creation_validation", "source"):
+        nested = result.get(nested_key)
+        if isinstance(nested, Mapping):
+            nested_id = nested.get("draft_id")
+            if isinstance(nested_id, str) and nested_id:
+                return nested_id
+    return None
+
 
 def _warning_count(result: Any) -> int:
     if not isinstance(result, Mapping):
@@ -91,10 +135,17 @@ def committed_terminal(
         "_terminal": _TERMINAL_MARKER,
         "version": _TERMINAL_VERSION,
         "ok": True,
+        # `state` is the closed machine; `status` is retained verbatim for existing
+        # consumers and always agrees with it.
+        "state": "committed",
         "status": "committed",
+        "terminal": True,
         "mutated": True,
     }
     terminal.update(_path_projection(leaf_result))
+    operation_id = _operation_id(leaf_result)
+    if operation_id is not None:
+        terminal["operation_id"] = operation_id
     terminal.update(
         request_id=request_id,
         receipt_id=receipt_id,
@@ -103,6 +154,62 @@ def committed_terminal(
     )
     if idempotency_key is not None:
         terminal["idempotency_key"] = idempotency_key
+    return terminal
+
+
+def _is_guarded_precommit(result: Any) -> bool:
+    """Whether a non-committing leaf result is a guarded write awaiting review.
+
+    Deliberately narrow. Most non-committing leaves are ordinary reads or unrelated
+    shapes and MUST pass through untouched; only a validated draft that explicitly
+    reports it did not mutate earns the nonterminal envelope.
+    """
+    if not isinstance(result, Mapping):
+        return False
+    if result.get("mutated") is not False:
+        return False
+    if _operation_id(result) is None:
+        return False
+    return any(
+        key in result
+        for key in ("committable_after_review", "draft_hash", "draft_token")
+    )
+
+
+def needs_review_terminal(leaf_result: Any) -> Any:
+    """Own the NONTERMINAL half of a guarded write; pass anything else through.
+
+    A precommit refusal is not a failure: the operation is mid-flight and the caller
+    should complete the review step. Before this, validation returned a shape with no
+    relationship to the eventual success envelope, so a client had nothing tying the
+    two calls together and could reasonably read the first response as the outcome —
+    which is exactly the misclassification observed on 2026-08-06.
+    """
+    if not _is_guarded_precommit(leaf_result):
+        return leaf_result
+    committable = bool(leaf_result.get("committable_after_review"))
+    terminal: dict[str, Any] = {
+        "_terminal": _TERMINAL_MARKER,
+        "version": _TERMINAL_VERSION,
+        "ok": True,
+        "state": "needs_review",
+        "terminal": False,
+        "mutated": False,
+        "next_action": (
+            "Re-issue the same call with the returned draft identity and an explicit "
+            "relation disposition to commit it. This response is not a failure."
+            if committable
+            else "Resolve the reported blocking findings, then re-validate. This "
+            "response is not a failure."
+        ),
+    }
+    operation_id = _operation_id(leaf_result)
+    if operation_id is not None:
+        terminal["operation_id"] = operation_id
+    terminal.update(
+        warnings_count=_warning_count(leaf_result),
+        leaf_result=leaf_result,
+    )
     return terminal
 
 
@@ -134,11 +241,7 @@ def project_terminal(result: Any, detail: ResponseDetail = "compact") -> Any:
         return result
     if detail == "legacy":
         return result["leaf_result"]
-    compact = {
-        key: result[key]
-        for key in ("ok", "status", "mutated", "path", "paths", "request_id", "receipt_id")
-        if key in result
-    }
+    compact = {key: result[key] for key in _ENVELOPE_KEYS if key in result}
     if "idempotency_key" in result:
         compact["idempotency_key"] = result["idempotency_key"]
     compact["warnings_count"] = result["warnings_count"]

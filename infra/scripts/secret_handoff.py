@@ -48,6 +48,7 @@ class SecretSpec:
     name: str
     sources: tuple[SourceSpec, ...]
     destinations: dict[str, DestinationSpec]
+    value_shape: str = "line"
 
 
 @dataclass(frozen=True)
@@ -165,6 +166,9 @@ def load_matrix(path: Path) -> HandoffMatrix:
             raise HandoffError(f"secret matrix has no sources for {name}")
         if not isinstance(raw_destinations, dict) or not raw_destinations:
             raise HandoffError(f"secret matrix has no destinations for {name}")
+        value_shape = raw_secret.get("value_shape", "line")
+        if value_shape not in {"line", "file"}:
+            raise HandoffError(f"secret matrix has an invalid value shape for {name}")
 
         sources: list[SourceSpec] = []
         seen_source_kinds: set[str] = set()
@@ -270,7 +274,20 @@ def load_matrix(path: Path) -> HandoffMatrix:
             name=name,
             sources=tuple(sources),
             destinations=destinations,
+            value_shape=value_shape,
         )
+    for secret in secrets.values():
+        if secret.value_shape != "file":
+            continue
+        offenders = sorted(
+            destination.destination_id
+            for destination in secret.destinations.values()
+            if destination.kind != "sops_k8s_secret"
+        )
+        if offenders:
+            raise HandoffError(
+                f"secret matrix routes file-shaped {secret.name} outside a Kubernetes Secret"
+            )
     return HandoffMatrix(
         schema_version=1,
         vercel_projects=vercel_projects,
@@ -278,18 +295,26 @@ def load_matrix(path: Path) -> HandoffMatrix:
     )
 
 
-def _normalize_secret(value: bytes) -> bytes:
+def _normalize_secret(value: bytes, value_shape: str = "line") -> bytes:
+    """Strip one trailing newline, then enforce the declared value shape.
+
+    A `line` secret is a single opaque token and must stay one line. A `file`
+    secret materializes a configuration file at its destination -- libpq's
+    `pg_service.conf` and `.pgpass` are inherently multi-line -- so embedded
+    newlines are content there rather than smuggling. Both shapes stay bounded
+    and NUL-free, and a `file` secret may only reach a Kubernetes Secret, which
+    the matrix parser enforces.
+    """
+
     if value.endswith(b"\n"):
         value = value[:-1]
         if value.endswith(b"\r"):
             value = value[:-1]
-    if (
-        not value
-        or len(value) > _MAX_SECRET_BYTES
-        or b"\x00" in value
-        or b"\n" in value
-        or b"\r" in value
-    ):
+    if not value or len(value) > _MAX_SECRET_BYTES or b"\x00" in value:
+        raise HandoffError("secret source has an invalid value")
+    if value_shape == "line" and (b"\n" in value or b"\r" in value):
+        raise HandoffError("secret source has an invalid value")
+    if value_shape == "file" and b"\r" in value:
         raise HandoffError("secret source has an invalid value")
     return value
 
@@ -307,8 +332,12 @@ def _read_secret(
     if source_kind in {"generated-ed25519-private", "derived-ed25519-public"}:
         raise HandoffError("derived key material requires the atomic keypair handoff")
     if source_kind == "stdin":
-        return _normalize_secret(sys.stdin.buffer.read(_MAX_SECRET_BYTES + 2))
+        return _normalize_secret(
+            sys.stdin.buffer.read(_MAX_SECRET_BYTES + 2), secret_spec.value_shape
+        )
     if source_kind == "prompt":
+        if secret_spec.value_shape == "file":
+            raise HandoffError("a file-shaped secret cannot be read from a single-line prompt")
         return _normalize_secret(getpass.getpass("Secret value: ").encode("utf-8"))
 
     assert source.root is not None and source.output is not None
@@ -331,7 +360,7 @@ def _read_secret(
         raise HandoffError("Terraform secret source failed") from exc
     if result.returncode != 0:
         raise HandoffError("Terraform secret source failed")
-    return _normalize_secret(result.stdout)
+    return _normalize_secret(result.stdout, secret_spec.value_shape)
 
 
 def _assert_safe_target(repository_root: Path, relative_target: str) -> Path:

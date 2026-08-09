@@ -108,6 +108,9 @@ capacity_values="${deploy_work_dir}/capacity-values.json"
 jq -n --argjson server_id "$hcloud_server_id" \
   '{capacityCollector: {hcloudServerId: $server_id}}' > "$capacity_values"
 chmod 0600 "$capacity_values"
+# The chart pipes this through `int64` before use. Helm parses values as float64
+# and Go prints a large one as 1.56895713e+08, which every worker rejects at
+# startup with "unable to parse string as an integer".
 helm template exomem-platform infra/helm/platform --namespace exomem-platform \
   --values infra/helm/platform/values.yaml \
   --values "${deploy_work_dir}/release-values.json" \
@@ -385,9 +388,14 @@ kubectl wait --for=condition=Available deployment/exomem-provisioner-api -n exom
 kubectl wait --for=condition=Available deployment/exomem-provisioner-worker -n exomem-platform --timeout=180s
 kubectl wait --for=condition=Available deployment/exomem-volume-worker -n exomem-platform --timeout=180s
 kubectl -n exomem-platform get service/exomem-provisioner -o jsonpath='{.spec.ports[0].port}{"\n"}'
-kubectl -n exomem-platform get configmap/exomem-hosted-release-v1 \
-  -o jsonpath='{.data.exomem-hosted-release-v1\.json}' | jq -e \
-  '.artifact == "exomem-hosted-release" and .schemaVersion == 1 and (.commandRegistry | length) == 21'
+lock_configmap="$(kubectl -n exomem-platform get configmap \
+  -l app.kubernetes.io/name=exomem-hosted-deployment-lock -o name)"
+test "$(kubectl -n exomem-platform get "$lock_configmap" -o jsonpath='{.immutable}')" = true
+kubectl -n exomem-platform get "$lock_configmap" \
+  -o jsonpath='{.data.exomem-hosted-deployment-lock-v2\.json}' | jq -e \
+  --arg phase "$EXOMEM_DEPLOYMENT_PHASE" \
+  '.artifact == "exomem-hosted-deployment-lock" and .schemaVersion == 2
+   and .admissionMode == $phase'
 kubectl get storageclass exomem-hcloud-encrypted-retain
 kubectl -n exomem-platform get configmap/exomem-capacity-contract \
   -o jsonpath='{.immutable}{"\n"}'

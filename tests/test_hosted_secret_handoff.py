@@ -875,3 +875,88 @@ def test_cli_has_no_argument_that_can_carry_a_secret_value() -> None:
     )
     assert b"--value" not in result.stdout
     assert b"--credential" not in result.stdout
+
+
+def test_file_shaped_secret_keeps_its_newlines_through_the_handoff(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A libpq service file is multi-line by format; the handoff must carry it whole.
+
+    The destination matrix declared `database_backup_pg_service_file` and
+    `database_backup_pgpass_file` long before anything could create them: every
+    source path funnelled through a normalizer that rejected embedded newlines,
+    so the only supported handoff could not produce the two ciphertexts the
+    install gate requires. No test caught it because none exercised creation.
+    """
+
+    module = _load_module()
+    service_file = b"[substrate-production]\nhost=db.example\nport=5432\ndbname=neondb\n"
+    monkeypatch.setenv("SOPS_AGE_RECIPIENTS", "age1testrecipient")
+    monkeypatch.setattr(module, "_read_secret", lambda **_kwargs: service_file.rstrip(b"\n"))
+
+    plaintext_by_path: dict[Path, dict[str, object]] = {}
+    monkeypatch.setattr(
+        module.subprocess,
+        "run",
+        lambda command, **kwargs: _run_fake_sops(list(command), kwargs, plaintext_by_path),
+    )
+    module.execute_handoff(
+        matrix_path=MATRIX,
+        repository_root=tmp_path,
+        secret_name="database_backup_pg_service_file",
+        version="v1",
+        destination_ids=("k3s.database-backup.pg-service.active",),
+        source_kind="stdin",
+        terraform_bin="terraform",
+        sops_bin="sops",
+        vercel_bin="vercel",
+        vercel_project=None,
+        dry_run=False,
+    )
+
+    target = tmp_path / "infra/secrets/database-backup/pg-service.v1.sops.json"
+    assert target.is_file()
+    # Sealing writes atomically, so the recorded key is the temporary path.
+    assert len(plaintext_by_path) == 1
+    sealed = next(iter(plaintext_by_path.values()))
+    stored = sealed["stringData"]["pg_service.conf"]  # type: ignore[index]
+    assert stored == service_file.rstrip(b"\n").decode("utf-8")
+    assert stored.count("\n") == 3
+
+
+def test_normalizer_holds_the_line_shape_and_rejects_carriage_returns() -> None:
+    module = _load_module()
+
+    assert module._normalize_secret(b"single-line\n") == b"single-line"
+    assert module._normalize_secret(b"a\nb", "file") == b"a\nb"
+
+    for value, shape in (
+        (b"a\nb", "line"),
+        (b"a\r\nb", "file"),
+        (b"a\x00b", "file"),
+        (b"", "file"),
+    ):
+        with pytest.raises(module.HandoffError):
+            module._normalize_secret(value, shape)
+
+
+def test_matrix_never_routes_a_file_shaped_secret_to_vercel(tmp_path: Path) -> None:
+    """A multi-line value in a Vercel env var is a different kind of object.
+
+    File shape is only meaningful for a Kubernetes Secret that materializes the
+    bytes as a file, so the matrix parser refuses any other destination for it.
+    """
+
+    module = _load_module()
+    matrix = json.loads(MATRIX.read_text(encoding="utf-8"))
+    shaped = [name for name, spec in matrix["secrets"].items() if spec.get("value_shape") == "file"]
+    assert set(shaped) == {"database_backup_pg_service_file", "database_backup_pgpass_file"}
+    for name in shaped:
+        for destination in matrix["secrets"][name]["destinations"].values():
+            assert destination["kind"] == "sops_k8s_secret"
+
+    matrix["secrets"]["cloudflare_access_client_id"]["value_shape"] = "file"
+    poisoned = tmp_path / "poisoned-matrix.json"
+    poisoned.write_text(json.dumps(matrix), encoding="utf-8")
+    with pytest.raises(module.HandoffError, match="outside a Kubernetes Secret"):
+        module.load_matrix(poisoned)
