@@ -1,0 +1,17 @@
+{
+  "harness": "memorybench",
+  "owner": "supermemory",
+  "repo_url": "https://github.com/supermemoryai/memorybench",
+  "commit_sha": "118209a746d97d0d85e5a7234267f0b6962857e9",
+  "tree_sha": "2ee25bdbcb6bfaaecb32f917920c53775a299b37",
+  "license_spdx": "MIT",
+  "license_sha256": "9ce388a89cce6a2dc109579d044f7f16e1397d8ee6fdb1f3bd3b980d365a07ae",
+  "bun_version_pinned": "1.3.14",
+  "bun_engines_declared_upstream": null,
+  "bun_lockfile_version": 1,
+  "checkout_env_var": "MEMORYBENCH_HOME",
+  "verified_at_utc": "2026-08-09",
+  "provider_files_sha256": {},
+  "registration_patch_sha256": null,
+  "notes": "Guest-lane pin. The checkout location is parameterized via MEMORYBENCH_HOME (a sibling checkout; never an absolute path in committed artifacts). setup must verify: detached checkout at commit_sha, clean porcelain, tree_sha match, license hash match. provider_files_sha256 and registration_patch_sha256 are filled when the TypeScript guest providers land; any other diff in the checkout is a refusal."
+}
