@@ -102,3 +102,34 @@ def test_wire_mode_smoke_search(corpus: Path, tmp_path: Path) -> None:
         assert hits, "wire-mode search returned nothing"
     finally:
         adapter.cleanup()
+
+
+def test_setup_refusal_restores_the_process_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A refused setup must not leak profile env pins into the process.
+
+    The semantic-load guard raises AFTER the profile env is applied, and a
+    raised setup never gets cleanup(). Unrestored, the pins poison every
+    test that runs later in the same process — observed as six
+    query-log/usage-ranking failures in the full lean suite (PR #390 CI at
+    d4f511e) that pass in isolation.
+    """
+    from exomem import embeddings as embeddings_module
+
+    from membench.adapters.exomem_local import embeddings_profile
+
+    def _refuse():  # the guard calls get_model() with no arguments
+        raise ImportError("forced: semantic lane unavailable")
+
+    monkeypatch.setattr(embeddings_module, "get_model", _refuse)
+    profile = embeddings_profile()
+    watched = sorted(set(profile.settings) | {"EXOMEM_VAULT_PATH", "EXOMEM_LOG_DIR"})
+    before = {key: os.environ.get(key) for key in watched}
+
+    adapter = ExomemLocalAdapter()
+    with pytest.raises(Exception, match="semantic lane"):
+        adapter.setup(tmp_path / "provider", profile)
+
+    after = {key: os.environ.get(key) for key in watched}
+    assert after == before, "refused setup leaked profile env pins into the process"

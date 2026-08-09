@@ -251,7 +251,29 @@ class ExomemLocalAdapter:
             self._saved_env.setdefault(key, os.environ.get(key))
             os.environ[key] = value
 
+    def _restore_env(self) -> None:
+        for key, previous in self._saved_env.items():
+            if previous is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = previous
+        self._saved_env.clear()
+
     def setup(self, workdir: Path, profile: Profile) -> None:
+        try:
+            self._setup(workdir, profile)
+        except BaseException:
+            # A refusal mid-setup (the semantic-load guard, an init fault)
+            # happens AFTER the profile env was applied, and callers never
+            # cleanup() an adapter whose setup raised. Without this restore,
+            # every deliberately-provoked refusal test leaks EXOMEM_* pins
+            # into the process and poisons unrelated tests that run later —
+            # measured as six query-log/usage-ranking failures in the full
+            # lean suite that vanish in isolation.
+            self._restore_env()
+            raise
+
+    def _setup(self, workdir: Path, profile: Profile) -> None:
         workdir = Path(workdir)
         self._workdir = workdir
         self._profile = profile
@@ -310,12 +332,7 @@ class ExomemLocalAdapter:
             self._mcp = build_server(require_auth=False)
 
     def cleanup(self) -> None:
-        for key, previous in self._saved_env.items():
-            if previous is None:
-                os.environ.pop(key, None)
-            else:
-                os.environ[key] = previous
-        self._saved_env.clear()
+        self._restore_env()
         self._mcp = None
         self._source_paths.clear()
         try:
