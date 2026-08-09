@@ -2236,3 +2236,70 @@ def test_new_operator_scripts_are_executable() -> None:
     ):
         mode = (INFRA / "scripts" / name).stat().st_mode
         assert stat.S_IMODE(mode) & stat.S_IXUSR, name
+
+
+def test_capacity_snapshot_reads_the_location_hcloud_actually_returns() -> None:
+    """HCloud returns `location` on the server and no longer sends `datacenter`.
+
+    The collector read only `server.datacenter.location.name`, so every run
+    failed closed with "HCloud server identity differs" and no capacity receipt
+    was ever written — which left provisioning parked on
+    `capacity-live-observation-mismatch` indefinitely. The old fixture encoded
+    the obsolete shape, so the suite stayed green while production could not
+    work at all.
+    """
+
+    module = _load(
+        "infra/helm/platform/files/operational_receipt_collector.py",
+        "operational_receipt_collector_location_test",
+    )
+    tenant_id, cell_id, operation_id = "tenant-1", "cell-1", "operation-1"
+    resource_name = f"exo-{hashlib.sha256(cell_id.encode()).hexdigest()[:20]}"
+    namespaces = [
+        {
+            "metadata": {
+                "name": resource_name,
+                "labels": {
+                    "exomem.io/tenant-cell": "true",
+                    "exomem.io/cell-resource": resource_name,
+                },
+                "annotations": {
+                    "exomem.io/tenant-id": tenant_id,
+                    "exomem.io/cell-id": cell_id,
+                    "exomem.io/operation-id": operation_id,
+                    "exomem.io/tenant-digest": hashlib.sha256(tenant_id.encode()).hexdigest(),
+                    "exomem.io/subject-digest": hashlib.sha256(cell_id.encode()).hexdigest(),
+                    "exomem.io/operation-digest": hashlib.sha256(operation_id.encode()).hexdigest(),
+                    "exomem.io/fence": "1",
+                    "exomem.io/resource-name": resource_name,
+                    "exomem.io/provision-mode": "serve",
+                },
+            }
+        }
+    ]
+    pages = [{"volumes": [{"id": 11, "server": 101}], "meta": {"pagination": {"next_page": None}}}]
+
+    current_shape = {"server": {"id": 101, "location": {"name": "fsn1"}}}
+    legacy_shape = {"server": {"id": 101, "datacenter": {"location": {"name": "fsn1"}}}}
+
+    for label, document in (("current", current_shape), ("legacy", legacy_shape)):
+        snapshot = module.capacity_snapshot_from_documents(
+            tenant_namespaces={"kind": "NamespaceList", "items": namespaces},
+            cluster_namespace={"metadata": {"uid": "cluster-uid-1234"}},
+            hcloud_server=document,
+            hcloud_pages=pages,
+            expected_server_id=101,
+            expected_location="fsn1",
+        )
+        assert snapshot is not None, label
+
+    # A genuine location mismatch must still fail in the shape now returned.
+    with pytest.raises(module.ReceiptCollectorError, match="HCloud server"):
+        module.capacity_snapshot_from_documents(
+            tenant_namespaces={"kind": "NamespaceList", "items": namespaces},
+            cluster_namespace={"metadata": {"uid": "cluster-uid-1234"}},
+            hcloud_server={"server": {"id": 101, "location": {"name": "nbg1"}}},
+            hcloud_pages=pages,
+            expected_server_id=101,
+            expected_location="fsn1",
+        )
