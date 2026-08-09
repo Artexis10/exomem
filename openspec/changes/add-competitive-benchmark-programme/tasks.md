@@ -157,7 +157,12 @@ them. Mission acceptance criteria (§14) close only from this ledger.
 - [ ] 8.2 LongMemEval-V2: pin official harness; 3-case offline fixture
       through THEIR harness with stub model; ≤25-case small tier only if
       budget allows
-- [ ] 8.3 STALE + MemOps licence/code recon → LOCKFILE or GAP.md each
+- [x] 8.3 STALE + MemOps licence/code recon → **both LOCKFILE** (full public
+      releases verified: STALE MIT+CC-BY-4.0 incl. runnable CUP-Mem, found
+      in paper Appendix G; MemOps MIT with no-adapter-interface caveat) +
+      bonus pins: MemoryAgentBench (MIT, ICLR 2026, CR split only 8 rows)
+      and the OIDA CC-BY-4.0 epistemic corpora. Clones at sibling
+      `suite-*` checkouts; pins in `benchmarks/suites/*/LOCKFILE.json`
 
 ## 9. Reports + CI (W11)
 

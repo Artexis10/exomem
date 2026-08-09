@@ -1,0 +1,16 @@
+{
+  "suite": "memops",
+  "paper": "arXiv:2607.12893",
+  "repo_url": "https://github.com/MemTensor/MemOps",
+  "commit_sha": "312af65e2c7b6d1b70f062ffa8b4cde32aaf6f35",
+  "upstream_last_commit": "2026-07-24",
+  "license_spdx": "MIT",
+  "license_sha256": "44321bf0b4b4e0fa2ea67a619db296eab0e38889e70580ef2cfc255fbf925e82",
+  "dataset": {
+    "note": "Injection-stage artifacts committed in-repo for smoke runs; full benchmark requires UltraChat from HF via ULTRACHAT_PATH"
+  },
+  "checkout_env_var": "SUITE_MEMOPS_HOME",
+  "runability": "runnable-with-cost",
+  "verified_at_utc": "2026-08-09",
+  "notes": "Five lifecycle operations (remember/forget/update/reflect/compose); six probe categories; leakage-vs-over-forgetting separation maps directly onto the supersession contract. CAVEAT: ~4 weeks old, single lab (MemTensor/MemOS), 15 commits; no adapter interface — integration requires an OpenAI-compatible shim or a fork of the test stage. Research dependency, never load-bearing."
+}
