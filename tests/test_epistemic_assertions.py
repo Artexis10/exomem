@@ -1054,3 +1054,152 @@ def test_residual1_collection_vocabulary_is_closed_and_case_insensitive() -> Non
         )
         result = fn(ctx)
         assert result.outcome == "pass", (decision_folder, hypothesis_folder, result.evidence)
+
+
+def test_rb1b_declared_but_unresolvable_subject_is_unsupported_not_a_pass() -> None:
+    """R-B1b: an unobservable subject must not inherit the snapshot-wide widening.
+
+    Reachable for real: ``VaultProjector`` ids are vault-relative paths while
+    scenario fixtures declare logical ids, so a mismatch produces a declared
+    subject that resolves to nothing. Widening to every revision group in that
+    case reinstates the original B1 free pass on a catastrophic assertion.
+    """
+
+    fn = resolve("prior_revision_retained")
+    ctx = AssertionContext(
+        snapshot=snapshot(
+            (
+                item("Knowledge Base/Notes/Research/retrieval-budget-v2", current="yes"),
+                item(
+                    "Knowledge Base/Archive/old-note",
+                    current="no",
+                    retired_reason="archived; unrelated to the budget lineage",
+                ),
+            )
+        ),
+        subject="claim-budget-v2",
+    )
+    result = fn(ctx)
+    assert result.outcome != "pass", result.evidence
+    assert result.outcome == "unsupported", result.evidence
+    assert "claim-budget-v2" in result.evidence
+    assert "not observable" in result.evidence
+
+
+def test_rb1b_omitted_subject_keeps_the_snapshot_wide_reading() -> None:
+    """R-B1b: pin the intended wide behaviour so the fix cannot over-tighten."""
+
+    fn = resolve("prior_revision_retained")
+    ctx = AssertionContext(
+        snapshot=snapshot(
+            (
+                item("budget-v1", current="no", retired_reason="superseded"),
+                item("budget-v2", current="yes"),
+            )
+        )
+    )
+    result = fn(ctx)
+    assert result.outcome == "pass", result.evidence
+    assert "budget-v1" in result.evidence
+
+
+def test_sibling_guard_decision_unresolvable_declared_pair_is_unsupported() -> None:
+    """A declared pair that is not in the projection must not fall back wide.
+
+    Same shape as R-B1b: unrelated decision/hypothesis items elsewhere in the
+    snapshot answered a question about two items nobody could observe.
+    """
+
+    fn = resolve("decision_distinguishable_from_hypothesis")
+    ctx = AssertionContext(
+        snapshot=snapshot(
+            (
+                item("real-a", kind="decision", current="yes"),
+                item("real-b", kind="hypothesis", current="yes"),
+            )
+        ),
+        subject="ghost",
+        counterpart="phantom",
+    )
+    result = fn(ctx)
+    assert result.outcome != "pass", result.evidence
+    assert result.outcome == "unsupported", result.evidence
+    assert "ghost" in result.evidence
+    assert "not observable" in result.evidence
+    assert "real-a" not in result.evidence
+
+
+def test_sibling_guard_decision_unresolvable_counterpart_is_unsupported() -> None:
+    """The counterpart is a co-equal pair member; it gets the same guard."""
+
+    fn = resolve("decision_distinguishable_from_hypothesis")
+    ctx = AssertionContext(
+        snapshot=snapshot(
+            (
+                item("real-a", kind="decision", current="yes"),
+                item("real-b", kind="hypothesis", current="yes"),
+            )
+        ),
+        subject="real-a",
+        counterpart="phantom",
+    )
+    result = fn(ctx)
+    assert result.outcome == "unsupported", result.evidence
+    assert "phantom" in result.evidence
+    assert "counterpart" in result.evidence
+
+
+def test_sibling_guard_decision_omitted_subject_keeps_the_wide_reading() -> None:
+    """Pin: with nothing declared, the snapshot-wide scan is the intended path."""
+
+    fn = resolve("decision_distinguishable_from_hypothesis")
+    ctx = AssertionContext(
+        snapshot=snapshot(
+            (
+                item("real-a", kind="decision", current="yes"),
+                item("real-b", kind="hypothesis", current="yes"),
+            )
+        )
+    )
+    result = fn(ctx)
+    assert result.outcome == "pass", result.evidence
+    assert "real-a" in result.evidence
+
+
+def test_sibling_guard_revision_links_unresolvable_subject_is_unsupported() -> None:
+    """No wrong-subject substitution: the verdict must be about what was declared."""
+
+    fn = resolve("revision_links_to_predecessor")
+    ctx = AssertionContext(
+        snapshot=snapshot(
+            (
+                item("other-v1", current="no", retired_reason="superseded"),
+                item("other-v2", current="yes", revision_of="other-v1"),
+            )
+        ),
+        subject="ghost",
+    )
+    result = fn(ctx)
+    assert result.outcome != "pass", result.evidence
+    assert result.outcome == "unsupported", result.evidence
+    assert "ghost" in result.evidence
+    assert "not observable" in result.evidence
+    assert "other-v2" not in result.evidence
+    assert result.subject == "ghost"
+
+
+def test_sibling_guard_revision_links_omitted_subject_keeps_the_wide_reading() -> None:
+    """Pin: with nothing declared, picking the observed successor stays correct."""
+
+    fn = resolve("revision_links_to_predecessor")
+    ctx = AssertionContext(
+        snapshot=snapshot(
+            (
+                item("other-v1", current="no", retired_reason="superseded"),
+                item("other-v2", current="yes", revision_of="other-v1"),
+            )
+        )
+    )
+    result = fn(ctx)
+    assert result.outcome == "pass", result.evidence
+    assert "other-v2" in result.evidence

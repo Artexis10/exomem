@@ -422,6 +422,44 @@ def _pair(ctx: AssertionContext) -> tuple[StateItem | None, StateItem | None]:
     return left, right
 
 
+def _declared_but_unobservable(
+    ctx: AssertionContext, name: str, *, check_counterpart: bool = False
+) -> AssertionResult | None:
+    """``unsupported`` when a declared subject/counterpart is not in the snapshot.
+
+    "Nothing was declared" and "what was declared is not there" are different
+    facts, and every assertion that collapsed them leaked the same way: the
+    unresolvable name fell through to a snapshot-wide reading, or to some
+    substituted item, and answered a question about state nobody could observe.
+    Once with a catastrophic assertion (see R-B1b) and twice more besides.
+
+    So a declared name that does not resolve is reported as exactly that. This
+    is also the only honest answer: an id-shape mismatch between a projector
+    (vault-relative paths) and a scenario fixture (logical ids) is a harness
+    problem, and scoring it as either a pass or a fail would attribute a
+    harness problem to the provider.
+
+    ``check_counterpart`` is opt-in because the counterpart does not mean the
+    same thing everywhere. Where it names a co-equal item under comparison, an
+    absent one is unobservable. Where it names an item whose *absence is the
+    finding* — ``prior_revision_retained``'s declared predecessor — this guard
+    must stay off, or it would convert destroyed history into ``unsupported``.
+    """
+
+    candidates = [("subject", ctx.subject)]
+    if check_counterpart:
+        candidates.append(("counterpart", ctx.counterpart))
+    for label, declared in candidates:
+        if declared and ctx.snapshot.item(declared) is None:
+            return _result(
+                name,
+                "unsupported",
+                f"declared {label} {declared!r} is not observable in this snapshot",
+                ctx.subject,
+            )
+    return None
+
+
 # --------------------------------------------------------------------------
 # 1-2: currency
 # --------------------------------------------------------------------------
@@ -575,6 +613,15 @@ def prior_revision_retained(ctx: AssertionContext) -> AssertionResult:
     by_id = snapshot.items_by_id()
     subject = snapshot.item(ctx.subject) if ctx.subject else None
 
+    # An unresolvable subject must not fall through to the snapshot-wide
+    # widening below — that was R-B1b, and it handed a catastrophic pass off any
+    # retired item anywhere. The counterpart is deliberately NOT checked here:
+    # for this assertion it names the declared predecessor, whose absence is the
+    # finding rather than a reason to stop scoring.
+    unobservable = _declared_but_unobservable(ctx, name)
+    if unobservable is not None:
+        return unobservable
+
     successors = (
         (subject,)
         if subject is not None
@@ -601,7 +648,9 @@ def prior_revision_retained(ctx: AssertionContext) -> AssertionResult:
     # Representation #2, scoped: a retained superseded artifact that the subject
     # can actually be connected to.
     lineage = {member.id for member in _lineage_members(snapshot, ctx.subject)}
-    if subject is None:
+    if not ctx.subject:
+        # Only an *undeclared* subject widens to every revision group. Past this
+        # point an unresolvable subject has already returned unsupported.
         lineage = {
             member.id
             for members in _revision_groups(snapshot).values()
@@ -616,10 +665,11 @@ def prior_revision_retained(ctx: AssertionContext) -> AssertionResult:
         if item.id in lineage and (item.current == "no" or item.retired_reason)
     ]
     if retained:
+        scope = "the subject's lineage" if ctx.subject else "an observed revision lineage"
         return _result(
             name,
             "pass",
-            f"retained superseded artifact(s) in the subject's lineage: {_listed(retained)}",
+            f"retained superseded artifact(s) in {scope}: {_listed(retained)}",
             ctx.subject,
         )
 
@@ -656,9 +706,18 @@ def revision_links_to_predecessor(ctx: AssertionContext) -> AssertionResult:
     if gated is not None:
         return gated
 
+    # A declared subject that does not resolve used to be silently replaced by
+    # "the first item with a revision_of, else the first current item" — so the
+    # verdict was about an item the scenario never named, and could be a pass.
+    unobservable = _declared_but_unobservable(ctx, name)
+    if unobservable is not None:
+        return unobservable
+
     snapshot = ctx.snapshot
     subject = snapshot.item(ctx.subject) if ctx.subject else None
     if subject is None:
+        # Nothing declared: picking the observed successor is the intended wide
+        # reading, not a substitution.
         successors = [item for item in snapshot.items if item.revision_of] or [
             item for item in snapshot.items if item.current == "yes"
         ]
@@ -981,6 +1040,13 @@ def decision_distinguishable_from_hypothesis(ctx: AssertionContext) -> Assertion
     gated = _gate(ctx, name, "kind")
     if gated is not None:
         return gated
+
+    # Both members are co-equal items under comparison, so an unresolvable one
+    # is unobservable rather than an invitation to scan the whole snapshot for
+    # some other decision/hypothesis pair and answer about that instead.
+    unobservable = _declared_but_unobservable(ctx, name, check_counterpart=True)
+    if unobservable is not None:
+        return unobservable
 
     snapshot = ctx.snapshot
     left, right = _pair(ctx)
