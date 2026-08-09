@@ -1,0 +1,29 @@
+# RED fixture: a transition invariant scored from a single snapshot. The
+# trajectory never takes a second snapshot, so there is no pair to compare and
+# the assertion could only ever return unsupported.
+scenario_id: red-transition-without-snapshot-pair
+family_id: f11
+kind: operational
+public_coverage: none
+phases:
+  - phase_id: p1
+    ops:
+      - op: ingest_source
+        ref: src-1
+      - op: snapshot
+        ref: s1
+    expect:
+      - assert: review_reopens_on_material_change
+        subject: note-1
+fairness:
+  why_neutral: red fixture; never scored
+  public_coverage_subtraction: none
+  mechanisms:
+    - provider_role: subject
+      mechanism: none
+      verdict: unknown
+      evidence: benchmarks/epistemic/PREREGISTRATION.md:39
+  privileged_endpoint_check:
+    - driver_tool: read-only state projection
+      competitor_equivalent: documented list/read endpoint
+  acceptance_predicate: none

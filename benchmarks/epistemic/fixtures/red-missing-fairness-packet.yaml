@@ -1,0 +1,14 @@
+# RED fixture: no fairness packet. The suite refuses to run such a scenario.
+scenario_id: red-missing-fairness-packet
+family_id: f07
+kind: corpus
+public_coverage: none
+phases:
+  - phase_id: p1
+    ops:
+      - op: snapshot
+        ref: s1
+    expect:
+      - assert: decision_distinguishable_from_hypothesis
+        subject: decide-1
+        counterpart: hypo-1

@@ -1,0 +1,27 @@
+# RED fixture: contradiction_not_flattened compares two named items, but the
+# expectation declares only a subject. Without the counterpart the assertion
+# would silently fall back to a snapshot-wide reading, so loading must fail.
+scenario_id: red-pair-assertion-missing-counterpart
+family_id: f03
+kind: corpus
+public_coverage: none
+phases:
+  - phase_id: p1
+    ops:
+      - op: snapshot
+        ref: s1
+    expect:
+      - assert: contradiction_not_flattened
+        subject: claim-a
+fairness:
+  why_neutral: red fixture; never scored
+  public_coverage_subtraction: none
+  mechanisms:
+    - provider_role: subject
+      mechanism: none
+      verdict: unknown
+      evidence: benchmarks/epistemic/PREREGISTRATION.md:39
+  privileged_endpoint_check:
+    - driver_tool: read-only state projection
+      competitor_equivalent: documented list/read endpoint
+  acceptance_predicate: none
