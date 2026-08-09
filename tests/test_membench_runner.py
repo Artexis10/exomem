@@ -14,6 +14,7 @@ from membench.adapters.base import (
     OpResult,
     Profile,
 )
+from membench.adapters import create_adapter
 from membench.generate import generate_corpus
 from membench.ids import sentinels_in
 from membench.reporting import build_comparison_report
@@ -441,3 +442,64 @@ def test_cross_run_report_marks_incomparable_environments(
     first_rows = [line for line in text.splitlines() if line.startswith("| ") and "run-3-12" in line]
     assert any("reference" in line for line in first_rows), first_rows
     assert "## Retrieval floor" in text
+
+
+def test_cross_contender_report_withholds_structurally_incomparable_columns(
+    corpus: Path, tmp_path: Path
+) -> None:
+    """Transport and harness-authored answer decisions are never comparison data."""
+
+    first = execute_run(_spec(corpus, tmp_path, FakeAdapter(), run_id="harness"))
+    second = execute_run(_spec(corpus, tmp_path, FakeAdapter(), run_id="native"))
+    manifest_path = second.run_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["answer_mode"] = "native"
+    manifest["provider"] = "exomem-local"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    ceiling = execute_run(
+        _spec(corpus, tmp_path, create_adapter("oracle-retrieval"), run_id="ceiling")
+    )
+    floor = execute_run(
+        _spec(corpus, tmp_path, create_adapter("null-abstain"), run_id="floor")
+    )
+
+    text = build_comparison_report(
+        [first.run_dir, second.run_dir, ceiling.run_dir, floor.run_dir],
+        tmp_path / "cmp-withheld.md",
+    ).read_text()
+
+    assert "withheld: transport asymmetry (4b.40)" in text
+    assert "| median_ms |" not in text
+    abstention_rows = [
+        line for line in text.splitlines() if line.startswith("| abstention |")
+    ]
+    assert len(abstention_rows) == 2  # dimensions and bounds surfaces
+    assert all(
+        "withheld: shared-answerer authored (audit CF#6)" in line
+        for line in abstention_rows
+    )
+    assert any("pass=" in line for line in abstention_rows)  # native remains reportable
+    label = "internal diagnostic — not publishable"
+    assert manifest["publication_label"] == label
+    assert label in text
+    assert label in (first.run_dir / "report.md").read_text(encoding="utf-8")
+
+    # Reference bounds provide a scale for a single contender; they are not a
+    # second product whose transport turns that contender's latency into noise.
+    bounded_text = build_comparison_report(
+        [second.run_dir, ceiling.run_dir, floor.run_dir], tmp_path / "cmp-bounded.md"
+    ).read_text()
+    assert "| median_ms |" in bounded_text
+    assert "withheld: transport asymmetry (4b.40)" not in bounded_text
+
+
+def test_internal_diagnostic_label_renders_in_its_own_report(
+    corpus: Path, tmp_path: Path
+) -> None:
+    result = execute_run(_spec(corpus, tmp_path, FakeAdapter(), run_id="internal"))
+
+    assert (
+        "internal diagnostic — not publishable"
+        in (result.run_dir / "report.md").read_text(encoding="utf-8")
+    )

@@ -8,22 +8,31 @@ EXOMEM_VAULT_PATH + the lexical/deterministic profile for every subprocess.
 
 from __future__ import annotations
 
+import datetime as dt
 import json
+import os
 from pathlib import Path
+import subprocess
+import sys
+import time
+
+import pytest
 
 from membench.judge import load_requests
 from membench.trackd.journeys import (
     J3_RUBRIC_PATH,
     PlantedItem,
     QueueObservation,
+    journey_env,
     load_j3_rubric,
+    normalize_instant,
     run_j1_longitudinal,
     run_j2_correction,
     run_j3_weekly_review,
     score_review_queue,
     write_j3_judge_requests,
 )
-from membench.trackd.runner import JOURNEYS
+from membench.trackd.runner import JOURNEYS, run_journeys
 
 
 def test_j1_longitudinal_evolution_green(tmp_path: Path) -> None:
@@ -84,6 +93,83 @@ def test_j1_wrong_order_variant_fails_chain_check(tmp_path: Path) -> None:
 
 def test_registry_exposes_all_journeys() -> None:
     assert set(JOURNEYS) == {"j1_longitudinal", "j2_correction", "j3_weekly_review"}
+
+
+@pytest.mark.timeout(180)
+def test_pinned_clock_keeps_track_d_verdicts_stable_across_utc_midnight(tmp_path: Path) -> None:
+    """Date-named artifacts must not alter a journey verdict at midnight (4b.34)."""
+
+    before_midnight = dt.datetime(2026, 8, 9, 23, 59, tzinfo=dt.UTC)
+    after_midnight = dt.datetime(2026, 8, 10, 0, 1, tzinfo=dt.UTC)
+    before_root = tmp_path / "before"
+    after_root = tmp_path / "after"
+    before_root.mkdir()
+    after_root.mkdir()
+    before = run_journeys(
+        ("j3_weekly_review",), tmp_root=before_root, instant=before_midnight
+    )
+    after = run_journeys(
+        ("j3_weekly_review",), tmp_root=after_root, instant=after_midnight
+    )
+
+    assert before["summary"] == after["summary"]
+    assert [
+        (journey["id"], journey["ok"], journey["checks_failed"])
+        for journey in before["journeys"]
+    ] == [
+        (journey["id"], journey["ok"], journey["checks_failed"])
+        for journey in after["journeys"]
+    ]
+
+
+@pytest.mark.timeout(180)
+def test_pinned_clock_controls_the_local_day_of_produced_note_paths(tmp_path: Path) -> None:
+    """A broken subprocess hook must not silently fall back to wall-clock time."""
+
+    instant = dt.datetime(2022, 1, 2, 1, 2, tzinfo=dt.UTC)
+    workdir = tmp_path / "pinned-day"
+    env = journey_env(workdir / "vault", workdir, instant)
+    env.pop("EXOMEM_TRACKD_INSTANT")
+    probe = subprocess.run(
+        [sys.executable, "-c", "pass"],
+        cwd=Path(__file__).resolve().parents[1],
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert probe.returncode != 0
+    assert "EXOMEM_TRACKD_INSTANT is required by Track D" in probe.stderr
+
+    result = run_j2_correction(workdir, instant=instant)
+
+    assert result.ok, result.failed
+    local_day = instant.astimezone().date().isoformat()
+    note_paths = [
+        path.name
+        for path in (workdir / "vault" / "Knowledge Base" / "Sources").rglob("*.md")
+        if path.name != "index.md"
+    ]
+    assert any(name.startswith(local_day) for name in note_paths), note_paths
+
+
+@pytest.mark.skipif(not hasattr(time, "tzset"), reason="platform lacks local-zone control")
+def test_pinned_clock_preserves_temporal_now_local_zone(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin the instant, not a UTC conversion that changes render_date's day."""
+
+    previous_tz = os.environ.get("TZ")
+    monkeypatch.setenv("TZ", "Europe/Tallinn")
+    time.tzset()
+    try:
+        instant = dt.datetime(2022, 1, 2, 22, 30, tzinfo=dt.UTC)
+        normalized = normalize_instant(instant)
+        assert normalized.date() == dt.date(2022, 1, 3)
+        assert normalized.utcoffset() == dt.timedelta(hours=2)
+    finally:
+        if previous_tz is None:
+            monkeypatch.delenv("TZ", raising=False)
+        else:
+            monkeypatch.setenv("TZ", previous_tz)
+        time.tzset()
 
 
 # ------------------------------------------------------------------- J3

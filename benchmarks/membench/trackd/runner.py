@@ -18,12 +18,13 @@ from pathlib import Path
 from membench.trackd.journeys import (
     REPO_ROOT,
     JourneyResult,
+    normalize_instant,
     run_j1_longitudinal,
     run_j2_correction,
     run_j3_weekly_review,
 )
 
-JOURNEYS: dict[str, Callable[[Path], JourneyResult]] = {
+JOURNEYS: dict[str, Callable[..., JourneyResult]] = {
     "j1_longitudinal": run_j1_longitudinal,
     "j2_correction": run_j2_correction,
     "j3_weekly_review": run_j3_weekly_review,
@@ -42,8 +43,10 @@ def run_journeys(
     *,
     tmp_root: Path | None = None,
     keep_tmp: bool = False,
+    instant: dt.datetime | None = None,
 ) -> dict:
     """Run the selected journeys, each against its own fresh isolated vault."""
+    pinned_instant = normalize_instant(instant)
     selected = journey_ids or JOURNEY_ORDER
     unknown = set(selected) - set(JOURNEYS)
     if unknown:
@@ -57,14 +60,14 @@ def run_journeys(
                 continue
             workdir = base / journey_id
             workdir.mkdir(parents=True, exist_ok=True)
-            results.append(JOURNEYS[journey_id](workdir))
+            results.append(JOURNEYS[journey_id](workdir, instant=pinned_instant))
     finally:
         if not keep_tmp:
             import shutil
 
             shutil.rmtree(base, ignore_errors=True)
     return {
-        "generated_at": dt.datetime.now(dt.UTC).isoformat(timespec="seconds"),
+        "generated_at": pinned_instant.isoformat(timespec="seconds"),
         "repo": str(REPO_ROOT),
         "journeys": [r.as_dict() for r in results],
         "summary": {
@@ -105,8 +108,17 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--json", action="store_true", help="emit machine-readable JSON")
     parser.add_argument("--keep-tmp", action="store_true", help="keep journey vaults")
+    parser.add_argument(
+        "--instant",
+        help="pinned ISO-8601 instant for reproducible journey timestamps",
+    )
     args = parser.parse_args(argv)
-    report = run_journeys(tuple(args.journey) if args.journey else None, keep_tmp=args.keep_tmp)
+    instant = dt.datetime.fromisoformat(args.instant) if args.instant else None
+    report = run_journeys(
+        tuple(args.journey) if args.journey else None,
+        keep_tmp=args.keep_tmp,
+        instant=instant,
+    )
     if args.json:
         print(json.dumps(report, indent=2, ensure_ascii=False))
     else:

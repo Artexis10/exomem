@@ -46,6 +46,7 @@ Product-contract notes encoded in the journey bodies:
 
 from __future__ import annotations
 
+import datetime as dt
 import json
 import os
 import subprocess
@@ -60,7 +61,60 @@ COMMAND_TIMEOUT_SECONDS = 60.0
 KB_DIRNAME = "Knowledge Base"
 
 
-def journey_env(vault: Path, workdir: Path) -> dict[str, str]:
+def normalize_instant(instant: dt.datetime | None) -> dt.datetime:
+    """Return Track D's pinned instant in the local zone temporal.now() uses."""
+
+    value = instant or dt.datetime.now().astimezone()
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=dt.UTC)
+    return value.astimezone().replace(microsecond=0)
+
+
+def _write_clock_hook(workdir: Path, instant: dt.datetime) -> Path:
+    """Freeze product write-time inside the real CLI subprocesses."""
+
+    hook_dir = workdir / "trackd-clock-hook"
+    hook_dir.mkdir(parents=True, exist_ok=True)
+    (hook_dir / "sitecustomize.py").write_text(
+        "import datetime as _dt\n"
+        "import importlib.abc as _abc\n"
+        "import importlib.machinery as _machinery\n"
+        "import os as _os\n"
+        "_raw_instant = _os.environ.get('EXOMEM_TRACKD_INSTANT')\n"
+        "if not _raw_instant:\n"
+        "    raise SystemExit('EXOMEM_TRACKD_INSTANT is required by Track D clock hook')\n"
+        "try:\n"
+        "    _instant = _dt.datetime.fromisoformat(_raw_instant)\n"
+        "except ValueError as _error:\n"
+        "    raise SystemExit('EXOMEM_TRACKD_INSTANT is invalid for Track D clock hook') from _error\n"
+        "if _instant.tzinfo is None:\n"
+        "    _instant = _instant.replace(tzinfo=_dt.UTC)\n"
+        "_instant = _instant.astimezone().replace(microsecond=0)\n"
+        "class _TemporalLoader(_abc.Loader):\n"
+        "    def __init__(self, loader):\n"
+        "        self._loader = loader\n"
+        "    def create_module(self, spec):\n"
+        "        create = getattr(self._loader, 'create_module', None)\n"
+        "        return create(spec) if create else None\n"
+        "    def exec_module(self, module):\n"
+        "        self._loader.exec_module(module)\n"
+        "        module.now = lambda: _instant\n"
+        "class _TemporalFinder(_abc.MetaPathFinder):\n"
+        "    def find_spec(self, fullname, path=None, target=None):\n"
+        "        if fullname != 'exomem.temporal':\n"
+        "            return None\n"
+        "        spec = _machinery.PathFinder.find_spec(fullname, path)\n"
+        "        if spec is not None and spec.loader is not None:\n"
+        "            spec.loader = _TemporalLoader(spec.loader)\n"
+        "        return spec\n"
+        "import sys as _sys\n"
+        "_sys.meta_path.insert(0, _TemporalFinder())\n",
+        encoding="utf-8",
+    )
+    return hook_dir
+
+
+def journey_env(vault: Path, workdir: Path, instant: dt.datetime) -> dict[str, str]:
     """Isolated deterministic env for product-CLI subprocesses.
 
     Copies lexical_profile()'s settings (benchmarks/membench/adapters/
@@ -70,14 +124,16 @@ def journey_env(vault: Path, workdir: Path) -> dict[str, str]:
     """
     from membench.adapters.exomem_local import lexical_profile
 
+    hook_dir = _write_clock_hook(workdir, instant)
     return {
         "PATH": "/usr/bin:/bin",
         "HOME": str(workdir),
         "EXOMEM_VAULT_PATH": str(vault),
         "EXOMEM_KB_DIRNAME": KB_DIRNAME,
         "EXOMEM_CONFIG_PATH": str(workdir / "exomem-config.json"),
-        "PYTHONPATH": str(SRC_DIR),
+        "PYTHONPATH": os.pathsep.join((str(hook_dir), str(SRC_DIR))),
         "PYTHONUTF8": "1",
+        "EXOMEM_TRACKD_INSTANT": instant.isoformat(),
         **lexical_profile().settings,
     }
 
@@ -166,11 +222,12 @@ def _json_payload(stdout: str) -> dict | None:
 class JourneyRunner:
     """Drives ``python -m exomem ...`` subprocesses against one isolated vault."""
 
-    def __init__(self, workdir: Path):
+    def __init__(self, workdir: Path, *, instant: dt.datetime | None = None):
         self.workdir = Path(workdir)
+        self.instant = normalize_instant(instant)
         self.vault = self.workdir / "vault"
         self.vault.mkdir(parents=True, exist_ok=True)
-        self.env = journey_env(self.vault, self.workdir)
+        self.env = journey_env(self.vault, self.workdir, self.instant)
         self.commands: list[CommandRun] = []
         self.steps_count = 0
         real_home = Path(os.path.expanduser("~"))
@@ -237,7 +294,7 @@ def _hit_paths(payload: dict | None) -> list[str]:
 
 
 def run_j1_longitudinal(
-    workdir: Path, *, skip_final_replace: bool = False
+    workdir: Path, *, skip_final_replace: bool = False, instant: dt.datetime | None = None
 ) -> JourneyResult:
     """J1: longitudinal evolution of one research-note conclusion.
 
@@ -249,7 +306,7 @@ def run_j1_longitudinal(
     tests to prove the checks bite (the chain check must then fail).
     """
     started = time.perf_counter()
-    runner = JourneyRunner(workdir)
+    runner = JourneyRunner(workdir, instant=instant)
     checks: list[JourneyCheck] = []
 
     init = runner.init_vault()
@@ -425,7 +482,7 @@ J2_PARAPHRASES = (
 )
 
 
-def run_j2_correction(workdir: Path) -> JourneyResult:
+def run_j2_correction(workdir: Path, *, instant: dt.datetime | None = None) -> JourneyResult:
     """J2: correction propagation with provenance.
 
     capture_source (wrong fact) -> remember conclusion citing it ->
@@ -435,7 +492,7 @@ def run_j2_correction(workdir: Path) -> JourneyResult:
     the source citation in ``sources:`` frontmatter.
     """
     started = time.perf_counter()
-    runner = JourneyRunner(workdir)
+    runner = JourneyRunner(workdir, instant=instant)
     checks: list[JourneyCheck] = []
 
     init = runner.init_vault()
@@ -788,7 +845,7 @@ def _queue_paths(payload: dict | None) -> tuple[str, ...]:
     )
 
 
-def run_j3_weekly_review(workdir: Path) -> J3Result:
+def run_j3_weekly_review(workdir: Path, *, instant: dt.datetime | None = None) -> J3Result:
     """J3: weekly review over planted stale/contradiction/unprocessed/open-loop
     items, scored by planted-id recall+precision, false-surface rate, and
     triage burden (scripted op count).
@@ -818,7 +875,7 @@ def run_j3_weekly_review(workdir: Path) -> J3Result:
     """
 
     started = time.perf_counter()
-    runner = JourneyRunner(workdir)
+    runner = JourneyRunner(workdir, instant=instant)
     # Declared product config: collapse the stale age edge (see docstring).
     runner.env["EXOMEM_STALE_AGE_DAYS"] = "0"
     checks: list[JourneyCheck] = []

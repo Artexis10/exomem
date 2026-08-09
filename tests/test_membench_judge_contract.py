@@ -385,7 +385,15 @@ def test_sample_expansion_collect_and_merge_keep_denominators(tmp_path: Path) ->
 
 
 def test_gate_conflict_annotation_and_invalid_run_rendering(tmp_path: Path) -> None:
-    run_ok = _make_run_dir(tmp_path, "run-conflict", provider="provider-one")
+    run_ok = _make_run_dir(
+        tmp_path,
+        "run-conflict",
+        provider="provider-one",
+        dimensions={
+            **_DIMENSIONS_OK,
+            "abstention": {"pass": 1, "fail": 0, "not_applicable": 0, "unsupported": 0},
+        },
+    )
     (run_ok / "judge-scores.json").write_text(
         json.dumps(
             {
@@ -443,10 +451,14 @@ def test_gate_conflict_annotation_and_invalid_run_rendering(tmp_path: Path) -> N
         if row.startswith("| factual_qa") or row.startswith("| governance"):
             assert row.rstrip().endswith("INVALID |")
 
-    # Latency stays in its own section with real numbers for the valid run.
+    # Cross-contender latency is structurally incomparable, and an INVALID
+    # harness-mode answer decision stays INVALID rather than being masked as
+    # withheld.
     latency_section = report.split("## Latency")[1].split("## Failures")[0]
-    assert "20.000" in latency_section  # median of 10/20/30
-    assert "INVALID" in latency_section
+    assert "withheld: transport asymmetry (4b.40)" in latency_section
+    assert not any(value in latency_section for value in ("10.000", "20.000", "30.000"))
+    abstention = next(line for line in dims_section.splitlines() if line.startswith("| abstention |"))
+    assert abstention.rstrip().endswith("INVALID |")
 
 
 # ------------------------------------------------------- skip, never fabricate

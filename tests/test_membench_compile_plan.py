@@ -127,6 +127,45 @@ def test_supersession_carries_to_the_conclusion() -> None:
     assert by_id["CLM-0001"].supersedes is None
 
 
+def test_supersession_predecessors_emit_before_their_successors() -> None:
+    """Claim-id order is not a valid compilation dependency order (4b.44)."""
+
+    claims = [
+        _claim("CLM-ZZZZ", "ENT-1", "deadline", "2025-03-14", superseded_by="CLM-AAAA"),
+        _claim("CLM-AAAA", "ENT-1", "deadline", "2025-03-28", supersedes="CLM-ZZZZ"),
+    ]
+    plan = derive_compile_plan(claims)
+    emitted: set[str] = set()
+    for conclusion in plan:
+        assert conclusion.supersedes is None or conclusion.supersedes in emitted
+        emitted.add(conclusion.conclusion_id)
+
+
+def test_supersession_cycle_is_refused() -> None:
+    claims = [
+        _claim("CLM-AAAA", "ENT-1", "deadline", "2025-03-14", supersedes="CLM-BBBB"),
+        _claim("CLM-BBBB", "ENT-1", "deadline", "2025-03-28", supersedes="CLM-AAAA"),
+    ]
+    with pytest.raises(ValueError, match="supersession cycle"):
+        derive_compile_plan(claims)
+
+
+@pytest.mark.timeout(180)
+def test_seed_one_emits_every_supersession_edge_after_its_predecessor(tmp_path) -> None:
+    """Seed 1 previously left 46 of 88 supersession edges unresolved (4b.44)."""
+
+    from membench.generate import generate_corpus
+    from membench.schema import load_jsonl
+
+    corpus = tmp_path / "s1"
+    generate_corpus(1, corpus)
+    plan = derive_compile_plan(load_jsonl(ClaimRecord, corpus / "claims.jsonl"))
+    emitted: set[str] = set()
+    for conclusion in plan:
+        assert conclusion.supersedes is None or conclusion.supersedes in emitted
+        emitted.add(conclusion.conclusion_id)
+
+
 def test_a_superseding_pair_is_not_a_dispute() -> None:
     """The trap in this derivation.
 
