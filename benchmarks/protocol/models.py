@@ -131,6 +131,9 @@ class RunManifest(StrictModel):
     readiness: list[LaneReadiness] = Field(default_factory=list)
     leakage: LeakageSummary = Field(default_factory=lambda: LeakageSummary(scanned_cases=0, invalidated_cases=0))
     contamination: Literal["isolated", "contaminated", "unverifiable"] | None = None
+    #: Why a terminal status is not VALID.  A manifest that refuses a run must
+    #: be able to say why without a reader consulting a second artifact.
+    invalid_reason: str | None = None
     budget: BudgetSummary | None = None
     provider_variant: str | None = None
     control_config_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")

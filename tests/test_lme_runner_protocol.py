@@ -442,3 +442,164 @@ def test_a_perturbed_real_run_pair_is_classified_by_the_gate(tmp_path: Path) -> 
     assert "top_k" in fields
     assert result.blocking, "a top_k difference is an identity/config difference and must block"
     assert all(diff.case_id != "run" for diff in result.diffs), "diffs are attributed per case"
+
+
+# --------------------------------------------------------------------------
+# Recheck residuals: write ordering, and isolation claimed without probes
+# --------------------------------------------------------------------------
+
+
+class _FixtureAdapter:
+    """The legacy no-provider path, driven without a real product vault."""
+
+    def run_question(self, question, workdir, *, dataset_identity, case_ordinal, limit=10):
+        del dataset_identity, case_ordinal, limit
+        from lme.dataset import render_session
+        from membench.adapters.base import OpResult
+
+        Path(workdir).mkdir(parents=True, exist_ok=True)
+        self.last_ingest_results = tuple(
+            OpResult(seq=index, op="capture_source", source_id=session.session_id, ok=True, latency_ms=float(index + 1))
+            for index, session in enumerate(question.sessions)
+        )
+        return [render_session(session) for session in question.sessions]
+
+
+def _poisoning_provider(run_id: str):
+    from lme.providers.hybrid_rag_direct import HybridRagDirectProvider
+    from protocol.canary import canary_for
+
+    class _CrossCaseLeak(HybridRagDirectProvider):
+        def ingest_case(self, events, handle):
+            inserted = super().ingest_case(events, handle)
+            if handle.case_id.startswith("__probe__"):
+                return inserted
+            token = canary_for(run_id, handle.case_id + "-other", "cross_case")
+            content = f"Neighbouring case material crossed the namespace boundary. Token: {token}."
+            leak = events[0].model_copy(update={
+                "content": content,
+                "content_sha256": hashlib.sha256(content.encode()).hexdigest(),
+                "session_ordinal": max(event.session_ordinal for event in events) + 1,
+                "ingestion_ordinal": max(event.ingestion_ordinal for event in events) + 1,
+            })
+            return inserted + super().ingest_case([leak], handle)
+
+    return _CrossCaseLeak
+
+
+def test_a_poisoned_run_ships_an_invalid_report_and_run_json(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The contamination verdict must reach run.json and report.md, not only the manifest."""
+
+    from lme.runner import LmeRunInvalid
+
+    run_id = "ordering-poisoned"
+    _install(monkeypatch, _poisoning_provider(run_id))
+    with pytest.raises(LmeRunInvalid, match="contaminat"):
+        _execute(tmp_path, run_id)
+    run_dir = tmp_path / run_id
+    legacy = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+    assert legacy["invalid"] is True, "run.json shipped a false green for a contaminated run"
+    assert legacy["invalid_reason"], "run.json recorded no reason for an invalidated run"
+    report = (run_dir / "report.md").read_text(encoding="utf-8")
+    assert "INVALID" in report, "report.md shipped without an INVALID banner"
+    assert "contamination=contaminated" in report
+
+
+@pytest.mark.parametrize("poisoned", [False, True], ids=["clean", "poisoned"])
+def test_all_three_report_entry_points_agree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, poisoned: bool
+) -> None:
+    """RM5: runner-written, artifact-only, and judge re-rendered reports are one text."""
+
+    from lme.judge_io import rerender_report
+    from lme.report import render_run_report
+    from lme.runner import LmeRunInvalid
+
+    run_id = "agreement-poisoned" if poisoned else "agreement-clean"
+    if poisoned:
+        _install(monkeypatch, _poisoning_provider(run_id))
+        with pytest.raises(LmeRunInvalid):
+            _execute(tmp_path, run_id)
+        run_dir = tmp_path / run_id
+    else:
+        run_dir = _execute(tmp_path, run_id).run_dir
+    written = (run_dir / "report.md").read_text(encoding="utf-8")
+    assert render_run_report(run_dir, offline=True) == written
+    rerender_report(run_dir)
+    assert (run_dir / "report.md").read_text(encoding="utf-8") == written
+
+
+def test_the_legacy_path_never_claims_isolation_without_canary_probes(tmp_path: Path) -> None:
+    """RB4: an isolation verdict with zero probes executed is a constructible zero."""
+
+    from lme.reader import StubReader
+    from lme.runner import RunConfig, execute_run
+
+    result = execute_run(
+        RunConfig(dataset=FIXTURE, out=tmp_path, reader_name="stub", run_id="legacy-path"),
+        reader=StubReader(), adapter_factory=_FixtureAdapter,
+    )
+    assert not (result.run_dir / "probes.jsonl").exists(), "the legacy path runs no probes"
+    manifest = _manifest(result.run_dir)
+    assert manifest["contamination"] != "isolated", "isolation was claimed with no canary evidence"
+    assert manifest["contamination"] == "unverifiable"
+    # Honest, and still usable on its own; strict validation refuses it for any
+    # comparative table, which is exactly what "unverifiable" is for.
+    code, output = _strict_validate(result.run_dir)
+    assert code == 2
+    assert "unverifiable" in output
+
+
+def test_leakage_invalidated_cases_is_a_real_per_case_count(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """RB4: the summary counts cases, not the truthiness of one run-level flag."""
+
+    from lme.providers.hybrid_rag_direct import HybridRagDirectProvider
+    from lme.runner import LmeRunInvalid
+
+    clean = _execute(tmp_path, "count-clean").run_dir
+    assert _manifest(clean)["leakage"]["invalidated_cases"] == 0
+
+    run_id = "count-poisoned"
+    _install(monkeypatch, _poisoning_provider(run_id))
+    with pytest.raises(LmeRunInvalid):
+        _execute(tmp_path, run_id)
+    poisoned = _manifest(tmp_path / run_id)["leakage"]
+    assert poisoned["scanned_cases"] == CASE_COUNT
+    assert poisoned["invalidated_cases"] == CASE_COUNT, "every contaminated case must be counted"
+
+    class _Crashing(HybridRagDirectProvider):
+        def ingest_case(self, events, handle):
+            self._case_id = handle.case_id
+            return super().ingest_case(events, handle)
+
+        def retrieve(self, question_text, top_k):
+            if not self._case_id.startswith("__probe__"):
+                raise RuntimeError("provider retrieval exploded")
+            return super().retrieve(question_text, top_k)
+
+    _install(monkeypatch, _Crashing)
+    with pytest.raises(LmeRunInvalid):
+        _execute(tmp_path, "count-crashed")
+    assert _manifest(tmp_path / "count-crashed")["leakage"]["invalidated_cases"] == 1
+
+
+def test_probe_inconclusiveness_follows_a_declared_capability_not_a_variant_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A provider that declares it retains nothing gets inconclusive-by-design probes."""
+
+    from lme.providers.null_direct import NullDirectProvider
+
+    class _RenamedNull(NullDirectProvider):
+        def variant_id(self) -> str:
+            return "some-other-empty-control"
+
+    _install(monkeypatch, _RenamedNull)
+    _execute(tmp_path, "declared-capability", provider="no-memory")
+    probes = _rows(tmp_path / "declared-capability" / "probes.jsonl")
+    assert {row["outcome"] for row in probes} == {"inconclusive-by-design"}
+    assert _manifest(tmp_path / "declared-capability")["provider_variant"] == "some-other-empty-control"

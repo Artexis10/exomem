@@ -25,6 +25,26 @@ def label_is_correct(value: object) -> bool:
     return False
 
 
+def manifest_banner(status: str, contamination: str | None, invalid_reason: str | None) -> str | None:
+    """The one banner every report entry point renders, or None when the run is usable.
+
+    Deriving it from the finalized terminal state — rather than from whichever
+    artifact a given entry point happens to read — is what keeps the runner's
+    report.md, the artifact-only regeneration, and the judge re-render one text.
+
+    A VALID run whose canary state is merely ``unverifiable`` is not an
+    environment fault: it stands on its own and is blocked only from a
+    comparative table, which ``protocol.cli validate --strict`` enforces.
+    """
+
+    if status == "VALID" and contamination != "contaminated":
+        return None
+    parts = [f"manifest status={status}", f"contamination={contamination}"]
+    if invalid_reason:
+        parts.append(f"reason={invalid_reason}")
+    return "; ".join(parts)
+
+
 def _score(ids: list[str], labels: Mapping[str, object]) -> str:
     present = [question_id for question_id in ids if question_id in labels]
     if len(present) != len(ids):
@@ -143,10 +163,8 @@ def render_run_report(run_dir: Path | str, *, offline: bool = False) -> str:
     def render() -> str:
         from .judge_io import render_from_artifacts
 
-        invalid_reason = None
-        if manifest.status != "VALID" or manifest.contamination in {"contaminated", "unverifiable"}:
-            invalid_reason = f"manifest status={manifest.status}; contamination={manifest.contamination}"
-        return render_from_artifacts(root, invalid_reason=invalid_reason, provider_variant=manifest.provider_variant)
+        banner = manifest_banner(manifest.status, manifest.contamination, manifest.invalid_reason)
+        return render_from_artifacts(root, invalid_reason=banner, provider_variant=manifest.provider_variant)
 
     if offline:
         with offline_guard():

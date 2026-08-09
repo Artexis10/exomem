@@ -47,6 +47,7 @@ def finalize_manifest(
     run_dir: Path | str, *, status: str, finalized_at: str,
     readiness: list[LaneReadiness] | None = None, leakage: LeakageSummary | None = None,
     contamination: str | None = None, budget: BudgetSummary | None = None,
+    invalid_reason: str | None = None,
 ) -> RunManifest:
     if not is_terminal(status):
         raise ManifestError("final status must be terminal")
@@ -56,6 +57,9 @@ def finalize_manifest(
     raw = json.loads(path.read_text(encoding="utf-8"))
     raw["status"] = status
     raw["finalized_at"] = finalized_at
+    # Always written, so a re-finalization can never leave a stale reason
+    # attached to a status that no longer carries it.
+    raw["invalid_reason"] = invalid_reason
     if readiness is not None:
         raw["readiness"] = [item.model_dump() for item in readiness]
     if leakage is not None:

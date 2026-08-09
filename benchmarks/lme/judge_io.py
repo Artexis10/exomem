@@ -8,7 +8,7 @@ import shutil
 from pathlib import Path
 
 from .dataset import load_dataset
-from .report import render_report
+from .report import manifest_banner, render_report
 
 
 LANE_FILES = {
@@ -131,14 +131,26 @@ def render_from_artifacts(run_dir: Path | str, *, invalid_reason: str | None, pr
 
 
 def rerender_report(run_dir: Path) -> None:
+    """Re-render from the finalized protocol manifest, the authoritative terminal record.
+
+    Reading the manifest rather than run.json (its legacy mirror) is what keeps
+    this entry point byte-identical to the runner's own report.md and to
+    render_run_report; every run this package writes finalizes a manifest, so a
+    missing or non-terminal one is a real fault and is raised, not papered over.
+    """
+
     run_dir = Path(run_dir)
-    manifest = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
-    report = render_from_artifacts(
-        run_dir,
-        invalid_reason=manifest.get("invalid_reason"),
-        provider_variant=manifest.get("provider_variant"),
+    from protocol.manifest import load_manifest
+
+    manifest = load_manifest(run_dir)
+    (run_dir / "report.md").write_text(
+        render_from_artifacts(
+            run_dir,
+            invalid_reason=manifest_banner(manifest.status, manifest.contamination, manifest.invalid_reason),
+            provider_variant=manifest.provider_variant,
+        ),
+        encoding="utf-8",
     )
-    (run_dir / "report.md").write_text(report, encoding="utf-8")
 
 
 def ingest_judge_labels(run_dir: Path | str, labels: Path | str, *, lane: str = "main") -> Path:

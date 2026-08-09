@@ -30,7 +30,7 @@ from .dataset import LmeDataset, QUESTION_TYPES, dump_dataset, load_dataset
 from .fetch import file_sha256, verify_sha256
 from .judge_io import _bound_ids, official_judge_commands
 from .reader import ABSTENTION, ApiReader, Reader, StubReader
-from .report import render_report
+from .report import manifest_banner, render_report
 from .normalize import ingest_field_groups, neutralize, render_neutral_session
 
 
@@ -346,8 +346,11 @@ def _run_probes(provider: object, identity: DatasetIdentity, run_id: str, profil
     for ordinal, spec in enumerate(known_answer_probe_specs(), 1):
         case_id = f"__probe__-{spec.kind}"
         handle = CaseHandle(case_id=case_id, case_ordinal=ordinal, question_date="2026-01-01T00:00:00Z")
-        if getattr(provider, "variant_id")() == "no-memory":
-            results.append(ProbeResult(case_id=case_id, probe_kind=spec.kind, outcome="inconclusive-by-design", detail="negative control intentionally stores no memory"))
+        # Gated on a DECLARED capability, not on a variant name: a control that
+        # stores nothing cannot answer a known-answer probe, and renaming the
+        # row must not silently turn that into a probe failure.
+        if getattr(provider, "retains_nothing", False):
+            results.append(ProbeResult(case_id=case_id, probe_kind=spec.kind, outcome="inconclusive-by-design", detail="provider declares it retains nothing, so a known-answer probe is inapplicable"))
             continue
         if ordinal > 1:
             provider.cleanup()
@@ -508,7 +511,7 @@ def execute_run(
     hypotheses: list[dict[str, object]] = []
     invalid_reason: str | None = None
     readiness_list = []
-    contamination_results: list[str] = []
+    contamination_by_case: dict[str, str] = {}
     leakage_findings: list[object] = []
     probe_results: list[ProbeResult] = []
     equivalence_cases: list[dict[str, object]] = []
@@ -572,14 +575,14 @@ def execute_run(
                 trace.append({"record": "search", "query": question.question, "raw_response_ref": "inline:provider-hit-list", "normalized_hit_ids": [hit.hit_id for hit in hits], "normalized_hit_shas": [hashlib.sha256(hit.text.encode()).hexdigest() for hit in hits], "top_k": config.top_k})
                 cross_case_token = canary_for(run_id, question.question_id + "-other", "cross_case")
                 never_ingested_token = canary_for(run_id, question.question_id, "never_ingested")
-                contamination_results.append(_canary_verdict(
+                contamination_by_case[question.question_id] = _canary_verdict(
                     {
                         "presence": _hit_contains(provider.retrieve(token, 1), token),
                         "cross_case": _hit_contains(provider.retrieve(cross_case_token, 1), cross_case_token),
                         "never_ingested": _hit_contains(provider.retrieve(never_ingested_token, 1), never_ingested_token),
                     },
                     retains_nothing=bool(getattr(provider, "retains_nothing", False)),
-                ))
+                )
                 equivalence_cases.append(_equivalence_case(
                     question=question, case_ids=case_ids, namespace_pattern=namespace_pattern(provider_kind),
                     payload_shas=payload_shas, readiness=per_case_readiness,
@@ -620,6 +623,12 @@ def execute_run(
             )
             break
         except Exception as exc:  # retained as a question failure, never dropped
+            # Deliberately asymmetric. On the direct-provider path the provider
+            # CONTRACT broke, so no case from that provider is trustworthy and
+            # the run is voided. On the legacy adapter path a question that
+            # fails is a scored failure inside the denominator — that is the
+            # established LME policy, and voiding the run instead would silently
+            # change what the benchmark measures.
             if config.provider:
                 invalid_reason = f"{question.question_id}: provider failure {type(exc).__name__}: {exc}"
             if reader_attempted:
@@ -671,6 +680,52 @@ def execute_run(
     _write_jsonl(run_dir / "failures.jsonl", failures)
     outcomes_path = run_dir / "question-outcomes.jsonl"
     _write_jsonl(outcomes_path, outcomes)
+
+    # The terminal verdict is decided HERE, before any artifact that encodes
+    # validity — pilot evidence, run.json, report.md.  Deciding it after those
+    # writes shipped a poisoned run with `invalid: false` in run.json and a
+    # report.md carrying no banner, which judge_io then faithfully re-rendered.
+    readiness_report = validate_readiness(readiness_list, strict=False) if readiness_list else None
+    readiness_status = readiness_report.status if readiness_report is not None else "VALID"
+    verdicts = list(contamination_by_case.values())
+    if config.provider:
+        contamination = (
+            "contaminated" if "contaminated" in verdicts
+            else "unverifiable" if "unverifiable" in verdicts
+            else "isolated" if verdicts
+            else "unverifiable"
+        )
+        # This path plants and probes canaries, so a probe that could not
+        # confirm isolation is a measured fault, not a missing measurement.
+        contamination_invalid = contamination in {"contaminated", "unverifiable"}
+    else:
+        # The legacy adapter path plants no canaries at all.  Recording
+        # "isolated" here would be a constructible zero: an isolation verdict
+        # with no evidence behind it.  "unverifiable" is the honest state — the
+        # run stands on its own, and `validate --strict` refuses it for any
+        # comparative table, which is exactly what unverifiable is for.
+        contamination = "unverifiable"
+        contamination_invalid = False
+    detector_counts: dict[str, int] = {}
+    for finding in leakage_findings:
+        detector = getattr(finding, "detector", "unknown")
+        detector_counts[detector] = detector_counts.get(detector, 0) + 1
+    if contamination_invalid and invalid_reason is None:
+        invalid_reason = f"canary contamination status: {contamination}"
+    if readiness_report is not None and readiness_report.status == "INVALID" and invalid_reason is None:
+        invalid_reason = "; ".join(readiness_report.reasons)
+    if any(probe.probe_kind == "semantic-zero-overlap" and probe.outcome == "fail" for probe in probe_results) and invalid_reason is None:
+        invalid_reason = "semantic known-answer readiness probe failed"
+    terminal_status = "INVALID" if invalid_reason is not None else readiness_status
+    # A real per-case count: every case whose canary verdict was contaminated,
+    # plus every case that failed in the harness, never the truthiness of one
+    # run-level flag.
+    invalidated_case_ids = {case_id for case_id, verdict in contamination_by_case.items() if verdict == "contaminated"}
+    invalidated_case_ids |= {
+        str(failure["question_id"]) for failure in failures
+        if failure.get("phase") in {"environment", "retrieve-or-read"}
+    }
+
     if pilot is not None:
         _write_json(
             run_dir / "pilot-evidence.json",
@@ -720,39 +775,20 @@ def execute_run(
             labels={},
             ceiling_question_ids=ceiling_ids,
             floor_question_ids=floor_ids,
-            invalid_reason=invalid_reason,
+            invalid_reason=manifest_banner(terminal_status, contamination, invalid_reason),
             provider_variant=provider_variant,
         ),
         encoding="utf-8",
     )
-    # Non-strict on purpose: an INVALID readiness list must FINALISE the run as
-    # INVALID, not raise past finalization and leave a non-terminal manifest.
-    readiness_report = validate_readiness(readiness_list, strict=False) if readiness_list else None
-    readiness_status = readiness_report.status if readiness_report is not None else "VALID"
-    contamination = (
-        "contaminated" if "contaminated" in contamination_results
-        else "unverifiable" if "unverifiable" in contamination_results
-        else "isolated" if contamination_results or not config.provider else "unverifiable"
-    )
-    detector_counts: dict[str, int] = {}
-    for finding in leakage_findings:
-        detector = getattr(finding, "detector", "unknown")
-        detector_counts[detector] = detector_counts.get(detector, 0) + 1
-    contamination_invalid = contamination in {"contaminated", "unverifiable"}
-    if contamination_invalid and invalid_reason is None:
-        invalid_reason = f"canary contamination status: {contamination}"
-    if readiness_report is not None and readiness_report.status == "INVALID" and invalid_reason is None:
-        invalid_reason = "; ".join(readiness_report.reasons)
-    if any(probe.probe_kind == "semantic-zero-overlap" and probe.outcome == "fail" for probe in probe_results) and invalid_reason is None:
-        invalid_reason = "semantic known-answer readiness probe failed"
     finalize_manifest(
         run_dir,
-        status="INVALID" if invalid_reason is not None else readiness_status,
+        status=terminal_status,
         finalized_at=dt.datetime.now(dt.UTC).isoformat().replace("+00:00", "Z"),
         readiness=readiness_list,
-        leakage=LeakageSummary(scanned_cases=len(outcomes), invalidated_cases=1 if invalid_reason else 0, detectors_fired=detector_counts),
+        leakage=LeakageSummary(scanned_cases=len(outcomes), invalidated_cases=len(invalidated_case_ids), detectors_fired=detector_counts),
         contamination=contamination,
         budget=_budget_summary(ledger),
+        invalid_reason=invalid_reason,
     )
     if invalid_reason is not None:
         raise LmeRunInvalid(invalid_reason, run_dir)
