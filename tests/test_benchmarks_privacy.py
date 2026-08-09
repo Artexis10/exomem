@@ -14,7 +14,8 @@ def _artifact_files(root: Path) -> list[Path]:
 
 
 def test_protocol_benchmark_artifacts_are_public_safe() -> None:
-    files = _artifact_files(Path("benchmarks/protocol"))
+    roots = (Path("benchmarks/protocol"), Path("benchmarks/lme/providers"), Path("benchmarks/equivalence"))
+    files = [path for root in roots for path in _artifact_files(root)]
     assert files
     assert_public_artifacts_clean(files, labels={path: str(path) for path in files})
 

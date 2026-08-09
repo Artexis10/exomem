@@ -131,7 +131,12 @@ class RunManifest(StrictModel):
     readiness: list[LaneReadiness] = Field(default_factory=list)
     leakage: LeakageSummary = Field(default_factory=lambda: LeakageSummary(scanned_cases=0, invalidated_cases=0))
     contamination: Literal["isolated", "contaminated", "unverifiable"] | None = None
+    #: Why a terminal status is not VALID.  A manifest that refuses a run must
+    #: be able to say why without a reader consulting a second artifact.
+    invalid_reason: str | None = None
     budget: BudgetSummary | None = None
+    provider_variant: str | None = None
+    control_config_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     pre_registration_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
 
 
@@ -227,7 +232,7 @@ class BudgetLedgerEntry(StrictModel):
     decision: str
 
 
-class EquivalenceDiff(StrictModel):
+class EquivalenceDifference(StrictModel):
     protocol_version: Literal[PROTOCOL_VERSION] = PROTOCOL_VERSION
     schema_version: Literal[EQUIVALENCE_DIFF_SCHEMA_VERSION] = EQUIVALENCE_DIFF_SCHEMA_VERSION
     case_id: str
@@ -235,6 +240,18 @@ class EquivalenceDiff(StrictModel):
     expected: str | None = None
     actual: str | None = None
     equal: bool
+    classification: Literal["blocking", "reported"]
+    explanation_required: bool = True
+    #: The registered weaker predicate that was applied, when one was.
+    compare_as: str | None = None
+
+
+class EquivalenceDiff(StrictModel):
+    protocol_version: Literal[PROTOCOL_VERSION] = PROTOCOL_VERSION
+    schema_version: Literal[EQUIVALENCE_DIFF_SCHEMA_VERSION] = EQUIVALENCE_DIFF_SCHEMA_VERSION
+    kind: Literal["equivalence-diff.v1"] = "equivalence-diff.v1"
+    mode: Literal["blocking", "reported"]
+    diffs: list[EquivalenceDifference]
 
 
 class EquivalenceException(StrictModel):
@@ -242,8 +259,9 @@ class EquivalenceException(StrictModel):
     schema_version: Literal[EQUIVALENCE_EXCEPTION_SCHEMA_VERSION] = EQUIVALENCE_EXCEPTION_SCHEMA_VERSION
     case_id: str
     field: str
-    rationale: str
+    compare_as: str
     evidence: str
+    approver: str
     expires_at: str
 
 

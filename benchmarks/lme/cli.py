@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -15,6 +16,7 @@ if str(_BENCHMARKS_ROOT) not in sys.path:
     sys.path.insert(0, str(_BENCHMARKS_ROOT))
 
 from .judge_io import ingest_judge_labels  # noqa: E402
+from .report import render_run_report  # noqa: E402
 from .runner import RunConfig, execute_run  # noqa: E402
 
 
@@ -35,6 +37,11 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--openai-api-key-env", default="OPENAI_API_KEY")
     run.add_argument("--claude-binary", default="claude")
     run.add_argument("--top-k", type=int, default=10)
+    run.add_argument("--provider", choices=("exomem-source-only", "hybrid-rag-control", "no-memory"))
+    run.add_argument(
+        "--budget-cap-usd", type=float, default=float(os.environ.get("PROTOCOL_BUDGET_CAP_USD", "0") or 0),
+        help="cap written into the run's immutable budget ledger (env: PROTOCOL_BUDGET_CAP_USD)",
+    )
     run.add_argument(
         "--pilot",
         type=int,
@@ -47,6 +54,9 @@ def _parser() -> argparse.ArgumentParser:
     labels.add_argument("--run-dir", required=True, type=Path)
     labels.add_argument("--labels", required=True, type=Path)
     labels.add_argument("--lane", choices=("main", "ceiling", "floor"), default="main")
+    report = commands.add_parser("report", help="regenerate a terminal run's artifact-only report")
+    report.add_argument("--run-dir", required=True, type=Path)
+    report.add_argument("--offline", action="store_true")
     return parser
 
 
@@ -55,6 +65,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "ingest-judge":
         destination = ingest_judge_labels(args.run_dir, args.labels, lane=args.lane)
         print(destination)
+        return 0
+    if args.command == "report":
+        print(render_run_report(args.run_dir, offline=args.offline))
         return 0
     result = execute_run(
         RunConfig(
@@ -72,6 +85,8 @@ def main(argv: list[str] | None = None) -> int:
             claude_binary=args.claude_binary,
             top_k=args.top_k,
             pilot=args.pilot,
+            provider=args.provider,
+            budget_cap_usd=args.budget_cap_usd,
         )
     )
     print(result.run_dir)

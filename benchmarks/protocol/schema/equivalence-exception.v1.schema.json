@@ -1,8 +1,16 @@
 {
   "additionalProperties": false,
   "properties": {
+    "approver": {
+      "title": "Approver",
+      "type": "string"
+    },
     "case_id": {
       "title": "Case Id",
+      "type": "string"
+    },
+    "compare_as": {
+      "title": "Compare As",
       "type": "string"
     },
     "evidence": {
@@ -23,10 +31,6 @@
       "title": "Protocol Version",
       "type": "string"
     },
-    "rationale": {
-      "title": "Rationale",
-      "type": "string"
-    },
     "schema_version": {
       "const": 1,
       "default": 1,
@@ -37,8 +41,9 @@
   "required": [
     "case_id",
     "field",
-    "rationale",
+    "compare_as",
     "evidence",
+    "approver",
     "expires_at"
   ],
   "title": "EquivalenceException",

@@ -25,6 +25,7 @@ def start_manifest(
     namespaces: dict[str, str] | None = None, pins: dict[str, str] | None = None,
     readiness: list[LaneReadiness] | None = None, leakage: LeakageSummary | None = None,
     contamination: str | None = None, budget: BudgetSummary | None = None,
+    provider_variant: str | None = None, control_config_sha256: str | None = None,
     pre_registration_sha256: str | None = None,
 ) -> RunManifest:
     path = _path(run_dir)
@@ -36,12 +37,18 @@ def start_manifest(
         namespaces=namespaces or {}, pins=pins or {}, readiness=readiness or [],
         leakage=leakage or LeakageSummary(scanned_cases=0, invalidated_cases=0),
         contamination=contamination, budget=budget, pre_registration_sha256=pre_registration_sha256,
+        provider_variant=provider_variant, control_config_sha256=control_config_sha256,
     )
     path.write_text(manifest.model_dump_json(indent=2) + "\n", encoding="utf-8")
     return manifest
 
 
-def finalize_manifest(run_dir: Path | str, *, status: str, finalized_at: str) -> RunManifest:
+def finalize_manifest(
+    run_dir: Path | str, *, status: str, finalized_at: str,
+    readiness: list[LaneReadiness] | None = None, leakage: LeakageSummary | None = None,
+    contamination: str | None = None, budget: BudgetSummary | None = None,
+    invalid_reason: str | None = None,
+) -> RunManifest:
     if not is_terminal(status):
         raise ManifestError("final status must be terminal")
     path = _path(run_dir)
@@ -50,6 +57,17 @@ def finalize_manifest(run_dir: Path | str, *, status: str, finalized_at: str) ->
     raw = json.loads(path.read_text(encoding="utf-8"))
     raw["status"] = status
     raw["finalized_at"] = finalized_at
+    # Always written, so a re-finalization can never leave a stale reason
+    # attached to a status that no longer carries it.
+    raw["invalid_reason"] = invalid_reason
+    if readiness is not None:
+        raw["readiness"] = [item.model_dump() for item in readiness]
+    if leakage is not None:
+        raw["leakage"] = leakage.model_dump()
+    if contamination is not None:
+        raw["contamination"] = contamination
+    if budget is not None:
+        raw["budget"] = budget.model_dump()
     manifest = RunManifest.model_validate(raw)
     path.write_text(manifest.model_dump_json(indent=2) + "\n", encoding="utf-8")
     return manifest

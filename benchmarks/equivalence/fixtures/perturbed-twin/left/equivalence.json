@@ -1,0 +1,65 @@
+{
+  "schema": "equivalence-input.v1",
+  "run_id": "twin-left",
+  "provider_variant": "hybrid-rag-fixture",
+  "cases": [
+    {
+      "case_id": "twin-all-keys",
+      "dataset_identity": {
+        "id": "longmemeval",
+        "variant": "mini",
+        "source": "local",
+        "revision": "r1",
+        "sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+        "case_count": 2
+      },
+      "case_set": ["twin-all-keys", "twin-null"],
+      "session_normalization": "lme.normalize.render_neutral_session/v1",
+      "namespace": "hybrid-run-24hex",
+      "ingestion_payloads": ["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],
+      "readiness": [
+        {"lane": "semantic", "requested": true, "verified": true, "method": "semantic-probe", "fallback_detected": false}
+      ],
+      "exact_query": "Which city hosted the autumn workshop?",
+      "top_k": 10,
+      "retrieved_ids": ["chunk-left-1"],
+      "retrieved_text": ["The autumn workshop was held in the harbour district."],
+      "packed_context": "The autumn workshop was held in the harbour district.",
+      "answer_judge_prompt_model_config": {
+        "reader": "stub",
+        "reader_model": "offline deterministic stub",
+        "judge_model": "gpt-4o",
+        "prompt_sha256": "2222222222222222222222222222222222222222222222222222222222222222"
+      }
+    },
+    {
+      "case_id": "twin-null",
+      "dataset_identity": {
+        "id": "longmemeval",
+        "variant": "mini",
+        "source": "local",
+        "revision": "r1",
+        "sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+        "case_count": 2
+      },
+      "case_set": ["twin-all-keys", "twin-null"],
+      "session_normalization": "lme.normalize.render_neutral_session/v1",
+      "namespace": "hybrid-run-24hex",
+      "ingestion_payloads": ["bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"],
+      "readiness": [
+        {"lane": "semantic", "requested": true, "verified": true, "method": "semantic-probe", "fallback_detected": false}
+      ],
+      "exact_query": "Which lantern was repainted?",
+      "top_k": 10,
+      "retrieved_ids": ["chunk-null-1"],
+      "retrieved_text": ["The seafoam lantern was repainted."],
+      "packed_context": null,
+      "answer_judge_prompt_model_config": {
+        "reader": "stub",
+        "reader_model": "offline deterministic stub",
+        "judge_model": "gpt-4o",
+        "prompt_sha256": "3333333333333333333333333333333333333333333333333333333333333333"
+      }
+    }
+  ]
+}
