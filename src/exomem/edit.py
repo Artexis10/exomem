@@ -211,7 +211,7 @@ def edit(
         )
 
     now = today or temporal.now()
-    date_iso = temporal.stamp(now)
+    date_iso = _reviewed_stamp(semantic_transition_token, now) or temporal.stamp(now)
 
     editable = load_editable(vault_root, path, expected_hash=expected_hash)
     abs_path = editable.abs_path
@@ -266,6 +266,7 @@ def edit(
                         relation_disposition=relation_disposition,
                         relation_review_hash=relation_review_hash,
                         relation_review_reason=relation_review_reason,
+                        stamp=date_iso,
                     ).as_dict()
                 except semantic_writes.SemanticWriteError as error:
                     raise EditError(error.code, ["semantic"], error.reason) from error
@@ -750,6 +751,7 @@ def commit_edit(
             relation_disposition=relation_disposition,
             relation_review_hash=relation_review_hash,
             relation_review_reason=relation_review_reason,
+            stamp=date_iso,
         )
         committed = semantic_writes.commit_existing(
             vault_root,
@@ -820,6 +822,36 @@ def _match_contexts(body: str, old_string: str, *, max_matches: int = 5) -> list
 
 
 _FM_PATTERN = re.compile(r"^---\n(.*?)\n---\n(.*)", re.DOTALL)
+
+
+_MAX_REVIEWED_STAMP_AGE = dt.timedelta(hours=24)
+_MAX_REVIEWED_STAMP_SKEW = dt.timedelta(minutes=5)
+
+
+def _reviewed_stamp(transition_token: str | None, now: dt.datetime) -> str | None:
+    """Reuse the instant a validated transition already reviewed, when sane.
+
+    `updated:` is stamped at second resolution, so recomputing it on commit
+    changes the projected page and the transition check rejects the write for a
+    difference nobody authored. Reusing the reviewed instant makes the committed
+    bytes identical to the reviewed ones.
+
+    The token is opaque but unauthenticated, so the instant is bounded rather
+    than trusted: a stamp from the future or older than a day is ignored and the
+    clock wins, which fails safe toward an honest `updated`.
+    """
+
+    stamp = semantic_writes.transition_token_stamp(transition_token)
+    if stamp is None:
+        return None
+    moment = temporal.parse(stamp)
+    if moment is None or moment.instant is None:
+        return None
+    reference = now if now.tzinfo is not None else now.replace(tzinfo=dt.UTC)
+    delta = reference.astimezone(dt.UTC) - moment.instant
+    if delta > _MAX_REVIEWED_STAMP_AGE or -delta > _MAX_REVIEWED_STAMP_SKEW:
+        return None
+    return stamp
 
 
 def _set_or_append(fm_text: str, key: str, value: str) -> str:

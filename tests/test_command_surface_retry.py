@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import datetime as dt
 import hashlib
 import json
 import logging
@@ -1105,3 +1106,58 @@ def test_bound_remember_replays_after_terminal_acknowledgement_loss(
     assert list((vault / replay["path"]).parent.glob("acknowledgement-safe-save*.md")) == [
         vault / replay["path"]
     ]
+
+
+def test_reviewed_transition_commits_when_the_clock_ticks_between_calls(
+    vault: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A validated transition must survive the second changing before commit.
+
+    `updated:` is stamped at second resolution, so recomputing it on commit
+    changed the projected page and the transition check rejected the write for a
+    difference nobody authored. Interactive callers hit this almost always,
+    because validate and commit are separate round trips; a fast test hit it only
+    when it happened to straddle a second boundary, which is why it read as a
+    flake rather than a defect.
+    """
+
+    from exomem import edit as edit_module
+    from exomem import temporal
+
+    path = _write_editable_note(vault)
+    ticks = iter(
+        [
+            dt.datetime(2026, 3, 1, 12, 0, 0, tzinfo=dt.UTC),
+            dt.datetime(2026, 3, 1, 12, 0, 1, tzinfo=dt.UTC),
+        ]
+    )
+    monkeypatch.setattr(temporal, "now", lambda: next(ticks))
+
+    preview = edit_module.edit(
+        vault,
+        path=path,
+        why="verify a validated transition survives a clock tick",
+        old_string="Before",
+        new_string="After",
+        validate_only=True,
+    )
+    semantic = preview.as_dict()["semantic"]
+
+    committed = edit_module.edit(
+        vault,
+        path=path,
+        why="verify a validated transition survives a clock tick",
+        old_string="Before",
+        new_string="After",
+        semantic_transition_token=semantic["transition_token"],
+        relation_disposition="reviewed_none",
+        relation_review_hash=semantic["transition_hash"],
+        relation_review_reason="No honest relation exists in the isolated fixture.",
+    )
+
+    assert isinstance(committed, edit_module.EditResult)
+    written = (vault / path).read_text(encoding="utf-8")
+    assert "After" in written
+    # The committed bytes carry the reviewed instant, not the commit instant.
+    assert "updated: 2026-03-01T12:00:00Z" in written
