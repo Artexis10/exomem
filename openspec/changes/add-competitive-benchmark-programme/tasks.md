@@ -114,7 +114,9 @@ them. Mission acceptance criteria (§14) close only from this ledger.
       dad6d5d, vendor-authored); questionDate never plumbed; _abs
       abstention unroutable; failed questions excluded from accuracy.
       Upstream filing = founder decision (list at harness-audit.md end)
-- [ ] 4.3 Recording proxy capturing their provider's actual traffic
+- [x] 4.3 Recording proxy capturing their provider's actual traffic (164
+      proxy checks / 187 focused offline checks; 272 cross-lane checks; exact
+      pin and artifact recomputation; final independent review CLEAR)
 - [ ] 4.4 TS providers (exomem via isolated REST service on ephemeral port;
       basic-memory via shared sidecar) + registration patch with verified
       diff hash
