@@ -314,30 +314,60 @@ def recall_triple(vault_root: Path, scope: str) -> tuple[int, int, str]:
 
 
 def recall_checkpoint(vault_root: Path, scope: str) -> RecallFreshnessCheckpoint:
-    """Return the recall projection plus static/local policy identity."""
+    """Return one coherent recall-projection and policy identity checkpoint."""
     from . import recall_policy
 
-    policy_version, access_fingerprint = recall_policy.recall_policy_identity(vault_root)
-    key = _key(vault_root, scope)
-    identity = (policy_version, access_fingerprint)
+    root = Path(vault_root)
+    key = _key(root, scope)
     while True:
+        policy_version, access_fingerprint = recall_policy.recall_policy_identity(root)
+        identity = (policy_version, access_fingerprint)
         with _lock:
             live = event_indexes_enabled() and key in _recall_live
-            if not live or _recall_identities.get(key) == identity:
-                triple = recall_triple(vault_root, scope)
+            if live and _recall_identities.get(key) == identity:
+                triple = _recall_triples.get(key)
+                if triple is None:
+                    triple = triple_from_entries(_recall_maps.get(key, {}).items())
+                    _recall_triples[key] = triple
                 generation = _recall_generations.get(key, 0)
-                break
-            broad_generation = _generations.get(key, 0)
-            broad_entries = dict(_maps.get(key, {}))
+                return RecallFreshnessCheckpoint(
+                    _instance_id,
+                    generation,
+                    triple,
+                    policy_version,
+                    access_fingerprint,
+                )
+            if live:
+                broad_generation = _generations.get(key, 0)
+                broad_entries = dict(_maps.get(key, {}))
+
+        if not live:
+            # The policy shapes the cold walk.  Do not label its result with an
+            # identity that changed while candidates were being admitted.
+            triple = recall_triple(root, scope)
+            if recall_policy.recall_policy_identity(root) != identity:
+                continue
+            with _lock:
+                # A watcher may have become authoritative while the walk ran.
+                if event_indexes_enabled() and key in _recall_live:
+                    continue
+                instance_id = _instance_id
+                generation = _recall_generations.get(key, 0)
+            return RecallFreshnessCheckpoint(
+                instance_id,
+                generation,
+                triple,
+                policy_version,
+                access_fingerprint,
+            )
+
         # Content reads are deliberately outside the global freshness lock.
         projected = {
             path: signature
             for path, signature in broad_entries.items()
-            if recall_policy.is_recall_candidate(vault_root, Path(path))
+            if recall_policy.is_recall_candidate(root, Path(path))
         }
-        if recall_policy.recall_policy_identity(vault_root) != identity:
-            policy_version, access_fingerprint = recall_policy.recall_policy_identity(vault_root)
-            identity = (policy_version, access_fingerprint)
+        if recall_policy.recall_policy_identity(root) != identity:
             continue
         with _lock:
             if _generations.get(key, 0) != broad_generation:
@@ -358,13 +388,6 @@ def recall_checkpoint(vault_root: Path, scope: str) -> RecallFreshnessCheckpoint
             # can remove/re-add eligible pages without a request-path walk.
             _record_recall_event(key, touched)
             continue
-    return RecallFreshnessCheckpoint(
-        _instance_id,
-        generation,
-        triple,
-        policy_version,
-        access_fingerprint,
-    )
 
 
 def recall_projection_snapshot(

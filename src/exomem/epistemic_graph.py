@@ -18,7 +18,7 @@ from contextlib import nullcontext
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 from . import find as find_module
 from . import (
@@ -213,10 +213,15 @@ def _incremental_projection_identity(
     Canonical writers and the watcher publish their exact path delta before
     index fan-out. Reusing that checkpoint keeps a one-file graph refresh
     proportional to the changed batch; a process without a live registry still
-    gets the direct projected walk from ``FreshnessSnapshot``.
+    gets the direct projected walk from ``recall_checkpoint``.  Identity-only
+    graph checks deliberately avoid materializing the request path allowlist.
     """
-    identity = find_module.FreshnessSnapshot(vault_root).projection_key("vault")
-    return cast(tuple[tuple[int, int, str], str, str], identity)
+    checkpoint = freshness.recall_checkpoint(vault_root, "vault")
+    return (
+        checkpoint.triple,
+        checkpoint.policy_version,
+        checkpoint.access_policy_fingerprint,
+    )
 
 
 def _availability_freshness_value(

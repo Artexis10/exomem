@@ -911,6 +911,28 @@ def test_live_incremental_refresh_does_not_repeat_a_full_disk_walk(
     )
 
 
+def test_incremental_projection_identity_does_not_materialize_recall_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault = tmp_path / "vault"
+    _seed(vault)
+    _seed_live_freshness(vault)
+    checkpoint = freshness.recall_checkpoint(vault, "vault")
+    monkeypatch.setattr(
+        find_module,
+        "FreshnessSnapshot",
+        lambda *_args, **_kwargs: pytest.fail(
+            "identity-only graph check materialized the request recall projection"
+        ),
+    )
+
+    assert epistemic_graph._incremental_projection_identity(vault) == (
+        checkpoint.triple,
+        checkpoint.policy_version,
+        checkpoint.access_policy_fingerprint,
+    )
+
+
 def test_external_event_observed_during_snapshot_open_fails_closed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

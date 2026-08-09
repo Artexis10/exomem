@@ -6,6 +6,58 @@ from exomem import find as find_module
 from exomem import freshness, recall_policy
 
 
+def test_cold_checkpoint_retries_when_access_policy_changes_during_projection(
+    tmp_path: Path, monkeypatch
+) -> None:
+    page = tmp_path / "Knowledge Base" / "Notes" / "page.md"
+    page.parent.mkdir(parents=True)
+    page.write_text("page", encoding="utf-8")
+    state = {"fingerprint": "before", "switch": True}
+
+    monkeypatch.setattr(
+        recall_policy,
+        "recall_policy_identity",
+        lambda _root: ("test-policy", state["fingerprint"]),
+    )
+
+    def candidate(_root: Path, _path: Path) -> bool:
+        eligible = state["fingerprint"] == "before"
+        if state["switch"]:
+            state["fingerprint"] = "after"
+            state["switch"] = False
+        return eligible
+
+    monkeypatch.setattr(recall_policy, "is_recall_candidate", candidate)
+
+    checkpoint = freshness.recall_checkpoint(tmp_path, "kb")
+
+    assert checkpoint.access_policy_fingerprint == "after"
+    assert checkpoint.triple == freshness.triple_from_entries(())
+
+
+def test_cold_checkpoint_retries_when_live_registry_appears_during_projection(
+    tmp_path: Path, monkeypatch
+) -> None:
+    page = tmp_path / "Knowledge Base" / "Notes" / "page.md"
+    page.parent.mkdir(parents=True)
+    page.write_text("page", encoding="utf-8")
+    signature = freshness.stat_signature(page)
+    cold_triple = freshness.triple_from_entries(())
+    projected_triple = freshness.triple_from_entries(((str(page), signature),))
+
+    def publish_live_registry(_root: Path, _scope: str):
+        freshness.seed(tmp_path, "kb", ((str(page), signature),))
+        return cold_triple
+
+    monkeypatch.setattr(freshness, "recall_triple", publish_live_registry)
+
+    checkpoint = freshness.recall_checkpoint(tmp_path, "kb")
+
+    assert freshness.is_live(tmp_path, "kb")
+    assert checkpoint.triple == projected_triple
+    assert checkpoint.generation > 0
+
+
 def test_seed_retries_projection_when_access_policy_changes_during_admission(
     tmp_path: Path, monkeypatch
 ) -> None:
