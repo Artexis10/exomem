@@ -1,0 +1,155 @@
+{
+  "$defs": {
+    "ExpectedAnswer": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "enum": [
+            "value",
+            "date",
+            "entity",
+            "text",
+            "list",
+            "none"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "tolerance": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Tolerance"
+        },
+        "unit": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Unit"
+        },
+        "values": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Values",
+          "type": "array"
+        }
+      },
+      "required": [
+        "kind"
+      ],
+      "title": "ExpectedAnswer",
+      "type": "object"
+    },
+    "UncertaintyExpectation": {
+      "additionalProperties": false,
+      "properties": {
+        "cite_both_sides": {
+          "default": false,
+          "title": "Cite Both Sides",
+          "type": "boolean"
+        },
+        "hedged": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Hedged"
+        },
+        "mention_dispute": {
+          "default": false,
+          "title": "Mention Dispute",
+          "type": "boolean"
+        }
+      },
+      "title": "UncertaintyExpectation",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "abstain": {
+      "default": false,
+      "title": "Abstain",
+      "type": "boolean"
+    },
+    "answer": {
+      "$ref": "#/$defs/ExpectedAnswer"
+    },
+    "clarify": {
+      "default": false,
+      "title": "Clarify",
+      "type": "boolean"
+    },
+    "forbidden_claims": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Forbidden Claims",
+      "type": "array"
+    },
+    "forbidden_disclosures": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Forbidden Disclosures",
+      "type": "array"
+    },
+    "gates": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Gates",
+      "type": "array"
+    },
+    "query_id": {
+      "title": "Query Id",
+      "type": "string"
+    },
+    "required_citations": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Required Citations",
+      "type": "array"
+    },
+    "required_claims": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Required Claims",
+      "type": "array"
+    },
+    "transitive_citations_ok": {
+      "default": true,
+      "title": "Transitive Citations Ok",
+      "type": "boolean"
+    },
+    "uncertainty": {
+      "$ref": "#/$defs/UncertaintyExpectation"
+    }
+  },
+  "required": [
+    "query_id",
+    "answer"
+  ],
+  "title": "ExpectedRecord",
+  "type": "object"
+}

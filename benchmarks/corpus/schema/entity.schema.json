@@ -1,0 +1,106 @@
+{
+  "$defs": {
+    "NameSpan": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "valid_from": {
+          "format": "date",
+          "title": "Valid From",
+          "type": "string"
+        },
+        "valid_to": {
+          "anyOf": [
+            {
+              "format": "date",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Valid To"
+        }
+      },
+      "required": [
+        "name",
+        "valid_from"
+      ],
+      "title": "NameSpan",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "aliases": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Aliases",
+      "type": "array"
+    },
+    "canonical_name": {
+      "title": "Canonical Name",
+      "type": "string"
+    },
+    "domain": {
+      "title": "Domain",
+      "type": "string"
+    },
+    "entity_id": {
+      "title": "Entity Id",
+      "type": "string"
+    },
+    "kind": {
+      "enum": [
+        "person",
+        "organization",
+        "project",
+        "place",
+        "product",
+        "concept",
+        "team"
+      ],
+      "title": "Kind",
+      "type": "string"
+    },
+    "merged_into": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Merged Into"
+    },
+    "name_timeline": {
+      "items": {
+        "$ref": "#/$defs/NameSpan"
+      },
+      "title": "Name Timeline",
+      "type": "array"
+    },
+    "split_into": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Split Into",
+      "type": "array"
+    }
+  },
+  "required": [
+    "entity_id",
+    "kind",
+    "domain",
+    "canonical_name"
+  ],
+  "title": "EntityRecord",
+  "type": "object"
+}

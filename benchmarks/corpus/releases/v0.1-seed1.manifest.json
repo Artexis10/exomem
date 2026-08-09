@@ -1,0 +1,2464 @@
+{
+  "artifacts": [
+    {
+      "bytes_sha256": "5607ea95733e51d89a0cc2959a570c673eaa0f17d217fcb2dcba2533fa4be405",
+      "kind": "markdown",
+      "logical_sha256": "1ffe79958682960bfba5a835305eaed922bc6b23afa715478375771eab9fc625",
+      "path": "sources/src-003eb6ca-corvi-analytics-directory-extract.md",
+      "source_id": "SRC-003EB6CA"
+    },
+    {
+      "bytes_sha256": "efe9e1b24ffc72c660dd07c40b3677e7aa6e870dd4342aebef368860b51e6694",
+      "kind": "markdown",
+      "logical_sha256": "98c5af98485d2fd2c5b9fac017fe12aea5919102deb003499e72766705444c58",
+      "path": "sources/src-00507fbf-project-embercrest-quarterly-audit.md",
+      "source_id": "SRC-00507FBF"
+    },
+    {
+      "bytes_sha256": "dfadfc6770ac8822460b229d7bb655829c11afb9a33be951504ef69f9440dd6c",
+      "kind": "markdown",
+      "logical_sha256": "e4adb286d5dc8ef93aac80af476e20ff559d40a5e7c5c1bfde45f2bf1e64f199",
+      "path": "sources/src-017641d3-project-quarryrun-pilot-plan-under-consideration.md",
+      "source_id": "SRC-017641D3"
+    },
+    {
+      "bytes_sha256": "d5e0c1feb7cf7707f400e8e8298be439640d3c9a5af576f77711ec293b387da7",
+      "kind": "markdown",
+      "logical_sha256": "b1a337820a196af21ab2eb2e51a8ed56e4bb693ee6054f6768586101b3c0c99d",
+      "path": "sources/src-0324dfd4-project-quarryrun-pilot-decision.md",
+      "source_id": "SRC-0324DFD4"
+    },
+    {
+      "bytes_sha256": "a74cdc67aa32f7594f4fede6701b81147ae6fbbf1d276bd1a223b956dbaa4f16",
+      "kind": "markdown",
+      "logical_sha256": "810a0d9109f0b25258bad464319eafcbfa9c9f933a85c28b6f0cef09a0bfa48f",
+      "path": "sources/src-039f9039-meridifield-weekly-digest.md",
+      "source_id": "SRC-039F9039"
+    },
+    {
+      "bytes_sha256": "8dbace4a014cbee9a671375fdc8f09705b9843d338f60e4a69d5f96ecac03a3c",
+      "kind": "markdown",
+      "logical_sha256": "e0e17773101d8c9472deae86a61654c9ae23cbc0cf5d40b62bc19c29f5b14d5d",
+      "path": "sources/src-073e2469-compensation-memo-for-nedra-kordal.md",
+      "source_id": "SRC-073E2469"
+    },
+    {
+      "bytes_sha256": "24f48a95ec0bc3b682785fcbba67bd9cd52085c29b6ca89a1912b00237354534",
+      "kind": "markdown",
+      "logical_sha256": "2804d6f1bc68b6440a2ff8b08efc4578ef801764cbfb54076a623270de4a9637",
+      "path": "sources/src-074f4033-project-driftcrest-status-digest-refresh.md",
+      "source_id": "SRC-074F4033"
+    },
+    {
+      "bytes_sha256": "3d387727c00627087737310d22ba7c8cb70d91b798de40d1a22cc544baf1b22c",
+      "kind": "csv",
+      "logical_sha256": "40da02a7ce6f555c4485f48383ef62986bd0adcd42662833575967c59703b0c6",
+      "path": "sources/src-07e05d6e-project-emberfall-capacity-sheet.csv",
+      "source_id": "SRC-07E05D6E"
+    },
+    {
+      "bytes_sha256": "42088ade21940a250be39c8b86ecc227ce7b9ee2662e6a52d6980e40de6087a1",
+      "kind": "markdown",
+      "logical_sha256": "2a833b3f0ca2362df6fd81b9916efcad960f050caf4e2b70d7dd47a97fab7ebd",
+      "path": "sources/src-08bfb8f9-kelva-dynamics-weekly-bulletin.md",
+      "source_id": "SRC-08BFB8F9"
+    },
+    {
+      "bytes_sha256": "a99f03e03ba1b74315e7803d32addec1a70e512cb1359414847eba708f2ecfc7",
+      "kind": "markdown",
+      "logical_sha256": "2c584dd240fafea8e3ad7b67c319da1845df565bebdc47948324c6f4da33e9bb",
+      "path": "sources/src-0901a1ec-project-hollowrun-crate-consignment-record.md",
+      "source_id": "SRC-0901A1EC"
+    },
+    {
+      "bytes_sha256": "47728d0b55a1c01f9cdca45e42ce9db1ea3fe58ea4e7c8c3ad59b8d096d7ead4",
+      "kind": "markdown",
+      "logical_sha256": "d2eba14acfff6e388435771b7742fcddcc5e34a3562692e25414abf671411cb0",
+      "path": "sources/src-0c4d2b4f-project-quarrycrest-status-digest.md",
+      "source_id": "SRC-0C4D2B4F"
+    },
+    {
+      "bytes_sha256": "97f1d50846bf198fad182b0bbc114de547963f06623dd43a9f10939f00f10543",
+      "kind": "markdown",
+      "logical_sha256": "ab2ff15b9cb86523be7bc55412900d77f238a29af141d962e5af0cb80cf3eaca",
+      "path": "sources/src-0c7f1a69-project-sablespur-budget-amendment.md",
+      "source_id": "SRC-0C7F1A69"
+    },
+    {
+      "bytes_sha256": "01e33314f2ce38b0353d54a0eff8c12da01288deb7e6bd456f36e903c3a54bda",
+      "kind": "markdown",
+      "logical_sha256": "17113695a97e42956e001fe5413c86c7e026b501737c0a3fea87d3ddd934030a",
+      "path": "sources/src-0c8aa13f-project-hollowreach-pilot-sign-off.md",
+      "source_id": "SRC-0C8AA13F"
+    },
+    {
+      "bytes_sha256": "9efd461856e293a7c4d12bb0b702bfd610db426538882c0ea56b8ee954b4c04e",
+      "kind": "markdown",
+      "logical_sha256": "4616a7953b57d86adc91d9eae5976dabfd05920b00ff1fbdf621bb93cbd6938f",
+      "path": "sources/src-0ca99354-kelva-institute-board-session-digest.md",
+      "source_id": "SRC-0CA99354"
+    },
+    {
+      "bytes_sha256": "9a1856ded4a22bb2d0c7ac0f7e10dda00e7f61942a61b22884e1b5e91ef52106",
+      "kind": "markdown",
+      "logical_sha256": "a9e2d2d9bfe7f8871e200e82ec2c27af8b348c9d8f3fa73d390b7ed11bfed733",
+      "path": "sources/src-0dea67f4-falford-depot-inspection-report.md",
+      "source_id": "SRC-0DEA67F4"
+    },
+    {
+      "bytes_sha256": "d34313e132f9b911dc81e0c308e5c26ff0db71615f1c051cdd6656bf017218c3",
+      "kind": "markdown",
+      "logical_sha256": "972b9d9a9b409192eb0e5bcbd33a93ea928f2081ef5bcf15666c50267c38f29c",
+      "path": "sources/src-0df35e06-petra-dynamics-monitoring-log.md",
+      "source_id": "SRC-0DF35E06"
+    },
+    {
+      "bytes_sha256": "0e6dda18932763bbcdba797b5cff222890f75a3dd4313d82c93e5aa05dd73352",
+      "kind": "markdown",
+      "logical_sha256": "4d3cf34174027a03e999f44e4a646b3b861e6d572b98cd239501ff2cc0a6a8cf",
+      "path": "sources/src-0f211a69-halden-analytics-directory-extract.md",
+      "source_id": "SRC-0F211A69"
+    },
+    {
+      "bytes_sha256": "81cf9cc3b95536489bd3651c789cb1c543b3853cc9bd4f969e3da3b8b2e4815c",
+      "kind": "markdown",
+      "logical_sha256": "78ebd9f583d215609ceea819c60e24c91a71212185cb90ae1483b3280153bf55",
+      "path": "sources/src-0f408007-petra-analytics-directory-extract.md",
+      "source_id": "SRC-0F408007"
+    },
+    {
+      "bytes_sha256": "7c2447c19996287aa47a92195e53c756624a463c09bb9b9553e7d81a86cfb204",
+      "kind": "markdown",
+      "logical_sha256": "54d6ae214fe97eea05aa763d0e0bb1e6a45e01aac368ec03a69b8053de75c50d",
+      "path": "sources/src-0f5aee0d-project-valecrest-records-policy-note.md",
+      "source_id": "SRC-0F5AEE0D"
+    },
+    {
+      "bytes_sha256": "a92714d22e05bd2aa57490457cabb827e2177cd45c2f316368ecff7c6fc678fc",
+      "kind": "markdown",
+      "logical_sha256": "ef1bad3e768c1935200e4447eacccd8391ac85dc88885b3a2418c93e4b8f93d3",
+      "path": "sources/src-0fe8b99d-project-emberfall-chart-note.md",
+      "source_id": "SRC-0FE8B99D"
+    },
+    {
+      "bytes_sha256": "3a0686652cd8bb22a182c08f50575010c97e9f1bbfd03e74e10bfc03d2d575a9",
+      "kind": "markdown",
+      "logical_sha256": "1d53bbb4f85b9157cce497b59a25caabe3925edca46ac01b152d2b214b8b3d2d",
+      "path": "sources/src-1061c87b-project-hollowrun-first-drill-log.md",
+      "source_id": "SRC-1061C87B"
+    },
+    {
+      "bytes_sha256": "17270224502ad87dfe9c3f114ecbb71c586bfef7cc8d8d816c612177f5016418",
+      "kind": "markdown",
+      "logical_sha256": "88e314a0dccb65cb209e0d48637154f4891c7cb18e6066d0e7d9932a72cfc26d",
+      "path": "sources/src-10bdb710-project-emberpoint-measurement-register.md",
+      "source_id": "SRC-10BDB710"
+    },
+    {
+      "bytes_sha256": "c74ed4fcb6b5f1fad9d8d34ea33ae34441ee0dc72a5ec8c7d0c4cd1cc18a81be",
+      "kind": "markdown",
+      "logical_sha256": "3f97b2ad381c82cff5517faa3bb1e9eb99cc6ad5a2fd78f4238d71f72ebc39fb",
+      "path": "sources/src-110ed858-project-warrenfall-deploy-runbook-revision-memo.md",
+      "source_id": "SRC-110ED858"
+    },
+    {
+      "bytes_sha256": "5fbff98efa1a43fe5e5480b9ea20c7967c3391ea305f8f1f51b0fde0edc5a913",
+      "kind": "markdown",
+      "logical_sha256": "209fd5c570e89bef1f01808b98a498071fe33003cd0e82ef01179bca59b09dd8",
+      "path": "sources/src-1190aa52-project-larkfall-week-7-check.md",
+      "source_id": "SRC-1190AA52"
+    },
+    {
+      "bytes_sha256": "c3d7308be28b1d03850a1356ace12792915c758b09896a8e45bd3b4daae2fc7d",
+      "kind": "markdown",
+      "logical_sha256": "3b412e8ccb38ecc370afd62d7ed42905100bb8018b3d855ba7bf332a3645580a",
+      "path": "sources/src-12010557-project-larkreach-supplier-chatter.md",
+      "source_id": "SRC-12010557"
+    },
+    {
+      "bytes_sha256": "b1a3adfbb731c4ca5127d5817f434e1988561e05d329c871495f9b8adfd5ff9e",
+      "kind": "markdown",
+      "logical_sha256": "d88b2e6aa60e30e2c95454568ace7a59a5741fd0d85a6584ce8b7041225657ff",
+      "path": "sources/src-12383d4c-corvi-dynamics-monitoring-log.md",
+      "source_id": "SRC-12383D4C"
+    },
+    {
+      "bytes_sha256": "29bd7aca62bd1fdc248a91bd6e65e6cf474d5a5e579852a995f7bfeb1eb43230",
+      "kind": "markdown",
+      "logical_sha256": "a677bfd001917d589c1f747a5d13dd1620f6fa019c9860f4048302612fc47bb3",
+      "path": "sources/src-1399f45e-corvi-dynamics-quarterly-return.md",
+      "source_id": "SRC-1399F45E"
+    },
+    {
+      "bytes_sha256": "a8da38a95a1cda94755ce6c52a7779c4e45c81f0dea3be5f572b1a9f2fedcc91",
+      "kind": "markdown",
+      "logical_sha256": "e66765fbf459bcc91b7ad3d49e17d0e787b60ac25cd8547a6271c86bde6e09bf",
+      "path": "sources/src-14f0e38e-project-emberrun-pallet-consignment-record.md",
+      "source_id": "SRC-14F0E38E"
+    },
+    {
+      "bytes_sha256": "50519ce11c248606d2d87846d51ebab7b0cb9d86e130bda70c10f0a0c1c0aeb3",
+      "kind": "markdown",
+      "logical_sha256": "b6ded9d13f8f82651ba673aac91f2de550e43e332c935b237945dad97c244d17",
+      "path": "sources/src-155df29b-project-beaconcrest-status-digest.md",
+      "source_id": "SRC-155DF29B"
+    },
+    {
+      "bytes_sha256": "caa3c10a57bdbebc83764705f21e3837ef0aba7c43ce97c7fce76611e7a017a6",
+      "kind": "markdown",
+      "logical_sha256": "d9c374b9f7b25ee1fdefbe59222a8a8000a6642b796acd2aa462f8e255ee338c",
+      "path": "sources/src-1560475a-project-mosscrest-leadership-note.md",
+      "source_id": "SRC-1560475A"
+    },
+    {
+      "bytes_sha256": "2c1554dd05f5a1bdb2c41966ca204b9b68937b57f9148b2811594f550f10fe96",
+      "kind": "markdown",
+      "logical_sha256": "cfccf92b446d2180431d49a01e39e279750b5404acdefd39750fcf6389f7fe3a",
+      "path": "sources/src-15b05981-project-larkcrest-quarterly-audit.md",
+      "source_id": "SRC-15B05981"
+    },
+    {
+      "bytes_sha256": "1582bde85573327eab79333bf6272deb752d473402150089194d1ae8a7c772a1",
+      "kind": "markdown",
+      "logical_sha256": "40055478d640ccee7de47f971dbba26d1052922fdffc188ad1fbffa265983e6c",
+      "path": "sources/src-15c5bf85-item.md",
+      "source_id": "SRC-15C5BF85"
+    },
+    {
+      "bytes_sha256": "2f398dce6bf451b1ba06eff783ba972cdc67ca1d5a76f28062be900b429cf3b6",
+      "kind": "markdown",
+      "logical_sha256": "5904c5ace499c33c173b42ebe409f25b26da04effd77e01b2737ca7abd9ddb9c",
+      "path": "sources/src-176623ed-project-emberfall-shipment-record.md",
+      "source_id": "SRC-176623ED"
+    },
+    {
+      "bytes_sha256": "19296ca921580897e914df1da4a0f8f3306789b93cd0d6c07076e6f75d7a22f9",
+      "kind": "markdown",
+      "logical_sha256": "16cfcd583a6f60c861e5054e79c702bf71f1b212559ba95fd2f41aad041946d7",
+      "path": "sources/src-181aa90b-tessel-institute-standby-site-memo.md",
+      "source_id": "SRC-181AA90B"
+    },
+    {
+      "bytes_sha256": "f86e38cbd9aba101c5179c43cb1582a9bfd535e2e3cc2b7aca76b2569d37fbb4",
+      "kind": "markdown",
+      "logical_sha256": "ecf7c936346a587f61f0b61e0ea95a87f6d36975e1c801b1912362abfeff060f",
+      "path": "sources/src-1830603c-project-hollowspur-kickoff-brief.md",
+      "source_id": "SRC-1830603C"
+    },
+    {
+      "bytes_sha256": "dfd4aca966b8e0aac94d3f774bdeac2264df95e792fe025ae337d84566441f5a",
+      "kind": "markdown",
+      "logical_sha256": "88bbe337340bfbaa17a8242f4fb88c349293b5a2bea0ab90184e2828ed9114a4",
+      "path": "sources/src-19626737-project-cinderrun-week-7-check.md",
+      "source_id": "SRC-19626737"
+    },
+    {
+      "bytes_sha256": "a278157a0bdf629374e22f72fb115edb6c513b75dec30592ef31a545f7858dc4",
+      "kind": "markdown",
+      "logical_sha256": "7244e98cf1c7652d4831efdbafee4de0611c4d30aa80a9af58f1aca0bd354ecd",
+      "path": "sources/src-1b77868f-project-thistlefall-deploy-runbook-revision-memo.md",
+      "source_id": "SRC-1B77868F"
+    },
+    {
+      "bytes_sha256": "9735db1a9d6f821c0bd33255f4c67276e430f6dc3fd68e41187cecc8f95d335b",
+      "kind": "markdown",
+      "logical_sha256": "61096984863e16a1301caa127b5d37a1298dd24e1f75946caebae2335c472c22",
+      "path": "sources/src-1da9e84d-project-driftcrest-scratch-jottings.md",
+      "source_id": "SRC-1DA9E84D"
+    },
+    {
+      "bytes_sha256": "06f3eea07a1d2ef55ee10bb650a5313534e000380256da01a6bc07d849b5a5e4",
+      "kind": "markdown",
+      "logical_sha256": "613f7f8da6b5a298ad35625acb9fd8f7f9c8cc0b86c72ee2d59e534b5d9f77a8",
+      "path": "sources/src-1f598c2a-project-warrenfield-planning-note-by-istaric-kordal.md",
+      "source_id": "SRC-1F598C2A"
+    },
+    {
+      "bytes_sha256": "92b7c9f00188ecf7c911ed32367cfe5a7bc81adb016784efe4fe4f589f587077",
+      "kind": "markdown",
+      "logical_sha256": "c592bf021e64c21be69fb45312b6593a9337efc7230bccaab145ffc41b9c2937",
+      "path": "sources/src-2006275d-project-valerun-pilot-plan-under-consideration.md",
+      "source_id": "SRC-2006275D"
+    },
+    {
+      "bytes_sha256": "0be9d725c49f48600b74d12d6d0434f390139174a5072c831aa49499c9998d07",
+      "kind": "markdown",
+      "logical_sha256": "179b59a95d169f4f473b3a11daf8dca1012eef8658fc4107ca91c2ab32bb0553",
+      "path": "sources/src-205c66fd-project-valegate-bench-readout.md",
+      "source_id": "SRC-205C66FD"
+    },
+    {
+      "bytes_sha256": "7d4088184daacf0eeeb9571470ae38dc73f8628e52ec779647ee02e340552bc4",
+      "kind": "markdown",
+      "logical_sha256": "ffd40d453a822fe6c236818e4315adb240ff1c4582e57afd7f3c2cdd7da2eb10",
+      "path": "sources/src-21603734-lumo-dynamics-quarterly-return.md",
+      "source_id": "SRC-21603734"
+    },
+    {
+      "bytes_sha256": "d0c2bf34df31d0ee8365b34429c1b6e9449377c92432691a0fdc0720f8b73403",
+      "kind": "markdown",
+      "logical_sha256": "d4bfc3388d267cc03681c2a909d01ae7b0fd766d1917165c1c200868459b8e47",
+      "path": "sources/src-22059bc6-project-hollowspur-replan-memo.md",
+      "source_id": "SRC-22059BC6"
+    },
+    {
+      "bytes_sha256": "c6bdecda1f5ca38ae07c5f203dc0b59c95e8d23928c98b6602af209ce74dbe65",
+      "kind": "markdown",
+      "logical_sha256": "d25ee0eda7419876c7dcd5ea04aff19c9271969867320fea2251dd5d50b669f5",
+      "path": "sources/src-22dd8f12-project-cinderspur-field-report.md",
+      "source_id": "SRC-22DD8F12"
+    },
+    {
+      "bytes_sha256": "9388a260d57a43dfe292413cd185ee0427fecef5408c0247149f4c7ce151a5e5",
+      "kind": "markdown",
+      "logical_sha256": "5ad6d23738ca2128551217910d57139c0150df8a370741dbd4503ee9574a135f",
+      "path": "sources/src-23213edf-project-emberspur-field-report.md",
+      "source_id": "SRC-23213EDF"
+    },
+    {
+      "bytes_sha256": "90d1e5948706b0cb9796efab56a304261b04e163e5bcd4f1442ad4f94ecde28c",
+      "kind": "markdown",
+      "logical_sha256": "384ffe832fafade821a9a58eba29aa6619a39b2c7d494b1114a150417c3fd82f",
+      "path": "sources/src-23c89873-project-thistlecrest-rename-memo.md",
+      "source_id": "SRC-23C89873"
+    },
+    {
+      "bytes_sha256": "ecff5255f8dae235e8de5050a2a40ed53f88ea957cde4ddc5985171967f2a4af",
+      "kind": "markdown",
+      "logical_sha256": "72dced1bfcffb092ee20cd8e7d7fa05b3d243101b30a777316531b54ed7258e3",
+      "path": "sources/src-245703e8-project-cinderfall-week-7-check.md",
+      "source_id": "SRC-245703E8"
+    },
+    {
+      "bytes_sha256": "8eca133a519503badd8347a81fc49d053b53dd93d06618d9eac8d2601bdd40c8",
+      "kind": "markdown",
+      "logical_sha256": "c78195a90d8ce9851a4e436f4be57cd2895066c78625bb2715dca298c5ece259",
+      "path": "sources/src-246f3cf6-project-mosscrest-kickoff-note.md",
+      "source_id": "SRC-246F3CF6"
+    },
+    {
+      "bytes_sha256": "60388ec9d42b799b5e2ff9ebd63e277b971ae36bca0ae2cc01a5c51ea6ec861c",
+      "kind": "markdown",
+      "logical_sha256": "8db6ede85dee3fc48ae1de4116d3a94ed9b24133394627bd621cbc39002a6334",
+      "path": "sources/src-2480d5c0-project-beaconcrest-records-policy-note.md",
+      "source_id": "SRC-2480D5C0"
+    },
+    {
+      "bytes_sha256": "701c21608a1898df882c44c03f8f043434d4c5533534656e29f0fdb5d21d63f4",
+      "kind": "markdown",
+      "logical_sha256": "d24e78c27423eaf77782cf20e3712461e320f1f04d45d8c5cc54c6193994af2d",
+      "path": "sources/src-25642698-project-larkspur-field-report.md",
+      "source_id": "SRC-25642698"
+    },
+    {
+      "bytes_sha256": "b368dcd78d10a2c839091133e524a64b981d1264a61c9ac3a845bce155bce6ca",
+      "kind": "markdown",
+      "logical_sha256": "c125a270402828d879a24b0265ee7714841575edb1e1e42add0bc6064fc0723e",
+      "path": "sources/src-26ab78fc-project-valecrest-retention-reminder.md",
+      "source_id": "SRC-26AB78FC"
+    },
+    {
+      "bytes_sha256": "0d7a85a5d5ef4e1ac8a7ba8002d7c6eb121c170e9b53e91b2d151a8320f21a5c",
+      "kind": "markdown",
+      "logical_sha256": "51506ed1b5b1d77f526405215b8ded5021330300eb486fcf354612d3de219f68",
+      "path": "sources/src-270266fa-project-sablefield-planning-note-by-kairic-kordal.md",
+      "source_id": "SRC-270266FA"
+    },
+    {
+      "bytes_sha256": "1e79f957ff4b9b1c40a76aa3735eb259c19c2199a85e39de45023f1677f4e3f4",
+      "kind": "markdown",
+      "logical_sha256": "6c76baf69ffa60ba82c72128f14670a0eb7378ced7da60815a6f290590e8ae88",
+      "path": "sources/src-28a32984-project-valegate-calibration-audit.md",
+      "source_id": "SRC-28A32984"
+    },
+    {
+      "bytes_sha256": "2afd039b6e7155cb3e19552ef45cf3507cda74a3a0e121af979757afe07dfe8b",
+      "kind": "markdown",
+      "logical_sha256": "d66e1ecf256959e5015109a4be60c925724c5f678a8c8eb305ba1426b491cf2f",
+      "path": "sources/src-291c0bfc-coril-group-partner-offer.md",
+      "source_id": "SRC-291C0BFC"
+    },
+    {
+      "bytes_sha256": "958f8077ca7d9b0b78be8ece3972eaf439bdb71142e5ac686720e3560fca5845",
+      "kind": "markdown",
+      "logical_sha256": "ab961fc987bb155666dc0e1a1ce2edada93466356f4c37cb70f112134ba998e1",
+      "path": "sources/src-291e8818-project-emberreach-procurement-statement.md",
+      "source_id": "SRC-291E8818"
+    },
+    {
+      "bytes_sha256": "ab05299f1ee8a5e01fe867c886b8125d517c3ea3860bd71c2e8b16e6b9f715a6",
+      "kind": "markdown",
+      "logical_sha256": "c1c7d1d3ddcfae11e7a33d2b8cb40e4a07590236e63d5e727a99115fd78163b2",
+      "path": "sources/src-2a79a447-project-quarrycrest-scratch-jottings.md",
+      "source_id": "SRC-2A79A447"
+    },
+    {
+      "bytes_sha256": "f40756f1cab3544864cfff8010d0512b49ef3de89f842b0a271aa13f83983243",
+      "kind": "markdown",
+      "logical_sha256": "18cd6619349c5bcda441bd308d65e75644cc40535175d8b5fecfdb826df7fb4a",
+      "path": "sources/src-2b90c240-lumo-dynamics-monitoring-log.md",
+      "source_id": "SRC-2B90C240"
+    },
+    {
+      "bytes_sha256": "be800d4d8c82a6c088473c9fd746bad2fe7147772b5ad87dd169cbd313f7335d",
+      "kind": "markdown",
+      "logical_sha256": "130b7094c05fb6c1fd198642416f8b450c0e08a5b84bafcc2159783862552678",
+      "path": "sources/src-2c58441e-follow-up-interview-with-lelen-kordal.md",
+      "source_id": "SRC-2C58441E"
+    },
+    {
+      "bytes_sha256": "279cf7716abdc887c8b27d7335f9a3fbcdc9151743a65710aa7166b87de37175",
+      "kind": "markdown",
+      "logical_sha256": "5c5a2635ac52217e697fe557cfa3a59982befff33f773671d997b3510c9adfa3",
+      "path": "sources/src-2cbda342-ardenholt-planning-brief.md",
+      "source_id": "SRC-2CBDA342"
+    },
+    {
+      "bytes_sha256": "5d60649aacc6d2e45a62c45f6b749870fa7a990d0ae55dfb960a50e811c46bea",
+      "kind": "markdown",
+      "logical_sha256": "d7b2730e81c88bd2d29fc8cae2fb716b23efcb4fb0756e463a2927f03400a1d7",
+      "path": "sources/src-2d46e66d-project-thistlefield-planning-note-by-miric-veldal.md",
+      "source_id": "SRC-2D46E66D"
+    },
+    {
+      "bytes_sha256": "de8fa9de1ce773101cdfca3494977868cbd1bea2c7c165d0601f2c49face3720",
+      "kind": "markdown",
+      "logical_sha256": "7fb10df12d9a7ecc62ebe4d1a075adc690df18a409bddd401b50a08cbed5baa8",
+      "path": "sources/src-2e83f0bd-corvi-dynamics-monitoring-log.md",
+      "source_id": "SRC-2E83F0BD"
+    },
+    {
+      "bytes_sha256": "02cf2a11a340303df517b23aa3cc56a58264b0a30ba4bf8a0b3b9d5d9521faa4",
+      "kind": "markdown",
+      "logical_sha256": "02c8076046acad76592b942549fcaa54c5d9fdcf29dc11669ddfe7de1988e97b",
+      "path": "sources/src-2f2b3054-interview-with-milen-kordal.md",
+      "source_id": "SRC-2F2B3054"
+    },
+    {
+      "bytes_sha256": "fd414df0367d8b484e13f6401abd9bfd93c5d5ed5fa8391a875e48786163c6c9",
+      "kind": "markdown",
+      "logical_sha256": "c8e3c57eda089bd403a662753dec827823645196fe62830e609d6fd4836bc0ff",
+      "path": "sources/src-2fea836d-interview-with-valen-kordal.md",
+      "source_id": "SRC-2FEA836D"
+    },
+    {
+      "bytes_sha256": "6b306dae20a1af16ec79721166bc25f15c7536859b58a2ba0cf9f14cddcfb805",
+      "kind": "markdown",
+      "logical_sha256": "0c96c82d42ad4f69a1d302dad2644d3353ec698182cb99847d5f35350196636b",
+      "path": "sources/src-2ff0d2db-meridi-group-partner-offer.md",
+      "source_id": "SRC-2FF0D2DB"
+    },
+    {
+      "bytes_sha256": "bc013dbf968f5b612d3a68e5cc6caf650d4144c26d4ced48dfc0dc6abb51ded9",
+      "kind": "markdown",
+      "logical_sha256": "29b40e8eb454f0de45f9c506003b3ef348c45d822d3dfb88132e6e85435adac8",
+      "path": "sources/src-30913287-project-warrencrest-rename-memo.md",
+      "source_id": "SRC-30913287"
+    },
+    {
+      "bytes_sha256": "9199b95497fa00721e6a92f64aea48708bb196c6e05fc35952caa3a198cf13b5",
+      "kind": "markdown",
+      "logical_sha256": "70600e9fc68f63223ab05544cc0d688472de5774aa63fac6bfae71bae10216e7",
+      "path": "sources/src-30cd0b3e-project-hollowfall-week-5-check.md",
+      "source_id": "SRC-30CD0B3E"
+    },
+    {
+      "bytes_sha256": "bb60bb51bb3235136bbcb3246e9e50444ecbe8af6eeb6c7056492ef46ddc97c0",
+      "kind": "markdown",
+      "logical_sha256": "adc2f8caad92265696083ae641ac3b3836bd2d8207ab072dcaa7d42601ba5aea",
+      "path": "sources/src-322b1d31-project-quarrycrest-records-policy-note.md",
+      "source_id": "SRC-322B1D31"
+    },
+    {
+      "bytes_sha256": "72e67f332b239ee2aa75feb6c8b011bd739c02a2c8c927af1a890191d067adcb",
+      "kind": "markdown",
+      "logical_sha256": "c1cb145e6550ad17d0ae80437ef6abd238d34432677d67207ee2a0a80a4bd27c",
+      "path": "sources/src-334bda73-norva-group-partner-offer.md",
+      "source_id": "SRC-334BDA73"
+    },
+    {
+      "bytes_sha256": "e87a06b112f0ab9eecf83e428cea710377f09a4e2c1b433ae3eec25d1dec4eff",
+      "kind": "markdown",
+      "logical_sha256": "3684fd4aba20bd931300071160c28d8d041ae74eb794ca07dbde4d4fb1b0028a",
+      "path": "sources/src-33b69a93-item.md",
+      "source_id": "SRC-33B69A93"
+    },
+    {
+      "bytes_sha256": "33e26b463974558e15c742775098718df3b4885cddbf125cf01a299eb08bac63",
+      "kind": "markdown",
+      "logical_sha256": "4869463b11925301cde0612f0b99cb43ae4044e327621c114624cb57446fbbb9",
+      "path": "sources/src-3432ff5b-corvi-dynamics-monitoring-log.md",
+      "source_id": "SRC-3432FF5B"
+    },
+    {
+      "bytes_sha256": "42aa88ae9b561a815f9a6bbd0c9004752e27740a8ebaeaf480a3877fecb60ac3",
+      "kind": "markdown",
+      "logical_sha256": "01d362731f79a089c297b21782343f8c22a77a2bc18afda41f001287ef3decf3",
+      "path": "sources/src-34cc9f52-lumo-dynamics-monitoring-log.md",
+      "source_id": "SRC-34CC9F52"
+    },
+    {
+      "bytes_sha256": "65d00fa54f3c75982c0dbf5fa7a20b0fcfb0fed238010446bc686decea868c94",
+      "kind": "markdown",
+      "logical_sha256": "20785f57d3c9e1f8d9981f8dfaa606b3385013c0988d2b166979c96ac5df0067",
+      "path": "sources/src-36560cc0-project-hollowfall-week-7-check.md",
+      "source_id": "SRC-36560CC0"
+    },
+    {
+      "bytes_sha256": "35433a1025421fa0faab6c71849e35b1242e4644b59587438e007215f912f53e",
+      "kind": "markdown",
+      "logical_sha256": "d08afb415ca81a7fecfe12de04a08e02fc8e05bd27a70d854ddda65d13ea43c1",
+      "path": "sources/src-36955412-lumo-dynamics-monitoring-log.md",
+      "source_id": "SRC-36955412"
+    },
+    {
+      "bytes_sha256": "b8e0dff758b0d2c439a6657687aaa28d5cc0bac7dd77f58ca94a561fdd66d77a",
+      "kind": "markdown",
+      "logical_sha256": "10a643ee2d8bf6ebf841e0418183f52bcb9ed7869b354f015f4365e89b6d7745",
+      "path": "sources/src-378dc1f5-halden-dynamics-quarterly-return.md",
+      "source_id": "SRC-378DC1F5"
+    },
+    {
+      "bytes_sha256": "7efa838a37e49c1599e48bb6a3996aa268e9a58873dff846084a0532bd740a8a",
+      "kind": "markdown",
+      "logical_sha256": "55f61d3c56ba98b5fd8699a19a79c1eff15e7eb9c213c11a316d6eaae497fcdd",
+      "path": "sources/src-387523f7-project-hollowspur-field-report.md",
+      "source_id": "SRC-387523F7"
+    },
+    {
+      "bytes_sha256": "dd857126191121b407bf4f7edff41cd0c444444cd8ee852f0d4491805cf8a799",
+      "kind": "markdown",
+      "logical_sha256": "c0181d20e137c621b74be7e87e68d4709e4c9bd03c374e6e02f2ec88cee43705",
+      "path": "sources/src-388e89c7-project-cinderfall-week-5-check.md",
+      "source_id": "SRC-388E89C7"
+    },
+    {
+      "bytes_sha256": "8a818abfceec678cd2b509affa4cb3b70b2118481ac1678b56ed7ecaaf353080",
+      "kind": "markdown",
+      "logical_sha256": "ad9b892e9451493a125313fc8241a1b010ce43718f17a8dbba894f7367dd9deb",
+      "path": "sources/src-38a7738d-petra-dynamics-monitoring-log.md",
+      "source_id": "SRC-38A7738D"
+    },
+    {
+      "bytes_sha256": "4213062172670d95935a7d526d8ea2c069cf7fa82620acb7efbfb1bd2e3a991e",
+      "kind": "markdown",
+      "logical_sha256": "0eb2cd4e5872b38338fe5542db0b8bca44a913d3df92dfbd450daa8cd9903626",
+      "path": "sources/src-394a6b29-lumo-dynamics-monitoring-log.md",
+      "source_id": "SRC-394A6B29"
+    },
+    {
+      "bytes_sha256": "d64e90ca27e274d3c4079931b3d9bf687438067d56675dab8067831578821812",
+      "kind": "markdown",
+      "logical_sha256": "e535948cbe392db7267569acb4e5f1e0509951e4d92a1beb68bb39e15a7f3825",
+      "path": "sources/src-3964872b-project-mossfall-deploy-runbook-operating-manual.md",
+      "source_id": "SRC-3964872B"
+    },
+    {
+      "bytes_sha256": "851f3b56d35068bd8194b6e03718231bddb101f3be823948e9230cd7d0a83806",
+      "kind": "markdown",
+      "logical_sha256": "c289fde9959bcf21c15b37822f11c80857a445564bf9184939ccfcf1d63231cf",
+      "path": "sources/src-398f76c6-corilgarth-lab-log.md",
+      "source_id": "SRC-398F76C6"
+    },
+    {
+      "bytes_sha256": "ea53d70fe22e7dc9ac829fe016a0dc3f96982dbaea19cdfa88ce52c663fe35ab",
+      "kind": "markdown",
+      "logical_sha256": "e6dfde4105c7dccf887a22b016f9d028da6a4b6aeeda57104e7be0139588849a",
+      "path": "sources/src-3c55d967-tessel-dynamics-weekly-bulletin.md",
+      "source_id": "SRC-3C55D967"
+    },
+    {
+      "bytes_sha256": "ab1db80764a4ed686151ee1804c7faa7bf103dffb964f947e84b5adeb3277d85",
+      "kind": "markdown",
+      "logical_sha256": "b1a1a85125d2654bdc84654410b6c537d69a137955c76d070d84e1d54d1c1602",
+      "path": "sources/src-3dc696b2-item.md",
+      "source_id": "SRC-3DC696B2"
+    },
+    {
+      "bytes_sha256": "ad58a75b56e05b51495ad9f8f29334a335d0900fb5274e8860b134b243cfb1b0",
+      "kind": "markdown",
+      "logical_sha256": "91e589811e8d7ca52881e30d985c20f928a4eef58d5ddd75c2459f432aa89d87",
+      "path": "sources/src-4021ece0-halden-networks-metric-register.md",
+      "source_id": "SRC-4021ECE0"
+    },
+    {
+      "bytes_sha256": "5c716a26561a92bf81a19649e5ef05a7f3cd0d412d6c1c0d913d1a0bfb3805f4",
+      "kind": "markdown",
+      "logical_sha256": "251522d814b39e38e92530d22abdb38d356d03b40fa2403f5639a65ab6faac10",
+      "path": "sources/src-416180df-project-beaconrun-pilot-plan-under-consideration.md",
+      "source_id": "SRC-416180DF"
+    },
+    {
+      "bytes_sha256": "cf3c65b8448d5f07b30e88d356ec91936c46fe5c01a478cf36e1392747335ddd",
+      "kind": "markdown",
+      "logical_sha256": "f248d407b1cad13dac7f06882cc158994092e84b6b838c0d2814caa787b98019",
+      "path": "sources/src-422c7117-project-valerun-pilot-decision.md",
+      "source_id": "SRC-422C7117"
+    },
+    {
+      "bytes_sha256": "0aabaf73b8a1dcdcb4ebdf26a9a4d2521309664b00dbd5a289cdde84930a1bb9",
+      "kind": "markdown",
+      "logical_sha256": "b08e52c9301b5233c8b7d2951890c8fe140dc124f719908e8c6636c312b4ba36",
+      "path": "sources/src-42ff6ad8-project-cinderreach-pilot-early-word.md",
+      "source_id": "SRC-42FF6AD8"
+    },
+    {
+      "bytes_sha256": "e45bbf351370ca27d61215742507a0b2b349148515d51d106fab127ec6e87271",
+      "kind": "markdown",
+      "logical_sha256": "a3307bfa934b47acb8cd8271318b2992040b6ac4c0158111a7832fdfce3fe70c",
+      "path": "sources/src-44992556-project-mossfall-deploy-runbook-revision-memo.md",
+      "source_id": "SRC-44992556"
+    },
+    {
+      "bytes_sha256": "0edba1f2e76e1d3e9d83ace0d2f400f4e1e1d51dddf397e15ce2c15d967160e5",
+      "kind": "markdown",
+      "logical_sha256": "bd834ad0035c1ef88097b0673ce161e15e4e6ca45490df2a490d5b8559c07ecd",
+      "path": "sources/src-450c5e83-project-cinderpoint-measurement-register.md",
+      "source_id": "SRC-450C5E83"
+    },
+    {
+      "bytes_sha256": "544e00de679fa1eeec7c5cd33d9ea8e28596e2c1410b65bf1acea617579fcc7e",
+      "kind": "markdown",
+      "logical_sha256": "3e9949be791d0ef5cbb14194b3b9f1f598c08ac10a94c7c196583a2d6df73c8c",
+      "path": "sources/src-45f52863-project-emberreach-supplier-chatter.md",
+      "source_id": "SRC-45F52863"
+    },
+    {
+      "bytes_sha256": "b84bbdb98343506c5fa1d8dbb2839e812da0d5682499940604fcbbc885a72265",
+      "kind": "markdown",
+      "logical_sha256": "720b07527790246f7d7f8f32d888e02e382875cece880c57ca7849e45163c9d5",
+      "path": "sources/src-46ffd2a4-petra-analytics-promotion-notice.md",
+      "source_id": "SRC-46FFD2A4"
+    },
+    {
+      "bytes_sha256": "878199e097573601ecb3a29625d07ad2fe123163b03fcd873bf77d1470d8b0ad",
+      "kind": "markdown",
+      "logical_sha256": "b0c17216024b5252a702f49adc18682b221f67278b935651bfd4c36bd31a91a7",
+      "path": "sources/src-4702e644-project-cinderrun-first-drill-log.md",
+      "source_id": "SRC-4702E644"
+    },
+    {
+      "bytes_sha256": "b07bf0b26f53ac27175b9e1680f781d33fe53d033e3165a3cb076ad310fe429c",
+      "kind": "markdown",
+      "logical_sha256": "fe18d8f50e7c6115cb8051fac508c321d8fc1a638b215b59954526f7662876c7",
+      "path": "sources/src-47cb95d1-project-beaconrun-pilot-decision.md",
+      "source_id": "SRC-47CB95D1"
+    },
+    {
+      "bytes_sha256": "bcfe2e322ee4e37a7ffb372829914a6f21141be54b8bb733a9d9d8d5b4387a88",
+      "kind": "markdown",
+      "logical_sha256": "416cd288b55504c90f1109ffdbb12c229e7f129eb155a5950d70566ad4b628ce",
+      "path": "sources/src-489589cb-halden-dynamics-monitoring-log.md",
+      "source_id": "SRC-489589CB"
+    },
+    {
+      "bytes_sha256": "532d56aff633829a9f5ab0da778dace0b000e1413da24f12fbf844a4466441b5",
+      "kind": "png",
+      "logical_sha256": "5650b9db3565a44e76d788e45b864952831265d56d547f4fa09ceae6964cc51c",
+      "path": "sources/src-49f96da8-project-hollowfall-wall-chart.png",
+      "source_id": "SRC-49F96DA8"
+    },
+    {
+      "bytes_sha256": "17273c8a8aa3d7794f27603c9ad68ac1a38aea42f1c9d6efa0fd390512a04904",
+      "kind": "markdown",
+      "logical_sha256": "74e8e2c637dbf29c8fe7e15a0459978398d466732780c9218990dba0c8b05961",
+      "path": "sources/src-4a803e46-project-thistlegate-rollout-plan.md",
+      "source_id": "SRC-4A803E46"
+    },
+    {
+      "bytes_sha256": "546aca02489e6050efb0fce91e8197f9ed2c6e3f4775eac28edf5bf66f65fa41",
+      "kind": "markdown",
+      "logical_sha256": "06bffbffbb03f59ac797c00222835630b6cc2d4233c860993bc7d84fc26f2090",
+      "path": "sources/src-4aaa66f2-project-cinderreach-pilot-sign-off.md",
+      "source_id": "SRC-4AAA66F2"
+    },
+    {
+      "bytes_sha256": "8776105f5f6f15eb53728d18e1ea8cfb3109159c43ef29738e3cf30e21ea86c2",
+      "kind": "markdown",
+      "logical_sha256": "eb96959c03f18c5f20edd741a4af3c79810a093aa02c7cc84b165c59f838319a",
+      "path": "sources/src-4c362886-coril-studios-directory-extract.md",
+      "source_id": "SRC-4C362886"
+    },
+    {
+      "bytes_sha256": "da8bad8238eff3dd559b9b31f727b310b416c3526366d189c7567f3e6cc943a4",
+      "kind": "markdown",
+      "logical_sha256": "10c06d8cfb2ed99321ba6acb1b50409a9212322d5caa165e9b75f4d2bb593b47",
+      "path": "sources/src-4cc6df07-arden-works-expansion-announcement.md",
+      "source_id": "SRC-4CC6DF07"
+    },
+    {
+      "bytes_sha256": "13e0267e96556147c03def28cef698567a68a8b811360c8bb9ff311c71e45594",
+      "kind": "markdown",
+      "logical_sha256": "2d0c21857d1d6cc4d3d338c140634d77e105f5957e561f08f78031b263d96301",
+      "path": "sources/src-4ec74385-project-beaconspur-hosting-reversal-memo.md",
+      "source_id": "SRC-4EC74385"
+    },
+    {
+      "bytes_sha256": "44bd834d90e27d59547e204b886d64332e3e0870f8b157432e5d143ec3493308",
+      "kind": "markdown",
+      "logical_sha256": "d695c14a3811ae3f5dfba21e773ad33a169bb08f82f997fe272378b36b59804b",
+      "path": "sources/src-4fb1f7e9-tessel-works-formal-retraction.md",
+      "source_id": "SRC-4FB1F7E9"
+    },
+    {
+      "bytes_sha256": "80dc7d49991007ebf5df439c3181e6f14ec01dc8d81487baaa0236e2f3991bf7",
+      "kind": "markdown",
+      "logical_sha256": "8e73a0020e839235c7d039466bc1aaea460ff75d5c195b86710c7a6bb08813b9",
+      "path": "sources/src-4fc5f6dd-corridor-talk-about-ostra-group.md",
+      "source_id": "SRC-4FC5F6DD"
+    },
+    {
+      "bytes_sha256": "fff1eb0e47aecfc693565a0bcad2a99c0957c4db1252147f28e6cb7ff59a232b",
+      "kind": "markdown",
+      "logical_sha256": "12d477bb88f82ac1a6ba87c91405611e5d3e7f4cc4117dd53623b9fdf327232e",
+      "path": "sources/src-51046d90-ardenholt-weekly-digest.md",
+      "source_id": "SRC-51046D90"
+    },
+    {
+      "bytes_sha256": "31534c67e8c1c9bca8a95676efcbca30cf4904b76609c5043a6f04a54960e2e6",
+      "kind": "markdown",
+      "logical_sha256": "e1b6bdabb4ba033f6ee6172ab97bc6844f82414c9c915e63d101134f91822c38",
+      "path": "sources/src-5170bd31-project-quarrygate-bench-readout.md",
+      "source_id": "SRC-5170BD31"
+    },
+    {
+      "bytes_sha256": "8bf922792e562f188e84fb39ec74969dfd29d5cfe3f60d97d9e590999fe7ec3c",
+      "kind": "markdown",
+      "logical_sha256": "24073e6612e26e660bbb103c8ebb1ee2bbaeac9ba5717bb7acb9d057008354e1",
+      "path": "sources/src-533d5705-halden-dynamics-quarterly-return.md",
+      "source_id": "SRC-533D5705"
+    },
+    {
+      "bytes_sha256": "6bafb6c65d42c25dfeee5c964e7aca77174861062fd4efe601161b18a5b8b91b",
+      "kind": "markdown",
+      "logical_sha256": "5e049578cef5eb7a8f0ce05b0f051b7431b673e84f7e109330dbe355f1f2a502",
+      "path": "sources/src-53a12db2-project-hollowreach-supplier-chatter.md",
+      "source_id": "SRC-53A12DB2"
+    },
+    {
+      "bytes_sha256": "277b37dc127fe294fcd632ca247464222e5167e1e53b5092f02a04049a2d8455",
+      "kind": "markdown",
+      "logical_sha256": "d58702d1ade3c7b396d60f8bf52c5872aa266ebcdc5d26fcbe10292e0b11613e",
+      "path": "sources/src-5511ae3a-petra-dynamics-monitoring-log.md",
+      "source_id": "SRC-5511AE3A"
+    },
+    {
+      "bytes_sha256": "c2e94938b47bbfaae2bcb8715700925eb5a23f469aa02bfe5ce327cc799520f5",
+      "kind": "markdown",
+      "logical_sha256": "76be9c64ab5dfa27a1b165a789ff872e5cd8782f4e512baf4ad0eb941f4d9b5b",
+      "path": "sources/src-55408d6b-halden-analytics-promotion-notice.md",
+      "source_id": "SRC-55408D6B"
+    },
+    {
+      "bytes_sha256": "e92ec6091abc5e24561bd4111327984f54ddaefdee85a4aa3a6e0a4b766c213f",
+      "kind": "markdown",
+      "logical_sha256": "3b525ec35c03a843391569bd2aaceb56d972d7b8e8c9ca962f7e708003116024",
+      "path": "sources/src-562c3a28-project-valerun-toolchain-decision.md",
+      "source_id": "SRC-562C3A28"
+    },
+    {
+      "bytes_sha256": "7f1c04cf9a80d1e31acc29029c8aaed00924dabaaf9ea887b423e06d12d03d1b",
+      "kind": "markdown",
+      "logical_sha256": "f0d7cce294b00a630ae9dec5c1f3306074ea7c04c1a0a29e218ce67af8ef5c6b",
+      "path": "sources/src-568c69f8-project-thistlefield-planning-note-by-ruric-kordal.md",
+      "source_id": "SRC-568C69F8"
+    },
+    {
+      "bytes_sha256": "951440801d6a129e4ee1386b580594ab189dff33f8c56f467ae6f0cef8d3e644",
+      "kind": "markdown",
+      "logical_sha256": "529c6bda348e9f5484803a2e61688f1128599a4e3274bca240014ea7c2f5df72",
+      "path": "sources/src-56d96816-corvi-dynamics-monitoring-log.md",
+      "source_id": "SRC-56D96816"
+    },
+    {
+      "bytes_sha256": "8c7aa7f5a9161c82a7fec8b51aebb15fcfa6916221182640bb5468232e88ab70",
+      "kind": "markdown",
+      "logical_sha256": "9d44af211c925aafce6d1dabdb44d0f5ba8a7d78531d32fbc2b593dbe9df024a",
+      "path": "sources/src-58eb5eeb-project-larkreach-procurement-statement.md",
+      "source_id": "SRC-58EB5EEB"
+    },
+    {
+      "bytes_sha256": "c460ecb12fc460a3ca70987353ce2a230b6aee98a09cfb607564b14ac490fdb3",
+      "kind": "markdown",
+      "logical_sha256": "61768dda54085a77f6fbee4133f00d389d23bed9fa0aeeca153d9d335175fa34",
+      "path": "sources/src-597839f4-project-mossfield-planning-note-by-leric-veldal.md",
+      "source_id": "SRC-597839F4"
+    },
+    {
+      "bytes_sha256": "b9581d23f2d91540dbd934468a64bcc9cc87129c6d6a8f1cc528074a2ce75065",
+      "kind": "markdown",
+      "logical_sha256": "1e6845eaa8f976f72bf574a97884bf164993c1532479367aeffa0447a71f0833",
+      "path": "sources/src-59c74c6e-ostra-works-formal-retraction.md",
+      "source_id": "SRC-59C74C6E"
+    },
+    {
+      "bytes_sha256": "ba43261c6f4432b7cceb9ca777ebe69a79329ae23bb57bc262f9a51b92e8e442",
+      "kind": "markdown",
+      "logical_sha256": "3ba57932c4846e1204c18eec64711fcb1f07b62b1d7acb9b13f131bc4e597d73",
+      "path": "sources/src-59d80df1-petra-networks-metric-register.md",
+      "source_id": "SRC-59D80DF1"
+    },
+    {
+      "bytes_sha256": "eb6f240359d117b19bf3491301e0a58dbb46721ef9b0856861d8e21309021f6f",
+      "kind": "markdown",
+      "logical_sha256": "8effd9f4303e57208fb0b7cab47eed4528a80cde8a41cba70470294c0b693593",
+      "path": "sources/src-5a98d8d6-project-warrenspur-budget-amendment.md",
+      "source_id": "SRC-5A98D8D6"
+    },
+    {
+      "bytes_sha256": "5457aef7629da18aef9ce42240ee66119ee8ac83775a09e59825ae7ec94ab22b",
+      "kind": "markdown",
+      "logical_sha256": "6757379ab58b70e239f8b71d59f774cdaa28925ec7426e9bc6d6d35222785d34",
+      "path": "sources/src-5b086a71-project-cinderspur-kickoff-brief.md",
+      "source_id": "SRC-5B086A71"
+    },
+    {
+      "bytes_sha256": "c571d0803db511c74a5b7d4eb4d3c0e3d48923c5676bce37bde741139610151a",
+      "kind": "markdown",
+      "logical_sha256": "bea75bf1930123acdb2303afadb11920fbd526b097945209f1a140092a799384",
+      "path": "sources/src-5b40c015-project-hollowrun-second-drill-log.md",
+      "source_id": "SRC-5B40C015"
+    },
+    {
+      "bytes_sha256": "91b9b77f622451a740d26343f239128aaa1845a83605ab3316a51abd2f95759b",
+      "kind": "markdown",
+      "logical_sha256": "aaa66db66e267a5a68ffc30be00523e2fd80e4bf50babd8bac80b8006858560f",
+      "path": "sources/src-5be4b829-petra-dynamics-monitoring-log.md",
+      "source_id": "SRC-5BE4B829"
+    },
+    {
+      "bytes_sha256": "0dcd4d44413f0cdb1cfa4b92392c93e3bd55f5889da96a3e6b2ac84d05ab9e8e",
+      "kind": "markdown",
+      "logical_sha256": "7581696edaf72c8b8face928d5fc608ad74e698aaae804ef3223d6fdaa2c76ad",
+      "path": "sources/src-5d32fd24-project-emberfall-week-5-check.md",
+      "source_id": "SRC-5D32FD24"
+    },
+    {
+      "bytes_sha256": "3cd029cc9ceb2af927a228aae37e6d76bc764fad4e62206ff9c4b35f58f3de9d",
+      "kind": "markdown",
+      "logical_sha256": "5803d0d646b207902f6108b427eb99d5913b67ffa45db196acf4f2057c16f14b",
+      "path": "sources/src-5d84ab59-item.md",
+      "source_id": "SRC-5D84AB59"
+    },
+    {
+      "bytes_sha256": "76b9952c012b23e658eb1a0e548a49c4c3721b6d6616944192f0f16bebb2b031",
+      "kind": "markdown",
+      "logical_sha256": "d5268226a5d39a0871b400d878218f9d6e5db5c3d5e44074b64c383a5914eed9",
+      "path": "sources/src-5d8f28f5-project-larkpoint-measurement-register.md",
+      "source_id": "SRC-5D8F28F5"
+    },
+    {
+      "bytes_sha256": "7620c674e2a028de88cb9603cf8ee609e11964e2933fd7f39086e8ac799c115c",
+      "kind": "markdown",
+      "logical_sha256": "d4e2802791103314d641702e8677d13aaa71ff49ee7423209c2a453a9c9dcfbf",
+      "path": "sources/src-5dd38dcd-corridor-talk-about-tessel-group.md",
+      "source_id": "SRC-5DD38DCD"
+    },
+    {
+      "bytes_sha256": "d195e5477006aab453fd252f0be6962c16a3f01e1ff58aee5072b6d28dfd617f",
+      "kind": "markdown",
+      "logical_sha256": "5b61899e04b12058a8652dac22cfb767251e23ed2499ba95778365484888a417",
+      "path": "sources/src-5df10afd-meridi-studios-directory-extract.md",
+      "source_id": "SRC-5DF10AFD"
+    },
+    {
+      "bytes_sha256": "92b9d8abaf1f2c5bf80169e2266a5c174790cc427c16fb323b3c89162e0d6c3f",
+      "kind": "markdown",
+      "logical_sha256": "471ac0bc7631a402f366593b7dbae63c1d3ffbae143511170e3e19bba587c2d8",
+      "path": "sources/src-5ebf5a1f-project-larkrun-second-drill-log.md",
+      "source_id": "SRC-5EBF5A1F"
+    },
+    {
+      "bytes_sha256": "201c74dbb2cc266c87f86a44aa08e969dd6efec4cd588a835365db65c847e505",
+      "kind": "markdown",
+      "logical_sha256": "f1c038ea5ae74acece6799a49b9df4f3fcc6a2093a1c3765f3073f5489dafdec",
+      "path": "sources/src-5fe4d5fe-tessel-institute-facilities-circular.md",
+      "source_id": "SRC-5FE4D5FE"
+    },
+    {
+      "bytes_sha256": "7fbde336de0faefeac20ecdc2e98ae981480f9bbf68bbb72ad4603c723bc84ed",
+      "kind": "markdown",
+      "logical_sha256": "7804b1ef76358130ae63c1bf5facc9763f1c3396405ecdac7df88c72b97fda46",
+      "path": "sources/src-604323ca-interview-with-lelen-kordal.md",
+      "source_id": "SRC-604323CA"
+    },
+    {
+      "bytes_sha256": "38e3822d29e6f3558c9a196b608b04942eb120c10e13631ebae5c038c3d447dd",
+      "kind": "markdown",
+      "logical_sha256": "5faba25dd43d4004f92e774b50df97c464b31b3ef395f120c906df413be6560a",
+      "path": "sources/src-6114923e-project-beaconrun-reporting-toolchain-proposal.md",
+      "source_id": "SRC-6114923E"
+    },
+    {
+      "bytes_sha256": "0dff37251ae6c20a5a95d6fd6c2f3758a065f20e727f506396d9374d88a39016",
+      "kind": "markdown",
+      "logical_sha256": "03258d1fad37ce43ac071e6efc3c049c4711db91d9d7025140a086a8d6f0f8a7",
+      "path": "sources/src-62141979-project-emberfall-week-7-check.md",
+      "source_id": "SRC-62141979"
+    },
+    {
+      "bytes_sha256": "1c15b73548e828f50620e5c2734b1aa135eb42a34209cdeb8d7a763519c09b95",
+      "kind": "markdown",
+      "logical_sha256": "cd13ac3ef72d54a383840e6a7ae53522c6f8eea35ba1ecd347e048f8d384402a",
+      "path": "sources/src-62f09ad4-corvi-networks-metric-register.md",
+      "source_id": "SRC-62F09AD4"
+    },
+    {
+      "bytes_sha256": "0934795b85abb3be5bfc185c0aeaf3bfd298185b007a13652517e3b0713ed577",
+      "kind": "markdown",
+      "logical_sha256": "3fd924b34040852119341fa61d18414aab6d42f7989c37bf4515ad50891c7aa7",
+      "path": "sources/src-63f693c2-kelva-group-staffing-register.md",
+      "source_id": "SRC-63F693C2"
+    },
+    {
+      "bytes_sha256": "e40650e09baa4e499579777de9153c4b639ff32f7dce37fe3795b6088a76e09e",
+      "kind": "markdown",
+      "logical_sha256": "8b35fd560983c67aa555bb7f53c9d76fc36fe7ad8f2211fa6bb45ea1379db667",
+      "path": "sources/src-6625f269-corvi-analytics-promotion-notice.md",
+      "source_id": "SRC-6625F269"
+    },
+    {
+      "bytes_sha256": "baae6b9ce55702a8fe5e1d72e81ad7d35a713aa91196cbcf218658c7605efe51",
+      "kind": "markdown",
+      "logical_sha256": "d4e85e7c7e7d184b5383c32f2fb15af3fb69049a29bdf5e42e7bb8781243e0dd",
+      "path": "sources/src-66634a20-project-hollowfall-week-6-check.md",
+      "source_id": "SRC-66634A20"
+    },
+    {
+      "bytes_sha256": "68a550284ca2f5c91d047514610e6c7f5b223a2cd193a584f0b8976bdd67a935",
+      "kind": "markdown",
+      "logical_sha256": "74e46682138a5d2f4280a360385d5848b6c1bc4861d4061fb4e88bf61f4b7648",
+      "path": "sources/src-67c9b12d-kelva-dynamics-weekly-bulletin.md",
+      "source_id": "SRC-67C9B12D"
+    },
+    {
+      "bytes_sha256": "3c7dcfe7c8b182eb2d4da8c366814b8e9e9557665dd530d4e18e8035a4b1e143",
+      "kind": "markdown",
+      "logical_sha256": "e4ae0868d506b6b9323e6e7d7d3e7d877af03ce0c7d33472d1ff7232cfa4bced",
+      "path": "sources/src-688673fb-project-driftgate-calibration-audit.md",
+      "source_id": "SRC-688673FB"
+    },
+    {
+      "bytes_sha256": "7913b9d41bf64325f754d48d76c1419406ca2e678a84dac714a4425b76b6bf61",
+      "kind": "markdown",
+      "logical_sha256": "c65a596d4a511fc09c3742b4bcd490f32b1f6b1ab926da51b6a928b1d0ed26a1",
+      "path": "sources/src-68e927eb-project-beaconspur-hosting-decision.md",
+      "source_id": "SRC-68E927EB"
+    },
+    {
+      "bytes_sha256": "b20ad90d402a4308854755b7fb27e4150f54d9b6c464fa10e4c5a9870084355c",
+      "kind": "markdown",
+      "logical_sha256": "91b9f4e2205acb5496b0fe26ae26bc6cc2ac72f831fe738140eab1762544a862",
+      "path": "sources/src-69f21cb0-project-valespur-hosting-decision.md",
+      "source_id": "SRC-69F21CB0"
+    },
+    {
+      "bytes_sha256": "24260effed3b952d1ba775f2d43a3b6261706d64e150bb14363d6d8956ba09e7",
+      "kind": "markdown",
+      "logical_sha256": "f59126da15536a3affc2eb69c9b6b60b29192df4f79ec7a752099c9e44e4dcb9",
+      "path": "sources/src-6a2b3d28-project-cinderrun-pallet-consignment-record.md",
+      "source_id": "SRC-6A2B3D28"
+    },
+    {
+      "bytes_sha256": "70d2832f28b2960fcd9a011a126091a3aa0d320b52716c3529832f0d0c1cc059",
+      "kind": "markdown",
+      "logical_sha256": "9d0739d0ece45c9c5f07ea33c7be55c4df30ca0004518bce4e55332b343d3b65",
+      "path": "sources/src-6a4f9406-arden-works-formal-retraction.md",
+      "source_id": "SRC-6A4F9406"
+    },
+    {
+      "bytes_sha256": "b92948ed2ec833be7f986ef2d0ea4edccca66f3b027a92b8dfae295388f1f8ea",
+      "kind": "markdown",
+      "logical_sha256": "6c33ac3e8f402de6a9e97b4ac59b07dce49f4641b2df9ddbac8ddd1875db5e02",
+      "path": "sources/src-6b1f12ef-project-warrengate-rollout-plan.md",
+      "source_id": "SRC-6B1F12EF"
+    },
+    {
+      "bytes_sha256": "f952fef7dedb930ef616b394e2d8e9acee3c303a4bec25ae1f4fae7ac8ef32df",
+      "kind": "markdown",
+      "logical_sha256": "cc0a5aa3d9dbaadb95f1396258516a509f782468a6a6d34822d9ddccbed7c5dc",
+      "path": "sources/src-6b838b9e-lumo-dynamics-monitoring-log.md",
+      "source_id": "SRC-6B838B9E"
+    },
+    {
+      "bytes_sha256": "62c7de8e62cef043957ed7f3c17fffdba8c4fa63cdd88353702eb60be91b6512",
+      "kind": "markdown",
+      "logical_sha256": "de51c06023f5965dc95d958274370b96dd794a1b0cbe018426d083a97b68b18c",
+      "path": "sources/src-6bcb7830-project-warrenspur-steering-decision.md",
+      "source_id": "SRC-6BCB7830"
+    },
+    {
+      "bytes_sha256": "14feac7bad06083f6645461beec82d159b87c532b6c7303ed69ba89775f9a42e",
+      "kind": "markdown",
+      "logical_sha256": "f41152ea54fe31b6b20a1ed9144cafb71759837d5eb8b203eec92424814b12f1",
+      "path": "sources/src-6c35f1d0-meridimere-lab-log.md",
+      "source_id": "SRC-6C35F1D0"
+    },
+    {
+      "bytes_sha256": "9ea4290fada0b839620e88733493e9f57ed67e9a8b6ca8c4a549d4f520d6ef09",
+      "kind": "markdown",
+      "logical_sha256": "4d193cf9534889b1c8f0a4458c05849494d24a84b6353acd6ff35db555d82cbe",
+      "path": "sources/src-6c4a3914-meridimere-planning-brief.md",
+      "source_id": "SRC-6C4A3914"
+    },
+    {
+      "bytes_sha256": "837e529ae12c4ce34bfa115f75996deda6bc32b1aa1bef9b168cf9e4a1352587",
+      "kind": "markdown",
+      "logical_sha256": "822c5c26d4e2aa78f73259982729cbc9d46d259679acfee3daf1d20df40ccf9a",
+      "path": "sources/src-6c62db64-project-cinderfall-week-6-check.md",
+      "source_id": "SRC-6C62DB64"
+    },
+    {
+      "bytes_sha256": "caae2dc71eb4724d303dc4e344d8085d82bca1a6d71c42ae54da92b3b303299d",
+      "kind": "markdown",
+      "logical_sha256": "5305578cc6d2513db39336877d14d42017c01abbc5e329db5ce780cf8fb10d85",
+      "path": "sources/src-6c8de442-compensation-memo-for-rendra-kordal.md",
+      "source_id": "SRC-6C8DE442"
+    },
+    {
+      "bytes_sha256": "de1c2e6aeb74ac0fe6f50916e93afeaf1a85e886a4dcfcc1381c9a54f5643293",
+      "kind": "markdown",
+      "logical_sha256": "b6be5c2a8443d003dc5db05b2898ff8b97d1c2c5c86b588ea1b814378c8e834b",
+      "path": "sources/src-6d68dc2d-project-thistlecrest-kickoff-note.md",
+      "source_id": "SRC-6D68DC2D"
+    },
+    {
+      "bytes_sha256": "6ceac069381b4c51df1c10f0f6baf2628bb34e5c4863bb381ab4c9e7448e30e9",
+      "kind": "markdown",
+      "logical_sha256": "e0f9864ba96606a3cab38a3e5a85d4bdfabbde0f78099e45a5a4c2ad1bbd366f",
+      "path": "sources/src-6e6ab74e-ardenholt-lab-log.md",
+      "source_id": "SRC-6E6AB74E"
+    },
+    {
+      "bytes_sha256": "c8fd4080acee4cc79fd853cf89539375e65f4c4de8eeb9ef147027dce6aab6fc",
+      "kind": "markdown",
+      "logical_sha256": "1ce28b2f1ff7926ab6d093dbeef8355bfc974c19b097e057278799460d7f2189",
+      "path": "sources/src-7044eda9-follow-up-interview-with-torlen-kordal.md",
+      "source_id": "SRC-7044EDA9"
+    },
+    {
+      "bytes_sha256": "20728a15aba5075d22063e2da7356864a9940a7f8eff644595573764afeb249c",
+      "kind": "markdown",
+      "logical_sha256": "b6c6a0c3f6b875142f98619cc17923c13b95ba5b0ed95089573f584fad7429bf",
+      "path": "sources/src-70b1e393-project-larkfall-week-6-check.md",
+      "source_id": "SRC-70B1E393"
+    },
+    {
+      "bytes_sha256": "e1f257621162d4783c8078ee72092820d10259e78f607e52f936126b78d4555a",
+      "kind": "markdown",
+      "logical_sha256": "629b5616afe34c168589e3ceb94c52be2375cac779962811d377a2037e61c84b",
+      "path": "sources/src-70bb8032-project-hollowrun-week-7-check.md",
+      "source_id": "SRC-70BB8032"
+    },
+    {
+      "bytes_sha256": "fd23e153c7efcce7575641558474b9051e65bf4784ea760140ee1f09cccccb47",
+      "kind": "markdown",
+      "logical_sha256": "dc51b74a87d1c6ddd38ecdcbf7d4cf33c11090b3a5cede2d3af55da9ad3b3c08",
+      "path": "sources/src-71b1e260-project-beaconcrest-status-digest-refresh.md",
+      "source_id": "SRC-71B1E260"
+    },
+    {
+      "bytes_sha256": "dc560021703c73748af0831bc89dad3a4369a086a13793e88f2546d113f5b453",
+      "kind": "markdown",
+      "logical_sha256": "7e99f819196e3c8909623593a8e87e488d5c6aa50322db742506054eb21beb8c",
+      "path": "sources/src-7259f4ce-project-cinderrun-second-drill-log.md",
+      "source_id": "SRC-7259F4CE"
+    },
+    {
+      "bytes_sha256": "e3a45b0c1b148843c875412b3e99f315104abd11012ad87c8ce5d0823be3a5d2",
+      "kind": "markdown",
+      "logical_sha256": "eac1d332a4896e4a36dd4efcee78e817c40f09260bd2e17735797e31944ea776",
+      "path": "sources/src-74380003-project-quarryspur-hosting-decision.md",
+      "source_id": "SRC-74380003"
+    },
+    {
+      "bytes_sha256": "82100f7e783909743041e5e005d707e5010c13dab6f536d957ccf5638605329b",
+      "kind": "csv",
+      "logical_sha256": "efab5c0321857d24fc39f6351dfe50fa74ded5ecdec21e2df8d612f8ff21930d",
+      "path": "sources/src-74d4c93b-project-hollowfall-capacity-sheet.csv",
+      "source_id": "SRC-74D4C93B"
+    },
+    {
+      "bytes_sha256": "e9310cf5881b949b3a62f8c2f0e73e82cb2f05d6303aa9e84beda4dcc2d31235",
+      "kind": "markdown",
+      "logical_sha256": "d32db94606e93b7a56b4049229ee42f4eef617a26ec27cf9ef379b25232a889d",
+      "path": "sources/src-75e037fe-lumo-dynamics-monitoring-log.md",
+      "source_id": "SRC-75E037FE"
+    },
+    {
+      "bytes_sha256": "ed80fbfa87986d3def61577f6d74b1cd30c6db6dec15dd98f6dcf1b3c570f88c",
+      "kind": "markdown",
+      "logical_sha256": "f4dc4362b6966de790ea235a4cc9345838f262db6da60e91a9353da8e90b0b87",
+      "path": "sources/src-764b421c-corilfield-ownership-record.md",
+      "source_id": "SRC-764B421C"
+    },
+    {
+      "bytes_sha256": "81c5b1edd02e75337cfd4efd3ebbadb3d2d302db3c21a1bf003b6f3385f598cb",
+      "kind": "markdown",
+      "logical_sha256": "4c3fb3f65de834c2ecaf9b45acbf9e191a4885d5a76251e435fa50b850d1e276",
+      "path": "sources/src-77a8d1f9-compensation-memo-for-oridra-kordal.md",
+      "source_id": "SRC-77A8D1F9"
+    },
+    {
+      "bytes_sha256": "e8449638f9064d87d3637dcdf80ed6caeb913469ed82838f517b56fd17f79dfc",
+      "kind": "markdown",
+      "logical_sha256": "bd4395e80b9e751405c8de3999d993edae7d4cd7b379640ff1e760a837e9f815",
+      "path": "sources/src-7a5c09e8-norva-studios-directory-extract.md",
+      "source_id": "SRC-7A5C09E8"
+    },
+    {
+      "bytes_sha256": "6b0a1c43ed6d9acbe62c0890c68978052459ecabca79ec479f41a0d35c1da308",
+      "kind": "markdown",
+      "logical_sha256": "63ee115a6834134444c69be5fcc813beee603723e7c6a09c61795e57f12ab26b",
+      "path": "sources/src-7a80eaa0-project-warrenfield-planning-note-by-torric-veldal.md",
+      "source_id": "SRC-7A80EAA0"
+    },
+    {
+      "bytes_sha256": "c1f4dd500839e789e58900af296a1dc13f6832b6b1f5efa6f3f39d2001068cdf",
+      "kind": "markdown",
+      "logical_sha256": "3962dfdddc6fc5b58d93a7d489a86b7c21502e9a5083ea1df4a26671edbaae13",
+      "path": "sources/src-7c009479-project-driftrun-pilot-plan-under-consideration.md",
+      "source_id": "SRC-7C009479"
+    },
+    {
+      "bytes_sha256": "7f8e91744ff832d5ea02da1043cd5e20b7838fe9cfe1f336af9298735f82ec1e",
+      "kind": "markdown",
+      "logical_sha256": "a2991769466dd063893e38210bb4fd349d2eec16c0b43be83aeba4e151b7ab6c",
+      "path": "sources/src-7c48451c-project-warrencrest-kickoff-note.md",
+      "source_id": "SRC-7C48451C"
+    },
+    {
+      "bytes_sha256": "ff5c4eae8f6dc4dbe13c25f6965136d28f6bcebb6f45ae1f884e7ebfc24b5667",
+      "kind": "markdown",
+      "logical_sha256": "6467628564a660780602de585a58bb501593d264ca49f8fa91ba59553d68fce8",
+      "path": "sources/src-7ce81bfc-project-cinderreach-supplier-chatter.md",
+      "source_id": "SRC-7CE81BFC"
+    },
+    {
+      "bytes_sha256": "d1c08eb70f715e00aca7e2f1e70293ea2337cd74df5e84c4b92b928a4158d2f8",
+      "kind": "markdown",
+      "logical_sha256": "83c4f7b39c6cd174b34ca29be4ceb6855d8cb4d0199257c8dcd2e411082ae770",
+      "path": "sources/src-7de1a372-corridor-talk-about-kelva-group.md",
+      "source_id": "SRC-7DE1A372"
+    },
+    {
+      "bytes_sha256": "f29b7d04e7b7f38c5002a7936971a573512c18e3d7097c0695327ce0599e053b",
+      "kind": "markdown",
+      "logical_sha256": "742f7bd5ef1bbe09f165e7fac2ce779f2eca399a8164ac36d0c793ec54e5521a",
+      "path": "sources/src-7e4f3f10-halden-dynamics-monitoring-log.md",
+      "source_id": "SRC-7E4F3F10"
+    },
+    {
+      "bytes_sha256": "b4efcb57a2d1431776527ac69a832496f867cf6d543f071fb0771aab6978f64d",
+      "kind": "markdown",
+      "logical_sha256": "0ef4f97134b39ef532b8070dfda9db432c5d03e35cd0d7079127624e89e79723",
+      "path": "sources/src-7e779ad3-kelva-works-expansion-announcement.md",
+      "source_id": "SRC-7E779AD3"
+    },
+    {
+      "bytes_sha256": "7cb84fe4782444f4388d21d058431d1cf26c54eb9c647b714f92f8528b208149",
+      "kind": "markdown",
+      "logical_sha256": "6530ccdc89ad6797affce592ef6a7c5fa23cd695626b1ceaec8943bbb4692d06",
+      "path": "sources/src-7e85f578-project-sablefall-deploy-runbook-revision-memo.md",
+      "source_id": "SRC-7E85F578"
+    },
+    {
+      "bytes_sha256": "a6213ff0a002b9f371606142a4bcc7deb0a0ac2521e350daa5799b75cbc355bc",
+      "kind": "markdown",
+      "logical_sha256": "e1a5ed6b76f879801b3639f9d827b76748ced2e26cd46087b9d55ab843aa7fd7",
+      "path": "sources/src-7f4bf1a0-project-larkspur-kickoff-brief.md",
+      "source_id": "SRC-7F4BF1A0"
+    },
+    {
+      "bytes_sha256": "29d9ec2d849cc91532db44aade7260dba49eb0d1949b40e185511af61ab9a45f",
+      "kind": "markdown",
+      "logical_sha256": "04f8a2c20a304a4104016c91896baea0660a8386c2d5a3649031900fa8570dcf",
+      "path": "sources/src-7f5ce241-interview-with-torlen-kordal.md",
+      "source_id": "SRC-7F5CE241"
+    },
+    {
+      "bytes_sha256": "b9a882d951835b423b26897a2f066f47bcb41f0b6a81e52871f05a6d0023a1fa",
+      "kind": "markdown",
+      "logical_sha256": "0d88143e2c8ad506a5dff3b203a706c55746d1db7be37c0ac4e944363fe918f7",
+      "path": "sources/src-7f672533-follow-up-interview-with-milen-kordal.md",
+      "source_id": "SRC-7F672533"
+    },
+    {
+      "bytes_sha256": "3c5e50018762b8847728e9056629fb9f18c70729bcbe3802cf7bd536896bf1ed",
+      "kind": "markdown",
+      "logical_sha256": "195831e812f7adc1552dd075eca6f344d0a01117506d6edd74459da860181aee",
+      "path": "sources/src-80adf313-project-thistlecrest-leadership-note.md",
+      "source_id": "SRC-80ADF313"
+    },
+    {
+      "bytes_sha256": "a75f55940fbaa8cd91c0b18f239c6c1c3294cc78e698b2a5db454a2e69ef9737",
+      "kind": "markdown",
+      "logical_sha256": "e2423e3e41a641df1ca8ad11e1303d9692edf6d09f29349c1ddb83ce6b19adbc",
+      "path": "sources/src-80d2ed1d-project-cinderfall-chart-note.md",
+      "source_id": "SRC-80D2ED1D"
+    },
+    {
+      "bytes_sha256": "a5550b3d14a89755db7a9c5eb09315f45ad666fd288d9f36894c54a2fb656011",
+      "kind": "markdown",
+      "logical_sha256": "5f6d5d33f37af66e28a9645eb368ab3644864b8df490ed86ec3d71b9a0a510ce",
+      "path": "sources/src-82a7281e-project-quarrycrest-records-policy-note.md",
+      "source_id": "SRC-82A7281E"
+    },
+    {
+      "bytes_sha256": "e54201e96d99764367e541a61269af57502d0805c5c41ecbef07f663848fbca2",
+      "kind": "markdown",
+      "logical_sha256": "6586df2ae9e0f46790d8e9ed7a7d77df2d7de305b6ba795b2ac954fc4c38d060",
+      "path": "sources/src-832c38d0-project-mosscrest-rename-memo.md",
+      "source_id": "SRC-832C38D0"
+    },
+    {
+      "bytes_sha256": "2826bd276fc13a8a5ecaac0036cc9d799a9a5949856e7d52b81fb4c10823a457",
+      "kind": "markdown",
+      "logical_sha256": "8d6f174330b053a2ea1db749d293a4982dfdcbbcd3b8122941dacc3e548ae7a5",
+      "path": "sources/src-832c7842-corridor-talk-about-arden-group.md",
+      "source_id": "SRC-832C7842"
+    },
+    {
+      "bytes_sha256": "1bfebec9b592d53de8fd6cf4ce636fa850e61ee2990a037a28372b49d9b80899",
+      "kind": "markdown",
+      "logical_sha256": "05a9d441b4beb9d78362f533fc2000679aa7c7283f0bb633d9ae41158a099a71",
+      "path": "sources/src-856cc746-ostra-works-expansion-announcement.md",
+      "source_id": "SRC-856CC746"
+    },
+    {
+      "bytes_sha256": "0fe6d9a87b909aeb045e24db3590877c39d727031fcff2b866f91d428363448b",
+      "kind": "markdown",
+      "logical_sha256": "f82fa8d5fe84ebc72512bbfbc0bf712fc564c67a876d554d8a1fdcc61390b76e",
+      "path": "sources/src-8575cb56-arden-dynamics-weekly-bulletin.md",
+      "source_id": "SRC-8575CB56"
+    },
+    {
+      "bytes_sha256": "37d3515b5ddda6cd0c2887120c7883154222a1e8f7e6c3e1230988d3f7d2be5d",
+      "kind": "markdown",
+      "logical_sha256": "72d8c45f15563858ea4eea521e1ec3cda9671e2188b32a92966bdb573c5670de",
+      "path": "sources/src-8595c931-project-emberrun-first-drill-log.md",
+      "source_id": "SRC-8595C931"
+    },
+    {
+      "bytes_sha256": "59ca294a405a2f8e023e9a6b6d2270c6bcd85ae91e8a6d49e866b95eb2730114",
+      "kind": "markdown",
+      "logical_sha256": "ffabb966f1fe3bddc903bda12628ca8597c2e216d649d654ffb6eb2aa56b35b1",
+      "path": "sources/src-868a830f-follow-up-interview-with-valen-kordal.md",
+      "source_id": "SRC-868A830F"
+    },
+    {
+      "bytes_sha256": "f3e455dfab39f156db40db0b4276ad96207e076665a80e9cdf66f1267e9d47c8",
+      "kind": "png",
+      "logical_sha256": "c2c38ba27a2d5bb006e86c108765ef7d5290d1dc52e3e69c91ae3170175ba76e",
+      "path": "sources/src-87ca3965-project-emberfall-wall-chart.png",
+      "source_id": "SRC-87CA3965"
+    },
+    {
+      "bytes_sha256": "807c8505e79cfefbb169d18dce567ab02cf6c265a573b6b5199db2d2f9ebeb60",
+      "kind": "markdown",
+      "logical_sha256": "8c44c8a5756dbd36a7f50da94e58a88fab12a712ada1b04a346a3a838a1e9b1e",
+      "path": "sources/src-8aeb4767-item.md",
+      "source_id": "SRC-8AEB4767"
+    },
+    {
+      "bytes_sha256": "9ac5ebfbd2c677e4a0f5ba9985d33c25013d2e92b6907b2982f8a930fbb5a415",
+      "kind": "markdown",
+      "logical_sha256": "a7cf13331ce6bdc34ba9f2c6518911864bd12a70ffb110fd07b98a7e1c0c4a94",
+      "path": "sources/src-8c0fa2f4-tessel-dynamics-weekly-bulletin.md",
+      "source_id": "SRC-8C0FA2F4"
+    },
+    {
+      "bytes_sha256": "d07c75f0645f8f5fe2aa9bc263262e289a0fbfee6af8f962eae9d6674a3c717f",
+      "kind": "markdown",
+      "logical_sha256": "0e93d0a67dd5128ea83f933dccb40df54086081446110b64b6bf1dd8ce177088",
+      "path": "sources/src-8c8003ea-corvi-dynamics-quarterly-return.md",
+      "source_id": "SRC-8C8003EA"
+    },
+    {
+      "bytes_sha256": "d7978c354a537ea7990cb57154e4beb3b2011ab03b24a44ace7b226060a791b0",
+      "kind": "markdown",
+      "logical_sha256": "d497c36b2a86022d661e2d543a2ed5cdc1a0cab70a5ae71f4ec7149581e8b0a9",
+      "path": "sources/src-8c9be03e-project-valecrest-status-digest.md",
+      "source_id": "SRC-8C9BE03E"
+    },
+    {
+      "bytes_sha256": "2ccbb2a740e6d07b2c3c82ac91ac8370b36e4f5bb6497cea8873799c472655bb",
+      "kind": "markdown",
+      "logical_sha256": "3dca9139605a19667df2011881f0e004e45b0aeff950472c4816d755eedf4731",
+      "path": "sources/src-8cc6e32b-project-driftgate-bench-readout.md",
+      "source_id": "SRC-8CC6E32B"
+    },
+    {
+      "bytes_sha256": "d406b85cc2a624265c26681fb9d3b43cd800147c9903e75764c82aff4e4e0d0c",
+      "kind": "markdown",
+      "logical_sha256": "54e8128a9787c8ef65c64564245e98fb020686299d4f2ad0dc8440052dd50e44",
+      "path": "sources/src-8e6b648c-arden-dynamics-weekly-bulletin.md",
+      "source_id": "SRC-8E6B648C"
+    },
+    {
+      "bytes_sha256": "278b9bb306c0e8adb12548b11a9340b4b1a6b72e6536f444075a4e4f90455398",
+      "kind": "markdown",
+      "logical_sha256": "3efec3e9bc6c2ec156994cdf92eec1f05922677c5ac0e9b8be797ccc5dd6bd05",
+      "path": "sources/src-8f637b65-project-larkrun-crate-consignment-record.md",
+      "source_id": "SRC-8F637B65"
+    },
+    {
+      "bytes_sha256": "8271ab46c7ce9140487e78b28e6706a7bad558795c1e05bbde430c94a9638e18",
+      "kind": "markdown",
+      "logical_sha256": "093aa8d66ef3055f46f97161d1d08c995de12244b362e0fb3deb42fa7659f31e",
+      "path": "sources/src-8f67245f-halden-dynamics-monitoring-log.md",
+      "source_id": "SRC-8F67245F"
+    },
+    {
+      "bytes_sha256": "2022feb2332157256f0d15e550e4f2fa99842682c572863921ef656f3c8ef24e",
+      "kind": "markdown",
+      "logical_sha256": "5e34b45315b426e50cf6d877563cfbf0ec3f75def56f257d2febfd6651f468bf",
+      "path": "sources/src-8f79717b-project-cindercrest-quarterly-audit.md",
+      "source_id": "SRC-8F79717B"
+    },
+    {
+      "bytes_sha256": "5d7995361594fa9bc74496e1b3064243db49c11a5074c5337f773c8e47f5bacf",
+      "kind": "markdown",
+      "logical_sha256": "4f47479d191ef517058676a17dad008ca83fa203507be8b037c2ea11a93d3b76",
+      "path": "sources/src-8f8f7a39-project-valecrest-scratch-jottings.md",
+      "source_id": "SRC-8F8F7A39"
+    },
+    {
+      "bytes_sha256": "879d4e1d671cdeadd689f5a29a7e7b044e2b59a22e57cb1f9ac9c135da62ee14",
+      "kind": "markdown",
+      "logical_sha256": "d13b31d608bca91be0335da3b912b47baffda9eea291d97b223f46a7b9c8784d",
+      "path": "sources/src-9152e78c-lumo-networks-metric-register.md",
+      "source_id": "SRC-9152E78C"
+    },
+    {
+      "bytes_sha256": "b072b8b26f7f3af5aea6b972638a984bc59b0f02ca82847a102e20295d8eac7e",
+      "kind": "markdown",
+      "logical_sha256": "905e31edd653afde9ac56e63e98e71e441a20d1d665c4fa0c5e6dfeb05b6ec07",
+      "path": "sources/src-933abd83-ostra-dynamics-weekly-bulletin.md",
+      "source_id": "SRC-933ABD83"
+    },
+    {
+      "bytes_sha256": "0c7cccbe04fcf1f7c300f5426e9962bc932d9f4ef9d569da1d4e16571fa369c4",
+      "kind": "markdown",
+      "logical_sha256": "6171743a2bcd7a364dd3663ecfc6b55a9e2f04d444fb04bf0f9ac96b460e0504",
+      "path": "sources/src-9365ac00-project-quarrygate-calibration-audit.md",
+      "source_id": "SRC-9365AC00"
+    },
+    {
+      "bytes_sha256": "45bed9da40c0f592b05137fd99bef11a346c8599a67e6c1465fa723f6b2c7815",
+      "kind": "markdown",
+      "logical_sha256": "d6ba0fbfeb83fb888ecc4fedaa8984921a5426defa94eb6917592da9a702dbc4",
+      "path": "sources/src-93d45c45-project-sablefall-deploy-runbook-operating-manual.md",
+      "source_id": "SRC-93D45C45"
+    },
+    {
+      "bytes_sha256": "504ef2d4623ac79b8e02ae1518b03d0e8e46acdbccb53d08a1b3d9bdcb6fcd0a",
+      "kind": "markdown",
+      "logical_sha256": "693793ea3be7d345a4a4d88a0666ae411475d6bbaa45e7cc7bb6eb6fa13549a7",
+      "path": "sources/src-93e59aa8-project-driftrun-pilot-decision.md",
+      "source_id": "SRC-93E59AA8"
+    },
+    {
+      "bytes_sha256": "6b0ead0d6a1ea561d6be04e3e5c03c52cf8003136c28ce803382c33b00e0ec95",
+      "kind": "markdown",
+      "logical_sha256": "3f5ab0adc9d08ce35b21e9f7c7556edcd3456b44575279dd63fbf8aeb61ea373",
+      "path": "sources/src-95489b13-project-sablegate-rollout-plan.md",
+      "source_id": "SRC-95489B13"
+    },
+    {
+      "bytes_sha256": "a0d09d8ab4e31bdef2dc8373928a7c3694d309d39a323acc832fc53674db2a53",
+      "kind": "markdown",
+      "logical_sha256": "0a9eab5bda52bbb35b23dda61c8d91d1fecdd5ccd5c0b9c96ebb2c0cdf113381",
+      "path": "sources/src-9577533e-project-quarryspur-hosting-reversal-memo.md",
+      "source_id": "SRC-9577533E"
+    },
+    {
+      "bytes_sha256": "e0cdee22f3a5d411c96f7f53cb2a2189631a190c8c1f92314931fd44b3c11f0a",
+      "kind": "markdown",
+      "logical_sha256": "5ec9cc50b8fc5d7b13f3126a60ae2746190e2ea5c64e102de0a21621f9bd1264",
+      "path": "sources/src-95ec5450-project-valerun-reporting-toolchain-proposal.md",
+      "source_id": "SRC-95EC5450"
+    },
+    {
+      "bytes_sha256": "b31cfa4b1d415ba02f537b990bab885ab9e07a43a33d62f0a27748403b865846",
+      "kind": "markdown",
+      "logical_sha256": "cb01b65d9c2be41dfd5829f65ccd43765acf3213b4775457a44526fa3de99c3e",
+      "path": "sources/src-9608b27b-arden-institute-board-session-digest.md",
+      "source_id": "SRC-9608B27B"
+    },
+    {
+      "bytes_sha256": "c5fa311c4258a9ed4162079448c1b4fa5d0358ea419a9e01372ceb42d113f3b9",
+      "kind": "markdown",
+      "logical_sha256": "75764389da33a0ae67dbab21e483de86f4b5ab6ffc3b3176178347583a44741e",
+      "path": "sources/src-960b219b-project-beacongate-calibration-audit.md",
+      "source_id": "SRC-960B219B"
+    },
+    {
+      "bytes_sha256": "f330c82928b5259d8c546f0156e423856bec0936b748a502e4840ea083d3c1fb",
+      "kind": "markdown",
+      "logical_sha256": "edcf8e231c7de20288289f1efc60190136171afef1cfc2af320a6f62797896d5",
+      "path": "sources/src-9645f94a-project-driftrun-toolchain-decision.md",
+      "source_id": "SRC-9645F94A"
+    },
+    {
+      "bytes_sha256": "bad88f41f08b1049bbcbcea60a4997aba62f6c8791703d35cdaea42eb71bf91f",
+      "kind": "markdown",
+      "logical_sha256": "b1a0625bf336d5a3072315ac74b0ea5579a01d082854f3397b49897d752866a7",
+      "path": "sources/src-96ecbdfc-project-sablecrest-leadership-note.md",
+      "source_id": "SRC-96ECBDFC"
+    },
+    {
+      "bytes_sha256": "3649828d23e6b6af7d842aa918bbeac1d700a5a150bd323468f4a732bdb7c2db",
+      "kind": "markdown",
+      "logical_sha256": "763838e1bf74846000e585d28686e448d7d935aee431459c9086665500475d5e",
+      "path": "sources/src-971f83cc-ostra-institute-facilities-circular.md",
+      "source_id": "SRC-971F83CC"
+    },
+    {
+      "bytes_sha256": "d4cac3f12a061741c835966240908c831dc3b9713b3728082da0c67948c8a3df",
+      "kind": "markdown",
+      "logical_sha256": "85c7dcccc72e0b45d2813845b5dba45707e215c79a16db2fa8fee83e0af768be",
+      "path": "sources/src-989c8111-project-emberfall-week-6-check.md",
+      "source_id": "SRC-989C8111"
+    },
+    {
+      "bytes_sha256": "da8e2ff434aa0ad3172215a73e40a5ddb141431c07a3ff1ee80aaaafbc23b53f",
+      "kind": "markdown",
+      "logical_sha256": "96a700ec62051c362586e2e8dcf38740b1865f6256034dc5308910d904042f96",
+      "path": "sources/src-994ac1cd-halden-dynamics-monitoring-log.md",
+      "source_id": "SRC-994AC1CD"
+    },
+    {
+      "bytes_sha256": "fd659d9b8d5ea23ec4dfe72e3f36992e0d5f010ffef3c67c618e62654d60455a",
+      "kind": "markdown",
+      "logical_sha256": "5176c7470d65f3d7e408a3ccfb5122c315a027db7b325951a6c8f6d66f0706c5",
+      "path": "sources/src-9c243c4f-kelva-dynamics-weekly-bulletin.md",
+      "source_id": "SRC-9C243C4F"
+    },
+    {
+      "bytes_sha256": "b1b06f958d0bae67cd4be62ce7b48694fde31f5cacee558b56a2f944347fd12b",
+      "kind": "markdown",
+      "logical_sha256": "a7dacc76aa85e7f9f8ecd71e07d6e1990263f7fe237aaab8f5e970d439335fe0",
+      "path": "sources/src-9f891a14-lumo-analytics-directory-extract.md",
+      "source_id": "SRC-9F891A14"
+    },
+    {
+      "bytes_sha256": "991bf8d072a874da6260ba0a99d36373d33af3fa5840ee4f215c5611ecaffd79",
+      "kind": "markdown",
+      "logical_sha256": "3c028fe0d349cee989d5e0342a46242cb4dce8d4b8a4d15a7d5e134f6c190289",
+      "path": "sources/src-9fbee322-kelva-institute-standby-site-memo.md",
+      "source_id": "SRC-9FBEE322"
+    },
+    {
+      "bytes_sha256": "633b6c4b20fc95d32f91d7f05df68296e9563960d341d0bf9eec7740d8e7d51e",
+      "kind": "markdown",
+      "logical_sha256": "e628417df325cf3b04e16d046d7ca0db4a3d36d736fc0bd33e8895df1ae144d5",
+      "path": "sources/src-a0126da2-kelva-works-formal-retraction.md",
+      "source_id": "SRC-A0126DA2"
+    },
+    {
+      "bytes_sha256": "c0e3d9a7e0c8abc8da92c11fc85a287478dc586c2d0198116357d6de81705e41",
+      "kind": "markdown",
+      "logical_sha256": "3970ea3781926425d2b92d3495ee39a50302af0d6b883b2d2fcf06062a9fe49b",
+      "path": "sources/src-a0785217-project-mossspur-budget-amendment.md",
+      "source_id": "SRC-A0785217"
+    },
+    {
+      "bytes_sha256": "3e974da1f19a493891e17c26f2c07efc24112f6563137bd213b54762e6e7dac0",
+      "kind": "markdown",
+      "logical_sha256": "9a0291bdec90e4523fd4abc71b022f40afe4535cfdc59d87215be93255114cd1",
+      "path": "sources/src-a09bb806-project-thistlespur-budget-amendment.md",
+      "source_id": "SRC-A09BB806"
+    },
+    {
+      "bytes_sha256": "c22fcb1b9bcb50e430cf75d8e81ff2e2e4b7aa5e045931d1de6223919779f842",
+      "kind": "png",
+      "logical_sha256": "588ab23824334c7e0213504f0fd3a451fa5d2fb27113fd8172d87376d4914fb6",
+      "path": "sources/src-a0b89a96-project-larkfall-wall-chart.png",
+      "source_id": "SRC-A0B89A96"
+    },
+    {
+      "bytes_sha256": "8e0148554295037edc949a850b8bb5d8bd82b29f71df6ae4404255ced1ccebc3",
+      "kind": "markdown",
+      "logical_sha256": "af96b693d7ffe488138bf1f7383667a3694f639c072e7719118da904956ab2c9",
+      "path": "sources/src-a0dcdc08-project-emberspur-kickoff-brief.md",
+      "source_id": "SRC-A0DCDC08"
+    },
+    {
+      "bytes_sha256": "269a6cfe053de4c3aa9bdcf5e4d50eee8752c0f0f929b258acb68b40ef2bfdb6",
+      "kind": "png",
+      "logical_sha256": "27c116ecfc2c572dfc4b8d41bb97d9fce10946b39e9aabfbf6edc1b3daa783cd",
+      "path": "sources/src-a166685a-project-cinderfall-wall-chart.png",
+      "source_id": "SRC-A166685A"
+    },
+    {
+      "bytes_sha256": "12b2bbec310a016150c59f20736d18c5ebe46657f6f150e10236ec6f4a8b41fb",
+      "kind": "markdown",
+      "logical_sha256": "1bb314412cd1ed113001b0a8c134dc0d91fa22028bc48a8d56220f52c69653b1",
+      "path": "sources/src-a18a7b5d-project-hollowrun-week-5-check.md",
+      "source_id": "SRC-A18A7B5D"
+    },
+    {
+      "bytes_sha256": "851b3dbeddf501f5a317e63c056c9cfa31cda5f03fa1228c7cbf01cb2527d551",
+      "kind": "markdown",
+      "logical_sha256": "7a0d89d20dd75868bb586607f9c3bad4ba1275c883ba06405db962c176f05586",
+      "path": "sources/src-a222d5ca-lumo-dynamics-monitoring-log.md",
+      "source_id": "SRC-A222D5CA"
+    },
+    {
+      "bytes_sha256": "2a29be84102d718e0b30ef1a242bafe9b662f8d95ac2c4e37b96b473072093f6",
+      "kind": "markdown",
+      "logical_sha256": "3f88b1a07dcbe2ca7171be9edf267f6c4b102ea9259384b664b81400dbe27549",
+      "path": "sources/src-a342b26d-corilgarth-weekly-digest.md",
+      "source_id": "SRC-A342B26D"
+    },
+    {
+      "bytes_sha256": "7441115d2434eb12a64532c5aaa7bdfbb09d4ee24935b9ee3cb101348252dffa",
+      "kind": "markdown",
+      "logical_sha256": "9a3765eef83eb990b612a3cc59a6b4310fa113c1eb7184821fdab2565de13a99",
+      "path": "sources/src-a48ffa13-ardengate-ownership-record.md",
+      "source_id": "SRC-A48FFA13"
+    },
+    {
+      "bytes_sha256": "e4d68e143399e8af4dff04c583685bf956e5505db458f5d4a6a33762e2bbd4d0",
+      "kind": "markdown",
+      "logical_sha256": "cb413309ddf403946b2d52ac52763dac289483342a4b039d50ef89b897d1e7d1",
+      "path": "sources/src-a495372f-corvi-dynamics-monitoring-log.md",
+      "source_id": "SRC-A495372F"
+    },
+    {
+      "bytes_sha256": "144649cda96a9160fe22107d45235015180845e6cb44ef9b4528a13616fce99c",
+      "kind": "markdown",
+      "logical_sha256": "12d9ad1e5d5d54ffff5a2941d58d7bf4de963a8d0c0251860363dc087b09409c",
+      "path": "sources/src-a57d5345-project-thistlefall-deploy-runbook-operating-manual.md",
+      "source_id": "SRC-A57D5345"
+    },
+    {
+      "bytes_sha256": "0b287a9551d98910fec4a79b9f71f8b6dd8ca7a25084d9e7c5e95c5acb335346",
+      "kind": "markdown",
+      "logical_sha256": "a4d004757a7f01b925d8a8867a15fe6ebc7c01e196f07d640d73e48bf06db1ca",
+      "path": "sources/src-a5b30ae9-tessel-group-staffing-register.md",
+      "source_id": "SRC-A5B30AE9"
+    },
+    {
+      "bytes_sha256": "d5edfbdda7646d46ca32991017e59236dac3df0379054e5ca777a188f7fe74ec",
+      "kind": "markdown",
+      "logical_sha256": "490fc519d21e53ddfa357126bc6f58c5969300b118b09b80e9b7758304d8778f",
+      "path": "sources/src-a6b27a8b-project-emberreach-pilot-sign-off.md",
+      "source_id": "SRC-A6B27A8B"
+    },
+    {
+      "bytes_sha256": "6dc089dcbb95330c583ffc9935d0d13d85f939b70d7a57eab606b8e7789a537c",
+      "kind": "markdown",
+      "logical_sha256": "4e1ada9244a04a283cb01ca526f7c07d1f759dc26c6362466924058269759e7f",
+      "path": "sources/src-a6d73ef5-project-emberrun-week-7-check.md",
+      "source_id": "SRC-A6D73EF5"
+    },
+    {
+      "bytes_sha256": "4a7c43afd1f2fcd6c04647885fca238b37bea916cd4e9a10af6990a54edf32a8",
+      "kind": "markdown",
+      "logical_sha256": "2979ad90ddba6717e5d891d4944979b75d99d8b142a8f9722a1ef12af906bb99",
+      "path": "sources/src-a6f19d32-corilwold-ownership-record.md",
+      "source_id": "SRC-A6F19D32"
+    },
+    {
+      "bytes_sha256": "9d918357cda3594293c9faf7eeee7a054634fefb84dd59140f9ca46b3ccb8691",
+      "kind": "markdown",
+      "logical_sha256": "9e4a9b1d4432cec50e1a72d4d4bdf7ff8b7c0c08352cd4ddaf67ab1087eb1069",
+      "path": "sources/src-a7004296-project-quarryrun-reporting-toolchain-proposal.md",
+      "source_id": "SRC-A7004296"
+    },
+    {
+      "bytes_sha256": "b69f8ec232af6bc686437af9fcce527a2f7ad4f2537ab3f42bb45f06aee78260",
+      "kind": "markdown",
+      "logical_sha256": "261af136de9d29021f8efce8143adbd5e16cfb092c026ab4384cec1f00cac8ff",
+      "path": "sources/src-a7e176d0-project-hollowfall-chart-note.md",
+      "source_id": "SRC-A7E176D0"
+    },
+    {
+      "bytes_sha256": "f745313b7e87f584a08d84a74f12e79ca9d836678dcc161ea26596a76354d5ab",
+      "kind": "markdown",
+      "logical_sha256": "33253f92f403e87347993ab8c738192f6066c0e109c64251c95e05d01a03b530",
+      "path": "sources/src-aa9c80ab-corilgarth-planning-brief.md",
+      "source_id": "SRC-AA9C80AB"
+    },
+    {
+      "bytes_sha256": "3399f72f7520c172d1eb696ec32a01516769c2a4f87b2d847345a0d2febe8b1e",
+      "kind": "markdown",
+      "logical_sha256": "40e2fcbf08cdf5f4e6f1fcf8aca0f11d66b7e65161361ec1a8e6a9e7a128b958",
+      "path": "sources/src-aae1249b-arden-dynamics-weekly-bulletin.md",
+      "source_id": "SRC-AAE1249B"
+    },
+    {
+      "bytes_sha256": "72a7dcdf9eedcbe3d31a8affed9b90353f94dbae8885cc2df38efcf518f94bef",
+      "kind": "markdown",
+      "logical_sha256": "d1ab831bb49aa443c1d4eb882d10368aa977caf187e9af0bb56beabff869f3c3",
+      "path": "sources/src-ab13f077-arden-institute-facilities-circular.md",
+      "source_id": "SRC-AB13F077"
+    },
+    {
+      "bytes_sha256": "0c831e16bc4e055baad269f5306ba8ced7795e11576a11611e58d978e223c20d",
+      "kind": "markdown",
+      "logical_sha256": "d12e1aa9b2469a96373afd6286545ac0ffd9c7677b4315e7454b829b583f45de",
+      "path": "sources/src-ac1bed9d-corvi-dynamics-monitoring-log.md",
+      "source_id": "SRC-AC1BED9D"
+    },
+    {
+      "bytes_sha256": "079f9d9d9e4c30d0ae3577aecf457812cdb7a9d5bad27557d8e16f9a6081382d",
+      "kind": "markdown",
+      "logical_sha256": "0e09b44222af5e3aca5752507c2a6b34c780d29225d9b22626d6aa5e5f007a0e",
+      "path": "sources/src-ac541c0d-project-sablespur-steering-decision.md",
+      "source_id": "SRC-AC541C0D"
+    },
+    {
+      "bytes_sha256": "ce41b869408d78c219027384d517812f7fdd8d01bb834c9eff59c0129cd11b19",
+      "kind": "markdown",
+      "logical_sha256": "fff1e2c8832c6103d19fd5ad2e3f2e9cb70107a6bd6a32b5ee4260302673ebc6",
+      "path": "sources/src-ac9b2291-tesselspan-ownership-record.md",
+      "source_id": "SRC-AC9B2291"
+    },
+    {
+      "bytes_sha256": "ecf91c96d85ab8635cdebf8f810df11b7e274d31a4ca50b6c87d5e4fad64a01a",
+      "kind": "markdown",
+      "logical_sha256": "c1c3d436f3fe60795c87455899319b43925aa3068523a383323bd94e3cc33235",
+      "path": "sources/src-af550db2-petra-dynamics-monitoring-log.md",
+      "source_id": "SRC-AF550DB2"
+    },
+    {
+      "bytes_sha256": "5382d992f06235389a4d143555fd834f157b5252b006ec16f0a4ce4df39a0a9e",
+      "kind": "markdown",
+      "logical_sha256": "0b5b7b737260478e1a79556d3ccef508f96068cf4a5b7d49a55fd787b5176797",
+      "path": "sources/src-af970832-petra-dynamics-quarterly-return.md",
+      "source_id": "SRC-AF970832"
+    },
+    {
+      "bytes_sha256": "a09d54d8ba4e5cecdb218f004cd089938fa0736f49a5667034b81e3ff63614b7",
+      "kind": "markdown",
+      "logical_sha256": "eb35f60854a4a658014761b7fd2c79ab3f80f58eeb6b2a12288097b014a2b215",
+      "path": "sources/src-b102e4e5-project-emberrun-second-drill-log.md",
+      "source_id": "SRC-B102E4E5"
+    },
+    {
+      "bytes_sha256": "260c1bb37bdfdbb3be24b01fb2a67a9bc5ecfca846914a1bbe49a8e386b96b4b",
+      "kind": "markdown",
+      "logical_sha256": "8d9a4ba284cdf05f7f0d31e866a0c3460d73034e895b7c2ee7ded9670369b283",
+      "path": "sources/src-b117bf1e-tessel-dynamics-weekly-bulletin.md",
+      "source_id": "SRC-B117BF1E"
+    },
+    {
+      "bytes_sha256": "21bc28e3901e61693bdfe76f7cdc48b994fb86faaff916a839fc650ddfea460b",
+      "kind": "markdown",
+      "logical_sha256": "62f06bbbfb638939814bb83b80d6851c727997520d561d6d9bdf7353360e2fbb",
+      "path": "sources/src-b14b67a8-ostra-dynamics-weekly-bulletin.md",
+      "source_id": "SRC-B14B67A8"
+    },
+    {
+      "bytes_sha256": "84b58518bc544966e8c64324544196cf996c0ababaacc8158d1e2641dcf576d0",
+      "kind": "markdown",
+      "logical_sha256": "3b7f67ac8ab4f32bf0b3f48a5f97d264886ca6a5106c79844918a0137359897a",
+      "path": "sources/src-b1a23e0a-project-driftcrest-retention-reminder.md",
+      "source_id": "SRC-B1A23E0A"
+    },
+    {
+      "bytes_sha256": "621694a36b51c03bd81b50e09510df0d980c471e0e52f3309016c5e609b73c8c",
+      "kind": "markdown",
+      "logical_sha256": "d541b0c8f6f27fad0a1e3acb94b575540f23cfadb2ecb9e04cc34b26ee6fe39c",
+      "path": "sources/src-b2fd7ca6-project-quarryrun-toolchain-decision.md",
+      "source_id": "SRC-B2FD7CA6"
+    },
+    {
+      "bytes_sha256": "6c744b7f52587f2a619bdd90ca89c9dfee0bb9c7b13e15824c0b675c0bb64a08",
+      "kind": "markdown",
+      "logical_sha256": "cb908fe77785ebeab152d624b460d848d9401cbb0a9979b3c5b80b4d91065d9a",
+      "path": "sources/src-b3250e55-project-valespur-hosting-reversal-memo.md",
+      "source_id": "SRC-B3250E55"
+    },
+    {
+      "bytes_sha256": "d8990809be16191a53965d0c08d6e74c36a7cc34e7989f6125ccf98e64aee071",
+      "kind": "markdown",
+      "logical_sha256": "a1c53441d7a65fc73100b331071d46dacea22f184d067dbb192ccf7bf484d925",
+      "path": "sources/src-b5a08d13-ostra-institute-board-session-digest.md",
+      "source_id": "SRC-B5A08D13"
+    },
+    {
+      "bytes_sha256": "988676147b554961755de3a341fb3f7cebe2c1429f1682df2b7e4172576133e4",
+      "kind": "markdown",
+      "logical_sha256": "7a22970f8686a8d2acd061b9b12c741d84cef98538a8202ad25a4c1b1639f82b",
+      "path": "sources/src-b68d9063-corvi-dynamics-monitoring-log.md",
+      "source_id": "SRC-B68D9063"
+    },
+    {
+      "bytes_sha256": "e68bfa020e8ce5aa196709cb6ae9bc8b9633ed8e4dbc3f49678588d550aa6a1f",
+      "kind": "markdown",
+      "logical_sha256": "c72ed96127f5f4fe46374d9ef115ce3da9bc21a0c6c826f40b4845bf925eb302",
+      "path": "sources/src-b76d8830-project-emberspur-replan-memo.md",
+      "source_id": "SRC-B76D8830"
+    },
+    {
+      "bytes_sha256": "86105d9ae71d4c68fb7364df35130620780f078306b1c82c63a06fedb6c40cb2",
+      "kind": "markdown",
+      "logical_sha256": "84df1405e630af85d949e8ea376b719df96643877a346c0ab9ca8d864e00d1d5",
+      "path": "sources/src-b79ce2f7-arden-dynamics-weekly-bulletin.md",
+      "source_id": "SRC-B79CE2F7"
+    },
+    {
+      "bytes_sha256": "d087b20297776940a93e41739e4233678a8660adc07db14e0123c71292afc34e",
+      "kind": "markdown",
+      "logical_sha256": "4ea05552bc80a358313bd0efd823b1fe6cb68afda13074a68e97e4dd3842113a",
+      "path": "sources/src-b7c2f5c5-project-larkfall-week-5-check.md",
+      "source_id": "SRC-B7C2F5C5"
+    },
+    {
+      "bytes_sha256": "ee218ccafe2ab9b39c9cbdf75a60978a1f083212c3a03e247fb8653582c0421e",
+      "kind": "markdown",
+      "logical_sha256": "ac497b038d794b7b3d6284c21647105ffc694b66776144f2341ef0574a55d11b",
+      "path": "sources/src-b970946d-petra-dynamics-monitoring-log.md",
+      "source_id": "SRC-B970946D"
+    },
+    {
+      "bytes_sha256": "327cd169542ae863cf4aba04b656d13a7b39317bb1c2a13cb5bd17625531999a",
+      "kind": "markdown",
+      "logical_sha256": "af33709b01bff2a130e54b2aac22803ce08fa556ad8038b74618e656f1f5e672",
+      "path": "sources/src-bbbddc6e-project-warrencrest-leadership-note.md",
+      "source_id": "SRC-BBBDDC6E"
+    },
+    {
+      "bytes_sha256": "855e7807f4fd87971fff7fb87de380d511e0e8b32b9632ace67c421aa82ca21f",
+      "kind": "markdown",
+      "logical_sha256": "fbfbd1ef03381172d4d7fdd78c666ae7c21ef485ed35a43654cf62597fba1daa",
+      "path": "sources/src-bf3d841d-project-hollowfall-shipment-record.md",
+      "source_id": "SRC-BF3D841D"
+    },
+    {
+      "bytes_sha256": "2dc9399c5b1eb58bef71bbacb65233e31c308a38f0c2b9c006d1e1e9ab171364",
+      "kind": "markdown",
+      "logical_sha256": "97b30079da77da2726dc4413af6f3224e01f061895e986f37fdf84c9f8547dbd",
+      "path": "sources/src-bfc693f9-lumo-dynamics-monitoring-log.md",
+      "source_id": "SRC-BFC693F9"
+    },
+    {
+      "bytes_sha256": "dc19d286b0f22c3ad0bb4b4c29f1bb1d7a47610bbda69b1d481cc0cd3b159fbb",
+      "kind": "markdown",
+      "logical_sha256": "e442c271a1519295519f8be3085dd3f3774f3e7c2f69abceb90a74eefc3edc51",
+      "path": "sources/src-c16c4de3-project-hollowreach-pilot-early-word.md",
+      "source_id": "SRC-C16C4DE3"
+    },
+    {
+      "bytes_sha256": "740ec610a422b6710ff3573e5dd92338964a9dd85403d1a2ff04fde7d8165d16",
+      "kind": "markdown",
+      "logical_sha256": "df07cd4a5793201c272879047626f917a7ce2be555b239aae0336e2202fcaabb",
+      "path": "sources/src-c40f428e-project-mossspur-steering-decision.md",
+      "source_id": "SRC-C40F428E"
+    },
+    {
+      "bytes_sha256": "5fe932a1e13e459744a4a0947378bbc58a946e71bd34e97ad099b80d53fada7b",
+      "kind": "markdown",
+      "logical_sha256": "5bc3a3c382bc43d486816949cea4eac6a9d34f1173f736b1aecd2b5f42427a36",
+      "path": "sources/src-c54d7d52-melmoor-depot-inspection-report.md",
+      "source_id": "SRC-C54D7D52"
+    },
+    {
+      "bytes_sha256": "f720e6bcee867e3db969166aee9c69746d3fd74163770197497e6cc3a6d67759",
+      "kind": "markdown",
+      "logical_sha256": "2cfbe496d5fb622a9169076f19794453176cceb2a136949570119377d67c5c75",
+      "path": "sources/src-c5b40ccf-compensation-memo-for-sadra-kordal.md",
+      "source_id": "SRC-C5B40CCF"
+    },
+    {
+      "bytes_sha256": "39634fe9d03bfd076ae9f2ed2f61c99597a8cfc9a16082971e3ef805b2b0b06c",
+      "kind": "markdown",
+      "logical_sha256": "f91574a2042708d8586dacb1b0e63d60dddc9cf8f09fbd249201bf57faab08a3",
+      "path": "sources/src-c5cfc5b8-meridifield-planning-brief.md",
+      "source_id": "SRC-C5CFC5B8"
+    },
+    {
+      "bytes_sha256": "2bd8bce943f37e1a227e51a654eb38160d04f1ac3419c839a218f7879f862926",
+      "kind": "markdown",
+      "logical_sha256": "bcd8806eb7a4cd5bef8660dbf8a24180028765b9a5e5f9a554a5e644b9d562a9",
+      "path": "sources/src-c61406f8-halden-dynamics-monitoring-log.md",
+      "source_id": "SRC-C61406F8"
+    },
+    {
+      "bytes_sha256": "c9f6d277574018d3c4e684bdea9bdb4a9262e709aef7679c53ad34fdb8c2af2e",
+      "kind": "markdown",
+      "logical_sha256": "b0b43102f998bf00027686207e4f43ec8bd689932825c1753c08c1811fa76952",
+      "path": "sources/src-c6d87fc6-project-valecrest-records-policy-note.md",
+      "source_id": "SRC-C6D87FC6"
+    },
+    {
+      "bytes_sha256": "7f607ea1446fd031b5092b437432a6979c22b2b239261c357a23a0b255a5fded",
+      "kind": "markdown",
+      "logical_sha256": "94dd2b78a6011bde1d503e81dd05cab7278654384e3603a09b01f4d395bf31d0",
+      "path": "sources/src-c7dfd4e4-project-cinderrun-week-5-check.md",
+      "source_id": "SRC-C7DFD4E4"
+    },
+    {
+      "bytes_sha256": "b79041e59abf60b49513918d97751fada62c43a2146d8f1650e81b604bc64361",
+      "kind": "markdown",
+      "logical_sha256": "33299b049e28e21e1cad6db24aaaf88422c233ef1180930ae8a1b3fccd692888",
+      "path": "sources/src-c838a586-vanta-group-partner-offer.md",
+      "source_id": "SRC-C838A586"
+    },
+    {
+      "bytes_sha256": "307a03ef042bf4aa78a016241882f25a402b7c97bc36d8efb3d6ea566797b457",
+      "kind": "markdown",
+      "logical_sha256": "01c1b7b118aec7be974bcbf29936cae846bcd709dc4a6d5a88f67d372e452c9e",
+      "path": "sources/src-c8a7433e-item.md",
+      "source_id": "SRC-C8A7433E"
+    },
+    {
+      "bytes_sha256": "07a4bc4d5da8e87dbdeec67469e4fa32ea3b81504ca01252fd24af06dda1f02b",
+      "kind": "markdown",
+      "logical_sha256": "0192ec3117740d77dabe1fd30d6fadd17549eee20467a57cae2013b120cec3c0",
+      "path": "sources/src-c91ce72a-halden-dynamics-monitoring-log.md",
+      "source_id": "SRC-C91CE72A"
+    },
+    {
+      "bytes_sha256": "af071bd1e49cf92e7e1086efc92aa0d40416a73d4b39a35b1dcf7c09a9c2a6ca",
+      "kind": "markdown",
+      "logical_sha256": "b08c0d5aeffbb8ac1711ec4c57ac39f7ed95dc9d70d6a550d11ba207206ade86",
+      "path": "sources/src-c932464d-project-quarrycrest-status-digest-refresh.md",
+      "source_id": "SRC-C932464D"
+    },
+    {
+      "bytes_sha256": "47a54c5a0c2cb0cbec7ffaaabbd2d5fb5f3588424eb7ac3c43ec551867bce13c",
+      "kind": "markdown",
+      "logical_sha256": "8ff64a5d60b4ad11da1105b79d136632178f21581ce4b5a24518a505c6e589c3",
+      "path": "sources/src-c9f5d495-project-warrenfall-deploy-runbook-operating-manual.md",
+      "source_id": "SRC-C9F5D495"
+    },
+    {
+      "bytes_sha256": "fe972de5bb29352560532c7b8872f622b5b8052333fe6cf7c557407429f1f2c5",
+      "kind": "markdown",
+      "logical_sha256": "2f44902b82219e9de2149a49425deeb5057d8b7d94bd6fb26720c2c28d074e76",
+      "path": "sources/src-c9fe41eb-ulmport-depot-inspection-report.md",
+      "source_id": "SRC-C9FE41EB"
+    },
+    {
+      "bytes_sha256": "b9885b6216ba7493a568d7923689eccc14c56e8b9d8d3596779224a2c109a952",
+      "kind": "markdown",
+      "logical_sha256": "fc82381f5b3de4d23c4b0d43fd1812a52855d5aae1472e87e2d86b7748b47ee7",
+      "path": "sources/src-ca79c170-arden-group-staffing-register.md",
+      "source_id": "SRC-CA79C170"
+    },
+    {
+      "bytes_sha256": "a1b37f10e2b62ffa781cf9f1acd3eb509ae1999630c47eabd94e748477e9b407",
+      "kind": "markdown",
+      "logical_sha256": "bccaeef8619d48b61f11cda00c94c34d0122393f6d93deb4666f73f8d312a671",
+      "path": "sources/src-cc398220-meridifield-lab-log.md",
+      "source_id": "SRC-CC398220"
+    },
+    {
+      "bytes_sha256": "2b4b89ed683751397cd882fe0354fe97a794c1aa5b5d35fcb2e949b6f1f1cce5",
+      "kind": "markdown",
+      "logical_sha256": "e2943298e47bb46c6859ba277ec35262a79f1fc46e6e10985d678aa5d4709aa1",
+      "path": "sources/src-cc3ce2d4-item.md",
+      "source_id": "SRC-CC3CE2D4"
+    },
+    {
+      "bytes_sha256": "b53ba983540c5638e397946b58f7c8cb2896dca823eea1f103da553bc64b6d9d",
+      "kind": "markdown",
+      "logical_sha256": "d7d5466488094a71e1efd7c2d01dec029aca4ac030799d2773fd21283f9d8d68",
+      "path": "sources/src-d0f33b29-project-larkreach-pilot-sign-off.md",
+      "source_id": "SRC-D0F33B29"
+    },
+    {
+      "bytes_sha256": "a48afd4bd6d943ff69dd30eff8d2a27624d9e2735358d169aa1c8dca23c35a49",
+      "kind": "markdown",
+      "logical_sha256": "dcaa9d3cf73dc31ca8357da8fb01a743f003ac7421deceddd1ea6b335a1be9e3",
+      "path": "sources/src-d18340f9-ostra-institute-standby-site-memo.md",
+      "source_id": "SRC-D18340F9"
+    },
+    {
+      "bytes_sha256": "6eb1f74a866a2cea524feb1ebee06e23cc3f4c171202d9fa5e7f6541597f6f45",
+      "kind": "markdown",
+      "logical_sha256": "9a57c58f5b47bb0d55a9e3bf16d437d5e1e4a2b9dad5f128f1b69901133a49e3",
+      "path": "sources/src-d1f5fb52-project-beaconcrest-records-policy-note.md",
+      "source_id": "SRC-D1F5FB52"
+    },
+    {
+      "bytes_sha256": "d1e118f2c7dbf5ac867e6c8504f691139c98979681d95410789744c6c7331c54",
+      "kind": "markdown",
+      "logical_sha256": "0fb81f008489154c48d1c3dc6a826128af57d52fa1576e0f6a227c6c27f1b75e",
+      "path": "sources/src-d20ae6b7-project-driftspur-hosting-decision.md",
+      "source_id": "SRC-D20AE6B7"
+    },
+    {
+      "bytes_sha256": "f7de108e007b58b55ccceabb494fa686db7e91cfdd1f4e5f773fbf0734874705",
+      "kind": "markdown",
+      "logical_sha256": "3b1db77f6a180fce20537e7164a29a901a17737701f174f93323df13a4d531b0",
+      "path": "sources/src-d211341a-project-driftcrest-status-digest.md",
+      "source_id": "SRC-D211341A"
+    },
+    {
+      "bytes_sha256": "e9a49f14a71784a189ee8920d31b59d8916b51b70e5560e8fe924fdb28c60d2d",
+      "kind": "markdown",
+      "logical_sha256": "743a0801f050f1dcd36097337c79b98390ba2afbd1010d1437f908586fdbe79a",
+      "path": "sources/src-d29c5f9c-vanta-studios-directory-extract.md",
+      "source_id": "SRC-D29C5F9C"
+    },
+    {
+      "bytes_sha256": "460571289390fb87f7a1ca3d7a5baa6f50b81dcaafd1c8ddfede0e1d8e8061e4",
+      "kind": "markdown",
+      "logical_sha256": "c54507ddfcff70dc0215fadacddaf0c9402ab4b6929ff22cdbd2d97de42432ce",
+      "path": "sources/src-d2ba8382-project-driftcrest-records-policy-note.md",
+      "source_id": "SRC-D2BA8382"
+    },
+    {
+      "bytes_sha256": "c96bd6fc200fc6e61637206673c7ef92f44509530957fdc0e89b3f7d020d81c2",
+      "kind": "markdown",
+      "logical_sha256": "060505894555fe0ddb0397a9fcb2fda032ba912d0c948e25fbe9e5d39cc17112",
+      "path": "sources/src-d2cdd28e-project-driftspur-hosting-reversal-memo.md",
+      "source_id": "SRC-D2CDD28E"
+    },
+    {
+      "bytes_sha256": "d959dc30f0f61e78969b77514cbe5508930276a25abfd8bd3530a1cef1cc2d13",
+      "kind": "markdown",
+      "logical_sha256": "4c4f1f637066c5fd98d125db8a5b35e7cc6098dd0ffbf01f4ac8aa50df3c14ab",
+      "path": "sources/src-d3a4108d-project-beaconcrest-retention-reminder.md",
+      "source_id": "SRC-D3A4108D"
+    },
+    {
+      "bytes_sha256": "8f6c9321ab4ea48f6acb34d99b000ef3819aac3e21998479aef8d19300b8e9f5",
+      "kind": "markdown",
+      "logical_sha256": "c45dcf841809da9394e73db890a3bebc5fb6ebe6837f00d0adc83b268010f660",
+      "path": "sources/src-d3be0587-vormont-depot-inspection-report.md",
+      "source_id": "SRC-D3BE0587"
+    },
+    {
+      "bytes_sha256": "42ba3fb30868a7708e137580ea49f34dbfb225e2a25987ddd1e0c2b30b032432",
+      "kind": "markdown",
+      "logical_sha256": "1ad12714fa267a0f94c0ca46b561d517b47f02c9c69434184997415d53ab00b7",
+      "path": "sources/src-d44ca132-project-emberrun-week-5-check.md",
+      "source_id": "SRC-D44CA132"
+    },
+    {
+      "bytes_sha256": "9462cb375f8db9e2264cdaf6a008da6b53ced8c4370fc48c62dcc9fa045680e5",
+      "kind": "markdown",
+      "logical_sha256": "3653573477817a1257949361f0bc5aef1894467f76b1b84d4a170d42c7ee633c",
+      "path": "sources/src-d4e4d66d-project-mossgate-rollout-plan.md",
+      "source_id": "SRC-D4E4D66D"
+    },
+    {
+      "bytes_sha256": "34ab95b476f5c66b4e9c57adf6fbdd07e400eab62e83f620db391dce37f499c0",
+      "kind": "markdown",
+      "logical_sha256": "fe11e751d35e864a368197b177e6ff34fb20f2bf8dfd8e2eac7e3d2df1c28d29",
+      "path": "sources/src-d6d25ab8-project-thistlespur-steering-decision.md",
+      "source_id": "SRC-D6D25AB8"
+    },
+    {
+      "bytes_sha256": "24bb6356176a39486a8fd37f7d121d7bd07dee1dc75c2f5183f3e5305ec3b80b",
+      "kind": "markdown",
+      "logical_sha256": "f80fd42a9684f2e8eb85f2a845084f363bcd0dcb50af41cf64a189a54516957e",
+      "path": "sources/src-d7a1b447-halden-dynamics-monitoring-log.md",
+      "source_id": "SRC-D7A1B447"
+    },
+    {
+      "bytes_sha256": "3dafccb401c9570befd7360d9468ce0ffee39b30fffc2097dcbe9d0220c513e1",
+      "kind": "markdown",
+      "logical_sha256": "a33e229321a7eaffa725b102ef4e43313ff41c4a65f4b512fa4a010a02ee5ca7",
+      "path": "sources/src-d84d8f4f-project-larkrun-first-drill-log.md",
+      "source_id": "SRC-D84D8F4F"
+    },
+    {
+      "bytes_sha256": "9397cb63ce6a9c5cc48e290701a7d62349617aa860e3b54aab913295f4d33230",
+      "kind": "markdown",
+      "logical_sha256": "24fcc37cd5f0dbe1cd2156b20699c66ba0f0ffe6a3dd9e73fa241081635af786",
+      "path": "sources/src-d87adb45-project-sablefield-planning-note-by-varic-veldal.md",
+      "source_id": "SRC-D87ADB45"
+    },
+    {
+      "bytes_sha256": "8a3284f29381dd77da0c9f0c6ffd9067119c29ca7a9eae61455d21ccaa66a244",
+      "kind": "markdown",
+      "logical_sha256": "afb084d94f1417bb98051c0f26799caa66876bc9de90f956371be322fe63cddf",
+      "path": "sources/src-d92dec97-ostra-group-staffing-register.md",
+      "source_id": "SRC-D92DEC97"
+    },
+    {
+      "bytes_sha256": "cdeba354298ac74a68804510b861556d3a6e0b6ef18f208d8bbabf610fdf2a56",
+      "kind": "markdown",
+      "logical_sha256": "aafaa0fcc189ec0d08ee6bb08d7aa974477f113fe1e72399df4c6b5c922eb2fa",
+      "path": "sources/src-da1f7bfd-project-larkreach-pilot-early-word.md",
+      "source_id": "SRC-DA1F7BFD"
+    },
+    {
+      "bytes_sha256": "7a34442019ac6c2fa43b540bf4250f0b03d836556e5534dfa128a2313cd355b2",
+      "kind": "markdown",
+      "logical_sha256": "4eac0e3b6577f3cf0f5f80c3e0663863bb70000a7ebf4a7e9a6843dfcfe95203",
+      "path": "sources/src-da4f4375-project-valecrest-status-digest-refresh.md",
+      "source_id": "SRC-DA4F4375"
+    },
+    {
+      "bytes_sha256": "5811c7becee56c5f35223cf0383fe4adb7657046b0dfd9bde3141966f8818eaf",
+      "kind": "markdown",
+      "logical_sha256": "954c3fba8352b363a7b7f7b24d984fefa437f8b3e1128949704ea0af0d3b5b21",
+      "path": "sources/src-da821b94-project-cinderfall-shipment-record.md",
+      "source_id": "SRC-DA821B94"
+    },
+    {
+      "bytes_sha256": "caa0d5a663c56a8e2f5e5411a435014ad4385da97af3bf73edb2983b542eb9b7",
+      "kind": "markdown",
+      "logical_sha256": "f85fa0db9799986cfb2c65a9cf40bf0fbf0ae10743888299d96be4f778ec40b4",
+      "path": "sources/src-dcf7abfd-project-hollowrun-pallet-consignment-record.md",
+      "source_id": "SRC-DCF7ABFD"
+    },
+    {
+      "bytes_sha256": "d30d0d46958b99ab067ea5d33a069ecb7526835ecc17318368be89775fdc9dc3",
+      "kind": "markdown",
+      "logical_sha256": "440974f71fb53f2c8a9bf529c4beecd8315ee11391132a75ce85c6db7ad4fc35",
+      "path": "sources/src-df661a4b-tessel-works-expansion-announcement.md",
+      "source_id": "SRC-DF661A4B"
+    },
+    {
+      "bytes_sha256": "4175c2b1599f0e4c45d103f51d784091f07c64d774e934b5d4d0870bb4586041",
+      "kind": "markdown",
+      "logical_sha256": "eb2b07f264c22a8543d7b7550acd71daa9e3bd8f813ba1b592a10135bdf8095e",
+      "path": "sources/src-df7aa1e2-tessel-institute-board-session-digest.md",
+      "source_id": "SRC-DF7AA1E2"
+    },
+    {
+      "bytes_sha256": "f35ee38b06cf3d403302e4ad4ca8389708c70092ef10e24b88c2b44fe70f1dd8",
+      "kind": "markdown",
+      "logical_sha256": "3db3327e02184b42aeda75d8296e66b8fec7706cbaef26445c3c57daa254a805",
+      "path": "sources/src-dfddeca7-lumo-analytics-promotion-notice.md",
+      "source_id": "SRC-DFDDECA7"
+    },
+    {
+      "bytes_sha256": "cca12b86a37d6c6b8dd7f2fc88a7ebcb35948baef4d649833112444a04e70a4d",
+      "kind": "csv",
+      "logical_sha256": "0261a621a269e7b71de632fa129831ad8a561c1c83b290e758acd385e78213bb",
+      "path": "sources/src-e0d73c89-project-cinderfall-capacity-sheet.csv",
+      "source_id": "SRC-E0D73C89"
+    },
+    {
+      "bytes_sha256": "ca206d2d73a9225370b610908cd45a64797430724e6b58b94166cdcfadddac39",
+      "kind": "markdown",
+      "logical_sha256": "53f209cec89a82ff9985e9fcd51b9ba8eda0545bbe29a73169a8c18077d765e2",
+      "path": "sources/src-e337bd6a-project-hollowreach-procurement-statement.md",
+      "source_id": "SRC-E337BD6A"
+    },
+    {
+      "bytes_sha256": "a1086f4b4c45f79778c181fd3fbbcb075d9ef08f99722fa8f21aa90472f00092",
+      "kind": "markdown",
+      "logical_sha256": "7debcd35355ee9c0cd98d8be4090eaf55eafc85127cca611056f173d2790fff4",
+      "path": "sources/src-e3704cb2-petra-dynamics-quarterly-return.md",
+      "source_id": "SRC-E3704CB2"
+    },
+    {
+      "bytes_sha256": "76dce1881269da97f253738ef0ad300f152be3d85f785935111916b3dc321a9d",
+      "kind": "markdown",
+      "logical_sha256": "fd88976fec2a8b66eab6b68fea676342928e1338ab93b869445a4afb66a043f9",
+      "path": "sources/src-e4865c88-kelva-institute-facilities-circular.md",
+      "source_id": "SRC-E4865C88"
+    },
+    {
+      "bytes_sha256": "e7d4185ce6e7f45aaa07174a672fdfcdcdbe3c653aab07c649d672ce96253bb6",
+      "kind": "markdown",
+      "logical_sha256": "273c8341d19a7e7de8b57f554804f8648198a8281441cb2afc5c4afb5b252b88",
+      "path": "sources/src-e4a30666-project-beaconrun-toolchain-decision.md",
+      "source_id": "SRC-E4A30666"
+    },
+    {
+      "bytes_sha256": "801fa74cd9d1acf8cbb96b1864a55c6be95d71e293b3d8ff75f8685bfb1827bd",
+      "kind": "markdown",
+      "logical_sha256": "f7cac67f952ff600fb152363e00d84c2d5ea08c224ac645dd4cd445c5078d969",
+      "path": "sources/src-e65ccfbd-project-larkfall-shipment-record.md",
+      "source_id": "SRC-E65CCFBD"
+    },
+    {
+      "bytes_sha256": "c0ffef85c9810e19567c76d415b743aa96d268577418331bdd8c07ee115b1a10",
+      "kind": "markdown",
+      "logical_sha256": "76793562352ca1710f81e14310c09f564ac1c17529b01fac2187c53e49d8c783",
+      "path": "sources/src-e699b95c-project-sablecrest-kickoff-note.md",
+      "source_id": "SRC-E699B95C"
+    },
+    {
+      "bytes_sha256": "22704b7c5424d91102b78052770a07c36b907d5a7cf9433e8d4be37144e7e1d9",
+      "kind": "markdown",
+      "logical_sha256": "666ba89751e0803cc5cfffdd46d4504d2ec5456e0800e6559f6ef85637275f22",
+      "path": "sources/src-e6c607a4-project-driftcrest-records-policy-note.md",
+      "source_id": "SRC-E6C607A4"
+    },
+    {
+      "bytes_sha256": "bcbafb971a30e99c6c1caed33165452d2e87bbb2b93e79105f948ecc346ad241",
+      "kind": "markdown",
+      "logical_sha256": "1a3c63fba51eb3b561c1239f5757d82ba5cee4e473ebaaa59951427a09e2941c",
+      "path": "sources/src-e6c992be-project-mossfield-planning-note-by-delric-kordal.md",
+      "source_id": "SRC-E6C992BE"
+    },
+    {
+      "bytes_sha256": "aedcbb74b9875199f16fc7bc0c76a32447ab6cee61ed5c6f492e03b2aeb5e7b4",
+      "kind": "markdown",
+      "logical_sha256": "ab55c83fbca71a1a2ebc552eaccc71d9a76a0abda5342f6a59554491a73c1ea8",
+      "path": "sources/src-e6e0ed65-kelva-dynamics-weekly-bulletin.md",
+      "source_id": "SRC-E6E0ED65"
+    },
+    {
+      "bytes_sha256": "a714e8d88bd5ab439a72bebf080e08d0c48159fda17b1c9a1cf820acf6c2cb0e",
+      "kind": "markdown",
+      "logical_sha256": "9711f6faac465bf3e15e4e77d30944a327962acd8eee18dda48c6326d2a0ad79",
+      "path": "sources/src-e8134fab-halden-dynamics-monitoring-log.md",
+      "source_id": "SRC-E8134FAB"
+    },
+    {
+      "bytes_sha256": "aed85b91560a24aa5021a54e52ee68c406c73f7aedb90562ad6a0041b6aa6f6b",
+      "kind": "markdown",
+      "logical_sha256": "a84b0bc26351ec313b3669eca2a67c4879d28c735a3549b62fb9a47360111c2a",
+      "path": "sources/src-e83fab8f-petra-dynamics-monitoring-log.md",
+      "source_id": "SRC-E83FAB8F"
+    },
+    {
+      "bytes_sha256": "9545051734b6732db2e63fff3c2926727bbe099e6797f2b8eeb54614dd7498ec",
+      "kind": "markdown",
+      "logical_sha256": "bbab6c9f346042e93348650866c10dfd74b2e8a35f64ae8e6ad1c3045f714ce7",
+      "path": "sources/src-e9f72146-corvi-dynamics-monitoring-log.md",
+      "source_id": "SRC-E9F72146"
+    },
+    {
+      "bytes_sha256": "9f1f7de73b74f68a624a692bf32bc405c138b7caf25c5076f74702c601140567",
+      "kind": "markdown",
+      "logical_sha256": "77e1d0e572399e2b85bbaaccb4376ce078ac8b3ecc77a686132dabb04db982b1",
+      "path": "sources/src-ed16eff6-arden-institute-standby-site-memo.md",
+      "source_id": "SRC-ED16EFF6"
+    },
+    {
+      "bytes_sha256": "2c581d8de6529d10eb8579241be86b0e68155d1d8087c4ed3834b39f6f7e9823",
+      "kind": "csv",
+      "logical_sha256": "f9b4aa5d49ec181dc60f3116b29975d4e7229e148d9ac53915ec50b251f4d889",
+      "path": "sources/src-ed3b4278-project-larkfall-capacity-sheet.csv",
+      "source_id": "SRC-ED3B4278"
+    },
+    {
+      "bytes_sha256": "c0d009108f8823659cc507a31198f9d4737b18f0726768c3138bd153c2fe4c73",
+      "kind": "markdown",
+      "logical_sha256": "aa69de3cea52cb356b8f464d794971fbfa95ae2083097002df6d94856b23bd45",
+      "path": "sources/src-edc02f50-project-quarrycrest-retention-reminder.md",
+      "source_id": "SRC-EDC02F50"
+    },
+    {
+      "bytes_sha256": "bce01b38922ddc17c3cad9d6fa62b3e30c04695f692ee4060d57147be235f628",
+      "kind": "markdown",
+      "logical_sha256": "da9f7b70611f5d1cbe2b6451f9efbc02b0426f7b46d9a058e64c8ac110fd6306",
+      "path": "sources/src-ee636476-project-driftrun-reporting-toolchain-proposal.md",
+      "source_id": "SRC-EE636476"
+    },
+    {
+      "bytes_sha256": "2da6309e511960573a9e75a5521eeb6967032678d0a5690c2ca0cbe88c0f0387",
+      "kind": "markdown",
+      "logical_sha256": "f0cdc939cb56606f251eaa3ab68dcb214bf2bf088aa4a46c6b76809691691c99",
+      "path": "sources/src-ee69fbf1-project-emberreach-pilot-early-word.md",
+      "source_id": "SRC-EE69FBF1"
+    },
+    {
+      "bytes_sha256": "1230c3836320f40415f913e52af1561f94e3e9cad80d86eb957a2165ee473032",
+      "kind": "markdown",
+      "logical_sha256": "01283814dd5b57a48f8d70b46fc45d4c72478870ee4333c713207bc88de20bbe",
+      "path": "sources/src-ef1ab024-project-emberrun-crate-consignment-record.md",
+      "source_id": "SRC-EF1AB024"
+    },
+    {
+      "bytes_sha256": "83d9a991d220b7c84abbcb2f4ee8b1b9cdb99177a7c44e2a48e6563fd7bcd8cc",
+      "kind": "markdown",
+      "logical_sha256": "022e2ff3c971f6181c4c65e0da5ddea7482020f2e09b8305c3c9088b6b9616d8",
+      "path": "sources/src-ef81f246-project-larkspur-replan-memo.md",
+      "source_id": "SRC-EF81F246"
+    },
+    {
+      "bytes_sha256": "8873e4a0026855aad5ab0dcadad89f8be1e05b54aa04b0b77b6ece09c8caea2f",
+      "kind": "markdown",
+      "logical_sha256": "b419b69ade16a31f93912d15205b5c330e1bbefd0f0ad0482481bc6b9155e878",
+      "path": "sources/src-f13c3192-item.md",
+      "source_id": "SRC-F13C3192"
+    },
+    {
+      "bytes_sha256": "a0e2760fc440201886788ee195f0db2a9b3c6d57fa4d9b1231063de139c75306",
+      "kind": "markdown",
+      "logical_sha256": "cb85ec0768b9b932eaf2f3a308f9d0edfb46d466e32bb4a2e6b998366b3bf5c7",
+      "path": "sources/src-f1a74038-project-larkfall-chart-note.md",
+      "source_id": "SRC-F1A74038"
+    },
+    {
+      "bytes_sha256": "d358adea1fee7a5646339e2f2faae9d66d1791af2b32bee0e29246db7d810061",
+      "kind": "markdown",
+      "logical_sha256": "ca9eb55413224474277b869cb5ea5aa0610de9fdccde5a209821d574b935e393",
+      "path": "sources/src-f25feff3-project-beaconcrest-scratch-jottings.md",
+      "source_id": "SRC-F25FEFF3"
+    },
+    {
+      "bytes_sha256": "38acb309d35f5ede18a226d30696cde55a182a8345bf714f53821dd2b8ff19e0",
+      "kind": "markdown",
+      "logical_sha256": "5ec80c1768ee75ecb212ace5e612ca5c5e6876acabe3050c1a23efc434f71314",
+      "path": "sources/src-f348a06c-lumo-dynamics-quarterly-return.md",
+      "source_id": "SRC-F348A06C"
+    },
+    {
+      "bytes_sha256": "78ef5ca7338fb08b5bd297efac2add60e7704027214caaff9361c34bcedcd4c9",
+      "kind": "markdown",
+      "logical_sha256": "9c8e77bfcc094437a3c9145ae85ada6001143fead349c17902ce0ad19b59eb64",
+      "path": "sources/src-f387ee40-project-beacongate-bench-readout.md",
+      "source_id": "SRC-F387EE40"
+    },
+    {
+      "bytes_sha256": "0c9b81549ea82d480ad32509f0fa6d7a24282a2d264b080b728e973a3f8b3429",
+      "kind": "markdown",
+      "logical_sha256": "f54356778f7f0eb5e36b6f102d17e37c2d14409c981344d7bf652afb354d2b62",
+      "path": "sources/src-f4935023-ostra-dynamics-weekly-bulletin.md",
+      "source_id": "SRC-F4935023"
+    },
+    {
+      "bytes_sha256": "3bc5aaaed32cb6fcbc9d0cce0324a2596ba49fe6dd90e4aa0ba040bb387de253",
+      "kind": "markdown",
+      "logical_sha256": "f26f5d2d018f1a587a56e4cdee728232b02e3e4e79d50cbc797ae22b32dd6bd8",
+      "path": "sources/src-f4edc2a3-project-larkrun-week-5-check.md",
+      "source_id": "SRC-F4EDC2A3"
+    },
+    {
+      "bytes_sha256": "ea2474f5524387d889ae66c5a0c36996c8e0aece9be9d230e17b5f06ea8f69d5",
+      "kind": "markdown",
+      "logical_sha256": "8be36894fe92ba9f1dcef6afcf8c5ed5f707f67e25c8c1e21478f297c03c0832",
+      "path": "sources/src-f6801b71-project-sablecrest-rename-memo.md",
+      "source_id": "SRC-F6801B71"
+    },
+    {
+      "bytes_sha256": "dfc6a1f49c93d659fb43dd960e512dfd05c02ea535f4118cff3bd02272c6a4b4",
+      "kind": "markdown",
+      "logical_sha256": "c540e009ae2c1c5823d0895082c04fabfa79675b82e9c4dabff57ee593e4087d",
+      "path": "sources/src-f6f4d098-project-hollowcrest-quarterly-audit.md",
+      "source_id": "SRC-F6F4D098"
+    },
+    {
+      "bytes_sha256": "2c74bc13cd9d9fac78e8d46c5f8ebc9f7024f793d48139ac95295063effe4cda",
+      "kind": "markdown",
+      "logical_sha256": "f5ffe9b9e08f6e484de5926da1588453abab34393fc8f9e8685005682fd73efc",
+      "path": "sources/src-f8215cba-project-hollowpoint-measurement-register.md",
+      "source_id": "SRC-F8215CBA"
+    },
+    {
+      "bytes_sha256": "5a4eb21bc5e5f1b9ccce6bd540ca229a16f2e7c52481ddd91bd34f6c2d9ae2c1",
+      "kind": "markdown",
+      "logical_sha256": "b8683945d2d5de1863bf255cb4c76fda92d02cf530270fc3c5cbab8769d87ce4",
+      "path": "sources/src-f8cdb3ba-meridimere-weekly-digest.md",
+      "source_id": "SRC-F8CDB3BA"
+    },
+    {
+      "bytes_sha256": "5322f45a3156cfe9b9632ccc92f5781c996911fe809cb6b56d540c42dc31da14",
+      "kind": "markdown",
+      "logical_sha256": "b28edc068ddc7ee9c426155050e99c7796b6edce695976d4bc30d097bed69f5b",
+      "path": "sources/src-f9b6a4c0-tessel-dynamics-weekly-bulletin.md",
+      "source_id": "SRC-F9B6A4C0"
+    },
+    {
+      "bytes_sha256": "49e21fa6634457b79e21752e1dc25d00798c4d36b7f3d7cee4980b8d07f9536c",
+      "kind": "markdown",
+      "logical_sha256": "1f2fb84ea359fe42ea582c7f585cb8bbdb76b1292a8380f68860d86cdb9d1a3d",
+      "path": "sources/src-fa6e7ab0-petra-dynamics-monitoring-log.md",
+      "source_id": "SRC-FA6E7AB0"
+    },
+    {
+      "bytes_sha256": "4d8c2fa69ca0f66c697c7e7a9b009203422edbb9be12a6f5e75c9d61f6bd1cd8",
+      "kind": "markdown",
+      "logical_sha256": "6805fee4e163da9f64b559df9c9a8848c68dae130f676211f0bcf8fa5d47da83",
+      "path": "sources/src-fc50d09b-project-cinderrun-crate-consignment-record.md",
+      "source_id": "SRC-FC50D09B"
+    },
+    {
+      "bytes_sha256": "53240deb5e32e7a0d595ca46323d08842afc5b324824e2842362a26f0fe19b92",
+      "kind": "markdown",
+      "logical_sha256": "f481362929f5479138a1cf4c3ca8728e8fc4c6a0a81df9e72ccf1eebe00c5f8c",
+      "path": "sources/src-fc5b13d2-project-cinderspur-replan-memo.md",
+      "source_id": "SRC-FC5B13D2"
+    },
+    {
+      "bytes_sha256": "74a8c92d1c660178d9669246022a33d1dd7c2aeadff4b8b53f841bb19c994c36",
+      "kind": "markdown",
+      "logical_sha256": "638876de5185e8361f96cd23f1dca67e626a2c6f43957afc06fa5ace80744315",
+      "path": "sources/src-fc8df42a-project-larkrun-week-7-check.md",
+      "source_id": "SRC-FC8DF42A"
+    },
+    {
+      "bytes_sha256": "91fbcc1cc6cb26d6c289c22811a764c2c473498351364fdb9ee3644132916912",
+      "kind": "markdown",
+      "logical_sha256": "ab74009b8bd0e7e42b00cc4e3c59e307a048a1bd311787950f16f98818ce7dc9",
+      "path": "sources/src-fc9ca752-ostra-dynamics-weekly-bulletin.md",
+      "source_id": "SRC-FC9CA752"
+    },
+    {
+      "bytes_sha256": "6e2784fdaabaf6de4b235d8b818281e51ef235acc675a18ad637349af1218ea3",
+      "kind": "markdown",
+      "logical_sha256": "8a030a657215aa0c1b1f177da21ad0cb5037618c9d33470b9abc24e567a5c658",
+      "path": "sources/src-fcaca9a3-project-larkrun-pallet-consignment-record.md",
+      "source_id": "SRC-FCACA9A3"
+    },
+    {
+      "bytes_sha256": "4329f9f2b3176fc576c5a749afc3238643f3e84a06abe91d8733a6b049c8e90b",
+      "kind": "markdown",
+      "logical_sha256": "cd9dae52be67a04231d713fd7cdd295d976679dcd4b02beb190988f9f00f2541",
+      "path": "sources/src-fd26d095-project-cinderreach-procurement-statement.md",
+      "source_id": "SRC-FD26D095"
+    }
+  ],
+  "counts": {
+    "claims": 340,
+    "conclusions": 348,
+    "entities": 160,
+    "events": 4,
+    "expected": 356,
+    "queries": 356,
+    "schedule_ops": 356,
+    "sources": 328
+  },
+  "degradations": [],
+  "generator_version": "membench-gen/0.1.0",
+  "master_seed": 1,
+  "renderer_versions": {
+    "membench-artifacts": "0.1.0",
+    "pillow": "12.2.0",
+    "pymupdf": "1.27.2.3"
+  },
+  "templates": [
+    {
+      "family": "query_behavior",
+      "summary": "Micro smoke scenario: supersession, as-of, canary recall, abstention, control",
+      "template_id": "t00_mini_smoke",
+      "variants": 4
+    },
+    {
+      "family": "temporal",
+      "summary": "Decision fully reversed later: current truth, as-of, change-and-why",
+      "template_id": "t01_temporal_reversal",
+      "variants": 4
+    },
+    {
+      "family": "temporal",
+      "summary": "One clause of a two-clause decision changes; the other stays current",
+      "template_id": "t02_partial_supersession",
+      "variants": 4
+    },
+    {
+      "family": "temporal",
+      "summary": "Week-1 event ingested in week 5: unknown before ingestion, known after",
+      "template_id": "t03_event_vs_ingestion",
+      "variants": 4
+    },
+    {
+      "family": "temporal",
+      "summary": "Retroactive disproof: same world week answered differently by knowledge week",
+      "template_id": "t04_late_evidence",
+      "variants": 4
+    },
+    {
+      "family": "temporal",
+      "summary": "Tentative future milestone: hedged plan answers, abstain on completion",
+      "template_id": "t05_future_plans",
+      "variants": 4
+    },
+    {
+      "family": "temporal",
+      "summary": "Offer with expiry: value before week 8, unknown/abstain afterwards",
+      "template_id": "t06_expiring_fact",
+      "variants": 4
+    },
+    {
+      "family": "epistemics",
+      "summary": "Register vs rumor: authoritative value answered, conflict acknowledged",
+      "template_id": "t07_authority_conflict",
+      "variants": 4
+    },
+    {
+      "family": "epistemics",
+      "summary": "Equal-authority disagreement stays disputed: hedge and cite both sides",
+      "template_id": "t08_equal_authority_dispute",
+      "variants": 4
+    },
+    {
+      "family": "epistemics",
+      "summary": "Tentative claims diverge: one confirmed, one disproved, answers track it",
+      "template_id": "t09_tentative_lifecycle",
+      "variants": 4
+    },
+    {
+      "family": "epistemics",
+      "summary": "Formal retraction: revoked statement abstained on, history still as-of",
+      "template_id": "t10_retraction",
+      "variants": 4
+    },
+    {
+      "family": "epistemics",
+      "summary": "Derived-from chain: answers must cite back to the original source",
+      "template_id": "t11_transitive_provenance",
+      "variants": 4
+    },
+    {
+      "family": "epistemics",
+      "summary": "Recorded absence answered; plausible-but-unsupported fact abstained",
+      "template_id": "t12_absence_vs_unsupported",
+      "variants": 4
+    },
+    {
+      "family": "maintenance",
+      "summary": "Triple ingestion with duplicate op, digest refresh, noise deletion",
+      "template_id": "t13_entropy_dedup",
+      "variants": 4
+    },
+    {
+      "family": "identity",
+      "summary": "Shared names need clarification; renames and role changes stay tracked",
+      "template_id": "t14_identity_graph",
+      "variants": 4
+    },
+    {
+      "family": "multimodal",
+      "summary": "CSV-only and PNG-only values, unit conversion, weekly trend",
+      "template_id": "t15_numeric_multimodal",
+      "variants": 4
+    },
+    {
+      "family": "governance",
+      "summary": "Audience rules, declassification, tombstone, and injection resistance",
+      "template_id": "t16_governance_audiences",
+      "variants": 4
+    },
+    {
+      "family": "procedural",
+      "summary": "Ordered how-to chain: current order, post-revision predecessor, as-of pre-revision order, precondition, never-existed step",
+      "template_id": "t17_procedural_chains",
+      "variants": 4
+    },
+    {
+      "family": "quantitative",
+      "summary": "Derived quantities: same-unit sum, kg/g conversion sum, weekly ratio, abstention",
+      "template_id": "t18_quantitative",
+      "variants": 4
+    },
+    {
+      "family": "negation_counterfactual",
+      "summary": "Recorded-false answered with rejection; not-recorded sibling abstained",
+      "template_id": "t19_negation_counterfactual",
+      "variants": 4
+    },
+    {
+      "family": "cross_lingual",
+      "summary": "Cyrillic sources queried through Latin aliases: direct recall, supersession, abstention, and same-script control",
+      "template_id": "t20_cross_lingual",
+      "variants": 4
+    },
+    {
+      "family": "preference_attribution",
+      "summary": "Holder-bound opinions: changed position, objective contrast, abstention",
+      "template_id": "t21_preference_attribution",
+      "variants": 4
+    },
+    {
+      "family": "source_reliability",
+      "summary": "Recurring bulletin: two corrections, clean contrast, fresh hedging",
+      "template_id": "t22_source_reliability",
+      "variants": 4
+    },
+    {
+      "family": "sub_day_temporality",
+      "summary": "Same-day reading stream ordered only by captured intra-day instants",
+      "template_id": "t23_sub_day_temporality",
+      "variants": 4
+    }
+  ]
+}

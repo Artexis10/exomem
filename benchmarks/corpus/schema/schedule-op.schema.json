@@ -1,0 +1,72 @@
+{
+  "$defs": {
+    "ScheduleOpKind": {
+      "enum": [
+        "ingest_source",
+        "correct_source",
+        "delete_source",
+        "duplicate_source",
+        "merge_entities",
+        "split_entity",
+        "user_correction",
+        "snapshot"
+      ],
+      "title": "ScheduleOpKind",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "entity_ids": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Entity Ids",
+      "type": "array"
+    },
+    "note": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Note"
+    },
+    "op": {
+      "$ref": "#/$defs/ScheduleOpKind"
+    },
+    "seq": {
+      "minimum": 0,
+      "title": "Seq",
+      "type": "integer"
+    },
+    "source_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Source Id"
+    },
+    "week": {
+      "minimum": 0,
+      "title": "Week",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "week",
+    "seq",
+    "op"
+  ],
+  "title": "ScheduleOp",
+  "type": "object"
+}

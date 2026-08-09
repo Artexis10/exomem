@@ -1,5 +1,13 @@
 ## Why
 
+> **Scope note (2026-07-31):** the cross-product *comparison* scope of this
+> change is superseded by `add-memory-proof-benchmark` (neutral corpus,
+> capability-declaring adapters, deterministic scoring, per-dimension
+> reporting). The perf-only lanes below — persistent-server latency/RSS
+> (`scripts/compare_memory_servers.py`), the `--rss` flag, and the startup
+> benchmark (`scripts/startup_benchmark.py`, which now exists) — remain this
+> change's scope; narrow or archive deliberately.
+
 The existing benchmark story has three measured gaps. First, the basic-memory comparison
 (2026-07-07/08, KB research notes) measured basic-memory through its one-shot CLI wrapper
 (~6.6–7.1 s/query, 15.1-minute first index) — but never as a persistent MCP server, which is
