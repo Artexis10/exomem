@@ -22,6 +22,8 @@ ARTIFACT_TYPE = "memorybench_http_recording"
 DEFAULT_MAX_BODY_BYTES = 4 * 1024 * 1024
 DEFAULT_UPSTREAM_TIMEOUT_SECONDS = 30.0
 REDACTED = "[redacted]"
+MAX_DECODE_ITERATIONS = 32
+MAX_DECODE_COMPONENT_CHARS = 4 * 1024 * 1024
 EXPECTED_SDK_VERSION = "4.0.0"
 EXPECTED_SDK_INTEGRITY = (
     "sha512-xMN05PQ8kTv8DuXa2qf8h/9LaRI7v1Kz3Tutt97JPq+PzhGabKLv5YVbSgqHiPX5yXc"
@@ -208,11 +210,59 @@ class HttpAttempt(StrictModel):
                 {
                     "if": {"properties": {"outcome": {"const": "forwarded"}}, "required": ["outcome"]},
                     "then": {
-                        "properties": {
-                            "response": {"not": {"type": "null"}},
-                            "upstream_status": {"type": "integer"},
-                            "error_code": {"type": "null"},
-                        }
+                        "allOf": [
+                            {
+                                "properties": {
+                                    "request": {
+                                        "properties": {
+                                            "body": {
+                                                "properties": {
+                                                    "state": {"not": {"const": "rejected"}}
+                                                },
+                                                "required": ["state"],
+                                            }
+                                        },
+                                        "required": ["body"],
+                                    },
+                                    "response": {
+                                        "allOf": [
+                                            {"not": {"type": "null"}},
+                                            {
+                                                "properties": {
+                                                    "body": {
+                                                        "properties": {
+                                                            "state": {"not": {"const": "rejected"}}
+                                                        },
+                                                        "required": ["state"],
+                                                    }
+                                                },
+                                                "required": ["body"],
+                                            },
+                                        ]
+                                    },
+                                    "upstream_status": {"type": "integer"},
+                                    "error_code": {"type": "null"},
+                                },
+                                "required": ["response", "upstream_status"],
+                            },
+                            {
+                                "oneOf": [
+                                    {
+                                        "properties": {
+                                            "client_status": {"const": status},
+                                            "upstream_status": {"const": status},
+                                            "response": {
+                                                "properties": {
+                                                    "status_code": {"const": status}
+                                                },
+                                                "required": ["status_code"],
+                                            },
+                                        }
+                                    }
+                                    for status in range(100, 600)
+                                ]
+                            },
+                        ]
                     },
                 },
                 {
@@ -223,18 +273,70 @@ class HttpAttempt(StrictModel):
                             "upstream_status": {"type": "null"},
                             "client_status": {"const": 400},
                             "error_code": {"enum": sorted(_REQUEST_ERROR_CODES)},
-                        }
+                            "request": {
+                                "properties": {
+                                    "body": {
+                                        "properties": {"state": {"const": "rejected"}},
+                                        "required": ["state"],
+                                    }
+                                },
+                                "required": ["body"],
+                            },
+                        },
+                        "required": ["error_code"],
                     },
                 },
                 {
                     "if": {"properties": {"outcome": {"const": "response_rejected"}}, "required": ["outcome"]},
                     "then": {
                         "properties": {
-                            "response": {"not": {"type": "null"}},
                             "upstream_status": {"type": "integer"},
                             "client_status": {"const": 502},
                             "error_code": {"const": "upstream_response_invalid"},
-                        }
+                            "request": {
+                                "properties": {
+                                    "body": {
+                                        "properties": {
+                                            "state": {"not": {"const": "rejected"}}
+                                        },
+                                        "required": ["state"],
+                                    }
+                                }
+                            },
+                            "response": {
+                                "allOf": [
+                                    {"not": {"type": "null"}},
+                                    {
+                                        "properties": {
+                                            "body": {
+                                                "properties": {"state": {"const": "rejected"}},
+                                                "required": ["state"],
+                                            }
+                                        },
+                                        "required": ["body"],
+                                    },
+                                ]
+                            },
+                        },
+                        "required": ["response", "upstream_status", "error_code"],
+                        "allOf": [
+                            {
+                                "oneOf": [
+                                    {
+                                        "properties": {
+                                            "upstream_status": {"const": status},
+                                            "response": {
+                                                "properties": {
+                                                    "status_code": {"const": status}
+                                                },
+                                                "required": ["status_code"],
+                                            },
+                                        }
+                                    }
+                                    for status in range(100, 600)
+                                ]
+                            }
+                        ],
                     },
                 },
                 {
@@ -245,7 +347,18 @@ class HttpAttempt(StrictModel):
                             "upstream_status": {"type": "null"},
                             "client_status": {"const": 502},
                             "error_code": {"const": "upstream_unavailable"},
-                        }
+                            "request": {
+                                "properties": {
+                                    "body": {
+                                        "properties": {
+                                            "state": {"not": {"const": "rejected"}}
+                                        },
+                                        "required": ["state"],
+                                    }
+                                }
+                            },
+                        },
+                        "required": ["error_code"],
                     },
                 },
             ]
@@ -308,9 +421,9 @@ class HttpAttempt(StrictModel):
 
 
 class InterceptionDeclaration(StrictModel):
-    environment_variable: Literal["SUPERMEMORY_BASE_URL"] = "SUPERMEMORY_BASE_URL"
-    provider_modified: Literal[False] = False
-    sdk_modified: Literal[False] = False
+    environment_variable: Literal["SUPERMEMORY_BASE_URL"]
+    provider_modified: Literal[False]
+    sdk_modified: Literal[False]
 
 
 class RecordingLimits(StrictModel):
@@ -319,8 +432,8 @@ class RecordingLimits(StrictModel):
 
 
 class TimingPolicy(StrictModel):
-    latency_publishable: Literal[False] = False
-    reason: Literal["host_unvalidated"] = "host_unvalidated"
+    latency_publishable: Literal[False]
+    reason: Literal["host_unvalidated"]
 
 
 class RecordingManifest(StrictModel):
@@ -344,23 +457,24 @@ class RecordingManifest(StrictModel):
                             "completed_at": {"type": "string"},
                             "attempt_count": {"type": "integer", "minimum": 1},
                             "attempts_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-                        }
+                        },
+                        "required": ["completed_at", "attempt_count", "attempts_sha256"],
                     },
                 },
             ]
         }
     )
 
-    artifact_type: Literal[ARTIFACT_TYPE] = ARTIFACT_TYPE
-    schema_version: Literal[SCHEMA_VERSION] = SCHEMA_VERSION
+    artifact_type: Literal[ARTIFACT_TYPE]
+    schema_version: Literal[SCHEMA_VERSION]
     status: Literal["recording", "complete"]
     started_at: AwareDatetime
     completed_at: AwareDatetime | None = None
-    interception: InterceptionDeclaration = Field(default_factory=InterceptionDeclaration)
+    interception: InterceptionDeclaration
     pins: HarnessPins
     limits: RecordingLimits
-    timing_policy: TimingPolicy = Field(default_factory=TimingPolicy)
-    attempts_file: Literal["http-attempts.jsonl"] = "http-attempts.jsonl"
+    timing_policy: TimingPolicy
+    attempts_file: Literal["http-attempts.jsonl"]
     attempt_count: int | None = Field(default=None, ge=1)
     attempts_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
 
@@ -417,19 +531,30 @@ def export_json_schemas(output_dir: Path) -> list[Path]:
     return paths
 
 
-def _decoded_stages(value: str, *, plus_as_space: bool) -> tuple[str, ...]:
+def _decoded_stages(
+    value: str,
+    *,
+    plus_as_space: bool,
+) -> tuple[tuple[str, ...], bool]:
     stages = [value]
+    if len(value) > MAX_DECODE_COMPONENT_CHARS:
+        return tuple(stages), False
     decoder = unquote_plus if plus_as_space else unquote
-    for _ in range(3):
+    for _ in range(MAX_DECODE_ITERATIONS):
         decoded = decoder(stages[-1])
+        if len(decoded) > MAX_DECODE_COMPONENT_CHARS:
+            return tuple(stages), False
         if decoded == stages[-1]:
-            break
+            return tuple(stages), True
         stages.append(decoded)
-    return tuple(stages)
+    return tuple(stages), False
 
 
 def is_sensitive_name(name: str, *, plus_as_space: bool = False) -> bool:
-    for stage in _decoded_stages(name, plus_as_space=plus_as_space):
+    stages, complete = _decoded_stages(name, plus_as_space=plus_as_space)
+    if not complete:
+        return True
+    for stage in stages:
         normalized = stage.lower().replace("-", "_")
         if any(part.replace("-", "_") in normalized for part in _SENSITIVE_PARTS):
             return True
@@ -441,14 +566,15 @@ def _secret_values(configured_secrets: tuple[str, ...]) -> tuple[str, ...]:
 
 
 def _contains_secret(
-    value: str,
+    value_stages: tuple[str, ...],
     secrets: tuple[str, ...],
     *,
     plus_as_space: bool,
 ) -> bool:
-    value_stages = _decoded_stages(value, plus_as_space=plus_as_space)
     for secret in secrets:
-        secret_stages = _decoded_stages(secret, plus_as_space=plus_as_space)
+        secret_stages, complete = _decoded_stages(secret, plus_as_space=plus_as_space)
+        if not complete:
+            return True
         if any(secret_stage in value_stage for secret_stage in secret_stages for value_stage in value_stages):
             return True
     return False
@@ -462,8 +588,10 @@ def sanitize_component(
     plus_as_space: bool = False,
 ) -> tuple[str, int]:
     secrets = _secret_values(secrets)
-    stages = _decoded_stages(value, plus_as_space=plus_as_space)
-    if _contains_secret(value, secrets, plus_as_space=plus_as_space) or (
+    stages, complete = _decoded_stages(value, plus_as_space=plus_as_space)
+    if not complete:
+        return REDACTED, 1
+    if _contains_secret(stages, secrets, plus_as_space=plus_as_space) or (
         classify_name and is_sensitive_name(value, plus_as_space=plus_as_space)
     ):
         return REDACTED, 1
@@ -640,11 +768,16 @@ def _validate_message_correlation(
     *,
     max_body_bytes: int,
     rejected: bool,
+    allow_oversized_declared_bytes: bool = False,
 ) -> None:
     body = message.body
     if not rejected and (
         body.observed_bytes > max_body_bytes
-        or (body.declared_bytes is not None and body.declared_bytes > max_body_bytes)
+        or (
+            not allow_oversized_declared_bytes
+            and body.declared_bytes is not None
+            and body.declared_bytes > max_body_bytes
+        )
     ):
         raise RecordingError("attempt_body_exceeds_limit")
     if rejected:
@@ -683,15 +816,20 @@ def _validate_attempt_correlation(
         raise RecordingError("attempt_header_body_mismatch")
     if attempt.response is None:
         return
+    method = attempt.request.method.upper()
+    status = attempt.response.status_code
+    allow_representation_length = (
+        attempt.response.body.state == "absent"
+        and (method == "HEAD" or status == 304)
+    )
     _validate_message_correlation(
         attempt.response,
         max_body_bytes=manifest.limits.max_body_bytes,
         rejected=attempt.response.body.state == "rejected",
+        allow_oversized_declared_bytes=allow_representation_length,
     )
     if attempt.response.body.state == "rejected":
         return
-    method = attempt.request.method.upper()
-    status = attempt.response.status_code
     body_forbidden = method == "HEAD" or status in {204, 205, 304} or 100 <= status < 200
     if body_forbidden and attempt.response.body.state != "absent":
         raise RecordingError("attempt_header_body_mismatch")
@@ -700,6 +838,13 @@ def _validate_attempt_correlation(
         and attempt.response.body.declared_bytes not in (None, 0)
         and not (method == "HEAD" or status == 304)
     ):
+        raise RecordingError("attempt_header_body_mismatch")
+    absent_body_is_legal = (
+        method == "HEAD"
+        or status in {204, 205, 304}
+        or 300 <= status < 400
+    )
+    if attempt.response.body.state == "absent" and not absent_body_is_legal:
         raise RecordingError("attempt_header_body_mismatch")
 
 
@@ -732,10 +877,22 @@ class RecordingWriter:
         except OSError as exc:
             raise RecordingError("artifact_write_failed") from exc
         self.manifest = RecordingManifest(
+            artifact_type=ARTIFACT_TYPE,
+            schema_version=SCHEMA_VERSION,
             status="recording",
             started_at=utc_now(),
+            interception=InterceptionDeclaration(
+                environment_variable="SUPERMEMORY_BASE_URL",
+                provider_modified=False,
+                sdk_modified=False,
+            ),
             pins=validated_pins,
             limits=validated_limits,
+            timing_policy=TimingPolicy(
+                latency_publishable=False,
+                reason="host_unvalidated",
+            ),
+            attempts_file="http-attempts.jsonl",
         )
         _atomic_write(
             output_dir / "recording-manifest.json",

@@ -506,10 +506,15 @@ def _inspect_response_headers(
     *,
     max_body_bytes: int,
     accepted_encodings: set[str],
+    allow_oversized_declared_bytes: bool,
 ) -> tuple[HeaderFacts, tuple[str, ...]]:
     grouped = _group_headers(headers)
     declared_bytes = _content_length(grouped)
-    if declared_bytes is not None and declared_bytes > max_body_bytes:
+    if (
+        declared_bytes is not None
+        and declared_bytes > max_body_bytes
+        and not allow_oversized_declared_bytes
+    ):
         raise RequestRefusal("body_too_large")
     transfer_values = grouped.get("transfer-encoding", [])
     if transfer_values:
@@ -520,8 +525,41 @@ def _inspect_response_headers(
     return HeaderFacts(declared_bytes=declared_bytes), encodings
 
 
+def _decompress_gzip_members(data: bytes, max_body_bytes: int) -> bytes:
+    remaining = data
+    decoded = bytearray()
+    member_count = 0
+    while remaining:
+        member_count += 1
+        try:
+            decompressor = zlib.decompressobj(zlib.MAX_WBITS | 16)
+            budget = max_body_bytes - len(decoded)
+            member = decompressor.decompress(remaining, budget + 1)
+            if len(member) > budget or decompressor.unconsumed_tail:
+                raise RequestRefusal("body_too_large")
+            member += decompressor.flush(budget + 1 - len(member))
+            if len(member) > budget:
+                raise RequestRefusal("body_too_large")
+            if not decompressor.eof:
+                raise RequestRefusal("invalid_json")
+            next_member = decompressor.unused_data
+            if next_member == remaining:
+                raise RequestRefusal("invalid_json")
+            decoded.extend(member)
+            remaining = next_member
+        except RequestRefusal:
+            raise
+        except zlib.error as exc:
+            raise RequestRefusal("invalid_json") from exc
+    if member_count == 0:
+        raise RequestRefusal("invalid_json")
+    return bytes(decoded)
+
+
 def _decompress_bounded(data: bytes, encoding: str, max_body_bytes: int) -> bytes:
-    window_bits = zlib.MAX_WBITS | 16 if encoding == "gzip" else zlib.MAX_WBITS
+    if encoding == "gzip":
+        return _decompress_gzip_members(data, max_body_bytes)
+    window_bits = zlib.MAX_WBITS
     try:
         decompressor = zlib.decompressobj(window_bits)
         decoded = decompressor.decompress(data, max_body_bytes + 1)
@@ -539,7 +577,7 @@ def _decompress_bounded(data: bytes, encoding: str, max_body_bytes: int) -> byte
     except RequestRefusal:
         raise
     except zlib.error as exc:
-        if encoding == "deflate" and window_bits == zlib.MAX_WBITS:
+        if encoding == "deflate":
             try:
                 decompressor = zlib.decompressobj(-zlib.MAX_WBITS)
                 decoded = decompressor.decompress(data, max_body_bytes + 1)
@@ -831,6 +869,9 @@ class RecordingProxy:
                 response_headers,
                 max_body_bytes=self.writer.max_body_bytes,
                 accepted_encodings=_accepted_content_encodings(headers),
+                allow_oversized_declared_bytes=(
+                    method.upper() == "HEAD" or response_status == 304
+                ),
             )
             response_data = bytearray()
             if upstream_response.is_stream_consumed:

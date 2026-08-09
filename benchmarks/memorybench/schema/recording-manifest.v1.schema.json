@@ -44,23 +44,25 @@
       "properties": {
         "environment_variable": {
           "const": "SUPERMEMORY_BASE_URL",
-          "default": "SUPERMEMORY_BASE_URL",
           "title": "Environment Variable",
           "type": "string"
         },
         "provider_modified": {
           "const": false,
-          "default": false,
           "title": "Provider Modified",
           "type": "boolean"
         },
         "sdk_modified": {
           "const": false,
-          "default": false,
           "title": "Sdk Modified",
           "type": "boolean"
         }
       },
+      "required": [
+        "environment_variable",
+        "provider_modified",
+        "sdk_modified"
+      ],
       "title": "InterceptionDeclaration",
       "type": "object"
     },
@@ -90,17 +92,19 @@
       "properties": {
         "latency_publishable": {
           "const": false,
-          "default": false,
           "title": "Latency Publishable",
           "type": "boolean"
         },
         "reason": {
           "const": "host_unvalidated",
-          "default": "host_unvalidated",
           "title": "Reason",
           "type": "string"
         }
       },
+      "required": [
+        "latency_publishable",
+        "reason"
+      ],
       "title": "TimingPolicy",
       "type": "object"
     }
@@ -156,14 +160,18 @@
           "completed_at": {
             "type": "string"
           }
-        }
+        },
+        "required": [
+          "completed_at",
+          "attempt_count",
+          "attempts_sha256"
+        ]
       }
     }
   ],
   "properties": {
     "artifact_type": {
       "const": "memorybench_http_recording",
-      "default": "memorybench_http_recording",
       "title": "Artifact Type",
       "type": "string"
     },
@@ -182,7 +190,6 @@
     },
     "attempts_file": {
       "const": "http-attempts.jsonl",
-      "default": "http-attempts.jsonl",
       "title": "Attempts File",
       "type": "string"
     },
@@ -223,7 +230,6 @@
     },
     "schema_version": {
       "const": 1,
-      "default": 1,
       "title": "Schema Version",
       "type": "integer"
     },
@@ -245,10 +251,15 @@
     }
   },
   "required": [
+    "artifact_type",
+    "schema_version",
     "status",
     "started_at",
+    "interception",
     "pins",
-    "limits"
+    "limits",
+    "timing_policy",
+    "attempts_file"
   ],
   "title": "RecordingManifest",
   "type": "object"

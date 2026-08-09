@@ -8,8 +8,10 @@ import concurrent.futures
 import gzip
 import hashlib
 import json
+import zlib
 from datetime import datetime, timedelta
 from pathlib import Path
+from urllib.parse import quote
 
 import httpx
 import pytest
@@ -52,6 +54,66 @@ def _proxy(tmp_path: Path, handler=_response, *, secrets: tuple[str, ...] = ("ne
 
 def _run(coro):
     return asyncio.run(coro)
+
+
+async def _feedback3_real_response_round_trip(
+    tmp_path: Path,
+    *,
+    method: str,
+    upstream_response: bytes,
+    max_body_bytes: int = 4 * 1024 * 1024,
+    request_headers: dict[str, str] | None = None,
+    raw_downstream: bool = False,
+) -> tuple[httpx.Response | bytes, dict[str, object], Path, bytes]:
+    from benchmarks.memorybench.recording_proxy import RecordingProxy
+    from benchmarks.memorybench.traffic import RecordingWriter
+
+    observed_head = bytearray()
+
+    async def upstream(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        observed_head.extend(await reader.readuntil(b"\r\n\r\n"))
+        writer.write(upstream_response)
+        await writer.drain()
+        writer.close()
+        await writer.wait_closed()
+
+    upstream_server = await asyncio.start_server(upstream, "127.0.0.1", 0)
+    upstream_port = upstream_server.sockets[0].getsockname()[1]
+    recording = tmp_path / "recording"
+    writer = RecordingWriter(recording, pins=PINS, max_body_bytes=max_body_bytes)
+    proxy = RecordingProxy(f"http://127.0.0.1:{upstream_port}", writer)
+    base_url = await proxy.start("127.0.0.1", 0)
+    try:
+        if raw_downstream:
+            proxy_port = int(base_url.rsplit(":", 1)[1])
+            reader, client_writer = await asyncio.open_connection("127.0.0.1", proxy_port)
+            request_head = [
+                f"{method} /v3/documents/a HTTP/1.1\r\n".encode(),
+                b"Host: 127.0.0.1\r\n",
+            ]
+            request_head.extend(
+                f"{name}: {value}\r\n".encode()
+                for name, value in (request_headers or {}).items()
+            )
+            request_head.append(b"Connection: close\r\n\r\n")
+            client_writer.write(b"".join(request_head))
+            await client_writer.drain()
+            response = await asyncio.wait_for(reader.read(), timeout=1)
+            client_writer.close()
+            await client_writer.wait_closed()
+        else:
+            async with httpx.AsyncClient() as client:
+                response = await client.request(
+                    method,
+                    f"{base_url}/v3/documents/a",
+                    headers=request_headers,
+                )
+    finally:
+        await proxy.close()
+        upstream_server.close()
+        await upstream_server.wait_closed()
+    row = json.loads((recording / "http-attempts.jsonl").read_text())
+    return response, row, recording, bytes(observed_head)
 
 
 def test_manifest_pins_verified_harness_provider_and_sdk(tmp_path: Path) -> None:
@@ -979,9 +1041,9 @@ def test_correction_writer_serializes_concurrent_rows(tmp_path: Path) -> None:
             attempt_ordinal=ordinal,
             started_at=writer.manifest.started_at,
             request=HttpRequest(method="GET", path=f"/{ordinal}", body=empty),
-            response=HttpResponse(status_code=200, body=empty),
-            upstream_status=200,
-            client_status=200,
+            response=HttpResponse(status_code=204, body=empty),
+            upstream_status=204,
+            client_status=204,
             outcome="forwarded",
             timing=Timing(ms=1),
         ))
@@ -1270,8 +1332,10 @@ def test_feedback2_exported_schemas_reject_impossible_cross_fields() -> None:
         HttpAttempt,
         HttpRequest,
         HttpResponse,
+        InterceptionDeclaration,
         RecordingLimits,
         RecordingManifest,
+        TimingPolicy,
         Timing,
     )
 
@@ -1291,10 +1355,22 @@ def test_feedback2_exported_schemas_reject_impossible_cross_fields() -> None:
     impossible_attempt = json.loads(json.dumps(attempt))
     impossible_attempt["response"] = None
     manifest = RecordingManifest(
+        artifact_type="memorybench_http_recording",
+        schema_version=1,
         status="recording",
         started_at=datetime.fromisoformat("2026-08-09T00:00:00+00:00"),
+        interception=InterceptionDeclaration(
+            environment_variable="SUPERMEMORY_BASE_URL",
+            provider_modified=False,
+            sdk_modified=False,
+        ),
         pins=HarnessPins.model_validate(PINS),
         limits=RecordingLimits(max_body_bytes=100, upstream_timeout_seconds=30.0),
+        timing_policy=TimingPolicy(
+            latency_publishable=False,
+            reason="host_unvalidated",
+        ),
+        attempts_file="http-attempts.jsonl",
     ).model_dump(mode="json")
     impossible_manifest = dict(manifest, status="complete")
 
@@ -1470,3 +1546,437 @@ def test_feedback2_bun_parser_accepts_jsonc_and_trailing_commas() -> None:
     }'''
 
     assert extract_supermemory_sdk_pin(bun_lock) == ("4.0.0", PINS["sdk_integrity"])
+
+
+def test_feedback3_deeply_encoded_configured_and_environment_secrets_fail_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    seen: list[httpx.Request] = []
+
+    def encode_layers(value: str, count: int) -> list[str]:
+        forms = [value]
+        for _ in range(count):
+            forms.append(quote(forms[-1], safe=""))
+        return forms
+
+    configured_forms = encode_layers("configured+secret", 40)
+    environment_forms = encode_layers("environment+secret", 4)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(
+            200,
+            headers={"content-type": "application/json"},
+            content=b'{"ok":true}',
+            request=request,
+        )
+
+    monkeypatch.setenv("SUPERMEMORY_API_KEY", environment_forms[0])
+    proxy = _proxy(tmp_path, handler, secrets=(configured_forms[0],))
+    path = f"/v3/{configured_forms[4]}/{environment_forms[4]}/{configured_forms[40]}"
+    query = (
+        f"{configured_forms[4]}={environment_forms[4]}"
+        f"&{environment_forms[4]}={configured_forms[4]}"
+    )
+    body = json.dumps({
+        configured_forms[4]: environment_forms[4],
+        environment_forms[4]: configured_forms[4],
+    }, separators=(",", ":")).encode()
+
+    result = _run(proxy.handle(
+        "POST",
+        path,
+        raw_query=query,
+        headers=[
+            ("content-type", "application/json"),
+            ("x-configured", configured_forms[4]),
+            ("x-environment", environment_forms[4]),
+        ],
+        body=body,
+    ))
+
+    assert result.status_code == 200
+    assert seen[0].url.raw_path == f"{path}?{query}".encode()
+    assert seen[0].content == body
+    artifact = (proxy.writer.output_dir / "http-attempts.jsonl").read_bytes().lower()
+    for reversible in (*configured_forms, *environment_forms):
+        assert reversible.encode().lower() not in artifact
+
+
+@pytest.mark.parametrize(
+    "field_path",
+    [
+        ("artifact_type",),
+        ("schema_version",),
+        ("interception",),
+        ("timing_policy",),
+        ("attempts_file",),
+        ("completed_at",),
+        ("attempt_count",),
+        ("attempts_sha256",),
+        ("interception", "environment_variable"),
+        ("interception", "provider_modified"),
+        ("interception", "sdk_modified"),
+        ("timing_policy", "latency_publishable"),
+        ("timing_policy", "reason"),
+    ],
+)
+def test_feedback3_manifest_consumption_never_fabricates_missing_claims(
+    tmp_path: Path,
+    field_path: tuple[str, ...],
+) -> None:
+    from jsonschema import Draft202012Validator
+    from benchmarks.memorybench.traffic import RecordingError, RecordingManifest, validate_recording
+
+    proxy = _proxy(tmp_path)
+    _run(proxy.handle("GET", "/v3/documents/a"))
+    proxy.writer.finalize()
+    manifest_path = proxy.writer.output_dir / "recording-manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    target = manifest
+    for component in field_path[:-1]:
+        target = target[component]
+    del target[field_path[-1]]
+    manifest_path.write_text(json.dumps(manifest))
+
+    with pytest.raises(RecordingError, match="manifest_invalid"):
+        validate_recording(proxy.writer.output_dir, expected_pins=PINS)
+    assert list(Draft202012Validator(RecordingManifest.model_json_schema()).iter_errors(manifest))
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "client_status_mismatch",
+        "upstream_status_mismatch",
+        "response_status_mismatch",
+        "forwarded_rejected_request",
+        "request_rejected_absent_body",
+        "response_rejected_absent_body",
+        "response_rejected_status_mismatch",
+        "response_rejected_rejected_request",
+        "upstream_error_rejected_request",
+        "request_rejected_missing_error",
+        "response_rejected_missing_error",
+        "upstream_error_missing_error",
+    ],
+)
+def test_feedback3_http_attempt_schema_matches_model_cross_field_rejections(case: str) -> None:
+    from jsonschema import Draft202012Validator
+    from pydantic import ValidationError
+    from benchmarks.memorybench.traffic import BodyRecord, HttpAttempt, HttpRequest, HttpResponse, Timing
+
+    absent = BodyRecord()
+    base = HttpAttempt(
+        attempt_ordinal=1,
+        started_at=datetime.fromisoformat("2026-08-09T00:00:00+00:00"),
+        request=HttpRequest(method="GET", path="/", body=absent),
+        response=HttpResponse(status_code=200, body=absent),
+        upstream_status=200,
+        client_status=200,
+        outcome="forwarded",
+        timing=Timing(ms=1),
+    ).model_dump(mode="json")
+    instance = json.loads(json.dumps(base))
+    if case == "client_status_mismatch":
+        instance["client_status"] = 201
+    elif case == "upstream_status_mismatch":
+        instance["upstream_status"] = 201
+    elif case == "response_status_mismatch":
+        instance["response"]["status_code"] = 201
+    elif case == "forwarded_rejected_request":
+        instance["request"]["body"] = {
+            "state": "rejected",
+            "declared_bytes": None,
+            "observed_bytes": 0,
+            "sha256": None,
+            "sanitized_json": None,
+            "redaction_count": 0,
+        }
+    elif case == "request_rejected_absent_body":
+        instance.update(
+            response=None,
+            upstream_status=None,
+            client_status=400,
+            outcome="request_rejected",
+            error_code="invalid_json",
+        )
+    elif case == "response_rejected_absent_body":
+        instance.update(
+            client_status=502,
+            outcome="response_rejected",
+            error_code="upstream_response_invalid",
+        )
+    elif case == "response_rejected_status_mismatch":
+        instance["response"]["body"] = {
+            "state": "rejected",
+            "declared_bytes": None,
+            "observed_bytes": 0,
+            "sha256": None,
+            "sanitized_json": None,
+            "redaction_count": 0,
+        }
+        instance.update(
+            upstream_status=201,
+            client_status=502,
+            outcome="response_rejected",
+            error_code="upstream_response_invalid",
+        )
+    elif case == "response_rejected_rejected_request":
+        rejected = {
+            "state": "rejected",
+            "declared_bytes": None,
+            "observed_bytes": 0,
+            "sha256": None,
+            "sanitized_json": None,
+            "redaction_count": 0,
+        }
+        instance["request"]["body"] = rejected
+        instance["response"]["body"] = rejected
+        instance.update(
+            client_status=502,
+            outcome="response_rejected",
+            error_code="upstream_response_invalid",
+        )
+    elif case == "upstream_error_rejected_request":
+        instance["request"]["body"] = {
+            "state": "rejected",
+            "declared_bytes": None,
+            "observed_bytes": 0,
+            "sha256": None,
+            "sanitized_json": None,
+            "redaction_count": 0,
+        }
+        instance.update(
+            response=None,
+            upstream_status=None,
+            client_status=502,
+            outcome="upstream_error",
+            error_code="upstream_unavailable",
+        )
+    else:
+        outcome = case.removesuffix("_missing_error")
+        instance["outcome"] = outcome
+        del instance["error_code"]
+        if outcome == "request_rejected":
+            instance["request"]["body"] = {
+                "state": "rejected",
+                "declared_bytes": None,
+                "observed_bytes": 0,
+                "sha256": None,
+                "sanitized_json": None,
+                "redaction_count": 0,
+            }
+            instance.update(response=None, upstream_status=None, client_status=400)
+        elif outcome == "response_rejected":
+            instance["response"]["body"] = {
+                "state": "rejected",
+                "declared_bytes": None,
+                "observed_bytes": 0,
+                "sha256": None,
+                "sanitized_json": None,
+                "redaction_count": 0,
+            }
+            instance["client_status"] = 502
+        else:
+            instance.update(response=None, upstream_status=None, client_status=502)
+
+    with pytest.raises(ValidationError):
+        HttpAttempt.model_validate(instance)
+    errors = list(Draft202012Validator(HttpAttempt.model_json_schema()).iter_errors(instance))
+    assert errors, instance
+
+
+def test_feedback3_complete_forgery_rejects_ordinary_forwarded_absent_body(
+    tmp_path: Path,
+) -> None:
+    from benchmarks.memorybench.traffic import RecordingError, validate_recording
+
+    proxy = _proxy(tmp_path)
+    _run(proxy.handle("GET", "/v3/documents/a"))
+    proxy.writer.finalize()
+    attempts_path = proxy.writer.output_dir / "http-attempts.jsonl"
+    manifest_path = proxy.writer.output_dir / "recording-manifest.json"
+    row = json.loads(attempts_path.read_text())
+    row["response"]["headers"] = [
+        header
+        for header in row["response"]["headers"]
+        if header["name"].lower() not in {"content-type", "content-length"}
+    ]
+    row["response"]["body"] = {
+        "state": "absent",
+        "declared_bytes": None,
+        "observed_bytes": 0,
+        "sha256": None,
+        "sanitized_json": None,
+        "redaction_count": 0,
+    }
+    attempts_data = json.dumps(row, sort_keys=True, separators=(",", ":")).encode() + b"\n"
+    attempts_path.write_bytes(attempts_data)
+    manifest = json.loads(manifest_path.read_text())
+    manifest["attempts_sha256"] = hashlib.sha256(attempts_data).hexdigest()
+    manifest_path.write_text(json.dumps(manifest))
+
+    with pytest.raises(RecordingError, match="attempt_header_body_mismatch"):
+        validate_recording(proxy.writer.output_dir, expected_pins=PINS)
+
+
+def test_feedback3_complete_artifact_accepts_legal_204_absent_body(tmp_path: Path) -> None:
+    from benchmarks.memorybench.traffic import validate_recording
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(204, request=request)
+
+    proxy = _proxy(tmp_path, handler)
+    _run(proxy.handle("GET", "/v3/documents/a"))
+    proxy.writer.finalize()
+
+    assert validate_recording(proxy.writer.output_dir, expected_pins=PINS).status == "complete"
+
+
+@pytest.mark.parametrize(("method", "status"), [("HEAD", 200), ("GET", 304)])
+def test_feedback3_real_listener_accepts_oversized_representation_length_without_body(
+    tmp_path: Path,
+    method: str,
+    status: int,
+) -> None:
+    from benchmarks.memorybench.traffic import DEFAULT_MAX_BODY_BYTES, validate_recording
+
+    declared = DEFAULT_MAX_BODY_BYTES + 123
+    upstream_response = (
+        f"HTTP/1.1 {status} Empty\r\n".encode()
+        + f"Content-Length: {declared}\r\n".encode()
+        + b"Connection: close\r\n\r\n"
+    )
+
+    response, row, recording, _observed = _run(_feedback3_real_response_round_trip(
+        tmp_path,
+        method=method,
+        upstream_response=upstream_response,
+    ))
+
+    assert response.status_code == status
+    assert response.content == b""
+    assert response.headers["content-length"] == str(declared)
+    assert row["response"]["body"]["state"] == "absent"
+    assert row["response"]["body"]["declared_bytes"] == declared
+    assert validate_recording(recording, expected_pins=PINS).status == "complete"
+
+
+def test_feedback3_real_listener_accepts_bounded_concatenated_gzip_members(
+    tmp_path: Path,
+) -> None:
+    from benchmarks.memorybench.traffic import validate_recording
+
+    decoded = b'{"ok":true}'
+    compressed = gzip.compress(decoded[:6], mtime=0) + gzip.compress(decoded[6:], mtime=0)
+    upstream_response = (
+        b"HTTP/1.1 200 OK\r\n"
+        b"Content-Type: application/json\r\n"
+        b"Content-Encoding: gzip\r\n"
+        + f"Content-Length: {len(compressed)}\r\n".encode()
+        + b"Connection: close\r\n\r\n"
+        + compressed
+    )
+
+    response, row, recording, observed = _run(_feedback3_real_response_round_trip(
+        tmp_path,
+        method="GET",
+        upstream_response=upstream_response,
+        request_headers={"accept-encoding": "gzip"},
+        raw_downstream=True,
+    ))
+
+    assert b"accept-encoding: gzip" in observed.lower()
+    assert isinstance(response, bytes)
+    response_head, response_body = response.split(b"\r\n\r\n", 1)
+    assert b" 200 " in response_head.split(b"\r\n", 1)[0]
+    assert b"content-encoding: gzip" in response_head.lower()
+    assert response_body == compressed
+    assert gzip.decompress(response_body) == decoded
+    assert row["response"]["body"]["sanitized_json"] == {"ok": True}
+    assert row["response"]["body"]["observed_bytes"] == len(compressed)
+    assert validate_recording(recording, expected_pins=PINS).status == "complete"
+
+
+def test_feedback3_real_listener_rejects_over_limit_concatenated_gzip(
+    tmp_path: Path,
+) -> None:
+    max_body_bytes = 100
+    decoded = b'{"value":"' + (b"x" * 120) + b'"}'
+    compressed = gzip.compress(decoded[:60], mtime=0) + gzip.compress(decoded[60:], mtime=0)
+    assert len(compressed) < max_body_bytes < len(decoded)
+    upstream_response = (
+        b"HTTP/1.1 200 OK\r\n"
+        b"Content-Type: application/json\r\n"
+        b"Content-Encoding: gzip\r\n"
+        + f"Content-Length: {len(compressed)}\r\n".encode()
+        + b"Connection: close\r\n\r\n"
+        + compressed
+    )
+
+    response, row, _recording, _observed = _run(_feedback3_real_response_round_trip(
+        tmp_path,
+        method="GET",
+        upstream_response=upstream_response,
+        max_body_bytes=max_body_bytes,
+        request_headers={"accept-encoding": "gzip"},
+    ))
+
+    assert response.status_code == 502
+    assert response.content == b'{"error":"upstream_response_invalid"}'
+    assert row["outcome"] == "response_rejected"
+
+
+@pytest.mark.parametrize("damage", ["truncated", "trailing_junk"])
+def test_feedback3_real_listener_rejects_malformed_concatenated_gzip(
+    tmp_path: Path,
+    damage: str,
+) -> None:
+    compressed = gzip.compress(b'{"ok":', mtime=0) + gzip.compress(b'true}', mtime=0)
+    malformed = compressed[:-4] if damage == "truncated" else compressed + b"junk"
+    upstream_response = (
+        b"HTTP/1.1 200 OK\r\n"
+        b"Content-Type: application/json\r\n"
+        b"Content-Encoding: gzip\r\n"
+        + f"Content-Length: {len(malformed)}\r\n".encode()
+        + b"Connection: close\r\n\r\n"
+        + malformed
+    )
+
+    response, row, _recording, _observed = _run(_feedback3_real_response_round_trip(
+        tmp_path,
+        method="GET",
+        upstream_response=upstream_response,
+        request_headers={"accept-encoding": "gzip"},
+    ))
+
+    assert response.status_code == 502
+    assert response.content == b'{"error":"upstream_response_invalid"}'
+    assert row["outcome"] == "response_rejected"
+
+
+def test_feedback3_real_listener_preserves_valid_deflate_behavior(tmp_path: Path) -> None:
+    decoded = b'{"deflate":true}'
+    compressed = zlib.compress(decoded)
+    upstream_response = (
+        b"HTTP/1.1 200 OK\r\n"
+        b"Content-Type: application/json\r\n"
+        b"Content-Encoding: deflate\r\n"
+        + f"Content-Length: {len(compressed)}\r\n".encode()
+        + b"Connection: close\r\n\r\n"
+        + compressed
+    )
+
+    response, row, _recording, observed = _run(_feedback3_real_response_round_trip(
+        tmp_path,
+        method="GET",
+        upstream_response=upstream_response,
+        request_headers={"accept-encoding": "deflate"},
+    ))
+
+    assert b"accept-encoding: deflate" in observed.lower()
+    assert response.status_code == 200
+    assert response.content == decoded
+    assert row["response"]["body"]["sanitized_json"] == {"deflate": True}
