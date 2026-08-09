@@ -90,9 +90,12 @@ them. Mission acceptance criteria (§14) close only from this ledger.
 
 - [ ] 4.1 Clone + `LOCKFILE.json` (commit/tree sha, bun pin, license hash);
       `setup --verify` refuses drift
-- [ ] 4.2 `audit/supermemory-provider-audit.md` +
-      `audit/provider-prompts-diff.md` (dreaming, awaitIndexing, searchMode,
-      ProviderPrompts, failed-question exclusion) — deliverable artifacts
+- [x] 4.2 `audit/supermemory-provider-audit.md` (incl. ProviderPrompts diff)
+      + `audit/harness-audit.md` — committed. Headline: their provider
+      hardcodes limit:30 vs shared limit:10 + include.chunks (commit
+      dad6d5d, vendor-authored); questionDate never plumbed; _abs
+      abstention unroutable; failed questions excluded from accuracy.
+      Upstream filing = founder decision (list at harness-audit.md end)
 - [ ] 4.3 Recording proxy capturing their provider's actual traffic
 - [ ] 4.4 TS providers (exomem via isolated REST service on ephemeral port;
       basic-memory via shared sidecar) + registration patch with verified
