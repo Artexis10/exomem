@@ -2431,3 +2431,115 @@ def test_feedback4_close_finalizes_after_normal_clean_drain(tmp_path: Path) -> N
 
     assert _run(exercise()) == b'{"ok":true,"token":"nested-secret"}'
     assert validate_recording(proxy.writer.output_dir, expected_pins=PINS).status == "complete"
+
+
+def _feedback5_nested_json(depth: int, *, mixed: bool, leaf: str) -> bytes:
+    payload = json.dumps(leaf, separators=(",", ":")).encode()
+    for level in range(depth):
+        if mixed and level % 2:
+            payload = b'{"item":' + payload + b"}"
+        else:
+            payload = b"[" + payload + b"]"
+    return payload
+
+
+def test_feedback5_uses_conservative_json_nesting_bound() -> None:
+    from benchmarks.memorybench.recording_proxy import MAX_JSON_NESTING_DEPTH
+
+    assert MAX_JSON_NESTING_DEPTH == 64
+
+
+@pytest.mark.parametrize(
+    ("case", "depth", "mixed", "expected_status"),
+    [
+        ("array_at_limit", 64, False, 204),
+        ("array_over_limit", 65, False, 400),
+        ("array_far_over_limit", 1000, False, 400),
+        ("mixed_at_limit", 64, True, 204),
+        ("brackets_in_string", 1, False, 204),
+    ],
+)
+def test_feedback5_real_listener_request_depth_boundary(
+    tmp_path: Path,
+    case: str,
+    depth: int,
+    mixed: bool,
+    expected_status: int,
+) -> None:
+    from benchmarks.memorybench.traffic import validate_recording
+
+    rejected = expected_status == 400
+    secret = f"{case}-request-payload-secret"
+    if case == "brackets_in_string":
+        payload = json.dumps({"value": ("[" * 1000) + ("]" * 1000)}, separators=(",", ":")).encode()
+    else:
+        payload = _feedback5_nested_json(
+            depth,
+            mixed=mixed,
+            leaf=secret if rejected else "safe-leaf",
+        )
+    response, rows, recording, upstream_calls = _run(_feedback4_real_request_round_trip(
+        tmp_path,
+        body=payload,
+    ))
+
+    assert int(response.split(b" ", 2)[1]) == expected_status
+    assert len(rows) == 1
+    assert rows[0]["outcome"] == ("request_rejected" if rejected else "forwarded")
+    assert rows[0]["error_code"] == ("invalid_json" if rejected else None)
+    assert upstream_calls == (0 if rejected else 1)
+    if rejected:
+        assert response.endswith(b'{"error":"invalid_json"}')
+        assert secret.encode() not in (recording / "http-attempts.jsonl").read_bytes()
+    assert validate_recording(recording, expected_pins=PINS).attempt_count == 1
+
+
+@pytest.mark.parametrize(
+    ("case", "depth", "mixed", "expected_status"),
+    [
+        ("array_at_limit", 64, False, 200),
+        ("array_over_limit", 65, False, 502),
+        ("array_far_over_limit", 1000, False, 502),
+        ("mixed_at_limit", 64, True, 200),
+        ("brackets_in_string", 1, False, 200),
+    ],
+)
+def test_feedback5_real_listener_response_depth_boundary(
+    tmp_path: Path,
+    case: str,
+    depth: int,
+    mixed: bool,
+    expected_status: int,
+) -> None:
+    from benchmarks.memorybench.traffic import validate_recording
+
+    rejected = expected_status == 502
+    secret = f"{case}-response-payload-secret"
+    if case == "brackets_in_string":
+        payload = json.dumps({"value": ("[" * 1000) + ("]" * 1000)}, separators=(",", ":")).encode()
+    else:
+        payload = _feedback5_nested_json(
+            depth,
+            mixed=mixed,
+            leaf=secret if rejected else "safe-leaf",
+        )
+    upstream_response = (
+        b"HTTP/1.1 200 OK\r\n"
+        b"Content-Type: application/json\r\n"
+        + f"Content-Length: {len(payload)}\r\n".encode()
+        + b"Connection: close\r\n\r\n"
+        + payload
+    )
+    response, row, recording, _observed = _run(_feedback3_real_response_round_trip(
+        tmp_path,
+        method="GET",
+        upstream_response=upstream_response,
+    ))
+
+    assert response.status_code == expected_status
+    assert row["outcome"] == ("response_rejected" if rejected else "forwarded")
+    assert row["error_code"] == ("upstream_response_invalid" if rejected else None)
+    if rejected:
+        assert response.content == b'{"error":"upstream_response_invalid"}'
+        assert secret.encode() not in (recording / "http-attempts.jsonl").read_bytes()
+    assert validate_recording(recording, expected_pins=PINS).attempt_count == 1
