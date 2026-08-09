@@ -105,8 +105,9 @@ them. Mission acceptance criteria (§14) close only from this ledger.
 
 ## 4. Guest lane: MemoryBench (W5 — lane: claude executor)
 
-- [ ] 4.1 Clone + `LOCKFILE.json` (commit/tree sha, bun pin, license hash);
-      `setup --verify` refuses drift
+- [x] 4.1 Clone + `LOCKFILE.json` (commit/tree sha, bun pin, license hash);
+      `setup --verify` refuses drift (23 focused offline checks; read-only
+      index proof; attached real checkout refused as required)
 - [x] 4.2 `audit/supermemory-provider-audit.md` (incl. ProviderPrompts diff)
       + `audit/harness-audit.md` — committed. Headline: their provider
       hardcodes limit:30 vs shared limit:10 + include.chunks (commit

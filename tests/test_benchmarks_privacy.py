@@ -24,3 +24,9 @@ def test_epistemic_benchmark_artifacts_are_public_safe() -> None:
     files = _artifact_files(Path("benchmarks/epistemic"))
     assert files
     assert_public_artifacts_clean(files, labels={path: str(path) for path in files})
+
+
+def test_memorybench_benchmark_artifacts_are_public_safe() -> None:
+    files = _artifact_files(Path("benchmarks/memorybench"))
+    assert files
+    assert_public_artifacts_clean(files, labels={path: str(path) for path in files})
