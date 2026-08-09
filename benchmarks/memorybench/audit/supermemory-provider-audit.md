@@ -8,6 +8,27 @@ enumerated with direction-of-favour. Findings feed the fairness matrix; none
 were "fixed" by us (cross-competitor defects are filed upstream per the
 fairness contract, pending founder approval for public filing).
 
+## Pinned SDK and interception evidence
+
+The verified Bun lock's exact resolved `packages.supermemory` tuple is
+`["supermemory@4.0.0", "", {}, "sha512-xMN05PQ8kTv8DuXa2qf8h/9LaRI7v1Kz3Tutt97JPq+PzhGabKLv5YVbSgqHiPX5yXcSUBVBNYPPbhAQMF6GYQ=="]`.
+The dependency range (`^4.0.0`) is not provenance for the installed bytes;
+the recording proxy requires the resolved version and integrity above.
+
+Official exact-version distribution files provide the static source
+verification used by this audit:
+
+- [`client.mjs`](https://app.unpkg.com/supermemory@4.0.0/files/client.mjs):
+  the constructor reads `SUPERMEMORY_BASE_URL`, defaults to a one-minute
+  timeout and two retries, and `add()` posts to `/v3/documents`.
+- [`resources/documents.mjs`](https://app.unpkg.com/supermemory@4.0.0/files/resources/documents.mjs):
+  `documents.get(id)` gets `/v3/documents/:id`.
+- [`resources/memories.mjs`](https://app.unpkg.com/supermemory@4.0.0/files/resources/memories.mjs):
+  `memories.get(id)` gets the same `/v3/documents/:id` resource.
+
+This is static source verification of the pinned distribution, with no live SDK invocation
+and no claim that runtime traffic was observed in ledger slice 4.3.
+
 ## Headline finding: hardcoded vendor retrieval advantage
 
 `src/providers/supermemory/index.ts:120-136` — the Supermemory provider
@@ -58,11 +79,12 @@ disclosed on any published number. No `/v4/profile` use, no entityContext.
 
 `awaitIndexing` (`:62-118`): polls `documents.get(docId)`; only on terminal
 document status does it additionally poll `memories.get(docId)`, requiring
-BOTH `done`. This is a genuine memories-readiness gate — Supermemory is the
-only provider gated on a second downstream signal; a guest reporting
-readiness at write-ack self-inflicts a deficit. Defects: a rejected poll
-(404/5xx) is never handled — the id stays pending and the loop (backoff
-capped 5s, no attempt/wall-clock cap) hangs forever; the ~2-minute
+BOTH `done`. The two SDK facades make consecutive requests to the same `/v3/documents/:id` resource, not a second downstream signal, so this is not
+a genuine memories-readiness gate. A recorder preserves identical GET
+attempts but cannot infer whether byte-identical GET attempts are an SDK
+retry, a later poll, or which facade issued them. The real defect remains: a
+rejected poll (404/5xx) is never handled — the id stays pending and the loop
+(backoff capped 5s, no attempt/wall-clock cap) hangs forever; the ~2-minute
 auto-delete on irrecoverable failures therefore hangs the run rather than
 recording a failure.
 
@@ -71,8 +93,9 @@ implement real deletion) — and `--force` deletes only the local checkpoint,
 so a re-run on the same run id re-ingests into a still-populated container:
 silent cross-run contamination for the vendor's own provider.
 
-`initialize` (`:24-29`) drops `config.baseUrl` — `SUPERMEMORY_BASE_URL` is
-dead config; the provider can only ever hit the hosted API.
+`initialize` (`:24-29`) drops `config.baseUrl`, but the pinned SDK constructor
+reads `SUPERMEMORY_BASE_URL`. SUPERMEMORY_BASE_URL is the no-provider-patch interception seam: it routes the unmodified provider through a loopback
+recorder rather than making the environment variable dead config.
 
 Concurrency self-declaration (`:17-22`): `{default: 50, ingest: 100,
 indexing: 200}` vs zep `{default: 10}` — search latency (the MemScore
@@ -130,10 +153,8 @@ Zep with others grades different providers by different rubrics.
   hit@k, and NDCG's ideal ranking is derived from what was retrieved. Do not
   cite them.
 
-## Verification TODOs carried by this programme
+## Remaining dataset verification carried by this programme
 
-- The `supermemory@4.0.0` SDK parameter surface was not installed/verified;
-  the "not passed" list is definitive for what the harness sends only.
 - Whether `longmemeval_s_cleaned.json` retains `_abs` abstention rows and
   what `question_type` they carry — verify at dataset fetch; if present,
   the harness has no abstention judge route for them (harness audit) and

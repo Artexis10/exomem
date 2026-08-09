@@ -1,0 +1,201 @@
+{
+  "$defs": {
+    "HarnessPins": {
+      "additionalProperties": false,
+      "properties": {
+        "memorybench_commit_sha": {
+          "pattern": "^[0-9a-f]{40}$",
+          "title": "Memorybench Commit Sha",
+          "type": "string"
+        },
+        "memorybench_tree_sha": {
+          "pattern": "^[0-9a-f]{40}$",
+          "title": "Memorybench Tree Sha",
+          "type": "string"
+        },
+        "provider_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Provider Sha256",
+          "type": "string"
+        },
+        "sdk_integrity": {
+          "const": "sha512-xMN05PQ8kTv8DuXa2qf8h/9LaRI7v1Kz3Tutt97JPq+PzhGabKLv5YVbSgqHiPX5yXcSUBVBNYPPbhAQMF6GYQ==",
+          "title": "Sdk Integrity",
+          "type": "string"
+        },
+        "sdk_version": {
+          "const": "4.0.0",
+          "title": "Sdk Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "memorybench_commit_sha",
+        "memorybench_tree_sha",
+        "provider_sha256",
+        "sdk_version",
+        "sdk_integrity"
+      ],
+      "title": "HarnessPins",
+      "type": "object"
+    },
+    "InterceptionDeclaration": {
+      "additionalProperties": false,
+      "properties": {
+        "environment_variable": {
+          "const": "SUPERMEMORY_BASE_URL",
+          "default": "SUPERMEMORY_BASE_URL",
+          "title": "Environment Variable",
+          "type": "string"
+        },
+        "provider_modified": {
+          "const": false,
+          "default": false,
+          "title": "Provider Modified",
+          "type": "boolean"
+        },
+        "sdk_modified": {
+          "const": false,
+          "default": false,
+          "title": "Sdk Modified",
+          "type": "boolean"
+        }
+      },
+      "title": "InterceptionDeclaration",
+      "type": "object"
+    },
+    "RecordingLimits": {
+      "additionalProperties": false,
+      "properties": {
+        "max_body_bytes": {
+          "minimum": 1,
+          "title": "Max Body Bytes",
+          "type": "integer"
+        },
+        "upstream_timeout_seconds": {
+          "exclusiveMinimum": 0,
+          "title": "Upstream Timeout Seconds",
+          "type": "number"
+        }
+      },
+      "required": [
+        "max_body_bytes",
+        "upstream_timeout_seconds"
+      ],
+      "title": "RecordingLimits",
+      "type": "object"
+    },
+    "TimingPolicy": {
+      "additionalProperties": false,
+      "properties": {
+        "latency_publishable": {
+          "const": false,
+          "default": false,
+          "title": "Latency Publishable",
+          "type": "boolean"
+        },
+        "reason": {
+          "const": "host_unvalidated",
+          "default": "host_unvalidated",
+          "title": "Reason",
+          "type": "string"
+        }
+      },
+      "title": "TimingPolicy",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "artifact_type": {
+      "const": "memorybench_http_recording",
+      "default": "memorybench_http_recording",
+      "title": "Artifact Type",
+      "type": "string"
+    },
+    "attempt_count": {
+      "anyOf": [
+        {
+          "minimum": 1,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Attempt Count"
+    },
+    "attempts_file": {
+      "const": "http-attempts.jsonl",
+      "default": "http-attempts.jsonl",
+      "title": "Attempts File",
+      "type": "string"
+    },
+    "attempts_sha256": {
+      "anyOf": [
+        {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Attempts Sha256"
+    },
+    "completed_at": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Completed At"
+    },
+    "interception": {
+      "$ref": "#/$defs/InterceptionDeclaration"
+    },
+    "limits": {
+      "$ref": "#/$defs/RecordingLimits"
+    },
+    "pins": {
+      "$ref": "#/$defs/HarnessPins"
+    },
+    "schema_version": {
+      "const": 1,
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "started_at": {
+      "format": "date-time",
+      "title": "Started At",
+      "type": "string"
+    },
+    "status": {
+      "enum": [
+        "recording",
+        "complete"
+      ],
+      "title": "Status",
+      "type": "string"
+    },
+    "timing_policy": {
+      "$ref": "#/$defs/TimingPolicy"
+    }
+  },
+  "required": [
+    "status",
+    "started_at",
+    "pins",
+    "limits"
+  ],
+  "title": "RecordingManifest",
+  "type": "object"
+}

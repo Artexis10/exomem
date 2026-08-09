@@ -1,0 +1,297 @@
+{
+  "$defs": {
+    "BodyRecord": {
+      "additionalProperties": false,
+      "description": "A safe description of a body; rejected raw bytes are never retained.",
+      "properties": {
+        "declared_bytes": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Declared Bytes"
+        },
+        "observed_bytes": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Observed Bytes",
+          "type": "integer"
+        },
+        "redaction_count": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Redaction Count",
+          "type": "integer"
+        },
+        "sanitized_json": {
+          "anyOf": [
+            {},
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Sanitized Json"
+        },
+        "sha256": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Sha256"
+        },
+        "state": {
+          "default": "absent",
+          "enum": [
+            "absent",
+            "json",
+            "rejected"
+          ],
+          "title": "State",
+          "type": "string"
+        }
+      },
+      "title": "BodyRecord",
+      "type": "object"
+    },
+    "Header": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "value": {
+          "title": "Value",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "value"
+      ],
+      "title": "Header",
+      "type": "object"
+    },
+    "HttpRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "body": {
+          "$ref": "#/$defs/BodyRecord"
+        },
+        "headers": {
+          "items": {
+            "$ref": "#/$defs/Header"
+          },
+          "title": "Headers",
+          "type": "array"
+        },
+        "method": {
+          "pattern": "^[A-Z][A-Z0-9!#$%&'*+.^_`|~-]*$",
+          "title": "Method",
+          "type": "string"
+        },
+        "path": {
+          "minLength": 1,
+          "pattern": "^/",
+          "title": "Path",
+          "type": "string"
+        },
+        "query": {
+          "items": {
+            "maxItems": 2,
+            "minItems": 2,
+            "prefixItems": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "string"
+              }
+            ],
+            "type": "array"
+          },
+          "title": "Query",
+          "type": "array"
+        }
+      },
+      "required": [
+        "method",
+        "path"
+      ],
+      "title": "HttpRequest",
+      "type": "object"
+    },
+    "HttpResponse": {
+      "additionalProperties": false,
+      "properties": {
+        "body": {
+          "$ref": "#/$defs/BodyRecord"
+        },
+        "headers": {
+          "items": {
+            "$ref": "#/$defs/Header"
+          },
+          "title": "Headers",
+          "type": "array"
+        },
+        "status_code": {
+          "maximum": 599,
+          "minimum": 100,
+          "title": "Status Code",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "status_code"
+      ],
+      "title": "HttpResponse",
+      "type": "object"
+    },
+    "Timing": {
+      "additionalProperties": false,
+      "properties": {
+        "latency_publishable": {
+          "const": false,
+          "default": false,
+          "title": "Latency Publishable",
+          "type": "boolean"
+        },
+        "ms": {
+          "minimum": 0,
+          "title": "Ms",
+          "type": "number"
+        },
+        "reason": {
+          "const": "host_unvalidated",
+          "default": "host_unvalidated",
+          "title": "Reason",
+          "type": "string"
+        }
+      },
+      "required": [
+        "ms"
+      ],
+      "title": "Timing",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "attempt_ordinal": {
+      "minimum": 1,
+      "title": "Attempt Ordinal",
+      "type": "integer"
+    },
+    "client_status": {
+      "maximum": 599,
+      "minimum": 100,
+      "title": "Client Status",
+      "type": "integer"
+    },
+    "error_code": {
+      "anyOf": [
+        {
+          "enum": [
+            "ambiguous_content_length",
+            "unsupported_transfer_encoding",
+            "unsupported_content_encoding",
+            "unsupported_media_type",
+            "invalid_json",
+            "duplicate_json_key",
+            "body_too_large",
+            "malformed_http"
+          ],
+          "type": "string"
+        },
+        {
+          "enum": [
+            "upstream_response_invalid",
+            "upstream_unavailable"
+          ],
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Error Code"
+    },
+    "outcome": {
+      "enum": [
+        "forwarded",
+        "request_rejected",
+        "response_rejected",
+        "upstream_error"
+      ],
+      "title": "Outcome",
+      "type": "string"
+    },
+    "request": {
+      "$ref": "#/$defs/HttpRequest"
+    },
+    "response": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/HttpResponse"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "schema_version": {
+      "const": 1,
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "started_at": {
+      "format": "date-time",
+      "title": "Started At",
+      "type": "string"
+    },
+    "timing": {
+      "$ref": "#/$defs/Timing"
+    },
+    "upstream_status": {
+      "anyOf": [
+        {
+          "maximum": 599,
+          "minimum": 100,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Upstream Status"
+    }
+  },
+  "required": [
+    "attempt_ordinal",
+    "started_at",
+    "request",
+    "client_status",
+    "outcome",
+    "timing"
+  ],
+  "title": "HttpAttempt",
+  "type": "object"
+}
