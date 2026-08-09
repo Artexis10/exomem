@@ -1730,9 +1730,11 @@ def op_evolution(
         tags: Optional tag filter passed to `find`.
 
     Returns:
-        {query, timelines: [{chain_id, topic_anchor, span: {from, to, n_versions},
-         versions: [{path, title, status, date, claims: {title, type, lede, sections,
-         outline}, transition: {reason, date} | null}]}], truncation: [...]}.
+        Topic route: {query, timelines: [{chain_id, topic_anchor, span: {from, to,
+        n_versions}, versions: [{path, title, status, date, claims: {title, type,
+        lede, sections, outline}, transition: {reason, date} | null}]}],
+        truncation: [...]}. `topic_anchor` is the retrieval hit that surfaced the
+        chain; `chain_id` is always the active head.
         `transition` is null on the active head; `versions` run oldest → newest by
         supersession order; `span`/
 _versions` describe the whole chain.
@@ -4581,18 +4583,32 @@ def op_review_memory(
             `adoption_studio(action="apply-proposal")` or dismiss via
             `triage_memory`.
         categories: Optional category filter for attention/activation/audit.
-        limit: Attention/activation/evolution result cap.
-        query: Topic for evolution review.
+        limit: Attention/activation result cap. On the topic evolution route, caps
+            returned timelines; the path route returns one selected chain and does
+            not use `limit`.
+        query: Topic for evolution review when `path` is absent. On the topic route,
+            `topic_anchor` is the retrieval hit that surfaced the chain; `chain_id`
+            is always the active head.
         sources: Source paths for compilation mode.
         suggested_title: Optional compilation title hint.
         tag: Provenance tag shorthand.
         key: Provenance key filter.
         value: Provenance value filter.
-        path: Restrict provenance scan to one path.
+        path: Restrict provenance scan to one path. For evolution, selects the path
+            route and `query` is not used: `topic_anchor` is the requested page and
+            `chain_id` is always the active head. An unresolvable path raises an
+            explicit error.
         state: For attention/activation, open (default), all, snoozed, or dismissed.
         ref: Stable `exomem://review/<id>` reference for item mode.
         detail: Audit output detail: actionable (default) or full.
         legacy_sample_limit: Audit legacy-backlog sample count, from 0 to 50.
+
+    Returns:
+        In evolution mode, the topic route (no `path`) returns {query, timelines,
+        truncation}; the path route returns {target_path, timelines, truncation}.
+        Both timeline shapes carry `chain_id` and `topic_anchor`; `chain_id` is the
+        active head, while `topic_anchor` is respectively the retrieval hit or the
+        requested page.
     """
     if path:
         path = _resolve_memory_identifier(vault_root, path)
@@ -4650,6 +4666,8 @@ def op_review_memory(
     if mode == "provenance":
         return op_provenance_report(vault_root, tag=tag, key=key, value=value, path=path)
     if mode == "evolution":
+        if path:
+            return evolution_module.evolution_for_path(vault_root, path=path)
         return op_evolution(vault_root, query=query, limit=limit)
     if mode == "compilation":
         if not sources:
