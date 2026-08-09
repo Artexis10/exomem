@@ -1,1 +1,65 @@
-{"case_id":"fixture-1","dataset_identity":"mini-v2","case_set":["fixture-1"],"session_normalization":"nfc-v1","namespace":"case-1","ingestion_payloads":["a"],"readiness":"verified","exact_query":"where?","top_k":5,"retrieved_ids":["one"],"retrieved_text":["beta"],"packed_context":"alpha","answer_judge_prompt_model_config":"stub-v1"}
+{
+  "schema": "equivalence-input.v1",
+  "run_id": "twin-right",
+  "provider_variant": "exomem-source-only",
+  "cases": [
+    {
+      "case_id": "twin-all-keys",
+      "dataset_identity": {
+        "id": "longmemeval",
+        "variant": "mini",
+        "source": "local",
+        "revision": "r1",
+        "sha256": "9999999999999999999999999999999999999999999999999999999999999999",
+        "case_count": 2
+      },
+      "case_set": ["twin-all-keys", "twin-null", "twin-extra"],
+      "session_normalization": "lme.normalize.render_neutral_session/v2",
+      "namespace": "exo-run-24hex",
+      "ingestion_payloads": ["cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"],
+      "readiness": [
+        {"lane": "semantic", "requested": true, "verified": false, "method": "semantic-probe", "fallback_detected": false}
+      ],
+      "exact_query": "Which city hosted the winter workshop?",
+      "top_k": 4,
+      "retrieved_ids": ["chunk-right-1"],
+      "retrieved_text": ["The winter workshop was held beside the old foundry."],
+      "packed_context": "The winter workshop was held beside the old foundry.",
+      "answer_judge_prompt_model_config": {
+        "reader": "stub",
+        "reader_model": "gpt-4o",
+        "judge_model": "gpt-4o",
+        "prompt_sha256": "2222222222222222222222222222222222222222222222222222222222222222"
+      }
+    },
+    {
+      "case_id": "twin-null",
+      "dataset_identity": {
+        "id": "longmemeval",
+        "variant": "mini",
+        "source": "local",
+        "revision": "r1",
+        "sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+        "case_count": 2
+      },
+      "case_set": ["twin-all-keys", "twin-null"],
+      "session_normalization": "lme.normalize.render_neutral_session/v1",
+      "namespace": "hybrid-run-24hex",
+      "ingestion_payloads": ["bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"],
+      "readiness": [
+        {"lane": "semantic", "requested": true, "verified": true, "method": "semantic-probe", "fallback_detected": false}
+      ],
+      "exact_query": "Which lantern was repainted?",
+      "top_k": 10,
+      "retrieved_ids": ["chunk-null-1"],
+      "retrieved_text": ["The seafoam lantern was repainted."],
+      "packed_context": null,
+      "answer_judge_prompt_model_config": {
+        "reader": "stub",
+        "reader_model": "offline deterministic stub",
+        "judge_model": "gpt-4o",
+        "prompt_sha256": "3333333333333333333333333333333333333333333333333333333333333333"
+      }
+    }
+  ]
+}

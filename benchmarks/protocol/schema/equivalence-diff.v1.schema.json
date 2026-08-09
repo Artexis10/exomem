@@ -1,40 +1,113 @@
 {
+  "$defs": {
+    "EquivalenceDifference": {
+      "additionalProperties": false,
+      "properties": {
+        "actual": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Actual"
+        },
+        "case_id": {
+          "title": "Case Id",
+          "type": "string"
+        },
+        "classification": {
+          "enum": [
+            "blocking",
+            "reported"
+          ],
+          "title": "Classification",
+          "type": "string"
+        },
+        "compare_as": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Compare As"
+        },
+        "equal": {
+          "title": "Equal",
+          "type": "boolean"
+        },
+        "expected": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Expected"
+        },
+        "explanation_required": {
+          "default": true,
+          "title": "Explanation Required",
+          "type": "boolean"
+        },
+        "field": {
+          "title": "Field",
+          "type": "string"
+        },
+        "protocol_version": {
+          "const": "1.0.0",
+          "default": "1.0.0",
+          "title": "Protocol Version",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "case_id",
+        "field",
+        "equal",
+        "classification"
+      ],
+      "title": "EquivalenceDifference",
+      "type": "object"
+    }
+  },
   "additionalProperties": false,
   "properties": {
-    "actual": {
-      "anyOf": [
-        {
-          "type": "string"
-        },
-        {
-          "type": "null"
-        }
-      ],
-      "default": null,
-      "title": "Actual"
+    "diffs": {
+      "items": {
+        "$ref": "#/$defs/EquivalenceDifference"
+      },
+      "title": "Diffs",
+      "type": "array"
     },
-    "case_id": {
-      "title": "Case Id",
+    "kind": {
+      "const": "equivalence-diff.v1",
+      "default": "equivalence-diff.v1",
+      "title": "Kind",
       "type": "string"
     },
-    "equal": {
-      "title": "Equal",
-      "type": "boolean"
-    },
-    "expected": {
-      "anyOf": [
-        {
-          "type": "string"
-        },
-        {
-          "type": "null"
-        }
+    "mode": {
+      "enum": [
+        "blocking",
+        "reported"
       ],
-      "default": null,
-      "title": "Expected"
-    },
-    "field": {
-      "title": "Field",
+      "title": "Mode",
       "type": "string"
     },
     "protocol_version": {
@@ -51,9 +124,8 @@
     }
   },
   "required": [
-    "case_id",
-    "field",
-    "equal"
+    "mode",
+    "diffs"
   ],
   "title": "EquivalenceDiff",
   "type": "object"

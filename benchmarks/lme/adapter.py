@@ -163,10 +163,15 @@ class LmeExomemAdapter(ExomemLocalAdapter):
     def retrieve_question(self, question: LmeQuestion, *, limit: int = 10) -> list[str]:
         """Retrieve at ``question_date`` using hybrid product defaults."""
 
+        return self.retrieve_text(question.question, question.question_date, limit=limit)
+
+    def retrieve_text(self, question_text: str, question_date: dt.datetime, *, limit: int = 10) -> list[str]:
+        """Retrieve neutral query text at an explicitly supplied case clock."""
+
         from exomem import find as find_module
         from exomem import find_policy, structured_filters, temporal
 
-        pinned_day = question.question_date.date()
+        pinned_day = question_date.date()
 
         class RetrievalDate(dt.date):
             @classmethod
@@ -181,9 +186,9 @@ class LmeExomemAdapter(ExomemLocalAdapter):
             stack.enter_context(mock.patch.object(find_module, "date", RetrievalDate))
             stack.enter_context(mock.patch.object(structured_filters, "date", RetrievalDate))
             stack.enter_context(
-                mock.patch.object(temporal, "now", return_value=question.question_date)
+                mock.patch.object(temporal, "now", return_value=question_date)
             )
-            hits = self.search(question.question, limit)
+            hits = self.search(question_text, limit)
         return [hit.text or hit.excerpt or "" for hit in hits if hit.text or hit.excerpt]
 
     def run_question(

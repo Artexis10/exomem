@@ -79,7 +79,10 @@ def test_runner_writes_official_hypotheses_bounds_environment_and_ability_report
     ):
         assert ability in report
     assert "abstention" in report
-    assert "| single-session-assistant | 0 |" in report
+    # Every report names the row that produced it, so all three entry points
+    # (runner, judge re-render, artifact-only regeneration) render one shape.
+    assert "| Ability | Variant | Questions |" in report
+    assert "| single-session-assistant | exomem-source-only | 0 |" in report
     assert "UNVERIFIED" in report
 
     with pytest.raises(FileExistsError, match="immutable"):

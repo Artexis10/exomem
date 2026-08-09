@@ -108,24 +108,35 @@ def _bound_ids(run_dir: Path, lane: str) -> set[str]:
     return ids
 
 
-def rerender_report(run_dir: Path) -> None:
+def render_from_artifacts(run_dir: Path | str, *, invalid_reason: str | None, provider_variant: str | None) -> str:
+    """The single renderer every report entry point uses.
+
+    Labels come from the real judge artifacts when they exist; a lane with no
+    verdict renders "awaiting official judge" rather than a fabricated False.
+    """
+
     run_dir = Path(run_dir)
-    dataset = load_dataset(run_dir / "dataset.json")
-    labels = load_labels(run_dir / LANE_FILES["main"][1])
     ceiling_labels_path = run_dir / LANE_FILES["ceiling"][1]
     floor_labels_path = run_dir / LANE_FILES["floor"][1]
-    ceiling_labels = load_labels(ceiling_labels_path) if ceiling_labels_path.is_file() else None
-    floor_labels = load_labels(floor_labels_path) if floor_labels_path.is_file() else None
-    manifest_path = run_dir / "run.json"
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    report = render_report(
-        dataset,
-        labels=labels,
+    return render_report(
+        load_dataset(run_dir / "dataset.json"),
+        labels=load_labels(run_dir / LANE_FILES["main"][1]),
         ceiling_question_ids=_bound_ids(run_dir, "ceiling"),
         floor_question_ids=_bound_ids(run_dir, "floor"),
-        ceiling_labels=ceiling_labels,
-        floor_labels=floor_labels,
+        ceiling_labels=load_labels(ceiling_labels_path) if ceiling_labels_path.is_file() else None,
+        floor_labels=load_labels(floor_labels_path) if floor_labels_path.is_file() else None,
+        invalid_reason=invalid_reason,
+        provider_variant=provider_variant,
+    )
+
+
+def rerender_report(run_dir: Path) -> None:
+    run_dir = Path(run_dir)
+    manifest = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+    report = render_from_artifacts(
+        run_dir,
         invalid_reason=manifest.get("invalid_reason"),
+        provider_variant=manifest.get("provider_variant"),
     )
     (run_dir / "report.md").write_text(report, encoding="utf-8")
 

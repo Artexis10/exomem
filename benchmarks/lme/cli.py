@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -37,6 +38,10 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--claude-binary", default="claude")
     run.add_argument("--top-k", type=int, default=10)
     run.add_argument("--provider", choices=("exomem-source-only", "hybrid-rag-control", "no-memory"))
+    run.add_argument(
+        "--budget-cap-usd", type=float, default=float(os.environ.get("PROTOCOL_BUDGET_CAP_USD", "0") or 0),
+        help="cap written into the run's immutable budget ledger (env: PROTOCOL_BUDGET_CAP_USD)",
+    )
     run.add_argument(
         "--pilot",
         type=int,
@@ -81,6 +86,7 @@ def main(argv: list[str] | None = None) -> int:
             top_k=args.top_k,
             pilot=args.pilot,
             provider=args.provider,
+            budget_cap_usd=args.budget_cap_usd,
         )
     )
     print(result.run_dir)

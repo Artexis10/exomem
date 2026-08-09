@@ -11,6 +11,7 @@ from .canary import evaluate_probes
 from .leakage import scan_ingest
 from .manifest import load_manifest
 from .models import CaseGold, export_json_schemas
+from .readiness import validate as validate_readiness
 from .probes import classify_update_outcome
 from .trace import CaseTraceReader
 
@@ -78,7 +79,19 @@ def main(argv: list[str] | None = None) -> int:
         return _export_schemas(args.check)
     if args.command == "validate":
         try:
-            print(load_manifest(args.run_dir).status)
+            manifest = load_manifest(args.run_dir)
+            readiness = validate_readiness(manifest.readiness, strict=args.strict)
+            if args.strict and manifest.status == "VALID":
+                if manifest.contamination in {"contaminated", "unverifiable"}:
+                    raise RuntimeError("VALID manifest cannot claim contaminated or unverifiable canary state")
+                if readiness.status != "VALID":
+                    raise RuntimeError("VALID manifest has invalid or unverifiable requested readiness")
+                if manifest.budget is None:
+                    raise RuntimeError("VALID manifest has no measured budget summary")
+                ledger = Path(args.run_dir) / "ledger.jsonl"
+                if not ledger.is_file() or not ledger.read_text(encoding="utf-8").strip():
+                    raise RuntimeError("VALID manifest has no measured budget ledger")
+            print(manifest.status)
             trace_dir = Path(args.run_dir) / "traces"
             for trace in sorted(trace_dir.glob("*.jsonl")) if trace_dir.exists() else ():
                 list(CaseTraceReader(args.run_dir, trace.stem))

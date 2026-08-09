@@ -124,24 +124,30 @@ def offline_guard():
 
 
 def render_run_report(run_dir: Path | str, *, offline: bool = False) -> str:
-    """Regenerate an LME report solely from a terminal protocol manifest and dataset."""
+    """Regenerate an LME report solely from a terminal protocol manifest and artifacts.
+
+    A non-VALID or contaminated manifest renders its status prominently; a
+    hypothesis is an answer record, never a judge verdict, so the stub path
+    renders "awaiting official judge" instead of a fabricated label.
+    """
 
     from protocol.manifest import ManifestError, load_manifest
 
     try:
-        load_manifest(run_dir)
+        manifest = load_manifest(run_dir)
     except ManifestError as exc:
         raise ValueError(str(exc)) from exc
-    from .dataset import load_dataset
 
     root = Path(run_dir)
+
     def render() -> str:
-        dataset = load_dataset(root / "dataset.json")
-        labels: dict[str, object] = {}
-        hypotheses = root / "hypotheses.jsonl"
-        if hypotheses.exists():
-            labels = {json.loads(line)["question_id"]: False for line in hypotheses.read_text(encoding="utf-8").splitlines() if line}
-        return render_report(dataset, labels=labels, ceiling_question_ids=set(), floor_question_ids=set(), provider_variant=load_manifest(root).provider_variant)
+        from .judge_io import render_from_artifacts
+
+        invalid_reason = None
+        if manifest.status != "VALID" or manifest.contamination in {"contaminated", "unverifiable"}:
+            invalid_reason = f"manifest status={manifest.status}; contamination={manifest.contamination}"
+        return render_from_artifacts(root, invalid_reason=invalid_reason, provider_variant=manifest.provider_variant)
+
     if offline:
         with offline_guard():
             return render()

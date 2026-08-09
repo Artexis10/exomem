@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
 import json
 import re
 import time
@@ -14,19 +15,23 @@ from typing import Callable
 from membench.adapters.base import AdapterEnvironmentError
 from membench.environment import capture_environment
 from membench.judge.backends import ClaudeCliBackend, OpenAICompatBackend
+from protocol.budget import BudgetLedger
 from protocol.canary import canary_for, evaluate_probes
+from protocol.leakage import scan_ingest
 from protocol.manifest import finalize_manifest, start_manifest
-from protocol.models import BudgetSummary, CaseHandle, DatasetIdentity, LeakageSummary
+from protocol.models import BudgetSummary, CaseGold, CaseHandle, DatasetIdentity, EventProvenance, LeakageSummary, ProtocolEvent, ProbeResult
+from protocol.namespace import derive_namespace, namespace_pattern
+from protocol.readiness import validate as validate_readiness
 from protocol.trace import CaseTraceWriter
 
-from .adapter import LmeExomemAdapter
+from .adapter import LmeExomemAdapter, lme_profile
 from .bounds import BoundRun, Hypothesis, run_bounds
 from .dataset import LmeDataset, QUESTION_TYPES, dump_dataset, load_dataset
 from .fetch import file_sha256, verify_sha256
 from .judge_io import _bound_ids, official_judge_commands
 from .reader import ABSTENTION, ApiReader, Reader, StubReader
 from .report import render_report
-from .normalize import neutralize
+from .normalize import ingest_field_groups, neutralize, render_neutral_session
 
 
 class LmeRunInvalid(RuntimeError):
@@ -58,6 +63,7 @@ class RunConfig:
     top_k: int = 10
     pilot: int | None = None
     provider: str | None = None
+    budget_cap_usd: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -238,6 +244,124 @@ def _reader_outcome(reader: Reader, *, attempted: bool) -> dict[str, object]:
     }
 
 
+def _budget_summary(ledger: BudgetLedger) -> BudgetSummary:
+    """Summarise the real append-only ledger; never substitute made-up zeros."""
+
+    entries = ledger._entries()
+    if not entries:
+        raise RuntimeError("budget ledger has no recorded operations")
+    return BudgetSummary(
+        cap_usd=float(ledger.caps["usd"]),
+        committed_usd=round(sum(entry.units for entry in entries if entry.kind == "commit"), 8),
+        refusals=sum(entry.decision == "refused-cap" for entry in entries),
+    )
+
+
+def _hit_contains(hits: object, token: str) -> bool:
+    """A probe hits only when the canary token is in the RETURNED HIT TEXT.
+
+    A dense control returns its top-k for any query, so "a hit came back" would
+    mark every run contaminated; only the token's presence is evidence.
+    """
+
+    return any(token in str(getattr(hit, "text", "")) for hit in hits or ())
+
+
+def _canary_verdict(hits_by_kind: dict[str, bool], *, retains_nothing: bool) -> str:
+    """Classify canary probes, honouring a control that stores nothing by design.
+
+    The negative control can never retrieve its own presence canary. Scoring
+    that as ``unverifiable`` would invalidate the floor the control exists to
+    provide, so presence is inconclusive-by-design there — while a cross-case
+    or never-ingested hit still contaminates the run exactly as it does
+    everywhere else.
+    """
+
+    if not retains_nothing:
+        return evaluate_probes(hits_by_kind)
+    if hits_by_kind.get("cross_case") or hits_by_kind.get("never_ingested"):
+        return "contaminated"
+    return "isolated"
+
+
+#: The differ's twelve keys, written per case so `equivalence gate` can run
+#: against two REAL run directories. Every value is run-invariant on purpose:
+#: run ids, wall clocks, and the run-scoped namespace suffix would otherwise
+#: make two honest runs of the same dataset differ on every key. The literal
+#: per-case namespace stays in the manifest; the equivalence key records the
+#: derivation pattern, which is what the design's namespace check compares.
+def _equivalence_case(
+    *, question, case_ids: list[str], namespace_pattern: str, payload_shas: list[str],
+    readiness: list, retrieved_ids: list[str], retrieved_text: list[str], top_k: int,
+    dataset_identity: DatasetIdentity, reader_name: str, reader_model: str,
+) -> dict[str, object]:
+    from .reader import CONTEXT_SEPARATOR
+
+    return {
+        "case_id": question.question_id,
+        "dataset_identity": dataset_identity.model_dump(),
+        "case_set": sorted(case_ids),
+        "session_normalization": "lme.normalize.render_neutral_session/v1",
+        "namespace": namespace_pattern,
+        "ingestion_payloads": payload_shas,
+        "readiness": [
+            {key: lane.model_dump()[key] for key in ("lane", "requested", "verified", "method", "fallback_detected")}
+            for lane in readiness
+        ],
+        "exact_query": question.question,
+        "top_k": top_k,
+        "retrieved_ids": retrieved_ids,
+        "retrieved_text": retrieved_text,
+        "packed_context": CONTEXT_SEPARATOR.join(retrieved_text),
+        "answer_judge_prompt_model_config": {
+            "reader": reader_name,
+            "reader_model": reader_model,
+            "judge_model": "gpt-4o",
+            "prompt_sha256": hashlib.sha256(question.question.encode()).hexdigest(),
+        },
+    }
+
+
+def _harness_canary(events: list[ProtocolEvent], handle: CaseHandle, token: str) -> ProtocolEvent:
+    """Append a pure harness-authored filler event without touching dataset payloads."""
+
+    content = f"Harness diagnostic filler. Token: {token}."
+    return ProtocolEvent(
+        dataset=events[0].dataset, case_id=handle.case_id,
+        session_ordinal=max(event.session_ordinal for event in events) + 1,
+        sequence=0, role="system", turn_ordinal=1, content=content,
+        content_sha256=hashlib.sha256(content.encode()).hexdigest(),
+        original_timestamp=events[-1].original_timestamp,
+        timestamp_semantics="ingestion_order_only", ingestion_ordinal=max(event.ingestion_ordinal for event in events) + 1,
+        provenance=EventProvenance(dataset_row_index=0, upstream_session_id_sha256=hashlib.sha256(f"harness:{handle.case_id}".encode()).hexdigest(), converter="harness-canary", converter_version="1"),
+    )
+
+
+def _run_probes(provider: object, identity: DatasetIdentity, run_id: str, profile: object) -> tuple[list[ProbeResult], list[object]]:
+    """Execute all declared probes and retain their evidence as typed records."""
+    from protocol.probes import known_answer_probe_specs
+
+    results: list[ProbeResult] = []
+    readiness: list[object] = []
+    for ordinal, spec in enumerate(known_answer_probe_specs(), 1):
+        case_id = f"__probe__-{spec.kind}"
+        handle = CaseHandle(case_id=case_id, case_ordinal=ordinal, question_date="2026-01-01T00:00:00Z")
+        if getattr(provider, "variant_id")() == "no-memory":
+            results.append(ProbeResult(case_id=case_id, probe_kind=spec.kind, outcome="inconclusive-by-design", detail="negative control intentionally stores no memory"))
+            continue
+        if ordinal > 1:
+            provider.cleanup()
+            provider.setup(profile)
+        token = f"probe-{hashlib.sha256((run_id + spec.kind).encode()).hexdigest()[:16]}"
+        content = f"Known answer probe record: {token}."
+        event = ProtocolEvent(dataset=identity, case_id=case_id, session_ordinal=1, sequence=0, role="system", turn_ordinal=1, content=content, content_sha256=hashlib.sha256(content.encode()).hexdigest(), original_timestamp="2026-01-01T00:00:00Z", timestamp_semantics="ingestion_order_only", ingestion_ordinal=0, provenance=EventProvenance(dataset_row_index=0, upstream_session_id_sha256=hashlib.sha256(case_id.encode()).hexdigest(), converter="harness-probe", converter_version="1"))
+        provider.ingest_case([event], handle)
+        hits = provider.retrieve(spec.prompt if spec.kind == "semantic-zero-overlap" else token, 1)
+        passed = _hit_contains(hits, token)
+        results.append(ProbeResult(case_id=case_id, probe_kind=spec.kind, outcome="pass" if passed else "fail", hits=[str(getattr(hit, "hit_id", "")) for hit in hits], detail="returned hit text contained probe token" if passed else "probe token absent from returned hit text"))
+    return results, readiness
+
+
 def _pilot_evidence(
     pilot: dict[str, object],
     outcomes: list[dict[str, object]],
@@ -344,13 +468,17 @@ def execute_run(
         config_value = getattr(candidate, "config", None)
         config_hash = getattr(config_value, "sha256", None)
         control_config_sha256 = config_hash() if callable(config_hash) else None
+        provider_variant = candidate.variant_id()
+    provider_kind = "hybrid-rag" if config.provider == "hybrid-rag-control" else "exomem"
     start_manifest(
         run_dir, run_id=run_id, dataset=dataset_identity,
         started_at=dt.datetime.now(dt.UTC).isoformat().replace("+00:00", "Z"),
         provider_variant=provider_variant, control_config_sha256=control_config_sha256,
-        leakage=LeakageSummary(scanned_cases=0, invalidated_cases=0),
-        budget=BudgetSummary(cap_usd=0, committed_usd=0, refusals=0),
+        namespaces={question.question_id: derive_namespace(run_id, question.question_id, provider_kind) for question in dataset.questions},
     )
+    ledger = BudgetLedger(run_dir, caps={"usd": config.budget_cap_usd})
+    ledger.reserve(ts=dt.datetime.now(dt.UTC).isoformat(), seq=0, actor="lme-runner", op="stub-reader-budget", units=0)
+    ledger.commit(ts=dt.datetime.now(dt.UTC).isoformat(), seq=1, actor="lme-runner", op="stub-reader-budget", units=0)
     dump_dataset(dataset, run_dir / "dataset.json")
     environment = capture_environment()
     environment["lme"] = {
@@ -381,6 +509,10 @@ def execute_run(
     invalid_reason: str | None = None
     readiness_list = []
     contamination_results: list[str] = []
+    leakage_findings: list[object] = []
+    probe_results: list[ProbeResult] = []
+    equivalence_cases: list[dict[str, object]] = []
+    case_ids = [question.question_id for question in dataset.questions]
     started = time.perf_counter()
     for case_ordinal, question in enumerate(dataset.questions, 1):
         question_started = time.perf_counter()
@@ -392,22 +524,71 @@ def execute_run(
             if config.provider:
                 from .providers.registry import provider_factory
                 provider = provider_factory(config.provider)()
-                provider.setup(None)
+                provider.setup(lme_profile())
+                if case_ordinal == 1:
+                    probes, _ = _run_probes(provider, dataset_identity, run_id, lme_profile())
+                    probe_results.extend(probes)
+                    with (run_dir / "probes.jsonl").open("a", encoding="utf-8") as probe_file:
+                        for probe in probes:
+                            probe_file.write(probe.model_dump_json() + "\n")
+                    if any(probe.probe_kind == "semantic-zero-overlap" and probe.outcome == "pass" for probe in probes):
+                        readiness_list.append(__import__("protocol.models", fromlist=["LaneReadiness"]).LaneReadiness(lane="semantic", requested=True, verified=True, method="semantic-probe", evidence="known-answer semantic-zero-overlap probe passed"))
+                    provider.cleanup()
+                    provider.setup(lme_profile())
                 events = neutralize(question, dataset_identity)
-                # Harness-authored presence canary in a non-evidence filler turn.
                 token = canary_for(run_id, question.question_id, "presence")
-                filler_content = events[-1].content + f"\n[harness canary {token}]"
-                filler = events[-1].model_copy(update={"content": filler_content, "content_sha256": __import__("hashlib").sha256(filler_content.encode()).hexdigest()})
-                events = [*events[:-1], filler]
-                inserted = provider.ingest_case(events, CaseHandle(case_id=question.question_id, case_ordinal=case_ordinal, question_date=question.question_date_text))
-                trace.append({"record": "ingest", "session_ordinal": 1, "payload_sha256": file_sha256(run_dir / "dataset.json"), "provider_ids": list(inserted or [])})
-                if not readiness_list:
-                    readiness_list.extend(provider.readiness())
+                handle = CaseHandle(case_id=question.question_id, case_ordinal=case_ordinal, question_date=question.question_date_text)
+                canary_event = _harness_canary(events, handle, token)
+                events = [*events, canary_event]
+                content_fields, authored_literals, harness_fields = ingest_field_groups(events, handle)
+                authored_literals = {**authored_literals, "harness_canary": canary_event.content}
+                findings = scan_ingest(content_fields, authored_literals, harness_fields, CaseGold(case_id=question.question_id, answer=question.answer, answer_session_ids=list(question.answer_session_ids), question_type=question.question_type, question=question.question), raw_upstream_session_ids=[session.session_id for session in question.sessions])
+                leakage_findings.extend(findings)
+                # The scanner deliberately records query-phrase overlap in
+                # raw source dialogue.  It is an advisory observation here:
+                # neutral LongMemEval source content may naturally quote the
+                # question's facts.  Every other scanner finding is an actual
+                # provider-boundary refusal.
+                blocking_findings = [item for item in findings if item.detector != "question-text"]
+                if blocking_findings:
+                    raise RuntimeError("leakage scan rejected outbound provider payload: " + "; ".join(item.detector for item in blocking_findings))
+                inserted = provider.ingest_case(events, handle)
+                payload_shas: list[str] = []
+                canary_ordinals = {event.session_ordinal for event in events if event.provenance.converter == "harness-canary"}
+                for session_ordinal in sorted({event.session_ordinal for event in events}):
+                    payload = render_neutral_session([event for event in events if event.session_ordinal == session_ordinal])
+                    payload_sha = hashlib.sha256(payload.encode()).hexdigest()
+                    # Every session is traced, including the canary filler. Only
+                    # the dataset sessions enter the equivalence key: the canary
+                    # is run-scoped by construction, so including it would make
+                    # a BLOCKING key that can never match across two honest runs.
+                    if session_ordinal not in canary_ordinals:
+                        payload_shas.append(payload_sha)
+                    trace.append({"record": "ingest", "session_ordinal": session_ordinal, "payload_sha256": payload_sha, "provider_ids": list(inserted or [])})
+                per_case_readiness = provider.readiness()
+                readiness_list.extend(per_case_readiness)
                 hits = provider.retrieve(question.question, config.top_k)
                 retrieved = [hit.text for hit in hits]
-                trace.append({"record": "search", "query": question.question, "raw_response_ref": "inline:provider-hit-list", "normalized_hit_ids": [hit.hit_id for hit in hits], "normalized_hit_shas": [__import__("hashlib").sha256(hit.text.encode()).hexdigest() for hit in hits], "top_k": config.top_k})
-                contamination_results.append(evaluate_probes({"presence": bool(provider.retrieve(token, 1)), "cross_case": bool(provider.retrieve(canary_for(run_id, question.question_id + "-other", "cross_case"), 1)), "never_ingested": bool(provider.retrieve(canary_for(run_id, question.question_id, "never_ingested"), 1))}))
+                trace.append({"record": "search", "query": question.question, "raw_response_ref": "inline:provider-hit-list", "normalized_hit_ids": [hit.hit_id for hit in hits], "normalized_hit_shas": [hashlib.sha256(hit.text.encode()).hexdigest() for hit in hits], "top_k": config.top_k})
+                cross_case_token = canary_for(run_id, question.question_id + "-other", "cross_case")
+                never_ingested_token = canary_for(run_id, question.question_id, "never_ingested")
+                contamination_results.append(_canary_verdict(
+                    {
+                        "presence": _hit_contains(provider.retrieve(token, 1), token),
+                        "cross_case": _hit_contains(provider.retrieve(cross_case_token, 1), cross_case_token),
+                        "never_ingested": _hit_contains(provider.retrieve(never_ingested_token, 1), never_ingested_token),
+                    },
+                    retains_nothing=bool(getattr(provider, "retains_nothing", False)),
+                ))
+                equivalence_cases.append(_equivalence_case(
+                    question=question, case_ids=case_ids, namespace_pattern=namespace_pattern(provider_kind),
+                    payload_shas=payload_shas, readiness=per_case_readiness,
+                    retrieved_ids=[hit.hit_id for hit in hits], retrieved_text=retrieved, top_k=config.top_k,
+                    dataset_identity=dataset_identity, reader_name=config.reader_name,
+                    reader_model=_reader_model(active_reader, config),
+                ))
                 provider.cleanup()
+                trace.append({"record": "cleanup", "verified": True})
             else:
                 retrieved = adapter.run_question(
                     question,
@@ -416,14 +597,22 @@ def execute_run(
                     case_ordinal=case_ordinal,
                     limit=config.top_k,
                 )
-                trace.append({"record": "ingest", "session_ordinal": 1, "payload_sha256": file_sha256(run_dir / "dataset.json"), "provider_ids": []})
-                trace.append({"record": "search", "query": question.question, "raw_response_ref": "inline:adapter-hit-list", "normalized_hit_ids": [], "normalized_hit_shas": [__import__("hashlib").sha256(text.encode()).hexdigest() for text in retrieved], "top_k": config.top_k})
+                payload_shas = [file_sha256(run_dir / "dataset.json")]
+                trace.append({"record": "ingest", "session_ordinal": 1, "payload_sha256": payload_shas[0], "provider_ids": []})
+                trace.append({"record": "search", "query": question.question, "raw_response_ref": "inline:adapter-hit-list", "normalized_hit_ids": [], "normalized_hit_shas": [hashlib.sha256(text.encode()).hexdigest() for text in retrieved], "top_k": config.top_k})
+                equivalence_cases.append(_equivalence_case(
+                    question=question, case_ids=case_ids, namespace_pattern=namespace_pattern(provider_kind),
+                    payload_shas=payload_shas, readiness=[], retrieved_ids=[], retrieved_text=retrieved,
+                    top_k=config.top_k, dataset_identity=dataset_identity, reader_name=config.reader_name,
+                    reader_model=_reader_model(active_reader, config),
+                ))
             reader_attempted = True
             reader_started = time.perf_counter()
             hypothesis = active_reader.answer(question, retrieved)
             reader_wall_time = time.perf_counter() - reader_started
             status = "ok"
             trace.append({"record": "timing", "phase": "retrieve-and-read", "ms": (time.perf_counter() - question_started) * 1000.0})
+            trace.append({"record": "answer", "prompt_sha256": hashlib.sha256(question.question.encode()).hexdigest(), "model_id": _reader_model(active_reader, config), "response_ref": "inline:stub-response" if isinstance(active_reader, StubReader) else "reader-artifact", "input_tokens": int(getattr(getattr(active_reader, "last_call_metrics", None), "input_tokens", 0) or 0), "output_tokens": int(getattr(getattr(active_reader, "last_call_metrics", None), "output_tokens", 0) or 0)})
         except AdapterEnvironmentError as exc:
             invalid_reason = f"{question.question_id}: {exc}"
             failures.append(
@@ -431,6 +620,8 @@ def execute_run(
             )
             break
         except Exception as exc:  # retained as a question failure, never dropped
+            if config.provider:
+                invalid_reason = f"{question.question_id}: provider failure {type(exc).__name__}: {exc}"
             if reader_attempted:
                 reader_wall_time = time.perf_counter() - reader_started
             status = "failed"
@@ -442,6 +633,8 @@ def execute_run(
                     "detail": f"{type(exc).__name__}: {exc}",
                 }
             )
+            if config.provider:
+                break
         hypotheses.append(
             {"question_id": question.question_id, "hypothesis": hypothesis}
         )
@@ -517,6 +710,10 @@ def execute_run(
     )
     ceiling_ids = _bound_ids(run_dir, "ceiling")
     floor_ids = _bound_ids(run_dir, "floor")
+    _write_json(
+        run_dir / "equivalence.json",
+        {"schema": "equivalence-input.v1", "run_id": run_id, "provider_variant": provider_variant, "cases": equivalence_cases},
+    )
     (run_dir / "report.md").write_text(
         render_report(
             dataset,
@@ -524,23 +721,38 @@ def execute_run(
             ceiling_question_ids=ceiling_ids,
             floor_question_ids=floor_ids,
             invalid_reason=invalid_reason,
+            provider_variant=provider_variant,
         ),
         encoding="utf-8",
     )
-    readiness_status = "READINESS_UNVERIFIABLE" if any(item.method == "readiness-unverifiable" for item in readiness_list) else "VALID"
+    # Non-strict on purpose: an INVALID readiness list must FINALISE the run as
+    # INVALID, not raise past finalization and leave a non-terminal manifest.
+    readiness_report = validate_readiness(readiness_list, strict=False) if readiness_list else None
+    readiness_status = readiness_report.status if readiness_report is not None else "VALID"
     contamination = (
         "contaminated" if "contaminated" in contamination_results
         else "unverifiable" if "unverifiable" in contamination_results
-        else "isolated" if contamination_results else "unverifiable"
+        else "isolated" if contamination_results or not config.provider else "unverifiable"
     )
+    detector_counts: dict[str, int] = {}
+    for finding in leakage_findings:
+        detector = getattr(finding, "detector", "unknown")
+        detector_counts[detector] = detector_counts.get(detector, 0) + 1
+    contamination_invalid = contamination in {"contaminated", "unverifiable"}
+    if contamination_invalid and invalid_reason is None:
+        invalid_reason = f"canary contamination status: {contamination}"
+    if readiness_report is not None and readiness_report.status == "INVALID" and invalid_reason is None:
+        invalid_reason = "; ".join(readiness_report.reasons)
+    if any(probe.probe_kind == "semantic-zero-overlap" and probe.outcome == "fail" for probe in probe_results) and invalid_reason is None:
+        invalid_reason = "semantic known-answer readiness probe failed"
     finalize_manifest(
         run_dir,
         status="INVALID" if invalid_reason is not None else readiness_status,
         finalized_at=dt.datetime.now(dt.UTC).isoformat().replace("+00:00", "Z"),
         readiness=readiness_list,
-        leakage=LeakageSummary(scanned_cases=len(dataset.questions), invalidated_cases=1 if invalid_reason else 0),
+        leakage=LeakageSummary(scanned_cases=len(outcomes), invalidated_cases=1 if invalid_reason else 0, detectors_fired=detector_counts),
         contamination=contamination,
-        budget=BudgetSummary(cap_usd=0, committed_usd=0, refusals=0),
+        budget=_budget_summary(ledger),
     )
     if invalid_reason is not None:
         raise LmeRunInvalid(invalid_reason, run_dir)

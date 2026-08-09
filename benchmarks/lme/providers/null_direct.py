@@ -11,6 +11,13 @@ from .base import ProviderHit, require_neutral
 
 
 class NullDirectProvider:
+    #: By-design declaration read by the runner's canary evaluation.  A control
+    #: that stores nothing can never retrieve its own presence canary; scoring
+    #: that as "unverifiable" would invalidate the very floor this row exists to
+    #: provide, so the runner treats presence as inconclusive-by-design here and
+    #: still lets a cross-case or never-ingested hit contaminate the run.
+    retains_nothing = True
+
     def setup(self, profile: Profile | None) -> None:
         del profile
 
