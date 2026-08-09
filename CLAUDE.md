@@ -17,10 +17,23 @@ to `main`.
 **Rule: never run a git operation that discards/overwrites uncommitted changes or
 rewrites the working tree in the shared primary checkout — unless the user
 explicitly approves that specific operation.** That covers `git checkout
-<branch>` / `git switch` (swaps files), `git stash`, `git reset --hard`,
+<branch>` / `git switch` (swaps files), `git reset --hard`,
 `git checkout -- <file>` / `git restore <file>` / `git clean` (discard a file's
 uncommitted state), and any rebase/merge that rewrites the tree. These have
-already caused a mid-edit collision.
+already caused a mid-edit collision. `git stash` is worse than these and is
+covered separately below, because it is unsafe from *any* worktree, not just
+this one.
+
+**`git stash` is never safe here, in any checkout — including your own
+worktree.** The stash stack lives in the repository, not the worktree: every
+worktree shares one `refs/stash`. A `pop` takes whatever is on top, which may be
+another session's entry, and applies it into your tree. Worse, `git stash push
+-- <paths>` **exits zero having created nothing** when those paths are already
+clean, so the paired `pop` silently targets a stranger's work. This has already
+half-applied another session's `uv.lock` change and produced a phantom test
+failure. To revert files temporarily — to prove a test red, for example — use
+`git checkout <ref> -- <paths>` and restore with `git checkout HEAD -- <paths>`;
+it touches no shared state.
 
 **Always fine on the primary — no worktree, no approval:** read-only git
 (`status`, `log`, `diff`, `fetch`); a clean `git pull --ff-only` on the branch
