@@ -47,6 +47,10 @@ _SUPPORTS_DIRECTORY_FD = bool(
 # denying the DELETE/WRITE access required for that path substitution.
 _WINDOWS_GUARDED_DIRECTORY_SHARE = 0x00000001
 _WINDOWS_DEFAULT_SHARE = 0x00000001 | 0x00000002 | 0x00000004
+# Requesting metadata-only access does not establish a Windows share
+# reservation.  FILE_LIST_DIRECTORY is the least directory access that makes
+# omission of FILE_SHARE_WRITE/DELETE actually pin the verified namespace.
+_WINDOWS_FILE_LIST_DIRECTORY = 0x00000001
 
 log = logging.getLogger(__name__)
 
@@ -2279,6 +2283,7 @@ def _read_bounded_windows_snapshot(
             raise PathGuardError("PATH_GUARD_ROOT", "vault root is unsafe")
         root_fd = _open_directory_path(
             root,
+            desired_access=_WINDOWS_FILE_LIST_DIRECTORY,
             share_mode=_WINDOWS_GUARDED_DIRECTORY_SHARE,
         )
         descriptors.append(root_fd)
@@ -2298,6 +2303,7 @@ def _read_bounded_windows_snapshot(
                 raise PathGuardError("PATH_GUARD_UNSAFE", "guard ancestor is unsafe")
             descriptor = _open_directory_path(
                 current,
+                desired_access=_WINDOWS_FILE_LIST_DIRECTORY,
                 share_mode=_WINDOWS_GUARDED_DIRECTORY_SHARE,
             )
             descriptors.append(descriptor)
@@ -2556,7 +2562,12 @@ def _open_windows_path_descriptor(
         raise
 
 
-def _open_directory_path(path: Path, *, share_mode: int | None = None) -> int:
+def _open_directory_path(
+    path: Path,
+    *,
+    desired_access: int = 0,
+    share_mode: int | None = None,
+) -> int:
     """Open a directory as a CRT descriptor on every supported platform."""
     if os.name != "nt":
         return os.open(path, _directory_flags())
@@ -2566,7 +2577,7 @@ def _open_directory_path(path: Path, *, share_mode: int | None = None) -> int:
     # giving the batch guard the same fstat/close lifecycle used on POSIX.
     return _open_windows_path_descriptor(
         path,
-        desired_access=0,
+        desired_access=desired_access,
         attributes=0x02000000 | 0x00200000,
         crt_flags=os.O_RDONLY,
         share_mode=_WINDOWS_DEFAULT_SHARE if share_mode is None else share_mode,

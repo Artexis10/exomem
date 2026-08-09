@@ -348,14 +348,19 @@ def test_windows_guarded_reader_bounds_reads_and_rechecks_ancestor_identity(
     real_read = os.read
     real_lstat = Path.lstat
     reads: list[int] = []
-    directory_share_modes: list[int | None] = []
+    directory_open_modes: list[tuple[int, int | None]] = []
     swapped = False
 
     def open_leaf(path: Path, **_kwargs: object) -> int:
         return os.open(path, os.O_RDONLY)
 
-    def open_pinned_directory(path: Path, *, share_mode: int | None = None) -> int:
-        directory_share_modes.append(share_mode)
+    def open_pinned_directory(
+        path: Path,
+        *,
+        desired_access: int = 0,
+        share_mode: int | None = None,
+    ) -> int:
+        directory_open_modes.append((desired_access, share_mode))
         return os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
 
     def read_and_swap(descriptor: int, size: int) -> bytes:
@@ -392,7 +397,12 @@ def test_windows_guarded_reader_bounds_reads_and_rechecks_ancestor_identity(
     assert max(reads) == 5
     assert all(size <= 5 for size in reads)
     if os.name != "nt":
-        assert directory_share_modes == [vault._WINDOWS_GUARDED_DIRECTORY_SHARE] * 2
+        assert directory_open_modes == [
+            (
+                vault._WINDOWS_FILE_LIST_DIRECTORY,
+                vault._WINDOWS_GUARDED_DIRECTORY_SHARE,
+            )
+        ] * 2
 
 
 @pytest.mark.skipif(os.name != "nt", reason="requires native Windows descriptors")
