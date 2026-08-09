@@ -150,7 +150,7 @@ def derive_compile_plan(
     claims: list[ClaimRecord],
     entities: list[EntityRecord] | None = None,
 ) -> list[ConclusionRecord]:
-    """Conclusions per claim revision, ordered by claim id so the plan is stable.
+    """Conclusions per claim revision in stable supersession order.
 
     Stability is load-bearing rather than tidy: the plan is written into the
     corpus and hashed into the release manifest, so an ordering that depended on
@@ -178,7 +178,40 @@ def derive_compile_plan(
     # built on raw ids would score zero for a reason that has nothing to do with
     # any contender. Entity ids are resolved to canonical names wherever known.
     names = {e.entity_id: e.canonical_name for e in (entities or [])}
-    ordered_claims = sorted(claims, key=lambda c: c.claim_id)
+    # Claim-id order is the stable baseline, but it cannot be the final plan
+    # order: a successor must only be emitted after the conclusion it replaces.
+    # Kahn's traversal preserves the baseline order whenever dependencies leave
+    # a choice, while making that predecessor-before-successor contract explicit.
+    baseline_claims = sorted(claims, key=lambda c: c.claim_id)
+    claims_by_id = {claim.claim_id: claim for claim in baseline_claims}
+    baseline_index = {
+        claim.claim_id: index for index, claim in enumerate(baseline_claims)
+    }
+    dependents: dict[str, list[str]] = defaultdict(list)
+    pending: dict[str, int] = {claim.claim_id: 0 for claim in baseline_claims}
+    for claim in baseline_claims:
+        if claim.supersedes in claims_by_id:
+            dependents[claim.supersedes].append(claim.claim_id)
+            pending[claim.claim_id] += 1
+
+    ready = [claim.claim_id for claim in baseline_claims if not pending[claim.claim_id]]
+    ordered_claims = []
+    while ready:
+        ready.sort(key=baseline_index.__getitem__)
+        claim_id = ready.pop(0)
+        ordered_claims.append(claims_by_id[claim_id])
+        for successor_id in dependents[claim_id]:
+            pending[successor_id] -= 1
+            if not pending[successor_id]:
+                ready.append(successor_id)
+    if len(ordered_claims) != len(baseline_claims):
+        cycle_claims = sorted(
+            claim_id for claim_id, dependency_count in pending.items() if dependency_count
+        )
+        raise ValueError(
+            "supersession cycle prevents compile-plan ordering: "
+            + ", ".join(cycle_claims)
+        )
     # The head of each claim's chain, so lineage and disputes can point at the
     # revision a store would actually be holding rather than at its first draft.
     heads = {

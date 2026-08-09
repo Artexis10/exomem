@@ -77,6 +77,9 @@ ANSWER_MODE_DIMENSIONS = frozenset(
 #: Only the non-default mode is surfaced in labels; a harness-answered run is
 #: the baseline every historical run used and needs no annotation.
 ANSWER_MODE_NATIVE_LABEL = "native"
+ANSWER_MODE_HARNESS = "harness"
+WITHHELD_LATENCY = "withheld: transport asymmetry (4b.40)"
+WITHHELD_HARNESS_ABSTENTION = "withheld: shared-answerer authored (audit CF#6)"
 
 #: Dimensions that are STRUCTURALLY unmeasurable at raw-source altitude: what
 #: they score does not exist, rather than existing and scoring badly. A citation
@@ -236,6 +239,10 @@ class _RunView:
     provider: str = "?"
     #: The layer the run measured at; see INGESTION_ALTITUDES.
     ingestion_altitude: str = "raw_source"
+    #: The writer of answer-level dimensions such as abstention.
+    answer_mode: str = ANSWER_MODE_HARNESS
+    #: Non-reference providers remain useful fixtures but are not publishable.
+    publication_label: str | None = None
 
 
 def _load_run(run_dir: Path) -> _RunView:
@@ -278,6 +285,10 @@ def _load_run(run_dir: Path) -> _RunView:
     floor = manifest.get("retrieval_floor")
     profile = manifest.get("profile", {})
     profile_name = profile.get("name", "?") if isinstance(profile, dict) else str(profile)
+    provider = str(manifest.get("provider", "?"))
+    publication_label = manifest.get("publication_label")
+    if publication_label is not None:
+        publication_label = str(publication_label)
     return _RunView(
         run_dir=run_dir,
         run_id=str(manifest.get("run_id", run_dir.name)),
@@ -308,8 +319,10 @@ def _load_run(run_dir: Path) -> _RunView:
         judged=judged,
         environment=environment,
         retrieval_floor=floor if isinstance(floor, dict) else None,
-        provider=str(manifest.get("provider", "?")),
+        provider=provider,
         ingestion_altitude=str(manifest.get("ingestion_altitude", "raw_source")),
+        answer_mode=str(manifest.get("answer_mode", ANSWER_MODE_HARNESS)),
+        publication_label=publication_label,
     )
 
 
@@ -375,9 +388,20 @@ def _recomputed_dimension_counts(rows: list[dict], dimension: str) -> dict | Non
     return counts if found else None
 
 
-def _dimension_cell(run: _RunView, dimension: str) -> str:
+def _dimension_cell(
+    run: _RunView, dimension: str, *, cross_contender: bool = False
+) -> str:
     if run.invalid:
         return "INVALID"
+    if (
+        cross_contender
+        and dimension == "abstention"
+        and run.answer_mode == ANSWER_MODE_HARNESS
+    ):
+        # The other answer-mode dimensions assess supplied answer content, but
+        # this correction is deliberately scoped to abstention: only a
+        # contender's own decision to abstain is a product-owned seam.
+        return WITHHELD_HARNESS_ABSTENTION
     if run.governance_state != "wired":
         if dimension in GOVERNANCE_DIMENSIONS:
             # Three-state contract: an ungoverned (or unsupported) measurement
@@ -690,7 +714,9 @@ def _was_attempted(run: _RunView, dimension: str) -> bool:
     return any(int(counts.get(key, 0) or 0) > 0 for key in ("pass", "fail", "unsupported"))
 
 
-def _bounds_section(runs: Sequence[_RunView]) -> list[str]:
+def _bounds_section(
+    runs: Sequence[_RunView], *, cross_contender: bool = False
+) -> list[str]:
     """Floor and ceiling per dimension, and where each contender sits between.
 
     A pass count on its own is not a measurement. "148 factual_qa" is only
@@ -788,8 +814,27 @@ def _bounds_section(runs: Sequence[_RunView]) -> list[str]:
         else:
             span = None
             range_cell = "—"
-        row = [name, low_cell, high_cell, range_cell]
+        if name == "abstention" and cross_contender:
+            floor_withheld = floor is not None and floor.answer_mode == ANSWER_MODE_HARNESS
+            ceiling_withheld = ceiling is not None and ceiling.answer_mode == ANSWER_MODE_HARNESS
+            row = [
+                name,
+                WITHHELD_HARNESS_ABSTENTION if floor_withheld else low_cell,
+                WITHHELD_HARNESS_ABSTENTION if ceiling_withheld else high_cell,
+                WITHHELD_HARNESS_ABSTENTION
+                if floor_withheld or ceiling_withheld
+                else range_cell,
+            ]
+        else:
+            row = [name, low_cell, high_cell, range_cell]
         for contender in contenders:
+            if (
+                name == "abstention"
+                and cross_contender
+                and contender.answer_mode == ANSWER_MODE_HARNESS
+            ):
+                row.append(WITHHELD_HARNESS_ABSTENTION)
+                continue
             score = _pass_count(contender, name)
             if score is None:
                 row.append("—")
@@ -847,6 +892,7 @@ def build_comparison_report(run_dirs: Sequence[Path], out_path: Path) -> Path:
     runs = [_load_run(Path(run_dir)) for run_dir in run_dirs]
     _dedupe_labels(runs)
     labels = [run.label for run in runs]
+    cross_contender = len({run.provider for run in runs} - REFERENCE_PROVIDERS) > 1
 
     lines: list[str] = [
         "# membench cross-run comparison",
@@ -868,6 +914,8 @@ def build_comparison_report(run_dirs: Sequence[Path], out_path: Path) -> Path:
     ]
     for run in runs:
         status = f"INVALID: {run.invalid_reason}" if run.invalid else "ok"
+        if run.publication_label:
+            status = f"{status} · {run.publication_label}"
         lines.append(
             f"| {run.run_id} | {run.label} | {status} | {run.run_failures} |"
         )
@@ -902,10 +950,12 @@ def build_comparison_report(run_dirs: Sequence[Path], out_path: Path) -> Path:
         }
     )
     for name in dimension_names:
-        cells = " | ".join(_dimension_cell(run, name) for run in runs)
+        cells = " | ".join(
+            _dimension_cell(run, name, cross_contender=cross_contender) for run in runs
+        )
         lines.append(f"| {name} | {cells} |")
 
-    lines.extend(_bounds_section(runs))
+    lines.extend(_bounds_section(runs, cross_contender=cross_contender))
 
     lines.extend(
         [
@@ -951,29 +1001,30 @@ def build_comparison_report(run_dirs: Sequence[Path], out_path: Path) -> Path:
             applicable_cells.append(str(stats["applicable_queries"] if stats else 0))
     lines.append("| applicable_queries | " + " | ".join(applicable_cells) + " |")
 
-    lines.extend(
-        [
-            "",
-            "## Latency (separate section; never mixed into quality tables)",
-            "",
-            "| metric | " + " | ".join(labels) + " |",
-            "| --- |" + " --- |" * len(runs),
-        ]
-    )
-    for metric_name in ("median_ms", "p95_ms", "search_calls"):
-        cells = []
-        for run in runs:
-            if run.invalid:
-                cells.append("INVALID")
-            elif not run.latencies:
-                cells.append("n/a")
-            elif metric_name == "median_ms":
-                cells.append(_fmt(statistics.median(run.latencies)))
-            elif metric_name == "p95_ms":
-                cells.append(_fmt(_p95(run.latencies)))
-            else:
-                cells.append(str(len(run.latencies)))
-        lines.append(f"| {metric_name} | " + " | ".join(cells) + " |")
+    lines.extend(["", "## Latency (separate section; never mixed into quality tables)", ""])
+    if cross_contender:
+        lines.append(WITHHELD_LATENCY)
+    else:
+        lines.extend(
+            [
+                "| metric | " + " | ".join(labels) + " |",
+                "| --- |" + " --- |" * len(runs),
+            ]
+        )
+        for metric_name in ("median_ms", "p95_ms", "search_calls"):
+            cells = []
+            for run in runs:
+                if run.invalid:
+                    cells.append("INVALID")
+                elif not run.latencies:
+                    cells.append("n/a")
+                elif metric_name == "median_ms":
+                    cells.append(_fmt(statistics.median(run.latencies)))
+                elif metric_name == "p95_ms":
+                    cells.append(_fmt(_p95(run.latencies)))
+                else:
+                    cells.append(str(len(run.latencies)))
+            lines.append(f"| {metric_name} | " + " | ".join(cells) + " |")
 
     lines.extend(_environment_section(runs))
     lines.extend(_retrieval_floor_section(runs))

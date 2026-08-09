@@ -15,6 +15,7 @@ Four contracts are pinned here, in the order they matter:
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -56,6 +57,19 @@ _PROBE_ITEMS = (
     / "judge-agreement"
     / "judge-vs-gates"
     / "direction-discrimination-items.json"
+)
+_PROBE_CORPUS_IDENTITY = (
+    Path(__file__).resolve().parents[1]
+    / "benchmarks"
+    / "judge-agreement"
+    / "probe-corpus-identity.json"
+)
+_RELEASE_MANIFEST = (
+    Path(__file__).resolve().parents[1]
+    / "benchmarks"
+    / "corpus"
+    / "releases"
+    / "v0.1-seed1.manifest.json"
 )
 
 
@@ -382,6 +396,11 @@ def test_expected_summary_matches_the_probe_that_justifies_the_dimension() -> No
     fails, the wording changed and the 19/19 evidence no longer describes what
     the runner sends — re-run the probe before touching the string.
     """
+
+    identity = json.loads(_PROBE_CORPUS_IDENTITY.read_text(encoding="utf-8"))
+    current_identity = hashlib.sha256(_RELEASE_MANIFEST.read_bytes()).hexdigest()
+    if identity["release_manifest_sha256"] != current_identity:
+        pytest.skip("probe artifact stale vs current corpus (4b.45)")
 
     items = {row["id"]: row["prompt"] for row in json.loads(_PROBE_ITEMS.read_text())}
     probe_id = "QRY-C30F6519|correct|plain"

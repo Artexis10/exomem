@@ -105,6 +105,8 @@ from membench.scoring.retrieval import score_retrieval
 #: 4b.29 shape — a configuration difference read as a product difference.
 ANSWER_MODE_NATIVE = "native"
 ANSWER_MODE_HARNESS = "harness"
+INTERNAL_DIAGNOSTIC_LABEL = "internal diagnostic — not publishable"
+REFERENCE_PROVIDERS = frozenset({"oracle-retrieval", "null-abstain"})
 
 # Every contender needs its corpus rendered into ITS OWN native grammar before
 # ingest. A provider absent from this map receives an EMPTY directory and is
@@ -129,6 +131,14 @@ _NATIVE_RENDERERS = {
     # an empty-corpus artefact instead of a measurement.
     "null-abstain": oracle_ceiling_native.render,
 }
+
+
+def _publication_label(provider: str) -> str | None:
+    """Non-reference contenders are retained only as internal diagnostics."""
+
+    if provider == "exomem-local" or provider in REFERENCE_PROVIDERS:
+        return None
+    return INTERNAL_DIAGNOSTIC_LABEL
 
 
 ANSWER_MODE_COMPILED = "compiled"
@@ -662,6 +672,9 @@ def execute_run(spec: RunSpec) -> RunResult:
             else ANSWER_MODE_HARNESS
         ),
     }
+    publication_label = _publication_label(spec.adapter.name)
+    if publication_label:
+        manifest["publication_label"] = publication_label
     corpus_manifest = (corpus_dir / "manifest.json").read_text(encoding="utf-8")
     (run_dir / "corpus-manifest.json").write_text(corpus_manifest, encoding="utf-8")
 
@@ -1141,6 +1154,8 @@ def _write_report(
         f"- judge: {judge_meta.get('backend', 'none')} "
         f"({judge_meta.get('status', 'not_run')})",
     ]
+    if publication_label := manifest.get("publication_label"):
+        lines.insert(3, f"- publication: {publication_label}")
     if manifest["invalid"]:
         # No table. A sheet of plausible-looking counts is precisely what an
         # invalidated run must not publish — the 2026-08-05 zero-hit run
