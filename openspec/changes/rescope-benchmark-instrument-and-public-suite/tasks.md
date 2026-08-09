@@ -57,6 +57,22 @@
       updated to the decided contract, never recalibrated to current
       behaviour
 
+## 3b. Review residuals (non-blocking, from the 2026-08-09 lane reviews)
+- [ ] 3b.1 LME runner: a failed question's row in question-outcomes.jsonl
+      inherits the PREVIOUS question's reader token/cost metrics
+      (`_reader_outcome` reads `reader.last_call_metrics` unreset on
+      failure), polluting pilot cost extrapolation — null the metrics when
+      status == "failed" (red-first)
+- [ ] 3b.2 LME test gaps: `retrieval_clock` recorded in environment.json/
+      run.json has no test; the pilot too-small-to-cover-groups refusal has
+      no test; the clock-seam test asserts the module attribute rather than
+      observing find_policy's computed `today`
+- [ ] 3b.3 LME full-run gate exempts fixture-path datasets entirely —
+      document or narrow (MUST 4(d) literally says "any non-pilot run")
+- [ ] 3b.4 membench bounds table: a native contender's abstention percentage
+      cell still renders against floor/ceiling values that are themselves
+      withheld on that row, leaking the scale relationship the row withholds
+
 ## 4. Validation
 - [ ] 4.1 `openspec validate rescope-benchmark-instrument-and-public-suite --strict`
 - [ ] 4.2 Lean membench suite green (the deliberate 4b.28 red documented
