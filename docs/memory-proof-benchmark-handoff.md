@@ -113,7 +113,7 @@ this niche (see the adjacent-landscape appendix).
   about versions until `uv sync`; lean tests <60 s each, offline, no
   credentials.
 - Test command: `EXOMEM_DISABLE_EMBEDDINGS=1 PYTHONPATH=src
-  /home/hugoa/projects/exomem/.venv/bin/python -m pytest
+  <repo>/.venv/bin/python -m pytest
   tests/test_membench_*.py -q` from the worktree root.
 
 ## Routing: what a GPT-5.6 Sol session can own

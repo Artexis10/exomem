@@ -40,7 +40,7 @@ AUG1_ENVIRONMENT: dict[str, object] = {
         "exomem": {
             "dirty": False,
             "head": "bc6cfac468280fd433b0f821bebed1d44085a439",
-            "path": "/home/hugoa/projects/exomem/.claude/worktrees/bench-foundation",
+            "path": "/srv/checkout/exomem-worktree",
         }
     },
 }
@@ -58,7 +58,7 @@ AUG5_ENVIRONMENT: dict[str, object] = {
         "exomem": {
             "dirty": False,
             "head": "25c37b0e50eabbef67c0f3a5b88d85628f021994",
-            "path": "/home/hugoa/projects/exomem/.claude/worktrees/bench-foundation",
+            "path": "/srv/checkout/exomem-worktree",
         }
     },
 }
@@ -174,7 +174,16 @@ def test_committed_run_artifacts_still_match_the_inlined_fixtures() -> None:
     for run_dir, fixture in ((AUG1_RUN, AUG1_ENVIRONMENT), (AUG5_RUN, AUG5_ENVIRONMENT)):
         if not (run_dir / "environment.json").is_file():
             pytest.skip(f"run artifacts absent (benchmarks/runs is not tracked): {run_dir}")
-        assert load_environment(run_dir) == fixture
+        loaded = load_environment(run_dir)
+        # The recorded worktree path is machine-specific by nature; the inlined
+        # fixtures carry a placeholder so the public-artifact privacy gate can
+        # hold. Pin everything else verbatim, and the path only structurally.
+        repos = loaded.get("repos")
+        assert isinstance(repos, dict)
+        for repo in repos.values():
+            assert isinstance(repo["path"], str) and repo["path"].startswith("/")
+            repo["path"] = "/srv/checkout/exomem-worktree"
+        assert loaded == fixture
 
 
 # --------------------------------------------------------------------------

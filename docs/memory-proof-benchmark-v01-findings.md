@@ -101,9 +101,9 @@ number for exomem carries this context.
   Note the previously recorded WSL2 CPU SIGABRT on BGE load may still apply.
 - **`bm-local` is sandbox-blocked** (spawns `uv run --project …`, and the uv
   cache is read-only here). User-run from the basic-memory worktree:
-  `cd /home/hugoa/projects/basic-memory-exomem-provider/benchmarks && EXOMEM_COMMAND=/home/hugoa/projects/exomem/.venv/bin/exomem .venv/bin/bm-bench run retrieval --dataset-id synthetic --dataset-path benchmarks/synthetic/queries.json --corpus-dir benchmarks/synthetic/docs --queries-path benchmarks/synthetic/queries.json --providers bm-local,exomem-local,baseline-grep --top-k 10 --bm-local-path /home/hugoa/projects/basic-memory-exomem-provider --allow-provider-skip`
+  `cd <bm-provider-worktree>/benchmarks && EXOMEM_COMMAND=<repo>/.venv/bin/exomem .venv/bin/bm-bench run retrieval --dataset-id synthetic --dataset-path benchmarks/synthetic/queries.json --corpus-dir benchmarks/synthetic/docs --queries-path benchmarks/synthetic/queries.json --providers bm-local,exomem-local,baseline-grep --top-k 10 --bm-local-path <bm-provider-worktree> --allow-provider-skip`
 - **External datasets** (LoCoMo, LongMemEval-S) need network:
-  `cd /home/hugoa/projects/basic-memory-exomem-provider/benchmarks && .venv/bin/bm-bench datasets fetch --dataset locomo --output benchmarks/datasets/locomo/locomo10.json`
+  `cd <bm-provider-worktree>/benchmarks && .venv/bin/bm-bench datasets fetch --dataset locomo --output benchmarks/datasets/locomo/locomo10.json`
 - **QA/diagnose stages** use the Claude CLI (network):
   `.venv/bin/bm-bench run qa --run-dir <run> --answerer claude:claude-haiku-4-5 --judge claude:claude-sonnet-4-6` then
   `.venv/bin/bm-bench run diagnose --run-dir <run>`
@@ -203,10 +203,10 @@ works; scale runs remain desk-side/user-run by design.
 
 ## Reproduction (single-line commands, dependency order)
 
-- `cd /home/hugoa/projects/exomem/.claude/worktrees/bench-foundation`
-- `EXOMEM_DISABLE_EMBEDDINGS=1 PYTHONPATH=src /home/hugoa/projects/exomem/.venv/bin/python -m pytest -q tests/test_membench_privacy.py tests/test_membench_schema.py tests/test_membench_oracle.py tests/test_membench_generate_determinism.py tests/test_membench_artifacts.py tests/test_membench_native_parity.py tests/test_membench_scoring_gates.py tests/test_membench_runner.py tests/test_membench_adapter_exomem.py tests/test_membench_template_suite.py tests/test_membench_private_format.py`
-- `EXOMEM_DISABLE_EMBEDDINGS=1 /home/hugoa/projects/exomem/.venv/bin/python benchmarks/run.py generate --seed 1 --out benchmarks/corpus/generated/s1`
-- `EXOMEM_DISABLE_EMBEDDINGS=1 /home/hugoa/projects/exomem/.venv/bin/python benchmarks/run.py run --corpus benchmarks/corpus/generated/s1 --provider exomem-local --mode leaf --label baseline-lexical --top-k 10`
+- `cd <repo-worktree>`
+- `EXOMEM_DISABLE_EMBEDDINGS=1 PYTHONPATH=src <repo>/.venv/bin/python -m pytest -q tests/test_membench_privacy.py tests/test_membench_schema.py tests/test_membench_oracle.py tests/test_membench_generate_determinism.py tests/test_membench_artifacts.py tests/test_membench_native_parity.py tests/test_membench_scoring_gates.py tests/test_membench_runner.py tests/test_membench_adapter_exomem.py tests/test_membench_template_suite.py tests/test_membench_private_format.py`
+- `EXOMEM_DISABLE_EMBEDDINGS=1 <repo>/.venv/bin/python benchmarks/run.py generate --seed 1 --out benchmarks/corpus/generated/s1`
+- `EXOMEM_DISABLE_EMBEDDINGS=1 <repo>/.venv/bin/python benchmarks/run.py run --corpus benchmarks/corpus/generated/s1 --provider exomem-local --mode leaf --label baseline-lexical --top-k 10`
 - Track A smoke: the `bm-bench run retrieval` line above (providers `exomem-local,baseline-grep` in-sandbox; add `bm-local` outside).
 - Determinism check: run `generate` twice into two directories and diff the manifests.
 
@@ -433,10 +433,10 @@ surface — a product decision, recorded here, not a harness simulation.
 
 **Reproduction (single-line commands):**
 
-- `EXOMEM_DISABLE_EMBEDDINGS=1 /home/hugoa/projects/exomem/.venv/bin/python benchmarks/run.py generate --seed 1 --out benchmarks/corpus/generated/s1-t16 --template t16_governance_audiences`
-- `EXOMEM_DISABLE_EMBEDDINGS=1 /home/hugoa/projects/exomem/.venv/bin/python benchmarks/run.py run --corpus benchmarks/corpus/generated/s1-t16 --governance wired --label t23-wired --top-k 10`
-- `EXOMEM_DISABLE_EMBEDDINGS=1 /home/hugoa/projects/exomem/.venv/bin/python benchmarks/run.py run --corpus benchmarks/corpus/generated/s1-t16 --label t23-default-open --top-k 10`
-- Wiring gate suite: `EXOMEM_DISABLE_EMBEDDINGS=1 PYTHONPATH=src /home/hugoa/projects/exomem/.venv/bin/python -m pytest -q tests/test_membench_governance_wiring.py`
+- `EXOMEM_DISABLE_EMBEDDINGS=1 <repo>/.venv/bin/python benchmarks/run.py generate --seed 1 --out benchmarks/corpus/generated/s1-t16 --template t16_governance_audiences`
+- `EXOMEM_DISABLE_EMBEDDINGS=1 <repo>/.venv/bin/python benchmarks/run.py run --corpus benchmarks/corpus/generated/s1-t16 --governance wired --label t23-wired --top-k 10`
+- `EXOMEM_DISABLE_EMBEDDINGS=1 <repo>/.venv/bin/python benchmarks/run.py run --corpus benchmarks/corpus/generated/s1-t16 --label t23-default-open --top-k 10`
+- Wiring gate suite: `EXOMEM_DISABLE_EMBEDDINGS=1 PYTHONPATH=src <repo>/.venv/bin/python -m pytest -q tests/test_membench_governance_wiring.py`
 
 ## Addendum — reproducibility defect: the release manifest is environment-pinned (2026-08-04)
 
