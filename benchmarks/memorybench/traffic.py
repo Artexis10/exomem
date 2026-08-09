@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
-from urllib.parse import unquote_plus
+from urllib.parse import unquote, unquote_plus
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validator
 
@@ -41,6 +42,16 @@ _SENSITIVE_PARTS = (
 )
 
 
+def _json_floats_are_finite(value: Any) -> bool:
+    if isinstance(value, float):
+        return math.isfinite(value)
+    if isinstance(value, dict):
+        return all(_json_floats_are_finite(item) for item in value.values())
+    if isinstance(value, (list, tuple)):
+        return all(_json_floats_are_finite(item) for item in value)
+    return True
+
+
 class StrictModel(BaseModel):
     """Base class for versioned artifacts that reject unknown fields."""
 
@@ -67,6 +78,43 @@ class Header(StrictModel):
 class BodyRecord(StrictModel):
     """A safe description of a body; rejected raw bytes are never retained."""
 
+    model_config = ConfigDict(
+        json_schema_extra={
+            "allOf": [
+                {
+                    "if": {"properties": {"state": {"const": "absent"}}, "required": ["state"]},
+                    "then": {
+                        "properties": {
+                            "observed_bytes": {"const": 0},
+                            "sha256": {"type": "null"},
+                            "sanitized_json": {"type": "null"},
+                            "redaction_count": {"const": 0},
+                        }
+                    },
+                },
+                {
+                    "if": {"properties": {"state": {"const": "json"}}, "required": ["state"]},
+                    "then": {
+                        "properties": {
+                            "observed_bytes": {"minimum": 1},
+                            "sha256": {"type": "string"},
+                        }
+                    },
+                },
+                {
+                    "if": {"properties": {"state": {"const": "rejected"}}, "required": ["state"]},
+                    "then": {
+                        "properties": {
+                            "sha256": {"type": "null"},
+                            "sanitized_json": {"type": "null"},
+                            "redaction_count": {"const": 0},
+                        }
+                    },
+                },
+            ]
+        }
+    )
+
     state: Literal["absent", "json", "rejected"] = "absent"
     declared_bytes: int | None = Field(default=None, ge=0)
     observed_bytes: int = Field(default=0, ge=0)
@@ -76,10 +124,11 @@ class BodyRecord(StrictModel):
 
     @model_validator(mode="after")
     def validate_state(self) -> BodyRecord:
+        if not _json_floats_are_finite(self.sanitized_json):
+            raise ValueError("body_contains_non_finite_number")
         if self.state == "absent":
             if (
-                self.declared_bytes not in (None, 0)
-                or self.observed_bytes != 0
+                self.observed_bytes != 0
                 or self.sha256 is not None
                 or self.sanitized_json is not None
                 or self.redaction_count != 0
@@ -112,7 +161,7 @@ class HttpResponse(HttpMessage):
 
 
 class Timing(StrictModel):
-    ms: float = Field(ge=0)
+    ms: float = Field(ge=0, allow_inf_nan=False)
     latency_publishable: Literal[False] = False
     reason: Literal["host_unvalidated"] = "host_unvalidated"
 
@@ -153,6 +202,56 @@ _REQUEST_ERROR_CODES = {
 
 
 class HttpAttempt(StrictModel):
+    model_config = ConfigDict(
+        json_schema_extra={
+            "allOf": [
+                {
+                    "if": {"properties": {"outcome": {"const": "forwarded"}}, "required": ["outcome"]},
+                    "then": {
+                        "properties": {
+                            "response": {"not": {"type": "null"}},
+                            "upstream_status": {"type": "integer"},
+                            "error_code": {"type": "null"},
+                        }
+                    },
+                },
+                {
+                    "if": {"properties": {"outcome": {"const": "request_rejected"}}, "required": ["outcome"]},
+                    "then": {
+                        "properties": {
+                            "response": {"type": "null"},
+                            "upstream_status": {"type": "null"},
+                            "client_status": {"const": 400},
+                            "error_code": {"enum": sorted(_REQUEST_ERROR_CODES)},
+                        }
+                    },
+                },
+                {
+                    "if": {"properties": {"outcome": {"const": "response_rejected"}}, "required": ["outcome"]},
+                    "then": {
+                        "properties": {
+                            "response": {"not": {"type": "null"}},
+                            "upstream_status": {"type": "integer"},
+                            "client_status": {"const": 502},
+                            "error_code": {"const": "upstream_response_invalid"},
+                        }
+                    },
+                },
+                {
+                    "if": {"properties": {"outcome": {"const": "upstream_error"}}, "required": ["outcome"]},
+                    "then": {
+                        "properties": {
+                            "response": {"type": "null"},
+                            "upstream_status": {"type": "null"},
+                            "client_status": {"const": 502},
+                            "error_code": {"const": "upstream_unavailable"},
+                        }
+                    },
+                },
+            ]
+        }
+    )
+
     schema_version: Literal[SCHEMA_VERSION] = SCHEMA_VERSION
     attempt_ordinal: int = Field(ge=1)
     started_at: AwareDatetime
@@ -216,7 +315,7 @@ class InterceptionDeclaration(StrictModel):
 
 class RecordingLimits(StrictModel):
     max_body_bytes: int = Field(ge=1)
-    upstream_timeout_seconds: float = Field(gt=0)
+    upstream_timeout_seconds: float = Field(gt=0, allow_inf_nan=False)
 
 
 class TimingPolicy(StrictModel):
@@ -225,6 +324,33 @@ class TimingPolicy(StrictModel):
 
 
 class RecordingManifest(StrictModel):
+    model_config = ConfigDict(
+        json_schema_extra={
+            "allOf": [
+                {
+                    "if": {"properties": {"status": {"const": "recording"}}, "required": ["status"]},
+                    "then": {
+                        "properties": {
+                            "completed_at": {"type": "null"},
+                            "attempt_count": {"type": "null"},
+                            "attempts_sha256": {"type": "null"},
+                        }
+                    },
+                },
+                {
+                    "if": {"properties": {"status": {"const": "complete"}}, "required": ["status"]},
+                    "then": {
+                        "properties": {
+                            "completed_at": {"type": "string"},
+                            "attempt_count": {"type": "integer", "minimum": 1},
+                            "attempts_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                        }
+                    },
+                },
+            ]
+        }
+    )
+
     artifact_type: Literal[ARTIFACT_TYPE] = ARTIFACT_TYPE
     schema_version: Literal[SCHEMA_VERSION] = SCHEMA_VERSION
     status: Literal["recording", "complete"]
@@ -274,6 +400,7 @@ def canonical_bytes(model: BaseModel) -> bytes:
         model.model_dump(mode="json"),
         sort_keys=True,
         separators=(",", ":"),
+        allow_nan=False,
     ).encode("utf-8")
 
 
@@ -290,28 +417,41 @@ def export_json_schemas(output_dir: Path) -> list[Path]:
     return paths
 
 
-def is_sensitive_name(name: str) -> bool:
-    normalized = unquote_plus_repeated(name).lower().replace("-", "_")
-    return any(part.replace("-", "_") in normalized for part in _SENSITIVE_PARTS)
-
-
-def unquote_plus_repeated(value: str) -> str:
-    decoded = value
+def _decoded_stages(value: str, *, plus_as_space: bool) -> tuple[str, ...]:
+    stages = [value]
+    decoder = unquote_plus if plus_as_space else unquote
     for _ in range(3):
-        next_value = unquote_plus(decoded)
-        if next_value == decoded:
+        decoded = decoder(stages[-1])
+        if decoded == stages[-1]:
             break
-        decoded = next_value
-    return decoded
+        stages.append(decoded)
+    return tuple(stages)
+
+
+def is_sensitive_name(name: str, *, plus_as_space: bool = False) -> bool:
+    for stage in _decoded_stages(name, plus_as_space=plus_as_space):
+        normalized = stage.lower().replace("-", "_")
+        if any(part.replace("-", "_") in normalized for part in _SENSITIVE_PARTS):
+            return True
+    return False
 
 
 def _secret_values(configured_secrets: tuple[str, ...]) -> tuple[str, ...]:
     return tuple(secret for secret in configured_secrets if secret)
 
 
-def _contains_secret(value: str, secrets: tuple[str, ...]) -> bool:
-    decoded = unquote_plus_repeated(value)
-    return any(secret in value or secret in decoded for secret in secrets)
+def _contains_secret(
+    value: str,
+    secrets: tuple[str, ...],
+    *,
+    plus_as_space: bool,
+) -> bool:
+    value_stages = _decoded_stages(value, plus_as_space=plus_as_space)
+    for secret in secrets:
+        secret_stages = _decoded_stages(secret, plus_as_space=plus_as_space)
+        if any(secret_stage in value_stage for secret_stage in secret_stages for value_stage in value_stages):
+            return True
+    return False
 
 
 def sanitize_component(
@@ -319,15 +459,21 @@ def sanitize_component(
     secrets: tuple[str, ...],
     *,
     classify_name: bool = False,
+    plus_as_space: bool = False,
 ) -> tuple[str, int]:
     secrets = _secret_values(secrets)
-    decoded = unquote_plus_repeated(value)
-    if _contains_secret(value, secrets) or (classify_name and is_sensitive_name(decoded)):
+    stages = _decoded_stages(value, plus_as_space=plus_as_space)
+    if _contains_secret(value, secrets, plus_as_space=plus_as_space) or (
+        classify_name and is_sensitive_name(value, plus_as_space=plus_as_space)
+    ):
         return REDACTED, 1
-    scrubbed_raw, raw_changed = scrub_text(value)
-    scrubbed_decoded, decoded_changed = scrub_text(decoded)
-    if raw_changed or decoded_changed:
-        return REDACTED, 1
+    scrubbed_raw = value
+    for stage in stages:
+        scrubbed_stage, changed = scrub_text(stage)
+        if stage == value:
+            scrubbed_raw = scrubbed_stage
+        if changed:
+            return REDACTED, 1
     return scrubbed_raw, 0
 
 
@@ -369,11 +515,15 @@ def sanitize_query(
     redactions = 0
     for component in raw_query.split("&"):
         raw_name, separator, raw_value = component.partition("=")
-        safe_name, name_redactions = sanitize_component(raw_name, secrets)
-        if is_sensitive_name(raw_name):
+        safe_name, name_redactions = sanitize_component(raw_name, secrets, plus_as_space=True)
+        if is_sensitive_name(raw_name, plus_as_space=True):
             safe_value, value_redactions = REDACTED, 1
         else:
-            safe_value, value_redactions = sanitize_component(raw_value if separator else "", secrets)
+            safe_value, value_redactions = sanitize_component(
+                raw_value if separator else "",
+                secrets,
+                plus_as_space=True,
+            )
         pairs.append((safe_name, safe_value))
         redactions += name_redactions + value_redactions
     return pairs, redactions
@@ -474,6 +624,83 @@ def _validate_ordinals(attempts: list[HttpAttempt]) -> None:
     ordinals = sorted(attempt.attempt_ordinal for attempt in attempts)
     if ordinals != list(range(1, len(attempts) + 1)):
         raise RecordingError("attempt_ordinals_invalid")
+
+
+def _recorded_content_length(headers: list[Header]) -> int | None:
+    values = [header.value.strip() for header in headers if header.name.lower() == "content-length"]
+    if not values:
+        return None
+    if len(values) != 1 or not values[0].isascii() or not values[0].isdigit():
+        raise RecordingError("attempt_header_body_mismatch")
+    return int(values[0])
+
+
+def _validate_message_correlation(
+    message: HttpRequest | HttpResponse,
+    *,
+    max_body_bytes: int,
+    rejected: bool,
+) -> None:
+    body = message.body
+    if not rejected and (
+        body.observed_bytes > max_body_bytes
+        or (body.declared_bytes is not None and body.declared_bytes > max_body_bytes)
+    ):
+        raise RecordingError("attempt_body_exceeds_limit")
+    if rejected:
+        return
+    declared_header = _recorded_content_length(message.headers)
+    if declared_header != body.declared_bytes:
+        raise RecordingError("attempt_header_body_mismatch")
+    if body.state == "json":
+        content_types = [
+            header.value
+            for header in message.headers
+            if header.name.lower() == "content-type"
+        ]
+        if len(content_types) != 1:
+            raise RecordingError("attempt_header_body_mismatch")
+        media_type = content_types[0].split(";", 1)[0].strip().lower()
+        if media_type != "application/json" and not (
+            media_type.startswith("application/") and media_type.endswith("+json")
+        ):
+            raise RecordingError("attempt_header_body_mismatch")
+
+
+def _validate_attempt_correlation(
+    attempt: HttpAttempt,
+    manifest: RecordingManifest,
+) -> None:
+    completed_at = manifest.completed_at
+    if completed_at is None or not (manifest.started_at <= attempt.started_at <= completed_at):
+        raise RecordingError("attempt_timestamp_out_of_bounds")
+    _validate_message_correlation(
+        attempt.request,
+        max_body_bytes=manifest.limits.max_body_bytes,
+        rejected=attempt.request.body.state == "rejected",
+    )
+    if attempt.request.body.state == "absent" and attempt.request.body.declared_bytes not in (None, 0):
+        raise RecordingError("attempt_header_body_mismatch")
+    if attempt.response is None:
+        return
+    _validate_message_correlation(
+        attempt.response,
+        max_body_bytes=manifest.limits.max_body_bytes,
+        rejected=attempt.response.body.state == "rejected",
+    )
+    if attempt.response.body.state == "rejected":
+        return
+    method = attempt.request.method.upper()
+    status = attempt.response.status_code
+    body_forbidden = method == "HEAD" or status in {204, 205, 304} or 100 <= status < 200
+    if body_forbidden and attempt.response.body.state != "absent":
+        raise RecordingError("attempt_header_body_mismatch")
+    if (
+        attempt.response.body.state == "absent"
+        and attempt.response.body.declared_bytes not in (None, 0)
+        and not (method == "HEAD" or status == 304)
+    ):
+        raise RecordingError("attempt_header_body_mismatch")
 
 
 class RecordingWriter:
@@ -585,4 +812,6 @@ def validate_recording(
     _validate_ordinals(attempts)
     if len(attempts) != manifest.attempt_count:
         raise RecordingError("attempt_count_mismatch")
+    for attempt in attempts:
+        _validate_attempt_correlation(attempt, manifest)
     return manifest

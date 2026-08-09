@@ -2,6 +2,83 @@
   "$defs": {
     "BodyRecord": {
       "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "const": "absent"
+              }
+            },
+            "required": [
+              "state"
+            ]
+          },
+          "then": {
+            "properties": {
+              "observed_bytes": {
+                "const": 0
+              },
+              "redaction_count": {
+                "const": 0
+              },
+              "sanitized_json": {
+                "type": "null"
+              },
+              "sha256": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "const": "json"
+              }
+            },
+            "required": [
+              "state"
+            ]
+          },
+          "then": {
+            "properties": {
+              "observed_bytes": {
+                "minimum": 1
+              },
+              "sha256": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "const": "rejected"
+              }
+            },
+            "required": [
+              "state"
+            ]
+          },
+          "then": {
+            "properties": {
+              "redaction_count": {
+                "const": 0
+              },
+              "sanitized_json": {
+                "type": "null"
+              },
+              "sha256": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      ],
       "description": "A safe description of a body; rejected raw bytes are never retained.",
       "properties": {
         "declared_bytes": {
@@ -190,6 +267,130 @@
     }
   },
   "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "outcome": {
+            "const": "forwarded"
+          }
+        },
+        "required": [
+          "outcome"
+        ]
+      },
+      "then": {
+        "properties": {
+          "error_code": {
+            "type": "null"
+          },
+          "response": {
+            "not": {
+              "type": "null"
+            }
+          },
+          "upstream_status": {
+            "type": "integer"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "outcome": {
+            "const": "request_rejected"
+          }
+        },
+        "required": [
+          "outcome"
+        ]
+      },
+      "then": {
+        "properties": {
+          "client_status": {
+            "const": 400
+          },
+          "error_code": {
+            "enum": [
+              "ambiguous_content_length",
+              "body_too_large",
+              "duplicate_json_key",
+              "invalid_json",
+              "malformed_http",
+              "unsupported_content_encoding",
+              "unsupported_media_type",
+              "unsupported_transfer_encoding"
+            ]
+          },
+          "response": {
+            "type": "null"
+          },
+          "upstream_status": {
+            "type": "null"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "outcome": {
+            "const": "response_rejected"
+          }
+        },
+        "required": [
+          "outcome"
+        ]
+      },
+      "then": {
+        "properties": {
+          "client_status": {
+            "const": 502
+          },
+          "error_code": {
+            "const": "upstream_response_invalid"
+          },
+          "response": {
+            "not": {
+              "type": "null"
+            }
+          },
+          "upstream_status": {
+            "type": "integer"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "outcome": {
+            "const": "upstream_error"
+          }
+        },
+        "required": [
+          "outcome"
+        ]
+      },
+      "then": {
+        "properties": {
+          "client_status": {
+            "const": 502
+          },
+          "error_code": {
+            "const": "upstream_unavailable"
+          },
+          "response": {
+            "type": "null"
+          },
+          "upstream_status": {
+            "type": "null"
+          }
+        }
+      }
+    }
+  ],
   "properties": {
     "attempt_ordinal": {
       "minimum": 1,

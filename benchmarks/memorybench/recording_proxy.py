@@ -7,9 +7,10 @@ import asyncio
 import hashlib
 import ipaddress
 import json
+import math
 import os
-import re
 import time
+import zlib
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -55,6 +56,9 @@ STANDARD_HOP_BY_HOP_HEADERS = {
     "transfer-encoding",
     "upgrade",
 }
+MAX_RAW_HEADER_BYTES = 64 * 1024
+MAX_BUN_LOCK_BYTES = 16 * 1024 * 1024
+SUPPORTED_CONTENT_ENCODINGS = {"gzip", "deflate"}
 
 
 class ConfigurationError(ValueError):
@@ -90,6 +94,7 @@ class ProxyConfig(BaseModel):
     upstream_timeout_seconds: float = Field(
         default=DEFAULT_UPSTREAM_TIMEOUT_SECONDS,
         gt=0,
+        allow_inf_nan=False,
     )
     configured_secrets: tuple[str, ...] = ()
 
@@ -154,27 +159,119 @@ def validate_proxy_configuration(listen_host: str, upstream_base_url: str) -> No
     _parse_upstream(upstream_base_url)
 
 
-def extract_supermemory_sdk_pin(bun_lock: bytes) -> tuple[str, str]:
-    """Read only the exact resolved ``packages.supermemory`` Bun tuple."""
-
-    packages_match = re.search(rb'"packages"\s*:\s*\{', bun_lock)
-    if packages_match is None:
-        raise ConfigurationError("verified_pins_unavailable")
-    packages = bun_lock[packages_match.end() :]
-    resolved_pattern = re.compile(
-        rb'"supermemory"\s*:\s*\[\s*'
-        rb'"supermemory@([^"\\]+)"\s*,\s*'
-        rb'""\s*,\s*\{\s*\}\s*,\s*'
-        rb'"(sha512-[^"\\]+)"\s*\]'
-    )
-    matches = resolved_pattern.findall(packages)
-    if len(matches) != 1:
+def _jsonc_to_json(data: bytes) -> str:
+    if len(data) > MAX_BUN_LOCK_BYTES:
         raise ConfigurationError("verified_pins_unavailable")
     try:
-        version = matches[0][0].decode("ascii")
-        integrity = matches[0][1].decode("ascii")
+        text = data.decode("utf-8", errors="strict")
     except UnicodeDecodeError as exc:
         raise ConfigurationError("verified_pins_unavailable") from exc
+    without_comments: list[str] = []
+    index = 0
+    in_string = False
+    escaped = False
+    while index < len(text):
+        character = text[index]
+        if in_string:
+            without_comments.append(character)
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == '"':
+                in_string = False
+            index += 1
+            continue
+        if character == '"':
+            in_string = True
+            without_comments.append(character)
+            index += 1
+            continue
+        if character == "/" and index + 1 < len(text) and text[index + 1] == "/":
+            without_comments.append(" ")
+            index += 2
+            while index < len(text) and text[index] not in "\r\n":
+                index += 1
+            continue
+        if character == "/" and index + 1 < len(text) and text[index + 1] == "*":
+            end = text.find("*/", index + 2)
+            if end < 0:
+                raise ConfigurationError("verified_pins_unavailable")
+            without_comments.append(" ")
+            index = end + 2
+            continue
+        without_comments.append(character)
+        index += 1
+    if in_string:
+        raise ConfigurationError("verified_pins_unavailable")
+
+    cleaned = "".join(without_comments)
+    output: list[str] = []
+    index = 0
+    in_string = False
+    escaped = False
+    while index < len(cleaned):
+        character = cleaned[index]
+        if in_string:
+            output.append(character)
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == '"':
+                in_string = False
+            index += 1
+            continue
+        if character == '"':
+            in_string = True
+            output.append(character)
+            index += 1
+            continue
+        if character == ",":
+            lookahead = index + 1
+            while lookahead < len(cleaned) and cleaned[lookahead].isspace():
+                lookahead += 1
+            if lookahead < len(cleaned) and cleaned[lookahead] in "}]":
+                index += 1
+                continue
+        output.append(character)
+        index += 1
+    return "".join(output)
+
+
+def extract_supermemory_sdk_pin(bun_lock: bytes) -> tuple[str, str]:
+    """Read only the exact direct ``packages.supermemory`` Bun tuple."""
+
+    def reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, value in pairs:
+            if key in result:
+                raise ConfigurationError("verified_pins_unavailable")
+            result[key] = value
+        return result
+
+    try:
+        root = json.loads(_jsonc_to_json(bun_lock), object_pairs_hook=reject_duplicate_keys)
+        packages = root["packages"]
+        resolved = packages["supermemory"]
+    except ConfigurationError:
+        raise
+    except Exception as exc:
+        raise ConfigurationError("verified_pins_unavailable") from exc
+    if (
+        not isinstance(root, dict)
+        or not isinstance(packages, dict)
+        or not isinstance(resolved, list)
+        or len(resolved) != 4
+        or not isinstance(resolved[0], str)
+        or resolved[1] != ""
+        or resolved[2] != {}
+        or not isinstance(resolved[3], str)
+        or not resolved[0].startswith("supermemory@")
+    ):
+        raise ConfigurationError("verified_pins_unavailable")
+    version = resolved[0].removeprefix("supermemory@")
+    integrity = resolved[3]
     if version != EXPECTED_SDK_VERSION or integrity != EXPECTED_SDK_INTEGRITY:
         raise ConfigurationError("verified_pins_unavailable")
     return version, integrity
@@ -220,12 +317,19 @@ def _parse_json(body: bytes) -> Any:
     def reject_nonstandard_constant(_value: str) -> Any:
         raise RequestRefusal("invalid_json")
 
+    def parse_finite_float(value: str) -> float:
+        parsed = float(value)
+        if not math.isfinite(parsed):
+            raise RequestRefusal("invalid_json")
+        return parsed
+
     try:
         text = body.decode("utf-8", errors="strict")
         return json.loads(
             text,
             object_pairs_hook=reject_duplicate_keys,
             parse_constant=reject_nonstandard_constant,
+            parse_float=parse_finite_float,
         )
     except RequestRefusal:
         raise
@@ -313,9 +417,11 @@ def strip_hop_by_hop_headers(
     headers: list[tuple[str, str]],
     *,
     request: bool,
+    remove_content_length: bool = True,
 ) -> list[tuple[str, str]]:
     excluded = STANDARD_HOP_BY_HOP_HEADERS | _connection_nominations(headers)
-    excluded.add("content-length")
+    if remove_content_length:
+        excluded.add("content-length")
     if request:
         excluded.add("host")
     return [(name, value) for name, value in headers if name.lower() not in excluded]
@@ -342,10 +448,149 @@ def _response_forbids_body(method: str, status_code: int) -> bool:
     return method.upper() == "HEAD" or status_code in {204, 205, 304} or 100 <= status_code < 200
 
 
+def _accepted_content_encodings(headers: list[tuple[str, str]]) -> set[str]:
+    qualities: dict[str, float] = {}
+    wildcard_quality = 0.0
+    for name, value in headers:
+        if name.lower() != "accept-encoding":
+            continue
+        for item in value.split(","):
+            token, *parameters = item.strip().lower().split(";")
+            if not token:
+                continue
+            quality = 1.0
+            for parameter in parameters:
+                key, separator, parameter_value = parameter.strip().partition("=")
+                if separator and key == "q":
+                    try:
+                        quality = float(parameter_value.strip())
+                    except ValueError:
+                        quality = 0.0
+            if not math.isfinite(quality) or quality < 0 or quality > 1:
+                quality = 0.0
+            if token == "*":
+                wildcard_quality = quality
+            elif token in SUPPORTED_CONTENT_ENCODINGS:
+                qualities[token] = quality
+    return {
+        encoding
+        for encoding in SUPPORTED_CONTENT_ENCODINGS
+        if qualities.get(encoding, wildcard_quality) > 0
+    }
+
+
+def _response_content_encodings(
+    headers: list[tuple[str, str]],
+    *,
+    accepted: set[str],
+) -> tuple[str, ...]:
+    values = _group_headers(headers).get("content-encoding", [])
+    if not values:
+        return ()
+    encodings = tuple(
+        token.strip().lower()
+        for value in values
+        for token in value.split(",")
+        if token.strip()
+    )
+    if not encodings or any(
+        encoding != "identity" and (encoding not in SUPPORTED_CONTENT_ENCODINGS or encoding not in accepted)
+        for encoding in encodings
+    ):
+        raise RequestRefusal("unsupported_content_encoding")
+    return tuple(encoding for encoding in encodings if encoding != "identity")
+
+
+def _inspect_response_headers(
+    headers: list[tuple[str, str]],
+    *,
+    max_body_bytes: int,
+    accepted_encodings: set[str],
+) -> tuple[HeaderFacts, tuple[str, ...]]:
+    grouped = _group_headers(headers)
+    declared_bytes = _content_length(grouped)
+    if declared_bytes is not None and declared_bytes > max_body_bytes:
+        raise RequestRefusal("body_too_large")
+    transfer_values = grouped.get("transfer-encoding", [])
+    if transfer_values:
+        tokens = [token.strip().lower() for value in transfer_values for token in value.split(",")]
+        if tokens != ["chunked"] or declared_bytes is not None:
+            raise RequestRefusal("unsupported_transfer_encoding")
+    encodings = _response_content_encodings(headers, accepted=accepted_encodings)
+    return HeaderFacts(declared_bytes=declared_bytes), encodings
+
+
+def _decompress_bounded(data: bytes, encoding: str, max_body_bytes: int) -> bytes:
+    window_bits = zlib.MAX_WBITS | 16 if encoding == "gzip" else zlib.MAX_WBITS
+    try:
+        decompressor = zlib.decompressobj(window_bits)
+        decoded = decompressor.decompress(data, max_body_bytes + 1)
+        if len(decoded) > max_body_bytes or decompressor.unconsumed_tail:
+            raise RequestRefusal("body_too_large")
+        decoded += decompressor.flush(max_body_bytes + 1 - len(decoded))
+        if (
+            len(decoded) > max_body_bytes
+            or not decompressor.eof
+            or decompressor.unused_data
+            or decompressor.unconsumed_tail
+        ):
+            raise RequestRefusal("body_too_large")
+        return decoded
+    except RequestRefusal:
+        raise
+    except zlib.error as exc:
+        if encoding == "deflate" and window_bits == zlib.MAX_WBITS:
+            try:
+                decompressor = zlib.decompressobj(-zlib.MAX_WBITS)
+                decoded = decompressor.decompress(data, max_body_bytes + 1)
+                decoded += decompressor.flush(max_body_bytes + 1 - len(decoded))
+                if len(decoded) <= max_body_bytes and decompressor.eof and not decompressor.unused_data:
+                    return decoded
+            except zlib.error:
+                pass
+        raise RequestRefusal("invalid_json") from exc
+
+
+def _decode_response_body(
+    raw_body: bytes,
+    encodings: tuple[str, ...],
+    *,
+    max_body_bytes: int,
+) -> bytes:
+    decoded = raw_body
+    for encoding in reversed(encodings):
+        decoded = _decompress_bounded(decoded, encoding, max_body_bytes)
+    if len(decoded) > max_body_bytes:
+        raise RequestRefusal("body_too_large")
+    return decoded
+
+
 def _validate_raw_target(path: str, raw_query: str) -> None:
     target = f"{path}?{raw_query}" if raw_query else path
     if not path.startswith("/") or any(ord(character) < 0x21 or ord(character) > 0x7E for character in target):
         raise RequestRefusal("malformed_http")
+
+
+def _parse_raw_request_head(
+    raw_head: bytes,
+) -> tuple[str, str, str, list[tuple[str, str]]]:
+    try:
+        lines = raw_head.removesuffix(b"\r\n\r\n").split(b"\r\n")
+        method_bytes, target_bytes, _version = lines[0].split(b" ", 2)
+        method = method_bytes.decode("ascii") or "UNKNOWN"
+        target = target_bytes.decode("ascii")
+        path, separator, raw_query = target.partition("?")
+        if not separator:
+            raw_query = ""
+        headers: list[tuple[str, str]] = []
+        for line in lines[1:]:
+            name, separator_bytes, value = line.partition(b":")
+            if not separator_bytes or not name:
+                raise ValueError
+            headers.append((name.decode("ascii"), value.strip(b" \t").decode("latin-1")))
+        return method, path if path.startswith("/") else "/", raw_query, headers
+    except (ValueError, UnicodeDecodeError):
+        return "UNKNOWN", "/", "", []
 
 
 class RecordingProxy:
@@ -367,7 +612,7 @@ class RecordingProxy:
         self.secrets = tuple(
             dict.fromkeys(secret for secret in (*configured_secrets, environment_secret) if secret)
         )
-        if timeout_seconds <= 0:
+        if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
             raise ConfigurationError("invalid_timeout")
         if timeout_seconds != writer.upstream_timeout_seconds:
             raise ConfigurationError("timeout_manifest_mismatch")
@@ -384,6 +629,7 @@ class RecordingProxy:
             follow_redirects=False,
             timeout=httpx.Timeout(timeout_seconds),
         )
+        self.client.headers.clear()
         self.server: asyncio.AbstractServer | None = None
         self._accepting = True
         self._next_ordinal = 1
@@ -581,9 +827,10 @@ class RecordingProxy:
         response_status = upstream_response.status_code
         observed_response_bytes = 0
         try:
-            response_facts = inspect_headers(
+            response_facts, response_encodings = _inspect_response_headers(
                 response_headers,
                 max_body_bytes=self.writer.max_body_bytes,
+                accepted_encodings=_accepted_content_encodings(headers),
             )
             response_data = bytearray()
             if upstream_response.is_stream_consumed:
@@ -602,12 +849,31 @@ class RecordingProxy:
                 raise RequestRefusal("invalid_json")
             if not raw_response and not _empty_response_is_legal(method, response_status):
                 raise RequestRefusal("invalid_json")
-            parsed_response, response_facts = validate_json_body(
-                response_headers,
-                raw_response or None,
-                max_body_bytes=self.writer.max_body_bytes,
-                allow_declared_without_body=(method.upper() == "HEAD" or response_status == 304),
+            if (
+                response_facts.declared_bytes is not None
+                and response_facts.declared_bytes != observed_response_bytes
+                and not (
+                    not raw_response
+                    and (method.upper() == "HEAD" or response_status == 304)
+                )
+            ):
+                raise RequestRefusal("ambiguous_content_length")
+            decoded_response = (
+                _decode_response_body(
+                    raw_response,
+                    response_encodings,
+                    max_body_bytes=self.writer.max_body_bytes,
+                )
+                if raw_response
+                else b""
             )
+            if decoded_response:
+                content_types = _group_headers(response_headers).get("content-type", [])
+                if len(content_types) != 1 or not _is_json_media_type(content_types[0]):
+                    raise RequestRefusal("unsupported_media_type")
+                parsed_response = _parse_json(decoded_response)
+            else:
+                parsed_response = None
         except Exception:
             safe_response_headers, _ = sanitize_headers(response_headers, self.secrets)
             response_record = HttpResponse(
@@ -632,10 +898,12 @@ class RecordingProxy:
             return result
 
         await upstream_response.aclose()
-        safe_response_headers, _ = sanitize_headers(response_headers, self.secrets)
-        declared_for_record = response_facts.declared_bytes
-        if not raw_response and declared_for_record not in (None, 0):
-            declared_for_record = None
+        forwarded_response_headers = strip_hop_by_hop_headers(
+            response_headers,
+            request=False,
+            remove_content_length=False,
+        )
+        safe_response_headers, _ = sanitize_headers(forwarded_response_headers, self.secrets)
         response_record = HttpResponse(
             status_code=response_status,
             headers=safe_response_headers,
@@ -643,7 +911,7 @@ class RecordingProxy:
                 raw_response or None,
                 parsed_response,
                 self.secrets,
-                declared_bytes=declared_for_record,
+                declared_bytes=response_facts.declared_bytes,
             ),
         )
         self._record_attempt(
@@ -657,7 +925,7 @@ class RecordingProxy:
         )
         return ProxyResult(
             status_code=response_status,
-            headers=strip_hop_by_hop_headers(response_headers, request=False),
+            headers=forwarded_response_headers,
             body=raw_response,
         )
 
@@ -703,8 +971,11 @@ class RecordingProxy:
         request_event: h11.Request | None,
         body_observed: int,
         error_code: str,
+        raw_head: bytes | None = None,
     ) -> ProxyResult:
-        if request_event is None:
+        if raw_head is not None:
+            method, path, raw_query, headers = _parse_raw_request_head(raw_head)
+        elif request_event is None:
             method = "UNKNOWN"
             path = "/"
             raw_query = ""
@@ -741,6 +1012,27 @@ class RecordingProxy:
         )
         return result
 
+    async def _send_unparsed_result(
+        self,
+        writer: asyncio.StreamWriter,
+        result: ProxyResult,
+    ) -> None:
+        headers = [
+            (name, value)
+            for name, value in result.headers
+            if name.lower() not in {"connection", "content-length"}
+        ]
+        headers.extend([
+            ("content-length", str(len(result.body))),
+            ("connection", "close"),
+        ])
+        reason = "Bad Request" if result.status_code == 400 else "Bad Gateway"
+        head = [f"HTTP/1.1 {result.status_code} {reason}\r\n".encode("ascii")]
+        head.extend(f"{name}: {value}\r\n".encode("latin-1") for name, value in headers)
+        head.append(b"\r\n")
+        writer.write(b"".join(head) + result.body)
+        await writer.drain()
+
     async def _send_result(
         self,
         connection: h11.Connection,
@@ -750,14 +1042,15 @@ class RecordingProxy:
         response_headers = [
             (name.encode("ascii"), value.encode("latin-1"))
             for name, value in result.headers
-            if name.lower() != "content-length"
+            if name.lower() != "connection"
         ]
-        response_headers.extend(
-            [
-                (b"content-length", str(len(result.body)).encode("ascii")),
-                (b"connection", b"close"),
-            ]
-        )
+        content_length_forbidden = 100 <= result.status_code < 200 or result.status_code in {204, 304}
+        if (
+            not content_length_forbidden
+            and not any(name.lower() == b"content-length" for name, _ in response_headers)
+        ):
+            response_headers.append((b"content-length", str(len(result.body)).encode("ascii")))
+        response_headers.append((b"connection", b"close"))
         writer.write(
             connection.send(
                 h11.Response(status_code=result.status_code, headers=response_headers)
@@ -782,10 +1075,45 @@ class RecordingProxy:
         connection = h11.Connection(h11.SERVER)
         request_event: h11.Request | None = None
         body = bytearray()
+        header_buffer = bytearray()
+        header_checked = False
         terminal_recorded = False
         try:
             while True:
                 incoming = await reader.read(65536)
+                if not header_checked:
+                    header_buffer.extend(incoming)
+                    header_end = header_buffer.find(b"\r\n\r\n")
+                    if header_end < 0:
+                        if len(header_buffer) >= MAX_RAW_HEADER_BYTES or not incoming:
+                            result = await self._record_parser_rejection(
+                                admission,
+                                None,
+                                0,
+                                "malformed_http",
+                                raw_head=bytes(header_buffer),
+                            )
+                            terminal_recorded = True
+                            await self._send_unparsed_result(writer, result)
+                            return
+                        continue
+                    raw_head = bytes(header_buffer[: header_end + 4])
+                    body_prefix = bytes(header_buffer[header_end + 4 :])
+                    _method, _path, _query, raw_headers = _parse_raw_request_head(raw_head)
+                    if sum(name.lower() == "content-length" for name, _ in raw_headers) > 1:
+                        result = await self._record_parser_rejection(
+                            admission,
+                            None,
+                            len(body_prefix),
+                            "ambiguous_content_length",
+                            raw_head=raw_head,
+                        )
+                        terminal_recorded = True
+                        await self._send_unparsed_result(writer, result)
+                        return
+                    incoming = raw_head + body_prefix
+                    header_buffer.clear()
+                    header_checked = True
                 connection.receive_data(incoming)
                 while True:
                     event = connection.next_event()
