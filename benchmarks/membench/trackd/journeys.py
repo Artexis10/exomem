@@ -14,7 +14,7 @@ vault first (2026-07-31, this worktree, lexical env below):
 - ``review_memory --mode evolution --path <p> --json`` ->
   ``data.timelines[0]`` with ``span.n_versions``, ordered ``versions`` rows
   ``{path, title, status: superseded|active, transition}`` and
-  ``chain_id`` = newest path, ``topic_anchor`` = oldest path
+  ``chain_id`` = active head, ``topic_anchor`` = requested path (the ``--path`` argument)
 - ``ask_memory <q> --json`` (product defaults: hybrid + prefer-active) ->
   ``data`` = ranked list of ``{path, type, title, updated, status?,
   superseded_by?, ref}`` where superseded pages carry ``status`` and rank
@@ -397,7 +397,7 @@ def run_j1_longitudinal(
     )
     checks.append(
         JourneyCheck(
-            "evolution anchors: chain_id=newest, topic_anchor=oldest",
+            "evolution anchors: chain_id=head, topic_anchor=requested path",
             timeline.get("chain_id") == current_path
             and timeline.get("topic_anchor") == v1_path,
             f"chain_id={timeline.get('chain_id')} topic_anchor={timeline.get('topic_anchor')}",

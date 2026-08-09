@@ -49,7 +49,7 @@ def test_j1_longitudinal_evolution_green(tmp_path: Path) -> None:
         "replace to v2 commits",
         "replace to v3 commits",
         "evolution shows 3-state chain in order",
-        "evolution anchors: chain_id=newest, topic_anchor=oldest",
+        "evolution anchors: chain_id=head, topic_anchor=requested path",
         "ask returns the current (v3-value) page first",
         "top hit carries the current value",
         "superseded v1 remains readable",

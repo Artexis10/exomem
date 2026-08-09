@@ -65,11 +65,14 @@ this niche (see the adjacent-landscape appendix).
   answer, day-granularity systems must abstain" scenario exists before
   checking off; it gates 4.1/4.2 (release bytes).
 - **Judgment-required (do NOT hand to a mechanical lane):**
-  4b.28 — Track D J1 anchor contract disagreement: the benchmark documents
-  "topic_anchor = oldest path" but the product's `evolution_for_path`
-  follows supersession to the active head. Settle which contract is
-  CORRECT (likely the benchmark doc is wrong; possibly the product is)
-  before recalibrating anything. 4b.23 — judge discrimination re-test on
+  4b.28 — SETTLED 2026-08-09 (see
+  `openspec/changes/honor-evolution-path-anchor/`): the benchmark's former
+  "topic_anchor = oldest path" line (since corrected) was a find-order
+  tie-break artifact, not a product contract, and the real defect was
+  `review_memory --mode evolution` silently dropping `--path`. The decided
+  contract: a requested page stays the anchor (`evolution_for_path` keeps
+  `topic_anchor` at the requested page while still reporting the active
+  head as `chain_id`). 4b.23 — judge discrimination re-test on
   real multi-document response text (current 19/19 is an upper bound from
   clean one-sentence candidates). Governance wiring (v0.2 group 2) — the
   adapter must drive exomem's real `_Governance/` surfaces; if a public
