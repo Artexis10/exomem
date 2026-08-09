@@ -32,7 +32,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from membench.adapters.base import Capability, Hit, NativeAnswer, OpResult, Profile
+from membench.adapters.base import Capability, Hit, NativeAnswer, OpResult
 from membench.generate import generate_corpus
 from membench.ids import sentinel
 from membench.scoring.answer_contract import AnswerRecord, extract_structure

@@ -75,7 +75,6 @@ from pathlib import Path
 
 from membench import oracle
 from membench.adapters.base import (
-    AdapterUnsupported,
     AdapterEnvironmentError,
     AdapterUnsupported,
     Capability,

@@ -14,7 +14,7 @@ import pytest
 
 from exomem.public_artifact_privacy import scan_artifact
 
-from membench import families, wordbank
+from membench import wordbank
 from membench.generate import generate_corpus
 from membench.ids import sentinel
 from membench.schema import (

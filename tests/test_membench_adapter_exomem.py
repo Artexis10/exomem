@@ -14,7 +14,6 @@ from pathlib import Path
 
 import pytest
 
-from membench.adapters.base import Profile
 from membench.adapters.exomem_local import ExomemLocalAdapter, lexical_profile
 from membench.generate import generate_corpus
 from membench.native import exomem_kb, load_corpus_view

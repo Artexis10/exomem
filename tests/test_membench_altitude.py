@@ -31,7 +31,7 @@ from pathlib import Path
 
 import pytest
 
-from membench.adapters.base import INGESTION_ALTITUDES, Capability, Profile
+from membench.adapters.base import INGESTION_ALTITUDES, Capability
 from membench.reporting import (
     ALTITUDE_DEPENDENT_DIMENSIONS,
     _altitude_conflict,

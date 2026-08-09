@@ -44,7 +44,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from membench.trackc.hook_home import (
-    REPO_ROOT,
     SRC_DIR,
     HookHome,
     ensure_isolated,
