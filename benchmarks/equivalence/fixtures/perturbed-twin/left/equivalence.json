@@ -1,0 +1,1 @@
+{"case_id":"fixture-1","dataset_identity":"mini-v1","case_set":["fixture-1"],"session_normalization":"nfc-v1","namespace":"case-1","ingestion_payloads":["a"],"readiness":"verified","exact_query":"where?","top_k":3,"retrieved_ids":["one"],"retrieved_text":["alpha"],"packed_context":"alpha","answer_judge_prompt_model_config":"stub-v1"}

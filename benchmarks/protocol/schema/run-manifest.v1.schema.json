@@ -174,6 +174,19 @@
       "default": null,
       "title": "Contamination"
     },
+    "control_config_sha256": {
+      "anyOf": [
+        {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Control Config Sha256"
+    },
     "dataset": {
       "$ref": "#/$defs/DatasetIdentity"
     },
@@ -224,6 +237,18 @@
       "default": "1.0.0",
       "title": "Protocol Version",
       "type": "string"
+    },
+    "provider_variant": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Provider Variant"
     },
     "readiness": {
       "items": {

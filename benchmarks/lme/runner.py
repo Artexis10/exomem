@@ -14,7 +14,10 @@ from typing import Callable
 from membench.adapters.base import AdapterEnvironmentError
 from membench.environment import capture_environment
 from membench.judge.backends import ClaudeCliBackend, OpenAICompatBackend
-from protocol.models import DatasetIdentity
+from protocol.canary import canary_for, evaluate_probes
+from protocol.manifest import finalize_manifest, start_manifest
+from protocol.models import BudgetSummary, CaseHandle, DatasetIdentity, LeakageSummary
+from protocol.trace import CaseTraceWriter
 
 from .adapter import LmeExomemAdapter
 from .bounds import BoundRun, Hypothesis, run_bounds
@@ -23,6 +26,7 @@ from .fetch import file_sha256, verify_sha256
 from .judge_io import _bound_ids, official_judge_commands
 from .reader import ABSTENTION, ApiReader, Reader, StubReader
 from .report import render_report
+from .normalize import neutralize
 
 
 class LmeRunInvalid(RuntimeError):
@@ -53,6 +57,7 @@ class RunConfig:
     claude_binary: str = "claude"
     top_k: int = 10
     pilot: int | None = None
+    provider: str | None = None
 
 
 @dataclass(frozen=True)
@@ -331,6 +336,21 @@ def execute_run(
         run_dir.mkdir(parents=True, exist_ok=False)
     except FileExistsError as exc:
         raise FileExistsError(f"run directory is immutable and already exists: {run_dir}") from exc
+    provider_variant = config.provider or "exomem-source-only"
+    control_config_sha256 = None
+    if config.provider:
+        from .providers.registry import provider_factory
+        candidate = provider_factory(config.provider)()
+        config_value = getattr(candidate, "config", None)
+        config_hash = getattr(config_value, "sha256", None)
+        control_config_sha256 = config_hash() if callable(config_hash) else None
+    start_manifest(
+        run_dir, run_id=run_id, dataset=dataset_identity,
+        started_at=dt.datetime.now(dt.UTC).isoformat().replace("+00:00", "Z"),
+        provider_variant=provider_variant, control_config_sha256=control_config_sha256,
+        leakage=LeakageSummary(scanned_cases=0, invalidated_cases=0),
+        budget=BudgetSummary(cap_usd=0, committed_usd=0, refusals=0),
+    )
     dump_dataset(dataset, run_dir / "dataset.json")
     environment = capture_environment()
     environment["lme"] = {
@@ -339,6 +359,7 @@ def execute_run(
         "dataset_variant": "LongMemEval-S cleaned September 2025",
         "reader": config.reader_name,
         "reader_model": _reader_model(active_reader, config),
+        "provider_variant": provider_variant,
         "judge_protocol": "official evaluate_qa.py, unmodified",
         "judge_model": "gpt-4o",
         "metered_approval": config.metered_approval,
@@ -358,6 +379,8 @@ def execute_run(
     outcomes: list[dict[str, object]] = []
     hypotheses: list[dict[str, object]] = []
     invalid_reason: str | None = None
+    readiness_list = []
+    contamination_results: list[str] = []
     started = time.perf_counter()
     for case_ordinal, question in enumerate(dataset.questions, 1):
         question_started = time.perf_counter()
@@ -365,18 +388,42 @@ def execute_run(
         reader_attempted = False
         reader_wall_time = 0.0
         try:
-            retrieved = adapter.run_question(
-                question,
-                run_dir / "questions" / _safe_id(question.question_id),
-                dataset_identity=dataset_identity,
-                case_ordinal=case_ordinal,
-                limit=config.top_k,
-            )
+            trace = CaseTraceWriter(run_dir, question.question_id)
+            if config.provider:
+                from .providers.registry import provider_factory
+                provider = provider_factory(config.provider)()
+                provider.setup(None)
+                events = neutralize(question, dataset_identity)
+                # Harness-authored presence canary in a non-evidence filler turn.
+                token = canary_for(run_id, question.question_id, "presence")
+                filler_content = events[-1].content + f"\n[harness canary {token}]"
+                filler = events[-1].model_copy(update={"content": filler_content, "content_sha256": __import__("hashlib").sha256(filler_content.encode()).hexdigest()})
+                events = [*events[:-1], filler]
+                inserted = provider.ingest_case(events, CaseHandle(case_id=question.question_id, case_ordinal=case_ordinal, question_date=question.question_date_text))
+                trace.append({"record": "ingest", "session_ordinal": 1, "payload_sha256": file_sha256(run_dir / "dataset.json"), "provider_ids": list(inserted or [])})
+                if not readiness_list:
+                    readiness_list.extend(provider.readiness())
+                hits = provider.retrieve(question.question, config.top_k)
+                retrieved = [hit.text for hit in hits]
+                trace.append({"record": "search", "query": question.question, "raw_response_ref": "inline:provider-hit-list", "normalized_hit_ids": [hit.hit_id for hit in hits], "normalized_hit_shas": [__import__("hashlib").sha256(hit.text.encode()).hexdigest() for hit in hits], "top_k": config.top_k})
+                contamination_results.append(evaluate_probes({"presence": bool(provider.retrieve(token, 1)), "cross_case": bool(provider.retrieve(canary_for(run_id, question.question_id + "-other", "cross_case"), 1)), "never_ingested": bool(provider.retrieve(canary_for(run_id, question.question_id, "never_ingested"), 1))}))
+                provider.cleanup()
+            else:
+                retrieved = adapter.run_question(
+                    question,
+                    run_dir / "questions" / _safe_id(question.question_id),
+                    dataset_identity=dataset_identity,
+                    case_ordinal=case_ordinal,
+                    limit=config.top_k,
+                )
+                trace.append({"record": "ingest", "session_ordinal": 1, "payload_sha256": file_sha256(run_dir / "dataset.json"), "provider_ids": []})
+                trace.append({"record": "search", "query": question.question, "raw_response_ref": "inline:adapter-hit-list", "normalized_hit_ids": [], "normalized_hit_shas": [__import__("hashlib").sha256(text.encode()).hexdigest() for text in retrieved], "top_k": config.top_k})
             reader_attempted = True
             reader_started = time.perf_counter()
             hypothesis = active_reader.answer(question, retrieved)
             reader_wall_time = time.perf_counter() - reader_started
             status = "ok"
+            trace.append({"record": "timing", "phase": "retrieve-and-read", "ms": (time.perf_counter() - question_started) * 1000.0})
         except AdapterEnvironmentError as exc:
             invalid_reason = f"{question.question_id}: {exc}"
             failures.append(
@@ -453,6 +500,7 @@ def execute_run(
         "invalid": invalid_reason is not None,
         "invalid_reason": invalid_reason,
         "reader": config.reader_name,
+        "provider_variant": provider_variant,
         "reader_model": _reader_model(active_reader, config),
         "metered_approval": config.metered_approval,
         "full_run_approval": config.full_run_approval,
@@ -478,6 +526,21 @@ def execute_run(
             invalid_reason=invalid_reason,
         ),
         encoding="utf-8",
+    )
+    readiness_status = "READINESS_UNVERIFIABLE" if any(item.method == "readiness-unverifiable" for item in readiness_list) else "VALID"
+    contamination = (
+        "contaminated" if "contaminated" in contamination_results
+        else "unverifiable" if "unverifiable" in contamination_results
+        else "isolated" if contamination_results else "unverifiable"
+    )
+    finalize_manifest(
+        run_dir,
+        status="INVALID" if invalid_reason is not None else readiness_status,
+        finalized_at=dt.datetime.now(dt.UTC).isoformat().replace("+00:00", "Z"),
+        readiness=readiness_list,
+        leakage=LeakageSummary(scanned_cases=len(dataset.questions), invalidated_cases=1 if invalid_reason else 0),
+        contamination=contamination,
+        budget=BudgetSummary(cap_usd=0, committed_usd=0, refusals=0),
     )
     if invalid_reason is not None:
         raise LmeRunInvalid(invalid_reason, run_dir)

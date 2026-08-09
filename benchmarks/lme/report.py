@@ -4,6 +4,10 @@ from __future__ import annotations
 
 from collections import defaultdict
 from collections.abc import Mapping, Set
+from contextlib import contextmanager
+import json
+import socket
+from pathlib import Path
 
 from .dataset import LmeDataset, QUESTION_TYPES
 
@@ -38,6 +42,7 @@ def render_report(
     ceiling_labels: Mapping[str, object] | None = None,
     floor_labels: Mapping[str, object] | None = None,
     invalid_reason: str | None = None,
+    provider_variant: str | None = None,
 ) -> str:
     """Render only per-ability rows; missing bounds block the affected row."""
 
@@ -56,19 +61,16 @@ def render_report(
         lines.extend([f"INVALID environment fault: {invalid_reason}", ""])
     lines.extend(
         [
-            "| Ability | Questions | Exomem | Gold-evidence ceiling | "
-            "Null-abstain floor | Status |",
-            "|---|---:|---:|---:|---:|---|",
+            ("| Ability | Variant | Questions | Score | Gold-evidence ceiling | Null-abstain floor | Status |"
+             if provider_variant else "| Ability | Questions | Exomem | Gold-evidence ceiling | Null-abstain floor | Status |"),
+            ("|---|---|---:|---:|---:|---:|---|" if provider_variant else "|---|---:|---:|---:|---:|---|"),
         ]
     )
     for ability in (*QUESTION_TYPES, ABSTENTION_ABILITY):
         ids = by_type.get(ability, [])
         if not ids:
             if ability in QUESTION_TYPES:
-                lines.append(
-                    f"| {ability} | 0 | n/a | n/a | n/a | "
-                    "no non-abstention questions |"
-                )
+                lines.append(f"| {ability} | {provider_variant} | 0 | n/a | n/a | n/a | no non-abstention questions |" if provider_variant else f"| {ability} | 0 | n/a | n/a | n/a | no non-abstention questions |")
             continue
         missing_ceiling = [
             question_id for question_id in ids if question_id not in ceiling_question_ids
@@ -98,19 +100,52 @@ def render_report(
             status = "harness-bounded"
         else:
             status = "bounded result"
-        lines.append(
-            "| "
-            + " | ".join(
-                (
-                    ability,
-                    str(len(ids)),
-                    _score(ids, labels),
-                    _score(ids, ceiling_labels or {}),
-                    _score(ids, floor_labels or {}),
-                    status,
-                )
-            )
-            + " |"
-        )
+        row = (ability, str(len(ids)), _score(ids, labels), _score(ids, ceiling_labels or {}), _score(ids, floor_labels or {}), status)
+        lines.append("| " + " | ".join((ability, provider_variant, *row[1:]) if provider_variant else row) + " |")
     lines.append("")
     return "\n".join(lines)
+
+
+@contextmanager
+def offline_guard():
+    """Make artifact-only report regeneration fail loudly on any network use."""
+
+    original = socket.socket.connect
+
+    def refused(self, address):  # type: ignore[no-untyped-def]
+        del self, address
+        raise OSError("offline report generation forbids socket.connect")
+
+    socket.socket.connect = refused
+    try:
+        yield
+    finally:
+        socket.socket.connect = original
+
+
+def render_run_report(run_dir: Path | str, *, offline: bool = False) -> str:
+    """Regenerate an LME report solely from a terminal protocol manifest and dataset."""
+
+    from protocol.manifest import ManifestError, load_manifest
+
+    try:
+        load_manifest(run_dir)
+    except ManifestError as exc:
+        raise ValueError(str(exc)) from exc
+    from .dataset import load_dataset
+
+    root = Path(run_dir)
+    def render() -> str:
+        dataset = load_dataset(root / "dataset.json")
+        labels: dict[str, object] = {}
+        hypotheses = root / "hypotheses.jsonl"
+        if hypotheses.exists():
+            labels = {json.loads(line)["question_id"]: False for line in hypotheses.read_text(encoding="utf-8").splitlines() if line}
+        return render_report(dataset, labels=labels, ceiling_question_ids=set(), floor_question_ids=set(), provider_variant=load_manifest(root).provider_variant)
+    if offline:
+        with offline_guard():
+            return render()
+    return render()
+
+
+render_run_report.offline_guard = offline_guard  # type: ignore[attr-defined]

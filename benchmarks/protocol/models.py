@@ -132,6 +132,8 @@ class RunManifest(StrictModel):
     leakage: LeakageSummary = Field(default_factory=lambda: LeakageSummary(scanned_cases=0, invalidated_cases=0))
     contamination: Literal["isolated", "contaminated", "unverifiable"] | None = None
     budget: BudgetSummary | None = None
+    provider_variant: str | None = None
+    control_config_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     pre_registration_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
 
 
