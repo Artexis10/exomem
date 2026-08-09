@@ -60,20 +60,31 @@ them. Mission acceptance criteria (§14) close only from this ledger.
 
 ## 2. Direct lane + equivalence (W2+W3 — lane: codex)
 
-- [ ] 2.1 `lme/providers/` package; exomem_direct from adapter.py (leak-free:
-      neutral titles, no question_type tags)
-- [ ] 2.2 `hybrid_rag_direct.py` (RRF k=60, bge-base, frozen config hash;
-      fixture-embedder path for CI)
-- [ ] 2.3 `basic_memory_direct.py` via sidecar; `supermemory_direct.py`
-      (local first; sequential ingest, instant-dreaming disclosed,
-      reaped_404, settings capture, verified cleanup); `null_direct.py`
-- [ ] 2.4 Runner wired to manifests/traces/readiness/canaries/budget;
-      report variant axis + `--offline` socket guard
-- [ ] 2.5 `equivalence/subsets/lme-s-25.json` + rationale committed BEFORE
-      any result exists (hash-ordered selection; 3×6 answerable + 7 abstention)
-- [ ] 2.6 `equivalence/differ.py` (12 keys; null never equals) +
-      `exceptions.yaml` (weaker-predicate-only, evidence, expiry) + fixture-mode
-      gate green vs `perturbed-twin.json`
+- [x] §2 CORE COMPLETE (merge bc51890; lane codex/cb-direct; review REJECT →
+      Terra retry (production fixed, tests absent) → escalation to Claude
+      executor (+62 tests) → recheck NOT-CLEAR (2 residuals: verdict-before-
+      write ordering incl. pilot-evidence.json; rework-introduced
+      constructible-zero on the legacy path) → surgical fixes → 139-test
+      acceptance group green; 365-test integration suite green post-merge.
+      Landed: providers package with runtime conformance tests; hybrid-RAG
+      control (rank-bm25, ingest-time caching, sentence packing on the
+      indexed tokenization, fixture-embedder variant honestly named); runner
+      protocol wiring (manifest-before-provider, typed per-session traces,
+      canaries as harness-authored filler events scanned by scan_ingest,
+      three known-answer probes, real budget ledger with CLI/env cap);
+      report honesty (one banner source, three agreeing renderers,
+      INVALID renders INVALID); validate --strict refuses false-green
+      manifests; equivalence differ (12 keys, per-key normalizers, tier
+      table, exceptions register wired, expired→unexplained) + selection
+      machinery + 12-key perturbed twin + null case; contamination
+      semantics: provider-path unverifiable invalidates, legacy-path
+      records honest unverifiable and is refused for comparative use.
+- [ ] 2.3-residual `basic_memory_direct.py` via sidecar +
+      `supermemory_direct.py` (deferred by scope note until the sidecar and
+      pinned local binary exist; null_direct + exomem-source-only landed)
+- [ ] 2.5-residual the REAL committed `lme-s-25.json` generates from the
+      pinned dataset at fetch time (W9); the selection algorithm + fixture
+      subsets are landed and tested
 
 ## 3. Guest lane: bm-bench (W4 — lane: codex + claude review)
 
