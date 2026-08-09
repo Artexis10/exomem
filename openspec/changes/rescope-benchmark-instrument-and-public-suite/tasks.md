@@ -77,6 +77,13 @@
       says EXOMEM_EVOLUTION_MAX_VERSIONS) — unactionable remediation for
       >25-version chains queried by path; align the message with a knob the
       caller can reach
+- [ ] 3b.6 Graph-value runner rescope (from the 2026-08-09 re-examination,
+      verdict REJECT—WITHDRAW): `scripts/graph_value_benchmark.py` survives
+      only as an exomem-only regression instrument — retire or
+      internal-diagnostic-label its basic-memory adapter path, remove the
+      dominance-gate framing, and keep the exomem regression invariants;
+      the comparison doc and all four live citations carry withdrawal
+      notes as of this change
 
 ## 4. Validation
 - [ ] 4.1 `openspec validate rescope-benchmark-instrument-and-public-suite --strict`

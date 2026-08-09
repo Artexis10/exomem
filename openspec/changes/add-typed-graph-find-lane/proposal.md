@@ -2,6 +2,14 @@
 
 ## Why
 
+> **Scope note (2026-08-09):** the "proven superior" framing below rested on
+> the graph-value comparison, which has been withdrawn (authored-competitor
+> bias, both directions — see `docs/comparison-basic-memory-graph.md`'s
+> banner and `rescope-benchmark-instrument-and-public-suite`). This change's
+> motivation stands without it: the typed graph exists, carries provenance/
+> lifecycle/block structure no competitor surface exposes, and is invisible
+> in ordinary recall — a product problem regardless of any comparison.
+
 The governed typed graph is proven superior to Basic Memory on graph-dependent
 tasks (see `docs/comparison-basic-memory-graph.md`), but it is invisible in
 ordinary recall: `find()`'s graph fusion lane still expands 1-hop outbound

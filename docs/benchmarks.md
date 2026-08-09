@@ -39,7 +39,10 @@ at native model setup (`SIGABRT` while SentenceTransformers loads BGE on either
 CPU or CUDA), so it is recorded as an environment failure rather than a product
 result. See
 [Exomem vs Basic Memory: graph-value comparison](comparison-basic-memory-graph.md)
-for exact revisions, gates, limitations, and reproduction commands.
+for exact revisions, gates, limitations, and reproduction commands —
+**withdrawn 2026-08-09** (adversarial re-examination: authored-competitor
+bias in both directions plus an unreproducible recorded run; see that
+page's banner). Its comparative claims are not citable.
 
 A third, falsification-oriented system — the four-track **memory-proof
 benchmark** (`benchmarks/membench`: deterministic seeded epistemic corpus,

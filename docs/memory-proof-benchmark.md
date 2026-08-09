@@ -23,7 +23,8 @@ This page defines the four-track benchmark system specified by OpenSpec change
 designed against (2026-07-31). It complements — and does not replace —
 [Measured retrieval quality](benchmarks.md) (golden-set retrieval + latency)
 and [the graph comparison](comparison-basic-memory-graph.md) (probe-level
-graph capability, `scripts/graph_value_benchmark.py`).
+graph capability, `scripts/graph_value_benchmark.py`; its cross-contender
+claims were **withdrawn 2026-08-09** — see that page's banner).
 
 **Design stance: the benchmark exists to falsify Exomem's claims, not to
 flatter them.** A result that exposes weaknesses is a successful result.

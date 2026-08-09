@@ -1,5 +1,29 @@
 # Exomem vs Basic Memory: graph-value comparison
 
+> **WITHDRAWN (2026-08-09) — historical internal diagnostic, not publishable.**
+> An independent adversarial re-examination (verdict **REJECT — WITHDRAW**;
+> artifact `codex-adversarial-fairness-re-examination-graph-value-comparison-…`,
+> 2026-08-09) found this comparison carries the same structural defect that
+> voided the Track B head-to-head: the benchmark's author defined Basic
+> Memory's corpus rendering, configuration, adapter, task taxonomy, and
+> scorer, with defects in **both** directions (flattened block/lifecycle
+> structure and name-keyed "unsupported" zeros against Basic Memory;
+> filtered-vs-unfiltered query comparisons behind the direction/distractor
+> "wins"; permissive parity scoring flattering Basic Memory; dominance axes
+> selected from exomem's own schema). Separately, the recorded revision
+> `7e89a3f` cannot produce the recorded 22-probe run — manifest v2 first
+> exists in the following day's commit — so the run is not reproducible from
+> its own provenance. **No verdict, parity row, count, or efficiency figure
+> below is safe to cite, in either direction.** Under
+> `rescope-benchmark-instrument-and-public-suite`, repo-authored
+> cross-contender comparisons are permanently retired; the runner may
+> survive only as an exomem-only regression instrument with any
+> competitor-containing output labelled internal-diagnostic. The one claim
+> that survives, as a product-interface observation rather than a score:
+> Basic Memory's `build_context` genuinely does not expose origin/source
+> anchors, lifecycle status, relation-family profiles, or relation-bearing
+> blocks — a capability-existence statement needing no benchmark.
+
 Measured 2026-07-16 against Exomem source package version `0.23.0` at the
 post-tag revision `7e89a3f7bff7` and Basic Memory `0.22.1` at pinned revision
 `0e59bbffaf7d`. The Exomem revision is current `main`, not the already-published
