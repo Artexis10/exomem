@@ -72,6 +72,11 @@
 - [ ] 3b.4 membench bounds table: a native contender's abstention percentage
       cell still renders against floor/ceiling values that are themselves
       withheld on that row, leaking the scale relationship the row withholds
+- [ ] 3b.5 `evolution.py` path-route truncation says "raise max_versions",
+      a parameter `review_memory` does not expose (topic route correctly
+      says EXOMEM_EVOLUTION_MAX_VERSIONS) — unactionable remediation for
+      >25-version chains queried by path; align the message with a knob the
+      caller can reach
 
 ## 4. Validation
 - [ ] 4.1 `openspec validate rescope-benchmark-instrument-and-public-suite --strict`
