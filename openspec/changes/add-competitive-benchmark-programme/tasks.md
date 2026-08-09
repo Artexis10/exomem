@@ -30,7 +30,13 @@ them. Mission acceptance criteria (§14) close only from this ledger.
 
 ## 1. Protocol substrate (W1 — lane: codex)
 
-- [ ] 1.1 Red leak test observed FAILING against current code
+- [x] §1 COMPLETE (merge 09e3fb4; lane codex/cb-protocol; review
+      APPROVE-WITH-FIXES → correction → recheck NOT-CLEAR (new blocker:
+      gold-vs-interpolation collisions) → final targeted correction →
+      orchestrator-verified green: 68 protocol/lme/privacy tests, drift +
+      fixture selftest, full membench 462 passed). 1.9 snapshot/projectors
+      deliberately deferred to the W6 lane. Sub-items:
+- [x] 1.1 Red leak test observed FAILING against current code
       (`benchmarks/lme/fixtures/leaky.json` +
       `tests/test_lme_normalize.py::test_ingestion_payloads_carry_no_gold_labels`)
 - [ ] 1.2 `benchmarks/protocol/models.py` + committed drift-gated schemas
