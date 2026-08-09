@@ -114,9 +114,20 @@ them. Mission acceptance criteria (§14) close only from this ledger.
 
 ## 5. Epistemic State Bench (W6 — lane: claude executor + external review)
 
-- [ ] 5.1 `epistemic/{schema,registry,assertions,catastrophic}.py`
-      (unknown-assertion load error; discrimination tests on synthetic
-      snapshots)
+- [x] 5.1 Engine COMPLETE (merge aff5a12; lane claude/cb-epistemic; review
+      APPROVE-WITH-FIXES → correction → recheck NOT-CLEAR (R-B1b) → surgical
+      fixes incl. sibling unobservable-subject guards → 227 tests green;
+      §7 amendment records vacuity-fails for evidence_path_resolves)
+- [ ] 5.1b W6b runner glue (ledgered from review M7): scenario→AssertionContext
+      binding for served_items / foreign_case_hits / external_edit_at;
+      REQUIRES_SNAPSHOT_PAIR bound to AssertionContext.prior
+- [ ] 5.1c exomem decision projection (review M9): entity_type: decision →
+      kind "decision" in the vault projector, else f07 is unscoreable for
+      the subject product
+- [ ] 5.1d census gaps (review): pre-registration sha256 into run manifests;
+      negative controls wired into every epistemic table; privileged-endpoint
+      disqualification check; headline table carries failing-assertion
+      artifact paths
 - [ ] 5.2 Families 1–9 fixtures + runs vs exomem + grep-markdown + no-memory
       (controls score non-trivially)
 - [ ] 5.3 4b.18 structural-blinding fix + structure-swap test (hard-gates all
