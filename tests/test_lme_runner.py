@@ -18,8 +18,8 @@ FIXTURE = Path("benchmarks/lme/fixtures/mini.json")
 
 
 class FixtureAdapter:
-    def run_question(self, question: LmeQuestion, workdir: Path, *, limit: int = 10) -> list[str]:
-        del limit
+    def run_question(self, question: LmeQuestion, workdir: Path, *, dataset_identity, case_ordinal: int, limit: int = 10) -> list[str]:
+        del limit, dataset_identity, case_ordinal
         workdir.mkdir(parents=True, exist_ok=True)
         self.last_ingest_results = tuple(
             OpResult(
@@ -175,8 +175,8 @@ def test_bound_presence_is_derived_from_artifacts_minus_failures(tmp_path: Path)
             return "answer"
 
     class MainOnlyAdapter:
-        def run_question(self, question, workdir, *, limit=10):
-            del question, limit
+        def run_question(self, question, workdir, *, dataset_identity, case_ordinal, limit=10):
+            del question, dataset_identity, case_ordinal, limit
             workdir.mkdir(parents=True, exist_ok=True)
             self.last_ingest_results = ()
             return ["main"]

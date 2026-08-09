@@ -14,6 +14,7 @@ from typing import Callable
 from membench.adapters.base import AdapterEnvironmentError
 from membench.environment import capture_environment
 from membench.judge.backends import ClaudeCliBackend, OpenAICompatBackend
+from protocol.models import DatasetIdentity
 
 from .adapter import LmeExomemAdapter
 from .bounds import BoundRun, Hypothesis, run_bounds
@@ -294,6 +295,14 @@ def execute_run(
         if config.pilot is not None
         else parent_dataset
     )
+    dataset_identity = DatasetIdentity(
+        id="longmemeval",
+        variant="LongMemEval-S cleaned September 2025",
+        source="xiaowu0162/longmemeval-cleaned",
+        revision=config.dataset_sha256 or "fixture-local",
+        sha256=dataset_checksum,
+        case_count=len(parent_dataset.questions),
+    )
     pilot = (
         {
             "size": len(dataset.questions),
@@ -350,7 +359,7 @@ def execute_run(
     hypotheses: list[dict[str, object]] = []
     invalid_reason: str | None = None
     started = time.perf_counter()
-    for question in dataset.questions:
+    for case_ordinal, question in enumerate(dataset.questions, 1):
         question_started = time.perf_counter()
         adapter = adapter_factory()
         reader_attempted = False
@@ -359,6 +368,8 @@ def execute_run(
             retrieved = adapter.run_question(
                 question,
                 run_dir / "questions" / _safe_id(question.question_id),
+                dataset_identity=dataset_identity,
+                case_ordinal=case_ordinal,
                 limit=config.top_k,
             )
             reader_attempted = True

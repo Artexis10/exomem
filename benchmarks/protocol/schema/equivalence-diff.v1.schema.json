@@ -1,0 +1,60 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "actual": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Actual"
+    },
+    "case_id": {
+      "title": "Case Id",
+      "type": "string"
+    },
+    "equal": {
+      "title": "Equal",
+      "type": "boolean"
+    },
+    "expected": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Expected"
+    },
+    "field": {
+      "title": "Field",
+      "type": "string"
+    },
+    "protocol_version": {
+      "const": "1.0.0",
+      "default": "1.0.0",
+      "title": "Protocol Version",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": 1,
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "case_id",
+    "field",
+    "equal"
+  ],
+  "title": "EquivalenceDiff",
+  "type": "object"
+}

@@ -1,0 +1,69 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "case_id": {
+      "title": "Case Id",
+      "type": "string"
+    },
+    "detail": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Detail"
+    },
+    "hits": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Hits",
+      "type": "array"
+    },
+    "outcome": {
+      "enum": [
+        "pass",
+        "fail",
+        "inconclusive-by-design",
+        "superseded",
+        "both_returned",
+        "stale_only",
+        "unresolvable"
+      ],
+      "title": "Outcome",
+      "type": "string"
+    },
+    "probe_kind": {
+      "enum": [
+        "lexical-rare-token",
+        "semantic-zero-overlap",
+        "update-current-state"
+      ],
+      "title": "Probe Kind",
+      "type": "string"
+    },
+    "protocol_version": {
+      "const": "1.0.0",
+      "default": "1.0.0",
+      "title": "Protocol Version",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": 1,
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "case_id",
+    "probe_kind",
+    "outcome"
+  ],
+  "title": "ProbeResult",
+  "type": "object"
+}

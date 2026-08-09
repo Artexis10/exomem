@@ -1,0 +1,50 @@
+{
+  "additionalProperties": false,
+  "description": "Private scoring record; adapter-facing APIs deliberately never accept it.",
+  "properties": {
+    "answer": {
+      "title": "Answer",
+      "type": "string"
+    },
+    "answer_session_ids": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Answer Session Ids",
+      "type": "array"
+    },
+    "case_id": {
+      "title": "Case Id",
+      "type": "string"
+    },
+    "protocol_version": {
+      "const": "1.0.0",
+      "default": "1.0.0",
+      "title": "Protocol Version",
+      "type": "string"
+    },
+    "question": {
+      "title": "Question",
+      "type": "string"
+    },
+    "question_type": {
+      "title": "Question Type",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": 1,
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "case_id",
+    "answer",
+    "answer_session_ids",
+    "question_type",
+    "question"
+  ],
+  "title": "CaseGold",
+  "type": "object"
+}

@@ -1,0 +1,17 @@
+# Public $/1M-token list. Confirm against provider price pages before a metered run.
+models:
+  gpt-4o:
+    input_per_million_usd: 2.50
+    output_per_million_usd: 10.00
+  gpt-4o-mini:
+    input_per_million_usd: 0.15
+    output_per_million_usd: 0.60
+  # TODO: verify these provider price-page values at the run date.
+  claude-haiku-4-5:
+    input_per_million_usd: 1.00
+    output_per_million_usd: 5.00
+  claude-sonnet-4-6:
+    input_per_million_usd: 3.00
+    output_per_million_usd: 15.00
+  supermemory_op:
+    per_operation_usd: null

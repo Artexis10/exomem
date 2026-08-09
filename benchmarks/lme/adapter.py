@@ -6,13 +6,19 @@ import datetime as dt
 import hashlib
 import importlib.util
 from contextlib import ExitStack
+from collections.abc import Sequence
 from pathlib import Path
 from unittest import mock
 
 from membench.adapters.base import AdapterEnvironmentError, OpResult, Profile
 from membench.adapters.exomem_local import ExomemLocalAdapter
 
-from .dataset import LmeQuestion, LmeSession, render_session
+from protocol.events import LeakageError
+from protocol.leakage import scan_ingest
+from protocol.models import CaseGold, CaseHandle, DatasetIdentity, ProtocolEvent
+
+from .dataset import LmeQuestion
+from .normalize import ingest_field_groups, neutral_tags, neutral_title, neutralize, render_neutral_session
 
 
 def lme_profile() -> Profile:
@@ -89,41 +95,47 @@ class LmeExomemAdapter(ExomemLocalAdapter):
             ) from exc
 
     @staticmethod
-    def _slug(question: LmeQuestion, session: LmeSession) -> str:
-        digest = hashlib.sha256(
-            f"{question.question_id}:{session.session_id}".encode("utf-8")
-        ).hexdigest()[:10]
+    def _slug(handle: CaseHandle, session_ordinal: int) -> str:
+        digest = hashlib.sha256(f"{handle.case_id}:{session_ordinal}".encode("utf-8")).hexdigest()[:10]
         return f"lme-session-{digest}"
 
-    def ingest_question(self, question: LmeQuestion) -> tuple[OpResult, ...]:
-        """Capture every session through ``op_capture_source`` at its own time."""
+    def ingest_case(self, events: Sequence[ProtocolEvent], handle: CaseHandle) -> tuple[OpResult, ...]:
+        """Capture neutral events; gold-bearing dataset records cannot cross this boundary."""
 
+        if not isinstance(handle, CaseHandle) or not isinstance(events, Sequence):
+            raise TypeError("ingest_case accepts Sequence[ProtocolEvent] plus CaseHandle")
+        if any(not isinstance(event, ProtocolEvent) or hasattr(event, "answer") for event in events):
+            raise TypeError("ingest_case accepts only neutral ProtocolEvent values, never answer-bearing objects")
+        if not events or any(event.case_id != handle.case_id for event in events):
+            raise TypeError("ingest_case events must be non-empty and match the neutral case handle")
         if self._vault is None or self._schema is None:
             raise AdapterEnvironmentError("adapter not set up")
         from exomem import commands, find as find_module, temporal
 
         results: list[OpResult] = []
-        for sequence, session in enumerate(question.sessions):
+        grouped: dict[int, list[ProtocolEvent]] = {}
+        for event in events:
+            grouped.setdefault(event.session_ordinal, []).append(event)
+        for sequence, session_ordinal in enumerate(sorted(grouped)):
             import time
 
             started = time.perf_counter()
-            source_id = session.session_id
+            source_id = f"session-{session_ordinal}"
+            session_events = grouped[session_ordinal]
             try:
                 # The product writer owns frontmatter. Clocking that public
                 # write is how the session timestamp lands in `captured:`
                 # without post-editing an append-only governed Source.
-                with mock.patch.object(temporal, "now", return_value=session.timestamp):
+                timestamp = dt.datetime.fromisoformat(session_events[0].original_timestamp.replace("Z", "+00:00"))
+                with mock.patch.object(temporal, "now", return_value=timestamp):
                     captured = commands.op_capture_source(
                         self._vault,
                         self._schema,
-                        content=render_session(session),
-                        title=(
-                            f"LongMemEval {question.question_id} session "
-                            f"{session.session_id}"
-                        ),
-                        slug=self._slug(question, session),
+                        content=render_neutral_session(session_events),
+                        title=neutral_title(handle.case_ordinal, session_ordinal),
+                        slug=self._slug(handle, session_ordinal),
                         source_type="session",
-                        tags=["longmemeval", question.question_type],
+                        tags=neutral_tags(),
                     )
                 source = captured.get("source") if isinstance(captured, dict) else None
                 path = source.get("path") if isinstance(source, dict) else None
@@ -175,13 +187,31 @@ class LmeExomemAdapter(ExomemLocalAdapter):
         return [hit.text or hit.excerpt or "" for hit in hits if hit.text or hit.excerpt]
 
     def run_question(
-        self, question: LmeQuestion, workdir: Path, *, limit: int = 10
+        self, question: LmeQuestion, workdir: Path, *, dataset_identity: DatasetIdentity,
+        case_ordinal: int, limit: int = 10,
     ) -> list[str]:
         """Set up, ingest, retrieve, and clean up one isolated question vault."""
 
         self.setup(Path(workdir), lme_profile())
         try:
-            ingested = self.ingest_question(question)
+            events = neutralize(question, dataset_identity)
+            handle = CaseHandle(
+                case_id=question.question_id, case_ordinal=case_ordinal,
+                question_date=question.question_date_text,
+            )
+            gold = CaseGold(
+                case_id=question.question_id, answer=question.answer,
+                answer_session_ids=list(question.answer_session_ids), question_type=question.question_type,
+                question=question.question,
+            )
+            content_fields, authored_literals, harness_fields = ingest_field_groups(events, handle)
+            findings = scan_ingest(
+                content_fields, authored_literals, harness_fields, gold,
+                raw_upstream_session_ids=[session.session_id for session in question.sessions],
+            )
+            if findings:
+                raise LeakageError("; ".join(finding.detector for finding in findings))
+            ingested = self.ingest_case(events, handle)
             self.last_ingest_results = ingested
             failed = [result for result in ingested if not result.ok]
             if failed:

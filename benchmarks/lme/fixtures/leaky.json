@@ -1,0 +1,42 @@
+[
+  {
+    "question_id": "leaky-city",
+    "question_type": "single-session-user",
+    "question": "Which signal was selected for the spring voyage?",
+    "answer": "Cobalt",
+    "question_date": "2026-01-20T12:00:00Z",
+    "haystack_session_ids": ["answer_3b7c9", "plain-44"],
+    "haystack_dates": ["2026-01-03T09:00:00Z", "2026-01-09T10:30:00Z"],
+    "haystack_sessions": [
+      [
+        {"role": "user", "content": "Ralven selected the Cobalt signal for the voyage."},
+        {"role": "assistant", "content": "I will remember that Cobalt was selected."}
+      ],
+      [
+        {"role": "user", "content": "The voyage uses a blue pennant."},
+        {"role": "assistant", "content": "Noted the pennant."}
+      ]
+    ],
+    "answer_session_ids": ["answer_3b7c9"]
+  },
+  {
+    "question_id": "leaky-preference",
+    "question_type": "single-session-preference",
+    "question": "Which card should be used for Neris's route plan?",
+    "answer": "Cedar",
+    "question_date": "2026-02-20T12:00:00Z",
+    "haystack_session_ids": ["plain-95", "answer_8d2ef"],
+    "haystack_dates": ["2026-02-02T08:00:00Z", "2026-02-08T08:15:00Z"],
+    "haystack_sessions": [
+      [
+        {"role": "user", "content": "Neris has two route maps."},
+        {"role": "assistant", "content": "I will keep both maps available."}
+      ],
+      [
+        {"role": "user", "content": "Neris saved the Cedar card for the route plan."},
+        {"role": "assistant", "content": "I recorded Cedar as the preference."}
+      ]
+    ],
+    "answer_session_ids": ["answer_8d2ef"]
+  }
+]
