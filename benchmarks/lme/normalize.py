@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable
 
-from protocol.events import assert_no_evidence_marked_ids, neutralize_dataset
+from protocol.events import LeakageError, assert_no_evidence_marked_ids, neutralize_dataset
 from protocol.models import CaseHandle, DatasetIdentity, ProtocolEvent
 
 from .dataset import LmeDataset, LmeQuestion
@@ -25,7 +26,12 @@ def neutralize(dataset: LmeDataset | LmeQuestion, dataset_identity: DatasetIdent
 def refuse_if_evidence_marked(dataset: LmeDataset | LmeQuestion, dataset_identity: DatasetIdentity) -> None:
     """Fail closed if neutral public identity fields contain evidence markers."""
 
-    neutralize(dataset, dataset_identity)
+    questions = dataset.questions if isinstance(dataset, LmeDataset) else (dataset,)
+    raw_session_ids = [session.session_id for question in questions for session in question.sessions]
+    if any(re.search(r"\banswer_[A-Za-z0-9]", session_id, re.IGNORECASE) for session_id in raw_session_ids):
+        raise LeakageError("raw upstream session identifiers include an evidence marker")
+    events = neutralize(dataset, dataset_identity)
+    assert_no_evidence_marked_ids(events, raw_upstream_session_ids=raw_session_ids)
 
 
 def render_neutral_session(events_for_session: Iterable[ProtocolEvent]) -> str:
@@ -46,8 +52,10 @@ def neutral_tags() -> list[str]:
     return ["longmemeval"]
 
 
-def ingest_field_groups(events: Iterable[ProtocolEvent], handle: CaseHandle) -> tuple[list[str], dict[str, object]]:
-    """Keep verbatim dataset messages separate from harness-authored fields."""
+def ingest_field_groups(
+    events: Iterable[ProtocolEvent], handle: CaseHandle
+) -> tuple[list[str], dict[str, object], dict[str, object]]:
+    """Partition data content, static template text, and rendered harness fields."""
 
     grouped: dict[int, list[ProtocolEvent]] = {}
     for event in events:
@@ -55,6 +63,11 @@ def ingest_field_groups(events: Iterable[ProtocolEvent], handle: CaseHandle) -> 
             raise ValueError("event case does not match neutral handle")
         grouped.setdefault(event.session_ordinal, []).append(event)
     content = [event.content for ordinal in sorted(grouped) for event in grouped[ordinal]]
+    authored_literals = {
+        "titles": ["LongMemEval case {case_ordinal} session {session_ordinal}" for _ordinal in sorted(grouped)],
+        "tags": neutral_tags(),
+        "prefixes": ["Session timestamp: {timestamp}", "Session ordinal: {session_ordinal}"],
+    }
     harness = {
         "titles": [neutral_title(handle.case_ordinal, ordinal) for ordinal in sorted(grouped)],
         "tags": neutral_tags(),
@@ -63,4 +76,4 @@ def ingest_field_groups(events: Iterable[ProtocolEvent], handle: CaseHandle) -> 
             for ordinal in sorted(grouped)
         ],
     }
-    return content, harness
+    return content, authored_literals, harness

@@ -204,9 +204,9 @@ class LmeExomemAdapter(ExomemLocalAdapter):
                 answer_session_ids=list(question.answer_session_ids), question_type=question.question_type,
                 question=question.question,
             )
-            content_fields, harness_fields = ingest_field_groups(events, handle)
+            content_fields, authored_literals, harness_fields = ingest_field_groups(events, handle)
             findings = scan_ingest(
-                content_fields, harness_fields, gold,
+                content_fields, authored_literals, harness_fields, gold,
                 raw_upstream_session_ids=[session.session_id for session in question.sessions],
             )
             if findings:

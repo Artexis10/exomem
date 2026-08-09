@@ -35,13 +35,13 @@ def test_ingest_field_detectors_are_scoped_and_token_bounded() -> None:
     gold = _gold()
     content = ["Answer me this: Where did the violet cedar lantern open at dawn?"]
     harness = {"title": "case 1", "tags": ["longmemeval"]}
-    detectors = {finding.detector for finding in scan_ingest(content, harness, gold)}
+    detectors = {finding.detector for finding in scan_ingest(content, harness, harness, gold)}
     assert "question-text" in detectors
     assert "raw-upstream-id" not in detectors
-    assert not scan_ingest(["The number is 3."], {"title": "case 34", "tags": []}, gold)
-    assert "gold-text" in {finding.detector for finding in scan_ingest([], {"title": "3"}, gold)}
+    assert not scan_ingest(["The number is 3."], {"title": "case {case}"}, {"title": "case 34", "tags": []}, gold)
+    assert "gold-text" in {finding.detector for finding in scan_ingest([], {"title": "3"}, {"title": "3"}, gold)}
     assert "raw-upstream-id" in {
-        finding.detector for finding in scan_ingest(["answer_x1"], {"title": "case"}, gold)
+        finding.detector for finding in scan_ingest(["answer_x1"], {"title": "case"}, {"title": "case"}, gold)
     }
 
 
@@ -50,7 +50,7 @@ def test_all_question_types_are_harness_labels() -> None:
     from protocol.leakage import scan_ingest
 
     for question_type in QUESTION_TYPES:
-        findings = scan_ingest([], {"tags": [question_type]}, _gold())
+        findings = scan_ingest([], {"tags": [question_type]}, {"tags": [question_type]}, _gold())
         assert any(finding.detector == "label-token" for finding in findings), question_type
 
 
@@ -94,6 +94,12 @@ def test_namespace_provider_prefixes_are_distinct_and_safe() -> None:
     names = {kind: derive_namespace("Run with symbols!" * 10, "case/1", kind) for kind in ("exomem", "basic-memory", "supermemory", "hybrid-rag")}
     assert len(set(names.values())) == 4
     assert all(len(name) <= 100 and name.replace("-", "").isalnum() for name in names.values())
+
+
+def test_namespace_is_deterministic_for_identical_inputs() -> None:
+    from protocol.namespace import derive_namespace
+
+    assert derive_namespace("run-1", "case-1", "exomem") == derive_namespace("run-1", "case-1", "exomem")
 
 
 def test_budget_refusal_does_not_consume_budget_and_stale_lock_recovers(tmp_path: Path) -> None:

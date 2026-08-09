@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+from types import SimpleNamespace
 from pathlib import Path
 
 import pytest
@@ -43,3 +44,23 @@ def test_upstream_id_is_hashed_and_gold_is_rejected_at_adapter_boundary(tmp_path
     from protocol.models import CaseHandle
     with pytest.raises(TypeError):
         LmeExomemAdapter().ingest_case(gold, CaseHandle(case_id=question.question_id, case_ordinal=1, question_date=question.question_date_text))  # type: ignore[arg-type]
+
+
+def test_neutralize_dataset_can_record_ingestion_order_only_for_timestampless_input() -> None:
+    """The official LME parser requires timestamps; this minimal protocol input reaches its no-time branch."""
+
+    from protocol.events import neutralize_dataset
+    from protocol.models import DatasetIdentity
+
+    dataset = SimpleNamespace(questions=[SimpleNamespace(
+        question_id="timestampless-case",
+        sessions=[SimpleNamespace(
+            session_id="plain-session",
+            timestamp_text=None,
+            messages=[SimpleNamespace(role="user", content="timestamp is unavailable")],
+        )],
+    )])
+    identity = DatasetIdentity(id="synthetic", variant="timestampless", source="test", revision="1", sha256="a" * 64, case_count=1)
+    events = neutralize_dataset(dataset, identity)
+    assert events[0].timestamp_semantics == "ingestion_order_only"
+    assert events[0].original_timestamp is None

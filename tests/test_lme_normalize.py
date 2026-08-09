@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from lme.dataset import load_dataset
-from lme.normalize import neutral_tags, neutral_title, neutralize, render_neutral_session
+from lme.normalize import neutral_tags, neutral_title, neutralize, refuse_if_evidence_marked, render_neutral_session
 from protocol.models import CaseHandle, DatasetIdentity
 
 
@@ -54,3 +54,12 @@ def test_real_adapter_ingest_keeps_gold_in_content_but_no_identity_or_label_leak
     assert "answer_" not in state
     assert all(session_id not in state for question in dataset.questions for session_id in (session.session_id for session in question.sessions))
     assert all(question.question_type not in state for question in dataset.questions)
+
+
+def test_refuse_if_evidence_marked_rejects_raw_evidence_session_ids() -> None:
+    """This explicit preflight must reject LME's evidence-marked source IDs."""
+
+    from protocol.events import LeakageError
+
+    with pytest.raises(LeakageError):
+        refuse_if_evidence_marked(load_dataset(FIXTURE), _identity())

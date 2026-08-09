@@ -65,12 +65,18 @@ def _finding(result: list[LeakageFinding], scope: Literal["ingest", "search", "a
 
 def scan_ingest(
     content_fields: object,
+    authored_literals: object,
     harness_fields: object,
     gold: CaseGold,
     *,
     raw_upstream_session_ids: Iterable[str] = (),
 ) -> tuple[LeakageFinding, ...]:
-    """Strictly scan harness-owned fields while allowing dataset evidence content."""
+    """Scan dataset content, static harness text, and rendered harness data separately.
+
+    Gold detectors deliberately inspect only static text authored by the harness.
+    Rendered ordinals and timestamps are protocol mechanics, not authored claims;
+    identifier, label, and structure detectors still inspect their full payload.
+    """
 
     result: list[LeakageFinding] = []
     raw_ids = {*gold.answer_session_ids, *raw_upstream_session_ids}
@@ -83,18 +89,22 @@ def scan_ingest(
             _finding(result, "ingest", "raw-upstream-id", location, "case-invalidating", "evidence-marked or raw upstream session id in content")
         if question_shingles & _shingles(text):
             _finding(result, "ingest", "question-text", location, "case-invalidating", "four-token question shingle in content")
-    label_tokens = {*QUESTION_TYPES, *_LABEL_LITERAL}
     gold_shingles = _shingles(gold.answer)
-    for location, value, is_key in _walk(harness_fields, "$.harness"):
+    for location, value, is_key in _walk(authored_literals, "$.authored_literals"):
         text = str(value)
-        if is_key and _STRUCTURAL_KEY.search(text):
-            _finding(result, "ingest", "structural-key", location, "case-invalidating", "sensitive structural key")
         if is_key:
             continue
         if gold.answer and _contains_boundary(text, gold.answer):
             _finding(result, "ingest", "gold-text", location, "case-invalidating", "exact gold answer in harness field")
         if gold_shingles and gold_shingles & _shingles(text):
             _finding(result, "ingest", "gold-shingle", location, "case-invalidating", "four-token gold shingle in harness field")
+    label_tokens = {*QUESTION_TYPES, *_LABEL_LITERAL}
+    for location, value, is_key in _walk(harness_fields, "$.harness"):
+        text = str(value)
+        if is_key and _STRUCTURAL_KEY.search(text):
+            _finding(result, "ingest", "structural-key", location, "case-invalidating", "sensitive structural key")
+        if is_key:
+            continue
         if any(token and _contains_boundary(text, token) for token in label_tokens):
             _finding(result, "ingest", "label-token", location, "case-invalidating", "gold-bearing label token in harness field")
         if _raw_id_found(text, raw_ids):

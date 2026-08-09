@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import tempfile
 from pathlib import Path
 
@@ -14,6 +15,7 @@ from .probes import classify_update_outcome
 from .trace import CaseTraceReader
 
 _ROOT = Path(__file__).resolve().parent
+_FIXTURE_PATH = _ROOT / "fixtures" / "selftest.json"
 
 
 def _export_schemas(check: bool) -> int:
@@ -31,9 +33,27 @@ def _export_schemas(check: bool) -> int:
     return 0
 
 
-def _selftest() -> int:
+def _selftest_fixture() -> int:
+    fixture = json.loads(_FIXTURE_PATH.read_text(encoding="utf-8"))
+    gold = CaseGold.model_validate(fixture["gold"])
+    if scan_ingest(
+        fixture["content_fields"], fixture["authored_literals"], fixture["harness_fields"], gold
+    ):
+        raise RuntimeError("clean fixture unexpectedly triggered leakage scan")
+    if evaluate_probes(fixture["canary_hits"]) != "isolated":
+        raise RuntimeError("canary fixture failed")
+    if classify_update_outcome(fixture["update_hits"]) != "superseded":
+        raise RuntimeError("probe fixture failed")
+    return 0
+
+
+def _selftest(*, fixtures: bool) -> int:
+    if fixtures:
+        _selftest_fixture()
+        print("protocol fixture selftest: ok")
+        return 0
     gold = CaseGold(case_id="fixture", answer="violet cedar lantern", answer_session_ids=["answer_fixture"], question_type="knowledge-update", question="Which lantern?")
-    if scan_ingest(["plain source"], {"title": "case 1", "tags": ["longmemeval"]}, gold):
+    if scan_ingest(["plain source"], {"title": "case {case}"}, {"title": "case 1", "tags": ["longmemeval"]}, gold):
         raise RuntimeError("clean fixture unexpectedly triggered leakage scan")
     if evaluate_probes({"presence": True, "cross_case": False, "never_ingested": False}) != "isolated":
         raise RuntimeError("canary selftest failed")
@@ -66,7 +86,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"invalid manifest: {exc}")
             return 2 if args.strict else 1
         return 0
-    return _selftest()
+    return _selftest(fixtures=args.fixtures)
 
 
 if __name__ == "__main__":
