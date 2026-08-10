@@ -4,10 +4,14 @@ import io
 import os
 import shutil
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+import pytest
+
 from exomem import commands, preserve, schema
+from exomem.cli_ops import OpError
 from exomem.writer_lease import LeaseConfig, LeaseManager
 
 
@@ -19,28 +23,78 @@ def test_twenty_concurrent_real_captures_leave_complete_vault_state(
     vault: Path, source_schema
 ) -> None:
     assert os.environ["EXOMEM_DISABLE_EMBEDDINGS"] == "1"
-    manager = LeaseManager(LeaseConfig(state_dir=vault.parent / "mutation-state"))
+    state_dir = vault.parent / "mutation-state"
+    manager = LeaseManager(LeaseConfig(state_dir=state_dir), mutation_timeout_seconds=0.05)
+    retry_manager = LeaseManager(LeaseConfig(state_dir=state_dir), mutation_timeout_seconds=0.05)
+    assert retry_manager._mutation_timeout_seconds == 0.05
+    holder = LeaseManager(LeaseConfig(state_dir=state_dir))
     command = _add_command()
     start = threading.Barrier(20)
+    holding = threading.Event()
+    release = threading.Event()
 
-    def capture(number: int) -> dict:
-        start.wait(timeout=5.0)
+    def arguments(number: int) -> dict[str, str]:
         slug = f"concurrent-capture-{number:02d}"
-        return manager.invoke(
+        return {
+            "content": f"bounded concurrent payload {number}",
+            "source_type": "other",
+            "title": f"Concurrent Capture {number:02d}",
+            "slug": slug,
+        }
+
+    def capture(number: int, *, synchronize: bool, retry: bool = False) -> dict:
+        if synchronize:
+            start.wait(timeout=10.0)
+        return (retry_manager if retry else manager).invoke(
             command,
             (vault, source_schema),
-            {
-                "content": f"bounded concurrent payload {number}",
-                "source_type": "other",
-                "title": f"Concurrent Capture {number:02d}",
-                "slug": slug,
-            },
+            arguments(number),
         )
 
-    with ThreadPoolExecutor(max_workers=20) as pool:
-        results = list(pool.map(capture, range(20)))
+    def hold_boundary() -> None:
+        with holder.mutation_guard(vault, request_id="holder", operation="capture"):
+            holding.set()
+            assert release.wait(10.0)
 
-    paths = [result["path"] for result in results]
+    thread = threading.Thread(target=hold_boundary)
+    thread.start()
+    assert holding.wait(10.0)
+    with ThreadPoolExecutor(max_workers=20) as pool:
+        first_attempts = [pool.submit(capture, number, synchronize=True) for number in range(20)]
+        refused: list[OpError] = []
+        for future in first_attempts:
+            with pytest.raises(OpError) as raised:
+                future.result(timeout=10.0)
+            refused.append(raised.value)
+        assert len(refused) == 20
+        assert all(error.code == "MUTATION_BUSY" for error in refused)
+        assert all(error.details.get("committed") is False for error in refused)
+        assert not list((vault / "Knowledge Base/Sources/Other").glob("concurrent-capture-*.md"))
+
+        release.set()
+        thread.join(timeout=10.0)
+        assert not thread.is_alive()
+        pending = set(range(20))
+        results: dict[int, dict] = {}
+        deadline = time.monotonic() + 45.0
+        while pending:
+            assert time.monotonic() < deadline, "concurrent retry waves did not make progress"
+            with ThreadPoolExecutor(max_workers=20) as retry_pool:
+                futures = {
+                    number: retry_pool.submit(capture, number, synchronize=False, retry=True)
+                    for number in pending
+                }
+                for number, future in futures.items():
+                    try:
+                        remaining = deadline - time.monotonic()
+                        assert remaining > 0, "concurrent retry waves did not make progress"
+                        results[number] = future.result(timeout=remaining)
+                    except OpError as error:
+                        assert error.code == "MUTATION_BUSY"
+                        assert error.details.get("committed") is False
+            pending.difference_update(results)
+
+    paths = [result["path"] for result in results.values()]
     assert len(paths) == len(set(paths)) == 20
     sources_index = (vault / "Knowledge Base/Sources/index.md").read_text(encoding="utf-8")
     top_index = (vault / "Knowledge Base/index.md").read_text(encoding="utf-8")

@@ -220,6 +220,32 @@ def _inspection_saved_view(value: Any) -> dict[str, Any] | None:
     return normalized
 
 
+def _inspection_plan_descriptor(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, Mapping) or set(value) != {"reference", "query"}:
+        return None
+    reference = _opaque_plan_reference(value.get("reference"))
+    query = value.get("query")
+    if reference is None or not isinstance(query, Mapping) or not query or set(query) - {"filters", "limit"}:
+        return None
+    limit = query.get("limit")
+    if type(limit) is not int or not 1 <= limit <= query_data.HARD_ROW_CAP:
+        return None
+    normalized_query: dict[str, Any] = {"limit": limit}
+    if "filters" in query:
+        filters = query["filters"]
+        if not isinstance(filters, Mapping) or len(filters) > 128:
+            return None
+        normalized_filters: dict[str, Any] = {}
+        for name, filter_value in filters.items():
+            field = _inspection_field_name(name)
+            projected = _inspection_json(filter_value)
+            if field is None or projected is _INSPECTION_INVALID:
+                return None
+            normalized_filters[field] = projected
+        normalized_query = {"filters": normalized_filters, "limit": limit}
+    return {"reference": reference, "query": normalized_query}
+
+
 def _validate_record_inspection(payload: Mapping[str, Any]) -> dict[str, Any] | None:
     """Reconstruct the report-only inspection union before it reaches egress."""
     kind = payload.get("kind")
@@ -275,7 +301,7 @@ def _validate_record_inspection(payload: Mapping[str, Any]) -> dict[str, Any] | 
     if kind == "collection":
         if legacy is not None or not isinstance(contract, Mapping):
             return None
-        if set(contract) != {"collection_id", "path", "title", "semantic_profile", "schema_version", "storage"}:
+        if set(contract) != {"collection_id", "path", "title", "semantic_profile", "schema_version", "storage", "plans"}:
             return None
         collection_id = _inspection_identifier(contract.get("collection_id"))
         path, title = _inspection_path(contract.get("path")), _inspection_string(contract.get("title"), maximum=512)
@@ -296,6 +322,12 @@ def _validate_record_inspection(payload: Mapping[str, Any]) -> dict[str, Any] | 
         strategy, source, format_version = storage.get("strategy"), _inspection_path(storage.get("source")), storage.get("format_version")
         if type(strategy) is not str or strategy not in {"markdown-log", "markdown-items", "dataset"} or source is None or format_version != 1:
             return None
+        plans = contract.get("plans")
+        if not isinstance(plans, list) or len(plans) > 32:
+            return None
+        normalized_plans = [_inspection_plan_descriptor(plan) for plan in plans]
+        if any(plan is None for plan in normalized_plans):
+            return None
         normalized_contract: dict[str, Any] | None = {
             "collection_id": collection_id,
             "path": path,
@@ -303,6 +335,7 @@ def _validate_record_inspection(payload: Mapping[str, Any]) -> dict[str, Any] | 
             "semantic_profile": profile,
             "schema_version": version,
             "storage": {"strategy": strategy, "source": source, "format_version": format_version},
+            "plans": [plan for plan in normalized_plans if plan is not None],
         }
         normalized_legacy: dict[str, Any] | None = None
         if status == "not_applicable":
@@ -765,7 +798,15 @@ def inspect_collection(
             {
                 "kind": "collection",
                 "report_only": True,
-                "contract": _inspection_contract(manifest),
+                "contract": {
+                    **_inspection_contract(manifest),
+                    "plans": [
+                        projected
+                        for plan in manifest.links.plans
+                        if (projected := _project_plan_link(root, manifest, plan, links=links))
+                        is not None
+                    ],
+                },
                 "legacy": None,
                 "snapshot": inspection.snapshot,
                 "source_versions": [
@@ -823,6 +864,7 @@ def _inspection_contract(manifest: collections.CollectionManifest) -> dict[str, 
             "source": manifest.storage.source,
             "format_version": manifest.storage.format_version,
         },
+        "plans": [],
     }
 
 
