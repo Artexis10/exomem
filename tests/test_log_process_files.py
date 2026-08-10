@@ -121,6 +121,37 @@ def test_bare_serve_is_not_a_cli_only_invocation() -> None:
     assert _is_cli_only_invocation(["--transport", "stdio"]) is False
 
 
+@pytest.mark.parametrize(
+    "operator_argv",
+    [
+        ["init", "--contract-version", "1", "--request-file", "/run/exomem/init.json"],
+        [
+            "restore-candidate",
+            "--contract-version",
+            "1",
+            "--request-file",
+            "/run/exomem/restore-candidate.json",
+        ],
+    ],
+)
+def test_main_dispatches_hosted_operators_without_cli_logging(
+    operator_argv: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import exomem.__main__ as main_module
+    from exomem import hosted_operator, logging_config
+
+    received: list[list[str]] = []
+
+    def cli_logging_must_not_run(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("hosted operators must not initialize CLI logging")
+
+    monkeypatch.setattr(logging_config, "configure_logging", cli_logging_must_not_run)
+    monkeypatch.setattr(hosted_operator, "main", lambda argv: received.append(argv) or 17)
+
+    assert main_module.main(["hosted", *operator_argv]) == 17
+    assert received == [operator_argv]
+
+
 def test_main_configures_cli_logging_for_doctor_but_not_for_serve(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
