@@ -480,15 +480,44 @@ def test_platform_rotation_quiescence_surfaces_every_database_consumer() -> None
         "exomem-database-backup",
         "exomem-deletion-dispatcher",
     }
-    for name in expected_deployments:
-        _find(documents, "Deployment", name)
-    for name in expected_cronjobs:
-        _find(documents, "CronJob", name)
 
-    deletion_template = _find(documents, "ConfigMap", "exomem-deletion-job-template")
-    assert "exomem-provisioner-database" in deletion_template["data"]["job-template.json"]
+    def references_database(container: dict) -> bool:
+        return any(
+            item.get("valueFrom", {}).get("secretKeyRef", {}).get("name")
+            == "exomem-provisioner-database"
+            for item in container.get("env", [])
+        )
+
+    standing: set[tuple[str, str]] = set()
+    for document in documents:
+        kind = document.get("kind")
+        if kind not in {"Deployment", "CronJob"}:
+            continue
+        pod = (
+            document["spec"]["template"]["spec"]
+            if kind == "Deployment"
+            else document["spec"]["jobTemplate"]["spec"]["template"]["spec"]
+        )
+        if any(
+            references_database(container)
+            for container in [*(pod.get("initContainers") or []), *(pod.get("containers") or [])]
+        ):
+            standing.add((kind, document["metadata"]["name"]))
+    assert standing == {
+        *(("Deployment", name) for name in expected_deployments),
+        *(("CronJob", name) for name in expected_cronjobs),
+    }
+
+    deletion_template = json.loads(
+        _find(documents, "ConfigMap", "exomem-deletion-job-template")["data"]["job-template.json"]
+    )
     migration = _find(documents, "Job", "exomem-provisioner-database-migration")
-    assert "exomem-provisioner-database" in json.dumps(migration)
+    for transient in (deletion_template, migration):
+        pod = transient["spec"]["template"]["spec"]
+        assert any(
+            references_database(container)
+            for container in [*(pod.get("initContainers") or []), *(pod.get("containers") or [])]
+        )
 
 
 def test_platform_renders_live_capacity_receipt_collector_with_isolated_keys() -> None:

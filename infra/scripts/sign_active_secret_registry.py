@@ -13,7 +13,7 @@ import secrets
 import stat
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -21,6 +21,14 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 class ActiveSecretRegistrySigningError(RuntimeError):
     """The active-secret registry cannot be safely signed and published."""
+
+
+class _ContentFreeParser(argparse.ArgumentParser):
+    def __init__(self) -> None:
+        super().__init__(description=__doc__, allow_abbrev=False)
+
+    def error(self, message: str) -> NoReturn:
+        raise ActiveSecretRegistrySigningError("command arguments are invalid")
 
 
 def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -69,6 +77,8 @@ def _active_destinations(matrix: dict[str, Any]) -> dict[str, tuple[str, str]]:
     ):
         raise ActiveSecretRegistrySigningError("secret destination matrix is invalid")
     result: dict[str, tuple[str, str]] = {}
+    destination_ids: set[str] = set()
+    target_paths: set[str] = set()
     for secret_name, secret in matrix["secrets"].items():
         destinations = secret.get("destinations") if isinstance(secret, dict) else None
         if not isinstance(secret_name, str) or not isinstance(destinations, dict):
@@ -76,6 +86,22 @@ def _active_destinations(matrix: dict[str, Any]) -> dict[str, tuple[str, str]]:
         for destination_id, destination in destinations.items():
             if not isinstance(destination_id, str) or not isinstance(destination, dict):
                 raise ActiveSecretRegistrySigningError("secret destination matrix is invalid")
+            if destination_id in destination_ids:
+                raise ActiveSecretRegistrySigningError("secret destination matrix is invalid")
+            destination_ids.add(destination_id)
+            kind = destination.get("kind")
+            if kind in {"sops_k8s_secret", "sops_escrow", "sops_ansible_vars"}:
+                target = destination.get("target")
+                if (
+                    not isinstance(target, str)
+                    or not target.endswith(".sops.json")
+                    or target.count("{version}") != 1
+                    or Path(target).is_absolute()
+                    or ".." in Path(target).parts
+                    or target in target_paths
+                ):
+                    raise ActiveSecretRegistrySigningError("secret destination matrix is invalid")
+                target_paths.add(target)
             if destination.get("kind") == "sops_k8s_secret" and destination.get("slot") == "active":
                 target = destination.get("target")
                 if not isinstance(target, str) or target.count("{version}") != 1:
@@ -159,7 +185,7 @@ def build_registry(
             "secret": secret,
             "version": selection[destination_id],
             "artifact_sha256": hashlib.sha256(
-                _safe_input(artifact, "active ciphertext artifact")
+                _strict_json(artifact, "active ciphertext artifact")[0]
             ).hexdigest(),
         }
     unsigned = {
@@ -181,7 +207,11 @@ def build_registry(
     }
 
 
-def _validate_output_directory(registry_output: Path, public_key_output: Path) -> Path:
+def _open_output_directory(
+    registry_output: Path, public_key_output: Path
+) -> tuple[int, tuple[str, str, str]]:
+    registry_output = registry_output.absolute()
+    public_key_output = public_key_output.absolute()
     directory = registry_output.parent
     if (
         directory != public_key_output.parent
@@ -199,32 +229,41 @@ def _validate_output_directory(registry_output: Path, public_key_output: Path) -
             raise ActiveSecretRegistrySigningError("registry output directory is invalid") from exc
         if stat.S_ISLNK(details.st_mode):
             raise ActiveSecretRegistrySigningError("registry output directory is invalid")
-    details = os.stat(absolute)
-    if (
-        not stat.S_ISDIR(details.st_mode)
-        or details.st_uid != os.getuid()
-        or stat.S_IMODE(details.st_mode) != 0o700
+    try:
+        directory_fd = os.open(absolute, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except OSError as exc:
+        raise ActiveSecretRegistrySigningError("registry output directory is invalid") from exc
+    details = os.fstat(directory_fd)
+    if not (
+        stat.S_ISDIR(details.st_mode)
+        and details.st_uid == os.getuid()
+        and stat.S_IMODE(details.st_mode) == 0o700
     ):
+        os.close(directory_fd)
         raise ActiveSecretRegistrySigningError("registry output directory is invalid")
-    for path in (registry_output, public_key_output):
+    names = (registry_output.name, public_key_output.name, f"{registry_output.name}.complete")
+    for name in names:
         try:
-            os.lstat(path)
+            os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
         except FileNotFoundError:
             continue
         except OSError as exc:
+            os.close(directory_fd)
             raise ActiveSecretRegistrySigningError("registry output is invalid") from exc
+        os.close(directory_fd)
         raise ActiveSecretRegistrySigningError("registry output already exists")
-    return absolute
+    return directory_fd, names
 
 
-def _write_staged(directory: Path, content: bytes) -> str:
+def _write_staged(directory_fd: int, content: bytes) -> str:
     descriptor = -1
     name = f".active-secret-registry-{secrets.token_hex(16)}"
     try:
         descriptor = os.open(
-            directory / name,
+            name,
             os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
             0o600,
+            dir_fd=directory_fd,
         )
         view = memoryview(content)
         while view:
@@ -237,6 +276,23 @@ def _write_staged(directory: Path, content: bytes) -> str:
     finally:
         if descriptor >= 0:
             os.close(descriptor)
+
+
+def _unlink_all(directory_fd: int, names: list[str]) -> None:
+    for name in names:
+        try:
+            os.unlink(name, dir_fd=directory_fd)
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            raise ActiveSecretRegistrySigningError("registry cleanup failed") from exc
+
+
+def _sync_directory(directory_fd: int) -> None:
+    try:
+        os.fsync(directory_fd)
+    except OSError as exc:
+        raise ActiveSecretRegistrySigningError("registry publication failed") from exc
 
 
 def _load_registry_verifier() -> Any:
@@ -259,69 +315,71 @@ def publish_verified_pair(
     registry: dict[str, Any],
     private_key: Ed25519PrivateKey,
 ) -> None:
-    registry_output = registry_output.absolute()
-    public_key_output = public_key_output.absolute()
-    directory = _validate_output_directory(registry_output, public_key_output)
+    directory_fd, (registry_name, public_key_name, completion_name) = _open_output_directory(
+        registry_output, public_key_output
+    )
     registry_stage: str | None = None
     public_stage: str | None = None
-    published: list[Path] = []
+    completion_stage: str | None = None
+    published: list[str] = []
     try:
-        registry_stage = _write_staged(
-            directory, json.dumps(registry, separators=(",", ":"), sort_keys=True).encode() + b"\n"
+        registry_bytes = (
+            json.dumps(registry, separators=(",", ":"), sort_keys=True).encode() + b"\n"
         )
-        public_stage = _write_staged(
-            directory,
-            private_key.public_key().public_bytes(
-                serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo
-            ),
+        public_bytes = private_key.public_key().public_bytes(
+            serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo
+        )
+        registry_stage = _write_staged(directory_fd, registry_bytes)
+        public_stage = _write_staged(directory_fd, public_bytes)
+        completion_stage = _write_staged(
+            directory_fd,
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "registry": registry_name,
+                    "public_key": public_key_name,
+                    "registry_sha256": hashlib.sha256(registry_bytes).hexdigest(),
+                    "public_key_sha256": hashlib.sha256(public_bytes).hexdigest(),
+                },
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode()
+            + b"\n",
         )
         verifier = _load_registry_verifier()
         verifier.load_registry(
             matrix_path=matrix_path,
-            registry_path=directory / registry_stage,
-            public_key_path=directory / public_stage,
+            registry_path=Path(f"/proc/self/fd/{directory_fd}/{registry_stage}"),
+            public_key_path=Path(f"/proc/self/fd/{directory_fd}/{public_stage}"),
             trust_contract_path=trust_path,
+            require_completion=False,
         )
-        directory_fd = os.open(directory, os.O_RDONLY)
-        try:
-            os.fsync(directory_fd)
-        finally:
-            os.close(directory_fd)
-        os.link(directory / registry_stage, registry_output, follow_symlinks=False)
-        published.append(registry_output)
-        os.link(directory / public_stage, public_key_output, follow_symlinks=False)
-        published.append(public_key_output)
-        directory_fd = os.open(directory, os.O_RDONLY)
-        try:
-            os.fsync(directory_fd)
-        finally:
-            os.close(directory_fd)
+        _sync_directory(directory_fd)
+        os.link(registry_stage, registry_name, src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
+        published.append(registry_name)
+        os.link(public_stage, public_key_name, src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
+        published.append(public_key_name)
+        _sync_directory(directory_fd)
+        os.link(completion_stage, completion_name, src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
+        published.append(completion_name)
+        _sync_directory(directory_fd)
     except Exception as exc:
-        for path in published:
-            try:
-                path.unlink()
-            except OSError:
-                pass
-        directory_fd = os.open(directory, os.O_RDONLY)
-        try:
-            os.fsync(directory_fd)
-        finally:
-            os.close(directory_fd)
+        _unlink_all(directory_fd, published)
+        _sync_directory(directory_fd)
         if isinstance(exc, ActiveSecretRegistrySigningError):
             raise
         raise ActiveSecretRegistrySigningError("registry publication failed") from exc
     finally:
-        for staged in (registry_stage, public_stage):
-            if staged is None:
-                continue
-            try:
-                (directory / staged).unlink()
-            except OSError:
-                pass
+        _unlink_all(
+            directory_fd,
+            [name for name in (registry_stage, public_stage, completion_stage) if name is not None],
+        )
+        _sync_directory(directory_fd)
+        os.close(directory_fd)
 
 
 def parser() -> argparse.ArgumentParser:
-    result = argparse.ArgumentParser(description=__doc__)
+    result = _ContentFreeParser()
     result.add_argument("--matrix", type=Path, required=True)
     result.add_argument("--selection", type=Path, required=True)
     result.add_argument("--trust-contract", type=Path, required=True)
@@ -332,7 +390,11 @@ def parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = parser().parse_args(argv)
+    try:
+        args = parser().parse_args(argv)
+    except ActiveSecretRegistrySigningError:
+        print("active-secret registry signing failed", file=sys.stderr)
+        return 2
     raw_key = sys.stdin.buffer.read()
     key_buffer = raw_key if isinstance(raw_key, bytearray) else bytearray(raw_key)
     try:

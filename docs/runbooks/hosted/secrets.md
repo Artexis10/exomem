@@ -403,8 +403,8 @@ registry="$registry_dir/active-secret-registry-$pair_id.json"
 public_key="$registry_dir/active-secret-registry-$pair_id.public.pem"
 test ! -e "$registry" && test ! -e "$public_key"
 
-bwsx-run --project 69843186-5161-40a2-951f-b487011122ce \
-  EXOMEM_HOSTED_ACTIVE_SECRET_REGISTRY_SIGNING_KEY -- sh -c \
+BWS_PROJECT_ID=69843186-5161-40a2-951f-b487011122ce \
+  bwsx-run EXOMEM_HOSTED_ACTIVE_SECRET_REGISTRY_SIGNING_KEY -- sh -c \
   'printf "%s\\n" "$EXOMEM_HOSTED_ACTIVE_SECRET_REGISTRY_SIGNING_KEY"' \
   | infra/scripts/sign_active_secret_registry.py \
       --matrix infra/contracts/secret-destinations-v1.json \
@@ -440,7 +440,7 @@ until final health is proven.
 1. Record `ready_cell_baseline_verified`: authenticate the existing ready cell
    and retain a content-free operation/cell health receipt. Block concurrent
    Helm work and snapshot the exact Deployment replicas, CronJob suspend states,
-   and external reconcile CronJob state.
+   and exact `exomem-hosted-scheduler-exomem-reconcile` suspend state.
 2. Only after that baseline, generate the v2 password and
    `database-url.v2.sops.json`. Review, merge, and verify its ciphertext plus
    the one-line selection promotion. Produce and retain immutable signed all-v1
@@ -449,7 +449,7 @@ until final health is proven.
    `exomem-durability-actions`, `exomem-export-gc`,
    `exomem-durability-backup`, `exomem-database-backup`, and
    `exomem-deletion-dispatcher`; scale `exomem-provisioner-api`,
-   `exomem-provisioner-worker`, and `exomem-volume-worker` to zero.
+   `exomem-provisioner-worker`, and `exomem-volume-worker` to zero; suspend the external reconcile CronJob `exomem-hosted-scheduler-exomem-reconcile`.
 4. Drain CronJob Jobs and dynamic `exomem-deletion-*` Jobs. Require migration
    and bootstrap Jobs and the bootstrap Secret to be absent. Discover every
    Pending or Running Pod whose normal or init container references
