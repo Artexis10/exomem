@@ -217,6 +217,7 @@ def main() -> int:
     )
     parser.add_argument("--sops", default="sops")
     parser.add_argument("--kubectl", default="kubectl")
+    parser.add_argument("--verify-only", action="store_true")
     args = parser.parse_args()
     try:
         active = load_registry(
@@ -225,6 +226,18 @@ def main() -> int:
             public_key_path=args.registry_public_key,
             trust_contract_path=args.trust_contract,
         )
+        if args.verify_only:
+            public_key = _public_key(args.registry_public_key, args.trust_contract)
+            public_key_id = hashlib.sha256(
+                public_key.public_bytes(
+                    serialization.Encoding.Raw,
+                    serialization.PublicFormat.Raw,
+                )
+            ).hexdigest()
+            print(
+                f"Verified {len(active)} active destinations with trusted public-key ID {public_key_id}"
+            )
+            return 0
         for item in active:
             result = subprocess.run(
                 [

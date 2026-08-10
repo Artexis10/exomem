@@ -382,6 +382,102 @@ its independent version sequence. Then redeploy and repeat acceptance,
 old-version rejection, cross-route denial, and cadence checks. Never retire an
 old value on receipt evidence alone.
 
+## Signed active-secret registry
+
+The registry signer is a release-custodian operation. It produces an immutable
+registry/public-key pair for every one of the 34 active K3s destinations; it
+does not decrypt an artifact or apply anything. Disable tracing and use the
+pre-created private directory `/secure/operator/exomem-hosted/active-secret-registry/`.
+It must be owned by the current operator, mode `0700`, and contain neither a
+symlink nor mutable `latest` pointer. Do not use a temporary directory for the
+pair.
+
+```bash
+set +x
+registry_dir=/secure/operator/exomem-hosted/active-secret-registry/
+test -d "$registry_dir" && test ! -L "$registry_dir"
+test "$(stat -c %U "$registry_dir")" = "$(id -un)"
+test "$(stat -c %a "$registry_dir")" = 700
+pair_id="$(date -u +%Y%m%dT%H%M%SZ)-reviewed-change"
+registry="$registry_dir/active-secret-registry-$pair_id.json"
+public_key="$registry_dir/active-secret-registry-$pair_id.public.pem"
+test ! -e "$registry" && test ! -e "$public_key"
+
+bwsx-run --project 69843186-5161-40a2-951f-b487011122ce \
+  EXOMEM_HOSTED_ACTIVE_SECRET_REGISTRY_SIGNING_KEY -- sh -c \
+  'printf "%s\\n" "$EXOMEM_HOSTED_ACTIVE_SECRET_REGISTRY_SIGNING_KEY"' \
+  | infra/scripts/sign_active_secret_registry.py \
+      --matrix infra/contracts/secret-destinations-v1.json \
+      --selection infra/contracts/active-secret-selection-v1.json \
+      --trust-contract infra/contracts/active-secret-registry-v1.json \
+      --private-key-stdin \
+      --registry-output "$registry" \
+      --public-key-output "$public_key"
+```
+
+The shell builtin `printf` is the only key transport in this command. The BWS
+project is used only for that named item: do not enumerate its contents. Keep
+the retained all-v1 pair when making a later v2 pair. Before any application,
+verify the pair without a subprocess that can mutate K3s:
+
+```bash
+infra/scripts/apply_active_sops_secrets.py \
+  --matrix infra/contracts/secret-destinations-v1.json \
+  --registry "$registry" \
+  --registry-public-key "$public_key" \
+  --trust-contract infra/contracts/active-secret-registry-v1.json \
+  --verify-only
+```
+
+## Future provisioner database rotation
+
+This procedure is deliberately future-only. Do not start it until an
+authenticated operation is `succeeded/bound` and its tenant/cell remains active
+and ready. Preserve the old role password, v1 ciphertext, signed v1 registry
+pair, exact controller snapshot, and the authenticated pre-change SQL session
+until final health is proven.
+
+1. Record `ready_cell_baseline_verified`: authenticate the existing ready cell
+   and retain a content-free operation/cell health receipt. Block concurrent
+   Helm work and snapshot the exact Deployment replicas, CronJob suspend states,
+   and external reconcile CronJob state.
+2. Only after that baseline, generate the v2 password and
+   `database-url.v2.sops.json`. Review, merge, and verify its ciphertext plus
+   the one-line selection promotion. Produce and retain immutable signed all-v1
+   and v2 registry/public-key pairs, proving the other 33 entries are unchanged.
+3. Record `three_deployments_and_five_cronjobs_quiesced`: preserve and suspend
+   `exomem-durability-actions`, `exomem-export-gc`,
+   `exomem-durability-backup`, `exomem-database-backup`, and
+   `exomem-deletion-dispatcher`; scale `exomem-provisioner-api`,
+   `exomem-provisioner-worker`, and `exomem-volume-worker` to zero.
+4. Drain CronJob Jobs and dynamic `exomem-deletion-*` Jobs. Require migration
+   and bootstrap Jobs and the bootstrap Secret to be absent. Discover every
+   Pending or Running Pod whose normal or init container references
+   `exomem-provisioner-database`; drain it and require zero before continuing.
+   Record `transient_database_consumers_drained`.
+5. Apply the complete 34-entry v2 registry while PostgreSQL still accepts v1.
+   Verify only `exomem-provisioner-database` metadata changed to
+   `exomem.io/secret-version=v2`, then record
+   `new_sops_ciphertext_and_exact_registry_verified` and
+   `new_database_secret_applied_before_provider_cutover`.
+6. Keep the pre-change authenticated SQL session open, change the role password,
+   and prove v2 authenticates with the exact role, schema, and revision. Keep
+   DSNs and passwords out of argv and output. Record
+   `new_database_credential_accepts`; prove v1 fails specifically due to
+   password authentication and record `old_database_credential_rejected`.
+7. Patch all five CronJob JobTemplate restart annotations. Restore the exact
+   CronJob suspend states and Deployment replicas, wait for all three rollouts,
+   and restore the external reconcile state. Record
+   `three_deployments_and_five_cronjobs_restored`.
+8. Re-run authenticated baseline-cell health and record
+   `ready_cell_health_reverified`. Produce every rotation receipt and pass
+   `rotation_gate.py` before retiring v1.
+
+On any failure, keep consumers stopped, restore the old password through the
+still-authenticated pre-change SQL session, reapply the complete v1 registry,
+verify its version label, then restore the exact controller state. If production
+rolls back, a follow-up PR reconciles the committed selection.
+
 ## Break glass
 
 The offline age identity may decrypt only the specific SOPS artifact needed for

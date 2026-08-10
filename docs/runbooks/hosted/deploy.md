@@ -172,6 +172,13 @@ infra/scripts/apply_active_sops_secrets.py \
   --matrix infra/contracts/secret-destinations-v1.json \
   --registry "$EXOMEM_ACTIVE_SECRET_REGISTRY" \
   --registry-public-key "$EXOMEM_ACTIVE_SECRET_REGISTRY_PUBLIC_KEY" \
+  --trust-contract infra/contracts/active-secret-registry-v1.json \
+  --verify-only
+
+infra/scripts/apply_active_sops_secrets.py \
+  --matrix infra/contracts/secret-destinations-v1.json \
+  --registry "$EXOMEM_ACTIVE_SECRET_REGISTRY" \
+  --registry-public-key "$EXOMEM_ACTIVE_SECRET_REGISTRY_PUBLIC_KEY" \
   --trust-contract infra/contracts/active-secret-registry-v1.json
 ```
 
