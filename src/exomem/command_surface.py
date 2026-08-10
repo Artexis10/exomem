@@ -298,7 +298,7 @@ class Command:
     routes: tuple[str, ...] = ()
     response_detail: ResponseDetail | None = None
     mcp_meta: Mapping[str, tuple[str, ...]] = field(
-        default_factory=lambda: types.MappingProxyType({}), compare=False, hash=False
+        default_factory=lambda: types.MappingProxyType({}), hash=False
     )
 
     @property

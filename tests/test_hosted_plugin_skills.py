@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import re
+from dataclasses import replace
 from pathlib import Path
+from types import MappingProxyType
 
 import pytest
 
@@ -13,11 +15,13 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 def test_hosted_profile_commands_remain_hashable_with_mcp_metadata() -> None:
     selected = commands.product_commands_for_profile(commands.HOSTED_ALPHA_AGENT_PROFILE, "rest")
 
-    assert set(selected) == set(selected)
+    assert len(set(selected)) == len(selected)
     artifact_command = next(
         command for command in commands.PRODUCT_COMMANDS if command.name == "preserve_artifacts"
     )
-    assert artifact_command in set(commands.PRODUCT_COMMANDS)
+    metadata_variant = replace(artifact_command, mcp_meta=MappingProxyType({}))
+    assert artifact_command != metadata_variant
+    assert len({artifact_command, metadata_variant}) == 2
     assert artifact_command.mcp_meta == {"openai/fileParams": ("files",)}
     assert {key: list(value) for key, value in artifact_command.mcp_meta.items()} == {
         "openai/fileParams": ["files"]
