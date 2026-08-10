@@ -11,6 +11,8 @@ The fields the remediation names must exist on the operation that provoked it.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
 from exomem import edit_operations
@@ -23,6 +25,8 @@ GUARDED_KINDS = [
     {"kind": "replace_string", "old_string": "a", "new_string": "b"},
     {"kind": "batch_replace", "edits": [{"old_string": "a", "new_string": "b"}]},
     {"kind": "edit_section", "heading": "## Notes", "new_string": "text"},
+    {"kind": "patch_frontmatter", "field": "status", "value": "active"},
+    {"kind": "fill_row", "row_key": "Film (2026)", "take": "Sharp."},
 ]
 
 DISPOSITION_FIELDS = (
@@ -32,11 +36,19 @@ DISPOSITION_FIELDS = (
 )
 
 
-def _remediation() -> str:
+def _remediation(*, existing: bool = True) -> str:
     from exomem import semantic_contract
 
-    source = semantic_contract._disposition_finding.__code__.co_consts
-    text = " ".join(c for c in source if isinstance(c, str))
+    finding = semantic_contract._disposition_finding(
+        SimpleNamespace(
+            eligible_compiled=True,
+            path="Knowledge Base/Notes/Insights/example.md",
+        ),
+        SimpleNamespace(satisfied=False, kind="stale"),
+        existing=existing,
+    )
+    assert finding is not None
+    text = finding.remediation
     assert "qualifying typed relation" in text, "remediation text moved"
     return text
 
@@ -62,44 +74,45 @@ def test_recovery_fields_live_on_the_shared_semantic_base(field):
     assert field in edit_operations._SemanticEditOperation.model_fields
 
 
-def test_remediation_does_not_name_validate_only():
-    """`validate_only` previews a surgical match; three of five guarded kinds lack it."""
-    assert "validate_only" not in _remediation()
+def test_every_guarded_kind_accepts_validate_only():
+    for payload in GUARDED_KINDS:
+        operation = EDIT_OPERATION_ADAPTER.validate_python(
+            {**payload, "validate_only": True}
+        )
+        assert operation.validate_only is True
 
 
-def test_remediation_qualifies_the_creation_only_draft_trio():
-    """Naming the trio unconditionally is what sent an edit caller off-route."""
+def test_existing_remediation_names_only_existing_edit_fields():
     text = _remediation()
+    for token in (
+        "validate_only",
+        "transition_token",
+        "relation_disposition",
+        "relation_review_hash",
+        "relation_review_reason",
+    ):
+        assert token in text
     for token in ("draft_id", "draft_hash", "draft_token"):
-        assert token in text, "the creation path still needs these"
-    assert "Creation writers" in text, "the trio must be marked creation-only"
+        assert token not in text
 
 
-def test_remediation_names_only_universally_available_fields_unqualified():
-    """Everything before the creation-writer caveat must exist on every guarded kind."""
-    unqualified = _remediation().split("Creation writers")[0]
-    for field in DISPOSITION_FIELDS:
-        assert field in unqualified
-
-    edit_section = EDIT_OPERATION_ADAPTER.validate_python(
-        {"kind": "edit_section", "heading": "## Notes", "new_string": "text"}
-    )
-    named = {
-        token.strip('",=')
-        for token in unqualified.replace("(", " ").replace(")", " ").split()
-        if token.strip('",=').isidentifier()
-    }
-    creation_only = {"draft_id", "draft_hash", "draft_token", "validate_only"}
-    assert not (named & creation_only), (
-        "the unqualified half names a field the edit route does not have"
-    )
-    assert edit_section.relation_disposition is None
+def test_creation_remediation_keeps_the_creation_draft_fields():
+    text = _remediation(existing=False)
+    for token in (
+        "validate_only",
+        "draft_id",
+        "draft_hash",
+        "draft_token",
+        "relation_disposition",
+        "relation_review_hash",
+        "relation_review_reason",
+    ):
+        assert token in text
+    assert "transition_token" not in text
 
 
-def test_validate_only_remains_surgical_only():
-    """Guard the boundary: it must not quietly acquire a second meaning."""
-    surgical = {"replace_string", "batch_replace"}
+def test_validate_only_lives_on_the_shared_semantic_base():
+    assert "validate_only" in edit_operations._SemanticEditOperation.model_fields
     for payload in GUARDED_KINDS:
         operation = EDIT_OPERATION_ADAPTER.validate_python(payload)
-        has_field = "validate_only" in type(operation).model_fields
-        assert has_field == (payload["kind"] in surgical), payload["kind"]
+        assert operation.validate_only is False

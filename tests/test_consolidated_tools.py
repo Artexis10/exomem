@@ -98,6 +98,13 @@ def test_edit_memory_discovery_is_one_discriminated_operation(
         for tool in asyncio.run(_build(monkeypatch).list_tools())
     }
     schema = tools["edit_memory"]["inputSchema"]
+    description = tools["edit_memory"]["description"]
+
+    assert "relation_review_hash=<returned relation_review_hash>" in description
+    assert "transition_token=<returned transition_token>" in description
+    assert "- supports [[Knowledge Base/Notes/Research/example-target]]" in description
+    assert "supports:: [[...]]" in description
+    assert "not supported relation syntax" in description
 
     assert set(schema["properties"]) == {
         "path",
@@ -127,9 +134,18 @@ def test_edit_memory_discovery_is_one_discriminated_operation(
     string = branches["replace_string"]
     batch = branches["batch_replace"]
     assert fill["additionalProperties"] is False
-    assert set(fill["properties"]) == {"kind", "row_key", "take", "overwrite"}
-    assert "expected_hash" not in frontmatter["properties"]
-    assert "validate_only" in frontmatter["properties"]
+    semantic_fields = {
+        "expected_hash",
+        "validate_only",
+        "transition_token",
+        "relation_disposition",
+        "relation_review_hash",
+        "relation_review_reason",
+    }
+    for branch in branches.values():
+        assert semantic_fields <= set(branch["properties"])
+    assert {"kind", "row_key", "take", "overwrite"} <= set(fill["properties"])
+    assert "expected_hash" in frontmatter["properties"]
     assert {"old_string", "new_string", "replace_all", "tags", "expected_hash", "validate_only"} <= set(string["properties"])
     assert "field" not in string["properties"]
     edits = batch["properties"]["edits"]

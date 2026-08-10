@@ -28,6 +28,7 @@ class _EditOperationModel(BaseModel):
 
 
 class _SemanticEditOperation(_EditOperationModel):
+    validate_only: bool = False
     transition_token: str | None = None
     relation_disposition: str | None = None
     relation_review_hash: str | None = None
@@ -55,7 +56,6 @@ class ReplaceStringOperation(_GuardedSemanticEditOperation):
     new_string: str
     replace_all: bool = False
     tags: list[str] | None = None
-    validate_only: bool = False
 
 
 class BatchReplaceItem(_EditOperationModel):
@@ -81,7 +81,6 @@ ConnectorBatchReplaceItem = Annotated[
 class BatchReplaceOperation(_GuardedSemanticEditOperation):
     kind: Literal["batch_replace"]
     edits: Annotated[list[ConnectorBatchReplaceItem], Field(min_length=1)]
-    validate_only: bool = False
 
 
 class EditSectionOperation(_GuardedSemanticEditOperation):
@@ -92,15 +91,14 @@ class EditSectionOperation(_GuardedSemanticEditOperation):
     tags: list[str] | None = None
 
 
-class PatchFrontmatterOperation(_SemanticEditOperation):
+class PatchFrontmatterOperation(_GuardedSemanticEditOperation):
     kind: Literal["patch_frontmatter"]
     field: str
     value: Any
     allow_curated: bool = False
-    validate_only: bool = False
 
 
-class FillRowOperation(_EditOperationModel):
+class FillRowOperation(_GuardedSemanticEditOperation):
     kind: Literal["fill_row"]
     row_key: str
     take: str

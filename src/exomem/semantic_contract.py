@@ -3117,7 +3117,10 @@ def _page_rule_findings(
 
 
 def _disposition_finding(
-    page: SemanticPageState, disposition: RelationDisposition
+    page: SemanticPageState,
+    disposition: RelationDisposition,
+    *,
+    existing: bool = True,
 ) -> ContractFinding | None:
     if disposition.satisfied or not page.eligible_compiled:
         return None
@@ -3131,18 +3134,23 @@ def _disposition_finding(
         path=page.path,
         span=None,
         detail=_disposition_detail(page, disposition),
-        # Route-neutral by necessity. This finding fires on creation writers AND on
-        # ordinary edits, but `validate_only` and the draft trio exist only on the
-        # creation path — naming them unconditionally sent edit callers hunting for
-        # fields their operation does not have, and pushed them onto an unnatural
-        # operation to find one. Name only what every route accepts, then qualify.
-        # Length matters: this repeats per finding and competes for the audit
-        # truncation budget, so keep it at or under the previous wording.
         remediation=(
-            "Add a qualifying typed relation, or re-issue the same call with "
-            "relation_disposition=\"reviewed_none\", relation_review_hash=<returned>, "
-            "relation_review_reason. Creation writers also return "
-            "draft_id/draft_hash/draft_token."
+            (
+                "Add a qualifying typed relation, or call validate_only=true, then "
+                "re-issue the same edit unchanged with transition_token=<returned "
+                "transition_token>, relation_disposition=\"reviewed_none\", "
+                "relation_review_hash=<returned relation_review_hash>, and "
+                "relation_review_reason."
+            )
+            if existing
+            else (
+                "Add a qualifying typed relation, or call validate_only=true, then "
+                "re-issue the same creation unchanged with draft_id=<returned draft_id>, "
+                "draft_hash=<returned draft_hash>, draft_token=<returned "
+                "draft_token>, relation_disposition=\"reviewed_none\", "
+                "relation_review_hash=<returned relation_review_hash>, and "
+                "relation_review_reason."
+            )
         ),
         governed_element_identity=("relations", "disposition"),
         resolved_rule=("relations", "*", "disposition"),
@@ -3259,7 +3267,9 @@ def _raw_findings(
     findings.extend(_registry_findings(page, corpus))
     findings.extend(_page_rule_findings(page, contracts, corpus))
     if disposition is not None:
-        disposition_finding = _disposition_finding(page, disposition)
+        disposition_finding = _disposition_finding(
+            page, disposition, existing=before is not None or mode == "posthoc"
+        )
         if disposition_finding is not None:
             findings.append(disposition_finding)
         typed_edge_finding = _typed_edge_finding(page, disposition)
