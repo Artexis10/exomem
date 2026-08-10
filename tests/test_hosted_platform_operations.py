@@ -719,6 +719,11 @@ def test_provisioner_database_rotation_contract_and_runbook_are_ordered_and_reve
     for command in (
         "set -euo pipefail",
         "trap 'rollback' ERR",
+        "rotation_phase=pre_password_cutover",
+        "DATABASE_PASSWORD_ROLLBACK_VERIFIED",
+        "leave consumers stopped; perform the verified database-password rollback",
+        'any(.metadata.ownerReferences[]?; .controller == true and .kind == "CronJob"',
+        "--wait=false",
         "-l exomem.io/deletion-job=true",
         "! kubectl -n exomem-platform get job exomem-provisioner-database-migration",
         "! kubectl -n exomem-platform get job exomem-provisioner-database-bootstrap",
@@ -732,8 +737,8 @@ def test_provisioner_database_rotation_contract_and_runbook_are_ordered_and_reve
         "length == 3 and ([.deployments[].name] | sort)",
         "length == 6 and ([.cronjobs[].name] | sort)",
         "(.spec.initContainers // []) + (.spec.containers // [])",
-        "kubectl -n exomem-platform wait --for=delete job",
-        "kubectl -n exomem-platform wait --for=delete pod",
+        '"$rotation_run/cronjob-jobs.json"',
+        '"$rotation_run/deletion-jobs.json"',
         "rotation SQL session remains open; consumers stay stopped",
         "rollback()",
         "kubectl -n exomem-platform get deployment",
@@ -746,6 +751,12 @@ def test_provisioner_database_rotation_contract_and_runbook_are_ordered_and_reve
         "password authentication failed",
     ):
         assert command in secrets
+    assert secrets.index("DATABASE_PASSWORD_ROLLBACK_VERIFIED") < secrets.index(
+        '--registry "$registry_v1"'
+    )
+    assert secrets.index("rollout status deployment/exomem-volume-worker") < secrets.index(
+        'patch cronjob "exomem-hosted-scheduler-exomem-reconcile"'
+    )
 
 
 def test_capacity_gate_blocks_unknown_economics_and_the_cell_past_the_cap(tmp_path: Path) -> None:

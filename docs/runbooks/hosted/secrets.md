@@ -447,8 +447,14 @@ namespace=exomem-platform
 rotation_root=/secure/operator/exomem-hosted/rotation-runs
 rotation_run="$rotation_root/$(date -u +%Y%m%dT%H%M%SZ)-database-v2"
 rotation_snapshot="$rotation_run/controller-snapshot.json"
+rotation_phase=pre_password_cutover
 rollback() {
   set +x
+  if test "$rotation_phase" = post_password_cutover && ! test "${DATABASE_PASSWORD_ROLLBACK_VERIFIED:-}" = yes; then
+    echo 'leave consumers stopped; perform the verified database-password rollback, set DATABASE_PASSWORD_ROLLBACK_VERIFIED=yes, then rerun recovery' >&2
+    trap - ERR
+    return 1
+  fi
   if test -f "$rotation_snapshot"; then
     infra/scripts/apply_active_sops_secrets.py --matrix infra/contracts/secret-destinations-v1.json --registry "$registry_v1" --registry-public-key "$public_key_v1" --trust-contract infra/contracts/active-secret-registry-v1.json --verify-only
     infra/scripts/apply_active_sops_secrets.py --matrix infra/contracts/secret-destinations-v1.json --registry "$registry_v1" --registry-public-key "$public_key_v1" --trust-contract infra/contracts/active-secret-registry-v1.json
@@ -470,9 +476,11 @@ chmod 0600 "$rotation_snapshot"
 for name in exomem-durability-actions exomem-export-gc exomem-durability-backup exomem-database-backup exomem-deletion-dispatcher exomem-hosted-scheduler-exomem-reconcile; do kubectl -n exomem-platform patch cronjob "$name" --type merge -p '{"spec":{"suspend":true}}'; done
 for name in exomem-provisioner-api exomem-provisioner-worker exomem-volume-worker; do kubectl -n exomem-platform scale deployment "$name" --replicas=0; done
 kubectl -n exomem-platform get jobs -o json
-kubectl -n exomem-platform delete job -l exomem.io/deletion-job=true --ignore-not-found
-kubectl -n exomem-platform wait --for=delete job -l exomem.io/deletion-job=true --timeout=120s
-kubectl -n exomem-platform wait --for=delete pod -l job-name --timeout=120s
+kubectl -n exomem-platform get jobs -o json | jq '[.items[] | select(any(.metadata.ownerReferences[]?; .controller == true and .kind == "CronJob" and .name | IN("exomem-durability-actions","exomem-export-gc","exomem-durability-backup","exomem-database-backup","exomem-deletion-dispatcher"))) | {name:.metadata.name,uid:.metadata.uid}]' > "$rotation_run/cronjob-jobs.json"
+kubectl -n exomem-platform get jobs -l exomem.io/deletion-job=true -o json | jq '[.items[] | {name:.metadata.name,uid:.metadata.uid}]' > "$rotation_run/deletion-jobs.json"
+jq -r '.[].name' "$rotation_run/cronjob-jobs.json" | while read -r name; do kubectl -n exomem-platform delete job "$name" --wait=false; done
+jq -r '.[].name' "$rotation_run/deletion-jobs.json" | while read -r name; do kubectl -n exomem-platform delete job "$name" --wait=false; done
+while jq -e --slurpfile cron "$rotation_run/cronjob-jobs.json" --slurpfile deletion "$rotation_run/deletion-jobs.json" '[.items[].metadata.uid] as $live | [($cron[0][]?, $deletion[0][]?) | select(.uid as $uid | $live | index($uid))] | length == 0' < <(kubectl -n exomem-platform get jobs -o json) >/dev/null; do sleep 2; done
 ! kubectl -n exomem-platform get job exomem-provisioner-database-migration 2>/dev/null
 ! kubectl -n exomem-platform get job exomem-provisioner-database-bootstrap 2>/dev/null
 ! kubectl -n exomem-platform get secret exomem-provisioner-database-bootstrap-admin 2>/dev/null
@@ -491,13 +499,16 @@ infra/scripts/apply_active_sops_secrets.py --matrix infra/contracts/secret-desti
 # The governed applier invokes kubectl -n exomem-platform apply -f only after registry verification.
 kubectl -n exomem-platform get secret exomem-provisioner-database -o jsonpath='{.metadata.labels.exomem\.io/secret-version}{"\n"}'
 echo 'rotation SQL session remains open; consumers stay stopped until v2 acceptance and v1 password authentication failed proof are recorded' >&2
+rotation_phase=post_password_cutover
 : "${ROTATION_AUTH_PROOFS_RECORDED:?record v2 acceptance and v1 password-authentication rejection before restore}"
 for name in exomem-durability-actions exomem-export-gc exomem-durability-backup exomem-database-backup exomem-deletion-dispatcher; do kubectl -n exomem-platform patch cronjob "$name" --type merge -p "{\"spec\":{\"jobTemplate\":{\"spec\":{\"template\":{\"metadata\":{\"annotations\":{\"exomem.io/restarted-at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}}}}}}}"; done
 jq -r '.deployments[] | [.name, .replicas] | @tsv' "$rotation_snapshot" | while IFS=$'\t' read -r name replicas; do kubectl -n exomem-platform scale deployment "$name" --replicas="$replicas"; done
-jq -r '.cronjobs[] | [.name, .suspend] | @tsv' "$rotation_snapshot" | while IFS=$'\t' read -r name suspend; do kubectl -n exomem-platform patch cronjob "$name" --type merge -p "{\"spec\":{\"suspend\":$suspend}}"; done
+jq -r '.cronjobs[] | select(.name != "exomem-hosted-scheduler-exomem-reconcile") | [.name, .suspend] | @tsv' "$rotation_snapshot" | while IFS=$'\t' read -r name suspend; do kubectl -n exomem-platform patch cronjob "$name" --type merge -p "{\"spec\":{\"suspend\":$suspend}}"; done
 kubectl -n exomem-platform rollout status deployment/exomem-provisioner-api --timeout=180s
 kubectl -n exomem-platform rollout status deployment/exomem-provisioner-worker --timeout=180s
 kubectl -n exomem-platform rollout status deployment/exomem-volume-worker --timeout=180s
+reconcile_suspend="$(jq -r '.cronjobs[] | select(.name == "exomem-hosted-scheduler-exomem-reconcile") | .suspend' "$rotation_snapshot")"
+kubectl -n exomem-platform patch cronjob "exomem-hosted-scheduler-exomem-reconcile" --type merge -p "{\"spec\":{\"suspend\":$reconcile_suspend}}"
 jq -r '.cronjobs[] | [.name, .suspend] | @tsv' "$rotation_snapshot" | while IFS=$'\t' read -r name suspend; do test "$(kubectl -n exomem-platform get cronjob "$name" -o jsonpath='{.spec.suspend}')" = "$suspend"; done
 trap - ERR
 ```
