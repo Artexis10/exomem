@@ -846,6 +846,34 @@ def test_exact_k3s_api_admits_only_the_rendered_tenant_shapes(k3s: str) -> None:
     init_pod = _pod(init_job, name="cell-alpha-init-positive", namespace=namespace)
     assert _server_dry_run(k3s, init_pod).returncode == 0
 
+    init_env_variants = (
+        ("missing-env", [], "exact approved operator command"),
+        ("alternate-env", [{"name": "EXOMEM_LOG_DIR", "value": "/tmp"}], "exact approved operator command"),
+        (
+            "value-from-env",
+            [
+                {
+                    "name": "EXOMEM_LOG_DIR",
+                    "valueFrom": {"configMapKeyRef": {"name": "foreign-env", "key": "log-dir"}},
+                }
+            ],
+            "exact approved operator command",
+        ),
+        (
+            "additional-env",
+            [
+                {"name": "EXOMEM_LOG_DIR", "value": "/dev"},
+                {"name": "UNTRUSTED", "value": "1"},
+            ],
+            "exact approved operator command",
+        ),
+    )
+    for name, env, message in init_env_variants:
+        init_env_drift = copy.deepcopy(init_pod)
+        init_env_drift["metadata"]["name"] = f"cell-alpha-init-{name}"
+        init_env_drift["spec"]["containers"][0]["env"] = env
+        _assert_denied(k3s, init_env_drift, message=message)
+
     protected_update = _kubectl(
         k3s,
         [

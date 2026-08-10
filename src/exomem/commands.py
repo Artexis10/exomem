@@ -507,7 +507,11 @@ def op_bootstrap(
                 "draft the smallest durable compiled conclusion",
                 "identify the Sources/ or Evidence/ pages this conclusion draws from; they become `sources:` and each receives an `ingested_into:` back-reference",
                 "run connect_memory(operation='suggest-links') and, when directional meaning matters, 'suggest-relations' on the draft",
-                "write accepted note-level edges under `## Relations` as `- relation_type [[Target]]`",
+                (
+                    "write accepted note-level edges under `## Relations`, for example "
+                    "`- supports [[Knowledge Base/Notes/Research/example-target]]`; "
+                    "Dataview-style `supports:: [[...]]` fields are not relation syntax"
+                ),
                 "write with remember, observe_memory, edit_memory, replace_memory, capture_source, preserve_evidence, or connect_memory as appropriate",
                 "inspect warnings, suggestions, and write_feedback from the write result",
                 "apply any accepted links through edit_memory",
@@ -583,6 +587,44 @@ def op_bootstrap(
                 "adoption_handoff": (
                     "adopt_vault(mode='compile-selected') returns a proposal only; review "
                     "it, then call remember() so normal semantic precommit still applies"
+                ),
+            },
+            "reviewed_existing_edit": {
+                "validate_call": {
+                    "tool": "edit_memory",
+                    "arguments": {
+                        "path": "Knowledge Base/Notes/Research/example.md",
+                        "why": "refresh relation review",
+                        "operation": {
+                            "kind": "replace_string",
+                            "old_string": "before",
+                            "new_string": "after",
+                            "validate_only": True,
+                        },
+                    },
+                },
+                "commit_call": {
+                    "tool": "edit_memory",
+                    "arguments": {
+                        "path": "Knowledge Base/Notes/Research/example.md",
+                        "why": "refresh relation review",
+                        "operation": {
+                            "kind": "replace_string",
+                            "old_string": "before",
+                            "new_string": "after",
+                            "transition_token": "<returned transition_token>",
+                            "relation_disposition": "reviewed_none",
+                            "relation_review_hash": "<returned relation_review_hash>",
+                            "relation_review_reason": (
+                                "No honest typed relation applies."
+                            ),
+                        },
+                    },
+                },
+                "rule": (
+                    "retain semantic.transition_token and "
+                    "semantic.relation_review_hash from validation; commit the "
+                    "identical proposed edit with a bounded reason"
                 ),
             },
         },
@@ -2310,14 +2352,13 @@ def op_edit(
         expected_hash: Optional drift guard. Pass the `content_hash` you
             got from `get`; the edit refuses (STALE_EDIT) if the file
             changed on disk since, so you never clobber another writer.
-        validate_only: Preview a surgical match without writing. Needs
-            `old_string`. Reports how many rows would be hit instead of
-            committing — use it before a `replace_all` to avoid an
-            ambiguous match silently touching more rows than intended.
+        validate_only: Validate the exact proposed bytes without writing for
+            every edit mode. Surgical edits also report match counts and lines.
         transition_token: Exact semantic transition token returned by a
             validate-only preflight.
         relation_disposition: Reviewed relation outcome for the commit.
-        relation_review_hash: Transition hash covered by reviewed-none.
+        relation_review_hash: Exact `relation_review_hash` returned by the
+            validate-only semantic preflight.
         relation_review_reason: Audit reason for reviewed-none.
 
     Returns:
@@ -2357,20 +2398,22 @@ def op_edit(
                 relation_review_reason=relation_review_reason,
             )
         elif row_key is not None:
-            if validate_only:
-                raise ValueError(
-                    "INVALID_EDIT: validate_only is not supported for row_key mode"
-                )
             if take is None:
                 raise ValueError("INVALID_EDIT: row_key mode requires `take`")
             result = set_take_module.set_take(
                 vault_root, path=path, row_key=row_key, take=take,
-                why=why, overwrite=overwrite,
+                why=why, overwrite=overwrite, expected_hash=expected_hash,
+                validate_only=validate_only,
+                semantic_transition_token=transition_token,
+                relation_disposition=relation_disposition,
+                relation_review_hash=relation_review_hash,
+                relation_review_reason=relation_review_reason,
             )
         elif field is not None:
             result = set_frontmatter_field_module.set_frontmatter_field(
                 vault_root, path=path, field=field, value=value,
-                why=why, allow_curated=allow_curated, validate_only=validate_only,
+                why=why, allow_curated=allow_curated,
+                expected_hash=expected_hash, validate_only=validate_only,
                 semantic_transition_token=transition_token,
                 relation_disposition=relation_disposition,
                 relation_review_hash=relation_review_hash,
@@ -4132,6 +4175,19 @@ def op_edit_memory(
     Use for small corrections, section edits, batch string edits, opinion-row
     fills, or one frontmatter field. Substantial rewrites should use
     `replace_memory` so history stays explicit.
+
+    When `RELATION_DISPOSITION_STALE` or `RELATION_DISPOSITION_MISSING` blocks
+    an edit, first call the identical operation with `validate_only=true`.
+    Then commit it unchanged with `transition_token=<returned transition_token>`,
+    `relation_disposition="reviewed_none"`,
+    `relation_review_hash=<returned relation_review_hash>`, and an explicit
+    `relation_review_reason`. The validate response uses the exact field name
+    required by the commit; do not substitute the page content hash.
+
+    Alternatively, author a typed page relation in the body exactly as:
+    `## Relations` followed by
+    `- supports [[Knowledge Base/Notes/Research/example-target]]`.
+    Dataview-style `supports:: [[...]]` fields are not supported relation syntax.
 
     Args:
         path: Page to edit.
@@ -6230,11 +6286,7 @@ def invocation_is_read_only(command: Command, kwargs: dict[str, Any]) -> bool:
             return True
         operation = kwargs.get("operation")
         if isinstance(operation, dict):
-            return (
-                operation.get("kind")
-                in {"replace_string", "batch_replace", "patch_frontmatter"}
-                and operation.get("validate_only") is True
-            )
+            return operation.get("validate_only") is True
         return False
     if command.name in {"remember", "replace_memory"}:
         # A validate-only remember builds and returns an immutable draft and

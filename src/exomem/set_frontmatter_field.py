@@ -97,6 +97,7 @@ def set_frontmatter_field(
     value: Any,
     why: str,
     allow_curated: bool = False,
+    expected_hash: str | None = None,
     today: dt.date | None = None,
     validate_only: bool = False,
     semantic_transition_token: str | None = None,
@@ -116,7 +117,10 @@ def set_frontmatter_field(
     if field == "updated":
         raise SetFrontmatterError(
             code="INVALID_SET",
-            reason="cannot set `updated:` directly — it's always bumped to today by this op",
+            reason=(
+                "cannot set `updated:` directly — it is always bumped to the "
+                "write instant by this operation"
+            ),
         )
     excluded_reason = excluded_frontmatter_reason(field)
     if excluded_reason is not None:
@@ -172,7 +176,10 @@ def set_frontmatter_field(
     body = m.group(2)
 
     now = today or temporal.now()
-    date_iso = temporal.stamp(now)
+    date_iso = (
+        semantic_writes.reviewed_transition_stamp(semantic_transition_token, now)
+        or temporal.stamp(now)
+    )
 
     old_value = _read_yaml_field(fm_text, field)
     fm_text = _remove_yaml_key(fm_text, field)
@@ -192,11 +199,13 @@ def set_frontmatter_field(
             path=rel_path,
             after_source=new_text,
             operation="edit",
-            expected_before_hash=content_hash(text),
+            expected_before_hash=expected_hash or content_hash(text),
             transition_token=semantic_transition_token,
             relation_disposition=relation_disposition,
             relation_review_hash=relation_review_hash,
             relation_review_reason=relation_review_reason,
+            stamp=date_iso,
+            validate_only=validate_only,
         )
     except semantic_writes.SemanticWriteError as error:
         raise SetFrontmatterError(error.code, error.reason) from error

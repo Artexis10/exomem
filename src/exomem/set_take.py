@@ -51,6 +51,30 @@ class SetTakeResult:
 
 
 @dataclass
+class SetTakeValidation:
+    path: str
+    row: str
+    validate_only: bool
+    mode: str
+    match_count: int
+    matches: list[str]
+    semantic: dict | None = None
+
+    def as_dict(self) -> dict:
+        value = {
+            "path": self.path,
+            "row": self.row,
+            "validate_only": self.validate_only,
+            "mode": self.mode,
+            "match_count": self.match_count,
+            "matches": self.matches,
+        }
+        if self.semantic is not None:
+            value["semantic"] = self.semantic
+        return value
+
+
+@dataclass
 class SetTakeError(Exception):
     code: str
     candidates: list[str]  # matched rows when AMBIGUOUS_ROW; else []
@@ -78,8 +102,14 @@ def set_take(
     take: str,
     why: str,
     overwrite: bool = False,
+    expected_hash: str | None = None,
+    validate_only: bool = False,
     today: dt.date | None = None,
-) -> SetTakeResult:
+    semantic_transition_token: str | None = None,
+    relation_disposition: str | None = None,
+    relation_review_hash: str | None = None,
+    relation_review_reason: str | None = None,
+) -> SetTakeResult | SetTakeValidation:
     """Fill the `[take: ]` of the unique row whose item text matches `row_key`.
 
     By default only fills an EMPTY `[take: ]`; pass `overwrite=True` to replace
@@ -94,7 +124,7 @@ def set_take(
 
     # Read + guard server-side (caller doesn't re-send the body).
     try:
-        editable = load_editable(vault_root, path)
+        editable = load_editable(vault_root, path, expected_hash=expected_hash)
     except EditError as e:
         raise SetTakeError(code=e.code, candidates=[], reason=e.reason) from e
 
@@ -163,11 +193,27 @@ def set_take(
             why=why,
             old_string=target_line,
             new_string=new_line,
+            expected_hash=expected_hash,
+            validate_only=validate_only,
             today=today,
+            semantic_transition_token=semantic_transition_token,
+            relation_disposition=relation_disposition,
+            relation_review_hash=relation_review_hash,
+            relation_review_reason=relation_review_reason,
         )
     except EditError as e:
         raise SetTakeError(code=e.code, candidates=[], reason=e.reason) from e
 
+    if isinstance(result, edit_module.EditValidation):
+        return SetTakeValidation(
+            path=result.path,
+            row=new_line,
+            validate_only=True,
+            mode=result.mode,
+            match_count=result.match_count,
+            matches=result.matches,
+            semantic=result.semantic,
+        )
     return SetTakeResult(
         path=result.path,
         row=new_line,

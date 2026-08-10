@@ -466,18 +466,43 @@ def test_valid_unit_does_not_satisfy_missing_relation_review(tmp_path: Path) -> 
     assert "RELATION_DISPOSITION_MISSING" in codes
     assert "missing_semantic_unit" not in codes
     finding = next(item for item in result.blocking_findings if item.code == "RELATION_DISPOSITION_MISSING")
-    # Route-neutral: this finding also fires on ordinary edits, where `validate_only`
-    # and the draft trio do not exist as parameters. Naming them unconditionally sent
-    # edit callers onto an unnatural operation to find a field they could reach.
-    assert "validate_only" not in finding.remediation
-    assert "draft_id" in finding.remediation
-    assert "draft_hash" in finding.remediation
-    assert "draft_token" in finding.remediation
-    assert "Creation writers" in finding.remediation
+    assert "validate_only" in finding.remediation
+    assert "transition_token" in finding.remediation
+    assert "draft_id" not in finding.remediation
+    assert "draft_hash" not in finding.remediation
+    assert "draft_token" not in finding.remediation
     assert 'relation_disposition="reviewed_none"' in finding.remediation
-    assert "re-issue the same call" in finding.remediation
+    assert "re-issue the same edit" in finding.remediation
     assert "relation_review_hash" in finding.remediation
     assert "relation_review_reason" in finding.remediation
+
+
+def test_posthoc_existing_page_uses_edit_remediation(tmp_path: Path) -> None:
+    after = _state(
+        tmp_path,
+        "Knowledge Base/Notes/Insights/posthoc-existing.md",
+        _source(
+            exomem_id=_ID_A,
+            body="## Observations\n\n- [constraint] Preserve the invariant.\n",
+        ),
+    )
+    corpus = _corpus(tmp_path, after)
+    result = _evaluate(
+        before=None,
+        after=after,
+        before_corpus=corpus,
+        after_corpus=corpus,
+        operation="audit",
+        mode="posthoc",
+    )
+
+    finding = next(
+        item
+        for item in result.findings
+        if item.code == "RELATION_DISPOSITION_MISSING"
+    )
+    assert "transition_token" in finding.remediation
+    assert "draft_id" not in finding.remediation
 
 
 def test_qualifying_relation_does_not_satisfy_missing_unit(tmp_path: Path) -> None:

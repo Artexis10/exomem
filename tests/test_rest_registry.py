@@ -603,13 +603,26 @@ def test_edit_memory_rest_and_openapi_use_discriminated_primary_shape(
         "patch_frontmatter",
         "fill_row",
     }
-    assert set(branches["fill_row"]["properties"]) == {
+    guarded_fields = {
+        "kind",
+        "validate_only",
+        "transition_token",
+        "relation_disposition",
+        "relation_review_hash",
+        "relation_review_reason",
+        "expected_hash",
+    }
+    assert set(branches["fill_row"]["properties"]) == guarded_fields | {
         "kind",
         "row_key",
         "take",
         "overwrite",
     }
-    assert "expected_hash" not in branches["patch_frontmatter"]["properties"]
+    assert set(branches["patch_frontmatter"]["properties"]) == guarded_fields | {
+        "field",
+        "value",
+        "allow_curated",
+    }
     edits = branches["batch_replace"]["properties"]["edits"]
     assert edits["minItems"] == 1
     assert set(edits["items"]["required"]) == {"old_string", "new_string"}
