@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import http.client
 import json
+import shutil
 import socket
 import sys
 import tempfile
@@ -72,7 +73,9 @@ def test_preserve_artifacts_has_openai_file_parameter_contract(
     assert command.mcp_meta == {"openai/fileParams": ("files",)}
     assert command.cli_writes is True
     assert {param.name for param in command.params} == {"scope", "category", "files", "response_detail"}
-    monkeypatch.setenv("EXOMEM_VAULT_PATH", str(tmp_path))
+    vault_root = tmp_path / "vault"
+    shutil.copytree(Path(__file__).resolve().parent / "fixtures", vault_root)
+    monkeypatch.setenv("EXOMEM_VAULT_PATH", str(vault_root))
     monkeypatch.setenv("EXOMEM_WRITER_LEASE_STATE_DIR", str(tmp_path / "lease"))
     monkeypatch.setenv("EXOMEM_DISABLE_MEDIA_EXTRACTION", "1")
     tool = next(
@@ -217,7 +220,9 @@ def test_staging_rejects_mismatched_content_length_and_removes_temp_file(
 
     response = _Response(content_length=content_length, blocks=blocks)
     original_mkstemp = tempfile.mkstemp
-    monkeypatch.setattr(client_artifacts, "resolve_public_addresses", lambda *_args: ("8.8.8.8",))
+    monkeypatch.setattr(
+        client_artifacts, "resolve_public_addresses", lambda *_args, **_kwargs: ("8.8.8.8",)
+    )
     monkeypatch.setattr(
         client_artifacts,
         "_PinnedHTTPSConnection",
@@ -817,7 +822,7 @@ def test_preserve_artifacts_keeps_append_only_collision_as_one_failed_outcome(
         filename="proof.bin",
     )
     staged.path.write_bytes(b"ok")
-    monkeypatch.setattr(client_artifacts, "stage_artifact", lambda *_args: staged)
+    monkeypatch.setattr(client_artifacts, "stage_artifact", lambda *_args, **_kwargs: staged)
     monkeypatch.setattr(
         client_artifacts,
         "preserve_stream",
@@ -857,7 +862,7 @@ def test_preserve_artifacts_marks_commit_before_media_reconciliation(
     )
     staged.path.write_bytes(b"ok")
     events: list[str] = []
-    monkeypatch.setattr(client_artifacts, "stage_artifact", lambda *_args: staged)
+    monkeypatch.setattr(client_artifacts, "stage_artifact", lambda *_args, **_kwargs: staged)
     monkeypatch.setattr(
         client_artifacts,
         "preserve_stream",
