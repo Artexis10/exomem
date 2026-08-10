@@ -1,5 +1,4 @@
-{{- $lock := include "exomem.hostedDeploymentLock" . | mustFromJson -}}
-{{- $runtimeImage := $lock.components.runtime.image -}}
+{{- $runtimeImages := include "exomem.hostedRuntimeImages" . | mustFromJson -}}
 {{- $provisionerImage := include "exomem.hostedProvisionerImage" . -}}
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
@@ -150,7 +149,7 @@ spec:
         (variables.target.spec.accessModes == ['ReadWriteOnce'] &&
           variables.target.spec.volumeMode == 'Filesystem' &&
           variables.target.spec.storageClassName == 'exomem-hcloud-encrypted-retain' &&
-          variables.target.spec.resources.requests.storage == quantity('10Gi'))
+          quantity(dyn(variables.target.spec).resources.requests['storage']).compareTo(quantity('10Gi')) == 0)
       message: The hosted provisioner may manage only the exact encrypted 10 GiB tenant PVC.
     - expression: >-
         request.resource.resource != 'services' || request.operation == 'DELETE' ||
@@ -177,7 +176,7 @@ spec:
             variables.target.spec.selector.matchLabels &&
           variables.target.spec.template.spec.serviceAccountName == request.namespace &&
           size(variables.target.spec.template.spec.containers) == 1 &&
-          variables.target.spec.template.spec.containers[0].image == '{{ $runtimeImage }}')
+          variables.target.spec.template.spec.containers[0].image in {{ $runtimeImages | toJson }})
       message: The hosted provisioner may manage only the exact pinned single-cell StatefulSet.
     - expression: >-
         request.resource.resource != 'networkpolicies' || request.operation != 'DELETE'
@@ -581,7 +580,7 @@ spec:
     - expression: >-
         request.resource.resource != 'jobs' || request.operation == 'DELETE' ||
         (variables.target.spec.template.spec.containers[0].name == 'restore-candidate' &&
-          variables.target.spec.template.spec.containers[0].image == '{{ $runtimeImage }}' &&
+          variables.target.spec.template.spec.containers[0].image in {{ $runtimeImages | toJson }} &&
           variables.target.spec.template.spec.containers[0].imagePullPolicy == 'IfNotPresent' &&
           variables.target.spec.template.spec.containers[0].command ==
             ['exomem', 'hosted', 'restore-candidate', '--contract-version', '1',
@@ -633,7 +632,7 @@ spec:
           variables.target.spec.accessModes == ['ReadWriteOnce'] &&
           variables.target.spec.volumeMode == 'Filesystem' &&
           variables.target.spec.storageClassName == 'exomem-hcloud-encrypted-retain' &&
-          variables.target.spec.resources.requests.storage == quantity('10Gi'))
+          quantity(dyn(variables.target.spec).resources.requests['storage']).compareTo(quantity('10Gi')) == 0)
       message: Durability actions may reconcile only the exact retained encrypted tenant PVC.
     - expression: >-
         request.resource.resource != 'serviceaccounts' ||
@@ -697,7 +696,7 @@ spec:
           variables.target.spec.template.spec.serviceAccountName == variables.resourceName &&
           variables.target.spec.template.spec.automountServiceAccountToken == false &&
           size(variables.target.spec.template.spec.containers) == 1 &&
-          variables.target.spec.template.spec.containers[0].image == '{{ $runtimeImage }}')
+          variables.target.spec.template.spec.containers[0].image in {{ $runtimeImages | toJson }})
       message: Durability actions may promote only the exact pinned candidate StatefulSet.
     - expression: >-
         request.resource.resource != 'services' ||

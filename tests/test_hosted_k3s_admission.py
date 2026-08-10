@@ -638,6 +638,11 @@ def test_exact_k3s_api_admits_only_the_rendered_tenant_shapes(k3s: str) -> None:
                     },
                     {
                         "apiGroups": [""],
+                        "resources": ["persistentvolumeclaims"],
+                        "verbs": ["create", "get"],
+                    },
+                    {
+                        "apiGroups": [""],
                         "resources": ["services"],
                         "verbs": ["create", "delete", "get", "patch", "update"],
                     },
@@ -719,6 +724,31 @@ def test_exact_k3s_api_admits_only_the_rendered_tenant_shapes(k3s: str) -> None:
         check=False,
     )
     assert routine_create.returncode == 0, routine_create.stderr
+
+    pvc_namespace = "exo-pvc-admission-test"
+    pvc_initialize = _render(
+        CELL,
+        CELL / "values.initialize.yaml",
+        pvc_namespace,
+        extra_args=("--set", f"resourceName={pvc_namespace}"),
+    )
+    pvc_namespace_document = next(item for item in pvc_initialize if item.get("kind") == "Namespace")
+    _kubectl(k3s, ["apply", "--filename=-"], documents=[pvc_namespace_document])
+    rendered_pvc = next(item for item in pvc_initialize if item.get("kind") == "PersistentVolumeClaim")
+    admitted_pvc = _kubectl(
+        k3s,
+        [
+            "apply",
+            "--namespace",
+            pvc_namespace,
+            "--dry-run=server",
+            "--filename=-",
+            f"--as={routine_username}",
+        ],
+        documents=[rendered_pvc],
+        check=False,
+    )
+    assert admitted_pvc.returncode == 0, admitted_pvc.stderr
 
     cleanup_namespace = "exo-restore-cleanup-test"
     _kubectl(k3s, ["create", "namespace", cleanup_namespace])
