@@ -64,6 +64,8 @@ _POSTHOC_PATH_LIMIT = 64
 _POSTHOC_SUMMARY_LIMIT = 64
 _POSTHOC_BYTE_BUDGET = 120 * 1024
 _MOVE_WIKILINK_PATTERN = re.compile(r"\[\[([^\]\|\n]+?)(\|[^\]\n]*)?\]\]")
+_MAX_REVIEWED_STAMP_AGE = dt.timedelta(hours=24)
+_MAX_REVIEWED_STAMP_SKEW = dt.timedelta(minutes=5)
 
 
 def rewrite_wikilinks_for_move(text: str, old_rel: str, new_rel: str) -> tuple[str, int]:
@@ -929,6 +931,9 @@ class ExistingPreflight:
             "grandfathered": self.grandfathered,
             "transition_token": self.transition_token,
             "transition_hash": self.transition_hash,
+            "relation_review_hash": self.transition_hash,
+            "before_hash": self.before.source_hash,
+            "after_hash": self.after.source_hash,
             "mutated": self.mutated,
             "contract_result": _bounded_semantic_feedback(self.contract_result),
         }
@@ -1290,6 +1295,34 @@ def transition_token_stamp(token: str | None) -> str | None:
     return stamp if type(stamp) is str and stamp else None
 
 
+def reviewed_transition_stamp(
+    transition_token: str | None,
+    now: dt.date | dt.datetime,
+) -> str | None:
+    """Reuse the bounded instant already reviewed by an existing transition.
+
+    Existing-page writers render their proposed bytes before semantic preflight,
+    so this is the shared seam that keeps every leaf's server-owned `updated:`
+    value identical between validation and commit.
+    """
+
+    stamp = transition_token_stamp(transition_token)
+    if stamp is None:
+        return None
+    moment = temporal.parse(stamp)
+    if moment is None or moment.instant is None:
+        return None
+    if isinstance(now, dt.datetime):
+        reference = now if now.tzinfo is not None else now.replace(tzinfo=dt.UTC)
+        reference = reference.astimezone(dt.UTC)
+    else:
+        reference = dt.datetime.combine(now, dt.time.max, tzinfo=dt.UTC)
+    delta = reference - moment.instant
+    if delta > _MAX_REVIEWED_STAMP_AGE or -delta > _MAX_REVIEWED_STAMP_SKEW:
+        return None
+    return stamp
+
+
 def _existing_transition_id(token: str) -> str:
     return str(_decode_existing_transition_token(token)["transition_id"])
 
@@ -1325,6 +1358,7 @@ def preflight_existing(
     relation_review_hash: str | None = None,
     relation_review_reason: str | None = None,
     stamp: str | None = None,
+    validate_only: bool = False,
 ) -> ExistingPreflight:
     """Evaluate an existing-page transition without mutating any shared state."""
     relation_disposition = relation_review.normalize_relation_disposition(relation_disposition)
@@ -1446,7 +1480,7 @@ def preflight_existing(
                 "INVALID_RELATION_REVIEW",
                 "reviewed-none applies only to an active compiled result",
             )
-        if relation_review_hash != transition_hash:
+        if not validate_only and relation_review_hash != transition_hash:
             raise SemanticWriteError(
                 "LIFECYCLE_TRANSITION_REVIEW_MISMATCH",
                 "review hash does not match the validated transition",

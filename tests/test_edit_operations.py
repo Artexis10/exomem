@@ -19,11 +19,11 @@ from exomem.edit_operations import (
     [
         (
             {"kind": "replace_body", "new_body": "After", "tags": ["new"]},
-            {"new_body": "After", "tags": ["new"]},
+            {"new_body": "After", "tags": ["new"], "validate_only": False},
         ),
         (
             {"kind": "replace_tags", "tags": ["new"]},
-            {"tags": ["new"]},
+            {"tags": ["new"], "validate_only": False},
         ),
         (
             {
@@ -54,6 +54,7 @@ from exomem.edit_operations import (
                 "heading": "Claim",
                 "new_string": "After",
                 "section_position": "append",
+                "validate_only": False,
             },
         ),
         (
@@ -67,7 +68,12 @@ from exomem.edit_operations import (
         ),
         (
             {"kind": "fill_row", "row_key": "Example", "take": "A view"},
-            {"row_key": "Example", "take": "A view", "overwrite": False},
+            {
+                "row_key": "Example",
+                "take": "A view",
+                "overwrite": False,
+                "validate_only": False,
+            },
         ),
     ],
 )
@@ -92,12 +98,12 @@ def test_each_variant_forbids_fields_from_other_branches() -> None:
                 "kind": "fill_row",
                 "row_key": "Example",
                 "take": "A view",
-                "expected_hash": "ignored-by-the-leaf",
+                "heading": "ignored-by-the-leaf",
             }
         )
 
     assert "fill_row" in str(exc.value)
-    assert "expected_hash" in str(exc.value)
+    assert "heading" in str(exc.value)
     schema = adapter.json_schema()
     assert schema["discriminator"] == {
         "propertyName": "kind",
@@ -218,8 +224,8 @@ def test_batch_items_fail_shared_validation_with_precise_guidance(
             "replace_string",
         ),
         (
-            {"operation": {"kind": "fill_row", "row_key": "Example", "take": "A view", "validate_only": True}},
-            "validate_only",
+            {"operation": {"kind": "fill_row", "row_key": "Example", "take": "A view", "heading": "Notes"}},
+            "heading",
         ),
         ({"operation": {"kind": "nonsense"}}, "nonsense"),
         ({"take": "A view"}, "row_key"),
@@ -353,6 +359,6 @@ def test_python_runtime_accepts_nested_and_deprecated_flat_forms(monkeypatch) ->
 
     assert nested == legacy == {"path": common["path"]}
     assert calls == [
-        {**common, "new_body": "After"},
-        {**common, "new_body": "After"},
+        {**common, "new_body": "After", "validate_only": False},
+        {**common, "new_body": "After", "validate_only": False},
     ]
