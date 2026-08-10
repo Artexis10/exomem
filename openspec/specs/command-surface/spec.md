@@ -201,3 +201,16 @@ Each action SHALL define required and forbidden arguments. `create` SHALL use cr
 - **WHEN** MCP exposes annotations for `record_memory`
 - **THEN** the command-level annotation remains write-capable even though selector dispatch keeps `inspect` and `query` lease-free
 
+### Requirement: Technical gap commands preserve registry parity
+The product registry SHALL expose `schema_memory`, stable-reference parameters and response fields, `connect_memory(operation="context")`, and `maintain_memory(mode="backfill-ids")` consistently across MCP, REST, CLI, OpenAPI, generated capability docs, and schema-fidelity tests.
+
+#### Scenario: One registry exposes every new route
+- **WHEN** generated surfaces are inspected
+- **THEN** the new command and modes are present with identical parameter semantics and no hand-maintained duplicate implementation
+
+### Requirement: Paths and references coexist
+Commands that accept governed page identifiers SHALL resolve paths and canonical references through one shared resolver and SHALL return both `path` and `ref` where they identify a durable governed artifact.
+
+#### Scenario: Surface responses carry durable identity
+- **WHEN** a source, note, entity, or evidence sidecar is created through MCP, REST, or CLI
+- **THEN** each surface reports the same vault-relative path and canonical reference
