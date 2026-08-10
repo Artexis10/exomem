@@ -14,6 +14,7 @@ import threading
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from queue import Empty, Queue
 from urllib.parse import urljoin, urlsplit
@@ -29,8 +30,11 @@ _CHUNK_SIZE = 1024 * 1024
 _TIMEOUT_SECONDS = 20.0
 _RETRIEVAL_DEADLINE_SECONDS = 20.0
 _BATCH_DEADLINE_SECONDS = 60.0
+_MAX_FILE_ID_CHARS = 256
+_MAX_CONTENT_TYPE_CHARS = 255
 _monotonic = time.monotonic
 _DNS_WORKERS = threading.BoundedSemaphore(4)
+_RETRIEVAL_WORKERS = threading.BoundedSemaphore(4)
 
 
 class SafeFetchError(Exception):
@@ -75,6 +79,32 @@ def remaining_retrieval_timeout(
     if remaining <= 0:
         raise SafeFetchError("SAFE_FETCH_FAILED", "download retrieval timed out")
     return min(_TIMEOUT_SECONDS, remaining)
+
+
+def _bounded_retrieval_call(operation: Callable[[], object], *, deadline: float) -> object:
+    """Run a blocking HTTP operation within the remaining wall-clock budget."""
+    timeout = remaining_retrieval_timeout(deadline)
+    if not _RETRIEVAL_WORKERS.acquire(timeout=timeout):
+        raise SafeFetchError("SAFE_FETCH_FAILED", "download retrieval timed out")
+    result: Queue[tuple[bool, object]] = Queue(maxsize=1)
+
+    def _run() -> None:
+        try:
+            result.put((True, operation()))
+        except Exception as error:  # noqa: BLE001 - preserved for the caller
+            result.put((False, error))
+        finally:
+            _RETRIEVAL_WORKERS.release()
+
+    threading.Thread(target=_run, daemon=True).start()
+    try:
+        succeeded, value = result.get(timeout=remaining_retrieval_timeout(deadline))
+    except Empty as error:
+        raise SafeFetchError("SAFE_FETCH_FAILED", "download retrieval timed out") from error
+    if not succeeded:
+        assert isinstance(value, Exception)
+        raise value
+    return value
 
 
 def validate_download_url(value: object):
@@ -182,9 +212,20 @@ def fallback_filename(sha256: str, content_type: str | None) -> str:
 
 def _file_id(file: Mapping[str, object]) -> str:
     value = file.get("file_id")
-    if not isinstance(value, str) or not value.strip():
+    if not isinstance(value, str) or not value.strip() or len(value.strip()) > _MAX_FILE_ID_CHARS:
         raise SafeFetchError("INVALID_FILE", "file_id is required")
     return value.strip()
+
+
+def _content_type(value: object) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise SafeFetchError("INVALID_FILE", "content type is invalid")
+    content_type = value.split(";", 1)[0].strip() or None
+    if content_type is not None and len(content_type) > _MAX_CONTENT_TYPE_CHARS:
+        raise SafeFetchError("INVALID_FILE", "content type is invalid")
+    return content_type
 
 
 def _validate_destination(scope: str, category: str) -> None:
@@ -230,7 +271,7 @@ def stage_artifact(
                     connection.putheader("Host", host_header)
                     connection.putheader("Accept-Encoding", "identity")
                     connection.endheaders()
-                    response = connection.getresponse()
+                    response = _bounded_retrieval_call(connection.getresponse, deadline=deadline)
                     selected_connection = connection
                     remaining_retrieval_timeout(deadline)
                     break
@@ -260,7 +301,12 @@ def stage_artifact(
                 selected_connection.close()
                 raise SafeFetchError("SAFE_FETCH_FAILED", "download response was not successful")
             content_length = response.getheader("Content-Length")
-            response_content_type = response.getheader("Content-Type")
+            try:
+                response_content_type = _content_type(response.getheader("Content-Type"))
+            except SafeFetchError:
+                response.close()
+                selected_connection.close()
+                raise
             declared_size: int | None = None
             if content_length is not None:
                 try:
@@ -283,7 +329,9 @@ def stage_artifact(
                     while True:
                         if selected_connection.sock is not None:
                             selected_connection.sock.settimeout(remaining_retrieval_timeout(deadline))
-                        block = response.read(_CHUNK_SIZE)
+                        block = _bounded_retrieval_call(
+                            partial(response.read, _CHUNK_SIZE), deadline=deadline
+                        )
                         remaining_retrieval_timeout(deadline)
                         if not block:
                             break
@@ -299,8 +347,7 @@ def stage_artifact(
                     "SAFE_FETCH_FAILED", "download Content-Length did not match streamed bytes"
                 )
             budget.consume(written)
-            content_type = response_content_type or file.get("mime_type")
-            content_type = str(content_type).split(";", 1)[0].strip() or None
+            content_type = response_content_type or _content_type(file.get("mime_type"))
             filename = str(file.get("file_name") or "").strip() or fallback_filename(
                 digest.hexdigest(), content_type
             )
@@ -360,6 +407,7 @@ def preserve_artifacts(
             _file_id(file)
             if not isinstance(file.get("download_url"), str) or not file["download_url"].strip():
                 raise SafeFetchError("INVALID_FILE", "download_url is required")
+            _content_type(file.get("mime_type"))
             staged[index] = stage_artifact(file, budget, batch_deadline=batch_deadline)
         except SafeFetchError as error:
             file_id = str(file.get("file_id") or "") if isinstance(file, Mapping) else ""
@@ -369,6 +417,13 @@ def preserve_artifacts(
     try:
         for index, artifact in staged.items():
             try:
+                if (
+                    not artifact.file_id
+                    or len(artifact.file_id) > _MAX_FILE_ID_CHARS
+                    or artifact.content_type is not None
+                    and len(artifact.content_type) > _MAX_CONTENT_TYPE_CHARS
+                ):
+                    raise SafeFetchError("INVALID_FILE", "staged file metadata is invalid")
                 with manager.mutation_guard(
                     vault_root,
                     request_id=active_mutation_request_id(),
@@ -412,7 +467,7 @@ def preserve_artifacts(
                     "content_type": payload.get("content_type"),
                     "warnings": warnings,
                 }
-            except PreserveError as error:
+            except (PreserveError, SafeFetchError) as error:
                 outcomes[index] = _failed(artifact.file_id, error)
     finally:
         for artifact in staged.values():

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
 import tempfile
 import threading
@@ -16,13 +17,16 @@ from exomem import commands
 
 
 class _Response:
-    def __init__(self, *, content_length: str, blocks: list[bytes]) -> None:
+    def __init__(
+        self, *, content_length: str, blocks: list[bytes], content_type: str = "image/png"
+    ) -> None:
         self.status = 200
         self._content_length = content_length
         self._blocks = iter(blocks)
+        self._content_type = content_type
 
     def getheader(self, name: str):
-        return {"Content-Length": self._content_length, "Content-Type": "image/png"}.get(name)
+        return {"Content-Length": self._content_length, "Content-Type": self._content_type}.get(name)
 
     def read(self, _size: int) -> bytes:
         return next(self._blocks)
@@ -86,15 +90,33 @@ def test_preserve_artifacts_has_openai_file_parameter_contract(
         "file_name",
     ]
     assert files["items"]["required"] == ["download_url", "file_id"]
+    assert files["items"]["properties"]["file_id"]["minLength"] == 1
+    assert files["items"]["properties"]["file_id"]["maxLength"] == 256
+    assert files["items"]["properties"]["mime_type"]["maxLength"] == 255
 
 
-def test_cli_file_handle_validation_is_bounded_and_content_free() -> None:
+@pytest.mark.parametrize(
+    "files",
+    [
+        json.dumps([{"download_url": "https://files.example/?signature=secret", "file_id": "   "}]),
+        json.dumps(
+            [
+                {
+                    "download_url": "https://files.example/?signature=secret",
+                    "file_id": "file-one",
+                    "mime_type": "x" * 256,
+                }
+            ]
+        ),
+    ],
+)
+def test_cli_file_handle_validation_is_bounded_and_content_free(files: str) -> None:
     from exomem import cli_ops
 
     with pytest.raises(cli_ops.OpError) as error:
         cli_ops.coerce(
             _command("preserve_artifacts").params,
-            {"files": '[{"download_url":"https://files.example/?signature=secret"}]'},
+            {"files": files},
             tool="preserve_artifacts",
             cli=True,
         )
@@ -213,6 +235,112 @@ def test_retrieval_deadline_bounds_every_attempt() -> None:
     assert remaining_retrieval_timeout(12.0, clock=lambda: 10.0) == 2.0
     with pytest.raises(SafeFetchError, match="timed out"):
         remaining_retrieval_timeout(10.0, clock=lambda: 10.0)
+
+
+def test_bounded_retrieval_call_stops_blocked_headers_or_body() -> None:
+    from exomem.client_artifacts import SafeFetchError, _bounded_retrieval_call
+
+    release = threading.Event()
+    started = time.monotonic()
+    try:
+        with pytest.raises(SafeFetchError, match="timed out"):
+            _bounded_retrieval_call(release.wait, deadline=started + 0.01)
+    finally:
+        release.set()
+
+    assert time.monotonic() - started < 0.5
+
+
+def test_staging_routes_headers_and_body_through_the_absolute_deadline_guard(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import client_artifacts
+
+    response = _Response(content_length="2", blocks=[b"ok", b""])
+    connection = _Connection(response)
+    guarded: list[object] = []
+    monkeypatch.setattr(client_artifacts, "resolve_public_addresses", lambda *_args, **_kwargs: ("8.8.8.8",))
+    monkeypatch.setattr(client_artifacts, "_PinnedHTTPSConnection", lambda *_args, **_kwargs: connection)
+    monkeypatch.setattr(
+        client_artifacts,
+        "_bounded_retrieval_call",
+        lambda operation, **_kwargs: guarded.append(operation) or operation(),
+    )
+    original_mkstemp = tempfile.mkstemp
+    monkeypatch.setattr(client_artifacts.tempfile, "mkstemp", lambda **_kwargs: original_mkstemp(dir=tmp_path))
+
+    staged = client_artifacts.stage_artifact(
+        {"download_url": "https://files.example/proof", "file_id": "file-one"},
+        client_artifacts.FetchBudget(),
+    )
+    staged.path.unlink()
+
+    assert len(guarded) == 3  # getresponse plus each body read
+
+
+def test_mixed_batch_keeps_truth_when_one_content_type_is_oversized(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import client_artifacts
+    from exomem.mutation_terminal import committed_terminal, project_terminal
+
+    staged: list[client_artifacts.StagedArtifact] = []
+    for file_id, content_type in (("file-good", "application/octet-stream"), ("file-bad", "x" * 256)):
+        path = tmp_path / f"{file_id}.bin"
+        path.write_bytes(b"ok")
+        staged.append(
+            client_artifacts.StagedArtifact(
+                file_id=file_id,
+                path=path,
+                size=2,
+                sha256="a" * 64,
+                content_type=content_type,
+                filename=f"{file_id}.bin",
+            )
+        )
+    monkeypatch.setattr(
+        client_artifacts, "stage_artifact", lambda *_args, **_kwargs: staged.pop(0)
+    )
+    monkeypatch.setattr(
+        client_artifacts,
+        "preserve_stream",
+        lambda _vault, **kwargs: type(
+            "Result",
+            (),
+            {
+                "as_dict": lambda self: {
+                    "path": f"Knowledge Base/Evidence/case/raw/{kwargs['filename']}",
+                    "size": 2,
+                    "hash": "a" * 64,
+                    "hash_algorithm": "sha256",
+                    "content_type": "application/octet-stream",
+                    "warnings": [],
+                }
+            },
+        )(),
+    )
+    monkeypatch.setattr(
+        client_artifacts,
+        "active_manager",
+        lambda: type("Manager", (), {"mutation_guard": lambda self, *_args, **_kwargs: nullcontext()})(),
+    )
+
+    result = commands.op_preserve_artifacts(
+        tmp_path,
+        scope="case",
+        category="raw",
+        files=[
+            {"download_url": "https://files.example/good", "file_id": "file-good"},
+            {"download_url": "https://files.example/bad", "file_id": "file-bad"},
+        ],
+    )
+    compact = project_terminal(
+        committed_terminal(result, request_id="request", receipt_id="receipt", idempotency_key=None)
+    )
+
+    assert [item["outcome"] for item in result["files"]] == ["stored", "failed"]
+    assert [item["file_id"] for item in compact["files"]] == ["file-good", "file-bad"]
+    assert compact["summary"] == {"stored": 1, "failed": 1}
 
 
 def test_staging_bounds_blocked_dns_resolution(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

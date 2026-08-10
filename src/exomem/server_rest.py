@@ -87,8 +87,8 @@ _OPENAPI_TYPES = {
             "type": "object",
             "properties": {
                 "download_url": {"type": "string"},
-                "file_id": {"type": "string"},
-                "mime_type": {"type": "string"},
+                "file_id": {"type": "string", "minLength": 1, "maxLength": 256},
+                "mime_type": {"type": "string", "maxLength": 255},
                 "file_name": {"type": "string"},
             },
             "required": ["download_url", "file_id"],

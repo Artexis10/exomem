@@ -114,6 +114,15 @@ def test_preserve_artifacts_rest_schema_and_malformed_file_error(vault, monkeypa
     ]
     assert schema["items"]["required"] == ["download_url", "file_id"]
     assert "additionalProperties" not in schema["items"]
+    assert schema["items"]["properties"]["file_id"] == {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 256,
+    }
+    assert schema["items"]["properties"]["mime_type"] == {
+        "type": "string",
+        "maxLength": 255,
+    }
 
     response = client.post(
         "/api/preserve_artifacts",

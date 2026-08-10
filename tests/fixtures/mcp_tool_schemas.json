@@ -2768,9 +2768,12 @@
                 "type": "string"
               },
               "file_id": {
+                "maxLength": 256,
+                "minLength": 1,
                 "type": "string"
               },
               "mime_type": {
+                "maxLength": 255,
                 "type": "string"
               },
               "file_name": {

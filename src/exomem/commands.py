@@ -34,7 +34,7 @@ from typing import Annotated, Any, Literal, NotRequired
 from fastmcp.tools import ToolResult
 from fastmcp.utilities.types import Image as FastMCPImage
 from mcp.types import TextContent
-from pydantic import Field, StrictInt
+from pydantic import Field, StrictInt, StringConstraints
 from typing_extensions import TypedDict
 
 from . import add as add_module
@@ -186,8 +186,8 @@ class ClientArtifactFile(TypedDict):
     """Client-neutral temporary remote file handle used by ``preserve_artifacts``."""
 
     download_url: str
-    file_id: str
-    mime_type: NotRequired[str]
+    file_id: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=256)]
+    mime_type: NotRequired[Annotated[str, Field(max_length=255)]]
     file_name: NotRequired[str]
 
 
