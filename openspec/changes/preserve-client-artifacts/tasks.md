@@ -19,6 +19,6 @@
 
 ## 4. Verification and delivery
 
-- [ ] 4.1 Run focused tests, OpenSpec strict validation, Ruff, schema/fingerprint checks, and the broad affected suite with the Windows temp-fixture workaround documented.
+- [x] 4.1 Run focused tests, OpenSpec strict validation, Ruff, schema/fingerprint checks, and the broad affected suite with the Windows temp-fixture workaround documented.
 - [x] 4.2 Run independent security/code review and end-to-end verification, address findings, and record the remaining live ChatGPT developer-mode eight-file acceptance gate.
 - [x] 4.3 Commit the intended scope, integrate current `origin/main`, push the feature branch, and open a ready Conventional Commit pull request with evidence.
