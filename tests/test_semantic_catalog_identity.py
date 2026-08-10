@@ -109,6 +109,15 @@ def test_catalog_identity_tracks_semantic_unit_parser_version(
     assert lexstore.catalog_semantic_identity(tmp_path) != baseline
 
 
+def test_catalog_identity_excludes_access_membership(tmp_path: Path) -> None:
+    """Access changes reproject the corpus; they do not change parsed rows."""
+    baseline = lexstore.catalog_semantic_identity(tmp_path)
+    access = tmp_path / "Knowledge Base" / "_access.yaml"
+    access.parent.mkdir(parents=True)
+    access.write_text("readonly: []\n", encoding="utf-8")
+    assert lexstore.catalog_semantic_identity(tmp_path) == baseline
+
+
 def test_precore_constraints_alias_change_invalidates_projection_identity(
     tmp_path: Path,
 ) -> None:

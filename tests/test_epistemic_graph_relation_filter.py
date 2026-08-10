@@ -146,9 +146,9 @@ def test_missing_sidecar_is_warming(tmp_path: Path) -> None:
 def test_stale_schema_sidecar_is_warming(tmp_path: Path) -> None:
     vault = tmp_path / "vault"
     _built(vault)
-    # Simulate a pre-bump (v6) sidecar: its identity no longer matches v7.
+    # Simulate a pre-bump (v7) sidecar: its identity no longer matches v8.
     conn = sqlite3.connect(epistemic_graph.sidecar_path(vault))
-    conn.execute("UPDATE graph_meta SET value = '6' WHERE key = 'schema_version'")
+    conn.execute("UPDATE graph_meta SET value = '7' WHERE key = 'schema_version'")
     conn.commit()
     conn.close()
     result = epistemic_graph.EpistemicGraphIndex(vault).relation_participants(["supports"])
@@ -158,10 +158,10 @@ def test_stale_schema_sidecar_is_warming(tmp_path: Path) -> None:
 def test_schema_bump_invalidates_cache_token(tmp_path: Path) -> None:
     vault = tmp_path / "vault"
     _built(vault)
-    assert epistemic_graph.SCHEMA_VERSION == 7
+    assert epistemic_graph.SCHEMA_VERSION == 8
     token = epistemic_graph.cache_token(vault)
     assert token is not None
-    assert token[0] == "7"
+    assert token[0] == "8"
 
 
 def test_deterministic_participants(tmp_path: Path) -> None:
@@ -172,3 +172,46 @@ def test_deterministic_participants(tmp_path: Path) -> None:
     assert {k: v.counterpart for k, v in first.provenance.items()} == {
         k: v.counterpart for k, v in second.provenance.items()
     }
+
+
+def test_participant_validation_is_bounded_by_unique_endpoints(tmp_path: Path, monkeypatch) -> None:
+    """A dense relation filter revalidates each endpoint once, not per edge."""
+    vault = tmp_path / "vault"
+    rels = [
+        "Knowledge Base/Notes/Insights/endpoint-a.md",
+        "Knowledge Base/Notes/Insights/endpoint-b.md",
+        "Knowledge Base/Notes/Insights/endpoint-c.md",
+        "Knowledge Base/Notes/Insights/endpoint-d.md",
+    ]
+    _write(
+        vault,
+        rels[0],
+        "---\ntype: insight\n---\n# A\n\n## Relations\n\n"
+        "- supports [[Knowledge Base/Notes/Insights/endpoint-b]]\n"
+        "- supports [[Knowledge Base/Notes/Insights/endpoint-c]]\n"
+        "- supports [[Knowledge Base/Notes/Insights/endpoint-d]]\n",
+    )
+    _write(
+        vault,
+        rels[1],
+        "---\ntype: insight\n---\n# B\n\n## Relations\n\n"
+        "- supports [[Knowledge Base/Notes/Insights/endpoint-c]]\n"
+        "- supports [[Knowledge Base/Notes/Insights/endpoint-d]]\n",
+    )
+    _write(vault, rels[2], "---\ntype: insight\n---\n# C\n\nBody.\n")
+    _write(vault, rels[3], "---\ntype: insight\n---\n# D\n\nBody.\n")
+    idx = epistemic_graph.EpistemicGraphIndex(vault)
+    idx.rebuild_all()
+
+    original = epistemic_graph._recall_path_allowed
+    calls: list[str] = []
+
+    def _counting_allowed(root: Path, rel: str) -> bool:
+        calls.append(rel)
+        return original(root, rel)
+
+    monkeypatch.setattr(epistemic_graph, "_recall_path_allowed", _counting_allowed)
+
+    assert idx.relation_participants(["supports"]).paths == frozenset(rels)
+    assert set(calls) == set(rels)
+    assert len(calls) == len(rels)

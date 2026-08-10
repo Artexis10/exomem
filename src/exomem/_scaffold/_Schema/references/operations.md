@@ -13,6 +13,7 @@ commands.
 | `ask` | Ask what Exomem knows, find a prior conclusion, gather context | `ask_memory`, then `read_memory`; use `ask_memory(deep=true)` for synthesis |
 | `remember` | Remember a durable conclusion, decision, solved problem, or pattern | `remember`; use `replace_memory` if it supersedes old knowledge |
 | `capture` | Preserve raw material, a source, proof, receipt, or record | `capture_source` for Sources; `preserve_evidence` or `transfer_artifact` for Evidence |
+| `record` | Log, correct, inspect, or query an observed event or current state | `record_memory` for a configured Record collection |
 | `review` | Review stale, contradictory, or unprocessed knowledge | `review_memory` |
 | `connect` | Suggest links or return graph, evidence, provenance, and history context | `connect_memory`; use `operation="context"` for the unified read-only view |
 | `adopt` | Assess or import an existing vault safely | `adopt_vault(mode="scan-only")` first; explicit modes for manifest/copy/compile planning |
@@ -22,6 +23,46 @@ commands.
 Do not ask users to choose internal folders, graph sidecars, or page types unless
 the distinction changes the write. Translate back to simple language when
 reporting results.
+
+## Records
+
+`record_memory` is the one public product command for human-owned observed
+state. It has exactly five actions: `inspect`, `create`, `query`, `append`, and
+`update`. Do not replace it with storage-specific tools. `inspect` is report-only;
+`create` explicitly creates a reviewed collection contract; `query` returns a
+bounded current view; `append` adds a new event; and `update` changes one item
+with current stale-write guards and a concise reason. Generic derived-index repair
+remains `maintain_memory(mode="reconcile")`.
+
+Records are intentionally manual-first. Canonical data remains ordinary files:
+an append-heavy chronological Markdown log, one Markdown file per item, or a
+CSV/TSV/JSON dataset. Storage is declared or inferred by the collection; there
+is no hidden database, and indexes and generated views are rebuildable from the
+canonical files. Datasets are query-only in this delivery. A migration between
+shapes is explicit and provenance-preserving; a derived view never becomes
+canonical merely because it was generated.
+
+Templates are optional, ordinary editable Markdown scaffolds, not schema truth.
+The intended Obsidian template root is `Knowledge Base/Templates/`: users keep
+their normal **Templates → Insert template** workflow. Exomem does not require
+Obsidian or a plugin and does not edit `.obsidian`; editing a template never
+rewrites historical records.
+
+An existing `type: tracker` without an adjacent reviewed collection manifest is
+inspectable only at collection level. Do not guess its item grammar or rewrite
+it. Adding an adjacent manifest opts into query and mutation while preserving the
+tracker, archive, notation, and templates; new agent-authored log items receive
+prospective stable markers, while old items remain as they are. Removing the
+manifest leaves the tracker manually usable. Fresh queries see direct editor
+changes; `inspect` reports drift and audit gaps without repairing canonical
+files. Agent history is bounded and may be incomplete after manual change.
+
+Structured reads and reductions pass Records governance before rows or
+aggregates are disclosed. A sensitive aggregate cannot reveal filtered data.
+High-volume raw items stay out of ordinary semantic recall; find the collection
+or compiled Note, then use a bounded Records query. Planning links are opaque
+references plus query descriptors only: no inferred progress, success, health
+judgment, or automatic Planning mutation.
 
 ## Index and log discipline (applies to every write)
 Every confirmed write that creates, moves, or supersedes a page performs two

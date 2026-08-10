@@ -31,6 +31,25 @@ is always clear.
 - `Evidence/` — proof/case-bound artifacts (binaries, documents, screenshots). Append-only. No analysis at this layer. A raw item is a Source by default; it becomes Evidence when preserved for a claim, case, dispute, warranty, record, or other proof-bearing context.
 - Anything outside `Knowledge Base/` — Claude reads, Claude does not write.
 
+## Planning and Records
+
+Keep the following layers distinct. Sources are externally received raw material;
+Evidence is proof-bearing material; Notes are compiled conclusions; and Entities
+are stable reusable identities. Planning is intended future state: goals,
+outcomes, initiatives, priorities, horizons, and commitments. Records are
+observed state and event history: what happened, when, measurements, sessions,
+transactions, and state changes. Review compares Planning intent with Records
+reality and feeds explicit decisions back into Planning and Notes. Imported is
+adoption staging, not the permanent home of live state.
+
+Planning and Records use separate semantic profiles on one structured-collection
+substrate. Planning owns durable intent and prioritisation. Records do not infer
+goals, completion, medical conclusions, or personal judgments. A collection may
+hold opaque links between a plan and a bounded Records query, but does not resolve
+or duplicate the other side. For software work, OpenSpec and the repository own
+accepted change contracts and execution truth; git, specs, tests, and code remain
+the authority.
+
 ## Proactive engagement
 
 This skill is **context-aware, not just request-driven.** It engages on its own
@@ -193,12 +212,12 @@ shot: you'll almost always need `bootstrap`, `ask_memory` (recall),
 `read_memory` (open a page), `browse_memory` (vault shape), `remember`
 (compiled conclusions), `observe_memory` (one semantic unit), `edit_memory`,
 `replace_memory`, `capture_source`,
-`compile_source`, `preserve_evidence`, `transfer_artifact`, `review_memory`,
+`compile_source`, `preserve_evidence`, `transfer_artifact`, `record_memory`, `review_memory`,
 `triage_memory`, `connect_memory`, `adopt_vault`, `maintain_memory`, `schema_memory`,
 `govern_memory`, `process_media`, `query_dataset`, and `read_media`. In Claude Code, load them by exact name in a
 single call:
 
-`ToolSearch("select:bootstrap,ask_memory,read_memory,browse_memory,remember,observe_memory,edit_memory,replace_memory,capture_source,compile_source,preserve_evidence,transfer_artifact,review_memory,triage_memory,connect_memory,adopt_vault,maintain_memory,schema_memory,govern_memory,process_media,query_dataset,read_media")`
+`ToolSearch("select:bootstrap,ask_memory,read_memory,browse_memory,remember,observe_memory,edit_memory,replace_memory,capture_source,compile_source,preserve_evidence,transfer_artifact,record_memory,review_memory,triage_memory,connect_memory,adopt_vault,maintain_memory,schema_memory,govern_memory,process_media,query_dataset,read_media")`
 
 On clients without a `select:` syntax (e.g. claude.ai), search by capability —
 "search the knowledge base", "read a KB page", "compile a note" — and each
@@ -262,6 +281,7 @@ experiments, proof-bearing records, review, and supersession.
 | `ask` | "what do I know," "find what I concluded," "show the context" | `ask_memory(detail="compact", rerank=false)` first; `read_memory` or `ask_memory(deep=true)` when synthesis needs context |
 | `remember` | "remember this," "save this conclusion," "write this decision" | `remember`; use `replace_memory` when it supersedes old knowledge |
 | `capture` | "save this article/source/transcript," "keep this receipt/record/proof" | `capture_source` for Sources; `preserve_evidence` or `transfer_artifact` for Evidence |
+| `record` | "log this session," "record this measurement," "add this transaction," "update the mileage" | `record_memory` for observed state in a configured Record collection |
 | `review` | "review stale knowledge," "what needs attention," "what sources are unprocessed" | `review_memory`; explicit dismiss/snooze/reopen via `triage_memory` |
 | `relations` | "review suggested relations," "pay down relation debt," "accept/reject suggested links" | `review_memory(mode="relation-queue")` for the batched read; accept one reviewed candidate via `connect_memory(operation="accept-relation")` (requires the queue fingerprint, target `expected_hash`, and an audit reason); reject via `triage_memory` |
 | `connect` | "connect these ideas," "suggest relations," "show the surrounding context" | `connect_memory`; use `operation="context"` for bounded graph, provenance, evidence, and history |
@@ -279,6 +299,8 @@ Examples:
   only if a conclusion is present.
 - "Keep this receipt for the warranty case" -> `preserve_evidence` or `transfer_artifact`, not as a
   general note.
+- "Log this training session" -> `record_memory(action="append")` after resolving the collection; keep the session as an observed Record, not a compiled conclusion.
+- "Show my last three months" -> `record_memory(action="query")` with a bounded date/query shape; use a compiled Note only for an explicit conclusion from that history.
 - "Compile these three sources" -> draft a sourced note with `remember` link suggestions,
   then write after the applicable approval rule.
 - "Show stale conclusions" -> run the review path and present candidates for

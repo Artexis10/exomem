@@ -573,6 +573,30 @@ def test_graph_context_unavailable_soft_fails(tmp_path: Path) -> None:
     }
 
 
+def test_graph_context_unavailable_unit_ref_is_stale(tmp_path: Path) -> None:
+    """A missing sidecar must not reveal whether a unit exists."""
+    vault = _seed_graph_vault(tmp_path)
+
+    context = epistemic_graph.graph_context(vault, unit_ref="unit:opaque-ref")
+
+    assert context == {
+        "available": False,
+        "reason": "graph sidecar unavailable",
+        "seeds": [],
+        "nodes": [],
+        "edges": [],
+        "truncation": [],
+        "unit_status": "stale",
+        "warnings": [
+            {
+                "code": "semantic_unit_index_drift",
+                "count": 1,
+                "reasons": {"graph_sidecar_unavailable": 1},
+            }
+        ],
+    }
+
+
 def test_graph_context_keeps_unresolved_relation_as_placeholder(tmp_path: Path) -> None:
     vault = _seed_graph_vault(tmp_path)
     epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()

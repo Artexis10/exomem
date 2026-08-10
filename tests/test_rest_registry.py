@@ -38,6 +38,7 @@ PRODUCT_ROUTES = [
     "adopt_vault",
     "maintain_memory",
     "schema_memory",
+    "record_memory",
     "manage_memory_file",
     "query_dataset",
     "process_media",

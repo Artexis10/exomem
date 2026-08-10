@@ -1094,6 +1094,15 @@ def test_builtin_packs_are_declarative_files() -> None:
     assert knowledge_packs.pack_schema()["directory"] == "src/exomem/packs/"
 
 
+def test_records_packs_route_observed_state_through_record_memory() -> None:
+    for pack_id in ("health-athletic", "personal-records"):
+        pack = knowledge_packs.get_builtin_pack(pack_id)
+        routes = [workflow["route"] for workflow in pack["suggested_workflows"]]
+
+        assert any("record_memory" in route for route in routes)
+        assert "guidance only" in pack["agent_instructions"].lower()
+
+
 def test_pack_validation_rejects_invalid_primitives_and_actions() -> None:
     raw = knowledge_packs.list_builtin_packs()[0]
     raw["primitives"] = ["source", "mind-palace"]

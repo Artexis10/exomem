@@ -14,9 +14,9 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from exomem import claims, embeddings, file_watcher, index_sync, scene_frames
 from exomem import delete_directory as delete_dir_module
 from exomem import delete_file as delete_module
-from exomem import embeddings, file_watcher, index_sync, scene_frames
 from exomem import reconcile as reconcile_module
 from exomem.embeddings import Scene
 
@@ -360,6 +360,15 @@ def test_reconcile_heals_clip_and_frame_orphans(
     idx.upsert(ghost_rel, _unit(2), 1.0)
     assert idx.has(ghost_rel)
 
+    # A media binary may outlive its Markdown sidecar. It still needs semantic
+    # cleanup, but it is not a binary orphan.
+    sidecar_only_rel = "Knowledge Base/Evidence/Yolo/photos/sidecar-only.jpg"
+    sidecar_only_binary = vault / sidecar_only_rel
+    sidecar_only_binary.parent.mkdir(parents=True, exist_ok=True)
+    sidecar_only_binary.write_bytes(b"\xff\xd8\xff")
+    idx.upsert(sidecar_only_rel, _unit(3), 1.0)
+    assert idx.has(sidecar_only_rel)
+
     # Seed a dangling `.frames/` dir: frame files with no parent video on disk.
     ghost_video = vault / "Knowledge Base/Notes/Clips/ghost.mp4"
     ghost_video.parent.mkdir(parents=True, exist_ok=True)
@@ -381,6 +390,8 @@ def test_reconcile_heals_clip_and_frame_orphans(
 
     assert report.clip_orphans_removed == 1
     assert not embeddings.ClipIndex(vault).has(ghost_rel)
+    assert not embeddings.ClipIndex(vault).has(sidecar_only_rel)
+    assert sidecar_only_binary.exists()
     assert report.frame_orphans_removed == 1
     assert not list(frames_dir.glob("scene-*.jpg"))
     assert not list(frames_dir.glob("scene-*.jpg.md"))
@@ -389,3 +400,24 @@ def test_reconcile_heals_clip_and_frame_orphans(
     report_again = reconcile_module.reconcile(vault)
     assert report_again.clip_orphans_removed == 0
     assert report_again.frame_orphans_removed == 0
+
+
+def test_reconcile_missing_rows_do_not_create_clip_sidecar_when_disabled(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Missing Markdown cleanup stays model-free when no CLIP sidecar exists."""
+    monkeypatch.setenv("EXOMEM_DISABLE_CLIP", "1")
+    missing_rel = "Knowledge Base/Records/Health/items/missing.md"
+    claim_index = claims.ClaimIndex(vault)
+    with claim_index._connect() as conn:
+        conn.execute(
+            "INSERT INTO claims(file_path, claim_text, checksum, vector, file_mtime) "
+            "VALUES (?, 'private', 'checksum', X'00', 0)",
+            (missing_rel,),
+        )
+
+    assert not embeddings.clip_sidecar_path(vault).exists()
+    report = reconcile_module.reconcile(vault)
+
+    assert report.semantic_missing_purged == [missing_rel]
+    assert not embeddings.clip_sidecar_path(vault).exists()

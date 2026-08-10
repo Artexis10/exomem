@@ -48,16 +48,18 @@ def iter_index_markdown(vault_root: Path):
     their own content-specific filters.
     """
     if index_scope() == "vault":
+        from .recall_policy import iter_recall_markdown
         from .vault import walk_vault_md
 
-        yield from walk_vault_md(vault_root)
+        yield from iter_recall_markdown(vault_root, walk_vault_md(vault_root))
         return
 
     from . import find as find_module
+    from .recall_policy import iter_recall_markdown
 
     kb = kb_index_root(vault_root)
     if kb.is_dir():
-        yield from find_module._walk_md(kb)
+        yield from iter_recall_markdown(vault_root, find_module._walk_md(kb))
 
 
 def is_embeddable_path(path: Path) -> bool:

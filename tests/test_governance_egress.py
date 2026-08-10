@@ -1653,6 +1653,34 @@ def test_direct_download_boundary_emits_a_single_authorization_receipt(vault: Pa
     assert records[0]["outcomes"][0]["decision"] == "release_authorized"
 
 
+def test_nested_disclosure_boundaries_are_independent_unless_joined(vault: Path) -> None:
+    other = vault.parent / "other-vault"
+
+    with egress.disclosure_boundary(vault, "outer") as outer:
+        egress._record_blocked_outcome(EXTERNAL)
+        with egress.disclosure_boundary(vault, "inner") as inner:
+            assert inner is not outer
+            egress._record_blocked_outcome(EXTERNAL)
+            egress.emit_boundary_receipt(inner)
+        egress.emit_boundary_receipt(outer)
+    with egress.disclosure_boundary(other, "cross-vault") as cross:
+        egress._record_blocked_outcome(EXTERNAL)
+        egress.emit_boundary_receipt(cross)
+
+    assert [record["outcomes"][0]["command"] for record in _receipt_records(vault)] == [
+        "inner",
+        "outer",
+    ]
+    assert _receipt_records(other)[0]["outcomes"][0]["command"] == "cross-vault"
+
+    with egress.disclosure_boundary(vault, "joined-outer") as outer:
+        with egress.disclosure_boundary(vault, "joined-inner", join_existing=True) as joined:
+            assert joined is outer
+        with pytest.raises(RuntimeError, match="different vault"):
+            with egress.disclosure_boundary(other, "bad-join", join_existing=True):
+                pass
+
+
 def test_hit_receipt_describes_only_the_final_limited_representation(vault: Path) -> None:
     write_scope(vault)
     write_rule(vault, ceiling=egress.LEVEL_FULL)

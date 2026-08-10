@@ -58,7 +58,7 @@ def test_search_hydrates_correct_texts_and_rank_parity(tmp_path: Path) -> None:
     expect = sorted(range(len(scores)), key=lambda i: -scores[i])[:7]
     assert [(h[0], h[1]) for h in hits] == [metadata[i] for i in expect]
     # Scores are the true cosines, descending.
-    assert all(h1[3] >= h2[3] for h1, h2 in zip(hits, hits[1:]))
+    assert all(h1[3] >= h2[3] for h1, h2 in zip(hits, hits[1:], strict=False))
 
 
 def test_cache_holds_no_chunk_text(tmp_path: Path) -> None:
@@ -66,7 +66,7 @@ def test_cache_holds_no_chunk_text(tmp_path: Path) -> None:
     idx, _ = _build(tmp_path, rng)
     idx.search(_unit_rows(rng, 1)[0], k=3)  # loads the cache
     assert idx._cache is not None
-    _epoch, _gen, _instance, _mtime, metadata, _matrix = idx._cache
+    metadata = idx._cache.metadata
     assert metadata and all(len(m) == 2 for m in metadata), (
         "numpy-lite cache must hold (file_path, chunk_idx) only — no text"
     )
@@ -88,6 +88,8 @@ def test_write_splice_keeps_hydration_and_shape(tmp_path: Path) -> None:
     assert hits[0][0] == rel and hits[0][1] == 2  # its own vector wins
     for fp, ci, txt, _score in hits:
         assert txt == texts[(fp, ci)]
-    _epoch, _gen, _instance, _mtime, metadata, matrix = idx._cache
+    assert idx._cache is not None
+    metadata = idx._cache.metadata
+    matrix = idx._cache.matrix
     assert len(metadata) == matrix.shape[0]
     assert all(len(m) == 2 for m in metadata)

@@ -1203,6 +1203,16 @@ def reset_corpus_context_cache() -> None:
         _CORPUS_CONTEXT_LANGUAGE_HASHES.clear()
 
 
+def evict_corpus_context(vault_root: Path) -> bool:
+    """Withdraw one vault's corpus projection after an unbridgeable event gap."""
+    cache_key = _corpus_cache_key(Path(vault_root))
+    with _CORPUS_CONTEXT_CACHE_LOCK:
+        removed = _CORPUS_CONTEXT_CACHE.pop(cache_key, None) is not None
+        _CORPUS_CONTEXT_EVENT_TOKENS.pop(cache_key, None)
+        _CORPUS_CONTEXT_LANGUAGE_HASHES.pop(cache_key, None)
+    return removed
+
+
 def _corpus_cache_key(root: Path) -> tuple[str, str]:
     return (
         os.path.normcase(str(root.resolve(strict=False))),

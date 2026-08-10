@@ -9,7 +9,10 @@ from __future__ import annotations
 import datetime as dt
 from pathlib import Path
 
+import pytest
+
 from exomem import audit_fix as audit_fix_module
+from exomem.vault import PathGuardError, PlannedWrite
 
 TODAY = dt.date(2026, 5, 28)
 
@@ -113,6 +116,101 @@ def test_audit_fix_uses_kb_relative_links_for_nested_obsidian_root(vault: Path) 
     text = path.read_text(encoding="utf-8")
     assert "[[Notes/Insights/progressive-disclosure-without-mode-fragmentation]]" in text
     assert "[[Knowledge Base/" not in text
+
+
+def test_audit_fix_composes_index_canonicalization_with_count_refresh(
+    vault: Path, monkeypatch
+) -> None:
+    """Index canonicalisation and refresh share one final write per path."""
+    kb = vault / "Knowledge Base"
+    (kb / ".obsidian").mkdir()
+    target = "progressive-disclosure-without-mode-fragmentation"
+
+    top_index = kb / "index.md"
+    top_index.write_text(
+        top_index.read_text(encoding="utf-8")
+        .replace("- Sources: 4 (articles: 2, books: 1, sessions: 1)", "- Sources: 0")
+        + f"\n## Links\n\n- [[{target}]]\n",
+        encoding="utf-8",
+    )
+    notes_index = kb / "Notes" / "index.md"
+    _seed(
+        notes_index,
+        "# Notes — Index\n\n"
+        f"See [[{target}]].\n\n"
+        "## By type\n\n"
+        "### Insights — distilled lessons (0)\n",
+    )
+
+    real_batch_atomic_write = audit_fix_module.batch_atomic_write
+    batches: list[list[Path]] = []
+
+    def _assert_unique_batch(writes, **kwargs):
+        planned = list(writes)
+        destinations = [write.path.resolve() for write in planned]
+        assert len(destinations) == len(set(destinations))
+        batches.append(destinations)
+        return real_batch_atomic_write(planned, **kwargs)
+
+    monkeypatch.setattr(audit_fix_module, "batch_atomic_write", _assert_unique_batch)
+
+    audit_fix_module.audit_fix(vault, today=TODAY)
+
+    top_text = top_index.read_text(encoding="utf-8")
+    notes_text = notes_index.read_text(encoding="utf-8")
+    expected = "[[Notes/Insights/progressive-disclosure-without-mode-fragmentation]]"
+    assert expected in top_text
+    assert expected in notes_text
+    assert "- Sources: 4 (articles: 2, books: 1, sessions: 1)" in top_text
+    assert "### Insights — distilled lessons (4)" in notes_text
+    assert batches
+
+
+def test_audit_fix_refuses_top_index_drift_after_composition(
+    vault: Path, monkeypatch
+) -> None:
+    """The final composed top-index write retains Pass 1's guarded snapshot."""
+    top_index = vault / "Knowledge Base" / "index.md"
+    top_index.write_text(
+        top_index.read_text(encoding="utf-8")
+        .replace("- Sources: 4 (articles: 2, books: 1, sessions: 1)", "- Sources: 0")
+        + "\n## Links\n\n- [[progressive-disclosure-without-mode-fragmentation]]\n",
+        encoding="utf-8",
+    )
+    real_batch_atomic_write = audit_fix_module.batch_atomic_write
+
+    def _race_top_index(writes, **kwargs):
+        top_index.write_text("manual edit wins\n", encoding="utf-8")
+        return real_batch_atomic_write(writes, **kwargs)
+
+    monkeypatch.setattr(audit_fix_module, "batch_atomic_write", _race_top_index)
+
+    with pytest.raises(PathGuardError, match="PATH_GUARD"):
+        audit_fix_module.audit_fix(vault, today=TODAY)
+
+    assert top_index.read_text(encoding="utf-8") == "manual edit wins\n"
+
+
+def test_audit_fix_composes_duplicate_target_across_batch_boundary(tmp_path: Path) -> None:
+    """Exact duplicates collapse before the later <=100 write chunking."""
+    initial = [
+        PlannedWrite(path=tmp_path / f"{number}.md", content=f"first-{number}")
+        for number in range(100)
+    ]
+    final = PlannedWrite(path=tmp_path / "0.md", content="final")
+
+    composed = audit_fix_module._compose_writes(initial, [final])
+
+    assert len(composed) == 100
+    assert next(write for write in composed if write.path.name == "0.md").content == "final"
+
+
+def test_audit_fix_composer_refuses_portable_case_collision(tmp_path: Path) -> None:
+    with pytest.raises(PathGuardError, match="PATH_GUARD_TARGET"):
+        audit_fix_module._compose_writes(
+            [PlannedWrite(path=tmp_path / "Record.md", content="first")],
+            [PlannedWrite(path=tmp_path / "record.md", content="second")],
+        )
 
 
 def test_audit_fix_skips_sources_and_evidence(vault: Path) -> None:

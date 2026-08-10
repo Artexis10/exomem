@@ -34,6 +34,7 @@ class _ClipCache(NamedTuple):
     generation: int
     instance: int
     mtime: float
+    recall_policy_identity: tuple[str, str]
     paths: list[str]
     frame_ts: list[float | None]
     matrix: np.ndarray
@@ -52,9 +53,10 @@ class ClipIndex:
         self._vec_quant_synced = False
         self._vec_failed = False
 
-    def _connect(self) -> sqlite3.Connection:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(self.path)
+    def _connect(self, path: Path | None = None) -> sqlite3.Connection:
+        target = path if path is not None else self.path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(target)
         sidecar_store.apply_sidecar_pragmas(conn)
         # Multi-vector schema: one row per image (frame_ts NULL) OR one row per
         # video keyframe (frame_ts = seconds). Composite PK keys frames within a
@@ -178,18 +180,103 @@ class ClipIndex:
         )
 
     def delete(self, rel_path: str) -> None:
-        conn = self._connect()
+        """Delete one visual key if the sidecar exists."""
+        self.purge_paths_if_present([rel_path])
+
+    def purge_paths_if_present(
+        self, rel_paths: list[str], *, connection_path: Path | None = None
+    ) -> int:
+        """Model-free, idempotent removal of stale visual-vector paths.
+
+        A policy transition must be able to evict a Record's image/video rows on
+        a machine without CLIP installed.  In particular this avoids creating a
+        missing sidecar merely to express an already-satisfied deletion.
+        """
+        paths = sorted({path for path in rel_paths if path})
+        target = connection_path if connection_path is not None else self.path
+        if not paths or not target.exists():
+            return 0
+        conn = self._connect(target)
         try:
             vec_on = vec_gate(self, conn)
             with conn:
-                if vec_on:
-                    self._vec.dual_delete(conn, "file_path = ?", (rel_path,))
-                conn.execute("DELETE FROM images WHERE file_path = ?", (rel_path,))
-                sidecar_store.bump_meta(conn, "generation")
-                own_epoch, own_gen, own_instance = sidecar_store.read_meta_token(conn)
+                removed = 0
+                for rel_path in paths:
+                    exists = conn.execute(
+                        "SELECT 1 FROM images WHERE file_path = ?", (rel_path,)
+                    ).fetchone()
+                    if exists is None:
+                        continue
+                    if vec_on:
+                        self._vec.dual_delete(conn, "file_path = ?", (rel_path,))
+                    conn.execute("DELETE FROM images WHERE file_path = ?", (rel_path,))
+                    removed += 1
+                if removed:
+                    sidecar_store.bump_meta(conn, "generation")
+                    own_epoch, own_gen, own_instance = sidecar_store.read_meta_token(conn)
         finally:
             conn.close()
-        self._patch_cache(rel_path, [], [], None, own_epoch, own_gen, own_instance)
+        if removed:
+            self._purge_cache_paths(set(paths), own_epoch, own_gen, own_instance)
+        return removed
+
+    def purge_exact_persisted_rows(
+        self, values: list[str], *, connection_path: Path | None = None
+    ) -> int:
+        """Remove quarantined visual keys without filesystem routing."""
+        return self.purge_paths_if_present(values, connection_path=connection_path)
+
+    def _purge_cache_paths(
+        self,
+        paths: set[str],
+        own_epoch: int,
+        own_gen: int,
+        own_instance: int,
+    ) -> None:
+        """Drop stale visual rows from a warm matrix only when contiguous."""
+        with self._lock:
+            cached = self._cache
+            if cached is None:
+                return
+            if (
+                own_epoch != cached.epoch
+                or own_instance != cached.instance
+                or own_gen != cached.generation + 1
+            ):
+                self._cache = None
+                return
+            keep = [index for index, path in enumerate(cached.paths) if path not in paths]
+            self._cache = _ClipCache(
+                cached.epoch,
+                own_gen,
+                cached.instance,
+                cached.mtime,
+                cached.recall_policy_identity,
+                [cached.paths[index] for index in keep],
+                [cached.frame_ts[index] for index in keep],
+                cached.matrix[keep]
+                if keep
+                else np.zeros((0, CLIP_DIM), dtype=np.float32),
+            )
+
+    def purge_markdown_paths_if_present(self, markdown_paths: list[str]) -> int:
+        """Purge image keys corresponding to Markdown sidecars.
+
+        ``photo.jpg.md`` is the canonical artifact exposed to ordinary recall;
+        CLIP stores it as ``photo.jpg``.  Only a terminal ``.md`` is stripped.
+        """
+        return self.purge_paths_if_present(
+            [path.removesuffix(".md") for path in markdown_paths]
+        )
+
+    def is_recall_candidate(self, rel_path: str) -> bool:
+        """Whether a CLIP key's Markdown sidecar may enter ordinary recall."""
+        from . import recall_policy
+
+        return recall_policy.is_recall_candidate(
+            self.vault_root,
+            self.vault_root / f"{rel_path}.md",
+        )
 
     def _patch_cache(
         self,
@@ -245,7 +332,14 @@ class ClipIndex:
                         f"{out_matrix.shape[0]} vecs"
                     )
                 self._cache = _ClipCache(
-                    c.epoch, own_gen, c.instance, c.mtime, out_paths, out_ts, out_matrix
+                    c.epoch,
+                    own_gen,
+                    c.instance,
+                    c.mtime,
+                    c.recall_policy_identity,
+                    out_paths,
+                    out_ts,
+                    out_matrix,
                 )
             except Exception as e:  # noqa: BLE001
                 log.warning("CLIP matrix splice failed (%s); dropping cache", e)
@@ -282,15 +376,28 @@ class ClipIndex:
         """Return parallel `(file_paths, frame_ts, matrix)` arrays."""
         if not self.path.exists():
             return [], [], np.zeros((0, CLIP_DIM), dtype=np.float32)
+        from . import recall_policy
+
+        policy_identity = recall_policy.recall_policy_identity(self.vault_root)
         c = self._cache
-        served = sidecar_store.try_serve_cached(c, self.path)
+        served = (
+            sidecar_store.try_serve_cached(c, self.path)
+            if c is not None and c.recall_policy_identity == policy_identity
+            else None
+        )
         if served is not None:
             return served.paths, served.frame_ts, served.matrix
         with self._lock:
             c = self._cache
-            served = sidecar_store.try_serve_cached(c, self.path)
+            served = (
+                sidecar_store.try_serve_cached(c, self.path)
+                if c is not None and c.recall_policy_identity == policy_identity
+                else None
+            )
             if served is not None:
                 return served.paths, served.frame_ts, served.matrix
+            # Keep this call zero-argument: cache tests and production probes
+            # deliberately wrap the named full-reload seam.
             loaded = self._load_all_rows()
             log.info(
                 "CLIP matrix full load: reason=%s rows=%d gen=%d epoch=%d",
@@ -322,8 +429,12 @@ class ClipIndex:
             "generation": c.generation,
         }
 
-    def _load_all_rows(self) -> _ClipCache:
+    def _load_all_rows(self, policy_identity: tuple[str, str] | None = None) -> _ClipCache:
         """Full reload from `.clip.sqlite` under one read transaction."""
+        if policy_identity is None:
+            from . import recall_policy
+
+            policy_identity = recall_policy.recall_policy_identity(self.vault_root)
         conn = self._connect()
         try:
             conn.execute("BEGIN")
@@ -343,12 +454,21 @@ class ClipIndex:
             mtime = 0.0
         if not rows:
             return _ClipCache(
-                epoch, gen, instance, mtime, [], [], np.zeros((0, CLIP_DIM), dtype=np.float32)
+                epoch,
+                gen,
+                instance,
+                mtime,
+                policy_identity,
+                [],
+                [],
+                np.zeros((0, CLIP_DIM), dtype=np.float32),
             )
         paths = [r[0] for r in rows]
         frame_ts = [r[1] for r in rows]
         matrix = np.stack([np.frombuffer(r[2], dtype=np.float32) for r in rows], axis=0)
-        return _ClipCache(epoch, gen, instance, mtime, paths, frame_ts, matrix)
+        return _ClipCache(
+            epoch, gen, instance, mtime, policy_identity, paths, frame_ts, matrix
+        )
 
     @staticmethod
     def cache_token(vault_root: Path) -> tuple[int, int, int]:

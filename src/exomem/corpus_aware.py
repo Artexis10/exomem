@@ -157,10 +157,12 @@ def _is_relation_target_eligible(vault_root: Path, rel_path: str) -> bool:
     like `Handbooks/`/`Reference/`) fails that bar — you can't act on the
     edge, so surfacing it just pollutes the graph (audit finding 2-02).
     """
-    from . import access
+    from . import access, recall_policy
 
     normalized = (rel_path or "").replace("\\", "/").lstrip("/")
     if not normalized.casefold().startswith(kb_prefix().casefold()):
+        return False
+    if not recall_policy.is_recall_candidate(vault_root, vault_root / normalized):
         return False
     return access.access_tier(vault_root, rel_path) not in (
         access.TIER_READONLY,
@@ -261,16 +263,23 @@ def _best_cosine_per_file(
     if readiness.should_defer("embeddings"):
         return {}
     try:
-        from . import embeddings
+        from . import embeddings, index_paths
 
         chunks = embeddings.chunk_text(title, body)
         if not chunks:
             return {}
         vecs = embeddings.embed_texts(chunks, is_query=False)
         idx = embeddings.get_embedding_index(vault_root)
+        root = vault_root.resolve()
+        allowed_paths = {
+            path.relative_to(root).as_posix()
+            for path in index_paths.iter_index_markdown(vault_root)
+        }
         best_per_file: dict[str, float] = {}
         for v in vecs:
-            for fp, _cidx, _ctext, score in idx.search(v, k=k):
+            for fp, _cidx, _ctext, score in idx.search(
+                v, k=k, allowed_paths=allowed_paths
+            ):
                 if fp not in best_per_file or score > best_per_file[fp]:
                     best_per_file[fp] = score
         return best_per_file
@@ -316,6 +325,7 @@ def detect_duplicates(
         return []
 
     from . import find as find_module
+    from . import recall_policy
 
     self_canon = _canon(self_path) if self_path else None
     out: list[DupCandidate] = []
@@ -323,6 +333,8 @@ def detect_duplicates(
         if score < threshold:
             break  # sorted desc — nothing below threshold remains
         if self_canon and _canon(fp) == self_canon:
+            continue
+        if not recall_policy.is_recall_candidate(vault_root, vault_root / fp):
             continue
         page = find_module._CACHE.get(vault_root / fp, vault_root)
         if page is None:
@@ -379,7 +391,8 @@ def detect_contradictions(
     if not best_per_file:
         return []
 
-    from . import access, find as find_module
+    from . import access, recall_policy
+    from . import find as find_module
 
     self_canon = _canon(self_path) if self_path else None
     out: list[DupCandidate] = []
@@ -389,6 +402,8 @@ def detect_contradictions(
         if score < floor:
             break  # sorted desc — nothing else reaches the band
         if self_canon and _canon(fp) == self_canon:
+            continue
+        if not recall_policy.is_recall_candidate(vault_root, vault_root / fp):
             continue
         page = find_module._CACHE.get(vault_root / fp, vault_root)
         if page is None:

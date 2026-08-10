@@ -103,6 +103,21 @@ def test_selected_pack_guidance_survives_in_compact(payloads):
     assert "agent_instructions" in selected
 
 
+def test_compact_action_catalogues_reference_selected_pack_guidance_once(payloads):
+    """Action aliases point at the selected pack; they do not repeat its body."""
+    compact = payloads["compact"]
+    for catalogue_name in ("simple_actions", "front_door_actions"):
+        for action in compact[catalogue_name].values():
+            for guidance in action.get("selected_pack_guidance", []):
+                assert set(guidance) <= {"pack_id", "name"}
+
+    assert any(
+        "agent_instructions" in guidance
+        for action in payloads["full"]["simple_actions"].values()
+        for guidance in action.get("selected_pack_guidance", [])
+    )
+
+
 def test_compact_still_teaches_the_core_loop(payloads):
     """A smaller contract is only a win if it is still a contract."""
     compact = payloads["compact"]

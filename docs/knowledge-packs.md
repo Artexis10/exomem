@@ -6,7 +6,9 @@ right governed layer without asking the user to understand Sources, Evidence,
 Notes, Entities, or supersession first.
 
 Packs do not create a new storage engine. They compose Exomem's product commands
-and governed canonical implementation leaves.
+and governed canonical implementation leaves. They are advisory: selecting one
+does not activate a collection, create folders or templates, migrate content, or
+make a schema true behind the user's back.
 
 ## Built-in packs
 
@@ -115,6 +117,13 @@ Packs do not bypass governance. They help agents choose product commands:
 | `connect` | `connect_memory` |
 | `adopt` | `adopt_vault(mode="scan-only")` before copy/compile modes |
 | `maintain` | `maintain_memory(mode="audit")`; explicit `fix` or `reconcile` modes for repairs |
+| `record` observed state | `record_memory`: `inspect`, `create`, `query`, `append`, or `update` |
 
 Agents should speak in product language. The user can say "save this warranty
 receipt"; the agent chooses the evidence/proof route and reports the saved path.
+They can say "log this training session" or "update the car mileage"; the agent
+uses `record_memory` for a configured Record collection, without exposing a
+storage-specific tool. Packs may recommend folders, fields, templates, views,
+and review rhythms, but those recommendations never fork core behavior or make a
+taxonomy mandatory. Machine-readable collection blueprints and pack activation
+remain deferred.

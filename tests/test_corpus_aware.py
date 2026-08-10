@@ -12,15 +12,11 @@ from pathlib import Path
 
 import pytest
 
-from exomem import (
-    add as add_module,
-    corpus_aware,
-    edit as edit_module,
-    embeddings,
-    find as find_module,
-    note as note_module,
-)
-
+from exomem import add as add_module
+from exomem import corpus_aware, embeddings
+from exomem import edit as edit_module
+from exomem import find as find_module
+from exomem import note as note_module
 
 # ---------------- pure / torch-free logic ----------------
 
@@ -39,16 +35,32 @@ def _hit(path: str, *, gid: int = 0, vr: int | None = None, br: int | None = Non
     )
 
 
-def test_suggest_related_excludes_self_and_already_linked(monkeypatch) -> None:
+def _seed_hit_file(vault: Path, path: str) -> None:
+    """Create a minimal in-KB target so eligibility tests exercise access."""
+    target = vault / path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("# Candidate\n\nCandidate body.\n", encoding="utf-8")
+
+
+def test_suggest_related_excludes_self_and_already_linked(
+    vault: Path, monkeypatch
+) -> None:
     fake = [
         _hit("Knowledge Base/Notes/Insights/self.md"),
         _hit("Knowledge Base/Notes/Insights/linked.md"),
         _hit("Knowledge Base/Notes/Insights/fresh1.md"),
         _hit("Knowledge Base/Notes/Insights/fresh2.md"),
     ]
+    for path in (
+        "Knowledge Base/Notes/Insights/self.md",
+        "Knowledge Base/Notes/Insights/linked.md",
+        "Knowledge Base/Notes/Insights/fresh1.md",
+        "Knowledge Base/Notes/Insights/fresh2.md",
+    ):
+        _seed_hit_file(vault, path)
     monkeypatch.setattr(find_module, "find", lambda *a, **k: fake)
     out = corpus_aware.suggest_related(
-        Path("/unused"), title="t", body="b",
+        vault, title="t", body="b",
         self_path="Knowledge Base/Notes/Insights/self",
         existing_links={"Knowledge Base/Notes/Insights/linked"},
         limit=8,
@@ -59,22 +71,28 @@ def test_suggest_related_excludes_self_and_already_linked(monkeypatch) -> None:
     assert {"notes/insights/fresh1", "notes/insights/fresh2"} <= paths
 
 
-def test_suggest_related_prefers_hubs(monkeypatch) -> None:
+def test_suggest_related_prefers_hubs(vault: Path, monkeypatch) -> None:
     # find ranks the leaf first; a strongly-connected hub sits just below it.
     # The hub bonus must lift the hub to the top.
     fake = [
         _hit("Knowledge Base/Notes/Insights/leaf.md", gid=0),
         _hit("Knowledge Base/Notes/Insights/hub.md", gid=100),
     ]
+    for path in (
+        "Knowledge Base/Notes/Insights/leaf.md",
+        "Knowledge Base/Notes/Insights/hub.md",
+    ):
+        _seed_hit_file(vault, path)
     monkeypatch.setattr(find_module, "find", lambda *a, **k: fake)
-    out = corpus_aware.suggest_related(Path("/unused"), title="t", body="b", limit=8)
+    out = corpus_aware.suggest_related(vault, title="t", body="b", limit=8)
     assert corpus_aware._canon(out[0].path) == "notes/insights/hub"
 
 
-def test_suggest_related_why_mentions_signals(monkeypatch) -> None:
+def test_suggest_related_why_mentions_signals(vault: Path, monkeypatch) -> None:
     fake = [_hit("Knowledge Base/Notes/Insights/x.md", gid=5, vr=2)]
+    _seed_hit_file(vault, "Knowledge Base/Notes/Insights/x.md")
     monkeypatch.setattr(find_module, "find", lambda *a, **k: fake)
-    out = corpus_aware.suggest_related(Path("/unused"), title="t", body="b")
+    out = corpus_aware.suggest_related(vault, title="t", body="b")
     assert "semantic #2" in out[0].why
     assert "hub" in out[0].why  # gid >= 3
 
@@ -300,15 +318,14 @@ def test_note_shares_one_embedding_pass(vault, monkeypatch) -> None:
 
 # ---------------- semantic (model-loading) ----------------
 
-pytest.importorskip("sentence_transformers")
-pytest.importorskip("torch")
-
 
 _INSIGHT = "Knowledge Base/Notes/Insights/progressive-disclosure-without-mode-fragmentation.md"
 
 
 @pytest.fixture
 def embeddings_enabled(monkeypatch):
+    pytest.importorskip("sentence_transformers")
+    pytest.importorskip("torch")
     monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
     embeddings._IMPORT_FAILED = False
 

@@ -42,7 +42,9 @@ from .mutation_terminal import (
     committed_terminal,
     needs_review_terminal,
     project_terminal,
+    replayed_terminal,
     split_response_detail,
+    valid_record_receipt,
 )
 from .privacy_log import content_private_logging_enabled
 
@@ -69,7 +71,7 @@ _IMPLICIT_RETRY_TTL_SECONDS = 600.0
 # `commit_existing`. `EXOMEM_WIDE_MUTATION_BOUNDARY` restores today's
 # wide-boundary behavior for every command in this set.
 _NARROW_BOUNDARY_COMMANDS = frozenset(
-    {"remember", "replace_memory", "edit_memory", "observe_memory"}
+    {"remember", "replace_memory", "edit_memory", "observe_memory", "record_memory"}
 )
 _EXPLICIT_RETRY_TTL_SECONDS = 24 * 60 * 60.0
 _IDEMPOTENCY_WAIT_SECONDS = 5.0
@@ -1370,6 +1372,17 @@ class LeaseManager:
                         receipt_id=receipt,
                         idempotency_key=effective_public_idempotency_key,
                     )
+                if (
+                    command.name == "record_memory"
+                    and valid_record_receipt(leaf_result)
+                    and leaf_result.get("outcome") == "replayed"
+                ):
+                    return replayed_terminal(
+                        leaf_result,
+                        request_id=request_id,
+                        receipt_id=receipt,
+                        idempotency_key=effective_public_idempotency_key,
+                    )
                 # A guarded write that validated but did not commit is mid-flight, not
                 # failed. Give it the same envelope shape as its eventual success so a
                 # client can correlate the pair on `operation_id` and see `terminal`
@@ -1477,7 +1490,13 @@ class LeaseManager:
             request_id=request_id,
             command=command.name,
             receipt=receipt,
-            outcome="committed",
+            outcome=(
+                "replayed"
+                if isinstance(result, Mapping)
+                and result.get("status") == "replayed"
+                and result.get("mutated") is False
+                else "committed"
+            ),
             error_code=None,
             duration_ms=round((time.perf_counter() - t_start) * 1000, 2),
             scope=implicit_idempotency_scope or idempotency_principal_scope,

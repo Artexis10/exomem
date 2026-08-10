@@ -107,7 +107,14 @@ def _hit(path: str):
     )
 
 
-def test_suggest_related_excludes_out_of_kb_targets(monkeypatch) -> None:
+def _seed_hit_file(vault: Path, path: str) -> None:
+    """Create a minimal in-KB target so eligibility tests exercise access."""
+    target = vault / path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("# Candidate\n\nCandidate body.\n", encoding="utf-8")
+
+
+def test_suggest_related_excludes_out_of_kb_targets(vault: Path, monkeypatch) -> None:
     # Handbooks/ and Reference/ are sibling trees of Knowledge Base/ — read-only
     # INPUT surfaced by find()'s auto-widen, never governed notes a relates_to
     # edge can point at.
@@ -116,8 +123,9 @@ def test_suggest_related_excludes_out_of_kb_targets(monkeypatch) -> None:
         _hit("Reference/sample-curated.md"),
         _hit("Knowledge Base/Notes/Insights/fresh.md"),
     ]
+    _seed_hit_file(vault, "Knowledge Base/Notes/Insights/fresh.md")
     monkeypatch.setattr(find_module, "find", lambda *a, **k: fake)
-    out = corpus_aware.suggest_related(Path("/unused"), title="t", body="b", limit=8)
+    out = corpus_aware.suggest_related(vault, title="t", body="b", limit=8)
     paths = {corpus_aware._canon(s.path) for s in out}
     assert "handbooks/incident-severity-levels" not in paths
     assert "reference/sample-curated" not in paths
@@ -135,11 +143,30 @@ def test_suggest_related_excludes_readonly_and_excluded_targets(
         _hit("Knowledge Base/Private/secret.md"),
         _hit("Knowledge Base/Notes/Insights/fresh.md"),
     ]
+    for path in (
+        "Knowledge Base/Products/ro-note.md",
+        "Knowledge Base/Private/secret.md",
+        "Knowledge Base/Notes/Insights/fresh.md",
+    ):
+        _seed_hit_file(vault, path)
     monkeypatch.setattr(find_module, "find", lambda *a, **k: fake)
     out = corpus_aware.suggest_related(vault, title="t", body="b", limit=8)
     paths = {corpus_aware._canon(s.path) for s in out}
     assert "products/ro-note" not in paths
     assert "private/secret" not in paths
+    assert paths == {"notes/insights/fresh"}
+
+
+def test_suggest_related_excludes_stale_missing_hits(vault: Path, monkeypatch) -> None:
+    """A stale index hit must not become a relation target after deletion."""
+    fake = [
+        _hit("Knowledge Base/Notes/Insights/missing.md"),
+        _hit("Knowledge Base/Notes/Insights/fresh.md"),
+    ]
+    _seed_hit_file(vault, "Knowledge Base/Notes/Insights/fresh.md")
+    monkeypatch.setattr(find_module, "find", lambda *a, **k: fake)
+    out = corpus_aware.suggest_related(vault, title="t", body="b", limit=8)
+    paths = {corpus_aware._canon(s.path) for s in out}
     assert paths == {"notes/insights/fresh"}
 
 
