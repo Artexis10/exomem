@@ -79,10 +79,10 @@ def _configure_local_search_capabilities(action: str | None) -> tuple[str, ...]:
 # Subcommands `_dispatch_main` routes explicitly, before falling through to
 # `_serve_main`. Kept alongside `_is_cli_only_invocation` so a one-shot CLI
 # command gets its own log file; `serve` configures server-role logging
-# itself from `server.run()`, so it is deliberately excluded here.
+# itself from `server.run()`, and `hosted` emits a JSON-only operator protocol,
+# so they are deliberately excluded here.
 _CLI_ONLY_SUBCOMMANDS: frozenset[str] = frozenset(
     {
-        "hosted",
         "setup",
         "init",
         "install-skill",
