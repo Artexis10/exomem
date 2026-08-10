@@ -65,6 +65,15 @@
 {{- $lock.components.runtime.image -}}
 {{- end -}}
 
+{{- define "exomem.hostedRuntimeImages" -}}
+{{- $lock := include "exomem.hostedDeploymentLock" . | mustFromJson -}}
+{{- $images := list $lock.components.runtime.image -}}
+{{- range $legacy := $lock.composition.legacyCatalog -}}
+{{- $images = append $images $legacy.runtimeImage -}}
+{{- end -}}
+{{- $images | uniq | toJson -}}
+{{- end -}}
+
 {{- define "exomem.hostedProvisionerImage" -}}
 {{- $lock := include "exomem.hostedDeploymentLock" . | mustFromJson -}}
 {{- $lock.components.provisioner.image -}}

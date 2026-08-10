@@ -1,4 +1,4 @@
-{{- $runtimeImage := include "exomem.hostedRuntimeImage" . -}}
+{{- $runtimeImages := include "exomem.hostedRuntimeImages" . | mustFromJson -}}
 {{- $provisionerImage := include "exomem.hostedProvisionerImage" . -}}
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
@@ -104,7 +104,7 @@ spec:
         !variables.inScope ||
         (
         object.spec.containers[0].name == 'exomem' &&
-        object.spec.containers[0].image == {{ $runtimeImage | quote }} &&
+        object.spec.containers[0].image in {{ $runtimeImages | toJson }} &&
         object.spec.containers[0].imagePullPolicy == 'IfNotPresent' &&
         object.spec.containers[0].securityContext.allowPrivilegeEscalation == false &&
         object.spec.containers[0].securityContext.readOnlyRootFilesystem == true &&
@@ -457,7 +457,7 @@ spec:
       message: Restore candidate fetch must use the exact pinned provisioner command and bounded source.
     - expression: >-
         variables.restore.name == 'restore-candidate' &&
-        variables.restore.image == {{ $runtimeImage | quote }} &&
+        variables.restore.image in {{ $runtimeImages | toJson }} &&
         variables.restore.imagePullPolicy == 'IfNotPresent' &&
         variables.restore.command ==
           ['exomem', 'hosted', 'restore-candidate', '--contract-version', '1',
