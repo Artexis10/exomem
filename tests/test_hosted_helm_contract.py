@@ -167,6 +167,93 @@ def test_platform_rejects_deployment_lock_hash_drift(
     assert "deployment lock SHA-256 mismatch" in result.stderr
 
 
+def test_platform_admission_policies_admit_each_governed_legacy_runtime_image(
+    tmp_path: Path,
+) -> None:
+    validation_values = yaml.safe_load(
+        (PLATFORM / "values.validation.yaml").read_text(encoding="utf-8")
+    )
+    lock = json.loads(validation_values["provisioner"]["deploymentLockJson"])
+    forward_image = lock["components"]["runtime"]["image"]
+    legacy_images = [
+        "ghcr.io/artexis10/exomem@sha256:" + "f" * 64,
+        "ghcr.io/artexis10/exomem@sha256:" + "e" * 64,
+    ]
+    unrelated_image = "ghcr.io/artexis10/exomem@sha256:" + "9" * 64
+    legacy_catalog = lock["composition"]["legacyCatalog"]
+    legacy = legacy_catalog[0]
+    for image in legacy_images:
+        unit = json.loads(json.dumps(legacy))
+        unit["runtimeImage"] = image
+        unit["contract"]["runtimeImage"] = image
+        unit["contractSha256"] = hashlib.sha256(
+            (json.dumps(unit["contract"], sort_keys=True, separators=(",", ":")) + "\n").encode()
+        ).hexdigest()
+        legacy_catalog.append(unit)
+    legacy["runtimeImage"] = forward_image
+    legacy["contract"]["runtimeImage"] = forward_image
+    legacy["contractSha256"] = hashlib.sha256(
+        (json.dumps(legacy["contract"], sort_keys=True, separators=(",", ":")) + "\n").encode()
+    ).hexdigest()
+    lock_json = json.dumps(lock, separators=(",", ":")) + "\n"
+    override = tmp_path / "legacy-runtime-lock.yaml"
+    override.write_text(
+        yaml.safe_dump(
+            {
+                "provisioner": {
+                    "deploymentLockJson": lock_json,
+                    "deploymentLockSha256": hashlib.sha256(lock_json.encode()).hexdigest(),
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    documents = _render(
+        PLATFORM,
+        PLATFORM / "values.validation.yaml",
+        namespace="exomem-platform",
+        extra_args=("--values", str(override)),
+    )
+    policy_expressions = {
+        name: [
+            validation["expression"]
+            for validation in _find(documents, "ValidatingAdmissionPolicy", name)["spec"][
+                "validations"
+            ]
+        ]
+        for name in (
+            "exomem-tenant-boundary",
+            "exomem-tenant-restore-candidate",
+            "exomem-provisioner-scope",
+            "exomem-durability-actions-scope",
+        )
+    }
+    policies = {name: "\n".join(expressions) for name, expressions in policy_expressions.items()}
+    runtime_images = json.dumps([forward_image, *legacy_images], separators=(",", ":"))
+    assert f"object.spec.containers[0].image in {runtime_images}" in policies[
+        "exomem-tenant-boundary"
+    ]
+    assert f"variables.restore.image in {runtime_images}" in policies[
+        "exomem-tenant-restore-candidate"
+    ]
+    provisioner_image_guard = (
+        f"variables.target.spec.template.spec.containers[0].image in {runtime_images}"
+    )
+    assert provisioner_image_guard in policies["exomem-provisioner-scope"]
+    durability_guards = (
+        "request.resource.resource != 'jobs'",
+        "request.resource.resource != 'statefulsets'",
+    )
+    assert all(
+        any(guard in expression and provisioner_image_guard in expression for expression in policy_expressions[
+            "exomem-durability-actions-scope"
+        ])
+        for guard in durability_guards
+    )
+    assert unrelated_image not in "\n".join(policies.values())
+
+
 def test_platform_rejects_wrong_provisioner_image_repository(tmp_path: Path) -> None:
     if HELM is None:
         pytest.skip("set HELM_BIN to run pinned Helm rendering")
