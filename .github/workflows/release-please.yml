@@ -108,7 +108,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: main
+          ref: ${{ needs.release-please.outputs.tag_name }}
 
       - name: Install uv
         uses: astral-sh/setup-uv@v5
@@ -176,7 +176,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: main
+          ref: ${{ needs.release-please.outputs.tag_name }}
 
       - name: Install uv
         uses: astral-sh/setup-uv@v5
@@ -213,7 +213,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: main
+          ref: ${{ needs.release-please.outputs.tag_name }}
 
       - name: Install mcp-publisher
         run: |
