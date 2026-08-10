@@ -800,6 +800,19 @@ def test_rotation_job_drain_jq_selects_only_captured_controller_jobs(tmp_path: P
         capture_output=True,
     )
     assert gone.returncode == 1
+    aborted = subprocess.run(
+        [
+            "bash",
+            "-c",
+            'set -euo pipefail; false > "$1"; echo drained',
+            "bash",
+            str(tmp_path / "jobs-current.json"),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert aborted.returncode != 0
+    assert "drained" not in aborted.stdout
 
 
 def test_capacity_gate_blocks_unknown_economics_and_the_cell_past_the_cap(tmp_path: Path) -> None:

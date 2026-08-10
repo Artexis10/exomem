@@ -480,7 +480,15 @@ kubectl -n exomem-platform get jobs -o json | jq '[.items[] | select(any(.metada
 kubectl -n exomem-platform get jobs -l exomem.io/deletion-job=true -o json | jq '[.items[] | {name:.metadata.name,uid:.metadata.uid}]' > "$rotation_run/deletion-jobs.json"
 jq -r '.[].name' "$rotation_run/cronjob-jobs.json" | while read -r name; do kubectl -n exomem-platform delete job "$name" --wait=false; done
 jq -r '.[].name' "$rotation_run/deletion-jobs.json" | while read -r name; do kubectl -n exomem-platform delete job "$name" --wait=false; done
-while jq -e --slurpfile cron "$rotation_run/cronjob-jobs.json" --slurpfile deletion "$rotation_run/deletion-jobs.json" '[.items[].metadata.uid] as $live | [($cron[0][]?, $deletion[0][]?) | select(.uid as $uid | $live | index($uid))] | length > 0' < <(kubectl -n exomem-platform get jobs -o json) >/dev/null; do sleep 2; done
+drain_attempt=0
+while :; do
+  drain_attempt=$((drain_attempt + 1))
+  test "$drain_attempt" -le 60 || { echo 'captured Jobs did not drain; leave consumers stopped' >&2; exit 1; }
+  kubectl -n exomem-platform get jobs -o json > "$rotation_run/jobs-current.json"
+  remaining_jobs="$(jq -r --slurpfile cron "$rotation_run/cronjob-jobs.json" --slurpfile deletion "$rotation_run/deletion-jobs.json" '[.items[].metadata.uid] as $live | [($cron[0][]?, $deletion[0][]?) | select(.uid as $uid | $live | index($uid))] | length' "$rotation_run/jobs-current.json")"
+  test "$remaining_jobs" -eq 0 && break
+  sleep 2
+done
 ! kubectl -n exomem-platform get job exomem-provisioner-database-migration 2>/dev/null
 ! kubectl -n exomem-platform get job exomem-provisioner-database-bootstrap 2>/dev/null
 ! kubectl -n exomem-platform get secret exomem-provisioner-database-bootstrap-admin 2>/dev/null
