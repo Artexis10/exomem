@@ -491,13 +491,20 @@ def test_platform_rotation_quiescence_surfaces_every_database_consumer() -> None
     standing: set[tuple[str, str]] = set()
     for document in documents:
         kind = document.get("kind")
-        if kind not in {"Deployment", "CronJob"}:
+        pod_paths = {
+            "Deployment": ("spec", "template", "spec"),
+            "StatefulSet": ("spec", "template", "spec"),
+            "DaemonSet": ("spec", "template", "spec"),
+            "ReplicaSet": ("spec", "template", "spec"),
+            "Job": ("spec", "template", "spec"),
+            "CronJob": ("spec", "jobTemplate", "spec", "template", "spec"),
+            "Pod": ("spec",),
+        }
+        if kind not in pod_paths:
             continue
-        pod = (
-            document["spec"]["template"]["spec"]
-            if kind == "Deployment"
-            else document["spec"]["jobTemplate"]["spec"]["template"]["spec"]
-        )
+        pod: dict = document
+        for key in pod_paths[kind]:
+            pod = pod[key]
         if any(
             references_database(container)
             for container in [*(pod.get("initContainers") or []), *(pod.get("containers") or [])]
@@ -506,6 +513,7 @@ def test_platform_rotation_quiescence_surfaces_every_database_consumer() -> None
     assert standing == {
         *(("Deployment", name) for name in expected_deployments),
         *(("CronJob", name) for name in expected_cronjobs),
+        ("Job", "exomem-provisioner-database-migration"),
     }
 
     deletion_template = json.loads(

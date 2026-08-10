@@ -437,6 +437,39 @@ and ready. Preserve the old role password, v1 ciphertext, signed v1 registry
 pair, exact controller snapshot, and the authenticated pre-change SQL session
 until final health is proven.
 
+Capture content-free controller state before stopping work; this snapshot is the
+only restoration input and is retained with the rotation receipts:
+
+```bash
+set +x
+namespace=exomem-platform
+rotation_snapshot=/secure/operator/exomem-hosted/rotation-snapshot.json
+umask 077
+kubectl -n exomem-platform get deployment -o json | jq '[.items[] | select(.metadata.name | IN("exomem-provisioner-api","exomem-provisioner-worker","exomem-volume-worker")) | {kind:"Deployment",name:.metadata.name,replicas:(.spec.replicas // 1)}]' > "$rotation_snapshot"
+kubectl -n exomem-platform get cronjob -o json | jq --slurpfile deployments "$rotation_snapshot" '{schema_version:1,deployments:$deployments[0],cronjobs:[.items[] | select(.metadata.name | IN("exomem-durability-actions","exomem-export-gc","exomem-durability-backup","exomem-database-backup","exomem-deletion-dispatcher","exomem-hosted-scheduler-exomem-reconcile")) | {name:.metadata.name,suspend:(.spec.suspend // false)}]}' > "$rotation_snapshot.next" && mv "$rotation_snapshot.next" "$rotation_snapshot"
+chmod 0600 "$rotation_snapshot"
+for name in exomem-durability-actions exomem-export-gc exomem-durability-backup exomem-database-backup exomem-deletion-dispatcher exomem-hosted-scheduler-exomem-reconcile; do kubectl -n exomem-platform patch cronjob "$name" --type merge -p '{"spec":{"suspend":true}}'; done
+for name in exomem-provisioner-api exomem-provisioner-worker exomem-volume-worker; do kubectl -n exomem-platform scale deployment "$name" --replicas=0; done
+kubectl -n exomem-platform get jobs -o json
+kubectl -n exomem-platform get pods -o json | jq -e '[.items[] | select(.status.phase == "Pending" or .status.phase == "Running") | select([.spec.initContainers[], .spec.containers[] | .env[]? | select(.valueFrom.secretKeyRef.name == "exomem-provisioner-database")] | length > 0)] | length == 0'
+```
+
+Apply the reviewed complete v2 registry with PostgreSQL still accepting v1;
+the command reads no Secret data. Use an interactive, non-echoing provider SQL
+session for the password change and authentication probes—never put either DSN
+or password in argv or output. The old probe must fail specifically with
+`password authentication failed`.
+
+```bash
+infra/scripts/apply_active_sops_secrets.py --matrix infra/contracts/secret-destinations-v1.json --registry "$registry_v2" --registry-public-key "$public_key_v2" --trust-contract infra/contracts/active-secret-registry-v1.json --verify-only
+infra/scripts/apply_active_sops_secrets.py --matrix infra/contracts/secret-destinations-v1.json --registry "$registry_v2" --registry-public-key "$public_key_v2" --trust-contract infra/contracts/active-secret-registry-v1.json
+# The governed applier invokes kubectl -n exomem-platform apply -f only after registry verification.
+kubectl -n exomem-platform get secret exomem-provisioner-database -o jsonpath='{.metadata.labels.exomem\.io/secret-version}{"\n"}'
+for name in exomem-durability-actions exomem-export-gc exomem-durability-backup exomem-database-backup exomem-deletion-dispatcher; do kubectl -n exomem-platform patch cronjob "$name" --type merge -p "{\"spec\":{\"jobTemplate\":{\"spec\":{\"template\":{\"metadata\":{\"annotations\":{\"exomem.io/restarted-at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}}}}}}}"; done
+jq -r '.deployments[] | [.name, .replicas] | @tsv' "$rotation_snapshot" | while IFS=$'\t' read -r name replicas; do kubectl -n exomem-platform scale deployment "$name" --replicas="$replicas"; done
+jq -r '.cronjobs[] | [.name, .suspend] | @tsv' "$rotation_snapshot" | while IFS=$'\t' read -r name suspend; do kubectl -n exomem-platform patch cronjob "$name" --type merge -p "{\"spec\":{\"suspend\":$suspend}}"; done
+```
+
 1. Record `ready_cell_baseline_verified`: authenticate the existing ready cell
    and retain a content-free operation/cell health receipt. Block concurrent
    Helm work and snapshot the exact Deployment replicas, CronJob suspend states,

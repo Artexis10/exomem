@@ -220,18 +220,24 @@ def _open_output_directory(
     ):
         raise ActiveSecretRegistrySigningError("registry output directory is invalid")
     absolute = directory.absolute()
-    current = Path(absolute.anchor)
-    for component in absolute.parts[1:]:
-        current /= component
-        try:
-            details = os.lstat(current)
-        except OSError as exc:
-            raise ActiveSecretRegistrySigningError("registry output directory is invalid") from exc
-        if stat.S_ISLNK(details.st_mode):
-            raise ActiveSecretRegistrySigningError("registry output directory is invalid")
     try:
-        directory_fd = os.open(absolute, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        directory_fd = os.open(absolute.anchor, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     except OSError as exc:
+        raise ActiveSecretRegistrySigningError("registry output directory is invalid") from exc
+    try:
+        for component in absolute.parts[1:]:
+            next_fd = os.open(
+                component,
+                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                dir_fd=directory_fd,
+            )
+            os.close(directory_fd)
+            directory_fd = next_fd
+    except OSError as exc:
+        try:
+            os.close(directory_fd)
+        finally:
+            pass
         raise ActiveSecretRegistrySigningError("registry output directory is invalid") from exc
     details = os.fstat(directory_fd)
     if not (

@@ -716,6 +716,18 @@ def test_provisioner_database_rotation_contract_and_runbook_are_ordered_and_reve
     assert secrets.index("suspend the external reconcile CronJob") < secrets.index(
         "restore the external reconcile state"
     )
+    for command in (
+        "rotation_snapshot=/secure/operator/exomem-hosted/rotation-snapshot.json",
+        "kubectl -n exomem-platform get deployment",
+        "kubectl -n exomem-platform get cronjob",
+        "kubectl -n exomem-platform get pods -o json",
+        "kubectl -n exomem-platform scale deployment",
+        "kubectl -n exomem-platform patch cronjob",
+        "kubectl -n exomem-platform get jobs -o json",
+        "kubectl -n exomem-platform apply -f",
+        "password authentication failed",
+    ):
+        assert command in secrets
 
 
 def test_capacity_gate_blocks_unknown_economics_and_the_cell_past_the_cap(tmp_path: Path) -> None:
@@ -1291,6 +1303,31 @@ def test_active_secret_registry_signer_rejects_unsafe_inputs_and_leaves_no_parti
     )
     assert not any(attacker.iterdir())
     assert (moved / "registry.json.complete").is_file()
+
+
+def test_active_secret_registry_signer_rejects_a_parent_swap_during_open(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    signer = _load("infra/scripts/sign_active_secret_registry.py", "active_registry_openat_test")
+    stable = tmp_path / "stable"
+    middle = stable / "middle"
+    output = middle / "output"
+    output.mkdir(parents=True, mode=0o700)
+    output.chmod(0o700)
+    attacker = tmp_path / "attacker"
+    (attacker / "output").mkdir(parents=True, mode=0o700)
+    (attacker / "output").chmod(0o700)
+    real_open = signer.os.open
+
+    def swap_before_open(path: object, flags: int, *args: object, **kwargs: object) -> int:
+        if path == "middle":
+            middle.rename(stable / "moved")
+            middle.symlink_to(attacker, target_is_directory=True)
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(signer.os, "open", swap_before_open)
+    with pytest.raises(signer.ActiveSecretRegistrySigningError, match="directory"):
+        signer._open_output_directory(output / "registry.json", output / "public.pem")
 
 
 def test_active_secret_registry_signer_parser_never_echoes_mistaken_key_material(
