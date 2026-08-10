@@ -175,11 +175,26 @@ def test_platform_admission_policies_admit_each_governed_legacy_runtime_image(
     )
     lock = json.loads(validation_values["provisioner"]["deploymentLockJson"])
     forward_image = lock["components"]["runtime"]["image"]
-    legacy_image = "ghcr.io/artexis10/exomem@sha256:" + "f" * 64
+    legacy_images = [
+        "ghcr.io/artexis10/exomem@sha256:" + "f" * 64,
+        "ghcr.io/artexis10/exomem@sha256:" + "e" * 64,
+    ]
     unrelated_image = "ghcr.io/artexis10/exomem@sha256:" + "9" * 64
-    legacy = lock["composition"]["legacyCatalog"][0]
-    legacy["runtimeImage"] = legacy_image
-    legacy["contract"]["runtimeImage"] = legacy_image
+    legacy_catalog = lock["composition"]["legacyCatalog"]
+    legacy = legacy_catalog[0]
+    for image in legacy_images:
+        unit = json.loads(json.dumps(legacy))
+        unit["runtimeImage"] = image
+        unit["contract"]["runtimeImage"] = image
+        unit["contractSha256"] = hashlib.sha256(
+            (json.dumps(unit["contract"], sort_keys=True, separators=(",", ":")) + "\n").encode()
+        ).hexdigest()
+        legacy_catalog.append(unit)
+    legacy["runtimeImage"] = forward_image
+    legacy["contract"]["runtimeImage"] = forward_image
+    legacy["contractSha256"] = hashlib.sha256(
+        (json.dumps(legacy["contract"], sort_keys=True, separators=(",", ":")) + "\n").encode()
+    ).hexdigest()
     lock_json = json.dumps(lock, separators=(",", ":")) + "\n"
     override = tmp_path / "legacy-runtime-lock.yaml"
     override.write_text(
@@ -215,7 +230,7 @@ def test_platform_admission_policies_admit_each_governed_legacy_runtime_image(
         )
     }
     policies = {name: "\n".join(expressions) for name, expressions in policy_expressions.items()}
-    runtime_images = json.dumps([forward_image, legacy_image], separators=(",", ":"))
+    runtime_images = json.dumps([forward_image, *legacy_images], separators=(",", ":"))
     assert f"object.spec.containers[0].image in {runtime_images}" in policies[
         "exomem-tenant-boundary"
     ]
