@@ -6828,6 +6828,18 @@ def _build_product_commands() -> tuple[Command, ...]:
                     choices=("compact", "full", "legacy"),
                 ),
             )
+        if name == "preserve_artifacts":
+            params = tuple(
+                Param(
+                    name=param.name,
+                    type="client_artifact_files" if param.name == "files" else param.type,
+                    required=param.required,
+                    help=param.help,
+                    cli_positional=param.cli_positional,
+                    choices=param.choices,
+                )
+                for param in params
+            )
         if name == "remember":
             generic_hint = "(any slug; unknown keys auto-register on first use)"
             desc = desc.replace("__PROJECT_KEYS_HINT__", generic_hint)

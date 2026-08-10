@@ -79,6 +79,21 @@ _OPENAPI_TYPES = {
     "list[str]": {"type": "array", "items": {"type": "string"}},
     "dict": {"type": "object"},
     "json": {},
+    "client_artifact_files": {
+        "type": "array",
+        "minItems": 1,
+        "maxItems": 8,
+        "items": {
+            "type": "object",
+            "properties": {
+                "download_url": {"type": "string"},
+                "file_id": {"type": "string"},
+                "mime_type": {"type": "string"},
+                "file_name": {"type": "string"},
+            },
+            "required": ["download_url", "file_id"],
+        },
+    },
 }
 
 _OPENAPI_OUTCOME_SCHEMA = {

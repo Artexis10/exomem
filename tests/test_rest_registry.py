@@ -98,6 +98,38 @@ def test_all_product_routes_exist(vault, monkeypatch: pytest.MonkeyPatch) -> Non
         assert r.status_code != 404, f"/api/{name} missing: {r.status_code} {r.text}"
 
 
+def test_preserve_artifacts_rest_schema_and_malformed_file_error(vault, monkeypatch: pytest.MonkeyPatch) -> None:
+    client = _client(vault, monkeypatch, EXOMEM_REST_API_KEY="sekret")
+    schema = client.get("/api/openapi.json").json()["paths"]["/api/preserve_artifacts"]["post"][
+        "requestBody"
+    ]["content"]["application/json"]["schema"]["properties"]["files"]
+
+    assert schema["minItems"] == 1
+    assert schema["maxItems"] == 8
+    assert list(schema["items"]["properties"]) == [
+        "download_url",
+        "file_id",
+        "mime_type",
+        "file_name",
+    ]
+    assert schema["items"]["required"] == ["download_url", "file_id"]
+    assert "additionalProperties" not in schema["items"]
+
+    response = client.post(
+        "/api/preserve_artifacts",
+        json={
+            "scope": "case",
+            "category": "raw",
+            "files": [{"download_url": "https://files.example/?signature=secret"}],
+        },
+        headers=_auth(),
+    )
+    assert response.status_code == 400
+    error = response.json()["error"]
+    assert error["code"] == "INVALID_FILE"
+    assert "signature" not in error["message"]
+
+
 def test_ask_memory_route_calls_the_same_find_leaf(vault, monkeypatch: pytest.MonkeyPatch) -> None:
     client = _client(vault, monkeypatch, EXOMEM_REST_API_KEY="sekret")
     r = client.post(

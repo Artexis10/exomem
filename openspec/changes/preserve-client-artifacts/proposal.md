@@ -23,4 +23,4 @@ Exomem's binary preservation contract assumes the client runtime can upload byte
 
 ## Impact
 
-The command registry, FastMCP registration, preservation/transfer helpers, bootstrap guidance, scaffold documentation, tool-schema fixtures, and upload/security tests change. The implementation reuses the existing `httpx` dependency and `preserve_stream` sink; it adds no model or reasoning service and does not change `/upload` compatibility.
+The command registry, FastMCP registration, preservation/transfer helpers, bootstrap guidance, scaffold documentation, tool-schema fixtures, and upload/security tests change. The implementation uses pinned standard-library HTTPS retrieval and the existing `preserve_stream` sink; it adds no model or reasoning service and does not change `/upload` compatibility.

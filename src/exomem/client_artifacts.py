@@ -10,10 +10,12 @@ import os
 import socket
 import ssl
 import tempfile
+import threading
+import time
 from collections.abc import Callable, Mapping
-from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
+from queue import Empty, Queue
 from urllib.parse import urljoin, urlsplit
 
 from .preserve import PreserveError, _sanitize_segment, preserve_stream
@@ -25,6 +27,10 @@ MAX_TOTAL_BYTES = MAX_FILE_BYTES
 MAX_REDIRECTS = 3
 _CHUNK_SIZE = 1024 * 1024
 _TIMEOUT_SECONDS = 20.0
+_RETRIEVAL_DEADLINE_SECONDS = 20.0
+_BATCH_DEADLINE_SECONDS = 60.0
+_monotonic = time.monotonic
+_DNS_WORKERS = threading.BoundedSemaphore(4)
 
 
 class SafeFetchError(Exception):
@@ -61,6 +67,16 @@ class StagedArtifact:
     filename: str
 
 
+def remaining_retrieval_timeout(
+    deadline: float, *, clock: Callable[[], float] | None = None
+) -> float:
+    """Return the remaining absolute retrieval budget or fail content-free."""
+    remaining = deadline - (clock or _monotonic)()
+    if remaining <= 0:
+        raise SafeFetchError("SAFE_FETCH_FAILED", "download retrieval timed out")
+    return min(_TIMEOUT_SECONDS, remaining)
+
+
 def validate_download_url(value: object):
     """Parse an HTTPS download URL without ever reflecting it into errors."""
     try:
@@ -84,20 +100,50 @@ def validate_redirect_url(current_url: str, location: str):
     return validate_download_url(urljoin(current_url, location))
 
 
+def _bounded_resolve(
+    resolver: Callable[[], list[str]], *, deadline: float
+) -> list[str]:
+    """Bound one blocking resolver call without retaining unbounded workers."""
+    timeout = remaining_retrieval_timeout(deadline)
+    if not _DNS_WORKERS.acquire(timeout=timeout):
+        raise SafeFetchError("SAFE_FETCH_FAILED", "download destination could not be resolved")
+    result: Queue[tuple[bool, object]] = Queue(maxsize=1)
+
+    def _resolve() -> None:
+        try:
+            result.put((True, resolver()))
+        except Exception as error:  # noqa: BLE001 - normalized below
+            result.put((False, error))
+        finally:
+            _DNS_WORKERS.release()
+
+    threading.Thread(target=_resolve, daemon=True).start()
+    try:
+        succeeded, value = result.get(timeout=remaining_retrieval_timeout(deadline))
+    except Empty as error:
+        raise SafeFetchError("SAFE_FETCH_FAILED", "download destination could not be resolved") from error
+    if not succeeded:
+        raise SafeFetchError("SAFE_FETCH_FAILED", "download destination could not be resolved") from value
+    return value  # type: ignore[return-value]
+
+
 def resolve_public_addresses(
     host: str,
     port: int,
     *,
     resolver: Callable[..., list[str]] | None = None,
+    deadline: float | None = None,
 ) -> tuple[str, ...]:
     """Return DNS answers only when every answer is globally routable."""
-    if resolver is None:
-        try:
-            answers = [entry[4][0] for entry in socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)]
-        except OSError as error:
-            raise SafeFetchError("SAFE_FETCH_FAILED", "download destination could not be resolved") from error
-    else:
-        answers = resolver(host, port)
+    def resolve() -> list[str]:
+        if resolver is None:
+            return [entry[4][0] for entry in socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)]
+        return resolver(host, port)
+
+    try:
+        answers = _bounded_resolve(resolve, deadline=deadline) if deadline is not None else resolve()
+    except OSError as error:
+        raise SafeFetchError("SAFE_FETCH_FAILED", "download destination could not be resolved") from error
     public: list[str] = []
     try:
         for answer in answers:
@@ -107,7 +153,7 @@ def resolve_public_addresses(
             rendered = str(address)
             if rendered not in public:
                 public.append(rendered)
-    except ValueError as error:
+    except (TypeError, ValueError) as error:
         raise SafeFetchError("SAFE_FETCH_FAILED", "download destination is not public") from error
     if not public:
         raise SafeFetchError("SAFE_FETCH_FAILED", "download destination is not public")
@@ -117,8 +163,10 @@ def resolve_public_addresses(
 class _PinnedHTTPSConnection(http.client.HTTPSConnection):
     """Connect to a validated address while retaining the URL hostname for TLS."""
 
-    def __init__(self, address: str, port: int, *, server_hostname: str) -> None:
-        super().__init__(address, port=port, timeout=_TIMEOUT_SECONDS, context=ssl.create_default_context())
+    def __init__(
+        self, address: str, port: int, *, server_hostname: str, timeout: float
+    ) -> None:
+        super().__init__(address, port=port, timeout=timeout, context=ssl.create_default_context())
         self._server_hostname = server_hostname
 
     def connect(self) -> None:
@@ -146,18 +194,23 @@ def _validate_destination(scope: str, category: str) -> None:
         raise SafeFetchError("INVALID_PRESERVE", "category is empty or invalid")
 
 
-def stage_artifact(file: Mapping[str, object], budget: FetchBudget) -> StagedArtifact:
+def stage_artifact(
+    file: Mapping[str, object], budget: FetchBudget, *, batch_deadline: float | None = None
+) -> StagedArtifact:
     """Download one handle to a private temporary file before vault mutation."""
     file_id = _file_id(file)
     current_url = str(file.get("download_url") or "")
     redirects = 0
     destination: Path | None = None
+    deadline = min(_monotonic() + _RETRIEVAL_DEADLINE_SECONDS, batch_deadline or float("inf"))
     try:
         while True:
+            remaining_retrieval_timeout(deadline)
             parsed = validate_download_url(current_url)
             host = (parsed.hostname or "").encode("idna").decode("ascii")
             port = parsed.port or 443
-            addresses = resolve_public_addresses(host, port)
+            addresses = resolve_public_addresses(host, port, deadline=deadline)
+            remaining_retrieval_timeout(deadline)
             target = parsed.path or "/"
             if parsed.query:
                 target += f"?{parsed.query}"
@@ -165,7 +218,12 @@ def stage_artifact(file: Mapping[str, object], budget: FetchBudget) -> StagedArt
             selected_connection = None
             last_error: Exception | None = None
             for address in addresses:
-                connection = _PinnedHTTPSConnection(address, port, server_hostname=host)
+                connection = _PinnedHTTPSConnection(
+                    address,
+                    port,
+                    server_hostname=host,
+                    timeout=remaining_retrieval_timeout(deadline),
+                )
                 try:
                     connection.putrequest("GET", target, skip_host=True, skip_accept_encoding=True)
                     host_header = host if port == 443 else f"{host}:{port}"
@@ -174,7 +232,13 @@ def stage_artifact(file: Mapping[str, object], budget: FetchBudget) -> StagedArt
                     connection.endheaders()
                     response = connection.getresponse()
                     selected_connection = connection
+                    remaining_retrieval_timeout(deadline)
                     break
+                except SafeFetchError:
+                    if response is not None:
+                        response.close()
+                    connection.close()
+                    raise
                 except (OSError, ssl.SSLError, http.client.HTTPException) as error:
                     last_error = error
                     connection.close()
@@ -197,9 +261,11 @@ def stage_artifact(file: Mapping[str, object], budget: FetchBudget) -> StagedArt
                 raise SafeFetchError("SAFE_FETCH_FAILED", "download response was not successful")
             content_length = response.getheader("Content-Length")
             response_content_type = response.getheader("Content-Type")
+            declared_size: int | None = None
             if content_length is not None:
                 try:
-                    budget.validate_content_length(int(content_length))
+                    declared_size = int(content_length)
+                    budget.validate_content_length(declared_size)
                 except ValueError as error:
                     response.close()
                     selected_connection.close()
@@ -214,15 +280,25 @@ def stage_artifact(file: Mapping[str, object], budget: FetchBudget) -> StagedArt
             written = 0
             try:
                 with os.fdopen(fd, "wb") as output:
-                    while block := response.read(_CHUNK_SIZE):
+                    while True:
+                        if selected_connection.sock is not None:
+                            selected_connection.sock.settimeout(remaining_retrieval_timeout(deadline))
+                        block = response.read(_CHUNK_SIZE)
+                        remaining_retrieval_timeout(deadline)
+                        if not block:
+                            break
                         written += len(block)
                         budget.validate_content_length(written)
                         digest.update(block)
                         output.write(block)
-                budget.consume(written)
             finally:
                 response.close()
                 selected_connection.close()
+            if declared_size is not None and written != declared_size:
+                raise SafeFetchError(
+                    "SAFE_FETCH_FAILED", "download Content-Length did not match streamed bytes"
+                )
+            budget.consume(written)
             content_type = response_content_type or file.get("mime_type")
             content_type = str(content_type).split(";", 1)[0].strip() or None
             filename = str(file.get("file_name") or "").strip() or fallback_filename(
@@ -251,6 +327,8 @@ def preserve_artifacts(
     files: list[Mapping[str, object]],
 ) -> dict:
     """Stage remote files first, then preserve each append-only artifact under a narrow guard."""
+    if not isinstance(files, list) or not files:
+        return {"files": [], "summary": {"stored": 0, "failed": 0}}
     try:
         _validate_destination(scope, category)
     except SafeFetchError as error:
@@ -271,64 +349,73 @@ def preserve_artifacts(
             "summary": {"stored": 0, "failed": len(files)},
         }
     budget = FetchBudget()
+    batch_deadline = _monotonic() + _BATCH_DEADLINE_SECONDS
     staged: dict[int, StagedArtifact] = {}
     outcomes: list[dict | None] = [None] * len(files)
     for index, file in enumerate(files):
+        if not isinstance(file, Mapping):
+            outcomes[index] = _failed("", SafeFetchError("INVALID_FILE", "file handle is invalid"))
+            continue
         try:
-            staged[index] = stage_artifact(file, budget)
+            _file_id(file)
+            if not isinstance(file.get("download_url"), str) or not file["download_url"].strip():
+                raise SafeFetchError("INVALID_FILE", "download_url is required")
+            staged[index] = stage_artifact(file, budget, batch_deadline=batch_deadline)
         except SafeFetchError as error:
             file_id = str(file.get("file_id") or "") if isinstance(file, Mapping) else ""
             outcomes[index] = _failed(file_id, error)
 
     manager = active_manager()
-    for index, artifact in staged.items():
-        try:
-            with manager.mutation_guard(
-                vault_root,
-                request_id=active_mutation_request_id(),
-                operation="preserve_artifacts_commit",
-                holder_kind="command",
-            ):
-                with artifact.path.open("rb") as stream:
-                    result = preserve_stream(
-                        vault_root,
-                        scope=scope,
-                        category=category,
-                        filename=artifact.filename,
-                        stream=stream,
-                        content_type=artifact.content_type,
-                        max_bytes=MAX_FILE_BYTES,
-                    )
-            mark_active_mutation_committed()
-            payload = result.as_dict()
-            warnings = list(payload.get("warnings") or [])
+    try:
+        for index, artifact in staged.items():
             try:
-                from . import media_processing
+                with manager.mutation_guard(
+                    vault_root,
+                    request_id=active_mutation_request_id(),
+                    operation="preserve_artifacts_commit",
+                    holder_kind="command",
+                ):
+                    with artifact.path.open("rb") as stream:
+                        result = preserve_stream(
+                            vault_root,
+                            scope=scope,
+                            category=category,
+                            filename=artifact.filename,
+                            stream=stream,
+                            content_type=artifact.content_type,
+                            max_bytes=MAX_FILE_BYTES,
+                        )
+                mark_active_mutation_committed()
+                payload = result.as_dict()
+                warnings = list(payload.get("warnings") or [])
+                try:
+                    from . import media_processing
 
-                if media_processing.classify_media(vault_root / payload["path"]) is not None:
-                    with manager.mutation_guard(
-                        vault_root,
-                        request_id=active_mutation_request_id(),
-                        operation="preserve_artifacts_media",
-                        holder_kind="command",
-                    ):
-                        media_processing.reconcile_media(vault_root, vault_root / payload["path"], explicit=False)
-            except Exception:  # noqa: BLE001 - the original bytes are durable and recoverable
-                warnings.append("media reconciliation failed; evidence remains recoverable")
-            outcomes[index] = {
-                "file_id": artifact.file_id,
-                "outcome": "stored",
-                "stored_path": payload.get("stored_path") or payload.get("path"),
-                "size": payload.get("size"),
-                "hash": payload.get("hash"),
-                "hash_algorithm": payload.get("hash_algorithm"),
-                "media_id": payload.get("media_id"),
-                "content_type": payload.get("content_type"),
-                "warnings": warnings,
-            }
-        except PreserveError as error:
-            outcomes[index] = _failed(artifact.file_id, error)
-        finally:
+                    if media_processing.classify_media(vault_root / payload["path"]) is not None:
+                        with manager.mutation_guard(
+                            vault_root,
+                            request_id=active_mutation_request_id(),
+                            operation="preserve_artifacts_media",
+                            holder_kind="command",
+                        ):
+                            media_processing.reconcile_media(vault_root, vault_root / payload["path"], explicit=False)
+                except Exception:  # noqa: BLE001 - the original bytes are durable and recoverable
+                    warnings.append("media reconciliation failed; evidence remains recoverable")
+                outcomes[index] = {
+                    "file_id": artifact.file_id,
+                    "outcome": "stored",
+                    "stored_path": payload.get("stored_path") or payload.get("path"),
+                    "size": payload.get("size"),
+                    "hash": payload.get("hash"),
+                    "hash_algorithm": payload.get("hash_algorithm"),
+                    "media_id": payload.get("media_id"),
+                    "content_type": payload.get("content_type"),
+                    "warnings": warnings,
+                }
+            except PreserveError as error:
+                outcomes[index] = _failed(artifact.file_id, error)
+    finally:
+        for artifact in staged.values():
             artifact.path.unlink(missing_ok=True)
     final = [outcome for outcome in outcomes if outcome is not None]
     return {

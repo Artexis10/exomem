@@ -432,8 +432,9 @@ These constraints apply equally to Tier 1 and Tier 2 — no escape hatch around 
   what's relevant into the note/evidence *text* (that's the queryable part), and
   deliver the *original file* separately. On claude.ai web, call
   **`preserve_artifacts(scope="...", category="...", files=[{"download_url": "...", "file_id": "...", "mime_type": "...", "file_name": "..."}])`** directly when the client supplies file handles. Otherwise call
-  **`transfer_artifact(operation="upload")`** for a short-lived `{token, upload_url}`, then have the
-  code sandbox multipart-`curl` the attached files to `upload_url`.
+  **`transfer_artifact(operation="upload")`** for a short-lived `{token, upload_url}`. If the
+  file-owning client can reach `upload_url`, multipart-`curl` the attached files there; otherwise
+  open the prefilled browser upload form or give its URL to the user for a manual upload.
   **Searchable binaries are automatic:** the server transcribes audio/video
   (Whisper), OCRs images (Tesseract), reads PDFs (pymupdf), extracts office/web
   documents (docx/xlsx/pptx/html via MarkItDown; txt/eml/ics via native parsers),

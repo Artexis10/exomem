@@ -3,14 +3,53 @@
 from __future__ import annotations
 
 import asyncio
-import io
 import sys
+import tempfile
+import threading
+import time
 from contextlib import nullcontext
 from pathlib import Path
 
 import pytest
 
 from exomem import commands
+
+
+class _Response:
+    def __init__(self, *, content_length: str, blocks: list[bytes]) -> None:
+        self.status = 200
+        self._content_length = content_length
+        self._blocks = iter(blocks)
+
+    def getheader(self, name: str):
+        return {"Content-Length": self._content_length, "Content-Type": "image/png"}.get(name)
+
+    def read(self, _size: int) -> bytes:
+        return next(self._blocks)
+
+    def close(self) -> None:
+        pass
+
+
+class _Connection:
+    def __init__(self, response: _Response) -> None:
+        self.response = response
+        self.sock = type("Socket", (), {"timeouts": [], "settimeout": lambda self, value: self.timeouts.append(value)})()
+
+    def putrequest(self, *_args, **_kwargs) -> None:
+        pass
+
+    def putheader(self, *_args, **_kwargs) -> None:
+        pass
+
+    def endheaders(self) -> None:
+        pass
+
+    def getresponse(self) -> _Response:
+        return self.response
+
+    def close(self) -> None:
+        pass
 
 
 def _command(name: str):
@@ -47,6 +86,51 @@ def test_preserve_artifacts_has_openai_file_parameter_contract(
         "file_name",
     ]
     assert files["items"]["required"] == ["download_url", "file_id"]
+
+
+def test_cli_file_handle_validation_is_bounded_and_content_free() -> None:
+    from exomem import cli_ops
+
+    with pytest.raises(cli_ops.OpError) as error:
+        cli_ops.coerce(
+            _command("preserve_artifacts").params,
+            {"files": '[{"download_url":"https://files.example/?signature=secret"}]'},
+            tool="preserve_artifacts",
+            cli=True,
+        )
+
+    assert error.value.code == "INVALID_FILE"
+    assert "signature" not in error.value.message
+
+
+def test_compact_terminal_drops_malformed_or_oversized_artifact_receipts() -> None:
+    from exomem.mutation_terminal import committed_terminal, project_terminal
+
+    terminal = committed_terminal(
+        {
+            "files": [
+                {
+                    "file_id": "file-one",
+                    "outcome": "stored",
+                    "stored_path": "Knowledge Base/Evidence/case/raw/proof.bin",
+                    "size": True,
+                    "hash": "a" * 64,
+                    "hash_algorithm": "sha256",
+                    "content_type": "application/octet-stream",
+                    "media_id": None,
+                    "warnings": ["x" * 301],
+                }
+            ],
+            "summary": {"stored": True, "failed": 0},
+        },
+        request_id="request",
+        receipt_id="receipt",
+        idempotency_key=None,
+    )
+
+    compact = project_terminal(terminal)
+    assert "files" not in compact
+    assert "summary" not in compact
 
 
 def test_client_artifact_url_validation_never_returns_the_signed_url() -> None:
@@ -86,6 +170,94 @@ def test_client_artifact_budget_enforces_file_and_aggregate_caps() -> None:
         budget.consume(2)
     with pytest.raises(SafeFetchError, match="size limit"):
         FetchBudget(max_file_bytes=3, max_total_bytes=10).validate_content_length(4)
+
+
+@pytest.mark.parametrize(
+    ("content_length", "blocks"),
+    [("3", [b"ab", b"cd", b""]), ("5", [b"abc", b""])],
+)
+def test_staging_rejects_mismatched_content_length_and_removes_temp_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    content_length: str,
+    blocks: list[bytes],
+) -> None:
+    from exomem import client_artifacts
+
+    response = _Response(content_length=content_length, blocks=blocks)
+    original_mkstemp = tempfile.mkstemp
+    monkeypatch.setattr(client_artifacts, "resolve_public_addresses", lambda *_args: ("8.8.8.8",))
+    monkeypatch.setattr(
+        client_artifacts,
+        "_PinnedHTTPSConnection",
+        lambda *_args, **_kwargs: _Connection(response),
+    )
+    monkeypatch.setattr(
+        client_artifacts.tempfile,
+        "mkstemp",
+        lambda **_kwargs: original_mkstemp(dir=tmp_path),
+    )
+
+    with pytest.raises(client_artifacts.SafeFetchError, match="Content-Length"):
+        client_artifacts.stage_artifact(
+            {"download_url": "https://files.example/proof", "file_id": "file-one"},
+            client_artifacts.FetchBudget(),
+        )
+
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_retrieval_deadline_bounds_every_attempt() -> None:
+    from exomem.client_artifacts import SafeFetchError, remaining_retrieval_timeout
+
+    assert remaining_retrieval_timeout(12.0, clock=lambda: 10.0) == 2.0
+    with pytest.raises(SafeFetchError, match="timed out"):
+        remaining_retrieval_timeout(10.0, clock=lambda: 10.0)
+
+
+def test_staging_bounds_blocked_dns_resolution(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from exomem import client_artifacts
+
+    release = threading.Event()
+    monkeypatch.setattr(client_artifacts, "_RETRIEVAL_DEADLINE_SECONDS", 0.01)
+    monkeypatch.setattr(
+        client_artifacts.socket,
+        "getaddrinfo",
+        lambda *_args, **_kwargs: release.wait() or [(None, None, None, None, ("8.8.8.8", 443))],
+    )
+    started = time.monotonic()
+    try:
+        with pytest.raises(client_artifacts.SafeFetchError, match="could not be resolved"):
+            client_artifacts.stage_artifact(
+                {"download_url": "https://files.example/proof", "file_id": "file-one"},
+                client_artifacts.FetchBudget(),
+            )
+    finally:
+        release.set()
+
+    assert time.monotonic() - started < 0.5
+
+
+def test_staging_resets_socket_timeout_before_each_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import client_artifacts
+
+    response = _Response(content_length="2", blocks=[b"ok", b""])
+    connection = _Connection(response)
+    monkeypatch.setattr(client_artifacts, "resolve_public_addresses", lambda *_args, **_kwargs: ("8.8.8.8",))
+    monkeypatch.setattr(client_artifacts, "_PinnedHTTPSConnection", lambda *_args, **_kwargs: connection)
+    original_mkstemp = tempfile.mkstemp
+    monkeypatch.setattr(client_artifacts.tempfile, "mkstemp", lambda **_kwargs: original_mkstemp(dir=tmp_path))
+
+    staged = client_artifacts.stage_artifact(
+        {"download_url": "https://files.example/proof", "file_id": "file-one"},
+        client_artifacts.FetchBudget(),
+    )
+    staged.path.unlink()
+
+    assert len(connection.sock.timeouts) == 2
+    assert all(0 < timeout <= client_artifacts._RETRIEVAL_DEADLINE_SECONDS for timeout in connection.sock.timeouts)
 
 
 def test_preserve_artifacts_refuses_invalid_destination_before_any_fetch(
@@ -146,6 +318,129 @@ def test_preserve_artifacts_uses_the_narrow_replay_boundary() -> None:
     assert "preserve_artifacts" in writer_lease._NARROW_BOUNDARY_COMMANDS
 
 
+def test_eight_artifacts_keep_ordered_receipt_and_replay_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import client_artifacts, writer_lease
+
+    command = _command("preserve_artifacts")
+    stage_calls: list[str] = []
+    commit_calls: list[str] = []
+
+    def stage(file, _budget, **_kwargs):
+        file_id = file["file_id"]
+        path = tmp_path / f"{file_id}.bin"
+        path.write_bytes(file_id.encode())
+        stage_calls.append(file_id)
+        return client_artifacts.StagedArtifact(
+            file_id=file_id,
+            path=path,
+            size=len(file_id),
+            sha256="a" * 64,
+            content_type="application/octet-stream",
+            filename=f"{file_id}.bin",
+        )
+
+    monkeypatch.setattr(client_artifacts, "stage_artifact", stage)
+    monkeypatch.setattr(
+        client_artifacts,
+        "preserve_stream",
+        lambda _vault, **kwargs: commit_calls.append(kwargs["filename"])
+        or type(
+            "Result",
+            (),
+            {
+                "as_dict": lambda self: {
+                    "path": f"Knowledge Base/Evidence/case/raw/{kwargs['filename']}",
+                    "size": 6,
+                    "hash": "a" * 64,
+                    "hash_algorithm": "sha256",
+                    "content_type": "application/octet-stream",
+                    "warnings": ["media warning"] if kwargs["filename"] == "file-0.bin" else [],
+                }
+            },
+        )(),
+    )
+    monkeypatch.setattr(
+        client_artifacts,
+        "active_manager",
+        lambda: type("Manager", (), {"mutation_guard": lambda self, *_args, **_kwargs: nullcontext()})(),
+    )
+    manager = writer_lease.LeaseManager(writer_lease.LeaseConfig(state_dir=tmp_path / "state"))
+    monkeypatch.setattr(writer_lease, "get_manager", lambda: manager)
+    files = [
+        {"download_url": f"https://files.example/{index}", "file_id": f"file-{index}"}
+        for index in range(8)
+    ]
+
+    first = writer_lease.invoke_command(
+        command, tmp_path, scope="case", category="raw", files=files, idempotency_key="eight-files"
+    )
+    replay = writer_lease.invoke_command(
+        command, tmp_path, scope="case", category="raw", files=files, idempotency_key="eight-files"
+    )
+
+    assert first == replay
+    assert [row["file_id"] for row in first["files"]] == [file["file_id"] for file in files]
+    assert first["summary"] == {"stored": 8, "failed": 0}
+    assert first["warnings_count"] == 1
+    assert first["paths"] == [
+        f"Knowledge Base/Evidence/case/raw/file-{index}.bin" for index in range(8)
+    ]
+    assert stage_calls == [file["file_id"] for file in files]
+    assert commit_calls == [f"file-{index}.bin" for index in range(8)]
+    assert not list(tmp_path.glob("file-*.bin"))
+
+
+def test_unexpected_commit_failure_removes_every_staged_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import client_artifacts
+
+    staged = []
+    for index in range(2):
+        path = tmp_path / f"staged-{index}.bin"
+        path.write_bytes(b"ok")
+        staged.append(
+            client_artifacts.StagedArtifact(
+                file_id=f"file-{index}",
+                path=path,
+                size=2,
+                sha256=str(index) * 64,
+                content_type="application/octet-stream",
+                filename=f"proof-{index}.bin",
+            )
+        )
+    monkeypatch.setattr(
+        client_artifacts, "stage_artifact", lambda file, _budget, **_kwargs: staged.pop(0)
+    )
+    monkeypatch.setattr(
+        client_artifacts,
+        "preserve_stream",
+        lambda *_args, **_kwargs: type(
+            "BrokenResult", (), {"as_dict": lambda self: (_ for _ in ()).throw(RuntimeError("broken result"))}
+        )(),
+    )
+    monkeypatch.setattr(
+        client_artifacts,
+        "active_manager",
+        lambda: type("Manager", (), {"mutation_guard": lambda self, *_args, **_kwargs: nullcontext()})(),
+    )
+
+    with pytest.raises(RuntimeError, match="broken result"):
+        commands.op_preserve_artifacts(
+            tmp_path,
+            scope="case",
+            category="raw",
+            files=[
+                {"download_url": "https://files.example/one", "file_id": "file-0"},
+                {"download_url": "https://files.example/two", "file_id": "file-1"},
+            ],
+        )
+
+    assert not list(tmp_path.glob("staged-*.bin"))
+
+
 def test_client_artifact_filename_fallback_is_deterministic() -> None:
     from exomem.client_artifacts import fallback_filename
 
@@ -169,7 +464,7 @@ def test_preserve_artifacts_reports_each_file_and_marks_committed(
         filename="proof.bin",
     )
     staged.path.write_bytes(b"ok")
-    def stage_artifact(file, _budget):
+    def stage_artifact(file, _budget, **_kwargs):
         if file["file_id"] == "file-bad":
             raise client_artifacts.SafeFetchError("SAFE_FETCH_FAILED", "download URL must use HTTPS")
         return staged
