@@ -717,7 +717,16 @@ def test_provisioner_database_rotation_contract_and_runbook_are_ordered_and_reve
         "restore the external reconcile state"
     )
     for command in (
-        "rotation_snapshot=/secure/operator/exomem-hosted/rotation-snapshot.json",
+        "rotation_root=/secure/operator/exomem-hosted/rotation-runs",
+        'mkdir -m 0700 "$rotation_run"',
+        "set -o noclobber",
+        "length == 3 and ([.deployments[].name] | sort)",
+        "length == 6 and ([.cronjobs[].name] | sort)",
+        "(.spec.initContainers // []) + (.spec.containers // [])",
+        "kubectl -n exomem-platform wait --for=delete job",
+        "kubectl -n exomem-platform wait --for=delete pod",
+        "rotation SQL session remains open; consumers stay stopped",
+        "rollback()",
         "kubectl -n exomem-platform get deployment",
         "kubectl -n exomem-platform get cronjob",
         "kubectl -n exomem-platform get pods -o json",
