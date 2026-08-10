@@ -81,11 +81,42 @@ def remaining_retrieval_timeout(
     return min(_TIMEOUT_SECONDS, remaining)
 
 
-def _bounded_retrieval_call(operation: Callable[[], object], *, deadline: float) -> object:
+def _cancel_connection(connection: http.client.HTTPConnection) -> None:
+    """Interrupt a timed-out HTTP response before its buffered reader is closed."""
+    sock = connection.sock
+    if sock is not None:
+        try:
+            sock.shutdown(socket.SHUT_RDWR)
+        except (AttributeError, OSError):
+            pass
+        try:
+            sock.close()
+        except (AttributeError, OSError):
+            pass
+    try:
+        connection.close()
+    except (OSError, http.client.HTTPException):
+        pass
+
+
+def _bounded_retrieval_call(
+    operation: Callable[[], object], *, deadline: float, cancel: Callable[[], None] | None = None
+) -> object:
     """Run a blocking HTTP operation within the remaining wall-clock budget."""
-    timeout = remaining_retrieval_timeout(deadline)
+    def timed_out() -> SafeFetchError:
+        if cancel is not None:
+            try:
+                cancel()
+            except (AttributeError, OSError, http.client.HTTPException):
+                pass
+        return SafeFetchError("SAFE_FETCH_FAILED", "download retrieval timed out")
+
+    try:
+        timeout = remaining_retrieval_timeout(deadline)
+    except SafeFetchError as error:
+        raise timed_out() from error
     if not _RETRIEVAL_WORKERS.acquire(timeout=timeout):
-        raise SafeFetchError("SAFE_FETCH_FAILED", "download retrieval timed out")
+        raise timed_out()
     result: Queue[tuple[bool, object]] = Queue(maxsize=1)
 
     def _run() -> None:
@@ -98,11 +129,16 @@ def _bounded_retrieval_call(operation: Callable[[], object], *, deadline: float)
 
     threading.Thread(target=_run, daemon=True).start()
     try:
-        succeeded, value = result.get(timeout=remaining_retrieval_timeout(deadline))
+        timeout = remaining_retrieval_timeout(deadline)
+        succeeded, value = result.get(timeout=timeout)
+    except SafeFetchError as error:
+        raise timed_out() from error
     except Empty as error:
-        raise SafeFetchError("SAFE_FETCH_FAILED", "download retrieval timed out") from error
+        raise timed_out() from error
     if not succeeded:
         assert isinstance(value, Exception)
+        if isinstance(value, TimeoutError):
+            raise timed_out() from value
         raise value
     return value
 
@@ -271,11 +307,16 @@ def stage_artifact(
                     connection.putheader("Host", host_header)
                     connection.putheader("Accept-Encoding", "identity")
                     connection.endheaders()
-                    response = _bounded_retrieval_call(connection.getresponse, deadline=deadline)
+                    response = _bounded_retrieval_call(
+                        connection.getresponse,
+                        deadline=deadline,
+                        cancel=partial(_cancel_connection, connection),
+                    )
                     selected_connection = connection
                     remaining_retrieval_timeout(deadline)
                     break
                 except SafeFetchError:
+                    _cancel_connection(connection)
                     if response is not None:
                         response.close()
                     connection.close()
@@ -325,20 +366,26 @@ def stage_artifact(
             digest = hashlib.sha256()
             written = 0
             try:
-                with os.fdopen(fd, "wb") as output:
-                    while True:
-                        if selected_connection.sock is not None:
-                            selected_connection.sock.settimeout(remaining_retrieval_timeout(deadline))
-                        block = _bounded_retrieval_call(
-                            partial(response.read, _CHUNK_SIZE), deadline=deadline
-                        )
-                        remaining_retrieval_timeout(deadline)
-                        if not block:
-                            break
-                        written += len(block)
-                        budget.validate_content_length(written)
-                        digest.update(block)
-                        output.write(block)
+                try:
+                    with os.fdopen(fd, "wb") as output:
+                        while True:
+                            if selected_connection.sock is not None:
+                                selected_connection.sock.settimeout(remaining_retrieval_timeout(deadline))
+                            block = _bounded_retrieval_call(
+                                partial(response.read, _CHUNK_SIZE),
+                                deadline=deadline,
+                                cancel=partial(_cancel_connection, selected_connection),
+                            )
+                            remaining_retrieval_timeout(deadline)
+                            if not block:
+                                break
+                            written += len(block)
+                            budget.validate_content_length(written)
+                            digest.update(block)
+                            output.write(block)
+                except SafeFetchError:
+                    _cancel_connection(selected_connection)
+                    raise
             finally:
                 response.close()
                 selected_connection.close()
@@ -363,7 +410,8 @@ def stage_artifact(
 
 
 def _failed(file_id: str, error: SafeFetchError | PreserveError) -> dict[str, str]:
-    return {"file_id": file_id, "outcome": "failed", "code": error.code, "reason": error.reason}
+    reason = "artifact already exists" if error.code == "ARTIFACT_EXISTS" else error.reason[:300]
+    return {"file_id": file_id, "outcome": "failed", "code": error.code, "reason": reason}
 
 
 def preserve_artifacts(

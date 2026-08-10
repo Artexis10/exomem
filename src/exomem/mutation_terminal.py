@@ -177,10 +177,20 @@ def _artifact_receipt_projection(result: Any) -> dict[str, Any]:
     summary = result.get("summary")
     if not isinstance(files, (list, tuple)) or not 1 <= len(files) <= 8 or not isinstance(summary, Mapping):
         return {}
+    def invalid_row(item: Any, index: int) -> dict[str, str]:
+        file_id = item.get("file_id") if isinstance(item, Mapping) else None
+        return {
+            "file_id": file_id if string(file_id, limit=256) else f"invalid-file-{index + 1}",
+            "outcome": "failed",
+            "code": "INVALID_ARTIFACT_RECEIPT",
+            "reason": "artifact result was invalid",
+        }
+
     projected: list[dict[str, Any]] = []
-    for item in files:
+    for index, item in enumerate(files):
         if not isinstance(item, Mapping) or not string(item.get("file_id"), limit=256):
-            return {}
+            projected.append(invalid_row(item, index))
+            continue
         outcome = item.get("outcome")
         if outcome == "stored":
             if not (
@@ -194,7 +204,8 @@ def _artifact_receipt_projection(result: Any) -> dict[str, Any]:
                 and len(item["warnings"]) <= 8
                 and all(string(warning, limit=300) for warning in item["warnings"])
             ):
-                return {}
+                projected.append(invalid_row(item, index))
+                continue
             row = {
                 key: item[key]
                 for key in (
@@ -215,18 +226,11 @@ def _artifact_receipt_projection(result: Any) -> dict[str, Any]:
         ):
             row = {key: item[key] for key in ("file_id", "outcome", "code", "reason")}
         else:
-            return {}
+            projected.append(invalid_row(item, index))
+            continue
         projected.append(row)
-    stored = summary.get("stored")
-    failed = summary.get("failed")
-    if (
-        not nonnegative_int(stored)
-        or not nonnegative_int(failed)
-        or stored + failed != len(projected)
-        or stored != sum(item["outcome"] == "stored" for item in projected)
-        or failed != sum(item["outcome"] == "failed" for item in projected)
-    ):
-        return {}
+    stored = sum(item["outcome"] == "stored" for item in projected)
+    failed = len(projected) - stored
     return {"files": projected, "summary": {"stored": stored, "failed": failed}}
 
 

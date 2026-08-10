@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+import http.client
 import json
+import socket
 import sys
 import tempfile
 import threading
 import time
 from contextlib import nullcontext
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import pytest
 
@@ -125,7 +127,7 @@ def test_cli_file_handle_validation_is_bounded_and_content_free(files: str) -> N
     assert "signature" not in error.value.message
 
 
-def test_compact_terminal_drops_malformed_or_oversized_artifact_receipts() -> None:
+def test_compact_terminal_keeps_bounded_failure_for_malformed_artifact_rows() -> None:
     from exomem.mutation_terminal import committed_terminal, project_terminal
 
     terminal = committed_terminal(
@@ -151,8 +153,15 @@ def test_compact_terminal_drops_malformed_or_oversized_artifact_receipts() -> No
     )
 
     compact = project_terminal(terminal)
-    assert "files" not in compact
-    assert "summary" not in compact
+    assert compact["files"] == [
+        {
+            "file_id": "file-one",
+            "outcome": "failed",
+            "code": "INVALID_ARTIFACT_RECEIPT",
+            "reason": "artifact result was invalid",
+        }
+    ]
+    assert compact["summary"] == {"stored": 0, "failed": 1}
 
 
 def test_client_artifact_url_validation_never_returns_the_signed_url() -> None:
@@ -251,6 +260,61 @@ def test_bounded_retrieval_call_stops_blocked_headers_or_body() -> None:
     assert time.monotonic() - started < 0.5
 
 
+def test_staging_cancels_real_http_response_before_close_on_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem import client_artifacts
+
+    class Connection:
+        def __init__(self, client: socket.socket) -> None:
+            self.sock = client
+
+        def putrequest(self, *_args, **_kwargs) -> None:
+            pass
+
+        def putheader(self, *_args, **_kwargs) -> None:
+            pass
+
+        def endheaders(self) -> None:
+            pass
+
+        def getresponse(self) -> http.client.HTTPResponse:
+            response = http.client.HTTPResponse(self.sock)
+            response.begin()
+            return response
+
+        def close(self) -> None:
+            self.sock.close()
+
+    client, peer = socket.socketpair()
+    peer.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 1\r\n\r\n")
+    connection = Connection(client)
+    release = threading.Timer(0.2, peer.close)
+    monkeypatch.setattr(client_artifacts, "_RETRIEVAL_DEADLINE_SECONDS", 0.01)
+    monkeypatch.setattr(client_artifacts, "resolve_public_addresses", lambda *_args, **_kwargs: ("8.8.8.8",))
+    monkeypatch.setattr(client_artifacts, "_PinnedHTTPSConnection", lambda *_args, **_kwargs: connection)
+    original_mkstemp = tempfile.mkstemp
+    monkeypatch.setattr(
+        client_artifacts.tempfile,
+        "mkstemp",
+        lambda **_kwargs: original_mkstemp(prefix="exomem-artifact-"),
+    )
+
+    started = time.monotonic()
+    release.start()
+    try:
+        with pytest.raises(client_artifacts.SafeFetchError, match="timed out"):
+            client_artifacts.stage_artifact(
+                {"download_url": "https://files.example/proof", "file_id": "file-one"},
+                client_artifacts.FetchBudget(),
+            )
+    finally:
+        release.cancel()
+        peer.close()
+
+    assert time.monotonic() - started < 0.1
+
+
 def test_staging_routes_headers_and_body_through_the_absolute_deadline_guard(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -341,6 +405,94 @@ def test_mixed_batch_keeps_truth_when_one_content_type_is_oversized(
     assert [item["outcome"] for item in result["files"]] == ["stored", "failed"]
     assert [item["file_id"] for item in compact["files"]] == ["file-good", "file-bad"]
     assert compact["summary"] == {"stored": 1, "failed": 1}
+
+
+def test_mixed_long_collision_reason_stays_in_compact_artifact_receipt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import client_artifacts, preserve
+    from exomem.mutation_terminal import committed_terminal, project_terminal
+
+    class ExistingArtifactPath:
+        def __init__(self, *parts: str) -> None:
+            self.parts = parts
+
+        def __truediv__(self, part: object) -> ExistingArtifactPath:
+            return ExistingArtifactPath(*self.parts, str(part))
+
+        def exists(self) -> bool:
+            return True
+
+        def relative_to(self, _vault_root: Path) -> PurePosixPath:
+            return PurePosixPath(*self.parts)
+
+    scope = "scope-" + "s" * 120
+    category = "category-" + "c" * 120
+    filename = "artifact-" + "a" * 120 + ".bin"
+    staged: list[client_artifacts.StagedArtifact] = []
+    for file_id, staged_filename in (("file-good", "good.bin"), ("file-collision", filename)):
+        path = tmp_path / f"{file_id}.bin"
+        path.write_bytes(b"ok")
+        staged.append(
+            client_artifacts.StagedArtifact(
+                file_id=file_id,
+                path=path,
+                size=2,
+                sha256="a" * 64,
+                content_type="application/octet-stream",
+                filename=staged_filename,
+            )
+        )
+    real_preserve_stream = preserve.preserve_stream
+    monkeypatch.setattr(client_artifacts, "stage_artifact", lambda *_args, **_kwargs: staged.pop(0))
+    monkeypatch.setattr(preserve, "kb_root", lambda _vault_root: ExistingArtifactPath("Knowledge Base"))
+    monkeypatch.setattr(
+        client_artifacts,
+        "preserve_stream",
+        lambda vault_root, **kwargs: type(
+            "Result",
+            (),
+            {
+                "as_dict": lambda self: {
+                    "path": "Knowledge Base/Evidence/case/raw/good.bin",
+                    "size": 2,
+                    "hash": "a" * 64,
+                    "hash_algorithm": "sha256",
+                    "content_type": "application/octet-stream",
+                    "warnings": [],
+                }
+            },
+        )()
+        if kwargs["filename"] == "good.bin"
+        else real_preserve_stream(vault_root, **kwargs),
+    )
+    monkeypatch.setattr(
+        client_artifacts,
+        "active_manager",
+        lambda: type("Manager", (), {"mutation_guard": lambda self, *_args, **_kwargs: nullcontext()})(),
+    )
+
+    result = commands.op_preserve_artifacts(
+        tmp_path,
+        scope=scope,
+        category=category,
+        files=[
+            {"download_url": "https://files.example/good", "file_id": "file-good"},
+            {"download_url": "https://files.example/collision", "file_id": "file-collision"},
+        ],
+    )
+    compact = project_terminal(
+        committed_terminal(result, request_id="request", receipt_id="receipt", idempotency_key=None)
+    )
+
+    assert [item["outcome"] for item in compact["files"]] == ["stored", "failed"]
+    assert compact["summary"] == {"stored": 1, "failed": 1}
+    assert compact["files"][1] == {
+        "file_id": "file-collision",
+        "outcome": "failed",
+        "code": "ARTIFACT_EXISTS",
+        "reason": "artifact already exists",
+    }
 
 
 def test_staging_bounds_blocked_dns_resolution(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
