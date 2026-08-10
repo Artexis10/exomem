@@ -5,9 +5,23 @@ from pathlib import Path
 
 import pytest
 
-from exomem import hosted_plugins
+from exomem import commands, hosted_plugins
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_hosted_profile_commands_remain_hashable_with_mcp_metadata() -> None:
+    selected = commands.product_commands_for_profile(commands.HOSTED_ALPHA_AGENT_PROFILE, "rest")
+
+    assert set(selected) == set(selected)
+    artifact_command = next(
+        command for command in commands.PRODUCT_COMMANDS if command.name == "preserve_artifacts"
+    )
+    assert artifact_command in set(commands.PRODUCT_COMMANDS)
+    assert artifact_command.mcp_meta == {"openai/fileParams": ("files",)}
+    assert {key: list(value) for key, value in artifact_command.mcp_meta.items()} == {
+        "openai/fileParams": ["files"]
+    }
 
 
 def test_every_hosted_skill_declares_and_uses_only_alpha_profile_tools() -> None:
