@@ -35,3 +35,11 @@ subset.
   authored in this repository without competitor-authored provenance
 - **THEN** the proposal is rejected under this requirement, citing the
   authored-competitor defect class from the 2026-08-08 audit
+
+#### Scenario: Paired own-harness and wrapped-provider rows remain distinct
+- **WHEN** the MemoryBench subset is evaluated comparatively
+- **THEN** Basic Memory's `bm-bench` own-harness row and its unmodified
+  `BasicMemoryLocalProvider` MemoryBench row are both present as distinct
+  variants, Supermemory's MemoryBench provider row is paired with the 4.7
+  direct-SDK spot-check, and no paired observations are collapsed into one
+  product number

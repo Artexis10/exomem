@@ -32,3 +32,6 @@
 *.ico       binary
 *.pdf       binary
 *.zip       binary
+
+# Exact-byte upstream overlay; unified-diff blank context lines are significant.
+benchmarks/memorybench/registration.patch binary

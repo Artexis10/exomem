@@ -1,0 +1,875 @@
+{
+  "$defs": {
+    "ArtifactReference": {
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "else": {
+            "properties": {
+              "path": {
+                "type": "null"
+              },
+              "path_hmac_sha256": {
+                "pattern": "^[0-9a-f]{64}$",
+                "type": "string"
+              }
+            }
+          },
+          "if": {
+            "properties": {
+              "root": {
+                "const": "output"
+              }
+            },
+            "required": [
+              "root"
+            ]
+          },
+          "then": {
+            "properties": {
+              "path": {
+                "minLength": 1,
+                "pattern": "^(?!/)(?!.*\\\\)(?!.*(?:^|/)\\.{1,2}(?:/|$))(?!.*//).+$",
+                "type": "string"
+              },
+              "path_hmac_sha256": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      ],
+      "properties": {
+        "path": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "pattern": "^(?!/)(?!.*\\\\)(?!.*(?:^|/)\\.{1,2}(?:/|$))(?!.*//).+$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Path"
+        },
+        "path_hmac_sha256": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Path Hmac Sha256"
+        },
+        "root": {
+          "enum": [
+            "memorybench_run",
+            "output"
+          ],
+          "title": "Root",
+          "type": "string"
+        },
+        "sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Sha256",
+          "type": "string"
+        }
+      },
+      "required": [
+        "root",
+        "path",
+        "path_hmac_sha256",
+        "sha256"
+      ],
+      "title": "ArtifactReference",
+      "type": "object"
+    },
+    "DatasetIdentity": {
+      "additionalProperties": false,
+      "properties": {
+        "case_count": {
+          "minimum": 0,
+          "title": "Case Count",
+          "type": "integer"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "revision": {
+          "title": "Revision",
+          "type": "string"
+        },
+        "sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Sha256",
+          "type": "string"
+        },
+        "source": {
+          "title": "Source",
+          "type": "string"
+        },
+        "variant": {
+          "title": "Variant",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "variant",
+        "source",
+        "revision",
+        "sha256",
+        "case_count"
+      ],
+      "title": "DatasetIdentity",
+      "type": "object"
+    },
+    "MemoryBenchExportCase": {
+      "additionalProperties": false,
+      "properties": {
+        "canonical_result": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ArtifactReference"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "case_id_hmac_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Case Id Hmac Sha256",
+          "type": "string"
+        },
+        "case_ordinal": {
+          "minimum": 1,
+          "title": "Case Ordinal",
+          "type": "integer"
+        },
+        "checkpoint": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ArtifactReference"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "container_tag_hmac_sha256": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Container Tag Hmac Sha256"
+        },
+        "failure_codes": {
+          "items": {
+            "enum": [
+              "stage_process_failed",
+              "checkpoint_missing",
+              "checkpoint_invalid",
+              "checkpoint_identity_mismatch",
+              "case_set_mismatch",
+              "phase_incomplete",
+              "phase_failed",
+              "result_missing",
+              "result_duplicate",
+              "result_outside_root",
+              "result_invalid",
+              "result_identity_mismatch",
+              "checkpoint_result_mismatch",
+              "hit_invalid",
+              "guest_evidence_invalid",
+              "secure_descriptor_invalid",
+              "private_gold_write_failed",
+              "export_write_failed",
+              "SIGINT",
+              "SIGTERM"
+            ],
+            "type": "string"
+          },
+          "title": "Failure Codes",
+          "type": "array",
+          "uniqueItems": true
+        },
+        "hits": {
+          "items": {
+            "$ref": "#/$defs/MemoryBenchHit"
+          },
+          "title": "Hits",
+          "type": "array"
+        },
+        "missing_fields": {
+          "items": {
+            "enum": [
+              "question.question_date",
+              "gold.answer_session_ids",
+              "ingest.transmitted_payloads",
+              "search.transmitted_query",
+              "search.options.limit",
+              "search.options.threshold",
+              "search.normalized_hit_ids",
+              "search.normalized_scores",
+              "search.normalized_ranks",
+              "search.retry_attempts",
+              "search.http_status"
+            ],
+            "type": "string"
+          },
+          "title": "Missing Fields",
+          "type": "array",
+          "uniqueItems": true
+        },
+        "phases": {
+          "$ref": "#/$defs/MemoryBenchPhases"
+        },
+        "private_gold": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ArtifactReference"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "question": {
+          "$ref": "#/$defs/MemoryBenchQuestion"
+        }
+      },
+      "required": [
+        "case_ordinal",
+        "case_id_hmac_sha256",
+        "question",
+        "container_tag_hmac_sha256",
+        "checkpoint",
+        "canonical_result",
+        "private_gold",
+        "phases",
+        "hits",
+        "failure_codes",
+        "missing_fields"
+      ],
+      "title": "MemoryBenchExportCase",
+      "type": "object"
+    },
+    "MemoryBenchHarnessIdentity": {
+      "additionalProperties": false,
+      "properties": {
+        "bun_lock_sha256": {
+          "const": "561d761fd16f895a6597227c6fc1e46064779284317fd479e079e3c86b9857da",
+          "title": "Bun Lock Sha256",
+          "type": "string"
+        },
+        "commit": {
+          "const": "118209a746d97d0d85e5a7234267f0b6962857e9",
+          "title": "Commit",
+          "type": "string"
+        },
+        "repository": {
+          "const": "https://github.com/supermemoryai/memorybench",
+          "title": "Repository",
+          "type": "string"
+        },
+        "tree": {
+          "const": "2ee25bdbcb6bfaaecb32f917920c53775a299b37",
+          "title": "Tree",
+          "type": "string"
+        }
+      },
+      "required": [
+        "repository",
+        "commit",
+        "tree",
+        "bun_lock_sha256"
+      ],
+      "title": "MemoryBenchHarnessIdentity",
+      "type": "object"
+    },
+    "MemoryBenchHit": {
+      "additionalProperties": false,
+      "properties": {
+        "content": {
+          "minLength": 1,
+          "title": "Content",
+          "type": "string"
+        },
+        "score": {
+          "title": "Score",
+          "type": "number"
+        }
+      },
+      "required": [
+        "content",
+        "score"
+      ],
+      "title": "MemoryBenchHit",
+      "type": "object"
+    },
+    "MemoryBenchLatency": {
+      "additionalProperties": false,
+      "properties": {
+        "publishable": {
+          "const": false,
+          "title": "Publishable",
+          "type": "boolean"
+        },
+        "reason": {
+          "const": "host_unvalidated",
+          "title": "Reason",
+          "type": "string"
+        }
+      },
+      "required": [
+        "publishable",
+        "reason"
+      ],
+      "title": "MemoryBenchLatency",
+      "type": "object"
+    },
+    "MemoryBenchPhase": {
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "else": {
+            "properties": {
+              "failure_code": {
+                "type": "null"
+              }
+            }
+          },
+          "if": {
+            "properties": {
+              "status": {
+                "const": "failed"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "properties": {
+              "failure_code": {
+                "not": {
+                  "type": "null"
+                }
+              }
+            }
+          }
+        }
+      ],
+      "properties": {
+        "failure_code": {
+          "anyOf": [
+            {
+              "enum": [
+                "stage_process_failed",
+                "checkpoint_missing",
+                "checkpoint_invalid",
+                "checkpoint_identity_mismatch",
+                "case_set_mismatch",
+                "phase_incomplete",
+                "phase_failed",
+                "result_missing",
+                "result_duplicate",
+                "result_outside_root",
+                "result_invalid",
+                "result_identity_mismatch",
+                "checkpoint_result_mismatch",
+                "hit_invalid",
+                "guest_evidence_invalid",
+                "secure_descriptor_invalid",
+                "private_gold_write_failed",
+                "export_write_failed",
+                "SIGINT",
+                "SIGTERM"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Failure Code"
+        },
+        "status": {
+          "enum": [
+            "unobserved",
+            "pending",
+            "in_progress",
+            "completed",
+            "failed"
+          ],
+          "title": "Status",
+          "type": "string"
+        }
+      },
+      "required": [
+        "status",
+        "failure_code"
+      ],
+      "title": "MemoryBenchPhase",
+      "type": "object"
+    },
+    "MemoryBenchPhases": {
+      "additionalProperties": false,
+      "properties": {
+        "indexing": {
+          "$ref": "#/$defs/MemoryBenchPhase"
+        },
+        "ingest": {
+          "$ref": "#/$defs/MemoryBenchPhase"
+        },
+        "search": {
+          "$ref": "#/$defs/MemoryBenchPhase"
+        }
+      },
+      "required": [
+        "ingest",
+        "indexing",
+        "search"
+      ],
+      "title": "MemoryBenchPhases",
+      "type": "object"
+    },
+    "MemoryBenchPrivacy": {
+      "additionalProperties": false,
+      "properties": {
+        "classification": {
+          "const": "provider_safe_reader_input",
+          "title": "Classification",
+          "type": "string"
+        },
+        "contains_ground_truth": {
+          "const": false,
+          "title": "Contains Ground Truth",
+          "type": "boolean"
+        },
+        "source_results_contain_ground_truth": {
+          "const": true,
+          "title": "Source Results Contain Ground Truth",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "classification",
+        "contains_ground_truth",
+        "source_results_contain_ground_truth"
+      ],
+      "title": "MemoryBenchPrivacy",
+      "type": "object"
+    },
+    "MemoryBenchQuestion": {
+      "additionalProperties": false,
+      "properties": {
+        "date": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Date"
+        },
+        "text": {
+          "title": "Text",
+          "type": "string"
+        },
+        "type": {
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "text",
+        "type",
+        "date"
+      ],
+      "title": "MemoryBenchQuestion",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "allOf": [
+    {
+      "else": {
+        "not": {
+          "properties": {
+            "cases": {
+              "items": {
+                "properties": {
+                  "canonical_result": {
+                    "not": {
+                      "type": "null"
+                    }
+                  },
+                  "checkpoint": {
+                    "not": {
+                      "type": "null"
+                    }
+                  },
+                  "container_tag_hmac_sha256": {
+                    "not": {
+                      "type": "null"
+                    }
+                  },
+                  "failure_codes": {
+                    "maxItems": 0
+                  },
+                  "phases": {
+                    "properties": {
+                      "indexing": {
+                        "properties": {
+                          "failure_code": {
+                            "type": "null"
+                          },
+                          "status": {
+                            "const": "completed"
+                          }
+                        },
+                        "required": [
+                          "status",
+                          "failure_code"
+                        ]
+                      },
+                      "ingest": {
+                        "properties": {
+                          "failure_code": {
+                            "type": "null"
+                          },
+                          "status": {
+                            "const": "completed"
+                          }
+                        },
+                        "required": [
+                          "status",
+                          "failure_code"
+                        ]
+                      },
+                      "search": {
+                        "properties": {
+                          "failure_code": {
+                            "type": "null"
+                          },
+                          "status": {
+                            "const": "completed"
+                          }
+                        },
+                        "required": [
+                          "status",
+                          "failure_code"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "ingest",
+                      "indexing",
+                      "search"
+                    ]
+                  },
+                  "private_gold": {
+                    "not": {
+                      "type": "null"
+                    }
+                  }
+                },
+                "required": [
+                  "container_tag_hmac_sha256",
+                  "checkpoint",
+                  "canonical_result",
+                  "private_gold",
+                  "failure_codes",
+                  "phases"
+                ]
+              }
+            },
+            "failure_codes": {
+              "maxItems": 0
+            }
+          },
+          "required": [
+            "failure_codes",
+            "cases"
+          ]
+        }
+      },
+      "if": {
+        "properties": {
+          "status": {
+            "const": "complete"
+          }
+        },
+        "required": [
+          "status"
+        ]
+      },
+      "then": {
+        "properties": {
+          "cases": {
+            "items": {
+              "properties": {
+                "canonical_result": {
+                  "not": {
+                    "type": "null"
+                  }
+                },
+                "checkpoint": {
+                  "not": {
+                    "type": "null"
+                  }
+                },
+                "container_tag_hmac_sha256": {
+                  "not": {
+                    "type": "null"
+                  }
+                },
+                "failure_codes": {
+                  "maxItems": 0
+                },
+                "phases": {
+                  "properties": {
+                    "indexing": {
+                      "properties": {
+                        "failure_code": {
+                          "type": "null"
+                        },
+                        "status": {
+                          "const": "completed"
+                        }
+                      },
+                      "required": [
+                        "status",
+                        "failure_code"
+                      ]
+                    },
+                    "ingest": {
+                      "properties": {
+                        "failure_code": {
+                          "type": "null"
+                        },
+                        "status": {
+                          "const": "completed"
+                        }
+                      },
+                      "required": [
+                        "status",
+                        "failure_code"
+                      ]
+                    },
+                    "search": {
+                      "properties": {
+                        "failure_code": {
+                          "type": "null"
+                        },
+                        "status": {
+                          "const": "completed"
+                        }
+                      },
+                      "required": [
+                        "status",
+                        "failure_code"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "ingest",
+                    "indexing",
+                    "search"
+                  ]
+                },
+                "private_gold": {
+                  "not": {
+                    "type": "null"
+                  }
+                }
+              },
+              "required": [
+                "container_tag_hmac_sha256",
+                "checkpoint",
+                "canonical_result",
+                "private_gold",
+                "failure_codes",
+                "phases"
+              ]
+            }
+          },
+          "failure_codes": {
+            "maxItems": 0
+          }
+        },
+        "required": [
+          "failure_codes",
+          "cases"
+        ]
+      }
+    }
+  ],
+  "properties": {
+    "artifact_type": {
+      "const": "memorybench-export.v1",
+      "title": "Artifact Type",
+      "type": "string"
+    },
+    "benchmark": {
+      "const": "longmemeval",
+      "title": "Benchmark",
+      "type": "string"
+    },
+    "cases": {
+      "items": {
+        "$ref": "#/$defs/MemoryBenchExportCase"
+      },
+      "minItems": 1,
+      "title": "Cases",
+      "type": "array",
+      "uniqueItems": true
+    },
+    "dataset": {
+      "$ref": "#/$defs/DatasetIdentity"
+    },
+    "excluded_stages": {
+      "const": [
+        "answer",
+        "evaluate",
+        "report"
+      ],
+      "items": {
+        "enum": [
+          "answer",
+          "evaluate",
+          "report"
+        ],
+        "type": "string"
+      },
+      "title": "Excluded Stages",
+      "type": "array"
+    },
+    "executed_stages": {
+      "const": [
+        "ingest",
+        "indexing",
+        "search"
+      ],
+      "items": {
+        "enum": [
+          "ingest",
+          "indexing",
+          "search"
+        ],
+        "type": "string"
+      },
+      "title": "Executed Stages",
+      "type": "array"
+    },
+    "failure_codes": {
+      "items": {
+        "enum": [
+          "stage_process_failed",
+          "checkpoint_missing",
+          "checkpoint_invalid",
+          "checkpoint_identity_mismatch",
+          "case_set_mismatch",
+          "phase_incomplete",
+          "phase_failed",
+          "result_missing",
+          "result_duplicate",
+          "result_outside_root",
+          "result_invalid",
+          "result_identity_mismatch",
+          "checkpoint_result_mismatch",
+          "hit_invalid",
+          "guest_evidence_invalid",
+          "secure_descriptor_invalid",
+          "private_gold_write_failed",
+          "export_write_failed",
+          "SIGINT",
+          "SIGTERM"
+        ],
+        "type": "string"
+      },
+      "title": "Failure Codes",
+      "type": "array",
+      "uniqueItems": true
+    },
+    "harness": {
+      "$ref": "#/$defs/MemoryBenchHarnessIdentity"
+    },
+    "latency": {
+      "$ref": "#/$defs/MemoryBenchLatency"
+    },
+    "privacy": {
+      "$ref": "#/$defs/MemoryBenchPrivacy"
+    },
+    "protocol_version": {
+      "const": "1.0.0",
+      "title": "Protocol Version",
+      "type": "string"
+    },
+    "provider": {
+      "enum": [
+        "basic-memory",
+        "exomem"
+      ],
+      "title": "Provider",
+      "type": "string"
+    },
+    "provider_variant": {
+      "minLength": 1,
+      "title": "Provider Variant",
+      "type": "string"
+    },
+    "run_id": {
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$",
+      "title": "Run Id",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "status": {
+      "enum": [
+        "complete",
+        "partial"
+      ],
+      "title": "Status",
+      "type": "string"
+    }
+  },
+  "required": [
+    "protocol_version",
+    "schema_version",
+    "artifact_type",
+    "status",
+    "run_id",
+    "provider",
+    "provider_variant",
+    "benchmark",
+    "harness",
+    "dataset",
+    "executed_stages",
+    "excluded_stages",
+    "privacy",
+    "latency",
+    "failure_codes",
+    "cases"
+  ],
+  "title": "MemoryBenchExport",
+  "type": "object"
+}

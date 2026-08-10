@@ -11,6 +11,10 @@ from pathlib import Path
 import pytest
 
 
+REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+if str(REPOSITORY_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPOSITORY_ROOT))
+
 REPOSITORY_URL = "https://github.com/supermemoryai/memorybench"
 
 
@@ -262,3 +266,309 @@ def test_verify_module_refuses_missing_environment_checkout() -> None:
     )
     assert completed.returncode == 1
     assert "MEMORYBENCH_HOME" in completed.stderr
+
+
+def _sha(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _overlay_checkout(tmp_path: Path) -> Path:
+    checkout = _checkout(tmp_path)
+    files = {
+        "src/types/provider.ts": 'export type ProviderName = "supermemory"\n',
+        "src/providers/index.ts": 'export const providers = ["supermemory"]\n',
+        "src/utils/config.ts": 'export const config = { supermemory: "key" }\n',
+    }
+    for relative, contents in files.items():
+        target = checkout / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(contents)
+    _git(checkout, "add", ".")
+    _git(checkout, "commit", "-qm", "registration preimages")
+    return checkout
+
+
+def _basic_checkout(tmp_path: Path) -> Path:
+    repository = tmp_path / "basic-memory"
+    subprocess.run(["git", "init", "-q", str(repository)], check=True)
+    _git(repository, "config", "user.email", "test@example.invalid")
+    _git(repository, "config", "user.name", "Basic Memory test")
+    files = {
+        "uv.lock": "root lock\n",
+        "benchmarks/uv.lock": "benchmark lock\n",
+        "benchmarks/pyproject.toml": "[project]\nname='fixture'\n",
+        "benchmarks/src/basic_memory_benchmarks/providers/base.py": "class BenchmarkProvider: pass\n",
+        "benchmarks/src/basic_memory_benchmarks/providers/bm_local.py": "class BasicMemoryLocalProvider: pass\n",
+        "benchmarks/src/basic_memory_benchmarks/converters/longmemeval_to_corpus.py": "def _render_session_doc(*args): return ''\n",
+        "benchmarks/src/basic_memory_benchmarks/models.py": "class RunConfig: pass\n",
+    }
+    for relative, contents in files.items():
+        target = repository / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(contents)
+    _git(repository, "add", ".")
+    _git(repository, "commit", "-qm", "basic pin")
+    _git(repository, "remote", "add", "origin", "https://github.com/basicmachines-co/basic-memory")
+    _git(repository, "checkout", "--detach", "-q")
+    return repository
+
+
+def _registration_diff(checkout: Path) -> bytes:
+    completed = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(checkout),
+            "-c",
+            "core.autocrlf=false",
+            "diff",
+            "--binary",
+            "--full-index",
+            "--no-ext-diff",
+            "--no-renames",
+            "--",
+            "src/types/provider.ts",
+            "src/providers/index.ts",
+            "src/utils/config.ts",
+        ],
+        check=True,
+        capture_output=True,
+    )
+    return completed.stdout
+
+
+def _overlay_fixture(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
+    checkout = _overlay_checkout(tmp_path / "memorybench-fixture")
+    basic = _basic_checkout(tmp_path / "basic-fixture")
+    source_root = tmp_path / "source"
+    memorybench_root = source_root / "benchmarks/memorybench"
+    additive_sources = {
+        "providers/_guest_transport.ts": "export const protocolVersion = 1\n",
+        "providers/exomem/index.ts": "export class ExomemProvider {}\n",
+        "providers/basic-memory/index.ts": "export class BasicMemoryProvider {}\n",
+        "providers/basic-memory/sidecar.py": "PROTOCOL_VERSION = 1\n",
+        "providers/tests/guest_transport.test.ts": "// guest transport test\n",
+        "providers/tests/basic_memory.test.ts": "// basic test\n",
+        "providers/tests/exomem.test.ts": "// exomem test\n",
+        "providers/basic-memory/test_sidecar.py": "# sidecar test\n",
+    }
+    destinations = {
+        "providers/_guest_transport.ts": "src/providers/_guest_transport.ts",
+        "providers/exomem/index.ts": "src/providers/exomem/index.ts",
+        "providers/basic-memory/index.ts": "src/providers/basic-memory/index.ts",
+        "providers/basic-memory/sidecar.py": "src/providers/basic-memory/sidecar.py",
+        "providers/tests/guest_transport.test.ts": "src/providers/__guest_tests__/guest_transport.test.ts",
+        "providers/tests/basic_memory.test.ts": "src/providers/__guest_tests__/basic_memory.test.ts",
+        "providers/tests/exomem.test.ts": "src/providers/__guest_tests__/exomem.test.ts",
+        "providers/basic-memory/test_sidecar.py": "src/providers/basic-memory/test_sidecar.py",
+    }
+    for relative, contents in additive_sources.items():
+        target = memorybench_root / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(contents)
+
+    registration_paths = [
+        "src/types/provider.ts",
+        "src/providers/index.ts",
+        "src/utils/config.ts",
+    ]
+    preimages = {path: _sha(checkout / path) for path in registration_paths}
+    (checkout / "src/types/provider.ts").write_text(
+        'export type ProviderName = "supermemory" | "exomem" | "basic-memory"\n'
+    )
+    (checkout / "src/providers/index.ts").write_text(
+        'export const providers = ["supermemory", "exomem", "basic-memory"]\n'
+    )
+    (checkout / "src/utils/config.ts").write_text(
+        'export const config = { supermemory: "key", exomem: "none", "basic-memory": "none" }\n'
+    )
+    postimages = {path: _sha(checkout / path) for path in registration_paths}
+    patch_bytes = _registration_diff(checkout)
+    patch_path = memorybench_root / "registration.patch"
+    patch_path.write_bytes(patch_bytes)
+    subprocess.run(
+        ["git", "-C", str(checkout), "checkout", "--", *registration_paths], check=True
+    )
+
+    basic_files = {
+        "root_uv_lock_sha256": "uv.lock",
+        "benchmark_uv_lock_sha256": "benchmarks/uv.lock",
+        "benchmark_pyproject_sha256": "benchmarks/pyproject.toml",
+        "provider_base_sha256": "benchmarks/src/basic_memory_benchmarks/providers/base.py",
+        "provider_bm_local_sha256": "benchmarks/src/basic_memory_benchmarks/providers/bm_local.py",
+        "longmemeval_renderer_sha256": (
+            "benchmarks/src/basic_memory_benchmarks/converters/longmemeval_to_corpus.py"
+        ),
+        "models_sha256": "benchmarks/src/basic_memory_benchmarks/models.py",
+    }
+    lock = {
+        "repo_url": REPOSITORY_URL,
+        "commit_sha": _git(checkout, "rev-parse", "HEAD"),
+        "tree_sha": _git(checkout, "rev-parse", "HEAD^{tree}"),
+        "license_sha256": _sha(checkout / "LICENSE"),
+        "bun_version_pinned": "1.3.14",
+        "bun_lockfile_version": 1,
+        "checkout_env_var": "MEMORYBENCH_HOME",
+        "basic_memory_checkout_env_var": "BASIC_MEMORY_HOME",
+        "provider_files_sha256": {
+            destination: {"source": source, "sha256": _sha(memorybench_root / source)}
+            for source, destination in destinations.items()
+        },
+        "registration_overlay": {
+            "patch_path": "benchmarks/memorybench/registration.patch",
+            "patch_sha256": hashlib.sha256(patch_bytes).hexdigest(),
+            "path_allowlist": sorted(registration_paths),
+            "files": [
+                {
+                    "path": path,
+                    "preimage_sha256": preimages[path],
+                    "postimage_sha256": postimages[path],
+                }
+                for path in registration_paths
+            ],
+        },
+        "registration_patch_sha256": hashlib.sha256(patch_bytes).hexdigest(),
+        "basic_memory": {
+            "repo_url": "https://github.com/basicmachines-co/basic-memory",
+            "commit_sha": _git(basic, "rev-parse", "HEAD"),
+            "tree_sha": _git(basic, "rev-parse", "HEAD^{tree}"),
+            **{key: _sha(basic / relative) for key, relative in basic_files.items()},
+        },
+    }
+    lockfile = memorybench_root / "LOCKFILE.json"
+    lockfile.write_text(json.dumps(lock, indent=2) + "\n")
+    return checkout, basic, source_root, lockfile
+
+
+def _overlay_verify(
+    checkout: Path,
+    basic: Path,
+    source_root: Path,
+    lockfile: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> str:
+    from benchmarks.memorybench import setup
+
+    _fake_bun(checkout.parent)
+    monkeypatch.setenv("PATH", f"{checkout.parent}:{os.environ['PATH']}")
+    return setup.verify_checkout(
+        checkout,
+        lockfile=lockfile,
+        source_root=source_root,
+        basic_checkout=basic,
+    )
+
+
+def test_overlay_pristine_materialize_and_verify_exact_allowlist(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from benchmarks.memorybench import setup
+
+    checkout, basic, source_root, lockfile = _overlay_fixture(tmp_path)
+    assert _overlay_verify(checkout, basic, source_root, lockfile, monkeypatch) == "pristine"
+
+    setup.materialize_checkout(
+        checkout, lockfile=lockfile, source_root=source_root, basic_checkout=basic
+    )
+
+    assert _overlay_verify(checkout, basic, source_root, lockfile, monkeypatch) == "materialized"
+    changed = set(_git(checkout, "status", "--porcelain=v1", "--untracked-files=all").splitlines())
+    assert len(changed) == 11
+    assert all("package.json" not in line and "bun.lock" not in line for line in changed)
+
+
+def test_overlay_registration_diff_regenerates_byte_identically(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from benchmarks.memorybench import setup
+
+    checkout, basic, source_root, lockfile = _overlay_fixture(tmp_path)
+    setup.materialize_checkout(
+        checkout, lockfile=lockfile, source_root=source_root, basic_checkout=basic
+    )
+    assert _registration_diff(checkout) == (
+        source_root / "benchmarks/memorybench/registration.patch"
+    ).read_bytes()
+    assert _overlay_verify(checkout, basic, source_root, lockfile, monkeypatch) == "materialized"
+
+
+@pytest.mark.parametrize("drift", ["postimage", "extra-tracked", "extra-untracked"])
+def test_overlay_verify_refuses_registration_or_extra_drift(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, drift: str
+) -> None:
+    from benchmarks.memorybench import setup
+
+    checkout, basic, source_root, lockfile = _overlay_fixture(tmp_path)
+    setup.materialize_checkout(
+        checkout, lockfile=lockfile, source_root=source_root, basic_checkout=basic
+    )
+    if drift == "postimage":
+        (checkout / "src/types/provider.ts").write_text("drift\n")
+    elif drift == "extra-tracked":
+        (checkout / "package.json").write_text('{"name":"drift"}\n')
+    else:
+        (checkout / "unexpected.txt").write_text("drift\n")
+    with pytest.raises(setup.SetupVerificationError):
+        _overlay_verify(checkout, basic, source_root, lockfile, monkeypatch)
+
+
+def test_overlay_restore_refuses_locally_modified_additive_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from benchmarks.memorybench import setup
+
+    checkout, basic, source_root, lockfile = _overlay_fixture(tmp_path)
+    setup.materialize_checkout(
+        checkout, lockfile=lockfile, source_root=source_root, basic_checkout=basic
+    )
+    (checkout / "src/providers/exomem/index.ts").write_text("local change\n")
+
+    with pytest.raises(setup.SetupVerificationError, match="modified|hash"):
+        setup.restore_checkout(
+            checkout, lockfile=lockfile, source_root=source_root, basic_checkout=basic
+        )
+    assert (checkout / "src/providers/exomem/index.ts").read_text() == "local change\n"
+
+
+def test_overlay_restore_removes_only_exact_files_and_proves_pristine(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from benchmarks.memorybench import setup
+
+    checkout, basic, source_root, lockfile = _overlay_fixture(tmp_path)
+    setup.materialize_checkout(
+        checkout, lockfile=lockfile, source_root=source_root, basic_checkout=basic
+    )
+    cache = checkout / "src/providers/basic-memory/__pycache__"
+    cache.mkdir()
+    (cache / "sidecar.cpython-test.pyc").write_bytes(b"test cache")
+
+    setup.restore_checkout(
+        checkout, lockfile=lockfile, source_root=source_root, basic_checkout=basic
+    )
+
+    assert not cache.exists()
+    assert _overlay_verify(checkout, basic, source_root, lockfile, monkeypatch) == "pristine"
+    assert not _git(checkout, "status", "--porcelain=v1", "--untracked-files=all")
+
+
+@pytest.mark.parametrize("drift", ["head", "tree", "root-lock", "benchmark-lock"])
+def test_overlay_refuses_basic_memory_pin_tree_and_both_lock_drifts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, drift: str
+) -> None:
+    from benchmarks.memorybench import setup
+
+    checkout, basic, source_root, lockfile = _overlay_fixture(tmp_path)
+    lock = json.loads(lockfile.read_text())
+    if drift == "head":
+        lock["basic_memory"]["commit_sha"] = "0" * 40
+    elif drift == "tree":
+        lock["basic_memory"]["tree_sha"] = "0" * 40
+    elif drift == "root-lock":
+        lock["basic_memory"]["root_uv_lock_sha256"] = "0" * 64
+    else:
+        lock["basic_memory"]["benchmark_uv_lock_sha256"] = "0" * 64
+    lockfile.write_text(json.dumps(lock) + "\n")
+
+    with pytest.raises(setup.SetupVerificationError, match="Basic Memory"):
+        _overlay_verify(checkout, basic, source_root, lockfile, monkeypatch)

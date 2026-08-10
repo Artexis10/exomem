@@ -117,14 +117,133 @@ them. Mission acceptance criteria (§14) close only from this ledger.
 - [x] 4.3 Recording proxy capturing their provider's actual traffic (164
       proxy checks / 187 focused offline checks; 272 cross-lane checks; exact
       pin and artifact recomputation; final independent review CLEAR)
-- [ ] 4.4 TS providers (exomem via isolated REST service on ephemeral port;
-      basic-memory via shared sidecar) + registration patch with verified
-      diff hash
-- [ ] 4.5 `export.py` (stages ingest,search only; missing_fields explicit)
+- [x] 4.4 TS providers + exact reversible registration overlay:
+      exomem via one isolated REST service per container (owned vault,
+      ephemeral loopback port, random REST key, doctor readiness);
+      basic-memory via one persistent shared Python sidecar exposing exactly
+      `POST /v1/{ingest,search,cleanup}` and wrapping the pinned unmodified
+      `BasicMemoryLocalProvider` + renderer under its uv environment.
+      Ingest blocks through positive readiness; raw `_abs`/question IDs are
+      neutralized before rendering; an inert benchmark-owned default project
+      prevents operator-home indexing; the same warm MCP process supplies
+      startup/config evidence from its isolated Basic log while every unique
+      ingest gets fresh fallback and project/document count proof;
+      fallback/non-JSON ambiguity invalidates.
+      Search forwards the exact limit once; growing-corpus N-reindex
+      asymmetry is disclosed; descriptor attach/cleanup is secure and proves
+      absence. Registration changes only ProviderName, registry/export, and
+      no-key config; setup materialize/verify/restore recomputes the canonical
+      diff and all locked hashes. Red-first coverage includes envelopes,
+      replay/collision, receipts, observation transparency, project-path
+      isolation, descriptor attacks, owned-group teardown, exact acceptance
+      sequence without cache writes, static provenance, and no product or
+      competitor-provider modification. Acceptance: focused Python source and
+      setup checks; hermetic sidecar checks under the pinned Basic benchmark
+      environment; materialize → verify → pinned local TypeScript compiler and
+      guest tests → restore → pristine verify; existing lean protocol/schema
+      suites; fresh independent review of the actual diff. No provider,
+      dataset, model, network, credential, or benchmark run in this item.
+      Final evidence: 91 focused Python checks; 53 Bun checks / 260
+      expectations; 260 + 137 cross-lane checks; pinned materialize → verify
+      → TypeScript 5.9.3 / Basic-env checks → restore → pristine lifecycle;
+      all 8 additive hashes and the canonical registration patch recomputed;
+      final independent targeted recheck `CLEAR`.
+- [x] 4.5 MemoryBench runner/export/cleanup glue for the two 4.4 guests
+      (`basic-memory|exomem`): accept an absolute owned mode-0600 strict
+      `memorybench-run-plan.v1` that binds and recomputes the local dataset
+      bytes/count, existing `DatasetIdentity`, exact harness pin/lock,
+      registered variant, run IDs, output, and contained guest roots before
+      provider work; emit strict typed public
+      `memorybench-export.v1.json` from pinned checkpoint + canonical result
+      files (executed ingest/indexing/search; answer/evaluate/report excluded;
+      original-order finite `{content,score}` hits; per-case phase states;
+      source refs/digests; all imported timing non-publishable) and protected
+      mode-0600 typed private-gold members under a mode-0700 directory. Never
+      copy the raw result envelope,
+      expose ground truth, invent `answer_session_ids: []`, or substitute
+      constants/inference for missing evidence. `missing_fields` is a closed,
+      sorted vocabulary: `question.question_date`,
+      `gold.answer_session_ids`, `ingest.transmitted_payloads`,
+      `search.transmitted_query`, `search.options.limit`,
+      `search.options.threshold`, `search.normalized_hit_ids`,
+      `search.normalized_scores`, `search.normalized_ranks`,
+      `search.retry_attempts`, `search.http_status`. Add strict
+      Rooted public refs use safe output paths, while MemoryBench source refs,
+      case IDs, and container tags expose only domain-separated HMAC-SHA256
+      pseudonyms under a random 32-byte key held solely in the mode-0600 run
+      plan; private gold carries raw IDs/paths and validators recompute HMAC +
+      byte digests. Plain raw-ID/path SHA-256 is forbidden as a dictionary
+      oracle; Python/TypeScript must pass the frozen NUL-delimited cross-language
+      HMAC vectors. Never copy/rename a source, publish the key, or leak raw identity
+      through a public ref/filename. Add strict
+      `guest-cleanup.v1.json` via descriptor-driven
+      `benchmarks/memorybench/cleanup.ts`: absolute owned mode-0600 strict
+      `guest-cleanup-plan.v1`,
+      attach-only through reviewed descriptor verification, sequential calls
+      to the concrete providers' existing `clear(containerTag)` paths, and no
+      launch/repair/replacement during teardown. Targets are the union of
+      non-pending checkpoint tags, validated guest request/response evidence,
+      and secure descriptors, deduplicated and digest-sorted; attempt every
+      target after individual failures. Persist token-free per-namespace plus aggregate
+      descriptor/process-group/work-root absence and Basic public-cleanup call
+      count. One `finally`/signal path writes partial-or-complete export before
+      cleanup, cleanup proof before final manifest, and returns `VALID` only
+      for complete export + `all_absent:true`; provider/export/interruption/
+      cleanup/proof failures are `INVALID`, while `BLOCKED` is pre-provider
+      only. Status is independent of exit: caught signal wins 130/143;
+      otherwise unproved cleanup 3, pre-provider BLOCKED 2, VALID 0, remaining
+      INVALID 1. Commit strict generated Draft 2020-12 schemas for the run
+      plan, export, private gold, cleanup plan, and cleanup proof; schemas prove
+      every standard-expressible structural invariant, while strict models +
+      shared validators recompute sibling equality, lexical ordering/root
+      containment, referenced digests and source facts. A schema/status pass is
+      never validity evidence; separate closed named schema→model and
+      model→artifact-validator registries enumerate every permitted semantic
+      difference and mandatory external recomputation. No-follow source
+      reads stay confined to the resolved run root; canonical result discovery
+      is independent of untrusted checkpoint paths; missing/duplicate/extra/
+      outside-root/non-finite or cross-source disagreement is partial INVALID,
+      never precedence selection. Bind `dataset_path` to MemoryBench's exact
+      native LongMemEval raw-cache path in a disposable exact-pin checkout;
+      refuse any pre-existing derived question cache or run root, never
+      download/delete/repair/reuse it, and reconcile fresh pinned question
+      shards before validity. Bind full versus explicit ordered question IDs
+      in the private plan and pass the latter through a lockfile-pinned
+      additive ingest entrypoint using the upstream `questionIds` seam; never
+      use `--limit` or sampling. Resolve verified Bun 1.3.14 and uv before
+      provider work, invoke Bun absolutely with a minimal verified `PATH`,
+      reject duplicate JSON members recursively in Python and TypeScript,
+      retain cleanup targets before fallible export projection and validate
+      each discovery candidate independently so malformed guest evidence or
+      descriptors record stable partial-export failure without erasing valid
+      siblings, run cleanup in
+      an isolated process group, observe Basic's zero-or-one cleanup count at
+      its real finalization seam (including honest failed proofs), and never
+      infer process/config absence from a missing
+      directory. Public bytes must pass the privacy scanner before persistence
+      and the persisted export must pass the full artifact validator before
+      terminal `VALID`. Red-first acceptance covers omission/no-fabrication, privacy,
+      schema parity, corrupt/duplicate/missing source artifacts, attach-only
+      teardown, target discovery, provider-clear invocation, partial export,
+      cleanup failure, signals, manifest ordering, deterministic replay, and
+      fresh independent review. No provider/dataset/model/network/credential/
+      benchmark run in this item.
+      Final evidence (2026-08-10): every implementation/correction pass retained
+      verbatim red-first transcripts in `.task/RESULT-4.5.md`; root final gates
+      were 329 Python passed (one existing fork deprecation warning), 80 Bun
+      passed / 376 expectations, protocol schema check, fixture selftest,
+      OpenSpec strict, and diff check green. The final local-only disposable
+      lifecycle passed 53 materialized provider tests, 27 cleanup tests, four
+      ingest-entrypoint tests, and TypeScript 5.9.3, then restored both exact
+      pinned checkouts pristine. The overlay is exactly nine additive files and
+      all lock hashes recompute. Final independent FEEDBACK6 recheck: `CLEAR`.
+      No competitor/provider/network/model/dataset benchmark, credential,
+      metered call, commit, push, or §4.6 work occurred.
 - [ ] 4.6 25-case Exomem direct-vs-MemoryBench equivalence gate GREEN
       (mode=blocking) — prerequisite for every comparative run
-- [ ] 4.7 Supermemory direct-SDK vs MemoryBench-provider spot-check
-      (mode=report)
+- [ ] 4.7 Ratify and implement the native Supermemory vendor-hit projection
+      (distinct from 4.5's flat guest-hit wire), then run the Supermemory
+      direct-SDK vs MemoryBench-provider spot-check (mode=report)
 
 ## 5. Epistemic State Bench (W6 — lane: claude executor + external review)
 

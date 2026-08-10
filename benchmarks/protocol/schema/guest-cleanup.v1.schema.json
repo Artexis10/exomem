@@ -1,0 +1,1029 @@
+{
+  "$defs": {
+    "ArtifactReference": {
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "else": {
+            "properties": {
+              "path": {
+                "type": "null"
+              },
+              "path_hmac_sha256": {
+                "pattern": "^[0-9a-f]{64}$",
+                "type": "string"
+              }
+            }
+          },
+          "if": {
+            "properties": {
+              "root": {
+                "const": "output"
+              }
+            },
+            "required": [
+              "root"
+            ]
+          },
+          "then": {
+            "properties": {
+              "path": {
+                "minLength": 1,
+                "pattern": "^(?!/)(?!.*\\\\)(?!.*(?:^|/)\\.{1,2}(?:/|$))(?!.*//).+$",
+                "type": "string"
+              },
+              "path_hmac_sha256": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      ],
+      "properties": {
+        "path": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "pattern": "^(?!/)(?!.*\\\\)(?!.*(?:^|/)\\.{1,2}(?:/|$))(?!.*//).+$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Path"
+        },
+        "path_hmac_sha256": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Path Hmac Sha256"
+        },
+        "root": {
+          "enum": [
+            "memorybench_run",
+            "output"
+          ],
+          "title": "Root",
+          "type": "string"
+        },
+        "sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Sha256",
+          "type": "string"
+        }
+      },
+      "required": [
+        "root",
+        "path",
+        "path_hmac_sha256",
+        "sha256"
+      ],
+      "title": "ArtifactReference",
+      "type": "object"
+    },
+    "GuestCleanupAbsence": {
+      "additionalProperties": false,
+      "properties": {
+        "config": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Config"
+        },
+        "corpus": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Corpus"
+        },
+        "descriptor": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Descriptor"
+        },
+        "namespace": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Namespace"
+        },
+        "process_group": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Process Group"
+        },
+        "work_root": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Work Root"
+        }
+      },
+      "required": [
+        "namespace",
+        "corpus",
+        "config",
+        "descriptor",
+        "process_group",
+        "work_root"
+      ],
+      "title": "GuestCleanupAbsence",
+      "type": "object"
+    },
+    "GuestCleanupTargetProof": {
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "else": {
+            "properties": {
+              "failure_code": {
+                "type": "null"
+              }
+            }
+          },
+          "if": {
+            "properties": {
+              "outcome": {
+                "enum": [
+                  "clear_failed",
+                  "absence_unproved"
+                ]
+              }
+            },
+            "required": [
+              "outcome"
+            ]
+          },
+          "then": {
+            "properties": {
+              "failure_code": {
+                "not": {
+                  "type": "null"
+                }
+              }
+            }
+          }
+        }
+      ],
+      "properties": {
+        "absence": {
+          "$ref": "#/$defs/GuestCleanupAbsence"
+        },
+        "artifacts": {
+          "items": {
+            "$ref": "#/$defs/ArtifactReference"
+          },
+          "title": "Artifacts",
+          "type": "array",
+          "uniqueItems": true
+        },
+        "container_tag_hmac_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Container Tag Hmac Sha256",
+          "type": "string"
+        },
+        "discovery_sources": {
+          "items": {
+            "enum": [
+              "checkpoint",
+              "guest_evidence",
+              "secure_descriptor"
+            ],
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Discovery Sources",
+          "type": "array",
+          "uniqueItems": true
+        },
+        "failure_code": {
+          "anyOf": [
+            {
+              "enum": [
+                "descriptor_missing",
+                "descriptor_insecure",
+                "descriptor_stale",
+                "descriptor_binding_mismatch",
+                "clear_failed",
+                "namespace_absence_unproved",
+                "corpus_absence_unproved",
+                "config_absence_unproved",
+                "process_group_absence_unproved",
+                "work_root_absence_unproved",
+                "cleanup_proof_write_failed"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Failure Code"
+        },
+        "outcome": {
+          "enum": [
+            "cleared",
+            "already_absent",
+            "clear_failed",
+            "absence_unproved"
+          ],
+          "title": "Outcome",
+          "type": "string"
+        }
+      },
+      "required": [
+        "container_tag_hmac_sha256",
+        "discovery_sources",
+        "outcome",
+        "failure_code",
+        "artifacts",
+        "absence"
+      ],
+      "title": "GuestCleanupTargetProof",
+      "type": "object"
+    },
+    "GuestFinalAbsence": {
+      "additionalProperties": false,
+      "properties": {
+        "artifacts": {
+          "items": {
+            "$ref": "#/$defs/ArtifactReference"
+          },
+          "title": "Artifacts",
+          "type": "array",
+          "uniqueItems": true
+        },
+        "config": {
+          "title": "Config",
+          "type": "boolean"
+        },
+        "descriptor": {
+          "title": "Descriptor",
+          "type": "boolean"
+        },
+        "process_group": {
+          "title": "Process Group",
+          "type": "boolean"
+        },
+        "work_root": {
+          "title": "Work Root",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "config",
+        "descriptor",
+        "process_group",
+        "work_root",
+        "artifacts"
+      ],
+      "title": "GuestFinalAbsence",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "allOf": [
+    {
+      "else": {
+        "properties": {
+          "basic_public_cleanup_calls": {
+            "const": 0
+          },
+          "targets": {
+            "items": {
+              "allOf": [
+                {
+                  "if": {
+                    "properties": {
+                      "outcome": {
+                        "const": "already_absent"
+                      }
+                    },
+                    "required": [
+                      "outcome"
+                    ]
+                  },
+                  "then": {
+                    "properties": {
+                      "absence": {
+                        "properties": {
+                          "descriptor": {
+                            "const": true
+                          },
+                          "work_root": {
+                            "const": true
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              ],
+              "properties": {
+                "absence": {
+                  "properties": {
+                    "config": {
+                      "type": "null"
+                    },
+                    "corpus": {
+                      "type": "null"
+                    },
+                    "descriptor": {
+                      "type": "boolean"
+                    },
+                    "namespace": {
+                      "type": "boolean"
+                    },
+                    "process_group": {
+                      "type": "boolean"
+                    },
+                    "work_root": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "if": {
+        "properties": {
+          "provider": {
+            "const": "basic-memory"
+          }
+        },
+        "required": [
+          "provider"
+        ]
+      },
+      "then": {
+        "allOf": [
+          {
+            "else": {
+              "else": {
+                "properties": {
+                  "basic_public_cleanup_calls": {
+                    "const": 1
+                  }
+                }
+              },
+              "if": {
+                "properties": {
+                  "targets": {
+                    "not": {
+                      "contains": {
+                        "properties": {
+                          "outcome": {
+                            "not": {
+                              "const": "already_absent"
+                            }
+                          }
+                        },
+                        "required": [
+                          "outcome"
+                        ]
+                      }
+                    }
+                  }
+                },
+                "required": [
+                  "targets"
+                ]
+              },
+              "then": {
+                "properties": {
+                  "basic_public_cleanup_calls": {
+                    "const": 0
+                  }
+                }
+              }
+            },
+            "if": {
+              "anyOf": [
+                {
+                  "properties": {
+                    "targets": {
+                      "contains": {
+                        "properties": {
+                          "outcome": {
+                            "enum": [
+                              "clear_failed",
+                              "absence_unproved"
+                            ]
+                          }
+                        },
+                        "required": [
+                          "outcome"
+                        ]
+                      }
+                    }
+                  },
+                  "required": [
+                    "targets"
+                  ]
+                },
+                {
+                  "properties": {
+                    "failure_codes": {
+                      "minItems": 1
+                    }
+                  },
+                  "required": [
+                    "failure_codes"
+                  ]
+                },
+                {
+                  "properties": {
+                    "final_absence": {
+                      "anyOf": [
+                        {
+                          "properties": {
+                            "config": {
+                              "const": false
+                            }
+                          },
+                          "required": [
+                            "config"
+                          ]
+                        },
+                        {
+                          "properties": {
+                            "descriptor": {
+                              "const": false
+                            }
+                          },
+                          "required": [
+                            "descriptor"
+                          ]
+                        },
+                        {
+                          "properties": {
+                            "process_group": {
+                              "const": false
+                            }
+                          },
+                          "required": [
+                            "process_group"
+                          ]
+                        },
+                        {
+                          "properties": {
+                            "work_root": {
+                              "const": false
+                            }
+                          },
+                          "required": [
+                            "work_root"
+                          ]
+                        }
+                      ]
+                    }
+                  },
+                  "required": [
+                    "final_absence"
+                  ]
+                }
+              ]
+            },
+            "then": {
+              "properties": {
+                "basic_public_cleanup_calls": {
+                  "maximum": 1,
+                  "minimum": 0
+                }
+              }
+            }
+          }
+        ],
+        "properties": {
+          "targets": {
+            "items": {
+              "allOf": [
+                {
+                  "if": {
+                    "properties": {
+                      "outcome": {
+                        "const": "already_absent"
+                      }
+                    },
+                    "required": [
+                      "outcome"
+                    ]
+                  },
+                  "then": {
+                    "properties": {
+                      "absence": {
+                        "properties": {
+                          "corpus": {
+                            "const": true
+                          },
+                          "namespace": {
+                            "const": true
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              ],
+              "properties": {
+                "absence": {
+                  "properties": {
+                    "config": {
+                      "type": "null"
+                    },
+                    "corpus": {
+                      "type": "boolean"
+                    },
+                    "descriptor": {
+                      "type": "null"
+                    },
+                    "namespace": {
+                      "type": "boolean"
+                    },
+                    "process_group": {
+                      "type": "null"
+                    },
+                    "work_root": {
+                      "type": "null"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "else": {
+        "properties": {
+          "all_absent": {
+            "const": false
+          }
+        }
+      },
+      "if": {
+        "anyOf": [
+          {
+            "allOf": [
+              {
+                "else": {
+                  "else": {
+                    "properties": {
+                      "basic_public_cleanup_calls": {
+                        "const": 1
+                      }
+                    }
+                  },
+                  "if": {
+                    "properties": {
+                      "targets": {
+                        "not": {
+                          "contains": {
+                            "properties": {
+                              "outcome": {
+                                "not": {
+                                  "const": "already_absent"
+                                }
+                              }
+                            },
+                            "required": [
+                              "outcome"
+                            ]
+                          }
+                        }
+                      }
+                    },
+                    "required": [
+                      "targets"
+                    ]
+                  },
+                  "then": {
+                    "properties": {
+                      "basic_public_cleanup_calls": {
+                        "const": 0
+                      }
+                    }
+                  }
+                },
+                "if": {
+                  "anyOf": [
+                    {
+                      "properties": {
+                        "targets": {
+                          "contains": {
+                            "properties": {
+                              "outcome": {
+                                "enum": [
+                                  "clear_failed",
+                                  "absence_unproved"
+                                ]
+                              }
+                            },
+                            "required": [
+                              "outcome"
+                            ]
+                          }
+                        }
+                      },
+                      "required": [
+                        "targets"
+                      ]
+                    },
+                    {
+                      "properties": {
+                        "failure_codes": {
+                          "minItems": 1
+                        }
+                      },
+                      "required": [
+                        "failure_codes"
+                      ]
+                    },
+                    {
+                      "properties": {
+                        "final_absence": {
+                          "anyOf": [
+                            {
+                              "properties": {
+                                "config": {
+                                  "const": false
+                                }
+                              },
+                              "required": [
+                                "config"
+                              ]
+                            },
+                            {
+                              "properties": {
+                                "descriptor": {
+                                  "const": false
+                                }
+                              },
+                              "required": [
+                                "descriptor"
+                              ]
+                            },
+                            {
+                              "properties": {
+                                "process_group": {
+                                  "const": false
+                                }
+                              },
+                              "required": [
+                                "process_group"
+                              ]
+                            },
+                            {
+                              "properties": {
+                                "work_root": {
+                                  "const": false
+                                }
+                              },
+                              "required": [
+                                "work_root"
+                              ]
+                            }
+                          ]
+                        }
+                      },
+                      "required": [
+                        "final_absence"
+                      ]
+                    }
+                  ]
+                },
+                "then": {
+                  "properties": {
+                    "basic_public_cleanup_calls": {
+                      "maximum": 1,
+                      "minimum": 0
+                    }
+                  }
+                }
+              }
+            ],
+            "properties": {
+              "failure_codes": {
+                "maxItems": 0
+              },
+              "final_absence": {
+                "properties": {
+                  "config": {
+                    "const": true
+                  },
+                  "descriptor": {
+                    "const": true
+                  },
+                  "process_group": {
+                    "const": true
+                  },
+                  "work_root": {
+                    "const": true
+                  }
+                },
+                "required": [
+                  "config",
+                  "descriptor",
+                  "process_group",
+                  "work_root"
+                ]
+              },
+              "provider": {
+                "const": "basic-memory"
+              },
+              "targets": {
+                "items": {
+                  "properties": {
+                    "absence": {
+                      "properties": {
+                        "config": {
+                          "type": "null"
+                        },
+                        "corpus": {
+                          "const": true
+                        },
+                        "descriptor": {
+                          "type": "null"
+                        },
+                        "namespace": {
+                          "const": true
+                        },
+                        "process_group": {
+                          "type": "null"
+                        },
+                        "work_root": {
+                          "type": "null"
+                        }
+                      }
+                    },
+                    "failure_code": {
+                      "type": "null"
+                    },
+                    "outcome": {
+                      "enum": [
+                        "cleared",
+                        "already_absent"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "outcome",
+                    "failure_code",
+                    "absence"
+                  ]
+                }
+              }
+            },
+            "required": [
+              "provider",
+              "failure_codes",
+              "targets",
+              "final_absence"
+            ]
+          },
+          {
+            "allOf": [
+              {
+                "properties": {
+                  "basic_public_cleanup_calls": {
+                    "const": 0
+                  }
+                }
+              }
+            ],
+            "properties": {
+              "failure_codes": {
+                "maxItems": 0
+              },
+              "final_absence": {
+                "properties": {
+                  "config": {
+                    "const": true
+                  },
+                  "descriptor": {
+                    "const": true
+                  },
+                  "process_group": {
+                    "const": true
+                  },
+                  "work_root": {
+                    "const": true
+                  }
+                },
+                "required": [
+                  "config",
+                  "descriptor",
+                  "process_group",
+                  "work_root"
+                ]
+              },
+              "provider": {
+                "const": "exomem"
+              },
+              "targets": {
+                "items": {
+                  "properties": {
+                    "absence": {
+                      "properties": {
+                        "config": {
+                          "type": "null"
+                        },
+                        "corpus": {
+                          "type": "null"
+                        },
+                        "descriptor": {
+                          "const": true
+                        },
+                        "namespace": {
+                          "const": true
+                        },
+                        "process_group": {
+                          "const": true
+                        },
+                        "work_root": {
+                          "const": true
+                        }
+                      }
+                    },
+                    "failure_code": {
+                      "type": "null"
+                    },
+                    "outcome": {
+                      "enum": [
+                        "cleared",
+                        "already_absent"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "outcome",
+                    "failure_code",
+                    "absence"
+                  ]
+                }
+              }
+            },
+            "required": [
+              "provider",
+              "failure_codes",
+              "targets",
+              "final_absence"
+            ]
+          }
+        ]
+      },
+      "then": {
+        "properties": {
+          "all_absent": {
+            "const": true
+          }
+        }
+      }
+    }
+  ],
+  "properties": {
+    "all_absent": {
+      "title": "All Absent",
+      "type": "boolean"
+    },
+    "artifact_type": {
+      "const": "guest-cleanup.v1",
+      "title": "Artifact Type",
+      "type": "string"
+    },
+    "basic_public_cleanup_calls": {
+      "minimum": 0,
+      "title": "Basic Public Cleanup Calls",
+      "type": "integer"
+    },
+    "failure_codes": {
+      "items": {
+        "enum": [
+          "descriptor_missing",
+          "descriptor_insecure",
+          "descriptor_stale",
+          "descriptor_binding_mismatch",
+          "clear_failed",
+          "namespace_absence_unproved",
+          "corpus_absence_unproved",
+          "config_absence_unproved",
+          "process_group_absence_unproved",
+          "work_root_absence_unproved",
+          "cleanup_proof_write_failed"
+        ],
+        "type": "string"
+      },
+      "title": "Failure Codes",
+      "type": "array",
+      "uniqueItems": true
+    },
+    "final_absence": {
+      "$ref": "#/$defs/GuestFinalAbsence"
+    },
+    "protocol_version": {
+      "const": "1.0.0",
+      "title": "Protocol Version",
+      "type": "string"
+    },
+    "provider": {
+      "enum": [
+        "basic-memory",
+        "exomem"
+      ],
+      "title": "Provider",
+      "type": "string"
+    },
+    "provider_variant": {
+      "minLength": 1,
+      "title": "Provider Variant",
+      "type": "string"
+    },
+    "run_id": {
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$",
+      "title": "Run Id",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "targets": {
+      "items": {
+        "$ref": "#/$defs/GuestCleanupTargetProof"
+      },
+      "title": "Targets",
+      "type": "array",
+      "uniqueItems": true
+    },
+    "trigger": {
+      "enum": [
+        "success",
+        "stage_failure",
+        "export_failure",
+        "SIGINT",
+        "SIGTERM"
+      ],
+      "title": "Trigger",
+      "type": "string"
+    }
+  },
+  "required": [
+    "protocol_version",
+    "schema_version",
+    "artifact_type",
+    "run_id",
+    "provider",
+    "provider_variant",
+    "trigger",
+    "targets",
+    "basic_public_cleanup_calls",
+    "failure_codes",
+    "final_absence",
+    "all_absent"
+  ],
+  "title": "GuestCleanup",
+  "type": "object"
+}

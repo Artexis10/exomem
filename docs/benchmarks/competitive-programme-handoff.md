@@ -143,21 +143,33 @@ providers strictly sequentially; benchmarks only on a quiesced machine;
 ## Work queue (the ledger is the source of truth:
 `openspec/changes/add-competitive-benchmark-programme/tasks.md`)
 
-- **§4 W5 — MemoryBench guest lane** (design settled in the audits):
-  TypeScript exomem provider against an isolated `exomem --transport http`
-  service (ephemeral port, temp vault, random REST key — service.py
-  pattern); Basic Memory TS provider via a shared Python sidecar wrapping
-  THEIR provider classes under THEIR uv env; registration patch with
-  verified diff hash into the pinned clone; run stages `ingest,search`
-  ONLY (answer/judge re-derived in the direct lane); guest provider
-  honours `options.limit` EXACTLY, carries its own bounded retries and
-  timeouts (the harness has none), returns flat `{content, score}` hits
-  (verbose objects zero the retrieval metrics), implements awaitIndexing
-  with attempt + wall-clock caps and 404 handling, declares honest
-  concurrency, implements clear(); exporter → protocol artifacts with
-  explicit `missing_fields`; then the **25-case Exomem
-  direct-vs-MemoryBench equivalence gate, mode=blocking** (4.6) and the
-  supermemory SDK spot-check (4.7).
+- **§4 W5 — MemoryBench guest lane** (4.4 transport contract now binding in
+  OpenSpec design decision 11): retain paired observations, not a single
+  synthetic product score. Basic Memory keeps its `bm-bench` own-harness row
+  and gains a MemoryBench row through the pinned, unmodified
+  `BasicMemoryLocalProvider`; Supermemory keeps its own MemoryBench row and
+  receives the 4.7 direct-SDK spot-check. The Basic TS provider reconnects to
+  one persistent, loopback-only Python sidecar across separate stage
+  processes; that sidecar exposes exactly ingest/search/cleanup, blocks
+  ingest through fresh per-session vector/fallback proof plus startup/config
+  evidence from the isolated Basic log, forwards the
+  exact search limit, and invalidates fallback or ambiguous output. Raw
+  `_abs`/question identity is digested before the competitor renderer. An
+  inert benchmark-owned Basic default project prevents accidental indexing
+  of `~/basic-memory`; all project paths and final absence are proven. The
+  Exomem TS provider owns one initialized vault and authenticated ephemeral
+  REST service per container and proves hybrid readiness with doctor. Both
+  transports use bounded retries/deadlines, sequential concurrency, secure
+  atomically published descriptors, owned-process-group teardown, and
+  token-free evidence. Registration is additive plus exactly three pinned
+  MemoryBench edits, with pre/postimages and a regenerated canonical diff;
+  materialize/verify/restore refuse all drift. 4.4 is hermetic and performs
+  no provider run. Then 4.5 imports ingest/search ONLY with explicit
+  `missing_fields` and owns `finally`/signal cleanup because pinned
+  MemoryBench never invokes `Provider.clear()`; 4.6 runs the **25-case
+  Exomem direct-vs-MemoryBench
+  equivalence gate in blocking mode**, and 4.7 performs the Supermemory
+  SDK/provider report-mode spot-check.
 - **§5 W6b — epistemic completion**: runner glue binding scenarios to
   AssertionContext (`served_items`, `foreign_case_hits`,
   `external_edit_at`, snapshot pairs → `prior`) — ledger 5.1b; exomem

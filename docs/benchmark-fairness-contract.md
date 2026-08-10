@@ -66,6 +66,27 @@ structurally impossible, not merely discouraged.
     the 2026-08-08 REJECT — and every material objection is fixed or
     published alongside the claim. A result showing a competitor ahead is a
     valid, publishable outcome of this programme.
+11. **Transport glue is not competitor configuration.** We may write the
+    process bridge needed to run a competitor's own provider inside another
+    harness: loopback authentication, isolated work roots, bounded retries,
+    persistent descriptors, evidence capture, and cleanup. Canonical-event
+    hygiene such as digesting evidence-labelled session IDs happens before
+    the observation boundary. From that normalized boundary, the bridge must
+    forward the competitor's renderer, search arguments, defaults,
+    exceptions, and return objects unchanged. Every observation seam and LOC
+    is disclosed. A silent embedding fallback or ambiguous non-JSON result is
+    an invalid environment row, never an empty competitor miss. Basic
+    Memory's MemoryBench wrapper necessarily performs one full reindex per
+    unique session while its own harness groups a corpus; that asymmetry is
+    printed beside the paired rows rather than optimized away. Each reindex
+    needs fresh fallback and project/document readiness proof; an earlier
+    session's positive counts never authorize a later receipt.
+12. **Provider-visible identity stays neutral.** MemoryBench may retain raw
+    case/session IDs for its own correlation, but evidence markers such as
+    `_abs` are replaced with positional digests before any renderer or index
+    sees them. Private mappings stay in protected evidence. Isolation glue
+    must also prove that every configured project path is benchmark-owned;
+    it may not discover or index an operator's existing memory directory.
 
 ## Fairness-matrix row (rendered per lane × provider × variant)
 

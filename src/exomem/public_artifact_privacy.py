@@ -169,6 +169,7 @@ _TEXT_SUFFIXES = frozenset(
         ".md",
         ".mjs",
         ".mako",
+        ".patch",
         ".plist",
         ".ps1",
         ".py",

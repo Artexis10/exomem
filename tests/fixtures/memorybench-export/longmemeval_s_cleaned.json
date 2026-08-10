@@ -1,0 +1,19 @@
+[
+  {
+    "question_id": "q-01",
+    "question": "Where is the receipt?",
+    "question_type": "single-session-user",
+    "question_date": "2026-01-01",
+    "answer": "answer-secret",
+    "sessions": [
+      {
+        "session_id": "q-01-session-1",
+        "date": "2025-12-31",
+        "messages": [
+          {"role": "user", "content": "receipt first"},
+          {"role": "assistant", "content": "kept privately"}
+        ]
+      }
+    ]
+  }
+]

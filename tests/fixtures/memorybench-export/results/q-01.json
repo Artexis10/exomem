@@ -1,0 +1,13 @@
+{
+  "questionId": "q-01",
+  "question": "Where is the receipt?",
+  "questionType": "single-session-user",
+  "groundTruth": "answer-secret",
+  "containerTag": "private-container-tag",
+  "timestamp": "2026-01-02T00:00:03Z",
+  "durationMs": 125,
+  "results": [
+    {"content": "first", "score": 0.9},
+    {"content": "second", "score": 0.1}
+  ]
+}

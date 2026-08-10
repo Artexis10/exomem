@@ -69,3 +69,49 @@ under another's identity is a validity failure.
 - **WHEN** an artifact or table presents a result under a variant identity
   that differs from the manifest's registered variant
 - **THEN** the run or table is INVALID until corrected
+
+### Requirement: Transport Glue Is Not Competitor Configuration
+Exomem-authored transport glue MAY isolate state, authenticate loopback
+traffic, enforce deadlines, preserve evidence, and adapt process boundaries,
+but SHALL forward every competitor-authored renderer, search, retrieval, and
+configuration value unchanged under the competitor's pinned project
+environment. Protocol-mandated canonical-event projection, including neutral
+identity derivation before product-visible ingestion, occurs before and
+outside the observation seam and SHALL be applied identically by provenance-
+locked protocol adapters. Every private observation seam SHALL preserve the
+post-projection arguments, exceptions, object identity, and return values; its files, line count,
+endpoints, and observed calls SHALL be disclosed. Isolation-only values SHALL
+be labelled Exomem-authored transport values and SHALL NOT be represented as
+competitor configuration.
+
+#### Scenario: Observation wrapper changes behavior
+- **WHEN** a wrapper changes a competitor call's post-projection arguments,
+  exception, return object, fallback decision, result normalization, or
+  warm-process lifecycle
+- **THEN** the row is INVALID as a modified competitor rather than reported as
+  an own-provider result
+
+#### Scenario: Isolation default is disclosed as transport glue
+- **WHEN** the Basic Memory sidecar seeds an inert benchmark-owned default
+  project to prevent access to the operator's home project
+- **THEN** the value is recorded as Exomem-authored isolation glue, every
+  configured path is proven inside the work root, and no retrieval default is
+  changed
+
+#### Scenario: Growing-corpus reindex asymmetry is recorded
+- **WHEN** MemoryBench's one-session ingest lifecycle makes the unmodified
+  Basic provider perform one full reindex per unique session
+- **THEN** the paired row records that directed asymmetry against Basic's
+  grouped own-harness lifecycle and does not batch, skip, or optimize the calls
+
+#### Scenario: Fallback is not a competitor loss
+- **WHEN** the pinned provider enters its documented embedding fallback or
+  converts a non-JSON MCP response into an empty result
+- **THEN** the observation seam leaves provider behavior untouched but marks
+  the benchmark row invalid instead of scoring the fallback or ambiguity
+
+#### Scenario: Neutral identity projection precedes observation
+- **WHEN** canonical-event normalization replaces an evidence-labelled raw
+  session ID with a neutral digest before the Basic renderer is called
+- **THEN** the projection is recorded as shared protocol hygiene and the
+  observation seam proves exact forwarding from that normalized boundary
