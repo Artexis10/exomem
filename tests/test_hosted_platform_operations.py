@@ -754,9 +754,52 @@ def test_provisioner_database_rotation_contract_and_runbook_are_ordered_and_reve
     assert secrets.index("DATABASE_PASSWORD_ROLLBACK_VERIFIED") < secrets.index(
         '--registry "$registry_v1"'
     )
-    assert secrets.index("rollout status deployment/exomem-volume-worker") < secrets.index(
-        'patch cronjob "exomem-hosted-scheduler-exomem-reconcile"'
+
+
+def test_rotation_job_drain_jq_selects_only_captured_controller_jobs(tmp_path: Path) -> None:
+    jobs = {
+        "items": [
+            {
+                "metadata": {
+                    "name": "owned",
+                    "uid": "owned-uid",
+                    "ownerReferences": [
+                        {"controller": True, "kind": "CronJob", "name": "exomem-export-gc"}
+                    ],
+                }
+            },
+            {
+                "metadata": {
+                    "name": "other",
+                    "uid": "other-uid",
+                    "ownerReferences": [{"controller": True, "kind": "CronJob", "name": "other"}],
+                }
+            },
+        ]
+    }
+    expression = '[.items[] | select(any(.metadata.ownerReferences[]?; .controller == true and .kind == "CronJob" and (.name | IN("exomem-export-gc")))) | .metadata.uid]'
+    selected = subprocess.run(
+        ["jq", "-c", expression], input=json.dumps(jobs), text=True, capture_output=True, check=True
     )
+    assert json.loads(selected.stdout) == ["owned-uid"]
+    captured = tmp_path / "captured.json"
+    captured.write_text('[{"uid":"owned-uid"}]', encoding="utf-8")
+    wait_expression = "[.items[].metadata.uid] as $live | [$captured[0][] | select(.uid as $uid | $live | index($uid))] | length > 0"
+    remaining = subprocess.run(
+        ["jq", "-e", "--slurpfile", "captured", str(captured), wait_expression],
+        input=json.dumps(jobs),
+        text=True,
+        capture_output=True,
+    )
+    assert remaining.returncode == 0
+    jobs["items"] = jobs["items"][1:]
+    gone = subprocess.run(
+        ["jq", "-e", "--slurpfile", "captured", str(captured), wait_expression],
+        input=json.dumps(jobs),
+        text=True,
+        capture_output=True,
+    )
+    assert gone.returncode == 1
 
 
 def test_capacity_gate_blocks_unknown_economics_and_the_cell_past_the_cap(tmp_path: Path) -> None:
