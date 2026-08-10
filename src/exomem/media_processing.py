@@ -18,7 +18,7 @@ from contextlib import AbstractContextManager, contextmanager, nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import access, media_jobs, media_types, memory_refs
+from . import access, media_jobs, media_types, memory_refs, recall_policy
 from .cli_ops import OpError
 from .kbdir import kb_dirname
 from .vault import (
@@ -180,6 +180,21 @@ def _runtime_unavailable(vault_root: Path) -> tuple[str, str] | None:
         return _RUNTIME_UNAVAILABLE.get(str(Path(vault_root).resolve()))
 
 
+def _is_automatic_media_candidate(vault: Path, binary: Path) -> bool:
+    """Reject raw Records media before automatic discovery reads its inputs."""
+    sidecar = binary.with_name(binary.name + ".md")
+    if not recall_policy.is_structured_only_path(vault, sidecar):
+        return True
+    try:
+        rel_sidecar = sidecar.relative_to(vault).as_posix()
+    except ValueError:
+        return False
+    from .clip_index import ClipIndex
+
+    ClipIndex(vault).purge_markdown_paths_if_present([rel_sidecar])
+    return False
+
+
 def reconcile_media(
     vault_root: Path,
     binary_path: str | Path,
@@ -198,6 +213,8 @@ def reconcile_media(
     if not binary.is_absolute():
         binary = vault / binary
     binary = Path(os.path.abspath(binary))
+    if not explicit and not _is_automatic_media_candidate(vault, binary):
+        return None
     resolved_binary = _confine_to_knowledge_base(vault, binary)
 
     media_type = classify_media(binary)
@@ -244,6 +261,7 @@ def reconcile_media(
     )
 
     deferred_fanout: list[Path] = []
+    deferred_created: list[Path] = []
 
     def _write_sidecar(write: PlannedWrite) -> None:
         written = batch_atomic_write(
@@ -253,6 +271,8 @@ def reconcile_media(
         )
         if commit_guard is not None:
             deferred_fanout.extend(written)
+            if write.create_only or write.expected_hash == MISSING_CONTENT_HASH:
+                deferred_created.extend(written)
 
     result: ReconcileResult | None = None
     boundary = commit_guard() if commit_guard is not None else nullcontext()
@@ -269,6 +289,7 @@ def reconcile_media(
                     list(dict.fromkeys(deferred_fanout)),
                     None,
                     None,
+                    created_paths=list(dict.fromkeys(deferred_created)),
                 )
 
     with _commit_scope():
@@ -471,10 +492,13 @@ def _iter_governed_media(vault: Path, kb_root: Path):
                         directories.append(child)
                 elif child.is_file() and not child.is_symlink() and classify_media(child):
                     rel = child.relative_to(vault).as_posix()
-                    if access.access_tier(vault, rel) not in {
+                    if (
+                        _is_automatic_media_candidate(vault, child)
+                        and access.access_tier(vault, rel) not in {
                         access.TIER_EXCLUDED,
                         access.TIER_READONLY,
-                    }:
+                        }
+                    ):
                         yield child
             except OSError:
                 continue

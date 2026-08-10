@@ -546,7 +546,7 @@ def test_clip_compute_stays_outside_guard_and_index_commit_is_inside(
     assert manager.depth == 0
 
 
-def test_scene_artifacts_use_guard_and_reembed_runs_outside_guard(
+def test_scene_artifacts_and_reembed_publish_under_guard(
     vault, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.delenv("EXOMEM_DISABLE_CLIP", raising=False)
@@ -577,8 +577,8 @@ def test_scene_artifacts_use_guard_and_reembed_runs_outside_guard(
         manager.events.append("scene-commit")
         return []
 
-    def reembed_outside(*_args, **_kwargs):
-        assert manager.depth == 0
+    def reembed_inside(*_args, **_kwargs):
+        assert manager.depth > 0
         manager.events.append("reembed-derived")
 
     monkeypatch.setattr(media_worker, "get_manager", lambda: manager, raising=False)
@@ -586,7 +586,7 @@ def test_scene_artifacts_use_guard_and_reembed_runs_outside_guard(
     monkeypatch.setattr(embeddings, "embed_video_scenes", embed_scenes_outside)
     monkeypatch.setattr(worker._clip_index, "upsert_frames", clip_commit_inside)
     monkeypatch.setattr(media_worker.scene_frames, "write_scene_frames", scene_commit_inside)
-    monkeypatch.setattr(media_worker.index_sync, "upsert_after_write", reembed_outside)
+    monkeypatch.setattr(media_worker.index_sync, "upsert_after_write", reembed_inside)
 
     clip_job = media_worker._Job(
         binary_path=vault / result.path,
@@ -622,18 +622,20 @@ def test_scene_artifacts_use_guard_and_reembed_runs_outside_guard(
     assert manager.depth == 0
 
 
-def test_reembed_does_not_consult_canonical_mutation_guard(
+def test_reembed_publishes_under_canonical_mutation_guard(
     vault, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     result = _preserve_media_stub(vault, filename="reembed-lease-race.mp3")
 
-    class _DeniedManager:
+    guard_metadata: list[dict[str, str]] = []
+
+    class _RecordingManager:
         @contextmanager
         def mutation_guard(self, _vault, **_metadata):
-            pytest.fail("pure derived re-embed requested canonical mutation authority")
+            guard_metadata.append(_metadata)
             yield
 
-    monkeypatch.setattr(media_worker, "get_manager", lambda: _DeniedManager())
+    monkeypatch.setattr(media_worker, "get_manager", lambda: _RecordingManager())
     reembedded: list[Path] = []
     monkeypatch.setattr(
         media_worker.index_sync,
@@ -652,6 +654,12 @@ def test_reembed_does_not_consult_canonical_mutation_guard(
     worker._process(job)
 
     assert reembedded == [job.sidecar_path]
+    assert guard_metadata == [
+        {
+            "operation": "background_media_reembed_commit",
+            "holder_kind": "background",
+        }
+    ]
 
 
 def test_parent_media_change_during_clip_compute_skips_stale_index_and_scenes(

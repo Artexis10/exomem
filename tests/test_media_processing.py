@@ -336,6 +336,7 @@ def test_background_commit_fans_out_derived_indexes_after_guard_release(
     binary = _drop_media(vault, "guarded-fanout.m4a")
     depth = 0
     fanout_depths: list[int] = []
+    fanout_kwargs: list[dict] = []
 
     @contextmanager
     def commit_guard():
@@ -346,8 +347,9 @@ def test_background_commit_fans_out_derived_indexes_after_guard_release(
         finally:
             depth -= 1
 
-    def observe_fanout(*_args, **_kwargs):
+    def observe_fanout(*_args, **kwargs):
         fanout_depths.append(depth)
+        fanout_kwargs.append(kwargs)
         return True
 
     monkeypatch.setattr(index_sync, "upsert_after_write", observe_fanout)
@@ -360,6 +362,12 @@ def test_background_commit_fans_out_derived_indexes_after_guard_release(
 
     assert result is not None
     assert fanout_depths == [0]
+    assert fanout_kwargs == [
+        {
+            "created_paths": [result.sidecar_path],
+            "publish_corpus_change": False,
+        }
+    ]
 
 
 def test_runtime_unavailable_background_commit_fans_out_once_after_guard_release(

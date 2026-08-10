@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from exomem import epistemic_graph
+from exomem import epistemic_graph, index_sync
 
 SEED = "Knowledge Base/Notes/Insights/seed.md"
 TARGET = "Knowledge Base/Notes/Insights/target.md"
@@ -111,6 +111,26 @@ def test_neighbors_for_is_deterministic(tmp_path: Path) -> None:
     ]
 
 
+def test_neighbors_validation_is_bounded_by_unique_endpoints(tmp_path: Path, monkeypatch) -> None:
+    vault = tmp_path / "vault"
+    _seed(vault)
+    idx = epistemic_graph.EpistemicGraphIndex(vault)
+    idx.rebuild_all()
+
+    original = epistemic_graph._recall_path_allowed
+    calls: list[str] = []
+
+    def _counting_allowed(root: Path, rel: str) -> bool:
+        calls.append(rel)
+        return original(root, rel)
+
+    monkeypatch.setattr(epistemic_graph, "_recall_path_allowed", _counting_allowed)
+
+    assert idx.neighbors_for([SEED])
+    assert set(calls) == {SEED, TARGET, LINKED, INBOUND}
+    assert len(calls) == 4
+
+
 def test_neighbors_for_empty_when_unavailable(tmp_path: Path, monkeypatch) -> None:
     vault = tmp_path / "vault"
     _seed(vault)
@@ -154,7 +174,8 @@ def test_generation_bumps_on_delete(tmp_path: Path) -> None:
     idx.rebuild_all()
     before = epistemic_graph.cache_token(vault)
 
-    epistemic_graph.delete_after_remove(vault, [LINKED])
+    (vault / LINKED).unlink()
+    index_sync.delete_after_remove(vault, [LINKED])
 
     after = epistemic_graph.cache_token(vault)
     assert int(after[2]) > int(before[2])

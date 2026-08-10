@@ -336,9 +336,10 @@ class ClaimIndex:
         self._cache: _ClaimCache | None = None
         self._lock = threading.RLock()
 
-    def _connect(self) -> sqlite3.Connection:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(self.path)
+    def _connect(self, path: Path | None = None) -> sqlite3.Connection:
+        target = path if path is not None else self.path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(target)
         sidecar_store.apply_sidecar_pragmas(conn)
         conn.execute(
             """
@@ -354,6 +355,15 @@ class ClaimIndex:
             """
         )
         sidecar_store.ensure_meta_table(conn, "claims", self.path.name)
+        # A sidecar becomes globally readable only after ``replace_all`` binds
+        # it to the current recall/access identity. Incremental rows may be
+        # useful for live fallback repair, but must not attest completeness.
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS recall_identity ("
+            "singleton INTEGER PRIMARY KEY CHECK (singleton = 1), "
+            "policy_version TEXT NOT NULL, access_fingerprint TEXT NOT NULL, "
+            "complete INTEGER NOT NULL)"
+        )
         return conn
 
     def checksums(self) -> dict[str, str]:
@@ -371,6 +381,22 @@ class ClaimIndex:
         self, file_path: str
     ) -> tuple[str, np.ndarray, str | None, str | None] | None:
         """`(claim_text, vector, page_type, status)` for one file, or None."""
+        from . import recall_policy
+
+        # A point lookup is an egress surface too. Reject before opening the
+        # claims sidecar so legacy Record rows cannot escape through callers
+        # that bypass ``claim_text_for_page``.
+        candidate = self.vault_root / file_path
+        if candidate.exists() and not recall_policy.is_recall_candidate(self.vault_root, candidate):
+            return None
+        if self._recall_identity_current() is False:
+            return None
+        return self._get_row_unchecked(file_path)
+
+    def _get_row_unchecked(
+        self, file_path: str
+    ) -> tuple[str, np.ndarray, str | None, str | None] | None:
+        """Raw sidecar lookup for maintenance/tests; never use for egress."""
         if not self.path.exists():
             return None
         conn = self._connect()
@@ -412,6 +438,7 @@ class ClaimIndex:
                         for fp, ct, cs, vec, pt, st, mt in rows
                     ],
                 )
+                self._invalidate_recall_identity(conn)
                 sidecar_store.bump_meta(conn, "generation")
         finally:
             conn.close()
@@ -419,27 +446,61 @@ class ClaimIndex:
             self._cache = None
 
     def delete(self, file_path: str) -> None:
-        if not self.path.exists():
-            return
-        conn = self._connect()
+        self.delete_many([file_path])
+
+    def delete_many(
+        self, file_paths: list[str], *, connection_path: Path | None = None
+    ) -> int:
+        """Delete claim rows without consulting model or feature gates.
+
+        This is deliberately safe for generic delete routing: an absent sidecar
+        remains absent, duplicate paths are harmless, and a no-op delete does
+        not manufacture a generation change.
+        """
+        target = connection_path if connection_path is not None else self.path
+        if not target.exists():
+            return 0
+        paths = sorted(set(file_paths))
+        if not paths:
+            return 0
+        deleted = 0
+        conn = self._connect(target)
         try:
             with conn:
-                conn.execute("DELETE FROM claims WHERE file_path = ?", (file_path,))
-                sidecar_store.bump_meta(conn, "generation")
+                for start in range(0, len(paths), 900):
+                    batch = paths[start : start + 900]
+                    placeholders = ",".join("?" for _ in batch)
+                    cursor = conn.execute(
+                        f"DELETE FROM claims WHERE file_path IN ({placeholders})", batch
+                    )
+                    deleted += max(0, int(cursor.rowcount))
+                if deleted:
+                    self._invalidate_recall_identity(conn)
+                    sidecar_store.bump_meta(conn, "generation")
         finally:
             conn.close()
-        with self._lock:
-            self._cache = None
+        if deleted:
+            with self._lock:
+                self._cache = None
+        return deleted
 
-    def all_claims(
+    def purge_exact_persisted_rows(
+        self, values: list[str], *, connection_path: Path | None = None
+    ) -> int:
+        """Delete quarantined stored values without interpreting them as paths."""
+        return self.delete_many(values, connection_path=connection_path)
+
+    def _all_claims_unchecked(
         self,
     ) -> tuple[list[tuple[str, str, str | None, str | None]], np.ndarray]:
-        """`(metadata, matrix)` cached until the sidecar's write generation (or
-        epoch) advances — NOT its mtime (see the class + generation-meta notes).
+        """Raw cached matrix for sidecar maintenance internals.
 
-        metadata[i] = (file_path, claim_text, page_type, status); matrix[i] =
-        the claim's bge vector. Empty when the sidecar is absent.
+        Ordinary recall consumers must use :meth:`all_claims`, which admits
+        source paths before looking up claim payloads.
         """
+        # `(metadata, matrix)` is cached until the sidecar's write generation
+        # advances, not its mtime. `metadata[i]` is `(file_path, claim_text,
+        # page_type, status)` and `matrix[i]` is the claim vector.
         if not self.path.exists():
             return [], np.zeros((0, embeddings.VECTOR_DIM), dtype=np.float32)
         # Snapshot the cache tuple ONCE: another thread may swap or null it between
@@ -463,6 +524,139 @@ class ClaimIndex:
             )
             self._cache = loaded
             return loaded.metadata, loaded.matrix
+
+    def all_claims(
+        self,
+    ) -> tuple[list[tuple[str, str, str | None, str | None]], np.ndarray]:
+        """Return only currently admitted claim rows without raw-sidecar egress."""
+        from . import find as find_module
+        from . import recall_policy
+
+        if not self.path.exists() or self._recall_identity_current() is False:
+            return [], np.zeros((0, embeddings.VECTOR_DIM), dtype=np.float32)
+        kb = self.vault_root / kb_dirname()
+        if not kb.is_dir():
+            return [], np.zeros((0, embeddings.VECTOR_DIM), dtype=np.float32)
+        admitted = [
+            _vault_relative(self.vault_root, path)
+            for path in find_module._walk_md(kb)
+            if index_paths.is_embeddable_path(path)
+            and recall_policy.is_recall_candidate(self.vault_root, path)
+        ]
+        paths = [path for path in admitted if path is not None]
+        if not paths:
+            return [], np.zeros((0, embeddings.VECTOR_DIM), dtype=np.float32)
+        metadata: list[tuple[str, str, str | None, str | None]] = []
+        vectors: list[np.ndarray] = []
+        conn = self._connect()
+        try:
+            for start in range(0, len(paths), 900):
+                batch = paths[start : start + 900]
+                placeholders = ",".join("?" for _ in batch)
+                rows = conn.execute(
+                    "SELECT file_path, claim_text, page_type, status, vector FROM claims "
+                    f"WHERE file_path IN ({placeholders}) ORDER BY file_path",
+                    batch,
+                ).fetchall()
+                for fp, claim, page_type, status, vector in rows:
+                    metadata.append((fp, claim, page_type, status))
+                    vectors.append(np.frombuffer(vector, dtype=np.float32))
+        finally:
+            conn.close()
+        if not vectors:
+            return [], np.zeros((0, embeddings.VECTOR_DIM), dtype=np.float32)
+        return metadata, np.stack(vectors, axis=0)
+
+    def _recall_identity_current(self) -> bool | None:
+        """Whether a bound full rebuild remains valid; ``None`` is legacy.
+
+        Incremental work deliberately marks a prior full rebuild incomplete: it
+        may keep point rows current, but cannot attest that an entire corpus is
+        globally complete. Reads then fail closed until a new full rebuild.
+        """
+        if not self.path.exists():
+            return False
+        conn = sqlite3.connect(self.path)
+        try:
+            exists = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='recall_identity'"
+            ).fetchone()
+            if exists is None:
+                return None
+            row = conn.execute(
+                "SELECT policy_version, access_fingerprint, complete "
+                "FROM recall_identity WHERE singleton = 1"
+            ).fetchone()
+        except sqlite3.Error:
+            return False
+        finally:
+            conn.close()
+        if row is None:
+            return False
+        from . import recall_policy
+
+        return bool(row[2]) and (str(row[0]), str(row[1])) == recall_policy.recall_policy_identity(
+            self.vault_root
+        )
+
+    @staticmethod
+    def _invalidate_recall_identity(conn: sqlite3.Connection) -> bool:
+        """Keep a partial write from masquerading as a complete rebuild."""
+        exists = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='recall_identity'"
+        ).fetchone()
+        if exists is not None:
+            cursor = conn.execute("UPDATE recall_identity SET complete = 0 WHERE singleton = 1")
+            return bool(cursor.rowcount)
+        return False
+
+    def _projected_recall_snapshot(
+        self,
+    ) -> tuple[tuple[str, str], tuple[tuple[str, tuple[int, int, int]], ...]] | None:
+        """Direct, no-parse snapshot of every currently admitted KB page.
+
+        The completeness marker describes the projected recall corpus, not just
+        pages that happened to produce a claim. Suppressed Records are rejected
+        by policy before a stat or parse; any unreadable admitted page makes the
+        snapshot unfit for a complete publication.
+        """
+        from . import find as find_module
+        from . import freshness, recall_policy
+
+        kb = self.vault_root / kb_dirname()
+        if not kb.is_dir():
+            return (recall_policy.recall_policy_identity(self.vault_root), ())
+        identity = recall_policy.recall_policy_identity(self.vault_root)
+        entries: list[tuple[str, freshness.FileSignature]] = []
+        for md in find_module._walk_md(kb):
+            if not index_paths.is_embeddable_path(md):
+                continue
+            if not recall_policy.is_recall_candidate(self.vault_root, md):
+                continue
+            rel = _vault_relative(self.vault_root, md)
+            if rel is None:
+                return None
+            try:
+                entries.append((rel, freshness.stat_signature(md)))
+            except OSError:
+                return None
+        if recall_policy.recall_policy_identity(self.vault_root) != identity:
+            return None
+        return identity, tuple(sorted(entries))
+
+    def _mark_repair_needed(self) -> None:
+        """Fail closed if a rebuild snapshot is overtaken before publication."""
+        if not self.path.exists():
+            return
+        conn = self._connect()
+        try:
+            with conn:
+                if self._invalidate_recall_identity(conn):
+                    sidecar_store.bump_meta(conn, "generation")
+        finally:
+            conn.close()
+        with self._lock:
+            self._cache = None
 
     def _load_all_rows(self) -> _ClaimCache:
         """Full reload from the sidecar → a `_ClaimCache`.
@@ -507,46 +701,101 @@ class ClaimIndex:
         """Wipe + re-extract/re-embed a claim for every compiled page. Returns the
         row count. The recovery path (mirrors `EmbeddingIndex.rebuild_all`) for a
         lost/stale sidecar; safe to call from an audit-fix lane."""
-        from . import access
         from . import find as find_module
+        from . import freshness, recall_policy
 
         kb = self.vault_root / kb_dirname()
         if not kb.is_dir():
             return 0
-        conn = self._connect()
-        try:
-            with conn:
-                conn.execute("DELETE FROM claims")
-        finally:
-            conn.close()
-        self._cache = None
-
         claim_types = _claim_types()
-        pending: list[tuple[str, str, str, str | None, str | None, float]] = []
+        snapshot = self._projected_recall_snapshot()
+        if snapshot is None:
+            self._mark_repair_needed()
+            return 0
+        identity, _entries = snapshot
+        pending: list[
+            tuple[Path, freshness.FileSignature, str, str, str, str | None, str | None, float]
+        ] = []
         for md in find_module._walk_md(kb):
             if not index_paths.is_embeddable_path(md):
                 continue
+            # Admission must precede parsing: raw Records may be high-volume,
+            # malformed, or sensitive, and never belong to claim extraction.
+            if not recall_policy.is_recall_candidate(self.vault_root, md):
+                continue
+            try:
+                signature = freshness.stat_signature(md)
+            except OSError:
+                continue
             page = find_module._CACHE.get(md, self.vault_root)
             if page is None or page.page_type not in claim_types:
-                continue
-            if not access.is_indexable(self.vault_root, page.rel_path):
                 continue
             claim = extract_claim_for_page(page)
             if not claim:
                 continue
             pending.append(
-                (page.rel_path, claim, _checksum(claim), page.page_type, page.status, page.mtime)
+                (
+                    md,
+                    signature,
+                    page.rel_path,
+                    claim,
+                    _checksum(claim),
+                    page.page_type,
+                    page.status,
+                    page.mtime,
+                )
             )
-        if not pending:
+        vecs = (
+            embeddings.embed_texts([p[3] for p in pending], is_query=False)
+            if pending
+            else np.zeros((0, embeddings.VECTOR_DIM), dtype=np.float32)
+        )
+        # The post-encode direct projection check catches all corpus changes,
+        # including an admitted page that was absent/non-claim during the first
+        # scan. Never leave an old complete marker behind on that race.
+        if self._projected_recall_snapshot() != snapshot:
+            self._mark_repair_needed()
             return 0
-        vecs = embeddings.embed_texts([p[1] for p in pending], is_query=False)
-        self.upsert_many(
+        self.replace_all(
             [
-                (fp, ct, cs, vecs[i], pt, st, mt)
-                for i, (fp, ct, cs, pt, st, mt) in enumerate(pending)
-            ]
+                (fp, claim, checksum, vecs[index], page_type, status, mtime)
+                for index, (_md, _signature, fp, claim, checksum, page_type, status, mtime) in enumerate(pending)
+            ],
+            identity=identity,
         )
         return len(pending)
+
+    def replace_all(
+        self,
+        rows: list[tuple[str, str, str, np.ndarray, str | None, str | None, float]],
+        *,
+        identity: tuple[str, str],
+    ) -> None:
+        """Atomically publish a complete, policy-bound rebuild."""
+        conn = self._connect()
+        try:
+            with conn:
+                conn.execute("DELETE FROM claims")
+                if rows:
+                    conn.executemany(
+                        "INSERT INTO claims "
+                        "(file_path, claim_text, checksum, vector, page_type, status, file_mtime) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                        [
+                            (fp, ct, cs, vec.astype(np.float32).tobytes(), pt, st, mt)
+                            for fp, ct, cs, vec, pt, st, mt in rows
+                        ],
+                    )
+                conn.execute(
+                    "INSERT OR REPLACE INTO recall_identity "
+                    "(singleton, policy_version, access_fingerprint, complete) VALUES (1, ?, ?, 1)",
+                    identity,
+                )
+                sidecar_store.bump_meta(conn, "generation")
+        finally:
+            conn.close()
+        with self._lock:
+            self._cache = None
 
 
 _CLAIM_INDEX_CACHE: dict[str, ClaimIndex] = {}
@@ -571,6 +820,29 @@ def clear_claim_indexes() -> None:
         _CLAIM_INDEX_CACHE.clear()
 
 
+def _vault_relative(vault_root: Path, path: Path | str) -> str | None:
+    """Return a lexical vault-relative path without resolving a missing target."""
+    candidate = Path(path)
+    if not candidate.is_absolute():
+        candidate = vault_root / candidate
+    try:
+        return candidate.relative_to(vault_root).as_posix()
+    except ValueError:
+        return None
+
+
+def _delete_claim_rows_if_present(vault_root: Path, rel_paths: list[str]) -> int:
+    """Model-free stale-row cleanup that never creates a sidecar."""
+    if not rel_paths or not sidecar_path(vault_root).exists():
+        return 0
+    return ClaimIndex(vault_root).delete_many(rel_paths)
+
+
+def delete_after_remove(vault_root: Path, removed_rel_paths: list[str]) -> None:
+    """Generic delete-routing seam: purge claim rows regardless of feature gates."""
+    _delete_claim_rows_if_present(vault_root, removed_rel_paths)
+
+
 def upsert_claims_after_write(vault_root: Path, written_paths: list[Path]) -> None:
     """Refresh the claim sidecar for each written compiled page (incremental).
 
@@ -581,38 +853,50 @@ def upsert_claims_after_write(vault_root: Path, written_paths: list[Path]) -> No
     any stale claim row dropped. No-op when the gate is off or embeddings are
     disabled/unimportable — the same soft-fail contract the vector sidecar honors.
     """
-    if not claim_level_enabled():
-        return
-    if os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
-        return
-    from . import access
     from . import find as find_module
+    from . import freshness, recall_policy
 
     md_paths = [p for p in written_paths if index_paths.is_embeddable_path(p)]
     if not md_paths:
         return
+    # Delete is deliberately before both feature gates and page parsing. A raw
+    # Record must clear an old row even on a lean install where claims/vectors
+    # are disabled, and must never be opened just to discover that fact.
+    suppressed: list[str] = []
+    admitted: list[Path] = []
+    for md in md_paths:
+        if recall_policy.is_recall_candidate(vault_root, md):
+            admitted.append(md)
+            continue
+        rel = _vault_relative(vault_root, md)
+        if rel is not None:
+            suppressed.append(rel)
+    _delete_claim_rows_if_present(vault_root, suppressed)
+    if not claim_level_enabled() or os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
+        return
+    if not admitted:
+        return
     idx = get_claim_index(vault_root)
     existing = idx.checksums()
     claim_types = _claim_types()
+    identity = recall_policy.recall_policy_identity(vault_root)
 
-    pending: list[tuple[str, str, str, str | None, str | None, float]] = []
-    for md in md_paths:
+    pending: list[
+        tuple[Path, freshness.FileSignature, str, str, str, str | None, str | None, float]
+    ] = []
+    for md in admitted:
         try:
-            mtime = md.stat().st_mtime
-        except FileNotFoundError:
-            try:
-                rel = md.resolve().relative_to(vault_root.resolve()).as_posix()
+            signature = freshness.stat_signature(md)
+        except OSError:
+            rel = _vault_relative(vault_root, md)
+            if rel is not None:
                 idx.delete(rel)
-            except ValueError:
-                pass
             continue
         page = find_module._CACHE.get(md, vault_root)
         if page is None:
             continue
         # Only compiled conclusions in an indexable tree carry a claim.
-        if page.page_type not in claim_types or not access.is_indexable(
-            vault_root, page.rel_path
-        ):
+        if page.page_type not in claim_types:
             idx.delete(page.rel_path)
             continue
         claim = extract_claim_for_page(page)
@@ -622,19 +906,55 @@ def upsert_claims_after_write(vault_root: Path, written_paths: list[Path]) -> No
         checksum = _checksum(claim)
         if existing.get(page.rel_path) == checksum:
             continue  # claim unchanged → keep the cached vector, skip re-embed
-        pending.append((page.rel_path, claim, checksum, page.page_type, page.status, mtime))
+        pending.append(
+            (
+                md,
+                signature,
+                page.rel_path,
+                claim,
+                checksum,
+                page.page_type,
+                page.status,
+                page.mtime,
+            )
+        )
 
     if not pending:
         return
     try:
-        vecs = embeddings.embed_texts([p[1] for p in pending], is_query=False)
+        vecs = embeddings.embed_texts([p[3] for p in pending], is_query=False)
     except Exception as e:  # noqa: BLE001 — best-effort; leave the sidecar stale
         log.warning("claim encode failed: %s; claim sidecar left stale", e)
         return
+    approved: list[
+        tuple[
+            int,
+            tuple[Path, freshness.FileSignature, str, str, str, str | None, str | None, float],
+        ]
+    ] = []
+    for position, pending_row in enumerate(pending):
+        md, signature, rel, *_rest = pending_row
+        try:
+            current = (
+                recall_policy.recall_policy_identity(vault_root) == identity
+                and freshness.stat_signature(md) == signature
+                and recall_policy.is_recall_candidate(vault_root, md)
+            )
+        except OSError:
+            current = False
+        if current:
+            approved.append((position, pending_row))
+        else:
+            # A raced path is unsafe to publish; dropping any old row is safer
+            # than keeping a claim whose source/version no longer matches.
+            idx.delete(rel)
+    if not approved:
+        return
     idx.upsert_many(
         [
-            (fp, ct, cs, vecs[i], pt, st, mt)
-            for i, (fp, ct, cs, pt, st, mt) in enumerate(pending)
+            (fp, ct, cs, vecs[position], pt, st, mt)
+            for position, row in approved
+            for _md, _signature, fp, ct, cs, pt, st, mt in [row]
         ]
     )
 
@@ -645,6 +965,12 @@ def claim_text_for_page(
     """Best available claim text for a stored page: the sidecar's cached claim if
     present, else live extraction from the parsed page. Lets the polarity lane work
     even before the sidecar is warm (graceful degradation)."""
+    from . import recall_policy
+
+    # Egress begins with the same admission check as all index ingress. This
+    # must happen before a stale sidecar lookup or a live page parse.
+    if not recall_policy.is_recall_candidate(vault_root, vault_root / rel_path):
+        return None
     idx = index or get_claim_index(vault_root)
     row = idx.get_row(rel_path)
     if row and row[0]:

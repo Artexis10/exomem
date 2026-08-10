@@ -12,6 +12,7 @@ The caller batches them with the source file into a single atomic write.
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from functools import cache
 from pathlib import Path
@@ -595,6 +596,7 @@ def compute_subindex_writes(
     vault_root: Path,
     *,
     top_index_text: str | None = None,
+    base_writes: Mapping[Path, PlannedWrite] | None = None,
     pending_paths: list[str] | None = None,
     include_unchanged: bool = False,
 ) -> tuple[list[PlannedWrite], str | None]:
@@ -603,8 +605,11 @@ def compute_subindex_writes(
     Returns `(writes, top_index_new_text)`. If `top_index_text` is provided,
     it is used as the base for rewriting top-index counts (so the caller's
     in-flight changes to Recent activity don't get clobbered); the rewritten
-    text is returned. Otherwise the caller is responsible for re-reading the
-    top index from disk later.
+    text is returned. `base_writes` similarly supplies already-planned text and
+    its guard for sub-indexes. This lets a caller compose independent edits to
+    an index into one guarded write instead of scheduling competing replacements.
+    Disk reads still bind a guard for indexes with no base write. Otherwise the
+    caller is responsible for re-reading the top index from disk later.
 
     `pending_paths` are vault-relative KB paths (with or without `.md`) of
     files the caller is about to write in the same atomic batch. They are
@@ -617,6 +622,9 @@ def compute_subindex_writes(
     """
     kb = kb_root(vault_root)
     writes: list[PlannedWrite] = []
+    planned_bases = {
+        path.resolve(): write for path, write in (base_writes or {}).items()
+    }
 
     sources_dir = kb / "Sources"
     notes_dir = kb / "Notes"
@@ -684,15 +692,21 @@ def compute_subindex_writes(
         except OSError:
             current = None
         if current is not None:
+            base_write = planned_bases.get(sources_index.resolve())
+            base = base_write.content if base_write is not None else current
             new = _replace_by_type_section(
-                current,
+                base,
                 folder_title="Articles",
                 folder_description="captured web/PDF content",
                 counts=sources_counts,
             )
             new = render_wikilinks_for_vault(new, vault_root)
-            if include_unchanged or new != current:
-                writes.append(PlannedWrite(path=sources_index, content=new, guard=guard))
+            if include_unchanged or new != base:
+                writes.append(PlannedWrite(
+                    path=sources_index,
+                    content=new,
+                    guard=base_write.guard if base_write and base_write.guard else guard,
+                ))
 
     # Notes/index.md refresh.
     notes_index = notes_dir / "index.md"
@@ -702,14 +716,20 @@ def compute_subindex_writes(
         except OSError:
             current = None
         if current is not None:
+            base_write = planned_bases.get(notes_index.resolve())
+            base = base_write.content if base_write is not None else current
             new = _refresh_notes_subindex_text(
-                current,
+                base,
                 counts_by_type=notes_counts,
                 counts_by_subfolder=notes_by_subfolder,
             )
             new = render_wikilinks_for_vault(new, vault_root)
-            if include_unchanged or new != current:
-                writes.append(PlannedWrite(path=notes_index, content=new, guard=guard))
+            if include_unchanged or new != base:
+                writes.append(PlannedWrite(
+                    path=notes_index,
+                    content=new,
+                    guard=base_write.guard if base_write and base_write.guard else guard,
+                ))
 
     # Entities/index.md refresh.
     entities_index = entities_dir / "index.md"
@@ -719,12 +739,18 @@ def compute_subindex_writes(
         except OSError:
             current = None
         if current is not None:
+            base_write = planned_bases.get(entities_index.resolve())
+            base = base_write.content if base_write is not None else current
             new = _refresh_entities_subindex_text(
-                current, counts_by_type=entities_counts
+                base, counts_by_type=entities_counts
             )
             new = render_wikilinks_for_vault(new, vault_root)
-            if include_unchanged or new != current:
-                writes.append(PlannedWrite(path=entities_index, content=new, guard=guard))
+            if include_unchanged or new != base:
+                writes.append(PlannedWrite(
+                    path=entities_index,
+                    content=new,
+                    guard=base_write.guard if base_write and base_write.guard else guard,
+                ))
 
     return writes, new_top_text
 

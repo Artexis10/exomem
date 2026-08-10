@@ -11,6 +11,10 @@ log = logging.getLogger(__name__)
 
 INSTANCE_MIN = 1
 INSTANCE_MAX = 2**31 - 1
+_POLICY_META_KEYS = (
+    "recall_policy_version",
+    "recall_access_fingerprint",
+)
 
 
 def apply_sidecar_pragmas(conn: sqlite3.Connection) -> None:
@@ -92,6 +96,52 @@ def bump_meta(conn: sqlite3.Connection, key: str) -> int:
         conn.execute("INSERT INTO meta (key, value) VALUES (?, 1)", (key,))
     return int(
         conn.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()[0]
+    )
+
+
+def read_recall_policy_identity(
+    conn: sqlite3.Connection, *, table: str = "meta"
+) -> tuple[str, str] | None:
+    """Read the policy projection identity stamped on an existing sidecar.
+
+    This deliberately stores only policy inputs, not a synthetic corpus
+    checkpoint.  Callers still own the correct freshness/reconciliation model
+    for their particular sidecar.
+    """
+    if table not in {"meta", "graph_meta"}:
+        raise ValueError("unsupported sidecar metadata table")
+    rows = dict(
+        conn.execute(
+            f"SELECT key, value FROM {table} WHERE key IN (?, ?)",
+            _POLICY_META_KEYS,
+        ).fetchall()
+    )
+    version = rows.get(_POLICY_META_KEYS[0])
+    fingerprint = rows.get(_POLICY_META_KEYS[1])
+    if not isinstance(version, str) or not isinstance(fingerprint, str):
+        return None
+    return version, fingerprint
+
+
+def write_recall_policy_identity(
+    conn: sqlite3.Connection,
+    policy_version: str,
+    access_policy_fingerprint: str,
+    *,
+    table: str = "meta",
+) -> None:
+    """Stamp semantic-sidecar policy inputs inside the caller's transaction."""
+    if table not in {"meta", "graph_meta"}:
+        raise ValueError("unsupported sidecar metadata table")
+    if not policy_version or not access_policy_fingerprint:
+        raise ValueError("recall policy identity must be nonempty")
+    conn.executemany(
+        f"INSERT INTO {table}(key, value) VALUES (?, ?) "
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        (
+            (_POLICY_META_KEYS[0], policy_version),
+            (_POLICY_META_KEYS[1], access_policy_fingerprint),
+        ),
     )
 
 

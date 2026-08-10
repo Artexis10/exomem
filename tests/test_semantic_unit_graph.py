@@ -11,6 +11,7 @@ from exomem import (
     commands,
     embeddings,
     epistemic_graph,
+    freshness,
     memory_context,
     memory_refs,
     semantic_index,
@@ -28,6 +29,17 @@ def _write(root: Path, rel: str, text: str) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
     return path
+
+
+def _rebuild_with_live_checkpoint(root: Path) -> None:
+    """Keep the projection gate valid while tests corrupt unit rows beneath it.
+
+    The mutations in this module deliberately omit event publication so the
+    graph-wide checkpoint remains at the committed generation and the
+    independent per-parent generation guards still get exercised.
+    """
+    assert all(freshness.rebaseline(root).values())
+    epistemic_graph.EpistemicGraphIndex(root).rebuild_all()
 
 
 def _unit_context_fixture(tmp_path: Path):
@@ -69,7 +81,7 @@ Use the indexed semantic language.
     )
     state = semantic_index.build_parent_index_state(tmp_path, source)
     compact, rich = state.document.units
-    epistemic_graph.EpistemicGraphIndex(tmp_path).rebuild_all()
+    _rebuild_with_live_checkpoint(tmp_path)
     return source, compact, rich
 
 
@@ -188,7 +200,7 @@ def test_graph_context_reports_ambiguous_unit_ref_without_selecting_a_collision(
     unit_ref = semantic_index.build_parent_index_state(tmp_path, first).document.units[
         0
     ].unit_ref
-    epistemic_graph.EpistemicGraphIndex(tmp_path).rebuild_all()
+    _rebuild_with_live_checkpoint(tmp_path)
 
     context = epistemic_graph.graph_context(tmp_path, unit_ref=unit_ref, depth=1)
 
@@ -219,7 +231,7 @@ def test_graph_context_ignores_deleted_parent_ref_collision(
     kb = tmp_path / "Knowledge Base"
     paths = sorted(find_module._walk_md(kb), reverse=True)
     monkeypatch.setattr(find_module, "_walk_md", lambda _root: iter(paths))
-    epistemic_graph.EpistemicGraphIndex(tmp_path).rebuild_all()
+    _rebuild_with_live_checkpoint(tmp_path)
     first.unlink()
 
     context = epistemic_graph.graph_context(tmp_path, unit_ref=unit_ref, depth=1)
@@ -267,7 +279,7 @@ def test_graph_context_rejects_collision_recovery_when_survivor_graph_is_stale(
     kb = tmp_path / "Knowledge Base"
     paths = sorted(find_module._walk_md(kb), reverse=True)
     monkeypatch.setattr(find_module, "_walk_md", lambda _root: iter(paths))
-    epistemic_graph.EpistemicGraphIndex(tmp_path).rebuild_all()
+    _rebuild_with_live_checkpoint(tmp_path)
     first.unlink()
     second.write_text(
         second.read_text(encoding="utf-8").replace("Second unit", "Changed second unit"),
@@ -300,7 +312,7 @@ def test_graph_context_ignores_noncurrent_parent_ref_collision(
     unit_ref = semantic_index.build_parent_index_state(tmp_path, first).document.units[
         0
     ].unit_ref
-    epistemic_graph.EpistemicGraphIndex(tmp_path).rebuild_all()
+    _rebuild_with_live_checkpoint(tmp_path)
     source = first.read_text(encoding="utf-8")
     if mutation == "ref_changed":
         source = source.replace(_PAGE_ID, "44444444-4444-4444-8444-444444444444")
@@ -329,7 +341,7 @@ def test_graph_context_reports_parent_ref_validation_work_exhaustion(
     unit_ref = semantic_index.build_parent_index_state(
         tmp_path, paths[-1]
     ).document.units[0].unit_ref
-    epistemic_graph.EpistemicGraphIndex(tmp_path).rebuild_all()
+    _rebuild_with_live_checkpoint(tmp_path)
     for path in paths[:-1]:
         path.unlink()
 
@@ -370,7 +382,7 @@ def test_graph_context_applies_freshness_before_the_unit_seed_cap(
             "---\ntype: insight\n---\n"
             f"# Extra {index}\n\n- [config] Extra indexed unit {index}\n",
         )
-    epistemic_graph.EpistemicGraphIndex(tmp_path).rebuild_all()
+    _rebuild_with_live_checkpoint(tmp_path)
     stale_path.write_text(
         stale_path.read_text(encoding="utf-8").replace("Old indexed", "Changed"),
         encoding="utf-8",
@@ -410,7 +422,7 @@ def test_graph_context_reports_when_unit_freshness_work_is_exhausted(
         )
         for index in range(6)
     ]
-    epistemic_graph.EpistemicGraphIndex(tmp_path).rebuild_all()
+    _rebuild_with_live_checkpoint(tmp_path)
     for path in paths:
         path.write_text(
             path.read_text(encoding="utf-8").replace("Indexed value", "Changed value"),

@@ -228,7 +228,7 @@ def test_warm_caches_populates(vault: Path, monkeypatch) -> None:
     else:
         assert (vault, "kb") in bm25._INDEX._cache
         assert (vault, "vault") in bm25._INDEX._cache
-    assert vault in find_module._RESOLVER_CACHE
+    assert vault in find_module._RECALL_RESOLVER_CACHE
     # Warmed state means the first query pays no corpus build.
     bm25._INDEX.last_tokenized = 0
     find_module.find(vault, query="metabolism")

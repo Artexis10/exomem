@@ -22,6 +22,32 @@ Users and agents should think in verbs first. Exomem's internal page types still
 | Review | Surface stale, unprocessed, disconnected, or contradictory areas; explicitly snooze/dismiss reviewed signals | `review_memory`; `triage_memory` for state changes |
 | Update | Correct, edit, or supersede knowledge while preserving history | `edit_memory`, `replace_memory`, `maintain_memory` |
 | Connect | Link related notes, entities, decisions, and sources | `connect_memory` |
+| Record | Log or correct an observed event, measurement, transaction, session, or current state | `record_memory(action="inspect"|"create"|"query"|"append"|"update")` |
+
+## Eight governed layers
+
+The layers name different kinds of material; they are not folders an agent should
+make a user choose.
+
+| Layer | Meaning |
+| --- | --- |
+| Sources | Externally received raw material. |
+| Evidence | Proof-bearing artifacts for a case, claim, compliance need, warranty, dispute, or provenance-sensitive history. |
+| Notes | Compiled conclusions, decisions, research, insights, patterns, failures, experiments, and productions. |
+| Entities | Stable reusable identities: people, organisations, concepts, assets, libraries, and decisions. |
+| Planning | Intended future state: goals, outcomes, initiatives, priorities, horizons, commitments, and candidate work. |
+| Records | Observed events and state: what happened, when, measurements, sessions, transactions, and status changes. |
+| Review | The loop that compares Planning intent with Records reality and feeds explicit decisions back into Planning and Notes. |
+| Imported | Adoption and migration staging, never the permanent home of live user-owned state. |
+
+Planning and Records have distinct semantic profiles but share the structured
+collection substrate. Exomem Planning owns durable intent and prioritisation.
+For software, OpenSpec and the repository own accepted change contracts and
+execution truth; git, specifications, tests, and code remain authoritative.
+Planning may point to Records as observed evidence, but neither layer mirrors the
+other or infers progress, completion, medical conclusions, or personal judgment.
+
+See [Records](records.md) for the manual-first collection contract.
 
 Compiled notes use visible typed Markdown for directional note-level edges:
 

@@ -28,7 +28,15 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import embeddings, extract, index_sync, preserve, scene_frames, semantic_segments
+from . import (
+    embeddings,
+    extract,
+    index_sync,
+    preserve,
+    recall_policy,
+    scene_frames,
+    semantic_segments,
+)
 from .backfill import iter_kb_files
 from .cli_ops import OpError
 from .kbdir import kb_dirname
@@ -208,6 +216,8 @@ class MediaWorker:
         do_clip: bool = False,
         do_reembed: bool = False,
     ) -> None:
+        if not self._is_automatic_media_sidecar(sidecar_path):
+            return
         job = _Job(
             id=None,
             binary_path=binary_path,
@@ -223,6 +233,17 @@ class MediaWorker:
             self._wake.set()
         else:
             self._q.put(job)
+
+    def _is_automatic_media_sidecar(self, sidecar: Path) -> bool:
+        """Gate automatic work without opening a structured-only sidecar."""
+        if not recall_policy.is_structured_only_path(self._vault_root, sidecar):
+            return True
+        try:
+            rel = sidecar.relative_to(self._vault_root).as_posix()
+        except ValueError:
+            return False
+        self._clip_index.purge_markdown_paths_if_present([rel])
+        return False
 
     def stop(self) -> None:
         self._stop_event.set()
@@ -265,6 +286,10 @@ class MediaWorker:
                 self._q.task_done()
 
     def _process(self, job: _Job) -> _ProcessOutcome:
+        if not self._is_recall_admitted_media_sidecar(job.sidecar_path):
+            if self._store is not None:
+                self._store.complete(job)
+            return _ProcessOutcome(_COMPLETE)
         outcome = _ProcessOutcome(_COMPLETE)
         if job.do_ocr:
             outcome = self._run_extraction(job)
@@ -274,6 +299,17 @@ class MediaWorker:
             self._run_reembed(job)
         return outcome
 
+    def _is_recall_admitted_media_sidecar(self, sidecar: Path) -> bool:
+        """Recheck semantic admission and purge stale CLIP rows when it is lost."""
+        if recall_policy.is_recall_candidate(self._vault_root, sidecar):
+            return True
+        try:
+            rel = sidecar.relative_to(self._vault_root).as_posix()
+        except ValueError:
+            return False
+        self._clip_index.purge_markdown_paths_if_present([rel])
+        return False
+
     def _run_reembed(self, job: _Job) -> None:
         """Re-embed a sidecar so semantic segmentation re-runs with late signals.
 
@@ -282,7 +318,14 @@ class MediaWorker:
         earlier embed (transcript+speaker signals only) remains valid.
         """
         try:
-            index_sync.upsert_after_write(self._vault_root, [job.sidecar_path])
+            with get_manager().mutation_guard(
+                self._vault_root,
+                operation="background_media_reembed_commit",
+                holder_kind="background",
+            ):
+                if not self._is_recall_admitted_media_sidecar(job.sidecar_path):
+                    return
+                index_sync.upsert_after_write(self._vault_root, [job.sidecar_path])
             log.info("re-embedded %s (post-frame-OCR segmentation)", job.sidecar_path.name)
         except OpError as exc:
             if exc.code in _TRANSIENT_OPERATION_CODES:
@@ -297,6 +340,8 @@ class MediaWorker:
         # this check under mutation authority to close the compute-window race.
         from . import media_processing
 
+        if not self._is_recall_admitted_media_sidecar(job.sidecar_path):
+            return _ProcessOutcome(_COMPLETE)
         try:
             claimed_content = job.sidecar_path.read_text(encoding="utf-8")
         except (OSError, UnicodeError):
@@ -416,6 +461,8 @@ class MediaWorker:
                 operation="background_media_extraction_commit",
                 holder_kind="background",
             ):
+                if not self._is_recall_admitted_media_sidecar(job.sidecar_path):
+                    return False
                 try:
                     current_content = job.sidecar_path.read_text(encoding="utf-8")
                 except (OSError, UnicodeError):
@@ -470,6 +517,8 @@ class MediaWorker:
                 operation="background_media_failure_commit",
                 holder_kind="background",
             ):
+                if not self._is_recall_admitted_media_sidecar(job.sidecar_path):
+                    return False
                 current_sidecar = _content_digest(job.sidecar_path)
                 current_binary = _binary_identity(job.binary_path)
                 if current_sidecar != expected_sidecar or current_binary != expected_binary:
@@ -510,6 +559,8 @@ class MediaWorker:
     def _run_clip(self, job: _Job) -> None:
         """CLIP-embed an image (one vector) or a video (per-keyframe vectors) so it's
         findable by visual content — video at the specific moment, not as one blur."""
+        if not self._is_recall_admitted_media_sidecar(job.sidecar_path):
+            return
         is_video = job.media_type == "video"
         scene_pairs: list | None = None
         expected_binary = _binary_identity(job.binary_path)
@@ -536,6 +587,8 @@ class MediaWorker:
             operation="background_media_clip_commit",
             holder_kind="background",
         ):
+            if not self._is_recall_admitted_media_sidecar(job.sidecar_path):
+                return
             if _binary_identity(job.binary_path) != expected_binary:
                 log.warning(
                     "CLIP result stale for %s; changed media was not indexed",
@@ -576,6 +629,8 @@ class MediaWorker:
             operation="background_media_scene_frame_commit",
             holder_kind="background",
         ):
+            if not self._is_recall_admitted_media_sidecar(job.sidecar_path):
+                return
             if expected_binary is not None and _binary_identity(job.binary_path) != expected_binary:
                 log.warning(
                     "scene-frame result stale for %s; changed media was not persisted",
@@ -700,6 +755,8 @@ class MediaWorker:
         for sidecar in iter_kb_files(kb):
             if sidecar.suffix.lower() != ".md":
                 continue
+            if not self._is_automatic_media_sidecar(sidecar):
+                continue
             try:
                 head = sidecar.read_text(encoding="utf-8")[:800]
             except OSError:
@@ -761,17 +818,20 @@ class MediaWorker:
         wasted work. The deliberate `exomem backfill-media` pass writes their sidecars
         (+ OCR + CLIP) — this incremental scan only tops up already-sidecar'd images.
         """
-        if not embeddings.clip_enabled():
-            return 0
         kb = self._vault_root / kb_dirname()
         if not kb.is_dir():
             return 0
+        clip_enabled = embeddings.clip_enabled()
         n = 0
         for f in iter_kb_files(kb):
             mt = extract.media_type_for(f)
             if mt not in ("image", "video"):  # video is CLIP-able too (keyframes)
                 continue
             sidecar = f.with_name(f.name + ".md")
+            if not self._is_automatic_media_sidecar(sidecar):
+                continue
+            if not clip_enabled:
+                continue
             if not sidecar.exists():
                 continue  # no sidecar → not findable; backfill-media handles these
             try:

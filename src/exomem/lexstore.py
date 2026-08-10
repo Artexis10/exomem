@@ -70,7 +70,7 @@ from .kbdir import kb_dirname
 log = logging.getLogger(__name__)
 
 _NAV_BASENAMES = frozenset({"index.md", "log.md"})
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 CATALOG_FOREGROUND_DELTA_CAP = 32
 
 # Publication-barrier timeouts. Every LIVE-sidecar mutation and journal-mode
@@ -151,6 +151,22 @@ class CatalogQueryResult:
 
     value: object | None
     readiness: CatalogReadiness
+
+
+def _checkpoint_state(checkpoint) -> tuple | None:
+    """Comparable projected state, intentionally excluding local history.
+
+    Process ids and generations say whether *this* registry can replay a delta;
+    they do not say whether a sidecar from another process already contains the
+    same projected corpus.  Readiness therefore compares this token instead.
+    """
+    if checkpoint is None or checkpoint.triple is None:
+        return None
+    return (
+        tuple(checkpoint.triple),
+        checkpoint.policy_version,
+        checkpoint.access_policy_fingerprint,
+    )
 
 
 CATALOG_RETRY_AFTER_MS = 250
@@ -297,16 +313,16 @@ def lexical_path(vault_root: Path) -> Path:
     return vault_root / kb_dirname() / ".lexical.sqlite"
 
 
-_CATALOG_IDENTITY_SCHEMA = "exomem.semantic-catalog.projection-identity.v1"
+_CATALOG_IDENTITY_SCHEMA = "exomem.semantic-catalog.row-identity.v3"
 _REGISTRY_ABSENT_MARKER = "absent"
 
 
 def catalog_semantic_identity(vault_root: Path) -> str:
-    """Return the content-addressed identity of the semantic-catalog projection.
+    """Return the content-addressed identity of parsed semantic-catalog rows.
 
     The identity is a compound of the components that make an already-built
-    catalog complete for a given corpus, so any of them changing invalidates a
-    projection even when no note Markdown changed:
+    catalog's parsed rows correct for a given corpus, so any of them changing
+    invalidates those rows even when no note Markdown changed:
 
     * this slice's catalog/schema version (``SCHEMA_VERSION``);
     * the semantic-unit ``semantic_index.PARSER_VERSION``;
@@ -316,6 +332,8 @@ def catalog_semantic_identity(vault_root: Path) -> str:
       ``semantic_language_registry.registry_path`` (an explicit stable marker
       when the registry is absent).
 
+    Recall policy and access membership deliberately do not participate here:
+    ``RecallFreshnessCheckpoint`` attests that independent projection boundary.
     Serialization is a canonical, sorted, separator-fixed JSON payload hashed
     with SHA-256. No Markdown corpus is walked, no YAML is interpreted, and no
     file is mutated; the registry is read only to hash its bytes, so neither
@@ -828,6 +846,18 @@ def delete_after_remove(vault_root: Path, removed_rel_paths: list[str]) -> None:
         log.warning("lexical sidecar delete skipped (%s)", e)
 
 
+def purge_exact_persisted_rows(
+    vault_root: Path, values: list[str], *, connection_path: Path | None = None
+) -> int:
+    """Purge untrusted stored identities without converting them to paths."""
+    target = connection_path if connection_path is not None else lexical_path(vault_root)
+    if not values or not target.exists():
+        return 0
+    return get_store(vault_root).purge_exact_persisted_rows(
+        values, connection_path=connection_path
+    )
+
+
 # ------------------------------------------------------------------ mechanism
 
 
@@ -844,6 +874,12 @@ class LexicalStore:
         # scope -> exact live-registry triple applied by an in-process hook.
         # A witness is single-use and cannot bless a later, different corpus.
         self._witnessed: dict[str, tuple] = {}
+        # For non-live CLI/polling scopes, a caller's broad snapshot tells us
+        # whether another projection walk is needed.  A repeated unchanged
+        # request reuses this in-memory projected checkpoint; a changed broad
+        # snapshot recomputes it so an ordinary-note edit is never missed.
+        self._broad_seen: dict[str, tuple | None] = {}
+        self._recall_seen: dict[str, object] = {}
         self._failed = False  # runtime-retired for this process
         self._lock = threading.Lock()
 
@@ -1453,9 +1489,9 @@ class LexicalStore:
     # -------------------------------------------------------------- freshness
 
     def _scope_triple(self, scope: str) -> tuple:
-        from . import bm25 as bm25_module
+        from . import freshness
 
-        return bm25_module.corpus_key(self.vault_root, scope)
+        return freshness.recall_triple(self.vault_root, scope)
 
     def _stored_count_max(self, conn: sqlite3.Connection, scope: str) -> tuple[int, int]:
         col = "in_vault" if scope == "vault" else "in_kb"
@@ -1494,7 +1530,14 @@ class LexicalStore:
             (identity if identity is not None else catalog_semantic_identity(self.vault_root),),
         )
 
-    def _bless(self, conn: sqlite3.Connection, scope: str, triple: tuple) -> None:
+    def _bless(self, conn: sqlite3.Connection, scope: str, checkpoint) -> None:
+        """Atomically attest rows to one already-captured recall projection.
+
+        The generic file stream deliberately includes raw Records edits; it can
+        never attest this sidecar.  Callers capture the projected checkpoint
+        which supplied their rows, then pass it here with the same transaction.
+        """
+        triple = tuple(checkpoint.triple)
         conn.execute(
             "INSERT INTO meta(key, value) VALUES(?, ?) "
             "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -1503,35 +1546,39 @@ class LexicalStore:
         # Pin the live freshness checkpoint the sidecar now reflects, alongside
         # the triple, so a later missed-event delta can be applied against a
         # known `from_` (see `apply_catalog_delta`).
-        self._store_checkpoint(conn, scope)
+        self._write_checkpoint(conn, scope, checkpoint)
         # Persist the catalog identity with the triple/checkpoint so all three
         # are established together (no extra commit of its own).
         self._write_catalog_identity(conn)
         conn.commit()
-        self._synced[scope] = triple
+        self._synced[scope] = _checkpoint_state(checkpoint)
 
     def _write_checkpoint(self, conn: sqlite3.Connection, scope: str, checkpoint) -> None:
-        """Persist a freshness checkpoint into `meta` (caller owns the txn)."""
+        """Persist the projected recall checkpoint into `meta` (caller owns txn)."""
         conn.execute(
             "INSERT INTO meta(key, value) VALUES(?, ?) "
             "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            (f"checkpoint:{scope}", repr(tuple(checkpoint))),
+            (f"recall_checkpoint:{scope}", repr(tuple(checkpoint))),
         )
 
     def _store_checkpoint(self, conn: sqlite3.Connection, scope: str) -> None:
-        """Store the current live freshness checkpoint for `scope`."""
+        """Store the current projected recall checkpoint for `scope`."""
         from . import freshness as freshness_module
 
         self._write_checkpoint(
-            conn, scope, freshness_module.consumer_checkpoint(self.vault_root, scope)
+            conn, scope, freshness_module.recall_checkpoint(self.vault_root, scope)
         )
 
     def _meta_checkpoint(self, conn: sqlite3.Connection, scope: str):
-        """The consumer checkpoint stored with the catalog for `scope`, or None."""
+        """The projected recall checkpoint stored for `scope`, or None.
+
+        Legacy ``checkpoint:`` values deliberately do not parse here: they
+        represent the broad corpus and cannot prove a Records-safe projection.
+        """
         from . import freshness as freshness_module
 
         row = conn.execute(
-            "SELECT value FROM meta WHERE key = ?", (f"checkpoint:{scope}",)
+            "SELECT value FROM meta WHERE key = ?", (f"recall_checkpoint:{scope}",)
         ).fetchone()
         if row is None:
             return None
@@ -1539,9 +1586,9 @@ class LexicalStore:
             val = ast.literal_eval(row[0])
         except (ValueError, SyntaxError):
             return None
-        if not isinstance(val, (list, tuple)) or len(val) != 3:
+        if not isinstance(val, (list, tuple)) or len(val) != 5:
             return None
-        instance_id, generation, triple = val
+        instance_id, generation, triple, policy_version, access_fingerprint = val
         if not isinstance(instance_id, str) or not instance_id:
             return None
         if isinstance(generation, bool) or not isinstance(generation, int):
@@ -1559,7 +1606,11 @@ class LexicalStore:
             ):
                 return None
             triple = (count, mtime_ns, digest)
-        return freshness_module.FreshnessCheckpoint(instance_id, generation, triple)
+        if not isinstance(policy_version, str) or not isinstance(access_fingerprint, str):
+            return None
+        return freshness_module.RecallFreshnessCheckpoint(
+            instance_id, generation, triple, policy_version, access_fingerprint
+        )
 
     def _ensure_synced(
         self,
@@ -1586,11 +1637,26 @@ class LexicalStore:
         blocking the publish or false-emptying the caller: the caller schedules a
         single-flight repair and the next request retries.
         """
-        if freshness is None:
-            if not repair:
-                return False
-            freshness = self._scope_triple(scope)
-        if self._synced.get(scope) == freshness:
+        from . import freshness as freshness_module
+
+        # Callers still pass their broad query snapshot for compatibility, but a
+        # lexical catalog is keyed only by the recall projection.  A raw Records
+        # write must not make ordinary search rebuild or bless the sidecar.
+        broad_freshness = freshness
+        if (
+            not freshness_module.recall_is_live(self.vault_root, scope)
+            and broad_freshness is not None
+            and self._broad_seen.get(scope) == broad_freshness
+            and scope in self._recall_seen
+        ):
+            checkpoint = self._recall_seen[scope]
+        else:
+            checkpoint = freshness_module.recall_checkpoint(self.vault_root, scope)
+            self._broad_seen[scope] = broad_freshness
+            self._recall_seen[scope] = checkpoint
+        freshness = tuple(checkpoint.triple)
+        state = _checkpoint_state(checkpoint)
+        if self._synced.get(scope) == state:
             return True
         from .vault import VaultLockError
 
@@ -1602,9 +1668,9 @@ class LexicalStore:
         try:
             with self._maybe_publication_barrier(barrier_held):
                 with self._lock:
-                    if self._synced.get(scope) == freshness:
+                    if self._synced.get(scope) == state:
                         return True
-                    return self._reconcile_live(conn, scope, freshness, repair)
+                    return self._reconcile_live(conn, scope, freshness, checkpoint, repair)
         except VaultLockError:
             # A concurrent publication holds the barrier; decline rather than
             # race the replace. Readiness/search schedules the repair worker.
@@ -1615,6 +1681,7 @@ class LexicalStore:
         conn: sqlite3.Connection,
         scope: str,
         freshness: tuple,
+        checkpoint,
         repair: bool,
     ) -> bool:
         """The four-rung reconcile ladder's mutating body.
@@ -1623,6 +1690,14 @@ class LexicalStore:
         explicitly delegated), so a rebuild/heal/bless of the live sidecar can
         never interleave with a concurrent atomic publish.
         """
+        from . import freshness as freshness_module
+
+        current = freshness_module.recall_checkpoint(self.vault_root, scope)
+        if current != checkpoint:
+            # A projected event landed after the caller captured its target.
+            # Restart from the exact newer state rather than stamping old rows
+            # with the newer checkpoint (or blessing the stale one).
+            return self._reconcile_live(conn, scope, tuple(current.triple), current, repair)
         if not self._ensure_schema(conn):
             if not repair:
                 return False
@@ -1634,12 +1709,13 @@ class LexicalStore:
             self._heal_delta(conn)  # incremental: patch only the drifted rows
             return True
         witnessed = self._witnessed.pop(scope, None)
-        if witnessed == freshness:
+        if witnessed is not None and _checkpoint_state(witnessed) == _checkpoint_state(checkpoint):
             # The hook updated the sidecar for exactly this registry state.
-            self._bless(conn, scope, freshness)
+            self._bless(conn, scope, checkpoint)
             return True
-        if self._meta_triple(conn, scope) == freshness:
-            self._synced[scope] = freshness  # verified before; unchanged
+        stored = self._meta_checkpoint(conn, scope)
+        if stored is not None and _checkpoint_state(stored) == _checkpoint_state(checkpoint):
+            self._synced[scope] = _checkpoint_state(checkpoint)
             return True
         if not repair:
             # Establishing whether an unknown digest is a cheap path-only
@@ -1662,14 +1738,19 @@ class LexicalStore:
         """One pass over both walks: membership flags + file signatures."""
         from . import find as find_module
         from . import freshness as freshness_module
+        from . import recall_policy
         from .vault import walk_vault_md
 
         kb = self.vault_root / kb_dirname()
         members: dict[Path, list[bool]] = {}  # abs path -> [in_kb, in_vault]
         if kb.is_dir():
             for p in find_module._walk_md(kb):
+                if not recall_policy.is_recall_candidate(self.vault_root, p):
+                    continue
                 members.setdefault(p, [False, False])[0] = True
         for p in walk_vault_md(self.vault_root):
+            if not recall_policy.is_recall_candidate(self.vault_root, p):
+                continue
             members.setdefault(p, [False, False])[1] = True
         signatures: dict[Path, freshness_module.FileSignature] = {}
         for p in list(members):
@@ -1684,6 +1765,14 @@ class LexicalStore:
             return path.resolve().relative_to(self.vault_root.resolve()).as_posix()
         except ValueError:
             return None
+
+    def _live_event_path(self, path: Path) -> str | None:
+        """The canonical path key the live freshness registry records."""
+        try:
+            rel = path.resolve().relative_to(self.vault_root.resolve())
+        except (OSError, ValueError):
+            return None
+        return str(self.vault_root / rel)
 
     def _walk_matches_rows(self, conn: sqlite3.Connection, scope: str) -> bool:
         """Exact (path, mtime_ns) comparison of the scope's current set vs stored
@@ -1708,6 +1797,10 @@ class LexicalStore:
         leaves BOTH scopes blessed and memoized."""
         from . import freshness as freshness_module
 
+        targets = {
+            scope: freshness_module.recall_checkpoint(self.vault_root, scope)
+            for scope in ("kb", "vault")
+        }
         members, signatures = self._walk_entries()
         log.info(
             "lexical sync: rebuilding %s from %d markdown file(s)",
@@ -1729,9 +1822,17 @@ class LexicalStore:
                 (str(SCHEMA_VERSION),),
             )
         self._witnessed.clear()
-        for scope, idx in (("kb", 0), ("vault", 1)):
-            entries = [(str(p), signatures[p]) for p, flags in members.items() if flags[idx]]
-            self._bless(conn, scope, freshness_module.triple_from_entries(entries))
+        # Never stamp a newer projection over bytes parsed from an older scan.
+        # A concurrent projected event is reconciled from its current live map;
+        # raw Records events leave these checkpoints unchanged and need no work.
+        if any(
+            freshness_module.recall_checkpoint(self.vault_root, scope) != target
+            for scope, target in targets.items()
+        ):
+            self._heal_delta(conn)
+            return
+        for scope, target in targets.items():
+            self._bless(conn, scope, target)
 
     def _delta_source(self):
         """`(members, signatures)` for the heal's diff — from the live freshness
@@ -1745,8 +1846,8 @@ class LexicalStore:
         registry isn't live (kill-switched, or a scope never seeded)."""
         from . import freshness as freshness_module
 
-        kb = freshness_module.live_entries(self.vault_root, "kb")
-        vault = freshness_module.live_entries(self.vault_root, "vault")
+        kb = freshness_module.live_recall_entries(self.vault_root, "kb")
+        vault = freshness_module.live_recall_entries(self.vault_root, "vault")
         if kb is None or vault is None:
             return self._walk_entries()
         members: dict[Path, list[bool]] = {}
@@ -1773,6 +1874,10 @@ class LexicalStore:
         diverge (the class of `UNIQUE constraint failed: pages.path`)."""
         from . import freshness as freshness_module
 
+        targets = {
+            scope: freshness_module.recall_checkpoint(self.vault_root, scope)
+            for scope in ("kb", "vault")
+        }
         members, signatures = self._delta_source()
         walk: dict[str, tuple[Path, tuple[int, int, int], bool, bool]] = {}
         for path, (in_kb, in_vault) in members.items():
@@ -1797,9 +1902,14 @@ class LexicalStore:
                 if s is None or (s[1], s[2], s[3]) != (signature[0], in_kb, in_vault):
                     self._insert_page(conn, path, signature[0], in_kb, in_vault)
         self._witnessed.clear()
-        for scope, idx in (("kb", 0), ("vault", 1)):
-            entries = [(str(p), signatures[p]) for p, flags in members.items() if flags[idx]]
-            self._bless(conn, scope, freshness_module.triple_from_entries(entries))
+        if any(
+            freshness_module.recall_checkpoint(self.vault_root, scope) != target
+            for scope, target in targets.items()
+        ):
+            self._heal_delta(conn)
+            return
+        for scope, target in targets.items():
+            self._bless(conn, scope, target)
 
     def _insert_page(
         self,
@@ -1817,6 +1927,13 @@ class LexicalStore:
         """
         from . import bm25 as bm25_module
         from . import find as find_module
+        from . import recall_policy
+
+        # Every insertion is independently guarded.  Rebuild, replay and a
+        # second lookup must not be able to resurrect a raw Record after an
+        # earlier delete-only suppression.
+        if not recall_policy.is_recall_candidate(self.vault_root, path):
+            return
 
         page = find_module._CACHE.get(path, self.vault_root)
         if page is not None:
@@ -2016,6 +2133,7 @@ class LexicalStore:
     def _upsert_paths_locked(self, paths: list[Path]) -> bool:
         """`upsert_paths` body with the publication barrier already held."""
         from . import freshness as freshness_module
+        from . import recall_policy
 
         if not self.path.exists():
             return False
@@ -2023,11 +2141,29 @@ class LexicalStore:
         try:
             if not self._schema_is_current(conn):
                 return False
+            witness_targets = {
+                scope: (
+                    (
+                        freshness_module.recall_checkpoint(self.vault_root, scope),
+                        self._meta_checkpoint(conn, scope),
+                    )
+                    if freshness_module.recall_is_live(self.vault_root, scope)
+                    else (None, None)
+                )
+                for scope in ("kb", "vault")
+            }
+            requested_paths = {
+                key for path in paths if (key := self._live_event_path(path)) is not None
+            }
             prepared: list[tuple[Path, str, tuple[int, int, int], bool, bool]] = []
+            suppressed: list[str] = []
             for path in paths:
                 try:
                     rel = path.resolve().relative_to(self.vault_root.resolve()).as_posix()
                 except ValueError:
+                    continue
+                if not recall_policy.is_recall_candidate(self.vault_root, path):
+                    suppressed.append(rel)
                     continue
                 # Validate every requested source before deleting any existing row.
                 # A path disappearing mid-request is an incomplete snapshot, not a
@@ -2036,6 +2172,12 @@ class LexicalStore:
                 in_kb, in_vault = self._membership(path)
                 prepared.append((path, rel, signature, in_kb, in_vault))
             with conn:
+                for rel in suppressed:
+                    row = conn.execute("SELECT rowid FROM pages WHERE path = ?", (rel,)).fetchone()
+                    if row is not None:
+                        self._delete_rowid(conn, row[0])
+                    else:
+                        self._delete_semantic_units(conn, rel)
                 for path, rel, signature, in_kb, in_vault in prepared:
                     row = conn.execute("SELECT rowid FROM pages WHERE path = ?", (rel,)).fetchone()
                     if row is not None:
@@ -2055,7 +2197,7 @@ class LexicalStore:
                         or self._membership(path) != (in_kb, in_vault)
                     ):
                         raise OSError(f"source changed during bounded upsert: {path.name}")
-            self._remember_live_witnesses()
+            self._remember_live_witnesses(witness_targets, requested_paths)
             return True
         finally:
             conn.close()
@@ -2082,14 +2224,84 @@ class LexicalStore:
             _schedule_repair(self.vault_root)
         return applied
 
+    def purge_exact_persisted_rows(
+        self, values: list[str], *, connection_path: Path | None = None
+    ) -> int:
+        """Delete exact sidecar values while keeping FTS companions coherent.
+
+        Unlike :meth:`delete_rel_paths`, these values are quarantined persisted
+        spellings.  They must never be joined to ``vault_root`` or used to build
+        a freshness witness.
+        """
+        raw_values = sorted({value for value in values if isinstance(value, str)})
+        target = connection_path if connection_path is not None else self.path
+        if not raw_values or not target.exists() or self._failed:
+            return 0
+        from .vault import VaultLockError
+
+        try:
+            with self._publication_lock(timeout=_PUBLICATION_TIMEOUT_FOREGROUND):
+                conn = self._connect(target)
+                try:
+                    removed = 0
+                    with conn:
+                        for value in raw_values:
+                            row = conn.execute(
+                                "SELECT rowid FROM pages WHERE path = ?", (value,)
+                            ).fetchone()
+                            if row is not None:
+                                self._delete_rowid(conn, row[0])
+                                removed += 1
+                            else:
+                                unit_count = conn.execute(
+                                    "SELECT COUNT(*) FROM semantic_units WHERE parent_path = ?",
+                                    (value,),
+                                ).fetchone()[0]
+                                self._delete_semantic_units(conn, value)
+                                removed += int(unit_count)
+                        if removed:
+                            # No vault event can attest these rows. Force the
+                            # next reader to reconcile its persisted checkpoint.
+                            conn.execute("DELETE FROM meta WHERE key LIKE 'triple:%'")
+                    if removed:
+                        self._synced.clear()
+                        self._witnessed.clear()
+                        self._broad_seen.clear()
+                        self._recall_seen.clear()
+                    return int(removed)
+                finally:
+                    conn.close()
+        except (VaultLockError, sqlite3.Error) as e:
+            log.info("lexical exact-row purge deferred (%s)", e)
+            _schedule_repair(self.vault_root)
+            return 0
+
     def _delete_rel_paths_locked(self, rel_paths: list[str]) -> bool:
         """`delete_rel_paths` body with the publication barrier already held."""
+        from . import freshness as freshness_module
+
         if not self.path.exists():
             return False
         conn = self._connect()
         try:
             if not self._schema_is_current(conn):
                 return False
+            witness_targets = {
+                scope: (
+                    (
+                        freshness_module.recall_checkpoint(self.vault_root, scope),
+                        self._meta_checkpoint(conn, scope),
+                    )
+                    if freshness_module.recall_is_live(self.vault_root, scope)
+                    else (None, None)
+                )
+                for scope in ("kb", "vault")
+            }
+            requested_paths = {
+                key
+                for rel in rel_paths
+                if (key := self._live_event_path(self.vault_root / rel)) is not None
+            }
             with conn:
                 for rel in rel_paths:
                     row = conn.execute("SELECT rowid FROM pages WHERE path = ?", (rel,)).fetchone()
@@ -2097,25 +2309,45 @@ class LexicalStore:
                         self._delete_rowid(conn, row[0])
                     else:
                         self._delete_semantic_units(conn, rel)
-            self._remember_live_witnesses()
+            self._remember_live_witnesses(witness_targets, requested_paths)
             return True
         finally:
             conn.close()
 
-    def _remember_live_witnesses(self) -> None:
+    def _remember_live_witnesses(
+        self,
+        targets: dict[str, tuple[object | None, object | None]],
+        requested_paths: set[str],
+    ) -> None:
         """Remember only the exact watcher-maintained corpus just applied.
 
-        Without a live registry there is no race-free corpus attestation, so
-        the next read takes the conservative verify/rebuild path.
+        A bounded operation can attest a live checkpoint only when its requested
+        paths cover every projected delta from the catalog's stored checkpoint.
+        Without that proof (or without a live registry), the next read takes the
+        conservative verify/rebuild path.
         """
         from . import freshness as freshness_module
 
         for scope in ("kb", "vault"):
-            triple = freshness_module.triple(self.vault_root, scope)
-            if triple is None:
+            checkpoint, stored = targets[scope]
+            if checkpoint is None or freshness_module.recall_checkpoint(
+                self.vault_root, scope
+            ) != checkpoint:
+                self._witnessed.pop(scope, None)
+            elif stored == checkpoint:
+                self._witnessed[scope] = checkpoint
+            elif stored is None:
                 self._witnessed.pop(scope, None)
             else:
-                self._witnessed[scope] = triple
+                delta = freshness_module.recall_delta_since(self.vault_root, scope, stored)
+                if (
+                    not delta.complete
+                    or delta.to != checkpoint
+                    or not (set(delta.changed) | set(delta.deleted)) <= requested_paths
+                ):
+                    self._witnessed.pop(scope, None)
+                else:
+                    self._witnessed[scope] = checkpoint
 
     def ensure_fresh(self) -> None:
         """Reconcile both scopes against their walks, PARANOIDLY: verified
@@ -2221,7 +2453,7 @@ class LexicalStore:
             with self._publication_lock():
                 start_identity = catalog_semantic_identity(self.vault_root)
                 start_checkpoints = {
-                    scope: freshness_module.consumer_checkpoint(self.vault_root, scope)
+                    scope: freshness_module.recall_checkpoint(self.vault_root, scope)
                     for scope in ("kb", "vault")
                 }
                 start_live_guard = self._live_publication_guard()
@@ -2288,23 +2520,18 @@ class LexicalStore:
         for scope, idx in (("kb", 0), ("vault", 1)):
             entries = [(str(p), signatures[p]) for p, flags in members.items() if flags[idx]]
             walk_triple = freshness_module.triple_from_entries(entries)
-            if freshness_module.live_entries(self.vault_root, scope) is not None:
-                delta = freshness_module.delta_since(
+            if freshness_module.live_recall_entries(self.vault_root, scope) is not None:
+                delta = freshness_module.recall_delta_since(
                     self.vault_root, scope, start_checkpoints[scope]
                 )
                 if not delta.complete:
                     return False
                 scope_targets[scope] = ("delta", delta, delta.to, delta.to.triple)
             else:
-                # No live registry (watcher disabled / never seeded): the walk is
-                # the authoritative snapshot. `consumer_checkpoint` reports a
-                # triple-None, generation-0 checkpoint for a non-live scope, which
-                # readiness could never match — publishing it claims success while
-                # readiness stays permanently stale, driving a rebuild storm. Bind
-                # the checkpoint to the exact WALK triple the built rows reflect so
-                # a non-live rebuild converges: readiness matching the walk triple
-                # becomes `available`, not permanent warming.
-                base = freshness_module.consumer_checkpoint(self.vault_root, scope)
+                # No projected live registry: the policy-filtered walk is the
+                # authoritative snapshot.  Bind the freshly captured recall
+                # policy identity to its exact walk triple.
+                base = freshness_module.recall_checkpoint(self.vault_root, scope)
                 checkpoint = base._replace(triple=walk_triple)
                 scope_targets[scope] = ("walk", None, checkpoint, walk_triple)
 
@@ -2485,17 +2712,17 @@ class LexicalStore:
                         raise ValueError(
                             "apply_catalog_delta requires a current schema; refusing to rebuild"
                         )
-                    captured_identity = catalog_semantic_identity(self.vault_root)
-                    if self._meta_catalog_identity(conn) != captured_identity:
-                        raise ValueError(
-                            "catalog identity changed before foreground delta apply"
-                        )
                     stored = self._meta_checkpoint(conn, scope)
                     if stored is None or delta.from_ != stored:
                         # A concurrent publish advanced the live checkpoint out
                         # from under this delta; it is no longer bound.
                         raise ValueError(
                             "delta is not bound to the stored catalog checkpoint"
+                        )
+                    captured_identity = catalog_semantic_identity(self.vault_root)
+                    if self._meta_catalog_identity(conn) != captured_identity:
+                        raise ValueError(
+                            "catalog identity changed before foreground delta apply"
                         )
                     if not self._delta_target_still_current(scope, delta):
                         raise ValueError(
@@ -2523,7 +2750,7 @@ class LexicalStore:
                         self._write_catalog_identity(conn, captured_identity)
                     # Committed: only now advance the in-memory synced attestation.
                     if delta.to.triple is not None:
-                        self._synced[scope] = tuple(delta.to.triple)
+                        self._synced[scope] = _checkpoint_state(delta.to)
                 finally:
                     conn.close()
         except VaultLockError:
@@ -2537,8 +2764,9 @@ class LexicalStore:
         reached this process. Both are checked before and after row materialization.
         """
         from . import freshness as freshness_module
+        from . import recall_policy
 
-        if freshness_module.consumer_checkpoint(self.vault_root, scope) != delta.to:
+        if freshness_module.recall_checkpoint(self.vault_root, scope) != delta.to:
             return False
         expected = dict(getattr(delta, "target_signatures", ()))
         if set(expected) != set(delta.changed):
@@ -2546,7 +2774,10 @@ class LexicalStore:
         scope_index = 0 if scope == "kb" else 1
         for sp, signature in expected.items():
             path = Path(sp)
-            if not self._membership(path)[scope_index]:
+            if (
+                not recall_policy.is_recall_candidate(self.vault_root, path)
+                or not self._membership(path)[scope_index]
+            ):
                 return False
             try:
                 if freshness_module.stat_signature(path) != tuple(signature):
@@ -2555,9 +2786,13 @@ class LexicalStore:
                 return False
         for sp in delta.deleted:
             path = Path(sp)
-            if path.exists() and self._membership(path)[scope_index]:
+            if (
+                path.exists()
+                and recall_policy.is_recall_candidate(self.vault_root, path)
+                and self._membership(path)[scope_index]
+            ):
                 return False
-        return freshness_module.consumer_checkpoint(self.vault_root, scope) == delta.to
+        return freshness_module.recall_checkpoint(self.vault_root, scope) == delta.to
 
     def _apply_delta_rows(self, conn: sqlite3.Connection, delta) -> None:
         """Replay one delta's row mutations onto `conn` (caller owns the txn).
@@ -2581,6 +2816,9 @@ class LexicalStore:
         for sp in delta.changed:
             path = Path(sp)
             if self._rel(path) is None:
+                continue
+            from . import recall_policy
+            if not recall_policy.is_recall_candidate(self.vault_root, path):
                 continue
             try:
                 mtime_ns = path.stat().st_mtime_ns
@@ -2722,7 +2960,11 @@ class LexicalStore:
         Every non-`available` outcome is reported (never raised); raw SQLite is
         classified here and never escapes this seam.
         """
+        from . import freshness as freshness_module
+
         backend_name = backend()
+        target_checkpoint = freshness_module.recall_checkpoint(self.vault_root, scope)
+        target_state = _checkpoint_state(target_checkpoint)
         if backend_name == "python":
             return CatalogReadiness("unsupported", False, backend_name)
         if self._failed:
@@ -2748,31 +2990,24 @@ class LexicalStore:
                     # sidecar defers to the atomic rebuild — this seam emits no DDL.
                     _schedule_repair(self.vault_root)
                     return CatalogReadiness("stale", False, backend_name)
-                stored_identity = self._meta_catalog_identity(conn)
-                if stored_identity is None or stored_identity != catalog_semantic_identity(
-                    self.vault_root
-                ):
-                    _schedule_repair(self.vault_root)
-                    return CatalogReadiness("stale", False, backend_name)
                 checkpoint = self._meta_checkpoint(conn, scope)
                 if checkpoint is None:
                     _schedule_repair(self.vault_root)
                     return CatalogReadiness("stale", False, backend_name)
-                if (
-                    freshness is not None
-                    and checkpoint.triple is not None
-                    and tuple(checkpoint.triple) == tuple(freshness)
-                ):
+                if _checkpoint_state(checkpoint) == target_state:
+                    if self._meta_catalog_identity(conn) != catalog_semantic_identity(
+                        self.vault_root
+                    ):
+                        _schedule_repair(self.vault_root)
+                        return CatalogReadiness("stale", False, backend_name)
                     return CatalogReadiness("available", True, backend_name)
             finally:
                 conn.close()
             # Well-formed sidecar whose checkpoint predates the request. Try one
             # bounded foreground delta to catch up before deferring to repair.
             if allow_delta:
-                from . import freshness as freshness_module
-
-                if freshness_module.live_entries(self.vault_root, scope) is not None:
-                    delta = freshness_module.delta_since(
+                if freshness_module.live_recall_entries(self.vault_root, scope) is not None:
+                    delta = freshness_module.recall_delta_since(
                         self.vault_root, scope, checkpoint
                     )
                     if (
@@ -2811,6 +3046,8 @@ class LexicalStore:
         `available`/`complete` verdict can never yield a false empty from a
         replacement N-1. Returns `query_fn`'s result, or None to defer.
         """
+        from . import freshness as freshness_module
+
         readiness = self.catalog_readiness(scope, freshness)
         if not readiness.complete:
             return CatalogQueryResult(None, readiness)
@@ -2821,11 +3058,9 @@ class LexicalStore:
                 # returned; the whole validate-then-query runs inside it.
                 conn.execute("BEGIN")
                 stored = self._meta_checkpoint(conn, scope)
+                target = freshness_module.recall_checkpoint(self.vault_root, scope)
                 if (
-                    freshness is None
-                    or stored is None
-                    or stored.triple is None
-                    or tuple(stored.triple) != tuple(freshness)
+                    _checkpoint_state(stored) != _checkpoint_state(target)
                     or not self._schema_is_current(conn)
                     or self._meta_catalog_identity(conn)
                     != catalog_semantic_identity(self.vault_root)

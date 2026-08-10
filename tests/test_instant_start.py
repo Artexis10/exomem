@@ -49,6 +49,10 @@ from exomem.__main__ import main
 @pytest.fixture(autouse=True)
 def _reset_readiness(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("EXOMEM_PRELOAD_MODELS", "1")
+    # Other test modules may exercise the lean-install soft-fail path first.
+    # These tests independently model a fresh process whose warmup can defer
+    # embedding work, so they must not inherit that process-global sentinel.
+    monkeypatch.setattr(embeddings, "_IMPORT_FAILED", False)
     readiness.reset()
     yield
     readiness.reset()
@@ -911,6 +915,8 @@ def test_upsert_after_write_defers_during_warm_without_loading_model(
 
     readiness.begin_warm()
     md_path = tmp_path / "Knowledge Base" / "Notes" / "probe.md"
+    md_path.parent.mkdir(parents=True)
+    md_path.write_text("# Probe\n", encoding="utf-8")
     embeddings.upsert_after_write(tmp_path, [md_path])
 
     drained = readiness.mark_ready("embeddings")

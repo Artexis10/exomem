@@ -6,12 +6,12 @@ Run `uv run python scripts/generate-capabilities.py --check` to verify it is cur
 
 ## Summary
 
-- Product commands: 26
-- Tier 1 commands: 22
+- Product commands: 27
+- Tier 1 commands: 23
 - Tier 2 commands: 4
-- Registry-generated MCP commands: 26
-- REST commands: 25
-- CLI commands: 25
+- Registry-generated MCP commands: 27
+- REST commands: 26
+- CLI commands: 26
 - Hand-registered MCP tools: none
 
 ## Hosted Cell Capability Boundary
@@ -59,6 +59,7 @@ See [hosted-operations.md](hosted-operations.md) and the
 | schema_memory | 1 | MCP, REST, CLI | write | yes | - | schema_memory | operation*, name, subject, project, page_type, save, expected_hash, strict, compare_to, proposal, include_model_suggestions, response_detail | Infer, validate, diff, or save governed memory schemas. |
 | govern_memory | 2 | MCP, REST, CLI | write | yes | operation | - | operation*, documents, selector_paths, intent, ttl_seconds, target_ceiling, duration, proposal_id, scope, grant_id, scope_ids, audience, ceiling, token, authorization_session, purpose, duration_seconds, rule_ids, path, paths, response_detail | Inspect or author opt-in confidential governance policy. |
 | manage_memory_file | 2 | MCP, REST, CLI | write | yes | - | create_file, list_directory, move_file, delete, append_to_file, list_trash, recover_from_trash | operation, path, content, frontmatter, overwrite, allow_curated, kind, parents, recursive, include_hidden, old_path, new_path, update_wikilinks, confirm, force_orphan, force_superseded, expected_dead_inbound, trash_path, restore_path, date, validate_only, draft_id, draft_hash, draft_token, semantic_transition_token, relation_disposition, relation_review_hash, relation_review_reason, promotion_reason, response_detail | Manage files through one governed file operation. |
+| record_memory | 1 | MCP, REST, CLI | write | yes | - | record_memory | action*, collection, manifest_path, manifest_text, why, scaffold, view, filters, columns, sort_by, descending, limit, aggregate, date_from, date_to, date_column, expand_children, continuation, include_agent_history, output_format, item, item_key, expected_container_hash, body, changes, expected_item_version, response_detail | Inspect, create, query, append, or update a governed Record collection. |
 | query_dataset | 2 | MCP, REST, CLI | read | no | path | query_data | path*, record_path, filters, columns, sort_by, descending, limit, offset, aggregate, date_from, date_to, date_column | Query a CSV, TSV, or JSON dataset under the vault. |
 | read_media | 2 | MCP | read | no | path | get_video_frames | path*, max_frames, start_sec, end_sec | Read sampled video frames inline for visual inspection. |
 

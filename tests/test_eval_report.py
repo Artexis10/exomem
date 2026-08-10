@@ -74,10 +74,11 @@ def _golden_strings() -> tuple[list[str], list[str]]:
 def test_count_corpus_stats_against_fixtures() -> None:
     """Corpus walk over tests/fixtures returns rounded, internally-consistent counts.
 
-    The fixture tree currently holds 30 markdown files vault-wide (28 KB notes
-    outside `_Schema` + 2 read-only `Reference/` pages) and no media binaries.
-    Rounded DOWN to the nearest 10 that is files=30, notes=20, media=0. We assert
-    the rounding contract and the bucket definitions, not exact filenames.
+    The fixture tree currently holds 43 markdown files vault-wide (28 KB notes
+    outside `_Schema`, 2 read-only input pages, and 10 Records adapter fixtures)
+    and no media binaries. Rounded DOWN to the nearest 10 that is files=40,
+    notes=20, media=0. We assert the rounding contract and the bucket definitions,
+    not exact filenames.
     """
     stats = eval_report.count_corpus_stats(FIXTURES)
 
@@ -91,8 +92,8 @@ def test_count_corpus_stats_against_fixtures() -> None:
     assert stats["media"] == 0
     # "files" (whole-vault markdown) is a superset of "notes" (KB-scoped markdown).
     assert stats["files"] >= stats["notes"]
-    # Current fixture tree: 30 files / 28 notes -> floor to 30 / 20.
-    assert stats["files"] == 30
+    # Current fixture tree: 43 files / 28 notes -> floor to 40 / 20.
+    assert stats["files"] == 40
     assert stats["notes"] == 20
 
 
