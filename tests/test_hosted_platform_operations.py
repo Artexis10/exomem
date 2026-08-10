@@ -717,6 +717,15 @@ def test_provisioner_database_rotation_contract_and_runbook_are_ordered_and_reve
         "restore the external reconcile state"
     )
     for command in (
+        "set -euo pipefail",
+        "trap 'rollback' ERR",
+        "-l exomem.io/deletion-job=true",
+        "! kubectl -n exomem-platform get job exomem-provisioner-database-migration",
+        "! kubectl -n exomem-platform get job exomem-provisioner-database-bootstrap",
+        "kubectl -n exomem-platform rollout status deployment/exomem-provisioner-api",
+        "kubectl -n exomem-platform rollout status deployment/exomem-provisioner-worker",
+        "kubectl -n exomem-platform rollout status deployment/exomem-volume-worker",
+        "kubectl -n exomem-platform get cronjob \"$name\" -o jsonpath='{.spec.suspend}'",
         "rotation_root=/secure/operator/exomem-hosted/rotation-runs",
         'mkdir -m 0700 "$rotation_run"',
         "set -o noclobber",
