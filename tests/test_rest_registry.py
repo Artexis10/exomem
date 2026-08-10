@@ -30,6 +30,7 @@ PRODUCT_ROUTES = [
     "capture_source",
     "compile_source",
     "preserve_evidence",
+    "preserve_artifacts",
     "transfer_artifact",
     "review_memory",
     "review_item_context",

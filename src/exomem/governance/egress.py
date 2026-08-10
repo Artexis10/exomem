@@ -2287,6 +2287,7 @@ _METADATA_ONLY_COMMANDS: frozenset[str] = frozenset(
         "remember",
         "capture_source",
         "preserve_evidence",
+        "preserve_artifacts",
         "compile_source",
         "observe_memory",
         "replace_memory",
