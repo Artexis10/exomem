@@ -212,12 +212,12 @@ shot: you'll almost always need `bootstrap`, `ask_memory` (recall),
 `read_memory` (open a page), `browse_memory` (vault shape), `remember`
 (compiled conclusions), `observe_memory` (one semantic unit), `edit_memory`,
 `replace_memory`, `capture_source`,
-`compile_source`, `preserve_evidence`, `transfer_artifact`, `record_memory`, `review_memory`,
+`compile_source`, `preserve_evidence`, `preserve_artifacts`, `transfer_artifact`, `record_memory`, `review_memory`,
 `triage_memory`, `connect_memory`, `adopt_vault`, `maintain_memory`, `schema_memory`,
 `govern_memory`, `process_media`, `query_dataset`, and `read_media`. In Claude Code, load them by exact name in a
 single call:
 
-`ToolSearch("select:bootstrap,ask_memory,read_memory,browse_memory,remember,observe_memory,edit_memory,replace_memory,capture_source,compile_source,preserve_evidence,transfer_artifact,record_memory,review_memory,triage_memory,connect_memory,adopt_vault,maintain_memory,schema_memory,govern_memory,process_media,query_dataset,read_media")`
+`ToolSearch("select:bootstrap,ask_memory,read_memory,browse_memory,remember,observe_memory,edit_memory,replace_memory,capture_source,compile_source,preserve_evidence,preserve_artifacts,transfer_artifact,record_memory,review_memory,triage_memory,connect_memory,adopt_vault,maintain_memory,schema_memory,govern_memory,process_media,query_dataset,read_media")`
 
 On clients without a `select:` syntax (e.g. claude.ai), search by capability —
 "search the knowledge base", "read a KB page", "compile a note" — and each
@@ -280,7 +280,7 @@ experiments, proof-bearing records, review, and supersession.
 |---|---|---|
 | `ask` | "what do I know," "find what I concluded," "show the context" | `ask_memory(detail="compact", rerank=false)` first; `read_memory` or `ask_memory(deep=true)` when synthesis needs context |
 | `remember` | "remember this," "save this conclusion," "write this decision" | `remember`; use `replace_memory` when it supersedes old knowledge |
-| `capture` | "save this article/source/transcript," "keep this receipt/record/proof" | `capture_source` for Sources; `preserve_evidence` or `transfer_artifact` for Evidence |
+| `capture` | "save this article/source/transcript," "keep this receipt/record/proof" | `capture_source` for Sources; `preserve_evidence` for text, `preserve_artifacts` for file handles, otherwise `transfer_artifact` for Evidence |
 | `record` | "log this session," "record this measurement," "add this transaction," "update the mileage" | `record_memory` for observed state in a configured Record collection |
 | `review` | "review stale knowledge," "what needs attention," "what sources are unprocessed" | `review_memory`; explicit dismiss/snooze/reopen via `triage_memory` |
 | `relations` | "review suggested relations," "pay down relation debt," "accept/reject suggested links" | `review_memory(mode="relation-queue")` for the batched read; accept one reviewed candidate via `connect_memory(operation="accept-relation")` (requires the queue fingerprint, target `expected_hash`, and an audit reason); reject via `triage_memory` |
@@ -297,7 +297,7 @@ Examples:
   retry with adjacent terms before treating a miss as meaningful.
 - "Save this article" -> `capture_source` with provenance; ask about compiling
   only if a conclusion is present.
-- "Keep this receipt for the warranty case" -> `preserve_evidence` or `transfer_artifact`, not as a
+- "Keep this receipt for the warranty case" -> `preserve_evidence`, `preserve_artifacts`, or `transfer_artifact`, not as a
   general note.
 - "Log this training session" -> `record_memory(action="append")` after resolving the collection; keep the session as an observed Record, not a compiled conclusion.
 - "Show my last three months" -> `record_memory(action="query")` with a bounded date/query shape; use a compiled Note only for an explicit conclusion from that history.
@@ -431,8 +431,10 @@ These constraints apply equally to Tier 1 and Tier 2 — no escape hatch around 
 - **Binaries go out-of-band — never inline through a tool argument.** Transcribe
   what's relevant into the note/evidence *text* (that's the queryable part), and
   deliver the *original file* separately. On claude.ai web, call
-  **`transfer_artifact(mode="upload")`** for a short-lived `{token, upload_url}`, then have the
-  code sandbox multipart-`curl` the attached files to `upload_url`.
+  **`preserve_artifacts(scope="...", category="...", files=[{"download_url": "...", "file_id": "...", "mime_type": "...", "file_name": "..."}])`** directly when the client supplies file handles. Otherwise call
+  **`transfer_artifact(operation="upload")`** for a short-lived `{token, upload_url}`. If the
+  file-owning client can reach `upload_url`, multipart-`curl` the attached files there; otherwise
+  open the prefilled browser upload form or give its URL to the user for a manual upload.
   **Searchable binaries are automatic:** the server transcribes audio/video
   (Whisper), OCRs images (Tesseract), reads PDFs (pymupdf), extracts office/web
   documents (docx/xlsx/pptx/html via MarkItDown; txt/eml/ics via native parsers),
@@ -451,13 +453,13 @@ These constraints apply equally to Tier 1 and Tier 2 — no escape hatch around 
   These actions enqueue or inspect work; they do not wait for model completion or
   overwrite an existing valid transcript.
 - **Pull a vault file back out — the download channel.** Call
-  **`transfer_artifact(mode="download")`** for a short-lived `{token, download_url}`, then GET
+  **`transfer_artifact(operation="download")`** for a short-lived `{token, download_url}`, then GET
   `download_url?path=<vault-relative path>` with `Authorization: Bearer <token>`.
   Read-only, download-scoped, path confined to the vault root.
 - **Media hits in `find` are first-class.** An extracted media sidecar carries
   `media_type` and `media_file` (a pointer to the original binary). Treat the
   *file* as the result and the matched transcript/OCR snippet as the "why"; offer
-  to pull the original via `transfer_artifact(mode="download")`. Images and video are also
+  to pull the original via `transfer_artifact(operation="download")`. Images and video are also
   searchable by *visual content* (CLIP), not just text — a purely-visual hit
   carries a `clip_score`; a video visual hit also carries `clip_match_at` (e.g.
   `"14:32"`), the timestamp of the matching keyframe.

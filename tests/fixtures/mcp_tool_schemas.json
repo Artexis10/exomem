@@ -2775,8 +2775,71 @@
       "type": "object"
     }
   },
+  "preserve_artifacts": {
+    "description": "Preserve client-provided binary file handles as append-only Evidence.\n\nUse this canonical binary-preservation command when the client can supply\ntemporary HTTPS file handles. Exomem retrieves each handle server-side and\nreturns one stored or failed outcome per file; no binary data is passed as\nbase64 through model-visible arguments. Clients without file handles keep\nusing `transfer_artifact(operation=\"upload\")` followed by `/upload`.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "scope": {
+          "description": "Incident, case, project, or domain key.",
+          "type": "string"
+        },
+        "category": {
+          "description": "Evidence category within the scope.",
+          "type": "string"
+        },
+        "files": {
+          "description": "One to eight temporary client file handles.",
+          "items": {
+            "description": "Client-neutral temporary remote file handle used by ``preserve_artifacts``.",
+            "properties": {
+              "download_url": {
+                "type": "string"
+              },
+              "file_id": {
+                "maxLength": 256,
+                "minLength": 1,
+                "type": "string"
+              },
+              "mime_type": {
+                "maxLength": 255,
+                "type": "string"
+              },
+              "file_name": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "download_url",
+              "file_id"
+            ],
+            "type": "object"
+          },
+          "maxItems": 8,
+          "minItems": 1,
+          "type": "array"
+        },
+        "response_detail": {
+          "default": "compact",
+          "description": "Successful committed mutation detail: compact (default), full diagnostics, or legacy raw leaf result.",
+          "enum": [
+            "compact",
+            "full",
+            "legacy"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "scope",
+        "category",
+        "files"
+      ],
+      "type": "object"
+    }
+  },
   "preserve_evidence": {
-    "description": "Preserve text evidence as append-only proof material.\n\nUse for receipts, letters, transcripts, warranty records, legal/dispute\nmaterial, and other factual artifacts. Binary files use `transfer_artifact`\nplus the `/upload` endpoint so bytes do not pass through the model.",
+    "description": "Preserve text evidence as append-only proof material.\n\nUse for receipts, letters, transcripts, warranty records, legal/dispute\nmaterial, and other factual artifacts. For binary files supplied as client\nfile handles, use `preserve_artifacts`; otherwise use `transfer_artifact`\nplus `/upload`. Bytes never pass through the model.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -4604,7 +4667,7 @@
     }
   },
   "transfer_artifact": {
-    "description": "Prepare out-of-band binary artifact transfer.\n\nReturns a short-lived token and URL for uploading evidence binaries or\ndownloading a vault file into a sandbox. The long-lived server secret never\nleaves the server.",
+    "description": "Prepare out-of-band binary artifact transfer.\n\nCompatibility transport for clients that cannot supply file handles to\n`preserve_artifacts`. Returns a short-lived token and URL for uploading\nevidence binaries or downloading a vault file into a sandbox. Minting an\nupload token does not mean bytes were stored.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {

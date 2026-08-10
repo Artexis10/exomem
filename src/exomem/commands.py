@@ -34,7 +34,7 @@ from typing import Annotated, Any, Literal, NotRequired
 from fastmcp.tools import ToolResult
 from fastmcp.utilities.types import Image as FastMCPImage
 from mcp.types import TextContent
-from pydantic import Field, StrictInt
+from pydantic import Field, StrictInt, StringConstraints
 from typing_extensions import TypedDict
 
 from . import add as add_module
@@ -146,7 +146,6 @@ _RerankCandidateLimit = Annotated[
         ),
     ),
 ]
-
 # Keep commands.py as the public command-surface facade for server, CLI, docs,
 # and tests while the implementation lives in command_surface.py.
 _COMMAND_SURFACE_EXPORTS = (
@@ -181,6 +180,25 @@ class SearchResult(TypedDict):
     title: str
     url: str
     metadata: dict[str, str]
+
+
+class ClientArtifactFile(TypedDict):
+    """Client-neutral temporary remote file handle used by ``preserve_artifacts``."""
+
+    download_url: str
+    file_id: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=256)]
+    mime_type: NotRequired[Annotated[str, Field(max_length=255)]]
+    file_name: NotRequired[str]
+
+
+_ClientArtifactFiles = Annotated[
+    list[ClientArtifactFile],
+    Field(
+        min_length=1,
+        max_length=8,
+        description="One to eight temporary client file handles.",
+    ),
+]
 
 
 class SearchResponse(TypedDict):
@@ -501,7 +519,7 @@ def op_bootstrap(
             ],
             "route_by_intent": {
                 "raw_material": "capture_source",
-                "raw_evidence_or_artifact": "preserve_evidence or transfer_artifact",
+                "raw_evidence_or_artifact": "preserve_evidence, preserve_artifacts, or transfer_artifact",
                 "new_durable_conclusion": "remember",
                 "conclusion_drawn_from_captured_material": "remember(sources=[...]) naming those pages, which links the conclusion to its provenance and marks the source processed",
                 "small_correction": "edit_memory",
@@ -653,9 +671,15 @@ def op_bootstrap(
                 "when": "substantial rewrite of compiled material",
             },
             "binary_upload": {
-                "tool": "transfer_artifact",
-                "endpoint": "/upload",
-                "fields": ["file", "scope", "category", "description", "text"],
+                "tool": "preserve_artifacts",
+                "fields": ["files", "scope", "category"],
+                "when": "the client can supply temporary file handles",
+                "fallback": {
+                    "tool": "transfer_artifact",
+                    "args": {"operation": "upload"},
+                    "endpoint": "/upload",
+                    "when": "the client cannot supply file handles",
+                },
             },
         },
         "performance_profiles": {
@@ -735,6 +759,7 @@ def op_bootstrap(
             "observe_memory",
             "replace_memory",
             "connect_memory",
+            "preserve_artifacts",
             "transfer_artifact",
             "read_media",
         ],
@@ -757,6 +782,21 @@ def op_bootstrap(
             {
                 "goal": "capture a durable conclusion",
                 "call": "remember(note_type='research-note'|'insight'|..., title='...', content='...')",
+            },
+            {
+                "goal": "preserve attached binary files when the client supplies file handles",
+                "call": (
+                    "preserve_artifacts(scope='...', category='...', files=["
+                    "{'download_url': 'https://...', 'file_id': '...', "
+                    "'mime_type': 'image/png', 'file_name': 'receipt.png'}])"
+                ),
+            },
+            {
+                "goal": "preserve binaries when the client cannot supply file handles",
+                "call": (
+                    "transfer_artifact(operation='upload') then POST multipart bytes to /upload; "
+                    "success requires stored_path, size, and hash"
+                ),
             },
         ]
     if profile == "diagnostics":
@@ -4473,8 +4513,9 @@ def op_preserve_evidence(
     """Preserve text evidence as append-only proof material.
 
     Use for receipts, letters, transcripts, warranty records, legal/dispute
-    material, and other factual artifacts. Binary files use `transfer_artifact`
-    plus the `/upload` endpoint so bytes do not pass through the model.
+    material, and other factual artifacts. For binary files supplied as client
+    file handles, use `preserve_artifacts`; otherwise use `transfer_artifact`
+    plus `/upload`. Bytes never pass through the model.
 
     Args:
         scope: Incident, case, project, or domain key.
@@ -4493,12 +4534,40 @@ def op_preserve_evidence(
     )
 
 
+def op_preserve_artifacts(
+    vault_root: Path,
+    scope: str,
+    category: str,
+    files: _ClientArtifactFiles,
+) -> dict:
+    """Preserve client-provided binary file handles as append-only Evidence.
+
+    Use this canonical binary-preservation command when the client can supply
+    temporary HTTPS file handles. Exomem retrieves each handle server-side and
+    returns one stored or failed outcome per file; no binary data is passed as
+    base64 through model-visible arguments. Clients without file handles keep
+    using `transfer_artifact(operation="upload")` followed by `/upload`.
+
+    Args:
+        scope: Incident, case, project, or domain key.
+        category: Evidence category within the scope.
+        files: Ordered temporary file handles. Each object requires `download_url`
+            and `file_id`; `mime_type` and `file_name` are optional.
+    """
+    from . import client_artifacts
+
+    return client_artifacts.preserve_artifacts(
+        vault_root, scope=scope, category=category, files=files
+    )
+
+
 def op_transfer_artifact(vault_root: Path, operation: str = "upload") -> dict:
     """Prepare out-of-band binary artifact transfer.
 
-    Returns a short-lived token and URL for uploading evidence binaries or
-    downloading a vault file into a sandbox. The long-lived server secret never
-    leaves the server.
+    Compatibility transport for clients that cannot supply file handles to
+    `preserve_artifacts`. Returns a short-lived token and URL for uploading
+    evidence binaries or downloading a vault file into a sandbox. Minting an
+    upload token does not mean bytes were stored.
 
     Args:
         operation: upload or download.
@@ -6566,7 +6635,27 @@ _PRODUCT_SPEC: tuple[tuple, ...] = (
         None,
         _MCRC,
         ("preserve",),
-        {"surface": "primary", "actions": ("prove", "save"), "first_run_safe": False},
+        {
+            "surface": "primary",
+            "actions": ("prove", "save"),
+            "first_run_safe": False,
+        },
+    ),
+    (
+        "preserve_artifacts",
+        op_preserve_artifacts,
+        1,
+        True,
+        False,
+        None,
+        _MCRC,
+        ("preserve",),
+        {
+            "surface": "primary",
+            "actions": ("prove", "save"),
+            "first_run_safe": False,
+            "mcp_meta": {"openai/fileParams": ("files",)},
+        },
     ),
     (
         "transfer_artifact",
@@ -6791,6 +6880,18 @@ def _build_product_commands() -> tuple[Command, ...]:
                     choices=("compact", "full", "legacy"),
                 ),
             )
+        if name == "preserve_artifacts":
+            params = tuple(
+                Param(
+                    name=param.name,
+                    type="client_artifact_files" if param.name == "files" else param.type,
+                    required=param.required,
+                    help=param.help,
+                    cli_positional=param.cli_positional,
+                    choices=param.choices,
+                )
+                for param in params
+            )
         if name == "remember":
             generic_hint = "(any slug; unknown keys auto-register on first use)"
             desc = desc.replace("__PROJECT_KEYS_HINT__", generic_hint)
@@ -6850,6 +6951,7 @@ def _build_product_commands() -> tuple[Command, ...]:
                 first_run_safe=bool(meta.get("first_run_safe", False)),
                 routes=tuple(routes),
                 response_detail=response_detail,
+                mcp_meta=MappingProxyType(dict(meta.get("mcp_meta", {}))),
             )
         )
     return tuple(cmds)

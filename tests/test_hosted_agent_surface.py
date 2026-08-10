@@ -31,6 +31,7 @@ FORBIDDEN_COMMANDS = {
     "edit_memory",
     "replace_memory",
     "transfer_artifact",
+    "preserve_artifacts",
     "process_media",
     "adopt_vault",
     "adoption_studio",

@@ -12,7 +12,7 @@ commands.
 |---|---|---|
 | `ask` | Ask what Exomem knows, find a prior conclusion, gather context | `ask_memory`, then `read_memory`; use `ask_memory(deep=true)` for synthesis |
 | `remember` | Remember a durable conclusion, decision, solved problem, or pattern | `remember`; use `replace_memory` if it supersedes old knowledge |
-| `capture` | Preserve raw material, a source, proof, receipt, or record | `capture_source` for Sources; `preserve_evidence` or `transfer_artifact` for Evidence |
+| `capture` | Preserve raw material, a source, proof, receipt, or record | `capture_source` for Sources; `preserve_evidence` for text, `preserve_artifacts` for file handles, otherwise `transfer_artifact` for Evidence |
 | `record` | Log, correct, inspect, or query an observed event or current state | `record_memory` for a configured Record collection |
 | `review` | Review stale, contradictory, or unprocessed knowledge | `review_memory` |
 | `connect` | Suggest links or return graph, evidence, provenance, and history context | `connect_memory`; use `operation="context"` for the unified read-only view |
@@ -350,14 +350,19 @@ preservation.
 - Category — a subfolder under the scope (e.g., `01 - Initial Letter 2026-05-15`). Use existing categories where they fit.
 - Optional: a descriptive filename if the original is generic.
 
-### Delivering the bytes — out-of-band (never inline through the model)
+### Delivering the bytes — direct handles first, never inline through the model
 
-Binaries are delivered out-of-band — never inline as a tool argument (the
-`preserve_evidence` command takes text only). Pick the channel by where the file actually is:
+Binaries are never inline as a tool argument (the `preserve_evidence` command
+takes text only). Pick the channel by the client capability:
 
-- **On claude.ai web — hands-off (preferred):** (1) call **`transfer_artifact(mode="upload")`** →
-  a short-lived `{token, ttl_seconds, upload_url}`; (2) in the code sandbox,
-  multipart-`curl` each attached file to `upload_url` with `Authorization: Bearer
+- **When the client can provide file handles:** call
+  **`preserve_artifacts(scope="...", category="...", files=[{"download_url": "...", "file_id": "..."}])`**.
+  Use one call for the whole batch. A successful preservation response contains
+  `stored_path`, `size`, and `hash`; never treat an upload token as proof that bytes landed.
+
+- **Without file handles (including Claude web):** (1) call **`transfer_artifact(operation="upload")`** →
+  a short-lived `{token, ttl_seconds, upload_url}`; (2) only where the runtime
+  holding the file can reach `upload_url`, multipart-POST each attached file with `Authorization: Bearer
   <token>` and form fields `file` / `scope` / `category` (optional `filename`,
   `description`, **`text`**); (3) **searchability is automatic** — the server
   transcribes audio/video (Whisper), OCRs images (Tesseract), reads PDFs
@@ -413,7 +418,7 @@ through the model.
 - needing the raw bytes of a dataset, an evidence scan, or any stored artifact to process locally
 
 ### Procedure
-1. Call **`transfer_artifact(mode="download")`** → `{token, ttl_seconds, download_url}` (download-scoped, short-lived).
+1. Call **`transfer_artifact(operation="download")`** → `{token, ttl_seconds, download_url}` (download-scoped, short-lived).
 2. In the sandbox, `GET {download_url}?path=<vault-relative path>` with header `Authorization: Bearer <token>`.
 3. The server resolves the path under the vault root (traversal-safe) and streams the file. An out-of-vault or missing path is refused.
 
