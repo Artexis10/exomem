@@ -77,6 +77,15 @@ This replaces the current promise that a web sandbox can always `curl` the retur
 3. Deploy with `/upload` still enabled; clients can fall back immediately if direct handles are unavailable.
 4. Roll back by removing the new command/metadata. No stored artifact format or existing transfer route changes, so preserved files remain valid.
 
+## Post-deploy acceptance
+
+The remaining live gate is a fresh ChatGPT developer-mode session that discovers
+`openai/fileParams`, submits eight PNG attachments in one `preserve_artifacts`
+call, and verifies every returned path, byte count, and SHA-256 digest against the
+stored Evidence files. This is intentionally not claimed by branch tests or PR
+CI: it requires the released service, refreshed connector discovery, and actual
+OpenAI temporary file handles.
+
 ## Open Questions
 
 None for the self-hosted delivery. Hosted gateway acquisition remains a separate design because tenant cells intentionally have no general outbound egress.
